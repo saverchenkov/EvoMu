@@ -4,6 +4,206 @@
 
 use super::*;
 
+fn handle_item_get_info(
+    ctx: &ServerContext,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let Some(raw_id) = args.first().and_then(|a| a.as_i64()) else {
+        return Err(BridgeRpcError { code: "InvalidArgument".into(), message: "ItemGetInfo requires itemID or typeID".into() });
+    };
+
+    // 1. Check if raw_id is an item in the world DB or a launched space drone ball
+    let item_opt = ctx.db.with_snapshot(|snap| snap.items.get(&raw_id).cloned());
+    let space_drone_opt = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        rt.active_drones_in_space
+            .values()
+            .find(|d| d.ball_id == raw_id || d.drone_item_id == raw_id)
+            .cloned()
+    });
+
+    let (type_id, owner_id, dyn_attrs, location_id, qty, singleton) = if let Some(ref item) = item_opt {
+        (
+            item.type_id,
+            PyRep::Integer(item.owner_id),
+            item.dynamic_attributes.clone(),
+            Some(item.location_id),
+            item.quantity,
+            item.singleton,
+        )
+    } else if let Some(ref sd) = space_drone_opt {
+        (
+            sd.type_id,
+            PyRep::Integer(sd.owner_char_id),
+            HashMap::new(),
+            Some(sd.parent_ship_id),
+            1,
+            true,
+        )
+    } else {
+        // If not found in items, raw_id is treated as a TypeId
+        let tid = raw_id as TypeId;
+        (tid, PyRep::None, HashMap::new(), None, 1, false)
+    };
+
+    let Some(show_info) = ctx.sde.show_info_for_type(type_id) else {
+        return Err(BridgeRpcError { code: "TypeNotFound".into(), message: format!("Type {type_id} not found in SDE") });
+    };
+
+    // Merge default attributes with dynamic attributes
+    let mut merged_attrs = show_info.default_attributes.clone();
+    for (&attr_id, &val) in &dyn_attrs {
+        merged_attrs.insert(attr_id, val);
+    }
+    let item_cat = ctx.sde.types.get(&type_id).map(|t| t.category_id).unwrap_or(0);
+    if item_cat == 18 {
+        let parent_opt = space_drone_opt
+            .as_ref()
+            .map(|sd| (sd.owner_char_id, sd.parent_ship_id))
+            .or_else(|| item_opt.as_ref().map(|it| (it.owner_id, it.location_id)));
+        if let Some((p_owner, p_ship)) = parent_opt {
+            if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(p_owner, p_ship) {
+                let eval_ctx = fit.evaluated_context(&ctx.sde);
+                if let Some(d_state) = eval_ctx
+                    .owned_items
+                    .iter()
+                    .find(|d| d.item_id == raw_id || d.type_id == type_id)
+                {
+                    let all_aids: std::collections::BTreeSet<u16> = d_state
+                        .base_attributes
+                        .keys()
+                        .copied()
+                        .chain(d_state.modifiers.iter().map(|m| m.target_attribute_id))
+                        .collect();
+                    for aid in all_aids {
+                        merged_attrs.insert(aid, d_state.get_attribute(aid, &ctx.sde));
+                    }
+                }
+                let has_active_triage = fit.modules.values().any(|fm| {
+                    matches!(fm.type_id, 27951 | 4294)
+                        && matches!(
+                            fm.state,
+                            eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
+                        )
+                });
+                if has_active_triage {
+                    merged_attrs.insert(64, 0.0);
+                }
+            }
+        }
+    } else if let Some(ref item) = item_opt {
+        if item_cat == 6 {
+            if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(item.owner_id, item.item_id) {
+                let eval_ctx = fit.evaluated_context(&ctx.sde);
+                let all_aids: std::collections::BTreeSet<u16> = eval_ctx
+                    .ship
+                    .base_attributes
+                    .keys()
+                    .copied()
+                    .chain(eval_ctx.ship.modifiers.iter().map(|m| m.target_attribute_id))
+                    .collect();
+                for aid in all_aids {
+                    merged_attrs.insert(aid, eval_ctx.ship.get_attribute(aid, &ctx.sde));
+                }
+                for (&attr_id, &val) in &dyn_attrs {
+                    merged_attrs.insert(attr_id, val);
+                }
+                apply_active_dbuffs_and_system_effects_to_ship_attrs(ctx, item.item_id, &mut merged_attrs);
+            }
+        } else if matches!(item.flag as u16, 11..=34 | 92..=94 | 125..=132) {
+            if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(item.owner_id, item.location_id) {
+                let eval_ctx = fit.evaluated_context(&ctx.sde);
+                if item_cat == 8 {
+                    if let Some(c_state) = eval_ctx
+                        .owned_items
+                        .iter()
+                        .find(|c| c.type_id == item.type_id)
+                    {
+                        let all_aids: std::collections::BTreeSet<u16> = c_state
+                            .base_attributes
+                            .keys()
+                            .copied()
+                            .chain(c_state.modifiers.iter().map(|m| m.target_attribute_id))
+                            .collect();
+                        for aid in all_aids {
+                            merged_attrs.insert(aid, c_state.get_attribute(aid, &ctx.sde));
+                        }
+                    }
+                } else if let Some(m_state) = eval_ctx
+                    .ship_located_items
+                    .iter()
+                    .find(|m| m.item_id == item.item_id)
+                {
+                    let all_aids: std::collections::BTreeSet<u16> = m_state
+                        .base_attributes
+                        .keys()
+                        .copied()
+                        .chain(m_state.modifiers.iter().map(|m| m.target_attribute_id))
+                        .collect();
+                    for aid in all_aids {
+                        merged_attrs.insert(aid, m_state.get_attribute(aid, &ctx.sde));
+                    }
+                    crate::services::tactical_modules::apply_projected_rtc_to_module_attrs(
+                        ctx,
+                        item.location_id,
+                        &mut merged_attrs,
+                    );
+                }
+                for &aid in &[3u16, 9, 84, 267, 268, 269, 270] {
+                    if let Some(&v) = dyn_attrs.get(&aid) {
+                        merged_attrs.insert(aid, v);
+                    }
+                }
+            }
+        }
+    }
+
+    crate::services::tactical_modules::apply_transient_item_attrs(ctx, raw_id, &mut merged_attrs);
+    let mut attr_entries: Vec<(PyRep, PyRep)> = merged_attrs
+        .into_iter()
+        .map(|(k, v)| (PyRep::Integer(k as i64), PyRep::Real(v)))
+        .collect();
+    attr_entries.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
+
+    let mut dyn_entries: Vec<(PyRep, PyRep)> = dyn_attrs
+        .into_iter()
+        .map(|(k, v)| (PyRep::Integer(k as i64), PyRep::Real(v)))
+        .collect();
+    dyn_entries.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
+
+    let var_reps: Vec<PyRep> = show_info.variations.into_iter().map(|v| PyRep::Integer(v as i64)).collect();
+    let custom_name = ctx.db.with_snapshot(|snap| snap.item_custom_names.get(&raw_id).cloned()).unwrap_or_default();
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let inv_item = ctx.db.get_item(raw_id).map(|it| eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(item_to_packed_cells(ctx, &it))).unwrap_or(PyRep::None);
+
+    Ok(PyRep::keyval([
+        ("itemID", PyRep::Integer(raw_id)),
+        ("invItem", inv_item),
+        ("typeID", PyRep::Integer(show_info.type_id as i64)),
+        ("typeName", PyRep::String(show_info.name)),
+        ("customName", PyRep::String(custom_name)),
+        ("groupID", PyRep::Integer(show_info.group_id as i64)),
+        ("categoryID", PyRep::Integer(show_info.category_id as i64)),
+        ("ownerID", owner_id),
+        ("locationID", location_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+        ("quantity", PyRep::Integer(qty as i64)),
+        ("singleton", PyRep::Bool(singleton)),
+        ("mass", PyRep::Real(show_info.mass)),
+        ("volume", PyRep::Real(show_info.volume)),
+        ("capacity", PyRep::Real(show_info.capacity)),
+        ("portionSize", PyRep::Integer(show_info.portion_size as i64)),
+        ("basePrice", PyRep::Real(show_info.base_price)),
+        ("published", PyRep::Bool(show_info.published)),
+        ("marketGroupID", show_info.market_group_id.map(|mg| PyRep::Integer(mg as i64)).unwrap_or(PyRep::None)),
+        ("variationParentTypeID", show_info.variation_parent_type_id.map(|vp| PyRep::Integer(vp as i64)).unwrap_or(PyRep::None)),
+        ("variations", PyRep::List(var_reps)),
+        ("dynamicAttributes", PyRep::Dict(dyn_entries)),
+        ("attributes", PyRep::Dict(attr_entries)),
+        ("activeEffects", PyRep::Dict(Vec::new())),
+        ("time", PyRep::Integer(now_ft)),
+        ("wallclockTime", PyRep::Integer(now_ft)),
+    ]))
+}
+
 pub(crate) async fn handle_dogma_im(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -161,204 +361,17 @@ pub(crate) async fn handle_dogma_im(
             Some(Ok(PyRep::Integer(stance_type_id)))
         }
 
-        ("dogmaIM", "ItemGetInfo")
-        | ("invbroker", "GetItemInfo")
-        | ("invbroker", "GetDynamicItemInfo")
-        | ("dogmaIM", "GetDynamicItemInfo") => {
-            let Some(raw_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "ItemGetInfo requires itemID or typeID".into() }));
-            };
-
-            // 1. Check if raw_id is an item in the world DB or a launched space drone ball
-            let item_opt = ctx.db.with_snapshot(|snap| snap.items.get(&raw_id).cloned());
-            let space_drone_opt = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                rt.active_drones_in_space
-                    .values()
-                    .find(|d| d.ball_id == raw_id || d.drone_item_id == raw_id)
-                    .cloned()
-            });
-
-            let (type_id, owner_id, dyn_attrs, location_id, qty, singleton) = if let Some(ref item) = item_opt {
-                (
-                    item.type_id,
-                    PyRep::Integer(item.owner_id),
-                    item.dynamic_attributes.clone(),
-                    Some(item.location_id),
-                    item.quantity,
-                    item.singleton,
-                )
-            } else if let Some(ref sd) = space_drone_opt {
-                (
-                    sd.type_id,
-                    PyRep::Integer(sd.owner_char_id),
-                    HashMap::new(),
-                    Some(sd.parent_ship_id),
-                    1,
-                    true,
-                )
-            } else {
-                // If not found in items, raw_id is treated as a TypeId
-                let tid = raw_id as TypeId;
-                (tid, PyRep::None, HashMap::new(), None, 1, false)
-            };
-
-            let Some(show_info) = ctx.sde.show_info_for_type(type_id) else {
-                return Some(Err(BridgeRpcError { code: "TypeNotFound".into(), message: format!("Type {type_id} not found in SDE") }));
-            };
-
-            // Merge default attributes with dynamic attributes
-            let mut merged_attrs = show_info.default_attributes.clone();
-            for (&attr_id, &val) in &dyn_attrs {
-                merged_attrs.insert(attr_id, val);
-            }
-            let item_cat = ctx.sde.types.get(&type_id).map(|t| t.category_id).unwrap_or(0);
-            if item_cat == 18 {
-                let parent_opt = space_drone_opt
-                    .as_ref()
-                    .map(|sd| (sd.owner_char_id, sd.parent_ship_id))
-                    .or_else(|| item_opt.as_ref().map(|it| (it.owner_id, it.location_id)));
-                if let Some((p_owner, p_ship)) = parent_opt {
-                    if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(p_owner, p_ship) {
-                        let eval_ctx = fit.evaluated_context(&ctx.sde);
-                        if let Some(d_state) = eval_ctx
-                            .owned_items
-                            .iter()
-                            .find(|d| d.item_id == raw_id || d.type_id == type_id)
-                        {
-                            let all_aids: std::collections::BTreeSet<u16> = d_state
-                                .base_attributes
-                                .keys()
-                                .copied()
-                                .chain(d_state.modifiers.iter().map(|m| m.target_attribute_id))
-                                .collect();
-                            for aid in all_aids {
-                                merged_attrs.insert(aid, d_state.get_attribute(aid, &ctx.sde));
-                            }
-                        }
-                        let has_active_triage = fit.modules.values().any(|fm| {
-                            matches!(fm.type_id, 27951 | 4294)
-                                && matches!(
-                                    fm.state,
-                                    eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
-                                )
-                        });
-                        if has_active_triage {
-                            merged_attrs.insert(64, 0.0);
-                        }
-                    }
-                }
-            } else if let Some(ref item) = item_opt {
-                if item_cat == 6 {
-                    if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(item.owner_id, item.item_id) {
-                        let eval_ctx = fit.evaluated_context(&ctx.sde);
-                        let all_aids: std::collections::BTreeSet<u16> = eval_ctx
-                            .ship
-                            .base_attributes
-                            .keys()
-                            .copied()
-                            .chain(eval_ctx.ship.modifiers.iter().map(|m| m.target_attribute_id))
-                            .collect();
-                        for aid in all_aids {
-                            merged_attrs.insert(aid, eval_ctx.ship.get_attribute(aid, &ctx.sde));
-                        }
-                        for (&attr_id, &val) in &dyn_attrs {
-                            merged_attrs.insert(attr_id, val);
-                        }
-                        apply_active_dbuffs_and_system_effects_to_ship_attrs(ctx, item.item_id, &mut merged_attrs);
-                    }
-                } else if matches!(item.flag as u16, 11..=34 | 92..=94 | 125..=132) {
-                    if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(item.owner_id, item.location_id) {
-                        let eval_ctx = fit.evaluated_context(&ctx.sde);
-                        if item_cat == 8 {
-                            if let Some(c_state) = eval_ctx
-                                .owned_items
-                                .iter()
-                                .find(|c| c.type_id == item.type_id)
-                            {
-                                let all_aids: std::collections::BTreeSet<u16> = c_state
-                                    .base_attributes
-                                    .keys()
-                                    .copied()
-                                    .chain(c_state.modifiers.iter().map(|m| m.target_attribute_id))
-                                    .collect();
-                                for aid in all_aids {
-                                    merged_attrs.insert(aid, c_state.get_attribute(aid, &ctx.sde));
-                                }
-                            }
-                        } else if let Some(m_state) = eval_ctx
-                            .ship_located_items
-                            .iter()
-                            .find(|m| m.item_id == item.item_id)
-                        {
-                            let all_aids: std::collections::BTreeSet<u16> = m_state
-                                .base_attributes
-                                .keys()
-                                .copied()
-                                .chain(m_state.modifiers.iter().map(|m| m.target_attribute_id))
-                                .collect();
-                            for aid in all_aids {
-                                merged_attrs.insert(aid, m_state.get_attribute(aid, &ctx.sde));
-                            }
-                            crate::services::tactical_modules::apply_projected_rtc_to_module_attrs(
-                                ctx,
-                                item.location_id,
-                                &mut merged_attrs,
-                            );
-                        }
-                        for &aid in &[3u16, 9, 84, 267, 268, 269, 270] {
-                            if let Some(&v) = dyn_attrs.get(&aid) {
-                                merged_attrs.insert(aid, v);
-                            }
-                        }
-                    }
-                }
-            }
-
-            crate::services::tactical_modules::apply_transient_item_attrs(ctx, raw_id, &mut merged_attrs);
-            let mut attr_entries: Vec<(PyRep, PyRep)> = merged_attrs
-                .into_iter()
-                .map(|(k, v)| (PyRep::Integer(k as i64), PyRep::Real(v)))
-                .collect();
-            attr_entries.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
-
-            let mut dyn_entries: Vec<(PyRep, PyRep)> = dyn_attrs
-                .into_iter()
-                .map(|(k, v)| (PyRep::Integer(k as i64), PyRep::Real(v)))
-                .collect();
-            dyn_entries.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
-
-            let var_reps: Vec<PyRep> = show_info.variations.into_iter().map(|v| PyRep::Integer(v as i64)).collect();
-            let custom_name = ctx.db.with_snapshot(|snap| snap.item_custom_names.get(&raw_id).cloned()).unwrap_or_default();
-            let now_ft = ctx.now_blueos_filetime_ticks();
-            let inv_item = ctx.db.get_item(raw_id).map(|it| eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(item_to_packed_cells(ctx, &it))).unwrap_or(PyRep::None);
-
-            Some(Ok(PyRep::keyval([
-                ("itemID", PyRep::Integer(raw_id)),
-                ("invItem", inv_item),
-                ("typeID", PyRep::Integer(show_info.type_id as i64)),
-                ("typeName", PyRep::String(show_info.name)),
-                ("customName", PyRep::String(custom_name)),
-                ("groupID", PyRep::Integer(show_info.group_id as i64)),
-                ("categoryID", PyRep::Integer(show_info.category_id as i64)),
-                ("ownerID", owner_id),
-                ("locationID", location_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                ("quantity", PyRep::Integer(qty as i64)),
-                ("singleton", PyRep::Bool(singleton)),
-                ("mass", PyRep::Real(show_info.mass)),
-                ("volume", PyRep::Real(show_info.volume)),
-                ("capacity", PyRep::Real(show_info.capacity)),
-                ("portionSize", PyRep::Integer(show_info.portion_size as i64)),
-                ("basePrice", PyRep::Real(show_info.base_price)),
-                ("published", PyRep::Bool(show_info.published)),
-                ("marketGroupID", show_info.market_group_id.map(|mg| PyRep::Integer(mg as i64)).unwrap_or(PyRep::None)),
-                ("variationParentTypeID", show_info.variation_parent_type_id.map(|vp| PyRep::Integer(vp as i64)).unwrap_or(PyRep::None)),
-                ("variations", PyRep::List(var_reps)),
-                ("dynamicAttributes", PyRep::Dict(dyn_entries)),
-                ("attributes", PyRep::Dict(attr_entries)),
-                ("activeEffects", PyRep::Dict(Vec::new())),
-                ("time", PyRep::Integer(now_ft)),
-                ("wallclockTime", PyRep::Integer(now_ft)),
-            ])))
+        ("dogmaIM", "ItemGetInfo") => {
+            Some(handle_item_get_info(ctx, args))
+        }
+        ("invbroker", "GetItemInfo") => {
+            Some(handle_item_get_info(ctx, args))
+        }
+        ("invbroker", "GetDynamicItemInfo") => {
+            Some(handle_item_get_info(ctx, args))
+        }
+        ("dogmaIM", "GetDynamicItemInfo") => {
+            Some(handle_item_get_info(ctx, args))
         }
 
         ("dogmaIM", "DestroyFitting") => {

@@ -821,6 +821,85 @@ pub async fn validate_single_item_can_be_opened(
     Ok(())
 }
 
+fn handle_alsc_lock_unlock(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let is_lock = method.contains("ALSCLock");
+    let container_id = args.first().and_then(|a| a.as_i64()).or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0);
+    if container_id <= 0 {
+        return Err(BridgeRpcError { code: "InvalidContainer".into(), message: "Valid containerID required for ALSC lock/unlock".into() });
+    }
+    let item_ids: Vec<i64> = match args.get(1).or_else(|| args.first()) {
+        Some(PyRep::List(v) | PyRep::Tuple(v)) => v.iter().filter_map(|x| x.as_i64()).collect(),
+        Some(PyRep::Integer(id)) if *id != container_id => vec![*id],
+        _ => kwargs.get("itemIDs").and_then(|v| match v { PyRep::List(l) | PyRep::Tuple(l) => Some(l.iter().filter_map(|x| x.as_i64()).collect()), _ => None }).unwrap_or_default(),
+    };
+    ctx.db.with_snapshot(|snap| {
+        let cont = snap.items.get(&container_id).ok_or_else(|| BridgeRpcError { code: "ContainerNotFound".into(), message: format!("Container {container_id} not found") })?;
+        let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+        let ch_loc = snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id).or(Some(c.solar_system_id as i64))).unwrap_or(0);
+        let ch_ship = snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0);
+        if cont.location_id != ch_loc && cont.location_id != ch_ship {
+            return Err(BridgeRpcError { code: "ColocationRequired".into(), message: format!("Must be co-located with container {container_id} to lock/unlock items") });
+        }
+        let is_ceo = snap.corporations.get(&corp_id).map(|c| c.ceo_id == char_id).unwrap_or(false);
+        let is_owner_or_corp = cont.owner_id == char_id || (corp_id > 0 && cont.owner_id == corp_id && (session.corp_role != 0 || is_ceo));
+        if !is_owner_or_corp {
+            return Err(BridgeRpcError { code: "ALSCAccessDenied".into(), message: format!("Not authorized to lock/unlock items in container {container_id}") });
+        }
+        for &iid in &item_ids {
+            let it = snap.items.get(&iid).ok_or_else(|| BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {iid} not found") })?;
+            if it.location_id != container_id {
+                return Err(BridgeRpcError { code: "ItemNotInContainer".into(), message: format!("Item {iid} is not located inside container {container_id}") });
+            }
+        }
+        Ok(())
+    })?;
+    let now_unix = ctx.now_unix_secs();
+    let mut st = read_container_ship_state(ctx);
+    let req_pw = st.container_passwords.get(&container_id).cloned().unwrap_or_default();
+    if !req_pw.is_empty() {
+        let cfg = st.container_configs.get(&container_id).cloned().unwrap_or_default();
+        let need_check = cfg.password_per_action || !st.unlocked_containers.contains(&(container_id, char_id));
+        if need_check {
+            let provided = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.get(2).and_then(|a| a.as_str())).unwrap_or("");
+            let tid = ctx.db.with_snapshot(|s| s.items.get(&container_id).map(|i| i.type_id)).unwrap_or(0);
+            if provided != req_pw {
+                st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordFailure".into(), item_id: container_id, item_type_id: tid, quantity: 1 });
+                save_container_ship_state(ctx, &st);
+                return Err(BridgeRpcError { code: if is_lock { "ALSCPasswordNeededToLock".into() } else { "ALSCPasswordNeededToUnlock".into() }, message: "Container password required".into() });
+            }
+            st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordSuccess".into(), item_id: container_id, item_type_id: tid, quantity: 1 });
+            st.unlocked_containers.insert((container_id, char_id));
+        }
+    }
+    for &iid in &item_ids {
+        if is_lock { st.alsc_locked_items.insert(iid); } else { st.alsc_locked_items.remove(&iid); }
+        let (tid, qty, owner_id, loc_id) = ctx.db.with_snapshot(|s| s.items.get(&iid).map(|i| (i.type_id, i.quantity, i.owner_id, i.location_id))).unwrap_or((0, 1, char_id, container_id));
+        st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry {
+            timestamp_unix: now_unix, actor_id: char_id, action: if is_lock { "ALSCActionLock".into() } else { "ALSCActionUnlock".into() }, item_id: iid, item_type_id: tid, quantity: qty,
+        });
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some((corp_id, c_tid, c_loc, loc_flag)) = resolve_corp_container_log_target(snap, container_id) {
+                snap.corp_container_logs.entry(corp_id).or_default().push(eve_db::CorpContainerLogEntry {
+                    logged_at_unix: now_unix, container_id, container_type_id: c_tid, character_id: char_id,
+                    location_id: c_loc, location_flag: loc_flag, action: if is_lock { "lock".into() } else { "unlock".into() },
+                    password_type: None, type_id: Some(tid as i32), quantity: Some(qty), old_config_bitmask: None, new_config_bitmask: None,
+                });
+            }
+        });
+        ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnLockedItemChange", "charid", vec![PyRep::Integer(iid), PyRep::Integer(owner_id), PyRep::Integer(loc_id)]);
+    }
+    save_container_ship_state(ctx, &st);
+    Ok(PyRep::keyval([("containerID", PyRep::Integer(container_id)), ("locked", PyRep::Bool(is_lock)), ("count", PyRep::Integer(item_ids.len() as i64))]))
+}
+
 pub(crate) async fn handle_containers_ships_and_fitting(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -944,77 +1023,17 @@ pub(crate) async fn handle_containers_ships_and_fitting(
             ])))
         }
 
-        ("invbroker", "ALSCLockItems") | ("invbroker", "ALSCLock") | ("invbroker", "ALSCUnlockItems") | ("invbroker", "ALSCUnlock") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let is_lock = method.contains("ALSCLock");
-            let container_id = args.first().and_then(|a| a.as_i64()).or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0);
-            if container_id <= 0 {
-                return Some(Err(BridgeRpcError { code: "InvalidContainer".into(), message: "Valid containerID required for ALSC lock/unlock".into() }));
-            }
-            let item_ids: Vec<i64> = match args.get(1).or_else(|| args.first()) {
-                Some(PyRep::List(v) | PyRep::Tuple(v)) => v.iter().filter_map(|x| x.as_i64()).collect(),
-                Some(PyRep::Integer(id)) if *id != container_id => vec![*id],
-                _ => kwargs.get("itemIDs").and_then(|v| match v { PyRep::List(l) | PyRep::Tuple(l) => Some(l.iter().filter_map(|x| x.as_i64()).collect()), _ => None }).unwrap_or_default(),
-            };
-            let auth_check = ctx.db.with_snapshot(|snap| {
-                let cont = snap.items.get(&container_id).ok_or_else(|| BridgeRpcError { code: "ContainerNotFound".into(), message: format!("Container {container_id} not found") })?;
-                let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                let ch_loc = snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id).or(Some(c.solar_system_id as i64))).unwrap_or(0);
-                let ch_ship = snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0);
-                if cont.location_id != ch_loc && cont.location_id != ch_ship {
-                    return Err(BridgeRpcError { code: "ColocationRequired".into(), message: format!("Must be co-located with container {container_id} to lock/unlock items") });
-                }
-                let is_ceo = snap.corporations.get(&corp_id).map(|c| c.ceo_id == char_id).unwrap_or(false);
-                let is_owner_or_corp = cont.owner_id == char_id || (corp_id > 0 && cont.owner_id == corp_id && (session.corp_role != 0 || is_ceo));
-                if !is_owner_or_corp {
-                    return Err(BridgeRpcError { code: "ALSCAccessDenied".into(), message: format!("Not authorized to lock/unlock items in container {container_id}") });
-                }
-                for &iid in &item_ids {
-                    let it = snap.items.get(&iid).ok_or_else(|| BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {iid} not found") })?;
-                    if it.location_id != container_id {
-                        return Err(BridgeRpcError { code: "ItemNotInContainer".into(), message: format!("Item {iid} is not located inside container {container_id}") });
-                    }
-                }
-                Ok(())
-            });
-            if let Err(e) = auth_check { return Some(Err(e)); }
-            let now_unix = ctx.now_unix_secs();
-            let mut st = read_container_ship_state(ctx);
-            let req_pw = st.container_passwords.get(&container_id).cloned().unwrap_or_default();
-            if !req_pw.is_empty() {
-                let cfg = st.container_configs.get(&container_id).cloned().unwrap_or_default();
-                let need_check = cfg.password_per_action || !st.unlocked_containers.contains(&(container_id, char_id));
-                if need_check {
-                    let provided = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.get(2).and_then(|a| a.as_str())).unwrap_or("");
-                    let tid = ctx.db.with_snapshot(|s| s.items.get(&container_id).map(|i| i.type_id)).unwrap_or(0);
-                    if provided != req_pw {
-                        st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordFailure".into(), item_id: container_id, item_type_id: tid, quantity: 1 });
-                        save_container_ship_state(ctx, &st);
-                        return Some(Err(BridgeRpcError { code: if is_lock { "ALSCPasswordNeededToLock".into() } else { "ALSCPasswordNeededToUnlock".into() }, message: "Container password required".into() }));
-                    }
-                    st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordSuccess".into(), item_id: container_id, item_type_id: tid, quantity: 1 });
-                    st.unlocked_containers.insert((container_id, char_id));
-                }
-            }
-            for &iid in &item_ids {
-                if is_lock { st.alsc_locked_items.insert(iid); } else { st.alsc_locked_items.remove(&iid); }
-                let (tid, qty, owner_id, loc_id) = ctx.db.with_snapshot(|s| s.items.get(&iid).map(|i| (i.type_id, i.quantity, i.owner_id, i.location_id))).unwrap_or((0, 1, char_id, container_id));
-                st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry {
-                    timestamp_unix: now_unix, actor_id: char_id, action: if is_lock { "ALSCActionLock".into() } else { "ALSCActionUnlock".into() }, item_id: iid, item_type_id: tid, quantity: qty,
-                });
-                ctx.db.with_mut_snapshot(|snap| {
-                    if let Some((corp_id, c_tid, c_loc, loc_flag)) = resolve_corp_container_log_target(snap, container_id) {
-                        snap.corp_container_logs.entry(corp_id).or_default().push(eve_db::CorpContainerLogEntry {
-                            logged_at_unix: now_unix, container_id, container_type_id: c_tid, character_id: char_id,
-                            location_id: c_loc, location_flag: loc_flag, action: if is_lock { "lock".into() } else { "unlock".into() },
-                            password_type: None, type_id: Some(tid as i32), quantity: Some(qty), old_config_bitmask: None, new_config_bitmask: None,
-                        });
-                    }
-                });
-                ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnLockedItemChange", "charid", vec![PyRep::Integer(iid), PyRep::Integer(owner_id), PyRep::Integer(loc_id)]);
-            }
-            save_container_ship_state(ctx, &st);
-            Some(Ok(PyRep::keyval([("containerID", PyRep::Integer(container_id)), ("locked", PyRep::Bool(is_lock)), ("count", PyRep::Integer(item_ids.len() as i64))])))
+        ("invbroker", "ALSCLockItems") => {
+            Some(handle_alsc_lock_unlock(ctx, session, bound_entry, method, args, kwargs))
+        }
+        ("invbroker", "ALSCLock") => {
+            Some(handle_alsc_lock_unlock(ctx, session, bound_entry, method, args, kwargs))
+        }
+        ("invbroker", "ALSCUnlockItems") => {
+            Some(handle_alsc_lock_unlock(ctx, session, bound_entry, method, args, kwargs))
+        }
+        ("invbroker", "ALSCUnlock") => {
+            Some(handle_alsc_lock_unlock(ctx, session, bound_entry, method, args, kwargs))
         }
 
         ("invbroker", "ALSCLogGet") => {
@@ -1055,10 +1074,7 @@ pub(crate) async fn handle_containers_ships_and_fitting(
         }
 
         ("invbroker", "GetDamageForCrystals") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let entries: Vec<(PyRep, PyRep)> = ctx.db.with_snapshot(|snap| {
                 snap.items
                     .values()
@@ -1090,10 +1106,7 @@ pub(crate) async fn handle_containers_ships_and_fitting(
         }
 
         ("invbroker", "GetAllItems") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let search_filter = args
                 .first()
                 .and_then(|a| a.as_str())
@@ -1137,10 +1150,7 @@ pub(crate) async fn handle_containers_ships_and_fitting(
         }
 
         ("invbroker", "IsMyItemAtDockableLocation") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let dock_id = session.station_id.or(session.structure_id);
             let at_dock = ctx.db.with_snapshot(|snap| {
@@ -1202,10 +1212,7 @@ pub(crate) async fn handle_containers_ships_and_fitting(
         }
 
         ("encodedItems", "DecodeItem") => {
-            let (_, _char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, _char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let (item_id_opt, fallback_tid_opt) = match args.first() {
                 Some(PyRep::Integer(id)) => (Some(*id), args.get(1).and_then(|a| a.as_i64())),
                 Some(PyRep::Tuple(v) | PyRep::List(v)) => (v.first().and_then(|x| x.as_i64()), v.get(1).and_then(|x| x.as_i64())),

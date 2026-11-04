@@ -953,10 +953,42 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
             ])))
         }
 
-        ("dogmaIM", "GetSystemWideEffectsOnShip")
-        | ("dogmaIM", "GetSystemWideEffectsInfo")
-        | ("dogmaIM", "RefreshSystemWideEnvironment")
-        | ("dogmaIM", "ResetSystemWideEffects") => {
+        ("dogmaIM", "GetSystemWideEffectsOnShip") => {
+            handle_system_wide_effects(ctx, session, method, args)
+        }
+        ("dogmaIM", "GetSystemWideEffectsInfo") => {
+            handle_system_wide_effects(ctx, session, method, args)
+        }
+        ("dogmaIM", "RefreshSystemWideEnvironment") => {
+            handle_system_wide_effects(ctx, session, method, args)
+        }
+        ("dogmaIM", "ResetSystemWideEffects") => {
+            handle_system_wide_effects(ctx, session, method, args)
+        }
+
+        ("jumpCloneSvc", "OfferShipCloneInstallation") => {
+            handle_ship_clone_installation(ctx, session, method, args)
+        }
+        ("jumpCloneSvc", "AcceptShipCloneInstallation") => {
+            handle_ship_clone_installation(ctx, session, method, args)
+        }
+        ("jumpCloneSvc", "CancelShipCloneInstallation") => {
+            handle_ship_clone_installation(ctx, session, method, args)
+        }
+        ("jumpCloneSvc", "GetShipCloneState") => {
+            handle_ship_clone_installation(ctx, session, method, args)
+        }
+
+        _ => None,
+    }
+}
+
+fn handle_system_wide_effects(
+    ctx: &ServerContext,
+    session: &SessionState,
+    method: &str,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1143,10 +1175,12 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
             ])))
         }
 
-        ("jumpCloneSvc", "OfferShipCloneInstallation")
-        | ("jumpCloneSvc", "AcceptShipCloneInstallation")
-        | ("jumpCloneSvc", "CancelShipCloneInstallation")
-        | ("jumpCloneSvc", "GetShipCloneState") => {
+fn handle_ship_clone_installation(
+    ctx: &ServerContext,
+    session: &SessionState,
+    method: &str,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1350,7 +1384,3 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
             // GetShipCloneState
             Some(crate::services::jump_clone_names::get_ship_clone_state(ctx, session, args))
         }
-
-        _ => None,
-    }
-}
