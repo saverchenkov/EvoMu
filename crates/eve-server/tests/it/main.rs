@@ -129,7 +129,6 @@ mod notify_corp_emission_alliances;
 mod notify_econ_char_emission;
 mod notify_fleet_emission;
 mod notify_mail_emission;
-mod notify_real_emitters_batch2;
 mod notify_space_sov_fleet_emission;
 mod open_feats_and_rpcs_b33;
 mod open_feats_and_rpcs_b33_part2;
@@ -314,6 +313,7 @@ pub(crate) use npc_spawns_pve as npc_spawns_pve_closure;
 pub(crate) use fw_warzone_insurgency as fw_warzone_insurgency_closure;
 #[allow(unused_imports)]
 pub(crate) use sovereignty_equinox_gameplay as sovereignty_equinox_gameplay_closure;
+pub(crate) use combat_weapons_wrecks::triglavian_entropic_spool_edencom_vorton as combat_weapons_wrecks_part2;
 mod plan_c3_c4_combat_closure;
 mod plan_economy_closure;
 mod plan_economy_closure_part2;
@@ -338,23 +338,14 @@ mod seasons_and_campaigns;
 mod notify_real_emitters_batch3;
 mod notify_real_emitters_batch5;
 mod notify_real_emitters_batch6;
+mod seasons_login_campaigns_closure;
+mod abyssal_pochven_void_closure_part2;
+mod pve_mining_sites_part2;
 mod zarzakh_gate_lock;
 mod abyssal_pochven_void;
-mod notify_real_emitters_batch7;
-mod notify_real_emitters_batch7_part2;
-mod notify_real_emitters_batch7_part3;
-mod notify_real_emitters_batch7_part4;
-mod notify_real_emitters_batch8;
-mod notify_real_emitters_batch8_part2;
-mod notify_real_emitters_batch8_part3;
 mod notify_real_emitters_batch8_part4;
 mod notify_real_emitters_batch8_part5;
 mod notify_real_emitters_batch8_part6;
-mod notify_real_emitters_batch10;
-mod notify_real_emitters_batch10_part2;
-mod notify_real_emitters_batch10_part3;
-mod notify_real_emitters_batch10_part4;
-mod notify_real_emitters_batch10_part5;
 mod notify_b23_closure;
 mod client_bug_reporting_suite;
 mod pi_and_evermarks_remediation;
@@ -430,6 +421,7 @@ mod open_feats_ships_pve_b5;
 mod open_feats_and_rpcs_batch2_part2;
 mod quasar_ship_unlocks_and_stargates;
 mod notify_p7_sp1_sp2_closure;
+mod esi_fw_and_social_closure;
 mod open_feats_and_rpcs_b30;
 mod open_feats_and_rpcs_b30_part2;
 mod notify_b30_closure;
@@ -447,6 +439,7 @@ mod open_feats_and_rpcs_b22_structures_modules;
 mod quasar_sov_hub_and_star_resources;
 mod notify_live_rpc_closure;
 mod serverops_and_shipcaster;
+mod serverops_shipcaster_remediation;
 mod parity_features_combat_part1;
 mod parity_features_combat_part2;
 mod parity_rpcs_part1;
@@ -573,6 +566,7 @@ pub(crate) use {
     abyssal_pochven_void as abyssal_pochven_void_closure,
     combat_ewar_logistics as combat_ewar_repairs_closure,
     combat_repairs_smartbombs as combat_repairs_smartbomb_closure,
+    crimewatch_hostility as crimewatch_closure,
     crimewatch_hostility as plan_c7_crimewatch_closure,
     fw_warzone_insurgency as fw_warzone_insurgency_closure,
     npc_spawns_pve as npc_spawns_pve_closure,
@@ -584,3 +578,8 @@ pub(crate) use {
     zarzakh_gate_lock as zarzakh_gate_lock_closure,
 };
 mod social_and_contacts_complete;
+mod notify_services_and_events;
+mod notify_structures_clones_pi;
+mod notify_progression_and_activities;
+#[allow(unused_imports)]
+pub(crate) use notify_structures_clones_pi as notify_real_emitters_batch7;

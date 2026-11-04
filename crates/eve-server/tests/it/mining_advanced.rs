@@ -1086,6 +1086,7 @@ async fn test_action_plan_mn13_to_mn16_moons_metenox_sites_ledgers() {
         .expect_err("Outsider must be denied GetObserverLedger");
     assert_eq!(outsider_err.code, "CrpAccessDenied");
 }
+}
 
 // Folded submodule: mining_advanced_part2
 #[allow(unused_imports, dead_code)]

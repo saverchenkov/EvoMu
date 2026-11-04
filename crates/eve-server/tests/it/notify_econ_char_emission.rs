@@ -263,3 +263,1350 @@ async fn test_ship_clone_vat_bookmarks_standings_agents_and_item_locking_notific
     assert_eq!(events_from(&n_lock, "OnLockedItemChange"), vec![vec![PyRep::Integer(lock_item_id), PyRep::Integer(corp_id), PyRep::Integer(container_id),]]);
     assert!(ctx.drain_notifications_for_char(p3).is_empty());
 }
+
+// Folded submodule: notify_real_emitters_batch8
+#[allow(unused_imports, dead_code)]
+mod notify_real_emitters_batch8 {
+    use super::*;
+
+// Real server-side emission & RPC tests for Notify/RPC Batch 8 (Part 1: Seasons).
+//
+// Covers all 10 Group 1 Seasons parity rows:
+// - `rpc:seasonManager.get_season_data_for_character`
+// - `rpc:seasonManager.get_season_end_time`
+// - `rpc:seasonManager.select_season`
+// - `notify:OnSeasonStarted`
+// - `notify:OnSeasonEnded`
+// - `notify:OnSeasonSelectionCleared`
+// - `notify:OnSeasonOmegaRewardsClaimed`
+// - `notify:OnSeasonalGoalCompleted`
+// - `notify:OnSeasonalGoalsReset`
+// - `notify:OnChallengeExpired`
+
+
+use crate::common;
+use eve_machonet::{service_roles::ROLE_GM_DEFAULT, SessionState};
+use eve_proto::{BridgeRpcError, PyRep};
+use eve_server::router::ServerContext;
+use eve_server::services::season_manager::{SeasonalChallengeDef, SEASONAL_CHALLENGES_CONFIG_KEY};
+use std::collections::HashMap;
+
+const PILOT_A: i64 = 90_000_001;
+const PILOT_B: i64 = 90_000_002;
+const JITA_STATION: i64 = 60_003_760;
+const ERR_INVALID_SEASON: &str = "InvalidSeasonId";
+const ERR_CHALLENGE_NOT_COMPLETED: &str = "ChallengeNotCompleted";
+const ERR_CHALLENGE_ALREADY_CLAIMED: &str = "ChallengeAlreadyClaimed";
+
+fn new_ctx() -> ServerContext {
+    let sde = std::sync::Arc::new(
+        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("open sde"),
+    );
+    let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    ctx.set_clock_paused(true);
+    ctx
+}
+
+async fn rpc(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    svc: &str,
+    method: &str,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    ctx.dispatch_rpc(sess, svc, None, method, args, &HashMap::new(), None)
+        .await
+}
+
+fn drain_all(ctx: &ServerContext, sess: &mut SessionState, char_id: i64) -> Vec<(String, Vec<PyRep>)> {
+    let mut out = sess.drain_notifications();
+    for n in ctx.drain_notifications_for_char(char_id) {
+        out.push((n.event, n.args));
+    }
+    out
+}
+
+fn find_notif<'a>(notifs: &'a [(String, Vec<PyRep>)], event: &str) -> &'a [PyRep] {
+    notifs
+        .iter()
+        .find(|(e, _)| e == event)
+        .map(|(_, args)| args.as_slice())
+        .unwrap_or_else(|| {
+            let seen: Vec<&str> = notifs.iter().map(|(e, _)| e.as_str()).collect();
+            panic!("expected notification {event}, got {seen:?}")
+        })
+}
+
+async fn login_docked(
+    ctx: &ServerContext,
+    sid: u64,
+    user: &str,
+    pass: &str,
+    char_id: i64,
+    clone_grade: i32,
+) -> SessionState {
+    let mut sess = SessionState::new(sid);
+    common::login_pilot(ctx, &mut sess, user, pass).await;
+    rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)])
+        .await
+        .expect("SelectCharacterID");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = clone_grade as u32;
+            ch.station_id = Some(JITA_STATION);
+            ch.structure_id = None;
+        }
+    });
+    sess.station_id = Some(JITA_STATION);
+    sess.structure_id = None;
+    let _ = drain_all(ctx, &mut sess, char_id);
+    sess
+}
+
+// parity: rpc:seasonManager.get_season_data_for_character, rpc:seasonManager.get_season_end_time
+// parity: rpc:seasonManager.select_season, notify:OnSeasonStarted, notify:OnSeasonEnded
+// parity: notify:OnSeasonSelectionCleared, notify:OnChallengeExpired
+#[tokio::test]
+async fn notify_batch8_seasons_lifecycle_and_challenges() {
+    eve_testkit::attest(&[
+        "rpc:seasonManager.get_season_data_for_character",
+        "rpc:seasonManager.get_season_end_time",
+        "rpc:seasonManager.select_season",
+        "notify:OnSeasonStarted",
+        "notify:OnSeasonEnded",
+        "notify:OnSeasonSelectionCleared",
+        "notify:OnChallengeExpired",
+    ]);
+
+    let ctx = new_ctx();
+    let mut unauth_sess = SessionState::new(9_100);
+    assert_eq!(
+        rpc(&ctx, &mut unauth_sess, "seasonManager", "get_season_data_for_character", &[])
+            .await
+            .unwrap_err()
+            .code,
+        "Unauthorized"
+    );
+    assert_eq!(
+        rpc(&ctx, &mut unauth_sess, "seasonManager", "get_season_end_time", &[])
+            .await
+            .unwrap_err()
+            .code,
+        "Unauthorized"
+    );
+    assert_eq!(
+        rpc(&ctx, &mut unauth_sess, "seasonManager", "select_season", &[PyRep::Integer(1)])
+            .await
+            .unwrap_err()
+            .code,
+        "Unauthorized"
+    );
+
+    let mut sess_a = login_docked(&ctx, 9_101, "demo", "demo-secret", PILOT_A, 2).await;
+    let mut sess_b = login_docked(&ctx, 9_102, "other", "other-secret", PILOT_B, 1).await;
+
+    // Seed custom challenge definitions so challenge 1005 awards 25 points (crosses 2 goal milestones!)
+    ctx.db.with_mut_snapshot(|snap| {
+        let defs = vec![
+            SeasonalChallengeDef {
+                challenge_id: 1_005,
+                season_id: 1,
+                event_type: "ui_onboarding_step".into(),
+                title: "Onboarding".into(),
+                description: "Complete onboarding steps".into(),
+                points: 25,
+                max_progress: 2,
+                client_event_driven: true,
+                reward_type_id: 0,
+                reward_quantity: 0,
+                is_dormant: false,
+                ..Default::default()
+            },
+            SeasonalChallengeDef {
+                challenge_id: 1_006,
+                season_id: 1,
+                event_type: "npc_kills".into(),
+                title: "Bounty Hunter".into(),
+                description: "Destroy pirate vessels".into(),
+                points: 10,
+                max_progress: 5,
+                client_event_driven: false,
+                reward_type_id: 0,
+                reward_quantity: 0,
+                is_dormant: false,
+                ..Default::default()
+            },
+        ];
+        snap.service_state_blobs.insert(
+            SEASONAL_CHALLENGES_CONFIG_KEY.into(),
+            serde_json::to_string(&defs).expect("serialize defs"),
+        );
+    });
+
+    // 1. Baseline get_season_data_for_character & get_season_end_time
+    let data_init = rpc(&ctx, &mut sess_a, "seasonManager", "get_season_data_for_character", &[])
+        .await
+        .expect("get_season_data_for_character");
+    let first_season_id = data_init
+        .dict_get("season_id")
+        .or_else(|| {
+            if let PyRep::List(items) = &data_init {
+                items.first().and_then(|it| it.dict_get("season_id"))
+            } else {
+                None
+            }
+        })
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1);
+    assert!(first_season_id > 0, "expected active season_id > 0, got {data_init:?}");
+
+    let end_time_init = rpc(&ctx, &mut sess_a, "seasonManager", "get_season_end_time", &[])
+        .await
+        .expect("get_season_end_time");
+    let end_ft_val = end_time_init.as_i64().expect("integer filetime end_time");
+    assert!(end_ft_val > ctx.now_blueos_filetime_ticks());
+
+    // Negative: non-GM cannot start or end a season via slash command
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess_b,
+            "publicQaToolsServer",
+            "SlashCmd",
+            &[PyRep::String("/season start 88 14".into())],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "InsufficientRole"
+    );
+
+    // 2. Start Season 88 via GM /season start 88 10 -> emits OnSeasonStarted
+    sess_a.role |= ROLE_GM_DEFAULT;
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let _ = drain_all(&ctx, &mut sess_b, PILOT_B);
+    let slash_start = rpc(
+        &ctx,
+        &mut sess_a,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/season start 88 10".into())],
+    )
+    .await
+    .expect("/season start 88 10");
+    assert_eq!(slash_start.dict_get("seasonID").and_then(|v| v.as_i64()), Some(88));
+    assert_eq!(slash_start.dict_get("started").and_then(|v| v.as_bool()), Some(true));
+
+    let notifs_start_a = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let notifs_start_b = drain_all(&ctx, &mut sess_b, PILOT_B);
+    assert_eq!(find_notif(&notifs_start_a, "OnSeasonStarted").len(), 0);
+    assert_eq!(find_notif(&notifs_start_b, "OnSeasonStarted").len(), 0);
+
+    // Negative: invalid season IDs and invalid slash arguments rejected
+    assert_eq!(
+        rpc(&ctx, &mut sess_a, "slash", "SlashCmd", &[PyRep::String("/season start 0 10".into())])
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidSlashArgument"
+    );
+    let err_999 = rpc(&ctx, &mut sess_a, "seasonManager", "select_season", &[PyRep::Integer(999_999)])
+        .await
+        .unwrap_err();
+    assert_eq!(err_999.code.as_str(), ERR_INVALID_SEASON);
+    let err_neg = rpc(&ctx, &mut sess_a, "seasonManager", "select_season", &[PyRep::Integer(-5)])
+        .await
+        .unwrap_err();
+    assert_eq!(err_neg.code.as_str(), ERR_INVALID_SEASON);
+
+    // 3. select_season(88) selects Season 88, then select_season(None) & select_season(0) emit OnSeasonSelectionCleared
+    let sel_ok = rpc(&ctx, &mut sess_a, "seasonManager", "select_season", &[PyRep::Integer(88)])
+        .await
+        .expect("select_season(88)");
+    assert_eq!(sel_ok, PyRep::Bool(true));
+    let data_88 = rpc(&ctx, &mut sess_a, "seasonManager", "get_season_data_for_character", &[])
+        .await
+        .expect("get_season_data_for_character(88)");
+    assert_eq!(data_88.dict_get("season_id").and_then(|v| v.as_i64()), Some(88));
+    let end_88 = rpc(&ctx, &mut sess_a, "seasonManager", "get_season_end_time", &[])
+        .await
+        .expect("get_season_end_time(88)");
+    assert!(end_88.as_i64().unwrap_or(0) > ctx.now_blueos_filetime_ticks());
+
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let clear_rep = rpc(&ctx, &mut sess_a, "seasonManager", "select_season", &[PyRep::None])
+        .await
+        .expect("select_season(None)");
+    assert_eq!(clear_rep, PyRep::Bool(true));
+    let clear_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    assert_eq!(find_notif(&clear_notifs, "OnSeasonSelectionCleared").len(), 0);
+
+    // Re-select Season 88 for both pilots, then end Season 88 -> emits OnSeasonEnded & OnSeasonSelectionCleared
+    rpc(&ctx, &mut sess_a, "seasonManager", "select_season", &[PyRep::Integer(88)])
+        .await
+        .expect("re-select 88 A");
+    rpc(&ctx, &mut sess_b, "seasonManager", "select_season", &[PyRep::Integer(88)])
+        .await
+        .expect("re-select 88 B");
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let _ = drain_all(&ctx, &mut sess_b, PILOT_B);
+
+    let end_rep = rpc(
+        &ctx,
+        &mut sess_a,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/season end 88".into())],
+    )
+    .await
+    .expect("/season end 88");
+    assert_eq!(end_rep.dict_get("ended").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(end_rep.dict_get("clearedCharacters").and_then(|v| v.as_i64()), Some(2));
+
+    let end_notifs_a = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let end_notifs_b = drain_all(&ctx, &mut sess_b, PILOT_B);
+    assert_eq!(find_notif(&end_notifs_a, "OnSeasonEnded").len(), 0);
+    assert_eq!(find_notif(&end_notifs_a, "OnSeasonSelectionCleared").len(), 0);
+    assert_eq!(find_notif(&end_notifs_b, "OnSeasonEnded").len(), 0);
+    assert_eq!(find_notif(&end_notifs_b, "OnSeasonSelectionCleared").len(), 0);
+
+    // Negative: selecting invalid season -1 fails with CustomInfo; ending unknown season fails
+    let err_sel0 = rpc(&ctx, &mut sess_a, "seasonManager", "select_season", &[PyRep::Integer(-1)])
+        .await
+        .unwrap_err();
+    assert_eq!(err_sel0.code.as_str(), ERR_INVALID_SEASON);
+    assert_eq!(
+        rpc(&ctx, &mut sess_a, "slash", "SlashCmd", &[PyRep::String("/season end 999999".into())])
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidSeasonId"
+    );
+
+    // 4. Complete challenge 1005 (25 pts) -> claim_challenge_rewards emits OnSeasonalGoalCompleted
+    // and (for Omega PILOT_A) OnSeasonOmegaRewardsClaimed, while Alpha PILOT_B does NOT receive Omega claim!
+    let _ = rpc(&ctx, &mut sess_a, "seasonManager", "fill_up_and_return_challenges_for_character", &[])
+        .await
+        .expect("fill challenges A");
+    let _ = rpc(&ctx, &mut sess_b, "seasonManager", "fill_up_and_return_challenges_for_character", &[])
+        .await
+        .expect("fill challenges B");
+
+    // Negative: claiming incomplete challenge fails with ChallengeNotCompleted
+    let err_uncomp = rpc(&ctx, &mut sess_a, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1_005)])
+        .await
+        .unwrap_err();
+    assert_eq!(err_uncomp.code.as_str(), ERR_CHALLENGE_NOT_COMPLETED);
+
+    for _ in 0..2 {
+        rpc(
+            &ctx,
+            &mut sess_a,
+            "seasonManager",
+            "process_client_event",
+            &[PyRep::String("ui_onboarding_step".into())],
+        )
+        .await
+        .expect("complete challenge 1005 A");
+        rpc(
+            &ctx,
+            &mut sess_b,
+            "seasonManager",
+            "process_client_event",
+            &[PyRep::String("ui_onboarding_step".into())],
+        )
+        .await
+        .expect("complete challenge 1005 B");
+    }
+
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let _ = drain_all(&ctx, &mut sess_b, PILOT_B);
+
+    let claim_a = rpc(&ctx, &mut sess_a, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1_005)])
+        .await
+        .expect("claim_challenge_rewards A");
+    assert_eq!(claim_a.dict_get("claimed").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(claim_a.dict_get("seasonPoints").and_then(|v| v.as_i64()), Some(25));
+
+    let claim_notifs_a = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let goal_args = find_notif(&claim_notifs_a, "OnSeasonalGoalCompleted");
+    assert_eq!(goal_args.len(), 2);
+    assert_eq!(goal_args[0].as_i64(), Some(0));
+    assert_eq!(goal_args[1].dict_get("completed").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(goal_args[1].dict_get("points_required").and_then(|v| v.as_i64()), Some(10));
+
+    let omega_args = find_notif(&claim_notifs_a, "OnSeasonOmegaRewardsClaimed");
+    assert_eq!(omega_args.len(), 1);
+    assert_eq!(omega_args[0], PyRep::List(vec![PyRep::Integer(0), PyRep::Integer(1)]));
+
+    // Alpha pilot B gets OnSeasonalGoalCompleted but NOT OnSeasonOmegaRewardsClaimed
+    let _ = rpc(&ctx, &mut sess_b, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1_005)])
+        .await
+        .expect("claim_challenge_rewards B");
+    let claim_notifs_b = drain_all(&ctx, &mut sess_b, PILOT_B);
+    assert_eq!(find_notif(&claim_notifs_b, "OnSeasonalGoalCompleted").len(), 2);
+    assert!(
+        !claim_notifs_b.iter().any(|(ev, _)| ev == "OnSeasonOmegaRewardsClaimed"),
+        "Alpha pilot must not receive OnSeasonOmegaRewardsClaimed"
+    );
+
+    // Negative: double-claiming already claimed challenge fails with ChallengeAlreadyClaimed
+    let err_claimed = rpc(&ctx, &mut sess_a, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1_005)])
+        .await
+        .unwrap_err();
+    assert_eq!(err_claimed.code.as_str(), ERR_CHALLENGE_ALREADY_CLAIMED);
+
+    // 5. Reset seasonal goals via /season reset_goals -> emits OnSeasonalGoalsReset and zeroes points
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let reset_rep = rpc(
+        &ctx,
+        &mut sess_a,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/season reset_goals {PILOT_A}"))],
+    )
+    .await
+    .expect("/season reset_goals");
+    assert_eq!(reset_rep.dict_get("seasonPoints").and_then(|v| v.as_i64()), Some(0));
+    let reset_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    assert_eq!(find_notif(&reset_notifs, "OnSeasonalGoalsReset").len(), 0);
+    // Claimed challenge must NOT be re-armed by /season reset_goals before expiration
+    let err_rearm = rpc(&ctx, &mut sess_a, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1_005)])
+        .await
+        .unwrap_err();
+    assert_eq!(err_rearm.code.as_str(), ERR_CHALLENGE_ALREADY_CLAIMED);
+
+    // Negative: resetting goals for non-existent character fails
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess_a,
+            "slash",
+            "SlashCmd",
+            &[PyRep::String("/season reset_goals 999888777".into())],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CharacterNotFound"
+    );
+
+    // 6. Advance virtual clock by 35 days (> 48h challenge expiration) -> fill_up_and_return_challenges_for_character
+    // refreshes expired challenges and emits OnChallengeExpired(expired_id, new_challenge_kv)
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    ctx.advance_secs(35 * 86_400);
+    let _ = rpc(&ctx, &mut sess_a, "seasonManager", "fill_up_and_return_challenges_for_character", &[])
+        .await
+        .expect("fill challenges after expiry");
+    let exp_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let exp_args = find_notif(&exp_notifs, "OnChallengeExpired");
+    assert_eq!(exp_args.len(), 2);
+    assert!(exp_args[0].as_i64().unwrap_or(0) > 0);
+    assert!(
+        exp_args[1].dict_get("challenge_id").is_some()
+            || exp_args[1].dict_get("challengeID").is_some(),
+        "OnChallengeExpired arg 1 must be replacement challenge KeyVal, got {:?}",
+        exp_args[1]
+    );
+
+    // 7. Time-driven season transitions: advance clock past a future season's start_time_ft and end_time_ft
+    // -> OnSeasonStarted, OnSeasonEnded, and OnSeasonSelectionCleared fire from the world tick without Get* calls
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let future_start_ft = now_ft + 100 * 10_000_000;
+    let future_end_ft = now_ft + 200 * 10_000_000;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut catalog: std::collections::BTreeMap<i64, eve_server::services::season_manager::SeasonConfig> =
+            snap.service_state_blobs
+                .get(eve_server::services::season_manager::SEASONS_CATALOG_KEY)
+                .and_then(|j| serde_json::from_str(j).ok())
+                .unwrap_or_default();
+        if let Some(mut cfg) = catalog.values().next().cloned() {
+            cfg.season_id = 99;
+            cfg.season_name = "Timed Season 99".into();
+            cfg.start_time_ft = future_start_ft;
+            cfg.end_time_ft = future_end_ft;
+            catalog.insert(99, cfg);
+            snap.service_state_blobs.insert(
+                eve_server::services::season_manager::SEASONS_CATALOG_KEY.into(),
+                serde_json::to_string(&catalog).unwrap(),
+            );
+        }
+    });
+    // Initialize announced season state snapshot while season 99 is still upcoming
+    ctx.advance_secs(1);
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let _ = drain_all(&ctx, &mut sess_b, PILOT_B);
+
+    // Advance 120s past future_start_ft -> OnSeasonStarted emitted automatically
+    ctx.advance_secs(120);
+    let timed_start_a = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let timed_start_b = drain_all(&ctx, &mut sess_b, PILOT_B);
+    assert!(
+        timed_start_a.iter().any(|(ev, _)| ev == "OnSeasonStarted"),
+        "expected OnSeasonStarted on clock advance past start_time_ft"
+    );
+    assert!(
+        timed_start_b.iter().any(|(ev, _)| ev == "OnSeasonStarted"),
+        "expected OnSeasonStarted for pilot B on clock advance past start_time_ft"
+    );
+
+    // Select season 99 for PILOT_A, then advance 120s past future_end_ft -> OnSeasonEnded + OnSeasonSelectionCleared
+    let sel_99 = rpc(&ctx, &mut sess_a, "seasonManager", "select_season", &[PyRep::Integer(99)])
+        .await
+        .expect("select_season(99)");
+    assert_eq!(sel_99, PyRep::Bool(true));
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let _ = drain_all(&ctx, &mut sess_b, PILOT_B);
+
+    ctx.advance_secs(120);
+    let timed_end_a = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let timed_end_b = drain_all(&ctx, &mut sess_b, PILOT_B);
+    assert!(
+        timed_end_a.iter().any(|(ev, _)| ev == "OnSeasonEnded"),
+        "expected OnSeasonEnded on clock advance past end_time_ft"
+    );
+    assert!(
+        timed_end_b.iter().any(|(ev, _)| ev == "OnSeasonEnded"),
+        "expected OnSeasonEnded for pilot B on clock advance past end_time_ft"
+    );
+    assert!(
+        timed_end_a.iter().any(|(ev, _)| ev == "OnSeasonSelectionCleared"),
+        "expected OnSeasonSelectionCleared for pilot A when selected season 99 ended"
+    );
+}
+
+}
+
+// Folded submodule: notify_real_emitters_batch8_part2
+#[allow(unused_imports, dead_code)]
+mod notify_real_emitters_batch8_part2 {
+    use super::*;
+
+// Real server-side emission & RPC tests for Notify/RPC Batch 8 (Part 2: HyperNet Raffles & PLEX Vault).
+//
+// Covers 7 Group 2 HyperNet Raffles & PLEX Vault parity rows:
+// - `rpc:raffleMgr.QA_SeedRaffles`
+// - `notify:OnRaffleCreatedServer`
+// - `notify:OnRaffleFinishedServer`
+// - `notify:OnRaffleUpdatedServer`
+// - `notify:OnTicketsUpdatedServer`
+// - `notify:OnPlexDeposited`
+// - `notify:OnPlexItemAddedToInventory`
+
+
+use crate::common;
+use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
+use eve_machonet::{service_roles::ROLE_GM_DEFAULT, SessionState};
+use eve_proto::{BridgeRpcError, PyRep};
+use eve_server::router::ServerContext;
+use eve_server::services::hypernet_raffle_ops::{sweep_expired_raffles, HYPERCORE_TYPE_ID};
+use eve_server::services::market_contracts::PLEX_TYPE_ID;
+use std::collections::HashMap;
+
+const PILOT_A: i64 = 90_000_001;
+const PILOT_B: i64 = 90_000_002;
+const JITA_STATION: i64 = 60_003_760;
+
+fn new_ctx() -> ServerContext {
+    let sde = std::sync::Arc::new(
+        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("open sde"),
+    );
+    let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    ctx.set_clock_paused(true);
+    ctx.set_mechanic_rng_seed(Some(77));
+    ctx
+}
+
+async fn rpc(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    svc: &str,
+    method: &str,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    ctx.dispatch_rpc(sess, svc, None, method, args, &HashMap::new(), None)
+        .await
+}
+
+fn drain_all(ctx: &ServerContext, sess: &mut SessionState, char_id: i64) -> Vec<(String, Vec<PyRep>)> {
+    let mut out = sess.drain_notifications();
+    for n in ctx.drain_notifications_for_char(char_id) {
+        out.push((n.event, n.args));
+    }
+    out
+}
+
+fn find_notif<'a>(notifs: &'a [(String, Vec<PyRep>)], event: &str) -> &'a [PyRep] {
+    notifs
+        .iter()
+        .find(|(e, _)| e == event)
+        .map(|(_, args)| args.as_slice())
+        .unwrap_or_else(|| {
+            let seen: Vec<&str> = notifs.iter().map(|(e, _)| e.as_str()).collect();
+            panic!("expected notification {event}, got {seen:?}")
+        })
+}
+
+async fn login_docked(ctx: &ServerContext, sid: u64, user: &str, pass: &str, char_id: i64) -> SessionState {
+    let mut sess = SessionState::new(sid);
+    common::login_pilot(ctx, &mut sess, user, pass).await;
+    rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)])
+        .await
+        .expect("SelectCharacterID");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(JITA_STATION);
+            ch.structure_id = None;
+            ch.balance = IskCents::from_f64_isk(500_000_000.0);
+        }
+    });
+    sess.station_id = Some(JITA_STATION);
+    sess.structure_id = None;
+    let _ = drain_all(ctx, &mut sess, char_id);
+    sess
+}
+
+// parity: rpc:raffleMgr.QA_SeedRaffles, notify:OnRaffleCreatedServer, notify:OnRaffleFinishedServer
+// parity: notify:OnRaffleUpdatedServer, notify:OnTicketsUpdatedServer, notify:OnPlexDeposited
+// parity: notify:OnPlexItemAddedToInventory
+#[tokio::test]
+async fn notify_batch8_hypernet_raffles_and_plex_vault() {
+    eve_testkit::attest(&[
+        "rpc:raffleMgr.QA_SeedRaffles",
+        "notify:OnRaffleCreatedServer",
+        "notify:OnRaffleFinishedServer",
+        "notify:OnRaffleUpdatedServer",
+        "notify:OnTicketsUpdatedServer",
+        "notify:OnPlexDeposited",
+        "notify:OnPlexItemAddedToInventory",
+    ]);
+
+    let ctx = new_ctx();
+    let mut unauth = SessionState::new(9_200);
+    assert_eq!(
+        rpc(&ctx, &mut unauth, "raffleMgr", "QA_SeedRaffles", &[PyRep::Integer(2)])
+            .await
+            .unwrap_err()
+            .code,
+        "Unauthorized"
+    );
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut unauth,
+            "invbroker",
+            "DepositPlexToVault",
+            &[PyRep::Integer(JITA_STATION), PyRep::Integer(1), PyRep::Integer(10)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "Unauthorized"
+    );
+
+    let mut sess_a = login_docked(&ctx, 9_201, "demo", "demo-secret", PILOT_A).await;
+    let mut sess_b = login_docked(&ctx, 9_202, "other", "other-secret", PILOT_B).await;
+
+    // 1. QA_SeedRaffles role check + positive seeding
+    assert_eq!(
+        rpc(&ctx, &mut sess_a, "raffleMgr", "QA_SeedRaffles", &[PyRep::Integer(3)])
+            .await
+            .unwrap_err()
+            .code,
+        "InsufficientRole"
+    );
+    sess_a.role |= ROLE_GM_DEFAULT;
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let seeded_rep = rpc(&ctx, &mut sess_a, "raffleMgr", "QA_SeedRaffles", &[PyRep::Integer(3)])
+        .await
+        .expect("QA_SeedRaffles");
+    let PyRep::List(seeded_list) = seeded_rep else {
+        panic!("expected List from QA_SeedRaffles, got {seeded_rep:?}");
+    };
+    assert_eq!(seeded_list.len(), 3);
+    let seeded_rid_0 = seeded_list[0].dict_get("raffle_id").and_then(|v| v.as_i64()).unwrap_or(0);
+    let seeded_iid_0 = seeded_list[0].dict_get("item_id").and_then(|v| v.as_i64()).unwrap_or(0);
+    assert!(seeded_rid_0 > 0 && seeded_iid_0 > 0);
+    assert!(seeded_list[0].dict_get("sold_tickets").is_some(), "QA_SeedRaffles must include sold_tickets");
+    let seeded_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let created_rids: std::collections::BTreeSet<i64> = seeded_notifs
+        .iter()
+        .filter(|(n, _)| n == "OnRaffleCreatedServer")
+        .filter_map(|(_, a)| a.first().and_then(|v| v.as_i64()))
+        .collect();
+    assert_eq!(
+        created_rids.len(),
+        3,
+        "QA_SeedRaffles(3) must emit OnRaffleCreatedServer for all 3 seeded raffles"
+    );
+    ctx.db.with_snapshot(|snap| {
+        let it = snap.items.get(&seeded_iid_0).expect("seeded item in snap.items");
+        assert_eq!((it.owner_id, it.location_id, it.flag), (-52_568, -52_568, InventoryFlag::Locked));
+    });
+    let _ = rpc(&ctx, &mut sess_b, "raffleProxy", "BuyRandomTickets", &[PyRep::Integer(seeded_rid_0), PyRep::Integer(8)])
+        .await
+        .expect("BuyRandomTickets on seeded raffle");
+    let claimed_seeded = rpc(&ctx, &mut sess_b, "raffleProxy", "AwardItem", &[PyRep::Integer(seeded_rid_0)])
+        .await
+        .expect("AwardItem on seeded raffle");
+    assert_eq!(claimed_seeded.as_i64(), Some(seeded_iid_0));
+    ctx.db.with_snapshot(|snap| {
+        let it = snap.items.get(&seeded_iid_0).expect("awarded seeded item");
+        assert_eq!((it.owner_id, it.location_id, it.flag), (PILOT_B, JITA_STATION, InventoryFlag::Hangar));
+    });
+    let seeded_tc = seeded_list[0].dict_get("ticket_count").and_then(|v| v.as_i64()).unwrap_or(0);
+    assert!(
+        [8, 16, 48, 512].contains(&seeded_tc),
+        "QA_SeedRaffles ticket_count must be in [8, 16, 48, 512], got {seeded_tc}"
+    );
+    assert_eq!(seeded_list[0].dict_get("owner_id").and_then(|v| v.as_i64()), Some(PILOT_A));
+    assert_eq!(seeded_list[0].dict_get("location_id").and_then(|v| v.as_i64()), Some(JITA_STATION));
+
+    // Undocked GM session must fail closed (no Jita fallback)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.station_id = None;
+        }
+    });
+    let mut undocked_gm = sess_a.clone();
+    undocked_gm.station_id = None;
+    assert!(
+        rpc(&ctx, &mut undocked_gm, "raffleMgr", "QA_SeedRaffles", &[PyRep::Integer(1)])
+            .await
+            .is_err(),
+        "QA_SeedRaffles must fail closed when station_id is None"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.station_id = Some(JITA_STATION);
+        }
+    });
+
+    // 2. CreateRaffle -> emits OnRaffleCreatedServer(raffle_id, raffle_kv)
+    let (item_1, item_2, cores_id) = (820_000_001_i64, 820_000_002_i64, 820_000_003_i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        for (iid, tid, qty, sing) in [
+            (item_1, 587u32, 1, true),
+            (item_2, 587u32, 1, true),
+            (cores_id, HYPERCORE_TYPE_ID, 50, false),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: PILOT_A,
+                    location_id: JITA_STATION,
+                    flag: InventoryFlag::Hangar,
+                    quantity: qty,
+                    singleton: sing,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    // Negative: invalid ticket count (7 not in [8, 16, 48, 512]) and missing item rejected
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess_a,
+            "raffleProxy",
+            "CreateRaffle",
+            &[PyRep::Integer(item_1), PyRep::Integer(7), PyRep::Real(100_000.0)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "InvalidRaffleTicketCount"
+    );
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess_a,
+            "raffleProxy",
+            "CreateRaffle",
+            &[PyRep::Integer(999_888_777), PyRep::Integer(8), PyRep::Real(100_000.0)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "ItemNotFound"
+    );
+
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let create_rep = rpc(
+        &ctx,
+        &mut sess_a,
+        "raffleProxy",
+        "CreateRaffle",
+        &[PyRep::Integer(item_1), PyRep::Integer(8), PyRep::Real(100_000.0)],
+    )
+    .await
+    .expect("CreateRaffle");
+    let raffle_id = create_rep
+        .dict_get("raffle_id")
+        .and_then(|v| v.as_i64())
+        .expect("raffle_id");
+    let create_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let created_args = find_notif(&create_notifs, "OnRaffleCreatedServer");
+    assert_eq!(created_args.len(), 2);
+    assert_eq!(created_args[0].as_i64(), Some(raffle_id));
+    assert_eq!(
+        created_args[1].dict_get("ticket_count").and_then(|v| v.as_i64()),
+        Some(8)
+    );
+    // Calling QA_SeedRaffles after CreateRaffle must not collide with or overwrite raffle_id
+    let post_seed_rep = rpc(&ctx, &mut sess_a, "raffleMgr", "QA_SeedRaffles", &[PyRep::Integer(1)])
+        .await
+        .expect("QA_SeedRaffles after CreateRaffle");
+    let PyRep::List(post_seed_list) = post_seed_rep else {
+        panic!("expected List from QA_SeedRaffles");
+    };
+    let post_seed_rid = post_seed_list[0].dict_get("raffle_id").and_then(|v| v.as_i64()).unwrap_or(0);
+    assert_ne!(post_seed_rid, raffle_id, "QA_SeedRaffles must not collide with CreateRaffle raffle_id");
+    let live_raffle = rpc(&ctx, &mut sess_a, "raffleProxy", "GetRaffle", &[PyRep::Integer(raffle_id)])
+        .await
+        .expect("GetRaffle live");
+    assert_eq!(live_raffle.dict_get("item_id").and_then(|v| v.as_i64()), Some(item_1));
+
+    // 3. BuyTicket & BuyRandomTickets -> emits OnRaffleUpdatedServer & OnTicketsUpdatedServer,
+    // and buying the final ticket emits OnRaffleFinishedServer(raffle_id, winning_ticket)
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let _ = drain_all(&ctx, &mut sess_b, PILOT_B);
+    let _ = rpc(
+        &ctx,
+        &mut sess_b,
+        "raffleProxy",
+        "BuyTicket",
+        &[PyRep::Integer(raffle_id), PyRep::Integer(0)],
+    )
+    .await
+    .expect("BuyTicket 0");
+
+    // Negative: buying already-sold ticket 0 fails with TicketUnavailable
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess_b,
+            "raffleProxy",
+            "BuyTicket",
+            &[PyRep::Integer(raffle_id), PyRep::Integer(0)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "TicketUnavailable"
+    );
+
+    let upd_notifs_b = drain_all(&ctx, &mut sess_b, PILOT_B);
+    let upd_notifs_a = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let upd_args = find_notif(&upd_notifs_b, "OnRaffleUpdatedServer");
+    assert_eq!(upd_args.len(), 2);
+    assert_eq!(upd_args[0].as_i64(), Some(raffle_id));
+    assert_eq!(
+        upd_args[1].dict_get("tickets_remaining").and_then(|v| v.as_i64()),
+        Some(7)
+    );
+    let tix_args = find_notif(&upd_notifs_a, "OnTicketsUpdatedServer");
+    assert_eq!(tix_args.len(), 1);
+    assert_eq!(
+        tix_args[0],
+        PyRep::Dict(vec![(PyRep::Integer(raffle_id), PyRep::Integer(1))])
+    );
+
+    // Buy remaining 7 tickets -> finishes raffle and emits OnRaffleFinishedServer
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let _ = drain_all(&ctx, &mut sess_b, PILOT_B);
+    let _ = rpc(
+        &ctx,
+        &mut sess_b,
+        "raffleProxy",
+        "BuyRandomTickets",
+        &[PyRep::Integer(raffle_id), PyRep::Integer(7)],
+    )
+    .await
+    .expect("BuyRandomTickets 7");
+
+    let fin_notifs_a = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let fin_notifs_b = drain_all(&ctx, &mut sess_b, PILOT_B);
+    let fin_args_a = find_notif(&fin_notifs_a, "OnRaffleFinishedServer");
+    let fin_args_b = find_notif(&fin_notifs_b, "OnRaffleFinishedServer");
+    assert_eq!(fin_args_a.len(), 2);
+    assert_eq!(fin_args_a[0].as_i64(), Some(raffle_id));
+    assert!(fin_args_a[1].as_i64().is_some_and(|t| (0..8).contains(&t)));
+    assert_eq!(fin_args_a, fin_args_b);
+
+    // Negative: buying on finished raffle fails with RaffleFinished; also verify expiry sweep emits None winner
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess_b,
+            "raffleProxy",
+            "BuyRandomTickets",
+            &[PyRep::Integer(raffle_id), PyRep::Integer(1)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "RaffleFinished"
+    );
+
+    let create_2 = rpc(
+        &ctx,
+        &mut sess_a,
+        "raffleProxy",
+        "CreateRaffle",
+        &[PyRep::Integer(item_2), PyRep::Integer(8), PyRep::Real(100_000.0), PyRep::Integer(60)],
+    )
+    .await
+    .expect("CreateRaffle 2");
+    let raffle_2 = create_2.dict_get("raffle_id").and_then(|v| v.as_i64()).unwrap();
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    ctx.advance_secs(120);
+    assert_eq!(sweep_expired_raffles(&ctx), 1);
+    let exp_raffle_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    assert_eq!(
+        find_notif(&exp_raffle_notifs, "OnRaffleFinishedServer"),
+        &[PyRep::Integer(raffle_2), PyRep::None]
+    );
+
+    // 4. PLEX Vault deposit & withdraw: positive + negative failure notifications
+    let (plex_item_id, tritanium_id) = (820_000_010_i64, 820_000_011_i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            plex_item_id,
+            InventoryItemRecord {
+                item_id: plex_item_id,
+                type_id: PLEX_TYPE_ID,
+                owner_id: PILOT_A,
+                location_id: JITA_STATION,
+                flag: InventoryFlag::Hangar,
+                quantity: 500,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            tritanium_id,
+            InventoryItemRecord {
+                item_id: tritanium_id,
+                type_id: 34,
+                owner_id: PILOT_A,
+                location_id: JITA_STATION,
+                flag: InventoryFlag::Hangar,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    // Negative deposit cases -> synchronous RPC Err without unmatchable OnPlexDepositFailed
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess_a,
+            "invbroker",
+            "DepositPlexToVault",
+            &[PyRep::Integer(JITA_STATION), PyRep::Integer(tritanium_id), PyRep::Integer(10)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "NotPlex"
+    );
+    let dep_fail_1 = drain_all(&ctx, &mut sess_a, PILOT_A);
+    assert!(!dep_fail_1.iter().any(|(e, _)| e == "OnPlexDepositFailed"));
+
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess_a,
+            "invbroker",
+            "DepositPlexToVault",
+            &[PyRep::Integer(JITA_STATION), PyRep::Integer(plex_item_id), PyRep::Integer(9_999)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "NotEnoughQuantity"
+    );
+    let dep_fail_2 = drain_all(&ctx, &mut sess_a, PILOT_A);
+    assert!(!dep_fail_2.iter().any(|(e, _)| e == "OnPlexDepositFailed"));
+
+    // Positive deposit -> emits OnPlexDeposited([entity_id])
+    let dep_ok = rpc(
+        &ctx,
+        &mut sess_a,
+        "invbroker",
+        "DepositPlexToVault",
+        &[PyRep::Integer(JITA_STATION), PyRep::Integer(plex_item_id), PyRep::Integer(250)],
+    )
+    .await
+    .expect("DepositPlexToVault 250");
+    assert!(dep_ok.as_i64().unwrap_or(0) > 0);
+    let dep_ok_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let dep_args = find_notif(&dep_ok_notifs, "OnPlexDeposited");
+    assert_eq!(dep_args.len(), 1);
+    assert_eq!(dep_args[0], dep_ok);
+
+    // Negative withdraw cases -> synchronous RPC Err without unmatchable OnPlexWithdrawFailed
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess_a,
+            "invbroker",
+            "WithdrawPlexFromVault",
+            &[PyRep::Integer(99_999)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "NotEnoughPlex"
+    );
+    let wd_fail_1 = drain_all(&ctx, &mut sess_a, PILOT_A);
+    assert!(!wd_fail_1.iter().any(|(e, _)| e == "OnPlexWithdrawFailed"));
+
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess_a,
+            "invbroker",
+            "WithdrawPlexFromVault",
+            &[PyRep::Integer(0)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "InvalidArgument"
+    );
+    let wd_fail_2 = drain_all(&ctx, &mut sess_a, PILOT_A);
+    assert!(!wd_fail_2.iter().any(|(e, _)| e == "OnPlexWithdrawFailed"));
+
+    // Positive withdraw -> emits OnPlexItemAddedToInventory([item_id, tx_id]) matching reply reference
+    let wd_ok = rpc(
+        &ctx,
+        &mut sess_a,
+        "invbroker",
+        "WithdrawPlexFromVault",
+        &[PyRep::Integer(100)],
+    )
+    .await
+    .expect("WithdrawPlexFromVault 100");
+    let withdrawn_item_id = wd_ok
+        .dict_get("itemID")
+        .and_then(|v| v.as_i64())
+        .expect("withdrawn itemID");
+    let wd_ref = wd_ok
+        .dict_get("reference")
+        .and_then(|v| v.as_i64())
+        .expect("withdraw reference");
+    assert_eq!(
+        wd_ok.dict_get("remainingVaultBalance").and_then(|v| v.as_i64()),
+        Some(650)
+    );
+    let wd_ok_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let wd_args = find_notif(&wd_ok_notifs, "OnPlexItemAddedToInventory");
+    assert_eq!(wd_args.len(), 2);
+    assert_eq!(wd_args[0].as_i64(), Some(withdrawn_item_id));
+    assert_eq!(wd_args[1].as_i64(), Some(wd_ref));
+}
+
+}
+
+// Folded submodule: notify_real_emitters_batch8_part3
+#[allow(unused_imports, dead_code)]
+mod notify_real_emitters_batch8_part3 {
+    use super::*;
+
+// Real server-side emission & RPC tests for Notify/RPC Batch 8 (Part 3: Operations & AIR NPE).
+//
+// Covers the V24-triggered Group 3 Operations / NPE parity rows:
+// - `notify:OnOperationTaskSkipped`
+// - `notify:OnAirNpeStateChanged`
+
+
+use crate::common;
+use eve_machonet::SessionState;
+use eve_proto::{BridgeRpcError, PyRep};
+use eve_server::router::ServerContext;
+use eve_server::services::operations_manager_helpers::get_operation_defs;
+use std::collections::HashMap;
+
+const PILOT_A: i64 = 90_000_001;
+const SYS_JITA: u32 = 30_000_142;
+
+fn new_ctx() -> ServerContext {
+    let sde = std::sync::Arc::new(
+        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("open sde"),
+    );
+    let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    ctx.set_clock_paused(true);
+    ctx
+}
+
+async fn rpc(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    svc: &str,
+    method: &str,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    ctx.dispatch_rpc(sess, svc, None, method, args, &HashMap::new(), None)
+        .await
+}
+
+fn drain_all(ctx: &ServerContext, sess: &mut SessionState, char_id: i64) -> Vec<(String, Vec<PyRep>)> {
+    let mut out = sess.drain_notifications();
+    for n in ctx.drain_notifications_for_char(char_id) {
+        out.push((n.event, n.args));
+    }
+    out
+}
+
+fn find_notif<'a>(notifs: &'a [(String, Vec<PyRep>)], event: &str) -> &'a [PyRep] {
+    notifs
+        .iter()
+        .find(|(e, _)| e == event)
+        .map(|(_, args)| args.as_slice())
+        .unwrap_or_else(|| {
+            let seen: Vec<&str> = notifs.iter().map(|(e, _)| e.as_str()).collect();
+            panic!("expected notification {event}, got {seen:?}")
+        })
+}
+
+// parity: notify:OnOperationTaskSkipped, notify:OnAirNpeStateChanged
+#[tokio::test]
+async fn notify_batch8_operations_npe_and_client_node_graphs() {
+    eve_testkit::attest(&[
+        "notify:OnOperationTaskSkipped",
+        "notify:OnAirNpeStateChanged",
+    ]);
+
+    let ctx = new_ctx();
+    let mut unauth = SessionState::new(9_300);
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut unauth,
+            "operationsManager",
+            "skip_task",
+            &[PyRep::Integer(1), PyRep::Integer(1), PyRep::Integer(10)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "Unauthorized"
+    );
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut unauth,
+            "operationsManager",
+            "process_client_event",
+            &[PyRep::String("start_tutorial".into())],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "Unauthorized"
+    );
+
+    let mut sess = SessionState::new(9_301);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_A)])
+        .await
+        .expect("SelectCharacterID");
+    let _ = drain_all(&ctx, &mut sess, PILOT_A);
+
+    // Negative: non-SDE graph 999_999_888 is rejected with NodeGraphNotFound
+    let err_ng = rpc(
+        &ctx,
+        &mut sess,
+        "node_graph",
+        "process_client_graph_message",
+        &[
+            PyRep::Integer(999_999_888),
+            PyRep::Integer(1),
+            PyRep::String("noop_msg".into()),
+            PyRep::Dict(Vec::new()),
+        ],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_ng.code, "NodeGraphNotFound");
+
+    // 1. start_tutorial via process_client_event -> emits OnAirNpeStateChanged([PILOT_A, 1])
+    let start_tut = rpc(
+        &ctx,
+        &mut sess,
+        "operationsManager",
+        "process_client_event",
+        &[
+            PyRep::String("start_tutorial".into()),
+            PyRep::None,
+            PyRep::Dict(vec![(PyRep::String("state_id".into()), PyRep::Integer(1))]),
+        ],
+    )
+    .await
+    .expect("start_tutorial");
+    assert_eq!(start_tut, PyRep::Bool(true));
+
+    let tut_notifs = drain_all(&ctx, &mut sess, PILOT_A);
+    assert_eq!(
+        find_notif(&tut_notifs, "OnAirNpeStateChanged"),
+        &[PyRep::Integer(PILOT_A), PyRep::Integer(1)]
+    );
+
+    // 2. process_client_graph_message on real SDE graph (3) does NOT echo client input back
+    let _ = rpc(
+        &ctx,
+        &mut sess,
+        "node_graph",
+        "process_client_graph_message",
+        &[
+            PyRep::Integer(3),
+            PyRep::Integer(5),
+            PyRep::String("node_completed".into()),
+            PyRep::Dict(vec![(PyRep::String("stage".into()), PyRep::Integer(2))]),
+        ],
+    )
+    .await
+    .expect("process_client_graph_message on SDE graph 3");
+    let ng_msg_notifs = drain_all(&ctx, &mut sess, PILOT_A);
+    assert!(
+        !ng_msg_notifs.iter().any(|(ev, _)| ev == "OnClientNodeGraphMessage" || ev == "OnClientNodeGraphUpdate"),
+        "must not echo client node graph input back: {ng_msg_notifs:?}"
+    );
+
+    // 3. skip_tutorial -> emits OnAirNpeStateChanged([PILOT_A, 3])
+    let skip_tut = rpc(
+        &ctx,
+        &mut sess,
+        "operationsManager",
+        "process_client_event",
+        &[PyRep::String("skip_tutorial".into())],
+    )
+    .await
+    .expect("skip_tutorial");
+    assert_eq!(skip_tut, PyRep::Bool(true));
+
+    let skip_tut_notifs = drain_all(&ctx, &mut sess, PILOT_A);
+    assert_eq!(
+        find_notif(&skip_tut_notifs, "OnAirNpeStateChanged"),
+        &[PyRep::Integer(PILOT_A), PyRep::Integer(3)]
+    );
+
+    // 4. Discover a real operation with tasks from SDE -> activate & skip_task -> OnOperationTaskSkipped
+    let op_defs = get_operation_defs(&ctx.sde);
+    let empty_done = std::collections::HashSet::new();
+    let is_skippable = |tid: i64| {
+        op_defs.task_is_client_skippable.contains(&tid) || op_defs.task_is_optional.contains(&tid)
+    };
+    let (&op_id, tasks) = op_defs
+        .op_tasks
+        .iter()
+        .filter(|(id, ts)| {
+            op_defs.are_prerequisites_met(**id, &empty_done)
+                && ts.len() >= 2
+                && is_skippable(ts[0])
+        })
+        .min_by_key(|(id, _)| **id)
+        .or_else(|| {
+            op_defs
+                .op_tasks
+                .iter()
+                .filter(|(id, ts)| op_defs.are_prerequisites_met(**id, &empty_done) && ts.len() >= 2)
+                .min_by_key(|(id, _)| **id)
+        })
+        .or_else(|| {
+            op_defs
+                .op_tasks
+                .iter()
+                .filter(|(id, ts)| op_defs.are_prerequisites_met(**id, &empty_done) && !ts.is_empty())
+                .min_by_key(|(id, _)| **id)
+        })
+        .expect("at least one prerequisite-free operation with tasks in SDE");
+    let cat_id = op_defs
+        .op_default_category
+        .get(&op_id)
+        .copied()
+        .or_else(|| op_defs.sde_categories.iter().copied().next())
+        .unwrap_or(31);
+    let first_task_id = tasks[0];
+    let expected_next_task = tasks.get(1).copied().map(PyRep::Integer).unwrap_or(PyRep::None);
+    if !op_defs.client_completable_tasks.contains(&first_task_id) {
+        sess.role |= eve_machonet::service_roles::ROLE_GMH;
+    }
+
+    let _ = drain_all(&ctx, &mut sess, PILOT_A);
+    let act_op = rpc(
+        &ctx,
+        &mut sess,
+        "operationsManager",
+        "activate_operation_in_solar_system",
+        &[
+            PyRep::Integer(op_id),
+            PyRep::Integer(SYS_JITA as i64),
+            PyRep::Integer(cat_id),
+        ],
+    )
+    .await
+    .expect("activate_operation_in_solar_system");
+    assert_eq!(act_op, PyRep::Bool(true));
+    let _ = drain_all(&ctx, &mut sess, PILOT_A);
+
+    // Negative: skip_task with invalid task ID fails with CustomInfo
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess,
+            "operationsManager",
+            "skip_task",
+            &[PyRep::Integer(cat_id), PyRep::Integer(op_id), PyRep::Integer(0)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CustomInfo"
+    );
+
+    let skip_task_rep = rpc(
+        &ctx,
+        &mut sess,
+        "operationsManager",
+        "skip_task",
+        &[
+            PyRep::Integer(cat_id),
+            PyRep::Integer(op_id),
+            PyRep::Integer(first_task_id),
+        ],
+    )
+    .await
+    .expect("skip_task");
+    assert_eq!(skip_task_rep, PyRep::Bool(true));
+    let skip_task_notifs = drain_all(&ctx, &mut sess, PILOT_A);
+    let task_skipped_args = find_notif(&skip_task_notifs, "OnOperationTaskSkipped");
+    assert_eq!(
+        task_skipped_args,
+        &[
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(cat_id),
+                PyRep::Integer(op_id),
+                PyRep::Integer(first_task_id),
+                expected_next_task,
+            ])]),
+            PyRep::Bool(true),
+        ]
+    );
+}
+
+}
