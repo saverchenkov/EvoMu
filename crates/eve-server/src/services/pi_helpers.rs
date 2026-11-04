@@ -894,6 +894,14 @@ pub fn save_orbital_settings(snap: &mut eve_db::WorldStateSnapshot, planet_or_or
             let (tag_a, tag_b) = (format!("Orbital:{planet_id}"), format!("Orbital:{planet_or_orbital_id}"));
             snap.structures.values().find(|s| s.structure_id == planet_or_orbital_id || s.name == tag_a || s.name == tag_b).map(|s| s.solar_system_id)
         })
+        .or_else(|| {
+            snap.items.get(&planet_id).or_else(|| snap.items.get(&planet_or_orbital_id))
+                .and_then(|it| if (30_000_000..=33_000_000).contains(&it.location_id) { Some(it.location_id as u32) } else { None })
+        })
+        .or_else(|| {
+            snap.characters.values().find(|c| c.corporation_id == settings.owner_corp_id).map(|c| c.solar_system_id)
+        })
+        .or_else(|| snap.characters.values().next().map(|c| c.solar_system_id))
         .unwrap_or(30_000_142);
     let office_id = orbital_id_opt.unwrap_or(planet_id);
     let standing_lvl = if settings.minimum_standing > 5.0 { Some("excellent".to_string()) }

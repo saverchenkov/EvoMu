@@ -890,8 +890,11 @@ pub fn handle_industry_facilities_bps(
                 }
                 _ => Vec::new(),
             };
-            let current_sys = session.solar_system_id.unwrap_or(30_000_142);
             let facilities = ctx.db.with_snapshot(|snap| {
+                let current_sys = session
+                    .solar_system_id
+                    .or_else(|| snap.characters.get(&char_id).map(|c| c.solar_system_id))
+                    .unwrap_or(30_000_142);
                 let mut list = Vec::new();
                 if !explicit_ids.is_empty() {
                     for fid in explicit_ids {
@@ -961,7 +964,9 @@ pub fn handle_industry_facilities_bps(
             let locs = ctx.db.with_snapshot(|snap| {
                 let sys_id = snap.structures.get(&fid).map(|s| s.solar_system_id)
                     .or_else(|| ctx.sde.stations.get(&fid).map(|st| st.solar_system_id as u32))
-                    .unwrap_or_else(|| session.solar_system_id.unwrap_or(30_000_142));
+                    .or(session.solar_system_id)
+                    .or_else(|| snap.characters.get(&char_id).map(|c| c.solar_system_id))
+                    .unwrap_or(30_000_142);
                 let reg = ctx.sde.solar_systems.get(&sys_id).map(|sys| sys.region_id as i64).unwrap_or(0);
                 let mut out = Vec::new();
                 if owner_filter.is_none() || owner_filter == Some(char_id) {
@@ -1260,9 +1265,10 @@ pub fn handle_industry_facilities_bps(
 
         // System Cost Index & 28d Job Volume (`feat:industry.cost-index`)
         ("map", "GetIndustryCostModifier") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let sys_id = args.first().and_then(|a| a.as_i64()).map(|v| v as u32).or(session.solar_system_id).unwrap_or(30_000_142);
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let req_sys = args.first().and_then(|a| a.as_i64()).map(|v| v as u32).or(session.solar_system_id);
             let res = ctx.db.with_snapshot(|snap| {
+                let sys_id = req_sys.or_else(|| snap.characters.get(&char_id).map(|c| c.solar_system_id)).unwrap_or(30_000_142);
                 let sci = |act| compute_canonical_system_cost_index(ctx, snap, sys_id, act);
                 PyRep::keyval([
                     ("solarSystemID", PyRep::Integer(sys_id as i64)),

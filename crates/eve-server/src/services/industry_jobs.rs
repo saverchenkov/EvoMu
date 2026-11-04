@@ -149,8 +149,11 @@ pub fn handle_industry_jobs(
 
             // Enforce remote job range (`feat:industry.job-range`) when `station_id != docked_id`
             if station_id != docked_id {
-                let current_sys = session.solar_system_id.unwrap_or(30_000_142);
                 let range_check = ctx.db.with_snapshot(|snap| {
+                    let current_sys = session
+                        .solar_system_id
+                        .or_else(|| snap.characters.get(&char_id).map(|c| c.solar_system_id))
+                        .unwrap_or(30_000_142);
                     let Some((_, _, f_sys, _, _, _, _)) =
                         resolve_facility_modifiers_and_system(ctx, snap, station_id)
                     else {

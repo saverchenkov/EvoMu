@@ -175,6 +175,8 @@ pub fn compute_pin_resource_distribution(
         .values()
         .find(|s| s.planet_ids.contains(&planet_id))
         .map(|s| s.solar_system_id)
+        .or_else(|| ctx.sde.location_solar_system(planet_id))
+        .or_else(|| snap.planetary_colonies.values().find(|c| c.planet_id == planet_id).map(|c| c.solar_system_id))
         .unwrap_or(30000142);
     let p0_resources = list_sde_planet_p0_resources(ctx, sys_id, planet_id);
 
