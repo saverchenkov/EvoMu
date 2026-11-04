@@ -614,6 +614,7 @@ mod parity_esi_calendar_closure;
 mod parity_plan_remaining_closure;
 mod parity_quasar_three_closure;
 mod parity_crimewatch_closure;
+mod crimewatch_timers_and_drones;
 mod parity_discovery_planet_closure;
 mod parity_fighters_lifecycle_closure;
 mod parity_quasar_achievement_remediation;

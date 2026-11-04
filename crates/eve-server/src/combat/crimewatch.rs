@@ -759,6 +759,13 @@ pub fn credit_specialized_npc_bounty_and_sec_status(
     if !credited {
         return;
     }
+    let sys_sec = ctx
+        .sde
+        .solar_systems
+        .get(&solar_system_id)
+        .map(|s| s.security_status)
+        .unwrap_or(0.0);
+    let sys_band = (sys_sec * 10.0).round() as i32;
     let old_sec = ctx.db.with_snapshot(|snap| {
         snap.characters
             .get(&killer_char_id)
@@ -766,34 +773,55 @@ pub fn credit_specialized_npc_bounty_and_sec_status(
             .unwrap_or(0.0)
     });
     if old_sec < 5.0 {
-        let supp_mult =
-            crate::services::security_mgr::insurgency_suppression_bounty_and_sec_multiplier(
-                ctx,
-                solar_system_id,
-            );
-        let gain = crate::combat::npc_ai::compute_sec_status_gain(old_sec, effective_bounty)
-            * supp_mult;
-        let new_sec = (old_sec + gain).min(5.0).clamp(-10.0, 10.0);
-        ctx.db.with_mut_snapshot(|snap| {
-            if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
-                ch.security_status = new_sec;
-            }
-        });
-        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-            rt.sec_status_transactions
-                .entry(killer_char_id)
-                .or_default()
-                .push(crate::services::combat_crimewatch::SecStatusTransaction {
-                    timestamp_unix: now_unix,
-                    old_sec,
-                    new_sec,
-                    delta: new_sec - old_sec,
-                    reason: "NPC Pirate Bounty".into(),
+        let (can_gain, incremental_bounty) =
+            crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                let entry = rt
+                    .npc_sec_gain_intervals
+                    .entry((killer_char_id, sys_band))
+                    .or_insert((0, 0.0));
+                if now_unix >= entry.0.saturating_add(900) {
+                    *entry = (now_unix, effective_bounty);
+                    (true, effective_bounty)
+                } else if effective_bounty > entry.1 {
+                    let prev = entry.1;
+                    entry.1 = effective_bounty;
+                    (true, effective_bounty - prev)
+                } else {
+                    (false, 0.0)
+                }
+            });
+        if can_gain {
+            let supp_mult =
+                crate::services::security_mgr::insurgency_suppression_bounty_and_sec_multiplier(
+                    ctx,
                     solar_system_id,
-                    event_type_id: crate::services::combat_crimewatch::crimewatch_timers::EVENT_SEC_STATUS_KILL_PIRATE_NPC,
-                    other_owner_id: None,
-                    other_type_id: None,
+                );
+            let gain = crate::combat::npc_ai::compute_sec_status_gain(old_sec, incremental_bounty)
+                * supp_mult;
+            if gain > 0.0 {
+                let new_sec = (old_sec + gain).min(5.0).clamp(-10.0, 10.0);
+                ctx.db.with_mut_snapshot(|snap| {
+                    if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
+                        ch.security_status = new_sec;
+                    }
                 });
-        });
+                crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                    rt.sec_status_transactions
+                        .entry(killer_char_id)
+                        .or_default()
+                        .push(crate::services::combat_crimewatch::SecStatusTransaction {
+                            timestamp_unix: now_unix,
+                            old_sec,
+                            new_sec,
+                            delta: new_sec - old_sec,
+                            reason: "NPC Pirate Bounty".into(),
+                            solar_system_id,
+                            event_type_id: crate::services::combat_crimewatch::crimewatch_timers::EVENT_SEC_STATUS_KILL_PIRATE_NPC,
+                            other_owner_id: None,
+                            other_type_id: None,
+                        });
+                });
+            }
+        }
     }
 }

@@ -563,7 +563,7 @@ pub fn record_illegal_pvp_penalties_if_new(
         return;
     }
     apply_illegal_pvp_sec_status_loss(ctx, attacker_char_id, victim_char_id, sys_id, sys_sec, is_pod, now_unix);
-    if sys_sec < 0.45 && is_pod && victim_char_id > 0 {
+    if (sys_sec >= 0.45 || is_pod) && victim_char_id > 0 {
         let rt_expiries = with_combat_runtime(ctx, |rt| rt.kill_right_expires_unix.clone());
         let has_unexpired_kr = ctx.db.with_snapshot(|snap| {
             snap.kill_rights.values().any(|kr| {
