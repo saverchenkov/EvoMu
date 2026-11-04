@@ -47,6 +47,13 @@ fn encode_timestamp(field_num: u32, secs: i64, out: &mut Vec<u8>) {
 fn extract_u64_from_field(dyn_msg: &DynamicQuasarMessage, field_num: u32) -> u64 {
     match dyn_msg.get(field_num) {
         Some(DynamicValue::Message(sub)) => match sub.get(1) {
+            Some(DynamicValue::Message(inner)) => match inner.get(1) {
+                Some(DynamicValue::Uint64(n)) => *n,
+                Some(DynamicValue::Uint32(n)) => *n as u64,
+                Some(DynamicValue::Int64(n)) => *n as u64,
+                Some(DynamicValue::Int32(n)) => *n as u64,
+                _ => 0,
+            },
             Some(DynamicValue::Uint64(n)) => *n,
             Some(DynamicValue::Uint32(n)) => *n as u64,
             Some(DynamicValue::Int64(n)) => *n as u64,

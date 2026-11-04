@@ -272,6 +272,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 let query = match msg.get(1) {
                     Some(DynamicValue::String(s)) => s.to_ascii_lowercase(),
                     Some(DynamicValue::Bytes(b)) => String::from_utf8_lossy(b).to_ascii_lowercase(),
+                    Some(DynamicValue::Message(sub)) => match sub.get(1) {
+                        Some(DynamicValue::String(s)) => s.to_ascii_lowercase(),
+                        Some(DynamicValue::Bytes(b)) => String::from_utf8_lossy(b).to_ascii_lowercase(),
+                        _ => String::new(),
+                    },
                     _ => String::new(),
                 };
                 let ids = d.with_snapshot(|s| {

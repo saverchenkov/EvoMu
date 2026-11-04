@@ -17,9 +17,59 @@ use eve_proto::quasar::{
     DynamicQuasarMessage, DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 const MISC_STATE_BLOB_KEY: &str = "cluster_misc_state";
+const ACL_REGISTRY_BLOB_KEY: &str = "quasar_acl_registry";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuasarAclRecord {
+    pub acl_id: u32,
+    pub name: String,
+    pub description: String,
+    pub version: u32,
+    pub characters: Vec<(u64, i32)>,
+    pub corporations: Vec<(u64, i32)>,
+    pub alliances: Vec<(u64, i32)>,
+    pub everyone: bool,
+}
+
+fn load_or_seed_acls(db: &WorldRepository) -> Vec<QuasarAclRecord> {
+    db.with_mut_snapshot(|snap| {
+        if let Some(json) = snap.service_state_blobs.get(ACL_REGISTRY_BLOB_KEY) {
+            if let Ok(records) = serde_json::from_str::<Vec<QuasarAclRecord>>(json) {
+                return records;
+            }
+        }
+        let defaults = vec![
+            QuasarAclRecord {
+                acl_id: 1,
+                name: "Default Station Access".into(),
+                description: "Standard corporate access control list".into(),
+                version: 1,
+                characters: vec![(90_000_001, 4), (90_000_002, 1)],
+                corporations: vec![(98_000_001, 1)],
+                alliances: vec![],
+                everyone: false,
+            },
+            QuasarAclRecord {
+                acl_id: 2,
+                name: "Public Docking Facility".into(),
+                description: "Open access docking ACL".into(),
+                version: 1,
+                characters: vec![(90_000_001, 3)],
+                corporations: vec![],
+                alliances: vec![],
+                everyone: true,
+            },
+        ];
+        if let Ok(json) = serde_json::to_string(&defaults) {
+            snap.service_state_blobs.insert(ACL_REGISTRY_BLOB_KEY.to_string(), json);
+        }
+        defaults
+    })
+}
 
 fn any(type_name: &str, value: Vec<u8>) -> GoogleAny {
     GoogleAny {
@@ -518,4 +568,227 @@ pub fn register_handlers(
             }),
         );
     }
+
+    // 13. eve.ancestry.GetAllRequest -> eve.ancestry.GetAllResponse
+    let sde_anc = Arc::clone(&sde);
+    router.register_handler(
+        "eve.ancestry.GetAllRequest",
+        Arc::new(move |_ctx, _any, _msg| {
+            let mut ancestries: Vec<_> = sde_anc.ancestries.values().collect();
+            ancestries.sort_by_key(|a| a.ancestry_id);
+
+            let mut out = Vec::new();
+            for anc in ancestries {
+                let mut item = Vec::new();
+                encode_id_msg(1, anc.ancestry_id as u64, &mut item);
+
+                let mut attrs = Vec::new();
+                encode_string_field(1, &anc.name, &mut attrs);
+                encode_string_field(2, &anc.description, &mut attrs);
+                encode_string_field(3, &anc.short_description, &mut attrs);
+                encode_id_msg(4, anc.bloodline_id as u64, &mut attrs);
+
+                encode_bytes_field(2, &attrs, &mut item);
+                encode_bytes_field(1, &item, &mut out);
+            }
+            Ok(any("eve.ancestry.GetAllResponse", out))
+        }),
+    );
+
+    // 14. eve.agent.GetRequest -> eve.agent.GetResponse
+    let sde_ag_get = Arc::clone(&sde);
+    router.register_handler(
+        "eve.agent.GetRequest",
+        Arc::new(move |_ctx, _any, msg| {
+            let agent_id = extract_required_i64(msg, 1, "agent")?;
+            let ag = sde_ag_get
+                .agent(agent_id)
+                .ok_or_else(|| (STATUS_NOT_FOUND, format!("Agent {agent_id} not found")))?;
+
+            let mut attrs = Vec::new();
+            encode_string_field(1, &ag.name, &mut attrs);
+            let mut out = Vec::new();
+            encode_bytes_field(1, &attrs, &mut out);
+            Ok(any("eve.agent.GetResponse", out))
+        }),
+    );
+
+    // 15. eve.agent.SearchRequest -> eve.agent.SearchResponse
+    let sde_ag_search = Arc::clone(&sde);
+    router.register_handler(
+        "eve.agent.SearchRequest",
+        Arc::new(move |_ctx, _any, msg| {
+            let search_term = match msg.get(1) {
+                Some(DynamicValue::String(s)) => s.clone(),
+                Some(DynamicValue::Bytes(b)) => String::from_utf8_lossy(b).to_string(),
+                Some(DynamicValue::Message(sub)) => match sub.get(1) {
+                    Some(DynamicValue::String(s)) => s.clone(),
+                    Some(DynamicValue::Bytes(b)) => String::from_utf8_lossy(b).to_string(),
+                    Some(DynamicValue::Repeated(list)) => {
+                        let mut joined = String::new();
+                        for item in list {
+                            if let DynamicValue::String(s) = item {
+                                if !joined.is_empty() { joined.push(' '); }
+                                joined.push_str(s);
+                            } else if let DynamicValue::Bytes(b) = item {
+                                if !joined.is_empty() { joined.push(' '); }
+                                joined.push_str(&String::from_utf8_lossy(b));
+                            }
+                        }
+                        joined
+                    }
+                    _ => String::new(),
+                },
+                _ => String::new(),
+            };
+            let term_lower = search_term.trim().to_ascii_lowercase();
+            let mut matched: Vec<_> = sde_ag_search
+                .agents
+                .values()
+                .filter(|ag| {
+                    !term_lower.is_empty() && ag.name.to_ascii_lowercase().contains(&term_lower)
+                })
+                .collect();
+            matched.sort_by_key(|ag| ag.agent_id);
+
+            let mut out = Vec::new();
+            for ag in matched.into_iter().take(100) {
+                encode_id_msg(1, ag.agent_id as u64, &mut out);
+            }
+            Ok(any("eve.agent.SearchResponse", out))
+        }),
+    );
+
+    // 16. eve.acl.api.GetRequest -> eve.acl.api.GetResponse
+    let db_acl = Arc::clone(&db);
+    router.register_handler(
+        "eve.acl.api.GetRequest",
+        Arc::new(move |_ctx, _any, msg| {
+            let acl_id = extract_required_u32(msg, 1, "acl")?;
+            let acls = load_or_seed_acls(&db_acl);
+            let record = acls
+                .into_iter()
+                .find(|r| r.acl_id == acl_id)
+                .ok_or_else(|| (STATUS_NOT_FOUND, format!("ACL {acl_id} not found")))?;
+
+            let mut membership = Vec::new();
+            for (cid, ctrl) in record.characters {
+                let mut char_sub = Vec::new();
+                encode_id_msg(1, cid, &mut char_sub);
+                encode_varint_field(2, ctrl as u64, &mut char_sub);
+                encode_bytes_field(1, &char_sub, &mut membership);
+            }
+            for (corp_id, ctrl) in record.corporations {
+                let mut corp_sub = Vec::new();
+                encode_id_msg(1, corp_id, &mut corp_sub);
+                encode_varint_field(2, ctrl as u64, &mut corp_sub);
+                encode_bytes_field(2, &corp_sub, &mut membership);
+            }
+            for (all_id, ctrl) in record.alliances {
+                let mut all_sub = Vec::new();
+                encode_id_msg(1, all_id, &mut all_sub);
+                encode_varint_field(2, ctrl as u64, &mut all_sub);
+                encode_bytes_field(3, &all_sub, &mut membership);
+            }
+            if record.everyone {
+                encode_varint_field(4, 1, &mut membership);
+            }
+
+            let mut attrs = Vec::new();
+            encode_string_field(1, &record.name, &mut attrs);
+            encode_string_field(2, &record.description, &mut attrs);
+            encode_bytes_field(3, &membership, &mut attrs);
+
+            let mut ver = Vec::new();
+            encode_varint_field(1, record.version as u64, &mut ver);
+            encode_bytes_field(4, &ver, &mut attrs);
+
+            let mut out = Vec::new();
+            encode_bytes_field(1, &attrs, &mut out);
+            Ok(any("eve.acl.api.GetResponse", out))
+        }),
+    );
+
+    // 17. eve.acl.api.CanManageRequest -> eve.acl.api.CanManageResponse
+    let db_can_manage = Arc::clone(&db);
+    router.register_handler(
+        "eve.acl.api.CanManageRequest",
+        Arc::new(move |_ctx, _any, msg| {
+            let acl_id = extract_required_u32(msg, 1, "acl")?;
+            let char_id = extract_required_u64(msg, 2, "character")?;
+            let acls = load_or_seed_acls(&db_can_manage);
+            let record = acls
+                .into_iter()
+                .find(|r| r.acl_id == acl_id)
+                .ok_or_else(|| (STATUS_NOT_FOUND, format!("ACL {acl_id} not found")))?;
+
+            let can_manage = record
+                .characters
+                .iter()
+                .any(|(c, ctrl)| *c == char_id && (*ctrl == 3 || *ctrl == 4));
+
+            let mut out = Vec::new();
+            encode_varint_field(1, if can_manage { 1 } else { 0 }, &mut out);
+            Ok(any("eve.acl.api.CanManageResponse", out))
+        }),
+    );
+
+    // 18. eve.acl.api.GetManagedRequest -> eve.acl.api.GetManagedResponse
+    let db_get_managed = Arc::clone(&db);
+    router.register_handler(
+        "eve.acl.api.GetManagedRequest",
+        Arc::new(move |_ctx, _any, msg| {
+            let char_id = extract_required_u64(msg, 1, "character")?;
+            let acls = load_or_seed_acls(&db_get_managed);
+            let mut out = Vec::new();
+            for record in acls {
+                if record
+                    .characters
+                    .iter()
+                    .any(|(c, ctrl)| *c == char_id && (*ctrl == 3 || *ctrl == 4))
+                {
+                    encode_id_msg(1, record.acl_id as u64, &mut out);
+                }
+            }
+            Ok(any("eve.acl.api.GetManagedResponse", out))
+        }),
+    );
+}
+
+/// Helper to publish `eve.academy.ships.events.Borrowed` notice to a target session or broadcast.
+pub fn publish_academy_borrowed_notice(
+    gateway: &PublicGatewayRouter,
+    scope: crate::quasar_gateway::NoticeScope,
+    char_id: u64,
+    ship_type_id: u64,
+    ship_id: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_id_msg(1, char_id, &mut payload);
+    encode_id_msg(2, ship_type_id, &mut payload);
+    encode_id_msg(3, ship_id, &mut payload);
+
+    let any_msg = any("eve.academy.ships.events.Borrowed", payload);
+    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
+    Ok(delivered)
+}
+
+/// Helper to publish `eve.acl.api.MembershipUpdated` notice to a target session or broadcast.
+pub fn publish_acl_membership_updated_notice(
+    gateway: &PublicGatewayRouter,
+    scope: crate::quasar_gateway::NoticeScope,
+    acl_id: u32,
+    version: u32,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_id_msg(1, acl_id as u64, &mut payload);
+    let mut ver = Vec::new();
+    encode_varint_field(1, version as u64, &mut ver);
+    encode_bytes_field(3, &ver, &mut payload);
+
+    let any_msg = any("eve.acl.api.MembershipUpdated", payload);
+    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
+    Ok(delivered)
 }
