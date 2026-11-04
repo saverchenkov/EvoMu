@@ -527,114 +527,17 @@ pub(super) fn handle_mail_and_calendar(
             Some(Ok(PyRep::Buffer(compressed)))
         }
 
-        ("mailMgr", "MarkAsRead")
-        | ("mailMgr", "MarkAsReadByLabel") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let mail_ids = crate::services::mail_notify::resolve_mail_targets(ctx, char_id, method, args.first());
-            if mail_ids.is_empty() {
-                if method.ends_with("ByLabel") {
-                    return Some(Ok(PyRep::keyval([
-                        ("messageID", PyRep::Integer(0)),
-                        ("messageIDs", PyRep::List(Vec::new())),
-                        ("read", PyRep::Bool(true)),
-                    ])));
-                }
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "MarkAsRead requires messageID or messageIDs list".into(),
-                }));
-            }
-            if !method.ends_with("ByLabel") {
-                let check_ownership = ctx.db.with_snapshot(|snap| {
-                    crate::services::mail_notify::check_mails_authorized(ctx, snap, &mail_ids, char_id)
-                });
-                if !check_ownership {
-                    return Some(Err(BridgeRpcError {
-                        code: "AccessDenied".into(),
-                        message: "Cannot modify mail belonging to another character".into(),
-                    }));
-                }
-            }
-            ctx.db
-                .try_with_mut_snapshot(|snap| {
-                    for &mid in &mail_ids {
-                        snap.read_mails.insert((char_id, mid));
-                        let mut meta = ctx.esi_state.get_mail_meta(char_id, mid, false);
-                        meta.is_read = true;
-                        ctx.esi_state.set_mail_meta(char_id, mid, meta);
-                    }
-                    Ok::<(), std::convert::Infallible>(())
-                })
-                .unwrap();
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnMailCountersUpdate",
-                "charid",
-                vec![PyRep::Integer(char_id)],
-            );
-            Some(Ok(PyRep::keyval([
-                ("messageID", PyRep::Integer(mail_ids[0])),
-                ("messageIDs", PyRep::List(mail_ids.into_iter().map(PyRep::Integer).collect())),
-                ("read", PyRep::Bool(true)),
-            ])))
+        ("mailMgr", "MarkAsRead") => {
+            handle_mark_as_read(ctx, session, args)
         }
-
-        ("mailMgr", "MarkAsUnread")
-        | ("mailMgr", "MarkAsUnreadByLabel") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let mail_ids = crate::services::mail_notify::resolve_mail_targets(ctx, char_id, method, args.first());
-            if mail_ids.is_empty() {
-                if method.ends_with("ByLabel") {
-                    return Some(Ok(PyRep::keyval([
-                        ("messageID", PyRep::Integer(0)),
-                        ("messageIDs", PyRep::List(Vec::new())),
-                        ("read", PyRep::Bool(false)),
-                    ])));
-                }
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "MarkAsUnread requires messageID or messageIDs list".into(),
-                }));
-            }
-            if !method.ends_with("ByLabel") {
-                let check_ownership = ctx.db.with_snapshot(|snap| {
-                    crate::services::mail_notify::check_mails_authorized(ctx, snap, &mail_ids, char_id)
-                });
-                if !check_ownership {
-                    return Some(Err(BridgeRpcError {
-                        code: "AccessDenied".into(),
-                        message: "Cannot modify mail belonging to another character".into(),
-                    }));
-                }
-            }
-            ctx.db
-                .try_with_mut_snapshot(|snap| {
-                    for &mid in &mail_ids {
-                        snap.read_mails.remove(&(char_id, mid));
-                        let mut meta = ctx.esi_state.get_mail_meta(char_id, mid, false);
-                        meta.is_read = false;
-                        ctx.esi_state.set_mail_meta(char_id, mid, meta);
-                    }
-                    Ok::<(), std::convert::Infallible>(())
-                })
-                .unwrap();
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnMailCountersUpdate",
-                "charid",
-                vec![PyRep::Integer(char_id)],
-            );
-            Some(Ok(PyRep::keyval([
-                ("messageID", PyRep::Integer(mail_ids[0])),
-                ("messageIDs", PyRep::List(mail_ids.into_iter().map(PyRep::Integer).collect())),
-                ("read", PyRep::Bool(false)),
-            ])))
+        ("mailMgr", "MarkAsReadByLabel") => {
+            handle_mark_as_read_by_label(ctx, session, args)
+        }
+        ("mailMgr", "MarkAsUnread") => {
+            handle_mark_as_unread(ctx, session, args)
+        }
+        ("mailMgr", "MarkAsUnreadByLabel") => {
+            handle_mark_as_unread_by_label(ctx, session, args)
         }
 
         ("mailMgr", "MarkAllAsRead") | ("mailMgr", "MarkAllAsUnread") => {
@@ -1078,6 +981,149 @@ pub(super) fn handle_mail_and_calendar(
 
         _ => None,
     }
+}
+
+fn apply_mail_read_status(
+    ctx: &ServerContext,
+    char_id: i64,
+    mail_ids: &[i64],
+    is_read: bool,
+) -> PyRep {
+    ctx.db
+        .try_with_mut_snapshot(|snap| {
+            for &mid in mail_ids {
+                if is_read {
+                    snap.read_mails.insert((char_id, mid));
+                } else {
+                    snap.read_mails.remove(&(char_id, mid));
+                }
+                let mut meta = ctx.esi_state.get_mail_meta(char_id, mid, false);
+                meta.is_read = is_read;
+                ctx.esi_state.set_mail_meta(char_id, mid, meta);
+            }
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .unwrap();
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnMailCountersUpdate",
+        "charid",
+        vec![PyRep::Integer(char_id)],
+    );
+    PyRep::keyval([
+        ("messageID", PyRep::Integer(mail_ids[0])),
+        (
+            "messageIDs",
+            PyRep::List(mail_ids.iter().copied().map(PyRep::Integer).collect()),
+        ),
+        ("read", PyRep::Bool(is_read)),
+    ])
+}
+
+fn handle_mark_as_read(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let mail_ids = extract_id_list(args.first());
+    if mail_ids.is_empty() {
+        return Some(Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "MarkAsRead requires messageID or messageIDs list".into(),
+        }));
+    }
+    let authorized = ctx.db.with_snapshot(|snap| {
+        crate::services::mail_notify::check_mails_authorized(ctx, snap, &mail_ids, char_id)
+    });
+    if !authorized {
+        return Some(Err(BridgeRpcError {
+            code: "AccessDenied".into(),
+            message: "Cannot modify mail belonging to another character".into(),
+        }));
+    }
+    Some(Ok(apply_mail_read_status(ctx, char_id, &mail_ids, true)))
+}
+
+fn handle_mark_as_read_by_label(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let mail_ids = crate::services::mail_notify::resolve_mail_targets(
+        ctx,
+        char_id,
+        "MarkAsReadByLabel",
+        args.first(),
+    );
+    if mail_ids.is_empty() {
+        return Some(Ok(PyRep::keyval([
+            ("messageID", PyRep::Integer(0)),
+            ("messageIDs", PyRep::List(Vec::new())),
+            ("read", PyRep::Bool(true)),
+        ])));
+    }
+    Some(Ok(apply_mail_read_status(ctx, char_id, &mail_ids, true)))
+}
+
+fn handle_mark_as_unread(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let mail_ids = extract_id_list(args.first());
+    if mail_ids.is_empty() {
+        return Some(Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "MarkAsUnread requires messageID or messageIDs list".into(),
+        }));
+    }
+    let authorized = ctx.db.with_snapshot(|snap| {
+        crate::services::mail_notify::check_mails_authorized(ctx, snap, &mail_ids, char_id)
+    });
+    if !authorized {
+        return Some(Err(BridgeRpcError {
+            code: "AccessDenied".into(),
+            message: "Cannot modify mail belonging to another character".into(),
+        }));
+    }
+    Some(Ok(apply_mail_read_status(ctx, char_id, &mail_ids, false)))
+}
+
+fn handle_mark_as_unread_by_label(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let mail_ids = crate::services::mail_notify::resolve_mail_targets(
+        ctx,
+        char_id,
+        "MarkAsUnreadByLabel",
+        args.first(),
+    );
+    if mail_ids.is_empty() {
+        return Some(Ok(PyRep::keyval([
+            ("messageID", PyRep::Integer(0)),
+            ("messageIDs", PyRep::List(Vec::new())),
+            ("read", PyRep::Bool(false)),
+        ])));
+    }
+    Some(Ok(apply_mail_read_status(ctx, char_id, &mail_ids, false)))
 }
 
 fn extract_label_bits(arg: Option<&PyRep>) -> Vec<i64> {

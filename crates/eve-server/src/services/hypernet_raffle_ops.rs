@@ -260,6 +260,57 @@ fn compute_active_historic_prices(
     })
 }
 
+fn handle_raffle_subscription(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    sub_type: &'static str,
+    is_subscribe: bool,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+    if target_id < 0 {
+        return Some(Err(rpc_err(
+            "InvalidArgument",
+            "Subscription target must be non-negative",
+        )));
+    }
+    let key = format!("{}:{}", sub_type, target_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut subs: BTreeMap<String, Vec<i64>> = snap
+            .service_state_blobs
+            .get("hypernet_subs")
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+
+        if is_subscribe {
+            if subs.len() >= 256 && !subs.contains_key(&key) {
+                if let Some(first_k) = subs.keys().next().cloned() {
+                    subs.remove(&first_k);
+                }
+            }
+            let entry = subs.entry(key).or_default();
+            if !entry.contains(&char_id) && entry.len() < 256 {
+                entry.push(char_id);
+            }
+        } else if let Some(entry) = subs.get_mut(&key) {
+            entry.retain(|&x| x != char_id);
+            if entry.is_empty() {
+                subs.remove(&key);
+            }
+        }
+
+        if let Ok(js) = serde_json::to_string(&subs) {
+            snap.service_state_blobs.insert("hypernet_subs".into(), js);
+        }
+    });
+    Some(Ok(PyRep::None))
+}
+
 pub fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -277,51 +328,17 @@ pub fn handle(
             let exists = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id));
             Some(Ok(PyRep::Bool(!exists)))
         }
-        (
-            "raffleProxy",
-            method @ ("SubscribeToRaffle" | "UnsubscribeFromRaffle" | "SubscribeToTickets" | "UnSubscribeFromTickets"),
-        ) => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let is_subscribe = method.starts_with("Subscribe");
-            let sub_type = if method.contains("Tickets") { "tickets" } else { "raffle" };
-            let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            if target_id < 0 {
-                return Some(Err(rpc_err("InvalidArgument", "Subscription target must be non-negative")));
-            }
-            let key = format!("{}:{}", sub_type, target_id);
-
-            ctx.db.with_mut_snapshot(|snap| {
-                let mut subs: BTreeMap<String, Vec<i64>> = snap
-                    .service_state_blobs
-                    .get("hypernet_subs")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
-
-                if is_subscribe {
-                    if subs.len() >= 256 && !subs.contains_key(&key) {
-                        if let Some(first_k) = subs.keys().next().cloned() {
-                            subs.remove(&first_k);
-                        }
-                    }
-                    let entry = subs.entry(key).or_default();
-                    if !entry.contains(&char_id) && entry.len() < 256 {
-                        entry.push(char_id);
-                    }
-                } else if let Some(entry) = subs.get_mut(&key) {
-                    entry.retain(|&x| x != char_id);
-                    if entry.is_empty() {
-                        subs.remove(&key);
-                    }
-                }
-
-                if let Ok(js) = serde_json::to_string(&subs) {
-                    snap.service_state_blobs.insert("hypernet_subs".into(), js);
-                }
-            });
-            Some(Ok(PyRep::None))
+        ("raffleProxy", "SubscribeToRaffle") => {
+            handle_raffle_subscription(ctx, session, args, "raffle", true)
+        }
+        ("raffleProxy", "UnsubscribeFromRaffle") => {
+            handle_raffle_subscription(ctx, session, args, "raffle", false)
+        }
+        ("raffleProxy", "SubscribeToTickets") => {
+            handle_raffle_subscription(ctx, session, args, "tickets", true)
+        }
+        ("raffleProxy", "UnSubscribeFromTickets") => {
+            handle_raffle_subscription(ctx, session, args, "tickets", false)
         }
         ("raffleProxy", "GetActiveHistoricPrices") => {
             let tid_raw = args
