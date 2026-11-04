@@ -425,6 +425,7 @@ async fn test_corp_invitations_and_leave_rules() {
     let PyRep::KeyVal(can_leave_kv) = can_leave_rep else { panic!("expected KeyVal") };
     assert_eq!(can_leave_kv["canLeave"], PyRep::Bool(true));
 
+    // rpc-lint: allow test helper
     rpc(&ctx, &mut sess_invitee, "corpRegistry", "LeaveCorporation", &[])
         .await
         .expect("LeaveCorporation");

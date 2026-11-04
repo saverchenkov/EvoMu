@@ -1,4 +1,7 @@
-//! Integration tests closing parity for 11 MISSING notify and rpc rows:
+//! Integration tests for progression, space, queue, client service notifications and management RPCs:
+//! - notify:OnJumpQueueUpdate
+//! - notify:OnLoginMilestoneAchieved
+//! - notify:OnNotificationUndeleted
 //! - notify:OnOfferReceived
 //! - notify:OnProgressionTaskWidgetUpdate
 //! - notify:OnRecommendationsChanged
@@ -17,6 +20,9 @@ use crate::common;
 use eve_machonet::{service_roles::ROLE_GM_DEFAULT, SessionState};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::{NotificationTarget, ServerContext};
+use eve_server::services::notify_emitters_batch3::emit_login_milestone_achieved;
+use eve_server::services::notify_emitters_batch3_space::emit_jump_queue_update;
+use eve_server::services::notify_emitters_missing::emit_notification_undeleted;
 use eve_server::services::notify_emitters_missing2::{
     emit_offer_received, emit_progression_task_widget_update, emit_recommendations_changed,
     emit_server_brain_updated, emit_server_map_data_push, emit_skill_bundle_injected,
@@ -67,24 +73,68 @@ async fn rpc(
         .await
 }
 
-// parity: notify:OnOfferReceived, notify:OnProgressionTaskWidgetUpdate
-// parity: notify:OnRecommendationsChanged, notify:OnServerBrainUpdated
-// parity: notify:OnServerMapDataPush, notify:OnSkillBundleInjected
+// parity: notify:OnJumpQueueUpdate
+// parity: notify:OnLoginMilestoneAchieved
+// parity: notify:OnNotificationUndeleted
+// parity: notify:OnOfferReceived
+// parity: notify:OnProgressionTaskWidgetUpdate
+// parity: notify:OnRecommendationsChanged
 #[tokio::test]
-async fn test_parity_notify_missing2_notifications() {
+async fn test_space_progression_and_queue_notifications() {
     eve_testkit::attest(&[
+        "notify:OnJumpQueueUpdate",
+        "notify:OnLoginMilestoneAchieved",
+        "notify:OnNotificationUndeleted",
         "notify:OnOfferReceived",
         "notify:OnProgressionTaskWidgetUpdate",
         "notify:OnRecommendationsChanged",
-        "notify:OnServerBrainUpdated",
-        "notify:OnServerMapDataPush",
-        "notify:OnSkillBundleInjected",
     ]);
 
     let ctx = new_ctx();
     let _sess_a = pilot(&ctx, 10_001, "demo", "demo-secret", PILOT_A).await;
 
-    // 1. OnOfferReceived
+    // 1. OnJumpQueueUpdate
+    emit_jump_queue_update(&ctx, PILOT_A, 30000142, 10, 2, vec![101, 102], 60);
+    let notifs = ctx.drain_notifications_for_char(PILOT_A);
+    let jump_notif = notifs
+        .iter()
+        .find(|n| n.event == "OnJumpQueueUpdate")
+        .expect("OnJumpQueueUpdate emitted");
+    assert_eq!(jump_notif.args.len(), 5);
+    assert_eq!(jump_notif.args[0], PyRep::Integer(30000142));
+    assert_eq!(jump_notif.args[1], PyRep::Integer(10));
+    assert_eq!(jump_notif.args[2], PyRep::Integer(2));
+    assert_eq!(
+        jump_notif.args[3],
+        PyRep::List(vec![PyRep::Integer(101), PyRep::Integer(102)])
+    );
+    assert_eq!(jump_notif.args[4], PyRep::Integer(60));
+
+    // 2. OnLoginMilestoneAchieved
+    emit_login_milestone_achieved(&ctx, PILOT_A, 42, 500_000.0);
+    let notifs = ctx.drain_notifications_for_char(PILOT_A);
+    let milestone_notif = notifs
+        .iter()
+        .find(|n| n.event == "OnLoginMilestoneAchieved")
+        .expect("OnLoginMilestoneAchieved emitted");
+    assert_eq!(milestone_notif.args.len(), 2);
+    assert_eq!(milestone_notif.args[0], PyRep::Integer(42));
+    assert_eq!(milestone_notif.args[1], PyRep::Real(500_000.0));
+
+    // 3. OnNotificationUndeleted
+    emit_notification_undeleted(&ctx, PILOT_A, &[1001, 1002]);
+    let notifs = ctx.drain_notifications_for_char(PILOT_A);
+    let undel_notif = notifs
+        .iter()
+        .find(|n| n.event == "OnNotificationUndeleted")
+        .expect("OnNotificationUndeleted emitted");
+    assert_eq!(undel_notif.args.len(), 1);
+    assert_eq!(
+        undel_notif.args[0],
+        PyRep::List(vec![PyRep::Integer(1001), PyRep::Integer(1002)])
+    );
+
+    // 4. OnOfferReceived
     // Direct emitter with default generated dictionary
     emit_offer_received(&ctx, PILOT_A, 42, None);
     let notifs = ctx.drain_notifications_for_char(PILOT_A);
@@ -117,7 +167,7 @@ async fn test_parity_notify_missing2_notifications() {
     assert_eq!(notifs[0].args[0], PyRep::Integer(99));
     assert_eq!(notifs[0].args[1], custom_offer);
 
-    // 2. OnProgressionTaskWidgetUpdate
+    // 5. OnProgressionTaskWidgetUpdate
     let widget_state = PyRep::Dict(vec![
         (PyRep::String("counter_value".into()), PyRep::Integer(5)),
         (PyRep::String("completed".into()), PyRep::Bool(false)),
@@ -141,7 +191,7 @@ async fn test_parity_notify_missing2_notifications() {
     assert_eq!(notifs[0].args[1], PyRep::Integer(203));
     assert_eq!(notifs[0].args[2], PyRep::Integer(7));
 
-    // 3. OnRecommendationsChanged
+    // 6. OnRecommendationsChanged
     emit_recommendations_changed(&ctx, PILOT_A);
     let notifs = ctx.drain_notifications_for_char(PILOT_A);
     let rec_notif = notifs
@@ -149,8 +199,29 @@ async fn test_parity_notify_missing2_notifications() {
         .find(|n| n.event == "OnRecommendationsChanged")
         .expect("OnRecommendationsChanged emitted");
     assert_eq!(rec_notif.args.len(), 0);
+}
 
-    // 4. OnServerBrainUpdated
+// parity: notify:OnServerBrainUpdated
+// parity: notify:OnServerMapDataPush
+// parity: notify:OnSkillBundleInjected
+// parity: notify:OnStartConversation
+// parity: notify:OnUpdateLocalizationTextCache
+// parity: notify:OnUpdateServiceMapping
+#[tokio::test]
+async fn test_system_brain_map_and_service_notifications() {
+    eve_testkit::attest(&[
+        "notify:OnServerBrainUpdated",
+        "notify:OnServerMapDataPush",
+        "notify:OnSkillBundleInjected",
+        "notify:OnStartConversation",
+        "notify:OnUpdateLocalizationTextCache",
+        "notify:OnUpdateServiceMapping",
+    ]);
+
+    let ctx = new_ctx();
+    let _sess_a = pilot(&ctx, 20_001, "demo", "demo-secret", PILOT_A).await;
+
+    // 7. OnServerBrainUpdated
     // V24 client BaseDogmaLocation.ProcessBrainData unpacks (brainVersion, grayMatter) 2-tuple:
     emit_server_brain_updated(&ctx, PILOT_A, 3);
     let notifs = ctx.drain_notifications_for_char(PILOT_A);
@@ -173,7 +244,7 @@ async fn test_parity_notify_missing2_notifications() {
         PyRep::Tuple(vec![PyRep::Integer(4), PyRep::None])
     );
 
-    // 5. OnServerMapDataPush
+    // 8. OnServerMapDataPush
     let tricolors = vec![(1.0, 0.5, 0.25)];
     let data = vec![(30000142, 2.0, 1.5, "Activity".to_string(), None)];
     emit_server_map_data_push(
@@ -188,7 +259,6 @@ async fn test_parity_notify_missing2_notifications() {
         .find(|n| n.event == "OnServerMapDataPush")
         .expect("OnServerMapDataPush emitted");
     assert_eq!(map_notif.args.len(), 2);
-    // Arg 0 is tricolors list of 3-tuples
     if let PyRep::List(tris) = &map_notif.args[0] {
         assert_eq!(tris.len(), 1);
         if let PyRep::Tuple(t) = &tris[0] {
@@ -202,7 +272,6 @@ async fn test_parity_notify_missing2_notifications() {
     } else {
         panic!("Expected List for tricolors");
     }
-    // Arg 1 is data list of 5-tuples: (sys_id, blobSize, colorScale, descText, overrideColor)
     if let PyRep::List(data_items) = &map_notif.args[1] {
         assert_eq!(data_items.len(), 1);
         if let PyRep::Tuple(d) = &data_items[0] {
@@ -238,7 +307,7 @@ async fn test_parity_notify_missing2_notifications() {
         }
     }
 
-    // 6. OnSkillBundleInjected
+    // 9. OnSkillBundleInjected
     emit_skill_bundle_injected(&ctx, PILOT_A, 5, 1_250_000);
     let notifs = ctx.drain_notifications_for_char(PILOT_A);
     let bundle_notif = notifs
@@ -248,29 +317,8 @@ async fn test_parity_notify_missing2_notifications() {
     assert_eq!(bundle_notif.args.len(), 2);
     assert_eq!(bundle_notif.args[0], PyRep::Integer(5));
     assert_eq!(bundle_notif.args[1], PyRep::Integer(1_250_000));
-}
 
-// parity: notify:OnStartConversation, notify:OnUpdateLocalizationTextCache
-// parity: notify:OnUpdateServiceMapping, rpc:localizationServer.ReloadFSDPickle
-// parity: rpc:debug.Exec
-#[tokio::test]
-async fn test_parity_notify_missing2_rpcs_and_cluster() {
-    eve_testkit::attest(&[
-        "notify:OnStartConversation",
-        "notify:OnUpdateLocalizationTextCache",
-        "notify:OnUpdateServiceMapping",
-        "rpc:localizationServer.ReloadFSDPickle",
-        "rpc:debug.Exec",
-    ]);
-
-    let ctx = new_ctx();
-    let mut sess_a = pilot(&ctx, 20_001, "demo", "demo-secret", PILOT_A).await;
-    let mut sess_b = pilot(&ctx, 20_002, "other", "other-secret", PILOT_B).await;
-
-    // Pilot A is GM; Pilot B is normal player
-    sess_a.role |= ROLE_GM_DEFAULT;
-
-    // 7. OnStartConversation
+    // 10. OnStartConversation
     emit_start_conversation(&ctx, PILOT_A, 701, true);
     let notifs = ctx.drain_notifications_for_char(PILOT_A);
     let conv_notif = notifs
@@ -288,7 +336,56 @@ async fn test_parity_notify_missing2_rpcs_and_cluster() {
     assert_eq!(notifs[0].args[0], PyRep::Integer(702));
     assert_eq!(notifs[0].args[1], PyRep::Bool(false));
 
-    // 8. OnUpdateLocalizationTextCache & 10. rpc:localizationServer.ReloadFSDPickle
+    // 11. OnUpdateLocalizationTextCache
+    emit_update_localization_text_cache(&ctx, NotificationTarget::Character(PILOT_A), None);
+    let notifs = ctx.drain_notifications_for_char(PILOT_A);
+    assert_eq!(notifs.len(), 1);
+    assert_eq!(notifs[0].event, "OnUpdateLocalizationTextCache");
+    assert_eq!(notifs[0].args.len(), 1);
+    if let PyRep::Tuple(elements) = &notifs[0].args[0] {
+        assert_eq!(elements.len(), 3);
+        assert!(matches!(elements[0], PyRep::Dict(_)));
+        assert!(matches!(elements[1], PyRep::Dict(_)));
+        assert!(matches!(elements[2], PyRep::Dict(_)));
+    } else {
+        panic!("Expected 3-tuple for localization text cache argument");
+    }
+
+    // 12. OnUpdateServiceMapping
+    emit_update_service_mapping(&ctx, NotificationTarget::Character(PILOT_A), "chatServer", 1001);
+    let notifs = ctx.drain_notifications_for_char(PILOT_A);
+    let svc_notif = notifs
+        .iter()
+        .find(|n| n.event == "OnUpdateServiceMapping")
+        .expect("OnUpdateServiceMapping emitted");
+    assert_eq!(svc_notif.args.len(), 2);
+    assert_eq!(svc_notif.args[0], PyRep::String("chatServer".into()));
+    assert_eq!(svc_notif.args[1], PyRep::Integer(1001));
+
+    emit_update_service_mapping(&ctx, NotificationTarget::Character(PILOT_A), "marketProxy", 2002);
+    let notifs = ctx.drain_notifications_for_char(PILOT_A);
+    assert_eq!(notifs.len(), 1);
+    assert_eq!(notifs[0].event, "OnUpdateServiceMapping");
+    assert_eq!(notifs[0].args[0], PyRep::String("marketProxy".into()));
+    assert_eq!(notifs[0].args[1], PyRep::Integer(2002));
+}
+
+// parity: rpc:localizationServer.ReloadFSDPickle
+// parity: rpc:debug.Exec
+#[tokio::test]
+async fn test_localization_and_debug_management_rpcs() {
+    eve_testkit::attest(&[
+        "rpc:localizationServer.ReloadFSDPickle",
+        "rpc:debug.Exec",
+    ]);
+
+    let ctx = new_ctx();
+    let mut sess_a = pilot(&ctx, 30_001, "demo", "demo-secret", PILOT_A).await;
+    let mut sess_b = pilot(&ctx, 30_002, "other", "other-secret", PILOT_B).await;
+
+    // Pilot A is GM; Pilot B is normal player
+    sess_a.role |= ROLE_GM_DEFAULT;
+
     // Negative: Non-GM pilot calling ReloadFSDPickle fails with RoleRequired
     let non_gm_res = rpc(&ctx, &mut sess_b, "localizationServer", "ReloadFSDPickle", &[]).await;
     assert!(non_gm_res.is_err());
@@ -317,7 +414,6 @@ async fn test_parity_notify_missing2_rpcs_and_cluster() {
         .expect("OnUpdateLocalizationTextCache emitted");
     assert_eq!(loc_notif.args.len(), 1);
     if let PyRep::Tuple(elements) = &loc_notif.args[0] {
-        // Unpacks (messagePerLanguage, metaDataPerLanguage, labelsDict)
         assert_eq!(elements.len(), 3);
         assert!(matches!(elements[0], PyRep::Dict(_)));
         assert!(matches!(elements[1], PyRep::Dict(_)));
@@ -326,31 +422,6 @@ async fn test_parity_notify_missing2_rpcs_and_cluster() {
         panic!("Expected 3-tuple for localization text cache argument");
     }
 
-    // Direct emitter
-    emit_update_localization_text_cache(&ctx, NotificationTarget::Character(PILOT_A), None);
-    let notifs = ctx.drain_notifications_for_char(PILOT_A);
-    assert_eq!(notifs.len(), 1);
-    assert_eq!(notifs[0].event, "OnUpdateLocalizationTextCache");
-
-    // 9. OnUpdateServiceMapping
-    emit_update_service_mapping(&ctx, NotificationTarget::Character(PILOT_A), "chatServer", 1001);
-    let notifs = ctx.drain_notifications_for_char(PILOT_A);
-    let svc_notif = notifs
-        .iter()
-        .find(|n| n.event == "OnUpdateServiceMapping")
-        .expect("OnUpdateServiceMapping emitted");
-    assert_eq!(svc_notif.args.len(), 2);
-    assert_eq!(svc_notif.args[0], PyRep::String("chatServer".into()));
-    assert_eq!(svc_notif.args[1], PyRep::Integer(1001));
-
-    emit_update_service_mapping(&ctx, NotificationTarget::Character(PILOT_A), "marketProxy", 2002);
-    let notifs = ctx.drain_notifications_for_char(PILOT_A);
-    assert_eq!(notifs.len(), 1);
-    assert_eq!(notifs[0].event, "OnUpdateServiceMapping");
-    assert_eq!(notifs[0].args[0], PyRep::String("marketProxy".into()));
-    assert_eq!(notifs[0].args[1], PyRep::Integer(2002));
-
-    // 11. rpc:debug.Exec
     // Negative: Non-GM pilot calling debug.Exec fails
     let non_gm_debug_res = rpc(&ctx, &mut sess_b, "debug", "Exec", &[PyRep::String("ping".into())]).await;
     assert!(non_gm_debug_res.is_err());

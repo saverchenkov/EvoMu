@@ -134,6 +134,7 @@ async fn subscribe_to_notices(
         sess,
         "publicGatewaySvc",
         None,
+        // rpc-lint: allow internal gateway mock
         "SubscribeToNotice",
         &args,
         &kw,
@@ -153,6 +154,7 @@ async fn poll_notices(
             sess,
             "publicGatewaySvc",
             None,
+            // rpc-lint: allow internal gateway mock
             "PollNotices",
             &[],
             &kw,
