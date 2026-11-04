@@ -195,108 +195,6 @@ pub fn try_match_legacy_operation(method: &str, raw_path: &str) -> Option<Matche
     None
 }
 
-fn load_merged_calendar_events(
-    ctx: &ServerContext,
-    snap: &eve_db::WorldStateSnapshot,
-) -> (
-    HashMap<i64, crate::esi::runtime_state::EsiCalendarEvent>,
-    HashMap<(i64, i64), String>,
-) {
-    let mut events = ctx
-        .esi_state
-        .calendar_events
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    let mut responses = ctx
-        .esi_state
-        .calendar_responses
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-
-    let mut merged = snap.calendar_events.clone();
-    if let Ok(s) = ctx.social_extras.lock() {
-        for (&eid, ev) in &s.calendar_events {
-            let entry = merged.entry(eid).or_insert_with(|| eve_db::CalendarEventRecord {
-                event_id: ev.event_id,
-                owner_id: ev.owner_id,
-                creator_id: ev.creator_id,
-                event_date_time: ev.event_date_time,
-                duration: ev.duration,
-                importance: ev.importance,
-                title: ev.title.clone(),
-                description: ev.description.clone(),
-                scope: ev._scope.clone(),
-                responses: ev.responses.clone(),
-                is_deleted: ev.is_deleted,
-            });
-            if ev.is_deleted {
-                entry.is_deleted = true;
-            }
-            for (&cid, &r) in &ev.responses {
-                entry.responses.insert(cid, r);
-            }
-        }
-    }
-
-    for (&eid, ev) in &merged {
-        if ev.is_deleted {
-            events.remove(&eid);
-            continue;
-        }
-        let event_date_unix = if ev.event_date_time > 100_000_000_000_000_000 {
-            ((ev.event_date_time / 10_000_000) - 11_644_473_600).max(0) as u64
-        } else {
-            ev.event_date_time.max(0) as u64
-        };
-        let owner_type = match ev.scope.as_str() {
-            "Corporation" => "corporation",
-            "Alliance" => "alliance",
-            "CCP" => "eve_server",
-            _ => "character",
-        }
-        .to_string();
-        let owner_name = snap
-            .characters
-            .get(&ev.owner_id)
-            .map(|c| c.name.clone())
-            .or_else(|| snap.corporations.get(&ev.owner_id).map(|c| c.name.clone()))
-            .or_else(|| snap.alliances.get(&ev.owner_id).map(|a| a.name.clone()))
-            .unwrap_or_else(|| format!("Owner {}", ev.owner_id));
-        let mut attendees: Vec<i64> = ev.responses.keys().copied().collect();
-        if ev.creator_id > 0 && !attendees.contains(&ev.creator_id) {
-            attendees.push(ev.creator_id);
-        }
-        attendees.sort_unstable();
-        events.insert(
-            eid,
-            crate::esi::runtime_state::EsiCalendarEvent {
-                event_id: eid,
-                event_date_unix,
-                title: ev.title.clone(),
-                text: ev.description.clone(),
-                duration_minutes: ev.duration,
-                importance: ev.importance,
-                owner_id: ev.owner_id,
-                owner_name,
-                owner_type,
-                attendees,
-            },
-        );
-        for (&cid, &status) in &ev.responses {
-            let resp_str = match status {
-                4 => "accepted",
-                2 => "declined",
-                5 => "tentative",
-                _ => "not_responded",
-            };
-            responses.insert((cid, eid), resp_str.to_string());
-        }
-    }
-    (events, responses)
-}
-
 #[allow(clippy::too_many_lines)]
 pub fn dispatch_char_social_route(
     ctx: &ServerContext,
@@ -654,28 +552,27 @@ pub fn dispatch_char_social_route(
                     .get(&ch.corporation_id)
                     .and_then(|c| c.member_roles.get(&char_id).copied())
                     .unwrap_or(0);
-                let role_table: &[(u64, &str)] = &[
-                    (eve_db::corp_roles::ROLE_DIRECTOR, "Director"),
-                    (eve_db::corp_roles::ROLE_ACCOUNTANT, "Accountant"),
-                    (eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT, "Junior_Accountant"),
-                    (eve_db::corp_roles::ROLE_CONFIG_EQUIPMENT, "Config_Equipment"),
-                    (eve_db::corp_roles::ROLE_DIPLOMAT, "Diplomat"),
-                    (eve_db::corp_roles::ROLE_FACTORY_MANAGER, "Factory_Manager"),
-                    (eve_db::corp_roles::ROLE_PERSONNEL_MANAGER, "Personnel_Manager"),
-                    (eve_db::corp_roles::ROLE_SECURITY_OFFICER, "Security_Officer"),
-                    (eve_db::corp_roles::ROLE_STATION_MANAGER, "Station_Manager"),
-                    (eve_db::corp_roles::ROLE_AUDITOR, "Auditor"),
-                ];
-                let roles: Vec<&str> = role_table
-                    .iter()
-                    .filter_map(|&(bit, name)| ((role_mask & bit) != 0).then_some(name))
-                    .collect();
+                let assigned = snap
+                    .corp_role_assignments
+                    .get(&(ch.corporation_id, char_id));
+                let roles = super::corp_governance_routes::decode_corp_roles(
+                    assigned.map_or(role_mask, |a| a.roles | role_mask),
+                );
+                let roles_at_hq = super::corp_governance_routes::decode_corp_roles(
+                    assigned.map_or(0, |a| a.roles_at_hq),
+                );
+                let roles_at_base = super::corp_governance_routes::decode_corp_roles(
+                    assigned.map_or(0, |a| a.roles_at_base),
+                );
+                let roles_at_other = super::corp_governance_routes::decode_corp_roles(
+                    assigned.map_or(0, |a| a.roles_at_other),
+                );
                 RouteExecutionResult::ok_json(
                     json!({
                         "roles": roles,
-                        "roles_at_hq": [],
-                        "roles_at_base": [],
-                        "roles_at_other": [],
+                        "roles_at_hq": roles_at_hq,
+                        "roles_at_base": roles_at_base,
+                        "roles_at_other": roles_at_other,
                     }),
                     3600,
                 )
@@ -740,324 +637,20 @@ pub fn dispatch_char_social_route(
             }))
         }
 
-        // 2. Calendar (ESI-4)
-        ("GET", "/characters/{character_id}/calendar") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            let from_event: Option<i64> = match query_params
-                .get("from_event")
-                .or_else(|| query_params.get("from_event_id"))
-            {
-                Some(raw) => match raw.parse::<i64>() {
-                    Ok(v) if v > 0 => Some(v),
-                    _ => {
-                        return Some(RouteExecutionResult::error(
-                            400,
-                            format!("Invalid from_event '{raw}'"),
-                        ));
-                    }
-                },
-                None => None,
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                let Some(ch) = snap.characters.get(&char_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                };
-                let (events_guard, resp_guard) = load_merged_calendar_events(ctx, snap);
-                let corp_alliance_id = snap
-                    .corporations
-                    .get(&ch.corporation_id)
-                    .and_then(|c| c.alliance_id);
-                let mut visible: Vec<_> = events_guard
-                    .values()
-                    .filter(|ev| {
-                        let invited = ev.owner_id == char_id
-                            || ev.attendees.contains(&char_id)
-                            || (ev.owner_type == "corporation"
-                                && ev.owner_id == ch.corporation_id)
-                            || (ev.owner_type == "alliance"
-                                && corp_alliance_id == Some(ev.owner_id))
-                            || ev.owner_type == "eve_server";
-                        invited && from_event.is_none_or(|f| ev.event_id >= f)
-                    })
-                    .collect();
-                visible.sort_by_key(|ev| ev.event_id);
-                let out: Vec<Value> = visible
-                    .into_iter()
-                    .take(50)
-                    .map(|ev| {
-                        let resp = resp_guard
-                            .get(&(char_id, ev.event_id))
-                            .cloned()
-                            .unwrap_or_else(|| "not_responded".to_string());
-                        json!({
-                            "event_id": ev.event_id,
-                            "event_date": format_iso8601_utc(ev.event_date_unix),
-                            "title": ev.title,
-                            "importance": ev.importance,
-                            "event_response": resp,
-                        })
-                    })
-                    .collect();
-                RouteExecutionResult::ok_json(json!(out), 5)
-            }))
-        }
-
-        ("GET", "/characters/{character_id}/calendar/{event_id}") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            let event_id = match parse_path_i64(path_params, "event_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                let Some(ch) = snap.characters.get(&char_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                };
-                let (events_guard, resp_guard) = load_merged_calendar_events(ctx, snap);
-                let Some(ev) = events_guard.get(&event_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Calendar event {event_id} not found"),
-                    );
-                };
-                let corp_alliance_id = snap
-                    .corporations
-                    .get(&ch.corporation_id)
-                    .and_then(|c| c.alliance_id);
-                let invited = ev.owner_id == char_id
-                    || ev.attendees.contains(&char_id)
-                    || (ev.owner_type == "corporation" && ev.owner_id == ch.corporation_id)
-                    || (ev.owner_type == "alliance" && corp_alliance_id == Some(ev.owner_id))
-                    || ev.owner_type == "eve_server";
-                if !invited {
-                    if !ev.attendees.is_empty() {
-                        return RouteExecutionResult::error(
-                            403,
-                            format!("Character {char_id} is not invited to calendar event {event_id}"),
-                        );
-                    }
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Calendar event {event_id} not found for character {char_id}"),
-                    );
-                }
-                let resp = resp_guard
-                    .get(&(char_id, event_id))
-                    .cloned()
-                    .unwrap_or_else(|| "not_responded".to_string());
-                RouteExecutionResult::ok_json(
-                    json!({
-                        "event_id": ev.event_id,
-                        "owner_id": ev.owner_id,
-                        "owner_name": ev.owner_name,
-                        "date": format_iso8601_utc(ev.event_date_unix),
-                        "title": ev.title,
-                        "duration": ev.duration_minutes,
-                        "importance": ev.importance,
-                        "response": resp,
-                        "text": ev.text,
-                        "owner_type": ev.owner_type,
-                    }),
-                    5,
-                )
-            }))
-        }
-
-        ("PUT", "/characters/{character_id}/calendar/{event_id}") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            let event_id = match parse_path_i64(path_params, "event_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            let payload: Value = match serde_json::from_slice(req_body) {
-                Ok(v) => v,
-                Err(e) => {
-                    return Some(RouteExecutionResult::error(
-                        400,
-                        format!("Invalid calendar response JSON: {e}"),
-                    ));
-                }
-            };
-            let Some(resp_str) = payload.get("response").and_then(Value::as_str) else {
-                return Some(RouteExecutionResult::error(
-                    400,
-                    "Missing calendar 'response' field",
-                ));
-            };
-            let response_code = match resp_str {
-                "accepted" => 4,
-                "declined" => 2,
-                "tentative" => 5,
-                _ => {
-                    return Some(RouteExecutionResult::error(
-                        400,
-                        format!("Invalid calendar response '{resp_str}'"),
-                    ));
-                }
-            };
-            let Some((corp_id, corp_alliance_id)) = ctx.db.with_snapshot(|snap| {
-                let ch = snap.characters.get(&char_id)?;
-                let ally_id = snap
-                    .corporations
-                    .get(&ch.corporation_id)
-                    .and_then(|c| c.alliance_id);
-                Some((ch.corporation_id, ally_id))
-            }) else {
-                return Some(RouteExecutionResult::error(
-                    404,
-                    format!("Character {char_id} not found"),
-                ));
-            };
-            let (event_exists, is_invited) = ctx.db.with_snapshot(|snap| {
-                let (events_guard, _) = load_merged_calendar_events(ctx, snap);
-                if let Some(ev) = events_guard.get(&event_id) {
-                    let inv = ev.owner_id == char_id
-                        || ev.attendees.contains(&char_id)
-                        || (ev.owner_type == "corporation" && ev.owner_id == corp_id)
-                        || (ev.owner_type == "alliance" && corp_alliance_id == Some(ev.owner_id))
-                        || ev.owner_type == "eve_server";
-                    (true, inv)
-                } else {
-                    (false, false)
-                }
-            });
-            if !event_exists {
-                return Some(RouteExecutionResult::error(
-                    404,
-                    format!("Calendar event {event_id} not found"),
-                ));
-            }
-            if !is_invited {
-                return Some(RouteExecutionResult::error(
-                    403,
-                    format!("Character {char_id} is not invited to calendar event {event_id}"),
-                ));
-            }
-            let social_ev = crate::services::fleet_social::update_calendar_response_from_esi(
-                ctx,
-                char_id,
-                event_id,
-                response_code,
-            );
-            let ev_meta = if let Some(meta) = social_ev {
-                meta
-            } else {
-                let mut esi_guard = ctx
-                    .esi_state
-                    .calendar_events
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner());
-                let Some(ev) = esi_guard.get_mut(&event_id) else {
-                    return Some(RouteExecutionResult::error(
-                        404,
-                        format!("Calendar event {event_id} not found"),
-                    ));
-                };
-                if !ev.attendees.contains(&char_id) {
-                    ev.attendees.push(char_id);
-                    ev.attendees.sort_unstable();
-                }
-                // Convert Unix epoch seconds to BlueOS FILETIME ticks (100 ns since 1601-01-01).
-                let filetime = (ev.event_date_unix as i64 + 11_644_473_600) * 10_000_000;
-                (
-                    ev.owner_id,
-                    filetime,
-                    ev.duration_minutes,
-                    ev.title.clone(),
-                    ev.importance,
-                )
-            };
-            ctx.esi_state
-                .calendar_responses
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert((char_id, event_id), resp_str.to_string());
-            let (owner_id, event_date_time, duration, title, importance) = ev_meta;
-            crate::services::mail_notify::emit_event_response_by_external(
-                ctx,
-                char_id,
-                event_id,
-                owner_id,
-                event_date_time,
-                duration,
-                &title,
-                importance,
-                response_code,
-            );
-            Some(RouteExecutionResult::no_content(0))
-        }
-
-        ("GET", "/characters/{character_id}/calendar/{event_id}/attendees") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            let event_id = match parse_path_i64(path_params, "event_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                let Some(ch) = snap.characters.get(&char_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                };
-                let (events_guard, resp_guard) = load_merged_calendar_events(ctx, snap);
-                let Some(ev) = events_guard.get(&event_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Calendar event {event_id} not found"),
-                    );
-                };
-                let corp_alliance_id = snap
-                    .corporations
-                    .get(&ch.corporation_id)
-                    .and_then(|c| c.alliance_id);
-                let invited = ev.owner_id == char_id
-                    || ev.attendees.contains(&char_id)
-                    || (ev.owner_type == "corporation" && ev.owner_id == ch.corporation_id)
-                    || (ev.owner_type == "alliance" && corp_alliance_id == Some(ev.owner_id))
-                    || ev.owner_type == "eve_server";
-                if !invited {
-                    return RouteExecutionResult::error(
-                        403,
-                        format!("Character {char_id} is not invited to calendar event {event_id}"),
-                    );
-                }
-                let mut attendees = ev.attendees.clone();
-                attendees.sort_unstable();
-                attendees.dedup();
-                let out: Vec<Value> = attendees
-                    .into_iter()
-                    .map(|cid| {
-                        let resp = resp_guard
-                            .get(&(cid, event_id))
-                            .cloned()
-                            .unwrap_or_else(|| "not_responded".to_string());
-                        json!({
-                            "character_id": cid,
-                            "event_response": resp,
-                        })
-                    })
-                    .collect();
-                RouteExecutionResult::ok_json(json!(out), 600)
-            }))
-        }
+        // 2. Calendar (ESI-4 — unified with calendarMgr / WorldStateSnapshot::calendar_events)
+        (
+            "GET" | "PUT",
+            "/characters/{character_id}/calendar"
+            | "/characters/{character_id}/calendar/{event_id}"
+            | "/characters/{character_id}/calendar/{event_id}/attendees",
+        ) => super::char_calendar_routes::dispatch_char_calendar_route(
+            ctx,
+            method,
+            path,
+            path_params,
+            query_params,
+            req_body,
+        ),
 
         // 5. Legacy / Extended Feature Routes (Bookmarks, Corp Projects, Opportunities)
         ("GET", "/characters/{character_id}/bookmarks") => {

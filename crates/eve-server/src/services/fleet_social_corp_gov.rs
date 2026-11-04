@@ -249,7 +249,10 @@ pub(super) fn handle_add_corporation(
             },
         );
         snap.chat_channels.insert(format!("corpid:{cid}"), ChatChannelRecord { channel_id: format!("corpid:{cid}"), name: name.to_string(), motd: String::new(), owner_id: Some(char_id), members: HashSet::from([char_id]), is_system_local: false, solar_system_id: None, is_private: false, operators: HashSet::from([char_id]), password: None, is_delayed_local: false });
+        let init_limit = snap.skills.get(&char_id).map(|sk| sk.values().map(|s| ctx.sde.types.get(&s.type_id).and_then(|t| t.default_attributes.get(&191).copied()).map_or(0, |b| (b.round() as i64) * i64::from(s.level))).sum::<i64>()).unwrap_or(0).max(10);
+        snap.corp_member_limits.insert(cid, init_limit);
         let state = snap.corp_governance.entry(cid).or_default();
+        state.member_limit = Some(init_limit as usize);
         state.shares.insert(cid, 1_000);
         state.company_shares = 1_000;
         state.logo = (shape1, shape2, shape3, color1);

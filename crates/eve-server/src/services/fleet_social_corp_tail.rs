@@ -373,11 +373,11 @@ pub(crate) fn handle_update_members(
             });
             let (new_roles, effective_roles, pending_hangar, newly_added_hangar) =
                 split_hangar(old_roles, prev_pending_hangar, sp.new_roles_opt);
-            let (_, eff_hq, pend_hq, newly_hq) =
+            let (new_hq, eff_hq, pend_hq, newly_hq) =
                 split_hangar(old_ra.roles_at_hq, prev_hq_p, sp.roles_at_hq_opt);
-            let (_, eff_base, pend_base, newly_base) =
+            let (new_base, eff_base, pend_base, newly_base) =
                 split_hangar(old_ra.roles_at_base, prev_base_p, sp.roles_at_base_opt);
-            let (_, eff_other, pend_other, newly_other) =
+            let (new_other, eff_other, pend_other, newly_other) =
                 split_hangar(old_ra.roles_at_other, prev_other_p, sp.roles_at_other_opt);
             if let Some(corp_mut) = snap.corporations.get_mut(&corp_id) {
                 corp_mut.member_roles.insert(target_char_id, effective_roles);
@@ -537,16 +537,41 @@ pub(crate) fn handle_update_members(
                     roles_at_other: dec(eff_other),
                 },
             );
-            snap.corp_role_history.entry(corp_id).or_default().push(
-                eve_db::snapshot_ext::CorpRoleHistoryEntry {
+            let role_diffs = [
+                ("roles", old_roles | prev_pending_hangar, new_roles, sp.new_roles_opt.is_some()),
+                ("grantable_roles", old_ra.grantable_roles, new_grantable, sp.grantable_roles_opt.is_some()),
+                ("roles_at_hq", old_ra.roles_at_hq | prev_hq_p, new_hq, sp.roles_at_hq_opt.is_some()),
+                ("grantable_roles_at_hq", old_ra.grantable_roles_at_hq, new_grantable_hq, sp.grantable_roles_at_hq_opt.is_some()),
+                ("roles_at_base", old_ra.roles_at_base | prev_base_p, new_base, sp.roles_at_base_opt.is_some()),
+                ("grantable_roles_at_base", old_ra.grantable_roles_at_base, new_grantable_base, sp.grantable_roles_at_base_opt.is_some()),
+                ("roles_at_other", old_ra.roles_at_other | prev_other_p, new_other, sp.roles_at_other_opt.is_some()),
+                ("grantable_roles_at_other", old_ra.grantable_roles_at_other, new_grantable_other, sp.grantable_roles_at_other_opt.is_some()),
+            ];
+            let hist = snap.corp_role_history.entry(corp_id).or_default();
+            let mut pushed_any = false;
+            for (rtype, om, nm, specified) in role_diffs {
+                if specified && om != nm {
+                    hist.push(eve_db::snapshot_ext::CorpRoleHistoryEntry {
+                        character_id: target_char_id,
+                        changed_at_unix: now_unix,
+                        issuer_id: char_id,
+                        role_type: rtype.into(),
+                        old_roles: dec(om),
+                        new_roles: dec(nm),
+                    });
+                    pushed_any = true;
+                }
+            }
+            if !pushed_any && sp.new_roles_opt.is_some() {
+                hist.push(eve_db::snapshot_ext::CorpRoleHistoryEntry {
                     character_id: target_char_id,
                     changed_at_unix: now_unix,
                     issuer_id: char_id,
                     role_type: "roles".into(),
                     old_roles: dec(old_roles),
                     new_roles: dec(new_roles),
-                },
-            );
+                });
+            }
             let delayed = (pending_hangar | pending_title_delayed | pend_hq | pend_base | pend_other) != 0
                 || new_roles > old_roles;
             results.push((

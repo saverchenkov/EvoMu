@@ -3,9 +3,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::esi::runtime_state::{
-    EsiCalendarEvent, EsiContactEntry, EsiMailLabel, EsiRuntimeState,
-};
+use crate::esi::runtime_state::{EsiContactEntry, EsiMailLabel, EsiRuntimeState};
 use crate::router::ServerContext;
 use eve_db::IskCents;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -406,62 +404,6 @@ pub(crate) fn sync_calendar_events_to_db(ctx: &ServerContext) {
             .collect()
     };
     ctx.db.with_mut_snapshot(|snap| {
-        if let (Ok(mut esi_evs), Ok(mut esi_resps)) = (
-            ctx.esi_state.calendar_events.write(),
-            ctx.esi_state.calendar_responses.write(),
-        ) {
-            esi_evs.retain(|&id, _| id <= 10);
-            for (&eid, ev) in &events {
-                if ev.is_deleted {
-                    esi_evs.remove(&eid);
-                    continue;
-                }
-                let event_date_unix = if ev.event_date_time > 100_000_000_000_000_000 {
-                    ((ev.event_date_time / 10_000_000) - 11_644_473_600).max(0) as u64
-                } else {
-                    ev.event_date_time.max(0) as u64
-                };
-                let owner_type = match ev.scope.as_str() {
-                    "Corporation" => "corporation",
-                    "Alliance" => "alliance",
-                    _ => "character",
-                }
-                .to_string();
-                let owner_name = snap
-                    .characters
-                    .get(&ev.owner_id)
-                    .map(|c| c.name.clone())
-                    .or_else(|| snap.corporations.get(&ev.owner_id).map(|c| c.name.clone()))
-                    .or_else(|| snap.alliances.get(&ev.owner_id).map(|a| a.name.clone()))
-                    .unwrap_or_else(|| format!("Owner {}", ev.owner_id));
-                let mut attendees: Vec<i64> = ev.responses.keys().copied().collect();
-                attendees.sort_unstable();
-                esi_evs.insert(
-                    eid,
-                    EsiCalendarEvent {
-                        event_id: eid,
-                        event_date_unix,
-                        title: ev.title.clone(),
-                        text: ev.description.clone(),
-                        duration_minutes: ev.duration,
-                        importance: ev.importance,
-                        owner_id: ev.owner_id,
-                        owner_name,
-                        owner_type,
-                        attendees,
-                    },
-                );
-                for (&cid, &status) in &ev.responses {
-                    let resp_str = match status {
-                        4 => "accepted",
-                        2 => "declined",
-                        5 => "tentative",
-                        _ => "not_responded",
-                    };
-                    esi_resps.insert((cid, eid), resp_str.to_string());
-                }
-            }
-        }
         snap.calendar_events = events;
     });
 }
@@ -702,60 +644,6 @@ pub fn hydrate_social_state_from_db(ctx: &ServerContext) {
             }
             meta.labels = lbls.clone();
             ctx.esi_state.set_mail_meta(char_id, mail_id, meta);
-        }
-        if let (Ok(mut esi_evs), Ok(mut esi_resps)) = (
-            ctx.esi_state.calendar_events.write(),
-            ctx.esi_state.calendar_responses.write(),
-        ) {
-            for (&eid, ev) in &snap.calendar_events {
-                if ev.is_deleted {
-                    continue;
-                }
-                let event_date_unix = if ev.event_date_time > 100_000_000_000_000_000 {
-                    ((ev.event_date_time / 10_000_000) - 11_644_473_600).max(0) as u64
-                } else {
-                    ev.event_date_time.max(0) as u64
-                };
-                let owner_type = match ev.scope.as_str() {
-                    "Corporation" => "corporation",
-                    "Alliance" => "alliance",
-                    _ => "character",
-                }
-                .to_string();
-                let owner_name = snap
-                    .characters
-                    .get(&ev.owner_id)
-                    .map(|c| c.name.clone())
-                    .or_else(|| snap.corporations.get(&ev.owner_id).map(|c| c.name.clone()))
-                    .or_else(|| snap.alliances.get(&ev.owner_id).map(|a| a.name.clone()))
-                    .unwrap_or_else(|| format!("Owner {}", ev.owner_id));
-                let mut attendees: Vec<i64> = ev.responses.keys().copied().collect();
-                attendees.sort_unstable();
-                esi_evs.insert(
-                    eid,
-                    EsiCalendarEvent {
-                        event_id: eid,
-                        event_date_unix,
-                        title: ev.title.clone(),
-                        text: ev.description.clone(),
-                        duration_minutes: ev.duration,
-                        importance: ev.importance,
-                        owner_id: ev.owner_id,
-                        owner_name,
-                        owner_type,
-                        attendees,
-                    },
-                );
-                for (&cid, &status) in &ev.responses {
-                    let resp_str = match status {
-                        4 => "accepted",
-                        2 => "declined",
-                        5 => "tentative",
-                        _ => "not_responded",
-                    };
-                    esi_resps.insert((cid, eid), resp_str.to_string());
-                }
-            }
         }
         (
             snap.service_state_blobs.get("fleet_join_requests").cloned(),

@@ -204,5 +204,3 @@ pub mod wormhole_lifecycle_ops;
 pub mod wormhole_pve_escalations;
 pub mod wormhole_pve_seeding;
 pub mod quasar_vendors_and_war_services;
-// Retained crate-private solely for merge-protected peer file (`agents_missions.rs`).
-pub(crate) use pve_ess_reserve_banks as pve_open_feats_b36;

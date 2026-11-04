@@ -42,11 +42,16 @@ fn map_blueprint_flag(flag: InventoryFlag) -> &'static str {
 
 fn map_upwell_state(state: &str) -> &'static str {
     match state {
+        "AnchorVulnerable" => "anchor_vulnerable",
         "Anchoring" => "anchoring",
-        "OnliningVulnerable" => "onlining_vulnerable",
+        "NoCore" | "FittingInvulnerable" => "fitting_invulnerable",
+        "Onlining" | "OnliningVulnerable" => "onlining_vulnerable",
         "ShieldVulnerable" => "shield_vulnerable",
         "ArmorReinforced" => "armor_reinforce",
+        "ArmorVulnerable" => "armor_vulnerable",
         "HullReinforced" => "hull_reinforce",
+        "HullVulnerable" => "hull_vulnerable",
+        "Unanchored" => "unanchored",
         _ => "shield_vulnerable",
     }
 }
@@ -594,6 +599,21 @@ pub fn dispatch_corp_alliance_route(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
+            let has_live_anchored = ctx.db.with_snapshot(|snap| {
+                let ext =
+                    crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+                snap.structures.values().any(|s| {
+                    s.owner_corp_id == corp_id
+                        && ext
+                            .lifecycle
+                            .get(&s.structure_id)
+                            .and_then(|l| l.anchoring_duration_secs)
+                            .is_some()
+                })
+            });
+            if has_live_anchored {
+                crate::services::station_structure::structure_lifecycle::sync_all_structures(ctx);
+            }
             Some(ctx.db.with_snapshot(|snap| {
                 if !snap.corporations.contains_key(&corp_id) {
                     return RouteExecutionResult::error(
@@ -601,6 +621,12 @@ pub fn dispatch_corp_alliance_route(
                         format!("Corporation {corp_id} not found"),
                     );
                 }
+                let fuel_groups =
+                    crate::services::station_structure::structure_lifecycle::service_fuel_groups(
+                        ctx,
+                    );
+                let ext =
+                    crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
                 let mut structs: Vec<_> = snap
                     .structures
                     .values()
@@ -610,7 +636,7 @@ pub fn dispatch_corp_alliance_route(
                 let out: Vec<Value> = structs
                     .into_iter()
                     .map(|s| {
-                        let mut fitted_services: Vec<(i64, Value)> = snap
+                        let mut fitted_services: Vec<(i64, u32, bool, Value)> = snap
                             .items
                             .values()
                             .filter(|i| {
@@ -636,6 +662,8 @@ pub fn dispatch_corp_alliance_route(
                                     .unwrap_or(false);
                                 Some((
                                     i.item_id,
+                                    i.type_id,
+                                    is_online,
                                     json!({
                                         "name": svc_name,
                                         "state": if is_online { "online" } else { "offline" },
@@ -643,12 +671,10 @@ pub fn dispatch_corp_alliance_route(
                                 ))
                             })
                             .collect();
-                        fitted_services.sort_by_key(|(id, _)| *id);
+                        fitted_services.sort_by_key(|(id, _, _, _)| *id);
                         let services: Vec<Value> =
-                            fitted_services.iter().map(|(_, v)| v.clone()).collect();
+                            fitted_services.iter().map(|(_, _, _, v)| v.clone()).collect();
 
-                        let ext =
-                            crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
                         let timer_meta = snap.structure_esi_timer_meta.get(&s.structure_id);
                         let profile_id = ext
                             .structure_profile_id
@@ -668,21 +694,62 @@ pub fn dispatch_corp_alliance_route(
                         });
 
                         let life = ext.lifecycle.get(&s.structure_id);
-                        let derived_fuel = if s.fuel_blocks > 0 {
-                            let has_online_svc = fitted_services
-                                .iter()
-                                .any(|(_, v)| v.get("state").and_then(|st| st.as_str()) == Some("online"));
-                            if has_online_svc {
-                                let last_tick = life
-                                    .and_then(|l| l.last_fuel_tick_unix)
-                                    .unwrap_or_else(|| ctx.now_unix());
-                                let burn_per_hour = fitted_services
-                                    .iter()
-                                    .filter(|(_, v)| v.get("state").and_then(|st| st.as_str()) == Some("online"))
-                                    .count() as u64
-                                    * 5;
-                                let hours = (s.fuel_blocks as u64) / burn_per_hour.max(1);
-                                Some(last_tick.saturating_add(hours * 3600))
+                        let avail_fuel = if s.fuel_blocks > 0 {
+                            s.fuel_blocks as u64
+                        } else {
+                            snap.items
+                                .values()
+                                .filter(|i| {
+                                    i.location_id == s.structure_id
+                                        && matches!(
+                                            i.flag,
+                                            InventoryFlag::StructureFuel
+                                                | InventoryFlag::SpecializedFuelBay
+                                        )
+                                        && ctx
+                                            .sde
+                                            .types
+                                            .get(&i.type_id)
+                                            .is_some_and(|t| fuel_groups.contains(&t.group_id))
+                                })
+                                .map(|i| i.quantity.max(0) as u64)
+                                .sum()
+                        };
+                        let derived_fuel = if let Some(l) = life {
+                            if avail_fuel > 0 && !l.online_modules.is_empty() {
+                                let mut burn_per_hour = 0u64;
+                                for &(_, mod_tid, is_online, _) in &fitted_services {
+                                    if !is_online {
+                                        continue;
+                                    }
+                                    let per_hour = ctx
+                                        .sde
+                                        .types
+                                        .get(&mod_tid)
+                                        .and_then(|t| {
+                                            t.default_attributes
+                                                .get(
+                                                    &crate::services::station_structure::structure_lifecycle::ATTR_SERVICE_FUEL_PER_HOUR,
+                                                )
+                                                .copied()
+                                        })
+                                        .unwrap_or(5.0);
+                                    let mult = crate::services::structure_acl_defense_rules::service_module_fuel_multiplier(
+                                        ctx,
+                                        s.type_id,
+                                        mod_tid,
+                                    );
+                                    burn_per_hour = burn_per_hour
+                                        .saturating_add((per_hour * mult).round().max(1.0) as u64);
+                                }
+                                if burn_per_hour > 0 {
+                                    let last_tick =
+                                        l.last_fuel_tick_unix.unwrap_or_else(|| ctx.now_unix());
+                                    let hours = avail_fuel / burn_per_hour;
+                                    Some(last_tick.saturating_add(hours * 3600))
+                                } else {
+                                    None
+                                }
                             } else {
                                 None
                             }
@@ -697,10 +764,40 @@ pub fn dispatch_corp_alliance_route(
                         {
                             obj["fuel_expires"] = json!(format_iso8601_utc(fe));
                         }
+                        let deploy_timer_start = if s.reinforced_until_unix > 0 {
+                            match s.state.as_str() {
+                                "AnchorVulnerable" => Some(
+                                    s.reinforced_until_unix.saturating_sub(
+                                        crate::services::station_structure::structure_lifecycle::ANCHOR_VULNERABLE_SECS,
+                                    ),
+                                ),
+                                "Anchoring" => {
+                                    let dur = life
+                                        .and_then(|l| l.anchoring_duration_secs)
+                                        .unwrap_or(
+                                            crate::services::station_structure::structure_lifecycle::ANCHORING_SECS,
+                                        );
+                                    Some(s.reinforced_until_unix.saturating_sub(dur))
+                                }
+                                "Onlining" | "OnliningVulnerable" => Some(
+                                    s.reinforced_until_unix.saturating_sub(
+                                        crate::services::station_structure::structure_lifecycle::ONLINING_SECS,
+                                    ),
+                                ),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
                         if let Some(ts) = timer_meta
                             .and_then(|m| m.state_timer_start_unix)
-                            .or_else(|| life.and_then(|l| l.fight_started_unix.or(l.shield_fight_started_unix)))
+                            .or_else(|| {
+                                life.and_then(|l| {
+                                    l.fight_started_unix.or(l.shield_fight_started_unix)
+                                })
+                            })
                             .or_else(|| (s.last_damage_unix > 0).then_some(s.last_damage_unix))
+                            .or(deploy_timer_start)
                             .filter(|&t| t > 0)
                         {
                             obj["state_timer_start"] = json!(format_iso8601_utc(ts));
@@ -708,7 +805,9 @@ pub fn dispatch_corp_alliance_route(
                         if let Some(te) = timer_meta
                             .and_then(|m| m.state_timer_end_unix)
                             .or_else(|| life.and_then(|l| l.repair_until_unix))
-                            .or_else(|| (s.reinforced_until_unix > 0).then_some(s.reinforced_until_unix))
+                            .or_else(|| {
+                                (s.reinforced_until_unix > 0).then_some(s.reinforced_until_unix)
+                            })
                             .or_else(|| ext.unanchoring_until_unix.get(&s.structure_id).copied())
                             .filter(|&t| t > 0)
                         {
@@ -723,8 +822,15 @@ pub fn dispatch_corp_alliance_route(
                         {
                             obj["unanchors_at"] = json!(format_iso8601_utc(ua));
                         }
-                        if let Some(&(ws, we)) =
-                            snap.structure_vulnerability_windows.get(&s.structure_id)
+                        if let Some((ws, we)) = snap
+                            .structure_vulnerability_windows
+                            .get(&s.structure_id)
+                            .copied()
+                            .or_else(|| {
+                                snap.corp_governance
+                                    .get(&s.owner_corp_id)
+                                    .map(|g| (u64::from(g.reinforce_hour), 0u64))
+                            })
                         {
                             let reinforce_hour = if ws < 24 {
                                 ws as i64
@@ -732,7 +838,7 @@ pub fn dispatch_corp_alliance_route(
                                 ((ws / 3600) % 24) as i64
                             };
                             obj["reinforce_hour"] = json!(reinforce_hour);
-                            if we > 0 {
+                            if we >= 1_000_000 {
                                 let next_reinforce_hour = timer_meta
                                     .and_then(|m| m.next_reinforce_hour)
                                     .unwrap_or_else(|| {

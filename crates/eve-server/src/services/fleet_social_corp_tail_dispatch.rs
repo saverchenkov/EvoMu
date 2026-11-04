@@ -335,7 +335,7 @@ pub fn handle_corp_gov_tail(
                                     .get(&s.type_id)
                                     .and_then(|t| t.default_attributes.get(&191).copied())
                                     .unwrap_or(0.0);
-                                (per_lvl * s.level as f64) as i64
+                                (per_lvl.round() as i64) * i64::from(s.level)
                             })
                             .sum::<i64>()
                     })

@@ -56,22 +56,24 @@ pub const CORP_ROLE_DEFINITIONS: &[(u64, &str, &str)] = &[
     (eve_db::corp_roles::ROLE_RENT_FACTORY_FACILITY, "Can Rent Factory Slot", "Rent_Factory_Facility"),
     (eve_db::corp_roles::ROLE_RENT_RESEARCH_FACILITY, "Can Rent Research Slot", "Rent_Research_Facility"),
     (eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT, "Junior Accountant", "Junior_Accountant"),
-    (eve_db::corp_roles::ROLE_STARBASE_CONFIG, "Starbase Config", "Starbase_Config"),
+    (eve_db::corp_roles::ROLE_STARBASE_CONFIG, "Starbase Config", "Config_Starbase_Equipment"),
     (eve_db::corp_roles::ROLE_TRADER, "Trader", "Trader"),
-    (eve_db::corp_roles::ROLE_CHAT_MANAGER, "Chat Manager", "Chat_Manager"),
+    (eve_db::corp_roles::ROLE_CHAT_MANAGER, "Chat Manager", "Communications_Officer"),
     (eve_db::corp_roles::ROLE_CONTRACT_MANAGER, "Contract Manager", "Contract_Manager"),
-    (eve_db::corp_roles::ROLE_INFRASTRUCTURE_TACTICIAN, "Infrastructure Tactical Officer", "Infrastructure_Tactician"),
-    (eve_db::corp_roles::ROLE_STARBASE_CARETAKER, "Starbase Caretaker", "Starbase_Caretaker"),
+    (eve_db::corp_roles::ROLE_INFRASTRUCTURE_TACTICIAN, "Infrastructure Tactical Officer", "Starbase_Defense_Operator"),
+    (eve_db::corp_roles::ROLE_STARBASE_CARETAKER, "Starbase Caretaker", "Starbase_Fuel_Technician"),
     (eve_db::corp_roles::ROLE_FITTING_MANAGER, "Fitting Manager", "Fitting_Manager"),
     (eve_db::corp_roles::ROLE_PROJECT_MANAGER, "Project Manager", "Project_Manager"),
-    (eve_db::corp_roles::ROLE_TERRESTRIAL_LOGISTICS_OFFICER, "Terrestrial Logistics Officer", "Terrestrial_Logistics_Officer"),
+    (eve_db::corp_roles::ROLE_TERRESTRIAL_LOGISTICS_OFFICER, "Terrestrial Logistics Officer", ""),
     (eve_db::corp_roles::ROLE_SKILL_PLAN_MANAGER, "Skill Plan Manager", "Skill_Plan_Manager"),
 ];
 
 pub(crate) fn decode_corp_roles(mask: u64) -> Vec<&'static str> {
     CORP_ROLE_DEFINITIONS
         .iter()
-        .filter_map(|&(bit, _, esi_name)| ((mask & bit) != 0).then_some(esi_name))
+        .filter_map(|&(bit, _, esi_name)| {
+            ((mask & bit) != 0 && !esi_name.is_empty()).then_some(esi_name)
+        })
         .collect()
 }
 
@@ -392,6 +394,13 @@ pub fn dispatch_corp_governance_route(
                 };
                 if let Some(&stored_limit) = snap.corp_member_limits.get(&corp_id) {
                     return RouteExecutionResult::ok_json(json!(stored_limit), 3600);
+                }
+                if let Some(gov_limit) = snap
+                    .corp_governance
+                    .get(&corp_id)
+                    .and_then(|g| g.member_limit)
+                {
+                    return RouteExecutionResult::ok_json(json!(gov_limit as i64), 3600);
                 }
                 // Compute from SDE dogma attribute 191 (maxCorporationMembersBonus) across CEO's trained skills,
                 // defaulting to EVE's base 10-member limit when CEO has no Corporation Management skills.

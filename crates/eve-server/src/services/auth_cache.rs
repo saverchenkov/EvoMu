@@ -196,7 +196,7 @@ pub async fn handle(
                         .insert("macho_global_config".into(), json);
                 });
             }
-            crate::services::notify_emitters_batch3::emit_global_config_updated(ctx, &key, &val);
+            crate::services::notify_emitters_character_services::emit_global_config_updated(ctx, &key, &val);
             Some(Ok(PyRep::Bool(true)))
         }
 
