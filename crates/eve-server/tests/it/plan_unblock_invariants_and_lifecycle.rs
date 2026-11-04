@@ -145,7 +145,7 @@ async fn test_d6_single_source_of_truth_cross_surface_and_restart() {
 
         let mut sess = SessionState::new(7102);
         let _ = rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)]).await.expect("SelectCharacterID");
-        let _ = rpc(&ctx, &mut sess, "addressbook", "AddContact", &[PyRep::Integer(90_000_002), PyRep::Real(10.0), PyRep::Bool(true)]).await.expect("AddContact");
+        let _ = rpc(&ctx, &mut sess, "charMgr", "AddContact", &[PyRep::Integer(90_000_002), PyRep::Real(10.0), PyRep::Bool(true)]).await.expect("AddContact");
         let _ = rpc(&ctx, &mut sess, "invbroker", "SetLabel", &[PyRep::Integer(100_000_001), PyRep::String("SSOT Flagship".into())]).await.expect("SetLabel");
         let _ = rpc(&ctx, &mut sess, "charMgr", "LogSettings", &[PyRep::Real(3_750.0)]).await.expect("charMgr.LogSettings");
         ctx.db.with_mut_snapshot(|snap| {
@@ -168,7 +168,7 @@ async fn test_d6_single_source_of_truth_cross_surface_and_restart() {
 
     let names_rep = rpc(&ctx2, &mut sess2, "dogmaIM", "ItemGetInfo", &[PyRep::Integer(100_000_001)]).await.expect("ItemGetInfo after restart");
     assert!(format!("{names_rep:?}").contains("SSOT Flagship"));
-    let contacts_rep = rpc(&ctx2, &mut sess2, "addressbook", "GetContactList", &[]).await.expect("addressbook after restart");
+    let contacts_rep = rpc(&ctx2, &mut sess2, "charMgr", "GetContactList", &[]).await.expect("charMgr after restart");
     assert!(format!("{contacts_rep:?}").contains("90000002"));
 
     let has_alliance = ctx2.db.with_snapshot(|snap| snap.alliances.contains_key(&99_000_777));

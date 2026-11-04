@@ -1004,7 +1004,7 @@ async fn test_esi4_contacts_char_crud_and_labels() {
         rpc_call(
             &ctx1,
             &mut sess,
-            "addressbook",
+            "charMgr",
             "CreateLabel",
             &[PyRep::String("Fleet Allies".into()), PyRep::Integer(1)],
         )

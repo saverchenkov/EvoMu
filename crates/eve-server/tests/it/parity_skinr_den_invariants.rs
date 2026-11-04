@@ -583,7 +583,7 @@ async fn test_atomic_rollback_all_stores_and_single_source_of_truth() {
         assert_eq!(ctx.db.with_snapshot(|snap| snap.contracts.len()), contracts_before);
 
         // 2. Single source of truth across Client, ESI, Quasar, and SQLite restart
-        macho_rpc(&ctx, &mut sess, "addressbook", "AddContact", &[PyRep::Integer(90_000_002), PyRep::Real(10.0), PyRep::Bool(true)])
+        macho_rpc(&ctx, &mut sess, "charMgr", "AddContact", &[PyRep::Integer(90_000_002), PyRep::Real(10.0), PyRep::Bool(true)])
             .await
             .expect("AddContact");
         macho_rpc(&ctx, &mut sess, "invbroker", "SetLabel", &[PyRep::Integer(100_000_001), PyRep::String("SSOT Rifter".into())])
@@ -639,7 +639,7 @@ async fn test_atomic_rollback_all_stores_and_single_source_of_truth() {
         .await
         .expect("ItemGetInfo");
     assert!(format!("{names_rep:?}").contains("SSOT Rifter"));
-    let contacts_rep = macho_rpc(&ctx2, &mut sess2, "addressbook", "GetContactList", &[])
+    let contacts_rep = macho_rpc(&ctx2, &mut sess2, "charMgr", "GetContactList", &[])
         .await
         .expect("GetContactList");
     assert!(format!("{contacts_rep:?}").contains("90000002"));

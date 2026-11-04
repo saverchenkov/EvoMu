@@ -62,10 +62,7 @@ pub(super) fn handle_chat_and_social(
         return handle_chat_rpc(ctx, session, service, method, args);
     }
 
-    if matches!(
-        service,
-        "addressbook" | "charMgr"
-    ) {
+    if service == "charMgr" {
         return handle_contacts_notifications_calendar(ctx, session, service, method, args);
     }
 
@@ -1177,23 +1174,13 @@ fn handle_contacts_notifications_calendar(
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("addressbook", "GetContactList")
-        | ("charMgr", "GetContactList")
-        | ("addressbook", "AddContact")
-        | ("addressbook", "EditContact")
+        ("charMgr", "GetContactList")
         | ("charMgr", "AddContact")
         | ("charMgr", "EditContact")
         | ("charMgr", "EditContactsRelationshipID")
-        | ("addressbook", "DeleteContacts")
         | ("charMgr", "DeleteContacts")
-        | ("addressbook", "BlockOwners")
         | ("charMgr", "BlockOwners")
-        | ("addressbook", "UnblockOwners")
-        | ("charMgr", "UnblockOwners")
-        | ("addressbook", "CreateLabel")
-        | ("addressbook", "GetLabels")
-        | ("addressbook", "EditLabel")
-        | ("addressbook", "DeleteLabel") => {
+        | ("charMgr", "UnblockOwners") => {
             let empty_kw = HashMap::new();
             crate::services::character_skills::character_contacts::handle_contacts(
                 ctx, session, "charMgr", method, args, &empty_kw,
