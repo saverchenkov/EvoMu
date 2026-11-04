@@ -645,3 +645,4 @@ mod inventory_containers_and_anchoring;
 mod sovereignty_skyhooks_and_mercenary_dens;
 mod scanning_probes_and_signatures;
 mod fw_insurgencies_and_fob;
+mod wallet_hypernet_and_esi_structure_timers;

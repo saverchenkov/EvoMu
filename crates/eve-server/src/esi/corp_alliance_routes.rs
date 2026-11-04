@@ -645,10 +645,17 @@ pub fn dispatch_corp_alliance_route(
                             .collect();
                         fitted_services.sort_by_key(|(id, _)| *id);
                         let services: Vec<Value> =
-                            fitted_services.into_iter().map(|(_, v)| v).collect();
+                            fitted_services.iter().map(|(_, v)| v.clone()).collect();
 
+                        let ext =
+                            crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
                         let timer_meta = snap.structure_esi_timer_meta.get(&s.structure_id);
-                        let profile_id = timer_meta.map(|m| m.profile_id).unwrap_or(0);
+                        let profile_id = ext
+                            .structure_profile_id
+                            .get(&s.structure_id)
+                            .copied()
+                            .or_else(|| timer_meta.map(|m| m.profile_id))
+                            .unwrap_or(0);
                         let mut obj = json!({
                             "structure_id": s.structure_id,
                             "type_id": s.type_id as i64,
@@ -660,11 +667,39 @@ pub fn dispatch_corp_alliance_route(
                             "services": services,
                         });
 
-                        if let Some(fe) = timer_meta.and_then(|m| m.fuel_expires_unix).filter(|&t| t > 0) {
+                        let life = ext.lifecycle.get(&s.structure_id);
+                        let derived_fuel = if s.fuel_blocks > 0 {
+                            let has_online_svc = fitted_services
+                                .iter()
+                                .any(|(_, v)| v.get("state").and_then(|st| st.as_str()) == Some("online"));
+                            if has_online_svc {
+                                let last_tick = life
+                                    .and_then(|l| l.last_fuel_tick_unix)
+                                    .unwrap_or_else(|| ctx.now_unix());
+                                let burn_per_hour = fitted_services
+                                    .iter()
+                                    .filter(|(_, v)| v.get("state").and_then(|st| st.as_str()) == Some("online"))
+                                    .count() as u64
+                                    * 5;
+                                let hours = (s.fuel_blocks as u64) / burn_per_hour.max(1);
+                                Some(last_tick.saturating_add(hours * 3600))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+
+                        if let Some(fe) = timer_meta
+                            .and_then(|m| m.fuel_expires_unix)
+                            .or(derived_fuel)
+                            .filter(|&t| t > 0)
+                        {
                             obj["fuel_expires"] = json!(format_iso8601_utc(fe));
                         }
                         if let Some(ts) = timer_meta
                             .and_then(|m| m.state_timer_start_unix)
+                            .or_else(|| life.and_then(|l| l.fight_started_unix.or(l.shield_fight_started_unix)))
                             .or_else(|| (s.last_damage_unix > 0).then_some(s.last_damage_unix))
                             .filter(|&t| t > 0)
                         {
@@ -672,12 +707,20 @@ pub fn dispatch_corp_alliance_route(
                         }
                         if let Some(te) = timer_meta
                             .and_then(|m| m.state_timer_end_unix)
+                            .or_else(|| life.and_then(|l| l.repair_until_unix))
                             .or_else(|| (s.reinforced_until_unix > 0).then_some(s.reinforced_until_unix))
+                            .or_else(|| ext.unanchoring_until_unix.get(&s.structure_id).copied())
                             .filter(|&t| t > 0)
                         {
                             obj["state_timer_end"] = json!(format_iso8601_utc(te));
                         }
-                        if let Some(ua) = timer_meta.and_then(|m| m.unanchors_at_unix).filter(|&t| t > 0) {
+                        if let Some(ua) = ext
+                            .unanchoring_until_unix
+                            .get(&s.structure_id)
+                            .copied()
+                            .or_else(|| timer_meta.and_then(|m| m.unanchors_at_unix))
+                            .filter(|&t| t > 0)
+                        {
                             obj["unanchors_at"] = json!(format_iso8601_utc(ua));
                         }
                         if let Some(&(ws, we)) =
@@ -705,6 +748,12 @@ pub fn dispatch_corp_alliance_route(
                                 obj["next_reinforce_hour"] = json!(next_reinforce_hour);
                                 obj["next_reinforce_apply"] = json!(format_iso8601_utc(next_apply));
                             }
+                        }
+                        if let Some(&(next_hour, _next_day, next_apply)) =
+                            ext.pending_reinforce_schedule.get(&s.structure_id)
+                        {
+                            obj["next_reinforce_hour"] = json!(next_hour as i64);
+                            obj["next_reinforce_apply"] = json!(format_iso8601_utc(next_apply));
                         }
                         if let Some(nrh) = timer_meta.and_then(|m| m.next_reinforce_hour) {
                             obj["next_reinforce_hour"] = json!(nrh);
