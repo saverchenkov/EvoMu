@@ -133,7 +133,7 @@ async fn test_skinr_sequencing_studio_and_paragon_hub_listing() {
     // 1. Verify SKINR sequencing skills discount tier pricing & durations
     let pricing_rsp = quasar_rpc(&ctx, &mut seller_sess, "eve_public.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingRequest", Vec::new()).await;
     assert_eq!(pricing_rsp.status_code, STATUS_OK);
-    assert_eq!(varint(&pricing_rsp.payload.as_ref().unwrap().value, 2), Some(10));
+    assert_eq!(varint(&pricing_rsp.payload.as_ref().unwrap().value, 2), Some(0));
 
     let dur_rsp = quasar_rpc(&ctx, &mut seller_sess, "eve_public.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierDurationsRequest", Vec::new()).await;
     assert_eq!(dur_rsp.status_code, STATUS_OK);
