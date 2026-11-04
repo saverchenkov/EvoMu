@@ -611,10 +611,21 @@ async fn test_shipping_storage_proximity_and_fleetmate_transfer() {
         &[PyRep::Integer(alsc_item), PyRep::Integer(ship_id), PyRep::Integer(5), PyRep::Integer(25)], &kw, None,
     ).await.expect("Fleetmate take from ALSC must succeed without deadlock");
     assert!(matches!(alsc_take, PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::None));
-    let log_res = ctx
+    // The audit log is visible only to the container owner (or owning corp), not to fleetmates.
+    let log_denied = ctx
         .dispatch_rpc(&mut sess, "invbroker", Some(mgr), "ALSCLogGet", &[PyRep::Integer(alsc_id)], &kw, None)
         .await
-        .expect("ALSCLogGet");
+        .expect_err("fleetmate must not read another pilot's ALSC audit log");
+    assert_eq!(log_denied.code, "ALSCAccessDenied");
+    let mut owner_sess = SessionState::new(7117);
+    common::login_pilot(&ctx, &mut owner_sess, "other", "other-secret").await;
+    ctx.dispatch_rpc(&mut owner_sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(other_char_id)], &kw, None)
+        .await
+        .expect("SelectCharacterID owner");
+    let log_res = ctx
+        .dispatch_rpc(&mut owner_sess, "invbroker", None, "ALSCLogGet", &[PyRep::Integer(alsc_id)], &kw, None)
+        .await
+        .expect("owner ALSCLogGet");
     let Some(PyRep::List(entries)) = log_res.dict_get("entries") else { panic!("expected entries list"); };
     assert!(entries.iter().any(|e| e.dict_get("action").and_then(|v| v.as_str()) == Some("ALSCActionTake") && e.dict_get("actorID").and_then(|v| v.as_i64()) == Some(char_id)));
 

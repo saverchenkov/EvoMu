@@ -387,6 +387,7 @@ mod rpc_services_remaining;
 
 mod social_and_contacts_complete;
 mod notify_structures_clones_pi;
+mod notify_mining_scanners_space_emission;
 mod notify_progression_and_activities;
 mod notify_space_corp_market;
 mod world_space_exploration;
@@ -418,3 +419,6 @@ mod esi_market_prices_and_structures;
 mod industry_research_and_capital;
 mod industry_job_costs_and_pause;
 mod industry_live_support;
+mod login_campaign_and_milestone_claims;
+mod modules_grappler_hull_energizer_and_spool;
+mod fleet_object_handler_lifecycle;
