@@ -131,6 +131,10 @@ pub fn handle(
             }
         }
 
+        ("skillMgr2", "AbortTraining") => Some(abort_training(ctx, session)),
+        ("skillMgr2", "GetRespecInfo") => Some(get_respec_info(ctx, session)),
+        ("skillMgr2", "GetSkillChangesForISIS") => Some(get_skill_changes_for_isis(session)),
+
         // parity: feat:fitting.strip-fitting
         ("dogmaIM", "StripFitting") | ("ship", "StripFitting") | ("invbroker", "StripFitting") => {
             Some(strip_ship_fitting(ctx, session, args, kwargs))
@@ -399,6 +403,77 @@ fn handle_omega_weekly_free_sp(
         ("freeSkillPointsGranted", PyRep::Integer(15_000)),
         ("freeSkillPoints", PyRep::Real(new_free_sp)),
     ]))
+}
+
+pub fn abort_training(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    super::character_skills::catch_up_skill_queue(ctx, char_id);
+    let now_unix = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.paused_skill_queues.insert(char_id);
+        if let Some(q) = snap.skill_queues.get_mut(&char_id) {
+            if let Some(head) = q.first_mut() {
+                let cur_sp = snap
+                    .skills
+                    .get(&char_id)
+                    .and_then(|m| m.get(&head.type_id))
+                    .map(|s| s.skill_points)
+                    .unwrap_or(head.start_sp);
+                head.start_sp = cur_sp;
+                head.started_at_unix = Some(now_unix);
+            }
+        }
+    });
+    let _ = ctx.notify_skill_queue_paused_server(char_id);
+    Ok(PyRep::Bool(true))
+}
+
+pub fn get_respec_info(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let res = ctx.db.with_snapshot(|snap| {
+        snap.characters.get(&char_id).map(|c| {
+            (
+                c.neural.bonus_remaps,
+                c.neural.last_remap_unix,
+                c.neural.remap_cooldown_until_unix,
+            )
+        })
+    });
+    let Some((bonus_remaps, last_remap, next_timed)) = res else {
+        return Err(BridgeRpcError {
+            code: "CharacterNotFound".into(),
+            message: format!("Character {char_id} not found"),
+        });
+    };
+    Ok(PyRep::keyval([
+        ("freeRespecs", PyRep::Integer(bonus_remaps as i64)),
+        ("bonusRemaps", PyRep::Integer(bonus_remaps as i64)),
+        (
+            "lastRespecDate",
+            last_remap
+                .map(|u| PyRep::Integer(u as i64))
+                .unwrap_or(PyRep::None),
+        ),
+        (
+            "nextTimedRespec",
+            next_timed
+                .map(|u| PyRep::Integer(u as i64))
+                .unwrap_or(PyRep::None),
+        ),
+    ]))
+}
+
+pub fn get_skill_changes_for_isis(
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    Ok(PyRep::List(Vec::new()))
 }
 
 fn strip_ship_fitting(

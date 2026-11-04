@@ -560,6 +560,14 @@ pub fn handle(
                         });
                     }
                 }
+                // Enforce Alpha clone 5,000,000 SP total limit on starting/saving training queue (feat:skills.alpha-5m-training-limit)
+                if ch.clone_grade <= 1 && (ch.skill_points + ch.free_skill_points) >= 5_000_000.0 {
+                    return Err(BridgeRpcError {
+                        code: "AlphaCloneSpCapExceeded".into(),
+                        message: "Alpha clones cannot queue skills beyond 5,000,000 SP".into(),
+                    });
+                }
+
                 if !is_add_to_end {
                     let now_ft = ctx.now_blueos_filetime_ticks();
                     if let Some(old_q) = snap.skill_queues.insert(char_id, Vec::new()) {
@@ -1136,29 +1144,7 @@ pub fn handle(
         ),
 
         ("skillMgr2", "AbortTraining") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            catch_up_skill_queue(ctx, char_id);
-            let now_unix = ctx.now_unix();
-            ctx.db.with_mut_snapshot(|snap| {
-                snap.paused_skill_queues.insert(char_id);
-                if let Some(q) = snap.skill_queues.get_mut(&char_id) {
-                    if let Some(head) = q.first_mut() {
-                        let cur_sp = snap
-                            .skills
-                            .get(&char_id)
-                            .and_then(|m| m.get(&head.type_id))
-                            .map(|s| s.skill_points)
-                            .unwrap_or(head.start_sp);
-                        head.start_sp = cur_sp;
-                        head.started_at_unix = Some(now_unix);
-                    }
-                }
-            });
-            let _ = ctx.notify_skill_queue_paused_server(char_id);
-            Some(Ok(PyRep::Bool(true)))
+            Some(super::character_skill_ops::abort_training(ctx, session))
         }
 
         ("skillMgr2", "GetSkillHistory") => {
@@ -1339,41 +1325,7 @@ pub fn handle(
         }
 
         ("skillMgr2", "GetRespecInfo") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let res = ctx.db.with_snapshot(|snap| {
-                snap.characters.get(&char_id).map(|c| {
-                    (
-                        c.neural.bonus_remaps,
-                        c.neural.last_remap_unix,
-                        c.neural.remap_cooldown_until_unix,
-                    )
-                })
-            });
-            let Some((bonus_remaps, last_remap, next_timed)) = res else {
-                return Some(Err(BridgeRpcError {
-                    code: "CharacterNotFound".into(),
-                    message: format!("Character {char_id} not found"),
-                }));
-            };
-            Some(Ok(PyRep::keyval([
-                ("freeRespecs", PyRep::Integer(bonus_remaps as i64)),
-                ("bonusRemaps", PyRep::Integer(bonus_remaps as i64)),
-                (
-                    "lastRespecDate",
-                    last_remap
-                        .map(|u| PyRep::Integer(u as i64))
-                        .unwrap_or(PyRep::None),
-                ),
-                (
-                    "nextTimedRespec",
-                    next_timed
-                        .map(|u| PyRep::Integer(u as i64))
-                        .unwrap_or(PyRep::None),
-                ),
-            ])))
+            Some(super::character_skill_ops::get_respec_info(ctx, session))
         }
 
         ("skillMgr2", "GetImplants") => Some(crate::services::implant_plugging::get_implants(
@@ -1383,11 +1335,7 @@ pub fn handle(
             ctx, session,
         )),
         ("skillMgr2", "GetSkillChangesForISIS") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            Some(Ok(PyRep::List(Vec::new())))
+            Some(super::character_skill_ops::get_skill_changes_for_isis(session))
         }
         ("dogmaIM", "InjectImplant") => Some(crate::services::implant_plugging::inject_implant(
             ctx, session, args,

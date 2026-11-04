@@ -6,14 +6,75 @@
 use crate::common;
 
 use eve_db::{
-    CharacterRecord, InventoryFlag, InventoryItemRecord, IskCents, NeuralAttributes,
-    SkillQueueEntry, TrainedSkillRecord,
+    CharacterRecord, InventoryFlag, InventoryItemRecord, IskCents, MarketOrderRecord,
+    NeuralAttributes, SkillQueueEntry, TrainedSkillRecord, WorldRepository,
 };
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::formulas::{sp_for_skill_level, sp_per_minute};
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
+use std::sync::Arc;
+
+fn seed_test_character(
+    char_id: i64,
+    user_id: u64,
+    name: &str,
+    clone_grade: u32,
+    skill_points: f64,
+    balance_isk: i64,
+) -> CharacterRecord {
+    CharacterRecord {
+        character_id: char_id,
+        user_id,
+        name: name.into(),
+        corporation_id: 1000001,
+        alliance_id: None,
+        war_faction_id: None,
+        race_id: 1,
+        bloodline_id: 1,
+        ancestry_id: 11,
+        school_id: 17,
+        solar_system_id: 30000142,
+        constellation_id: 20000020,
+        region_id: 10000002,
+        station_id: Some(60003760),
+        structure_id: None,
+        active_ship_id: 990_000_000 + char_id,
+        balance: IskCents::from_isk(balance_isk),
+        plex_balance: 0,
+        loyalty_points: HashMap::new(),
+        standings: HashMap::new(),
+        security_status: 0.0,
+        clone_grade,
+        skill_points,
+        activity_status: None,
+        free_skill_points: 0.0,
+        last_clone_jump_unix: 0,
+        jump_fatigue_minutes: 0.0,
+        jump_cooldown_until_unix: 0,
+        jump_fatigue_until_unix: 0,
+        description: String::new(),
+        title: String::new(),
+        gender: 0,
+        create_date_unix: 1704067200,
+        fleet_id: None,
+        autopilot_waypoints: Vec::new(),
+        version: 1,
+        system_epoch: 1,
+        neural: NeuralAttributes {
+            charisma: 20,
+            intelligence: 20,
+            memory: 20,
+            perception: 20,
+            willpower: 20,
+            bonus_remaps: 1,
+            last_remap_unix: None,
+            remap_cooldown_until_unix: None,
+        },
+        home_station_id: 60003760,
+    }
+}
 
 #[tokio::test]
 async fn test_ch1_skill_training_engine_and_caps() {
@@ -53,109 +114,13 @@ async fn test_ch1_skill_training_engine_and_caps() {
         // Omega character (clone_grade = 2)
         snap.characters.insert(
             omega_char_id,
-            CharacterRecord {
-                character_id: omega_char_id,
-                user_id: 1,
-                name: "Omega Queue Pilot".into(),
-                corporation_id: 1000001,
-                alliance_id: None,
-                war_faction_id: None,
-                race_id: 1,
-                bloodline_id: 1,
-                ancestry_id: 11,
-                school_id: 17,
-                solar_system_id: 30000142,
-                constellation_id: 20000020,
-                region_id: 10000002,
-                station_id: Some(60003760),
-                structure_id: None,
-                active_ship_id: 992_000_101,
-                balance: IskCents::from_isk(100_000),
-                plex_balance: 0,
-                loyalty_points: HashMap::new(),
-                standings: HashMap::new(),
-                security_status: 0.0,
-                clone_grade: 2, // Omega
-                skill_points: 0.0,
-                activity_status: None,
-            free_skill_points: 0.0,
-                last_clone_jump_unix: 0,
-                jump_fatigue_minutes: 0.0,
-                jump_cooldown_until_unix: 0,
-                jump_fatigue_until_unix: 0,
-                description: String::new(),
-                title: String::new(),
-                gender: 0,
-                create_date_unix: 1704067200,
-                fleet_id: None, autopilot_waypoints: Vec::new(),
-                version: 1,
-                system_epoch: 1,
-                neural: NeuralAttributes {
-                    charisma: 20,
-                    intelligence: 20,
-                    memory: 20,
-                    perception: 20,
-                    willpower: 20,
-                    bonus_remaps: 1,
-                    last_remap_unix: None,
-                    remap_cooldown_until_unix: None,
-                },
-                home_station_id: 60003760,
-            },
+            seed_test_character(omega_char_id, 1, "Omega Queue Pilot", 2, 0.0, 100_000),
         );
 
         // Alpha character (clone_grade = 1)
         snap.characters.insert(
             alpha_char_id,
-            CharacterRecord {
-                character_id: alpha_char_id,
-                user_id: 2,
-                name: "Alpha Queue Pilot".into(),
-                corporation_id: 1000001,
-                alliance_id: None,
-                war_faction_id: None,
-                race_id: 1,
-                bloodline_id: 1,
-                ancestry_id: 11,
-                school_id: 17,
-                solar_system_id: 30000142,
-                constellation_id: 20000020,
-                region_id: 10000002,
-                station_id: Some(60003760),
-                structure_id: None,
-                active_ship_id: 992_000_102,
-                balance: IskCents::from_isk(100_000),
-                plex_balance: 0,
-                loyalty_points: HashMap::new(),
-                standings: HashMap::new(),
-                security_status: 0.0,
-                clone_grade: 1, // Alpha
-                skill_points: 0.0,
-                activity_status: None,
-            free_skill_points: 0.0,
-                last_clone_jump_unix: 0,
-                jump_fatigue_minutes: 0.0,
-                jump_cooldown_until_unix: 0,
-                jump_fatigue_until_unix: 0,
-                description: String::new(),
-                title: String::new(),
-                gender: 0,
-                create_date_unix: 1704067200,
-                fleet_id: None, autopilot_waypoints: Vec::new(),
-                version: 1,
-                system_epoch: 1,
-                neural: NeuralAttributes {
-                    charisma: 20,
-                    intelligence: 20,
-                    memory: 20,
-                    perception: 20,
-                    willpower: 20,
-                    bonus_remaps: 1,
-                    last_remap_unix: None,
-                    remap_cooldown_until_unix: None,
-                },
-                home_station_id: 60003760,
-            },
+            seed_test_character(alpha_char_id, 2, "Alpha Queue Pilot", 1, 0.0, 100_000),
         );
 
         // Skill 3300 (Gunnery): rank 1, Primary Perception(20), Secondary Willpower(20)
@@ -262,55 +227,7 @@ async fn test_ch1_skill_training_engine_and_caps() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.insert(
             alpha_cap_id,
-            CharacterRecord {
-                character_id: alpha_cap_id,
-                user_id: 3,
-                name: "Alpha Cap Pilot".into(),
-                corporation_id: 1000001,
-                alliance_id: None,
-                war_faction_id: None,
-                race_id: 1,
-                bloodline_id: 1,
-                ancestry_id: 11,
-                school_id: 17,
-                solar_system_id: 30000142,
-                constellation_id: 20000020,
-                region_id: 10000002,
-                station_id: Some(60003760),
-                structure_id: None,
-                active_ship_id: 992_000_103,
-                balance: IskCents::from_isk(100_000),
-                plex_balance: 0,
-                loyalty_points: HashMap::new(),
-                standings: HashMap::new(),
-                security_status: 0.0,
-                clone_grade: 1, // Alpha
-                skill_points: 4_999_960.0, // 40 SP remaining until 5M
-                activity_status: None,
-            free_skill_points: 0.0,
-                last_clone_jump_unix: 0,
-                jump_fatigue_minutes: 0.0,
-                jump_cooldown_until_unix: 0,
-                jump_fatigue_until_unix: 0,
-                description: String::new(),
-                title: String::new(),
-                gender: 0,
-                create_date_unix: 1704067200,
-                fleet_id: None, autopilot_waypoints: Vec::new(),
-                version: 1,
-                system_epoch: 1,
-                neural: NeuralAttributes {
-                    charisma: 20,
-                    intelligence: 20,
-                    memory: 20,
-                    perception: 20,
-                    willpower: 20,
-                    bonus_remaps: 0,
-                    last_remap_unix: None,
-                    remap_cooldown_until_unix: None,
-                },
-                home_station_id: 60003760,
-            },
+            seed_test_character(alpha_cap_id, 3, "Alpha Cap Pilot", 1, 4_999_960.0, 100_000),
         );
         snap.skill_queues.insert(
             alpha_cap_id,
@@ -1262,5 +1179,145 @@ async fn test_ch1_ch2_effective_attributes_catchup_and_2arg_free_sp() {
         respec_kv.get("freeRespecs").and_then(|v| v.as_i64()),
         Some(2)
     );
+}
+
+#[tokio::test]
+async fn test_skills_alpha_cap_direct_purchase_omega_sp_and_history() {
+    // parity: feat:skills.alpha-5m-training-limit, feat:skills.direct-purchase-inject, feat:skills.omega-weekly-free-sp, feat:skills.skill-history-events
+    eve_testkit::attest(&[
+        "feat:skills.alpha-5m-training-limit",
+        "feat:skills.direct-purchase-inject",
+        "feat:skills.omega-weekly-free-sp",
+        "feat:skills.skill-history-events",
+    ]);
+
+    let db_path = std::env::temp_dir().join(format!("evomu_skills_cclones_{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&db_path);
+    let repo = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
+    let ctx = ServerContext::with_repository(repo);
+    let demo = WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
+    ctx.db.with_mut_snapshot(|snap| *snap = demo);
+    common::pin_clock(&ctx);
+
+    let kw = HashMap::new();
+    let char_id = 90_000_001;
+    let mut sess = SessionState::new(9301);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None).await.expect("SelectCharacterID");
+
+    // 1. feat:skills.alpha-5m-training-limit:
+    // Alpha clone with 4.9M trained SP + 200k unallocated SP (>= 5.0M total SP) cannot start passive training,
+    // an active queue is paused at 5M, unallocated SP can still be applied, and Omega status removes the limit.
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.clone_grade = 1; // Alpha
+        ch.skill_points = 4_900_000.0;
+        ch.free_skill_points = 200_000.0;
+        snap.skills.entry(char_id).or_default().insert(3300, TrainedSkillRecord { type_id: 3300, level: 1, skill_points: 250.0 });
+    });
+    let q_err = ctx.dispatch_rpc(&mut sess, "skillMgr2", None, "SaveSkillQueue", &[PyRep::List(vec![PyRep::List(vec![PyRep::Integer(3300), PyRep::Integer(2)])])], &kw, None).await.expect_err("Alpha with trained + unallocated SP >= 5M cannot start passive skill queue");
+    assert_eq!(q_err.code, "AlphaCloneSpCapExceeded");
+
+    // Even when passive queue is blocked by unallocated SP, ApplyFreeSkillPoints still works up to 5M trained SP
+    let applied = ctx.dispatch_rpc(&mut sess, "skillMgr2", None, "ApplyFreeSkillPoints", &[PyRep::Integer(3300), PyRep::Integer(1_165)], &kw, None).await.expect("ApplyFreeSkillPoints allowed while trained SP < 5M");
+    assert_eq!(applied, PyRep::Real(1_415.0));
+
+    // Active Alpha queue running across the 5M boundary pauses automatically on tick
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.skill_points = 4_990_000.0;
+        ch.free_skill_points = 0.0;
+    });
+    ctx.dispatch_rpc(&mut sess, "skillMgr2", None, "SaveSkillQueue", &[PyRep::List(vec![PyRep::List(vec![PyRep::Integer(3300), PyRep::Integer(3)])])], &kw, None).await.expect("SaveSkillQueue below 5M total SP");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().skill_points = 4_999_995.0;
+    });
+    ctx.advance_secs(120);
+    assert!(ctx.db.with_snapshot(|s| s.paused_skill_queues.contains(&char_id)), "Alpha skill queue must pause automatically once total SP reaches 5,000,000");
+
+    // 2. feat:skills.omega-weekly-free-sp:
+    // Refused for Alpha; granted once per week (15,000 SP) for Omega; refused on second claim in same week; refreshes after Tuesday 11:00 UTC downtime.
+    let can_alpha = ctx.dispatch_rpc(&mut sess, "storeManager", None, "can_purchase_offer", &[PyRep::Integer(1005)], &kw, None).await.expect("can_purchase_offer Alpha");
+    assert_eq!(can_alpha, PyRep::Bool(false));
+    let buy_alpha_err = ctx.dispatch_rpc(&mut sess, "storeManager", None, "buy_offer", &[PyRep::Integer(1005)], &kw, None).await.expect_err("Alpha cannot claim Omega weekly free SP");
+    assert_eq!(buy_alpha_err.code.to_ascii_lowercase(), "omegarequired");
+
+    // Upgrade to Omega (clone_grade = 2) -> removes the 5M SP training limit and allows SaveSkillQueue & training completion above 5M SP!
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().clone_grade = 2;
+        snap.paused_skill_queues.remove(&char_id);
+    });
+    ctx.dispatch_rpc(&mut sess, "skillMgr2", None, "SaveSkillQueue", &[PyRep::List(vec![PyRep::List(vec![PyRep::Integer(3300), PyRep::Integer(3)])])], &kw, None).await.expect("Omega removes the 5M SP SaveSkillQueue limit");
+    ctx.advance_secs(18_000);
+    assert_eq!(ctx.db.with_snapshot(|s| s.skills[&char_id][&3300].level), 3, "Omega skill queue trains past 5M SP to completion");
+    assert!(ctx.db.get_character(char_id).unwrap().skill_points > 5_000_000.0);
+
+    let free_before = ctx.db.get_character(char_id).unwrap().free_skill_points;
+    let claim1 = ctx.dispatch_rpc(&mut sess, "storeManager", None, "buy_offer", &[PyRep::Integer(1005)], &kw, None).await.expect("Omega claims weekly 15,000 free SP");
+    assert_eq!(claim1.dict_get("freeSkillPointsGranted"), Some(&PyRep::Integer(15_000)));
+    assert_eq!(ctx.db.get_character(char_id).unwrap().free_skill_points, free_before + 15_000.0);
+
+    let claim_dup = ctx.dispatch_rpc(&mut sess, "storeManager", None, "buy_offer", &[PyRep::Integer(1005)], &kw, None).await.expect_err("Second weekly SP claim in same week must be refused");
+    assert_eq!(claim_dup.code.to_ascii_lowercase(), "weeklyofferalreadyclaimed");
+
+    // Advance 7 days past next Tuesday 11:00 UTC downtime -> weekly window refreshes
+    ctx.advance_secs(7 * 86_400);
+    let claim2 = ctx.dispatch_rpc(&mut sess, "storeManager", None, "buy_offer", &[PyRep::Integer(1005)], &kw, None).await.expect("Omega claims weekly 15,000 free SP after Tuesday 11:00 UTC reset");
+    assert_eq!(claim2.dict_get("freeSkillPointsGranted"), Some(&PyRep::Integer(15_000)));
+
+    // 3. feat:skills.direct-purchase-inject:
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().remove(&3386);
+        snap.skills.entry(char_id).or_default().remove(&3410);
+        snap.market_orders.retain(|_, o| o.type_id != 3386 && o.type_id != 3410);
+        snap.market_orders.insert(999_111_222, MarketOrderRecord {
+            order_id: 999_111_222, owner_id: 1_000_035, station_id: 60_004_588, region_id: 10_000_030,
+            type_id: 3386, is_bid: false, price: IskCents::from_f64_isk(100_000.0), vol_entered: 100,
+            vol_remaining: 100, min_volume: 1, is_npc: true, escrow: IskCents(0),
+        });
+    });
+    let bal_before = ctx.db.get_character(char_id).unwrap().balance.to_f64_isk();
+    let buy_skill = ctx.dispatch_rpc(&mut sess, "skillMgr2", None, "PurchaseSkills", &[PyRep::List(vec![PyRep::Integer(3386)])], &kw, None).await.expect("Direct purchase of NPC-seeded skill 3386 from any location");
+    assert_eq!(buy_skill.dict_get("totalCostISK"), Some(&PyRep::Real(130_000.0)));
+    let bal_after = ctx.db.get_character(char_id).unwrap().balance.to_f64_isk();
+    assert!((bal_before - bal_after - 130_000.0).abs() < 1e-2, "Must charge 130% of NPC price (130,000 ISK)");
+    assert_eq!(ctx.db.with_snapshot(|s| s.skills[&char_id][&3386].level), 0);
+
+    let unseeded_err = ctx.dispatch_rpc(&mut sess, "skillMgr2", None, "PurchaseSkills", &[PyRep::List(vec![PyRep::Integer(3410)])], &kw, None).await.expect_err("Non-NPC-seeded skill must be refused for direct purchase");
+    assert_eq!(unseeded_err.code, "SkillUnavailableForPurchase");
+
+    // 4. feat:skills.skill-history-events:
+    // Exercise injection (36), training completion (37), extraction (39), and removal (38) in chronological order, persisted across relog.
+    ctx.advance_secs(60);
+    let extractor_id = 991_001_050;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().skill_points = 6_000_000.0;
+        snap.skills.entry(char_id).or_default().insert(3392, TrainedSkillRecord { type_id: 3392, level: 5, skill_points: 512_000.0 });
+        snap.items.insert(extractor_id, InventoryItemRecord { item_id: extractor_id, type_id: 40519, owner_id: char_id, location_id: 60_003_760, flag: InventoryFlag::Hangar, quantity: 1, singleton: false, version: 1, ..Default::default() });
+    });
+    ctx.dispatch_rpc(&mut sess, "skillMgr2", None, "ExtractSkills", &[PyRep::Dict(vec![(PyRep::Integer(3392), PyRep::Integer(500_000))]), PyRep::Integer(extractor_id)], &kw, None).await.expect("Extract 500k SP from 3392");
+
+    ctx.advance_secs(60);
+    let obs_skill_id = ctx.sde.types.values().find(|t| t.category_id == 16 && !t.published).map(|t| t.type_id).unwrap_or(999_999);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(obs_skill_id, TrainedSkillRecord { type_id: obs_skill_id, level: 1, skill_points: 500.0 });
+    });
+    let (removed_cnt, _) = eve_server::services::character_skill_ops::migrate_obsolete_skills_for_character(&ctx, char_id);
+    assert_eq!(removed_cnt, 1);
+
+    drop(ctx);
+    let repo2 = Arc::new(WorldRepository::open_sqlite(&db_path).expect("reopen sqlite"));
+    let ctx2 = ServerContext::with_repository(repo2);
+    let mut sess2 = SessionState::new(9302);
+    common::login_pilot(&ctx2, &mut sess2, "demo", "demo-secret").await;
+    ctx2.dispatch_rpc(&mut sess2, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None).await.unwrap();
+    let hist_rep = ctx2.dispatch_rpc(&mut sess2, "skillMgr2", None, "GetSkillHistory", &[PyRep::Integer(50)], &kw, None).await.expect("GetSkillHistory after relog");
+    let PyRep::Rowset { rows, .. } = hist_rep else { panic!("expected Rowset") };
+    assert!(rows.iter().any(|r| r[1] == PyRep::Integer(36) && r[2] == PyRep::Integer(3386)), "Skill injection event 36 must persist");
+    assert!(rows.iter().any(|r| r[1] == PyRep::Integer(37) && r[2] == PyRep::Integer(3300)), "Skill training completion event 37 must persist");
+    assert!(rows.iter().any(|r| r[1] == PyRep::Integer(39) && r[2] == PyRep::Integer(3392)), "Skill extraction event 39 must persist");
+    assert!(rows.iter().any(|r| r[1] == PyRep::Integer(38) && r[2] == PyRep::Integer(obs_skill_id as i64)), "Skill removal event 38 must persist");
+    assert!(rows.windows(2).all(|w| w[0][0].as_i64().unwrap() <= w[1][0].as_i64().unwrap()), "GetSkillHistory rows must be in chronological logDate order");
+    let _ = std::fs::remove_file(&db_path);
 }
 
