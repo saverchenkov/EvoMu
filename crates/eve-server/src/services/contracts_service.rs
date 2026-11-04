@@ -85,6 +85,13 @@ fn contract_to_pyrep(c: &ContractRecord, snap: &eve_db::WorldStateSnapshot) -> P
     let req_rep = PyRep::List(c.requested_items.iter().map(|&(tid, qty)| PyRep::keyval([("typeID", PyRep::Integer(tid as i64)), ("quantity", PyRep::Integer(qty as i64))])).collect());
     let bids_rep = PyRep::List(c.bid_history.iter().map(|&(bidder_id, amount, ts)| PyRep::keyval([("bidderID", PyRep::Integer(bidder_id)), ("amountISK", PyRep::Real(amount.to_wire_f64())), ("timestampUnix", PyRep::Integer(ts as i64))])).collect());
     let availability = if c.availability.is_empty() { "Public".to_string() } else { c.availability.clone() };
+    let primary = c.item_ids.first().and_then(|id| snap.items.get(id));
+    let primary_me = primary.map(|it| it.dynamic_attributes.get(&1112).copied().unwrap_or(0.0) as i64).unwrap_or(0);
+    let primary_te = primary.map(|it| it.dynamic_attributes.get(&1113).copied().unwrap_or(0.0) as i64).unwrap_or(0);
+    let primary_copy = primary.map(|it| it.is_blueprint_copy).unwrap_or(false);
+    let primary_runs = primary.and_then(|it| it.blueprint_runs_remaining).map(|r| PyRep::Integer(r as i64)).unwrap_or(PyRep::Integer(-1));
+    let primary_dmg = primary.map(|it| it.dynamic_attributes.get(&3).copied().unwrap_or(0.0)).unwrap_or(0.0);
+    let primary_muta = primary.and_then(|it| it.source_mutaplasmid_id).map(|m| PyRep::Integer(m as i64)).unwrap_or(PyRep::None);
     let base_fields = [
         ("contractID", PyRep::Integer(c.contract_id)), ("issuerID", PyRep::Integer(c.issuer_id)),
         ("issuerCorpID", PyRep::Integer(c.issuer_corp_id)), ("acceptorID", c.acceptor_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
@@ -97,6 +104,10 @@ fn contract_to_pyrep(c: &ContractRecord, snap: &eve_db::WorldStateSnapshot) -> P
         ("itemIDs", items_rep), ("items", detailed_items_rep), ("requestedItems", req_rep), ("bids", bids_rep),
         ("expirationUnix", PyRep::Integer(c.expiration_unix as i64)), ("dateIssuedUnix", PyRep::Integer(c.date_issued_unix as i64)),
         ("numDays", PyRep::Integer(c.num_days.max(1) as i64)), ("title", PyRep::String(c.title.clone())), ("forCorp", PyRep::Bool(c.for_corp)),
+        ("copy", PyRep::Bool(primary_copy)), ("isBlueprintCopy", PyRep::Bool(primary_copy)),
+        ("materialEfficiency", PyRep::Integer(primary_me)), ("timeEfficiency", PyRep::Integer(primary_te)),
+        ("runs", primary_runs.clone()), ("runsRemaining", primary_runs), ("damage", PyRep::Real(primary_dmg)),
+        ("sourceMutaplasmidID", primary_muta),
     ];
     let contract_kv = PyRep::keyval(base_fields.clone());
     let mut outer: Vec<(&str, PyRep)> = base_fields.into();
@@ -134,7 +145,7 @@ pub fn handle(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    if service != "contractProxy" { return None; }
+    if service != "contractProxy" && service != "contractMgr" { return None; }
 
     match method {
         "CreateContract" => {
@@ -957,6 +968,31 @@ pub fn handle(
                     Some(Ok(PyRep::keyval([
                         ("contractID", PyRep::Integer(cid)),
                         ("status", PyRep::String(new_status.into())),
+                    ])))
+                }
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        "BreakPlasticWrap" => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let wrap_id = args.first().and_then(|a| a.as_i64())
+                .or_else(|| kwargs.get("itemID").or_else(|| kwargs.get("plasticWrapID")).and_then(|v| v.as_i64()))
+                .unwrap_or(0);
+            let now_unix = ctx.now_unix();
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                break_courier_plastic_wrap(snap, char_id, wrap_id, now_unix)
+            });
+            match res {
+                Ok((cid, issuer_id, extracted)) => {
+                    notify_contract(ctx, issuer_id, "OnContractFailed", cid);
+                    Some(Ok(PyRep::keyval([
+                        ("contractID", PyRep::Integer(cid)),
+                        ("status", PyRep::String("Failed".into())),
+                        ("extractedItemIDs", PyRep::List(extracted.into_iter().map(PyRep::Integer).collect())),
                     ])))
                 }
                 Err(e) => Some(Err(e)),

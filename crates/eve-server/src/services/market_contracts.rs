@@ -219,7 +219,7 @@ pub fn handle(
     args: &[PyRep],
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    if service == "contractProxy" {
+    if service == "contractProxy" || service == "contractMgr" {
         if let Some(res) = super::contracts_service::handle(ctx, session, service, method, args, _kwargs) {
             return Some(res);
         }
