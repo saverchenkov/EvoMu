@@ -9,6 +9,9 @@
 //! - `eve/freelance/project/api/requests.proto`
 //! - `eve/freelance/project/api/admin/requests.proto`
 
+use super::quasar_freelance_defs::{
+    encode_next_page, extract_currency_isk, paginate_slice, register_item_delivery_and_definitions,
+};
 use super::quasar_social_chat::{ctx_now_unix, ctx_queue_notice};
 use crate::quasar_gateway::{
     NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
@@ -17,7 +20,7 @@ use crate::quasar_gateway::{
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    DynamicValue, GoogleAny, GoogleEmpty, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
+    DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -194,6 +197,25 @@ fn encode_corp_id_field(field_num: u32, corpid: u32, out: &mut Vec<u8>) {
     encode_bytes_field(field_num, &id_bytes, out);
 }
 
+fn encode_project_attributes(proj: &FreelanceProjectRecord) -> Vec<u8> {
+    let mut attr = Vec::new();
+    encode_corp_id_field(1, proj.owner_corp_id, &mut attr);
+    encode_char_id_field(2, proj.creator_char_id, &mut attr);
+    encode_varint_field(3, proj.state as u64, &mut attr);
+    encode_string_field(4, &proj.name, &mut attr);
+    encode_string_field(5, &proj.description, &mut attr);
+    encode_varint_field(11, proj.target_progress.max(0) as u64, &mut attr);
+    encode_varint_field(12, proj.current_progress.max(0) as u64, &mut attr);
+    encode_varint_field(13, proj.committed_participants.len() as u64, &mut attr);
+    encode_varint_field(
+        14,
+        proj.committed_participants.len().max(proj.contributors.len()) as u64,
+        &mut attr,
+    );
+    encode_varint_field(15, proj.contributors.len() as u64, &mut attr);
+    attr
+}
+
 fn check_corp_admin_role(
     ctx: &AuthoritativeContext,
     db: Option<&Arc<WorldRepository>>,
@@ -318,15 +340,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 }
             }
             let mut max_per_char = None;
+            // V24 `ContributionModifiers`: 2 = contributions_per_participant_limit (oneof with 1 = unlimited).
             if let Some(DynamicValue::Message(mods)) = dyn_msg.get(7) {
-                if let Some(b) = mods.get(4).or_else(|| mods.get(2)).and_then(|v| match v {
-                    DynamicValue::Uint64(u) => i64::try_from(*u).ok(),
-                    DynamicValue::Int64(i) => Some(*i),
-                    _ => None,
-                }) {
-                    batch_size = b;
-                }
-                max_per_char = mods.get(5).and_then(|v| match v {
+                max_per_char = mods.get(2).and_then(|v| match v {
                     DynamicValue::Uint64(u) if *u > 0 => Some(*u),
                     DynamicValue::Int64(i) if *i > 0 => Some(*i as u64),
                     _ => None,
@@ -341,24 +357,30 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 batch_size = batch_size.max(1);
                 (tm.to_string(), (required_type_id > 0).then_some(required_type_id as i64))
             } else {
-                if required_type_id == 0 || batch_size <= 0 || !sde_create.types.contains_key(&required_type_id) {
-                    return Err((STATUS_BAD_REQUEST, "Missing or invalid item delivery required_type_id or batch_size".into()));
+                batch_size = batch_size.max(1);
+                if required_type_id == 0 || !sde_create.types.contains_key(&required_type_id) {
+                    return Err((STATUS_BAD_REQUEST, "Missing or invalid item delivery item type".into()));
                 }
                 ("DeliverItem".to_string(), Some(required_type_id as i64))
             };
 
-            let (budget_isk, unit_rate_isk): (i64, i64) = match dyn_msg.get(10).or_else(|| dyn_msg.get(5)) {
-                Some(DynamicValue::Message(rew)) => rew.get(1).and_then(|c| match c {
-                    DynamicValue::Message(cm) => cm.get(1).and_then(|u| match u {
-                        DynamicValue::Uint64(v) => i64::try_from(*v).ok().map(|v| (v.saturating_mul(target_prog), v)),
-                        DynamicValue::Int64(v) | DynamicValue::Sint64(v) => Some((v.saturating_mul(target_prog), *v)),
-                        _ => None,
-                    }),
-                    DynamicValue::Uint64(v) => i64::try_from(*v).ok().map(|v| (v, v / target_prog.max(1))),
-                    DynamicValue::Int64(v) => Some((*v, *v / target_prog.max(1))),
-                    _ => None,
-                }).unwrap_or((50_000_000, 0)),
-                _ => (50_000_000, 0),
+            let unit_rate_opt = match dyn_msg.get(10) {
+                Some(DynamicValue::Message(rew)) => {
+                    extract_currency_isk(rew.get(1)).or_else(|| extract_currency_isk(Some(DynamicValue::Message(rew.clone())).as_ref()))
+                }
+                other => extract_currency_isk(other),
+            };
+            let deposit_opt = match dyn_msg.get(11) {
+                Some(DynamicValue::Message(ec)) => {
+                    extract_currency_isk(ec.get(3)).or_else(|| extract_currency_isk(ec.get(4)))
+                }
+                _ => None,
+            };
+            let (budget_isk, unit_rate_isk): (i64, i64) = match (unit_rate_opt, deposit_opt) {
+                (Some(unit), Some(dep)) if dep > 0 => (dep, unit),
+                (Some(unit), _) => (unit.saturating_mul(target_prog), unit),
+                (None, Some(dep)) => (dep, dep / target_prog.max(1)),
+                (None, None) => (0, 0),
             };
             if budget_isk < 0 || unit_rate_isk < 0 {
                 return Err((STATUS_BAD_REQUEST, "Invalid project budget".into()));
@@ -371,7 +393,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             }
 
             let now_u = ctx_now_unix(ctx);
-            let deadline = dyn_msg.get(4).and_then(|v| match v {
+            let deadline = dyn_msg.get(5).or_else(|| dyn_msg.get(4)).and_then(|v| match v {
                 DynamicValue::Message(m) => m.get(1).and_then(|s| match s {
                     DynamicValue::Uint64(u) if *u > 0 => Some(*u),
                     DynamicValue::Int64(i) | DynamicValue::Sint64(i) if *i > 0 => Some(*i as u64),
@@ -412,6 +434,15 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
 
             let mut notice_bytes = Vec::new();
             encode_uuid_field(1, &uuid_vec, &mut notice_bytes);
+            if let Some(created_proj) = state_create
+                .projects
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&uuid_vec)
+            {
+                let attr = encode_project_attributes(created_proj);
+                encode_bytes_field(2, &attr, &mut notice_bytes);
+            }
             ctx_queue_notice(
                 NoticeScope::Corporation(corpid),
                 GoogleAny {
@@ -448,20 +479,13 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
 
             let cid = ctx.effective_character_id().unwrap_or(0);
             let (char_prog, unredeemed) = proj.contributors.get(&cid).copied().unwrap_or((0, 0));
-
-            let mut attr = Vec::new();
-            encode_corp_id_field(1, proj.owner_corp_id, &mut attr);
-            encode_char_id_field(2, proj.creator_char_id, &mut attr);
-            encode_varint_field(3, proj.state as u64, &mut attr);
-            encode_string_field(4, &proj.name, &mut attr);
-            encode_string_field(5, &proj.description, &mut attr);
-            encode_varint_field(11, proj.target_progress as u64, &mut attr);
-            encode_varint_field(12, proj.current_progress as u64, &mut attr);
-            encode_varint_field(13, proj.committed_participants.len() as u64, &mut attr);
+            // V24 `ParticipationState`: 1 = COMMITTED, 0 = UNSPECIFIED (not participating).
+            let part_state = u64::from(proj.committed_participants.contains(&cid));
+            let attr = encode_project_attributes(&proj);
 
             let mut out = Vec::new();
             encode_bytes_field(1, &attr, &mut out);
-            encode_varint_field(2, 1, &mut out);
+            encode_varint_field(2, part_state, &mut out);
             encode_varint_field(3, char_prog as u64, &mut out);
             encode_varint_field(4, unredeemed as u64, &mut out);
 
@@ -485,16 +509,17 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 return Err((STATUS_NOT_FOUND, "Freelance project not found".to_string()));
             };
 
-            let mut attr = Vec::new();
-            encode_corp_id_field(1, proj.owner_corp_id, &mut attr);
-            encode_string_field(4, &proj.name, &mut attr);
-            encode_varint_field(11, proj.target_progress as u64, &mut attr);
-            encode_varint_field(12, proj.current_progress as u64, &mut attr);
-
+            let cid = ctx.effective_character_id().unwrap_or(0);
+            let (char_prog, unredeemed) = proj.contributors.get(&cid).copied().unwrap_or((0, 0));
+            let attr = encode_project_attributes(&proj);
+            let mut admin = Vec::new();
+            encode_varint_field(1, 1, &mut admin); // AdminDetails.no_acl
             let mut out = Vec::new();
             encode_bytes_field(1, &attr, &mut out);
-            encode_varint_field(3, 1, &mut out);
-            encode_varint_field(4, proj.current_progress as u64, &mut out);
+            encode_bytes_field(2, &admin, &mut out);
+            encode_varint_field(3, u64::from(proj.committed_participants.contains(&cid)), &mut out);
+            encode_varint_field(4, char_prog.max(0) as u64, &mut out);
+            encode_varint_field(5, unredeemed.max(0) as u64, &mut out);
 
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetForManagerResponse"),
@@ -515,9 +540,15 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             state_all_corp.refresh_from_db(ctx_now_unix(ctx));
             let projects = state_all_corp.projects.read().unwrap_or_else(|e| e.into_inner());
 
+            let mut uuids: Vec<Vec<u8>> = projects
+                .values()
+                .filter(|p| p.owner_corp_id == corpid && p.state == 1)
+                .map(|p| p.uuid.clone())
+                .collect();
+            uuids.sort();
             let mut out = Vec::new();
-            for p in projects.values().filter(|p| p.owner_corp_id == corpid && p.state == 1) {
-                encode_uuid_field(1, &p.uuid, &mut out);
+            for u in &uuids {
+                encode_uuid_field(1, u, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetAllActiveForCorporationResponse"),
@@ -533,9 +564,15 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         Arc::new(move |ctx, _any, _dyn_msg| {
             state_all_act.refresh_from_db(ctx_now_unix(ctx));
             let projects = state_all_act.projects.read().unwrap_or_else(|e| e.into_inner());
+            let mut uuids: Vec<Vec<u8>> = projects
+                .values()
+                .filter(|p| p.state == 1)
+                .map(|p| p.uuid.clone())
+                .collect();
+            uuids.sort();
             let mut out = Vec::new();
-            for p in projects.values().filter(|p| p.state == 1) {
-                encode_uuid_field(1, &p.uuid, &mut out);
+            for u in &uuids {
+                encode_uuid_field(1, u, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetAllActiveResponse"),
@@ -548,13 +585,21 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let state_all_inact = Arc::clone(&state);
     router.register_handler(
         "eve_public.freelance.project.api.GetAllInactiveRequest",
-        Arc::new(move |ctx, _any, _dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
             state_all_inact.refresh_from_db(ctx_now_unix(ctx));
             let projects = state_all_inact.projects.read().unwrap_or_else(|e| e.into_inner());
+            let mut uuids: Vec<Vec<u8>> = projects
+                .values()
+                .filter(|p| p.state != 1)
+                .map(|p| p.uuid.clone())
+                .collect();
+            uuids.sort();
+            let (slice, next_tok) = paginate_slice(dyn_msg.get(3), &uuids);
             let mut out = Vec::new();
-            for p in projects.values().filter(|p| p.state != 1) {
-                encode_uuid_field(1, &p.uuid, &mut out);
+            for u in &slice {
+                encode_uuid_field(1, u, &mut out);
             }
+            encode_next_page(2, next_tok.as_deref(), &mut out);
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetAllInactiveResponse"),
                 value: out,
@@ -566,12 +611,26 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let state_bcast = Arc::clone(&state);
     router.register_handler(
         "eve_public.freelance.project.api.GetAllBroadcastedRequest",
-        Arc::new(move |ctx, _any, _dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
             state_bcast.refresh_from_db(ctx_now_unix(ctx));
             let projects = state_bcast.projects.read().unwrap_or_else(|e| e.into_inner());
+            let sys_id = match dyn_msg.get(1) {
+                Some(DynamicValue::Repeated(list)) => list.first().and_then(|v| extract_id(Some(v))),
+                other => extract_id(other),
+            }
+            .unwrap_or(30_000_142);
+            let mut sys_b = Vec::new();
+            encode_varint_field(1, sys_id, &mut sys_b);
             let mut bcast = Vec::new();
-            for p in projects.values() {
-                encode_uuid_field(1, &p.uuid, &mut bcast);
+            encode_bytes_field(1, &sys_b, &mut bcast);
+            let mut uuids: Vec<Vec<u8>> = projects
+                .values()
+                .filter(|p| p.state == 1)
+                .map(|p| p.uuid.clone())
+                .collect();
+            uuids.sort();
+            for u in &uuids {
+                encode_uuid_field(2, u, &mut bcast);
             }
             let mut out = Vec::new();
             encode_bytes_field(1, &bcast, &mut out);
@@ -593,9 +652,15 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             state_comm.refresh_from_db(ctx_now_unix(ctx));
             let projects = state_comm.projects.read().unwrap_or_else(|e| e.into_inner());
 
+            let mut uuids: Vec<Vec<u8>> = projects
+                .values()
+                .filter(|p| p.committed_participants.contains(&cid))
+                .map(|p| p.uuid.clone())
+                .collect();
+            uuids.sort();
             let mut out = Vec::new();
-            for p in projects.values().filter(|p| p.committed_participants.contains(&cid)) {
-                encode_uuid_field(1, &p.uuid, &mut out);
+            for u in &uuids {
+                encode_uuid_field(1, u, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetAllCommittedResponse"),
@@ -608,17 +673,25 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let state_unred = Arc::clone(&state);
     router.register_handler(
         "eve_public.freelance.project.api.GetAllUnredeemedRequest",
-        Arc::new(move |ctx, _any, _dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
             let cid = ctx
                 .effective_character_id()
                 .ok_or_else(|| (STATUS_FORBIDDEN, "Character required".to_string()))?;
             state_unred.refresh_from_db(ctx_now_unix(ctx));
             let projects = state_unred.projects.read().unwrap_or_else(|e| e.into_inner());
 
+            let mut uuids: Vec<Vec<u8>> = projects
+                .values()
+                .filter(|p| p.contributors.get(&cid).is_some_and(|(_, unredeemed)| *unredeemed > 0))
+                .map(|p| p.uuid.clone())
+                .collect();
+            uuids.sort();
+            let (slice, next_tok) = paginate_slice(dyn_msg.get(1), &uuids);
             let mut out = Vec::new();
-            for p in projects.values().filter(|p| p.contributors.get(&cid).is_some_and(|(_, unredeemed)| *unredeemed > 0)) {
-                encode_uuid_field(1, &p.uuid, &mut out);
+            for u in &slice {
+                encode_uuid_field(1, u, &mut out);
             }
+            encode_next_page(2, next_tok.as_deref(), &mut out);
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetAllUnredeemedResponse"),
                 value: out,
@@ -639,13 +712,18 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 .get(&uuid)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Freelance project not found".to_string()))?;
 
+            let (slice, next_tok) = paginate_slice(dyn_msg.get(2), &p.committed_participants);
             let mut out = Vec::new();
-            for cid in &p.committed_participants {
+            for cid in &slice {
                 let mut part = Vec::new();
                 encode_char_id_field(1, *cid, &mut part);
                 encode_varint_field(2, 1, &mut part);
+                if let Some(&(prog, _)) = p.contributors.get(cid) {
+                    encode_varint_field(3, prog.max(0) as u64, &mut part);
+                }
                 encode_bytes_field(1, &part, &mut out);
             }
+            encode_next_page(2, next_tok.as_deref(), &mut out);
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetParticipationDetailsResponse"),
                 value: out,
@@ -754,20 +832,46 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let Some(pid) = corp_projects::freelance_uuid_to_project_id(&uuid) else {
                 return Err((STATUS_NOT_FOUND, "Freelance project not found".into()));
             };
+            let mut active = false;
             if let Some(ref db) = state_commit.db {
-                db.with_mut_snapshot(|snap| {
-                    if let Some(det) = snap.alliance_war_state.project_details.get_mut(&pid) {
-                        if !det.committed_participants.contains(&(cid as i64)) {
-                            det.committed_participants.push(cid as i64);
-                        }
+                active = db.with_mut_snapshot(|snap| {
+                    let Some(det) = snap.alliance_war_state.project_details.get_mut(&pid) else {
+                        return false;
+                    };
+                    if det.status != "Active" {
+                        return false;
                     }
+                    if !det.committed_participants.contains(&(cid as i64)) {
+                        det.committed_participants.push(cid as i64);
+                    }
+                    true
+                });
+            }
+            if !active {
+                // V24 `CommitResponse.invalid_project_state = 3`.
+                let mut out = Vec::new();
+                encode_bytes_field(3, &[], &mut out);
+                return Ok(GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.CommitResponse"),
+                    value: out,
                 });
             }
             state_commit.refresh_from_db(now_u);
 
+            let (comm_cnt, tot_cnt) = state_commit
+                .projects
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&uuid)
+                .map(|p| {
+                    let c = p.committed_participants.len();
+                    (c as u64, c.max(p.contributors.len()) as u64)
+                })
+                .unwrap_or((1, 1));
             let mut notice_bytes = Vec::new();
             encode_uuid_field(1, &uuid, &mut notice_bytes);
-            encode_char_id_field(2, cid, &mut notice_bytes);
+            encode_varint_field(2, comm_cnt, &mut notice_bytes);
+            encode_varint_field(3, tot_cnt, &mut notice_bytes);
             ctx_queue_notice(
                 NoticeScope::Corporation(corpid),
                 GoogleAny {
@@ -777,9 +881,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 now_u,
             );
 
+            let mut out = Vec::new();
+            encode_bytes_field(1, &[], &mut out);
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.CommitResponse"),
-                value: Vec::new(),
+                value: out,
             })
         }),
     );
@@ -804,9 +910,16 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             }
             state_abandon.refresh_from_db(now_u);
 
+            let comm_cnt = state_abandon
+                .projects
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&uuid)
+                .map(|p| p.committed_participants.len() as u64)
+                .unwrap_or(0);
             let mut notice_bytes = Vec::new();
             encode_uuid_field(1, &uuid, &mut notice_bytes);
-            encode_char_id_field(2, cid, &mut notice_bytes);
+            encode_varint_field(2, comm_cnt, &mut notice_bytes);
             ctx_queue_notice(
                 NoticeScope::Corporation(corpid),
                 GoogleAny {
@@ -816,9 +929,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 now_u,
             );
 
+            let mut out = Vec::new();
+            encode_bytes_field(1, &[], &mut out);
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.ResignResponse"),
-                value: Vec::new(),
+                value: out,
             })
         }),
     );
@@ -862,30 +977,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             );
 
             let mut out = Vec::new();
-            encode_varint_field(1, 1, &mut out);
+            encode_bytes_field(1, &[], &mut out);
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.KickResponse"),
                 value: out,
             })
-        }),
-    );
-
-    // BroadcastRequest -> BroadcastResponse
-    let state_bcast_cmd = Arc::clone(&state);
-    router.register_handler(
-        "eve_public.freelance.project.api.BroadcastRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
-            let Some(cid) = ctx.effective_character_id() else {
-                return Err((STATUS_UNAUTHENTICATED, "Unauthenticated".into()));
-            };
-            let caller_corp = ctx.effective_corporation_id();
-            let uuid = extract_uuid(dyn_msg.get(1)).ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
-            let owner_corp = state_bcast_cmd.owner_corp_of(&uuid, ctx_now_unix(ctx))?;
-            if caller_corp != Some(owner_corp) {
-                return Err((STATUS_PERMISSION_DENIED, "Permission denied".into()));
-            }
-            check_corp_admin_role(ctx, state_bcast_cmd.db.as_ref(), cid, owner_corp)?;
-            Ok(GoogleEmpty.to_any())
         }),
     );
 
@@ -920,42 +1016,90 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 },
                 now_u,
             );
-            Ok(GoogleEmpty.to_any())
+            let mut out = Vec::new();
+            encode_bytes_field(1, &[], &mut out);
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.CloseResponse"),
+                value: out,
+            })
         }),
     );
 
-    // DeleteRequest -> DeleteResponse
-    let state_del_cmd = Arc::clone(&state);
+    // Admin/Manager SetNameRequest & SetDescriptionRequest
+    let state_set_name = Arc::clone(&state);
     router.register_handler(
-        "eve_public.freelance.project.api.DeleteRequest",
+        "eve.freelance.project.api.admin.SetNameRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_UNAUTHENTICATED, "Unauthenticated".into()));
             };
-            let caller_corp = ctx.effective_corporation_id();
-            let uuid = extract_uuid(dyn_msg.get(1)).ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
+            let uuid = extract_uuid(dyn_msg.get(1))
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
+            let Some(DynamicValue::String(raw_name)) = dyn_msg.get(2) else {
+                return Err((STATUS_BAD_REQUEST, "Project name required".into()));
+            };
+            let new_name = raw_name.trim().to_string();
+            if new_name.is_empty() {
+                return Err((STATUS_BAD_REQUEST, "Project name required".into()));
+            }
             let now_u = ctx_now_unix(ctx);
-            let corpid = state_del_cmd.owner_corp_of(&uuid, now_u)?;
-            if caller_corp != Some(corpid) {
+            let corpid = state_set_name.owner_corp_of(&uuid, now_u)?;
+            if ctx.effective_corporation_id() != Some(corpid) {
                 return Err((STATUS_PERMISSION_DENIED, "Permission denied".into()));
             }
-            check_corp_admin_role(ctx, state_del_cmd.db.as_ref(), cid, corpid)?;
-            if let (Some(pid), Some(ref db)) = (corp_projects::freelance_uuid_to_project_id(&uuid), &state_del_cmd.db) {
-                let _ = corp_projects::close_or_delete_canonical_project(db, pid, true, now_u);
+            check_corp_admin_role(ctx, state_set_name.db.as_ref(), cid, corpid)?;
+            if let (Some(pid), Some(ref db)) = (
+                corp_projects::freelance_uuid_to_project_id(&uuid),
+                &state_set_name.db,
+            ) {
+                db.with_mut_snapshot(|snap| {
+                    if let Some(p) = snap.corp_projects.get_mut(&pid) {
+                        p.name = new_name;
+                    }
+                });
             }
-            state_del_cmd.refresh_from_db(now_u);
+            state_set_name.refresh_from_db(now_u);
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.freelance.project.api.admin.SetNameResponse"),
+                value: Vec::new(),
+            })
+        }),
+    );
 
-            let mut notice_bytes = Vec::new();
-            encode_uuid_field(1, &uuid, &mut notice_bytes);
-            ctx_queue_notice(
-                NoticeScope::Corporation(corpid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.AclDeletedNotice"),
-                    value: notice_bytes,
-                },
-                now_u,
-            );
-            Ok(GoogleEmpty.to_any())
+    let state_set_desc = Arc::clone(&state);
+    router.register_handler(
+        "eve.freelance.project.api.admin.SetDescriptionRequest",
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let Some(cid) = ctx.effective_character_id() else {
+                return Err((STATUS_UNAUTHENTICATED, "Unauthenticated".into()));
+            };
+            let uuid = extract_uuid(dyn_msg.get(1))
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
+            let new_desc = match dyn_msg.get(2) {
+                Some(DynamicValue::String(s)) => s.clone(),
+                _ => return Err((STATUS_BAD_REQUEST, "Project description required".into())),
+            };
+            let now_u = ctx_now_unix(ctx);
+            let corpid = state_set_desc.owner_corp_of(&uuid, now_u)?;
+            if ctx.effective_corporation_id() != Some(corpid) {
+                return Err((STATUS_PERMISSION_DENIED, "Permission denied".into()));
+            }
+            check_corp_admin_role(ctx, state_set_desc.db.as_ref(), cid, corpid)?;
+            if let (Some(pid), Some(ref db)) = (
+                corp_projects::freelance_uuid_to_project_id(&uuid),
+                &state_set_desc.db,
+            ) {
+                db.with_mut_snapshot(|snap| {
+                    if let Some(det) = snap.alliance_war_state.project_details.get_mut(&pid) {
+                        det.description = new_desc;
+                    }
+                });
+            }
+            state_set_desc.refresh_from_db(now_u);
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.freelance.project.api.admin.SetDescriptionResponse"),
+                value: Vec::new(),
+            })
         }),
     );
 
@@ -999,340 +1143,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         }),
     );
 
-    // 18. DeliverRequest -> DeliverResponse (Item Delivery Contribution Method)
-    let state_deliver = Arc::clone(&state);
-    router.register_handler(
-        "eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
-            let Some(cid) = ctx.effective_character_id() else {
-                return Err((STATUS_UNAUTHENTICATED, "Unauthenticated".into()));
-            };
-            let uuid = extract_uuid(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
-            let now_u = ctx_now_unix(ctx);
-            state_deliver.refresh_from_db(now_u);
-
-            let (target_type_id, batch_size, corpid, rem_progress) = {
-                let projects = state_deliver.projects.read().unwrap_or_else(|e| e.into_inner());
-                let Some(p) = projects.get(&uuid) else {
-                    return Err((STATUS_NOT_FOUND, "Freelance project not found".into()));
-                };
-                if p.state != 1 || !p.committed_participants.contains(&cid) {
-                    return Err((STATUS_BAD_REQUEST, "Project not active or caller not committed".into()));
-                };
-                let rem = (p.target_progress - p.current_progress).max(0);
-                if rem <= 0 || p.required_type_id == 0 {
-                    return Err((STATUS_BAD_REQUEST, "Project target progress already reached".into()));
-                }
-                (p.required_type_id, p.batch_size.max(1), p.owner_corp_id, rem)
-            };
-            let Some(pid) = corp_projects::freelance_uuid_to_project_id(&uuid) else {
-                return Err((STATUS_NOT_FOUND, "Freelance project not found".into()));
-            };
-            let req_qty = dyn_msg.get(4).and_then(|v| match v {
-                DynamicValue::Uint64(u) => Some(*u as i64),
-                DynamicValue::Int64(i) => Some(*i),
-                DynamicValue::Uint32(u) => Some(*u as i64),
-                DynamicValue::Int32(i) => Some(*i as i64),
-                _ => None,
-            }).unwrap_or(25).max(batch_size).min(rem_progress);
-
-            let Some(ref db) = state_deliver.db else {
-                return Err((STATUS_BAD_REQUEST, "Database not available".into()));
-            };
-            let mut delivered_units = 0i64;
-            let mut consumed_loc = 0i64;
-            let mut found = false;
-            db.with_mut_snapshot(|snap| {
-                let Some(char_loc) = snap.characters.get(&(cid as i64)).and_then(|c| c.station_id.or(c.structure_id)) else {
-                    return;
-                };
-                let max_char_rem = snap
-                    .alliance_war_state
-                    .project_details
-                    .get(&pid)
-                    .and_then(|d| {
-                        let prev = d.char_contributions.get(&(cid as i64)).copied().unwrap_or(0);
-                        d.max_per_character.map(|cap| cap.saturating_sub(prev) as i64)
-                    })
-                    .unwrap_or(i64::MAX);
-                let allowed_qty = req_qty.min(max_char_rem);
-                if allowed_qty < batch_size {
-                    return;
-                }
-                let mut to_remove = None;
-                for item in snap.items.values_mut() {
-                    if item.owner_id == cid as i64
-                        && item.type_id == target_type_id
-                        && item.quantity >= (batch_size as i32)
-                        && item.flag == eve_db::InventoryFlag::Hangar
-                        && item.location_id == char_loc
-                    {
-                        let take = ((item.quantity.min(allowed_qty as i32) as i64) / batch_size) * batch_size;
-                        if take > 0 {
-                            item.quantity -= take as i32;
-                            delivered_units = take;
-                            consumed_loc = char_loc;
-                            found = true;
-                            if item.quantity == 0 {
-                                to_remove = Some(item.item_id);
-                            }
-                            break;
-                        }
-                    }
-                }
-                if let Some(iid) = to_remove {
-                    snap.items.remove(&iid);
-                }
-            });
-            if !found {
-                return Err((STATUS_BAD_REQUEST, format!("Failed precondition: no items of type {target_type_id} available to deliver")));
-            }
-
-            let mut completed = false;
-            let mut total_prog = 0i64;
-            let applied = db.with_mut_snapshot(|snap| {
-                let is_active = snap
-                    .alliance_war_state
-                    .project_details
-                    .get(&pid)
-                    .is_some_and(|d| d.status == "Active" && d.committed_participants.contains(&(cid as i64)));
-                if !is_active || !snap.corp_projects.contains_key(&pid) {
-                    return false;
-                }
-                if let Some(p_mut) = snap.corp_projects.get_mut(&pid) {
-                    p_mut.current_quantity = p_mut.current_quantity.saturating_add(delivered_units as u64);
-                    total_prog = p_mut.current_quantity as i64;
-                    completed = p_mut.current_quantity >= p_mut.target_quantity;
-                }
-                if let Some(det) = snap.alliance_war_state.project_details.get_mut(&pid) {
-                    *det.char_contributions.entry(cid as i64).or_insert(0) += delivered_units as u64;
-                    if completed {
-                        det.status = "Completed".into();
-                    }
-                }
-                if completed {
-                    if let Some(m) = snap.alliance_war_state.project_meta.get_mut(&pid) {
-                        m.2 = true;
-                    }
-                }
-                corp_projects::sync_corp_project_contributors(snap, pid);
-                true
-            });
-            if !applied {
-                let _ = db.add_or_stack_item(cid as i64, consumed_loc, eve_db::InventoryFlag::Hangar, target_type_id, delivered_units);
-                return Err((STATUS_BAD_REQUEST, "Project no longer active".into()));
-            }
-            let _ = db.add_or_stack_item(
-                corpid as i64,
-                consumed_loc,
-                eve_db::InventoryFlag::CorpDeliveries,
-                target_type_id,
-                delivered_units,
-            );
-            state_deliver.refresh_from_db(now_u);
-
-            let mut succ_bytes = Vec::new();
-            encode_uuid_field(1, &uuid, &mut succ_bytes);
-            encode_char_id_field(2, cid, &mut succ_bytes);
-            encode_varint_field(3, delivered_units as u64, &mut succ_bytes);
-            ctx_queue_notice(
-                NoticeScope::Character(cid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.contributionmethod.itemdelivery.api.ContributionSucceededNotice"),
-                    value: succ_bytes,
-                },
-                now_u,
-            );
-
-            let mut prog_bytes = Vec::new();
-            encode_uuid_field(1, &uuid, &mut prog_bytes);
-            encode_varint_field(2, total_prog as u64, &mut prog_bytes);
-            encode_varint_field(3, 1, &mut prog_bytes);
-            ctx_queue_notice(
-                NoticeScope::Corporation(corpid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.ProgressedNotice"),
-                    value: prog_bytes,
-                },
-                now_u,
-            );
-
-            if completed {
-                let mut comp_bytes = Vec::new();
-                encode_uuid_field(1, &uuid, &mut comp_bytes);
-                ctx_queue_notice(
-                    NoticeScope::Corporation(corpid),
-                    GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.CompletedNotice"),
-                        value: comp_bytes,
-                    },
-                    now_u,
-                );
-            }
-
-            let mut out = Vec::new();
-            encode_varint_field(1, 1, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.contributionmethod.itemdelivery.api.DeliverResponse"),
-                value: out,
-            })
-        }),
-    );
-
-    // 20b. eve_public.freelance.contributionmethod.itemdelivery.api.GetStatusRequest -> GetStatusResponse
-    let state_delivery_status = Arc::clone(&state);
-    router.register_handler(
-        "eve_public.freelance.contributionmethod.itemdelivery.api.GetStatusRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
-            let uuid = extract_uuid(dyn_msg.get(1))
-                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing delivery UUID".into()))?;
-            state_delivery_status.refresh_from_db(ctx_now_unix(ctx));
-            let projects = state_delivery_status.projects.read().unwrap_or_else(|e| e.into_inner());
-            let p = projects
-                .get(&uuid)
-                .ok_or_else(|| (STATUS_NOT_FOUND, "Delivery project not found".into()))?;
-            let mut out = Vec::new();
-            let field_num = if p.current_progress > 0 {
-                2
-            } else if p.state == 1 {
-                1
-            } else {
-                3
-            };
-            encode_bytes_field(field_num, &[], &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.contributionmethod.itemdelivery.api.GetStatusResponse"),
-                value: out,
-            })
-        }),
-    );
-
-    // 21. eve_public.freelance.contributionmethod.definition.api.GetAllLatestRequest
-    {
-        let sde = Arc::clone(&router.sde);
-        router.register_handler(
-            "eve_public.freelance.contributionmethod.definition.api.GetAllLatestRequest",
-            Arc::new(move |_ctx, _any, _dyn_msg| {
-                Ok(encode_freelance_contribution_methods(
-                    &sde,
-                    &format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.contributionmethod.definition.api.GetAllLatestResponse"),
-                    true,
-                    1,
-                ))
-            }),
-        );
-    }
-
-    // 22. eve_public.freelance.contributionmethod.definition.api.GetAllLatestWithinMajorRequest
-    {
-        let sde = Arc::clone(&router.sde);
-        router.register_handler(
-            "eve_public.freelance.contributionmethod.definition.api.GetAllLatestWithinMajorRequest",
-            Arc::new(move |_ctx, _any, dyn_msg| {
-                let major = dyn_msg.get(1).and_then(|v| match v {
-                    DynamicValue::Uint32(n) => Some(*n),
-                    DynamicValue::Int32(n) => Some(*n as u32),
-                    DynamicValue::Uint64(n) => Some(*n as u32),
-                    DynamicValue::Int64(n) => Some(*n as u32),
-                    _ => None,
-                }).unwrap_or(1);
-                let include_defs = major == 0 || major == 1;
-                Ok(encode_freelance_contribution_methods(
-                    &sde,
-                    &format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.contributionmethod.definition.api.GetAllLatestWithinMajorResponse"),
-                    include_defs,
-                    if major == 0 { 1 } else { major },
-                ))
-            }),
-        );
-    }
-}
-
-fn encode_freelance_contribution_methods(
-    sde: &eve_sde::SdeRegistry,
-    rsp_type_url: &str,
-    include_defs: bool,
-    major: u32,
-) -> GoogleAny {
-    let mut out = Vec::new();
-    // `contributionmethods.fsdbinary` carries no semantic version, so the static SDE set is
-    // published as `<major>.0.0` (minor / patch have no source data to vary from).
-    let mut ver_bytes = Vec::new();
-    encode_varint_field(1, major as u64, &mut ver_bytes);
-    encode_varint_field(2, 0, &mut ver_bytes);
-    encode_varint_field(3, 0, &mut ver_bytes);
-    encode_bytes_field(1, &ver_bytes, &mut out);
-
-    // Definitions come exclusively from SDE `res:/staticdata/contributionmethods.fsdbinary`; when
-    // the table cannot be loaded the response carries no definitions (no embedded fallback table).
-    if include_defs {
-        if let Ok(methods) = sde.contribution_methods() {
-            for (name, val) in &methods {
-                encode_single_freelance_def(name, val, &mut out);
-            }
-        }
-    }
-
-    GoogleAny {
-        type_url: rsp_type_url.to_string(),
-        value: out,
-    }
-}
-
-fn encode_loc_id(field: u32, val: &serde_json::Value, key: &str, out: &mut Vec<u8>) {
-    if let Some(id) = val.get(key).and_then(|v| v.as_u64()).filter(|v| *v > 0) {
-        let mut b = Vec::new();
-        encode_varint_field(1, id, &mut b);
-        encode_bytes_field(field, &b, out);
-    }
-}
-
-fn encode_name_id(field: u32, name: &str, out: &mut Vec<u8>) {
-    if !name.is_empty() {
-        let mut b = Vec::new();
-        encode_string_field(1, name, &mut b);
-        encode_bytes_field(field, &b, out);
-    }
-}
-
-/// Encodes one SDE contribution method record as
-/// `eve_public.freelance.contributionmethod.definition.api.*Response.Definition`.
-fn encode_single_freelance_def(name: &str, val: &serde_json::Value, out: &mut Vec<u8>) {
-    let mut id_bytes = Vec::new();
-    encode_string_field(1, name, &mut id_bytes);
-
-    let mut attr = Vec::new();
-    encode_loc_id(1, val, "titleID", &mut attr);
-    encode_loc_id(2, val, "descriptionID", &mut attr);
-    encode_loc_id(3, val, "progressDescriptionID", &mut attr);
-    encode_loc_id(4, val, "targetValueDescriptionID", &mut attr);
-    encode_loc_id(5, val, "rewardingDescriptionID", &mut attr);
-    encode_name_id(6, val.get("icon").and_then(|v| v.as_str()).unwrap_or(""), &mut attr);
-    for tag in val.get("contentTags").and_then(|v| v.as_array()).into_iter().flatten() {
-        encode_name_id(7, tag.as_str().unwrap_or(""), &mut attr);
-    }
-    // SDE parameters -> `definition.Parameter { matcher = MatcherParameter }` (key, type, icon,
-    // optional, max_entries). Their `title` / `info` are label paths, not message ids, so they
-    // are not encoded as `localization.message.Identifier`.
-    for p in val.get("parameters").and_then(|v| v.as_array()).into_iter().flatten() {
-        let mut m = Vec::new();
-        encode_string_field(1, p.get("parameterKey").and_then(|v| v.as_str()).unwrap_or(""), &mut m);
-        encode_string_field(2, p.get("parameterType").and_then(|v| v.as_str()).unwrap_or(""), &mut m);
-        encode_name_id(5, p.get("icon").and_then(|v| v.as_str()).unwrap_or(""), &mut m);
-        let required = p.get("isRequired").and_then(|v| v.as_u64()).unwrap_or(0) != 0;
-        encode_varint_field(8, u64::from(!required), &mut m);
-        if let Some(max) = p.get("maxEntries").and_then(|v| v.as_u64()) {
-            encode_varint_field(9, max, &mut m);
-        }
-        let mut param = Vec::new();
-        encode_bytes_field(1, &m, &mut param);
-        encode_bytes_field(11, &param, &mut attr);
-    }
-
-    let mut def_bytes = Vec::new();
-    encode_bytes_field(1, &id_bytes, &mut def_bytes);
-    encode_bytes_field(2, &attr, &mut def_bytes);
-    encode_bytes_field(2, &def_bytes, out);
+    register_item_delivery_and_definitions(router, state);
 }
 
 fn extract_uuid(val: Option<&DynamicValue>) -> Option<Vec<u8>> {

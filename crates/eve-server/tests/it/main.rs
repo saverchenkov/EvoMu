@@ -135,6 +135,8 @@ mod quasar_progression_extra_suite;
 mod quasar_drafts_titles_dailygoals;
 mod quasar_campaign_lifecycle;
 mod quasar_social_complete;
+mod quasar_goals_mail_wars;
+mod quasar_freelance_and_corporation_live;
 mod quasar_space_cosmetics_complete;
 mod quasar_extended_endpoints;
 mod quasar_cosmetics_sovereignty;

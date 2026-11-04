@@ -534,6 +534,7 @@ async fn r5_232_234_235_236_237_projects_skills_fitting_clones_and_agents() {
     eve_proto::quasar::encode_string_field(1, "DestroyNPCShips", &mut m_id);
     eve_proto::quasar::encode_bytes_field(1, &m_id, &mut fl_cfg);
     eve_proto::quasar::encode_bytes_field(6, &fl_cfg, &mut create_fl);
+    eve_proto::quasar::encode_bytes_field(10, &isk_b, &mut create_fl);
     let build_q = |type_name: &str, role_mask: u64, payload: Vec<u8>| eve_proto::quasar::EvePublicRequest {
         issued: Some(eve_proto::quasar::GoogleTimestamp { seconds: now_q as i64, nanos: 0 }),
         correlation_uuid: vec![0x32; 16],

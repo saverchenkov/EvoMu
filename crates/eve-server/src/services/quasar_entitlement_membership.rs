@@ -69,7 +69,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 st.user_entitlements
                     .get(&uid)
                     .cloned()
-                    .unwrap_or_else(|| vec!["standard_pilot".to_string()])
+                    .unwrap_or_default()
             });
 
             let mut out = Vec::new();
@@ -242,11 +242,11 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                     .filter(|&id| id > 0)
                     .unwrap_or(caller_uid);
                 let name = if let Some(DynamicValue::String(s)) = ent_msg.get(3) {
-                    s.clone()
+                    s.trim().to_string()
                 } else if let Some(DynamicValue::String(s)) = ent_msg.get(1) {
-                    s.clone()
+                    s.trim().to_string()
                 } else {
-                    "special_access".to_string()
+                    String::new()
                 };
                 (target_uid, name)
             } else if let Some(DynamicValue::Message(ent_msg)) = dyn_msg.get(2) {
@@ -256,14 +256,20 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                     .filter(|&id| id > 0)
                     .unwrap_or(caller_uid);
                 let name = if let Some(DynamicValue::String(s)) = ent_msg.get(1) {
-                    s.clone()
+                    s.trim().to_string()
                 } else {
-                    "special_access".to_string()
+                    String::new()
                 };
                 (target_uid, name)
             } else {
-                (caller_uid, "special_access".to_string())
+                (caller_uid, String::new())
             };
+            if ent_name.is_empty() {
+                return Err((
+                    crate::quasar_gateway::STATUS_BAD_REQUEST,
+                    "Entitlement name is required".to_string(),
+                ));
+            }
 
             with_identity_store(&db_ent_grant, |guard| {
                 let list = guard.user_entitlements.entry(uid).or_default();

@@ -697,6 +697,51 @@ fn take_offer(
 
     match res {
         Ok((item_id, type_id, qty_delivered, rem_lp, bal_after, lp_before)) => {
+            if !is_corp_take
+                && offer.corp_id == crate::services::lp_store_catalog::PARAGON_CORP_ID
+            {
+                if let Some((ship_type_id, cosmetic_type)) =
+                    crate::services::quasar_cosmetics_live::ship_emblem_license_spec(
+                        &ctx.sde, type_id,
+                    )
+                {
+                    let is_alliance = cosmetic_type == 2;
+                    crate::services::quasar_auth_user::with_identity_store(&ctx.db, |guard| {
+                        let map = if is_alliance {
+                            &mut guard.char_alliance_logo_ships
+                        } else {
+                            &mut guard.char_corp_logo_ships
+                        };
+                        let ships = map.entry(char_id.max(0) as u64).or_default();
+                        if !ships.contains(&u64::from(ship_type_id)) {
+                            ships.push(u64::from(ship_type_id));
+                        }
+                    });
+                    let ident =
+                        crate::services::quasar_entitlement_membership::encode_logo_identifier(
+                            char_id.max(0) as u64,
+                            u64::from(ship_type_id),
+                        );
+                    let pkg = if is_alliance {
+                        "eve_public.entitlement.character.ship.alliancelogo"
+                    } else {
+                        "eve_public.entitlement.character.ship.corplogo"
+                    };
+                    let mut notice_bytes = Vec::new();
+                    eve_proto::quasar::encode_bytes_field(1, &ident, &mut notice_bytes);
+                    let _ = ctx.quasar_gateway.publish_notice(
+                        crate::quasar_gateway::NoticeScope::Character(char_id as u32),
+                        eve_proto::quasar::GoogleAny {
+                            type_url: format!(
+                                "{}{pkg}.GrantedNotice",
+                                eve_proto::quasar::TYPE_GOOGLEAPIS_PREFIX
+                            ),
+                            value: notice_bytes,
+                        },
+                        ctx.now_unix(),
+                    );
+                }
+            }
             if is_corp_take {
                 let corp_id = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0));
                 ctx.notify(

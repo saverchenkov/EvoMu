@@ -154,6 +154,7 @@ pub mod quasar_social_chat;
 pub mod quasar_social_community;
 pub mod quasar_social_corp;
 pub mod quasar_corp_domain;
+pub mod quasar_freelance_defs;
 pub mod quasar_social_freelance;
 pub mod quasar_sov_services;
 pub mod quasar_sov_hub;

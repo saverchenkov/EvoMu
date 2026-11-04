@@ -735,9 +735,12 @@ pub fn redeem_freelance_reward_for_char(
         let batch_reward = if proj.isk_per_unit.raw_cents() > 0 {
             proj.isk_per_unit
                 .checked_mul_qty(batch as i64)
-                .unwrap_or_else(|| IskCents::from_isk(100_000))
+                .unwrap_or(IskCents::ZERO)
+        } else if proj.escrow_remaining.raw_cents() > 0 && proj.target_quantity > 0 {
+            let unit_cents = (proj.escrow_remaining.raw_cents() / (proj.target_quantity as i64)).max(1);
+            IskCents(unit_cents.saturating_mul(batch as i64))
         } else {
-            IskCents::from_isk(100_000)
+            IskCents::ZERO
         };
         let avail_batches = if batch_reward.raw_cents() > 0 {
             (proj.escrow_remaining.raw_cents().max(0) / batch_reward.raw_cents()) as u64
@@ -1185,6 +1188,29 @@ pub fn record_server_project_activity(
             if u.corp_id > 0 {
                 let mut id_b = Vec::with_capacity(18);
                 encode_bytes_field(1, &u.uuid, &mut id_b);
+                if contributor_u32 > 0 {
+                    let char_tot = ctx.db.with_snapshot(|s| {
+                        s.alliance_war_state
+                            .project_details
+                            .get(&u.pid)
+                            .and_then(|d| d.char_contributions.get(&char_id).copied())
+                            .unwrap_or(u.new_cur)
+                    });
+                    let mut cid_b = Vec::with_capacity(8);
+                    encode_varint_field(1, u64::from(contributor_u32), &mut cid_b);
+                    let mut contrib_b = Vec::new();
+                    encode_bytes_field(1, &id_b, &mut contrib_b);
+                    encode_bytes_field(2, &cid_b, &mut contrib_b);
+                    encode_varint_field(3, char_tot, &mut contrib_b);
+                    let _ = ctx.quasar_gateway.publish_notice(
+                        NoticeScope::Corporation(u.corp_id as u32),
+                        GoogleAny {
+                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.ParticipantContributedNotice"),
+                            value: contrib_b,
+                        },
+                        now_unix,
+                    );
+                }
                 let mut prog_b = Vec::new();
                 encode_bytes_field(1, &id_b, &mut prog_b);
                 encode_varint_field(2, u.new_cur, &mut prog_b);

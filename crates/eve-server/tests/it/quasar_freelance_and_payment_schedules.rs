@@ -107,13 +107,7 @@ fn poll_notice_names(ctx: &ServerContext, sess: &SessionState) -> Vec<String> {
 
 #[tokio::test]
 async fn test_quasar_batch2_freelance_projects_and_item_delivery_e2e() {
-    // parity: quasar:eveProto/generated/eve_public/freelance/contributionmethod/itemdelivery/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/freelance/contributionmethod/itemdelivery/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/freelance/project/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/freelance/project/api/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/freelance/contributionmethod/itemdelivery/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/freelance/contributionmethod/itemdelivery/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/freelance/project/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/freelance/project/api/requests_pb2.pyj",
-    ]);
+    // Regression only; freelance rows are attested by the live player-session suite in quasar_freelance_and_corporation_live.rs.
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
