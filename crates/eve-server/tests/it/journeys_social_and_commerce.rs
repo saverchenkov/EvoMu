@@ -1,4 +1,9 @@
-//! End-to-End Integration Journeys Part 2 (`journey:local_chat` .. `journey:contracts`).
+//! End-to-End Integration Journeys (Social & Commerce):
+//! - journey:local_chat
+//! - journey:multiplayer_presence
+//! - journey:skills_training
+//! - journey:market_trade
+//! - journey:contracts
 #![forbid(unsafe_code)]
 
 use eve_db::{InventoryFlag, IskCents, MarketOrderRecord};
@@ -42,8 +47,10 @@ fn bound_id_from_tuple(rep: &PyRep) -> u64 {
     }
 }
 
+// parity: journey:local_chat
 #[tokio::test]
 async fn test_journey_local_chat() {
+    eve_testkit::attest(&["journey:local_chat"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -160,8 +167,10 @@ async fn test_journey_local_chat() {
     assert_eq!(moved_sync.dict_get("channelID").and_then(|v| v.as_str()), Some("solarsystemid2:30000144"));
 }
 
+// parity: journey:multiplayer_presence
 #[tokio::test]
 async fn test_journey_multiplayer_presence() {
+    eve_testkit::attest(&["journey:multiplayer_presence"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -235,8 +244,10 @@ async fn test_journey_multiplayer_presence() {
     assert!(p2_trit >= 100, "direct trade must transfer Tritanium to player 2");
 }
 
+// parity: journey:skills_training
 #[tokio::test]
 async fn test_journey_skills_training() {
+    eve_testkit::attest(&["journey:skills_training"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -301,8 +312,10 @@ async fn test_journey_skills_training() {
     });
 }
 
+// parity: journey:market_trade
 #[tokio::test]
 async fn test_journey_market_trade() {
+    eve_testkit::attest(&["journey:market_trade"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -426,8 +439,10 @@ async fn test_journey_market_trade() {
     assert!(hist_rows.iter().any(|r| format!("{r:?}").contains("avgPrice")));
 }
 
+// parity: journey:contracts
 #[tokio::test]
 async fn test_journey_contracts() {
+    eve_testkit::attest(&["journey:contracts"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
