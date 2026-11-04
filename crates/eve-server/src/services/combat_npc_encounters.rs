@@ -687,7 +687,7 @@ pub async fn populate_npc_wreck_on_turret_kill(
     if convoy_opt.is_some() {
         if wreck_id > 0 {
             ctx.living_world
-                .mark_convoy_destroyed_with_supply_shock(npc_ball_id, &ctx.db);
+                .mark_convoy_destroyed_in_combat(npc_ball_id);
         } else {
             let _ = ctx
                 .living_world

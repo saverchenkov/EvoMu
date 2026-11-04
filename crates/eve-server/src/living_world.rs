@@ -342,35 +342,16 @@ impl LivingWorldDirector {
         }
     }
 
-    pub fn mark_convoy_destroyed_with_supply_shock(&self, convoy_id: i64, db: &WorldRepository) {
-        let convoy_opt = {
-            let mut guard = self.convoys.write().unwrap_or_else(|e| e.into_inner());
-            guard.get_mut(&convoy_id).and_then(|c| {
-                if c.destroyed {
-                    None
-                } else {
-                    c.destroyed = true;
-                    if c.archetype == NpcArchetype::HaulerConvoy {
-                        let mut cd = self.hauler_cooldowns.write().unwrap_or_else(|e| e.into_inner());
-                        cd.insert(c.origin_system_id, std::time::Instant::now() + std::time::Duration::from_secs(1800));
-                    }
-                    Some(c.clone())
-                }
-            })
-        };
-        if let Some(convoy) = convoy_opt {
-            db.with_mut_snapshot(|snap| {
-                for order in snap.market_orders.values_mut() {
-                    if !order.is_bid
-                        && order.is_npc
-                        && order.station_id == convoy.destination_station_id
-                        && order.type_id == convoy.cargo_type_id
-                    {
-                        let spiked = ((order.price.0 as f64) * 1.15).ceil();
-                        order.price = IskCents(spiked.clamp(1.0, i64::MAX as f64) as i64);
-                    }
-                }
-            });
+    /// Marks a live convoy destroyed exactly once (combat kill path). Losing a convoy does not
+    /// rewrite NPC market prices: no supply-shock multiplier exists in the client data.
+    pub fn mark_convoy_destroyed_in_combat(&self, convoy_id: i64) {
+        let mut guard = self.convoys.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(c) = guard.get_mut(&convoy_id).filter(|c| !c.destroyed) {
+            c.destroyed = true;
+            if c.archetype == NpcArchetype::HaulerConvoy {
+                let mut cd = self.hauler_cooldowns.write().unwrap_or_else(|e| e.into_inner());
+                cd.insert(c.origin_system_id, std::time::Instant::now() + std::time::Duration::from_secs(1800));
+            }
         }
     }
 
@@ -388,8 +369,8 @@ impl LivingWorldDirector {
     }
 
     /// Interdicts and destroys a Living World convoy (`E2E-17`), dropping its physical cargo into a
-    /// space wreck (`type_id: 26557`) in `convoy.current_system_id` and increasing NPC destination
-    /// station ask prices by `+15%` due to supply loss.
+    /// space wreck (`type_id: 26557`) in `convoy.current_system_id`; returns the destination station's
+    /// current NPC ask price for the cargo type.
     pub fn interdict_convoy(
         &self,
         convoy_id: i64,
@@ -468,19 +449,16 @@ impl LivingWorldDirector {
                 },
             );
 
-            // Spike NPC destination station ask orders for `cargo_type_id` by +15% (supply shock)
-            let mut new_ask_price = IskCents::from_isk(6);
-            for order in snap.market_orders.values_mut() {
-                if !order.is_bid
-                    && order.is_npc
-                    && order.station_id == convoy.destination_station_id
-                    && order.type_id == convoy.cargo_type_id
-                {
-                    let spiked = ((order.price.0 as f64) * 1.15).ceil();
-                    order.price = IskCents(spiked.clamp(1.0, i64::MAX as f64) as i64);
-                    new_ask_price = order.price;
-                }
-            }
+            // Report the destination station's current NPC ask price; convoy loss does not move it.
+            let new_ask_price = snap
+                .market_orders
+                .values()
+                .filter(|o| {
+                    !o.is_bid && o.is_npc && o.station_id == convoy.destination_station_id && o.type_id == convoy.cargo_type_id
+                })
+                .map(|o| o.price)
+                .min_by_key(|p| p.0)
+                .unwrap_or(IskCents::from_isk(6));
             Ok((wreck_item_id, loot_item_id, new_ask_price))
         })
     }

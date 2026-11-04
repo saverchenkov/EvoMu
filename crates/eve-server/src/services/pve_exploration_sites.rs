@@ -375,6 +375,7 @@ pub async fn spawn_sleeper_wave_core(
             mode: MovementMode::Stop,
         };
         let _ = sys_handle.spawn_ball_with_combat(ball, build_type_combat_state_from_sde(sde, tid)).await;
+        let sde_attr = |aid: u16| sde.types.get(&tid).and_then(|t| t.default_attributes.get(&aid).copied());
         let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
         rt.npc_entities.insert(
             bid,
@@ -406,9 +407,11 @@ pub async fn spawn_sleeper_wave_core(
                 scram_range: 12_000.0,
                 neut_amount: 120.0,
                 ecm_jammed: false,
-                remote_shield_rep: 0.0,
-                remote_armor_rep: 0.0,
-                remote_rep_range: 0.0,
+                // Sleeper logistics: remote shield / armor amounts from SDE `shieldBonus` (68) /
+                // `armorDamageAmount` (84) on the Sleeper type; 0 when the type carries no rep module.
+                remote_shield_rep: sde_attr(68).unwrap_or(0.0),
+                remote_armor_rep: sde_attr(84).unwrap_or(0.0),
+                remote_rep_range: if sde_attr(68).or(sde_attr(84)).unwrap_or(0.0) > 0.0 { 25_000.0 } else { 0.0 },
                 tag_drop_type_id: None,
                 spawn_position: pos,
                 sleeper_wh_class: wh_class,

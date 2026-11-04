@@ -620,11 +620,11 @@ async fn test_review_r6_np0_np1_regressions() {
     assert_eq!(wreck_item.type_id, 26557);
     assert_eq!(wreck_item.location_id, 30_000_142);
     assert_eq!(loot_item.location_id, wreck_id);
-    // Player ask order 999_999 remains at 4.00 ISK (400 cents), while NPC ask order 700_000_001 spiked by +15% from 5.00 ISK (500 cents) to 5.75 ISK (575 cents)
+    // Convoy loss does not rewrite market prices: player ask 999_999 stays 4.00 ISK and NPC ask 700_000_001 stays 5.00 ISK.
     let player_price = ctx.db.with_snapshot(|s| s.market_orders[&999_999].price.0);
     let npc_price = ctx
         .db
         .with_snapshot(|s| s.market_orders[&700_000_001].price.0);
     assert_eq!(player_price, 400);
-    assert_eq!(npc_price, 575);
+    assert_eq!(npc_price, 500);
 }

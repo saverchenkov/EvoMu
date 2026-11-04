@@ -883,7 +883,8 @@ pub fn build_specialized_npc_components(
                 .and_then(|c| c.wormhole_class_id)
                 .or_else(|| ctx.sde.regions.get(&s.region_id).and_then(|r| r.wormhole_class_id))
         })
-        .unwrap_or(3) as u8;
+        // Known-space (and unclassified) systems carry no wormhole class: never default Sleepers to C3 behaviour.
+        .unwrap_or(0) as u8;
     let entity = ExtendedNpcEntity {
         ball_id,
         type_id: npc_type_id,
@@ -911,20 +912,10 @@ pub fn build_specialized_npc_components(
         scram_range,
         neut_amount: if is_static_structure { 0.0 } else { attr(97).unwrap_or(120.0) },
         ecm_jammed: false,
-        remote_shield_rep: if matches!(archetype, "Sleeper" | "IncursionSansha") {
-            250.0
-        } else if is_static_structure {
-            0.0
-        } else {
-            attr(68).unwrap_or(0.0)
-        },
-        remote_armor_rep: if matches!(archetype, "Sleeper" | "Triglavian" | "IncursionSansha") {
-            250.0
-        } else if is_static_structure {
-            0.0
-        } else {
-            attr(84).unwrap_or(0.0)
-        },
+        // Remote shield / armor repair amounts come from the NPC type's SDE `shieldBonus` (68) /
+        // `armorDamageAmount` (84) attributes for every archetype, Sleepers included.
+        remote_shield_rep: if is_static_structure { 0.0 } else { attr(68).unwrap_or(0.0) },
+        remote_armor_rep: if is_static_structure { 0.0 } else { attr(84).unwrap_or(0.0) },
         remote_rep_range: 25_000.0,
         tag_drop_type_id: tag_drop,
         spawn_position: pos,
