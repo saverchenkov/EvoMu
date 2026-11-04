@@ -3975,7 +3975,7 @@ async fn batch3_dungeon_instance_cache_homefront_and_triglavian() {
         assert_eq!(err_trig.code, "UnknownSolarSystem");
     }
 
-    // High-sec systems (both Jita and dynamically seeded Perimeter) return Homefront sites
+    // Seeded high-sec systems (Jita and Amarr) return Homefront sites; unseeded Perimeter returns 0
     let hf_jita = rpc(
         &ctx,
         &mut sess,
@@ -3987,6 +3987,17 @@ async fn batch3_dungeon_instance_cache_homefront_and_triglavian() {
     .expect("GetHomefrontSiteInstances Jita");
     assert_eq!(count_nested_instances(&hf_jita, SYS_JITA), 2);
 
+    let hf_amarr = rpc(
+        &ctx,
+        &mut sess,
+        "dungeonInstanceCacheMgr",
+        "GetHomefrontSiteInstances",
+        &[PyRep::Integer(30_002_187)],
+    )
+    .await
+    .expect("GetHomefrontSiteInstances Amarr");
+    assert_eq!(count_nested_instances(&hf_amarr, 30_002_187), 2);
+
     let hf_perim = rpc(
         &ctx,
         &mut sess,
@@ -3996,7 +4007,7 @@ async fn batch3_dungeon_instance_cache_homefront_and_triglavian() {
     )
     .await
     .expect("GetHomefrontSiteInstances Perimeter");
-    assert_eq!(count_nested_instances(&hf_perim, SYS_PERIMETER), 2);
+    assert_eq!(count_nested_instances(&hf_perim, SYS_PERIMETER), 0);
 
     // Low-sec system Tama has 0 Homefront sites
     let hf_tama = rpc(

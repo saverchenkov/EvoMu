@@ -107,11 +107,11 @@ pub fn ensure_homefront_sites_for_system_locked(
     );
 }
 
+pub const HOMEFRONT_SYSTEMS: &[SolarSystemId] =
+    &[30_000_142_u32, 30_002_187, 30_002_659, 30_002_510];
+
 pub fn init_homefront_sites(ctx: &ServerContext, reg: &mut PveSpecialSitesRegistry) {
-    if !reg.homefront_sites.is_empty() {
-        return;
-    }
-    for &sys_id in &[30_000_142_u32, 30_002_187, 30_002_659, 30_002_510] {
+    for &sys_id in HOMEFRONT_SYSTEMS {
         ensure_homefront_sites_for_system_locked(ctx, reg, sys_id);
     }
 }
@@ -150,7 +150,6 @@ pub fn handle_get_homefront_site_instances(
     };
 
     let reply = with_pve_special_reg(ctx, |reg| {
-        ensure_homefront_sites_for_system_locked(ctx, reg, sys_id);
         let mut by_dungeon: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
         if let Some(list) = reg.homefront_sites.get(&sys_id) {
             for s in list {

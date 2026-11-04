@@ -275,6 +275,7 @@ pub(crate) async fn warp_lock_and_destroy_via_rpc(
         }
         let _ = handle.step_manual(1.0).await;
     }
+    ctx.advance_secs(15);
     for _ in 0..max_volleys {
         for &gid in guns {
             if handle.get_ball_snapshot(target_id).await.unwrap().is_none() {
@@ -285,6 +286,7 @@ pub(crate) async fn warp_lock_and_destroy_via_rpc(
         if handle.get_ball_snapshot(target_id).await.unwrap().is_none() {
             return;
         }
+        ctx.advance_secs(15);
         if handle.get_combat_state(ship_id).await.ok().flatten().is_some_and(|cs| cs.capacitor < 300.0) {
             let _ = handle.step_manual(25.0).await;
         }
