@@ -756,10 +756,20 @@ pub fn register_handlers(
 
     // 19. eve.dogma.modifier.system_wide.api.GetModifiersRequest -> GetModifiersResponse
     let sde_dogma = Arc::clone(&sde);
+    let db_dogma = Arc::clone(&db);
     router.register_handler(
         "eve.dogma.modifier.system_wide.api.GetModifiersRequest",
-        Arc::new(move |_ctx, _any, msg| {
-            let sys_id = extract_u64_checked(msg, 1)?.unwrap_or(30_000_142);
+        Arc::new(move |ctx, _any, msg| {
+            let sys_id = extract_u64_checked(msg, 1)?
+                .filter(|&id| id > 0)
+                .or_else(|| {
+                    ctx.effective_character_id().and_then(|cid| {
+                        db_dogma.with_snapshot(|s| {
+                            s.characters.get(&(cid as i64)).map(|c| c.solar_system_id as u64)
+                        })
+                    })
+                })
+                .unwrap_or(0);
             let mut out = Vec::new();
             if sde_dogma.solar_systems.contains_key(&(sys_id as u32)) {
                 let mut mod_sub = Vec::new();

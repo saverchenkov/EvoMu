@@ -32,6 +32,34 @@ fn encode_identifier(field_num: u32, id: u64, out: &mut Vec<u8>) {
     encode_bytes_field(field_num, &id_buf, out);
 }
 
+fn caller_solar_system(ctx: &AuthoritativeContext, db: &WorldRepository) -> u64 {
+    ctx.effective_character_id()
+        .and_then(|cid| {
+            db.with_snapshot(|s| {
+                s.characters.get(&(cid as i64)).map(|c| c.solar_system_id as u64)
+            })
+        })
+        .unwrap_or(0)
+}
+
+fn caller_station_and_solar_system(
+    ctx: &AuthoritativeContext,
+    db: &WorldRepository,
+) -> (u64, u64) {
+    ctx.effective_character_id()
+        .and_then(|cid| {
+            db.with_snapshot(|s| {
+                s.characters.get(&(cid as i64)).map(|c| {
+                    (
+                        c.station_id.or(c.structure_id).unwrap_or(0) as u64,
+                        c.solar_system_id as u64,
+                    )
+                })
+            })
+        })
+        .unwrap_or((0, 0))
+}
+
 fn encode_currency(field_num: u32, isk_cents: i64, out: &mut Vec<u8>) {
     let mut cur_buf = Vec::new();
     encode_varint_field(1, (isk_cents.max(0) / 100) as u64, &mut cur_buf);
@@ -466,16 +494,18 @@ pub fn register_economy_planetary_industry_handlers(
     );
 
     // 8. eve.industry.facility.GetRequest
+    let db_fac = Arc::clone(&db);
     router.register_handler(
         "eve.industry.facility.GetRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
+        Arc::new(move |ctx, _any, _dyn_msg| {
+            let (station_id, sys_id) = caller_station_and_solar_system(ctx, &db_fac);
             let mut out = Vec::new();
             let mut fac = Vec::new();
-            encode_identifier(1, 60_003_760, &mut fac); // Jita 4-4 station
+            encode_identifier(1, station_id, &mut fac);
             let mut attrs = Vec::new();
             encode_identifier(1, 1000002, &mut attrs); // corp
             encode_identifier(2, 10000002, &mut attrs); // region
-            encode_identifier(3, 30000142, &mut attrs); // solar system
+            encode_identifier(3, sys_id, &mut attrs); // solar system
             encode_varint_field(5, 1, &mut attrs); // online
             encode_bytes_field(2, &attrs, &mut fac);
             encode_bytes_field(1, &fac, &mut out);
@@ -488,12 +518,14 @@ pub fn register_economy_planetary_industry_handlers(
     );
 
     // 8. eve.industry.system.GetCostIndicesRequest
+    let db_cost = Arc::clone(&db);
     router.register_handler(
         "eve.industry.system.GetCostIndicesRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
+        Arc::new(move |ctx, _any, _dyn_msg| {
+            let sys_id = caller_solar_system(ctx, &db_cost);
             let mut out = Vec::new();
             let mut idx = Vec::new();
-            encode_identifier(1, 30000142, &mut idx); // Jita
+            encode_identifier(1, sys_id, &mut idx);
             encode_bytes_field(1, &idx, &mut out);
 
             Ok(GoogleAny {
@@ -506,12 +538,14 @@ pub fn register_economy_planetary_industry_handlers(
     );
 
     // 9. eve.planet.GetRequest
+    let db_planet = Arc::clone(&db);
     router.register_handler(
         "eve.planet.GetRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let sys_id = caller_solar_system(ctx, &db_planet);
             let planet_id = extract_u64_from_field(dyn_msg, 1);
             let mut attrs = Vec::new();
-            encode_identifier(1, 30000142, &mut attrs); // solar system
+            encode_identifier(1, sys_id, &mut attrs); // solar system
             encode_string_field(3, &format!("Planet #{planet_id}"), &mut attrs);
             encode_identifier(5, 11, &mut attrs); // planet type Temperate
 
@@ -669,13 +703,15 @@ pub fn register_economy_planetary_industry_handlers(
     );
 
     // 18. eve.moon.GetRequest
+    let db_moon = Arc::clone(&db);
     router.register_handler(
         "eve.moon.GetRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let sys_id = caller_solar_system(ctx, &db_moon);
             let moon_id = extract_u64_from_field(dyn_msg, 1);
             let mut attrs = Vec::new();
             encode_string_field(1, &format!("Moon #{moon_id}"), &mut attrs);
-            encode_identifier(3, 30000142, &mut attrs); // solar system
+            encode_identifier(3, sys_id, &mut attrs); // solar system
             let mut out = Vec::new();
             encode_bytes_field(1, &attrs, &mut out);
             Ok(GoogleAny {
@@ -702,13 +738,15 @@ pub fn register_economy_planetary_industry_handlers(
     );
 
     // 20. eve.asteroidbelt.GetRequest
+    let db_belt = Arc::clone(&db);
     router.register_handler(
         "eve.asteroidbelt.GetRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let sys_id = caller_solar_system(ctx, &db_belt);
             let belt_id = extract_u64_from_field(dyn_msg, 1);
             let mut attrs = Vec::new();
             encode_string_field(1, &format!("Asteroid Belt #{belt_id}"), &mut attrs);
-            encode_identifier(3, 30000142, &mut attrs); // solar system
+            encode_identifier(3, sys_id, &mut attrs); // solar system
             let mut out = Vec::new();
             encode_bytes_field(1, &attrs, &mut out);
             Ok(GoogleAny {
