@@ -40,13 +40,25 @@ fn sde_new_activity_ids(sde: &eve_sde::SdeRegistry) -> &'static std::collections
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FastCheckoutProductRecord {
+    pub type_id: u32,
+    pub quantity: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FastCheckoutOfferRecord {
     pub offer_id: i64,
     pub plex_amount: i64,
     pub price_usd: f64,
+    #[serde(default)]
+    pub price_plex: i64,
     pub name: String,
     pub description: String,
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub products: Vec<FastCheckoutProductRecord>,
+    #[serde(default)]
+    pub category_id: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,17 +87,22 @@ fn load_catalog_plex_offers(snap: &eve_db::WorldStateSnapshot) -> Vec<FastChecko
         .offers
         .iter()
         .filter_map(|offer| {
-            let cents = offer.price_cents.filter(|&c| c > 0)?;
-            let plex_amount: i64 = offer
-                .product_ids
-                .iter()
-                .filter_map(|pid| catalog.products.iter().find(|p| p.id == *pid))
-                .filter(|p| {
-                    p.type_id == crate::services::market_contracts::PLEX_TYPE_ID && p.quantity > 0
-                })
-                .map(|p| i64::from(p.quantity))
-                .sum();
-            if plex_amount <= 0 {
+            let cents = offer.price_cents.unwrap_or(0);
+            let mut plex_amount: i64 = 0;
+            let mut products = Vec::new();
+            for pid in &offer.product_ids {
+                if let Some(p) = catalog.products.iter().find(|prod| prod.id == *pid) {
+                    if p.type_id == crate::services::market_contracts::PLEX_TYPE_ID && p.quantity > 0 {
+                        plex_amount += i64::from(p.quantity);
+                    } else if p.quantity > 0 {
+                        products.push(FastCheckoutProductRecord {
+                            type_id: p.type_id,
+                            quantity: p.quantity,
+                        });
+                    }
+                }
+            }
+            if plex_amount <= 0 && products.is_empty() {
                 return None;
             }
             let tags = tags_map.get(&offer.id).cloned().unwrap_or_default();
@@ -93,9 +110,12 @@ fn load_catalog_plex_offers(snap: &eve_db::WorldStateSnapshot) -> Vec<FastChecko
                 offer_id: i64::from(offer.id),
                 plex_amount,
                 price_usd: (cents as f64) / 100.0,
+                price_plex: offer.price_plex,
                 name: offer.name.clone(),
                 description: offer.description.clone(),
                 tags,
+                products,
+                category_id: offer.category_id,
             })
         })
         .collect()
@@ -711,13 +731,30 @@ fn handle_set_activities_pop_state(
     Ok(PyRep::Bool(true))
 }
 
+pub fn is_fast_checkout_enabled_for_user(ctx: &ServerContext, user_id: u64) -> bool {
+    let st = get_user_fast_checkout_state(ctx, user_id);
+    if st.enabled {
+        return true;
+    }
+    if let Ok(guard) = ctx.global_config_values.read() {
+        if let Some(val) = guard.get("fastCheckoutEnabled") {
+            return match val {
+                PyRep::Bool(b) => *b,
+                PyRep::Integer(i) => *i != 0,
+                PyRep::String(s) => s == "1" || s.eq_ignore_ascii_case("true"),
+                _ => false,
+            };
+        }
+    }
+    false
+}
+
 fn handle_is_fast_checkout_enabled_for_user(
     ctx: &ServerContext,
     session: &SessionState,
 ) -> Result<PyRep, BridgeRpcError> {
     let user_id = ServerContext::require_auth(session)?;
-    let st = get_user_fast_checkout_state(ctx, user_id);
-    Ok(PyRep::Bool(st.enabled))
+    Ok(PyRep::Bool(is_fast_checkout_enabled_for_user(ctx, user_id)))
 }
 
 fn handle_get_offers_for_user(
@@ -725,10 +762,10 @@ fn handle_get_offers_for_user(
     session: &SessionState,
 ) -> Result<PyRep, BridgeRpcError> {
     let user_id = ServerContext::require_auth(session)?;
-    let mut st = get_user_fast_checkout_state(ctx, user_id);
-    if !st.enabled {
+    if !is_fast_checkout_enabled_for_user(ctx, user_id) {
         return Ok(PyRep::List(Vec::new()));
     }
+    let mut st = get_user_fast_checkout_state(ctx, user_id);
     let offers = match st.cached_offers.clone() {
         Some(cached) if !cached.is_empty() => cached,
         _ => ctx.db.with_snapshot(load_catalog_plex_offers),
@@ -743,16 +780,38 @@ fn handle_get_offers_for_user(
     let plex_offers: Vec<PyRep> = offers
         .into_iter()
         .map(|o| {
+            let base_qty = if o.plex_amount > 0 {
+                o.plex_amount
+            } else {
+                o.products.first().map(|p| p.quantity as i64).unwrap_or(1)
+            };
+            let display_price = if o.price_usd > 0.0 {
+                o.price_usd
+            } else {
+                o.price_plex as f64
+            };
+            let prod_reps: Vec<PyRep> = o
+                .products
+                .iter()
+                .map(|p| {
+                    PyRep::Dict(vec![
+                        (PyRep::String("typeId".into()), PyRep::Integer(p.type_id as i64)),
+                        (PyRep::String("quantity".into()), PyRep::Integer(p.quantity as i64)),
+                    ])
+                })
+                .collect();
             PyRep::Dict(vec![
                 (PyRep::String("offerId".into()), PyRep::Integer(o.offer_id)),
-                (PyRep::String("baseQuantity".into()), PyRep::Integer(o.plex_amount)),
-                (PyRep::String("price".into()), PyRep::Real(o.price_usd)),
+                (PyRep::String("baseQuantity".into()), PyRep::Integer(base_qty)),
+                (PyRep::String("price".into()), PyRep::Real(display_price)),
+                (PyRep::String("pricePlex".into()), PyRep::Integer(o.price_plex)),
                 (
                     PyRep::String("tags".into()),
                     PyRep::List(o.tags.into_iter().map(PyRep::String).collect()),
                 ),
                 (PyRep::String("name".into()), PyRep::String(o.name)),
                 (PyRep::String("description".into()), PyRep::String(o.description)),
+                (PyRep::String("products".into()), PyRep::List(prod_reps)),
             ])
         })
         .collect();
@@ -794,25 +853,36 @@ fn handle_buy_offer(
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
     let user_id = ServerContext::require_auth(session)?;
-    let st = get_user_fast_checkout_state(ctx, user_id);
-    if !st.enabled {
+    if !is_fast_checkout_enabled_for_user(ctx, user_id) {
         return Err(BridgeRpcError {
             code: "FastCheckoutDisabled".into(),
             message: "Fast checkout is disabled for this user".into(),
         });
     }
 
-    let offer_id = args
+    let raw_offer_id = args
         .first()
         .and_then(extract_offer_id)
         .or_else(|| kwargs.get("offer").and_then(extract_offer_id))
         .or_else(|| kwargs.get("offerID").and_then(extract_offer_id))
         .or_else(|| kwargs.get("offer_id").and_then(extract_offer_id))
-        .or_else(|| kwargs.get("id").and_then(extract_offer_id))
-        .ok_or_else(|| BridgeRpcError {
-            code: "InvalidArgument".into(),
-            message: "BuyOffer requires offerID".into(),
-        })?;
+        .or_else(|| kwargs.get("id").and_then(extract_offer_id));
+
+    let offer_id = match raw_offer_id {
+        Some(id) if id > 0 => id,
+        Some(id) if id <= 0 => {
+            return Err(BridgeRpcError {
+                code: "OfferNotFound".into(),
+                message: "UserError: OfferNotFound: invalid offerID".into(),
+            });
+        }
+        _ => {
+            return Err(BridgeRpcError {
+                code: "InvalidArgument".into(),
+                message: "BuyOffer requires offerID".into(),
+            });
+        }
+    };
 
     let (quantity, password_opt) = if args.len() >= 3 {
         let q = args[1].as_i64().unwrap_or(1);
@@ -847,7 +917,7 @@ fn handle_buy_offer(
         });
     }
 
-    let (account, active_char_id) = ctx.db.with_snapshot(|snap| {
+    let (account, active_char_id, active_station_id) = ctx.db.with_snapshot(|snap| {
         let acc = snap.accounts.values().find(|a| a.user_id == user_id).cloned();
         let cid = session.character_id.or_else(|| {
             snap.characters
@@ -855,7 +925,10 @@ fn handle_buy_offer(
                 .find(|c| c.user_id == user_id)
                 .map(|c| c.character_id)
         });
-        (acc, cid)
+        let st_id = cid.and_then(|id| snap.characters.get(&id)).map(|c| {
+            session.station_id.or(session.structure_id).unwrap_or(c.home_station_id)
+        });
+        (acc, cid, st_id)
     });
 
     let Some(acc) = account else {
@@ -872,6 +945,7 @@ fn handle_buy_offer(
         });
     }
 
+    let st = get_user_fast_checkout_state(ctx, user_id);
     let offers = match st.cached_offers {
         Some(cached) if !cached.is_empty() => cached,
         _ => ctx.db.with_snapshot(load_catalog_plex_offers),
@@ -879,7 +953,7 @@ fn handle_buy_offer(
     let Some(offer) = offers.iter().find(|o| o.offer_id == offer_id).cloned() else {
         return Err(BridgeRpcError {
             code: "OfferNotFound".into(),
-            message: format!("Offer {offer_id} not found in catalog"),
+            message: format!("UserError: Offer {offer_id} not found in catalog"),
         });
     };
 
@@ -902,84 +976,184 @@ fn handle_buy_offer(
             message: "Total PLEX quantity overflows i64".into(),
         })?;
 
+    // User Balance check:
+    if offer.price_plex > 0 {
+        let total_cost_plex = offer.price_plex.checked_mul(quantity).ok_or_else(|| BridgeRpcError {
+            code: "ArithmeticOverflow".into(),
+            message: "Total PLEX price overflows i64".into(),
+        })?;
+        let cur_plex = ctx.db.with_snapshot(|snap| {
+            active_char_id
+                .map(|cid| snap.plex_vault_balance(cid))
+                .or_else(|| snap.account_plex_vault.get(&user_id).copied())
+                .unwrap_or(0)
+        });
+        if cur_plex < total_cost_plex {
+            return Err(BridgeRpcError {
+                code: "UserError".into(),
+                message: format!("UserError: Insufficient balance: need {total_cost_plex} PLEX, have {cur_plex}"),
+            });
+        }
+    }
+
     let now_unix = ctx.now_unix();
     let unit_cents = (offer.price_usd * 100.0).round().max(0.0) as u32;
     let amount_in_cents = unit_cents.saturating_mul(quantity.min(i64::from(u32::MAX)) as u32);
-    let (tx_id, rem_plex) = ctx.db.try_with_mut_snapshot(|snap| {
-        let tokens: Vec<crate::services::quasar_payment_store_types::PaymentTokenRecord> = snap
-            .service_state_blobs
-            .get("payment_tokens")
-            .and_then(|json| serde_json::from_str(json).ok())
-            .unwrap_or_default();
-        if !tokens
-            .iter()
-            .any(|t| t.user_id == user_id && t.is_quick_pay && !t.consumed)
-        {
-            return Err(BridgeRpcError {
-                code: "PaymentTokenRequired".into(),
-                message: "No active quick-pay payment token for user".into(),
-            });
-        }
-        let rem = snap
-            .adjust_plex_vault(active_char_id.unwrap_or(user_id as i64), total_plex)
-            .or_else(|| {
-                let cur = snap.account_plex_vault.get(&user_id).copied().unwrap_or(0);
-                let next = cur.checked_add(total_plex)?;
-                snap.account_plex_vault.insert(user_id, next);
-                Some(next)
-            })
-            .ok_or_else(|| BridgeRpcError {
-                code: "ArithmeticOverflow".into(),
-                message: "Account PLEX vault overflows i64".into(),
-            })?;
-        snap.next_entity_id += 1;
-        let tid = snap.next_entity_id as u64;
-        crate::services::quasar_payment_store::record_plex_transaction(
-            snap,
-            tid,
-            user_id,
-            total_plex,
-            rem,
-            "FastCheckout Purchase",
-            now_unix,
-        );
-        let mut receipts: Vec<crate::services::quasar_payment_store_types::PaymentReceiptRecord> =
-            snap.service_state_blobs
-                .get("payment_receipts")
+    let (tx_id, rem_plex, delivered_items_count) = ctx.db.try_with_mut_snapshot(|snap| {
+        if amount_in_cents > 0 {
+            let tokens: Vec<crate::services::quasar_payment_store_types::PaymentTokenRecord> = snap
+                .service_state_blobs
+                .get("payment_tokens")
                 .and_then(|json| serde_json::from_str(json).ok())
                 .unwrap_or_default();
-        receipts.push(
-            crate::services::quasar_payment_store_types::PaymentReceiptRecord {
-                receipt_id: tid,
-                user_id,
-                offer_id: offer_id.to_string(),
-                amount_in_cents,
-                currency: "USD".to_string(),
-                timestamp_unix: now_unix,
-            },
-        );
-        if let Ok(serialized) = serde_json::to_string(&receipts) {
-            snap.service_state_blobs
-                .insert("payment_receipts".to_string(), serialized);
+            if !tokens
+                .iter()
+                .any(|t| t.user_id == user_id && t.is_quick_pay && !t.consumed)
+            {
+                return Err(BridgeRpcError {
+                    code: "PaymentTokenRequired".into(),
+                    message: "No active quick-pay payment token for user".into(),
+                });
+            }
         }
-        Ok::<_, BridgeRpcError>((tid, rem))
+
+        let mut cur_rem = 0_i64;
+        if offer.price_plex > 0 {
+            let total_cost_plex = offer.price_plex.checked_mul(quantity).ok_or_else(|| BridgeRpcError {
+                code: "ArithmeticOverflow".into(),
+                message: "Total PLEX price overflows i64".into(),
+            })?;
+            cur_rem = active_char_id
+                .and_then(|cid| snap.adjust_plex_vault(cid, -total_cost_plex))
+                .or_else(|| {
+                    let cur = snap.account_plex_vault.get(&user_id).copied().unwrap_or(0);
+                    let next = cur.checked_sub(total_cost_plex)?;
+                    snap.account_plex_vault.insert(user_id, next);
+                    Some(next)
+                })
+                .ok_or_else(|| BridgeRpcError {
+                    code: "UserError".into(),
+                    message: "UserError: Insufficient PLEX balance in vault".into(),
+                })?;
+        }
+
+        if total_plex > 0 {
+            cur_rem = snap
+                .adjust_plex_vault(active_char_id.unwrap_or(user_id as i64), total_plex)
+                .or_else(|| {
+                    let cur = snap.account_plex_vault.get(&user_id).copied().unwrap_or(0);
+                    let next = cur.checked_add(total_plex)?;
+                    snap.account_plex_vault.insert(user_id, next);
+                    Some(next)
+                })
+                .ok_or_else(|| BridgeRpcError {
+                    code: "ArithmeticOverflow".into(),
+                    message: "Account PLEX vault overflows i64".into(),
+                })?;
+        }
+
+        snap.next_entity_id += 1;
+        let tid = snap.next_entity_id as u64;
+
+        if offer.price_plex > 0 || total_plex > 0 {
+            let delta = if total_plex > 0 { total_plex } else { -offer.price_plex * quantity };
+            crate::services::quasar_payment_store::record_plex_transaction(
+                snap,
+                tid,
+                user_id,
+                delta,
+                cur_rem,
+                "FastCheckout Purchase",
+                now_unix,
+            );
+        }
+
+        let mut delivered_count = 0_i64;
+        let char_id = active_char_id.unwrap_or(user_id as i64);
+        let station_id = active_station_id.unwrap_or(60_003_760);
+        for prod in &offer.products {
+            if prod.type_id > 0 && prod.quantity > 0 {
+                let total_item_qty = i32::try_from(
+                    (prod.quantity as i64)
+                        .checked_mul(quantity)
+                        .ok_or_else(|| BridgeRpcError {
+                            code: "ArithmeticOverflow".into(),
+                            message: "Product quantity overflows i32".into(),
+                        })?,
+                )
+                .map_err(|_| BridgeRpcError {
+                    code: "ArithmeticOverflow".into(),
+                    message: "Product quantity overflows i32".into(),
+                })?;
+                snap.next_entity_id += 1;
+                let item_id = snap.next_entity_id;
+                snap.items.insert(
+                    item_id,
+                    eve_db::InventoryItemRecord {
+                        item_id,
+                        type_id: prod.type_id,
+                        owner_id: char_id,
+                        location_id: station_id,
+                        flag: eve_db::InventoryFlag::Hangar,
+                        quantity: total_item_qty,
+                        singleton: false,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
+                delivered_count += total_item_qty as i64;
+            }
+        }
+
+        if offer.category_id == 1 {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.clone_grade = 2;
+            }
+        }
+
+        if amount_in_cents > 0 {
+            let mut receipts: Vec<crate::services::quasar_payment_store_types::PaymentReceiptRecord> =
+                snap.service_state_blobs
+                    .get("payment_receipts")
+                    .and_then(|json| serde_json::from_str(json).ok())
+                    .unwrap_or_default();
+            receipts.push(
+                crate::services::quasar_payment_store_types::PaymentReceiptRecord {
+                    receipt_id: tid,
+                    user_id,
+                    offer_id: offer_id.to_string(),
+                    amount_in_cents,
+                    currency: "USD".to_string(),
+                    timestamp_unix: now_unix,
+                },
+            );
+            if let Ok(serialized) = serde_json::to_string(&receipts) {
+                snap.service_state_blobs
+                    .insert("payment_receipts".to_string(), serialized);
+            }
+        }
+
+        Ok::<_, BridgeRpcError>((tid, cur_rem, delivered_count))
     })?;
 
-    crate::services::quasar_payment_store::emit_balance_changed_notice(
-        &ctx.quasar_gateway.pending_notices,
-        user_id,
-        tx_id,
-        total_plex,
-        rem_plex,
-        "FastCheckout Purchase",
-        ctx.now_unix(),
-    );
+    if total_plex > 0 {
+        crate::services::quasar_payment_store::emit_balance_changed_notice(
+            &ctx.quasar_gateway.pending_notices,
+            user_id,
+            tx_id,
+            total_plex,
+            rem_plex,
+            "FastCheckout Purchase",
+            ctx.now_unix(),
+        );
+    }
 
     Ok(PyRep::Dict(vec![
         (PyRep::String("status".into()), PyRep::String("CONFIRMED".into())),
         (PyRep::String("transactionID".into()), PyRep::Integer(tx_id as i64)),
         (PyRep::String("offerID".into()), PyRep::Integer(offer_id)),
         (PyRep::String("plexAmount".into()), PyRep::Integer(total_plex)),
+        (PyRep::String("itemsDelivered".into()), PyRep::Integer(delivered_items_count)),
     ]))
 }
 
