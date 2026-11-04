@@ -276,10 +276,14 @@ pub fn register_handlers(
     {
         let d = Arc::clone(&desc);
         let sde_sys = Arc::clone(&sde);
+        let db_sys = Arc::clone(&db);
         router.register_handler(
             "eve_public.solarsystem.api.GetRequest",
-            Arc::new(move |_ctx, _any, dyn_msg| {
-                let sys_id = get_identifier_or_int(dyn_msg, 1).unwrap_or(30_000_142) as u32;
+            Arc::new(move |ctx, _any, dyn_msg| {
+                let sys_id = match get_identifier_or_int(dyn_msg, 1) {
+                    Some(s) if s > 0 => s as u32,
+                    _ => caller_solar_system(ctx, &db_sys).unwrap_or(0),
+                };
                 if sys_id == 0 {
                     return Err((STATUS_BAD_REQUEST, "SolarSystemId must be positive".into()));
                 }
@@ -299,10 +303,14 @@ pub fn register_handlers(
     {
         let d = Arc::clone(&desc);
         let sde_jump = Arc::clone(&sde);
+        let db_jump = Arc::clone(&db);
         router.register_handler(
             "eve.solarsystem.api.GetSolarSystemsInJumpRangeRequest",
-            Arc::new(move |_ctx, _any, dyn_msg| {
-                let origin_sys = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u32;
+            Arc::new(move |ctx, _any, dyn_msg| {
+                let origin_sys = match get_identifier_or_int(dyn_msg, 1) {
+                    Some(s) if s > 0 => s as u32,
+                    _ => caller_solar_system(ctx, &db_jump).unwrap_or(0),
+                };
                 if origin_sys == 0 {
                     return Err((STATUS_BAD_REQUEST, "Origin system ID must be positive".into()));
                 }
@@ -471,11 +479,15 @@ pub fn register_handlers(
     {
         let d = Arc::clone(&desc);
         let sde_j = Arc::clone(&sde);
+        let db_j = Arc::clone(&db);
         router.register_handler(
             "eve.universe.navigation.GetShortestGateJumpCountRequest",
-            Arc::new(move |_ctx, _any, dyn_msg| {
-                let from_sys = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u32;
-                let to_sys = get_int_field(dyn_msg, 2).unwrap_or(30_000_144) as u32;
+            Arc::new(move |ctx, _any, dyn_msg| {
+                let from_sys = match get_identifier_or_int(dyn_msg, 1) {
+                    Some(s) if s > 0 => s as u32,
+                    _ => caller_solar_system(ctx, &db_j).unwrap_or(0),
+                };
+                let to_sys = get_identifier_or_int(dyn_msg, 2).unwrap_or(30_000_144) as u32;
                 if from_sys == 0 || to_sys == 0 {
                     return Err((STATUS_BAD_REQUEST, "Jump systems must be valid".into()));
                 }
@@ -513,7 +525,7 @@ pub fn register_handlers(
                     s.characters
                         .get(&(cid as i64))
                         .map(|c| c.solar_system_id)
-                        .unwrap_or(30_000_142)
+                        .unwrap_or(0)
                 });
                 encode_domain_message(&d, "eve.bubble.presence.api.GetInBubbleResponse", |reg, resp| {
                     set_domain_attributes(reg, resp, cid as u64, sys_id as u64, "BubblePresence");
@@ -535,7 +547,7 @@ pub fn register_handlers(
                     s.characters
                         .get(&(char_id as i64))
                         .map(|c| c.solar_system_id)
-                        .unwrap_or(30_000_142)
+                        .unwrap_or(0)
                 });
                 encode_domain_message(
                     &d,
@@ -860,10 +872,14 @@ pub fn register_handlers(
     }
     {
         let d = Arc::clone(&desc);
+        let db_b1 = Arc::clone(&db);
         router.register_handler(
             "eve.dynamicbountysystem.GetPaidSystemBountiesRequest",
-            Arc::new(move |_ctx, _any, dyn_msg| {
-                let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u64;
+            Arc::new(move |ctx, _any, dyn_msg| {
+                let sys_id = match get_identifier_or_int(dyn_msg, 1) {
+                    Some(s) if s > 0 => s as u64,
+                    _ => caller_solar_system(ctx, &db_b1).unwrap_or(0) as u64,
+                };
                 encode_domain_message(
                     &d,
                     "eve.dynamicbountysystem.GetPaidSystemBountiesResponse",
@@ -876,10 +892,14 @@ pub fn register_handlers(
     }
     {
         let d = Arc::clone(&desc);
+        let db_b2 = Arc::clone(&db);
         router.register_handler(
             "eve.dynamicbountysystem.GetAccumulatedSystemShipLossValueRequest",
-            Arc::new(move |_ctx, _any, dyn_msg| {
-                let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u64;
+            Arc::new(move |ctx, _any, dyn_msg| {
+                let sys_id = match get_identifier_or_int(dyn_msg, 1) {
+                    Some(s) if s > 0 => s as u64,
+                    _ => caller_solar_system(ctx, &db_b2).unwrap_or(0) as u64,
+                };
                 encode_domain_message(
                     &d,
                     "eve.dynamicbountysystem.GetAccumulatedSystemShipLossValueResponse",
@@ -1060,12 +1080,16 @@ pub fn register_handlers(
                     );
                     (msg, false, Some(("type_name", item_type.name.clone())))
                 } else {
-                    let cur_sys_id = caller_solar_system(ctx, &db_ai).unwrap_or(30_000_142);
-                    let (sys_name, sec) = sde_ai
-                        .solar_systems
-                        .get(&cur_sys_id)
-                        .map(|s| (s.name.clone(), s.security_status))
-                        .unwrap_or_else(|| ("Jita".to_string(), 0.95));
+                    let cur_sys_id = caller_solar_system(ctx, &db_ai).unwrap_or(0);
+                    let (sys_name, sec) = if cur_sys_id > 0 {
+                        sde_ai
+                            .solar_systems
+                            .get(&cur_sys_id)
+                            .map(|s| (s.name.clone(), s.security_status))
+                            .unwrap_or_else(|| ("Unknown Space".to_string(), 0.0))
+                    } else {
+                        ("Unknown Space".to_string(), 0.0)
+                    };
                     let msg = format!(
                         "Aura Guidance: You are currently in {} (security {:.2}). Ask about any solar system or ship/item type in New Eden.",
                         sys_name, sec
