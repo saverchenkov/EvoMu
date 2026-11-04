@@ -243,7 +243,7 @@ async fn test_batch4_fw_lp_vp_and_insurgency_corruption_security() {
     // OnVictoryPointStateUpdated via live FW complex capture + Insurgency Stage 5 corruption
     let fw_ctx = new_ctx();
     crate::common::pin_clock(&fw_ctx);
-    let (_enemy_sys, warzone_sys, _cmd_sys, _rear_sys) = crate::fw_warzone_insurgency_closure::setup_warzone_chain(&fw_ctx);
+    let (_enemy_sys, warzone_sys, _cmd_sys, _rear_sys) = crate::fw_warzone_insurgency::setup_warzone_chain(&fw_ctx);
     let fw_ship = 640_000_309_i64;
     fw_ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&PILOT_A) {

@@ -3,7 +3,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::sovereignty_equinox_gameplay_closure::{
+use crate::sovereignty_equinox_gameplay::{
     make_ball, place_ship_ball, register_online_pilot, rpc_call, set_pilot_location,
 };
 use eve_db::snapshot_ext::FwSystemOccupationRecord;

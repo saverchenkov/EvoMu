@@ -482,7 +482,7 @@ async fn test_batch2_facwar_bunker_vulnerable_and_incursion_influence_update() {
     // 1. OnFacWarBunkerVulnerable via live FW complex capture reaching 100% contested
     let fw_ctx = new_ctx();
     let (_enemy_sys, warzone_sys, _cmd_sys, _rear_sys) =
-        crate::fw_warzone_insurgency_closure::setup_warzone_chain(&fw_ctx);
+        crate::fw_warzone_insurgency::setup_warzone_chain(&fw_ctx);
     let (fw_ship, fw_gun) = (720_000_301_i64, 720_000_310_i64);
     fw_ctx.db.with_mut_snapshot(|snap| {
         if let Some(occ) = snap.fw_system_occupations.get_mut(&warzone_sys) {

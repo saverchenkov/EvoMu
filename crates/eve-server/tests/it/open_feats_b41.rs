@@ -6,8 +6,8 @@
 
 #![forbid(unsafe_code)]
 
-use crate::fw_warzone_insurgency_closure::setup_warzone_chain;
-use crate::sovereignty_equinox_gameplay_closure::{
+use crate::fw_warzone_insurgency::setup_warzone_chain;
+use crate::sovereignty_equinox_gameplay::{
     lock_target_via_rpc, place_ship_ball, register_online_pilot, rpc_call, set_pilot_location,
 };
 use eve_db::{FleetRecord, InventoryFlag, InventoryItemRecord};

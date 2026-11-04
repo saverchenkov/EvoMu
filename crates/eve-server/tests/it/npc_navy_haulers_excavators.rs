@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use crate::common;
-use crate::npc_spawns_pve_closure::{bind_beyonce, rpc, setup_docked_pilot};
+use crate::npc_spawns_pve::{bind_beyonce, rpc, setup_docked_pilot};
 use eve_db::{InventoryFlag, TrainedSkillRecord};
 use eve_destiny::MovementMode;
 use eve_proto::PyRep;

@@ -105,7 +105,7 @@ async fn kill_target_live(
     gun_base_id: i64,
     target_id: i64,
 ) {
-    crate::sovereignty_equinox_gameplay_closure::lock_target_via_rpc(
+    crate::sovereignty_equinox_gameplay::lock_target_via_rpc(
         ctx, sess, sys_id, ship_id, target_id,
     )
     .await;
@@ -138,7 +138,7 @@ async fn kill_target_live(
             }
         }
         if target_id >= 500_000_000 {
-            crate::sovereignty_equinox_gameplay_closure::step_weapon_ticks(ctx, sys_id).await;
+            crate::sovereignty_equinox_gameplay::step_weapon_ticks(ctx, sys_id).await;
         }
     }
     assert!(
@@ -168,14 +168,14 @@ async fn capture_novice_complex_live(
             .copied()
             .unwrap_or(0)
     });
-    crate::sovereignty_equinox_gameplay_closure::set_pilot_location(ctx, sess, sys_id, None);
+    crate::sovereignty_equinox_gameplay::set_pilot_location(ctx, sess, sys_id, None);
     sess.structure_id = None;
     sess.ship_id = Some(ship_id);
     ctx.db.with_mut_snapshot(|s| {
         s.characters.get_mut(&char_id).unwrap().structure_id = None;
         s.items.get_mut(&ship_id).unwrap().location_id = i64::from(sys_id);
     });
-    crate::sovereignty_equinox_gameplay_closure::place_ship_ball(
+    crate::sovereignty_equinox_gameplay::place_ship_ball(
         ctx,
         sys_id,
         char_id,
@@ -196,7 +196,7 @@ async fn capture_novice_complex_live(
         let pos = s.item_positions.get(&gid).copied().unwrap_or([0.0, 0.0, 0.0]);
         (gid, DVec3::new(pos[0], pos[1], pos[2]))
     });
-    crate::sovereignty_equinox_gameplay_closure::place_ship_ball(
+    crate::sovereignty_equinox_gameplay::place_ship_ball(
         ctx,
         sys_id,
         char_id,
@@ -252,7 +252,7 @@ async fn test_fw_lp_complexes_kills_status_scaling_and_militia_store() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let (enemy_sys, front_sys, cmd_sys, rear_sys) =
-        crate::fw_warzone_insurgency_closure::setup_warzone_chain(&ctx);
+        crate::fw_warzone_insurgency::setup_warzone_chain(&ctx);
 
     let mut sess_cal = setup_pilot(&ctx, PILOT_1).await;
     let cal_ship_id = ctx.db.with_mut_snapshot(|snap| {
@@ -293,11 +293,11 @@ async fn test_fw_lp_complexes_kills_status_scaling_and_militia_store() {
     let gal_ship = 100_995_002i64;
     let wing_cid = 90_000_003i64;
     let wing_ship = 100_995_003i64;
-    let mut sess_gal = crate::sovereignty_equinox_gameplay_closure::register_online_pilot(
+    let mut sess_gal = crate::sovereignty_equinox_gameplay::register_online_pilot(
         &ctx, 39_102, "gal_fw", "gal-secret", gal_cid, 98_000_102, None,
         front_sys, gal_ship, 593, DVec3::new(50_000.0, 0.0, 0.0), 0,
     ).await;
-    let mut sess_wing = crate::sovereignty_equinox_gameplay_closure::register_online_pilot(
+    let mut sess_wing = crate::sovereignty_equinox_gameplay::register_online_pilot(
         &ctx, 39_103, "wing_fw", "wing-secret", wing_cid, 98_000_103, None,
         front_sys, wing_ship, 587, DVec3::new(50_800.0, 0.0, 0.0), 0,
     ).await;
@@ -358,14 +358,14 @@ async fn test_fw_lp_complexes_kills_status_scaling_and_militia_store() {
     let expected_each_share = ((expected_status_kill_lp as f64) / 2.0).round() as i64;
     assert!(expected_each_share > 0, "fitted Tristan + cargo net loss must yield positive FW LP");
 
-    crate::sovereignty_equinox_gameplay_closure::set_pilot_location(&ctx, &mut sess_cal, front_sys, None);
-    crate::sovereignty_equinox_gameplay_closure::place_ship_ball(
+    crate::sovereignty_equinox_gameplay::set_pilot_location(&ctx, &mut sess_cal, front_sys, None);
+    crate::sovereignty_equinox_gameplay::place_ship_ball(
         &ctx, front_sys, PILOT_1, cal_ship_id, 587, DVec3::new(50_600.0, 0.0, 0.0),
     ).await;
     let p1_lp_pre_kill = ctx.db.with_snapshot(|s| s.characters[&PILOT_1].loyalty_points.get(&STATE_PROTECTORATE_CORP).copied().unwrap_or(0));
 
     // Wingman lands a single turret hit, then PILOT_1 destroys the enemy Tristan via live combat ticks
-    crate::sovereignty_equinox_gameplay_closure::lock_target_via_rpc(&ctx, &mut sess_wing, front_sys, wing_ship, gal_ship).await;
+    crate::sovereignty_equinox_gameplay::lock_target_via_rpc(&ctx, &mut sess_wing, front_sys, wing_ship, gal_ship).await;
     rpc(&ctx, &mut sess_wing, "dogmaIM", "Activate", &[
         PyRep::Integer(wing_guns), PyRep::String("targetAttack".into()), PyRep::Integer(gal_ship),
     ]).await.expect("wingman turret activate");
@@ -560,7 +560,7 @@ async fn test_fw_offensive_lp_zero_when_vulnerable() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let (enemy_sys, _front_sys, _cmd_sys, _rear_sys) =
-        crate::fw_warzone_insurgency_closure::setup_warzone_chain(&ctx);
+        crate::fw_warzone_insurgency::setup_warzone_chain(&ctx);
 
     let mut sess_cal = setup_pilot(&ctx, PILOT_1).await;
     let cal_ship_id = ctx.db.with_mut_snapshot(|snap| {

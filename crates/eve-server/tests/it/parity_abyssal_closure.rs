@@ -6,7 +6,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::abyssal_deadspace_closure::{
+use crate::abyssal_deadspace::{
     login_pilot_in_space, move_pilot_to_system, seed_cargo_item, FIL_T1_ELEC, FIL_T3_ELEC,
     FIL_T5_ELEC, SYS_08_LASHESIH, SYS_LOW_TAMA,
 };

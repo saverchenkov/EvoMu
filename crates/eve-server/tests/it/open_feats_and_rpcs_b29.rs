@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::common;
-use crate::plan_c7_crimewatch_closure::{far_celestial_id, item_rec, setup_pilot_in_space};
+use crate::crimewatch_hostility::{far_celestial_id, item_rec, setup_pilot_in_space};
 use eve_db::{
     InventoryFlag, IskCents, TrainedSkillRecord, VirtualServerClock, WorldRepository,
 };

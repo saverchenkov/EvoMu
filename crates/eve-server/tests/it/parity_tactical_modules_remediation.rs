@@ -4,7 +4,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::sovereignty_equinox_gameplay_closure::{
+use crate::sovereignty_equinox_gameplay::{
     open_sqlite_ctx, place_ship_ball, register_online_pilot, rpc_call, set_pilot_location,
     temp_sqlite_path, ALLIANCE, CORP, PILOT, PILOT_SHIP,
 };

@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use crate::quasar_sov_equinox_hub::{field, fields, id_req, rpc, structure, subscribe, varint};
-use crate::sovereignty_equinox_gameplay_closure::{
+use crate::sovereignty_equinox_gameplay::{
     drain_notif_events, drain_quasar, find_nullsec_planets, fit_siege_artillery,
     lock_target_via_rpc, make_ball, register_online_pilot, rpc_call, step_weapon_ticks,
     ALLIANCE, CORP, PILOT, PILOT_SHIP,

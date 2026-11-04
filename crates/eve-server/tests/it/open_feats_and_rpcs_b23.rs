@@ -1,5 +1,5 @@
 //! Integration tests closing 17 `feat:cosmetics.*` and `feat:crimewatch.*` parity rows (Batch 23).
-use crate::plan_c7_crimewatch_closure::{dict_get, item_rec, setup_pilot_in_space};
+use crate::crimewatch_hostility::{dict_get, item_rec, setup_pilot_in_space};
 use crate::quasar_goal_tale_notices::{bytes, sub, varint};
 use crate::quasar_progression_complete::{build_sess, quasar_rpc};
 use eve_db::{InventoryFlag, IskCents, TrainedSkillRecord};

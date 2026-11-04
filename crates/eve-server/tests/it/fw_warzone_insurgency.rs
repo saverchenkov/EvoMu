@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::sovereignty_equinox_gameplay_closure::{
+use crate::sovereignty_equinox_gameplay::{
     drain_notif_events, fit_siege_artillery, lock_target_via_rpc, make_ball, open_sqlite_ctx, register_online_pilot,
     rpc_call, set_pilot_location, step_weapon_ticks, temp_sqlite_path,
 };

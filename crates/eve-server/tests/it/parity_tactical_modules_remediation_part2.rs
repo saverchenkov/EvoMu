@@ -4,7 +4,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::sovereignty_equinox_gameplay_closure::{
+use crate::sovereignty_equinox_gameplay::{
     open_sqlite_ctx, register_online_pilot, temp_sqlite_path, ALLIANCE, CORP,
 };
 use eve_db::{
