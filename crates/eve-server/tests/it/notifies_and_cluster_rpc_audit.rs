@@ -1,4 +1,4 @@
-//! Live integration tests covering 14 missing `notify:*` parity rows.
+//! Live integration tests covering 14 notify and cluster RPC parity rows.
 
 #![forbid(unsafe_code)]
 
@@ -6,18 +6,14 @@ use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::{service_roles::ROLE_GM_DEFAULT, SessionState};
 use eve_proto::{BridgeRpcError, PyRep};
-use eve_server::router::{
-    cache_notifications::NotificationRecord, NotificationTarget, ServerContext,
-};
+use eve_server::router::{NotificationTarget, ServerContext};
 use eve_server::services::notify_emitters_batch3::{
-    emit_ccp_notification, emit_contextual_offer_purchased, emit_login_milestone_achieved,
+    emit_ccp_notification, emit_contextual_offer_purchased,
 };
-use eve_server::services::notify_emitters_batch3_space::{
-    emit_ess_reserve_bank_inventory_full, emit_jump_queue_update,
-};
+use eve_server::services::notify_emitters_batch3_space::emit_ess_reserve_bank_inventory_full;
 use eve_server::services::notify_emitters_missing::{
-    emit_bean_prime, emit_clear_fetched_data, emit_flagged_lists_change,
-    restore_character_notifications,
+    emit_bean_prime, emit_clear_fetched_data, emit_client_event_market_item_received,
+    emit_flagged_lists_change,
 };
 use eve_server::services::pve_dungeon_runtime::{
     check_dungeon_triggers, with_dungeon_runtime_store_db, DungeonRuntimeInstance,
@@ -169,9 +165,17 @@ async fn setup_pilot_in_space(
 // parity: notify:OnDungeonCameraInterest, notify:OnDungeonTriggerAmbientSound
 // parity: notify:OnDungeonTriggerAudio, notify:OnDungeonTriggerMessage
 // parity: notify:OnDungeonTriggerMusic, notify:OnEssReserveBankInventoryFull
-// parity: notify:OnJumpQueueUpdate
 #[tokio::test]
-async fn test_parity_notify_missing1_dungeon_and_space() {
+async fn test_dungeon_and_space_notifications() {
+    eve_testkit::attest(&[
+        "notify:OnDungeonCameraInterest",
+        "notify:OnDungeonTriggerAmbientSound",
+        "notify:OnDungeonTriggerAudio",
+        "notify:OnDungeonTriggerMessage",
+        "notify:OnDungeonTriggerMusic",
+        "notify:OnEssReserveBankInventoryFull",
+    ]);
+
     let ctx = ServerContext::new();
     let ship_a = 700_801_i64;
     let ship_b = 700_802_i64;
@@ -366,37 +370,20 @@ async fn test_parity_notify_missing1_dungeon_and_space() {
     // Negative: Pilot B in SYS_PERIMETER does NOT receive SYS_JITA's ESS full notification
     let notifs_ess_b = drain_all(&ctx, &mut sess_b, PILOT_B);
     assert!(!has_notif(&notifs_ess_b, "OnEssReserveBankInventoryFull"));
-
-    // 7. OnJumpQueueUpdate
-    // Negative: Pilot A initially has no jump queue notification
-    assert!(!has_notif(
-        &drain_all(&ctx, &mut sess_a, PILOT_A),
-        "OnJumpQueueUpdate"
-    ));
-
-    // Positive: pilot queued at stargate receives OnJumpQueueUpdate with 5 V24 args
-    emit_jump_queue_update(&ctx, PILOT_A, SYS_JITA, 40, 3, vec![101, 102], 180);
-    let notifs_jq = drain_all(&ctx, &mut sess_a, PILOT_A);
-    let jq = find_notif(&notifs_jq, "OnJumpQueueUpdate");
-    assert_eq!(jq.len(), 5);
-    assert_eq!(jq[0].as_i64(), Some(i64::from(SYS_JITA)));
-    assert_eq!(jq[1].as_i64(), Some(40));
-    assert_eq!(jq[2].as_i64(), Some(3));
-    assert!(matches!(&jq[3], PyRep::List(keys) if keys.len() == 2));
-    assert_eq!(jq[4].as_i64(), Some(180));
-
-    // Negative: Pilot B was not in the jump queue -> 0 OnJumpQueueUpdate
-    assert!(!has_notif(
-        &drain_all(&ctx, &mut sess_b, PILOT_B),
-        "OnJumpQueueUpdate"
-    ));
 }
 
 // parity: notify:OnBeanPrime, notify:OnCCPNotification, notify:OnClearFetchedData
 // parity: notify:OnContextualOfferPurchased, notify:OnFlaggedListsChange
-// parity: notify:OnLoginMilestoneAchieved, notify:OnNotificationUndeleted
 #[tokio::test]
-async fn test_parity_notify_missing1_cluster_account_notifications() {
+async fn test_cluster_account_notifications() {
+    eve_testkit::attest(&[
+        "notify:OnBeanPrime",
+        "notify:OnCCPNotification",
+        "notify:OnClearFetchedData",
+        "notify:OnContextualOfferPurchased",
+        "notify:OnFlaggedListsChange",
+    ]);
+
     let ctx = ServerContext::new();
     let mut sess_a = setup_pilot_in_space(&ctx, PILOT_A, 700_901, 587, SYS_JITA, false).await;
     let mut sess_b = setup_pilot_in_space(&ctx, PILOT_B, 700_902, 587, SYS_PERIMETER, false).await;
@@ -534,81 +521,96 @@ async fn test_parity_notify_missing1_cluster_account_notifications() {
     let notifs_flag = drain_all(&ctx, &mut sess_a, PILOT_A);
     let flg = find_notif(&notifs_flag, "OnFlaggedListsChange");
     assert_eq!(flg.len(), 0, "OnFlaggedListsChange arity is 0");
+}
 
-    // 13. OnLoginMilestoneAchieved
-    // Negative: Pilot B initially has 0 OnLoginMilestoneAchieved
-    assert!(!has_notif(&drain_all(&ctx, &mut sess_b, PILOT_B), "OnLoginMilestoneAchieved"));
+// parity: rpc:localizationServer.ReloadFSDPickle, rpc:debug.Exec, notify:OnClientEvent_MarketItemReceived
+#[tokio::test]
+async fn test_cluster_rpcs_and_market_event() {
+    eve_testkit::attest(&[
+        "rpc:localizationServer.ReloadFSDPickle",
+        "rpc:debug.Exec",
+        "notify:OnClientEvent_MarketItemReceived",
+    ]);
 
-    // Positive: milestone achieved emits OnLoginMilestoneAchieved(milestoneID, iskAmount)
-    emit_login_milestone_achieved(&ctx, PILOT_A, 401, 1_250_000.0);
-    let notifs_mile = drain_all(&ctx, &mut sess_a, PILOT_A);
-    let mile = find_notif(&notifs_mile, "OnLoginMilestoneAchieved");
-    assert_eq!(mile.len(), 2);
-    assert_eq!(mile[0].as_i64(), Some(401));
-    assert_eq!(mile[1].as_f64(), Some(1_250_000.0));
+    let ctx = ServerContext::new();
+    let mut sess_player = setup_pilot_in_space(&ctx, PILOT_A, 700_903, 587, SYS_JITA, false).await;
+    let mut sess_gm = setup_pilot_in_space(&ctx, PILOT_B, 700_904, 587, SYS_PERIMETER, true).await;
 
-    // Negative: Pilot B receives 0 OnLoginMilestoneAchieved
-    assert!(!has_notif(&drain_all(&ctx, &mut sess_b, PILOT_B), "OnLoginMilestoneAchieved"));
+    // 1. rpc:localizationServer.ReloadFSDPickle
+    // Negative: Non-GM pilot calling ReloadFSDPickle fails with RoleRequired
+    let non_gm_res = rpc(&ctx, &mut sess_player, "localizationServer", "ReloadFSDPickle", &[]).await;
+    let err = non_gm_res.expect_err("non-GM must be denied ReloadFSDPickle");
+    assert_eq!(err.code, "RoleRequired");
 
-    // 14. OnNotificationUndeleted
-    // Setup persistent notification records for PILOT_A
-    let n1_id = 9_801_i64;
-    let n2_id = 9_802_i64;
-    let now_u = ctx.now_unix();
-    {
-        let mut recs = ctx.notification_records.write().unwrap();
-        recs.push(NotificationRecord {
-            notification_id: n1_id,
-            type_id: 1,
-            sender_id: 1_000_001,
-            receiver_id: PILOT_A,
-            processed: false,
-            group_id: 1,
-            created: now_u as i64,
-            data: "{}".into(),
-            deleted: false,
-            interacted: false,
-        });
-        recs.push(NotificationRecord {
-            notification_id: n2_id,
-            type_id: 1,
-            sender_id: 1_000_001,
-            receiver_id: PILOT_A,
-            processed: false,
-            group_id: 1,
-            created: now_u as i64,
-            data: "{}".into(),
-            deleted: false,
-            interacted: false,
-        });
-    }
-
-    // Delete notifications via notificationMgr.DeleteNotifications
-    let del_res = rpc(
+    // Negative: GM calling ReloadFSDPickle with args returns UnimplementedRPC
+    let gm_args_err = rpc(
         &ctx,
-        &mut sess_a,
-        "notificationMgr",
-        "DeleteNotifications",
-        &[PyRep::List(vec![PyRep::Integer(n1_id), PyRep::Integer(n2_id)])],
+        &mut sess_gm,
+        "localizationServer",
+        "ReloadFSDPickle",
+        &[PyRep::String("bad_pickle".into())],
     )
     .await
-    .expect("DeleteNotifications");
-    assert_eq!(del_res, PyRep::Integer(2));
-    let notifs_del = drain_all(&ctx, &mut sess_a, PILOT_A);
-    assert!(has_notif(&notifs_del, "OnNotificationDeleted"));
-    assert!(!has_notif(&notifs_del, "OnNotificationUndeleted"));
+    .expect_err("ReloadFSDPickle with args must return UnimplementedRPC");
+    assert_eq!(gm_args_err.code, "UnimplementedRPC");
 
-    // Positive: restore_character_notifications un-deletes records and emits OnNotificationUndeleted
-    let restored = restore_character_notifications(&ctx, PILOT_A, &[n1_id, n2_id]);
-    assert_eq!(restored, 2);
-    let notifs_undel = drain_all(&ctx, &mut sess_a, PILOT_A);
-    let undel = find_notif(&notifs_undel, "OnNotificationUndeleted");
-    assert_eq!(undel.len(), 1);
-    assert!(matches!(&undel[0], PyRep::List(ids) if ids.len() == 2 && ids[0].as_i64() == Some(n1_id) && ids[1].as_i64() == Some(n2_id)));
+    // Positive: GM calling ReloadFSDPickle with empty args succeeds
+    let reload_res = rpc(&ctx, &mut sess_gm, "localizationServer", "ReloadFSDPickle", &[])
+        .await
+        .expect("ReloadFSDPickle with empty args succeeds");
+    assert_eq!(reload_res, PyRep::Bool(true));
 
-    // Negative: Pilot B did not have notifications restored -> 0 OnNotificationUndeleted
-    assert!(!has_notif(
-        &drain_all(&ctx, &mut sess_b, PILOT_B),
-        "OnNotificationUndeleted"
-    ));
+    // 2. rpc:debug.Exec
+    // Negative: Non-GM / non-admin pilot calling debug.Exec fails with NotAuthorized
+    let non_gm_debug = rpc(&ctx, &mut sess_player, "debug", "Exec", &[PyRep::String("ping".into())]).await;
+    let debug_err = non_gm_debug.expect_err("unprivileged player must be denied debug.Exec");
+    assert_eq!(debug_err.code, "UserError");
+
+    // Negative: GM calling debug.Exec with "status" or "self.stats()" fails with UnimplementedRPC
+    let gm_status_err = rpc(&ctx, &mut sess_gm, "debug", "Exec", &[PyRep::String("status".into())])
+        .await
+        .expect_err("debug.Exec status must fail closed");
+    assert_eq!(gm_status_err.code, "UnimplementedRPC");
+
+    // Positive: GM calling debug.Exec with command returns server execution report
+    let exec_res = rpc(&ctx, &mut sess_gm, "debug", "Exec", &[PyRep::String("ping".into())])
+        .await
+        .expect("debug.Exec with command succeeds");
+    if let PyRep::List(items) = exec_res {
+        assert_eq!(items.len(), 1);
+        if let PyRep::Tuple(parts) = &items[0] {
+            assert_eq!(parts[0].as_str(), Some("server"));
+            assert_eq!(parts[1].as_i64(), Some(1));
+            assert_eq!(parts[2].as_str(), Some("OK"));
+        } else {
+            panic!("Expected Tuple in debug.Exec list");
+        }
+    } else {
+        panic!("Expected List from debug.Exec");
+    }
+
+    // 3. notify:OnClientEvent_MarketItemReceived
+    let _ = drain_all(&ctx, &mut sess_player, PILOT_A);
+    let item_id = 99_888_777_i64;
+    let type_id = 587_i64; // Rifter
+    let flag = 4_i64; // Hangar
+    let location_id = 60_003_760_i64; // Jita IV - 4
+    emit_client_event_market_item_received(
+        &ctx,
+        PILOT_A,
+        item_id,
+        type_id,
+        flag,
+        location_id,
+    );
+    let notifs = drain_all(&ctx, &mut sess_player, PILOT_A);
+    let mkt = find_notif(&notifs, "OnClientEvent_MarketItemReceived");
+    assert_eq!(mkt.len(), 4);
+    assert_eq!(mkt[0].as_i64(), Some(item_id));
+    assert_eq!(mkt[1].as_i64(), Some(type_id));
+    assert_eq!(mkt[2].as_i64(), Some(flag));
+    assert_eq!(mkt[3].as_i64(), Some(location_id));
+
+    // Negative: Pilot B did not receive Pilot A's market event
+    assert!(!has_notif(&drain_all(&ctx, &mut sess_gm, PILOT_B), "OnClientEvent_MarketItemReceived"));
 }

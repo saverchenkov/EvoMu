@@ -146,3 +146,120 @@ pub fn restore_character_notifications(
     restored.len()
 }
 
+/// Emits `OnClientEvent_MarketItemReceived(itemID, typeID, flag, locationID)`.
+/// Matches `eve/client/script/ui/shared/market/marketQuote.pyj`.
+pub fn emit_client_event_market_item_received(
+    ctx: &ServerContext,
+    char_id: i64,
+    item_id: i64,
+    type_id: i64,
+    flag: i64,
+    location_id: i64,
+) {
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnClientEvent_MarketItemReceived",
+        "charid",
+        vec![
+            PyRep::Integer(item_id),
+            PyRep::Integer(type_id),
+            PyRep::Integer(flag),
+            PyRep::Integer(location_id),
+        ],
+    );
+}
+
+/// Emits `OnDungeonCameraInterest(itemID, speed, duration)` (`3` args, `id_type = "charid"`).
+pub fn emit_dungeon_camera_interest(
+    ctx: &ServerContext,
+    char_id: i64,
+    item_id: i64,
+    speed: f64,
+    duration: f64,
+) {
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnDungeonCameraInterest",
+        "charid",
+        vec![
+            PyRep::Integer(item_id),
+            PyRep::Real(speed),
+            PyRep::Real(duration),
+        ],
+    );
+}
+
+/// Emits `OnDungeonTriggerAmbientSound(dungeonID, soundID, entityItemID)`.
+pub fn emit_dungeon_trigger_ambient_sound(
+    ctx: &ServerContext,
+    char_id: i64,
+    dungeon_id: i64,
+    sound_id: i64,
+    entity_item_id: i64,
+) {
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnDungeonTriggerAmbientSound",
+        "charid",
+        vec![
+            PyRep::Integer(dungeon_id),
+            PyRep::Integer(sound_id),
+            PyRep::Integer(entity_item_id),
+        ],
+    );
+}
+
+/// Emits `OnDungeonTriggerAudio(dungeonID, audioUrl)`.
+pub fn emit_dungeon_trigger_audio(
+    ctx: &ServerContext,
+    char_id: i64,
+    dungeon_id: i64,
+    audio_url: &str,
+) {
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnDungeonTriggerAudio",
+        "charid",
+        vec![
+            PyRep::Integer(dungeon_id),
+            PyRep::String(audio_url.to_string()),
+        ],
+    );
+}
+
+/// Emits `OnDungeonTriggerMessage(messageType, messageID)`.
+pub fn emit_dungeon_trigger_message(
+    ctx: &ServerContext,
+    char_id: i64,
+    message_type: i64,
+    message_id: i64,
+) {
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnDungeonTriggerMessage",
+        "charid",
+        vec![
+            PyRep::Integer(message_type),
+            PyRep::Integer(message_id),
+        ],
+    );
+}
+
+/// Emits `OnDungeonTriggerMusic(dungeonID, musicTriggerID)`.
+pub fn emit_dungeon_trigger_music(
+    ctx: &ServerContext,
+    char_id: i64,
+    dungeon_id: i64,
+    music_trigger_id: i64,
+) {
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnDungeonTriggerMusic",
+        "charid",
+        vec![
+            PyRep::Integer(dungeon_id),
+            PyRep::Integer(music_trigger_id),
+        ],
+    );
+}
+
