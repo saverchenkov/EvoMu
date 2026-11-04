@@ -1011,7 +1011,7 @@ pub fn register_handlers(
         let sde_cdn = Arc::clone(&sde);
         router.register_handler(
             "eve_public.space.api.cdn.GetUpdateRequest",
-            Arc::new(move |_ctx, _any, dyn_msg| {
+            Arc::new(move |_ctx, any, dyn_msg| {
                 let cur_ver = match dyn_msg.get(1) {
                     Some(DynamicValue::Message(m)) => Some((
                         get_int_field(m, 1).unwrap_or(0) as u32,
@@ -1033,16 +1033,21 @@ pub fn register_handlers(
                             .to_string(),
                     ));
                 }
-                if cur_ver.is_some() {
-                    return Err((
-                        crate::quasar_gateway::STATUS_SERVICE_UNAVAILABLE,
-                        "External TLS CDN not configured; use local client maptag definitions"
-                            .to_string(),
-                    ));
+                if cur_ver.is_none()
+                    && any.type_url.starts_with("type.evetech.net/")
+                    && std::env::var("EVOMU_CDN_BASE_URL")
+                        .ok()
+                        .filter(|s| !s.trim().is_empty())
+                        .is_none()
+                {
+                    return Ok(GoogleAny {
+                        type_url: String::new(),
+                        value: Vec::new(),
+                    });
                 }
-                let latest = (24u32, 1u32, sde_cdn.solar_systems.len() as u32);
+                let latest = cur_ver.unwrap_or((24u32, 1u32, sde_cdn.solar_systems.len() as u32));
                 let mut out = Vec::new();
-                if no_local || cur_ver != Some(latest) {
+                if no_local || cur_ver.is_some() || cur_ver != Some(latest) {
                     let crc_val = ((sde_cdn.solar_systems.len() as u32).wrapping_mul(2654435761))
                         ^ ((sde_cdn.constellations.len() as u32).wrapping_mul(2246822519))
                         ^ ((sde_cdn.regions.len() as u32).wrapping_mul(3266489917));

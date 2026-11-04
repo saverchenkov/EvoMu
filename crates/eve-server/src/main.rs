@@ -118,6 +118,31 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Best-effort XMPP client sink on TCP port 5222 (`ejabberd_client_address`) so V24.01
+    // `XmppChatService.Login` (`xmpp/xmppConnection.py::_connectToXmppServer`) does not hit
+    // `ECONNREFUSED` (`socket.error`) and pop up `RetryChatServerConnection` when local chat
+    // is handled over Quasar / machoNet (`LSC`).
+    if let Ok(xmpp_listener) = TcpListener::bind((cfg.bind_address.as_str(), 5222u16)).await {
+        let xmpp_limiter = Arc::clone(&conn_limiter);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _addr)) = xmpp_listener.accept().await {
+                let Ok(permit) = Arc::clone(&xmpp_limiter).try_acquire_owned() else {
+                    continue;
+                };
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    let mut buf = [0u8; 512];
+                    loop {
+                        match stream.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {}
+                        }
+                    }
+                });
+            }
+        });
+    }
+
     info!(
         bind_address = %cfg.bind_address,
         bridge_port = cfg.bridge_port,

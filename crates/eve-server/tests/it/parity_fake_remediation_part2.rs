@@ -305,6 +305,22 @@ async fn test_parity_remediation_quasar_title_definitions_and_space_cdn() {
     assert_eq!(ach_http.status_code, 200);
     let ach_defs: Value = serde_json::from_slice(&ach_http.body).expect("ach defs JSON");
     assert_eq!(ach_defs.as_array().unwrap().len(), ach_mgr.sde_achievement_count);
+
+    // 5. GlobalConfig includes ejabberd_client_address (#298) and V24.01 desktop flatbuffer CDN
+    //    requests return 200 OK without triggering HTTPS handshake failures (#288, #304).
+    let gcfg = eve_server::bug_reporting::build_client_global_config(&ctx, Some("127.0.0.1"));
+    assert!(gcfg.contains_key("ejabberd_client_address"));
+    let evetech_ach_req = eve_proto::quasar::EvePublicRequest {
+        correlation_uuid: vec![1, 2, 3, 4],
+        payload: Some(eve_proto::quasar::GoogleAny {
+            type_url: "type.evetech.net/eve_public.achievement.definition.api.cdn.GetLatestRequest".to_string(),
+            value: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    let evetech_ach_rsp = ctx.quasar_gateway.handle_public_request(&s, &evetech_ach_req, None, false, 1_700_000_000);
+    assert_eq!(evetech_ach_rsp.status_code, STATUS_OK);
+    assert!(evetech_ach_rsp.payload.is_none());
 }
 
 #[tokio::test]

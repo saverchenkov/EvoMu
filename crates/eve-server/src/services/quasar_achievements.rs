@@ -1137,18 +1137,28 @@ pub fn register_achievement_handlers(
     let mgr_cdn = Arc::clone(&manager);
     router.register_handler(
         "eve_public.achievement.definition.api.cdn.GetLatestRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |_ctx, any, dyn_msg| {
             // V24.01 `FlatbufferContentProvider._send_http_request` unconditionally uses
-            // `httplib.HTTPSConnection` with CCP root CA verification. When a client sends
-            // `client_version` (`field 1`), returning `STATUS_SERVICE_UNAVAILABLE` lets
-            // `FlatbufferContentProvider._send_request` catch `ServiceUnavailableError` and
-            // fall back cleanly to local definitions without raising an uncaught `SSLError`.
-            if dyn_msg.get(1).is_some() {
-                return Err((
-                    crate::quasar_gateway::STATUS_SERVICE_UNAVAILABLE,
-                    "External TLS CDN not configured; use local client achievement definitions"
-                        .to_string(),
-                ));
+            // `httplib.HTTPSConnection` with CCP root CA verification.
+            // - When `current_version` (`field 1`) is provided by the client, echoing that
+            //   version in `checkpoint.version` makes `if local_version == version: return [None, None]`
+            //   succeed cleanly with 0 exceptions.
+            // - When `current_version` is absent (`None`) on the real V24.01 desktop client
+            //   (`type.evetech.net/...`) and no external TLS CDN is configured (`EVOMU_CDN_BASE_URL`),
+            //   returning an empty `200 OK` response (`payload = None`) makes `FlatbufferContentProvider.fetch`
+            //   take the `if response:` false branch and return `[None, None]` cleanly without attempting
+            //   an HTTPS fetch or raising `GenericNotFoundError` / `SSLError`.
+            if dyn_msg.get(1).is_none()
+                && any.type_url.starts_with("type.evetech.net/")
+                && std::env::var("EVOMU_CDN_BASE_URL")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+                    .is_none()
+            {
+                return Ok(GoogleAny {
+                    type_url: String::new(),
+                    value: Vec::new(),
+                });
             }
             let count = mgr_cdn.sde_achievement_count;
             let hash = &mgr_cdn.sde_achievement_hash;

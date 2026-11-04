@@ -887,7 +887,13 @@ impl PublicGatewayRouter {
             );
         };
         let norm_type = payload_any.normalized_type_name().to_string();
-        if self.descriptors.get_message(&norm_type).is_none() {
+        let has_descriptor = self.descriptors.get_message(&norm_type).is_some();
+        let has_handler = self
+            .handlers
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&norm_type);
+        if !has_descriptor && !has_handler {
             return build_response(
                 STATUS_NOT_FOUND,
                 format!("Unknown Quasar protobuf message type '{norm_type}'"),
@@ -911,7 +917,10 @@ impl PublicGatewayRouter {
             );
         }
 
-        let dyn_msg = match self.descriptors.decode_dynamic(&norm_type, &payload_any.value) {
+        let dyn_msg = match self
+            .descriptors
+            .decode_dynamic_or_wire(&norm_type, &payload_any.value)
+        {
             Ok(m) => m,
             Err(e) => {
                 return build_response(
@@ -960,6 +969,9 @@ impl PublicGatewayRouter {
         let pre_notice_len = self.pending_notices.read().unwrap_or_else(|e| e.into_inner()).len();
         let (status_code, status_message, rsp_payload) = match handler_opt {
             Some(handler) => match handler(&auth_ctx, payload_any, &dyn_msg) {
+                Ok(any_out) if any_out.type_url.is_empty() && any_out.value.is_empty() => {
+                    (STATUS_OK, "OK".to_string(), None)
+                }
                 Ok(any_out) => (STATUS_OK, "OK".to_string(), Some(any_out)),
                 Err((code, msg)) => (code, msg, None),
             },

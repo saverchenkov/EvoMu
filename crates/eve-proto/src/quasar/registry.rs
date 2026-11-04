@@ -578,16 +578,73 @@ impl QuasarDescriptorRegistry {
     }
 
     pub fn encode_dynamic(&self, msg: &DynamicQuasarMessage) -> Result<Vec<u8>, QuasarError> {
-        let desc = self
-            .get_message(&msg.full_name)
-            .ok_or_else(|| QuasarError::UnknownMessageType(msg.full_name.clone()))?;
+        let desc = self.get_message(&msg.full_name);
         let mut out = Vec::new();
         for (&field_num, val) in &msg.fields {
-            let fdesc = desc.fields.iter().find(|f| f.number == field_num);
+            let fdesc = desc.and_then(|d| d.fields.iter().find(|f| f.number == field_num));
             let ftype = fdesc.map(|f| f.field_type);
             self.encode_dynamic_field(field_num, ftype, val, &mut out)?;
         }
         Ok(out)
+    }
+
+    pub fn decode_dynamic_or_wire(
+        &self,
+        full_name_or_type_url: &str,
+        buf: &[u8],
+    ) -> Result<DynamicQuasarMessage, QuasarError> {
+        if self.get_message(full_name_or_type_url).is_some() {
+            return self.decode_dynamic(full_name_or_type_url, buf);
+        }
+        Self::decode_wire_fallback(full_name_or_type_url, buf, 0)
+    }
+
+    fn decode_wire_fallback(
+        full_name_or_type_url: &str,
+        buf: &[u8],
+        depth: usize,
+    ) -> Result<DynamicQuasarMessage, QuasarError> {
+        if depth > MAX_RECURSION_DEPTH {
+            return Err(QuasarError::RecursionLimitExceeded);
+        }
+        let wm = WireMessage::decode(buf)?;
+        let norm_name = Self::normalize_type_name(full_name_or_type_url).to_string();
+        let mut msg = DynamicQuasarMessage::new(norm_name);
+        for wf in wm.fields {
+            let decoded_val = match wf.value {
+                WireValue::Varint(v) => DynamicValue::Uint64(v),
+                WireValue::Fixed64(v) => DynamicValue::Fixed64(v),
+                WireValue::Fixed32(v) => DynamicValue::Fixed32(v),
+                WireValue::LengthDelimited(bytes) => {
+                    if bytes.is_empty() {
+                        DynamicValue::Message(Box::new(DynamicQuasarMessage::new("")))
+                    } else if let Ok(s) = std::str::from_utf8(&bytes) {
+                        if s.bytes().all(|b| !b.is_ascii_control() || b == b'\n' || b == b'\r' || b == b'\t') {
+                            DynamicValue::String(s.to_string())
+                        } else if let Ok(sub) = Self::decode_wire_fallback("", &bytes, depth + 1) {
+                            DynamicValue::Message(Box::new(sub))
+                        } else {
+                            DynamicValue::Bytes(bytes)
+                        }
+                    } else if let Ok(sub) = Self::decode_wire_fallback("", &bytes, depth + 1) {
+                        DynamicValue::Message(Box::new(sub))
+                    } else {
+                        DynamicValue::Bytes(bytes)
+                    }
+                }
+            };
+            match msg.fields.get_mut(&wf.field_number) {
+                Some(DynamicValue::Repeated(list)) => list.push(decoded_val),
+                Some(prev) => {
+                    let first = prev.clone();
+                    *prev = DynamicValue::Repeated(vec![first, decoded_val]);
+                }
+                None => {
+                    msg.fields.insert(wf.field_number, decoded_val);
+                }
+            }
+        }
+        Ok(msg)
     }
 
     fn encode_dynamic_field(
