@@ -1,4 +1,12 @@
-//! End-to-End Integration Journeys Part 3 (`journey:mining_loop` .. `journey:wormholes_filaments`).
+//! End-to-End Integration Journeys: Mining, Combat, Missions, Exploration, Wormholes/Filaments.
+//!
+//! Covering:
+//! - `journey:mining_loop`
+//! - `journey:pve_combat`
+//! - `journey:missions`
+//! - `journey:exploration`
+//! - `journey:wormholes_filaments`
+
 #![forbid(unsafe_code)]
 
 use eve_db::{InventoryFlag, InventoryItemRecord};
@@ -20,8 +28,10 @@ async fn call_rpc(
         .await
 }
 
+// parity: journey:mining_loop
 #[tokio::test]
 async fn test_journey_mining_loop() {
+    eve_testkit::attest(&["journey:mining_loop"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -165,8 +175,10 @@ async fn test_journey_mining_loop() {
     assert!(trit_qty > 0, "reprocessing Veldspar must yield Tritanium");
 }
 
+// parity: journey:pve_combat
 #[tokio::test]
 async fn test_journey_pve_combat() {
+    eve_testkit::attest(&["journey:pve_combat"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -285,8 +297,10 @@ async fn test_journey_pve_combat() {
     assert!(wallet_after > wallet_before, "wallet balance must increase after NPC bounty payout");
 }
 
+// parity: journey:missions
 #[tokio::test]
 async fn test_journey_missions() {
+    eve_testkit::attest(&["journey:missions"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -366,8 +380,10 @@ async fn test_journey_missions() {
     assert!(!offer_list.is_empty(), "LP store must have offers");
 }
 
+// parity: journey:exploration
 #[tokio::test]
 async fn test_journey_exploration() {
+    eve_testkit::attest(&["journey:exploration"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -448,8 +464,10 @@ async fn test_journey_exploration() {
     assert!(dscan_list.iter().any(|e| e.dict_get("typeID").and_then(|v| v.as_i64()).unwrap_or(0) > 0));
 }
 
+// parity: journey:wormholes_filaments
 #[tokio::test]
 async fn test_journey_wormholes_filaments() {
+    eve_testkit::attest(&["journey:wormholes_filaments"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();

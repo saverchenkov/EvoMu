@@ -1,4 +1,12 @@
-//! End-to-End Integration Journeys Part 4 (`journey:ship_loss` .. `journey:corporation`).
+//! End-to-End Integration Journeys: Ship Loss, Clones, Industry, Planetary, Corporation.
+//!
+//! Covering:
+//! - `journey:ship_loss`
+//! - `journey:clones`
+//! - `journey:industry`
+//! - `journey:planetary`
+//! - `journey:corporation`
+
 #![forbid(unsafe_code)]
 
 use eve_db::{corp_roles, InventoryFlag, InventoryItemRecord, IskCents};
@@ -18,8 +26,10 @@ async fn call_rpc(
         .await
 }
 
+// parity: journey:ship_loss
 #[tokio::test]
 async fn test_journey_ship_loss() {
+    eve_testkit::attest(&["journey:ship_loss"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -69,8 +79,10 @@ async fn test_journey_ship_loss() {
     assert!(format!("{km_rows:?}").contains("90000001"));
 }
 
+// parity: journey:clones
 #[tokio::test]
 async fn test_journey_clones() {
+    eve_testkit::attest(&["journey:clones"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -127,8 +139,10 @@ async fn test_journey_clones() {
     assert_eq!(sess.station_id, Some(60_003_760));
 }
 
+// parity: journey:industry
 #[tokio::test]
 async fn test_journey_industry() {
+    eve_testkit::attest(&["journey:industry"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -181,8 +195,10 @@ async fn test_journey_industry() {
     );
 }
 
+// parity: journey:planetary
 #[tokio::test]
 async fn test_journey_planetary() {
+    eve_testkit::attest(&["journey:planetary"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -233,8 +249,10 @@ async fn test_journey_planetary() {
     assert!(col.dict_get("planetID").is_some() || col.dict_get("resources").is_some());
 }
 
+// parity: journey:corporation
 #[tokio::test]
 async fn test_journey_corporation() {
+    eve_testkit::attest(&["journey:corporation"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
