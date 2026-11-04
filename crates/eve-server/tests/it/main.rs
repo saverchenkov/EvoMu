@@ -105,8 +105,6 @@ mod modules_advanced_tactical;
 mod modules_lances_depots_and_nanite;
 mod modules_cyno_portal;
 mod modules_scanners_mutaplasmids_dbuffs;
-mod parity_notify_batch_closure;
-mod parity_notify_batch_closure_part2;
 mod notify_contacts_emission;
 mod notify_corp_emission;
 mod notify_corp_emission_alliances;
@@ -320,28 +318,16 @@ mod quasar_faction_payment_schedule;
 mod capital_combat_and_escalation;
 mod economy_market_lookup_social;
 mod features_fitting_dogma_rpcs;
-mod open_feats_b36;
-mod open_feats_and_rpcs_b7;
 mod features_faction_warfare_rpcs;
 mod features_social_chat_rpcs;
-mod open_feats_and_rpcs_b11;
-mod open_feats_b42;
 mod features_wallet_journal_rpcs;
-mod open_feats_and_rpcs_b34;
 mod features_dogma_attribute_rpcs;
 mod features_ships_and_pve;
 mod features_sovereignty_upwell_rpcs;
-mod open_feats_and_rpcs_b7_fw;
-mod open_feats_and_rpcs_b7_social;
 mod features_fleet_broadcast_rpcs;
-mod open_feats_b42;
-mod open_feats_and_rpcs_b9;
 mod features_station_markets_rpcs;
-mod open_feats_and_rpcs_b5;
-mod open_feats_ships_pve_b5;
 mod quasar_ship_unlocks_and_stargates;
 mod features_drone_fighters_rpcs;
-mod open_feats_b37;
 mod features_character_customization_rpcs;
 mod paragon_hub_self_purchase;
 mod features_station_facilities_rpcs;
@@ -353,10 +339,6 @@ mod features_mining_resource_rpcs;
 mod features_structure_modules_rpcs;
 mod quasar_sov_hub_and_star_resources;
 mod serverops_and_shipcaster;
-mod parity_features_combat_part1;
-mod parity_features_combat_part2;
-mod parity_corp_combat_batch_closure;
-mod parity_corp_combat_batch_closure_part2;
 mod quasar_freelance_and_payment_schedules;
 mod quasar_paragon_hub_and_workforce;
 mod quasar_agency_and_seasons;
@@ -468,27 +450,6 @@ pub(crate) use {
     features_industry_manufacturing_rpcs as open_feats_and_rpcs_b33,
     features_station_markets_rpcs as open_feats_and_rpcs_b34,
 };
-pub(crate) use abyssal_pochven_void as abyssal_pochven_void_closure;
-#[allow(unused_imports)]
-pub(crate) use combat_ewar_logistics as combat_ewar_repairs_closure;
-#[allow(unused_imports)]
-pub(crate) use combat_repairs_smartbombs as combat_repairs_smartbomb_closure;
-#[allow(unused_imports)]
-pub(crate) use crimewatch_hostility as crimewatch_closure;
-#[allow(unused_imports)]
-pub(crate) use notify_structures_clones_pi as notify_real_emitters_batch7;
-#[allow(unused_imports)]
-pub(crate) use notify_space_corp_market as notify_real_emitters_batch9;
-#[allow(unused_imports)]
-pub(crate) use pochven_wormholes_travel as pochven_wormholes_travel_closure;
-#[allow(unused_imports)]
-pub(crate) use wormhole_pve_escalations as wormhole_pve_escalations_closure;
-#[allow(unused_imports)]
-pub(crate) use wormhole_special_systems as wormhole_special_systems_closure;
-#[allow(unused_imports)]
-pub(crate) use wormhole_statics_lifecycle as wormhole_statics_lifecycle_closure;
-#[allow(unused_imports)]
-pub(crate) use zarzakh_gate_lock as zarzakh_gate_lock_closure;
 mod features_bounties_ess;
 mod features_loyalty_and_lp;
 mod features_dynamic_bounties;
