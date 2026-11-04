@@ -208,7 +208,7 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
             }
             Some(Ok(PyRep::Bool(true)))
         }
-        ("structureControl", "TakeControl") => Some(crate::services::structure_control_ops::handle_take_control(ctx, session, args).await),
+        ("structureControl", "TakeControl") | ("structureControl", "TakeoverControl") => Some(crate::services::structure_control_ops::handle_take_control(ctx, session, args).await),
         ("structureControl", "ReleaseControl") => Some(crate::services::structure_control_ops::handle_release_control(ctx, session, args)),
         ("structureControl", "GetStructurePilot") => Some(crate::services::structure_control_ops::handle_get_structure_pilot(ctx, session, args)),
         ("structureControl", "BoardStructure") => Some(crate::services::structure_control_ops::handle_board_structure(ctx, session, args).await),

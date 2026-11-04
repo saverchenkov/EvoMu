@@ -630,4 +630,5 @@ mod parity_pve_dungeons_events_remediation;
 mod fleets_social_and_command;
 mod corporation_governance_and_shares;
 mod npc_navy_haulers_excavators;
+mod structures_upwell_and_acl;
 

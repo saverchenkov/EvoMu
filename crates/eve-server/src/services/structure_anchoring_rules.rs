@@ -182,15 +182,19 @@ pub fn check_anchor_position(
         }
         _ => false,
     });
-    let min_struct_dist = if profile.hull_class == HullClass::Flex {
-        FLEX_MIN_STRUCTURE_DISTANCE_M
-    } else {
-        MIN_ANCHOR_DISTANCE_M
-    };
     let structure_hit = snap.structures.values().any(|s| {
-        s.solar_system_id == sys_id
-            && s.state != STATE_DESTROYED
-            && DVec3::from_array(s.position).distance(pos) < min_struct_dist
+        if s.solar_system_id != sys_id || s.state == STATE_DESTROYED {
+            return false;
+        }
+        let other_is_flex = life::structure_profile(ctx, s.type_id)
+            .map(|p| p.hull_class == HullClass::Flex)
+            .unwrap_or(false);
+        let req_dist = if profile.hull_class == HullClass::Flex && other_is_flex {
+            FLEX_MIN_STRUCTURE_DISTANCE_M
+        } else {
+            MIN_ANCHOR_DISTANCE_M
+        };
+        DVec3::from_array(s.position).distance(pos) < req_dist
     });
     if station_hit || celestial_hit || structure_hit {
         return Err(err(

@@ -441,11 +441,22 @@ pub async fn handle(
                         .copied()
                 })
                 .unwrap_or(0.0);
-            let inertia = ship_type
+            let mut inertia = ship_type
                 .default_attributes
                 .get(&attr_ids::AGILITY)
                 .copied()
                 .unwrap_or(1.0);
+            if station_id == 60_015_187 || ch.solar_system_id == 30_100_000 {
+                let mult = ctx.db.with_snapshot(|s| {
+                    crate::services::station_structure_handlers::fulcrum_alignment_inertia_multiplier(
+                        s,
+                        char_id,
+                        Some(station_id),
+                        ch.solar_system_id,
+                    )
+                });
+                inertia *= mult;
+            }
             let mass = ship_type.mass;
             let radius = ship_type.radius;
 

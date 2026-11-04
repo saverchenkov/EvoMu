@@ -214,13 +214,31 @@ async fn engage_structure_control(
             return Ok((released, Some(e)));
         }
         let already_ctrl = ext.active_pilot_by_structure.get(&structure_id) == Some(&char_id);
+        let mut displaced = None;
         if let Some(&pilot) = ext.active_pilot_by_structure.get(&structure_id) {
             if pilot != char_id {
-                return Err(err(
-                    "StructureAlreadyControlled",
-                    format!("Structure {structure_id} is already controlled by pilot {pilot}"),
-                ));
+                let caller_is_manager = crate::services::station_structure::structure_lifecycle_rpc::has_structure_manager_role(snap, session, char_id, st.owner_corp_id);
+                let pilot_is_manager = snap.corporations.get(&st.owner_corp_id).is_some_and(|c| {
+                    let req_roles = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
+                    c.ceo_id == pilot || c.member_roles.get(&pilot).is_some_and(|&r| (r & req_roles) != 0)
+                }) || snap.corp_role_assignments.get(&(st.owner_corp_id, pilot)).is_some_and(|a| {
+                    let req_roles = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
+                    (a.roles & req_roles) != 0
+                });
+                let can_takeover = !board_mode && caller_is_manager && !pilot_is_manager;
+                if !can_takeover {
+                    return Err(err(
+                        "StructureAlreadyControlled",
+                        format!("Structure {structure_id} is already controlled by pilot {pilot}"),
+                    ));
+                }
+                let (dis_sys_id, restored_ship) = disengage_structure_control_in_snap(Some(ctx), snap, structure_id, pilot, None);
+                displaced = Some((structure_id, pilot, dis_sys_id, restored_ship));
             }
+        }
+        let mut all_released = released;
+        if let Some(disp) = displaced {
+            all_released.push(disp);
         }
         ext.active_pilot_by_structure.insert(structure_id, char_id);
         let prev = session
@@ -238,7 +256,7 @@ async fn engage_structure_control(
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.active_ship_id = structure_id;
         }
-        Ok((released, None))
+        Ok((all_released, None))
     })?;
     notify_released_structure_controllers(ctx, &released);
     if let Some(e) = verify_err {
@@ -589,7 +607,7 @@ pub(crate) fn sync_character_session(ctx: &ServerContext, session: &mut SessionS
 
 /// Synchronizes live `SessionState.ship_id` when a pilot was involuntarily displaced from
 /// controlling a structure (called from `ServerContext::sync_session` and `macho_listener`).
-pub(crate) fn apply_forced_session_ship_sync(ctx: &ServerContext, session: &mut SessionState) {
+pub fn apply_forced_session_ship_sync(ctx: &ServerContext, session: &mut SessionState) {
     if let Some(cid) = session.character_id {
         if let Some((old_structure_id, new_ship_opt)) =
             crate::services::fleet_social::fleet_social_persistence::with_social_state(ctx, |s| s.forced_session_ship_sync.remove(&cid))

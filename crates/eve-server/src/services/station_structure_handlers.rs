@@ -805,9 +805,11 @@ pub fn evaluate_station_service_standing_gate(
             if service_id == 23 {
                 snap.corporations.get(&ch.corporation_id).is_some_and(|corp| {
                     snap.characters.get(&corp.ceo_id).and_then(|ceo| ceo.war_faction_id).is_some_and(|f| matches!(f, 500_010 | 500_011))
+                        || snap.fw_runtime.corp_war_factions.get(&ch.corporation_id).copied().is_some_and(|f| matches!(f, 500_010 | 500_011))
                 })
             } else {
                 matches!(ch.war_faction_id, Some(500_010 | 500_011))
+                    || snap.fw_runtime.direct_enlisted_chars.get(&char_id).copied().is_some_and(|f| matches!(f, 500_010 | 500_011))
             }
         });
         if !ok {
@@ -858,4 +860,23 @@ pub fn evaluate_station_service_standing_gate(
         }
         Ok(PyRep::Bool(true))
     })
+}
+
+/// Computes Fulcrum alignment speed inertia multiplier (`feat:structures.fulcrum-alignment-services`).
+/// Pirate-enlisted pilots (500010 Angel / 500011 Guristas) at The Fulcrum (60015187) or in Zarzakh (30100000)
+/// receive the Deathless alignment speed buff (reducing inertia by 20%, 0.80x multiplier).
+pub fn fulcrum_alignment_inertia_multiplier(
+    snap: &WorldStateSnapshot,
+    char_id: i64,
+    station_id: Option<i64>,
+    sys_id: u32,
+) -> f64 {
+    if station_id == Some(60_015_187) || sys_id == 30_100_000 {
+        let is_pirate = snap.characters.get(&char_id).and_then(|c| c.war_faction_id).is_some_and(|wf| matches!(wf, 500_010 | 500_011))
+            || snap.fw_runtime.direct_enlisted_chars.get(&char_id).copied().is_some_and(|wf| matches!(wf, 500_010 | 500_011));
+        if is_pirate {
+            return 0.80;
+        }
+    }
+    1.0
 }
