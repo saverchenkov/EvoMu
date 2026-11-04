@@ -505,8 +505,13 @@ pub async fn activate_fw_complex_gate_in_space(
             b.mode = MovementMode::Stop;
         }
     }
+    let now_unix = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
         let occ = snap.fw_runtime.complex_occupants.entry(gate_id).or_default();
+        if occ.is_empty() {
+            // The capture timer only runs while a pilot holds the pocket: restart its step clock on entry.
+            snap.fw_runtime.complex_last_step_unix.insert(gate_id, now_unix);
+        }
         if !occ.iter().any(|&(c, _)| c == char_id) {
             occ.push((char_id, ship_id));
         }
@@ -878,8 +883,14 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
             continue;
         }
         let first_fac = present[0].1;
+        let hold_timer = |ctx: &ServerContext| {
+            ctx.db.with_mut_snapshot(|s| {
+                s.fw_runtime.complex_last_step_unix.insert(gid, now_unix);
+            });
+        };
         if present.iter().any(|&(_, f)| f != first_fac) {
             // Contested by opposing militia ships inside the capture pocket -> timer paused!
+            hold_timer(ctx);
             continue;
         }
         if first_fac != occ_fac {
@@ -888,6 +899,7 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
                 s.fw_runtime.complex_guards_cleared.get(&gid).copied().unwrap_or(false)
             }) || !guard_alive;
             if !guard_cleared {
+                hold_timer(ctx);
                 continue;
             }
             ctx.db.with_mut_snapshot(|s| {

@@ -38,7 +38,7 @@ fn call_esi(router: &EsiRouter, req: EsiHttpRequest, expected: u16) -> Value {
     crate::esi_universe_fw_complete::call(router, req, expected)
 }
 
-async fn rpc(
+pub(crate) async fn rpc(
     ctx: &ServerContext,
     sess: &mut SessionState,
     service: &str,
@@ -53,13 +53,13 @@ async fn rpc(
     ctx.dispatch_rpc(sess, service, bound_id, method, args, &HashMap::new(), None).await
 }
 
-async fn slash(ctx: &ServerContext, sess: &mut SessionState, cmd: &str) -> PyRep {
+pub(crate) async fn slash(ctx: &ServerContext, sess: &mut SessionState, cmd: &str) -> PyRep {
     rpc(ctx, sess, "slash", "SlashCmd", &[PyRep::String(cmd.into())])
         .await
         .unwrap_or_else(|e| panic!("slash `{cmd}` failed: {} ({})", e.code, e.message))
 }
 
-async fn select_gm_pilot(ctx: &ServerContext, sid: u64, user: &str, pass: &str, char_id: i64) -> SessionState {
+pub(crate) async fn select_gm_pilot(ctx: &ServerContext, sid: u64, user: &str, pass: &str, char_id: i64) -> SessionState {
     ctx.db.set_account_role(user, eve_db::service_roles::ROLE_GM_DEFAULT).expect("set_account_role");
     let mut sess = SessionState::new(sid);
     crate::common::login_pilot(ctx, &mut sess, user, pass).await;
@@ -70,7 +70,7 @@ async fn select_gm_pilot(ctx: &ServerContext, sid: u64, user: &str, pass: &str, 
     sess
 }
 
-async fn create_corp_and_alliance(
+pub(crate) async fn create_corp_and_alliance(
     ctx: &ServerContext,
     sess: &mut SessionState,
     corp_name: &str,
@@ -115,7 +115,7 @@ async fn create_corp_and_alliance(
     (corp_id, ally_id)
 }
 
-async fn lock_target(ctx: &ServerContext, sess: &mut SessionState, sys_id: u32, ship_id: i64, target_id: i64, dist_m: f64) {
+pub(crate) async fn lock_target(ctx: &ServerContext, sess: &mut SessionState, sys_id: u32, ship_id: i64, target_id: i64, dist_m: f64) {
     let sys = ctx.systems.get_or_spawn(sys_id);
     if let Some((_, tb)) = sys.get_ball_snapshot(target_id).await.unwrap() {
         sys.set_ball_position(ship_id, tb.position + DVec3::new(dist_m, 0.0, 0.0)).await;
@@ -123,7 +123,7 @@ async fn lock_target(ctx: &ServerContext, sess: &mut SessionState, sys_id: u32, 
     crate::sovereignty_equinox_gameplay::lock_target_via_rpc(ctx, sess, sys_id, ship_id, target_id).await;
 }
 
-async fn arm_ship_autocannons(ctx: &ServerContext, sess: &mut SessionState, char_id: i64) -> (i64, Vec<i64>) {
+pub(crate) async fn arm_ship_autocannons(ctx: &ServerContext, sess: &mut SessionState, char_id: i64) -> (i64, Vec<i64>) {
     for sk in [3300_u32, 3303, 3306, 11083, 3413, 3426] {
         slash(ctx, sess, &format!("/giveskill {sk} 5")).await;
     }
@@ -159,7 +159,7 @@ async fn arm_ship_autocannons(ctx: &ServerContext, sess: &mut SessionState, char
     (ship_id, guns)
 }
 
-async fn lock_and_destroy_target(
+pub(crate) async fn lock_and_destroy_target(
     ctx: &ServerContext,
     sess: &mut SessionState,
     sys_id: u32,

@@ -486,19 +486,16 @@ async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
         remove_ship_entosis_link(ctx, ship_id);
 
         if is_hub {
-            let has_schedule = ctx.db.with_mut_snapshot(|snap| {
+            // Command nodes never spawn here: the hub stays reinforced for 48h and nodes only appear once
+            // `tick_sov_gameplay` sees the timer expire inside the hub's next vulnerability window.
+            ctx.db.with_mut_snapshot(|snap| {
                 snap.sov_runtime.entosis_capture_progress.remove(&target_id);
                 if let Some(st) = snap.structures.get_mut(&target_id) {
                     st.state = "HullReinforced".into();
                     st.reinforced_until_unix = now_unix + 48 * 3_600;
                 }
                 crate::services::sov_warzone_dynamic::init_hub_campaign_scores_in_snap(snap, target_id, sys_id);
-                snap.sov_runtime.adm_vulnerability_windows.contains_key(&target_id)
-                    || snap.structure_vulnerability_windows.contains_key(&target_id)
             });
-            if !has_schedule {
-                crate::services::sov_warzone_dynamic::spawn_command_nodes_for_hub(ctx, target_id, sys_id).await;
-            }
             emit_sov_structures_updated(ctx, sys_id, &[target_id]);
             ctx.notify(
                 NotificationTarget::SolarSystem(sys_id),
@@ -1240,6 +1237,7 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
                 (st.type_id == TYPE_SOVEREIGNTY_HUB || sov_types.contains(&st.type_id))
                     && st.state == "HullReinforced"
                     && now_unix >= st.reinforced_until_unix
+                    && is_hub_within_vulnerability_window_in_snap(snap, st.structure_id, now_unix)
                     && !snap.sov_runtime.command_nodes.values().any(|&(hid, _, _)| hid == st.structure_id)
             })
             .map(|st| (st.structure_id, st.solar_system_id))

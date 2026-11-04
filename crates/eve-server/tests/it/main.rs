@@ -422,3 +422,4 @@ mod industry_live_support;
 mod login_campaign_and_milestone_claims;
 mod modules_grappler_hull_energizer_and_spool;
 mod fleet_object_handler_lifecycle;
+mod sov_fw_capture_live;
