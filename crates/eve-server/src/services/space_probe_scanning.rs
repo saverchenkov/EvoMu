@@ -19,6 +19,13 @@ use std::collections::HashMap;
 pub const PROBE_STATE_INACTIVE: i32 = 0; pub const PROBE_STATE_IDLE: i32 = 1; pub const PROBE_STATE_MOVING: i32 = 2;
 pub const PROBE_STATE_WARPING: i32 = 3; pub const PROBE_STATE_SCANNING: i32 = 4; pub const PROBE_STATE_RETURNING: i32 = 5;
 
+fn resolve_caller_solar_system(ctx: &ServerContext, session: &SessionState, char_id: i64) -> u32 {
+    session
+        .solar_system_id
+        .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id)))
+        .unwrap_or(0)
+}
+
 // parity: feat:scanning.probe-target-classes, feat:scanning.probe-range-deviation
 pub fn is_combat_scanner_probe(sde: &SdeRegistry, probe_type_id: u32) -> bool {
     sde.types
@@ -466,10 +473,7 @@ async fn handle_get_system_scan_mgr(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let caller_sys = session
-        .solar_system_id
-        .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id)))
-        .unwrap_or(30_000_142);
+    let caller_sys = resolve_caller_solar_system(ctx, session, char_id);
     if let Some(arg_sys) = args.first().and_then(|a| a.as_i64()).map(|v| v as u32) {
         if arg_sys != caller_sys && !session.has_gm_role() {
             return Some(Err(BridgeRpcError {
@@ -569,10 +573,7 @@ async fn handle_get_anomalies(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let caller_sys = session
-        .solar_system_id
-        .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id)))
-        .unwrap_or(30_000_142);
+    let caller_sys = resolve_caller_solar_system(ctx, session, char_id);
     if let Some(b) = bound_entry {
         if (b.object_id as u32) != caller_sys && !session.has_gm_role() {
             return Some(Err(BridgeRpcError {
@@ -609,10 +610,7 @@ async fn handle_request_scans(
         return None;
     }
 
-    let caller_sys = session
-        .solar_system_id
-        .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id)))
-        .unwrap_or(30_000_142);
+    let caller_sys = resolve_caller_solar_system(ctx, session, char_id);
     if let Some(b) = bound_entry {
         if (b.object_id as u32) != caller_sys && !session.has_gm_role() {
             return Some(Err(BridgeRpcError {
@@ -1110,7 +1108,7 @@ async fn handle_recover_probes(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let sys_id = bound_entry.map(|b| b.object_id as u32).or(session.solar_system_id).unwrap_or(30_000_142);
+    let sys_id = bound_entry.map(|b| b.object_id as u32).unwrap_or_else(|| resolve_caller_solar_system(ctx, session, char_id));
 
     let mut target_probe_ids: Vec<i64> = Vec::new();
     if let Some(PyRep::List(list) | PyRep::Tuple(list)) = args.first() {
@@ -1292,7 +1290,7 @@ async fn handle_recover_probes(
 
 async fn handle_reconnect_probes(ctx: &ServerContext, session: &mut SessionState, bound_entry: Option<&BoundObjectEntry>) -> Option<Result<PyRep, BridgeRpcError>> {
     let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-    let sys_id = bound_entry.map(|b| b.object_id as u32).or(session.solar_system_id).unwrap_or(30_000_142);
+    let sys_id = bound_entry.map(|b| b.object_id as u32).unwrap_or_else(|| resolve_caller_solar_system(ctx, session, char_id));
     let (auto_returned, expired_lost) = expire_overdue_probes_for_char(ctx, char_id, ctx.now_unix()).await;
     let ship_id = session.ship_id.unwrap_or(0);
     let mut reconnected_ids = Vec::new();
@@ -1319,7 +1317,7 @@ async fn handle_reconnect_probes(ctx: &ServerContext, session: &mut SessionState
 
 async fn handle_destroy_probe(ctx: &ServerContext, session: &mut SessionState, bound_entry: Option<&BoundObjectEntry>, args: &[PyRep]) -> Option<Result<PyRep, BridgeRpcError>> {
     let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-    let sys_id = bound_entry.map(|b| b.object_id as u32).or(session.solar_system_id).unwrap_or(30_000_142);
+    let sys_id = bound_entry.map(|b| b.object_id as u32).unwrap_or_else(|| resolve_caller_solar_system(ctx, session, char_id));
     let target_pid = args.first().and_then(|a| a.as_i64());
     let destroyed_probes: Vec<crate::router::ActiveScannerProbe> = if let Ok(mut map) = ctx.active_scanner_probes.write() {
         let ids: Vec<i64> = map.values().filter(|p| p.owner_char_id == char_id && p.state >= 0 && (target_pid.is_none() || target_pid == Some(p.probe_id))).map(|p| p.probe_id).collect();

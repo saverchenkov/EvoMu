@@ -1075,11 +1075,12 @@ fn handle_get_behavior_tree_manager(
     _args: &[PyRep],
     _kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
-    let (_, _char_id) = ServerContext::require_character(session)?;
+    let (_, char_id) = ServerContext::require_character(session)?;
     let sys_id = session
         .solar_system_id
         .or_else(|| bound_entry.and_then(|b| u32::try_from(b.object_id).ok()))
-        .unwrap_or(30_000_142);
+        .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id)))
+        .unwrap_or(0);
 
     let (active_trees, archetypes) = with_combat_runtime(ctx, |rt| {
         let matching: Vec<&crate::services::combat_crimewatch::ExtendedNpcEntity> = rt
@@ -1107,11 +1108,12 @@ async fn handle_get_debug_enemy_clusters(
     _args: &[PyRep],
     _kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
-    let (_, _char_id) = ServerContext::require_character(session)?;
+    let (_, char_id) = ServerContext::require_character(session)?;
     let sys_id = session
         .solar_system_id
         .or_else(|| bound_entry.and_then(|b| u32::try_from(b.object_id).ok()))
-        .unwrap_or(30_000_142);
+        .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id)))
+        .unwrap_or(0);
 
     let clusters_data = with_combat_runtime(ctx, |rt| {
         let mut grouped: HashMap<u32, Vec<&crate::services::combat_crimewatch::ExtendedNpcEntity>> =
