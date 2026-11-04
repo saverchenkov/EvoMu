@@ -310,17 +310,36 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     router.register_handler(
         "eve.membership.GetCharacterAllRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
-            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
-            let has_omega = read_identity_store(&db_mem, |st| {
-                st.user_entitlements
-                    .get(&uid)
-                    .is_some_and(|ents| ents.iter().any(|e| e.eq_ignore_ascii_case("omega")))
+            let cid = ctx.effective_character_id().unwrap_or(90000001) as i64;
+            let (corp_id, alliance_id) = db_mem.with_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get(&cid) {
+                    (ch.corporation_id, ch.alliance_id)
+                } else {
+                    (1000170, None)
+                }
             });
+
             let mut mem_attr = Vec::new();
-            encode_varint_field(1, u64::from(has_omega), &mut mem_attr); // active = 1 if omega else 0
-            encode_string_field(2, if has_omega { "omega" } else { "alpha" }, &mut mem_attr);
-            let now = ctx.received.as_ref().map(|t| t.seconds as u64).unwrap_or(0);
-            encode_varint_field(3, now.saturating_sub(86400 * 30), &mut mem_attr); // join date
+            // f#1: corporation_id (.eve.corporation.Identifier)
+            let mut corp_sub = Vec::new();
+            encode_varint_field(1, corp_id as u64, &mut corp_sub);
+            encode_bytes_field(1, &corp_sub, &mut mem_attr);
+
+            // f#2: alliance_membership (.eve.membership.AllMembership.AllianceMembership)
+            let mut all_sub = Vec::new();
+            if let Some(aid) = alliance_id {
+                let mut aid_sub = Vec::new();
+                encode_varint_field(1, aid as u64, &mut aid_sub);
+                encode_bytes_field(2, &aid_sub, &mut all_sub);
+            } else {
+                encode_varint_field(1, 1, &mut all_sub); // unaffiliated = true
+            }
+            encode_bytes_field(2, &all_sub, &mut mem_attr);
+
+            // f#3: faction_membership (.eve.membership.AllMembership.FactionMembership)
+            let mut fac_sub = Vec::new();
+            encode_varint_field(1, 1, &mut fac_sub); // unaffiliated = true
+            encode_bytes_field(3, &fac_sub, &mut mem_attr);
 
             let mut out = Vec::new();
             encode_bytes_field(1, &mem_attr, &mut out);
@@ -328,6 +347,56 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve.membership.GetCharacterAllResponse"
                 ),
+                value: out,
+            })
+        }),
+    );
+
+    // 5b. eve.membership.corporation.GetCharacterRequest -> eve.membership.corporation.GetCharacterResponse
+    let db_corp_mem = Arc::clone(&db);
+    router.register_handler(
+        "eve.membership.corporation.GetCharacterRequest",
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let cid = dyn_msg
+                .get(1)
+                .and_then(|v| match v {
+                    DynamicValue::Message(sub) => sub.get(1).and_then(|u| match u {
+                        DynamicValue::Uint64(n) => Some(*n as i64),
+                        DynamicValue::Int64(n) => Some(*n),
+                        DynamicValue::Uint32(n) => Some(*n as i64),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+                .or_else(|| ctx.effective_character_id().map(|c| c as i64))
+                .unwrap_or(90000001);
+
+            let (corp_id, title) = db_corp_mem.with_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get(&cid) {
+                    let corp_title = if snap.corporations.get(&ch.corporation_id).map(|c| c.ceo_id) == Some(cid) {
+                        "Chief Executive Officer".to_string()
+                    } else if (ctx.corp_role_mask & eve_db::corp_roles::ROLE_DIRECTOR) != 0 {
+                        "Director".to_string()
+                    } else {
+                        "Member".to_string()
+                    };
+                    (ch.corporation_id, corp_title)
+                } else {
+                    (1000170, "Member".to_string())
+                }
+            });
+
+            let mut out = Vec::new();
+            let mut corp_sub = Vec::new();
+            encode_varint_field(1, corp_id as u64, &mut corp_sub);
+            encode_bytes_field(1, &corp_sub, &mut out);
+
+            let mut attr_sub = Vec::new();
+            encode_string_field(1, &title, &mut attr_sub);
+            encode_bytes_field(2, &attr_sub, &mut out);
+
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.membership.corporation.GetCharacterResponse"),
                 value: out,
             })
         }),

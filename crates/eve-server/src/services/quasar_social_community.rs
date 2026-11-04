@@ -621,3 +621,82 @@ fn extract_ids(val: Option<&DynamicValue>) -> Vec<u32> {
             .unwrap_or_default(),
     }
 }
+
+/// Helper to publish `eve.medal.issued.Awarded` notice to a target session or broadcast.
+pub fn publish_medal_awarded_notice(
+    gateway: &PublicGatewayRouter,
+    scope: crate::quasar_gateway::NoticeScope,
+    medal_id: u64,
+    recipient_id: u64,
+    issuer_char_id: u64,
+    issuer_corp_id: u64,
+    reason: &str,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut medal_sub = Vec::new();
+    encode_seq_id(1, medal_id, &mut medal_sub);
+
+    let mut payload = Vec::new();
+    encode_bytes_field(1, &medal_sub, &mut payload);
+    encode_seq_id(2, recipient_id, &mut payload);
+    encode_seq_id(3, issuer_char_id, &mut payload);
+    encode_seq_id(4, issuer_corp_id, &mut payload);
+    encode_string_field(5, reason, &mut payload);
+
+    let any_msg = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.medal.issued.Awarded"),
+        value: payload,
+    };
+    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
+    Ok(delivered)
+}
+
+/// Helper to publish `eve.narrative.api.WarpVectorItemActivated` notice to a target session or broadcast.
+pub fn publish_narrative_warp_vector_notice(
+    gateway: &PublicGatewayRouter,
+    scope: crate::quasar_gateway::NoticeScope,
+    character_id: u64,
+    solar_system_id: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_seq_id(1, character_id, &mut payload);
+    encode_seq_id(3, solar_system_id, &mut payload);
+
+    let any_msg = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.narrative.api.WarpVectorItemActivated"),
+        value: payload,
+    };
+    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
+    Ok(delivered)
+}
+
+/// Helper to publish `eve.notification.Attributes` notice to a target session or broadcast.
+pub fn publish_notification_notice(
+    gateway: &PublicGatewayRouter,
+    scope: crate::quasar_gateway::NoticeScope,
+    notification_type_id: u64,
+    sender_char_id: u64,
+    was_read: bool,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_seq_id(1, notification_type_id, &mut payload);
+    let mut cid_sub = Vec::new();
+    encode_varint_field(1, sender_char_id, &mut cid_sub);
+    let mut sender_sub = Vec::new();
+    encode_bytes_field(1, &cid_sub, &mut sender_sub);
+    encode_bytes_field(2, &sender_sub, &mut payload);
+    let mut ts = Vec::new();
+    encode_varint_field(1, now_unix, &mut ts);
+    encode_bytes_field(3, &ts, &mut payload);
+    encode_varint_field(4, if was_read { 1 } else { 0 }, &mut payload);
+
+    let any_msg = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.notification.Attributes"),
+        value: payload,
+    };
+    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
+    Ok(delivered)
+}
+

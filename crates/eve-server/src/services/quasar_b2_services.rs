@@ -1004,6 +1004,100 @@ pub fn register_handlers(
             Ok(any("eve.fulfillment.RewardDeliveryResponse", out))
         }),
     );
+
+    // 35. eve.mission.api.GetCompletedCountRequest -> eve.mission.api.GetCompletedCountResponse
+    let db_mission = Arc::clone(&db);
+    router.register_handler(
+        "eve.mission.api.GetCompletedCountRequest",
+        Arc::new(move |ctx, _any, msg| {
+            let cid = extract_u64_checked(msg, 1)?
+                .map(|v| v as i64)
+                .or_else(|| ctx.effective_character_id().map(|c| c as i64))
+                .unwrap_or(90000001);
+            let completed_count = db_mission.with_snapshot(|snap| {
+                snap.characters.get(&cid).map(|_| 15u64).unwrap_or(0)
+            });
+            let mut out = Vec::new();
+            encode_varint_field(1, completed_count, &mut out);
+            Ok(any("eve.mission.api.GetCompletedCountResponse", out))
+        }),
+    );
+
+    // 36. eve.monolith.GetClusterInfoRequest -> eve.monolith.GetClusterInfoResponse
+    router.register_handler(
+        "eve.monolith.GetClusterInfoRequest",
+        Arc::new(move |_ctx, _any, _msg| {
+            let mut cluster = Vec::new();
+            encode_string_field(1, "macho.tranquility", &mut cluster);
+            encode_string_field(2, "release/v24.01", &mut cluster);
+            encode_varint_field(3, 1024, &mut cluster);
+            encode_varint_field(5, 1, &mut cluster);
+            encode_string_field(6, "24.01", &mut cluster);
+            let mut node = Vec::new();
+            for (fnr, val) in [(1, 1), (3, 1), (12, 1), (13, 1), (14, 0x7FFF), (15, 1)] {
+                encode_varint_field(fnr, val, &mut node);
+            }
+            encode_string_field(2, "esp://127.0.0.1:26001", &mut node);
+            let mut out = Vec::new();
+            encode_bytes_field(1, &cluster, &mut out);
+            encode_bytes_field(2, &node, &mut out);
+            Ok(any("eve.monolith.GetClusterInfoResponse", out))
+        }),
+    );
+
+    // 37. eve.monolith.character.location.GetRequest -> eve.monolith.character.location.GetResponse
+    let db_mono_loc = Arc::clone(&db);
+    router.register_handler(
+        "eve.monolith.character.location.GetRequest",
+        Arc::new(move |ctx, _any, msg| {
+            let cid = extract_u64_checked(msg, 1)?
+                .map(|v| v as i64)
+                .or_else(|| ctx.effective_character_id().map(|c| c as i64))
+                .unwrap_or(90000001);
+            let (sys_id, station_id) = db_mono_loc.with_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get(&cid) {
+                    (ch.solar_system_id as u64, ch.station_id.map(|s| s as u64).unwrap_or(60003760))
+                } else {
+                    (30000142, 60003760)
+                }
+            });
+            let mut out = Vec::new();
+            encode_id_msg(1, sys_id, &mut out);
+            encode_varint_field(2, 0, &mut out);
+            encode_id_msg(3, station_id, &mut out);
+            Ok(any("eve.monolith.character.location.GetResponse", out))
+        }),
+    );
+
+    // 38. eve.monolith.character.logonstatus.GetRequest -> eve.monolith.character.logonstatus.GetResponse
+    router.register_handler(
+        "eve.monolith.character.logonstatus.GetRequest",
+        Arc::new(move |_ctx, _any, _dyn_msg| {
+            let mut out = Vec::new();
+            encode_varint_field(1, 1, &mut out);
+            Ok(any("eve.monolith.character.logonstatus.GetResponse", out))
+        }),
+    );
+
+    // 39. eve.monolith.legacy.json.Request -> eve.monolith.legacy.json.Response
+    router.register_handler(
+        "eve.monolith.legacy.json.Request",
+        Arc::new(move |_ctx, _any, dyn_msg| {
+            let mut headers = Vec::new();
+            encode_string_field(3, "corr-legacy-dispatch", &mut headers);
+            encode_string_field(13, "monolith.dispatch", &mut headers);
+            encode_varint_field(17, 0, &mut headers);
+            encode_string_field(18, "success", &mut headers);
+            let body_str = match dyn_msg.get(3) {
+                Some(DynamicValue::String(s)) => format!(r#"{{"echo":"{}", "status":"ok", "dispatched":true}}"#, s),
+                _ => r#"{"status":"ok", "dispatched":true}"#.to_string(),
+            };
+            let mut out = Vec::new();
+            encode_bytes_field(1, &headers, &mut out);
+            encode_string_field(3, &body_str, &mut out);
+            Ok(any("eve.monolith.legacy.json.Response", out))
+        }),
+    );
 }
 
 /// Helper to publish `eve.academy.ships.events.Borrowed` notice to a target session or broadcast.
@@ -1019,7 +1113,6 @@ pub fn publish_academy_borrowed_notice(
     encode_id_msg(1, char_id, &mut payload);
     encode_id_msg(2, ship_type_id, &mut payload);
     encode_id_msg(3, ship_id, &mut payload);
-
     let any_msg = any("eve.academy.ships.events.Borrowed", payload);
     let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
     Ok(delivered)
@@ -1038,7 +1131,6 @@ pub fn publish_acl_membership_updated_notice(
     let mut ver = Vec::new();
     encode_varint_field(1, version as u64, &mut ver);
     encode_bytes_field(3, &ver, &mut payload);
-
     let any_msg = any("eve.acl.api.MembershipUpdated", payload);
     let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
     Ok(delivered)
@@ -1061,7 +1153,6 @@ pub fn publish_system_wide_dbuff_applied(
     encode_varint_field(1, units as u64, &mut mag);
     encode_varint_field(2, nanos as u64, &mut mag);
     encode_bytes_field(3, &mag, &mut payload);
-
     let any_msg = any("eve.dogma.modifier.system_wide.api.Applied", payload);
     let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
     Ok(delivered)
@@ -1078,7 +1169,6 @@ pub fn publish_system_wide_dbuff_removed(
     let mut payload = Vec::new();
     encode_id_msg(1, system_id, &mut payload);
     encode_id_msg(2, dbuff_id, &mut payload);
-
     let any_msg = any("eve.dogma.modifier.system_wide.api.Removed", payload);
     let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
     Ok(delivered)
@@ -1086,108 +1176,64 @@ pub fn publish_system_wide_dbuff_removed(
 
 /// Helper to publish `eve.duel.ChallengeIssued` notice.
 pub fn publish_duel_challenge_issued_notice(
-    gateway: &PublicGatewayRouter,
-    scope: crate::quasar_gateway::NoticeScope,
-    challenger_id: u64,
-    recipient_id: u64,
-    now_unix: u64,
+    gateway: &PublicGatewayRouter, scope: crate::quasar_gateway::NoticeScope,
+    challenger_id: u64, recipient_id: u64, now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut payload = Vec::new();
-    encode_id_msg(1, challenger_id, &mut payload);
-    encode_id_msg(2, recipient_id, &mut payload);
-
-    let any_msg = any("eve.duel.ChallengeIssued", payload);
-    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
-    Ok(delivered)
+    gateway.publish_notice(scope, any("eve.duel.ChallengeIssued", encode_duel_challenge_issued(challenger_id, recipient_id)), now_unix).map(|(_, d)| d)
 }
 
 /// Helper to publish `eve.duel.ChallengeAccepted` notice.
 pub fn publish_duel_challenge_accepted_notice(
-    gateway: &PublicGatewayRouter,
-    scope: crate::quasar_gateway::NoticeScope,
-    challenger_id: u64,
-    recipient_id: u64,
-    now_unix: u64,
+    gateway: &PublicGatewayRouter, scope: crate::quasar_gateway::NoticeScope,
+    challenger_id: u64, recipient_id: u64, now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut payload = Vec::new();
-    encode_id_msg(1, challenger_id, &mut payload);
-    encode_id_msg(2, recipient_id, &mut payload);
-
-    let any_msg = any("eve.duel.ChallengeAccepted", payload);
-    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
-    Ok(delivered)
+    gateway.publish_notice(scope, any("eve.duel.ChallengeAccepted", encode_duel_challenge_accepted(challenger_id, recipient_id)), now_unix).map(|(_, d)| d)
 }
 
 /// Helper to publish `eve.effect.combat.electronic.pvp.WarpScramblingApplied` notice.
 pub fn publish_warp_scrambling_applied_notice(
-    gateway: &PublicGatewayRouter,
-    scope: crate::quasar_gateway::NoticeScope,
-    scrambler_id: u64,
-    scrambled_id: u64,
-    module_type_id: u64,
-    now_unix: u64,
+    gateway: &PublicGatewayRouter, scope: crate::quasar_gateway::NoticeScope,
+    scrambler_id: u64, scrambled_id: u64, module_type_id: u64, now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
     let mut payload = Vec::new();
     encode_id_msg(1, scrambler_id, &mut payload);
     encode_id_msg(2, scrambled_id, &mut payload);
     encode_id_msg(3, module_type_id, &mut payload);
-
-    let any_msg = any("eve.effect.combat.electronic.pvp.WarpScramblingApplied", payload);
-    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
-    Ok(delivered)
+    gateway.publish_notice(scope, any("eve.effect.combat.electronic.pvp.WarpScramblingApplied", payload), now_unix).map(|(_, d)| d)
 }
 
 /// Helper to publish `eve.mission.epicarc.event.CharacterCompleted` notice.
 pub fn publish_epicarc_character_completed_notice(
-    gateway: &PublicGatewayRouter,
-    scope: crate::quasar_gateway::NoticeScope,
-    char_id: u64,
-    faction_id: u64,
-    now_unix: u64,
+    gateway: &PublicGatewayRouter, scope: crate::quasar_gateway::NoticeScope,
+    char_id: u64, faction_id: u64, now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
     let mut payload = Vec::new();
     encode_id_msg(1, char_id, &mut payload);
     encode_id_msg(2, faction_id, &mut payload);
-
-    let any_msg = any("eve.mission.epicarc.event.CharacterCompleted", payload);
-    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
-    Ok(delivered)
+    gateway.publish_notice(scope, any("eve.mission.epicarc.event.CharacterCompleted", payload), now_unix).map(|(_, d)| d)
 }
 
 /// Helper to publish `eve.fleet.api.AdvertCreated` notice.
 pub fn publish_fleet_advert_created_notice(
-    gateway: &PublicGatewayRouter,
-    scope: crate::quasar_gateway::NoticeScope,
-    fleet_id: u64,
-    char_id: u64,
-    solar_system_id: u64,
-    now_unix: u64,
+    gateway: &PublicGatewayRouter, scope: crate::quasar_gateway::NoticeScope,
+    fleet_id: u64, char_id: u64, solar_system_id: u64, now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
     let mut payload = Vec::new();
     encode_id_msg(1, fleet_id, &mut payload);
     encode_id_msg(2, char_id, &mut payload);
     encode_id_msg(3, solar_system_id, &mut payload);
-
-    let any_msg = any("eve.fleet.api.AdvertCreated", payload);
-    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
-    Ok(delivered)
+    gateway.publish_notice(scope, any("eve.fleet.api.AdvertCreated", payload), now_unix).map(|(_, d)| d)
 }
 
 /// Helper to publish `eve.fleet.member.Joined` notice.
 pub fn publish_fleet_member_joined_notice(
-    gateway: &PublicGatewayRouter,
-    scope: crate::quasar_gateway::NoticeScope,
-    fleet_id: u64,
-    member_id: u64,
-    now_unix: u64,
+    gateway: &PublicGatewayRouter, scope: crate::quasar_gateway::NoticeScope,
+    fleet_id: u64, member_id: u64, now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
     let mut payload = Vec::new();
     encode_id_msg(1, fleet_id, &mut payload);
     encode_id_msg(2, member_id, &mut payload);
-
-    let any_msg = any("eve.fleet.member.Joined", payload);
-    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
-    Ok(delivered)
+    gateway.publish_notice(scope, any("eve.fleet.member.Joined", payload), now_unix).map(|(_, d)| d)
 }
 
 /// Helper to encode duel ChallengeIssued message payload.
@@ -1216,20 +1262,12 @@ pub fn encode_dbs_setting_value(units: i64, nanos: i32) -> Vec<u8> {
 
 /// Helper to encode DBS Settings with min, max, and equilibrium multiplier fields.
 pub fn encode_dbs_settings(
-    min_units: i64,
-    min_nanos: i32,
-    max_units: i64,
-    max_nanos: i32,
-    eq_units: i64,
-    eq_nanos: i32,
+    min_units: i64, min_nanos: i32, max_units: i64, max_nanos: i32, eq_units: i64, eq_nanos: i32,
 ) -> Vec<u8> {
     let mut out = Vec::new();
-    let min_val = encode_dbs_setting_value(min_units, min_nanos);
-    let max_val = encode_dbs_setting_value(max_units, max_nanos);
-    let eq_val = encode_dbs_setting_value(eq_units, eq_nanos);
-    encode_bytes_field(6, &min_val, &mut out);
-    encode_bytes_field(7, &max_val, &mut out);
-    encode_bytes_field(9, &eq_val, &mut out);
+    encode_bytes_field(6, &encode_dbs_setting_value(min_units, min_nanos), &mut out);
+    encode_bytes_field(7, &encode_dbs_setting_value(max_units, max_nanos), &mut out);
+    encode_bytes_field(9, &encode_dbs_setting_value(eq_units, eq_nanos), &mut out);
     out
 }
 
@@ -1237,10 +1275,7 @@ pub fn encode_dbs_settings(
 pub fn encode_dbs_solar_system_details(solar_system_id: u64, sec_units: i64, sec_nanos: i32) -> Vec<u8> {
     let mut out = Vec::new();
     encode_id_msg(1, solar_system_id, &mut out);
-    let mut sec = Vec::new();
-    encode_varint_field(1, sec_units as u64, &mut sec);
-    encode_varint_field(2, sec_nanos as u64, &mut sec);
-    encode_bytes_field(2, &sec, &mut out);
+    encode_bytes_field(2, &encode_dbs_setting_value(sec_units, sec_nanos), &mut out);
     out
 }
 
@@ -1273,9 +1308,7 @@ pub fn encode_fighter_squad_state(
 /// Helper to encode epic arc progress stages.
 pub fn encode_epicarc_progress(arc_id: u32, branch_stage: u32, completed: bool) -> Vec<u8> {
     let mut out = Vec::new();
-    let mut arc = Vec::new();
-    encode_varint_field(1, arc_id as u64, &mut arc);
-    encode_bytes_field(1, &arc, &mut out);
+    encode_id_msg(1, arc_id as u64, &mut out);
     encode_varint_field(2, branch_stage as u64, &mut out);
     encode_varint_field(3, if completed { 1 } else { 0 }, &mut out);
     out
@@ -1290,27 +1323,22 @@ pub fn decode_wire_dynamic(full_name: &str, buf: &[u8]) -> DynamicQuasarMessage 
                 WireValue::Varint(v) => DynamicValue::Uint64(v),
                 WireValue::Fixed64(v) => DynamicValue::Fixed64(v),
                 WireValue::Fixed32(v) => DynamicValue::Fixed32(v),
-                WireValue::LengthDelimited(b) => {
-                    if let Ok(sub) = WireMessage::decode(&b) {
-                        if !sub.fields.is_empty() {
-                            let mut smsg = DynamicQuasarMessage::new(String::new());
-                            for sf in sub.fields {
-                                let sv = match sf.value {
-                                    WireValue::Varint(v) => DynamicValue::Uint64(v),
-                                    WireValue::Fixed64(v) => DynamicValue::Fixed64(v),
-                                    WireValue::Fixed32(v) => DynamicValue::Fixed32(v),
-                                    WireValue::LengthDelimited(sb) => DynamicValue::Bytes(sb),
-                                };
-                                smsg.set(sf.field_number, sv);
-                            }
-                            DynamicValue::Message(Box::new(smsg))
-                        } else {
-                            DynamicValue::Bytes(b)
+                WireValue::LengthDelimited(b) => match WireMessage::decode(&b) {
+                    Ok(sub) if !sub.fields.is_empty() => {
+                        let mut smsg = DynamicQuasarMessage::new(String::new());
+                        for sf in sub.fields {
+                            let sv = match sf.value {
+                                WireValue::Varint(v) => DynamicValue::Uint64(v),
+                                WireValue::Fixed64(v) => DynamicValue::Fixed64(v),
+                                WireValue::Fixed32(v) => DynamicValue::Fixed32(v),
+                                WireValue::LengthDelimited(sb) => DynamicValue::Bytes(sb),
+                            };
+                            smsg.set(sf.field_number, sv);
                         }
-                    } else {
-                        DynamicValue::Bytes(b)
+                        DynamicValue::Message(Box::new(smsg))
                     }
-                }
+                    _ => DynamicValue::Bytes(b),
+                },
             };
             msg.set(f.field_number, val);
         }
