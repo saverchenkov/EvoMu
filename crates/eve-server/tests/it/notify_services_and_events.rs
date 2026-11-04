@@ -926,8 +926,10 @@ async fn test_batch3_gm_and_admin_rpc_notifications() {
         .expect("IsFastCheckoutEnabledForUser after disable");
     assert_eq!(fc_disabled, PyRep::Bool(false));
 
-    // 9. OnCampaignEnrollmentChanged via /campaign enroll 2
-    ctx.dispatch_rpc(&mut s1, "slash", None, "SlashCmd", &[PyRep::String("/campaign enroll 2".into())], &HashMap::new(), None)
+    // 9. OnCampaignEnrollmentChanged via /campaign enroll
+    let campaigns = eve_server::services::campaigns_and_milestones::get_sde_login_campaigns(&ctx.sde);
+    let target_campaign = campaigns.keys().copied().next().unwrap_or(2261);
+    ctx.dispatch_rpc(&mut s1, "slash", None, "SlashCmd", &[PyRep::String(format!("/campaign enroll {target_campaign}"))], &HashMap::new(), None)
         .await
         .expect("/campaign enroll");
     let ev = events(&ctx, P1, "OnCampaignEnrollmentChanged");
@@ -6222,7 +6224,8 @@ async fn destroy_npc_ball(
             let _ = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gid), PyRep::String(effect_name.into())]).await;
         }
     }
-    sys_handle.step_manual(5.0).await.unwrap();
+    ctx.advance_secs(10);
+    sys_handle.step_manual(10.0).await.unwrap();
     let mut sync_weapons = false;
     for idx in 0..8_i64 {
         let gid = gun_base + idx * 2;
