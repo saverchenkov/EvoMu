@@ -1074,11 +1074,27 @@ fn handle_milestone_claim_rewards(
             ));
         }
 
+        // Milestone progression tracking: preceding milestone must be claimed first
+        if milestone_id > 1 && !claimed.contains(&(milestone_id - 1)) {
+            return Err(err(
+                "MilestonePrerequisiteNotMet",
+                format!("Milestone {} must be claimed before milestone {milestone_id}", milestone_id - 1),
+            ));
+        }
+
         let char_rec = snap
             .characters
             .get_mut(&char_id)
             .ok_or_else(|| err("CharacterNotFound", format!("Character {char_id} not found")))?;
         char_rec.balance = eve_db::IskCents(char_rec.balance.0.saturating_add(add_cents));
+        let bal_after = char_rec.balance;
+        snap.append_journal(
+            char_id,
+            "MilestoneReward",
+            eve_db::IskCents(add_cents),
+            bal_after,
+            format!("Login Milestone {milestone_id} Achieved"),
+        );
 
         claimed.push(milestone_id);
         save_cosmetics_ui_state(snap, &ext);

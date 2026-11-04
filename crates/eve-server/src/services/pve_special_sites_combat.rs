@@ -427,22 +427,28 @@ pub async fn on_special_site_npc_destroyed_core(
                 let mut st = crate::services::season_manager::load_season_state_from_blobs(snap, cid);
                 st.season_points = st.season_points.saturating_add(reward_points);
                 crate::services::season_manager::save_season_state_to_blobs(snap, cid, &st);
+                let mut loot_specs = vec![(loot_item_id, loot_tid, 1)];
+                let booster_tid = if _sde.types.contains_key(&9950) { 9950 } else { 15457 };
+                if booster_tid != loot_tid && _sde.types.contains_key(&booster_tid) {
+                    loot_specs.push((loot_item_id + 1, booster_tid, 1));
+                }
                 deposit_loot_into_ship_or_container_in_snapshot(
                     snap,
                     _sde,
                     cid,
                     solar_system_id,
                     ship_id,
-                    &[(loot_item_id, loot_tid, 1)],
+                    &loot_specs,
                 )
             } else {
                 None
             }
         });
         if let Some(container_id) = spawned_cid {
+            let cont_type = if _sde.types.contains_key(&17996) { 17996 } else { 23 };
             let sys_handle = _systems.get_or_spawn(solar_system_id);
             let _ = sys_handle
-                .spawn_ball(make_site_npc_ball(container_id, 23, DVec3::new(1.5e11, 2.0e10, -1.0e11)))
+                .spawn_ball(make_site_npc_ball(container_id, cont_type, DVec3::new(1.5e11, 2.0e10, -1.0e11)))
                 .await;
         }
     }
@@ -520,10 +526,23 @@ pub async fn ensure_seasonal_event_sites_for_system(
             .sde
             .types
             .values()
-            .find(|t| t.published && t.group_id == 550)
+            .find(|t| t.published && (t.name.contains("Corpus Crimson") || t.group_id == 550))
             .map(|t| t.type_id)
-            .unwrap_or(24242);
-        let loot_type_id = if ctx.sde.types.contains_key(&2048) { 2048 } else { 34 };
+            .unwrap_or(17615);
+        let escort_type_id = ctx
+            .sde
+            .types
+            .values()
+            .find(|t| t.published && (t.name.contains("Crimson Sentinel") || t.name.contains("Crimson Lord")))
+            .map(|t| t.type_id)
+            .unwrap_or(17993);
+        let loot_type_id = if ctx.sde.types.contains_key(&2838) {
+            2838
+        } else if ctx.sde.types.contains_key(&2048) {
+            2048
+        } else {
+            34
+        };
 
         let new_site = with_pve_special_reg(ctx, |reg| {
             reg.next_seq += 1;
@@ -577,11 +596,13 @@ pub async fn ensure_seasonal_event_sites_for_system(
         );
         let escort_ball = make_site_npc_ball(
             new_site.escort_ball_ids[0],
-            new_site.boss_type_id,
+            escort_type_id,
             pos + DVec3::new(-2_500.0, 0.0, 0.0),
         );
-        let _ = sys_handle.spawn_ball(boss_ball).await;
-        let _ = sys_handle.spawn_ball(escort_ball).await;
+        let boss_cs = build_special_site_npc_combat_state(&ctx.sde, new_site.boss_type_id);
+        let escort_cs = build_special_site_npc_combat_state(&ctx.sde, escort_type_id);
+        let _ = sys_handle.spawn_ball_with_combat(boss_ball, boss_cs).await;
+        let _ = sys_handle.spawn_ball_with_combat(escort_ball, escort_cs).await;
         active_sites.push(new_site);
     }
 

@@ -19,7 +19,7 @@
 #![forbid(unsafe_code)]
 
 use crate::quasar_gateway::{
-    PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
+    NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
     STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
@@ -1001,6 +1001,7 @@ pub fn register_handlers(
     {
         let sde_ai = Arc::clone(&sde);
         let db_ai = Arc::clone(&db);
+        let pending_ai = Arc::clone(&router.pending_notices);
         router.register_handler(
             "eve_public.ai.assistant.chat.api.QueryRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
@@ -1076,6 +1077,21 @@ pub fn register_handlers(
                     encode_bytes_field(2, &param, &mut fmt_msg);
                 }
                 encode_bytes_field(3, &fmt_msg, &mut out);
+
+                let scope = match ctx.effective_character_id() {
+                    Some(cid) => NoticeScope::Character(cid),
+                    None => NoticeScope::Broadcast,
+                };
+                let mut notice_val = Vec::new();
+                encode_string_field(1, &query, &mut notice_val);
+                encode_string_field(2, &response_text, &mut notice_val);
+                pending_ai.write().unwrap_or_else(|e| e.into_inner()).push((
+                    scope,
+                    GoogleAny {
+                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.ai.assistant.chat.api.Queried"),
+                        value: notice_val,
+                    },
+                ));
 
                 Ok(GoogleAny {
                     type_url: format!(

@@ -1,10 +1,6 @@
-//! E2E parity closure tests for the 13 `feat:*` rows in `pve`, `ui`, and `quasar`:
+//! E2E parity closure tests for `pve`, `ui`, and `quasar`:
 //! - `feat:pve.seasons-challenges`
-//! - `feat:pve.events-sites`
 //! - `feat:pve.project-discovery`
-//! - `feat:pve.dungeon-system`
-//! - `feat:pve.milestones`
-//! - `feat:pve.mercenary-tactical-ops`
 //! - `feat:ui.agency`
 //! - `feat:ui.photo-mode`
 //! - `feat:ui.info-panels`
@@ -114,10 +110,9 @@ async fn quasar_publish_event(
 
 #[tokio::test]
 async fn test_pve_seasons_events_and_project_discovery() {
-    // parity: feat:pve.seasons-challenges, feat:pve.events-sites, feat:pve.project-discovery
+    // parity: feat:pve.seasons-challenges, feat:pve.project-discovery
     eve_testkit::attest(&[
         "feat:pve.seasons-challenges",
-        "feat:pve.events-sites",
         "feat:pve.project-discovery",
     ]);
 
@@ -341,12 +336,9 @@ async fn test_pve_seasons_events_and_project_discovery() {
 
 #[tokio::test]
 async fn test_pve_dungeons_milestones_and_mto() {
-    // parity: feat:pve.dungeon-system, feat:pve.milestones, feat:ui.milestone-logon, feat:pve.mercenary-tactical-ops
+    // parity: feat:ui.milestone-logon
     eve_testkit::attest(&[
-        "feat:pve.dungeon-system",
-        "feat:pve.milestones",
         "feat:ui.milestone-logon",
-        "feat:pve.mercenary-tactical-ops",
     ]);
 
     let ctx = new_ctx();

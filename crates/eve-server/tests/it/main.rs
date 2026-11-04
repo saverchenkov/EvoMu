@@ -625,4 +625,5 @@ mod navigation_features_remediated_suite;
 mod navigation_features_remediated_part2;
 mod parity_tactical_modules_remediation;
 mod parity_tactical_modules_remediation_part2;
+mod parity_pve_dungeons_events_remediation;
 

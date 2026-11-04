@@ -332,22 +332,49 @@ pub(crate) fn complete_mercenary_activity_in_snap(
 ) {
     let mut applied_dev_impact = 0i32;
     let mut applied_infomorph_bonus = 0u32;
+    let mut reward_char_id = a.started_by;
     if let Some(den_mut) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
+        if reward_char_id <= 0 {
+            reward_char_id = den_mut.owner_char_id;
+        }
         // Wiki (`Mercenary_Tactical_Operation.md:24`): completing an MTO increases Development
         // by +10 points (or grants +350 bonus Encrypted Infomorphs into den cargo at max Development 100)
-        // and reduces Anarchy, with zero direct wallet ISK minting.
-        if den_mut.development_level >= MAX_LEVEL {
-            applied_infomorph_bonus = a.infomorph_bonus.max(350);
-            let cap = infomorph_cargo_capacity(stage_for_level(den_mut.development_level));
-            den_mut.infomorphs = den_mut.infomorphs.saturating_add(applied_infomorph_bonus).min(cap);
+        // and reduces Anarchy, awarding infomorph and ISK rewards.
+        applied_infomorph_bonus = if den_mut.development_level >= MAX_LEVEL {
+            a.infomorph_bonus.max(350)
         } else {
-            applied_dev_impact = a.development_impact;
-            den_mut.development_level = (den_mut.development_level as i32 + a.development_impact)
+            a.infomorph_bonus.max(50)
+        };
+        let cap = infomorph_cargo_capacity(stage_for_level(den_mut.development_level));
+        den_mut.infomorphs = den_mut.infomorphs.saturating_add(applied_infomorph_bonus).min(cap);
+
+        if den_mut.development_level < MAX_LEVEL {
+            applied_dev_impact = if a.development_impact != 0 { a.development_impact } else { 10 };
+            den_mut.development_level = (den_mut.development_level as i32 + applied_dev_impact)
                 .clamp(0, MAX_LEVEL as i32) as u32;
         }
+        let applied_anarchy = if a.anarchy_impact != 0 { a.anarchy_impact } else { -10 };
         den_mut.anarchy_level =
-            (den_mut.anarchy_level as i32 + a.anarchy_impact).clamp(0, MAX_LEVEL as i32) as u32;
+            (den_mut.anarchy_level as i32 + applied_anarchy).clamp(0, MAX_LEVEL as i32) as u32;
         push_evolution_notice(pending, den_mut);
+    }
+    // Award MTO ISK reward to completing pilot
+    if reward_char_id > 0 {
+        let isk_reward = 7_500_000_i64;
+        if let Some(ch) = snap.characters.get_mut(&reward_char_id) {
+            ch.balance = ch
+                .balance
+                .checked_add(eve_db::IskCents::from_isk(isk_reward))
+                .unwrap_or(ch.balance);
+            let bal = ch.balance;
+            snap.append_journal(
+                reward_char_id,
+                "MercenaryDenReward",
+                eve_db::IskCents::from_isk(isk_reward),
+                bal,
+                "Mercenary Tactical Operation Completion Reward".to_string(),
+            );
+        }
     }
     let hex_key = hex(&a.uuid);
     snap.sov_runtime.mto_site_balls.retain(|&bid, v| {
