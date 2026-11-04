@@ -936,6 +936,9 @@ pub async fn handle(
                     {
                         return Err(BridgeRpcError { code: "ItemNotReprocessable".into(), message: format!("Item type {} ({}) has no SDE typeMaterials and cannot be reprocessed", item.type_id, inv_type.name) });
                     }
+                    if crate::services::inventory_fitting::fitting_containers_ships::container_has_active_audit_log_snap(snap, item_id, now_unix as u64) {
+                        return Err(BridgeRpcError { code: "ContainerHasActiveAuditLog".into(), message: format!("Container {item_id} has audit log entries younger than 3 weeks and cannot be reprocessed") });
+                    }
                     if item.singleton || snap.items.values().any(|child| child.location_id == item_id) {
                         return Err(BridgeRpcError { code: "ItemMustBeRepackaged".into(), message: format!("Item {item_id} must be emptied and repackaged before reprocessing") });
                     }

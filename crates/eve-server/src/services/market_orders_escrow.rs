@@ -286,6 +286,12 @@ pub fn handle_orders_escrow(
                                     message: format!("Item of type {type_id} in station {station_id} hangar must be repackaged before selling on the market"),
                                 });
                             }
+                            if let Some(cand) = snap.items.values().find(|i| i.type_id == type_id && i.owner_id == char_id && snap.items.get(&i.location_id).is_some_and(|p| crate::services::inventory_fitting::fitting_containers_ships::is_container_group(ctx.sde.types.get(&p.type_id).map(|t| t.group_id).unwrap_or(0), p.type_id))) {
+                                return Err(BridgeRpcError {
+                                    code: "ItemInsideContainer".into(),
+                                    message: format!("Item {} is inside a container and must be moved to item hangar before selling", cand.item_id),
+                                });
+                            }
                             return Err(BridgeRpcError {
                                 code: "InsufficientInventoryForSellOrder".into(),
                                 message: format!("Seller does not have {quantity_i32}x repackaged consumable type {type_id} in station {station_id} hangar"),
@@ -301,6 +307,12 @@ pub fn handle_orders_escrow(
                             message: format!("Item {item_id} not found in seller inventory"),
                         });
                     };
+                    if snap.items.get(&item.location_id).is_some_and(|p| crate::services::inventory_fitting::fitting_containers_ships::is_container_group(ctx.sde.types.get(&p.type_id).map(|t| t.group_id).unwrap_or(0), p.type_id)) {
+                        return Err(BridgeRpcError {
+                            code: "ItemInsideContainer".into(),
+                            message: format!("Item {item_id} is inside a container and must be moved to item hangar before selling"),
+                        });
+                    }
                     if is_courier_item(item_id) {
                         return Err(BridgeRpcError {
                             code: "ItemCannotBeSold".into(),

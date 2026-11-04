@@ -1290,9 +1290,16 @@ async fn handle_open_shipping_unit_storage(
         }
     }
 
+    let now_unix = ctx.now_unix_secs();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(meta) = snap.sp6_lifecycle.space_object_meta.get_mut(&unit_id) {
+            if meta.anchor_completed || meta.anchor_start_unix.is_some() {
+                meta.anchor_start_unix = Some(now_unix);
+            }
+        }
+    });
     let is_alsc = unit_type.map(|t| t.group_id == 448).unwrap_or(false);
     if is_alsc {
-        let now_unix = ctx.now_unix_secs();
         fitting_containers_ships::write_container_ship_state(ctx, |st| {
             st.alsc_logs.entry(unit_id).or_default().push(fitting_containers_ships::AlscLogEntry {
                 timestamp_unix: now_unix,

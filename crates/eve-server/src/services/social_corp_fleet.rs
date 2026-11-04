@@ -1160,9 +1160,12 @@ pub async fn handle(
             let target_id_or_div = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 for &iid in &item_ids {
-                    let Some(_) = snap.items.get(&iid) else {
+                    let Some(item) = snap.items.get(&iid) else {
                         return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {iid} not found") });
                     };
+                    if snap.items.get(&item.location_id).is_some_and(|p| crate::services::inventory_fitting::fitting_containers_ships::is_container_group(ctx.sde.types.get(&p.type_id).map(|t| t.group_id).unwrap_or(0), p.type_id)) {
+                        return Err(BridgeRpcError { code: "ItemInsideContainer".into(), message: format!("Item {iid} is inside a container and must be moved to item hangar before delivery") });
+                    }
                     if snap.item_custom_names.get(&iid).is_some_and(|name| name.starts_with("courier_cargo:")) {
                         return Err(BridgeRpcError { code: "ItemCannotBeTransferred".into(), message: "Courier mission items cannot be transferred to corporation hangars or members".into() });
                     }

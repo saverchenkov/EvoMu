@@ -1053,6 +1053,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             let first_id = item_ids[0];
             let alsc_locked = read_container_ship_state(ctx)
                 .alsc_locked_items;
+            let now_unix = ctx.now_unix();
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let (active_ship_id, char_dock, char_sys) = snap
@@ -1103,6 +1104,9 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     }
                     if item.flag == InventoryFlag::Locked || alsc_locked.contains(&item_id) || snap.is_item_locked_in_contract_or_job(item_id) {
                         return Err(BridgeRpcError { code: "ItemLocked".into(), message: format!("Item {item_id} is locked by an active contract, industry job, or container") });
+                    }
+                    if fitting_containers_ships::container_has_active_audit_log_snap(snap, item_id, now_unix) {
+                        return Err(BridgeRpcError { code: "ContainerHasActiveAuditLog".into(), message: format!("Container {item_id} has audit log entries younger than 3 weeks and cannot be trashed") });
                     }
                     if item.flag as u16 == 36 {
                         return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Cannot trash item {item_id} in Asset Safety") });

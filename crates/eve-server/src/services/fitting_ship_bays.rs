@@ -374,7 +374,7 @@ pub(crate) async fn ship_jettison(
             let item_vol = fitting_containers_ships::effective_item_unit_volume(&ctx.sde, it) * (it.quantity as f64);
             total_vol += item_vol;
         }
-        let jetcan_cap = ctx.sde.types.get(&23).map(|t| t.capacity).unwrap_or(27_500.0);
+        let jetcan_cap = ctx.sde.types.get(&23).map(|t| t.capacity.max(55_000.0)).unwrap_or(55_000.0);
         if total_vol > jetcan_cap + 1e-4 {
             return Err(err(
                 "CapacityExceeded",
@@ -599,11 +599,12 @@ pub(crate) async fn ship_drop(
             if drop_qty > orig_qty { return Err(err("UserError", "Drop quantity cannot exceed item quantity")); }
 
             let spawn_pos = ship_pos + DVec3::new(100.0 + ((dropped_items.len() as f64) * 50.0), 0.0, 0.0);
+            let is_freight = ctx.sde.types.get(&tid).is_some_and(|t| t.group_id == 649);
             let launched_id = if orig_qty == drop_qty {
                 let it = snap.items.get_mut(&iid).unwrap();
                 it.location_id = sys_id as i64;
                 it.flag = InventoryFlag::None;
-                it.singleton = orig_singleton;
+                it.singleton = orig_singleton || is_freight;
                 it.owner_id = drop_owner;
                 it.version += 1;
                 iid
@@ -622,7 +623,7 @@ pub(crate) async fn ship_drop(
                         location_id: sys_id as i64,
                         flag: InventoryFlag::None,
                         quantity: drop_qty,
-                        singleton: orig_singleton,
+                        singleton: orig_singleton || is_freight,
                         version: 1,
                         ..Default::default()
                     },
@@ -1137,6 +1138,7 @@ pub(crate) async fn ship_scoop_and_store(
         let it_type = ctx.sde.types.get(&it.type_id);
         let it_cat = it_type.map(|t| t.category_id).unwrap_or(0);
         let it_grp = it_type.map(|t| t.group_id).unwrap_or(0);
+        let it_singleton = it.singleton;
         let it_vol = effective_item_unit_volume(&ctx.sde, it) * (it.quantity as f64);
         let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
         if !crate::services::mobile_deployables::can_deployable_be_scooped(it_grp) {
@@ -1345,7 +1347,7 @@ pub(crate) async fn ship_scoop_and_store(
         let it_mut = snap.items.get_mut(&item_id).unwrap();
         it_mut.location_id = host_ship_id;
         it_mut.flag = target_flag;
-        it_mut.singleton = it_cat == 6 || is_deployable;
+        it_mut.singleton = it_cat == 6 || is_deployable || it_singleton;
         it_mut.version += 1;
         if to_transfer {
             it_mut.owner_id = char_id;

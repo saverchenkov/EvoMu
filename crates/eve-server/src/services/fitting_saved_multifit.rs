@@ -794,6 +794,9 @@ pub(crate) async fn handle_ships_and_services(
                             message: format!("Cannot repackage item {item_id} while it is fitted in slot {:?}", item.flag),
                         });
                     }
+                    if snap.items.get(&item.location_id).is_some_and(|p| fitting_containers_ships::is_container_group(ctx.sde.types.get(&p.type_id).map(|t| t.group_id).unwrap_or(0), p.type_id)) {
+                        return Err(BridgeRpcError { code: "ItemInsideContainer".into(), message: format!("Item {item_id} is inside a container and must be moved to item hangar before repackaging") });
+                    }
                     if item.location_id != station_id {
                         return Err(BridgeRpcError {
                             code: "OwnershipOrLocationViolation".into(),
@@ -811,6 +814,9 @@ pub(crate) async fn handle_ships_and_services(
                             code: "ItemLocked".into(),
                             message: format!("Item {item_id} is locked in an active contract or industry job"),
                         });
+                    }
+                    if fitting_containers_ships::container_has_active_audit_log_snap(snap, item_id, now_unix as u64) {
+                        return Err(BridgeRpcError { code: "ContainerHasActiveAuditLog".into(), message: format!("Container {item_id} has audit log entries younger than 3 weeks and cannot be repackaged") });
                     }
                     let has_contained_items = snap.items.values().any(|o| o.item_id != item_id && o.location_id == item_id && o.quantity > 0);
                     if has_contained_items {
@@ -1323,6 +1329,12 @@ pub(crate) async fn handle_ships_and_services(
                             "solarsystemid",
                             vec![PyRep::Integer(item_id), PyRep::String(label.to_string())],
                         );
+                    }
+                    if let Some(it) = ctx.db.with_snapshot(|s| s.items.get(&item_id).cloned()) {
+                        let grp = ctx.sde.types.get(&it.type_id).map(|t| t.group_id).unwrap_or(0);
+                        if fitting_containers_ships::is_container_group(grp, it.type_id) {
+                            fitting_containers_ships::record_container_rename_log(ctx, char_id, item_id, it.type_id);
+                        }
                     }
                     Some(Ok(PyRep::keyval([
                         ("itemID", PyRep::Integer(item_id)),

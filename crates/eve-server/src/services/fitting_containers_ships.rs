@@ -37,6 +37,13 @@ impl Default for ShipAccessConfig {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct ContainerConfig {
+    pub lock_by_default: bool,
+    pub password_per_action: bool,
+    pub config_bitmask: u32,
+}
+
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub(crate) struct ContainerShipRuntimeState {
     pub container_passwords: HashMap<i64, String>,
@@ -50,6 +57,8 @@ pub(crate) struct ContainerShipRuntimeState {
     pub insurance_contracts: HashMap<i64, InsuranceContractRecord>,
     #[serde(default)]
     pub ship_passwords: HashMap<i64, String>,
+    #[serde(default)]
+    pub container_configs: HashMap<i64, ContainerConfig>,
 }
 
 impl ContainerShipRuntimeState {
@@ -340,6 +349,12 @@ pub(crate) fn record_container_add_log(
         return;
     }
     write_container_ship_state(ctx, |st| {
+        if st.container_configs.get(&container_id).is_some_and(|c| c.lock_by_default) {
+            st.alsc_locked_items.insert(item_id);
+            st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry {
+                timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionLock".into(), item_id, item_type_id: moved_tid, quantity: moved_qty,
+            });
+        }
         st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry {
             timestamp_unix: now_unix,
             actor_id: char_id,
@@ -426,6 +441,19 @@ pub(crate) fn record_container_take_log(
             );
         }
     });
+}
+
+pub(crate) fn record_container_rename_log(ctx: &ServerContext, char_id: i64, container_id: i64, tid: u32) {
+    let now_unix = ctx.now_unix_secs();
+    write_container_ship_state(ctx, |st| {
+        st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry {
+            timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionRename".into(), item_id: container_id, item_type_id: tid, quantity: 1,
+        });
+    });
+}
+
+pub(crate) fn container_has_active_audit_log_snap(snap: &eve_db::WorldStateSnapshot, container_id: i64, now_unix: u64) -> bool {
+    read_container_ship_state_snap(snap).alsc_logs.get(&container_id).map_or(false, |logs| logs.iter().any(|e| now_unix.saturating_sub(e.timestamp_unix) < 21 * 86_400))
 }
 
 /// Validates container rules, ALSC locks/passwords, SMA (`flag 90`), and Fleet Hangar (`flag 155`) on item move.
@@ -548,6 +576,12 @@ pub(crate) fn validate_container_and_bay_move(
             return Err(BridgeRpcError {
                 code: "CapacityExceeded".into(),
                 message: "Assembled Station Containers cannot be loaded into a ship".into(),
+            });
+        }
+        if matches!(dest_type.group_id, 513 | 902) && dest_type.category_id == 6 && moving_item.singleton && is_container_group(moving_grp, moving_item.type_id) && moving_grp != 649 {
+            return Err(BridgeRpcError {
+                code: "OnlyFreightContainersAllowedInFreighters".into(),
+                message: "Freight containers are the only containers allowed assembled in freighter holds".into(),
             });
         }
 
@@ -709,15 +743,19 @@ pub(crate) fn validate_container_and_bay_move(
 
     if let Some((grp, _, _)) = snap_check {
         let mut st = read_container_ship_state(ctx);
+        let cfg = st.container_configs.get(&new_loc).cloned().unwrap_or_default();
+        let need_check = cfg.password_per_action || !st.unlocked_containers.contains(&(new_loc, char_id));
         if let Some(req_pw) = st.container_passwords.get(&new_loc).cloned() {
-            if !req_pw.is_empty() && !st.unlocked_containers.contains(&(new_loc, char_id)) {
+            if !req_pw.is_empty() && need_check {
                 let provided = kwargs.get("password").and_then(|v| v.as_str()).unwrap_or("");
+                let now_unix = ctx.now_unix_secs();
+                let tid = ctx.db.with_snapshot(|s| s.items.get(&new_loc).map(|i| i.type_id)).unwrap_or(0);
                 if provided != req_pw {
-                    return Err(BridgeRpcError {
-                        code: "ALSCPasswordNeededToOpen".into(),
-                        message: format!("Password required to access secure container {new_loc}"),
-                    });
+                    st.alsc_logs.entry(new_loc).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordFailure".into(), item_id: new_loc, item_type_id: tid, quantity: 1 });
+                    save_container_ship_state(ctx, &st);
+                    return Err(BridgeRpcError { code: "ALSCPasswordNeededToOpen".into(), message: format!("Password required to access secure container {new_loc}") });
                 }
+                st.alsc_logs.entry(new_loc).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordSuccess".into(), item_id: new_loc, item_type_id: tid, quantity: 1 });
                 st.unlocked_containers.insert((new_loc, char_id));
                 save_container_ship_state(ctx, &st);
             }
@@ -898,7 +936,12 @@ pub(crate) async fn handle_containers_ships_and_fitting(
             let container_id = args.first().and_then(|a| a.as_i64()).or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0);
             let st = read_container_ship_state(ctx);
             let has_pw = st.get_container_password(container_id, 1).is_some() || st.get_container_password(container_id, 2).is_some();
-            Some(Ok(PyRep::keyval([("containerID", PyRep::Integer(container_id)), ("passwordRequired", PyRep::Bool(has_pw)), ("hasPassword", PyRep::Bool(has_pw))])))
+            let cfg = st.container_configs.get(&container_id).cloned().unwrap_or_default();
+            Some(Ok(PyRep::keyval([
+                ("containerID", PyRep::Integer(container_id)), ("passwordRequired", PyRep::Bool(has_pw)),
+                ("hasPassword", PyRep::Bool(has_pw)), ("lockByDefault", PyRep::Bool(cfg.lock_by_default)),
+                ("passwordPerAction", PyRep::Bool(cfg.password_per_action)), ("configBitmask", PyRep::Integer(cfg.config_bitmask as i64)),
+            ])))
         }
 
         ("invbroker", "ALSCLockItems") | ("invbroker", "ALSCLock") | ("invbroker", "ALSCUnlockItems") | ("invbroker", "ALSCUnlock") => {
@@ -939,14 +982,19 @@ pub(crate) async fn handle_containers_ships_and_fitting(
             let mut st = read_container_ship_state(ctx);
             let req_pw = st.container_passwords.get(&container_id).cloned().unwrap_or_default();
             if !req_pw.is_empty() {
-                let provided = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.get(2).and_then(|a| a.as_str())).unwrap_or("");
-                if provided != req_pw && !st.unlocked_containers.contains(&(container_id, char_id)) {
-                    return Some(Err(BridgeRpcError {
-                        code: if is_lock { "ALSCPasswordNeededToLock".into() } else { "ALSCPasswordNeededToUnlock".into() },
-                        message: "Container password required".into(),
-                    }));
+                let cfg = st.container_configs.get(&container_id).cloned().unwrap_or_default();
+                let need_check = cfg.password_per_action || !st.unlocked_containers.contains(&(container_id, char_id));
+                if need_check {
+                    let provided = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.get(2).and_then(|a| a.as_str())).unwrap_or("");
+                    let tid = ctx.db.with_snapshot(|s| s.items.get(&container_id).map(|i| i.type_id)).unwrap_or(0);
+                    if provided != req_pw {
+                        st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordFailure".into(), item_id: container_id, item_type_id: tid, quantity: 1 });
+                        save_container_ship_state(ctx, &st);
+                        return Some(Err(BridgeRpcError { code: if is_lock { "ALSCPasswordNeededToLock".into() } else { "ALSCPasswordNeededToUnlock".into() }, message: "Container password required".into() }));
+                    }
+                    st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordSuccess".into(), item_id: container_id, item_type_id: tid, quantity: 1 });
+                    st.unlocked_containers.insert((container_id, char_id));
                 }
-                st.unlocked_containers.insert((container_id, char_id));
             }
             for &iid in &item_ids {
                 if is_lock { st.alsc_locked_items.insert(iid); } else { st.alsc_locked_items.remove(&iid); }
@@ -972,13 +1020,33 @@ pub(crate) async fn handle_containers_ships_and_fitting(
         ("invbroker", "ALSCLogGet") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let container_id = args.first().and_then(|a| a.as_i64()).or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0);
-            let st = read_container_ship_state(ctx);
-            if let Some(req_pw) = st.container_passwords.get(&container_id) {
-                if !req_pw.is_empty() && !st.unlocked_containers.contains(&(container_id, char_id)) {
+            let auth_ok = ctx.db.with_snapshot(|snap| {
+                if let Some(cont) = snap.items.get(&container_id) {
+                    let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                    cont.owner_id == char_id || (corp_id > 0 && cont.owner_id == corp_id)
+                } else {
+                    true
+                }
+            });
+            if !auth_ok {
+                return Some(Err(BridgeRpcError { code: "ALSCAccessDenied".into(), message: format!("Not authorized to view audit log for container {container_id}") }));
+            }
+            let mut st = read_container_ship_state(ctx);
+            let cfg = st.container_configs.get(&container_id).cloned().unwrap_or_default();
+            let need_check = cfg.password_per_action || !st.unlocked_containers.contains(&(container_id, char_id));
+            if let Some(req_pw) = st.container_passwords.get(&container_id).cloned() {
+                if !req_pw.is_empty() && need_check {
                     let provided = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.get(1).and_then(|a| a.as_str())).unwrap_or("");
+                    let now_unix = ctx.now_unix_secs();
+                    let tid = ctx.db.with_snapshot(|s| s.items.get(&container_id).map(|i| i.type_id)).unwrap_or(0);
                     if provided != req_pw {
+                        st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordFailure".into(), item_id: container_id, item_type_id: tid, quantity: 1 });
+                        save_container_ship_state(ctx, &st);
                         return Some(Err(BridgeRpcError { code: "ALSCPasswordNeededToViewAuditLog".into(), message: "Container password required to view audit log".into() }));
                     }
+                    st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordSuccess".into(), item_id: container_id, item_type_id: tid, quantity: 1 });
+                    st.unlocked_containers.insert((container_id, char_id));
+                    save_container_ship_state(ctx, &st);
                 }
             }
             let entries: Vec<PyRep> = st.alsc_logs.get(&container_id).cloned().unwrap_or_default().into_iter()
@@ -1121,18 +1189,13 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                             && (alsc_locked.contains(&item.item_id) || snap.contracts.contains_key(&item.location_id));
                         vote_locked || container_or_escrow
                     })
-                    .map(|item| {
-                        (
-                            PyRep::Integer(item.item_id),
-                            PyRep::keyval([
-                                ("itemID", PyRep::Integer(item.item_id)),
-                                ("typeID", PyRep::Integer(item.type_id as i64)),
-                                ("locationID", PyRep::Integer(item.location_id)),
-                                ("ownerID", PyRep::Integer(item.owner_id)),
-                                ("flagID", PyRep::Integer(item.flag as i64)),
-                            ]),
-                        )
-                    })
+                    .map(|item| (
+                        PyRep::Integer(item.item_id),
+                        PyRep::keyval([
+                            ("itemID", PyRep::Integer(item.item_id)), ("typeID", PyRep::Integer(item.type_id as i64)),
+                            ("locationID", PyRep::Integer(item.location_id)), ("ownerID", PyRep::Integer(item.owner_id)), ("flagID", PyRep::Integer(item.flag as i64)),
+                        ]),
+                    ))
                     .collect()
             });
             Some(Ok(PyRep::Dict(locked_entries)))
@@ -1145,15 +1208,10 @@ pub(crate) async fn handle_containers_ships_and_fitting(
             };
             let (item_id_opt, fallback_tid_opt) = match args.first() {
                 Some(PyRep::Integer(id)) => (Some(*id), args.get(1).and_then(|a| a.as_i64())),
-                Some(PyRep::Tuple(v) | PyRep::List(v)) => (
-                    v.first().and_then(|x| x.as_i64()),
-                    v.get(1).and_then(|x| x.as_i64()),
-                ),
+                Some(PyRep::Tuple(v) | PyRep::List(v)) => (v.first().and_then(|x| x.as_i64()), v.get(1).and_then(|x| x.as_i64())),
                 Some(PyRep::String(s)) => {
                     let mut parts = s.split(':');
-                    let p1 = parts.next().and_then(|x| x.trim().parse::<i64>().ok());
-                    let p2 = parts.next().and_then(|x| x.trim().parse::<i64>().ok());
-                    (p1, p2)
+                    (parts.next().and_then(|x| x.trim().parse::<i64>().ok()), parts.next().and_then(|x| x.trim().parse::<i64>().ok()))
                 }
                 _ => (kwargs.get("itemID").and_then(|v| v.as_i64()), kwargs.get("typeID").and_then(|v| v.as_i64())),
             };

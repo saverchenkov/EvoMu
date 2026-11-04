@@ -680,8 +680,18 @@ pub(crate) fn handle_load_ammo(
             && matches!(stack.flag, InventoryFlag::Cargo | InventoryFlag::SpecializedAmmoHold)
             && snap.is_ship_colocated_with_character(char_id, ship_id, current_dock)
             && !snap.is_item_locked_in_contract_or_job(first_charge_id);
+        let in_container_in_ship = stack.owner_id == char_id
+            && stack.quantity > 0
+            && stack.flag != InventoryFlag::Locked
+            && snap.items.get(&stack.location_id).is_some_and(|parent| {
+                parent.location_id == ship_id
+                    && matches!(parent.flag, InventoryFlag::Cargo | InventoryFlag::SpecializedAmmoHold)
+            })
+            && snap.is_ship_colocated_with_character(char_id, ship_id, current_dock)
+            && !snap.is_item_locked_in_contract_or_job(first_charge_id);
         if !snap.is_item_consumable_by(stack, char_id, current_dock, Some(ship_id))
             && !in_ship_ammo_hold
+            && !in_container_in_ship
         {
             return Err(rpc_err(
                 "AmmoNotReachable",
@@ -835,7 +845,10 @@ pub(crate) fn handle_load_ammo(
             let source_in_cargo = snap
                 .items
                 .get(&first_charge_id)
-                .is_some_and(|s| s.location_id == ship_id && s.flag == InventoryFlag::Cargo);
+                .is_some_and(|s| {
+                    (s.location_id == ship_id && s.flag == InventoryFlag::Cargo)
+                        || snap.items.get(&s.location_id).is_some_and(|p| p.location_id == ship_id && p.flag == InventoryFlag::Cargo)
+                });
             let current_cargo_used: f64 = snap
                 .items
                 .values()

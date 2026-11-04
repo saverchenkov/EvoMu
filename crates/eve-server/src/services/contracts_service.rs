@@ -395,6 +395,12 @@ pub fn handle(
                             "Courier mission items cannot be placed in contracts",
                         ));
                     }
+                    let Some(item_loc) = snap.items.get(&iid).map(|i| i.location_id) else {
+                        return Err(rpc_err("ContractItemNotFound", format!("Contract item {iid} not found")));
+                    };
+                    if snap.items.get(&item_loc).is_some_and(|p| crate::services::inventory_fitting::fitting_containers_ships::is_container_group(ctx.sde.types.get(&p.type_id).map(|t| t.group_id).unwrap_or(0), p.type_id)) {
+                        return Err(rpc_err("ItemInsideContainer", format!("Item {iid} is inside a container and must be moved to item hangar before adding to contract")));
+                    }
                     let Some(item) = snap.items.get_mut(&iid) else {
                         return Err(rpc_err("ContractItemNotFound", format!("Contract item {iid} not found")));
                     };

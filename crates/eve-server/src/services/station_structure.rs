@@ -952,6 +952,12 @@ pub async fn handle(
                     message: "Legacy POS starbases and control towers are superseded by Upwell structures in V24.01".into(),
                 }));
             }
+            if item_type.group_id == 649 {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotAnchorFreightContainer".into(),
+                    message: "Freight containers cannot be anchored in space".into(),
+                }));
+            }
             if item_type.category_id != 22 && !item_type.effect_ids.contains(&649) {
                 return Some(Err(BridgeRpcError {
                     code: "ItemNotAnchorable".into(),
@@ -1084,7 +1090,7 @@ pub async fn handle(
                     ),
                 }));
             }
-            if matches!(item_type.group_id, 12 | 340 | 448 | 649) && item_type.type_id != 23 && sys_sec >= 0.75 {
+            if matches!(item_type.group_id, 12 | 340 | 448) && item_type.type_id != 23 && sys_sec >= 0.75 {
                 return Some(Err(BridgeRpcError {
                     code: "CantAnchorInHighSec08".into(),
                     message: format!(
