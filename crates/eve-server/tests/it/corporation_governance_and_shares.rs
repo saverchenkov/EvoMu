@@ -1628,6 +1628,97 @@ async fn test_corp_governance_divisions_ceo_placement_tax() {
     assert!(tax_entry.is_some(), "Wallet journal must record 11% NPC corp tax deduction");
     let tax_rec = tax_entry.unwrap();
     assert_eq!(tax_rec.amount.raw_cents(), -110_000_00, "11% of 1M highsec bounty is 110,000 ISK");
+
+    // Agent mission ISK & LP rewards via real agentMgr RPCs: 11% NPC corp tax gated on 100,000 ISK threshold
+    let (&ag_id, ag) = ctx
+        .sde
+        .agents
+        .iter()
+        .filter(|(_, a)| {
+            a.level == 3 && a.agent_type_id == 2 && a.division_id == 24 && a.station_id.is_some() && a.solar_system_id.is_some()
+        })
+        .min_by_key(|(&id, _)| id)
+        .expect("L3 security agent");
+    let ag_sta = ag.station_id.unwrap();
+    let ag_sys = ag.solar_system_id.unwrap();
+    let ag_corp = ag.corporation_id;
+    ctx.db.with_mut_snapshot(|s| {
+        let ch = s.characters.get_mut(&PILOT_2).unwrap();
+        ch.clone_grade = 1;
+        ch.solar_system_id = ag_sys;
+        ch.station_id = Some(ag_sta);
+        ch.standings.insert(ag_id, 7.0);
+        ch.standings.insert(ag_corp, 7.0);
+    });
+    sess2.corporation_id = Some(1_000_006);
+    sess2.solar_system_id = Some(ag_sys);
+    sess2.station_id = Some(ag_sta);
+
+    let offer_rep = rpc(&ctx, &mut sess2, "agentMgr", "DoAction", &[PyRep::Integer(2), PyRep::Integer(ag_id)])
+        .await
+        .expect("agentMgr.DoAction RequestMission");
+    let big_mid = offer_rep.dict_get("missionID").and_then(PyRep::as_i64).expect("missionID") as u32;
+    rpc(&ctx, &mut sess2, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(i64::from(big_mid))])
+        .await
+        .expect("agentMgr.DoAction AcceptMission");
+    let lp_pre = ctx.db.with_snapshot(|s| s.characters[&PILOT_2].loyalty_points.get(&ag_corp).copied().unwrap_or(0));
+    let dest_sta = ctx.db.with_mut_snapshot(|s| {
+        if let Some(m) = s.active_missions.get_mut(&(PILOT_2, big_mid)) {
+            m.npcs_remaining = 0;
+        }
+        let mut sta = ag_sta;
+        if let Some(meta) = eve_server::services::agents_missions::load_mission_meta(s, PILOT_2, big_mid) {
+            if let Some(d) = meta.destination_station_id {
+                sta = d;
+                s.characters.get_mut(&PILOT_2).unwrap().station_id = Some(d);
+            }
+            if let Some(tid) = meta.required_delivery_type_id {
+                s.next_entity_id += 1;
+                let iid = s.next_entity_id;
+                s.items.insert(
+                    iid,
+                    eve_db::InventoryItemRecord {
+                        item_id: iid,
+                        type_id: tid,
+                        owner_id: PILOT_2,
+                        location_id: sta,
+                        flag: eve_db::InventoryFlag::Hangar,
+                        quantity: meta.required_delivery_qty.max(1),
+                        singleton: false,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+        sta
+    });
+    sess2.station_id = Some(dest_sta);
+
+    let journal_idx = ctx.db.with_snapshot(|s| s.wallet_journal.len());
+    let comp_rep = rpc(&ctx, &mut sess2, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(i64::from(big_mid))])
+        .await
+        .expect("agentMgr.DoAction CompleteMission");
+    let gross_isk = comp_rep.dict_get("iskReward").and_then(PyRep::as_i64).expect("iskReward");
+    let gross_lp = comp_rep.dict_get("lpReward").and_then(PyRep::as_i64).expect("lpReward");
+    assert!(gross_isk >= 100_000, "L4 mission ISK reward ({gross_isk}) must exceed 100k ISK threshold");
+    assert!(gross_lp > 0 && gross_lp < 100_000, "L4 mission LP ({gross_lp}) must be positive and < 100k");
+
+    let expected_isk_tax_cents = (eve_db::IskCents::from_isk(gross_isk).raw_cents() * 11 + 50) / 100;
+    let expected_net_lp = gross_lp - ((gross_lp * 11 + 50) / 100);
+    ctx.db.with_snapshot(|s| {
+        let lp_gained = s.characters[&PILOT_2].loyalty_points.get(&ag_corp).copied().unwrap_or(0) - lp_pre;
+        assert_eq!(lp_gained, expected_net_lp, "11% NPC corp LP tax must apply when mission ISK >= 100k");
+        let new_entries = &s.wallet_journal[journal_idx..];
+        assert!(
+            new_entries.iter().any(|e| {
+                e.character_id == PILOT_2
+                    && e.entry_type == "agent_mission_reward_corporation_tax"
+                    && e.amount.raw_cents() == -expected_isk_tax_cents
+            }),
+            "Wallet journal must record 11% NPC corp tax on mission ISK reward"
+        );
+    });
 }
 
 #[tokio::test]

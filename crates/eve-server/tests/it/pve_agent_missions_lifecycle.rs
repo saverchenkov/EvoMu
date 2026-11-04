@@ -298,8 +298,12 @@ async fn test_pve_mission_lifecycle_accept_tracker_complete_journal() {
     let post_lp = ctx.db.with_snapshot(|snap| snap.characters[&char_id].loyalty_points.get(&corp_id).copied().unwrap_or(0));
     assert!(post_isk > initial_isk, "Balance must increase after completion");
     assert!(post_isk <= initial_isk + paid_isk + paid_bonus, "Net increase cannot exceed gross rewards after corp tax");
-    assert_eq!(post_lp, initial_lp + paid_lp);
-    assert_eq!(post_lp, initial_lp + paid_lp);
+    let net_paid_lp = if paid_isk >= 100_000 {
+        paid_lp - ((paid_lp * 11 + 50) / 100)
+    } else {
+        paid_lp
+    };
+    assert_eq!(post_lp, initial_lp + net_paid_lp);
 
     let journal_entries = ctx.db.with_snapshot(|snap| {
         snap.wallet_journal.iter().filter(|e| e.character_id == char_id).map(|e| e.entry_type.clone()).collect::<Vec<_>>()

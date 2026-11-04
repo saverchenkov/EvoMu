@@ -1111,6 +1111,16 @@ pub async fn handle(
                             .map(|e| (1.0 - e.lp_penalty).clamp(0.0, 1.0))
                             .unwrap_or(1.0);
                         let effective_lp = ((lp_reward.max(0) as f64) * lp_mult).round() as i64;
+                        let is_taxed_npc_corp = snap.characters.get(&char_id).is_some_and(|ch| {
+                            ch.corporation_id > 0
+                                && !snap.corporations.contains_key(&ch.corporation_id)
+                                && !matches!(ch.corporation_id, 1_000_179..=1_000_182 | 1_000_436 | 1_000_437)
+                        });
+                        let credited_lp = if is_taxed_npc_corp && isk_reward >= 100_000 {
+                            effective_lp - ((effective_lp.saturating_mul(11) + 50) / 100)
+                        } else {
+                            effective_lp
+                        };
 
                         if let Some(ch) = snap.characters.get_mut(&char_id) {
                             let reward_cents = IskCents::from_isk(isk_reward);
@@ -1146,13 +1156,13 @@ pub async fn handle(
                             }
 
                             let lp_entry = ch.loyalty_points.entry(corp_id).or_insert(0);
-                            *lp_entry = lp_entry.saturating_add(effective_lp);
+                            *lp_entry = lp_entry.saturating_add(credited_lp);
                         }
                         crate::services::lp_store::record_lp_reward_log(
                             snap,
                             char_id,
                             corp_id,
-                            effective_lp,
+                            credited_lp,
                             format!("Mission {mission_id} (agent {m_agent_id})"),
                             now,
                         );

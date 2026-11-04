@@ -40,7 +40,12 @@ pub fn record_lp_reward_log(
             .unwrap_or(0);
         let (is_player_corp, tax_rate) = match snap.corporations.get(&char_corp_id) {
             Some(c) => (true, c.tax_rate.clamp(0.0, 1.0)),
-            None => (false, 0.11),
+            None if char_corp_id > 0
+                && !matches!(char_corp_id, 1_000_179..=1_000_182 | 1_000_436 | 1_000_437) =>
+            {
+                (false, 0.11)
+            }
+            None => (false, 0.0),
         };
         if tax_rate > 0.0 {
             let recent_rewards: Vec<(i64, String, IskCents, String)> = snap
@@ -62,7 +67,14 @@ pub fn record_lp_reward_log(
             for (eid, etype, gross_amt, ereason) in recent_rewards.into_iter().rev() {
                 snap.service_state_blobs
                     .insert(format!("mission_taxed_journal:{eid}"), "1".to_string());
-                let tax_cents = IskCents::from_f64_isk(gross_amt.to_wire_f64() * tax_rate);
+                if !is_player_corp && gross_amt < IskCents::from_isk(100_000) {
+                    continue;
+                }
+                let tax_cents = if is_player_corp {
+                    IskCents::from_f64_isk(gross_amt.to_wire_f64() * tax_rate)
+                } else {
+                    IskCents::from_raw_cents((gross_amt.raw_cents().saturating_mul(11) + 50) / 100)
+                };
                 if tax_cents.raw_cents() <= 0 {
                     continue;
                 }
