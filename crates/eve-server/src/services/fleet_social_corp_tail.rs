@@ -716,6 +716,10 @@ fn remove_member_to_bloodline_npc_in_snap(
         }
     }
     if let Some(g) = snap.corp_governance.get_mut(&corp_id) {
+        if let Some(member_shares) = g.shares.remove(&tid) {
+            g.company_shares = g.company_shares.saturating_add(member_shares);
+            g.shares.insert(corp_id, g.company_shares);
+        }
         g.pending_role_grants.remove(&tid);
         g.pending_title_role_grants.remove(&tid);
         g.pending_scoped_role_grants.remove(&tid);
@@ -751,6 +755,12 @@ fn remove_member_to_bloodline_npc_in_snap(
         .members
         .insert(tid);
     if closed {
+        if let Some(g) = snap.corp_governance.remove(&corp_id) {
+            for (_station_id, office_id) in g.offices {
+                snap.items.remove(&office_id);
+                snap.items.retain(|_, it| it.location_id != office_id);
+            }
+        }
         snap.corporations.remove(&corp_id);
         snap.chat_channels.remove(&format!("corpid:{corp_id}"));
     }

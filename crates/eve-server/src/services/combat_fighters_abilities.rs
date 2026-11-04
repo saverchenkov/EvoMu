@@ -466,12 +466,21 @@ async fn activate_single_fighter_ability(
                 // Anti-fighter missile volley (`feat:drones.light-fighter-space-superiority`):
                 // Deals missile damage with +100% bonus against fighter squadrons
                 let bonus = if is_target_fighter { 2.0 } else { 1.0 };
-                let base = attr(2238).or_else(|| attr(2130)).unwrap_or(120.0) * squad_mult * bonus;
-                DamageVector {
-                    em: base * 0.25,
-                    thermal: base * 0.25,
-                    kinetic: base * 0.25,
-                    explosive: base * 0.25,
+                let mult = attr(2130).unwrap_or(1.0) * squad_mult * bonus;
+                let em = attr(2131).unwrap_or(0.0) * mult;
+                let therm = attr(2132).unwrap_or(0.0) * mult;
+                let kin = attr(2133).unwrap_or(0.0) * mult;
+                let exp = attr(2134).unwrap_or(0.0) * mult;
+                if em + therm + kin + exp > 0.0 {
+                    DamageVector { em, thermal: therm, kinetic: kin, explosive: exp }
+                } else {
+                    let base = 120.0 * mult;
+                    DamageVector {
+                        em: base * 0.25,
+                        thermal: base * 0.25,
+                        kinetic: base * 0.25,
+                        explosive: base * 0.25,
+                    }
                 }
             }
             // Support fighter EWAR abilities:
@@ -484,7 +493,7 @@ async fn activate_single_fighter_ability(
             }
             10 | 36 => {
                 // Siren I: Warp disruption (`feat:drones.fighter-support-cenotaph-scarab`, `feat:drones.support-fighter-abilities`)
-                let base_scram = attr(2204).or_else(|| attr(2149)).unwrap_or(1.0) as i32;
+                let base_scram = attr(2205).or_else(|| attr(105)).unwrap_or(1.0) as i32;
                 let scram_pts = (base_scram * (fighter.squadron_size as i32)).max(1);
                 let _ = sys_handle.set_warp_scramble_strength(tid, scram_pts).await;
                 DamageVector::default()
@@ -649,7 +658,13 @@ async fn activate_single_fighter_ability(
                     let mut b = fighter_ball.clone();
                     b.max_velocity *= 1.0 + speed_bonus_pct / 100.0;
                     b.speed_fraction = 1.0;
-                    if let Ok(Some(cs)) = sys_handle.get_combat_state(fighter_ball_id).await {
+                    if let Ok(Some(mut cs)) = sys_handle.get_combat_state(fighter_ball_id).await {
+                        if ability_id == 13 {
+                            if cs.base_signature_radius.is_none() {
+                                cs.base_signature_radius = Some(cs.signature_radius);
+                            }
+                            cs.signature_radius *= 0.50;
+                        }
                         let _ = sys_handle.spawn_ball_with_combat(b, cs).await;
                     } else {
                         let _ = sys_handle.spawn_ball(b).await;
@@ -1143,7 +1158,12 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
                 .unwrap_or(400.0);
             if let Ok(Some((_, mut b))) = sys_handle.get_ball_snapshot(fighter_ball_id).await {
                 b.max_velocity /= 1.0 + speed_bonus_pct / 100.0;
-                if let Ok(Some(cs)) = sys_handle.get_combat_state(fighter_ball_id).await {
+                if let Ok(Some(mut cs)) = sys_handle.get_combat_state(fighter_ball_id).await {
+                    if ability_id == 13 {
+                        if let Some(base_sig) = cs.base_signature_radius.take() {
+                            cs.signature_radius = base_sig;
+                        }
+                    }
                     let _ = sys_handle.spawn_ball_with_combat(b, cs).await;
                 } else {
                     let _ = sys_handle.spawn_ball(b).await;

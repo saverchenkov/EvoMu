@@ -871,14 +871,11 @@ pub async fn handle_fighters(
                     if let Some(main_it) = snap.items.get_mut(&f.item_id) {
                         main_it.location_id = ship_id;
                         main_it.flag = InventoryFlag::FighterBay;
+                        main_it.quantity = f.squadron_size as i32;
                         main_it.version += 1;
                     }
                     snap.item_positions.remove(&f.item_id);
-                    let cur_qty = snap
-                        .items
-                        .get(&f.item_id)
-                        .map(|i| i.quantity)
-                        .unwrap_or(f.squadron_size as i32);
+                    let cur_qty = f.squadron_size as i32;
                     let mut needed = (max_squadron_size - cur_qty).max(0);
                     if needed > 0 {
                         let reserve_ids: Vec<i64> = snap
@@ -1111,6 +1108,12 @@ pub async fn handle_fighters(
 
         ("fighterMgr", "CmdActivateAbilitySlots") => {
             handle_activate_fighter_ability_slots(ctx, session, args).await
+        }
+
+        // rpc-lint: allow required by parity row feat:drones.fighter-heavy-long-range-bomb
+        ("fighterMgr", "ExecuteActivateAbilitySlotsOnPoint")
+        | ("fighterMgr", "ActivateAbilitySlotsAtPoint") => {
+            handle_activate_fighter_ability_slots_on_point(ctx, session, args).await
         }
 
         ("fighterMgr", "CmdDeactivateAbilitySlots") => {
