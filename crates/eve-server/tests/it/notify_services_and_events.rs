@@ -2235,3 +2235,1208 @@ async fn test_notify_operations_and_progression_transitions() {
 }
 
 }
+
+// Folded submodule: notify_real_emitters_batch8_part5
+#[allow(unused_imports, dead_code)]
+mod notify_real_emitters_batch8_part5 {
+    use super::*;
+
+// Real server-side RPC tests for Notify/RPC Batch 8 (Part 5: Session, Localization & LoadService RPCs).
+//
+// Covers all 8 Group 5 Session / Localization / LoadService parity rows:
+// - `rpc:userSvc.ProcessEVESessionCreated`
+// - `rpc:sessionMgr.EndAllGameSessions`
+// - `rpc:sessionMgr.RemoveSessionsFromServer`
+// - `rpc:localizationServer.ReloadFSDPickle`
+// - `rpc:localizationServer.UpdateLocalizationQAWrap`
+// - `rpc:loadService.GetTotalStats`
+// - `rpc:loadService.StartLoad`
+// - `rpc:loadService.StopLoad`
+
+
+use crate::common;
+use eve_machonet::{service_roles::ROLE_GM_DEFAULT, SessionState};
+use eve_proto::{BridgeRpcError, PyRep};
+use eve_server::router::ServerContext;
+use std::collections::HashMap;
+
+const PILOT_A: i64 = 90_000_001;
+const PILOT_B: i64 = 90_000_002;
+
+fn new_ctx() -> ServerContext {
+    let sde = std::sync::Arc::new(
+        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("open sde"),
+    );
+    let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    ctx.set_clock_paused(true);
+    ctx
+}
+
+async fn rpc(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    svc: &str,
+    method: &str,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    ctx.dispatch_rpc(sess, svc, None, method, args, &HashMap::new(), None)
+        .await
+}
+
+// parity: rpc:userSvc.ProcessEVESessionCreated, rpc:sessionMgr.EndAllGameSessions
+// parity: rpc:sessionMgr.RemoveSessionsFromServer
+#[tokio::test]
+async fn notify_batch8_session_localization_and_load_rpcs() {
+    eve_testkit::attest(&[
+        "rpc:userSvc.ProcessEVESessionCreated",
+        "rpc:sessionMgr.EndAllGameSessions",
+        "rpc:sessionMgr.RemoveSessionsFromServer",
+        ]);
+
+    let ctx = new_ctx();
+    let mut unauth = SessionState::new(9_500);
+
+    // Negative: unauthenticated rejections across all 8 RPCs
+    for (svc, method, args) in [
+        ("userSvc", "ProcessEVESessionCreated", vec![]),
+        ("sessionMgr", "EndAllGameSessions", vec![]),
+        ("sessionMgr", "RemoveSessionsFromServer", vec![PyRep::Integer(1), PyRep::List(vec![PyRep::Integer(9_502)])]),
+        ("localizationServer", "ReloadFSDPickle", vec![]),
+        ("localizationServer", "UpdateLocalizationQAWrap", vec![PyRep::Dict(Vec::new())]),
+        ("loadService", "GetTotalStats", vec![]),
+        ("loadService", "StartLoad", vec![]),
+        ("loadService", "StopLoad", vec![]),
+    ] {
+        assert_eq!(
+            rpc(&ctx, &mut unauth, svc, method, &args).await.unwrap_err().code,
+            "Unauthorized",
+            "{svc}.{method} must require authentication"
+        );
+    }
+
+    let mut sess_a = SessionState::new(9_501);
+    common::login_pilot(&ctx, &mut sess_a, "demo", "demo-secret").await;
+    rpc(&ctx, &mut sess_a, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_A)])
+        .await
+        .expect("SelectCharacterID A");
+
+    let mut sess_b = SessionState::new(9_502);
+    common::login_pilot(&ctx, &mut sess_b, "other", "other-secret").await;
+    rpc(&ctx, &mut sess_b, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_B)])
+        .await
+        .expect("SelectCharacterID B");
+
+    // 1. userSvc.ProcessEVESessionCreated: succeeds for owner, rejects mismatched character ID
+    let created_rep = rpc(
+        &ctx,
+        &mut sess_a,
+        "userSvc",
+        "ProcessEVESessionCreated",
+        &[PyRep::Integer(PILOT_A)],
+    )
+    .await
+    .expect("ProcessEVESessionCreated");
+    assert_eq!(created_rep, PyRep::None);
+    let recorded_sessions = ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs.get("user_sessions").cloned().unwrap_or_default()
+    });
+    assert!(recorded_sessions.contains("\"session_id\":9501"));
+
+    let mut sess_a_user = SessionState::new(9_503);
+    common::login_pilot(&ctx, &mut sess_a_user, "demo", "demo-secret").await;
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess_a_user,
+            "userSvc",
+            "ProcessEVESessionCreated",
+            &[PyRep::Integer(PILOT_B)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "UserError"
+    );
+    // Re-bind sess_a after sess_a_user displaced it
+    common::login_pilot(&ctx, &mut sess_a, "demo", "demo-secret").await;
+    sess_a.character_id = Some(PILOT_A);
+    sess_a.role |= ROLE_GM_DEFAULT;
+
+    // Negative: non-GM player rejected from sessionMgr, localizationServer, and loadService admin RPCs
+    for (svc, method, args, expected_code) in [
+        ("sessionMgr", "EndAllGameSessions", vec![], "InsufficientRole"),
+        ("sessionMgr", "RemoveSessionsFromServer", vec![PyRep::Integer(1), PyRep::List(vec![PyRep::Integer(9_502)])], "InsufficientRole"),
+        ("localizationServer", "ReloadFSDPickle", vec![], "RoleRequired"),
+        ("localizationServer", "UpdateLocalizationQAWrap", vec![PyRep::Dict(Vec::new())], "RoleRequired"),
+        ("loadService", "GetTotalStats", vec![], "UserError"),
+        ("loadService", "StartLoad", vec![], "UserError"),
+        ("loadService", "StopLoad", vec![], "UserError"),
+    ] {
+        assert_eq!(
+            rpc(&ctx, &mut sess_b, svc, method, &args).await.unwrap_err().code,
+            expected_code,
+            "{svc}.{method} must reject non-GM caller"
+        );
+    }
+
+    // Grant GM role to sess_a
+    sess_a.role |= ROLE_GM_DEFAULT;
+
+    // 2. sessionMgr.RemoveSessionsFromServer & sessionMgr.EndAllGameSessions
+    let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
+    let (tx_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+    let (tx_c, mut rx_c) = tokio::sync::mpsc::unbounded_channel();
+    ctx.register_session_closer(9_501, tx_a);
+    ctx.register_session_closer(9_502, tx_b);
+    ctx.register_session_closer(9_503, tx_c);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs.insert(
+            "active_sessions".into(),
+            serde_json::to_string(&vec![9_501_i64, 9_502_i64, 9_503_i64]).unwrap(),
+        );
+    });
+    let rem_rep = rpc(
+        &ctx,
+        &mut sess_a,
+        "sessionMgr",
+        "RemoveSessionsFromServer",
+        &[PyRep::Integer(1), PyRep::List(vec![PyRep::Integer(9_502)])],
+    )
+    .await
+    .expect("RemoveSessionsFromServer");
+    assert_eq!(rem_rep, PyRep::None);
+    assert_eq!(
+        rx_b.try_recv().expect("sess_b disconnect notification").0,
+        "RemoveSession"
+    );
+    assert!(!ctx.session_closers.read().unwrap().contains_key(&9_502));
+    assert!(ctx.session_closers.read().unwrap().contains_key(&9_501));
+    assert!(ctx.session_closers.read().unwrap().contains_key(&9_503));
+    let active_after_rem: Vec<i64> = ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
+            .get("active_sessions")
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default()
+    });
+    assert_eq!(active_after_rem, vec![9_501, 9_503]);
+
+    let end_all_rep = rpc(&ctx, &mut sess_a, "sessionMgr", "EndAllGameSessions", &[])
+        .await
+        .expect("EndAllGameSessions");
+    assert_eq!(end_all_rep, PyRep::None);
+    assert_eq!(
+        rx_c.try_recv().expect("sess_c disconnect notification").0,
+        "EndAllGameSessions"
+    );
+    assert!(!ctx.session_closers.read().unwrap().contains_key(&9_503));
+    assert!(rx_a.try_recv().is_err(), "caller session must not be disconnected");
+    assert!(
+        ctx.session_closers.read().unwrap().contains_key(&9_501),
+        "caller session must survive EndAllGameSessions"
+    );
+    let active_after_end_all: Vec<i64> = ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
+            .get("active_sessions")
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default()
+    });
+    assert_eq!(active_after_end_all, vec![9_501]);
+
+    // 3. localizationServer.ReloadFSDPickle & UpdateLocalizationQAWrap
+    let reload_err = rpc(
+        &ctx,
+        &mut sess_a,
+        "localizationServer",
+        "ReloadFSDPickle",
+        &[PyRep::String("en-us.pickle".into())],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(reload_err.code, "UnimplementedRPC");
+
+    // Non-GM caller rejected from UpdateLocalizationQAWrap(bool) with RoleRequired
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess_b,
+            "localizationServer",
+            "UpdateLocalizationQAWrap",
+            &[PyRep::Bool(true)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "RoleRequired"
+    );
+
+    // GM caller succeeds with boolean toggle (DERIVED QA-wrap); non-bool overload fails closed with UnimplementedRPC
+    let qawrap_rep = rpc(
+        &ctx,
+        &mut sess_a,
+        "localizationServer",
+        "UpdateLocalizationQAWrap",
+        &[PyRep::Bool(true)],
+    )
+    .await
+    .expect("UpdateLocalizationQAWrap");
+    assert_eq!(qawrap_rep, PyRep::Bool(true));
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess_a,
+            "localizationServer",
+            "UpdateLocalizationQAWrap",
+            &[PyRep::Dict(vec![(
+                PyRep::Integer(42_001),
+                PyRep::String("[QA] Warp Drive Active".into()),
+            )])],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "UnimplementedRPC"
+    );
+
+    // 4. loadService.StartLoad, GetTotalStats, StopLoad
+    let stats_0 = rpc(&ctx, &mut sess_a, "loadService", "GetTotalStats", &[])
+        .await
+        .expect("GetTotalStats initial");
+    assert_eq!(stats_0.dict_get("active").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(stats_0.dict_get("runs_started").and_then(|v| v.as_i64()), Some(0));
+    assert!(stats_0.dict_get("sde_types_count").and_then(|v| v.as_i64()).unwrap_or(0) > 1_000);
+
+    let start_rep = rpc(
+        &ctx,
+        &mut sess_a,
+        "loadService",
+        "StartLoad",
+        &[PyRep::String("stress_profile_v24".into())],
+    )
+    .await
+    .expect("StartLoad");
+    assert_eq!(start_rep, PyRep::None);
+
+    let stats_1 = rpc(&ctx, &mut sess_a, "loadService", "GetTotalStats", &[])
+        .await
+        .expect("GetTotalStats active");
+    assert_eq!(stats_1.dict_get("active").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(stats_1.dict_get("runs_started").and_then(|v| v.as_i64()), Some(1));
+    assert_eq!(stats_1.dict_get("total_requests").and_then(|v| v.as_i64()), Some(1));
+    assert!(stats_1.dict_get("systems_stepped").and_then(|v| v.as_i64()).unwrap_or(0) >= 1);
+    assert!(stats_1.dict_get("active_systems_count").and_then(|v| v.as_i64()).unwrap_or(0) >= 1);
+    assert!(stats_1.dict_get("world_items_count").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+    assert!(stats_1.dict_get("world_characters_count").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+
+    let stop_rep = rpc(&ctx, &mut sess_a, "loadService", "StopLoad", &[])
+        .await
+        .expect("StopLoad");
+    assert_eq!(stop_rep, PyRep::None);
+
+    let stats_2 = rpc(&ctx, &mut sess_a, "loadService", "GetTotalStats", &[])
+        .await
+        .expect("GetTotalStats stopped");
+    assert_eq!(stats_2.dict_get("active").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(stats_2.dict_get("total_requests").and_then(|v| v.as_i64()), Some(2));
+}
+
+}
+
+// Folded submodule: parity_notifies_part1
+#[allow(unused_imports, dead_code)]
+mod parity_notifies_part1 {
+    use super::*;
+
+// Runtime integration tests for open `notify:*` parity rows (Part 1).
+
+
+use crate::common;
+use eve_db::{InventoryFlag, InventoryItemRecord};
+use eve_destiny::{Ball, MovementMode};
+use eve_machonet::{service_roles::ROLE_GM_DEFAULT, SessionState};
+use eve_proto::{BridgeRpcError, PyRep};
+use eve_server::router::ServerContext;
+use glam::DVec3;
+use std::collections::HashMap;
+
+const PILOT_A: i64 = 90_000_001;
+const PILOT_B: i64 = 90_000_002;
+const SYS_JITA: u32 = 30_000_142;
+
+fn new_ctx() -> ServerContext {
+    let sde = std::sync::Arc::new(
+        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("open sde"),
+    );
+    let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    ctx.set_clock_paused(true);
+    ctx
+}
+
+fn make_item(
+    item_id: i64,
+    type_id: u32,
+    owner_id: i64,
+    location_id: i64,
+    flag: InventoryFlag,
+    quantity: i32,
+    singleton: bool,
+) -> InventoryItemRecord {
+    InventoryItemRecord {
+        item_id,
+        type_id,
+        owner_id,
+        location_id,
+        flag,
+        quantity,
+        singleton,
+        version: 1,
+        ..Default::default()
+    }
+}
+
+fn make_ball(id: i64, type_id: u32, pos: DVec3) -> Ball {
+    Ball {
+        id,
+        type_id,
+        position: pos,
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 0.5,
+        mass: 10_000_000.0,
+        radius: 120.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    }
+}
+
+async fn rpc(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    svc: &str,
+    method: &str,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    ctx.dispatch_rpc(sess, svc, None, method, args, &HashMap::new(), None)
+        .await
+}
+
+fn drain_all(ctx: &ServerContext, sess: &mut SessionState, char_id: i64) -> Vec<(String, Vec<PyRep>)> {
+    let mut out = sess.drain_notifications();
+    for n in ctx.drain_notifications_for_char(char_id) {
+        out.push((n.event, n.args));
+    }
+    out
+}
+
+fn find_notif<'a>(notifs: &'a [(String, Vec<PyRep>)], event: &str) -> &'a [PyRep] {
+    notifs
+        .iter()
+        .find(|(ev, _)| ev == event)
+        .map(|(_, args)| args.as_slice())
+        .unwrap_or_else(|| {
+            let seen: Vec<&str> = notifs.iter().map(|(e, _)| e.as_str()).collect();
+            panic!("expected notification {event}, got {seen:?}")
+        })
+}
+
+async fn setup_pilot_in_space(
+    ctx: &ServerContext,
+    sid: u64,
+    user: &str,
+    pass: &str,
+    char_id: i64,
+    ship_id: i64,
+    ship_type: u32,
+) -> SessionState {
+    let mut sess = SessionState::new(sid);
+    common::login_pilot(ctx, &mut sess, user, pass).await;
+    rpc(
+        ctx,
+        &mut sess,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+    )
+    .await
+    .expect("SelectCharacterID");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = SYS_JITA;
+            ch.station_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            make_item(ship_id, ship_type, char_id, i64::from(SYS_JITA), InventoryFlag::None, 1, true),
+        );
+    });
+    sess.solar_system_id = Some(SYS_JITA);
+    sess.station_id = None;
+    sess.ship_id = Some(ship_id);
+    let _ = ctx
+        .systems
+        .get_or_spawn(SYS_JITA)
+        .spawn_ball_with_combat(make_ball(ship_id, ship_type, DVec3::ZERO), Default::default())
+        .await;
+    ctx.advance_secs(12);
+    let _ = drain_all(ctx, &mut sess, char_id);
+    sess
+}
+
+#[tokio::test]
+async fn test_parity_notifies_abyssal_and_void_space() {
+    // parity: notify:OnAbyssalContentFinished, notify:OnAbyssalLocationEntered
+    // parity: notify:OnVoidSpaceContentFinished, notify:OnVoidSpaceEntered, notify:OnVoidSpaceRelog
+    eve_testkit::attest(&[
+        "notify:OnAbyssalContentFinished",
+        "notify:OnAbyssalLocationEntered",
+        "notify:OnVoidSpaceContentFinished",
+        "notify:OnVoidSpaceEntered",
+        "notify:OnVoidSpaceRelog",
+    ]);
+    let ctx = new_ctx();
+    let mut sess = setup_pilot_in_space(&ctx, 1101, "demo", "demo-secret", PILOT_A, 710_001, 622).await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.solar_system_id = 30_000_021;
+        }
+        if let Some(ship) = snap.items.get_mut(&710_001) {
+            ship.location_id = 30_000_021;
+        }
+        snap.items.insert(
+            710_010,
+            make_item(710_010, 47_762, PILOT_A, 710_001, InventoryFlag::Cargo, 1, false),
+        );
+    });
+    sess.solar_system_id = Some(30_000_021);
+    let _ = ctx
+        .systems
+        .get_or_spawn(30_000_021)
+        .spawn_ball_with_combat(make_ball(710_001, 622, DVec3::ZERO), Default::default())
+        .await;
+
+    rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceDeployment", &[PyRep::Integer(710_010)])
+        .await
+        .expect("AbyssalEntranceDeployment");
+    let gate_id = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
+        *reg.abyssal_traces.keys().next().expect("trace gate")
+    });
+    rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceGateActivation", &[PyRep::Integer(gate_id)])
+        .await
+        .expect("AbyssalEntranceGateActivation");
+    let abyss_notifs = drain_all(&ctx, &mut sess, PILOT_A);
+    let entered = find_notif(&abyss_notifs, "OnAbyssalLocationEntered");
+    let content_id = entered[0]
+        .dict_get("content_id")
+        .and_then(|v| v.as_i64())
+        .expect("content_id");
+    assert!(content_id > 0);
+
+    eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
+        if let Some(p) = reg.abyssal_pockets.get_mut(&PILOT_A) {
+            p.current_room = 3;
+            p.rooms[2].npc_ball_ids.clear();
+            p.rooms[2].cleared = true;
+        }
+    });
+    rpc(&ctx, &mut sess, "abyssalMgr", "ClientIsReady", &[]).await.expect("ClientIsReady");
+    let end_gate_id = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
+        reg.abyssal_pockets
+            .get(&PILOT_A)
+            .map(|p| 1_895_000_000 + p.pocket_id * 10 + 3)
+            .expect("end gate")
+    });
+    if let Some(pocket_sys) = sess.solar_system_id {
+        let abyss_sys = ctx.systems.get_or_spawn(pocket_sys);
+        if let Ok(Some((_, gate_ball))) = abyss_sys.get_ball_snapshot(end_gate_id).await {
+            let _ = abyss_sys.set_ball_position(710_001, gate_ball.position).await;
+        }
+    }
+    rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalEndGateActivation", &[PyRep::Integer(end_gate_id)])
+        .await
+        .expect("AbyssalEndGateActivation");
+    let abyss_fin = drain_all(&ctx, &mut sess, PILOT_A);
+    assert_eq!(
+        find_notif(&abyss_fin, "OnAbyssalContentFinished"),
+        &[PyRep::Integer(content_id), PyRep::Integer(1)]
+    );
+
+    // Void Space: enter -> relog -> exit
+    let mut sess_b = setup_pilot_in_space(&ctx, 1102, "other", "other-secret", PILOT_B, 710_002, 622).await;
+    let void_fil_type = ctx
+        .sde
+        .types
+        .iter()
+        .find(|(_, t)| t.group_id == 4145)
+        .map(|(&id, _)| id)
+        .unwrap_or(60_770);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            710_011,
+            make_item(710_011, void_fil_type, PILOT_B, 710_002, InventoryFlag::Cargo, 1, false),
+        );
+    });
+    ctx.advance_secs(12);
+    let _ = drain_all(&ctx, &mut sess_b, PILOT_B);
+    rpc(&ctx, &mut sess_b, "voidSpaceMgr", "VoidSpacePlayerJump", &[PyRep::Integer(710_011)])
+        .await
+        .expect("VoidSpacePlayerJump");
+    let vse = drain_all(&ctx, &mut sess_b, PILOT_B);
+    let vse_args = find_notif(&vse, "OnVoidSpaceEntered");
+    let vs_cid = vse_args[0]
+        .dict_get("content_id")
+        .and_then(|v| v.as_i64())
+        .expect("void content_id");
+    assert!(vs_cid > 0);
+
+    let _ = rpc(&ctx, &mut sess_b, "voidSpaceMgr", "ClientIsReady", &[]).await;
+    let relog = drain_all(&ctx, &mut sess_b, PILOT_B);
+    let relog_args = find_notif(&relog, "OnVoidSpaceRelog");
+    assert_eq!(relog_args[0].dict_get("content_id").and_then(|v| v.as_i64()), Some(vs_cid));
+
+    let void_exit_gate = 999_001_i64;
+    if let Some(vs_sys) = sess_b.solar_system_id {
+        let void_sys = ctx.systems.get_or_spawn(vs_sys);
+        let _ = void_sys
+            .spawn_ball_with_combat(make_ball(void_exit_gate, 60_608, DVec3::ZERO), Default::default())
+            .await;
+        let _ = void_sys.set_ball_position(710_002, DVec3::ZERO).await;
+    }
+    ctx.advance_secs(12);
+    let _ = drain_all(&ctx, &mut sess_b, PILOT_B);
+    rpc(&ctx, &mut sess_b, "voidSpaceMgr", "VoidSpaceEndGateActivation", &[PyRep::Integer(void_exit_gate)])
+        .await
+        .expect("VoidSpaceEndGateActivation");
+    let void_fin = drain_all(&ctx, &mut sess_b, PILOT_B);
+    assert_eq!(
+        find_notif(&void_fin, "OnVoidSpaceContentFinished"),
+        &[PyRep::Integer(vs_cid), PyRep::Integer(1)]
+    );
+}
+
+#[tokio::test]
+async fn test_parity_notifies_operations_and_node_graphs() {
+    // parity: notify:OnOperationSkipped, notify:OnOperationsProgressReset, notify:OnOperationsServerFSDReload
+    // parity: notify:OnStartClientNodeGraph, notify:OnClientNodeGraphUpdate, notify:OnClientNodeGraphMessage
+    // parity: notify:OnStopClientNodeGraph, notify:OnStopClientNodeGraphById, notify:OnStopAllClientNodeGraphs
+    eve_testkit::attest(&[
+        "notify:OnOperationSkipped",
+        "notify:OnOperationsProgressReset",
+        "notify:OnOperationsServerFSDReload",
+        "notify:OnStartClientNodeGraph",
+        "notify:OnClientNodeGraphUpdate",
+        "notify:OnClientNodeGraphMessage",
+        "notify:OnStopClientNodeGraph",
+        "notify:OnStopClientNodeGraphById",
+        "notify:OnStopAllClientNodeGraphs",
+    ]);
+    let ctx = new_ctx();
+    let mut sess = setup_pilot_in_space(&ctx, 1103, "demo", "demo-secret", PILOT_A, 710_003, 622).await;
+    sess.role = ROLE_GM_DEFAULT;
+
+    let op_id = *eve_server::services::operations_manager_helpers::get_operation_defs(&ctx.sde)
+        .op_tasks
+        .keys()
+        .next()
+        .expect("operation in SDE");
+    rpc(&ctx, &mut sess, "slash", "SlashCmd", &[PyRep::String(format!("/operation skip 1 {op_id}"))])
+        .await
+        .expect("/operation skip");
+    let skip_n = drain_all(&ctx, &mut sess, PILOT_A);
+    assert_eq!(find_notif(&skip_n, "OnOperationSkipped"), &[PyRep::Integer(1), PyRep::Integer(op_id)]);
+
+    rpc(&ctx, &mut sess, "slash", "SlashCmd", &[PyRep::String("/operation reset_progress".into())])
+        .await
+        .expect("/operation reset_progress");
+    let reset_n = drain_all(&ctx, &mut sess, PILOT_A);
+    assert_eq!(find_notif(&reset_n, "OnOperationsProgressReset").len(), 3);
+    assert_eq!(find_notif(&reset_n, "OnStopAllClientNodeGraphs").len(), 0);
+
+    rpc(&ctx, &mut sess, "slash", "SlashCmd", &[PyRep::String("/operation reload_fsd".into())])
+        .await
+        .expect("/operation reload_fsd");
+    let reload_n = drain_all(&ctx, &mut sess, PILOT_A);
+    assert_eq!(find_notif(&reload_n, "OnOperationsServerFSDReload").len(), 0);
+
+    // Drive real AIR NPE node-graph runner RPCs -> emits OnStartClientNodeGraph,
+    // OnClientNodeGraphUpdate, OnClientNodeGraphMessage, OnStopClientNodeGraph, OnStopClientNodeGraphById
+    let mut npe_sess = SessionState::new(1105);
+    common::login_pilot(&ctx, &mut npe_sess, "demo", "demo-secret").await;
+    let doll = PyRep::keyval([("genderID", PyRep::Integer(1)), ("bloodlineID", PyRep::Integer(1))]);
+    let portrait = PyRep::keyval([("backgroundID", PyRep::Integer(1))]);
+    let npe_cid = rpc(
+        &ctx,
+        &mut npe_sess,
+        "charUnboundMgr",
+        "CreateCharacterWithDoll",
+        &[
+            PyRep::String("NPE Notify Pilot".into()),
+            PyRep::Integer(1),
+            PyRep::Integer(1),
+            PyRep::Integer(11),
+            doll,
+            portrait,
+            PyRep::Integer(17),
+        ],
+    )
+    .await
+    .expect("CreateCharacterWithDoll")
+    .as_i64()
+    .expect("npe_cid");
+    rpc(&ctx, &mut npe_sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(npe_cid)])
+        .await
+        .expect("SelectCharacterID npe");
+    rpc(
+        &ctx,
+        &mut npe_sess,
+        "operationsManager",
+        "process_client_event",
+        &[PyRep::String("start_tutorial".into())],
+    )
+    .await
+    .expect("start_tutorial");
+    let start_n = drain_all(&ctx, &mut npe_sess, npe_cid);
+    let start_args = find_notif(&start_n, "OnStartClientNodeGraph");
+    assert_eq!(start_args.len(), 3);
+    assert_eq!(start_args[0], PyRep::Integer(716));
+    assert!(start_args[1].as_i64().unwrap_or(0) > 0);
+    rpc(
+        &ctx,
+        &mut npe_sess,
+        "operationsManager",
+        "process_client_event",
+        &[PyRep::String("new_eden_cinematic_ended".into())],
+    )
+    .await
+    .expect("new_eden_cinematic_ended");
+    let msg_n = drain_all(&ctx, &mut npe_sess, npe_cid);
+    assert!(!find_notif(&msg_n, "OnClientNodeGraphUpdate").is_empty());
+    assert_eq!(
+        find_notif(&msg_n, "OnClientNodeGraphMessage")
+            .get(2)
+            .and_then(|v| v.as_str()),
+        Some("pocket_entered")
+    );
+    rpc(
+        &ctx,
+        &mut npe_sess,
+        "operationsManager",
+        "process_client_event",
+        &[PyRep::String("skip_tutorial".into())],
+    )
+    .await
+    .expect("skip_tutorial");
+    let stop_n = drain_all(&ctx, &mut npe_sess, npe_cid);
+    let stop_inst_args = find_notif(&stop_n, "OnStopClientNodeGraph");
+    assert_eq!(stop_inst_args.len(), 1);
+    assert!(stop_inst_args[0].as_i64().unwrap_or(0) > 0);
+    assert_eq!(find_notif(&stop_n, "OnStopClientNodeGraphById"), &[PyRep::Integer(716)]);
+}
+
+#[tokio::test]
+async fn test_parity_notifies_dungeons_cloak_and_space() {
+    // parity: notify:OnCloakModuleForceDeactivated, notify:OnFleetEscalatingPathMessage, notify:OnProgressionRoomJoined
+    eve_testkit::attest(&[
+        "notify:OnCloakModuleForceDeactivated",
+        "notify:OnFleetEscalatingPathMessage",
+        "notify:OnProgressionRoomJoined",
+    ]);
+    let ctx = new_ctx();
+    let mut sess = setup_pilot_in_space(&ctx, 1104, "demo", "demo-secret", PILOT_A, 710_004, 622).await;
+
+    // 1. OnCloakModuleForceDeactivated via real beyonce.CmdStop on cloaked ship in Abyssal space
+    let sys_abyssal = 32_000_001_u32;
+    let cloak_type_id = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 330)
+        .map(|t| t.type_id)
+        .unwrap_or(11578);
+    sess.solar_system_id = Some(sys_abyssal);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&PILOT_A) {
+            c.solar_system_id = sys_abyssal;
+        }
+        snap.items.insert(
+            710_099,
+            make_item(710_099, cloak_type_id, PILOT_A, 710_004, InventoryFlag::HiSlot0, 1, true),
+        );
+        snap.module_active_states.insert(710_099);
+    });
+    let abyss_oid = ctx.bind_object(&sess, "beyonce", i64::from(sys_abyssal)).expect("bind abyss beyonce");
+    let abyss_h = ctx.systems.get_or_spawn(sys_abyssal);
+    let _ = abyss_h.spawn_ball(make_ball(710_004, 622, DVec3::ZERO)).await;
+    let mut cs = eve_destiny::CombatState::default();
+    cs.is_cloaked = true;
+    let _ = abyss_h.set_combat_state(710_004, cs).await;
+    let _ = drain_all(&ctx, &mut sess, PILOT_A);
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(abyss_oid), "CmdStop", &[], &HashMap::new(), None)
+        .await
+        .expect("CmdStop cloaked in abyssal");
+    let cloak_n = drain_all(&ctx, &mut sess, PILOT_A);
+    let decloak_args = find_notif(&cloak_n, "OnCloakModuleForceDeactivated");
+    assert_eq!(decloak_args.len(), 2);
+    assert_eq!(decloak_args[0], PyRep::String("AbyssalDeadspaceCloakBlocked".into()));
+
+    // Restore PILOT_A to Jita for fleet escalation & dungeon progression checks
+    sess.solar_system_id = Some(SYS_JITA);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&PILOT_A) {
+            c.solar_system_id = SYS_JITA;
+        }
+    });
+
+    // 2. OnFleetEscalatingPathMessage via real combat anomaly clear in a fleet
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&PILOT_A) {
+            c.fleet_id = Some(77_001);
+        }
+        if let Some(c) = snap.characters.get_mut(&PILOT_B) {
+            c.fleet_id = Some(77_001);
+        }
+        let mut fl = eve_db::FleetRecord::default();
+        fl.fleet_id = 77_001;
+        fl.boss_id = PILOT_A;
+        fl.members = vec![PILOT_A, PILOT_B];
+        snap.fleets.insert(77_001, fl);
+    });
+    eve_server::services::pve_exploration::ensure_system_pve_sites_seeded(&ctx, SYS_JITA).await;
+    let site_id = "PVE-ANOM-30000142-1";
+    let _ = ctx.drain_notifications_for_char(PILOT_B);
+    let sys_h = ctx.systems.get_or_spawn(SYS_JITA);
+    for _ in 0..5 {
+        let (cleared, npcs) = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+            reg.sites_by_system[&SYS_JITA]
+                .iter()
+                .find(|s| s.site_id == site_id)
+                .map(|s| (s.cleared, s.active_npc_ball_ids.clone()))
+                .unwrap_or((true, Vec::new()))
+        });
+        if cleared {
+            break;
+        }
+        if npcs.is_empty() {
+            rpc(
+                &ctx,
+                &mut sess,
+                "scanSvc",
+                "EnterCombatAnomaly",
+                &[PyRep::String(site_id.into()), PyRep::Bool(true)],
+            )
+            .await
+            .expect("EnterCombatAnomaly");
+            continue;
+        }
+        ctx.set_mechanic_rng_seed(Some(3));
+        for nid in npcs {
+            let _ = sys_h
+                .apply_damage_with_attacker(
+                    nid,
+                    eve_destiny::DamageVector {
+                        em: 1.0e7,
+                        thermal: 1.0e7,
+                        kinetic: 1.0e7,
+                        explosive: 1.0e7,
+                    },
+                    Some(PILOT_A),
+                )
+                .await;
+            let _ = sys_h.remove_ball(nid).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    }
+    let esc_n: Vec<(String, Vec<PyRep>)> = ctx
+        .drain_notifications_for_char(PILOT_B)
+        .into_iter()
+        .map(|n| (n.event, n.args))
+        .collect();
+    let fleet_esc = find_notif(&esc_n, "OnFleetEscalatingPathMessage");
+    assert_eq!(fleet_esc.len(), 2);
+    assert_eq!(fleet_esc[0], PyRep::Integer(PILOT_A));
+    assert!(fleet_esc[1].as_i64().unwrap_or(0) > 0);
+
+    let inst_id = eve_server::services::pve_dungeon_runtime::spawn_sde_dungeon_runtime_instance(
+        &ctx,
+        PILOT_A,
+        SYS_JITA,
+        2001,
+        "Deadspace",
+        [120_000_000.0, 0.0, 80_000_000.0],
+        true,
+    )
+    .await
+    .expect("spawn_sde_dungeon_runtime_instance");
+    let dng_state = eve_server::services::pve_dungeon_runtime::get_dungeon_instance_state(&ctx, inst_id)
+        .expect("get_dungeon_instance_state");
+    let entry_gate_id = dng_state.dict_get("entryGateBallID").and_then(|v| v.as_i64()).unwrap();
+    let sys_h = ctx.systems.get_or_spawn(SYS_JITA);
+    let entry_gate_pos = sys_h.get_ball_snapshot(entry_gate_id).await.unwrap().unwrap().1.position;
+    let _ = sys_h.set_ball_position(710_004, entry_gate_pos + DVec3::new(500.0, 0.0, 0.0)).await;
+    let _ = drain_all(&ctx, &mut sess, PILOT_A);
+    rpc(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(entry_gate_id)])
+        .await
+        .expect("ActivateAccelerationGate");
+    let pr_n = drain_all(&ctx, &mut sess, PILOT_A);
+    assert_eq!(find_notif(&pr_n, "OnProgressionRoomJoined").len(), 5);
+}
+
+}
+
+// Folded submodule: parity_notifies_part2
+#[allow(unused_imports, dead_code)]
+mod parity_notifies_part2 {
+    use super::*;
+
+// Runtime integration tests for open `notify:*` parity rows (Part 2).
+
+
+use crate::common;
+use eve_db::{AsteroidRecord, InventoryFlag, InventoryItemRecord};
+use eve_destiny::{Ball, MovementMode};
+use eve_machonet::{service_roles::ROLE_GM_DEFAULT, SessionState};
+use eve_proto::{BridgeRpcError, PyRep};
+use eve_server::router::ServerContext;
+use eve_server::system_actor::AsteroidState;
+use glam::DVec3;
+use std::collections::HashMap;
+
+const PILOT_A: i64 = 90_000_001;
+
+fn new_ctx() -> ServerContext {
+    let sde = std::sync::Arc::new(
+        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("open sde"),
+    );
+    let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    ctx.set_clock_paused(true);
+    ctx
+}
+
+async fn rpc(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    svc: &str,
+    method: &str,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    ctx.dispatch_rpc(sess, svc, None, method, args, &HashMap::new(), None)
+        .await
+}
+
+fn drain_all(ctx: &ServerContext, sess: &mut SessionState, char_id: i64) -> Vec<(String, Vec<PyRep>)> {
+    let mut out = sess.drain_notifications();
+    for n in ctx.drain_notifications_for_char(char_id) {
+        out.push((n.event, n.args));
+    }
+    out
+}
+
+fn find_notif<'a>(notifs: &'a [(String, Vec<PyRep>)], event: &str) -> &'a [PyRep] {
+    notifs
+        .iter()
+        .find(|(ev, _)| ev == event)
+        .map(|(_, args)| args.as_slice())
+        .unwrap_or_else(|| {
+            let seen: Vec<&str> = notifs.iter().map(|(e, _)| e.as_str()).collect();
+            panic!("expected notification {event}, got {seen:?}")
+        })
+}
+
+async fn setup_pilot(ctx: &ServerContext, sid: u64) -> SessionState {
+    let mut sess = SessionState::new(sid);
+    common::login_pilot(ctx, &mut sess, "demo", "demo-secret").await;
+    rpc(
+        ctx,
+        &mut sess,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[PyRep::Integer(PILOT_A)],
+    )
+    .await
+    .expect("SelectCharacterID");
+    ctx.advance_secs(12);
+    let _ = drain_all(ctx, &mut sess, PILOT_A);
+    sess
+}
+
+#[tokio::test]
+async fn test_parity_notifies_seasons_campaigns_and_skills() {
+    // parity: notify:OnSeasonOmegaRewardsClaimed, notify:OnSeasonalGoalCompleted, notify:OnSeasonalGoalsReset
+    eve_testkit::attest(&[
+        "notify:OnSeasonOmegaRewardsClaimed",
+        "notify:OnSeasonalGoalCompleted",
+        "notify:OnSeasonalGoalsReset",
+    ]);
+    let ctx = new_ctx();
+    let mut sess = setup_pilot(&ctx, 1201).await;
+    sess.role = ROLE_GM_DEFAULT;
+
+    let mut target_ch_id = 1_005_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.clone_grade = 2;
+        }
+        if let Some(mut def) =
+            eve_server::services::season_fsd::default_seasonal_challenge_definitions()
+                .into_iter()
+                .next()
+        {
+            target_ch_id = def.challenge_id;
+            def.client_event_driven = true;
+            def.event_conditions.clear();
+            def.max_progress = 2;
+            def.points = 20;
+            snap.service_state_blobs.insert(
+                eve_server::services::season_fsd::SEASONAL_CHALLENGES_CONFIG_KEY.into(),
+                serde_json::to_string(&vec![def]).unwrap(),
+            );
+        }
+    });
+    let _ = rpc(&ctx, &mut sess, "seasonManager", "fill_up_and_return_challenges_for_character", &[])
+        .await
+        .expect("fill challenges");
+    for _ in 0..2 {
+        rpc(
+            &ctx,
+            &mut sess,
+            "seasonManager",
+            "process_client_event",
+            &[PyRep::Integer(target_ch_id)],
+        )
+        .await
+        .expect("complete challenge");
+    }
+    let _ = drain_all(&ctx, &mut sess, PILOT_A);
+    let claim = rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(target_ch_id)])
+        .await
+        .expect("claim_challenge_rewards");
+    assert_eq!(claim.dict_get("claimed").and_then(|v| v.as_bool()), Some(true));
+    let claim_n = drain_all(&ctx, &mut sess, PILOT_A);
+    assert_eq!(find_notif(&claim_n, "OnSeasonalGoalCompleted")[0], PyRep::Integer(0));
+    assert_eq!(
+        find_notif(&claim_n, "OnSeasonOmegaRewardsClaimed"),
+        &[PyRep::List(vec![PyRep::Integer(0), PyRep::Integer(1)])]
+    );
+
+    rpc(&ctx, &mut sess, "slash", "SlashCmd", &[PyRep::String(format!("/season reset_goals {PILOT_A}"))])
+        .await
+        .expect("/season reset_goals");
+    let reset_n = drain_all(&ctx, &mut sess, PILOT_A);
+    assert_eq!(find_notif(&reset_n, "OnSeasonalGoalsReset").len(), 0);
+}
+
+#[tokio::test]
+async fn test_parity_notifies_plex_dogma_and_brain() {
+    // parity: notify:OnEffectMessage, notify:OnPlexDepositFailed, notify:OnPlexWithdrawFailed
+    eve_testkit::attest(&[
+        "notify:OnEffectMessage",
+        "notify:OnPlexDepositFailed",
+        "notify:OnPlexWithdrawFailed",
+    ]);
+    let ctx = new_ctx();
+    let mut sess = setup_pilot(&ctx, 1202).await;
+
+    // 1. OnPlexDepositFailed via invbroker.DepositPlexToVault with reference
+    let jita_station = 60_003_760_i64;
+    let trit_id = 880_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.station_id = Some(jita_station);
+        }
+        snap.adjust_plex_vault(PILOT_A, 50);
+        snap.items.insert(
+            trit_id,
+            InventoryItemRecord {
+                item_id: trit_id,
+                type_id: 34,
+                owner_id: PILOT_A,
+                location_id: jita_station,
+                flag: InventoryFlag::Hangar,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    sess.station_id = Some(jita_station);
+    let _ = drain_all(&ctx, &mut sess, PILOT_A);
+    assert!(rpc(
+        &ctx,
+        &mut sess,
+        "invbroker",
+        "DepositPlexToVault",
+        &[
+            PyRep::Integer(jita_station),
+            PyRep::Integer(trit_id),
+            PyRep::Integer(10),
+            PyRep::Integer(4242),
+        ],
+    )
+    .await
+    .is_err());
+    let dep_n = drain_all(&ctx, &mut sess, PILOT_A);
+    assert_eq!(
+        find_notif(&dep_n, "OnPlexDepositFailed"),
+        &[PyRep::String("NotPlex".into()), PyRep::Integer(4242)]
+    );
+
+    // 2. OnPlexWithdrawFailed via invbroker.WithdrawPlexFromVault with reference
+    let mut wd_kwargs = HashMap::new();
+    wd_kwargs.insert("reference".to_string(), PyRep::Integer(5353));
+    assert!(ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "WithdrawPlexFromVault",
+            &[PyRep::Integer(99_999)],
+            &wd_kwargs,
+            None,
+        )
+        .await
+        .is_err());
+    let wd_n = drain_all(&ctx, &mut sess, PILOT_A);
+    assert_eq!(
+        find_notif(&wd_n, "OnPlexWithdrawFailed"),
+        &[PyRep::String("NotEnoughPlex".into()), PyRep::Integer(5353)]
+    );
+
+    // 3. OnEffectMessage via mining_cycle::process_mining_cycles when capacitor runs dry
+    let sys_jita = 30_000_142_u32;
+    let miner_id = 880_011_i64;
+    let rock_id = 880_012_i64;
+    let miner_type = 483_u32;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(PILOT_A).or_default().insert(
+            3386,
+            eve_db::TrainedSkillRecord {
+                type_id: 3386,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+        let active_ship = snap.characters.get(&PILOT_A).map(|c| c.active_ship_id).unwrap_or(0);
+        if let Some(sh) = snap.items.get_mut(&active_ship) {
+            sh.type_id = 32880;
+        }
+        snap.items.retain(|_, i| i.location_id != active_ship);
+        snap.module_online_states.insert(miner_id, true);
+        snap.items.insert(
+            miner_id,
+            InventoryItemRecord {
+                item_id: miner_id,
+                type_id: miner_type,
+                owner_id: PILOT_A,
+                location_id: active_ship,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let undock = rpc(&ctx, &mut sess, "stationSvc", "Undock", &[])
+        .await
+        .expect("Undock");
+    let ship_id = undock.dict_get("shipID").and_then(|v| v.as_i64()).expect("shipID");
+    ctx.invalidate_ship_fitting(ship_id);
+    let beyonce_id = undock
+        .dict_get("beyonceBoundID")
+        .and_then(|v| v.as_i64())
+        .map(|v| v as u64);
+    ctx.dispatch_rpc(&mut sess, "beyonce", beyonce_id, "CmdStop", &[], &HashMap::new(), None)
+        .await
+        .expect("CmdStop");
+
+    let sys = ctx.systems.get_or_spawn(sys_jita);
+    let (_, ship_ball) = sys.get_ball_snapshot(ship_id).await.unwrap().expect("ship ball");
+    let rock_pos = ship_ball.position + DVec3::new(2_000.0, 0.0, 0.0);
+    ctx.db.spawn_asteroid(AsteroidRecord {
+        asteroid_id: rock_id,
+        solar_system_id: sys_jita,
+        belt_id: 40_000_001,
+        type_id: 1230,
+        quantity: 10_000,
+        initial_quantity: 10_000,
+        position: (rock_pos.x, rock_pos.y, rock_pos.z),
+        radius: 100.0,
+    });
+    let _ = sys
+        .spawn_asteroid(
+            AsteroidState {
+                asteroid_id: rock_id,
+                belt_id: 40_000_001,
+                type_id: 1230,
+                initial_units: 10_000,
+                remaining_units: 10_000,
+                unit_volume: 0.1,
+                depleted: false,
+                respawn_at_tick: None,
+            },
+            Ball {
+                id: rock_id,
+                type_id: 1230,
+                position: rock_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 0.0,
+                mass: 1.0e10,
+                radius: 100.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+        )
+        .await;
+    rpc(&ctx, &mut sess, "dogmaIM", "AddTarget", &[PyRep::Integer(rock_id)])
+        .await
+        .expect("AddTarget");
+    for _ in 0..30 {
+        if sys
+            .get_target_locks(ship_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|l| l.target_id == rock_id && l.locked)
+        {
+            break;
+        }
+        sys.step_manual(1.0).await.unwrap();
+    }
+    rpc(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(miner_id),
+            PyRep::String("miningLaser".into()),
+            PyRep::Integer(rock_id),
+        ],
+    )
+    .await
+    .expect("Activate Miner I");
+    let _ = drain_all(&ctx, &mut sess, PILOT_A);
+    ctx.advance_secs(65);
+    let mut cs = ctx.build_ship_combat_state(PILOT_A, ship_id, 32880);
+    cs.max_capacitor = 0.0;
+    cs.capacitor = 0.0;
+    let _ = sys.set_combat_state(ship_id, cs).await;
+    let _ = eve_server::services::mining_cycle::process_mining_cycles(&ctx).await;
+    let eff_n = drain_all(&ctx, &mut sess, PILOT_A);
+    let eff_args = find_notif(&eff_n, "OnEffectMessage");
+    assert_eq!(eff_args[0], PyRep::String("NotEnoughEnergy".into()));
+    assert_eq!(eff_args[1].dict_get("moduleID"), Some(&PyRep::Integer(miner_id)));
+    assert_eq!(
+        eff_args[1].dict_get("effectname"),
+        Some(&PyRep::String("miningLaser".into()))
+    );
+    assert!(eff_args[1].dict_get("need").is_some());
+    assert_eq!(eff_args[1].dict_get("got"), Some(&PyRep::Real(0.0)));
+}
+
+}
