@@ -10,7 +10,7 @@ pub(crate) use super::fleet_social_persistence::{
     CalendarEventState, SocialExtrasState,
 };
 
-fn prune_delayed_local_speakers_on_leave(
+pub(crate) fn prune_delayed_local_speakers_on_leave(
     ctx: &ServerContext,
     snap: &mut eve_db::WorldStateSnapshot,
     chan_id: &str,

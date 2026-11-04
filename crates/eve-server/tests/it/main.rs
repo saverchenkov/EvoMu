@@ -247,6 +247,7 @@ mod social_fleets;
 mod social_fleets_complete;
 mod social_fleets_complete_part2;
 mod social_fleets_corps;
+mod social_chat_mail_and_presence;
 mod sov_fw_complete;
 mod sov_fw_complete_part2;
 mod space;

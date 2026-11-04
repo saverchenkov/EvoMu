@@ -1154,21 +1154,20 @@ impl ServerContext {
                     let old_chan_id = format!("solarsystemid2:{}", old);
                     if let Some(chan) = snap.chat_channels.get_mut(&old_chan_id) {
                         chan.members.remove(&char_id);
+                        let rem_set = chan.members.clone();
+                        crate::services::fleet_social::fleet_social_chat::prune_delayed_local_speakers_on_leave(
+                            self, snap, &old_chan_id, char_id, &rem_set,
+                        );
                     }
                 }
             }
             let new_chan_id = format!("solarsystemid2:{}", new_sys);
-            let chan = snap
-                .chat_channels
-                .entry(new_chan_id.clone())
-                .or_insert_with(|| eve_db::ChatChannelRecord {
-                    channel_id: new_chan_id.clone(),
-                    name: format!("Local: {}", new_sys),
-                    motd: String::new(), owner_id: None, members: std::collections::HashSet::new(),
-                    is_system_local: true, solar_system_id: Some(new_sys), is_private: false,
-                    operators: std::collections::HashSet::new(), password: None,
-                    is_delayed_local: crate::services::quasar_social_chat::is_delayed_local_system(new_sys),
-                });
+            let chan = snap.chat_channels.entry(new_chan_id.clone()).or_insert_with(|| eve_db::ChatChannelRecord {
+                channel_id: new_chan_id.clone(), name: format!("Local: {}", new_sys), motd: String::new(),
+                owner_id: None, members: std::collections::HashSet::new(), is_system_local: true,
+                solar_system_id: Some(new_sys), is_private: false, operators: std::collections::HashSet::new(),
+                password: None, is_delayed_local: crate::services::quasar_social_chat::is_delayed_local_system(new_sys),
+            });
             chan.members.insert(char_id);
             Ok::<(), std::convert::Infallible>(())
         });
@@ -1215,10 +1214,12 @@ impl ServerContext {
             }
         }
 
-        self.notify(
-            NotificationTarget::SolarSystem(new_sys), "OnChannelJoined", "channelid",
-            vec![PyRep::String(format!("solarsystemid2:{}", new_sys)), PyRep::String("Join".into()), PyRep::Integer(char_id)],
-        );
+        if !crate::services::quasar_social_chat::is_delayed_local_system(new_sys) {
+            self.notify(
+                NotificationTarget::SolarSystem(new_sys), "OnChannelJoined", "channelid",
+                vec![PyRep::String(format!("solarsystemid2:{}", new_sys)), PyRep::String("Join".into()), PyRep::Integer(char_id)],
+            );
+        }
         if old_sys != Some(new_sys) {
             crate::services::pve_incursion_lifecycle::emit_active_incursion_tale_data_for_system(
                 self, new_sys,

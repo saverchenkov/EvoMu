@@ -329,15 +329,27 @@ pub fn remove_character_from_chat_channels(
     });
 
     if !left_channels.is_empty() {
-        let mut s = ctx.social_extras.lock().unwrap();
-        for (chan_id, _) in &left_channels {
-            if let Some(speakers) = s.delayed_local_speakers.get_mut(chan_id) {
-                speakers.remove(&char_id);
+        ctx.db.with_mut_snapshot(|snap| {
+            for (chan_id, remaining) in &left_channels {
+                if chan_id.starts_with("solarsystemid2:") {
+                    let rem_set: std::collections::HashSet<i64> = remaining.iter().copied().collect();
+                    crate::services::fleet_social::fleet_social_chat::prune_delayed_local_speakers_on_leave(
+                        ctx, snap, chan_id, char_id, &rem_set,
+                    );
+                }
             }
-        }
+        });
     }
 
     for (chan_id, remaining_members) in left_channels {
+        if chan_id.starts_with("solarsystemid2:") {
+            let is_del = ctx.db.with_snapshot(|snap| {
+                snap.chat_channels.get(&chan_id).is_some_and(|c| c.is_delayed_local)
+            });
+            if is_del {
+                continue;
+            }
+        }
         let left_args = vec![PyRep::String(chan_id), PyRep::Integer(char_id)];
         for mid in remaining_members {
             ctx.notify(
