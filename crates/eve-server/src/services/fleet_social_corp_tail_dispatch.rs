@@ -220,13 +220,13 @@ pub fn handle_corp_gov_tail(
         }
 
         ("corpRegistry", "GetStructureReinforceDefault") => {
-            let hour = read_corp_gov(ctx, |g| g.get(&corp_id).map(|s| s.reinforce_hour).unwrap_or(18));
-            Some(Ok(PyRep::Integer(hour as i64)))
-        }
-
-        ("corpRegistry", "GetStructureReinforceWeekdayDefault") => {
-            let weekday = read_corp_gov(ctx, |g| g.get(&corp_id).map(|s| s.reinforce_weekday).unwrap_or(5));
-            Some(Ok(PyRep::Integer(weekday as i64)))
+            if args.first().and_then(|a| a.as_str()) == Some("weekday") {
+                let weekday = read_corp_gov(ctx, |g| g.get(&corp_id).map(|s| s.reinforce_weekday).unwrap_or(5));
+                Some(Ok(PyRep::Integer(weekday as i64)))
+            } else {
+                let hour = read_corp_gov(ctx, |g| g.get(&corp_id).map(|s| s.reinforce_hour).unwrap_or(18));
+                Some(Ok(PyRep::Integer(hour as i64)))
+            }
         }
 
         ("corpRegistry", "GetDivisionNames")

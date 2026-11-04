@@ -197,6 +197,7 @@ async fn test_highsec_stage5_vorton_weapons_yellow_safety_and_arc_capsule_concor
         let mut bp = hs_h.ballpark.write().unwrap_or_else(|e| e.into_inner());
         bp.set_ball_position(pod_ball, DVec3::new(3_500.0, 0.0, 0.0));
     }
+    ctx.advance_secs(10);
     ctx.db.with_mut_snapshot(|s| {
         s.module_active_states.remove(&vorton_id);
     });
@@ -208,6 +209,7 @@ async fn test_highsec_stage5_vorton_weapons_yellow_safety_and_arc_capsule_concor
     with_mut_combat_runtime(&ctx, |rt| {
         rt.safety_levels.insert(atk_cid, SafetyLevel::Red);
     });
+    ctx.advance_secs(10);
     ctx.db.with_mut_snapshot(|s| {
         s.module_active_states.remove(&vorton_id);
     });

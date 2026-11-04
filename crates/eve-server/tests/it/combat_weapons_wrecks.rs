@@ -144,6 +144,7 @@ async fn test_c1_turret_families_hit_formula_wrecking_shots_and_crystal_degradat
     assert_eq!(rem_ac_ammo, 99, "Projectile turret must consume 1 round per cycle");
 
     // 4. Wrecking shot (`hitRoll < 0.01` -> 3.0x base damage) vs normal hit (`hitRoll = 0.50`)
+    ctx.advance_secs(5);
     let kw_wreck = HashMap::new();
     ctx.set_invention_roll_override(Some(0.005));
     let wreck_res = dispatch_combat_rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(autocannon_id), PyRep::Integer(target_id)], &kw_wreck)
@@ -179,6 +180,7 @@ async fn test_c1_turret_families_hit_formula_wrecking_shots_and_crystal_degradat
     let _ = sys_handle
         .add_target_lock(ship_id, TargetLock { target_id: far_target_id, lock_time_ms: 100.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None })
         .await;
+    ctx.advance_secs(5);
     let kw_miss = HashMap::new();
     ctx.set_invention_roll_override(Some(0.95));
     let miss_res = dispatch_combat_rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(autocannon_id), PyRep::Integer(far_target_id)], &kw_miss)
@@ -240,6 +242,7 @@ async fn test_c1_turret_families_hit_formula_wrecking_shots_and_crystal_degradat
             c.dynamic_attributes.insert(3, 0.995);
         }
     });
+    ctx.advance_secs(5);
     let shatter_res = dispatch_combat_rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(pulse_t2_id), PyRep::Integer(target_id)], &kw_crys)
         .await
         .expect("T2 Shatter Activate");
@@ -371,6 +374,7 @@ async fn test_c2_missiles_drf_smartbombs_bombs_breacher_pods_damage_layers_and_s
         dispatch_combat_rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(xl_launcher_id), PyRep::Integer(fast_frig_id)], &HashMap::new())
             .await
             .expect("XL Torpedo vs Frigate");
+    ctx.advance_secs(15);
     let res_bs = dispatch_combat_rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(xl_launcher_id), PyRep::Integer(big_bs_id)], &HashMap::new())
         .await
         .expect("XL Torpedo vs Battleship");
@@ -391,6 +395,7 @@ async fn test_c2_missiles_drf_smartbombs_bombs_breacher_pods_damage_layers_and_s
     );
 
     // Spawn an in-flight missile and destroy it mid-flight with a Smartbomb (`Small EMP Smartbomb I` 1563)
+    ctx.advance_secs(10);
     let kw_defer = HashMap::new();
     let defer_res = dispatch_combat_rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(lml_id), PyRep::Integer(victim_ship_id)], &kw_defer)
         .await
@@ -418,6 +423,7 @@ async fn test_c2_missiles_drf_smartbombs_bombs_breacher_pods_damage_layers_and_s
     assert!(sys_handle.get_ball_snapshot(missile_ball_id).await.unwrap().is_none(), "Destroyed missile ball must be removed from ballpark");
 
     // Also verify Defender Missile (`Defender Launcher I` 44102 + `Defender Missile I` 32782) intercepts an incoming missile
+    ctx.advance_secs(10);
     let defer_res2 = dispatch_combat_rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(lml_id), PyRep::Integer(victim_ship_id)], &kw_defer)
         .await
         .expect("Deferred Missile 2");
@@ -516,6 +522,7 @@ async fn test_c2_missiles_drf_smartbombs_bombs_breacher_pods_damage_layers_and_s
             c.type_id = 27922;
         }
     });
+    ctx.advance_secs(120);
     let _ = dispatch_combat_rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(bomb_launcher_id)], &HashMap::new())
         .await
         .expect("Lockbreaker Bomb Activate");
@@ -536,6 +543,7 @@ async fn test_c2_missiles_drf_smartbombs_bombs_breacher_pods_damage_layers_and_s
     let active_dots = with_combat_runtime(&ctx, |rt| rt.active_breacher_dots.len());
     assert_eq!(active_dots, 1, "Single active breacher DoT entry per target");
     // Step 5 seconds of combat system and verify DoT ticks without stacking when re-applied
+    ctx.advance_secs(10);
     let _ = dispatch_combat_rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(breacher_id), PyRep::Integer(victim_ship_id)], &HashMap::new())
         .await
         .expect("Breacher Pod 2");

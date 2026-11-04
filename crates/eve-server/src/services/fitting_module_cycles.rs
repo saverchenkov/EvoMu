@@ -143,6 +143,12 @@ pub(crate) async fn handle_module_cycles(
                 return Some(Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module type {} not found in SDE", m.type_id) }));
             };
             let is_weapon = matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807);
+            if method == "Activate" && is_weapon && ctx.is_module_in_reactivation_delay(ship_id, module_id) {
+                return Some(Err(BridgeRpcError {
+                    code: "ModuleAlreadyActive".into(),
+                    message: format!("Module {module_id} is already active in a cycle"),
+                }));
+            }
             let is_upwell_weapon_or_aoe = (target_id_opt.is_some_and(|tid| {
                 tid >= 1_000_000_000_000 || ctx.db.with_snapshot(|s| s.structures.contains_key(&tid) || s.sov_runtime.mercenary_dens.contains_key(&tid) || s.sov_runtime.mto_site_balls.contains_key(&tid) || (s.system_states.get(&sys_id).is_some_and(|st| st.sov_alliance_id.is_some()) && !s.characters.contains_key(&tid) && !s.characters.values().any(|c| c.active_ship_id == tid)))
             }) && is_weapon)
@@ -637,13 +643,15 @@ pub(crate) async fn handle_module_cycles(
                     return Some(Ok(rep));
                 }
                 if ctx.is_module_in_reactivation_delay(ship_id, module_id) {
-                    return Some(Err(BridgeRpcError { code: "ModuleReactivationDelay".into(), message: format!("Module {module_id} cannot reactivate before delay expires") }));
+                    let code = if matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807) { "ModuleAlreadyActive" } else { "ModuleReactivationDelay" };
+                    return Some(Err(BridgeRpcError { code: code.into(), message: format!("Module {module_id} cannot reactivate before delay expires") }));
                 }
                 if method == "Activate"
                     && already_active
                     && matches!(
                         mod_type.group_id,
                         40 | 1156 | 41 | 1697 | 67 | 71 | 76 | 1122 | 650 | 80 | 353
+                            | 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807
                     )
                 {
                     return Some(Err(BridgeRpcError {
@@ -1276,6 +1284,7 @@ pub(crate) async fn handle_module_cycles(
             let is_cycle_gated = matches!(
                 mod_type.group_id,
                 72 | 40 | 1156 | 41 | 1697 | 67 | 71 | 76 | 1122 | 650 | 80 | 353
+                    | 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807
             );
             if is_cycle_gated || (repeat == 0 && reactivation_delay_s > 0.0) {
                 let total_delay = if mod_type.group_id == 40 {

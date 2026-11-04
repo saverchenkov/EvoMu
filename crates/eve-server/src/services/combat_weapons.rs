@@ -86,7 +86,7 @@ pub async fn handle_weapons(
                     fit = rebuilt;
                 }
             }
-            let m = if let Some(found) = fit.modules.get(&module_id).cloned() {
+            let mut m = if let Some(found) = fit.modules.get(&module_id).cloned() {
                 found
             } else if let Some(item_rec) = ctx.db.with_snapshot(|snap| {
                 snap.items
@@ -634,26 +634,30 @@ pub async fn handle_weapons(
                 }));
             }
 
-            // Entropic Disintegrator pre-validation (P1-ENTROPIC-PARTIAL-MUTATION-AND-AMMO-DEPLETION):
-            // Activating an already active entropic module on the same target must fail with AlreadyActive
-            // BEFORE deducting capacitor or consuming ammo.
-            if is_entropic {
-                let is_already_active = {
-                    let is_active_in_db = ctx.db.with_snapshot(|snap| {
-                        snap.module_active_states.contains(&module_id)
-                    });
-                    is_active_in_db && with_combat_runtime(ctx, |rt| {
-                        rt.entropic_spools
-                            .get(&(ship_id, module_id))
-                            .is_some_and(|entry| entry.target_id == target_ball_id)
-                    })
-                };
-                if is_already_active {
-                    return Some(Err(BridgeRpcError {
-                        code: "AlreadyActive".into(),
-                        message: format!("Module {module_id} is already active"),
-                    }));
+            let in_delay = ctx.is_module_in_reactivation_delay(ship_id, module_id);
+            let in_cycle = sys_handle.has_module_cycle(ship_id, module_id).await;
+            if !in_delay && !in_cycle {
+                ctx.db.with_mut_snapshot(|s| { s.module_active_states.remove(&module_id); });
+                if matches!(m.state, eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded) {
+                    m.state = eve_dogma::ModuleState::Online;
+                    if let Some(fm) = fit.modules.get_mut(&module_id) {
+                        fm.state = eve_dogma::ModuleState::Online;
+                    }
+                    ctx.store_ship_fitting(ship_id, fit.clone());
                 }
+            }
+            if is_entropic {
+                let is_already_active = ctx.db.with_snapshot(|snap| snap.module_active_states.contains(&module_id))
+                    && with_combat_runtime(ctx, |rt| rt.entropic_spools.get(&(ship_id, module_id)).is_some_and(|entry| entry.target_id == target_ball_id));
+                if is_already_active {
+                    return Some(Err(BridgeRpcError { code: "AlreadyActive".into(), message: format!("Module {module_id} is already active") }));
+                }
+            }
+            let already_active = matches!(m.state, eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded)
+                || ctx.db.with_snapshot(|s| s.module_active_states.contains(&module_id))
+                || in_cycle || in_delay;
+            if method == "Activate" && (in_delay || already_active) {
+                return Some(Err(BridgeRpcError { code: "ModuleAlreadyActive".into(), message: format!("Module {module_id} is already active in a cycle") }));
             }
 
             // Capacitor check & deduction:
@@ -1339,6 +1343,7 @@ pub async fn handle_weapons(
                 let _ = fit.activate_module(module_id, is_overloaded, &ctx.sde);
             }
             ctx.store_ship_fitting(ship_id, fit);
+            ctx.record_module_reactivation_delay(ship_id, module_id, cycle_secs);
 
             let st_state = if is_upwell_target {
                 ctx.db.with_snapshot(|snap| snap.structures.get(&target_ball_id).map(|s| s.state.clone()))

@@ -448,11 +448,11 @@ async fn test_corporation_structure_default_reinforcement_and_anchoring_inherita
         &ctx,
         &mut sess1,
         "corpRegistry",
-        "GetStructureReinforceWeekdayDefault",
-        &[],
+        "GetStructureReinforceDefault",
+        &[PyRep::String("weekday".into())],
     )
     .await
-    .expect("GetStructureReinforceWeekdayDefault");
+    .expect("GetStructureReinforceDefault");
     assert_eq!(get_rf_day, PyRep::Integer(4));
 
     // 3. Anchor a new Upwell structure for the corporation

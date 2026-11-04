@@ -107,9 +107,9 @@ async fn test_contracts_item_exchange_blueprints_metadata_bpo_and_bpc() {
         .expect("CreateContract BPO + BPC");
     let cid = field(&create_rep, "contractID").as_i64().unwrap_or_else(|| create_rep.as_i64().unwrap());
 
-    // Pilot 2 inspects contract via contractProxy.GetContractInfo
-    let info = rpc(&ctx, &mut sess2, "contractProxy", "GetContractInfo", &[PyRep::Integer(cid)]).await.expect("contractProxy.GetContractInfo");
-    let PyRep::List(items) = field(&info, "items") else { panic!("expected items list in GetContractInfo"); };
+    // Pilot 2 inspects contract via contractProxy.GetContract
+    let info = rpc(&ctx, &mut sess2, "contractProxy", "GetContract", &[PyRep::Integer(cid)]).await.expect("contractProxy.GetContract");
+    let PyRep::List(items) = field(&info, "items") else { panic!("expected items list in GetContract"); };
     assert_eq!(items.len(), 2);
 
     let bpo_entry = items.iter().find(|it| field(it, "itemID") == PyRep::Integer(bpo_id)).expect("BPO item entry");
@@ -227,9 +227,9 @@ async fn test_contracts_blueprint_singleton_and_abyssal_preservation() {
         .expect("CreateContract");
     let cid = field(&create_rep, "contractID").as_i64().unwrap_or_else(|| create_rep.as_i64().unwrap());
 
-    // Query via contractMgr.GetContractInfo (testing contractMgr service dispatch)
-    let info = rpc(&ctx, &mut sess2, "contractMgr", "GetContractInfo", &[PyRep::Integer(cid)]).await.expect("contractMgr.GetContractInfo");
-    let PyRep::List(items) = field(&info, "items") else { panic!("expected items list in GetContractInfo"); };
+    // Query via contractProxy.GetContract (testing contractProxy service dispatch)
+    let info = rpc(&ctx, &mut sess2, "contractProxy", "GetContract", &[PyRep::Integer(cid)]).await.expect("contractProxy.GetContract");
+    let PyRep::List(items) = field(&info, "items") else { panic!("expected items list in GetContract"); };
     assert_eq!(items.len(), 3);
 
     let bpc_entry = items.iter().find(|it| field(it, "itemID") == PyRep::Integer(bpc_id)).expect("BPC entry");
@@ -246,18 +246,18 @@ async fn test_contracts_blueprint_singleton_and_abyssal_preservation() {
     assert_eq!(field(aby_entry, "sourceMutaplasmidID"), PyRep::Integer(MUTAPLASMID_TYPE_ID));
     assert_eq!(field(aby_entry, "singleton"), PyRep::Bool(true));
 
-    // Also verify contractMgr.SearchContracts exposes all contract items
+    // Also verify contractProxy.SearchContracts exposes all contract items
     let search_kw = HashMap::from([("contractType".to_string(), PyRep::String("ItemExchange".into()))]);
-    let search_res = rpc_kw(&ctx, &mut sess2, "contractMgr", "SearchContracts", &[], &search_kw).await.expect("contractMgr.SearchContracts");
+    let search_res = rpc_kw(&ctx, &mut sess2, "contractProxy", "SearchContracts", &[], &search_kw).await.expect("contractProxy.SearchContracts");
     let PyRep::List(search_list) = search_res else { panic!("expected search list"); };
     let found = search_list.iter().find(|c| field(c, "contractID") == PyRep::Integer(cid)).expect("found in search");
     let PyRep::List(found_items) = field(found, "items") else { panic!("items in found search result"); };
     assert_eq!(found_items.len(), 3);
 
-    // Accept contract via contractMgr.AcceptContract
-    rpc(&ctx, &mut sess2, "contractMgr", "AcceptContract", &[PyRep::Integer(cid), PyRep::Bool(false)])
+    // Accept contract via contractProxy.AcceptContract
+    rpc(&ctx, &mut sess2, "contractProxy", "AcceptContract", &[PyRep::Integer(cid), PyRep::Bool(false)])
         .await
-        .expect("contractMgr.AcceptContract");
+        .expect("contractProxy.AcceptContract");
 
     // Verify all singleton attributes strictly preserved upon contract completion
     ctx.db.with_snapshot(|s| {

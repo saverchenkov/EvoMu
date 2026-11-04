@@ -152,6 +152,7 @@ async fn test_entropic_activation_and_cycle_do_not_partially_mutate_and_deplete_
 
     // 5. Single loaded round: activation consumes it; next cycle stops spool without draining capacitor
     let _ = dispatch_combat_rpc(&ctx, &mut sess, "dogmaIM", "Deactivate", &[PyRep::Integer(ent_id)], &HashMap::new()).await;
+    ctx.advance_time_seconds(5);
     let single_id = 201_103;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.remove(&ammo_id);

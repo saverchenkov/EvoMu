@@ -248,6 +248,7 @@ async fn test_c1_triglavian_entropic_spool_and_edencom_vorton_arc_and_sig_radius
     assert!((m_max - 3.125).abs() < 1e-6, "Entropic spool must cap at 3.125x (got {m_max})");
 
     // Switching target resets spool to 1.0x
+    ctx.advance_secs(5);
     let c_switch = dispatch_combat_rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(entropic_id), PyRep::Integer(target_ids[1])], &kw)
         .await
         .expect("Entropic Switch Target");
@@ -261,6 +262,7 @@ async fn test_c1_triglavian_entropic_spool_and_edencom_vorton_arc_and_sig_radius
 
     // Deactivating module (`dogmaIM.Deactivate`) also resets spool
     let _ = dispatch_combat_rpc(&ctx, &mut sess, "dogmaIM", "Deactivate", &[PyRep::Integer(entropic_id)], &HashMap::new()).await.expect("Deactivate entropic");
+    ctx.advance_secs(5);
     let c_after_deact = dispatch_combat_rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(entropic_id), PyRep::Integer(target_ids[1])], &kw)
         .await
         .expect("Entropic after Deactivate");

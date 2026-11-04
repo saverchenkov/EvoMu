@@ -274,6 +274,10 @@ async fn test_emergency_hull_energizer_and_overheat_burnout_state() {
     let ungrouped_res = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(gun1_id), PyRep::String("projectileFired".into()), PyRep::Integer(raven_id)], &kw, None).await;
     assert!(ungrouped_res.is_ok(), "Ungrouped healthy module can be activated");
 
+    // Deactivate gun1 and advance clock past weapon rate-of-fire cooldown
+    let _ = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Deactivate", &[PyRep::Integer(gun1_id), PyRep::String("projectileFired".into())], &kw, None).await;
+    ctx.advance_secs(10);
+
     // Repairing burned module also re-enables grouped activation
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(it) = snap.items.get_mut(&gun2_id) {

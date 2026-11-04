@@ -53,8 +53,7 @@ pub fn record_lp_reward_log(
                     matches!(
                         e.entry_type.as_str(),
                         "agent_mission_reward" | "agent_mission_time_bonus_reward"
-                    ) && e.amount >= IskCents::from_isk(100_000)
-                        && !snap
+                    ) && !snap
                             .service_state_blobs
                             .contains_key(&format!("mission_taxed_journal:{}", e.entry_id))
                 })

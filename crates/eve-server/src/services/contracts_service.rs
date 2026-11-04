@@ -1,11 +1,11 @@
 //! `contracts_service` — Contract Lifecycle, Escrow, Courier, ItemExchange & Auctions (`E-3`).
 //!
-//! Handles `contractProxy` and `contractMgr` RPCs for:
+//! Handles `contractProxy` RPCs for:
 //! - `ItemExchange` (one-way, want-to-buy, and two-way `requested_items`, preserving BPC/mutated/damage attributes)
 //! - `Courier` (plastic wrap `3468`, collateral + reward escrow, delivery, failure/expiry settlement, `BreakPlasticWrap`)
 //! - `Auction` (starting bid, minimum bid increments, outbid escrow refund, immediate buyout, expiry settlement)
 //! - Contract visibility (`Public`, `Personal`, `Corporation`, `Alliance`), slot limits (`Contracting` `25235`),
-//!   and search/query endpoints (`GetContractInfo`, `SearchContracts`, `GetMyCurrentContractList`,
+//!   and search/query endpoints (`GetContract`, `SearchContracts`, `GetMyCurrentContractList`,
 //!   `GetMyExpiredContractList`, `GetContractListForOwner`, `GetMyBids`, `RejectContract`, `GM_ExpireContract`).
 
 #![forbid(unsafe_code)]
@@ -145,7 +145,7 @@ pub fn handle(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    if service != "contractProxy" && service != "contractMgr" { return None; }
+    if service != "contractProxy" { return None; }
 
     match method {
         "CreateContract" => {
