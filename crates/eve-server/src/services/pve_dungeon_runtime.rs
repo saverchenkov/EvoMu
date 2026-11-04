@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
-use crate::services::notify_emitters_batch3_space::{
+use crate::services::notify_emitters_space_dungeons::{
     emit_dungeon_progression_notifications, emit_exiting_dungeon_on_warp_if_present,
 };
 use crate::services::pve_exploration::with_pve_exploration_reg;
@@ -1021,7 +1021,7 @@ pub async fn despawn_completed_dungeon_core(
                 }
             }
         }
-        crate::services::notify_emitters_b36::push_char_notification_with_db(
+        crate::services::notify_emitters_ess_bounties::push_char_notification_with_db(
             db,
             pending_notifications,
             notify_tx,
@@ -1112,7 +1112,7 @@ async fn apply_dungeon_trigger_actions_core(
         crate::services::pve_dungeon_runtime_rpc::dispatch_dungeon_notify_actions(db, pending_notifications, notify_tx, recipient_char, &progression_events);
     }
     if let Some((did, obj_ids, n_acts)) = notify_batch {
-        crate::services::notify_emitters_b23::dispatch_dungeon_trigger_notify_actions(db, pending_notifications, notify_tx, recipient_char, did, &obj_ids, n_acts);
+        crate::services::notify_emitters_channel_events::dispatch_dungeon_trigger_notify_actions(db, pending_notifications, notify_tx, recipient_char, did, &obj_ids, n_acts);
     }
 
     if !groups_to_spawn.is_empty() {

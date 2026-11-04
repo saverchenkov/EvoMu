@@ -524,7 +524,7 @@ pub fn notify_pve_destruction_events(
     new_escalation: Option<EscalatingPathEntry>,
     advanced_step: Option<EscalatingPathEntry>,
 ) {
-    crate::services::notify_emitters_batch10::emit_expedition_combat_notifications(
+    crate::services::notify_emitters_tournaments_anomalies::emit_expedition_combat_notifications(
         db,
         pending_notifications,
         notify_tx,

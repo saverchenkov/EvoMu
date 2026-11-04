@@ -69,7 +69,7 @@ pub async fn handle(
             });
             if r.is_ok() {
                 if let Some((rs, bs, st, r_ids, b_ids, refs)) = notify_info {
-                    crate::services::notify_emitters_batch10::emit_tournament_match_state_change(
+                    crate::services::notify_emitters_tournaments_anomalies::emit_tournament_match_state_change(
                         ctx, rs, bs, st, &r_ids, &b_ids, &refs,
                     );
                 }
@@ -502,7 +502,7 @@ pub async fn handle(
                     for bid in beacons_to_remove { let _ = sys_handle.remove_ball(bid).await; }
                 }
                 if let Some((rs, bs, st, r_ids, b_ids, refs)) = notify_info {
-                    crate::services::notify_emitters_batch10::emit_tournament_match_state_change(
+                    crate::services::notify_emitters_tournaments_anomalies::emit_tournament_match_state_change(
                         ctx, rs, bs, st, &r_ids, &b_ids, &refs,
                     );
                 }
@@ -840,7 +840,7 @@ pub async fn handle(
             });
             if r.is_ok() {
                 if let Some((rs, bs, st, r_ids, b_ids, refs)) = notify_info {
-                    crate::services::notify_emitters_batch10::emit_tournament_match_state_change(
+                    crate::services::notify_emitters_tournaments_anomalies::emit_tournament_match_state_change(
                         ctx, rs, bs, st, &r_ids, &b_ids, &refs,
                     );
                 }
@@ -969,7 +969,7 @@ pub async fn handle(
                         ],
                     );
                     if old_sys != match_sys as u32 || old_st.is_some() {
-                        crate::services::notify_emitters_batch10::emit_enter_tournament_system(ctx, cid);
+                        crate::services::notify_emitters_tournaments_anomalies::emit_enter_tournament_system(ctx, cid);
                     }
                 }
             }

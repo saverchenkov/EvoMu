@@ -509,7 +509,7 @@ pub(super) async fn handle_fleet_ops(
                     notify::sync_fleet_options_to_db(ctx);
                     let old = notify::options_keyval(old_free, old_reg, auto);
                     notify::emit_options_changed(ctx, fleet_id, old, notify::options_keyval(is_free_move, reg, auto));
-                    crate::services::notify_emitters_batch3::emit_fleet_respawn_points_if_any(ctx, fleet_id);
+                    crate::services::notify_emitters_character_services::emit_fleet_respawn_points_if_any(ctx, fleet_id);
                     Some(Ok(PyRep::keyval([("isFreeMove", PyRep::Bool(is_free_move)), ("isRegistered", PyRep::Bool(reg))])))
                 }
                 Err(e) => Some(Err(e)),
@@ -1147,7 +1147,7 @@ async fn handle_fleet_warp(
         DVec3::new(150_000_000.0, 0.0, 0.0)
     };
 
-    if let Err(e) = crate::services::pve_open_feats_b36::check_ess_warp_destination_allowed(
+    if let Err(e) = crate::services::pve_ess_reserve_banks::check_ess_warp_destination_allowed(
         ctx, sys_id, dest_pos, dest_pos,
     )
     .await
@@ -1171,7 +1171,7 @@ async fn handle_fleet_warp(
             if sys.is_ball_scrambled(ship_id).await.unwrap_or(false) {
                 continue;
             }
-            if crate::services::pve_open_feats_b36::check_ess_intrusion_bubble_restriction(
+            if crate::services::pve_ess_reserve_banks::check_ess_intrusion_bubble_restriction(
                 ctx, sys_id, ship_id, "warp",
             )
             .await
@@ -1199,7 +1199,7 @@ async fn handle_fleet_warp(
                     _ => DVec3::ZERO,
                 };
                 let landing = dest_pos - dir * min_range + offset;
-                if crate::services::pve_open_feats_b36::check_ess_warp_destination_allowed(
+                if crate::services::pve_ess_reserve_banks::check_ess_warp_destination_allowed(
                     ctx, sys_id, dest_pos, landing,
                 )
                 .await

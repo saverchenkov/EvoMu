@@ -664,7 +664,7 @@ pub(crate) mod abyssal_deadspace_part2 {
 // boundary damage, pocket clearing rules, automated pylons, caches, clouds, and weathers.
 
 
-use crate::abyssal_deadspace_closure::{
+use crate::abyssal_deadspace::{
     login_pilot_in_space, move_pilot_to_system, seed_cargo_item, FIL_T0_ELEC, FIL_T1_ELEC,
     FIL_T3_ELEC, SYS_08_LASHESIH, SYS_09_JITA, SYS_LOW_TAMA,
 };
@@ -1355,7 +1355,7 @@ pub(crate) mod abyssal_deadspace_part3 {
 // - Monotonic `WorldRepository::instance_id` isolation in the ballpark registry (`NBF-01`)
 
 
-use crate::abyssal_deadspace_closure::{
+use crate::abyssal_deadspace::{
     login_pilot_in_space, move_pilot_to_system, seed_cargo_item, FIL_T1_ELEC, SYS_08_LASHESIH,
 };
 use crate::common;

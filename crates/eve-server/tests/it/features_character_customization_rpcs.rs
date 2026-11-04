@@ -686,7 +686,7 @@ pub(crate) mod part2 {
 
 // Integration tests for Batch 23 remediation (Abyssal exit suspect flag, war interference, command burst filter, CONCORD & jump-in).
 
-use crate::plan_c7_crimewatch_closure::{dict_get, item_rec, setup_pilot_in_space};
+use crate::crimewatch_hostility::{dict_get, item_rec, setup_pilot_in_space};
 use eve_db::{InventoryFlag, WarRecord};
 use eve_proto::PyRep;
 use eve_server::combat::crimewatch::concord_delay_for_security;

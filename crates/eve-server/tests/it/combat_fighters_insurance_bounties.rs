@@ -636,7 +636,7 @@ async fn nullsec_ess_main_bank_reserve_security_key_and_dynamic_bounty_multiplie
         Some(PyRep::Real(v)) => *v,
         other => panic!("expected Real stolenISK, got {:?}", other),
     };
-    let expected_p1 = (eve_server::services::pve_open_feats_b36::compute_ess_reserve_pulse_payout_cents(
+    let expected_p1 = (eve_server::services::pve_ess_reserve_banks::compute_ess_reserve_pulse_payout_cents(
         4_000_000_000,
         15,
         15,
@@ -1974,7 +1974,7 @@ fn make_sess(char_id: i64, ship_id: i64) -> SessionState {
 }
 
 async fn setup_carrier(ctx: &ServerContext, char_id: i64, ship_id: i64) {
-    crate::open_feats_b35::give_item(ctx, ship_id, ARCHON_CARRIER, char_id, SYS_ID as i64, InventoryFlag::None, 1);
+    crate::features_bounties_ess::give_item(ctx, ship_id, ARCHON_CARRIER, char_id, SYS_ID as i64, InventoryFlag::None, 1);
     ctx.db.with_mut_snapshot(|s| {
         if let Some(ch) = s.characters.get_mut(&char_id) {
             ch.solar_system_id = SYS_ID;
@@ -2006,7 +2006,7 @@ async fn setup_carrier(ctx: &ServerContext, char_id: i64, ship_id: i64) {
 }
 
 async fn setup_target_cruiser(ctx: &ServerContext, char_id: i64, ship_id: i64, pos: DVec3) {
-    crate::open_feats_b35::give_item(ctx, ship_id, 626, char_id, SYS_ID as i64, InventoryFlag::None, 1);
+    crate::features_bounties_ess::give_item(ctx, ship_id, 626, char_id, SYS_ID as i64, InventoryFlag::None, 1);
     let sys = ctx.systems.get_or_spawn(SYS_ID);
     let mut cs = ctx.build_type_combat_state(626);
     if cs.max_shield_hp <= 0.0 {
@@ -2056,7 +2056,7 @@ async fn test_fighter_heavy_long_range_bomb() {
     let mut sess = make_sess(char_id, carrier_id);
 
     let item_id = 410_001;
-    crate::open_feats_b35::give_item(&ctx, item_id, AMETAT_HEAVY_FIGHTER, char_id, carrier_id, InventoryFlag::FighterBay, 3);
+    crate::features_bounties_ess::give_item(&ctx, item_id, AMETAT_HEAVY_FIGHTER, char_id, carrier_id, InventoryFlag::FighterBay, 3);
     dispatch_combat_rpc(&ctx, &mut sess, "fighterMgr", "LoadFightersToTube", &[PyRep::Integer(0), PyRep::Integer(item_id)], &kw)
         .await
         .expect("LoadFightersToTube");
@@ -2113,8 +2113,8 @@ async fn test_fighter_refuel_rearm_repair() {
 
     let tube_item = 410_010;
     let bay_spare = 410_011;
-    crate::open_feats_b35::give_item(&ctx, tube_item, EQUITE_LIGHT_FIGHTER, char_id, carrier_id, InventoryFlag::FighterBay, 9);
-    crate::open_feats_b35::give_item(&ctx, bay_spare, EQUITE_LIGHT_FIGHTER, char_id, carrier_id, InventoryFlag::FighterBay, 6);
+    crate::features_bounties_ess::give_item(&ctx, tube_item, EQUITE_LIGHT_FIGHTER, char_id, carrier_id, InventoryFlag::FighterBay, 9);
+    crate::features_bounties_ess::give_item(&ctx, bay_spare, EQUITE_LIGHT_FIGHTER, char_id, carrier_id, InventoryFlag::FighterBay, 6);
 
     dispatch_combat_rpc(&ctx, &mut sess, "fighterMgr", "LoadFightersToTube", &[PyRep::Integer(0), PyRep::Integer(tube_item)], &kw)
         .await
@@ -2207,7 +2207,7 @@ async fn test_fighter_support_abilities_and_squadron_scaling() {
     ] {
         for (idx, tid) in pair.into_iter().enumerate() {
             let iid = base_id + idx as i64;
-            crate::open_feats_b35::give_item(&ctx, iid, tid, char_id, carrier_id, InventoryFlag::FighterBay, 3);
+            crate::features_bounties_ess::give_item(&ctx, iid, tid, char_id, carrier_id, InventoryFlag::FighterBay, 3);
             dispatch_combat_rpc(&ctx, &mut sess, "fighterMgr", "LoadFightersToTube", &[PyRep::Integer(idx as i64), PyRep::Integer(iid)], &kw)
                 .await
                 .expect("Load support fighter");
@@ -2280,7 +2280,7 @@ async fn test_light_fighter_space_superiority() {
     let mut sess = make_sess(char_id, carrier_id);
 
     let equite_id = 410_050;
-    crate::open_feats_b35::give_item(&ctx, equite_id, EQUITE_LIGHT_FIGHTER, char_id, carrier_id, InventoryFlag::FighterBay, 9);
+    crate::features_bounties_ess::give_item(&ctx, equite_id, EQUITE_LIGHT_FIGHTER, char_id, carrier_id, InventoryFlag::FighterBay, 9);
     dispatch_combat_rpc(&ctx, &mut sess, "fighterMgr", "LoadFightersToTube", &[PyRep::Integer(0), PyRep::Integer(equite_id)], &kw)
         .await
         .expect("Load Equite");
@@ -2358,7 +2358,7 @@ pub(crate) mod fighters_lifecycle {
 //! - Industry pause timing and CompleteManyJobs (`feat:lifecycle.industry-pause-and-many`)
 //! - Quitting corporation full cleanup and bloodline NPC assignment (`feat:lifecycle.corp-quit-cleanup`)
 
-use crate::open_feats_b35::give_item;
+use crate::features_bounties_ess::give_item;
 use eve_db::{
     corp_roles, ChatChannelRecord, CorporationRecord, InventoryFlag, IskCents,
     UpwellStructureRecord,

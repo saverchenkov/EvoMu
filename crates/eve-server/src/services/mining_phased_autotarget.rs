@@ -1,4 +1,4 @@
-//! `mining_b33` — Phased Asteroid Field lifecycle & Mobile Phase Anchor integration (`MN-08`).
+//! `mining_phased_autotarget` — Phased Asteroid Field lifecycle & Mobile Phase Anchor integration (`MN-08`).
 //!
 //! Wires `PhasedAsteroidFieldState` into live system mining-site seeding, `WorldStateSnapshot`
 //! persistence (`service_state_blobs["phased_asteroid_fields"]`), deployable Mobile Phase Anchor

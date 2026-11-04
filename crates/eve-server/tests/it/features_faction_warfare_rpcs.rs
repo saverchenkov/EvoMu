@@ -11,7 +11,7 @@ use eve_server::router::ServerContext;
 use glam::DVec3;
 
 use super::common;
-use super::open_feats_and_rpcs_b7::{rpc, setup_pilot};
+use super::features_sovereignty_upwell_rpcs::{rpc, setup_pilot};
 
 const PILOT_1: i64 = 90_000_001;
 const STATE_PROTECTORATE_CORP: i64 = 1_000_180;

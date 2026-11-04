@@ -3,7 +3,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::open_feats_and_rpcs_b11_part2::{quasar_rpc, select_char};
+use crate::features_fleet_broadcast_rpcs::part2::{quasar_rpc, select_char};
 use crate::quasar_info_panels_and_plex_payments::{
     drain_notices, encode_double_field, encode_seq_id,
 };

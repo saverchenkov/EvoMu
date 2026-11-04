@@ -423,7 +423,7 @@ pub(crate) async fn validate_pre_warp_common(
         ship_id,
     )
     .await?;
-    crate::services::pve_open_feats_b36::check_ess_intrusion_bubble_restriction(
+    crate::services::pve_ess_reserve_banks::check_ess_intrusion_bubble_restriction(
         ctx, sys_id, ship_id, "warp",
     )
     .await?;
@@ -734,7 +734,7 @@ pub async fn handle_use_warp_vector(
         rollback_warp_vector_reservation(ctx, char_id, target_id, prev_item, prev_cd_until);
         return Err(e);
     }
-    if let Err(e) = crate::services::pve_open_feats_b36::check_ess_warp_destination_allowed(
+    if let Err(e) = crate::services::pve_ess_reserve_banks::check_ess_warp_destination_allowed(
         ctx,
         sys_id,
         dest_pos,

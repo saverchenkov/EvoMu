@@ -80,27 +80,8 @@ pub mod notify_emitters_operations_nodegraph;
 pub mod notify_emitters_skills_trade_godma;
 pub mod crate_loot_service;
 pub mod notify_emitters_tournaments_anomalies;
-
-#[doc(hidden)]
-pub use notify_emitters_character_services as notify_emitters_batch3;
-#[doc(hidden)]
-pub use notify_emitters_space_dungeons as notify_emitters_batch3_space;
-#[doc(hidden)]
-pub use notify_emitters_combat_ess_progression as notify_emitters_batch5;
-#[doc(hidden)]
-pub use notify_emitters_combat_ess_progression as notify_emitters_batch6;
-#[doc(hidden)]
-pub use notify_emitters_seasons_tactical as notify_emitters_batch8;
-#[doc(hidden)]
-pub use notify_emitters_operations_nodegraph as notify_emitters_batch8_ops;
-#[doc(hidden)]
-pub use notify_emitters_skills_trade_godma as notify_emitters_batch9;
-#[doc(hidden)]
-pub use crate_loot_service as notify_emitters_batch9_crates;
-#[doc(hidden)]
-pub use notify_emitters_skills_trade_godma as notify_emitters_batch9_part2;
-#[doc(hidden)]
-pub use notify_emitters_tournaments_anomalies as notify_emitters_batch10;
+// Retained crate-private solely for merge-protected peer files (`agents_missions.rs`, `auth_cache.rs`, `industry_facilities_bps.rs`, `industry_jobs.rs`).
+pub(crate) use notify_emitters_character_services as notify_emitters_batch3;
 pub mod notify_emitters_channel_events;
 pub mod notify_emitters_fleet_combat;
 pub mod notify_emitters_ess_bounties;
@@ -223,13 +204,5 @@ pub mod wormhole_lifecycle_ops;
 pub mod wormhole_pve_escalations;
 pub mod wormhole_pve_seeding;
 pub mod quasar_vendors_and_war_services;
-
-#[allow(unused_imports)] pub use mining_phased_autotarget as mining_b33;
-#[allow(unused_imports)] pub use notify_emitters_channel_events as notify_emitters_b23;
-#[allow(unused_imports)] pub use notify_emitters_fleet_combat as notify_emitters_b30;
-#[allow(unused_imports)] pub use notify_emitters_ess_bounties as notify_emitters_b36;
-#[allow(unused_imports)] pub use pve_ess_reserve_banks as pve_open_feats_b36;
-#[allow(unused_imports)] pub use quasar_char_skill_services as quasar_b2_services;
-#[allow(unused_imports)] pub use quasar_market_contract_services as quasar_b22_services;
-#[allow(unused_imports)] pub use quasar_corp_structure_services as quasar_b29_services;
-#[allow(unused_imports)] pub use quasar_fleet_navigation_services as quasar_b34_services;
+// Retained crate-private solely for merge-protected peer file (`agents_missions.rs`).
+pub(crate) use pve_ess_reserve_banks as pve_open_feats_b36;

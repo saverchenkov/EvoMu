@@ -81,7 +81,7 @@ use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use glam::DVec3;
 
-use crate::open_feats_and_rpcs_b7::{rpc, setup_pilot, setup_pilot_for_user};
+use crate::features_sovereignty_upwell_rpcs::{rpc, setup_pilot, setup_pilot_for_user};
 
 const PILOT_1: i64 = 90_000_001;
 const PILOT_2: i64 = 90_000_002;
@@ -207,7 +207,7 @@ async fn test_cosmetics_skin_apply_in_space_broadcast_and_persistence() {
     sess1.station_id = None;
     let sys_h = ctx.systems.get_or_spawn(JITA_SYS);
     let _ = sys_h
-        .spawn_ball(crate::sovereignty_equinox_gameplay_closure::make_ball(
+        .spawn_ball(crate::sovereignty_equinox_gameplay::make_ball(
             active_ship_id,
             587,
             DVec3::new(10_000.0, 0.0, 0.0),
@@ -264,7 +264,7 @@ async fn test_cosmetics_skin_apply_in_space_broadcast_and_persistence() {
     // Late-arriving grid observer syncing Ballpark state via beyonce.UpdateStateRequest sees skinID in SetState slims
     let late_observer_cid = 90_000_003i64;
     let late_ship_id = 100_999_003i64;
-    let mut sess_late = crate::sovereignty_equinox_gameplay_closure::register_online_pilot(
+    let mut sess_late = crate::sovereignty_equinox_gameplay::register_online_pilot(
         &ctx,
         39_903,
         "demo3",
@@ -312,7 +312,7 @@ async fn test_cosmetics_skin_apply_in_space_broadcast_and_persistence() {
     let _ = sys_h.drain_observer_updates(late_ship_id).await;
     let _ = sys_h
         .spawn_ball_with_meta(
-            crate::sovereignty_equinox_gameplay_closure::make_ball(
+            crate::sovereignty_equinox_gameplay::make_ball(
                 active_ship_id,
                 587,
                 DVec3::new(10_000.0, 0.0, 0.0),

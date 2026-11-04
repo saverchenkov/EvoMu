@@ -668,8 +668,8 @@ mod part2 {
 // - `feat:pve.proving-grounds-queue-and-rewards`: party size, boss, <= 30 km range, cargo module, jump-clone implant
 
 
-use crate::fw_warzone_insurgency_closure::setup_warzone_chain;
-use crate::sovereignty_equinox_gameplay_closure::{
+use crate::fw_warzone_insurgency::setup_warzone_chain;
+use crate::sovereignty_equinox_gameplay::{
     lock_target_via_rpc, register_online_pilot, rpc_call,
 };
 use eve_db::{FleetRecord, InventoryFlag, InventoryItemRecord};

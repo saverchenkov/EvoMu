@@ -379,7 +379,7 @@ pub(crate) fn deactivate_operation_for_char(ctx: &ServerContext, char_id: i64) -
         })
     })?;
     stop_active_operation_node_graph_for_category(ctx, char_id, prev_op);
-    crate::services::notify_emitters_b23::emit_operation_deactivated(ctx, char_id);
+    crate::services::notify_emitters_channel_events::emit_operation_deactivated(ctx, char_id);
     Ok(PyRep::Bool(true))
 }
 
@@ -409,7 +409,7 @@ fn replay_operation_for_char(
             }
         });
     });
-    crate::services::notify_emitters_b30::emit_operation_replayed(ctx, char_id, cat_id, op_id);
+    crate::services::notify_emitters_fleet_combat::emit_operation_replayed(ctx, char_id, cat_id, op_id);
     Ok(PyRep::Bool(true))
 }
 
@@ -441,7 +441,7 @@ pub(crate) fn skip_operation_for_char(
         });
     });
     stop_active_operation_node_graph_for_category(ctx, char_id, op_id);
-    crate::services::notify_emitters_b23::emit_operation_skipped(ctx, char_id, cat_id, op_id);
+    crate::services::notify_emitters_channel_events::emit_operation_skipped(ctx, char_id, cat_id, op_id);
     Ok(PyRep::Bool(true))
 }
 
@@ -503,7 +503,7 @@ pub(crate) fn reset_operations_progress_for_char(
         })
     });
     stop_all_client_node_graphs_for_char(ctx, char_id);
-    crate::services::notify_emitters_b23::emit_operations_progress_reset(
+    crate::services::notify_emitters_channel_events::emit_operations_progress_reset(
         ctx,
         char_id,
         &items_to_lock,
@@ -528,7 +528,7 @@ pub(crate) fn reload_operations_fsd_data(
         ));
     }
     let _ = load_operation_definitions(&ctx.sde);
-    crate::services::notify_emitters_b23::emit_operations_server_fsd_reload(ctx, char_id);
+    crate::services::notify_emitters_channel_events::emit_operations_server_fsd_reload(ctx, char_id);
     Ok(PyRep::Bool(true))
 }
 
@@ -556,7 +556,7 @@ pub fn handle_operation_slash(
         Some("reset_progress" | "reset") => Some(reset_operations_progress_for_char(ctx, caller_char_id)),
         Some("reload_fsd") => Some(reload_operations_fsd_data(ctx, session, caller_char_id)),
         Some("reveal_ui") => {
-            crate::services::notify_emitters_b30::emit_ui_reveal_forced(ctx, caller_char_id);
+            crate::services::notify_emitters_fleet_combat::emit_ui_reveal_forced(ctx, caller_char_id);
             Some(Ok(PyRep::Bool(true)))
         }
         _ => Some(Err(rpc_err(

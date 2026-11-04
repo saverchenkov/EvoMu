@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::open_feats_and_rpcs_b22::{rpc, select_pilot, PILOT_1, PILOT_2};
+use crate::features_market_orders_rpcs::{rpc, select_pilot, PILOT_1, PILOT_2};
 use eve_db::{corp_roles, InventoryFlag, InventoryItemRecord, TrainedSkillRecord, UpwellStructureRecord};
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;

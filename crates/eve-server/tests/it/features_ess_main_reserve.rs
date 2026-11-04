@@ -1,7 +1,7 @@
 //! Dedicated integration tests for open `feat:modules.*` parity rows (Batch 35, Part 4: Nanite Repair Paste & Industrial Cyno).
 
 use crate::modules_advanced_tactical::{build_ctx, seed_pilot, NULL_SYS};
-use crate::open_feats_b35::{give_item, put_in_fleet, set_skill, spawn_ship_in_space, DEST_NULL_SYS};
+use crate::features_bounties_ess::{give_item, put_in_fleet, set_skill, spawn_ship_in_space, DEST_NULL_SYS};
 use eve_db::{InventoryFlag, IskCents, UpwellStructureRecord};
 use eve_destiny::DVec3;
 use eve_proto::PyRep;

@@ -561,8 +561,8 @@ pub(crate) async fn ship_drop(
                 if (t.group_id == 361 || disallow_in_empire) && sys_sec > 0.0 {
                     return Err(err("UserError", format!("Item {} cannot be deployed in empire space (system security {sys_sec:.2} > 0.0)", t.name)));
                 }
-                if t.type_id == crate::services::mining_b33::TYPE_MOBILE_PHASE_ANCHOR
-                    && !crate::services::mining_b33::is_low_or_null_kspace(ctx, sys_id)
+                if t.type_id == crate::services::mining_phased_autotarget::TYPE_MOBILE_PHASE_ANCHOR
+                    && !crate::services::mining_phased_autotarget::is_low_or_null_kspace(ctx, sys_id)
                 {
                     return Err(err("CannotDeployInHighSec", "Mobile Phase Anchor can only be deployed in low-sec or null-sec K-space"));
                 }
@@ -664,8 +664,8 @@ pub(crate) async fn ship_drop(
                 },
             )
             .await;
-        if tid == crate::services::mining_b33::TYPE_MOBILE_PHASE_ANCHOR {
-            crate::services::mining_b33::on_mobile_phase_anchor_deployed(ctx, sys_id, launched_id).await;
+        if tid == crate::services::mining_phased_autotarget::TYPE_MOBILE_PHASE_ANCHOR {
+            crate::services::mining_phased_autotarget::on_mobile_phase_anchor_deployed(ctx, sys_id, launched_id).await;
         }
     }
     let mut map: HashMap<i64, Vec<PyRep>> = ctor_map;
@@ -1359,7 +1359,7 @@ pub(crate) async fn ship_scoop_and_store(
     if let Ok(Some(cs)) = sys.get_combat_state(item_id).await {
         crate::services::mobile_deployables::record_scooped_deployable_damage(ctx, item_id, &cs);
     }
-    crate::services::notify_emitters_batch8::on_deployable_deactivated(ctx, session.fleet_id, item_id);
+    crate::services::notify_emitters_seasons_tactical::on_deployable_deactivated(ctx, session.fleet_id, item_id);
     crate::services::mobile_deployables::write_deployable_state(ctx, |st| {
         st.deployables.remove(&item_id);
     });

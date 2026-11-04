@@ -7,7 +7,7 @@ use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
 
-use super::open_feats_and_rpcs_b22::{field, rowset_rows, rpc, select_pilot, PILOT_1, PILOT_2};
+use super::features_market_orders_rpcs::{field, rowset_rows, rpc, select_pilot, PILOT_1, PILOT_2};
 
 #[tokio::test]
 async fn test_b22_corp_governance_shares_dividends_ceo_divisions_autokick() {

@@ -597,7 +597,7 @@ pub async fn handle_pve_hacking(
                 } else {
                     (revealed_count as f64 / game.tiles.len().max(1) as f64).clamp(0.0, 1.0)
                 };
-                crate::services::notify_emitters_batch3_space::emit_local_hack_progress_updated(
+                crate::services::notify_emitters_space_dungeons::emit_local_hack_progress_updated(
                     ctx,
                     game.solar_system_id,
                     container_id,

@@ -724,7 +724,7 @@ pub async fn handle(
                 set_corp_militia_faction(snap, cid, Some(fac));
             });
             session.war_faction_id = Some(fac);
-            crate::services::notify_emitters_batch3::emit_campaign_enrollment_changed(ctx, char_id);
+            crate::services::notify_emitters_character_services::emit_campaign_enrollment_changed(ctx, char_id);
             Some(Ok(PyRep::Bool(true)))
         }
         ("facWarMgr", "LeaveFactionAsCorporation") => {
@@ -772,7 +772,7 @@ pub async fn handle(
                 snap.characters.get(&char_id).and_then(|c| c.war_faction_id)
             });
             session.war_faction_id = new_char_fac;
-            crate::services::notify_emitters_batch3::emit_campaign_enrollment_changed(ctx, char_id);
+            crate::services::notify_emitters_character_services::emit_campaign_enrollment_changed(ctx, char_id);
             Some(Ok(PyRep::Bool(true)))
         }
         ("facWarMgr", "JoinFactionAsAlliance") => {
@@ -853,7 +853,7 @@ pub async fn handle(
                 return Some(Err(e));
             }
             session.war_faction_id = Some(fac);
-            crate::services::notify_emitters_batch3::emit_campaign_enrollment_changed(ctx, char_id);
+            crate::services::notify_emitters_character_services::emit_campaign_enrollment_changed(ctx, char_id);
             Some(Ok(PyRep::Bool(true)))
         }
         ("facWarMgr", "LeaveFactionAsAlliance") => {
@@ -912,7 +912,7 @@ pub async fn handle(
             match res {
                 Ok(new_fac) => {
                     session.war_faction_id = new_fac;
-                    crate::services::notify_emitters_batch3::emit_campaign_enrollment_changed(ctx, char_id);
+                    crate::services::notify_emitters_character_services::emit_campaign_enrollment_changed(ctx, char_id);
                     Some(Ok(PyRep::Bool(true)))
                 }
                 Err(e) => Some(Err(e)),

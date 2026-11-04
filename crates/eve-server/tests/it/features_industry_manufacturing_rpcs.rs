@@ -446,7 +446,7 @@ async fn test_b33_phased_asteroid_field_mobile_anchor_and_prismaticite() {
 
     // 1. High-sec Jita refuses Phased Asteroid Field; null-sec 1DQ1-A spawns probeable signature
     assert!(
-        eve_server::services::mining_b33::spawn_phased_asteroid_field(
+        eve_server::services::mining_phased_autotarget::spawn_phased_asteroid_field(
             &p.ctx, JITA, "PHS-HI", 9_300_009, 10_000, (0.0, 0.0, 0.0),
         )
         .is_none(),
@@ -482,7 +482,7 @@ async fn test_b33_phased_asteroid_field_mobile_anchor_and_prismaticite() {
         .unwrap();
 
     let pris_ast_id = 9_300_010_i64;
-    let field = eve_server::services::mining_b33::spawn_phased_asteroid_field(
+    let field = eve_server::services::mining_phased_autotarget::spawn_phased_asteroid_field(
         &p.ctx,
         NULL_SYS,
         "PHS-001",
@@ -528,8 +528,8 @@ async fn test_b33_phased_asteroid_field_mobile_anchor_and_prismaticite() {
 
     // 2. Deploy Mobile Phase Anchor (90037) via ship.Drop; reject WH/Pochven; live tick reconciles ICS ships within 50 km
     let (porp1_ship, orca_ship, porp2_ship) = (9_300_031_i64, 9_300_032_i64, 9_300_033_i64);
-    assert!(!eve_server::services::mining_b33::is_low_or_null_kspace(&p.ctx, 31_000_005), "Wormhole space must reject Mobile Phase Anchor");
-    assert!(!eve_server::services::mining_b33::is_low_or_null_kspace(&p.ctx, 30_001_445), "Pochven must reject Mobile Phase Anchor");
+    assert!(!eve_server::services::mining_phased_autotarget::is_low_or_null_kspace(&p.ctx, 31_000_005), "Wormhole space must reject Mobile Phase Anchor");
+    assert!(!eve_server::services::mining_phased_autotarget::is_low_or_null_kspace(&p.ctx, 30_001_445), "Pochven must reject Mobile Phase Anchor");
 
     insert_item(&p.ctx, 9_300_019, MOBILE_PHASE_ANCHOR, 9_999_999, i64::from(NULL_SYS), InventoryFlag::None, 1);
     let anchor_cargo_id = 9_300_020_i64;
@@ -564,8 +564,8 @@ async fn test_b33_phased_asteroid_field_mobile_anchor_and_prismaticite() {
         velocity: DVec3::ZERO, max_velocity: 150.0, inertia: 1.0, mass: 1e7, radius: 100.0, speed_fraction: 0.0, mode: MovementMode::Stop,
     }).await.unwrap();
     // Without active Industrial Cores, ICS hulls in range do NOT connect
-    eve_server::services::mining_b33::tick_phased_asteroid_fields(&p.ctx, p.ctx.now_unix_secs()).await;
-    assert!((eve_server::services::mining_b33::phased_field_efficiency_for_asteroid(&p.ctx, NULL_SYS, pris_ast_id, PRISMATICITE) - 0.10).abs() < 1e-6);
+    eve_server::services::mining_phased_autotarget::tick_phased_asteroid_fields(&p.ctx, p.ctx.now_unix_secs()).await;
+    assert!((eve_server::services::mining_phased_autotarget::phased_field_efficiency_for_asteroid(&p.ctx, NULL_SYS, pris_ast_id, PRISMATICITE) - 0.10).abs() < 1e-6);
 
     // Activating Industrial Cores on Porpoise #1 + Orca + Porpoise #2 connects (35 + 50 + 35 = 120 >= 100)
     p.ctx.db.with_mut_snapshot(|s| {
@@ -575,15 +575,15 @@ async fn test_b33_phased_asteroid_field_mobile_anchor_and_prismaticite() {
             s.module_active_states.insert(cid);
         }
     });
-    eve_server::services::mining_b33::tick_phased_asteroid_fields(&p.ctx, p.ctx.now_unix_secs()).await;
-    assert!((eve_server::services::mining_b33::phased_field_efficiency_for_asteroid(&p.ctx, NULL_SYS, pris_ast_id, PRISMATICITE) - 1.0).abs() < 1e-6);
+    eve_server::services::mining_phased_autotarget::tick_phased_asteroid_fields(&p.ctx, p.ctx.now_unix_secs()).await;
+    assert!((eve_server::services::mining_phased_autotarget::phased_field_efficiency_for_asteroid(&p.ctx, NULL_SYS, pris_ast_id, PRISMATICITE) - 1.0).abs() < 1e-6);
 
     // Moving Porpoise #2 beyond 50 km tether range drops energy to 85 < 100 and reverts phased_in
     assert!(null_sys_handle.set_ball_position(porp2_ship, p.ship_pos + DVec3::new(60_000.0, 0.0, 0.0)).await);
-    eve_server::services::mining_b33::tick_phased_asteroid_fields(&p.ctx, p.ctx.now_unix_secs()).await;
-    assert!((eve_server::services::mining_b33::phased_field_efficiency_for_ore(&p.ctx, NULL_SYS, PRISMATICITE) - 0.10).abs() < 1e-6);
+    eve_server::services::mining_phased_autotarget::tick_phased_asteroid_fields(&p.ctx, p.ctx.now_unix_secs()).await;
+    assert!((eve_server::services::mining_phased_autotarget::phased_field_efficiency_for_ore(&p.ctx, NULL_SYS, PRISMATICITE) - 0.10).abs() < 1e-6);
     assert!(null_sys_handle.set_ball_position(porp2_ship, p.ship_pos + DVec3::new(6_000.0, 0.0, 0.0)).await);
-    eve_server::services::mining_b33::tick_phased_asteroid_fields(&p.ctx, p.ctx.now_unix_secs()).await;
+    eve_server::services::mining_phased_autotarget::tick_phased_asteroid_fields(&p.ctx, p.ctx.now_unix_secs()).await;
 
     let phased_outcomes = advance(&p, 46).await;
     let phased_units = phased_outcomes[0].units_delivered;
@@ -591,16 +591,16 @@ async fn test_b33_phased_asteroid_field_mobile_anchor_and_prismaticite() {
 
     // 3. Live cluster tick advances fracture past 0.5 -> beacon spawns at site position; past 1.0 -> field collapses
     p.ctx.clock().advance_secs(1);
-    eve_server::services::mining_b33::tick_phased_asteroid_fields(&p.ctx, p.ctx.now_unix_secs()).await;
+    eve_server::services::mining_phased_autotarget::tick_phased_asteroid_fields(&p.ctx, p.ctx.now_unix_secs()).await;
     p.ctx.clock().advance_secs(7_201);
-    eve_server::services::mining_b33::tick_phased_asteroid_fields(&p.ctx, p.ctx.now_unix_secs()).await;
+    eve_server::services::mining_phased_autotarget::tick_phased_asteroid_fields(&p.ctx, p.ctx.now_unix_secs()).await;
     let anom_pos = p.ctx.db.with_snapshot(|s| {
         s.cosmic_anomalies.get(&NULL_SYS).and_then(|v| v.iter().find(|a| a.anomaly_id == "PHS-001" && !a.cleared)).map(|a| a.position)
     });
     assert_eq!(anom_pos, Some([ast_pos.x, ast_pos.y, ast_pos.z]), "Beacon must spawn at actual site position");
 
     p.ctx.clock().advance_secs(7_201);
-    eve_server::services::mining_b33::tick_phased_asteroid_fields(&p.ctx, p.ctx.now_unix_secs()).await;
+    eve_server::services::mining_phased_autotarget::tick_phased_asteroid_fields(&p.ctx, p.ctx.now_unix_secs()).await;
     assert_eq!(p.ctx.db.with_snapshot(|s| s.asteroids.get(&pris_ast_id).map(|a| a.quantity).unwrap_or(-1)), 0);
     assert_eq!(p.ctx.db.with_snapshot(|s| s.asteroids.get(&other_pris_id).map(|a| a.quantity).unwrap_or(-1)), 25_000, "Collapse must not wipe unrelated Prismaticite");
 
@@ -692,7 +692,7 @@ pub(crate) mod part2 {
 use std::collections::HashMap;
 
 use crate::mining_cycle_engine::{lock, pilot, rpc, CHAR_ID, JITA, MINER_I, VELDSPAR};
-use crate::open_feats_and_rpcs_b33::{dict_get, insert_item};
+use crate::features_industry_manufacturing_rpcs::{dict_get, insert_item};
 use eve_db::{CorporationRecord, InventoryFlag, InventoryItemRecord, UpwellStructureRecord};
 use eve_destiny::{Ball, MovementMode};
 use eve_proto::PyRep;

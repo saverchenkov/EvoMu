@@ -524,7 +524,7 @@ async fn test_ui_browser_lockdown_policy_and_persistence() {
 
     // Persist updated policy and verify RPCs reflect it
     ctx.db.with_mut_snapshot(|snap| {
-        eve_server::services::notify_emitters_batch9_part2::set_browser_lockdown_policy(
+        eve_server::services::notify_emitters_skills_trade_godma::set_browser_lockdown_policy(
             snap,
             true,
             "https://forums.eveonline.com",

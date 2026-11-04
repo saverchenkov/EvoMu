@@ -951,7 +951,7 @@ fn handle_trade_action(
                         );
                         if party != char_id {
                             if let Some(iid) = added_item_id {
-                                crate::services::notify_emitters_batch9_part2::emit_priming_needed_for_trade_items(
+                                crate::services::notify_emitters_skills_trade_godma::emit_priming_needed_for_trade_items(
                                     ctx,
                                     party,
                                     &[iid],

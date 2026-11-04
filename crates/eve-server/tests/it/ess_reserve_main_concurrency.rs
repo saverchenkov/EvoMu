@@ -283,7 +283,7 @@ async fn test_ess_concurrent_main_and_reserve_links() {
     assert_eq!(kv_comp_b.get("linkStartedOnly"), Some(&PyRep::Bool(false)));
     let stolen_b = kv_comp_b.get("stolenISK").or_else(|| kv_comp_b.get("amount")).and_then(PyRep::as_f64).unwrap_or(0.0);
     // Payout for first pulse follows progressive spool-up curve rather than draining the whole bank
-    let expected_first_pulse = eve_server::services::pve_open_feats_b36::compute_ess_reserve_pulse_payout_cents(
+    let expected_first_pulse = eve_server::services::pve_ess_reserve_banks::compute_ess_reserve_pulse_payout_cents(
         eve_db::IskCents::from_f64_isk(100_000_000.0).0,
         15,
         15,

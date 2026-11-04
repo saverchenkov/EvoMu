@@ -571,8 +571,8 @@ pub(crate) mod insurgency_fob_operations {
 //  Part 2 of FW & Insurgency closure tests: FW I-Hub Siege/Regen, System Tiers, War HQs, Leaderboards, FW Agents & Corp/Alliance Enlistment (`SO-5`, `Q-8`).
 
 
-use crate::fw_warzone_insurgency_closure::setup_warzone_chain;
-use crate::sovereignty_equinox_gameplay_closure::{
+use crate::fw_warzone_insurgency::setup_warzone_chain;
+use crate::sovereignty_equinox_gameplay::{
     drain_notif_events, fit_siege_artillery, lock_target_via_rpc, make_ball, open_sqlite_ctx,
     register_online_pilot, rpc_call, set_pilot_location, step_weapon_ticks, temp_sqlite_path,
 };
@@ -949,8 +949,8 @@ pub(crate) mod insurgency_corruption_suppression {
 //  Part 3 of FW & Insurgency closure tests: Pirate Enlistment, 48h Forecasting -> 7d Active -> WindDown Lifecycle, Spread & Stage 5 Corruption Effects (`SO-5`, `Q-8`).
 
 
-use crate::fw_warzone_insurgency_closure::setup_warzone_chain;
-use crate::sovereignty_equinox_gameplay_closure::{
+use crate::fw_warzone_insurgency::setup_warzone_chain;
+use crate::sovereignty_equinox_gameplay::{
     drain_notif_events, fit_siege_artillery, lock_target_via_rpc, make_ball,
     register_online_pilot, rpc_call,
 };
@@ -1297,8 +1297,8 @@ pub(crate) mod insurgency_battlefields_zones {
 //  Part 4 of FW & Insurgency closure tests: Pirate FOB Docking & 3h±1h Armor Siege, Ambition Scaling, Surrender I-Hub Vulnerability & Contribution Payouts (`SO-5`, `Q-8`).
 
 
-use crate::fw_warzone_insurgency_closure::setup_warzone_chain;
-use crate::sovereignty_equinox_gameplay_closure::{
+use crate::fw_warzone_insurgency::setup_warzone_chain;
+use crate::sovereignty_equinox_gameplay::{
     drain_notif_events, fit_siege_artillery, lock_target_via_rpc, make_ball, open_sqlite_ctx, register_online_pilot,
     rpc_call, step_weapon_ticks, temp_sqlite_path,
 };
@@ -1678,8 +1678,8 @@ pub(crate) mod insurgency_frontlines_advantage {
 //    time-on-grid ranked 30-pilot standing cap, and VP/Advantage shifts (`feat:fw.battlefield-capture-rules`).
 
 
-use crate::fw_warzone_insurgency_closure::setup_warzone_chain;
-use crate::sovereignty_equinox_gameplay_closure::{make_ball, register_online_pilot, rpc_call};
+use crate::fw_warzone_insurgency::setup_warzone_chain;
+use crate::sovereignty_equinox_gameplay::{make_ball, register_online_pilot, rpc_call};
 use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
@@ -2364,9 +2364,9 @@ pub(crate) mod insurgency_lp_rewards {
 //    and Highsec Stage 5 Green/Yellow/Red safety & Faction Police suppression.
 
 
-use crate::fw_warzone_insurgency_closure::setup_warzone_chain;
+use crate::fw_warzone_insurgency::setup_warzone_chain;
 use crate::quasar_sov_equinox_hub::{field, varint};
-use crate::sovereignty_equinox_gameplay_closure::{make_ball, register_online_pilot, rpc_call};
+use crate::sovereignty_equinox_gameplay::{make_ball, register_online_pilot, rpc_call};
 use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::MovementMode;
 use eve_proto::PyRep;
@@ -3008,9 +3008,9 @@ pub(crate) mod insurgency_victory_points {
 //    returning `false` when no active/winddown campaign covers a solar system.
 
 
-use crate::combat_weapons_wrecks_part2::fit_module_and_charge;
-use crate::fw_warzone_insurgency_closure::setup_warzone_chain;
-use crate::sovereignty_equinox_gameplay_closure::{make_ball, register_online_pilot, rpc_call};
+use crate::combat_weapons_wrecks::triglavian_entropic_spool_edencom_vorton::fit_module_and_charge;
+use crate::fw_warzone_insurgency::setup_warzone_chain;
+use crate::sovereignty_equinox_gameplay::{make_ball, register_online_pilot, rpc_call};
 use eve_db::{
     FwSystemOccupationRecord, InventoryFlag, InventoryItemRecord, TrainedSkillRecord,
     VirtualServerClock, WorldRepository,

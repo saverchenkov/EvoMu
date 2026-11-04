@@ -209,7 +209,7 @@ pub(crate) async fn handle_module_cycles(
                 );
             }
 
-            if let Err(e) = crate::services::pve_open_feats_b36::check_ess_module_activation_allowed(ctx, sys_id, ship_id, mod_type, &effect_name).await {
+            if let Err(e) = crate::services::pve_ess_reserve_banks::check_ess_module_activation_allowed(ctx, sys_id, ship_id, mod_type, &effect_name).await {
                 return Some(Err(e));
             }
             if mod_type.group_id == 330 {

@@ -1012,8 +1012,8 @@ use crate::common;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::notify_emitters_batch3_space::*;
-use eve_server::services::notify_emitters_batch5::*;
+use eve_server::services::notify_emitters_space_dungeons::*;
+use eve_server::services::notify_emitters_combat_ess_progression::*;
 use std::collections::HashMap;
 
 const P1: i64 = 90_000_001;
@@ -1719,7 +1719,7 @@ async fn test_batch6_ess_and_dynamic_bounty() {
         .dispatch_rpc(&mut s1, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_ball_id)], &kw, None)
         .await
         .expect("AttemptLinkToReserveBank complete");
-    let expected_p1 = (eve_server::services::pve_open_feats_b36::compute_ess_reserve_pulse_payout_cents(
+    let expected_p1 = (eve_server::services::pve_ess_reserve_banks::compute_ess_reserve_pulse_payout_cents(
         10_000_000_000,
         15,
         15,
@@ -3925,7 +3925,7 @@ pub mod b30 {
 
 
 use crate::common;
-use crate::notify_real_emitters_batch7::{login_in_space, make_item};
+use crate::notify_structures_clones_pi::{login_in_space, make_item};
 use eve_db::{
     corp_roles::{ROLE_DIRECTOR, ROLE_EQUIPMENT_CONFIG},
     InventoryFlag, TrainedSkillRecord,
@@ -4363,7 +4363,7 @@ async fn notify_b30_target_multi_event_and_fw_warzone() {
     // 7. OnVictoryPointStateUpdated: live FW complex capture via RPCs + guard combat + clock advance
     let fw_ctx = new_ctx();
     let (_enemy_sys, warzone_sys, _cmd_sys, _rear_sys) =
-        crate::fw_warzone_insurgency_closure::setup_warzone_chain(&fw_ctx);
+        crate::fw_warzone_insurgency::setup_warzone_chain(&fw_ctx);
     let fw_ship = 960_000_109_i64;
     fw_ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
@@ -6063,7 +6063,7 @@ pub(crate) mod parity_notify_batch2 {
 
 
 use crate::common;
-use crate::notify_real_emitters_batch7::{login_in_space, make_item};
+use crate::notify_structures_clones_pi::{login_in_space, make_item};
 use eve_db::{InventoryFlag, TrainedSkillRecord};
 use eve_machonet::{service_roles::ROLE_GM_DEFAULT, SessionState};
 use eve_proto::{BridgeRpcError, PyRep};
@@ -6711,7 +6711,7 @@ pub(crate) mod parity_notify_batch4 {
 // Integration tests verifying remediation of FLAGGED_FAKE `notify:*` rows (batch 4).
 
 use crate::common;
-use crate::notify_real_emitters_batch7::login_in_space;
+use crate::notify_structures_clones_pi::login_in_space;
 use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 use eve_destiny::TargetLock;
 use eve_machonet::service_roles::{ROLE_GMH, ROLE_GM_DEFAULT};

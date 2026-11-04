@@ -10,7 +10,7 @@ use eve_proto::quasar::{
 use eve_proto::PyRep;
 use eve_server::quasar_gateway::NoticeScope;
 use eve_server::router::ServerContext;
-use eve_server::services::quasar_b2_services::{
+use eve_server::services::quasar_char_skill_services::{
     publish_academy_borrowed_notice, publish_acl_membership_updated_notice,
 };
 use std::collections::HashMap;

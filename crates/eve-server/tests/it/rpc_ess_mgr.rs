@@ -323,7 +323,7 @@ async fn test_ess_mgr_telemetry_links_and_thefts() {
         Some(PyRep::Real(v)) => *v,
         other => panic!("expected Real stolenISK, got {:?}", other),
     };
-    let expected_first = eve_server::services::pve_open_feats_b36::compute_ess_reserve_pulse_payout_cents(
+    let expected_first = eve_server::services::pve_ess_reserve_banks::compute_ess_reserve_pulse_payout_cents(
         eve_db::IskCents::from_f64_isk(35_000_000.0).0,
         15,
         15,

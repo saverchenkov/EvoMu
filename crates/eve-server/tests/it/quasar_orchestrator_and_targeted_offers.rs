@@ -12,7 +12,7 @@ use eve_server::quasar_gateway::{
     STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_OK,
 };
 use eve_server::router::ServerContext;
-use eve_server::services::quasar_b29_services::{
+use eve_server::services::quasar_corp_structure_services::{
     ContentGroupRecord, ContentTypeRecord, DeploymentInstanceRecord, DeploymentRecord,
     FailedFulfillmentRecord, OrchestratorState, TargetedOfferAdminRecord,
 };

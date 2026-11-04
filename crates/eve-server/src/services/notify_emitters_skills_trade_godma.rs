@@ -380,7 +380,7 @@ pub fn handle_rnd_buy_datacores(
                 format!("No active R&D research with agent {agent_id}"),
             ));
         };
-        let Some(dc_type_id) = super::pve_open_feats_b36::resolve_datacore_for_research_skill(
+        let Some(dc_type_id) = super::pve_ess_reserve_banks::resolve_datacore_for_research_skill(
             &ctx.sde,
             entry.research_type_id,
         ) else {
@@ -391,7 +391,7 @@ pub fn handle_rnd_buy_datacores(
         };
         let elapsed_days = (now_unix.saturating_sub(entry.started_unix) as f64) / 86_400.0;
         let total_rp = entry.initial_points + entry.points_per_day * elapsed_days;
-        let max_offered = super::pve_open_feats_b36::max_affordable_datacores(total_rp);
+        let max_offered = super::pve_ess_reserve_banks::max_affordable_datacores(total_rp);
         let rp_cost = 100.0 * (qty as f64);
         if qty > max_offered || total_rp + 1e-6 < rp_cost {
             return Err(err(

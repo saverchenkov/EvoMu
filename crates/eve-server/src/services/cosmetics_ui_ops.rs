@@ -510,25 +510,25 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         ("nes_intro", "skip_nes_intro") => Some(handle_nes_intro_skip(ctx, session)),
 
         ("crateService", "OpenCrate") => {
-            crate::services::notify_emitters_batch9::handle_crate_service(ctx, session, method, args)
+            crate::services::notify_emitters_skills_trade_godma::handle_crate_service(ctx, session, method, args)
         }
         ("crateService", "ClaimLoot") => {
-            crate::services::notify_emitters_batch9::handle_crate_service(ctx, session, method, args)
+            crate::services::notify_emitters_skills_trade_godma::handle_crate_service(ctx, session, method, args)
         }
         ("crateService", "ClaimSkillBundle") => {
-            crate::services::notify_emitters_batch9::handle_crate_service(ctx, session, method, args)
+            crate::services::notify_emitters_skills_trade_godma::handle_crate_service(ctx, session, method, args)
         }
         ("crateService", "ClaimFitting") => {
-            crate::services::notify_emitters_batch9::handle_crate_service(ctx, session, method, args)
+            crate::services::notify_emitters_skills_trade_godma::handle_crate_service(ctx, session, method, args)
         }
         ("crateService", "ClaimLootFromCrateStack") => {
-            crate::services::notify_emitters_batch9::handle_crate_service(ctx, session, method, args)
+            crate::services::notify_emitters_skills_trade_godma::handle_crate_service(ctx, session, method, args)
         }
         ("crateService", "GetCrateLocation") => {
-            crate::services::notify_emitters_batch9::handle_crate_service(ctx, session, method, args)
+            crate::services::notify_emitters_skills_trade_godma::handle_crate_service(ctx, session, method, args)
         }
         ("crateService", "PeekInsideFixedCrate") => {
-            crate::services::notify_emitters_batch9::handle_crate_service(ctx, session, method, args)
+            crate::services::notify_emitters_skills_trade_godma::handle_crate_service(ctx, session, method, args)
         }
         _ => None,
     }
@@ -848,7 +848,7 @@ fn handle_nes_intro_skip(ctx: &ServerContext, session: &mut SessionState) -> Res
         save_cosmetics_ui_state(snap, &ext);
         Ok(PyRep::None)
     })?;
-    crate::services::notify_emitters_batch9::emit_nes_intro_state_changed(ctx, char_id, 1);
+    crate::services::notify_emitters_skills_trade_godma::emit_nes_intro_state_changed(ctx, char_id, 1);
     Ok(PyRep::None)
 }
 

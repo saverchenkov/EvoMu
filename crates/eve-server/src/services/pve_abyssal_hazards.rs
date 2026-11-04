@@ -387,7 +387,7 @@ pub async fn validate_and_consume_abyssal_filaments(
         DVec3::from_array(p)
     };
 
-    crate::services::pve_open_feats_b36::check_ess_intrusion_bubble_restriction(
+    crate::services::pve_ess_reserve_banks::check_ess_intrusion_bubble_restriction(
         ctx, cur_sys, ship_id, "filament",
     )
     .await?;

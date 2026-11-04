@@ -623,7 +623,7 @@ async fn entosis_target_to_completion(
     let _ = sys_handle
         .spawn_ball_with_combat(make_ball(ship_id, 621, DVec3::from_array(target_pos) + DVec3::new(2_500.0, 0.0, 0.0)), cs)
         .await;
-    crate::sovereignty_equinox_gameplay_closure::lock_target_via_rpc(ctx, sess, target_sys, ship_id, target_id).await;
+    crate::sovereignty_equinox_gameplay::lock_target_via_rpc(ctx, sess, target_sys, ship_id, target_id).await;
     let kw = HashMap::new();
     ctx.dispatch_rpc(
         sess,

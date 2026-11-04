@@ -105,7 +105,7 @@ pub async fn handle_cmd_return_bay(
                 PyRep::Integer(ship_id),
             ];
             ctx.notify(NotificationTarget::Character(char_id), "OnDroneStateChange", "charid", notif_args);
-            crate::services::notify_emitters_batch3_space::emit_drone_activity_change(ctx, char_id, d.ball_id, 4, Some("returning"));
+            crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(ctx, char_id, d.ball_id, 4, Some("returning"));
             continue;
         }
 
@@ -163,7 +163,7 @@ pub async fn handle_cmd_return_bay(
             PyRep::None,
         ];
         ctx.notify(NotificationTarget::Character(char_id), "OnDroneStateChange", "charid", notif_args);
-        crate::services::notify_emitters_batch3_space::emit_drone_activity_change(ctx, char_id, d.ball_id, 0, None);
+        crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(ctx, char_id, d.ball_id, 0, None);
 
         // Emit OnItemChange
         ctx.notify(

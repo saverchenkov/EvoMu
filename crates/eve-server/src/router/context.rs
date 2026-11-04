@@ -190,7 +190,7 @@ impl ServerContext {
                         crate::services::pve_incursion_sites::notify_incursion_site_completed(&gw, &db, sys_id, r);
                     }
                     if let Some(Ok(r)) = &inc {
-                        crate::services::notify_emitters_batch10::emit_incursion_completion_combat_notifications(
+                        crate::services::notify_emitters_tournaments_anomalies::emit_incursion_completion_combat_notifications(
                             &db, &sde, pw.upgrade().as_deref(), Some(&tx), r,
                         );
                     }
@@ -255,9 +255,9 @@ impl ServerContext {
                 let ctx = ServerContext::from_step_components(instance_id, sys, db, sde, rng, fit, pend, ntx, ce, gw, inv_roll, cd_map, af_map, pe, pes, aes, tac);
                 for (tid, killer_opt) in destroyed_balls {
                     crate::services::fw_gameplay::on_space_entity_destroyed(&ctx, sys_id, killer_opt, tid, 0).await;
-                    crate::services::notify_emitters_batch8::on_deployable_deactivated(&ctx, None, tid);
+                    crate::services::notify_emitters_seasons_tactical::on_deployable_deactivated(&ctx, None, tid);
                     crate::services::shipcaster_ops::on_landing_pad_ball_destroyed(&ctx, tid).await;
-                    let _ = crate::services::notify_emitters_batch3_space::flush_ship_all_ewar_sync(&ctx, 0, Some(sys_id), tid);
+                    let _ = crate::services::notify_emitters_space_dungeons::flush_ship_all_ewar_sync(&ctx, 0, Some(sys_id), tid);
                     let _ = crate::services::wormhole_pve_escalations::on_decloaked_relay_attacked_sync(&ctx, sys_id, tid);
                     if let Some((vcid, acid, pos)) = ctx.db.with_snapshot(|s| {
                         let vc = s.characters.values().find(|c| c.active_ship_id == tid)?;

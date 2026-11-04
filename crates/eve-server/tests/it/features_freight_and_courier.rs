@@ -677,11 +677,11 @@ mod part2 {
 // effect removal upon stage drop, and negative RPC auth/validation (`feat:fw.corruption-suppression-effects`, Part 2).
 
 
-use crate::open_feats_b40::{
+use crate::features_freight_and_courier::{
     fast_forward_secs, fit_tactical_sabre, in_memory_ctx, local_campaign_stages,
     lookup_modified_sec, pulse_complex_60s, setup_warzone_chain_with_hs_station,
 };
-use crate::sovereignty_equinox_gameplay_closure::{
+use crate::sovereignty_equinox_gameplay::{
     fit_siege_artillery, make_ball, place_ship_ball, register_online_pilot, rpc_call,
     set_pilot_location,
 };

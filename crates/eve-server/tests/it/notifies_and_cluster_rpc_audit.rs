@@ -7,10 +7,10 @@ use eve_destiny::{Ball, MovementMode};
 use eve_machonet::{service_roles::ROLE_GM_DEFAULT, SessionState};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::{NotificationTarget, ServerContext};
-use eve_server::services::notify_emitters_batch3::{
+use eve_server::services::notify_emitters_character_services::{
     emit_ccp_notification, emit_contextual_offer_purchased,
 };
-use eve_server::services::notify_emitters_batch3_space::emit_ess_reserve_bank_inventory_full;
+use eve_server::services::notify_emitters_space_dungeons::emit_ess_reserve_bank_inventory_full;
 use eve_server::services::notify_emitters_missing::{
     emit_bean_prime, emit_clear_fetched_data, emit_client_event_market_item_received,
     emit_flagged_lists_change,

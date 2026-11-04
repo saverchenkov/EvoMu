@@ -640,12 +640,12 @@ fn execute_due_abyssal_collapse_sync(
 /// Runs all time-driven SP-6 / SP-7 lifecycle progressions when server time advances from `prev_unix`
 /// by `secs` seconds (or when `tick_background_cluster` runs with `secs == 0`).
 pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
-    crate::services::notify_emitters_batch10::emit_sim_clock_rebase_if_advanced(ctx, prev_unix, secs);
+    crate::services::notify_emitters_tournaments_anomalies::emit_sim_clock_rebase_if_advanced(ctx, prev_unix, secs);
     crate::services::space_destiny::space_probe_scanning::tick_probe_warp_end(ctx);
     let now_unix = ctx.now_unix();
 
     // 0. Sweep expired market orders and check season transitions across cluster ticks.
-    crate::services::notify_emitters_batch8::check_and_emit_season_transitions(ctx);
+    crate::services::notify_emitters_seasons_tactical::check_and_emit_season_transitions(ctx);
     let swept = ctx.db.with_mut_snapshot(|s| crate::services::market_contracts::sweep_expired_orders(s, now_unix));
     if !swept.is_empty() {
         crate::services::market_contracts::emit_expired_order_notifications(ctx, &swept);
@@ -1003,7 +1003,7 @@ pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
         );
     }
 
-    crate::services::notify_emitters_batch9::sweep_due_login_milestones_and_alpha_injectors(
+    crate::services::notify_emitters_skills_trade_godma::sweep_due_login_milestones_and_alpha_injectors(
         ctx,
         now_unix,
     );
@@ -1208,7 +1208,7 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     });
     crate::services::mining_advanced::tick_all_metenox_moon_drills(ctx, prev_metenox_tick, now_unix);
     crate::services::mining_advanced::tick_all_moon_extractions(ctx).await;
-    crate::services::mining_b33::tick_phased_asteroid_fields(ctx, now_unix).await;
+    crate::services::mining_phased_autotarget::tick_phased_asteroid_fields(ctx, now_unix).await;
     crate::services::quasar_payment_store_types::process_due_payment_schedules(&ctx.db, &ctx.quasar_gateway.pending_notices, now_unix);
     for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
         let _ = ctx.quasar_gateway.publish_notice(scope, payload, ts);
@@ -1235,8 +1235,8 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     crate::services::sov_gameplay::tick_sov_gameplay(ctx, now_unix).await;
     crate::services::fw_gameplay::tick_fw_gameplay(ctx, now_unix).await;
     crate::services::combat_npc_encounters::tick_overdue_npc_bounty_payouts(ctx, now_unix);
-    let _ = crate::services::pve_open_feats_b36::tick_ess_main_bank_autopayout(ctx, now_unix);
-    let _ = crate::services::pve_open_feats_b36::tick_ess_reserve_bank_links(ctx, now_unix).await;
+    let _ = crate::services::pve_ess_reserve_banks::tick_ess_main_bank_autopayout(ctx, now_unix);
+    let _ = crate::services::pve_ess_reserve_banks::tick_ess_reserve_bank_links(ctx, now_unix).await;
 
     let due_bounty_ticks: Vec<(u32, i64)> = with_mut_combat_runtime(ctx, |rt| {
         let mut due = Vec::new();
@@ -1367,7 +1367,7 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
         }
         if (32_000_000..=32_999_999).contains(&sys_id) {
             crate::services::pve_special_sites_abyssal::prune_out_of_bounds_abyssal_probes(ctx, sys_id);
-            crate::services::notify_emitters_batch10::sync_deathzone_state_notifications(ctx, sys_id);
+            crate::services::notify_emitters_tournaments_anomalies::sync_deathzone_state_notifications(ctx, sys_id);
         }
         let _ = crate::services::insurgency_services::step_system_insurgency_tick(ctx, sys_id).await;
         let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::step_wreck_and_jetcan_decay(

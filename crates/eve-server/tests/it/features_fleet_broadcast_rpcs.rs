@@ -1186,7 +1186,7 @@ pub(crate) mod part3 {
 
 
 use crate::common;
-use crate::open_feats_and_rpcs_b11_part2::{
+use crate::features_fleet_broadcast_rpcs::part2::{
     cleanup_sqlite_path, quasar_rpc, rpc, select_char, temp_sqlite_path,
 };
 use eve_db::{
@@ -1787,7 +1787,7 @@ async fn test_b11_multithread_wal_error_survives_await_and_rolls_back() {
     mem_ctx.db.save_to_sqlite(&db_path).expect("save_to_sqlite");
     let ctx = ServerContext::from_sqlite(&db_path).expect("from_sqlite");
     let mut sess = select_char(&ctx, 72_049, "demo", "demo-secret", P1).await;
-    let before = crate::open_feats_and_rpcs_b11_part2::capture_observable_state(&ctx);
+    let before = crate::features_fleet_broadcast_rpcs::part2::capture_observable_state(&ctx);
     let conn = rusqlite::Connection::open(&db_path).expect("open sqlite");
     conn.execute_batch(
         "CREATE TRIGGER abort_char_upd BEFORE UPDATE ON characters BEGIN SELECT RAISE(ABORT, 'injected_mt_wal_fail'); END;",
@@ -1813,7 +1813,7 @@ async fn test_b11_multithread_wal_error_survives_await_and_rolls_back() {
     );
     assert!(err.message.contains("injected_mt_wal_fail"));
     tokio::task::yield_now().await;
-    assert_eq!(crate::open_feats_and_rpcs_b11_part2::capture_observable_state(&ctx), before);
+    assert_eq!(crate::features_fleet_broadcast_rpcs::part2::capture_observable_state(&ctx), before);
     let _ = std::fs::remove_file(&db_path);
 }
 

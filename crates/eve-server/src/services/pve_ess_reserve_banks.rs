@@ -717,7 +717,7 @@ pub async fn try_activate_ess_acceleration_gate(
             cs.is_covert_cloak = false;
             cs.cloak_stabilization_remaining_s = 0.0;
             let _ = sys_handle.set_combat_state(ship_id, cs).await;
-            crate::services::notify_emitters_batch3_space::emit_cloak_module_force_deactivated(
+            crate::services::notify_emitters_space_dungeons::emit_cloak_module_force_deactivated(
                 ctx,
                 char_id,
                 "DecloakProximityOrDeactivation",
@@ -976,7 +976,7 @@ pub fn tick_ess_main_bank_autopayout(ctx: &ServerContext, now_unix: u64) -> usiz
             ("mainBank", PyRep::Real(post_main)),
             ("reserveBank", PyRep::Real(post_reserve)),
         ]);
-        super::notify_emitters_batch6::emit_system_ess_data_changed(
+        super::notify_emitters_combat_ess_progression::emit_system_ess_data_changed(
             ctx,
             sys_id as i64,
             ess_data,
@@ -1106,7 +1106,7 @@ pub async fn tick_ess_reserve_bank_links(ctx: &ServerContext, now_unix: u64) -> 
                 true
             });
             if severed {
-                super::notify_emitters_batch6::emit_reserve_bank_player_link_disconnected(ctx, char_id, sys_id, 1);
+                super::notify_emitters_combat_ess_progression::emit_reserve_bank_player_link_disconnected(ctx, char_id, sys_id, 1);
             }
             continue;
         }
@@ -1229,7 +1229,7 @@ pub async fn tick_ess_reserve_bank_links(ctx: &ServerContext, now_unix: u64) -> 
                     ("mainBank", PyRep::Real(post_main)),
                     ("reserveBank", PyRep::Real(post_reserve)),
                 ]);
-                super::notify_emitters_batch6::emit_system_ess_data_changed(
+                super::notify_emitters_combat_ess_progression::emit_system_ess_data_changed(
                     ctx,
                     sys_id as i64,
                     ess_data,
@@ -1237,7 +1237,7 @@ pub async fn tick_ess_reserve_bank_links(ctx: &ServerContext, now_unix: u64) -> 
             }
         }
         if terminated {
-            super::notify_emitters_batch6::emit_reserve_bank_player_link_disconnected(ctx, char_id, sys_id, 0);
+            super::notify_emitters_combat_ess_progression::emit_reserve_bank_player_link_disconnected(ctx, char_id, sys_id, 0);
         }
     }
     processed

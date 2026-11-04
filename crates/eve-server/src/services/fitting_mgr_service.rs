@@ -583,7 +583,7 @@ async fn handle_save_fitting(
     match save_res {
         Ok(saved_ids) => {
             if is_community_fitting_owner(owner_id) {
-                crate::services::notify_emitters_batch3::emit_community_fittings_updated(ctx);
+                crate::services::notify_emitters_character_services::emit_community_fittings_updated(ctx);
             }
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
@@ -706,7 +706,7 @@ async fn handle_update_fitting(
     match res {
         Ok(owner_id) => {
             if is_community_fitting_owner(owner_id) {
-                crate::services::notify_emitters_batch3::emit_community_fittings_updated(ctx);
+                crate::services::notify_emitters_character_services::emit_community_fittings_updated(ctx);
             }
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
@@ -787,7 +787,7 @@ async fn handle_delete_fitting(
         let deleted_list: Vec<PyRep> = deleted_ids.iter().copied().map(PyRep::Integer).collect();
         if !deleted_list.is_empty() {
             if is_community_fitting_owner(target_owner) {
-                crate::services::notify_emitters_batch3::emit_community_fittings_updated(ctx);
+                crate::services::notify_emitters_character_services::emit_community_fittings_updated(ctx);
             }
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
@@ -850,7 +850,7 @@ async fn handle_delete_fitting(
             .unwrap();
         if deleted {
             if is_community_fitting_owner(target_owner) {
-                crate::services::notify_emitters_batch3::emit_community_fittings_updated(ctx);
+                crate::services::notify_emitters_character_services::emit_community_fittings_updated(ctx);
             }
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),

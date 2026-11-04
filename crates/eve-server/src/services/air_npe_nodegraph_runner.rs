@@ -24,8 +24,8 @@ use crate::services::air_npe_nodegraph_pocket::{
     cleanup_npe_pocket_and_restore_ui, spawn_or_get_npe_pocket, spawn_or_move_ship_in_pocket,
     NPE_POCKET_ANCHOR_POS,
 };
-use crate::services::notify_emitters_batch3_space::emit_dungeon_progression_notifications;
-use crate::services::notify_emitters_batch8_ops::{
+use crate::services::notify_emitters_space_dungeons::emit_dungeon_progression_notifications;
+use crate::services::notify_emitters_operations_nodegraph::{
     start_client_node_graph_instance, stop_client_node_graph_instances_by_id,
 };
 use crate::services::operations_manager::{
@@ -624,7 +624,7 @@ pub fn on_start_tutorial(
         save_runner_state(snap, &runner);
     });
 
-    crate::services::notify_emitters_batch8_ops::on_tutorial_started(ctx, char_id, state_id);
+    crate::services::notify_emitters_operations_nodegraph::on_tutorial_started(ctx, char_id, state_id);
 }
 
 /// Executes SDE server graph `103` (`[AIR NPE] Move New Character to Target Dungeon`):
@@ -1242,7 +1242,7 @@ pub fn on_skip_air_npe(
         Ok::<_, BridgeRpcError>((gid, cnode, comp))
     })?;
 
-    crate::services::notify_emitters_batch8_ops::on_tutorial_skipped(ctx, char_id);
+    crate::services::notify_emitters_operations_nodegraph::on_tutorial_skipped(ctx, char_id);
     Ok((graph_id, curr_node, completed))
 }
 

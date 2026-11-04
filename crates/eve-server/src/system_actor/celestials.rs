@@ -1298,7 +1298,7 @@ impl SystemHandle {
             .filter(|c| {
                 c.target_id == Some(target_ship_id)
                     && c.ship_id != target_ship_id
-                    && crate::services::mining_b33::is_offensive_aggressor_cycle(c, sde)
+                    && crate::services::mining_phased_autotarget::is_offensive_aggressor_cycle(c, sde)
             })
             .map(|c| c.ship_id)
             .collect()

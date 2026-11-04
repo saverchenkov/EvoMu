@@ -386,7 +386,7 @@ impl PublicGatewayRouter {
         crate::services::quasar_inventory_asset::register_inventory_asset_handlers(&router, Arc::clone(&db), Arc::clone(&sde), Arc::clone(desc));
         crate::services::quasar_assetholding_entitlements::register_assetholding_handlers(&router, Arc::clone(&db), Arc::clone(&sde), Arc::clone(desc));
         crate::services::quasar_economy_planetary_industry::register_economy_planetary_industry_handlers(&router, Arc::clone(&db), Arc::clone(&sde), Arc::clone(desc));
-        crate::services::quasar_b34_services::register_handlers(
+        crate::services::quasar_fleet_navigation_services::register_handlers(
             &router,
             Arc::clone(&db),
             Arc::clone(&sde),
@@ -452,9 +452,9 @@ impl PublicGatewayRouter {
         // 7. Quasar Character & Progression Track (Q-4) handlers
         crate::services::quasar_progression::register_all_progression_handlers(self, Arc::clone(&db), Arc::clone(&self.progression));
 
-        crate::services::quasar_b2_services::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
-        crate::services::quasar_b29_services::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
-        crate::services::quasar_b22_services::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
+        crate::services::quasar_char_skill_services::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
+        crate::services::quasar_corp_structure_services::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
+        crate::services::quasar_market_contract_services::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
         crate::services::quasar_vendors_and_war_services::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
         crate::services::quasar_debug_race_ship_services::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
     }
@@ -907,7 +907,7 @@ impl PublicGatewayRouter {
 
         let dyn_msg = match self.descriptors.decode_dynamic_or_wire(&norm_type, &payload_any.value) {
             Ok(m) => m,
-            Err(_) if has_handler => crate::services::quasar_b2_services::decode_wire_dynamic(&norm_type, &payload_any.value),
+            Err(_) if has_handler => crate::services::quasar_char_skill_services::decode_wire_dynamic(&norm_type, &payload_any.value),
             Err(e) => return build_response(STATUS_BAD_REQUEST, format!("Invalid protobuf wire payload for '{norm_type}': {e}"), None),
         };
 

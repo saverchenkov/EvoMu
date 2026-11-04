@@ -793,12 +793,12 @@ pub fn advance_incursion_lifecycles(ctx: &ServerContext) {
         }
     }
     for (cid, tale_id, new_inf) in regen_updates {
-        crate::services::notify_emitters_batch10::emit_tale_influence_update(
+        crate::services::notify_emitters_tournaments_anomalies::emit_tale_influence_update(
             ctx, cid, tale_id, new_inf,
         );
     }
     for (cid, tale_id) in ended_tales {
-        crate::services::notify_emitters_batch10::emit_tale_remove_for_constellation(
+        crate::services::notify_emitters_tournaments_anomalies::emit_tale_remove_for_constellation(
             ctx,
             cid,
             tale_id,
@@ -1296,7 +1296,7 @@ pub fn emit_active_incursion_tale_data_for_system(ctx: &ServerContext, sys_id: S
             .map(|inc| (inc.tale_id, build_incursion_tale_py(inc)))
     });
     if let Some((tale_id, payload)) = found {
-        crate::services::notify_emitters_batch10::emit_tale_data_for_system(
+        crate::services::notify_emitters_tournaments_anomalies::emit_tale_data_for_system(
             ctx, sys_id, tale_id, payload,
         );
     }
@@ -1313,14 +1313,14 @@ pub fn emit_incursion_completion_macho_notifications(
             .map(|inc| (inc.constellation_id, inc.tale_id))
     });
     if let Some((cid, tale_id)) = info {
-        crate::services::notify_emitters_batch10::emit_tale_influence_update(
+        crate::services::notify_emitters_tournaments_anomalies::emit_tale_influence_update(
             ctx,
             cid,
             tale_id,
             result.influence,
         );
         if result.incursion_ended {
-            crate::services::notify_emitters_batch10::emit_tale_remove_for_constellation(
+            crate::services::notify_emitters_tournaments_anomalies::emit_tale_remove_for_constellation(
                 ctx,
                 cid,
                 tale_id,

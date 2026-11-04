@@ -935,7 +935,7 @@ pub fn emit_expedition_combat_notifications(
                 .collect()
         });
         for cid in recipients {
-            crate::services::notify_emitters_b36::push_char_notification_with_db(
+            crate::services::notify_emitters_ess_bounties::push_char_notification_with_db(
                 db,
                 Some(pending_notifications),
                 Some(notify_tx),

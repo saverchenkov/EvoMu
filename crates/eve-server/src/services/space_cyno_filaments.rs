@@ -413,7 +413,7 @@ async fn handle_random_jump_filament(
     }
 
     let caller_pos = current_ball.position;
-    crate::services::pve_open_feats_b36::check_ess_intrusion_bubble_restriction(
+    crate::services::pve_ess_reserve_banks::check_ess_intrusion_bubble_restriction(
         ctx, old_sys, ship_id, "filament",
     )
     .await?;

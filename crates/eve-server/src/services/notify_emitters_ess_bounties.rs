@@ -1,4 +1,4 @@
-//! `notify_emitters_b36` — Server-side V24 notification emitters for Batch 36
+//! `notify_emitters_ess_bounties` — Server-side V24 notification emitters for Batch 36
 //! (`OnProgressionAdvanced`, `OnProgressionTaskCompleted`, and `OnCombatMessage`).
 
 #![forbid(unsafe_code)]

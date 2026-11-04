@@ -239,7 +239,7 @@ async fn test_war_registry_bind_and_unbind() {
     }
 
     let mut sess = setup_pilot(&ctx, PILOT_1).await;
-    let mut sess_other = crate::open_feats_and_rpcs_b7::setup_pilot_for_user(
+    let mut sess_other = crate::features_sovereignty_upwell_rpcs::setup_pilot_for_user(
         &ctx,
         77_092,
         "other",

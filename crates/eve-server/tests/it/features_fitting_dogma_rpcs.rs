@@ -670,7 +670,7 @@ use eve_server::services::insurgency_services::{
 };
 use eve_server::services::quasar_social_chat::on_character_local_chat_membership_refreshed;
 
-use crate::open_feats_and_rpcs_b8::{
+use crate::features_fitting_dogma_rpcs::{
     gate_jump, rpc, setup_space_pilot, ALSAVOINON_GATE_ID, ALSAVOINON_SYS, ERR_ANCHORING_ZARZAKH,
     ERR_HORIZON_SIEGE_CASTER, FULCRUM_STATION_ID, TURNUR_GATE_ID, TURNUR_SYS,
     ZARZAKH_ALSAVOINON_GATE_ID, ZARZAKH_SYS, ZARZAKH_TURNUR_GATE_ID,

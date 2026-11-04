@@ -821,7 +821,7 @@ pub(crate) async fn handle_multi_add(
     let moved: Vec<i64> = moved.into_iter().map(|(id, _, _)| id).collect();
     let mut source_ships = HashSet::new();
     for &(old_loc, item_id, _) in &fitted_unfit_ids {
-        let _ = crate::services::notify_emitters_batch3_space::flush_module_profile_and_ewar_end(
+        let _ = crate::services::notify_emitters_space_dungeons::flush_module_profile_and_ewar_end(
             ctx,
             char_id,
             session.solar_system_id,

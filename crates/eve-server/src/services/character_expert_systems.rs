@@ -433,7 +433,7 @@ pub fn handle(
                 msg_name,
                 &msg_data,
             ) {
-                crate::services::notify_emitters_batch8_ops::on_client_graph_message(
+                crate::services::notify_emitters_operations_nodegraph::on_client_graph_message(
                     ctx,
                     char_id,
                     graph_id,
@@ -466,7 +466,7 @@ pub fn start_client_node_graph_for_operation(
 /// Helper for AIR category completion; under DATA GAP no guessed client node graphs are stopped.
 // DATA GAP: V24 operation node graph mappings are Tranquility server-only
 pub fn stop_active_operation_node_graph(ctx: &ServerContext, char_id: i64, cat_id: i64) {
-    crate::services::notify_emitters_batch8_ops::stop_active_operation_node_graph_for_category(ctx, char_id, cat_id);
+    crate::services::notify_emitters_operations_nodegraph::stop_active_operation_node_graph_for_category(ctx, char_id, cat_id);
 }
 
 /// Marks AIR NPE completed for `char_id`, stops any active AIR NPE client graphs and pocket,

@@ -1,4 +1,4 @@
-//! `notify_emitters_b23` — Real Gameplay & Service Notification Emitters (Batch 23).
+//! `notify_emitters_channel_events` — Real Gameplay & Service Notification Emitters (Batch 23).
 //!
 //! Covers 11 V24 client notifications:
 //! - Operations Manager (`OnOperationDeactivated`, `OnOperationSkipped`,

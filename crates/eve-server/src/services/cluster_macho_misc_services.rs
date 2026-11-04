@@ -830,7 +830,7 @@ pub async fn handle(
         // shipcasterTravelMgr: Interstellar and Starter Shipcaster Operations
         // --------------------------------------------------------------------
         _ => {
-            if let Some(res) = crate::services::notify_emitters_batch9_part2::handle_misc_batch9(
+            if let Some(res) = crate::services::notify_emitters_skills_trade_godma::handle_misc_batch9(
                 ctx,
                 session,
                 service,

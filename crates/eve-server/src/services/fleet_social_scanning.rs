@@ -89,7 +89,7 @@ pub(super) async fn handle_scanning_and_wormholes(
             });
             if method == "SignalTrackerRegister" {
                 register_signal_tracker_subscriber(ctx, sys_id, char_id);
-                crate::services::notify_emitters_batch10::emit_signal_tracker_full_state_for_system(
+                crate::services::notify_emitters_tournaments_anomalies::emit_signal_tracker_full_state_for_system(
                     ctx, char_id, sys_id, &sigs,
                 );
             }
@@ -727,7 +727,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                     .await,
                 );
             }
-            if let Some(res) = crate::services::pve_open_feats_b36::try_activate_ess_acceleration_gate(
+            if let Some(res) = crate::services::pve_ess_reserve_banks::try_activate_ess_acceleration_gate(
                 ctx, char_id, sys_id, ship_id, gate_id,
             )
             .await

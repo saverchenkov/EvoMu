@@ -384,13 +384,13 @@ pub fn sync_metaliminal_storm_effects_and_sites(ctx: &ServerContext) {
     });
 
     for (sid, aid, inst_id, did, dname) in added_anomalies {
-        crate::services::notify_emitters_batch10::emit_cosmic_anomaly_added_for_system(
+        crate::services::notify_emitters_tournaments_anomalies::emit_cosmic_anomaly_added_for_system(
             ctx, sid, &aid, inst_id, did, dname,
         );
     }
 
     for (sid, tids) in added_by_sys {
-        crate::services::notify_emitters_batch10::emit_system_effect_started(ctx, sid, tids);
+        crate::services::notify_emitters_tournaments_anomalies::emit_system_effect_started(ctx, sid, tids);
     }
     let mut cleared_env_systems = HashSet::new();
     for (sid, item_id, old_tid) in removed_beacons {
@@ -401,7 +401,7 @@ pub fn sync_metaliminal_storm_effects_and_sites(ctx: &ServerContext) {
             .and_then(|t| t.effect_ids.first().copied())
             .map(i64::from)
             .unwrap_or_else(|| i64::from(old_tid));
-        crate::services::notify_emitters_batch10::emit_system_wide_effect_stop(
+        crate::services::notify_emitters_tournaments_anomalies::emit_system_wide_effect_stop(
             ctx,
             sid,
             effect_id,
@@ -409,7 +409,7 @@ pub fn sync_metaliminal_storm_effects_and_sites(ctx: &ServerContext) {
             i64::from(old_tid),
         );
         if !effect_lists_by_sys.contains_key(&sid) && cleared_env_systems.insert(sid) {
-            crate::services::notify_emitters_batch10::emit_component_removed_system_environment(
+            crate::services::notify_emitters_tournaments_anomalies::emit_component_removed_system_environment(
                 ctx, sid,
             );
         }

@@ -472,7 +472,7 @@ pub(crate) mod npc_spawns_pve_closure_part2 {
 
 
 use crate::common;
-use crate::npc_spawns_pve_closure::{
+use crate::npc_spawns_pve::{
     bind_beyonce, rpc, setup_docked_pilot, setup_space_pilot, warp_lock_and_destroy_via_rpc,
 };
 use eve_destiny::DVec3;

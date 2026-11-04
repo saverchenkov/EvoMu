@@ -15,7 +15,7 @@
 use crate::router::{NotificationTarget, ServerContext};
 use eve_proto::PyRep;
 
-pub use crate::services::notify_emitters_batch9::emit_skill_bundle_injected;
+pub use crate::services::notify_emitters_skills_trade_godma::emit_skill_bundle_injected;
 
 /// Emits `OnOfferReceived(offerID, offer)` (`2` args, `id_type = "charid"`).
 /// Matches `contextualOffers/client/contextualOffersSvc.pyj:ContextualOfferService.OnOfferReceived`.

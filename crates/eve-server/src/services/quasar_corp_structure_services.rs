@@ -1,4 +1,4 @@
-//! `quasar_b29_services` — Batch 29 Quasar Public Gateway Admin & Orchestrator Handlers.
+//! `quasar_corp_structure_services` — Batch 29 Quasar Public Gateway Admin & Orchestrator Handlers.
 //!
 //! All handlers require `ROLE_ADMIN | ROLE_GMH` (enforced by `PublicGatewayRouter::requires_admin_role`)
 //! and read/write canonical `WorldRepository` state (`quasar_cosmetics_market`, `payment_receipts`,

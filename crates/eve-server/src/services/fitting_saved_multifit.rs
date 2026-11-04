@@ -1050,7 +1050,7 @@ pub(crate) async fn handle_ships_and_services(
                         .get(&ship_type_id)
                         .is_some_and(|t| matches!(t.group_id, 29 | 237))
                     {
-                        crate::services::notify_emitters_batch9::emit_pod_or_corvette_assembly(
+                        crate::services::notify_emitters_skills_trade_godma::emit_pod_or_corvette_assembly(
                             ctx,
                             char_id,
                             assembled_id,

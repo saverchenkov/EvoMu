@@ -891,7 +891,7 @@ impl NpcSpawnManager {
         }
 
         let res = ctx.db.try_with_mut_snapshot(|snap| {
-            crate::services::pve_open_feats_b36::credit_ballpark_npc_bounty_with_ess_split(
+            crate::services::pve_ess_reserve_banks::credit_ballpark_npc_bounty_with_ess_split(
                 &ctx.sde,
                 snap,
                 sys_id,

@@ -1,4 +1,4 @@
-//! `quasar_b2_services` — Batch 2 Quasar V24.01 Protobuf Gateway Handlers.
+//! `quasar_char_skill_services` — Batch 2 Quasar V24.01 Protobuf Gateway Handlers.
 //!
 //! Wired directly to `WorldSnapshot` (`structures`, `zarzakh_gate_locks`,
 //! `system_states`, `sov_runtime`, `service_state_blobs["cluster_misc_state"]`)

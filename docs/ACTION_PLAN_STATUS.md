@@ -4,7 +4,7 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 5979 / 6353 ledger rows closed (94.11%)**, 2402 NA, 1487 tagged tests, 1982 passing tests. Flagged fake by the gap auditor: 335.
+**Parity: 5973 / 6353 ledger rows closed (94.02%)**, 2402 NA, 1637 tagged tests, 2134 passing tests. Flagged fake by the gap auditor: 335.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
@@ -14,9 +14,9 @@ The canonical plan is `.agents/skills/evomu-adversarial-review/references/action
 | feat | 1604 | 1361 | 94 | 149 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 455 | 819 | 37 |
-| plan | 118 | 97 | 0 | 21 |
+| plan | 118 | 92 | 0 | 26 |
 | quasar | 1455 | 72 | 1328 | 55 |
-| rpc | 1373 | 1211 | 109 | 53 |
+| rpc | 1373 | 1210 | 109 | 54 |
 | sde | 213 | 169 | 44 | 0 |
 
 Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = mapped `feat:` rows closed/total; **Assessment** = the agent's own judgement from `docs/parity/task_notes.json` (DONE is accepted only when the ledger row is DONE).
@@ -57,12 +57,12 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | T-3 | Property and fuzz tests. Use proptest round-trips for every marshal opcode, Pack… | DONE | 0/0 | prop_t3_dbrow_pack_unpack_roundtrip, prop_t3_destiny_add_balls_roundtrip, prop_t3_destiny_decoder_fuzz_never_panics, pro | DONE | Comprehensive proptest fuzzing for MachoNet framing, DBRow codec, Destiny wire, Dogma VM, and Quasar envelopes with zero panics. | 6270c6cfe 2026-10-18 |
 | T-4 | Golden wire tests against the client's own codecs. Through the in-client bridge,… | DONE | 0/0 | test_t4_golden_wire_marshal_destiny_quasar_and_python_bridge_roundtrip | DONE | Golden wire PyRep marshaling, binary Destiny stream, and Quasar Protobuf wire format roundtrip verified. | 5a5503691 2026-10-18 |
 | T-5 | Coverage and mutation tooling. Install cargo-llvm-cov and cargo-mutants. Run car… | DONE | 0/0 | test_phase_t_t5_coverage_and_mutation_tooling, test_t5_db_persistence_accounts_and_wallet_coverage, test_t5_destiny_move | DONE | Installed cargo-llvm-cov and cargo-mutants and added QA coverage and mutation verification harness enforcing >= 85% thresholds. | 6270c6cfe 2026-10-18 |
-| T-6 | Real-client harness. tools/client-harness/run_journeys --out DIR --journeys FILE… | BLOCKED_BY_FEATURES | 0/0 | test_plan_t6_z6_client_harness_and_journeys | PARTIAL | Client journey runner and simulated two-client harness in place; real V24 client journey execution pending. | 6adf21085 2026-11-03 |
+| T-6 | Real-client harness. tools/client-harness/run_journeys --out DIR --journeys FILE… | MISSING | 0/0 | — | PARTIAL | Client journey runner and simulated two-client harness in place; real V24 client journey execution pending. | 6adf21085 2026-11-03 |
 | T-7 | Time control. Add an injectable server clock and time acceleration so skill trai… | DONE | 0/0 | test_t7_injectable_server_clock_time_acceleration_and_pause_on_tick | DONE | Injectable ServerClock, tick pause, and time acceleration for simulated progression tested. | c938dfc53 2026-10-19 |
 | T-8 | Invariant checking with randomized play (user-added 2026-10-22) | DONE | 1/1 | test_canonical_plan_t8_t9_t10_t11_harnesses_and_oracles | — | — | 27af60bc9 2026-10-31 |
 | T-9 | Crash, disconnect and restart harness (user-added 2026-10-22) | DONE | 1/1 | test_canonical_plan_t8_t9_t10_t11_harnesses_and_oracles | — | — | 4c8c20912 2026-10-22 |
 | T-10 | Client-expectation oracle (user-added 2026-10-22) | DONE | 0/0 | test_canonical_plan_t8_t9_t10_t11_harnesses_and_oracles | — | — | e5bbe9837 2026-10-31 |
-| T-11 | Destiny differential physics harness & golden vector capture (user-added 2026-10… | DONE | 0/0 | test_canonical_plan_t8_t9_t10_t11_harnesses_and_oracles | PARTIAL | Destiny differential harness framework implemented with 6 baseline scenarios tested; full closure requires 1,000 scenarios driven against CCP _destiny runtime. | ede4b7e6c 2026-10-23 |
+| T-11 | Destiny differential physics harness & golden vector capture (user-added 2026-10… | MISSING | 0/0 | — | PARTIAL | Destiny differential harness framework implemented with 6 baseline scenarios tested; full closure requires 1,000 scenarios driven against CCP _destiny runtime. | ede4b7e6c 2026-10-23 |
 | T-12 | Dogma differential attribute harness & golden fit capture (user-added 2026-10-23… | DONE | 0/0 | test_t12_dogma_differential_fits_and_stacking_penalties, test_t12_dogma_procedural_differential_500_fits, test_t12_golde | DONE | Dogma differential harness verifying 10 canonical and 520 procedural ship, module, implant, rig, booster, overheat, gang burst, and mutaplasmid fits within 1e-5 against CCP Python 2.7 Dogma runtime. | af9d6b5d2 2026-10-24 |
 
 ## Phase 2: Wire protocol
@@ -153,7 +153,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | E-1 | Fee inputs | DONE | 4/4 | test_e1_broker_fee_and_sales_tax_skill_discounts | PARTIAL | Broker fee calculation with Broker Relations and standings discount, sales tax with Accounting discount, and escrow deduction tested; auditor-flagged feat:market.broker-fee pending clearance. | 0dd62e6b2 2026-10-21 |
 | E-2 | Order lifecycle | DONE | 23/23 | test_e2_market_order_matching_queries_and_cancellation, test_e2_structure_market_service_and_order_expiry | PARTIAL | Limit orders, immediate buy and sell matching against order book, regional order book queries, order cancellation, and escrow refund tested; blocked by remaining features. | 252371f52 2026-10-27 |
 | E-3 | Contracts | DONE | 15/15 | test_e3_contracts_lifecycle_item_exchange_courier_auction, test_e3_corp_contract_wallet_roles_and_issuer_departure | PARTIAL | Item Exchange, Courier with collateral hold and delivery failure, and Auction contracts with bidding and escrow refund tested; blocked by remaining features. | 02ea9ce13 2026-10-21 |
-| E-4 | Industry | BLOCKED_BY_FEATURES | 28/33 | test_e4_capital_shipyard_restrictions_and_exponential_research, test_e4_industry_jobs_lifecycle_manufacturing_research_a | PARTIAL | Industry blueprint data, facilities lookup, job cost with facility tax, manufacturing, TE/ME research, copying, and delivery tested; blocked by remaining features. | 9e1232b41 2026-10-30 |
+| E-4 | Industry | BLOCKED_BY_FEATURES | 28/33 | test_e4_capital_shipyard_restrictions_and_exponential_research, test_e4_industry_jobs_lifecycle_manufacturing_research_a | PARTIAL | Industry blueprint data, facilities lookup, job cost with facility tax, manufacturing, TE/ME research, copying, and delivery tested; blocked by remaining features. | 41295bf88 2026-11-03 |
 | E-5 | Agents and missions | FLAGGED_FAKE | 25/26 | test_e5_agent_finder_and_conversation_lifecycle, test_plan_e5_agent_finder_and_conversation_lifecycle | PARTIAL | PVE agent finder, agent conversation, mission offer/accept/decline/quit state machine, and standing calculations; blocked by remaining features. | 3ed24678b 2026-11-03 |
 | E-6 | PI basics | DONE | 23/23 | test_e6_pi_extractor_expiry_and_launch_canister | PARTIAL | Planetary Interaction planet info, command center placement, colony limit from skill, pin placement, links, and production routing tested; blocked by remaining features. | 252371f52 2026-10-27 |
 | E-7 | AIR NPE server-side node-graph runner & tutorial pocket orchestrator (user-added… | DONE | 3/3 | air_npe_server_nodegraph_runner_full_tutorial_to_completion | — | — | ac4908537 2026-11-02 |
@@ -200,11 +200,11 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| Z-1 | Close every rpc: row (1,230 client-called methods) with V24 argument layouts and… | DONE | 0/0 | test_canonical_plan_z1_z2_rpc_and_notify_closure | PARTIAL | Catalog RPC methods implemented and verified; remaining catalog methods open. | e19dce396 2026-10-18 |
-| Z-2 | Close every notify: row. Server-emitted notifications are sent with correct payl… | DONE | 0/0 | test_canonical_plan_z1_z2_rpc_and_notify_closure | PARTIAL | Notification methods implemented and verified; remaining notifications open. | e19dce396 2026-10-18 |
+| Z-1 | Close every rpc: row (1,230 client-called methods) with V24 argument layouts and… | MISSING | 0/0 | — | PARTIAL | Catalog RPC methods implemented and verified; remaining catalog methods open. | e19dce396 2026-10-18 |
+| Z-2 | Close every notify: row. Server-emitted notifications are sent with correct payl… | MISSING | 0/0 | — | PARTIAL | Notification methods implemented and verified; remaining notifications open. | e19dce396 2026-10-18 |
 | Z-3 | Close every destiny: and ballmode: row on the binary destiny stream. | DONE | 0/0 | test_plan_z3_destiny_binary_stream_ball_mode | PARTIAL | Destiny actions and ball modes implemented and verified; remaining actions and ball modes open. | 6adf21085 2026-11-03 |
 | Z-4 | Close every sde: row and effect:. | DONE | 0/0 | test_plan_t2_z4_sde_and_dogma_effect_attestation | PARTIAL | SDE static data rows and effect rows implemented and verified; expression-only effects open. | 322b1baeb 2026-10-18 |
-| Z-5 | Close every feat: row, including every row the gap auditor has appended. Fix eve… | DONE | 0/0 | test_plan_z5_feature_parity_closure | PARTIAL | Structure features implemented with loaded-ammo auto-defense per ledger acceptance (wiki notes manual gunner control); flagged rows await gap audit. | a7e5196df 2026-10-18 |
-| Z-6 | Pass every journey: row on the real client through tools/client-harness/run_jour… | DONE | 0/0 | test_plan_t6_z6_client_harness_and_journeys | NOT STARTED | Real-client journeys require execution via the V24 client journey harness. | e2be34b69 2026-10-18 |
-| Z-7 | Reach workspace line coverage ≥ 90% and mutation score ≥ 85% on every crate. | BLOCKED_BY_FEATURES | 0/0 | test_plan_z7_z8_test_thresholds_and_final_acceptance_gate | PARTIAL | Coverage and mutation QA harness present; full workspace >=90% coverage and >=85% mutation gate pending. | 609a8780e 2026-10-21 |
+| Z-5 | Close every feat: row, including every row the gap auditor has appended. Fix eve… | MISSING | 0/0 | — | PARTIAL | Structure features implemented with loaded-ammo auto-defense per ledger acceptance (wiki notes manual gunner control); flagged rows await gap audit. | a7e5196df 2026-10-18 |
+| Z-6 | Pass every journey: row on the real client through tools/client-harness/run_jour… | MISSING | 0/0 | — | NOT STARTED | Real-client journeys require execution via the V24 client journey harness. | e2be34b69 2026-10-18 |
+| Z-7 | Reach workspace line coverage ≥ 90% and mutation score ≥ 85% on every crate. | MISSING | 0/0 | — | PARTIAL | Coverage and mutation QA harness present; full workspace >=90% coverage and >=85% mutation gate pending. | 609a8780e 2026-10-21 |
 | Z-8 | Final acceptance. The claims review is PASS and the gap audit is CLEAN on the fi… | BLOCKED_BY_FEATURES | 0/0 | test_plan_z7_z8_test_thresholds_and_final_acceptance_gate | NOT STARTED | — | 6adf21085 2026-11-03 |

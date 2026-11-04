@@ -20,8 +20,8 @@ use crate::common;
 use eve_machonet::{service_roles::ROLE_GM_DEFAULT, SessionState};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::{NotificationTarget, ServerContext};
-use eve_server::services::notify_emitters_batch3::emit_login_milestone_achieved;
-use eve_server::services::notify_emitters_batch3_space::emit_jump_queue_update;
+use eve_server::services::notify_emitters_character_services::emit_login_milestone_achieved;
+use eve_server::services::notify_emitters_space_dungeons::emit_jump_queue_update;
 use eve_server::services::notify_emitters_missing::emit_notification_undeleted;
 use eve_server::services::notify_emitters_missing2::{
     emit_offer_received, emit_progression_task_widget_update, emit_recommendations_changed,

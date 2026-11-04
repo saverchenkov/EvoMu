@@ -9,7 +9,7 @@ use eve_proto::quasar::{
 use eve_proto::PyRep;
 use eve_server::quasar_gateway::NoticeScope;
 use eve_server::router::ServerContext;
-use eve_server::services::quasar_b2_services::{
+use eve_server::services::quasar_char_skill_services::{
     encode_dbs_settings, encode_dbs_solar_system_details, encode_duel_challenge_accepted,
     encode_duel_challenge_issued, encode_epicarc_progress, encode_fighter_squad_state,
     encode_fighter_type_identifier, publish_duel_challenge_accepted_notice,

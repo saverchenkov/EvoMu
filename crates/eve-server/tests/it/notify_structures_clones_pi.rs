@@ -639,7 +639,7 @@ mod notify_real_emitters_batch7_part2 {
 // Real server-side emission tests for Notify Batch 7 (Part 2: Fitting, Weapon Banks,
 // Drones, Stances, Conduit Jump, Character Energy, Skill Injectors & Skill Bundles).
 
-use crate::notify_real_emitters_batch7::{
+use crate::notify_structures_clones_pi::{
     drain_all, find_notif, login_in_space, make_item, new_ctx, rpc, JITA_STATION, PILOT_A,
     PILOT_B, SYS_JITA,
 };
@@ -1045,7 +1045,7 @@ mod notify_real_emitters_batch7_part3 {
 // Real server-side emission tests for Notify Batch 7 (Part 3: Cosmetics, Petitions,
 // Mail Undelete, Planetary Interaction Launches, Orbital State & Escalations).
 
-use crate::notify_real_emitters_batch7::{
+use crate::notify_structures_clones_pi::{
     drain_all, find_notif, login_in_space, make_item, new_ctx, rpc, JITA_STATION, PILOT_A,
     PILOT_B, SYS_JITA,
 };
@@ -1384,7 +1384,7 @@ mod notify_real_emitters_batch7_part4 {
 // Real server-side emission tests for Notify Batch 7 (Part 4: Agent Missions,
 // Faction Warfare, Sovereignty Dev Index, PVP Filaments & Tournaments).
 
-use crate::notify_real_emitters_batch7::{
+use crate::notify_structures_clones_pi::{
     drain_all, find_notif, login_in_space, make_item, new_ctx, rpc, PILOT_A, PILOT_B, SYS_JITA,
 };
 use eve_db::{FwSystemOccupationRecord, InventoryFlag};

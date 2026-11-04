@@ -264,10 +264,10 @@ pub fn sync_subscription(ctx: &ServerContext, uid: u64) -> (u32, u64) {
         (target.or(grade).unwrap_or(1), exp.unwrap_or(0), changed, exp_changed)
     });
     if exp_changed {
-        crate::services::notify_emitters_batch9::emit_subscription_time_update_server(ctx, uid, res_exp);
+        crate::services::notify_emitters_skills_trade_godma::emit_subscription_time_update_server(ctx, uid, res_exp);
     }
     for (cid, g) in changed_grades {
-        crate::services::notify_emitters_batch9::emit_subscription_changed_server(ctx, cid, g);
+        crate::services::notify_emitters_skills_trade_godma::emit_subscription_changed_server(ctx, cid, g);
     }
     (res_grade, res_exp)
 }
@@ -277,7 +277,7 @@ pub fn set_subscription_expiry(ctx: &ServerContext, uid: u64, until: u64) -> (u3
     with_store(ctx, |_, store| {
         store.subscription_expiry.insert(uid, until);
     });
-    crate::services::notify_emitters_batch9::emit_subscription_time_update_server(ctx, uid, until);
+    crate::services::notify_emitters_skills_trade_godma::emit_subscription_time_update_server(ctx, uid, until);
     sync_subscription(ctx, uid)
 }
 
@@ -640,7 +640,7 @@ fn handle_inner(
                     });
                 id
             });
-            crate::services::notify_emitters_batch9::emit_redeeming_queue_updated_for_user(
+            crate::services::notify_emitters_skills_trade_godma::emit_redeeming_queue_updated_for_user(
                 ctx,
                 uid,
                 session.character_id,
@@ -817,13 +817,13 @@ fn handle_inner(
                 }
                 Ok((claimed_toks, created_items, dest_loc, added_non_dim_qty))
             })?;
-            crate::services::notify_emitters_batch9::emit_redeeming_queue_updated_for_user(
+            crate::services::notify_emitters_skills_trade_godma::emit_redeeming_queue_updated_for_user(
                 ctx,
                 uid,
                 Some(cid),
             );
             if added_non_dim_qty > 0 {
-                crate::services::notify_emitters_batch9::emit_non_diminishing_injections_added(
+                crate::services::notify_emitters_skills_trade_godma::emit_non_diminishing_injections_added(
                     ctx,
                     cid,
                     added_non_dim_qty,
@@ -859,7 +859,7 @@ fn handle_inner(
                 before.saturating_sub(list.len())
             });
             if removed > 0 {
-                crate::services::notify_emitters_batch9::emit_redeeming_queue_updated_for_user(
+                crate::services::notify_emitters_skills_trade_godma::emit_redeeming_queue_updated_for_user(
                     ctx,
                     uid,
                     session.character_id,
@@ -996,7 +996,7 @@ fn handle_inner(
                     snap.service_state_blobs.insert(format!("mct_slots:{uid}"), json);
                 }
             });
-            crate::services::notify_emitters_batch9::emit_multiple_characters_training_updated(
+            crate::services::notify_emitters_skills_trade_godma::emit_multiple_characters_training_updated(
                 ctx,
                 uid,
             );
@@ -1016,7 +1016,7 @@ fn handle_inner(
                 store.mct_slots.get(&uid).cloned().unwrap_or_default()
             });
             if method == "InvalidateMultiCharacterTrainingCache" {
-                crate::services::notify_emitters_batch9::emit_multiple_characters_training_updated(
+                crate::services::notify_emitters_skills_trade_godma::emit_multiple_characters_training_updated(
                     ctx,
                     uid,
                 );

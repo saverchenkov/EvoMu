@@ -439,7 +439,7 @@ async fn handle_cmd_warp_to_stuff(
         anchor_pos.to_array(),
         preview_dest.to_array(),
     )?;
-    crate::services::pve_open_feats_b36::check_ess_warp_destination_allowed(
+    crate::services::pve_ess_reserve_banks::check_ess_warp_destination_allowed(
         ctx,
         sys_id,
         anchor_pos,
@@ -561,7 +561,7 @@ async fn handle_cmd_warp_to_stuff(
     let warp_speed = compute_pilot_warp_speed_au_s(ctx, char_id, sys_id, current_ball.type_id);
     let mode = MovementMode::new_warp(current_ball.position, dest_pos, warp_speed);
     if !is_covert_cloaked {
-        let _ = crate::services::notify_emitters_batch8::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
+        let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
     }
     let target_belt_id = ctx
         .sde
@@ -893,7 +893,7 @@ async fn handle_cmd_stargate_jump(
             },
         )
         .await;
-    crate::services::notify_emitters_batch3_space::emit_exiting_dungeon_on_warp_if_present(
+    crate::services::notify_emitters_space_dungeons::emit_exiting_dungeon_on_warp_if_present(
         ctx, char_id, old_sys, current_ball.position.to_array(),
     );
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, old_sys);
@@ -920,8 +920,8 @@ async fn handle_cmd_stargate_jump(
     let spawn_tick = new_handle.spawn_ball_with_meta(new_ball, combat_state, slim_meta).await.unwrap_or(0);
     let _ = ctx.living_world.materialize_system_lod2(dest_sys_id, &ctx.systems, &ctx.sde).await;
     let _ = new_handle.push_set_state(ship_id).await;
-    crate::services::notify_emitters_batch3_space::emit_jump_cloak_started(ctx, char_id, ship_id);
-    crate::services::notify_emitters_batch8::emit_restoring_invuln_updated(ctx, char_id, ship_id, 600_000_000);
+    crate::services::notify_emitters_space_dungeons::emit_jump_cloak_started(ctx, char_id, ship_id);
+    crate::services::notify_emitters_seasons_tactical::emit_restoring_invuln_updated(ctx, char_id, ship_id, 600_000_000);
 
     session.solar_system_id = Some(updated_ch.solar_system_id);
     session.constellation_id = Some(updated_ch.constellation_id);
@@ -1246,7 +1246,7 @@ async fn handle_dock(
     }
     match ctx.db.dock_character(char_id, dock_id, is_structure) {
         Ok(_) => {
-            crate::services::notify_emitters_batch3_space::emit_exiting_dungeon_on_warp_if_present(
+            crate::services::notify_emitters_space_dungeons::emit_exiting_dungeon_on_warp_if_present(
                 ctx,
                 char_id,
                 sys_id,

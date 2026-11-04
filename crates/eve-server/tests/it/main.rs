@@ -278,13 +278,6 @@ mod skills_injectors_and_attributes;
 mod fw_parity_complete;
 mod pve_parity_complete;
 mod plan_char_dogma_social_esi;
-#[allow(unused_imports)]
-#[allow(unused_imports)]
-#[allow(unused_imports)]
-#[allow(unused_imports)]
-#[allow(unused_imports)]
-#[allow(unused_imports)]
-
 mod fleet_and_wings_management;
 mod crimewatch_hostility;
 mod combat_r4_regressions;
@@ -401,54 +394,7 @@ mod esi_calendar_and_fleet;
 mod esi_characters_and_contacts;
 mod fleet_operations_and_broadcasts;
 mod features_corp_and_structure_ops;
-#[allow(unused_imports)]
-pub(crate) use features_fleet_broadcast_rpcs::part2 as open_feats_and_rpcs_b11_part2;
 mod features_industry_exploration;
-
-#[allow(unused_imports)]
-pub(crate) use {
-    abyssal_deadspace as abyssal_deadspace_closure,
-    abyssal_pochven_void as abyssal_pochven_void_closure,
-    combat_ewar_logistics as combat_ewar_repairs_closure,
-    combat_repairs_smartbombs as combat_repairs_smartbomb_closure,
-    combat_weapons_wrecks::triglavian_entropic_spool_edencom_vorton as combat_weapons_wrecks_part2,
-    crimewatch_hostility as crimewatch_closure,
-    crimewatch_hostility as plan_c7_crimewatch_closure,
-    fw_warzone_insurgency as fw_warzone_insurgency_closure,
-    npc_spawns_pve as npc_spawns_pve_closure,
-    notify_structures_clones_pi as notify_real_emitters_batch7,
-    notify_space_corp_market as notify_real_emitters_batch9,
-    pochven_wormholes_travel as pochven_wormholes_travel_closure,
-    sovereignty_equinox_gameplay as sovereignty_equinox_gameplay_closure,
-    wormhole_pve_escalations as wormhole_pve_escalations_closure,
-    wormhole_special_systems as wormhole_special_systems_closure,
-    wormhole_statics_lifecycle as wormhole_statics_lifecycle_closure,
-    zarzakh_gate_lock as zarzakh_gate_lock_closure,
-    features_industry_exploration as open_feats_batch6,
-    combat_pve as parity_corp_combat_batch_closure,
-    combat_pve as parity_corp_combat_batch_closure_part2,
-    combat_weapons_wrecks as parity_features_combat_part1,
-    combat_fighters_insurance_bounties as parity_features_combat_part2,
-    combat_fighters_insurance_bounties as parity_fighters_lifecycle_closure,
-    features_ships_and_pve as open_feats_ships_pve_b5,
-    features_regression_suite as regressions_b01_b15,
-    features_faction_warfare_rpcs as open_feats_and_rpcs_b7_fw,
-    features_social_chat_rpcs as open_feats_and_rpcs_b7_social,
-    features_corp_governance_rpcs as open_feats_and_rpcs_b22_corp,
-    features_mining_resource_rpcs as open_feats_and_rpcs_b22_mining,
-    features_structure_modules_rpcs as open_feats_and_rpcs_b22_structures_modules,
-    features_dogma_attribute_rpcs as open_feats_and_rpcs_b5,
-    features_wallet_journal_rpcs as open_feats_and_rpcs_b9,
-    features_market_orders_rpcs as open_feats_and_rpcs_b22,
-    features_station_facilities_rpcs as open_feats_and_rpcs_b29,
-    features_sovereignty_upwell_rpcs as open_feats_and_rpcs_b7,
-    features_fitting_dogma_rpcs as open_feats_and_rpcs_b8,
-    features_fleet_broadcast_rpcs as open_feats_and_rpcs_b11,
-    features_character_customization_rpcs as open_feats_and_rpcs_b23,
-    features_drone_fighters_rpcs as open_feats_and_rpcs_b30,
-    features_industry_manufacturing_rpcs as open_feats_and_rpcs_b33,
-    features_station_markets_rpcs as open_feats_and_rpcs_b34,
-};
 mod features_bounties_ess;
 mod features_loyalty_and_lp;
 mod features_dynamic_bounties;
@@ -460,25 +406,3 @@ mod features_structure_reinforcement;
 mod features_freight_and_courier;
 mod features_corporation_projects;
 mod features_homefront_operations;
-#[allow(unused_imports)]
-pub(crate) use features_bounties_ess as open_feats_b35;
-#[allow(unused_imports)]
-pub(crate) use features_loyalty_and_lp as open_feats_b35_b;
-#[allow(unused_imports)]
-pub(crate) use features_dynamic_bounties as open_feats_b35_c;
-#[allow(unused_imports)]
-pub(crate) use features_ess_main_reserve as open_feats_b35_d;
-#[allow(unused_imports)]
-pub(crate) use features_daily_challenges as open_feats_b36;
-#[allow(unused_imports)]
-pub(crate) use features_paragon_missions as open_feats_b37;
-#[allow(unused_imports)]
-pub(crate) use features_air_career_goals as open_feats_b38;
-#[allow(unused_imports)]
-pub(crate) use features_structure_reinforcement as open_feats_b39;
-#[allow(unused_imports)]
-pub(crate) use features_freight_and_courier as open_feats_b40;
-#[allow(unused_imports)]
-pub(crate) use features_corporation_projects as open_feats_b41;
-#[allow(unused_imports)]
-pub(crate) use features_homefront_operations as open_feats_b42;

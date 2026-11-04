@@ -1,7 +1,7 @@
 //! Dedicated integration tests for open `feat:navigation.*` parity rows (Batch 35, Part 3).
 
 use crate::modules_advanced_tactical::{build_ctx, seed_pilot, NULL_SYS};
-use crate::open_feats_b35::{give_item, set_skill, spawn_ship_in_space};
+use crate::features_bounties_ess::{give_item, set_skill, spawn_ship_in_space};
 use eve_db::InventoryFlag;
 use eve_destiny::{Ball, DVec3, MovementMode};
 use eve_proto::PyRep;

@@ -441,7 +441,7 @@ async fn resolve_cycle(ctx: &ServerContext, cycle: &ActiveMiningCycle, fraction:
     };
     let (fit, crystal) = cycle_fit(ctx, cycle.char_id, cycle.ship_id, cycle.module_id, asteroid.type_id)?;
     let eff = |a: u16| module_attr(ctx, &fit, cycle.ship_id, cycle.module_id, a);
-    let phase_eff = super::mining_b33::phased_field_efficiency_for_asteroid(
+    let phase_eff = super::mining_phased_autotarget::phased_field_efficiency_for_asteroid(
         ctx,
         cycle.solar_system_id,
         asteroid.asteroid_id,
@@ -800,7 +800,7 @@ pub async fn process_mining_cycles(ctx: &ServerContext) -> Vec<MiningCycleOutcom
             };
             let stop = outcome.stop;
             if outcome.units_removed > 0 {
-                crate::services::notify_emitters_batch10::emit_ore_mined_by_other(
+                crate::services::notify_emitters_tournaments_anomalies::emit_ore_mined_by_other(
                     ctx,
                     cycle.solar_system_id,
                     cycle.char_id,

@@ -454,7 +454,7 @@ pub async fn handle_gm_dungeon_editor_op(
                 );
             });
             if method == "EditDungeon" {
-                crate::services::notify_emitters_batch3_space::emit_dungeon_edit(
+                crate::services::notify_emitters_space_dungeons::emit_dungeon_edit(
                     ctx,
                     char_id,
                     dungeon_id,
@@ -506,7 +506,7 @@ pub async fn handle_gm_dungeon_editor_op(
                 entry.solar_system_id = Some(sys_id);
             });
             if is_editing {
-                crate::services::notify_emitters_batch3_space::emit_dungeon_edit(
+                crate::services::notify_emitters_space_dungeons::emit_dungeon_edit(
                     ctx, char_id, dungeon_id, room_id, room_pos,
                 );
             }

@@ -1134,7 +1134,7 @@ pub async fn handle(
             ]);
             ctx.notify(NotificationTarget::Alliance(aid), "OnAllianceChanged", "allianceid", vec![PyRep::Integer(aid), change]);
             if let Some(allow_war) = args.get(2).and_then(|a| a.as_bool()) {
-                crate::services::notify_emitters_batch3::emit_allow_war_updated_for_alliance(ctx, aid, allow_war);
+                crate::services::notify_emitters_character_services::emit_allow_war_updated_for_alliance(ctx, aid, allow_war);
             }
             Some(Ok(PyRep::keyval([("allianceID", PyRep::Integer(aid)), ("description", PyRep::String(description)), ("url", PyRep::String(url)), ("dictatorial", PyRep::Bool(dictatorial))])))
         }

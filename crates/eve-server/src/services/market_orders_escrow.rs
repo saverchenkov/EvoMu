@@ -220,7 +220,7 @@ pub fn handle_orders_escrow(
                 };
                 let broker_ppm = (broker_rate * 1_000_000.0).round() as i128;
 
-                let damaged_count = crate::services::notify_emitters_batch9_part2::count_damaged_sell_items(snap, &damaged_fitted_ships, char_id, caller_corp_id, use_corp, &parsed_items);
+                let damaged_count = crate::services::notify_emitters_skills_trade_godma::count_damaged_sell_items(snap, &damaged_fitted_ships, char_id, caller_corp_id, use_corp, &parsed_items);
                 if damaged_count > 0 {
                     return Err(BridgeRpcError { code: "CantRepackageDamagedItem".into(), message: damaged_count.to_string() });
                 }
@@ -819,7 +819,7 @@ pub fn handle_orders_escrow(
                 Err(e) => {
                     if e.code == "CantRepackageDamagedItem" {
                         let count = e.message.parse::<i64>().unwrap_or(1).max(1);
-                        crate::services::notify_emitters_batch9_part2::emit_sell_repackage_errors(ctx, char_id, "CantRepackageDamagedItem", count);
+                        crate::services::notify_emitters_skills_trade_godma::emit_sell_repackage_errors(ctx, char_id, "CantRepackageDamagedItem", count);
                     }
                     Some(Err(e))
                 }
@@ -1316,7 +1316,7 @@ pub fn handle_orders_escrow(
                 Err(e) => {
                     if e.code == "CantRepackageDamagedItem" {
                         let count = e.message.parse::<i64>().unwrap_or(1).max(1);
-                        crate::services::notify_emitters_batch9_part2::emit_sell_repackage_errors(ctx, char_id, "CantRepackageDamagedItem", count);
+                        crate::services::notify_emitters_skills_trade_godma::emit_sell_repackage_errors(ctx, char_id, "CantRepackageDamagedItem", count);
                     }
                     Some(Err(e))
                 }

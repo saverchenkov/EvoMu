@@ -240,7 +240,7 @@ pub(crate) fn step_cycles_and_capacitor(
     let mut auto_target_aggressors: HashMap<BallId, Vec<BallId>> = HashMap::new();
     for c in active_module_cycles.iter() {
         if let Some(tid) = c.target_id.filter(|&tid| tid != c.ship_id) {
-            if crate::services::mining_b33::is_offensive_aggressor_cycle(c, sde_opt.as_deref()) {
+            if crate::services::mining_phased_autotarget::is_offensive_aggressor_cycle(c, sde_opt.as_deref()) {
                 auto_target_aggressors.entry(tid).or_default().push(c.ship_id);
             }
         }
@@ -397,14 +397,14 @@ pub(crate) fn step_cycles_and_capacitor(
             // 1c. Auto-Targeting System (`feat:modules.auto-targeting-system`)
             if cycle.is_auto_targeter {
                 let agg = auto_target_aggressors.get(&cycle.ship_id).map(|v| v.as_slice()).unwrap_or(&[]);
-                let fleet_ships = crate::services::mining_b33::fleet_ship_ids_for_ship(db_opt.as_ref(), cycle.ship_id);
+                let fleet_ships = crate::services::mining_phased_autotarget::fleet_ship_ids_for_ship(db_opt.as_ref(), cycle.ship_id);
                 let char_faction = db_opt.as_ref().and_then(|db| {
                     db.with_snapshot(|s| {
                         let owner = cycle.owner_char_id.or_else(|| s.items.get(&cycle.ship_id).map(|i| i.owner_id))?;
                         s.characters.get(&owner).and_then(|c| c.war_faction_id)
                     })
                 });
-                crate::services::mining_b33::run_auto_targeter_ballpark_tick(
+                crate::services::mining_phased_autotarget::run_auto_targeter_ballpark_tick(
                     ballpark, sde_opt.as_deref(), char_faction, cycle.ship_id, cycle.auto_target_max_range, cycle.auto_target_max_locks, cycle.auto_target_scan_res, agg, &fleet_ships,
                 );
             }

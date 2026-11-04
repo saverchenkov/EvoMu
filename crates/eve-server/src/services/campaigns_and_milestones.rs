@@ -1027,7 +1027,7 @@ fn handle_milestone_process_logon(
 
     if !already_claimed {
         let end_ft = ctx.now_blueos_filetime_ticks().saturating_add(7_200 * 10_000_000);
-        crate::services::notify_emitters_batch9::emit_login_milestone_timer_started(
+        crate::services::notify_emitters_skills_trade_godma::emit_login_milestone_timer_started(
             ctx,
             char_id,
             end_ft,
@@ -1101,7 +1101,7 @@ fn handle_milestone_claim_rewards(
         Ok(())
     })?;
 
-    crate::services::notify_emitters_batch3::emit_login_milestone_achieved(
+    crate::services::notify_emitters_character_services::emit_login_milestone_achieved(
         ctx,
         char_id,
         milestone_id,

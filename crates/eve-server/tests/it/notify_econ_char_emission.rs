@@ -2942,7 +2942,7 @@ async fn notify_batch8_ammo_drones_and_fleet_events() {
         ]
     );
 
-    eve_server::services::notify_emitters_batch8::on_deployable_deactivated(
+    eve_server::services::notify_emitters_seasons_tactical::on_deployable_deactivated(
         &ctx,
         sess_a.fleet_id,
         beacon_id,

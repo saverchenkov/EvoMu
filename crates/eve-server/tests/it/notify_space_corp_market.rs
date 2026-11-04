@@ -1,7 +1,7 @@
 //! Real server-side emission tests for Notify Batch 9 (Part 1: Skills & Injectors).
 
 use crate::common;
-use crate::notify_real_emitters_batch7::{
+use crate::notify_structures_clones_pi::{
     drain_all, find_notif, make_item, new_ctx, rpc, JITA_STATION, PILOT_A, PILOT_B, SYS_JITA,
 };
 use eve_db::InventoryFlag;
@@ -116,7 +116,7 @@ async fn notify_batch9_alpha_and_non_diminishing_injectors() {
     assert!(matches!(cd_avail, PyRep::Integer(v) if v > 0));
 
     // Negative 1a: Sweep before ALPHA_INJECTOR_COOLDOWN_TICKS expires does NOT emit OnAlphaInjectionAvailable
-    eve_server::services::notify_emitters_batch9::sweep_due_login_milestones_and_alpha_injectors(
+    eve_server::services::notify_emitters_skills_trade_godma::sweep_due_login_milestones_and_alpha_injectors(
         &ctx,
         base_unix,
     );
@@ -126,7 +126,7 @@ async fn notify_batch9_alpha_and_non_diminishing_injectors() {
 
     // Positive: Advance clock past ALPHA_INJECTOR_COOLDOWN_TICKS (24h = 86_400s) and run sweep
     eve_db::ServerClock::advance_secs(&*clock, 86_401);
-    eve_server::services::notify_emitters_batch9::sweep_due_login_milestones_and_alpha_injectors(
+    eve_server::services::notify_emitters_skills_trade_godma::sweep_due_login_milestones_and_alpha_injectors(
         &ctx,
         base_unix + 86_401,
     );
@@ -134,7 +134,7 @@ async fn notify_batch9_alpha_and_non_diminishing_injectors() {
     assert!(alpha_notifs.iter().any(|(e, a)| e == "OnAlphaInjectionAvailable" && a.is_empty()));
 
     // Negative 1b: Repeated sweep after notification does not duplicate OnAlphaInjectionAvailable
-    eve_server::services::notify_emitters_batch9::sweep_due_login_milestones_and_alpha_injectors(
+    eve_server::services::notify_emitters_skills_trade_godma::sweep_due_login_milestones_and_alpha_injectors(
         &ctx,
         base_unix + 86_402,
     );
@@ -443,10 +443,10 @@ mod notify_real_emitters_batch9_part2 {
 
 // Real server-side emission tests for Notify Batch 9 (Part 2: Milestones, Redeeming, Crates, Character & Subscription).
 
-use crate::notify_real_emitters_batch7::{
+use crate::notify_structures_clones_pi::{
     drain_all, find_notif, make_item, new_ctx, rpc, JITA_STATION, PILOT_A,
 };
-use crate::notify_real_emitters_batch9::login_docked;
+use crate::notify_space_corp_market::login_docked;
 use eve_db::InventoryFlag;
 use eve_proto::PyRep;
 
@@ -482,7 +482,7 @@ async fn notify_batch9_milestones_redeeming_crates_and_assembly() {
 
     // Negative 1c: Advancing cluster tick past 7200s does NOT auto-credit ISK or emit OnLoginMilestoneAchieved
     let future_unix = ctx.now_unix() + 7_205;
-    eve_server::services::notify_emitters_batch9::sweep_due_login_milestones_and_alpha_injectors(
+    eve_server::services::notify_emitters_skills_trade_godma::sweep_due_login_milestones_and_alpha_injectors(
         &ctx,
         future_unix,
     );
@@ -848,10 +848,10 @@ mod notify_real_emitters_batch9_part3 {
 
 // Real server-side emission tests for Notify Batch 9 (Part 3: Diplomacy, Fittings, Offers, NES, Agents & Datacores).
 
-use crate::notify_real_emitters_batch7::{
+use crate::notify_structures_clones_pi::{
     drain_all, find_notif, new_ctx, rpc, JITA_STATION, PILOT_A, PILOT_B,
 };
-use crate::notify_real_emitters_batch9::login_docked;
+use crate::notify_space_corp_market::login_docked;
 use eve_proto::PyRep;
 
 // parity: notify:OnAllowWarUpdated, notify:OnNesIntroStateChanged
@@ -1281,11 +1281,11 @@ mod notify_real_emitters_batch9_part4 {
 
 // Real server-side emission tests for Notify Batch 9 (Part 4: Facilities, Industry, Trade, Market, Godma & Cache).
 
-use crate::notify_real_emitters_batch7::{
+use crate::notify_structures_clones_pi::{
     drain_all, find_notif, login_in_space, make_item, new_ctx, rpc, JITA_STATION,
     PILOT_A, PILOT_B, SYS_JITA,
 };
-use crate::notify_real_emitters_batch9::{login_docked, upwell_struct};
+use crate::notify_space_corp_market::{login_docked, upwell_struct};
 use eve_db::InventoryFlag;
 use eve_proto::PyRep;
 use glam::DVec3;
@@ -1782,11 +1782,11 @@ mod notify_real_emitters_batch9_part5 {
 
 // Real server-side emission tests for Notify Batch 9 (Part 5: JumpQueue, FlaggedLists, CfgDataChanged, CCPNotification, ServerMessage, Localization & ServiceMapping).
 
-use crate::notify_real_emitters_batch7::{
+use crate::notify_structures_clones_pi::{
     drain_all, find_notif, login_in_space, new_ctx, rpc, JITA_STATION, PILOT_A,
     PILOT_B, SYS_JITA,
 };
-use crate::notify_real_emitters_batch9::{login_docked, upwell_struct};
+use crate::notify_space_corp_market::{login_docked, upwell_struct};
 use eve_proto::PyRep;
 use glam::DVec3;
 

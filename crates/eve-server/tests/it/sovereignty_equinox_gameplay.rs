@@ -658,7 +658,7 @@ pub(crate) mod equinox_workforce_transit {
 
 
 use crate::quasar_sov_equinox_hub::{field, fields, id_req, rpc, structure, subscribe};
-use crate::sovereignty_equinox_gameplay_closure::{
+use crate::sovereignty_equinox_gameplay::{
     drain_notif_events, drain_quasar, find_nullsec_planets, fit_siege_artillery,
     lock_target_via_rpc, make_ball, register_online_pilot, rpc_call, set_pilot_location,
     step_weapon_ticks, ALLIANCE, CORP, PILOT, PILOT_SHIP,
@@ -1056,7 +1056,7 @@ pub(crate) mod equinox_skyhook_reagents {
 
 
 use crate::quasar_sov_equinox_hub::{field, fields, id_req, idm, rpc, structure, subscribe, varint};
-use crate::sovereignty_equinox_gameplay_closure::{
+use crate::sovereignty_equinox_gameplay::{
     drain_notif_events, drain_quasar, find_nullsec_planets, fit_siege_artillery,
     lock_target_via_rpc, make_ball, open_sqlite_ctx, register_online_pilot, rpc_call,
     step_weapon_ticks, temp_sqlite_path, ALLIANCE, CORP, PILOT, PILOT_SHIP,
@@ -1525,7 +1525,7 @@ pub(crate) mod equinox_mercenary_dens {
 
 
 use crate::quasar_sov_equinox_hub::structure;
-use crate::sovereignty_equinox_gameplay_closure::{
+use crate::sovereignty_equinox_gameplay::{
     drain_notif_events, find_nullsec_planets, fit_siege_artillery, lock_target_via_rpc, make_ball,
     open_sqlite_ctx, register_online_pilot, rpc_call, temp_sqlite_path, ALLIANCE, CORP, PILOT,
     PILOT_SHIP,
@@ -1705,7 +1705,7 @@ async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes()
         let gun_id = if ej_idx % 2 == 0 { 996_000 } else { 996_002 };
         rpc_call(&ctx, &mut s_def, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::Integer(alt_ship)])
             .await.expect("destroy ejected empty player hull");
-        crate::sovereignty_equinox_gameplay_closure::step_weapon_ticks(&ctx, null_sys).await;
+        crate::sovereignty_equinox_gameplay::step_weapon_ticks(&ctx, null_sys).await;
     }
     assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.sov_npc_kills.get(&null_sys).copied().unwrap_or(0)), 0, "destroying 5 ejected player hulls must credit 0 NPC kills");
     assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&null_sys].military_index), 0, "destroying 5 ejected player hulls must not raise Military Index");
@@ -1733,7 +1733,7 @@ async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes()
                 "single NPC kill must not advance Military Index 1 (threshold is 5 kills)"
             );
         }
-        crate::sovereignty_equinox_gameplay_closure::step_weapon_ticks(&ctx, null_sys).await;
+        crate::sovereignty_equinox_gameplay::step_weapon_ticks(&ctx, null_sys).await;
     }
     assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&null_sys].military_index), 1);
 

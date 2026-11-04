@@ -525,7 +525,7 @@ pub fn flush_npc_bounty_tick(
                     .ess_main_bank
                     .checked_add(main_cents)
                     .unwrap_or(st.ess_main_bank);
-                crate::services::pve_open_feats_b36::record_ess_main_bank_contribution(
+                crate::services::pve_ess_reserve_banks::record_ess_main_bank_contribution(
                     st,
                     char_id,
                     main_cents.0,

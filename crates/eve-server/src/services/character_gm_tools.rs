@@ -724,7 +724,7 @@ pub async fn handle_gm_slash_ext(
             Ok((item_id, owner_id, loc_id, old_val)) => {
                 ctx.invalidate_ship_fitting(item_id);
                 ctx.invalidate_ship_fitting(loc_id);
-                crate::services::notify_emitters_batch3::emit_setattr_notifications(
+                crate::services::notify_emitters_character_services::emit_setattr_notifications(
                     ctx, owner_id, loc_id, item_id, attr_id, now_ft, val, old_val,
                 );
                 Some(Ok(PyRep::keyval([
@@ -1242,10 +1242,10 @@ pub async fn handle_gm_slash_ext(
         return crate::services::operations_manager::handle_survey_slash(ctx, cid, cmd);
     }
     if cmd == "/season" || cmd.starts_with("/season ") {
-        return crate::services::notify_emitters_batch8::handle_season_slash(ctx, cid, cmd);
+        return crate::services::notify_emitters_seasons_tactical::handle_season_slash(ctx, cid, cmd);
     }
     if cmd == "/operation" || cmd.starts_with("/operation ") {
-        return crate::services::notify_emitters_batch8_ops::handle_operation_slash(ctx, session, cid, cmd);
+        return crate::services::notify_emitters_operations_nodegraph::handle_operation_slash(ctx, session, cid, cmd);
     }
     if let Some(rest) = cmd.strip_prefix("/energy ") {
         let parts: Vec<&str> = rest.split_whitespace().collect();
@@ -1265,7 +1265,7 @@ pub async fn handle_gm_slash_ext(
         return Some(Ok(crate::services::character_energy::energy_to_keyval(&st)));
     }
 
-    if let Some(res) = crate::services::notify_emitters_batch3::handle_batch3_gm_slash_cmd(ctx, cid, session.solar_system_id, cmd) {
+    if let Some(res) = crate::services::notify_emitters_character_services::handle_batch3_gm_slash_cmd(ctx, cid, session.solar_system_id, cmd) {
         return Some(res);
     }
 

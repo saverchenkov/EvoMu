@@ -4888,8 +4888,8 @@ pub(crate) mod rpc_localization_qa {
 //  Runtime integration tests closing open `rpc:*` parity rows:
 //  - `rpc:localizationServer.UpdateLocalizationQAWrap`
 
-use crate::notify_real_emitters_batch7::{new_ctx, rpc, JITA_STATION, PILOT_A, PILOT_B};
-use crate::notify_real_emitters_batch9::login_docked;
+use crate::notify_structures_clones_pi::{new_ctx, rpc, JITA_STATION, PILOT_A, PILOT_B};
+use crate::notify_space_corp_market::login_docked;
 use eve_db::OwnerNoteRecord;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;

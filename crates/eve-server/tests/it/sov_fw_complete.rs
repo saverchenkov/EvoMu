@@ -621,7 +621,7 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
     let ship_id: i64 = 100_090_001;
     let hub_pos = glam::DVec3::new(45_000_000.0, 45_000_000.0, 45_000_000.0);
 
-    let mut sess = crate::sovereignty_equinox_gameplay_closure::register_online_pilot(
+    let mut sess = crate::sovereignty_equinox_gameplay::register_online_pilot(
         &ctx, 42_003, "demo", "demo-secret", PILOT, corp_id, Some(alliance_id),
         sys_id, ship_id, 11_957, hub_pos, eve_db::corp_roles::ROLE_DIRECTOR,
     ).await;
@@ -761,7 +761,7 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
 
     // 3. Anchor Tenebrex Cyno Jammer (`37534`) via `structureDeployment.Anchor` & load fuel blocks via `invbroker.Add`!
     let jam_pos = hub_pos + glam::DVec3::new(2_000_000.0, 0.0, 0.0);
-    let _ = ctx.systems.get_or_spawn(sys_id).spawn_ball(crate::sovereignty_equinox_gameplay_closure::make_ball(ship_id, 11_957, jam_pos)).await;
+    let _ = ctx.systems.get_or_spawn(sys_id).spawn_ball(crate::sovereignty_equinox_gameplay::make_ball(ship_id, 11_957, jam_pos)).await;
     let anchor_jam = sov_call(&ctx, &mut sess, "structureDeployment", "Anchor", &[PyRep::Integer(990_011), PyRep::String("Cyno Jammer".into())])
         .await
         .expect("anchor Tenebrex");
@@ -810,7 +810,7 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
     // 4. Hack Sov Hub via live `Data Analyzer I` (`22175`) + `hackingMgr.ClickedOnTile` -> `OnSovHubHacked`, jam disabled, cyno allowed!
     let hacker_cid = 90_000_088i64;
     let hacker_ship = 100_090_088i64;
-    let mut s_hacker = crate::sovereignty_equinox_gameplay_closure::register_online_pilot(
+    let mut s_hacker = crate::sovereignty_equinox_gameplay::register_online_pilot(
         &ctx, 42_088, "other", "other-secret", hacker_cid, 98_000_188, Some(99_000_288),
         sys_id, hacker_ship, 621, hub_pos + glam::DVec3::new(2_500.0, 0.0, 0.0), 0,
     ).await;
@@ -835,7 +835,7 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
         s.module_online_states.insert(990_300, true);
     });
     ctx.invalidate_ship_fitting(hacker_ship);
-    crate::sovereignty_equinox_gameplay_closure::lock_target_via_rpc(&ctx, &mut s_hacker, sys_id, hacker_ship, hub_id).await;
+    crate::sovereignty_equinox_gameplay::lock_target_via_rpc(&ctx, &mut s_hacker, sys_id, hacker_ship, hub_id).await;
     ctx.drain_notifications_for_char(PILOT);
     sov_call(&ctx, &mut s_hacker, "dogmaIM", "Activate", &[PyRep::Integer(990_300), PyRep::String("dataHacking".into()), PyRep::Integer(hub_id)])
         .await

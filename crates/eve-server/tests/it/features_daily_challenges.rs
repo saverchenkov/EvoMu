@@ -850,7 +850,7 @@ async fn test_b36_storyline_offer_counter() {
         (2, true), (3, false), (4, true), (5, false), (6, false), (7, false),
         (8, false), (9, false), (10, true), (11, true), (12, false),
     ] {
-        assert_eq!(eve_server::services::pve_open_feats_b36::is_storyline_qualifying_agent_type(tid), expected);
+        assert_eq!(eve_server::services::pve_ess_reserve_banks::is_storyline_qualifying_agent_type(tid), expected);
     }
     let tutorial_agent = ctx.sde.agents[&3_010_811].clone();
     assert_eq!(tutorial_agent.agent_type_id, 3);
@@ -2866,7 +2866,7 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
     ctx2.dispatch_rpc(&mut sess_a, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_id)], &kw, None).await.unwrap();
     ctx2.db.clock().advance_secs(60);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx2).await;
-    let expected_45_p1 = eve_server::services::pve_open_feats_b36::compute_ess_reserve_pulse_payout_cents(4_500_000, 45, 45);
+    let expected_45_p1 = eve_server::services::pve_ess_reserve_banks::compute_ess_reserve_pulse_payout_cents(4_500_000, 45, 45);
     assert_eq!(ctx2.db.with_snapshot(|s| s.characters[&pilot_a].balance.0) - bal_before_r45, expected_45_p1);
 }
 

@@ -115,7 +115,7 @@ pub fn break_location_change_invulnerability(ctx: &ServerContext, char_id: i64) 
                 .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.active_ship_id))
                 .unwrap_or(0);
             if ship_id > 0 {
-                crate::services::notify_emitters_batch3_space::emit_warp_cloak_or_invuln_cancelled(
+                crate::services::notify_emitters_space_dungeons::emit_warp_cloak_or_invuln_cancelled(
                     ctx, char_id, ship_id, false, true,
                 );
             }
@@ -443,7 +443,7 @@ pub async fn handle(
             if !(sys_sec <= 0.0 && sys_id < 31_000_000) {
                 return Some(Ok(PyRep::None));
             }
-            crate::services::pve_open_feats_b36::ensure_ess_intrusion_site_balls(ctx, sys_id).await;
+            crate::services::pve_ess_reserve_banks::ensure_ess_intrusion_site_balls(ctx, sys_id).await;
             let now_u = ctx.now_unix();
             let rt_until = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
                 rt.ess_reserve_unlocked_until.get(&sys_id).copied().unwrap_or(0)
@@ -586,7 +586,7 @@ pub async fn handle(
                 false
             });
             if is_reserve && unlinked {
-                super::notify_emitters_batch6::emit_reserve_bank_player_link_disconnected(
+                super::notify_emitters_combat_ess_progression::emit_reserve_bank_player_link_disconnected(
                     ctx, char_id, sys_id, 0,
                 );
             }
@@ -660,7 +660,7 @@ pub async fn handle(
             });
             let key_item_id_arg = args.first().and_then(|a| a.as_i64());
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                crate::services::pve_open_feats_b36::ensure_ess_reserve_bank_not_already_unlocked(
+                crate::services::pve_ess_reserve_banks::ensure_ess_reserve_bank_not_already_unlocked(
                     snap, sys_id, now_unix, rt_until,
                 )?;
                 let (key_item_id, key_type_id, duration_mins) =

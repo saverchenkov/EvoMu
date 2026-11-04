@@ -1572,7 +1572,7 @@ async fn test_c4_npc_target_switching_and_clone_soldier_lowsec_spawns() {
 }
 
 #[allow(unused_imports)]
-pub(crate) mod parity_corp_combat_batch_closure {
+pub(crate) mod pochven_loot_and_corp_audit {
 //! End-to-end integration tests for Pochven loot drop, corporation project contribution
 //! methods, corporation member role audit, and corporation structure reinforce default.
 //!
@@ -2218,7 +2218,7 @@ async fn create_proj(
 }
 
 #[allow(unused_imports)]
-pub(crate) mod parity_corp_combat_batch_closure_part2 {
+pub(crate) mod corp_audit_and_reinforce {
 //! Part 2 of end-to-end integration tests for corporation member role audit and
 //! corporation structure reinforce default.
 //!
@@ -2229,7 +2229,7 @@ pub(crate) mod parity_corp_combat_batch_closure_part2 {
 
 use std::collections::HashMap;
 
-use super::parity_corp_combat_batch_closure::{
+use super::pochven_loot_and_corp_audit::{
     field, rowset_rows, rpc, select_pilot, spawn_ship_in_space, PILOT_1, PILOT_2,
 };
 use crate::common;

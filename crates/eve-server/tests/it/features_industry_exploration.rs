@@ -559,7 +559,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::quasar_sov_equinox_hub::{id_req, rpc as q_sov_rpc, structure};
-use crate::sovereignty_equinox_gameplay_closure::{
+use crate::sovereignty_equinox_gameplay::{
     find_nullsec_planets, make_ball, register_online_pilot, rpc_call, ALLIANCE, CORP, PILOT,
     PILOT_SHIP,
 };

@@ -2749,7 +2749,7 @@ pub(crate) mod npc_mining_batch_closure {
 // E2E parity integration tests for NPC & Mining features (Part 1).
 
 
-use crate::open_feats_and_rpcs_b22::{rpc, select_pilot, PILOT_1, PILOT_2};
+use crate::features_market_orders_rpcs::{rpc, select_pilot, PILOT_1, PILOT_2};
 use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
@@ -3355,7 +3355,7 @@ pub(crate) mod npc_mining_batch_closure_part2 {
 // E2E parity integration tests for Mining Market/Goals, Standings, Lookup, and Downtime (Part 2).
 
 
-use crate::open_feats_and_rpcs_b22::{rpc, select_pilot, PILOT_1, PILOT_2};
+use crate::features_market_orders_rpcs::{rpc, select_pilot, PILOT_1, PILOT_2};
 use eve_db::{CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
