@@ -472,6 +472,7 @@ impl PublicGatewayRouter {
                 | "eve_public.character.GetNamesByUserRequest"
                 | "eve.quasar.config.api.GetRequest"
                 | "eve_public.solarsystem.api.GetRequest"
+                | "eve_public.station.api.GetRequest" | "eve.station.GetRequest" | "eve.station.GetNameRequest" | "eve.station.GetStationsInSolarSystemRequest"
                 | "eve.constellation.GetRequest"
                 | "eve.constellation.GetAllRequest"
                 | "eve.constellation.SearchRequest"

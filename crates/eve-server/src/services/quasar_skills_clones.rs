@@ -668,7 +668,16 @@ pub fn register_skill_handlers(
                 .get(2)
                 .and_then(|v| match v {
                     DynamicValue::Uint32(u) => Some(*u),
+                    DynamicValue::Uint64(u) => Some(*u as u32),
                     DynamicValue::Int32(i) => Some(*i as u32),
+                    DynamicValue::Int64(i) => Some(*i as u32),
+                    DynamicValue::Message(m) => m.get(1).and_then(|iv| match iv {
+                        DynamicValue::Uint32(u) => Some(*u),
+                        DynamicValue::Uint64(u) => Some(*u as u32),
+                        DynamicValue::Int32(i) => Some(*i as u32),
+                        DynamicValue::Int64(i) => Some(*i as u32),
+                        _ => None,
+                    }),
                     _ => None,
                 })
                 .unwrap_or(3300);

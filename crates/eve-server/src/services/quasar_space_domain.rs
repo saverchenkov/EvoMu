@@ -303,6 +303,101 @@ pub fn register_handlers(
         );
     }
 
+    // 4b. eve_public.station.api.GetRequest
+    {
+        let sde_st = Arc::clone(&sde);
+        router.register_handler(
+            "eve_public.station.api.GetRequest",
+            Arc::new(move |_ctx, _any, msg| {
+                let st_id = sub(msg, 1)
+                    .and_then(|i| i.get(1))
+                    .and_then(as_u32)
+                    .or_else(|| msg.get(1).and_then(as_u32))
+                    .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing station identifier".into()))?;
+                let st = sde_st
+                    .stations
+                    .get(&(st_id as i64))
+                    .ok_or_else(|| (STATUS_NOT_FOUND, format!("Station {st_id} not found")))?;
+                let mut attrs = Vec::new();
+                encode_string_field(1, &st.name, &mut attrs);
+                let mut out = Vec::new();
+                encode_bytes_field(1, &attrs, &mut out);
+                Ok(any("eve_public.station.api.GetResponse", out))
+            }),
+        );
+    }
+
+    // 4c. eve.station.GetRequest
+    {
+        let sde_st = Arc::clone(&sde);
+        router.register_handler(
+            "eve.station.GetRequest",
+            Arc::new(move |_ctx, _any, msg| {
+                let st_id = sub(msg, 1)
+                    .and_then(|i| i.get(1))
+                    .and_then(as_u32)
+                    .or_else(|| msg.get(1).and_then(as_u32))
+                    .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing station identifier".into()))?;
+                let st = sde_st
+                    .stations
+                    .get(&(st_id as i64))
+                    .ok_or_else(|| (STATUS_NOT_FOUND, format!("Station {st_id} not found")))?;
+                let mut attrs = Vec::new();
+                encode_string_field(1, &st.name, &mut attrs);
+                encode_bytes_field(2, &seq_id(st.solar_system_id), &mut attrs);
+                encode_bytes_field(3, &seq_id(st.station_type_id), &mut attrs);
+                encode_bytes_field(10, &seq_id(st.owner_corporation_id as u32), &mut attrs);
+                let mut out = Vec::new();
+                encode_bytes_field(1, &attrs, &mut out);
+                Ok(any("eve.station.GetResponse", out))
+            }),
+        );
+    }
+
+    // 4d. eve.station.GetNameRequest
+    {
+        let sde_st = Arc::clone(&sde);
+        router.register_handler(
+            "eve.station.GetNameRequest",
+            Arc::new(move |_ctx, _any, msg| {
+                let st_id = sub(msg, 1)
+                    .and_then(|i| i.get(1))
+                    .and_then(as_u32)
+                    .or_else(|| msg.get(1).and_then(as_u32))
+                    .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing station identifier".into()))?;
+                let st = sde_st
+                    .stations
+                    .get(&(st_id as i64))
+                    .ok_or_else(|| (STATUS_NOT_FOUND, format!("Station {st_id} not found")))?;
+                let mut out = Vec::new();
+                encode_string_field(1, &st.name, &mut out);
+                Ok(any("eve.station.GetNameResponse", out))
+            }),
+        );
+    }
+
+    // 4e. eve.station.GetStationsInSolarSystemRequest
+    {
+        let sde_st = Arc::clone(&sde);
+        router.register_handler(
+            "eve.station.GetStationsInSolarSystemRequest",
+            Arc::new(move |_ctx, _any, msg| {
+                let sys_id = sub(msg, 1)
+                    .and_then(|i| i.get(1))
+                    .and_then(as_u32)
+                    .or_else(|| msg.get(1).and_then(as_u32))
+                    .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing solar system identifier".into()))?;
+                let mut out = Vec::new();
+                for st in sde_st.stations.values() {
+                    if st.solar_system_id == sys_id {
+                        encode_bytes_field(1, &seq_id(st.station_id as u32), &mut out);
+                    }
+                }
+                Ok(any("eve.station.GetStationsInSolarSystemResponse", out))
+            }),
+        );
+    }
+
     // 5. Space measurements: RecordRequest, admin.api.RecordRequest, QueryRequest
     for (req_name, rsp_name) in [
         (
