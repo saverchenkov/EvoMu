@@ -207,6 +207,14 @@ async fn test_b35_01_lance_doomsday_directional_geometry() {
     let v_200_char = 950_203;
     let v_200km = 960_203;
     let mut v_200_sess = seed_pilot(&ctx, v_200_char, v_200km, 23757, NULL_SYS, false); // Archon
+    ctx.db.with_mut_snapshot(|s| {
+        let mut acc = s.accounts.values().next().cloned().unwrap();
+        acc.user_id = v_200_char as u64;
+        acc.username = format!("u_{v_200_char}");
+        s.accounts.insert(acc.username.clone(), acc);
+        s.characters.get_mut(&v_200_char).unwrap().user_id = v_200_char as u64;
+    });
+    v_200_sess.user_id = Some(v_200_char as u64);
     give_item(&ctx, 970_204, 31796, v_200_char, v_200km, InventoryFlag::MedSlot0, 1);
     give_item(&ctx, 970_205, 31796, v_200_char, v_200km, InventoryFlag::MedSlot1, 1);
     spawn_ship_in_space(&ctx, v_200_char, v_200km, 23757, NULL_SYS, DVec3::new(200_000.0, 0.0, 0.0)).await;
@@ -273,13 +281,6 @@ async fn test_b35_01_lance_doomsday_directional_geometry() {
     ctx.db
         .acquire_online_lock_with_computer_hash(titan_uid, titan_char as u64, Some(titan_char), None, true, 1)
         .expect("register titan online session");
-    ctx.db.with_mut_snapshot(|s| {
-        let mut acc = s.accounts.values().next().cloned().unwrap();
-        acc.user_id = v_200_char as u64;
-        acc.username = format!("u_{v_200_char}");
-        s.accounts.insert(acc.username.clone(), acc);
-        s.characters.get_mut(&v_200_char).unwrap().user_id = v_200_char as u64;
-    });
     ctx.db.acquire_online_lock_with_computer_hash(v_200_char as u64, v_200_char as u64, Some(v_200_char), None, true, 1).expect("register v_200 online");
     let _ = ctx.drain_notifications_for_char(titan_char);
     let _ = ctx.drain_notifications_for_char(v_200_char);
