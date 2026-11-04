@@ -626,7 +626,8 @@ async fn test_journey_undock_navigate() {
             .sde
             .stargates()
             .values()
-            .find(|g| g.from_solar_system_id == cur_sys && !visited_systems.contains(&g.to_solar_system_id))
+            .find(|g| g.from_solar_system_id == cur_sys && !visited_systems.contains(&g.to_solar_system_id) && ctx.sde.stations.values().any(|st| st.solar_system_id == g.to_solar_system_id))
+            .or_else(|| ctx.sde.stargates().values().find(|g| g.from_solar_system_id == cur_sys && !visited_systems.contains(&g.to_solar_system_id)))
             .or_else(|| ctx.sde.stargates().values().find(|g| g.from_solar_system_id == cur_sys))
             .expect("next stargate");
         let dest_sys = sg.to_solar_system_id;
@@ -644,19 +645,15 @@ async fn test_journey_undock_navigate() {
     }
     assert!(visited_systems.len() == 4, "must traverse 3 stargates across 4 systems");
 
-    // Dock at a station in the destination system (or Jita 4-4)
+    // Dock at a station in the destination system
     let dest_sys = sess.solar_system_id.unwrap();
     let d_bind = call_rpc(&ctx, &mut sess, "beyonce", "MachoBindObject", &[PyRep::Integer(dest_sys as i64), PyRep::None])
         .await
         .expect("beyonce bind dest");
     let d_bid = bound_id_from_tuple(&d_bind);
-    let (dest_station, dest_pos) = ctx
-        .sde
-        .stations
-        .values()
-        .find(|st| st.solar_system_id == dest_sys)
-        .map(|st| (st.station_id as i64, st.position))
-        .unwrap_or((60_003_760, glam::DVec3::ZERO));
+    let target_station = ctx.sde.stations.values().find(|st| st.solar_system_id == dest_sys).expect("destination station in solar system");
+    let dest_station = target_station.station_id as i64;
+    let dest_pos = target_station.position;
     let _ = ctx.systems.get_or_spawn(dest_sys).set_ball_position(ship_id, dest_pos).await;
     eve_server::services::space_destiny::clear_session_change_timer(&ctx, 90_000_001);
     call_bound_rpc(&ctx, &mut sess, "beyonce", d_bid, "CmdDock", &[PyRep::Integer(dest_station)])
