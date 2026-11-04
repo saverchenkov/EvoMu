@@ -634,4 +634,5 @@ mod structures_upwell_and_acl;
 // mod fleets_social_and_command;
 // mod corporation_governance_and_shares;
 mod exploration_hacking_and_minigame;
+mod wormhole_phenomena_and_lifecycle;
 
