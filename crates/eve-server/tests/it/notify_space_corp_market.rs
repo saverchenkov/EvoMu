@@ -2825,7 +2825,7 @@ async fn test_batch3_sim_clock_rebase_and_crimewatch_timers() {
     );
 
     // Zarzakh disapproval timer (501 active -> 502 countdown -> 500 idle) & NPC timer (401 -> 402 -> 400)
-    let (ship_a, ship_b, gun_id) = (640_000_101_i64, 640_000_102_i64, 640_000_110_i64);
+    let (ship_a, ship_b, gun_id, gun2_id) = (640_000_101_i64, 640_000_102_i64, 640_000_110_i64, 640_000_112_i64);
     let mut s_a = login_in_space(
         &ctx,
         92_003,
@@ -2855,7 +2855,12 @@ async fn test_batch3_sim_clock_rebase_and_crimewatch_timers() {
             gun_id,
             make_item(gun_id, 484, PILOT_A, ship_a, InventoryFlag::HiSlot0, 1, true),
         );
+        snap.items.insert(
+            gun2_id,
+            make_item(gun2_id, 484, PILOT_A, ship_a, InventoryFlag::HiSlot1, 1, true),
+        );
         snap.module_online_states.insert(gun_id, true);
+        snap.module_online_states.insert(gun2_id, true);
     });
     ctx.invalidate_ship_fitting(ship_a);
     let sys_h = ctx.systems.get_or_spawn(SYS_ZARZAKH);
@@ -2939,7 +2944,7 @@ async fn test_batch3_sim_clock_rebase_and_crimewatch_timers() {
         "dogmaIM",
         "Activate",
         &[
-            PyRep::Integer(gun_id),
+            PyRep::Integer(gun2_id),
             PyRep::String("projectileFired".into()),
             PyRep::Integer(npc_id),
         ],
