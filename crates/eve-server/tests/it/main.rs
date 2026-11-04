@@ -146,7 +146,7 @@ mod quasar_sov_pirate_insurgency;
 mod sovereignty_mercenary_dens;
 mod fw_warzone_insurgency;
 mod sovereignty_equinox_gameplay;
-mod regressions_b01_b15;
+mod features_regression_suite;
 mod regressions_r6;
 mod regressions_r8;
 mod rpc_char_lifecycle;
@@ -322,26 +322,26 @@ mod economy_market_lookup_social;
 mod open_feats_and_rpcs_b8;
 mod open_feats_b36;
 mod open_feats_and_rpcs_b7;
-mod open_feats_and_rpcs_b7_fw;
-mod open_feats_and_rpcs_b7_social;
+mod features_faction_warfare_rpcs;
+mod features_social_chat_rpcs;
 mod open_feats_and_rpcs_b11;
 mod open_feats_b42;
-mod open_feats_and_rpcs_b9;
+mod features_wallet_journal_rpcs;
 mod open_feats_and_rpcs_b34;
-mod open_feats_and_rpcs_b5;
-mod open_feats_ships_pve_b5;
+mod features_dogma_attribute_rpcs;
+mod features_ships_and_pve;
 mod quasar_ship_unlocks_and_stargates;
 mod open_feats_and_rpcs_b30;
 mod open_feats_b37;
 mod open_feats_and_rpcs_b23;
 mod paragon_hub_self_purchase;
-mod open_feats_and_rpcs_b29;
+mod features_station_facilities_rpcs;
 mod quasar_orchestrator_and_targeted_offers;
 mod quasar_faction_activities_and_skyhooks;
-mod open_feats_and_rpcs_b22;
-mod open_feats_and_rpcs_b22_corp;
-mod open_feats_and_rpcs_b22_mining;
-mod open_feats_and_rpcs_b22_structures_modules;
+mod features_market_orders_rpcs;
+mod features_corp_governance_rpcs;
+mod features_mining_resource_rpcs;
+mod features_structure_modules_rpcs;
 mod quasar_sov_hub_and_star_resources;
 mod serverops_and_shipcaster;
 mod parity_features_combat_part1;
@@ -440,6 +440,17 @@ pub(crate) use {
     combat_weapons_wrecks as parity_features_combat_part1,
     combat_fighters_insurance_bounties as parity_features_combat_part2,
     combat_fighters_insurance_bounties as parity_fighters_lifecycle_closure,
+    features_ships_and_pve as open_feats_ships_pve_b5,
+    features_regression_suite as regressions_b01_b15,
+    features_faction_warfare_rpcs as open_feats_and_rpcs_b7_fw,
+    features_social_chat_rpcs as open_feats_and_rpcs_b7_social,
+    features_corp_governance_rpcs as open_feats_and_rpcs_b22_corp,
+    features_mining_resource_rpcs as open_feats_and_rpcs_b22_mining,
+    features_structure_modules_rpcs as open_feats_and_rpcs_b22_structures_modules,
+    features_dogma_attribute_rpcs as open_feats_and_rpcs_b5,
+    features_wallet_journal_rpcs as open_feats_and_rpcs_b9,
+    features_market_orders_rpcs as open_feats_and_rpcs_b22,
+    features_station_facilities_rpcs as open_feats_and_rpcs_b29,
 };
 pub(crate) use abyssal_pochven_void as abyssal_pochven_void_closure;
 #[allow(unused_imports)]
