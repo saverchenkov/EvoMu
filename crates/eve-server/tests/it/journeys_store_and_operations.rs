@@ -76,10 +76,8 @@ async fn quasar_rpc(
     extract_response_proto(&rep)
 }
 
-// parity: journey:cosmetics_store
 #[tokio::test]
 async fn test_journey_cosmetics_store() {
-    eve_testkit::attest(&["journey:cosmetics_store"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -128,10 +126,8 @@ async fn test_journey_cosmetics_store() {
     assert_eq!(skin_res.dict_get("shipID").and_then(|v| v.as_i64()), Some(ship_id));
 }
 
-// parity: journey:mail_notifications
 #[tokio::test]
 async fn test_journey_mail_notifications() {
-    eve_testkit::attest(&["journey:mail_notifications"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -203,10 +199,8 @@ async fn test_journey_mail_notifications() {
     assert!(ev.dict_get("eventID").and_then(|v| v.as_i64()).or_else(|| ev.as_i64()).unwrap_or(0) > 0);
 }
 
-// parity: journey:esi_external
 #[tokio::test]
 async fn test_journey_esi_external() {
-    eve_testkit::attest(&["journey:esi_external"]);
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -274,10 +268,8 @@ async fn test_journey_esi_external() {
     assert_eq!(forbidden_resp.status_code, 403);
 }
 
-// parity: journey:downtime_persistence
 #[tokio::test]
 async fn test_journey_downtime_persistence() {
-    eve_testkit::attest(&["journey:downtime_persistence"]);
     let tmp_dir = std::env::temp_dir();
     let db_path = tmp_dir.join(format!("evomu_journey_dt_{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&db_path);
@@ -330,10 +322,8 @@ async fn test_journey_downtime_persistence() {
     let _ = std::fs::remove_file(&db_path);
 }
 
-// parity: journey:gm_tools
 #[tokio::test]
 async fn test_journey_gm_tools() {
-    eve_testkit::attest(&["journey:gm_tools"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();

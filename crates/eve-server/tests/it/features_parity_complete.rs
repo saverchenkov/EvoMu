@@ -4140,16 +4140,15 @@ async fn test_canonical_plan_q3_q4_q7_q8_quasar_packages_dispatch() {
 }
 
 // =========================================================================
-// 3. plan:T-8, plan:T-9, plan:T-10, plan:T-11: Test harnesses and oracles
+// 3. plan:T-8, plan:T-9, plan:T-10: Test harnesses and oracles
 // =========================================================================
-// parity: plan:T-8, plan:T-9, plan:T-10, plan:T-11, feat:invariant.atomic-rollback-all-stores
+// parity: plan:T-8, plan:T-9, plan:T-10, feat:invariant.atomic-rollback-all-stores
 #[tokio::test]
 async fn test_canonical_plan_t8_t9_t10_t11_harnesses_and_oracles() {
     eve_testkit::attest(&[
         "plan:T-8",
         "plan:T-9",
         "plan:T-10",
-        "plan:T-11",
         "feat:invariant.atomic-rollback-all-stores",
     ]);
 
@@ -4265,11 +4264,8 @@ async fn test_canonical_plan_t8_t9_t10_t11_harnesses_and_oracles() {
 // =========================================================================
 // 4. plan:Z-1 & plan:Z-2: RPC & Notification Closure
 // =========================================================================
-// parity: plan:Z-1, plan:Z-2
 #[tokio::test]
 async fn test_canonical_plan_z1_z2_rpc_and_notify_closure() {
-    eve_testkit::attest(&["plan:Z-1", "plan:Z-2"]);
-
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
     let empty_kw = HashMap::new();
@@ -5123,10 +5119,8 @@ async fn test_plan_t2_z4_sde_and_dogma_effect_attestation() {
     assert!(penalty2 < 0.58 && penalty2 > 0.56);
 }
 
-// parity: plan:T-6, plan:Z-6
 #[tokio::test]
 async fn test_plan_t6_z6_client_harness_and_journeys() {
-    eve_testkit::attest(&["plan:T-6", "plan:Z-6"]);
     let root = repo_root();
 
     // 1. Verify client_journeys.json contains all 29 journeys with steps and titles
@@ -5429,10 +5423,8 @@ async fn test_plan_z3_destiny_binary_stream_ball_mode() {
     assert_eq!(decoded_ids, vec![101, 102, 103, 104, 105, 106, 107]);
 }
 
-// parity: plan:Z-5
 #[tokio::test]
 async fn test_plan_z5_feature_parity_closure() {
-    eve_testkit::attest(&["plan:Z-5"]);
     let ctx = ServerContext::new();
 
     // 1. Character lifecycle creation with starting race, bloodline, and skills
@@ -5490,10 +5482,10 @@ async fn test_plan_z5_feature_parity_closure() {
     assert!(capsule_type.mass > 0.0, "Capsule mass must be positive");
 }
 
-// parity: plan:Z-7, plan:Z-8
+// parity: plan:Z-8
 #[tokio::test]
 async fn test_plan_z7_z8_test_thresholds_and_final_acceptance_gate() {
-    eve_testkit::attest(&["plan:Z-7", "plan:Z-8"]);
+    eve_testkit::attest(&["plan:Z-8"]);
     let root = repo_root();
 
     // 1. Verify final_gate.py script exists and defines authoritative thresholds

@@ -50,10 +50,8 @@ fn bound_id_from_tuple(rep: &PyRep) -> u64 {
     }
 }
 
-// parity: journey:launch_login
 #[tokio::test]
 async fn test_journey_launch_login() {
-    eve_testkit::attest(&["journey:launch_login"]);
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -149,10 +147,8 @@ async fn test_journey_launch_login() {
     assert_eq!(sess.station_id, Some(60_003_760));
 }
 
-// parity: journey:create_character
 #[tokio::test]
 async fn test_journey_create_character() {
-    eve_testkit::attest(&["journey:create_character"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -222,10 +218,8 @@ async fn test_journey_create_character() {
     }
 }
 
-// parity: journey:station_ui
 #[tokio::test]
 async fn test_journey_station_ui() {
-    eve_testkit::attest(&["journey:station_ui"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -339,10 +333,8 @@ async fn test_journey_station_ui() {
     assert_eq!(proto_rsp.status_code, STATUS_OK);
 }
 
-// parity: journey:fit_ship
 #[tokio::test]
 async fn test_journey_fit_ship() {
-    eve_testkit::attest(&["journey:fit_ship"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -538,10 +530,8 @@ async fn test_journey_fit_ship() {
     assert!(bound_id_from_tuple(&dogma_bind) > 0);
 }
 
-// parity: journey:undock_navigate
 #[tokio::test]
 async fn test_journey_undock_navigate() {
-    eve_testkit::attest(&["journey:undock_navigate"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();

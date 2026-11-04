@@ -75,10 +75,8 @@ async fn quasar_rpc(
     extract_response_proto(&rep)
 }
 
-// parity: journey:fleet
 #[tokio::test]
 async fn test_journey_fleet() {
-    eve_testkit::attest(&["journey:fleet"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -142,10 +140,8 @@ async fn test_journey_fleet() {
     assert!(saw_bcast, "SendBroadcast must emit OnFleetBroadcast with AlignSun");
 }
 
-// parity: journey:structures
 #[tokio::test]
 async fn test_journey_structures() {
-    eve_testkit::attest(&["journey:structures"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -257,10 +253,8 @@ async fn test_journey_structures() {
     assert!(saw_unanchoring, "Unanchor must emit OnStructureStateChanged(Unanchoring)");
 }
 
-// parity: journey:sovereignty_fw
 #[tokio::test]
 async fn test_journey_sovereignty_fw() {
-    eve_testkit::attest(&["journey:sovereignty_fw"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -369,10 +363,8 @@ async fn test_journey_sovereignty_fw() {
     assert!(sov_wm.fields.iter().any(|f| f.field_number == 1), "GetResourcesResponse must include power field");
 }
 
-// parity: journey:daily_goals_events
 #[tokio::test]
 async fn test_journey_daily_goals_events() {
-    eve_testkit::attest(&["journey:daily_goals_events"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
