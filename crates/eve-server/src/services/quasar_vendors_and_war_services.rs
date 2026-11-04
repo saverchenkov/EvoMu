@@ -652,11 +652,17 @@ pub fn register_handlers(
     // ------------------------------------------------------------------------
     // 2. Tournament: Arena, Layouts & Rulesets
     // ------------------------------------------------------------------------
+    let db_arena = Arc::clone(&db);
     router.register_handler(
         "eve.tournament.arena.api.GetAllRequest",
-        Arc::new(move |_ctx, _any, _msg| {
+        Arc::new(move |ctx, _any, msg| {
+            let req_sys = extract_u64_checked(msg, 1)?.map(|v| v as u32).filter(|&s| s > 0);
+            let caller_sys = ctx.effective_character_id()
+                .and_then(|cid| db_arena.with_snapshot(|s| s.characters.get(&(cid as i64)).map(|c| c.solar_system_id)))
+                .filter(|&s| s > 0);
+            let sys_id = req_sys.or(caller_sys).unwrap_or(0);
             let mut out = Vec::new();
-            let arena_bytes = encode_tournament_arena(b"arena-alpha-1234", "Amarr Championship Arena", 30_000_142, 200_000, b"tourney-2024", b"ruleset-v1");
+            let arena_bytes = encode_tournament_arena(b"arena-alpha-1234", "Amarr Championship Arena", sys_id, 200_000, b"tourney-2024", b"ruleset-v1");
             encode_bytes_field(1, &arena_bytes, &mut out);
             Ok(any("eve.tournament.arena.api.GetAllResponse", out))
         }),

@@ -915,20 +915,22 @@ pub fn register_handlers(
     {
         let d = Arc::clone(&desc);
         let sde_dng = Arc::clone(&sde);
+        let db_dng1 = Arc::clone(&db);
         router.register_handler(
             "eve.dungeon.sovereignty.api.GetInstancesRequest",
-            Arc::new(move |_ctx, _any, _dyn_msg| {
+            Arc::new(move |ctx, _any, _dyn_msg| {
                 let dng_id = sde_dng
                     .dungeons
                     .keys()
                     .next()
                     .copied()
                     .unwrap_or(1) as u64;
+                let sys_id = caller_solar_system(ctx, &db_dng1).unwrap_or(0) as u64;
                 encode_domain_message(
                     &d,
                     "eve.dungeon.sovereignty.api.GetInstancesResponse",
                     |reg, resp| {
-                        set_domain_attributes(reg, resp, dng_id, 30_000_142, "SovereigntyDungeon");
+                        set_domain_attributes(reg, resp, dng_id, sys_id, "SovereigntyDungeon");
                     },
                 )
             }),
@@ -937,20 +939,22 @@ pub fn register_handlers(
     {
         let d = Arc::clone(&desc);
         let sde_dng = Arc::clone(&sde);
+        let db_dng2 = Arc::clone(&db);
         router.register_handler(
             "eve_public.dungeon.sovereignty.api.GetVisibleInstancesRequest",
-            Arc::new(move |_ctx, _any, _dyn_msg| {
+            Arc::new(move |ctx, _any, _dyn_msg| {
                 let dng_id = sde_dng
                     .dungeons
                     .keys()
                     .next()
                     .copied()
                     .unwrap_or(1) as u64;
+                let sys_id = caller_solar_system(ctx, &db_dng2).unwrap_or(0) as u64;
                 encode_domain_message(
                     &d,
                     "eve_public.dungeon.sovereignty.api.GetVisibleInstancesResponse",
                     |reg, resp| {
-                        set_domain_attributes(reg, resp, dng_id, 30_000_142, "VisibleSovereigntyDungeon");
+                        set_domain_attributes(reg, resp, dng_id, sys_id, "VisibleSovereigntyDungeon");
                     },
                 )
             }),
