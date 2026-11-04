@@ -903,13 +903,16 @@ pub(super) fn handle_corp_gov(
             Some(Ok(PyRep::keyval([("voteCaseID", PyRep::Integer(case_id)), ("optionID", PyRep::Integer(option_id)), ("weight", PyRep::Integer(weight))])))
         }
 
-        ("voteManager", "GetVotes")
-        | ("voteManager", "GetVoteCase")
-        | ("voteManager", "GetVoteCasesByCorporation")
-        | ("voteManager", "GetVoteCaseOptions")
-        | ("voteManager", "GetCorpSanctionedActions") => {
-            handle_vote_queries(ctx, corp_id, now_unix, method, args)
-        }
+        // parity: rpc:voteManager.GetVotes
+        ("voteManager", "GetVotes") => handle_vote_queries(ctx, corp_id, now_unix, method, args),
+        // parity: rpc:voteManager.GetVoteCase
+        ("voteManager", "GetVoteCase") => handle_vote_queries(ctx, corp_id, now_unix, method, args),
+        // parity: rpc:voteManager.GetVoteCasesByCorporation
+        ("voteManager", "GetVoteCasesByCorporation") => handle_vote_queries(ctx, corp_id, now_unix, method, args),
+        // parity: rpc:voteManager.GetVoteCaseOptions
+        ("voteManager", "GetVoteCaseOptions") => handle_vote_queries(ctx, corp_id, now_unix, method, args),
+        // parity: rpc:voteManager.GetCorpSanctionedActions
+        ("voteManager", "GetCorpSanctionedActions") => handle_vote_queries(ctx, corp_id, now_unix, method, args),
 
         ("voteManager", "ActivateSanctionedAction") => {
             let case_id = if args.len() >= 2 && args.first().and_then(|a| a.as_i64()) == Some(corp_id) {
@@ -1017,16 +1020,20 @@ pub(super) fn handle_corp_gov(
             }
         }
 
-        // parity: feat:character.medals-display, rpc:corporationSvc.CreateMedal, rpc:corporationSvc.GiveMedalToCharacters, rpc:corporationSvc.SetMedalStatus, rpc:corporationSvc.GetAllCorpMedals, rpc:corporationSvc.GetMedalDetails, rpc:corporationSvc.GetMedalsReceived, rpc:corporationSvc.GetRecipientsOfMedal
-        ("corporationSvc", "CreateMedal")
-        | ("corporationSvc", "GiveMedalToCharacters")
-        | ("corporationSvc", "SetMedalStatus")
-        | ("corporationSvc", "GetAllCorpMedals")
-        | ("corporationSvc", "GetMedalDetails")
-        | ("corporationSvc", "GetMedalsReceived")
-        | ("corporationSvc", "GetRecipientsOfMedal") => {
-            handle_corp_medals(ctx, corp_id, char_id, now_unix, has_comms, method, args)
-        }
+        // parity: rpc:corporationSvc.CreateMedal
+        ("corporationSvc", "CreateMedal") => handle_corp_medals(ctx, corp_id, char_id, now_unix, has_comms, method, args),
+        // parity: rpc:corporationSvc.GiveMedalToCharacters
+        ("corporationSvc", "GiveMedalToCharacters") => handle_corp_medals(ctx, corp_id, char_id, now_unix, has_comms, method, args),
+        // parity: feat:character.medals-display, rpc:corporationSvc.SetMedalStatus
+        ("corporationSvc", "SetMedalStatus") => handle_corp_medals(ctx, corp_id, char_id, now_unix, has_comms, method, args),
+        // parity: rpc:corporationSvc.GetAllCorpMedals
+        ("corporationSvc", "GetAllCorpMedals") => handle_corp_medals(ctx, corp_id, char_id, now_unix, has_comms, method, args),
+        // parity: rpc:corporationSvc.GetMedalDetails
+        ("corporationSvc", "GetMedalDetails") => handle_corp_medals(ctx, corp_id, char_id, now_unix, has_comms, method, args),
+        // parity: rpc:corporationSvc.GetMedalsReceived
+        ("corporationSvc", "GetMedalsReceived") => handle_corp_medals(ctx, corp_id, char_id, now_unix, has_comms, method, args),
+        // parity: rpc:corporationSvc.GetRecipientsOfMedal
+        ("corporationSvc", "GetRecipientsOfMedal") => handle_corp_medals(ctx, corp_id, char_id, now_unix, has_comms, method, args),
 
         ("corporationSvc", "GetEmploymentRecord") => {
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
@@ -1254,14 +1261,18 @@ pub(super) fn handle_corp_gov(
             Some(Ok(PyRep::keyval([("adID", PyRep::Integer(ad_id)), ("deleted", PyRep::Bool(true))])))
         }
 
-        ("corpRegistry", "AddCorporateContact")
-        | ("corpRegistry", "EditCorporateContact")
-        | ("corpRegistry", "EditContactsRelationshipID")
-        | ("corpRegistry", "DeleteLabel")
-        | ("corpRegistry", "AssignLabels")
-        | ("corpRegistry", "RemoveLabels") => {
-            handle_corp_contacts_and_labels(ctx, corp_id, has_diplomat, method, args)
-        }
+        // parity: rpc:corpRegistry.AddCorporateContact
+        ("corpRegistry", "AddCorporateContact") => handle_corp_contacts_and_labels(ctx, corp_id, has_diplomat, method, args),
+        // parity: rpc:corpRegistry.EditCorporateContact
+        ("corpRegistry", "EditCorporateContact") => handle_corp_contacts_and_labels(ctx, corp_id, has_diplomat, method, args),
+        // parity: rpc:corpRegistry.EditContactsRelationshipID
+        ("corpRegistry", "EditContactsRelationshipID") => handle_corp_contacts_and_labels(ctx, corp_id, has_diplomat, method, args),
+        // parity: rpc:corpRegistry.DeleteLabel
+        ("corpRegistry", "DeleteLabel") => handle_corp_contacts_and_labels(ctx, corp_id, has_diplomat, method, args),
+        // parity: rpc:corpRegistry.AssignLabels
+        ("corpRegistry", "AssignLabels") => handle_corp_contacts_and_labels(ctx, corp_id, has_diplomat, method, args),
+        // parity: rpc:corpRegistry.RemoveLabels
+        ("corpRegistry", "RemoveLabels") => handle_corp_contacts_and_labels(ctx, corp_id, has_diplomat, method, args),
 
         ("corpRegistry", "RemoveCorporateContacts") => {
             if !has_diplomat {
