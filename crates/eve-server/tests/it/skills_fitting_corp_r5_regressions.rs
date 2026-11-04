@@ -528,11 +528,17 @@ async fn r5_232_234_235_236_237_projects_skills_fitting_clones_and_agents() {
     eve_proto::quasar::encode_bytes_field(2, &isk_b, &mut pool_b);
     eve_proto::quasar::encode_bytes_field(8, &pool_b, &mut create_goal);
     let now_q = ctx.now_unix();
-    let build_q = |role_mask: u64, payload: Vec<u8>| eve_proto::quasar::EvePublicRequest {
+    let (mut create_fl, mut m_id, mut fl_cfg) = (Vec::new(), Vec::new(), Vec::new());
+    eve_proto::quasar::encode_string_field(1, "Freelance Exploit", &mut create_fl);
+    eve_proto::quasar::encode_varint_field(3, 10, &mut create_fl);
+    eve_proto::quasar::encode_string_field(1, "DestroyNPCShips", &mut m_id);
+    eve_proto::quasar::encode_bytes_field(1, &m_id, &mut fl_cfg);
+    eve_proto::quasar::encode_bytes_field(6, &fl_cfg, &mut create_fl);
+    let build_q = |type_name: &str, role_mask: u64, payload: Vec<u8>| eve_proto::quasar::EvePublicRequest {
         issued: Some(eve_proto::quasar::GoogleTimestamp { seconds: now_q as i64, nanos: 0 }),
         correlation_uuid: vec![0x32; 16],
         payload: Some(eve_proto::quasar::GoogleAny {
-            type_url: "type.googleapis.com/eve_public.goal.api.CreateRequest".into(),
+            type_url: format!("type.googleapis.com/{type_name}"),
             value: payload,
         }),
         external_origin: "test".into(),
@@ -543,27 +549,26 @@ async fn r5_232_234_235_236_237_projects_skills_fitting_clones_and_agents() {
         trace_context: None,
     };
 
-    // #232a (R6-P0-01): Empty corp.member_roles + unprivileged member -> rejected on both RPC & Quasar
+    // #232a (R6-P0-01): Empty corp.member_roles + unprivileged member -> rejected on both Goal & Freelance Quasar APIs
     sess.corp_role = 0;
     ctx.db.with_mut_snapshot(|s| {
         s.corporations.get_mut(&corp_id).unwrap().member_roles.clear();
         s.corp_governance.entry(corp_id).or_default().member_account_keys.insert(pilot_id, 1000);
     });
-    let goal_args = [PyRep::String("Steal".into()), PyRep::Integer(10), PyRep::Real(10_000.0), PyRep::String("DestroyNPCShips".into()), PyRep::Bool(false), PyRep::Integer(1)];
-    assert_eq!(ctx.dispatch_rpc(&mut sess, "corporationSvc", None, "CreateGoalSubmit", &goal_args, &kw, None).await.unwrap_err().code, "CorpRoleDenied");
-    assert_eq!(ctx.quasar_gateway.handle_public_request(&sess, &build_q(0, create_goal.clone()), None, false, now_q).status_code, eve_server::quasar_gateway::STATUS_FORBIDDEN);
+    assert_eq!(ctx.quasar_gateway.handle_public_request(&sess, &build_q("eve_public.freelance.project.api.CreateRequest", 0, create_fl.clone()), None, false, now_q).status_code, eve_server::quasar_gateway::STATUS_FORBIDDEN);
+    assert_eq!(ctx.quasar_gateway.handle_public_request(&sess, &build_q("eve_public.goal.api.CreateRequest", 0, create_goal.clone()), None, false, now_q).status_code, eve_server::quasar_gateway::STATUS_FORBIDDEN);
 
     // #232b (R6-P0-01): ROLE_ACCOUNTANT cannot create corp projects or bypass wallet take role
     sess.corp_role = eve_db::corp_roles::ROLE_ACCOUNTANT;
     ctx.db.with_mut_snapshot(|s| { s.corporations.get_mut(&corp_id).unwrap().member_roles.insert(pilot_id, sess.corp_role); });
-    assert_eq!(ctx.dispatch_rpc(&mut sess, "corporationSvc", None, "CreateGoalSubmit", &goal_args, &kw, None).await.unwrap_err().code, "CorpRoleDenied");
-    assert_eq!(ctx.quasar_gateway.handle_public_request(&sess, &build_q(sess.corp_role, create_goal.clone()), None, false, now_q).status_code, eve_server::quasar_gateway::STATUS_FORBIDDEN);
+    assert_eq!(ctx.quasar_gateway.handle_public_request(&sess, &build_q("eve_public.freelance.project.api.CreateRequest", sess.corp_role, create_fl.clone()), None, false, now_q).status_code, eve_server::quasar_gateway::STATUS_FORBIDDEN);
+    assert_eq!(ctx.quasar_gateway.handle_public_request(&sess, &build_q("eve_public.goal.api.CreateRequest", sess.corp_role, create_goal.clone()), None, false, now_q).status_code, eve_server::quasar_gateway::STATUS_FORBIDDEN);
 
     // #232c (R6-P0-01): ROLE_PROJECT_MANAGER with ZERO wallet-take bits is rejected on Master Wallet (wallet_div = 1)
     sess.corp_role = eve_db::corp_roles::ROLE_PROJECT_MANAGER;
     ctx.db.with_mut_snapshot(|s| { s.corporations.get_mut(&corp_id).unwrap().member_roles.insert(pilot_id, sess.corp_role); });
-    assert_eq!(ctx.dispatch_rpc(&mut sess, "corporationSvc", None, "CreateGoalSubmit", &goal_args, &kw, None).await.unwrap_err().code, "CorpRoleDenied");
-    let rsp_notake = ctx.quasar_gateway.handle_public_request(&sess, &build_q(sess.corp_role, create_goal.clone()), None, false, now_q);
+    assert_eq!(ctx.quasar_gateway.handle_public_request(&sess, &build_q("eve_public.freelance.project.api.CreateRequest", sess.corp_role, create_fl), None, false, now_q).status_code, eve_server::quasar_gateway::STATUS_FORBIDDEN);
+    let rsp_notake = ctx.quasar_gateway.handle_public_request(&sess, &build_q("eve_public.goal.api.CreateRequest", sess.corp_role, create_goal.clone()), None, false, now_q);
     assert_eq!(rsp_notake.status_code, eve_server::quasar_gateway::STATUS_FORBIDDEN);
     assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp_id].division_balance(1)), IskCents::from_isk(20_000_000));
 
@@ -573,7 +578,7 @@ async fn r5_232_234_235_236_237_projects_skills_fitting_clones_and_agents() {
         s.corporations.get_mut(&corp_id).unwrap().member_roles.insert(pilot_id, sess.corp_role);
         s.corp_governance.entry(corp_id).or_default().member_account_keys.insert(pilot_id, 1001);
     });
-    let rsp_div2 = ctx.quasar_gateway.handle_public_request(&sess, &build_q(sess.corp_role, create_goal.clone()), None, false, now_q);
+    let rsp_div2 = ctx.quasar_gateway.handle_public_request(&sess, &build_q("eve_public.goal.api.CreateRequest", sess.corp_role, create_goal.clone()), None, false, now_q);
     assert_eq!(rsp_div2.status_code, eve_server::quasar_gateway::STATUS_FORBIDDEN);
     assert!(rsp_div2.status_message.contains("CorpRoleDenied"), "unexpected message: {}", rsp_div2.status_message);
     assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp_id].division_balance(2)), IskCents::from_isk(20_000_000));
@@ -581,7 +586,7 @@ async fn r5_232_234_235_236_237_projects_skills_fitting_clones_and_agents() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corp_governance.entry(corp_id).or_default().member_account_keys.insert(pilot_id, 1000);
     });
-    let rsp_div1 = ctx.quasar_gateway.handle_public_request(&sess, &build_q(sess.corp_role, create_goal), None, false, now_q);
+    let rsp_div1 = ctx.quasar_gateway.handle_public_request(&sess, &build_q("eve_public.goal.api.CreateRequest", sess.corp_role, create_goal), None, false, now_q);
     assert_eq!(rsp_div1.status_code, eve_server::quasar_gateway::STATUS_OK, "{}", rsp_div1.status_message);
     assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp_id].division_balance(1)), IskCents::from_isk(19_900_000));
 

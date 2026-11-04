@@ -190,6 +190,22 @@ pub struct PersistedProjectDetails {
     pub allowed_faction_id: Option<i64>,
     #[serde(default)]
     pub contributions_by_char: HashMap<i64, u64>,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub creator_id: i64,
+    #[serde(default)]
+    pub created_unix: u64,
+    #[serde(default)]
+    pub auto_payout_on_contribution: bool,
+    #[serde(default)]
+    pub batch_size: u64,
+    #[serde(default)]
+    pub committed_participants: Vec<i64>,
+    #[serde(default)]
+    pub uuid_bytes: Vec<u8>,
+    #[serde(default)]
+    pub initial_escrow: IskCents,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

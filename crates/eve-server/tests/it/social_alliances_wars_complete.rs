@@ -506,10 +506,6 @@ fn rows(rep: &PyRep) -> (Vec<String>, Vec<Vec<PyRep>>) {
     }
 }
 
-fn col(cols: &[String], name: &str) -> usize {
-    cols.iter().position(|c| c == name).unwrap_or_else(|| panic!("column {name} missing in {cols:?}"))
-}
-
 fn corp_wallet(ctx: &ServerContext, corp_id: i64) -> f64 {
     ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].wallet_divisions[0].balance.to_wire_f64())
 }
@@ -600,7 +596,13 @@ async fn run_corporation_deliveries_and_governance_suite() -> (bool, bool, i64, 
     assert_eq!(field(&attr_rep, "memberLimit"), PyRep::Integer(5 * 20 + 5 * 400));
     ctx.db.with_mut_snapshot(|snap| snap.skills.get_mut(&90_000_001).unwrap().clear());
     let attr_min = ctx.dispatch_rpc(&mut sess1, "corpRegistry", None, "UpdateAttributes", &[], &kw, None).await.unwrap();
-    assert_eq!(field(&attr_min, "memberLimit"), PyRep::Integer(1));
+    assert_eq!(field(&attr_min, "memberLimit"), PyRep::Integer(10));
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.get_mut(&corp_id).unwrap();
+        for m in 90_999_001..=90_999_009 {
+            corp.members.insert(m);
+        }
+    });
     let app_rep = ctx.dispatch_rpc(&mut sess2, "corpRegistry", None, "InsertApplication", &[PyRep::Integer(corp_id), PyRep::String("Apply".into())], &kw, None).await.unwrap();
     let app_id = field(&app_rep, "applicationID").as_i64().unwrap();
     assert_eq!(ctx.dispatch_rpc(&mut sess1, "corpRegistry", None, "UpdateApplicationOffer", &[PyRep::Integer(app_id), PyRep::String("Accepted".into())], &kw, None).await.unwrap_err().code, "CorporationFull");
@@ -609,8 +611,15 @@ async fn run_corporation_deliveries_and_governance_suite() -> (bool, bool, i64, 
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(90_000_001).or_default().insert(3363, eve_db::TrainedSkillRecord { type_id: 3363, level: 1, skill_points: 250.0 });
     });
-    ctx.dispatch_rpc(&mut sess1, "corpRegistry", None, "UpdateAttributes", &[], &kw, None).await.unwrap();
+    let attr_lvl1 = ctx.dispatch_rpc(&mut sess1, "corpRegistry", None, "UpdateAttributes", &[], &kw, None).await.unwrap();
+    assert_eq!(field(&attr_lvl1, "memberLimit"), PyRep::Integer(20));
     ctx.dispatch_rpc(&mut sess1, "corpRegistry", None, "UpdateApplicationOffer", &[PyRep::Integer(app_id), PyRep::String("Accepted".into())], &kw, None).await.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.get_mut(&corp_id).unwrap();
+        for m in 90_999_001..=90_999_009 {
+            corp.members.remove(&m);
+        }
+    });
     sess2.corporation_id = Some(corp_id);
     sess2.corp_role = 0;
 
@@ -781,16 +790,54 @@ async fn run_corporation_deliveries_and_governance_suite() -> (bool, bool, i64, 
     ctx.dispatch_rpc(&mut sess1, "corpRecProxy", None, "UpdateRecruitmentAd", &[PyRep::Integer(ad_id), PyRep::Integer(12), PyRep::String("Updated PvP".into()), PyRep::String("Updated".into())], &kw, None).await.unwrap();
     ctx.dispatch_rpc(&mut sess1, "corpRecProxy", None, "DeleteRecruitmentAd", &[PyRep::Integer(ad_id)], &kw, None).await.unwrap();
 
-    let goal_rep = ctx.dispatch_rpc(&mut sess1, "corporationSvc", None, "CreateGoalSubmit", &[PyRep::String("Kill 10 Pirates".into()), PyRep::Integer(10), PyRep::Real(100_000.0), PyRep::String("DamageNPCShips".into()), PyRep::Bool(true)], &kw, None).await.unwrap();
-    let goal_id = goal_rep.dict_get("projectID").and_then(|v| v.as_i64()).unwrap();
-    let self_report = ctx.dispatch_rpc(&mut sess1, "corporationSvc", None, "GoalProgress", &[PyRep::Integer(goal_id), PyRep::Integer(10)], &kw, None).await.expect_err("client cannot self-report kills");
-    assert_eq!(self_report.code, "ServerTrackedMatcher");
-    let (fcols, frows) = rows(&ctx.dispatch_rpc(&mut sess2, "corporationSvc", None, "GetActiveFreelanceProjectId", &[], &kw, None).await.unwrap());
-    assert!(frows.iter().any(|r| r[col(&fcols, "projectID")] == PyRep::Integer(goal_id)));
-    assert_eq!(ctx.dispatch_rpc(&mut sess2, "corporationSvc", None, "CloseCorpProject", &[PyRep::Integer(goal_id)], &kw, None).await.unwrap_err().code, "CorpRoleDenied");
+    let q_pub = |sess: &SessionState, type_name: &str, payload: Vec<u8>| {
+        let now_u = ctx.now_unix();
+        let req = eve_proto::quasar::EvePublicRequest {
+            issued: Some(eve_proto::quasar::GoogleTimestamp { seconds: now_u as i64, nanos: 0 }),
+            correlation_uuid: vec![0x61; 16],
+            payload: Some(eve_proto::quasar::GoogleAny { type_url: format!("type.googleapis.com/{type_name}"), value: payload }),
+            external_origin: "test".into(),
+            application_instance_uuid: vec![0x62; 16],
+            authoritative_context: Some(
+                eve_proto::quasar::AuthoritativeContext::for_session_at(
+                    sess.user_id.map(|u| u as i32),
+                    sess.character_id.map(|c| c as u32),
+                    sess.corporation_id.map(|c| c as u32),
+                    sess.corp_role,
+                    "tranquility",
+                    vec![0x63; 16],
+                    now_u,
+                )
+                .with_service_roles(sess.role),
+            ),
+            trace_context: None,
+        };
+        ctx.quasar_gateway.handle_public_request(sess, &req, None, false, now_u)
+    };
+    let (mut fl_req, mut m_id, mut fl_cfg, mut curr_b, mut rew_b) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    eve_proto::quasar::encode_string_field(1, "Kill 10 Pirates", &mut fl_req);
+    eve_proto::quasar::encode_varint_field(3, 10, &mut fl_req);
+    eve_proto::quasar::encode_string_field(1, "DamageShips", &mut m_id);
+    eve_proto::quasar::encode_bytes_field(1, &m_id, &mut fl_cfg);
+    eve_proto::quasar::encode_bytes_field(6, &fl_cfg, &mut fl_req);
+    eve_proto::quasar::encode_varint_field(1, eve_proto::quasar::encode_zigzag64(100_000), &mut curr_b);
+    eve_proto::quasar::encode_bytes_field(1, &curr_b, &mut rew_b);
+    eve_proto::quasar::encode_bytes_field(10, &rew_b, &mut fl_req);
+    let fl_rsp = q_pub(&sess1, "eve_public.freelance.project.api.CreateRequest", fl_req);
+    assert_eq!(fl_rsp.status_code, eve_server::quasar_gateway::STATUS_OK, "{}", fl_rsp.status_message);
+    let fl_out = fl_rsp.payload.unwrap().value;
+    let fl_uuid = fl_out[6..22].to_vec();
+    let fl_id_wire = fl_out[2..22].to_vec();
+    let mut spoof_prog = fl_id_wire.clone();
+    eve_proto::quasar::encode_varint_field(3, 10, &mut spoof_prog);
+    assert_eq!(q_pub(&sess2, "eve_public.goal.api.SetCurrentProgressRequest", spoof_prog).status_code, eve_server::quasar_gateway::STATUS_FORBIDDEN);
+    let active_fl = q_pub(&sess2, "eve_public.freelance.project.api.GetAllActiveRequest", Vec::new());
+    assert_eq!(active_fl.status_code, eve_server::quasar_gateway::STATUS_OK);
+    assert!(active_fl.payload.unwrap().value.windows(16).any(|w| w == fl_uuid.as_slice()));
+    assert_eq!(q_pub(&sess2, "eve_public.freelance.project.api.CloseRequest", fl_id_wire.clone()).status_code, eve_server::quasar_gateway::STATUS_FORBIDDEN);
     assert_eq!(ctx.dispatch_rpc(&mut sess2, "corpRegistry", None, "UpdateTitle", &[PyRep::Integer(1), PyRep::String("Unauth".into()), PyRep::Integer(0)], &kw, None).await.unwrap_err().code, "CorpRoleDenied");
     let cw_before_close = corp_wallet(&ctx, corp_id);
-    ctx.dispatch_rpc(&mut sess1, "corporationSvc", None, "CloseCorpProject", &[PyRep::Integer(goal_id)], &kw, None).await.unwrap();
+    assert_eq!(q_pub(&sess1, "eve_public.freelance.project.api.CloseRequest", fl_id_wire).status_code, eve_server::quasar_gateway::STATUS_OK);
     assert!(corp_wallet(&ctx, corp_id) > cw_before_close);
 
     ctx.advance_secs(86_401);

@@ -1204,9 +1204,13 @@ pub async fn handle(
                 }
 
                 let mut last_res = (corp_id, InventoryFlag::Deliveries as i64);
+                let mut personal_deliveries: Vec<(u32, i32)> = Vec::new();
                 for &iid in &item_ids {
                     if let Some(item) = snap.items.get_mut(&iid) {
                         if method == "DeliverToCorpHangar" {
+                            if item.owner_id == char_id && item.quantity > 0 {
+                                personal_deliveries.push((item.type_id, item.quantity));
+                            }
                             item.owner_id = corp_id;
                             let out_flag = match target_id_or_div { 1..=7 => 115 + target_id_or_div, 116..=122 => target_id_or_div, _ => InventoryFlag::Deliveries as i64 };
                             item.flag = InventoryFlag::from_u16(out_flag as u16);
@@ -1220,22 +1224,30 @@ pub async fn handle(
                         }
                     }
                 }
-                Ok(last_res)
+                Ok((last_res, personal_deliveries))
             });
             match res {
-                Ok((new_owner, flag_id)) => Some(Ok(PyRep::keyval([
-                    ("itemID", PyRep::Integer(first_item_id)),
-                    ("ownerID", PyRep::Integer(new_owner)),
-                    ("flagID", PyRep::Integer(flag_id)),
-                    ("delivered", PyRep::Bool(true)),
-                ]))),
+                Ok(((new_owner, flag_id), personal_deliveries)) => {
+                    for (tid, qty) in personal_deliveries {
+                        social_corp_projects::record_server_project_activity(
+                            ctx,
+                            char_id,
+                            &["DeliverItem"],
+                            qty as u64,
+                            Some(tid as i64),
+                        );
+                    }
+                    Some(Ok(PyRep::keyval([
+                        ("itemID", PyRep::Integer(first_item_id)),
+                        ("ownerID", PyRep::Integer(new_owner)),
+                        ("flagID", PyRep::Integer(flag_id)),
+                        ("delivered", PyRep::Bool(true)),
+                    ])))
+                }
                 Err(e) => Some(Err(e)),
             }
         }
 
-        // =====================================================================
-        // Corp Goals & Freelance Projects (`feat:corporation.corp-goals`, `feat:corporation.freelance-jobs`)
-        // =====================================================================
         ("allianceRegistry", "UpdateLogo") => {
             let aid = match require_executor(ctx, session) {
                 Ok(a) => a,
@@ -1286,8 +1298,7 @@ pub async fn handle(
             ])))
         }
 
-        _ => social_corp_projects::handle_corp_projects_rpc(ctx, session, service, method, args)
-            .or_else(|| social_wars::handle_wars(ctx, session, service, method, args, bound_obj_id)),
+        _ => social_wars::handle_wars(ctx, session, service, method, args, bound_obj_id),
     }
 }
 

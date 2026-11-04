@@ -327,13 +327,15 @@ async fn test_b22_corp_governance_shares_dividends_ceo_divisions_autokick() {
 
 #[tokio::test]
 async fn test_b22_corp_projects_and_npc_corp_rules() {
-    // parity: feat:corporation.corp-project-close-expiry, feat:corporation.corp-project-reward-pool
+    // parity: feat:corporation.corp-project-close-expiry, feat:corporation.corp-project-reward-pool, feat:esi.corporation.projects
     eve_testkit::attest(&[
         "feat:corporation.corp-project-close-expiry",
         "feat:corporation.corp-project-reward-pool",
+        "feat:esi.corporation.projects",
     ]);
 
-    let ctx = ServerContext::new();
+    let ctx = std::sync::Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let mut sess1 = select_pilot(&ctx, 72_301, "demo", "demo-secret", PILOT_1).await;
     let mut sess2 = select_pilot(&ctx, 72_302, "other", "other-secret", PILOT_2).await;
 
@@ -372,97 +374,79 @@ async fn test_b22_corp_projects_and_npc_corp_rules() {
                 owner_id: PILOT_2,
                 location_id: dock_id,
                 flag: eve_db::InventoryFlag::Hangar,
-                quantity: 10,
+                quantity: 5,
                 ..Default::default()
             },
         );
     });
     sess2.corporation_id = Some(corp_id);
 
-    // 1. Create projects for MineMaterials, DestroyNPCShips, EarnLoyaltyPoints, and DeliverItem
-    let create_mine = rpc(
-        &ctx,
-        &mut sess1,
-        "corporationSvc",
-        "CreateGoalSubmit",
-        &[
-            PyRep::String("Mine Veldspar".into()),
-            PyRep::Integer(100),
-            PyRep::Real(10_000.0),
-            PyRep::String("MineMaterials".into()),
-            PyRep::Bool(false),
-            PyRep::Integer(1),
-            PyRep::Integer(50),
-            PyRep::Integer(86_400),
-        ],
-    )
-    .await
-    .expect("CreateGoalSubmit MineMaterials");
-    let pid_mine = field(&create_mine, "projectID").as_i64().unwrap();
+    let q_req = |sess: &eve_machonet::SessionState, type_name: &str, payload: Vec<u8>| {
+        let now_u = ctx.now_unix();
+        let req = eve_proto::quasar::EvePublicRequest {
+            issued: Some(eve_proto::quasar::GoogleTimestamp { seconds: now_u as i64, nanos: 0 }),
+            correlation_uuid: vec![0x51; 16],
+            payload: Some(eve_proto::quasar::GoogleAny { type_url: format!("type.googleapis.com/{type_name}"), value: payload }),
+            external_origin: "test".into(),
+            application_instance_uuid: vec![0x52; 16],
+            authoritative_context: Some(
+                eve_proto::quasar::AuthoritativeContext::for_session_at(
+                    sess.user_id.map(|u| u as i32),
+                    sess.character_id.map(|c| c as u32),
+                    sess.corporation_id.map(|c| c as u32),
+                    sess.corp_role,
+                    "tranquility",
+                    vec![0x53; 16],
+                    now_u,
+                )
+                .with_service_roles(sess.role),
+            ),
+            trace_context: None,
+        };
+        ctx.quasar_gateway.handle_public_request(sess, &req, None, false, now_u)
+    };
+    let create_goal = |name: &str, target: u64, escrow_isk: i64, cfg_field: u32, item_filter: Option<u64>, limit: u64| -> (i64, Vec<u8>) {
+        let (mut m, mut cfg, mut curr, mut isk, mut pool, mut ts) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        eve_proto::quasar::encode_string_field(1, name, &mut m);
+        eve_proto::quasar::encode_varint_field(3, target, &mut m);
+        let sub_cfg = if let Some(tid) = item_filter {
+            let (mut id_b, mut card, mut sets, mut items, mut deliv) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            eve_proto::quasar::encode_varint_field(1, tid, &mut id_b);
+            eve_proto::quasar::encode_bytes_field(1, &id_b, &mut card);
+            eve_proto::quasar::encode_bytes_field(3, &card, &mut sets);
+            eve_proto::quasar::encode_bytes_field(2, &sets, &mut items);
+            eve_proto::quasar::encode_bytes_field(1, &items, &mut deliv);
+            deliv
+        } else {
+            Vec::new()
+        };
+        eve_proto::quasar::encode_bytes_field(cfg_field, &sub_cfg, &mut cfg);
+        eve_proto::quasar::encode_bytes_field(4, &cfg, &mut m);
+        eve_proto::quasar::encode_varint_field(1, eve_proto::quasar::encode_zigzag64(escrow_isk), &mut curr);
+        eve_proto::quasar::encode_bytes_field(1, &curr, &mut isk);
+        eve_proto::quasar::encode_varint_field(1, 1, &mut pool);
+        eve_proto::quasar::encode_bytes_field(2, &isk, &mut pool);
+        eve_proto::quasar::encode_bytes_field(8, &pool, &mut m);
+        eve_proto::quasar::encode_varint_field(1, ctx.now_unix() + 86_400, &mut ts);
+        eve_proto::quasar::encode_bytes_field(10, &ts, &mut m);
+        eve_proto::quasar::encode_varint_field(26, limit, &mut m);
+        let rsp = q_req(&sess1, "eve_public.goal.api.CreateRequest", m);
+        assert_eq!(rsp.status_code, eve_server::quasar_gateway::STATUS_OK, "{}", rsp.status_message);
+        let id_wire = rsp.payload.unwrap().value;
+        let pid = eve_server::services::social_corp_fleet::social_corp_projects::goal_uuid_to_project_id(&id_wire[4..20]).unwrap();
+        (pid, id_wire)
+    };
 
-    let create_npc = rpc(
-        &ctx,
-        &mut sess1,
-        "corporationSvc",
-        "CreateGoalSubmit",
-        &[
-            PyRep::String("Clear Rats".into()),
-            PyRep::Integer(10),
-            PyRep::Real(5_000.0),
-            PyRep::String("DestroyNPCShips".into()),
-            PyRep::Bool(false),
-            PyRep::Integer(1),
-            PyRep::Integer(10),
-            PyRep::Integer(86_400),
-        ],
-    )
-    .await
-    .expect("CreateGoalSubmit DestroyNPCShips");
-    let pid_npc = field(&create_npc, "projectID").as_i64().unwrap();
+    // 1. Create projects via Quasar for MineMaterials (25), DestroyNPCShips (31), EarnLoyaltyPoints (29), and DeliverItem (37)
+    let (pid_mine, mine_id_wire) = create_goal("Mine Veldspar", 100, 1_000_000, 25, None, 50);
+    let (pid_npc, _) = create_goal("Clear Rats", 10, 50_000, 31, None, 10);
+    let (pid_lp, _) = create_goal("Earn LP", 100, 100_000, 29, None, 100);
+    let (pid_deliv, _) = create_goal("Deliver Tritanium", 50, 50_000, 37, Some(34), 50);
 
-    let create_lp = rpc(
-        &ctx,
-        &mut sess1,
-        "corporationSvc",
-        "CreateGoalSubmit",
-        &[
-            PyRep::String("Earn LP".into()),
-            PyRep::Integer(100),
-            PyRep::Real(1_000.0),
-            PyRep::String("EarnLoyaltyPoints".into()),
-            PyRep::Bool(false),
-            PyRep::Integer(1),
-            PyRep::Integer(100),
-            PyRep::Integer(86_400),
-        ],
-    )
-    .await
-    .expect("CreateGoalSubmit EarnLoyaltyPoints");
-    let pid_lp = field(&create_lp, "projectID").as_i64().unwrap();
-
-    let create_deliv = rpc(
-        &ctx,
-        &mut sess1,
-        "corporationSvc",
-        "CreateGoalSubmit",
-        &[
-            PyRep::String("Deliver Tritanium".into()),
-            PyRep::Integer(50),
-            PyRep::Real(1_000.0),
-            PyRep::String("DeliverItem".into()),
-            PyRep::Bool(false),
-            PyRep::Integer(1),
-            PyRep::Integer(50),
-            PyRep::Integer(86_400),
-        ],
-    )
-    .await
-    .expect("CreateGoalSubmit DeliverItem");
-    let pid_deliv = field(&create_deliv, "projectID").as_i64().unwrap();
-
-    // Client-reported GoalProgress on server-tracked MineMaterials must be rejected
-    let client_spoof = rpc(&ctx, &mut sess2, "corporationSvc", "GoalProgress", &[PyRep::Integer(pid_mine), PyRep::Integer(10)]).await;
-    assert_eq!(client_spoof.unwrap_err().code, "ServerTrackedMatcher");
+    // Client-reported SetCurrentProgressRequest from non-GM member must be rejected
+    let mut spoof_req = mine_id_wire.clone();
+    eve_proto::quasar::encode_varint_field(3, 10, &mut spoof_req);
+    assert_eq!(q_req(&sess2, "eve_public.goal.api.SetCurrentProgressRequest", spoof_req).status_code, eve_server::quasar_gateway::STATUS_FORBIDDEN);
 
     // Drive real server paths for MineMaterials, DestroyNPCShips, EarnLoyaltyPoints, and DeliverItem
     eve_server::services::space_mining_harvest::dispatch_mining_gameplay_events(&ctx, PILOT_2, 10, 30000142, 1230);
@@ -471,26 +455,46 @@ async fn test_b22_corp_projects_and_npc_corp_rules() {
     ctx.db.with_mut_snapshot(|s| {
         eve_server::services::lp_store::record_lp_reward_log(s, PILOT_2, 1_000_006, 25, "LP reward".into(), now_unix);
     });
-    let over_deliv = rpc(&ctx, &mut sess2, "corporationSvc", "GoalProgress", &[PyRep::Integer(pid_deliv), PyRep::Integer(20)]).await;
-    assert_eq!(over_deliv.unwrap_err().code, "InsufficientContributionItems");
-    rpc(&ctx, &mut sess2, "corporationSvc", "GoalProgress", &[PyRep::Integer(pid_deliv), PyRep::Integer(5)])
+    assert_eq!(
+        rpc(&ctx, &mut sess2, "invbroker", "DeliverToCorpHangar", &[PyRep::Integer(999_999_999), PyRep::Integer(1)]).await.unwrap_err().code,
+        "ItemNotFound"
+    );
+    rpc(&ctx, &mut sess2, "invbroker", "DeliverToCorpHangar", &[PyRep::Integer(trit_item_id), PyRep::Integer(1)])
         .await
-        .expect("GoalProgress DeliverItem");
+        .expect("DeliverToCorpHangar Tritanium");
 
     ctx.db.with_snapshot(|s| {
         assert_eq!(s.corp_projects[&pid_mine].current_quantity, 10);
         assert_eq!(s.corp_projects[&pid_npc].current_quantity, 1);
         assert_eq!(s.corp_projects[&pid_lp].current_quantity, 25);
         assert_eq!(s.corp_projects[&pid_deliv].current_quantity, 5);
-        assert_eq!(s.items[&trit_item_id].quantity, 5, "DeliverItem must consume 5 Tritanium from PILOT_2 hangar");
+        assert_eq!(s.items[&trit_item_id].owner_id, corp_id, "DeliverToCorpHangar must transfer 5 Tritanium to corporation hangar");
         assert_eq!(s.characters[&PILOT_2].balance.raw_cents(), 135_000_00);
     });
 
-    // Close project and verify remaining escrow (900,000 ISK) refunded
+    // Verify live ESI `GET /v1/corporations/{corp_id}/projects/` reads unified Quasar projects & contributors
+    let router = eve_server::esi::EsiRouter::new(std::sync::Arc::clone(&ctx));
+    let spec = eve_server::esi::OpenApiSpec::pinned();
+    let code_noscope = ctx.db.authorize_pkce("demo", "demo-secret", PILOT_1, "b22-esi", "https://localhost/cb", vec![], "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", "S256", now_unix).unwrap();
+    let tok_noscope = ctx.db.exchange_pkce_code(&code_noscope, "b22-esi", "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk", now_unix).unwrap().access_token;
+    assert_eq!(router.handle_request(&eve_server::esi::EsiHttpRequest::new("GET", format!("/v1/corporations/{corp_id}/projects/")).with_bearer_token(&tok_noscope)).status_code, 403);
+    let code_ok = ctx.db.authorize_pkce("demo", "demo-secret", PILOT_1, "b22-esi", "https://localhost/cb", vec!["esi-corporations.read_projects.v1".into()], "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", "S256", now_unix).unwrap();
+    let tok_ok = ctx.db.exchange_pkce_code(&code_ok, "b22-esi", "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk", now_unix).unwrap().access_token;
+    let esi_resp = router.handle_request(&eve_server::esi::EsiHttpRequest::new("GET", format!("/v1/corporations/{corp_id}/projects/")).with_bearer_token(&tok_ok));
+    assert_eq!(esi_resp.status_code, 200);
+    spec.validate_response("GET", &format!("/v1/corporations/{corp_id}/projects/"), esi_resp.status_code, &esi_resp.headers, &esi_resp.body).expect("OpenAPI projects schema");
+    let etag = esi_resp.header("etag").expect("ETag header").to_string();
+    assert_eq!(router.handle_request(&eve_server::esi::EsiHttpRequest::new("GET", format!("/v1/corporations/{corp_id}/projects/")).with_bearer_token(&tok_ok).with_header("If-None-Match", &etag)).status_code, 304);
+    let esi_json: serde_json::Value = serde_json::from_slice(&esi_resp.body).unwrap();
+    let mine_entry = esi_json.as_array().unwrap().iter().find(|p| p["project_id"] == pid_mine).expect("Mine Veldspar in ESI projects");
+    assert_eq!(mine_entry["current_quantity"], 10);
+    assert_eq!(mine_entry["isk_per_unit"], 10_000.0);
+    assert_eq!(mine_entry["escrow_remaining"], 900_000.0);
+    assert_eq!(mine_entry["contributors"], serde_json::json!([{ "character_id": PILOT_2, "contributed_quantity": 10 }]));
+
+    // Close project via Quasar and verify remaining escrow (900,000 ISK) refunded
     let bal_before_close = ctx.db.with_snapshot(|s| s.corporations[&corp_id].wallet_divisions[0].balance.raw_cents());
-    rpc(&ctx, &mut sess1, "corporationSvc", "CloseCorpProject", &[PyRep::Integer(pid_mine)])
-        .await
-        .expect("CloseCorpProject");
+    assert_eq!(q_req(&sess1, "eve_public.goal.api.CloseRequest", mine_id_wire).status_code, eve_server::quasar_gateway::STATUS_OK);
     ctx.db.with_snapshot(|s| {
         let bal_after_close = s.corporations[&corp_id].wallet_divisions[0].balance.raw_cents();
         assert_eq!(bal_after_close - bal_before_close, 900_000_00);

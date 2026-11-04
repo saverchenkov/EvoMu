@@ -613,9 +613,11 @@ async fn test_quasar_state_blobs_persistence_reload_sqlite() {
     // Persist to SQLite and reopen a second ServerContext
     let ctx_reloaded = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "quasar_blobs");
 
-    // Verify all quasar_state_blobs are present in SQLite
+    // Verify canonical corp_projects + remaining quasar_state_blobs are present in SQLite
     ctx_reloaded.db.with_snapshot(|s| {
-        for key in &["quasar_freelance", "quasar_corp_goals", "quasar_cosmetics", "quasar_achievements", "quasar_active_tales"] {
+        assert!(s.corp_projects.len() >= 2, "Freelance and corp goal projects must persist in canonical snap.corp_projects");
+        assert!(!s.quasar_state_blobs.contains_key("quasar_freelance") && !s.quasar_state_blobs.contains_key("quasar_corp_goals"));
+        for key in &["quasar_corp_plans", "quasar_cosmetics", "quasar_achievements", "quasar_active_tales"] {
             assert!(s.quasar_state_blobs.contains_key(*key), "{key} blob must persist in SQLite");
         }
     });

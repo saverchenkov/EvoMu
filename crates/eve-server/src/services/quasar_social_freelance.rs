@@ -26,18 +26,9 @@ use std::sync::{Arc, RwLock};
 const STATUS_UNAUTHENTICATED: u32 = STATUS_UNAUTHORIZED;
 const STATUS_PERMISSION_DENIED: u32 = STATUS_FORBIDDEN;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct FreelancePersistedState {
-    pub projects: Vec<FreelanceProjectRecord>,
-    #[serde(default = "default_seq_one")]
-    pub next_seq: u64,
-    #[serde(default)]
-    pub seeded: bool,
-}
-
-fn default_seq_one() -> u64 {
-    1
-}
+use super::social_corp_fleet::social_corp_projects::{
+    self as corp_projects, CanonicalProjectSpec, SERVER_TRACKED_MATCHERS,
+};
 
 fn legacy_serde_type_id() -> u32 {
     34
@@ -59,7 +50,7 @@ pub struct FreelanceProjectRecord {
     pub created: u64,
     pub target_progress: i64,
     pub current_progress: i64,
-    pub state: i32, // 1 = Active, 2 = Completed, 3 = Closed
+    pub state: i32, // 1 = Active, 2 = Completed, 3 = Closed, 4 = Expired
     pub committed_participants: Vec<u32>,
     pub contributors: HashMap<u32, (i64, i64)>, // char_id -> (progress, unredeemed_units)
     pub reward_isk: i64,
@@ -67,6 +58,79 @@ pub struct FreelanceProjectRecord {
     pub required_type_id: u32,
     #[serde(default = "legacy_serde_batch_size")]
     pub batch_size: i64,
+}
+
+fn build_freelance_map_from_snap(
+    snap: &eve_db::WorldStateSnapshot,
+) -> (HashMap<Vec<u8>, FreelanceProjectRecord>, u64) {
+    let mut projs = HashMap::new();
+    let mut max_pid = 100i64;
+    for (&pid, p) in &snap.corp_projects {
+        max_pid = max_pid.max(pid);
+        if !snap.alliance_war_state.project_meta.get(&pid).is_some_and(|m| m.1) {
+            continue;
+        }
+        let det = snap
+            .alliance_war_state
+            .project_details
+            .get(&pid)
+            .cloned()
+            .unwrap_or_default();
+        let uuid = if det.uuid_bytes.len() == 16 {
+            det.uuid_bytes.clone()
+        } else {
+            corp_projects::freelance_uuid(det.created_unix, pid).to_vec()
+        };
+        let state = if det.expired || det.status == "Expired" {
+            4
+        } else if det.closed || det.status == "Closed" {
+            3
+        } else if p.current_quantity >= p.target_quantity || det.status == "Completed" {
+            2
+        } else {
+            1
+        };
+        let batch = det.batch_size.max(1);
+        let mut contributors = HashMap::new();
+        for (&cid_i, &prog_u) in &det.char_contributions {
+            if cid_i <= 0 {
+                continue;
+            }
+            let total_batches = (prog_u / batch) as i64;
+            let redeemed = det.contributions_by_char.get(&cid_i).copied().unwrap_or(0) as i64;
+            contributors.insert(
+                cid_i as u32,
+                (prog_u as i64, (total_batches - redeemed).max(0)),
+            );
+        }
+        let committed_participants = det
+            .committed_participants
+            .iter()
+            .filter_map(|&c| u32::try_from(c).ok())
+            .collect();
+        projs.insert(
+            uuid.clone(),
+            FreelanceProjectRecord {
+                uuid,
+                owner_corp_id: p.corporation_id.max(0) as u32,
+                creator_char_id: det.creator_id.max(0) as u32,
+                name: p.name.clone(),
+                description: det.description,
+                career: 1,
+                deadline: det.expires_unix.unwrap_or(det.created_unix.saturating_add(604_800)),
+                created: det.created_unix,
+                target_progress: p.target_quantity as i64,
+                current_progress: p.current_quantity as i64,
+                state,
+                committed_participants,
+                contributors,
+                reward_isk: (p.escrow_remaining.raw_cents() / 100).max(0),
+                required_type_id: det.filter_id.unwrap_or(0).max(0) as u32,
+                batch_size: batch as i64,
+            },
+        );
+    }
+    (projs, (max_pid + 1) as u64)
 }
 
 #[derive(Default)]
@@ -78,51 +142,37 @@ pub struct QuasarFreelanceState {
 
 impl QuasarFreelanceState {
     pub fn from_db(db: Arc<WorldRepository>) -> Arc<Self> {
-        let (projects_map, saved_next, _already_seeded) = db.with_snapshot(|snap| {
-            let mut projs = HashMap::new();
-            let mut n_seq = 1u64;
-            let mut seeded = false;
-            if let Some(s) = snap.quasar_state_blobs.get("quasar_freelance") {
-                seeded = true;
-                if let Ok(st) = serde_json::from_str::<FreelancePersistedState>(s) {
-                    n_seq = st.next_seq.max(1);
-                    seeded = st.seeded || seeded;
-                    for p in st.projects {
-                        projs.insert(p.uuid.clone(), p);
-                    }
-                } else if let Ok(saved) = serde_json::from_str::<Vec<FreelanceProjectRecord>>(s) {
-                    for p in saved {
-                        projs.insert(p.uuid.clone(), p);
-                    }
-                } else if let Ok(saved_map) = serde_json::from_str::<HashMap<Vec<u8>, FreelanceProjectRecord>>(s) {
-                    projs = saved_map;
-                }
-            }
-            (projs, n_seq, seeded)
-        });
-
+        let (projects_map, next_id) = db.with_snapshot(build_freelance_map_from_snap);
         Arc::new(Self {
-            db: Some(Arc::clone(&db)),
+            db: Some(db),
             projects: RwLock::new(projects_map),
-            next_seq: AtomicU64::new(saved_next),
+            next_seq: AtomicU64::new(next_id.max(1)),
         })
     }
 
-    pub fn sync_to_db(&self) {
-        if let Some(db) = &self.db {
-            let projs: Vec<FreelanceProjectRecord> = self.projects.read().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
-            let payload = FreelancePersistedState {
-                projects: projs,
-                next_seq: self.next_seq.load(Ordering::SeqCst),
-                seeded: true,
-            };
-            if let Ok(json) = serde_json::to_string(&payload) {
-                let _ = db.try_with_mut_snapshot(|snap| {
-                    snap.quasar_state_blobs.insert("quasar_freelance".into(), json);
-                    Ok::<(), String>(())
-                });
+    pub fn refresh_from_db(&self, now_unix: u64) {
+        if let Some(ref db) = self.db {
+            if now_unix > 0 {
+                let _ = db.with_mut_snapshot(|s| corp_projects::sweep_expired_corp_projects_in_snap(s, now_unix));
             }
+            let (map, next_id) = db.with_snapshot(build_freelance_map_from_snap);
+            *self.projects.write().unwrap_or_else(|e| e.into_inner()) = map;
+            let _ = self.next_seq.fetch_max(next_id, Ordering::SeqCst);
         }
+    }
+
+    pub fn sync_to_db(&self) {
+        self.refresh_from_db(0);
+    }
+
+    fn owner_corp_of(&self, uuid: &[u8], now_u: u64) -> Result<u32, (u32, String)> {
+        self.refresh_from_db(now_u);
+        self.projects
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(uuid)
+            .map(|p| p.owner_corp_id)
+            .ok_or_else(|| (STATUS_NOT_FOUND, "Freelance project not found".into()))
     }
 }
 
@@ -149,28 +199,21 @@ fn check_corp_admin_role(
     db: Option<&Arc<WorldRepository>>,
     cid: u32,
     corpid: u32,
-) -> Result<(), (u32, String)> {
-    let corp_role = ctx
-        .identity
-        .as_ref()
-        .and_then(|id| id.roles.as_ref().map(|r| r.bitmask))
-        .unwrap_or(0);
-    let has_role = if let Some(db) = db {
+) -> Result<(bool, u64, u8), (u32, String)> {
+    let sess_role = ctx.identity.as_ref().and_then(|id| id.roles.as_ref().map(|r| r.bitmask)).unwrap_or(ctx.corp_role_mask);
+    let now_u = ctx_now_unix(ctx);
+    let (is_ceo, eff_roles, wallet_div) = db.map_or((false, sess_role, 1u8), |db| {
         db.with_snapshot(|snap| {
-            if let Some(corp) = snap.corporations.get(&(corpid as i64)) {
-                if corp.ceo_id == cid as i64 {
-                    return true;
-                }
-            }
-            (corp_role & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_PROJECT_MANAGER)) != 0
+            let (ceo, eff) = corp_projects::effective_corp_member_roles(snap, corpid as i64, cid as i64, sess_role, now_u);
+            let acct = snap.corp_governance.get(&(corpid as i64)).and_then(|g| g.member_account_keys.get(&(cid as i64)).copied()).unwrap_or(1000);
+            let div = if (1000..=1006).contains(&acct) { (acct - 999) as u8 } else { 1 };
+            (ceo, eff | (sess_role & !corp_projects::HANGAR_DIV_MASK), div)
         })
-    } else {
-        (corp_role & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_PROJECT_MANAGER)) != 0
-    };
-    if !has_role {
+    });
+    if !is_ceo && (eff_roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_PROJECT_MANAGER)) == 0 {
         return Err((STATUS_FORBIDDEN, "Insufficient corporation role".into()));
     }
-    Ok(())
+    Ok((is_ceo, eff_roles, wallet_div))
 }
 
 pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
@@ -188,7 +231,8 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let Some(corpid) = ctx.effective_corporation_id() else {
                 return Err((STATUS_PERMISSION_DENIED, "Permission denied".into()));
             };
-            check_corp_admin_role(ctx, state_create.db.as_ref(), cid, corpid)?;
+            let (is_ceo, eff_roles, wallet_div) =
+                check_corp_admin_role(ctx, state_create.db.as_ref(), cid, corpid)?;
 
             let Some(DynamicValue::String(raw_name)) = dyn_msg.get(1) else {
                 return Err((STATUS_BAD_REQUEST, "Freelance project name is required".into()));
@@ -207,6 +251,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 _ => return Err((STATUS_BAD_REQUEST, "Positive target_progress is required".into())),
             };
 
+            let mut method_name = String::new();
             let mut required_type_id: u32 = 0;
             let mut batch_size: i64 = 0;
             let parse_matcher_u32 = |m: &eve_proto::quasar::DynamicQuasarMessage| -> Option<u32> {
@@ -228,6 +273,17 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 None
             };
             if let Some(DynamicValue::Message(cfg)) = dyn_msg.get(6) {
+                if let Some(m_id) = cfg.get(1) {
+                    match m_id {
+                        DynamicValue::String(s) => method_name = s.trim().to_string(),
+                        DynamicValue::Message(sub) => {
+                            if let Some(DynamicValue::String(s)) = sub.get(1) {
+                                method_name = s.trim().to_string();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 if let Some(DynamicValue::Repeated(params)) = cfg.get(3) {
                     for p in params {
                         if let DynamicValue::Message(pm) = p {
@@ -261,6 +317,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     }
                 }
             }
+            let mut max_per_char = None;
             if let Some(DynamicValue::Message(mods)) = dyn_msg.get(7) {
                 if let Some(b) = mods.get(4).or_else(|| mods.get(2)).and_then(|v| match v {
                     DynamicValue::Uint64(u) => i64::try_from(*u).ok(),
@@ -269,81 +326,90 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 }) {
                     batch_size = b;
                 }
-            }
-            if required_type_id == 0 || batch_size <= 0 || !sde_create.types.contains_key(&required_type_id) {
-                return Err((STATUS_BAD_REQUEST, "Missing or invalid item delivery required_type_id or batch_size".into()));
+                max_per_char = mods.get(5).and_then(|v| match v {
+                    DynamicValue::Uint64(u) if *u > 0 => Some(*u),
+                    DynamicValue::Int64(i) if *i > 0 => Some(*i as u64),
+                    _ => None,
+                });
             }
 
-            let budget_isk: i64 = match dyn_msg.get(10).or_else(|| dyn_msg.get(5)) {
+            let tracked_matcher = SERVER_TRACKED_MATCHERS
+                .iter()
+                .copied()
+                .find(|m| m.eq_ignore_ascii_case(&method_name));
+            let (matcher_type, filter_id) = if let Some(tm) = tracked_matcher {
+                batch_size = batch_size.max(1);
+                (tm.to_string(), (required_type_id > 0).then_some(required_type_id as i64))
+            } else {
+                if required_type_id == 0 || batch_size <= 0 || !sde_create.types.contains_key(&required_type_id) {
+                    return Err((STATUS_BAD_REQUEST, "Missing or invalid item delivery required_type_id or batch_size".into()));
+                }
+                ("DeliverItem".to_string(), Some(required_type_id as i64))
+            };
+
+            let (budget_isk, unit_rate_isk): (i64, i64) = match dyn_msg.get(10).or_else(|| dyn_msg.get(5)) {
                 Some(DynamicValue::Message(rew)) => rew.get(1).and_then(|c| match c {
                     DynamicValue::Message(cm) => cm.get(1).and_then(|u| match u {
-                        DynamicValue::Uint64(v) => i64::try_from(*v).ok().map(|v| v.saturating_mul(target_prog)),
-                        DynamicValue::Int64(v) | DynamicValue::Sint64(v) => Some(v.saturating_mul(target_prog)),
+                        DynamicValue::Uint64(v) => i64::try_from(*v).ok().map(|v| (v.saturating_mul(target_prog), v)),
+                        DynamicValue::Int64(v) | DynamicValue::Sint64(v) => Some((v.saturating_mul(target_prog), *v)),
                         _ => None,
                     }),
-                    DynamicValue::Uint64(v) => i64::try_from(*v).ok(),
-                    DynamicValue::Int64(v) => Some(*v),
+                    DynamicValue::Uint64(v) => i64::try_from(*v).ok().map(|v| (v, v / target_prog.max(1))),
+                    DynamicValue::Int64(v) => Some((*v, *v / target_prog.max(1))),
                     _ => None,
-                }).unwrap_or(50_000_000),
-                _ => 50_000_000,
+                }).unwrap_or((50_000_000, 0)),
+                _ => (50_000_000, 0),
             };
-            if budget_isk < 0 {
+            if budget_isk < 0 || unit_rate_isk < 0 {
                 return Err((STATUS_BAD_REQUEST, "Invalid project budget".into()));
             }
-            let cost = eve_db::IskCents::from_isk(budget_isk);
-
-            // Release any lock on projects BEFORE calling db.with_mut_snapshot!
-            if cost.0 > 0 {
-                if let Some(db) = &state_create.db {
-                    let mut funded = false;
-                    db.with_mut_snapshot(|snap| {
-                        if let Some(corp) = snap.corporations.get_mut(&(corpid as i64)) {
-                            if let Some(debit) = corp.master_wallet.checked_sub(cost) {
-                                corp.master_wallet = debit;
-                                funded = true;
-                            }
-                        }
-                    });
-                    if !funded {
-                        return Err((STATUS_BAD_REQUEST, "Insufficient corporation funds for project escrow".into()));
-                    }
+            if budget_isk > 0 && !is_ceo && (eff_roles & eve_db::corp_roles::ROLE_DIRECTOR) == 0 {
+                let take_bit = eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[(wallet_div.clamp(1, 7) - 1) as usize];
+                if (eff_roles & take_bit) == 0 {
+                    return Err((STATUS_FORBIDDEN, "CorpRoleDenied: Project Manager lacks wallet division take role for escrow".into()));
                 }
             }
 
-            let seq = state_create.next_seq.fetch_add(1, Ordering::SeqCst);
+            let now_u = ctx_now_unix(ctx);
+            let deadline = dyn_msg.get(4).and_then(|v| match v {
+                DynamicValue::Message(m) => m.get(1).and_then(|s| match s {
+                    DynamicValue::Uint64(u) if *u > 0 => Some(*u),
+                    DynamicValue::Int64(i) | DynamicValue::Sint64(i) if *i > 0 => Some(*i as u64),
+                    _ => None,
+                }),
+                _ => None,
+            }).unwrap_or_else(|| now_u.saturating_add(604_800));
 
-            let mut uuid = [0u8; 16];
-            uuid[0..8].copy_from_slice(&ctx_now_unix(ctx).to_be_bytes());
-            uuid[8..16].copy_from_slice(&seq.to_be_bytes());
-            let uuid_vec = uuid.to_vec();
-
-            let proj = FreelanceProjectRecord {
-                uuid: uuid_vec.clone(),
-                owner_corp_id: corpid,
-                creator_char_id: cid,
-                name: name.clone(),
-                description: desc.clone(),
-                career: 1,
-                deadline: ctx_now_unix(ctx) + 604800,
-                created: ctx_now_unix(ctx),
-                target_progress: target_prog,
-                current_progress: 0,
-                state: 1, // Active
-                committed_participants: Vec::new(),
-                contributors: HashMap::new(),
-                reward_isk: (cost.0 / 100).max(0),
-                required_type_id,
-                batch_size,
+            let Some(ref db) = state_create.db else {
+                return Err((STATUS_BAD_REQUEST, "Database not available".into()));
             };
+            let min_id = state_create.next_seq.fetch_add(1, Ordering::SeqCst) as i64;
+            let (_pid, uuid_arr) = corp_projects::create_canonical_project(
+                db,
+                CanonicalProjectSpec {
+                    corp_id: corpid as i64,
+                    creator_id: cid as i64,
+                    name,
+                    description: desc,
+                    target_quantity: target_prog as u64,
+                    initial_quantity: 0,
+                    escrow: eve_db::IskCents::from_isk(budget_isk),
+                    isk_per_unit: eve_db::IskCents::from_isk(unit_rate_isk),
+                    wallet_division: wallet_div,
+                    matcher_type,
+                    is_freelance: true,
+                    auto_payout_on_contribution: false,
+                    max_per_character: max_per_char,
+                    expires_unix: Some(deadline),
+                    filter_id,
+                    batch_size: batch_size.max(1) as u64,
+                    now_unix: now_u,
+                    min_project_id: min_id,
+                },
+            )?;
+            let uuid_vec = uuid_arr.to_vec();
+            state_create.refresh_from_db(now_u);
 
-            state_create
-                .projects
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(uuid_vec.clone(), proj);
-            state_create.sync_to_db();
-
-            // Notice: CreatedNotice to corporation
             let mut notice_bytes = Vec::new();
             encode_uuid_field(1, &uuid_vec, &mut notice_bytes);
             ctx_queue_notice(
@@ -352,10 +418,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.CreatedNotice"),
                     value: notice_bytes,
                 },
-                ctx_now_unix(ctx),
+                now_u,
             );
 
-            // Response: CreateResponse with created.project.uuid
             let mut created_msg = Vec::new();
             encode_uuid_field(1, &uuid_vec, &mut created_msg);
             let mut out = Vec::new();
@@ -375,6 +440,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         Arc::new(move |ctx, _any, dyn_msg| {
             let uuid = extract_uuid(dyn_msg.get(1))
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".to_string()))?;
+            state_get.refresh_from_db(ctx_now_unix(ctx));
             let projects = state_get.projects.read().unwrap_or_else(|e| e.into_inner());
             let Some(proj) = projects.get(&uuid).cloned() else {
                 return Err((STATUS_NOT_FOUND, "Freelance project not found".to_string()));
@@ -383,22 +449,21 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let cid = ctx.effective_character_id().unwrap_or(0);
             let (char_prog, unredeemed) = proj.contributors.get(&cid).copied().unwrap_or((0, 0));
 
-            // Attributes
             let mut attr = Vec::new();
-            encode_corp_id_field(1, proj.owner_corp_id, &mut attr); // owner
-            encode_char_id_field(2, proj.creator_char_id, &mut attr); // creator
-            encode_varint_field(3, proj.state as u64, &mut attr); // state
-            encode_string_field(4, &proj.name, &mut attr); // name
-            encode_string_field(5, &proj.description, &mut attr); // description
-            encode_varint_field(11, proj.target_progress as u64, &mut attr); // target_progress
-            encode_varint_field(12, proj.current_progress as u64, &mut attr); // current_progress
+            encode_corp_id_field(1, proj.owner_corp_id, &mut attr);
+            encode_char_id_field(2, proj.creator_char_id, &mut attr);
+            encode_varint_field(3, proj.state as u64, &mut attr);
+            encode_string_field(4, &proj.name, &mut attr);
+            encode_string_field(5, &proj.description, &mut attr);
+            encode_varint_field(11, proj.target_progress as u64, &mut attr);
+            encode_varint_field(12, proj.current_progress as u64, &mut attr);
             encode_varint_field(13, proj.committed_participants.len() as u64, &mut attr);
 
             let mut out = Vec::new();
-            encode_bytes_field(1, &attr, &mut out); // project
-            encode_varint_field(2, 1, &mut out); // state = Committed
-            encode_varint_field(3, char_prog as u64, &mut out); // progress
-            encode_varint_field(4, unredeemed as u64, &mut out); // units_unredeemed
+            encode_bytes_field(1, &attr, &mut out);
+            encode_varint_field(2, 1, &mut out);
+            encode_varint_field(3, char_prog as u64, &mut out);
+            encode_varint_field(4, unredeemed as u64, &mut out);
 
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetResponse"),
@@ -411,9 +476,10 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let state_mgr = Arc::clone(&state);
     router.register_handler(
         "eve_public.freelance.project.api.GetForManagerRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
             let uuid = extract_uuid(dyn_msg.get(1))
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".to_string()))?;
+            state_mgr.refresh_from_db(ctx_now_unix(ctx));
             let projects = state_mgr.projects.read().unwrap_or_else(|e| e.into_inner());
             let Some(proj) = projects.get(&uuid).cloned() else {
                 return Err((STATUS_NOT_FOUND, "Freelance project not found".to_string()));
@@ -446,6 +512,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 .map(|v| v as u32)
                 .or_else(|| ctx.effective_corporation_id())
                 .ok_or_else(|| (STATUS_FORBIDDEN, "Corporation required".to_string()))?;
+            state_all_corp.refresh_from_db(ctx_now_unix(ctx));
             let projects = state_all_corp.projects.read().unwrap_or_else(|e| e.into_inner());
 
             let mut out = Vec::new();
@@ -463,7 +530,8 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let state_all_act = Arc::clone(&state);
     router.register_handler(
         "eve_public.freelance.project.api.GetAllActiveRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
+        Arc::new(move |ctx, _any, _dyn_msg| {
+            state_all_act.refresh_from_db(ctx_now_unix(ctx));
             let projects = state_all_act.projects.read().unwrap_or_else(|e| e.into_inner());
             let mut out = Vec::new();
             for p in projects.values().filter(|p| p.state == 1) {
@@ -480,7 +548,8 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let state_all_inact = Arc::clone(&state);
     router.register_handler(
         "eve_public.freelance.project.api.GetAllInactiveRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
+        Arc::new(move |ctx, _any, _dyn_msg| {
+            state_all_inact.refresh_from_db(ctx_now_unix(ctx));
             let projects = state_all_inact.projects.read().unwrap_or_else(|e| e.into_inner());
             let mut out = Vec::new();
             for p in projects.values().filter(|p| p.state != 1) {
@@ -497,7 +566,8 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let state_bcast = Arc::clone(&state);
     router.register_handler(
         "eve_public.freelance.project.api.GetAllBroadcastedRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
+        Arc::new(move |ctx, _any, _dyn_msg| {
+            state_bcast.refresh_from_db(ctx_now_unix(ctx));
             let projects = state_bcast.projects.read().unwrap_or_else(|e| e.into_inner());
             let mut bcast = Vec::new();
             for p in projects.values() {
@@ -520,6 +590,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let cid = ctx
                 .effective_character_id()
                 .ok_or_else(|| (STATUS_FORBIDDEN, "Character required".to_string()))?;
+            state_comm.refresh_from_db(ctx_now_unix(ctx));
             let projects = state_comm.projects.read().unwrap_or_else(|e| e.into_inner());
 
             let mut out = Vec::new();
@@ -541,6 +612,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let cid = ctx
                 .effective_character_id()
                 .ok_or_else(|| (STATUS_FORBIDDEN, "Character required".to_string()))?;
+            state_unred.refresh_from_db(ctx_now_unix(ctx));
             let projects = state_unred.projects.read().unwrap_or_else(|e| e.into_inner());
 
             let mut out = Vec::new();
@@ -558,9 +630,10 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let state_part = Arc::clone(&state);
     router.register_handler(
         "eve_public.freelance.project.api.GetParticipationDetailsRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
             let uuid = extract_uuid(dyn_msg.get(1))
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".to_string()))?;
+            state_part.refresh_from_db(ctx_now_unix(ctx));
             let projects = state_part.projects.read().unwrap_or_else(|e| e.into_inner());
             let p = projects
                 .get(&uuid)
@@ -570,7 +643,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             for cid in &p.committed_participants {
                 let mut part = Vec::new();
                 encode_char_id_field(1, *cid, &mut part);
-                encode_varint_field(2, 1, &mut part); // Committed
+                encode_varint_field(2, 1, &mut part);
                 encode_bytes_field(1, &part, &mut out);
             }
             Ok(GoogleAny {
@@ -584,7 +657,8 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let state_stats = Arc::clone(&state);
     router.register_handler(
         "eve_public.freelance.project.api.GetStatsRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            state_stats.refresh_from_db(ctx_now_unix(ctx));
             let projects = state_stats.projects.read().unwrap_or_else(|e| e.into_inner());
             let mut requested_uuids = Vec::new();
             if let Some(DynamicValue::Repeated(list)) = dyn_msg.get(1) {
@@ -624,11 +698,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         "eve_public.freelance.project.api.GetCreationLimitsRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
             let mut out = Vec::new();
-            encode_varint_field(1, 100, &mut out); // max_active_projects_per_corporation
-            encode_varint_field(2, 50, &mut out); // max_active_projects_broadcast_per_system
-            encode_varint_field(3, 30, &mut out); // max_character_age_days
-            encode_varint_field(4, 10, &mut out); // max_broadcasting_locations_per_project
-            encode_varint_field(5, 500, &mut out); // max_committed_participants_per_project
+            encode_varint_field(1, 100, &mut out);
+            encode_varint_field(2, 50, &mut out);
+            encode_varint_field(3, 30, &mut out);
+            encode_varint_field(4, 10, &mut out);
+            encode_varint_field(5, 500, &mut out);
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetCreationLimitsResponse"),
                 value: out,
@@ -641,7 +715,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         "eve_public.freelance.project.api.GetCreationPricesRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
             let mut prices = Vec::new();
-            encode_varint_field(1, 10_000_000, &mut prices); // base_price
+            encode_varint_field(1, 10_000_000, &mut prices);
             let mut out = Vec::new();
             encode_bytes_field(1, &prices, &mut out);
             Ok(GoogleAny {
@@ -656,8 +730,8 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         "eve_public.freelance.project.api.GetCommitLimitsRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
             let mut out = Vec::new();
-            encode_varint_field(1, 10, &mut out); // max_active_projects_per_participant
-            encode_varint_field(2, 500, &mut out); // max_committed_participants_per_project
+            encode_varint_field(1, 10, &mut out);
+            encode_varint_field(2, 500, &mut out);
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetCommitLimitsResponse"),
                 value: out,
@@ -675,19 +749,22 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Character required".into()));
             };
-            let corpid = {
-                let mut projects = state_commit.projects.write().unwrap_or_else(|e| e.into_inner());
-                let p = projects
-                    .get_mut(&uuid)
-                    .ok_or_else(|| (STATUS_NOT_FOUND, "Freelance project not found".into()))?;
-                if !p.committed_participants.contains(&cid) {
-                    p.committed_participants.push(cid);
-                }
-                p.owner_corp_id
+            let now_u = ctx_now_unix(ctx);
+            let corpid = state_commit.owner_corp_of(&uuid, now_u)?;
+            let Some(pid) = corp_projects::freelance_uuid_to_project_id(&uuid) else {
+                return Err((STATUS_NOT_FOUND, "Freelance project not found".into()));
             };
-            state_commit.sync_to_db();
+            if let Some(ref db) = state_commit.db {
+                db.with_mut_snapshot(|snap| {
+                    if let Some(det) = snap.alliance_war_state.project_details.get_mut(&pid) {
+                        if !det.committed_participants.contains(&(cid as i64)) {
+                            det.committed_participants.push(cid as i64);
+                        }
+                    }
+                });
+            }
+            state_commit.refresh_from_db(now_u);
 
-            // Notice: ParticipantAddedNotice
             let mut notice_bytes = Vec::new();
             encode_uuid_field(1, &uuid, &mut notice_bytes);
             encode_char_id_field(2, cid, &mut notice_bytes);
@@ -697,7 +774,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.ParticipantAddedNotice"),
                     value: notice_bytes,
                 },
-                ctx_now_unix(ctx),
+                now_u,
             );
 
             Ok(GoogleAny {
@@ -712,22 +789,21 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.freelance.project.api.ResignRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let uuid = extract_uuid(dyn_msg.get(1))
-                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
+            let uuid = extract_uuid(dyn_msg.get(1)).ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Character required".into()));
             };
-            let corpid = {
-                let mut projects = state_abandon.projects.write().unwrap_or_else(|e| e.into_inner());
-                let p = projects
-                    .get_mut(&uuid)
-                    .ok_or_else(|| (STATUS_NOT_FOUND, "Freelance project not found".into()))?;
-                p.committed_participants.retain(|&c| c != cid);
-                p.owner_corp_id
-            };
-            state_abandon.sync_to_db();
+            let now_u = ctx_now_unix(ctx);
+            let corpid = state_abandon.owner_corp_of(&uuid, now_u)?;
+            if let (Some(pid), Some(ref db)) = (corp_projects::freelance_uuid_to_project_id(&uuid), &state_abandon.db) {
+                db.with_mut_snapshot(|snap| {
+                    if let Some(det) = snap.alliance_war_state.project_details.get_mut(&pid) {
+                        det.committed_participants.retain(|&c| c != cid as i64);
+                    }
+                });
+            }
+            state_abandon.refresh_from_db(now_u);
 
-            // Notice: ParticipantRemovedNotice
             let mut notice_bytes = Vec::new();
             encode_uuid_field(1, &uuid, &mut notice_bytes);
             encode_char_id_field(2, cid, &mut notice_bytes);
@@ -737,7 +813,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.ParticipantRemovedNotice"),
                     value: notice_bytes,
                 },
-                ctx_now_unix(ctx),
+                now_u,
             );
 
             Ok(GoogleAny {
@@ -756,25 +832,23 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 return Err((STATUS_UNAUTHENTICATED, "Unauthenticated".into()));
             };
             let caller_corp = ctx.effective_corporation_id();
-            let uuid = extract_uuid(dyn_msg.get(1))
-                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
-            let target_cid = extract_id(dyn_msg.get(2))
-                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing target character ID".into()))? as u32;
-
-            {
-                let mut projects = state_kick.projects.write().unwrap_or_else(|e| e.into_inner());
-                let Some(p) = projects.get_mut(&uuid) else {
-                    return Err((STATUS_NOT_FOUND, "Freelance project not found".into()));
-                };
-                if caller_corp != Some(p.owner_corp_id) {
-                    return Err((STATUS_PERMISSION_DENIED, "Permission denied".into()));
-                }
-                check_corp_admin_role(ctx, state_kick.db.as_ref(), cid, p.owner_corp_id)?;
-                p.committed_participants.retain(|&c| c != target_cid);
+            let uuid = extract_uuid(dyn_msg.get(1)).ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
+            let target_cid = extract_id(dyn_msg.get(2)).ok_or_else(|| (STATUS_BAD_REQUEST, "Missing target character ID".into()))? as u32;
+            let now_u = ctx_now_unix(ctx);
+            let owner_corp = state_kick.owner_corp_of(&uuid, now_u)?;
+            if caller_corp != Some(owner_corp) {
+                return Err((STATUS_PERMISSION_DENIED, "Permission denied".into()));
             }
-            state_kick.sync_to_db();
+            check_corp_admin_role(ctx, state_kick.db.as_ref(), cid, owner_corp)?;
+            if let (Some(pid), Some(ref db)) = (corp_projects::freelance_uuid_to_project_id(&uuid), &state_kick.db) {
+                db.with_mut_snapshot(|snap| {
+                    if let Some(det) = snap.alliance_war_state.project_details.get_mut(&pid) {
+                        det.committed_participants.retain(|&c| c != target_cid as i64);
+                    }
+                });
+            }
+            state_kick.refresh_from_db(now_u);
 
-            // Notice: ParticipantKickedNotice to target character
             let mut notice_bytes = Vec::new();
             encode_uuid_field(1, &uuid, &mut notice_bytes);
             encode_char_id_field(2, target_cid, &mut notice_bytes);
@@ -784,11 +858,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.ParticipantKickedNotice"),
                     value: notice_bytes,
                 },
-                ctx_now_unix(ctx),
+                now_u,
             );
 
             let mut out = Vec::new();
-            encode_varint_field(1, 1, &mut out); // kicked
+            encode_varint_field(1, 1, &mut out);
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.KickResponse"),
                 value: out,
@@ -805,22 +879,12 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 return Err((STATUS_UNAUTHENTICATED, "Unauthenticated".into()));
             };
             let caller_corp = ctx.effective_corporation_id();
-            let uuid = extract_uuid(dyn_msg.get(1))
-                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
-            {
-                let mut projects = state_bcast_cmd.projects.write().unwrap_or_else(|e| e.into_inner());
-                let Some(p) = projects.get_mut(&uuid) else {
-                    return Err((STATUS_NOT_FOUND, "Freelance project not found".into()));
-                };
-                if caller_corp != Some(p.owner_corp_id) {
-                    return Err((STATUS_PERMISSION_DENIED, "Permission denied".into()));
-                }
-                check_corp_admin_role(ctx, state_bcast_cmd.db.as_ref(), cid, p.owner_corp_id)?;
-                if p.state == 0 {
-                    p.state = 1;
-                }
+            let uuid = extract_uuid(dyn_msg.get(1)).ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
+            let owner_corp = state_bcast_cmd.owner_corp_of(&uuid, ctx_now_unix(ctx))?;
+            if caller_corp != Some(owner_corp) {
+                return Err((STATUS_PERMISSION_DENIED, "Permission denied".into()));
             }
-            state_bcast_cmd.sync_to_db();
+            check_corp_admin_role(ctx, state_bcast_cmd.db.as_ref(), cid, owner_corp)?;
             Ok(GoogleEmpty.to_any())
         }),
     );
@@ -834,35 +898,17 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 return Err((STATUS_UNAUTHENTICATED, "Unauthenticated".into()));
             };
             let caller_corp = ctx.effective_corporation_id();
-            let uuid = extract_uuid(dyn_msg.get(1))
-                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
-            let corpid;
-            let refund_isk;
-            {
-                let mut projects = state_close_cmd.projects.write().unwrap_or_else(|e| e.into_inner());
-                let Some(p) = projects.get_mut(&uuid) else {
-                    return Err((STATUS_NOT_FOUND, "Freelance project not found".into()));
-                };
-                if caller_corp != Some(p.owner_corp_id) {
-                    return Err((STATUS_PERMISSION_DENIED, "Permission denied".into()));
-                }
-                check_corp_admin_role(ctx, state_close_cmd.db.as_ref(), cid, p.owner_corp_id)?;
-                p.state = 3; // Closed
-                corpid = p.owner_corp_id;
-                refund_isk = p.reward_isk;
-                p.reward_isk = 0;
+            let uuid = extract_uuid(dyn_msg.get(1)).ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
+            let now_u = ctx_now_unix(ctx);
+            let corpid = state_close_cmd.owner_corp_of(&uuid, now_u)?;
+            if caller_corp != Some(corpid) {
+                return Err((STATUS_PERMISSION_DENIED, "Permission denied".into()));
             }
-            state_close_cmd.sync_to_db();
-
-            if refund_isk > 0 {
-                if let Some(db) = &state_close_cmd.db {
-                    db.with_mut_snapshot(|snap| {
-                        if let Some(corp) = snap.corporations.get_mut(&(corpid as i64)) {
-                            corp.master_wallet = corp.master_wallet.checked_add(eve_db::IskCents::from_isk(refund_isk)).unwrap_or(corp.master_wallet);
-                        }
-                    });
-                }
+            check_corp_admin_role(ctx, state_close_cmd.db.as_ref(), cid, corpid)?;
+            if let (Some(pid), Some(ref db)) = (corp_projects::freelance_uuid_to_project_id(&uuid), &state_close_cmd.db) {
+                let _ = corp_projects::close_or_delete_canonical_project(db, pid, false, now_u);
             }
+            state_close_cmd.refresh_from_db(now_u);
 
             let mut notice_bytes = Vec::new();
             encode_uuid_field(1, &uuid, &mut notice_bytes);
@@ -872,7 +918,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.ClosedNotice"),
                     value: notice_bytes,
                 },
-                ctx_now_unix(ctx),
+                now_u,
             );
             Ok(GoogleEmpty.to_any())
         }),
@@ -887,34 +933,17 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 return Err((STATUS_UNAUTHENTICATED, "Unauthenticated".into()));
             };
             let caller_corp = ctx.effective_corporation_id();
-            let uuid = extract_uuid(dyn_msg.get(1))
-                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
-            let corpid;
-            let refund_isk;
-            {
-                let mut projects = state_del_cmd.projects.write().unwrap_or_else(|e| e.into_inner());
-                let Some(p) = projects.get_mut(&uuid) else {
-                    return Err((STATUS_NOT_FOUND, "Freelance project not found".into()));
-                };
-                if caller_corp != Some(p.owner_corp_id) {
-                    return Err((STATUS_PERMISSION_DENIED, "Permission denied".into()));
-                }
-                check_corp_admin_role(ctx, state_del_cmd.db.as_ref(), cid, p.owner_corp_id)?;
-                corpid = p.owner_corp_id;
-                refund_isk = p.reward_isk;
-                projects.remove(&uuid);
+            let uuid = extract_uuid(dyn_msg.get(1)).ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
+            let now_u = ctx_now_unix(ctx);
+            let corpid = state_del_cmd.owner_corp_of(&uuid, now_u)?;
+            if caller_corp != Some(corpid) {
+                return Err((STATUS_PERMISSION_DENIED, "Permission denied".into()));
             }
-            state_del_cmd.sync_to_db();
-
-            if refund_isk > 0 {
-                if let Some(db) = &state_del_cmd.db {
-                    db.with_mut_snapshot(|snap| {
-                        if let Some(corp) = snap.corporations.get_mut(&(corpid as i64)) {
-                            corp.master_wallet = corp.master_wallet.checked_add(eve_db::IskCents::from_isk(refund_isk)).unwrap_or(corp.master_wallet);
-                        }
-                    });
-                }
+            check_corp_admin_role(ctx, state_del_cmd.db.as_ref(), cid, corpid)?;
+            if let (Some(pid), Some(ref db)) = (corp_projects::freelance_uuid_to_project_id(&uuid), &state_del_cmd.db) {
+                let _ = corp_projects::close_or_delete_canonical_project(db, pid, true, now_u);
             }
+            state_del_cmd.refresh_from_db(now_u);
 
             let mut notice_bytes = Vec::new();
             encode_uuid_field(1, &uuid, &mut notice_bytes);
@@ -924,7 +953,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.AclDeletedNotice"),
                     value: notice_bytes,
                 },
-                ctx_now_unix(ctx),
+                now_u,
             );
             Ok(GoogleEmpty.to_any())
         }),
@@ -940,66 +969,17 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Character required".into()));
             };
-
-            let (units_paid, payout_isk) = {
-                let mut projects = state_redeem.projects.write().unwrap_or_else(|e| e.into_inner());
-                let p = projects
-                    .get_mut(&uuid)
-                    .ok_or_else(|| (STATUS_NOT_FOUND, "Freelance project not found".into()))?;
-                let entry = p
-                    .contributors
-                    .get_mut(&cid)
-                    .ok_or_else(|| (STATUS_BAD_REQUEST, "No contributor progress for freelance project".into()))?;
-                let unredeemed = entry.1.max(0);
-                let unit_reward = if p.reward_isk != 50_000_000 && p.target_progress > 0 && p.reward_isk >= p.target_progress {
-                    (p.reward_isk / (p.target_progress / p.batch_size.max(1)).max(1)).max(1)
-                } else {
-                    100_000
-                };
-                let available_units = p.reward_isk.max(0) / unit_reward;
-                let units = unredeemed.min(available_units);
-                if units <= 0 {
-                    return Err((STATUS_BAD_REQUEST, "No redeemable freelance rewards available".into()));
-                }
-                let payout = units.saturating_mul(unit_reward);
-                entry.1 = entry.1.saturating_sub(units);
-                p.reward_isk = p.reward_isk.saturating_sub(payout);
-                (units, payout)
+            let now_u = ctx_now_unix(ctx);
+            state_redeem.refresh_from_db(now_u);
+            let Some(pid) = corp_projects::freelance_uuid_to_project_id(&uuid) else {
+                return Err((STATUS_NOT_FOUND, "Freelance project not found".into()));
             };
-
-            let Some(db) = &state_redeem.db else {
+            let Some(ref db) = state_redeem.db else {
                 return Err((STATUS_BAD_REQUEST, "Database not available".into()));
             };
-            let reward_cents = eve_db::IskCents::from_isk(payout_isk);
-            let mut credited = false;
-            db.with_mut_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get_mut(&(cid as i64)) {
-                    if let Some(new_bal) = ch.balance.checked_add(reward_cents) {
-                        ch.balance = new_bal;
-                        credited = true;
-                        snap.append_journal(
-                            cid as i64,
-                            "FreelanceReward",
-                            reward_cents,
-                            new_bal,
-                            "Freelance project reward",
-                        );
-                    }
-                }
-            });
-            if !credited {
-                let mut projects = state_redeem.projects.write().unwrap_or_else(|e| e.into_inner());
-                if let Some(p) = projects.get_mut(&uuid) {
-                    if let Some(entry) = p.contributors.get_mut(&cid) {
-                        entry.1 = entry.1.saturating_add(units_paid);
-                    }
-                    p.reward_isk = p.reward_isk.saturating_add(payout_isk);
-                }
-                return Err((STATUS_BAD_REQUEST, "Unable to credit freelance reward".into()));
-            }
-            state_redeem.sync_to_db();
+            let _ = corp_projects::redeem_freelance_reward_for_char(db, pid, cid as i64, now_u)?;
+            state_redeem.refresh_from_db(now_u);
 
-            // Notice: ParticipantRewardRedeemedNotice
             let mut notice_bytes = Vec::new();
             encode_uuid_field(1, &uuid, &mut notice_bytes);
             encode_char_id_field(2, cid, &mut notice_bytes);
@@ -1009,7 +989,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.ParticipantRewardRedeemedNotice"),
                     value: notice_bytes,
                 },
-                ctx_now_unix(ctx),
+                now_u,
             );
 
             Ok(GoogleAny {
@@ -1028,8 +1008,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 return Err((STATUS_UNAUTHENTICATED, "Unauthenticated".into()));
             };
             let uuid = extract_uuid(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
+            let now_u = ctx_now_unix(ctx);
+            state_deliver.refresh_from_db(now_u);
 
-            // 1. Verify project state == 1 (Active) and caller is committed participant before touching DB
             let (target_type_id, batch_size, corpid, rem_progress) = {
                 let projects = state_deliver.projects.read().unwrap_or_else(|e| e.into_inner());
                 let Some(p) = projects.get(&uuid) else {
@@ -1039,10 +1020,13 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     return Err((STATUS_BAD_REQUEST, "Project not active or caller not committed".into()));
                 };
                 let rem = (p.target_progress - p.current_progress).max(0);
-                if rem <= 0 {
+                if rem <= 0 || p.required_type_id == 0 {
                     return Err((STATUS_BAD_REQUEST, "Project target progress already reached".into()));
                 }
                 (p.required_type_id, p.batch_size.max(1), p.owner_corp_id, rem)
+            };
+            let Some(pid) = corp_projects::freelance_uuid_to_project_id(&uuid) else {
+                return Err((STATUS_NOT_FOUND, "Freelance project not found".into()));
             };
             let req_qty = dyn_msg.get(4).and_then(|v| match v {
                 DynamicValue::Uint64(u) => Some(*u as i64),
@@ -1052,8 +1036,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 _ => None,
             }).unwrap_or(25).max(batch_size).min(rem_progress);
 
-            // 2. Consume stack of required_type_id in station/structure hangar without holding projects lock
-            let Some(db) = &state_deliver.db else {
+            let Some(ref db) = state_deliver.db else {
                 return Err((STATUS_BAD_REQUEST, "Database not available".into()));
             };
             let mut delivered_units = 0i64;
@@ -1063,6 +1046,19 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 let Some(char_loc) = snap.characters.get(&(cid as i64)).and_then(|c| c.station_id.or(c.structure_id)) else {
                     return;
                 };
+                let max_char_rem = snap
+                    .alliance_war_state
+                    .project_details
+                    .get(&pid)
+                    .and_then(|d| {
+                        let prev = d.char_contributions.get(&(cid as i64)).copied().unwrap_or(0);
+                        d.max_per_character.map(|cap| cap.saturating_sub(prev) as i64)
+                    })
+                    .unwrap_or(i64::MAX);
+                let allowed_qty = req_qty.min(max_char_rem);
+                if allowed_qty < batch_size {
+                    return;
+                }
                 let mut to_remove = None;
                 for item in snap.items.values_mut() {
                     if item.owner_id == cid as i64
@@ -1071,7 +1067,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         && item.flag == eve_db::InventoryFlag::Hangar
                         && item.location_id == char_loc
                     {
-                        let take = ((item.quantity.min(req_qty as i32) as i64) / batch_size) * batch_size;
+                        let take = ((item.quantity.min(allowed_qty as i32) as i64) / batch_size) * batch_size;
                         if take > 0 {
                             item.quantity -= take as i32;
                             delivered_units = take;
@@ -1092,28 +1088,36 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 return Err((STATUS_BAD_REQUEST, format!("Failed precondition: no items of type {target_type_id} available to deliver")));
             }
 
-            // 3. Re-verify project is still active under write lock; if cancelled concurrently, refund consumed items
             let mut completed = false;
             let mut total_prog = 0i64;
-            let applied = {
-                let mut projects = state_deliver.projects.write().unwrap_or_else(|e| e.into_inner());
-                if let Some(p) = projects.get_mut(&uuid).filter(|p| p.state == 1 && p.committed_participants.contains(&cid)) {
-                    p.current_progress += delivered_units;
-                    total_prog = p.current_progress;
-                    let entry = p.contributors.entry(cid).or_insert((0, 0));
-                    let old_total = entry.0;
-                    entry.0 += delivered_units;
-                    let newly_earned = (entry.0 / batch_size) - (old_total / batch_size);
-                    entry.1 += newly_earned;
-                    if p.current_progress >= p.target_progress {
-                        p.state = 2; // Completed
-                        completed = true;
-                    }
-                    true
-                } else {
-                    false
+            let applied = db.with_mut_snapshot(|snap| {
+                let is_active = snap
+                    .alliance_war_state
+                    .project_details
+                    .get(&pid)
+                    .is_some_and(|d| d.status == "Active" && d.committed_participants.contains(&(cid as i64)));
+                if !is_active || !snap.corp_projects.contains_key(&pid) {
+                    return false;
                 }
-            };
+                if let Some(p_mut) = snap.corp_projects.get_mut(&pid) {
+                    p_mut.current_quantity = p_mut.current_quantity.saturating_add(delivered_units as u64);
+                    total_prog = p_mut.current_quantity as i64;
+                    completed = p_mut.current_quantity >= p_mut.target_quantity;
+                }
+                if let Some(det) = snap.alliance_war_state.project_details.get_mut(&pid) {
+                    *det.char_contributions.entry(cid as i64).or_insert(0) += delivered_units as u64;
+                    if completed {
+                        det.status = "Completed".into();
+                    }
+                }
+                if completed {
+                    if let Some(m) = snap.alliance_war_state.project_meta.get_mut(&pid) {
+                        m.2 = true;
+                    }
+                }
+                corp_projects::sync_corp_project_contributors(snap, pid);
+                true
+            });
             if !applied {
                 let _ = db.add_or_stack_item(cid as i64, consumed_loc, eve_db::InventoryFlag::Hangar, target_type_id, delivered_units);
                 return Err((STATUS_BAD_REQUEST, "Project no longer active".into()));
@@ -1125,23 +1129,21 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 target_type_id,
                 delivered_units,
             );
-            state_deliver.sync_to_db();
+            state_deliver.refresh_from_db(now_u);
 
-            // 1. ContributionSucceededNotice
             let mut succ_bytes = Vec::new();
             encode_uuid_field(1, &uuid, &mut succ_bytes);
             encode_char_id_field(2, cid, &mut succ_bytes);
-            encode_varint_field(3, delivered_units as u64, &mut succ_bytes); // units contributed
+            encode_varint_field(3, delivered_units as u64, &mut succ_bytes);
             ctx_queue_notice(
                 NoticeScope::Character(cid),
                 GoogleAny {
                     type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.contributionmethod.itemdelivery.api.ContributionSucceededNotice"),
                     value: succ_bytes,
                 },
-                ctx_now_unix(ctx),
+                now_u,
             );
 
-            // 2. ProgressedNotice to corporation
             let mut prog_bytes = Vec::new();
             encode_uuid_field(1, &uuid, &mut prog_bytes);
             encode_varint_field(2, total_prog as u64, &mut prog_bytes);
@@ -1152,10 +1154,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.ProgressedNotice"),
                     value: prog_bytes,
                 },
-                ctx_now_unix(ctx),
+                now_u,
             );
 
-            // 3. CompletedNotice if reached target
             if completed {
                 let mut comp_bytes = Vec::new();
                 encode_uuid_field(1, &uuid, &mut comp_bytes);
@@ -1165,13 +1166,12 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.CompletedNotice"),
                         value: comp_bytes,
                     },
-                    ctx_now_unix(ctx),
+                    now_u,
                 );
             }
 
-            // Response: DeliverResponse (deliver_result = Escrowed / Succeeded)
             let mut out = Vec::new();
-            encode_varint_field(1, 1, &mut out); // success / escrowed
+            encode_varint_field(1, 1, &mut out);
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.contributionmethod.itemdelivery.api.DeliverResponse"),
                 value: out,
@@ -1183,9 +1183,10 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let state_delivery_status = Arc::clone(&state);
     router.register_handler(
         "eve_public.freelance.contributionmethod.itemdelivery.api.GetStatusRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
             let uuid = extract_uuid(dyn_msg.get(1))
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing delivery UUID".into()))?;
+            state_delivery_status.refresh_from_db(ctx_now_unix(ctx));
             let projects = state_delivery_status.projects.read().unwrap_or_else(|e| e.into_inner());
             let p = projects
                 .get(&uuid)

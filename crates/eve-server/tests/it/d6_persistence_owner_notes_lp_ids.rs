@@ -505,7 +505,16 @@ async fn test_d6_ids_monotonic_and_durable_notifications_across_sqlite_restart()
         let quasar_corp = eve_server::services::quasar_social_corp::QuasarCorpState::from_db(std::sync::Arc::clone(&ctx.db));
         let plan_id_1 = quasar_corp.alloc_plan_id();
         let ms_id_1 = quasar_corp.alloc_milestone_id();
-        let goal_id_1 = quasar_corp.alloc_goal_id();
+        let goal_id_1 = quasar_corp
+            .create_goal_from_division(
+                corp_id_1 as u32,
+                "Pre-Restart Corp Goal".into(),
+                "Goal persisted before restart".into(),
+                250,
+                500_000,
+                1,
+            )
+            .expect("create_goal_from_division");
         quasar_corp.skill_plans.write().unwrap().insert(
             plan_id_1,
             eve_server::services::quasar_social_corp::CorpSkillPlanRecord {
@@ -516,23 +525,6 @@ async fn test_d6_ids_monotonic_and_durable_notifications_across_sqlite_restart()
                 category_id: 1,
                 requirements: vec![(3300, 5)],
                 milestones: vec![(ms_id_1, "Milestone Alpha".into())],
-            },
-        );
-        quasar_corp.goals.write().unwrap().insert(
-            goal_id_1,
-            eve_server::services::quasar_social_corp::CorpGoalRecord {
-                id: goal_id_1,
-                corp_id: corp_id_1 as u32,
-                name: "Pre-Restart Corp Goal".into(),
-                description: "Goal persisted before restart".into(),
-                target_progress: 250,
-                current_progress: 75,
-                active: true,
-                contributors: std::collections::HashMap::new(),
-                escrow_isk: 500_000,
-                initial_escrow_isk: 500_000,
-                reward_per_unit_isk: 0,
-                wallet_division: 3,
             },
         );
         quasar_corp.sync_to_db();
@@ -630,7 +622,10 @@ async fn test_d6_ids_monotonic_and_durable_notifications_across_sqlite_restart()
 
         let quasar_corp = eve_server::services::quasar_social_corp::QuasarCorpState::from_db(std::sync::Arc::clone(&ctx.db));
         assert!(quasar_corp.skill_plans.read().unwrap().contains_key(&plan_id_1), "Pre-restart skill plan must survive restart");
-        assert!(quasar_corp.goals.read().unwrap().contains_key(&goal_id_1), "Pre-restart corp goal must survive restart");
+        assert!(
+            ctx.db.with_snapshot(|s| s.corp_projects.contains_key(&(goal_id_1 as i64)) && !s.quasar_state_blobs.contains_key("quasar_corp_goals")),
+            "Pre-restart corp goal must survive restart in canonical snap.corp_projects"
+        );
         let plan_id_2 = quasar_corp.alloc_plan_id();
         let ms_id_2 = quasar_corp.alloc_milestone_id();
         let goal_id_2 = quasar_corp.alloc_goal_id();

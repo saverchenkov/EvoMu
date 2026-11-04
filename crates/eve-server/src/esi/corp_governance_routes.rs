@@ -676,30 +676,47 @@ pub fn dispatch_corp_governance_route(
                 let out: Vec<Value> = projs
                     .into_iter()
                     .map(|p| {
-                        let contributors: Vec<Value> = snap
-                            .corp_project_contributors
-                            .get(&p.project_id)
-                            .map(|list| {
-                                let mut sorted = list.clone();
-                                sorted.sort_by_key(|c| c.character_id);
-                                sorted
-                                    .into_iter()
-                                    .map(|c| {
-                                        json!({
-                                            "character_id": c.character_id,
-                                            "contributed_quantity": c.contributed_quantity,
-                                        })
-                                    })
-                                    .collect()
+                        let mut contrib_map: BTreeMap<i64, u64> = BTreeMap::new();
+                        if let Some(list) = snap.corp_project_contributors.get(&p.project_id) {
+                            for c in list {
+                                if c.contributed_quantity > 0 {
+                                    let entry = contrib_map.entry(c.character_id).or_insert(0);
+                                    *entry = (*entry).max(c.contributed_quantity);
+                                }
+                            }
+                        }
+                        let det = snap.alliance_war_state.project_details.get(&p.project_id);
+                        if let Some(d) = det {
+                            for (&cid, &qty) in &d.char_contributions {
+                                if qty > 0 {
+                                    let entry = contrib_map.entry(cid).or_insert(0);
+                                    *entry = (*entry).max(qty);
+                                }
+                            }
+                        }
+                        let contributors: Vec<Value> = contrib_map
+                            .into_iter()
+                            .map(|(cid, qty)| {
+                                json!({
+                                    "character_id": cid,
+                                    "contributed_quantity": qty,
+                                })
                             })
-                            .unwrap_or_default();
+                            .collect();
+                        let isk_per_unit = if p.isk_per_unit.raw_cents() > 0 {
+                            p.isk_per_unit.to_wire_f64()
+                        } else if let Some(d) = det.filter(|d| d.initial_escrow.raw_cents() > 0 && p.target_quantity > 0) {
+                            eve_db::IskCents(d.initial_escrow.raw_cents() / (p.target_quantity as i64)).to_wire_f64()
+                        } else {
+                            0.0
+                        };
                         json!({
                             "project_id": p.project_id,
                             "corporation_id": p.corporation_id,
                             "name": p.name,
                             "target_quantity": p.target_quantity,
                             "current_quantity": p.current_quantity,
-                            "isk_per_unit": p.isk_per_unit.to_wire_f64(),
+                            "isk_per_unit": isk_per_unit,
                             "escrow_remaining": p.escrow_remaining.to_wire_f64(),
                             "contributors": contributors,
                         })

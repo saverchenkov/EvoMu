@@ -550,45 +550,43 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
     .await
     .unwrap();
 
-    // E2E-18: Corporation Project Escrow & Member Contribution Payout (while docked at 60_003_760 where ore/mineral is in Hangar)
+    // E2E-18: Corporation Project Escrow & Member Contribution Payout via Quasar (while docked at 60_003_760)
     let corp_id = session.corporation_id.unwrap();
     ctx.db.with_mut_snapshot(|s| {
         if let Some(c) = s.corporations.get_mut(&corp_id) {
             c.wallet_divisions[0].balance = eve_db::IskCents::from_isk(1_000_000);
         }
     });
-    let proj_res = ctx
-        .dispatch_rpc(
-            &mut session,
-            "corporationSvc",
-            None,
-            "CreateGoalSubmit",
-            &[
-                PyRep::String("Mine Veldspar".into()),
-                PyRep::Integer(500),
-                PyRep::Real(100.0),
-                PyRep::String("MineMaterial".into()),
-            ],
-            &empty,
-            None,
-        )
-        .await
-        .unwrap();
-    let PyRep::KeyVal(pkv) = proj_res else {
-        panic!("Expected project KeyVal");
-    };
-    let pid = pkv.get("projectID").unwrap().as_i64().unwrap();
-    crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
-        &ctx,
-        90_000_001,
-        &["MineMaterial"],
-        500,
+    let (mut g_req, mut g_cfg, mut curr, mut isk, mut pool) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    eve_proto::quasar::encode_string_field(1, "Mine Veldspar", &mut g_req);
+    eve_proto::quasar::encode_varint_field(3, 500, &mut g_req);
+    eve_proto::quasar::encode_bytes_field(25, &[], &mut g_cfg);
+    eve_proto::quasar::encode_bytes_field(4, &g_cfg, &mut g_req);
+    eve_proto::quasar::encode_varint_field(1, eve_proto::quasar::encode_zigzag64(50_000), &mut curr);
+    eve_proto::quasar::encode_bytes_field(1, &curr, &mut isk);
+    eve_proto::quasar::encode_varint_field(1, 1, &mut pool);
+    eve_proto::quasar::encode_bytes_field(2, &isk, &mut pool);
+    eve_proto::quasar::encode_bytes_field(8, &pool, &mut g_req);
+    let now_u = ctx.now_unix();
+    let proj_rsp = ctx.quasar_gateway.handle_public_request(
+        &session,
+        &eve_proto::quasar::EvePublicRequest {
+            issued: Some(eve_proto::quasar::GoogleTimestamp { seconds: now_u as i64, nanos: 0 }),
+            correlation_uuid: vec![0x41; 16],
+            payload: Some(eve_proto::quasar::GoogleAny { type_url: "type.googleapis.com/eve_public.goal.api.CreateRequest".into(), value: g_req }),
+            external_origin: "test".into(),
+            application_instance_uuid: vec![0x42; 16],
+            authoritative_context: Some(eve_proto::quasar::AuthoritativeContext::for_session_at(Some(1), Some(90_000_001), Some(corp_id as u32), session.corp_role, "tranquility", vec![0x43; 16], now_u)),
+            trace_context: None,
+        },
         None,
+        false,
+        now_u,
     );
-    assert_eq!(
-        ctx.db.with_snapshot(|s| s.corp_projects[&pid].current_quantity),
-        500
-    );
+    assert_eq!(proj_rsp.status_code, crate::quasar_gateway::STATUS_OK, "{}", proj_rsp.status_message);
+    let pid = crate::services::social_corp_fleet::social_corp_projects::goal_uuid_to_project_id(&proj_rsp.payload.unwrap().value[4..20]).unwrap();
+    crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(&ctx, 90_000_001, &["MineMaterials"], 500, None);
+    assert_eq!(ctx.db.with_snapshot(|s| s.corp_projects[&pid].current_quantity), 500);
 
     // Undock via RPC and verify AbyssalEntranceDeployment returns UnimplementedRPC
     ctx.advance_secs(12);

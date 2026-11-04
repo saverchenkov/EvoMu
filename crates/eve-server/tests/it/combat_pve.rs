@@ -2006,28 +2006,35 @@ async fn test_feat_corporation_corp_project_contribution_methods_e2e() {
     let pid_mine = create_proj(&ctx, &mut sess1, "Mine Veldspar", 100, "MineMaterials", 1230).await;
     let pid_mfg = create_proj(&ctx, &mut sess1, "Build Item", 5, "ManufactureItems", mfg_prod_type_id as i64).await;
     let pid_deliv = create_proj(&ctx, &mut sess1, "Deliver Tritanium", 100, "DeliverItem", 34).await;
-    let fw_sys = ctx
-        .sde
-        .solar_systems
-        .values()
-        .find(|s| s.security_status > 0.0 && s.security_status < 0.45 && s.region_id != 10_000_070)
-        .expect("lowsec system")
-        .solar_system_id;
+    let fw_sys = ctx.db.with_snapshot(|snap| {
+        ctx.sde
+            .solar_systems
+            .values()
+            .filter(|s| {
+                s.security_status > 0.0
+                    && s.security_status < 0.45
+                    && s.region_id != 10_000_070
+                    && !snap
+                        .fw_system_occupations
+                        .get(&s.solar_system_id)
+                        .is_some_and(|o| matches!(o.occupier_faction_id, 500_001 | 500_003))
+            })
+            .map(|s| s.solar_system_id)
+            .min()
+            .expect("enemy/unoccupied lowsec system")
+    });
     let pid_fw = create_proj(&ctx, &mut sess1, "Capture FW", 5, "CaptureFWComplexes", fw_sys as i64).await;
     let pid_dmg = create_proj(&ctx, &mut sess1, "Damage Ships", 10_000, "DamageShips", jita_sys as i64).await;
     let pid_lp = create_proj(&ctx, &mut sess1, "Earn Caldari LP", 5_000, "EarnLoyaltyPoints", 1_000_180).await;
 
-    // Client-reported GoalProgress must be rejected for server-tracked matchers
-    let spoof_err = rpc(
-        &ctx,
-        &mut sess2,
-        "corporationSvc",
-        "GoalProgress",
-        &[PyRep::Integer(pid_npc), PyRep::Integer(5)],
-    )
-    .await
-    .expect_err("Client-reported count on server-tracked matcher must fail");
-    assert_eq!(spoof_err.code, "ServerTrackedMatcher");
+    // Client-reported SetCurrentProgressRequest must be rejected for non-GM pilots
+    let mut spoof_req = Vec::new();
+    let mut id_sub = Vec::new();
+    encode_bytes_field(1, &eve_server::services::social_corp_fleet::social_corp_projects::corp_goal_uuid(pid_npc), &mut id_sub);
+    encode_bytes_field(1, &id_sub, &mut spoof_req);
+    encode_varint_field(3, 5, &mut spoof_req);
+    let spoof_rsp = quasar_rpc(&ctx, &mut sess2, "eve_public.goal.api.SetCurrentProgressRequest", spoof_req, b"spoof-prog-1").await;
+    assert_eq!(spoof_rsp.status_code, eve_server::quasar_gateway::STATUS_FORBIDDEN);
 
     // 1. Kill NPCs: matching system advances, non-matching system does not
     let npc_type_id = ctx.sde.types.iter().find(|(_, t)| t.category_id == 11 && t.published).map(|(&id, _)| id).unwrap_or(10_000_001);
@@ -2041,7 +2048,7 @@ async fn test_feat_corporation_corp_project_contribution_methods_e2e() {
     eve_server::services::space_mining_harvest::dispatch_mining_gameplay_events(&ctx, PILOT_2, 35, jita_sys, 1228);
 
     // 3. Manufacture items: install & complete manufacturing job from SDE blueprint
-    let (bpo_id, ship_p2) = ctx.db.with_mut_snapshot(|s| {
+    let (bpo_id, ship_p2, trit_id) = ctx.db.with_mut_snapshot(|s| {
         let ship_id = s.characters.get(&PILOT_2).unwrap().active_ship_id;
         let ch = s.characters.get_mut(&PILOT_2).unwrap();
         ch.station_id = Some(jita_station);
@@ -2068,11 +2075,11 @@ async fn test_feat_corporation_corp_project_contribution_methods_e2e() {
         let trit_id = s.next_entity_id;
         s.items.insert(trit_id, InventoryItemRecord {
             item_id: trit_id, type_id: 34, owner_id: PILOT_2, location_id: jita_station,
-            flag: InventoryFlag::Hangar, quantity: 10_000, singleton: false, version: 1,
+            flag: InventoryFlag::Hangar, quantity: 40, singleton: false, version: 1,
             dynamic_attributes: HashMap::new(), source_mutaplasmid_id: None,
             insured_payout_isk: 0.0, is_blueprint_copy: false, blueprint_runs_remaining: None,
         });
-        (bpo, ship_id)
+        (bpo, ship_id, trit_id)
     });
     sess2.station_id = Some(jita_station);
     sess2.solar_system_id = Some(jita_sys);
@@ -2097,10 +2104,10 @@ async fn test_feat_corporation_corp_project_contribution_methods_e2e() {
         .await
         .expect("CompleteJob");
 
-    // 4. Deliver items: MachoNet GoalProgress + Quasar freelance DeliverRequest
-    rpc(&ctx, &mut sess2, "corporationSvc", "GoalProgress", &[PyRep::Integer(pid_deliv), PyRep::Integer(40)])
+    // 4. Deliver items: MachoNet invbroker.DeliverToCorpHangar + Quasar freelance DeliverRequest
+    rpc(&ctx, &mut sess2, "invbroker", "DeliverToCorpHangar", &[PyRep::Integer(trit_id), PyRep::Integer(1)])
         .await
-        .expect("GoalProgress DeliverItem");
+        .expect("DeliverToCorpHangar DeliverItem");
 
     let mut fl_create = Vec::new();
     encode_string_field(1, "Freelance Tritanium", &mut fl_create);
@@ -2194,26 +2201,42 @@ async fn create_proj(
     matcher: &str,
     filter: i64,
 ) -> i64 {
-    let rep = rpc(
-        ctx,
-        sess,
-        "corporationSvc",
-        "CreateGoalSubmit",
-        &[
-            PyRep::String(name.into()),
-            PyRep::Integer(target),
-            PyRep::Real(1_000.0),
-            PyRep::String(matcher.into()),
-            PyRep::Bool(false),
-            PyRep::Integer(1),
-            PyRep::Integer(target),
-            PyRep::Integer(7 * 86_400),
-            PyRep::Integer(filter),
-        ],
+    let wrap_id = |id: u64, path: &[u32]| -> Vec<u8> {
+        let mut cur = Vec::new();
+        encode_varint_field(1, id, &mut cur);
+        for &tag in path {
+            let mut outer = Vec::new();
+            encode_bytes_field(tag, &cur, &mut outer);
+            cur = outer;
+        }
+        cur
+    };
+    let (cfg_field, sub_bytes) = match matcher {
+        "DestroyNPCShips" => (31, wrap_id(filter as u64, &[1, 4, 2, 1])),
+        "MineMaterials" => (25, wrap_id(filter as u64, &[1, 3, 2, 2])),
+        "ManufactureItems" => (38, wrap_id(filter as u64, &[1, 3, 2, 1])),
+        "DeliverItem" => (37, wrap_id(filter as u64, &[1, 3, 2, 1])),
+        "CaptureFWComplexes" => (34, wrap_id(filter as u64, &[1, 4, 2, 2])),
+        "DamageShips" => (26, wrap_id(filter as u64, &[1, 4, 2, 1])),
+        "EarnLoyaltyPoints" => (29, wrap_id(filter as u64, &[1, 2, 1])),
+        other => panic!("unsupported matcher {other}"),
+    };
+    let (mut req, mut cfg, mut curr, mut isk, mut pool) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    encode_string_field(1, name, &mut req);
+    encode_varint_field(3, target as u64, &mut req);
+    encode_bytes_field(cfg_field, &sub_bytes, &mut cfg);
+    encode_bytes_field(4, &cfg, &mut req);
+    encode_varint_field(1, eve_proto::quasar::encode_zigzag64(target * 1_000), &mut curr);
+    encode_bytes_field(1, &curr, &mut isk);
+    encode_varint_field(1, 1, &mut pool);
+    encode_bytes_field(2, &isk, &mut pool);
+    encode_bytes_field(8, &pool, &mut req);
+    let rsp = quasar_rpc(ctx, sess, "eve_public.goal.api.CreateRequest", req, name.as_bytes()).await;
+    assert_eq!(rsp.status_code, STATUS_OK, "{}", rsp.status_message);
+    eve_server::services::social_corp_fleet::social_corp_projects::goal_uuid_to_project_id(
+        &rsp.payload.unwrap().value[4..20],
     )
-    .await
-    .expect("CreateGoalSubmit");
-    field(&rep, "projectID").as_i64().expect("projectID")
+    .expect("projectID")
 }
 }
 

@@ -222,19 +222,18 @@ async fn test_r7_p0_02_title_bitmask_shift_24h_role_delay_edit_project_and_goal_
     };
     ctx.dispatch_rpc(&mut sess_ceo, "corpRegistry", None, "UpdateMember", &upd_member_15(0, 1), &kw, None).await.expect("Assign Title 1");
 
-    let init_args = [
-        PyRep::String("Initial Project".into()),
-        PyRep::Integer(10),
-        PyRep::Real(1_000.0),
-        PyRep::String("DestroyNPCShips".into()),
-        PyRep::Bool(false),
-        PyRep::Integer(1),
-    ];
-    let created = ctx.dispatch_rpc(&mut sess_ceo, "corporationSvc", None, "CreateGoalSubmit", &init_args, &kw, None).await.unwrap();
-    let pid = match created {
-        PyRep::KeyVal(m) => m["projectID"].as_i64().unwrap(),
-        other => panic!("unexpected CreateGoalSubmit reply: {other:?}"),
-    };
+    let created = q_call(
+        &ctx,
+        &sess_ceo,
+        "eve_public.goal.api.CreateRequest",
+        encode_goal_create_with_escrow("Initial Project", 10, 10_000, 0),
+        now,
+    );
+    assert_eq!(created.status_code, STATUS_OK);
+    let pid = eve_server::services::social_corp_fleet::social_corp_projects::goal_uuid_to_project_id(
+        &created.payload.unwrap().value[4..20],
+    )
+    .expect("canonical project id");
 
     // 1. Pilot with Title 1 (`tmask = 1`) + stale `session.corp_role = ROLE_DIRECTOR` does NOT inherit Title 3 or stale session role
     let mut sess_p = make_session(70202, 2, pilot_id, corp_id, 0, corp_roles::ROLE_DIRECTOR);
@@ -242,15 +241,6 @@ async fn test_r7_p0_02_title_bitmask_shift_24h_role_delay_edit_project_and_goal_
         ctx.dispatch_rpc(&mut sess_p, "corpRegistry", None, "SetAccountKey", &[PyRep::Integer(1001)], &kw, None).await.unwrap_err().code,
         "CorpRoleDenied"
     );
-    let goal_args = [
-        PyRep::String("Title1 Exploit".into()),
-        PyRep::Integer(5),
-        PyRep::Real(10_000.0),
-        PyRep::String("DestroyNPCShips".into()),
-        PyRep::Bool(false),
-        PyRep::Integer(1),
-    ];
-    assert_eq!(ctx.dispatch_rpc(&mut sess_p, "corporationSvc", None, "CreateGoalSubmit", &goal_args, &kw, None).await.unwrap_err().code, "CorpRoleDenied");
     assert_eq!(
         eve_server::services::social_corp_fleet::social_corp_projects::handle_edit_project(
             &ctx,
@@ -292,7 +282,6 @@ async fn test_r7_p0_02_title_bitmask_shift_24h_role_delay_edit_project_and_goal_
         "CorpRoleDenied"
     );
     let t1 = ctx.now_unix();
-    assert_eq!(ctx.dispatch_rpc(&mut sess_p, "corporationSvc", None, "CreateGoalSubmit", &goal_args, &kw, None).await.unwrap_err().code, "CorpRoleDenied");
     assert_eq!(q_call(&ctx, &sess_p, "eve_public.goal.api.CreateRequest", q_escrow.clone(), t1).status_code, STATUS_FORBIDDEN);
 
     ctx.advance_secs(11);

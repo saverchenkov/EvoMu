@@ -180,13 +180,15 @@ impl ProgressionExtraManager {
     /// Owning corporation of a goal backed by the corporation project ledger (`CORPGOAL` UUIDs).
     /// Must be read before a delete removes the ledger entry.
     pub fn goal_corp_id(&self, uuid: &[u8; 16]) -> Option<u32> {
-        if &uuid[0..8] != notices::CORP_GOAL_UUID_PREFIX {
-            return None;
-        }
-        let goal_id = u64::from_be_bytes(uuid[8..16].try_into().ok()?);
-        let cs = self.corp_state.as_ref()?;
-        let goals = cs.goals.read().unwrap_or_else(|e| e.into_inner());
-        goals.get(&goal_id).map(|g| g.corp_id)
+        let pid = crate::services::social_corp_fleet::social_corp_projects::goal_uuid_to_project_id(uuid)?;
+        let db = self.db.as_ref().or_else(|| self.corp_state.as_ref()?.db.as_ref())?;
+        db.with_snapshot(|s| {
+            s.corp_projects
+                .get(&pid)
+                .filter(|_| !s.alliance_war_state.project_meta.get(&pid).is_some_and(|m| m.1))
+                .and_then(|p| u32::try_from(p.corporation_id).ok())
+                .filter(|&c| c > 0)
+        })
     }
 
     pub fn save_to_db(&self) {
@@ -618,49 +620,77 @@ pub fn register_progression_extra_handlers(
     );
 
     // ------------------------------------------------------------------------
-    // 3. Generic Goal Handlers
+    // 3. Generic Goal Handlers (unified onto canonical snap.corp_projects)
     // ------------------------------------------------------------------------
-    fn parse_isk_value(val: &DynamicValue) -> Result<i64, (u32, String)> {
-        match val {
-            DynamicValue::Sint64(v) | DynamicValue::Int64(v) => {
-                if *v < 0 {
-                    Err((STATUS_BAD_REQUEST, "Negative goal reward amount".into()))
+    use crate::services::social_corp_fleet::social_corp_projects as corp_projects;
+
+    fn load_live_goal(
+        mgr: &ProgressionExtraManager,
+        target_uuid: &[u8; 16],
+        now_unix: u64,
+    ) -> Option<(GenericGoalRecord, u64)> {
+        if let (Some(pid), Some(ref db)) = (corp_projects::goal_uuid_to_project_id(target_uuid), &mgr.db) {
+            let _ = db.with_mut_snapshot(|s| corp_projects::sweep_expired_corp_projects_in_snap(s, now_unix));
+            let from_db = db.with_snapshot(|s| {
+                let p = s.corp_projects.get(&pid)?;
+                if s.alliance_war_state.project_meta.get(&pid).is_some_and(|m| m.1) {
+                    return None;
+                }
+                let det = s.alliance_war_state.project_details.get(&pid).cloned().unwrap_or_default();
+                let st = if det.expired || det.status == "Expired" {
+                    4
+                } else if det.closed || det.status == "Closed" {
+                    2
+                } else if p.current_quantity >= p.target_quantity || det.status == "Completed" {
+                    3
                 } else {
-                    Ok(*v)
-                }
-            }
-            DynamicValue::Uint64(u) => i64::try_from(*u).map_err(|_| (STATUS_BAD_REQUEST, "Goal reward overflow".into())),
-            DynamicValue::Sint32(v) | DynamicValue::Int32(v) => {
-                if *v < 0 {
-                    Err((STATUS_BAD_REQUEST, "Negative goal reward amount".into()))
+                    1
+                };
+                Some((p.name.clone(), det.description, p.target_quantity, p.current_quantity, det.creator_id, det.closed || det.status == "Closed", st))
+            });
+            if let Some((name, desc, desired, current, det_creator, closed, state)) = from_db {
+                let creator_id = if det_creator > 0 {
+                    det_creator as u32
                 } else {
-                    Ok(*v as i64)
-                }
+                    mgr.generic_goals.read().unwrap_or_else(|e| e.into_inner()).get(&uuid_to_hex(target_uuid)).map_or(0, |g| g.creator_id)
+                };
+                return Some((GenericGoalRecord { uuid: *target_uuid, creator_id, name, description: desc, desired_progress: desired, current_progress: current, closed }, state));
             }
-            DynamicValue::Uint32(u) => Ok(*u as i64),
-            DynamicValue::Message(m) => {
-                if let Some(sub2) = m.get(2) {
-                    if let Ok(v) = parse_isk_value(sub2) {
-                        if v > 0 {
-                            return Ok(v);
-                        }
-                    }
-                }
-                if let Some(sub1) = m.get(1) {
-                    return parse_isk_value(sub1);
-                }
-                Ok(0)
-            }
-            DynamicValue::Repeated(list) => {
-                let mut sum = 0i64;
-                for item in list {
-                    let v = parse_isk_value(item)?;
-                    sum = sum.checked_add(v).ok_or_else(|| (STATUS_BAD_REQUEST, "Goal reward overflow".into()))?;
-                }
-                Ok(sum)
-            }
-            _ => Ok(0),
         }
+        mgr.generic_goals.read().unwrap_or_else(|e| e.into_inner()).get(&uuid_to_hex(target_uuid)).cloned().map(|g| {
+            let st = if g.closed { 2 } else if g.current_progress >= g.desired_progress { 3 } else { 1 };
+            (g, st)
+        })
+    }
+
+    fn collect_all_live_goals(mgr: &ProgressionExtraManager, now_unix: u64) -> Vec<GenericGoalRecord> {
+        let mut by_hex: HashMap<String, GenericGoalRecord> = mgr.generic_goals.read().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(ref db) = mgr.db {
+            let _ = db.with_mut_snapshot(|s| corp_projects::sweep_expired_corp_projects_in_snap(s, now_unix));
+            db.with_snapshot(|s| {
+                for (&pid, p) in &s.corp_projects {
+                    if s.alliance_war_state.project_meta.get(&pid).is_some_and(|m| m.1) {
+                        continue;
+                    }
+                    let det = s.alliance_war_state.project_details.get(&pid).cloned().unwrap_or_default();
+                    let uuid = corp_projects::corp_goal_uuid(pid);
+                    let hex = uuid_to_hex(&uuid);
+                    let creator_id = if det.creator_id > 0 { det.creator_id as u32 } else { by_hex.get(&hex).map_or(0, |g| g.creator_id) };
+                    by_hex.insert(hex, GenericGoalRecord {
+                        uuid,
+                        creator_id,
+                        name: p.name.clone(),
+                        description: det.description,
+                        desired_progress: p.target_quantity,
+                        current_progress: p.current_quantity,
+                        closed: det.closed || det.status == "Closed",
+                    });
+                }
+            });
+        }
+        let mut list: Vec<GenericGoalRecord> = by_hex.into_values().collect();
+        list.sort_by_key(|g| g.uuid);
+        list
     }
 
     let mgr = Arc::clone(&manager);
@@ -671,104 +701,86 @@ pub fn register_progression_extra_handlers(
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
             let corpid = ctx.effective_corporation_id().or_else(|| {
-                mgr.db.as_ref().and_then(|d| {
-                    d.with_snapshot(|s| s.characters.get(&(cid as i64)).map(|c| c.corporation_id as u32))
-                })
+                mgr.db.as_ref().and_then(|d| d.with_snapshot(|s| s.characters.get(&(cid as i64)).map(|c| c.corporation_id as u32)))
             });
-            let sess_role = ctx.corp_role_mask;
             let now_u = ctx.now_unix();
-            let (is_ceo, corp_role, wallet_div) = corpid.zip(mgr.db.as_ref()).map_or((false, sess_role, 1u8), |(c_id, d)| {
+            let (is_ceo, corp_role, wallet_div) = corpid.zip(mgr.db.as_ref()).map_or((false, ctx.corp_role_mask, 1u8), |(c_id, d)| {
                 d.with_snapshot(|s| {
-                    let cid_i = cid as i64;
-                    let c_id_i = c_id as i64;
-                    let (ceo, eff_roles) = crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-                        s, c_id_i, cid_i, sess_role, now_u,
-                    );
-                    let acct = s.corp_governance.get(&c_id_i).and_then(|g| g.member_account_keys.get(&cid_i).copied()).unwrap_or(1000);
+                    let (ceo, eff) = corp_projects::effective_corp_member_roles(s, c_id as i64, cid as i64, ctx.corp_role_mask, now_u);
+                    let acct = s.corp_governance.get(&(c_id as i64)).and_then(|g| g.member_account_keys.get(&(cid as i64)).copied()).unwrap_or(1000);
                     let div = if (1000..=1006).contains(&acct) { (acct - 999) as u8 } else { 1 };
-                    (ceo, eff_roles, div)
+                    (ceo, eff, div)
                 })
             });
             let is_gm = require_admin_role(ctx).is_ok();
-            let has_corp_role = (corp_role
-                & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_PROJECT_MANAGER))
-                != 0;
+            let has_corp_role = (corp_role & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_PROJECT_MANAGER)) != 0;
             if !is_ceo && !has_corp_role && !is_gm {
                 return Err((STATUS_FORBIDDEN, "CorpRoleDenied: Insufficient corporation role to create corporation goal".into()));
             }
 
-            let name = dyn_msg
-                .get(1)
-                .and_then(|v| match v {
-                    DynamicValue::String(s) if !s.trim().is_empty() => Some(s.clone()),
-                    _ => None,
-                })
-                .unwrap_or_else(|| "Organization Goal".to_string());
-            let desc = dyn_msg
-                .get(2)
-                .and_then(|v| match v {
-                    DynamicValue::String(s) => Some(s.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default();
-            let target = dyn_msg
-                .get(3)
-                .and_then(|v| match v {
-                    DynamicValue::Uint64(u) if *u > 0 => Some(*u),
-                    DynamicValue::Int64(i) if *i > 0 => Some(*i as u64),
-                    _ => None,
-                })
-                .unwrap_or(100);
-            let initial_prog = dyn_msg
-                .get(5)
-                .and_then(|v| match v {
-                    DynamicValue::Uint64(u) => Some(*u),
-                    DynamicValue::Int64(i) if *i >= 0 => Some(*i as u64),
-                    _ => None,
-                })
-                .unwrap_or(0)
-                .min(target);
+            let name = match dyn_msg.get(1) {
+                Some(DynamicValue::String(s)) if !s.trim().is_empty() => s.clone(),
+                _ => "Organization Goal".to_string(),
+            };
+            let desc = match dyn_msg.get(2) {
+                Some(DynamicValue::String(s)) => s.clone(),
+                _ => String::new(),
+            };
+            let target = match dyn_msg.get(3) {
+                Some(DynamicValue::Uint64(u)) if *u > 0 => *u,
+                Some(DynamicValue::Int64(i)) if *i > 0 => *i as u64,
+                _ => 100,
+            };
+            let initial_prog = match dyn_msg.get(5) {
+                Some(DynamicValue::Uint64(u)) => (*u).min(target),
+                Some(DynamicValue::Int64(i)) if *i >= 0 => (*i as u64).min(target),
+                _ => 0,
+            };
             if initial_prog > 0 && !is_gm {
                 return Err((STATUS_FORBIDDEN, "Non-admin callers cannot seed initial goal progress on CreateRequest".into()));
             }
-            let (mut escrow_isk, mut explicit_reward_per_unit) = (0i64, 0i64);
-            if let Some(pools) = dyn_msg.get(8) {
-                escrow_isk = escrow_isk.saturating_add(parse_isk_value(pools)?);
-            }
-            if let Some(rewards) = dyn_msg.get(7) {
-                explicit_reward_per_unit = parse_isk_value(rewards)?;
-                if escrow_isk == 0 {
-                    escrow_isk = escrow_isk.saturating_add(explicit_reward_per_unit.saturating_mul(target as i64));
-                }
-            }
-            if escrow_isk > 0 && !is_ceo && !is_gm && (corp_role & eve_db::corp_roles::ROLE_DIRECTOR) == 0 {
+            let opts = corp_projects::parse_goal_create_options(dyn_msg, target)?;
+            if opts.escrow.raw_cents() > 0 && !is_ceo && !is_gm && (corp_role & eve_db::corp_roles::ROLE_DIRECTOR) == 0 {
                 let take_bit = eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[(wallet_div.clamp(1, 7) - 1) as usize];
                 if (corp_role & take_bit) == 0 {
                     return Err((STATUS_FORBIDDEN, "CorpRoleDenied: Project Manager lacks wallet division take role for escrow".into()));
                 }
             }
 
-            let goal_id = if let (Some(ref cs), Some(c_id)) = (&mgr.corp_state, corpid) {
-                let gid = cs.create_goal_from_division(c_id, name.clone(), desc.clone(), target as i64, escrow_isk, wallet_div)?;
-                if initial_prog > 0 || explicit_reward_per_unit > 0 {
-                    if let Some(cg) = cs.goals.write().unwrap_or_else(|e| e.into_inner()).get_mut(&gid) {
-                        if initial_prog > 0 {
-                            cg.current_progress = initial_prog as i64;
-                        }
-                        if explicit_reward_per_unit > 0 {
-                            cg.reward_per_unit_isk = explicit_reward_per_unit;
-                        }
-                    }
+            let uuid = if let (Some(ref db), Some(c_id)) = (&mgr.db, corpid) {
+                let min_id = mgr.corp_state.as_ref().map_or(101, |cs| cs.alloc_goal_id() as i64);
+                let (pid, u) = corp_projects::create_canonical_project(
+                    db,
+                    corp_projects::CanonicalProjectSpec {
+                        corp_id: c_id as i64,
+                        creator_id: cid as i64,
+                        name: name.clone(),
+                        description: desc.clone(),
+                        target_quantity: target,
+                        initial_quantity: initial_prog,
+                        escrow: opts.escrow,
+                        isk_per_unit: opts.isk_per_unit,
+                        wallet_division: wallet_div,
+                        matcher_type: opts.matcher_type,
+                        is_freelance: false,
+                        auto_payout_on_contribution: opts.auto_payout,
+                        max_per_character: opts.max_per_character,
+                        expires_unix: opts.expires_unix,
+                        filter_id: opts.filter_id,
+                        batch_size: 1,
+                        now_unix: now_u,
+                        min_project_id: min_id,
+                    },
+                )?;
+                if let Some(ref cs) = mgr.corp_state {
+                    cs.id_counters.write().unwrap_or_else(|e| e.into_inner()).2 = (pid as u64) + 1;
                     cs.sync_to_db();
                 }
-                gid
+                u
             } else {
-                mgr.corp_state.as_ref().map(|cs| cs.alloc_goal_id()).unwrap_or_else(|| ctx.now_unix())
+                let gid = mgr.corp_state.as_ref().map(|cs| cs.alloc_goal_id()).unwrap_or_else(|| ctx.now_unix());
+                corp_projects::corp_goal_uuid(gid as i64)
             };
-
-            let mut uuid = [0u8; 16];
-            uuid[0..8].copy_from_slice(b"CORPGOAL");
-            uuid[8..16].copy_from_slice(&goal_id.to_be_bytes());
 
             let rec = GenericGoalRecord {
                 uuid,
@@ -779,12 +791,11 @@ pub fn register_progression_extra_handlers(
                 current_progress: initial_prog,
                 closed: false,
             };
-            // Members of the owning corporation see new projects appear via CreatedNotice.
             let goal_corp = mgr.goal_corp_id(&uuid);
             let created = notices::goal_created(
                 &uuid,
                 &notices::GoalAttributesView {
-                    created_unix: ctx.now_unix(),
+                    created_unix: now_u,
                     creator_id: cid,
                     corp_id: goal_corp,
                     name: &rec.name,
@@ -795,7 +806,7 @@ pub fn register_progression_extra_handlers(
             );
             mgr.generic_goals.write().unwrap_or_else(|e| e.into_inner()).insert(uuid_to_hex(&uuid), rec);
             mgr.save_to_db();
-            ctx_queue_notice(notices::goal_scope(goal_corp, cid), created, ctx.now_unix());
+            ctx_queue_notice(notices::goal_scope(goal_corp, cid), created, now_u);
 
             let mut out = Vec::new();
             let mut id_bytes = Vec::new();
@@ -827,9 +838,7 @@ pub fn register_progression_extra_handlers(
                     }
                 }
             }
-            let goals = mgr.generic_goals.read().unwrap_or_else(|e| e.into_inner());
-            let g = goals
-                .get(&uuid_to_hex(&target_uuid))
+            let (g, state) = load_live_goal(&mgr, &target_uuid, ctx.now_unix())
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Goal not found".into()))?;
 
             let mut out = Vec::new();
@@ -837,13 +846,12 @@ pub fn register_progression_extra_handlers(
             encode_string_field(2, &g.name, &mut attr_bytes);
             encode_string_field(3, &g.description, &mut attr_bytes);
 
-            // 5: progress
             let mut prog_bytes = Vec::new();
             encode_varint_field(1, g.desired_progress, &mut prog_bytes);
             encode_varint_field(2, g.current_progress, &mut prog_bytes);
             encode_bytes_field(5, &prog_bytes, &mut attr_bytes);
 
-            encode_varint_field(6, if g.closed { 2 } else { 1 }, &mut attr_bytes); // state
+            encode_varint_field(6, state, &mut attr_bytes);
             encode_bytes_field(1, &attr_bytes, &mut out);
 
             Ok(GoogleAny {
@@ -864,9 +872,8 @@ pub fn register_progression_extra_handlers(
                     db.with_snapshot(|s| s.characters.get(&(cid as i64)).map(|c| c.corporation_id as u32))
                 })
             });
-            let goals = mgr.generic_goals.read().unwrap_or_else(|e| e.into_inner());
             let mut out = Vec::new();
-            for g in goals.values() {
+            for g in collect_all_live_goals(&mgr, ctx.now_unix()) {
                 if !is_admin {
                     if let (Some(gc), Some(cc)) = (mgr.goal_corp_id(&g.uuid), caller_corp) {
                         if gc != 0 && gc != cc && caller_cid != Some(g.creator_id) {
@@ -902,7 +909,7 @@ pub fn register_progression_extra_handlers(
                         if caller_corp != Some(gc) {
                             return false;
                         }
-                        let (ceo, eff) = crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+                        let (ceo, eff) = corp_projects::effective_corp_member_roles(
                             s, gc as i64, caller_id as i64, ctx.corp_role_mask, ctx.now_unix(),
                         );
                         ceo || (eff & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_PROJECT_MANAGER)) != 0
@@ -921,33 +928,32 @@ pub fn register_progression_extra_handlers(
             let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
+            let now_u = ctx.now_unix();
             let hex = uuid_to_hex(&target_uuid);
             let goal_corp = mgr.goal_corp_id(&target_uuid);
             let is_corp_mgr = can_manage_corp_goal(&mgr, caller_id, goal_corp, ctx);
-            let (creator_id, was_open) = {
-                let mut goals = mgr.generic_goals.write().unwrap_or_else(|e| e.into_inner());
-                let Some(g) = goals.get_mut(&hex) else {
-                    return Err((STATUS_NOT_FOUND, "Goal not found".into()));
-                };
-                if g.creator_id != caller_id && !is_corp_mgr && crate::quasar_gateway::require_admin_role(ctx).is_err() {
-                    return Err((STATUS_FORBIDDEN, "Forbidden: not goal creator or corporation project manager/director".into()));
-                }
-                let was_open = !g.closed;
+            let (live_g, _) = load_live_goal(&mgr, &target_uuid, now_u)
+                .ok_or_else(|| (STATUS_NOT_FOUND, "Goal not found".into()))?;
+            if live_g.creator_id != caller_id && !is_corp_mgr && crate::quasar_gateway::require_admin_role(ctx).is_err() {
+                return Err((STATUS_FORBIDDEN, "Forbidden: not goal creator or corporation project manager/director".into()));
+            }
+            let was_open = !live_g.closed;
+            if let Some(g) = mgr.generic_goals.write().unwrap_or_else(|e| e.into_inner()).get_mut(&hex) {
                 g.closed = true;
-                (g.creator_id, was_open)
-            };
+            }
             mgr.save_to_db();
-            if let Some(ref cs) = mgr.corp_state {
-                if &target_uuid[0..8] == b"CORPGOAL" {
-                    let goal_id = u64::from_be_bytes(target_uuid[8..16].try_into().unwrap());
-                    cs.close_or_delete_goal(goal_id, false);
+            if let (Some(pid), Some(ref db)) = (corp_projects::goal_uuid_to_project_id(&target_uuid), &mgr.db) {
+                let _ = corp_projects::close_or_delete_canonical_project(db, pid, false, now_u);
+            } else if let Some(ref cs) = mgr.corp_state {
+                if let Some(pid) = corp_projects::goal_uuid_to_project_id(&target_uuid) {
+                    cs.close_or_delete_goal(pid as u64, false, now_u);
                 }
             }
             if was_open {
                 ctx_queue_notice(
-                    notices::goal_scope(goal_corp, creator_id),
+                    notices::goal_scope(goal_corp, live_g.creator_id),
                     notices::goal_closed(&target_uuid, caller_id),
-                    ctx.now_unix(),
+                    now_u,
                 );
             }
             Ok(GoogleAny {
@@ -981,39 +987,47 @@ pub fn register_progression_extra_handlers(
                     _ => None,
                 })
                 .unwrap_or(0);
+            let now_u = ctx.now_unix();
             let hex = uuid_to_hex(&target_uuid);
-            let (capped, prev, desired, creator_id) = {
-                let mut goals = mgr.generic_goals.write().unwrap_or_else(|e| e.into_inner());
-                let Some(g) = goals.get_mut(&hex) else {
-                    return Err((STATUS_NOT_FOUND, "Goal not found".into()));
-                };
-                if expected_curr != g.current_progress {
-                    return Err((
-                        crate::quasar_gateway::STATUS_CONFLICT,
-                        format!("Goal current_progress CAS mismatch: expected {expected_curr}, actual {}", g.current_progress),
-                    ));
-                }
-                let prev = g.current_progress;
-                let c = new_prog.min(g.desired_progress);
-                g.current_progress = c;
-                (c, prev, g.desired_progress, g.creator_id)
-            };
-            mgr.save_to_db();
-            if let Some(ref cs) = mgr.corp_state {
-                if &target_uuid[0..8] == b"CORPGOAL" {
-                    let goal_id = u64::from_be_bytes(target_uuid[8..16].try_into().unwrap());
-                    if let Some(cg) = cs.goals.write().unwrap_or_else(|e| e.into_inner()).get_mut(&goal_id) {
-                        cg.current_progress = (capped as i64).clamp(0, cg.target_progress);
-                    }
-                    cs.sync_to_db();
-                }
+            let (live_g, _) = load_live_goal(&mgr, &target_uuid, now_u)
+                .ok_or_else(|| (STATUS_NOT_FOUND, "Goal not found".into()))?;
+            if expected_curr != live_g.current_progress {
+                return Err((
+                    crate::quasar_gateway::STATUS_CONFLICT,
+                    format!("Goal current_progress CAS mismatch: expected {expected_curr}, actual {}", live_g.current_progress),
+                ));
             }
-            let scope = notices::goal_scope(mgr.goal_corp_id(&target_uuid), creator_id);
+            let prev = live_g.current_progress;
+            let desired = live_g.desired_progress;
+            let capped = new_prog.min(desired);
+            if let Some(g) = mgr.generic_goals.write().unwrap_or_else(|e| e.into_inner()).get_mut(&hex) {
+                g.current_progress = capped;
+            }
+            mgr.save_to_db();
+            if let (Some(pid), Some(ref db)) = (corp_projects::goal_uuid_to_project_id(&target_uuid), &mgr.db) {
+                db.with_mut_snapshot(|snap| {
+                    if let Some(p) = snap.corp_projects.get_mut(&pid) {
+                        p.current_quantity = capped.min(p.target_quantity);
+                        let done = p.current_quantity >= p.target_quantity;
+                        if let Some(m) = snap.alliance_war_state.project_meta.get_mut(&pid) {
+                            m.2 = done;
+                        }
+                        if done {
+                            if let Some(d) = snap.alliance_war_state.project_details.get_mut(&pid) {
+                                if d.status == "Active" {
+                                    d.status = "Completed".into();
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+            let scope = notices::goal_scope(mgr.goal_corp_id(&target_uuid), live_g.creator_id);
             if capped != prev {
-                ctx_queue_notice(scope.clone(), notices::goal_progressed(&target_uuid, capped), ctx.now_unix());
+                ctx_queue_notice(scope.clone(), notices::goal_progressed(&target_uuid, capped), now_u);
             }
             if capped >= desired && prev < desired {
-                ctx_queue_notice(scope, notices::goal_completed(&target_uuid), ctx.now_unix());
+                ctx_queue_notice(scope, notices::goal_completed(&target_uuid), now_u);
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.api.SetCurrentProgressResponse"),
@@ -1032,32 +1046,28 @@ pub fn register_progression_extra_handlers(
             let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
+            let now_u = ctx.now_unix();
             let hex = uuid_to_hex(&target_uuid);
             let goal_corp = mgr.goal_corp_id(&target_uuid);
             let is_corp_mgr = can_manage_corp_goal(&mgr, caller_id, goal_corp, ctx);
-            let creator_id = {
-                let mut goals = mgr.generic_goals.write().unwrap_or_else(|e| e.into_inner());
-                let Some(g) = goals.get(&hex) else {
-                    return Err((STATUS_NOT_FOUND, "Goal not found".into()));
-                };
-                if g.creator_id != caller_id && !is_corp_mgr && crate::quasar_gateway::require_admin_role(ctx).is_err() {
-                    return Err((STATUS_FORBIDDEN, "Forbidden: not goal creator or corporation project manager/director".into()));
-                }
-                let creator_id = g.creator_id;
-                goals.remove(&hex);
-                creator_id
-            };
+            let (live_g, _) = load_live_goal(&mgr, &target_uuid, now_u)
+                .ok_or_else(|| (STATUS_NOT_FOUND, "Goal not found".into()))?;
+            if live_g.creator_id != caller_id && !is_corp_mgr && crate::quasar_gateway::require_admin_role(ctx).is_err() {
+                return Err((STATUS_FORBIDDEN, "Forbidden: not goal creator or corporation project manager/director".into()));
+            }
+            mgr.generic_goals.write().unwrap_or_else(|e| e.into_inner()).remove(&hex);
             mgr.save_to_db();
-            if let Some(ref cs) = mgr.corp_state {
-                if &target_uuid[0..8] == b"CORPGOAL" {
-                    let goal_id = u64::from_be_bytes(target_uuid[8..16].try_into().unwrap());
-                    cs.close_or_delete_goal(goal_id, true);
+            if let (Some(pid), Some(ref db)) = (corp_projects::goal_uuid_to_project_id(&target_uuid), &mgr.db) {
+                let _ = corp_projects::close_or_delete_canonical_project(db, pid, true, now_u);
+            } else if let Some(ref cs) = mgr.corp_state {
+                if let Some(pid) = corp_projects::goal_uuid_to_project_id(&target_uuid) {
+                    cs.close_or_delete_goal(pid as u64, true, now_u);
                 }
             }
             ctx_queue_notice(
-                notices::goal_scope(goal_corp, creator_id),
+                notices::goal_scope(goal_corp, live_g.creator_id),
                 notices::goal_deleted(&target_uuid),
-                ctx.now_unix(),
+                now_u,
             );
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.api.DeleteResponse"),
@@ -1088,28 +1098,30 @@ pub fn register_progression_extra_handlers(
                 if is_name && text.trim().is_empty() {
                     return Err((STATUS_BAD_REQUEST, "Goal name must not be empty".into()));
                 }
-                let creator_id = {
-                    let mut goals = mgr.generic_goals.write().unwrap_or_else(|e| e.into_inner());
-                    let Some(g) = goals.get_mut(&uuid_to_hex(&target_uuid)) else {
-                        return Err((STATUS_NOT_FOUND, "Goal not found".into()));
-                    };
+                let now_u = ctx.now_unix();
+                let (live_g, _) = load_live_goal(&mgr, &target_uuid, now_u)
+                    .ok_or_else(|| (STATUS_NOT_FOUND, "Goal not found".into()))?;
+                if let Some(g) = mgr.generic_goals.write().unwrap_or_else(|e| e.into_inner()).get_mut(&uuid_to_hex(&target_uuid)) {
                     if is_name { g.name = text.clone() } else { g.description = text.clone() }
-                    g.creator_id
-                };
+                }
                 mgr.save_to_db();
-                if let (Some(cs), true) = (&mgr.corp_state, &target_uuid[0..8] == notices::CORP_GOAL_UUID_PREFIX) {
-                    let goal_id = u64::from_be_bytes(target_uuid[8..16].try_into().unwrap_or([0; 8]));
-                    if let Some(cg) = cs.goals.write().unwrap_or_else(|e| e.into_inner()).get_mut(&goal_id) {
-                        if is_name { cg.name = text.clone() } else { cg.description = text.clone() }
-                    }
-                    cs.sync_to_db();
+                if let (Some(pid), Some(ref db)) = (corp_projects::goal_uuid_to_project_id(&target_uuid), &mgr.db) {
+                    db.with_mut_snapshot(|snap| {
+                        if is_name {
+                            if let Some(p) = snap.corp_projects.get_mut(&pid) {
+                                p.name = text.clone();
+                            }
+                        } else if let Some(d) = snap.alliance_war_state.project_details.get_mut(&pid) {
+                            d.description = text.clone();
+                        }
+                    });
                 }
                 let notice = if is_name {
                     notices::goal_name_changed(&target_uuid, &text)
                 } else {
                     notices::goal_description_changed(&target_uuid, &text)
                 };
-                ctx_queue_notice(notices::goal_scope(mgr.goal_corp_id(&target_uuid), creator_id), notice, ctx.now_unix());
+                ctx_queue_notice(notices::goal_scope(mgr.goal_corp_id(&target_uuid), live_g.creator_id), notice, now_u);
                 Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rsp_name}"), value: Vec::new() })
             }),
         );
@@ -1122,13 +1134,13 @@ pub fn register_progression_extra_handlers(
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let count = mgr.generic_goals.read().unwrap_or_else(|e| e.into_inner())
-                .values()
+            let count = collect_all_live_goals(&mgr, ctx.now_unix())
+                .into_iter()
                 .filter(|g| g.creator_id == cid && !g.closed)
                 .count() as u64;
             let mut out = Vec::new();
-            encode_varint_field(1, count, &mut out);  // count
-            encode_varint_field(2, 50, &mut out); // capacity = 50
+            encode_varint_field(1, count, &mut out);
+            encode_varint_field(2, 50, &mut out);
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.api.GetCapacityResponse"),
                 value: out,
@@ -1147,20 +1159,24 @@ pub fn register_progression_extra_handlers(
         s_b
     };
     let resolve_goal_contribs = |mgr: &ProgressionExtraManager, g: &GenericGoalRecord| -> Vec<(u32, u64)> {
-        if &g.uuid[0..8] == notices::CORP_GOAL_UUID_PREFIX {
-            if let Some(ref cs) = mgr.corp_state {
-                let gid = u64::from_be_bytes(g.uuid[8..16].try_into().unwrap_or([0; 8]));
-                if let Some(cg) = cs.goals.read().unwrap_or_else(|e| e.into_inner()).get(&gid) {
-                    let mut list: Vec<(u32, u64)> = cg
-                        .contributors
-                        .iter()
-                        .map(|(&c, &(p, _))| (c, p.max(0) as u64))
-                        .collect();
-                    list.sort_by_key(|&(c, _)| c);
-                    if !list.is_empty() {
-                        return list;
-                    }
-                }
+        if let (Some(pid), Some(ref db)) = (corp_projects::goal_uuid_to_project_id(&g.uuid), &mgr.db) {
+            let list = db.with_snapshot(|s| {
+                let mut v: Vec<(u32, u64)> = s
+                    .alliance_war_state
+                    .project_details
+                    .get(&pid)
+                    .map(|d| {
+                        d.char_contributions
+                            .iter()
+                            .filter_map(|(&c, &p)| (c > 0 && p > 0).then_some((c as u32, p)))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                v.sort_by_key(|&(c, _)| c);
+                v
+            });
+            if !list.is_empty() {
+                return list;
             }
         }
         if g.current_progress > 0 {
@@ -1180,12 +1196,7 @@ pub fn register_progression_extra_handlers(
             let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
-            let g = mgr
-                .generic_goals
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(&uuid_to_hex(&target_uuid))
-                .cloned()
+            let (g, _) = load_live_goal(&mgr, &target_uuid, ctx.now_unix())
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Goal not found".into()))?;
             if let Some(gc) = mgr.goal_corp_id(&target_uuid) {
                 let caller_corp = mgr.db.as_ref().and_then(|db| {
@@ -1217,12 +1228,7 @@ pub fn register_progression_extra_handlers(
             let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
-            let g = mgr
-                .generic_goals
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(&uuid_to_hex(&target_uuid))
-                .cloned()
+            let (g, _) = load_live_goal(&mgr, &target_uuid, ctx.now_unix())
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Goal not found".into()))?;
             let prog = resolve_goal_contribs(&mgr, &g)
                 .into_iter()
@@ -1246,15 +1252,8 @@ pub fn register_progression_extra_handlers(
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let goals: Vec<GenericGoalRecord> = mgr
-                .generic_goals
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .values()
-                .cloned()
-                .collect();
             let mut out = Vec::new();
-            for g in goals {
+            for g in collect_all_live_goals(&mgr, ctx.now_unix()) {
                 if let Some((_, prog)) = resolve_goal_contribs(&mgr, &g).into_iter().find(|&(c, p)| c == cid && p > 0) {
                     let s_b = encode_goal_contrib_summary(cid, prog, &g.uuid);
                     encode_bytes_field(1, &s_b, &mut out);

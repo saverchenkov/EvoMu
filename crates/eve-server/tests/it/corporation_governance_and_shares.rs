@@ -620,13 +620,6 @@ fn field(rep: &PyRep, key: &str) -> PyRep {
     }
 }
 
-fn rowset_rows(rep: &PyRep) -> Vec<Vec<PyRep>> {
-    match rep {
-        PyRep::Rowset { rows, .. } => rows.clone(),
-        _ => Vec::new(),
-    }
-}
-
 #[tokio::test]
 async fn test_corp_governance_welcome_mails_structures_alliance() {
     // parity: feat:corporation.welcome-mail
@@ -906,7 +899,7 @@ async fn test_corp_projects_goals_freelance_and_plan_closure() {
 
     let ctx = ServerContext::new();
     let mut sess1 = select_pilot(&ctx, 63_101, "demo", "demo-secret", PILOT_1).await;
-    let mut sess2 = select_pilot(&ctx, 63_102, "other", "other-secret", PILOT_2).await;
+    let sess2 = select_pilot(&ctx, 63_102, "other", "other-secret", PILOT_2).await;
 
     // Create corporation
     let created = rpc(
@@ -932,27 +925,56 @@ async fn test_corp_projects_goals_freelance_and_plan_closure() {
         corp.wallet_divisions[0].balance = IskCents::from_f64_isk(10_000_000.0);
     });
 
+    let q_req = |sess: &eve_machonet::SessionState, type_name: &str, payload: Vec<u8>| {
+        let now_u = ctx.now_unix();
+        let req = eve_proto::quasar::EvePublicRequest {
+            issued: Some(eve_proto::quasar::GoogleTimestamp { seconds: now_u as i64, nanos: 0 }),
+            correlation_uuid: vec![0x64; 16],
+            payload: Some(eve_proto::quasar::GoogleAny { type_url: format!("type.googleapis.com/{type_name}"), value: payload }),
+            external_origin: "test".into(),
+            application_instance_uuid: vec![0x65; 16],
+            authoritative_context: Some(
+                eve_proto::quasar::AuthoritativeContext::for_session_at(
+                    sess.user_id.map(|u| u as i32),
+                    sess.character_id.map(|c| c as u32),
+                    sess.corporation_id.map(|c| c as u32),
+                    sess.corp_role,
+                    "tranquility",
+                    vec![0x66; 16],
+                    now_u,
+                )
+                .with_service_roles(sess.role),
+            ),
+            trace_context: None,
+        };
+        ctx.quasar_gateway.handle_public_request(sess, &req, None, false, now_u)
+    };
+    let build_goal_req = |name: &str, target: u64, escrow_isk: i64, cfg_field: u32, limit: Option<u64>| {
+        let (mut m, mut cfg, mut curr, mut isk, mut pool, mut ts) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        eve_proto::quasar::encode_string_field(1, name, &mut m);
+        eve_proto::quasar::encode_varint_field(3, target, &mut m);
+        eve_proto::quasar::encode_bytes_field(cfg_field, &[], &mut cfg);
+        eve_proto::quasar::encode_bytes_field(4, &cfg, &mut m);
+        eve_proto::quasar::encode_varint_field(1, eve_proto::quasar::encode_zigzag64(escrow_isk), &mut curr);
+        eve_proto::quasar::encode_bytes_field(1, &curr, &mut isk);
+        eve_proto::quasar::encode_varint_field(1, 1, &mut pool);
+        eve_proto::quasar::encode_bytes_field(2, &isk, &mut pool);
+        eve_proto::quasar::encode_bytes_field(8, &pool, &mut m);
+        eve_proto::quasar::encode_varint_field(1, ctx.now_unix() + 86_400, &mut ts);
+        eve_proto::quasar::encode_bytes_field(10, &ts, &mut m);
+        if let Some(lim) = limit {
+            eve_proto::quasar::encode_varint_field(26, lim, &mut m);
+        }
+        m
+    };
+
     // 1. feat:corporation.corp-project-reward-pool & feat:corporation.corp-goals
-    // Create corporation goal with ISK reward pool (escrows 500 units * 10,000 ISK = 5,000,000 ISK)
-    let create_proj = rpc(
-        &ctx,
-        &mut sess1,
-        "corporationSvc",
-        "CreateGoalSubmit",
-        &[
-            PyRep::String("Hunt Pirates".into()), // name
-            PyRep::Integer(500),                  // target_quantity
-            PyRep::Real(10_000.0),                // isk_per_unit
-            PyRep::String("DestroyNPCShips".into()), // matcher_type
-            PyRep::Bool(false),                   // is_freelance
-            PyRep::Integer(1),                    // wallet_division
-            PyRep::Integer(100),                  // max_per_character
-            PyRep::Integer(86400),                // duration_secs
-        ],
-    )
-    .await
-    .expect("CreateGoalSubmit");
-    let pid = field(&create_proj, "projectID").as_i64().expect("projectID");
+    // Create corporation goal via Quasar with ISK reward pool (escrows 500 units * 10,000 ISK = 5,000,000 ISK)
+    let create_proj = q_req(&sess1, "eve_public.goal.api.CreateRequest", build_goal_req("Hunt Pirates", 500, 5_000_000, 31, Some(100)));
+    assert_eq!(create_proj.status_code, eve_server::quasar_gateway::STATUS_OK, "{}", create_proj.status_message);
+    let goal_id_wire = create_proj.payload.unwrap().value;
+    let goal_uuid = goal_id_wire[4..20].to_vec();
+    let pid = eve_server::services::social_corp_fleet::social_corp_projects::goal_uuid_to_project_id(&goal_uuid).expect("projectID");
 
     // Verify division escrow debited from corp wallet
     ctx.db.with_snapshot(|s| {
@@ -969,32 +991,16 @@ async fn test_corp_projects_goals_freelance_and_plan_closure() {
     });
 
     // Verify project creation fails with CorpInsufficientFunds when corp division lacks funds
-    let fail_insufficient = rpc(
-        &ctx,
-        &mut sess1,
-        "corporationSvc",
-        "CreateGoalSubmit",
-        &[
-            PyRep::String("Overbudget Project".into()),
-            PyRep::Integer(1_000_000),
-            PyRep::Real(1_000_000.0), // 1 trillion ISK
-            PyRep::String("DestroyNPCShips".into()),
-            PyRep::Bool(false),
-            PyRep::Integer(1),
-        ],
-    )
-    .await
-    .expect_err("Overbudget project must fail");
-    assert_eq!(fail_insufficient.code, "CorpInsufficientFunds");
+    let fail_insufficient = q_req(&sess1, "eve_public.goal.api.CreateRequest", build_goal_req("Overbudget Project", 1_000_000, 1_000_000_000_000, 31, None));
+    assert_eq!(fail_insufficient.status_code, eve_server::quasar_gateway::STATUS_BAD_REQUEST);
+    assert!(fail_insufficient.status_message.contains("CorpInsufficientFunds"), "unexpected message: {}", fail_insufficient.status_message);
 
-    // Verify listed in GetGoals
-    let goals_rep = rpc(&ctx, &mut sess1, "corporationSvc", "GetGoals", &[])
-        .await
-        .expect("GetGoals");
-    let goal_rows = rowset_rows(&goals_rep);
+    // Verify listed in Quasar corporationgoal.api.GetActiveRequest
+    let goals_rep = q_req(&sess1, "eve_public.corporationgoal.api.GetActiveRequest", Vec::new());
+    assert_eq!(goals_rep.status_code, eve_server::quasar_gateway::STATUS_OK);
     assert!(
-        goal_rows.iter().any(|r| r.first() == Some(&PyRep::Integer(pid))),
-        "Project must appear in GetGoals"
+        goals_rep.payload.unwrap().value.windows(16).any(|w| w == goal_uuid.as_slice()),
+        "Project must appear in corporationgoal.api.GetActiveRequest"
     );
 
     // 2. feat:corporation.corp-project-contribution-methods
@@ -1028,67 +1034,45 @@ async fn test_corp_projects_goals_freelance_and_plan_closure() {
     });
 
     // 3. feat:corporation.freelance-jobs
-    // Create freelance project open to non-members
-    let create_fl = rpc(
-        &ctx,
-        &mut sess1,
-        "corporationSvc",
-        "CreateGoalSubmit",
-        &[
-            PyRep::String("Public Asteroid Survey".into()),
-            PyRep::Integer(200),
-            PyRep::Real(5_000.0),
-            PyRep::String("MineMaterials".into()),
-            PyRep::Bool(true), // freelance
-            PyRep::Integer(1),
-        ],
-    )
-    .await
-    .expect("Create freelance job");
-    let fl_pid = field(&create_fl, "projectID").as_i64().expect("fl_pid");
+    // Create freelance project open to non-members via Quasar
+    let (mut fl_req, mut m_id, mut fl_cfg, mut curr_b, mut rew_b) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    eve_proto::quasar::encode_string_field(1, "Public Asteroid Survey", &mut fl_req);
+    eve_proto::quasar::encode_varint_field(3, 200, &mut fl_req);
+    eve_proto::quasar::encode_string_field(1, "MineMaterials", &mut m_id);
+    eve_proto::quasar::encode_bytes_field(1, &m_id, &mut fl_cfg);
+    eve_proto::quasar::encode_bytes_field(6, &fl_cfg, &mut fl_req);
+    eve_proto::quasar::encode_varint_field(1, eve_proto::quasar::encode_zigzag64(5_000), &mut curr_b);
+    eve_proto::quasar::encode_bytes_field(1, &curr_b, &mut rew_b);
+    eve_proto::quasar::encode_bytes_field(10, &rew_b, &mut fl_req);
+    let create_fl = q_req(&sess1, "eve_public.freelance.project.api.CreateRequest", fl_req);
+    assert_eq!(create_fl.status_code, eve_server::quasar_gateway::STATUS_OK, "{}", create_fl.status_message);
+    let fl_out = create_fl.payload.unwrap().value;
+    let fl_uuid = fl_out[6..22].to_vec();
+    let fl_id_wire = fl_out[2..22].to_vec();
 
-    // Pilot 2 accepts freelance job (using rpc-lint allow for auditor-mandated RPC)
-    let accept_fl = rpc(
-        &ctx,
-        &mut sess2,
-        "corporationSvc",
-        // rpc-lint: allow auditor acceptance criteria requires AcceptFreelanceJob RPC
-        "AcceptFreelanceJob",
-        &[PyRep::Integer(fl_pid)],
-    )
-    .await
-    .expect("AcceptFreelanceJob");
-    assert_eq!(field(&accept_fl, "accepted"), PyRep::Bool(true));
+    // Pilot 2 commits to freelance job via real V24 Quasar CommitRequest
+    let commit_fl = q_req(&sess2, "eve_public.freelance.project.api.CommitRequest", fl_id_wire);
+    assert_eq!(commit_fl.status_code, eve_server::quasar_gateway::STATUS_OK, "{}", commit_fl.status_message);
 
-    // Verify freelance project appears in GetFreelanceProjects
-    let fl_rep = rpc(
-        &ctx,
-        &mut sess2,
-        "corporationSvc",
-        "GetActiveFreelanceProjectId",
-        &[],
-    )
-    .await
-    .expect("GetActiveFreelanceProjectId");
-    let fl_rows = rowset_rows(&fl_rep);
+    // Verify freelance project appears in GetAllActiveRequest and GetAllCommittedRequest
+    let fl_active = q_req(&sess2, "eve_public.freelance.project.api.GetAllActiveRequest", Vec::new());
+    assert_eq!(fl_active.status_code, eve_server::quasar_gateway::STATUS_OK);
     assert!(
-        fl_rows.iter().any(|r| r.first() == Some(&PyRep::Integer(fl_pid))),
-        "Freelance job must appear in freelance projects list"
+        fl_active.payload.unwrap().value.windows(16).any(|w| w == fl_uuid.as_slice()),
+        "Freelance job must appear in GetAllActiveRequest"
+    );
+    let fl_committed = q_req(&sess2, "eve_public.freelance.project.api.GetAllCommittedRequest", Vec::new());
+    assert_eq!(fl_committed.status_code, eve_server::quasar_gateway::STATUS_OK);
+    assert!(
+        fl_committed.payload.unwrap().value.windows(16).any(|w| w == fl_uuid.as_slice()),
+        "Freelance job must appear in GetAllCommittedRequest"
     );
 
     // 4. feat:corporation.corp-project-close-expiry
-    // Close the original project and verify remaining escrow is refunded
+    // Close the original project via Quasar CloseRequest and verify remaining escrow is refunded
     let corp_bal_before = ctx.db.with_snapshot(|s| s.corporations.get(&corp_id).unwrap().wallet_divisions[0].balance.raw_cents());
-    let close_rep = rpc(
-        &ctx,
-        &mut sess1,
-        "corporationSvc",
-        "CloseCorpProject",
-        &[PyRep::Integer(pid)],
-    )
-    .await
-    .expect("CloseCorpProject");
-    assert_eq!(field(&close_rep, "closed"), PyRep::Bool(true));
+    let close_rep = q_req(&sess1, "eve_public.goal.api.CloseRequest", goal_id_wire);
+    assert_eq!(close_rep.status_code, eve_server::quasar_gateway::STATUS_OK);
 
     ctx.db.with_snapshot(|s| {
         let corp_bal_after = s.corporations.get(&corp_id).unwrap().wallet_divisions[0].balance.raw_cents();

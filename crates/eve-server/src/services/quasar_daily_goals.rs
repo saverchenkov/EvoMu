@@ -726,47 +726,6 @@ impl DailyGoalManager {
         }
         self.save_to_db();
 
-        let corp_updates = gateway.progression.corp_state.on_member_activity(char_id, delta as i64);
-        if !corp_updates.is_empty() {
-            let mut contributed = Vec::new();
-            {
-                let mut ggoals = gateway
-                    .progression
-                    .extra
-                    .generic_goals
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner());
-                for (goal_id, new_prog) in corp_updates {
-                    let mut uuid = [0u8; 16];
-                    uuid[0..8].copy_from_slice(b"CORPGOAL");
-                    uuid[8..16].copy_from_slice(&goal_id.to_be_bytes());
-                    let hex = crate::services::quasar_progression_extra::uuid_to_hex(&uuid);
-                    if let Some(g) = ggoals.get_mut(&hex) {
-                        let prev = g.current_progress;
-                        g.current_progress = new_prog.min(g.desired_progress);
-                        if g.current_progress > prev {
-                            contributed.push((uuid, prev, g.current_progress, g.desired_progress));
-                        }
-                    }
-                }
-            }
-            gateway.progression.extra.save_to_db();
-            // Each server-observed contribution is announced to the project's corporation:
-            // ContributedNotice carries previous/current progress; reaching the target completes it.
-            for (uuid, prev, current, desired) in contributed {
-                use crate::services::quasar_goal_tale_notices as notices;
-                let scope = notices::goal_scope(gateway.progression.extra.goal_corp_id(&uuid), char_id);
-                let _ = gateway.publish_notice(
-                    scope.clone(),
-                    notices::goal_contributed(&uuid, char_id, prev, current, now_unix),
-                    now_unix,
-                );
-                if current >= desired && prev < desired {
-                    let _ = gateway.publish_notice(scope, notices::goal_completed(&uuid), now_unix);
-                }
-            }
-        }
-
         for (uuid, current_progress, just_completed) in progressed {
             let mut id_bytes = Vec::new();
             encode_bytes_field(1, &uuid, &mut id_bytes);

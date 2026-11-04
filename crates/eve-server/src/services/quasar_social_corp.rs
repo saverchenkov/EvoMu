@@ -33,64 +33,21 @@ pub struct CorpSkillPlanRecord {
     pub milestones: Vec<(u64, String)>,
 }
 
-fn default_wallet_div_one() -> u8 {
-    1
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct CorpGoalRecord {
-    pub id: u64,
-    pub corp_id: u32,
-    pub name: String,
-    pub description: String,
-    pub target_progress: i64,
-    pub current_progress: i64,
-    pub active: bool,
-    pub contributors: HashMap<u32, (i64, bool)>, // char_id -> (progress, redeemed)
-    #[serde(default)]
-    pub escrow_isk: i64,
-    #[serde(default)]
-    pub initial_escrow_isk: i64,
-    #[serde(default)]
-    pub reward_per_unit_isk: i64,
-    #[serde(default = "default_wallet_div_one")]
-    pub wallet_division: u8,
-}
-
-impl CorpGoalRecord {
-    pub fn calc_reward_isk(&self, progress: i64) -> i64 {
-        if progress <= 0 {
-            return 0;
-        }
-        let pool = if self.initial_escrow_isk > 0 {
-            self.initial_escrow_isk
-        } else {
-            self.escrow_isk
-        };
-        let unit_rate = if self.reward_per_unit_isk > 0 {
-            self.reward_per_unit_isk
-        } else if self.target_progress > 0 && pool > 0 {
-            (pool / self.target_progress).clamp(1, 10_000)
-        } else {
-            10_000
-        };
-        progress.saturating_mul(unit_rate)
-    }
-}
+use super::social_corp_fleet::social_corp_projects::{
+    self as corp_projects, CanonicalProjectSpec,
+};
 
 #[derive(Default)]
 pub struct QuasarCorpState {
     pub db: Option<Arc<WorldRepository>>,
     pub skill_plans: RwLock<HashMap<u64, CorpSkillPlanRecord>>,
-    pub goals: RwLock<HashMap<u64, CorpGoalRecord>>,
     pub id_counters: RwLock<(u64, u64, u64)>,
 }
 
 impl QuasarCorpState {
     pub fn from_db(db: Arc<WorldRepository>) -> Arc<Self> {
-        let (plans_map, goals_map, saved_counters) = db.with_snapshot(|snap| {
+        let (plans_map, max_goal, saved_counters) = db.with_snapshot(|snap| {
             let mut plans = HashMap::new();
-            let mut goals = HashMap::new();
             let mut counters = (1u64, 1u64, 101u64);
             if let Some(s) = snap.quasar_state_blobs.get("quasar_corp_counters") {
                 if let Ok(c) = serde_json::from_str::<(u64, u64, u64)>(s) {
@@ -102,12 +59,14 @@ impl QuasarCorpState {
                     plans = p_map;
                 }
             }
-            if let Some(s) = snap.quasar_state_blobs.get("quasar_corp_goals") {
-                if let Ok(g_map) = serde_json::from_str::<HashMap<u64, CorpGoalRecord>>(s) {
-                    goals = g_map;
-                }
-            }
-            (plans, goals, counters)
+            let max_proj = snap
+                .corp_projects
+                .keys()
+                .copied()
+                .max()
+                .unwrap_or(100)
+                .max(100) as u64;
+            (plans, max_proj, counters)
         });
 
         let max_plan = plans_map.keys().copied().max().unwrap_or(0);
@@ -116,12 +75,10 @@ impl QuasarCorpState {
             .flat_map(|p| p.milestones.iter().map(|(mid, _)| *mid))
             .max()
             .unwrap_or(0);
-        let max_goal = goals_map.keys().copied().max().unwrap_or(100);
 
         Arc::new(Self {
             db: Some(db),
             skill_plans: RwLock::new(plans_map),
-            goals: RwLock::new(goals_map),
             id_counters: RwLock::new((
                 saved_counters.0.max(1).max(max_plan + 1),
                 saved_counters.1.max(1).max(max_ms + 1),
@@ -130,118 +87,73 @@ impl QuasarCorpState {
         })
     }
 
-    pub fn create_goal(&self, corp_id: u32, name: String, description: String, target_progress: i64, escrow_isk: i64) -> Result<u64, (u32, String)> {
+    pub fn create_goal(
+        &self,
+        corp_id: u32,
+        name: String,
+        description: String,
+        target_progress: i64,
+        escrow_isk: i64,
+    ) -> Result<u64, (u32, String)> {
         self.create_goal_from_division(corp_id, name, description, target_progress, escrow_isk, 1)
     }
 
-    pub fn create_goal_from_division(&self, corp_id: u32, name: String, description: String, target_progress: i64, escrow_isk: i64, wallet_div: u8) -> Result<u64, (u32, String)> {
-        let Some(ref db) = self.db else { return Err((STATUS_BAD_REQUEST, "Database not available".into())); };
+    pub fn create_goal_from_division(
+        &self,
+        corp_id: u32,
+        name: String,
+        description: String,
+        target_progress: i64,
+        escrow_isk: i64,
+        wallet_div: u8,
+    ) -> Result<u64, (u32, String)> {
+        let Some(ref db) = self.db else {
+            return Err((STATUS_BAD_REQUEST, "Database not available".into()));
+        };
         if escrow_isk < 0 || target_progress <= 0 {
             return Err((STATUS_BAD_REQUEST, "Invalid goal target or escrow amount".into()));
         }
-        let div = wallet_div.clamp(1, 7);
-        if escrow_isk > 0 {
-            let cost = eve_db::IskCents::from_isk(escrow_isk);
-            let mut debited = false;
-            db.with_mut_snapshot(|snap| {
-                if let Some(corp) = snap.corporations.get_mut(&(corp_id as i64)) {
-                    let cur = if div == 1 { corp.master_wallet } else { corp.ensure_wallet_divisions(); corp.division_balance(div) };
-                    if let Some(rem) = cur.checked_sub(cost) {
-                        corp.set_division_balance(div, rem);
-                        debited = true;
-                    }
-                }
-            });
-            if !debited {
-                return Err((STATUS_BAD_REQUEST, "Insufficient corporation funds for goal escrow".into()));
-            }
-        }
-        let id = self.alloc_goal_id();
+        let min_id = self.alloc_goal_id() as i64;
+        let (pid, _) = corp_projects::create_canonical_project(
+            db,
+            CanonicalProjectSpec {
+                corp_id: corp_id as i64,
+                creator_id: 0,
+                name,
+                description,
+                target_quantity: target_progress as u64,
+                initial_quantity: 0,
+                escrow: eve_db::IskCents::from_isk(escrow_isk),
+                isk_per_unit: eve_db::IskCents::ZERO,
+                wallet_division: wallet_div.clamp(1, 7),
+                matcher_type: "Any".into(),
+                is_freelance: false,
+                auto_payout_on_contribution: false,
+                max_per_character: None,
+                expires_unix: None,
+                filter_id: None,
+                batch_size: 1,
+                now_unix: 0,
+                min_project_id: min_id,
+            },
+        )?;
         {
-            let mut goals = self.goals.write().unwrap_or_else(|e| e.into_inner());
-            goals.insert(id, CorpGoalRecord {
-                id, corp_id, name, description, target_progress, current_progress: 0,
-                active: true, contributors: HashMap::new(), escrow_isk,
-                initial_escrow_isk: escrow_isk, reward_per_unit_isk: 0,
-                wallet_division: div,
-            });
+            let mut c = self.id_counters.write().unwrap_or_else(|e| e.into_inner());
+            c.2 = c.2.max((pid as u64) + 1);
         }
         self.sync_to_db();
-        Ok(id)
+        Ok(pid as u64)
     }
 
-    pub fn close_or_delete_goal(&self, goal_id: u64, remove: bool) {
-        let mut refund = None;
-        {
-            let mut goals = self.goals.write().unwrap_or_else(|e| e.into_inner());
-            if remove {
-                if let Some(cg) = goals.remove(&goal_id) {
-                    if cg.escrow_isk > 0 {
-                        refund = Some((cg.corp_id, cg.wallet_division.clamp(1, 7), cg.escrow_isk));
-                    }
-                }
-            } else if let Some(cg) = goals.get_mut(&goal_id) {
-                cg.active = false;
-                if cg.escrow_isk > 0 {
-                    refund = Some((cg.corp_id, cg.wallet_division.clamp(1, 7), cg.escrow_isk));
-                    cg.escrow_isk = 0;
-                }
-            }
+    pub fn close_or_delete_goal(&self, goal_id: u64, remove: bool, now_unix: u64) {
+        if let Some(ref db) = self.db {
+            let _ = corp_projects::close_or_delete_canonical_project(
+                db,
+                goal_id as i64,
+                remove,
+                now_unix,
+            );
         }
-        if let (Some(ref db), Some((corp_id, div, amount_isk))) = (&self.db, refund) {
-            let credit = eve_db::IskCents::from_isk(amount_isk);
-            db.with_mut_snapshot(|snap| {
-                if let Some(corp) = snap.corporations.get_mut(&(corp_id as i64)) {
-                    corp.ensure_wallet_divisions();
-                    let cur = if div == 1 { corp.master_wallet } else { corp.division_balance(div) };
-                    let next = cur.checked_add(credit).unwrap_or(cur);
-                    corp.set_division_balance(div, next);
-                }
-            });
-        }
-        self.sync_to_db();
-    }
-
-    pub fn on_member_activity(&self, char_id: u32, delta: i64) -> Vec<(u64, u64)> {
-        if delta <= 0 {
-            return Vec::new();
-        }
-        let Some(ref db) = self.db else { return Vec::new() };
-        let corp_ids: Vec<u32> = db.with_snapshot(|snap| {
-            let mut ids = Vec::new();
-            if let Some(c) = snap.characters.get(&(char_id as i64)) {
-                ids.push(c.corporation_id as u32);
-            }
-            for corp in snap.corporations.values() {
-                if corp.ceo_id == char_id as i64 && !ids.contains(&(corp.corporation_id as u32)) {
-                    ids.push(corp.corporation_id as u32);
-                }
-            }
-            ids
-        });
-        if corp_ids.is_empty() {
-            return Vec::new();
-        }
-        let mut updated = Vec::new();
-        {
-            let mut goals = self.goals.write().unwrap_or_else(|e| e.into_inner());
-            for g in goals.values_mut() {
-                if corp_ids.contains(&g.corp_id) && g.active && g.current_progress < g.target_progress {
-                    let rem = (g.target_progress - g.current_progress).max(0);
-                    let add = delta.min(rem);
-                    if add > 0 {
-                        g.current_progress = g.current_progress.saturating_add(add);
-                        let entry = g.contributors.entry(char_id).or_insert((0, false));
-                        entry.0 = entry.0.saturating_add(add).min(g.target_progress);
-                        updated.push((g.id, g.current_progress as u64));
-                    }
-                }
-            }
-        }
-        if !updated.is_empty() {
-            self.sync_to_db();
-        }
-        updated
     }
 
     pub fn alloc_plan_id(&self) -> u64 {
@@ -259,8 +171,13 @@ impl QuasarCorpState {
     }
 
     pub fn alloc_goal_id(&self) -> u64 {
+        let max_db = self
+            .db
+            .as_ref()
+            .map(|d| d.with_snapshot(|s| s.corp_projects.keys().copied().max().unwrap_or(100) as u64))
+            .unwrap_or(100);
         let mut c = self.id_counters.write().unwrap_or_else(|e| e.into_inner());
-        let id = c.2.max(101);
+        let id = c.2.max(101).max(max_db + 1);
         c.2 = id + 1;
         id
     }
@@ -268,7 +185,6 @@ impl QuasarCorpState {
     pub fn sync_to_db(&self) {
         let Some(ref db) = self.db else { return };
         let plans = self.skill_plans.read().unwrap_or_else(|e| e.into_inner()).clone();
-        let goals = self.goals.read().unwrap_or_else(|e| e.into_inner()).clone();
         let counters = *self.id_counters.read().unwrap_or_else(|e| e.into_inner());
         db.with_mut_snapshot(|snap| {
             if let Ok(c_json) = serde_json::to_string(&counters) {
@@ -277,9 +193,7 @@ impl QuasarCorpState {
             if let Ok(p_json) = serde_json::to_string(&plans) {
                 snap.quasar_state_blobs.insert("quasar_corp_plans".into(), p_json);
             }
-            if let Ok(g_json) = serde_json::to_string(&goals) {
-                snap.quasar_state_blobs.insert("quasar_corp_goals".into(), g_json);
-            }
+            snap.quasar_state_blobs.remove("quasar_corp_goals");
         });
     }
 }
@@ -738,8 +652,19 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
     );
 
     // ========================================================================
-    // CORPORATION GOALS (AIR CORPORATE PROJECTS)
+    // CORPORATION GOALS (CANONICAL `snap.corp_projects` STORE)
     // ========================================================================
+
+    fn is_corp_goal_in_snap(snap: &eve_db::WorldStateSnapshot, pid: i64) -> bool {
+        !snap.alliance_war_state.project_meta.get(&pid).is_some_and(|m| m.1)
+    }
+
+    fn is_goal_active_in_snap(snap: &eve_db::WorldStateSnapshot, pid: i64) -> bool {
+        snap.alliance_war_state
+            .project_details
+            .get(&pid)
+            .map_or(true, |d| d.status.is_empty() || d.status == "Active")
+    }
 
     // 37. eve_public.corporationgoal.api.GetAllRequest -> GetAllResponse
     let state_cg_all = Arc::clone(&state);
@@ -747,11 +672,23 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
         "eve_public.corporationgoal.api.GetAllRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
             let corpid = resolve_corp_id(ctx, state_cg_all.db.as_ref())?;
-            let goals = state_cg_all.goals.read().unwrap_or_else(|e| e.into_inner());
-
+            let mut ids = Vec::new();
+            if let Some(ref db) = state_cg_all.db {
+                let now = ctx_now_unix(ctx);
+                db.with_mut_snapshot(|snap| {
+                    let _ = corp_projects::sweep_expired_corp_projects_in_snap(snap, now);
+                    ids = snap
+                        .corp_projects
+                        .values()
+                        .filter(|p| p.corporation_id == corpid as i64 && is_corp_goal_in_snap(snap, p.project_id))
+                        .map(|p| p.project_id as u64)
+                        .collect();
+                });
+                ids.sort_unstable();
+            }
             let mut out = Vec::new();
-            for g in goals.values().filter(|g| g.corp_id == corpid) {
-                encode_goal_id(1, g.id, &mut out);
+            for gid in ids {
+                encode_goal_id(1, gid, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.GetAllResponse"),
@@ -766,11 +703,27 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
         "eve_public.corporationgoal.api.GetActiveRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
             let corpid = resolve_corp_id(ctx, state_cg_act.db.as_ref())?;
-            let goals = state_cg_act.goals.read().unwrap_or_else(|e| e.into_inner());
-
+            let mut ids = Vec::new();
+            if let Some(ref db) = state_cg_act.db {
+                let now = ctx_now_unix(ctx);
+                db.with_mut_snapshot(|snap| {
+                    let _ = corp_projects::sweep_expired_corp_projects_in_snap(snap, now);
+                    ids = snap
+                        .corp_projects
+                        .values()
+                        .filter(|p| {
+                            p.corporation_id == corpid as i64
+                                && is_corp_goal_in_snap(snap, p.project_id)
+                                && is_goal_active_in_snap(snap, p.project_id)
+                        })
+                        .map(|p| p.project_id as u64)
+                        .collect();
+                });
+                ids.sort_unstable();
+            }
             let mut out = Vec::new();
-            for g in goals.values().filter(|g| g.corp_id == corpid && g.active) {
-                encode_goal_id(1, g.id, &mut out);
+            for gid in ids {
+                encode_goal_id(1, gid, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.GetActiveResponse"),
@@ -785,11 +738,27 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
         "eve_public.corporationgoal.api.GetInactiveRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
             let corpid = resolve_corp_id(ctx, state_cg_inact.db.as_ref())?;
-            let goals = state_cg_inact.goals.read().unwrap_or_else(|e| e.into_inner());
-
+            let mut ids = Vec::new();
+            if let Some(ref db) = state_cg_inact.db {
+                let now = ctx_now_unix(ctx);
+                db.with_mut_snapshot(|snap| {
+                    let _ = corp_projects::sweep_expired_corp_projects_in_snap(snap, now);
+                    ids = snap
+                        .corp_projects
+                        .values()
+                        .filter(|p| {
+                            p.corporation_id == corpid as i64
+                                && is_corp_goal_in_snap(snap, p.project_id)
+                                && !is_goal_active_in_snap(snap, p.project_id)
+                        })
+                        .map(|p| p.project_id as u64)
+                        .collect();
+                });
+                ids.sort_unstable();
+            }
             let mut out = Vec::new();
-            for g in goals.values().filter(|g| g.corp_id == corpid && !g.active) {
-                encode_goal_id(1, g.id, &mut out);
+            for gid in ids {
+                encode_goal_id(1, gid, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.GetInactiveResponse"),
@@ -806,20 +775,40 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             let corpid = resolve_corp_id(ctx, state_cg_summ.db.as_ref())?;
             let goal_id = extract_goal_id(dyn_msg.get(1))
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing corporation goal Identifier".into()))?;
-            let goals = state_cg_summ.goals.read().unwrap_or_else(|e| e.into_inner());
-            let g = goals
-                .get(&goal_id)
-                .ok_or_else(|| (STATUS_NOT_FOUND, "Corporation goal not found".into()))?;
-            if g.corp_id != corpid && crate::quasar_gateway::require_admin_role(ctx).is_err() {
-                return Err((STATUS_FORBIDDEN, "Cross-corporation access denied".into()));
-            }
+            let Some(ref db) = state_cg_summ.db else {
+                return Err((STATUS_NOT_FOUND, "Corporation goal not found".into()));
+            };
+            let is_admin = crate::quasar_gateway::require_admin_role(ctx).is_ok();
+            let contribs = db.with_snapshot(|snap| -> Result<Vec<(u64, u64)>, (u32, String)> {
+                let p = snap
+                    .corp_projects
+                    .get(&(goal_id as i64))
+                    .filter(|_| is_corp_goal_in_snap(snap, goal_id as i64))
+                    .ok_or_else(|| (STATUS_NOT_FOUND, "Corporation goal not found".into()))?;
+                if p.corporation_id != corpid as i64 && !is_admin {
+                    return Err((STATUS_FORBIDDEN, "Cross-corporation access denied".into()));
+                }
+                let mut list: Vec<(u64, u64)> = snap
+                    .alliance_war_state
+                    .project_details
+                    .get(&(goal_id as i64))
+                    .map(|d| {
+                        d.char_contributions
+                            .iter()
+                            .filter_map(|(&c, &q)| u64::try_from(c).ok().map(|cu| (cu, q)))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                list.sort_by_key(|&(c, _)| c);
+                Ok(list)
+            })?;
 
             let mut out = Vec::new();
-            for (cid, (prog, _red)) in &g.contributors {
+            for (cid, prog) in contribs {
                 let mut s = Vec::new();
-                encode_seq_id(1, *cid as u64, &mut s);
-                encode_varint_field(2, *prog as u64, &mut s);
-                encode_goal_id(3, g.id, &mut s);
+                encode_seq_id(1, cid, &mut s);
+                encode_varint_field(2, prog, &mut s);
+                encode_goal_id(3, goal_id, &mut s);
                 encode_bytes_field(1, &s, &mut out);
             }
             Ok(GoogleAny {
@@ -839,14 +828,27 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 .ok_or_else(|| (STATUS_UNAUTHORIZED, "Character authentication required".into()))?;
             let goal_id = extract_goal_id(dyn_msg.get(1))
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing corporation goal Identifier".into()))?;
-            let goals = state_cg_mysumm.goals.read().unwrap_or_else(|e| e.into_inner());
-            let goal = goals.get(&goal_id).ok_or((STATUS_NOT_FOUND, "Corporation goal not found".into()))?;
+            let Some(ref db) = state_cg_mysumm.db else {
+                return Err((STATUS_NOT_FOUND, "Corporation goal not found".into()));
+            };
+            let prog = db.with_snapshot(|snap| -> Result<u64, (u32, String)> {
+                if !snap.corp_projects.contains_key(&(goal_id as i64))
+                    || !is_corp_goal_in_snap(snap, goal_id as i64)
+                {
+                    return Err((STATUS_NOT_FOUND, "Corporation goal not found".into()));
+                }
+                Ok(snap
+                    .alliance_war_state
+                    .project_details
+                    .get(&(goal_id as i64))
+                    .and_then(|d| d.char_contributions.get(&(cid as i64)).copied())
+                    .unwrap_or(0))
+            })?;
 
             let mut s = Vec::new();
             encode_seq_id(1, cid as u64, &mut s);
-            let prog = goal.contributors.get(&cid).map(|(p, _)| *p).unwrap_or(0);
-            encode_varint_field(2, prog as u64, &mut s);
-            encode_goal_id(3, goal.id, &mut s);
+            encode_varint_field(2, prog, &mut s);
+            encode_goal_id(3, goal_id, &mut s);
 
             let mut out = Vec::new();
             encode_bytes_field(1, &s, &mut out);
@@ -865,17 +867,33 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             let cid = ctx
                 .effective_character_id()
                 .ok_or_else(|| (STATUS_UNAUTHORIZED, "Character authentication required".into()))?;
-            let goals = state_cg_mysumms.goals.read().unwrap_or_else(|e| e.into_inner());
+            let mut entries = Vec::new();
+            if let Some(ref db) = state_cg_mysumms.db {
+                db.with_snapshot(|snap| {
+                    for (&pid, _proj) in &snap.corp_projects {
+                        if !is_corp_goal_in_snap(snap, pid) {
+                            continue;
+                        }
+                        if let Some(&p) = snap
+                            .alliance_war_state
+                            .project_details
+                            .get(&pid)
+                            .and_then(|d| d.char_contributions.get(&(cid as i64)))
+                        {
+                            entries.push((pid as u64, p));
+                        }
+                    }
+                });
+                entries.sort_by_key(|&(gid, _)| gid);
+            }
 
             let mut out = Vec::new();
-            for g in goals.values() {
-                if let Some((p, _)) = g.contributors.get(&cid) {
-                    let mut s = Vec::new();
-                    encode_seq_id(1, cid as u64, &mut s);
-                    encode_varint_field(2, *p as u64, &mut s);
-                    encode_goal_id(3, g.id, &mut s);
-                    encode_bytes_field(1, &s, &mut out);
-                }
+            for (gid, p) in entries {
+                let mut s = Vec::new();
+                encode_seq_id(1, cid as u64, &mut s);
+                encode_varint_field(2, p, &mut s);
+                encode_goal_id(3, gid, &mut s);
+                encode_bytes_field(1, &s, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.GetMyContributorSummariesResponse"),
@@ -892,15 +910,28 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             let cid = ctx
                 .effective_character_id()
                 .ok_or_else(|| (STATUS_UNAUTHORIZED, "Character authentication required".into()))?;
-            let goals = state_cg_rewards.goals.read().unwrap_or_else(|e| e.into_inner());
+            let mut reward_ids = Vec::new();
+            if let Some(ref db) = state_cg_rewards.db {
+                db.with_snapshot(|snap| {
+                    for (&pid, proj) in &snap.corp_projects {
+                        if !is_corp_goal_in_snap(snap, pid) || proj.escrow_remaining.raw_cents() <= 0 {
+                            continue;
+                        }
+                        if let Some(det) = snap.alliance_war_state.project_details.get(&pid) {
+                            let tot = det.char_contributions.get(&(cid as i64)).copied().unwrap_or(0);
+                            let red = det.contributions_by_char.get(&(cid as i64)).copied().unwrap_or(0);
+                            if tot > red {
+                                reward_ids.push(pid as u64);
+                            }
+                        }
+                    }
+                });
+                reward_ids.sort_unstable();
+            }
 
             let mut out = Vec::new();
-            for g in goals.values() {
-                if let Some((prog, redeemed)) = g.contributors.get(&cid) {
-                    if *prog > 0 && !redeemed && g.escrow_isk > 0 {
-                        encode_goal_id(1, g.id, &mut out);
-                    }
-                }
+            for gid in reward_ids {
+                encode_goal_id(1, gid, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.GetMineWithRewardsResponse"),
@@ -919,63 +950,16 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 .ok_or_else(|| (STATUS_UNAUTHORIZED, "Character authentication required".into()))?;
             let goal_id = extract_goal_id(dyn_msg.get(1))
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing corporation goal Identifier".into()))?;
-
-            let payout = {
-                let mut goals = state_cg_redeem.goals.write().unwrap_or_else(|e| e.into_inner());
-                let g = goals
-                    .get_mut(&goal_id)
-                    .ok_or_else(|| (STATUS_NOT_FOUND, "Corporation goal not found".into()))?;
-                let entry_prog = g
-                    .contributors
-                    .get(&cid)
-                    .ok_or_else(|| (STATUS_PRECONDITION_FAILED, "No contributor progress for corporation goal".into()))?;
-                if entry_prog.1 || entry_prog.0 <= 0 {
-                    return Err((STATUS_PRECONDITION_FAILED, "No unredeemed rewards available for corporation goal".into()));
-                }
-                let calc_reward = g.calc_reward_isk(entry_prog.0);
-                let available = g.escrow_isk.max(0);
-                let p = calc_reward.min(available);
-                if p <= 0 {
-                    return Err((STATUS_PRECONDITION_FAILED, "Corporation goal reward escrow is empty".into()));
-                }
-                if let Some(entry) = g.contributors.get_mut(&cid) {
-                    entry.1 = true;
-                }
-                g.escrow_isk = g.escrow_isk.saturating_sub(p);
-                p
-            };
-
             let Some(ref db) = state_cg_redeem.db else {
                 return Err((STATUS_PRECONDITION_FAILED, "Database unavailable for reward payout".into()));
             };
-            let reward_cents = eve_db::IskCents::from_isk(payout);
-            let mut credited = false;
-            db.with_mut_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get_mut(&(cid as i64)) {
-                    if let Some(new_bal) = ch.balance.checked_add(reward_cents) {
-                        ch.balance = new_bal;
-                        credited = true;
-                        snap.append_journal(
-                            cid as i64,
-                            "CorporationGoalReward",
-                            reward_cents,
-                            new_bal,
-                            format!("Corporation goal {goal_id} reward"),
-                        );
-                    }
-                }
-            });
-            if !credited {
-                let mut goals = state_cg_redeem.goals.write().unwrap_or_else(|e| e.into_inner());
-                if let Some(g) = goals.get_mut(&goal_id) {
-                    if let Some(entry) = g.contributors.get_mut(&cid) {
-                        entry.1 = false;
-                    }
-                    g.escrow_isk = g.escrow_isk.saturating_add(payout);
-                }
-                return Err((STATUS_PRECONDITION_FAILED, "Unable to credit corporation goal reward".into()));
-            }
-            state_cg_redeem.sync_to_db();
+            let now = ctx_now_unix(ctx);
+            let payout = corp_projects::redeem_corp_goal_reward_for_char(
+                db,
+                goal_id as i64,
+                cid as i64,
+                now,
+            )?;
 
             let mut notice_bytes = Vec::new();
             encode_goal_id(1, goal_id, &mut notice_bytes);
@@ -986,7 +970,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                     type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.RedeemedNotice"),
                     value: notice_bytes,
                 },
-                ctx_now_unix(ctx),
+                now,
             );
 
             Ok(GoogleAny {
@@ -1004,75 +988,24 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             let cid = ctx
                 .effective_character_id()
                 .ok_or_else(|| (STATUS_UNAUTHORIZED, "Character authentication required".into()))?;
-            let mut total_payout = 0i64;
-            let mut redeemed_goals = Vec::new();
-            {
-                let mut goals = state_cg_redeem_all.goals.write().unwrap_or_else(|e| e.into_inner());
-                for g in goals.values_mut() {
-                    let calc_reward = g.contributors.get(&cid).map(|&(prog, red)| if !red && prog > 0 { g.calc_reward_isk(prog) } else { 0 }).unwrap_or(0);
-                    if calc_reward > 0 {
-                        let available = g.escrow_isk.max(0);
-                        let payout = calc_reward.min(available);
-                        if payout > 0 {
-                            if let Some(entry) = g.contributors.get_mut(&cid) {
-                                entry.1 = true;
-                            }
-                            g.escrow_isk = g.escrow_isk.saturating_sub(payout);
-                            total_payout = total_payout.saturating_add(payout);
-                            redeemed_goals.push((g.id, payout));
-                        }
-                    }
-                }
-            }
-
-            if total_payout > 0 {
-                let Some(ref db) = state_cg_redeem_all.db else {
-                    return Err((STATUS_PRECONDITION_FAILED, "Database unavailable for reward payout".into()));
-                };
-                let reward_cents = eve_db::IskCents::from_isk(total_payout);
-                let mut credited = false;
-                db.with_mut_snapshot(|snap| {
-                    if let Some(ch) = snap.characters.get_mut(&(cid as i64)) {
-                        if let Some(new_bal) = ch.balance.checked_add(reward_cents) {
-                            ch.balance = new_bal;
-                            credited = true;
-                            snap.append_journal(
-                                cid as i64,
-                                "CorporationGoalReward",
-                                reward_cents,
-                                new_bal,
-                                "Corporation goal rewards redeemed",
-                            );
-                        }
-                    }
-                });
-                if !credited {
-                    let mut goals = state_cg_redeem_all.goals.write().unwrap_or_else(|e| e.into_inner());
-                    for (gid, payout) in redeemed_goals {
-                        if let Some(g) = goals.get_mut(&gid) {
-                            if let Some(entry) = g.contributors.get_mut(&cid) {
-                                entry.1 = false;
-                            }
-                            g.escrow_isk = g.escrow_isk.saturating_add(payout);
-                        }
-                    }
-                    return Err((STATUS_PRECONDITION_FAILED, "Unable to credit corporation goal rewards".into()));
-                }
-                state_cg_redeem_all.sync_to_db();
-
-                for (gid, payout) in redeemed_goals {
-                    let mut notice_bytes = Vec::new();
-                    encode_goal_id(1, gid, &mut notice_bytes);
-                    encode_varint_field(2, payout as u64, &mut notice_bytes);
-                    ctx_queue_notice(
-                        NoticeScope::Character(cid),
-                        GoogleAny {
-                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.RedeemedNotice"),
-                            value: notice_bytes,
-                        },
-                        ctx_now_unix(ctx),
-                    );
-                }
+            let Some(ref db) = state_cg_redeem_all.db else {
+                return Err((STATUS_PRECONDITION_FAILED, "Database unavailable for reward payout".into()));
+            };
+            let now = ctx_now_unix(ctx);
+            let redeemed_goals =
+                corp_projects::redeem_all_corp_goal_rewards_for_char(db, cid as i64, now)?;
+            for (pid, payout) in redeemed_goals {
+                let mut notice_bytes = Vec::new();
+                encode_goal_id(1, pid as u64, &mut notice_bytes);
+                encode_varint_field(2, payout as u64, &mut notice_bytes);
+                ctx_queue_notice(
+                    NoticeScope::Character(cid),
+                    GoogleAny {
+                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.RedeemedNotice"),
+                        value: notice_bytes,
+                    },
+                    now,
+                );
             }
 
             Ok(GoogleAny {
@@ -1093,11 +1026,22 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             if corpid != caller_corpid && crate::quasar_gateway::require_admin_role(ctx).is_err() {
                 return Err((STATUS_FORBIDDEN, "Cross-corporation access denied".into()));
             }
-            let goals = state_cg_internal.goals.read().unwrap_or_else(|e| e.into_inner());
+            let mut ids = Vec::new();
+            if let Some(ref db) = state_cg_internal.db {
+                db.with_snapshot(|snap| {
+                    ids = snap
+                        .corp_projects
+                        .values()
+                        .filter(|p| p.corporation_id == corpid as i64 && is_corp_goal_in_snap(snap, p.project_id))
+                        .map(|p| p.project_id as u64)
+                        .collect();
+                });
+                ids.sort_unstable();
+            }
 
             let mut out = Vec::new();
-            for g in goals.values().filter(|g| g.corp_id == corpid) {
-                encode_goal_id(1, g.id, &mut out);
+            for gid in ids {
+                encode_goal_id(1, gid, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporationgoal.api.GetAllResponse"),
@@ -1114,19 +1058,34 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             let caller_corpid = resolve_corp_id(ctx, state_cg_get_int.db.as_ref())?;
             let goal_id = extract_goal_id(dyn_msg.get(1))
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing corporation goal Identifier".into()))?;
-            let goals = state_cg_get_int.goals.read().unwrap_or_else(|e| e.into_inner());
-            let goal = goals
-                .get(&goal_id)
-                .ok_or_else(|| (STATUS_NOT_FOUND, "Corporation goal not found".into()))?;
-            if goal.corp_id != caller_corpid && crate::quasar_gateway::require_admin_role(ctx).is_err() {
-                return Err((STATUS_FORBIDDEN, "Cross-corporation access denied".into()));
-            }
+            let Some(ref db) = state_cg_get_int.db else {
+                return Err((STATUS_NOT_FOUND, "Corporation goal not found".into()));
+            };
+            let is_admin = crate::quasar_gateway::require_admin_role(ctx).is_ok();
+            let (name, desc, target_q, cur_q) =
+                db.with_snapshot(|snap| -> Result<(String, String, u64, u64), (u32, String)> {
+                    let p = snap
+                        .corp_projects
+                        .get(&(goal_id as i64))
+                        .filter(|_| is_corp_goal_in_snap(snap, goal_id as i64))
+                        .ok_or_else(|| (STATUS_NOT_FOUND, "Corporation goal not found".into()))?;
+                    if p.corporation_id != caller_corpid as i64 && !is_admin {
+                        return Err((STATUS_FORBIDDEN, "Cross-corporation access denied".into()));
+                    }
+                    let d = snap
+                        .alliance_war_state
+                        .project_details
+                        .get(&(goal_id as i64))
+                        .map(|det| det.description.clone())
+                        .unwrap_or_default();
+                    Ok((p.name.clone(), d, p.target_quantity, p.current_quantity))
+                })?;
 
             let mut attr = Vec::new();
-            encode_string_field(1, &goal.name, &mut attr);
-            encode_string_field(2, &goal.description, &mut attr);
-            encode_varint_field(3, goal.target_progress as u64, &mut attr);
-            encode_varint_field(4, goal.current_progress as u64, &mut attr);
+            encode_string_field(1, &name, &mut attr);
+            encode_string_field(2, &desc, &mut attr);
+            encode_varint_field(3, target_q, &mut attr);
+            encode_varint_field(4, cur_q, &mut attr);
 
             let mut out = Vec::new();
             encode_bytes_field(1, &attr, &mut out);
@@ -1147,12 +1106,21 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 .or_else(|| ctx.effective_corporation_id())
                 .unwrap_or(0);
             let count = state_cg_cap
-                .goals
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .values()
-                .filter(|g| g.corp_id == corpid && g.active)
-                .count() as u64;
+                .db
+                .as_ref()
+                .map(|db| {
+                    db.with_snapshot(|snap| {
+                        snap.corp_projects
+                            .values()
+                            .filter(|p| {
+                                p.corporation_id == corpid as i64
+                                    && is_corp_goal_in_snap(snap, p.project_id)
+                                    && is_goal_active_in_snap(snap, p.project_id)
+                            })
+                            .count() as u64
+                    })
+                })
+                .unwrap_or(0);
             let mut out = Vec::new();
             encode_varint_field(1, count, &mut out);
             encode_varint_field(2, 20, &mut out);
@@ -1173,18 +1141,30 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing corporation goal Identifier".into()))?;
             let cid = extract_id(dyn_msg.get(2))
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing character Identifier".into()))? as u32;
-            let goals = state_cg_csum.goals.read().unwrap_or_else(|e| e.into_inner());
-            let goal = goals
-                .get(&goal_id)
-                .ok_or_else(|| (STATUS_NOT_FOUND, "Corporation goal not found".into()))?;
-            if goal.corp_id != caller_corpid && crate::quasar_gateway::require_admin_role(ctx).is_err() {
-                return Err((STATUS_FORBIDDEN, "Cross-corporation access denied".into()));
-            }
-            let prog = goal.contributors.get(&cid).map(|(p, _)| *p).unwrap_or(0);
+            let Some(ref db) = state_cg_csum.db else {
+                return Err((STATUS_NOT_FOUND, "Corporation goal not found".into()));
+            };
+            let is_admin = crate::quasar_gateway::require_admin_role(ctx).is_ok();
+            let prog = db.with_snapshot(|snap| -> Result<u64, (u32, String)> {
+                let p = snap
+                    .corp_projects
+                    .get(&(goal_id as i64))
+                    .filter(|_| is_corp_goal_in_snap(snap, goal_id as i64))
+                    .ok_or_else(|| (STATUS_NOT_FOUND, "Corporation goal not found".into()))?;
+                if p.corporation_id != caller_corpid as i64 && !is_admin {
+                    return Err((STATUS_FORBIDDEN, "Cross-corporation access denied".into()));
+                }
+                Ok(snap
+                    .alliance_war_state
+                    .project_details
+                    .get(&(goal_id as i64))
+                    .and_then(|d| d.char_contributions.get(&(cid as i64)).copied())
+                    .unwrap_or(0))
+            })?;
             let mut s = Vec::new();
             encode_seq_id(1, cid as u64, &mut s);
-            encode_varint_field(2, prog as u64, &mut s);
-            encode_goal_id(3, goal.id, &mut s);
+            encode_varint_field(2, prog, &mut s);
+            encode_goal_id(3, goal_id, &mut s);
 
             let mut out = Vec::new();
             encode_bytes_field(1, &s, &mut out);
