@@ -134,13 +134,14 @@ pub(super) async fn handle_scanning_and_wormholes(
         }
 
         ("scanMgr", "GetSignatures") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let sys_id = args
                 .first()
                 .and_then(|a| a.as_i64())
                 .map(|v| v as u32)
                 .or(session.solar_system_id)
-                .unwrap_or(30_000_142);
+                .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id)))
+                .unwrap_or(0);
             let now_unix = ctx.now_unix();
             let _ = ensure_system_signatures(ctx, sys_id).await;
             let signatures = ctx.db.try_with_mut_snapshot(|snap| {
@@ -579,7 +580,10 @@ pub(super) async fn handle_scanning_and_wormholes(
         // =====================================================================
         ("wormholeMgr", "GetWormholePolarization") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let sys_id = session
+                .solar_system_id
+                .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id)))
+                .unwrap_or(0);
             let now_unix = ctx.now_unix();
             let arg_str_opt = args.first().and_then(|a| a.as_str());
             let arg_int_opt = args.first().and_then(|a| a.as_i64());

@@ -654,7 +654,19 @@ pub(super) async fn handle_fleet_ops(
                                     .unwrap_or(606);
                                 (c.solar_system_id, c.active_ship_id, st)
                             })
-                            .unwrap_or((30_000_142, 0, 606));
+                            .unwrap_or_else(|| {
+                                let s_id = if session.character_id == Some(m.character_id) {
+                                    session.solar_system_id.unwrap_or(0)
+                                } else {
+                                    0
+                                };
+                                let ship = if session.character_id == Some(m.character_id) {
+                                    session.ship_id.unwrap_or(0)
+                                } else {
+                                    0
+                                };
+                                (s_id, ship, 606)
+                            });
                         (
                             m.character_id,
                             ship_type_id,

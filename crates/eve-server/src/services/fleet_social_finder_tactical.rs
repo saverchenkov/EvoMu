@@ -553,8 +553,11 @@ pub(super) async fn handle_finder_and_tactical(
                     (fn_name, desc, scope, aj, min_st, min_sec)
                 };
             let now_unix = ctx.now_unix();
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let mut sys_id = session.solar_system_id.unwrap_or(0);
             ctx.db.with_mut_snapshot(|snap| {
+                if sys_id == 0 {
+                    sys_id = snap.characters.get(&char_id).map(|c| c.solar_system_id).unwrap_or(0);
+                }
                 if let Some(f) = snap.fleets.get_mut(&fleet_id) { f.is_registered = true; }
             });
             ctx.fleet_extras.lock().unwrap().adverts.insert(

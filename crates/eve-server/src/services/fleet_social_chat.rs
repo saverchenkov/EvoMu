@@ -182,7 +182,7 @@ fn handle_chat_rpc(
                     .and_then(parse_channel_system_id)
                     .or(session.solar_system_id)
                     .or_else(|| ch.map(|c| c.solar_system_id))
-                    .unwrap_or(30_000_142);
+                    .unwrap_or(0);
                 let corp_id = session.corporation_id.or_else(|| ch.map(|c| c.corporation_id)).unwrap_or(1_000_009);
                 let alliance_id = session.alliance_id.or_else(|| ch.and_then(|c| c.alliance_id));
                 let fleet_id = session.fleet_id.or_else(|| snap.fleets.values().find(|f| f.members.contains(&char_id)).map(|f| f.fleet_id));
