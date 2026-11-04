@@ -463,21 +463,30 @@ pub fn build_price_history_rows(
     rows
 }
 
-/// Resolves `(solar_system_id, constellation_id)` for a station or structure ID, defaulting to Jita (`30_000_142`, `20_000_020`).
+/// Resolves `(solar_system_id, constellation_id)` for a station or structure ID.
 pub(crate) fn resolve_station_solar_and_constellation(
     ctx: &ServerContext,
     snap: &WorldStateSnapshot,
     station_id: i64,
 ) -> (u32, u32) {
     let sys_id = super::market_trading::resolve_station_solar_system(ctx, snap, station_id)
-        .unwrap_or(30_000_142);
+        .or_else(|| {
+            if ctx.sde.solar_systems.contains_key(&(station_id as u32)) {
+                Some(station_id as u32)
+            } else {
+                snap.items.get(&station_id).and_then(|it| {
+                    super::market_trading::resolve_station_solar_system(ctx, snap, it.location_id)
+                })
+            }
+        })
+        .unwrap_or(0);
     let const_id = ctx
         .sde
         .solar_systems
         .get(&sys_id)
         .map(|s| s.constellation_id)
         .filter(|&c| c > 0)
-        .unwrap_or(20_000_020);
+        .unwrap_or(0);
     (sys_id, const_id)
 }
 
@@ -549,6 +558,25 @@ pub(crate) fn build_own_order_changed_payload(
                 ("orderState", PyRep::Integer(state)),
             ])
         } else {
+            let (st_id, reg_id, sys_id, const_id) = snap
+                .market_order_meta
+                .get(&order_id)
+                .and_then(|m| m.issued_by)
+                .and_then(|cid| snap.characters.get(&cid))
+                .map(|c| {
+                    let st = c.station_id.unwrap_or(c.home_station_id);
+                    let (sys, con) = resolve_station_solar_and_constellation(ctx, snap, st);
+                    let sys_actual = if sys > 0 { sys } else { c.solar_system_id };
+                    let con_actual = if con > 0 { con } else { c.constellation_id };
+                    let reg_actual = ctx
+                        .sde
+                        .solar_systems
+                        .get(&sys_actual)
+                        .map(|s| s.region_id as i64)
+                        .unwrap_or(c.region_id as i64);
+                    (st, reg_actual, sys_actual, con_actual)
+                })
+                .unwrap_or((0, 0, 0, 0));
             PyRep::keyval([
                 ("orderID", PyRep::Integer(order_id)),
                 ("typeID", PyRep::Integer(34)),
@@ -558,10 +586,10 @@ pub(crate) fn build_own_order_changed_payload(
                 ("volEntered", PyRep::Integer(1)),
                 ("minVolume", PyRep::Integer(1)),
                 ("price", PyRep::Real(1.0)),
-                ("stationID", PyRep::Integer(60_003_760)),
-                ("regionID", PyRep::Integer(10_000_002)),
-                ("solarSystemID", PyRep::Integer(30_000_142)),
-                ("constellationID", PyRep::Integer(20_000_020)),
+                ("stationID", PyRep::Integer(st_id)),
+                ("regionID", PyRep::Integer(reg_id)),
+                ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                ("constellationID", PyRep::Integer(const_id as i64)),
                 ("range", PyRep::Integer(-1)),
                 (
                     "issueDate",

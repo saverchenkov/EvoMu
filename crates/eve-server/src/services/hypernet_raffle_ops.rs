@@ -861,7 +861,15 @@ pub fn handle(
                                         let reg = ctx.sde.solar_systems.get(&s.solar_system_id).map(|sys| sys.region_id as i64).unwrap_or(0);
                                         (s.solar_system_id as i64, reg)
                                     }))
-                                    .unwrap_or((30_000_142, 10_000_002));
+                                    .or_else(|| snap.characters.get(&r.creator_id).map(|c| {
+                                        let reg = ctx.sde.solar_systems.get(&c.solar_system_id).map(|sys| sys.region_id as i64).unwrap_or(c.region_id as i64);
+                                        (c.solar_system_id as i64, reg)
+                                    }))
+                                    .or_else(|| snap.characters.get(&char_id).map(|c| {
+                                        let reg = ctx.sde.solar_systems.get(&c.solar_system_id).map(|sys| sys.region_id as i64).unwrap_or(c.region_id as i64);
+                                        (c.solar_system_id as i64, reg)
+                                    }))
+                                    .unwrap_or((0, 0));
                                 if f_sys.is_some_and(|s| st_sys != s) || f_reg.is_some_and(|rg| st_reg != rg) {
                                     return false;
                                 }
