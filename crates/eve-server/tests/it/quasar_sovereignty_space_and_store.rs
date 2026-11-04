@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 
 use crate::open_feats_and_rpcs_b11_part2::{quasar_rpc, select_char};
-use crate::parity_quasar_remaining_closure::{
+use crate::quasar_info_panels_and_plex_payments::{
     drain_notices, encode_double_field, encode_seq_id,
 };
 use crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite;
