@@ -495,7 +495,11 @@ pub fn pick_destination_system_for_target_class_excluding(
     }
     candidates.sort_unstable();
     if candidates.is_empty() {
-        30_000_142
+        if source_sys_id > 0 {
+            source_sys_id
+        } else {
+            sde.solar_systems.keys().copied().find(|&id| id < 31_000_000).unwrap_or(30_000_142)
+        }
     } else {
         let mix = (source_sys_id as usize)
             .wrapping_mul(2_654_435_761)

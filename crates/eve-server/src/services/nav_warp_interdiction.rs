@@ -516,10 +516,13 @@ pub async fn handle_use_warp_vector(
         code: "NoActiveShip".into(),
         message: "Session has no active ship in space".into(),
     })?;
-    let sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError {
-        code: "NoSolarSystem".into(),
-        message: "Session has no active solar system".into(),
-    })?;
+    let sys_id = session
+        .solar_system_id
+        .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id)))
+        .ok_or_else(|| BridgeRpcError {
+            code: "NoSolarSystem".into(),
+            message: "Session has no active solar system".into(),
+        })?;
     let target_id = args
         .first()
         .and_then(|a| a.as_i64())

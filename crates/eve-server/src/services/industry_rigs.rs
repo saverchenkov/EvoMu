@@ -227,7 +227,15 @@ pub fn resolve_facility_modifiers_and_system(
             let sys_id = if (30_000_000..40_000_000).contains(&it.location_id) {
                 it.location_id as u32
             } else {
-                30_000_142
+                snap.structures
+                    .get(&facility_id)
+                    .or_else(|| snap.structures.get(&it.location_id))
+                    .map(|s| s.solar_system_id)
+                    .or_else(|| ctx.sde.location_solar_system(it.location_id))
+                    .or_else(|| snap.characters.get(&it.owner_id).map(|c| c.solar_system_id))
+                    .or_else(|| snap.characters.values().find(|c| c.corporation_id == it.owner_id).map(|c| c.solar_system_id))
+                    .or_else(|| snap.characters.values().next().map(|c| c.solar_system_id))
+                    .unwrap_or(30_000_142)
             };
             let region_id = ctx
                 .sde

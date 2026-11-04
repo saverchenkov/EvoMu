@@ -656,7 +656,14 @@ pub fn handle_special_dialogue_action(
             if !agent_info.is_locator {
                 return Some(Err(BridgeRpcError { code: "AgentHasNoLocatorService".into(), message: format!("Agent {agent_id} does not offer Locator services") }));
             }
-            let caller_sys = session.solar_system_id.or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))).unwrap_or(0);
+            let caller_sys = if sys_id > 0 {
+                sys_id
+            } else {
+                session
+                    .solar_system_id
+                    .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id)))
+                    .unwrap_or(0)
+            };
             if agent_info.solar_system_id != Some(caller_sys)
                 || (session.station_id.is_some()
                     && agent_info.station_id.is_some()
@@ -710,8 +717,8 @@ pub fn handle_special_dialogue_action(
                     });
                 }
                 let sys_info = ctx.sde.solar_systems.get(&target_ch.solar_system_id);
-                let const_id = sys_info.map(|s| s.constellation_id).unwrap_or(20_000_020);
-                let reg_id = sys_info.map(|s| s.region_id).unwrap_or(10_000_002);
+                let const_id = sys_info.map(|s| s.constellation_id).unwrap_or(target_ch.constellation_id);
+                let reg_id = sys_info.map(|s| s.region_id).unwrap_or(target_ch.region_id);
                 if reg_id >= 11_000_000 {
                     return Err(BridgeRpcError {
                         code: "LocatorTargetInUnknownSpace".into(),
@@ -719,8 +726,8 @@ pub fn handle_special_dialogue_action(
                     });
                 }
                 let agent_sys_info = agent_info.solar_system_id.and_then(|sid| ctx.sde.solar_systems.get(&sid));
-                let agent_const_id = agent_sys_info.map(|s| s.constellation_id).unwrap_or(20_000_020);
-                let agent_reg_id = agent_sys_info.map(|s| s.region_id).unwrap_or(10_000_002);
+                let agent_const_id = agent_sys_info.map(|s| s.constellation_id).unwrap_or(target_ch.constellation_id);
+                let agent_reg_id = agent_sys_info.map(|s| s.region_id).unwrap_or(target_ch.region_id);
                 if agent_info.level == 1 && const_id != agent_const_id {
                     return Err(BridgeRpcError {
                         code: "LocatorTargetOutOfRange".into(),
