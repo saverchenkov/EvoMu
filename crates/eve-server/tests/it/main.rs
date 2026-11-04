@@ -286,6 +286,7 @@ mod plan_char_dogma_social_esi;
 #[allow(unused_imports)]
 #[allow(unused_imports)]
 #[allow(unused_imports)]
+
 mod fleet_and_wings_management;
 mod crimewatch_hostility;
 mod combat_r4_regressions;
@@ -349,29 +350,16 @@ mod parity_corp_combat_batch_closure;
 mod parity_corp_combat_batch_closure_part2;
 mod quasar_freelance_and_payment_schedules;
 mod quasar_paragon_hub_and_workforce;
-mod parity_pve_nav_batch_closure;
-mod parity_npc_mining_batch_closure;
-mod parity_npc_mining_batch_closure_part2;
-mod parity_notify_batch4_closure;
 mod quasar_agency_and_seasons;
 mod quasar_info_panels_and_plex_payments;
 mod quasar_sovereignty_space_and_store;
 mod notifies_and_cluster_rpc_audit;
-mod parity_notify_batch3_closure;
-mod parity_notify_batch3_closure_part2;
-mod parity_notify_batch3_closure_part3;
-mod parity_notify_batch2_closure;
 mod notifies_progression_and_services;
 mod parity_notify_market_item_received;
-mod parity_plan_canonical_closure;
-mod parity_plan_fake_closure;
-mod parity_plan_remaining_closure;
 mod quasar_achievement_career_and_cosmetics;
 mod crimewatch_timers_and_drones;
 mod parity_fighters_lifecycle_closure;
 mod quasar_achievements_progress;
-mod parity_notify_flagged_remediation;
-mod parity_pve_dungeons_events_remediation;
 // mod fleets_social_and_command;
 // mod corporation_governance_and_shares;
 mod npc_navy_haulers_excavators;

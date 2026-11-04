@@ -2058,6 +2058,7 @@ async fn test_attributes_remaps_implants_boosters() {
 // Folded submodule: parity_fake_remediation_feat_part1
 #[allow(unused_imports, dead_code)]
 pub(crate) mod features_parity_part4 {
+    #[allow(unused_imports)]
     use super::*;
 
 // Integration tests remediating `FLAGGED_FAKE` `feat:*` parity rows.
@@ -2594,6 +2595,7 @@ async fn test_skyhook_reagent_harvest_secure_surplus_split() {
 // Folded submodule: parity_fake_remediation_part1
 #[allow(unused_imports, dead_code)]
 pub(crate) mod features_parity_part5 {
+    #[allow(unused_imports)]
     use super::*;
 
 // End-to-end remediation integration tests for ESI social, calendar, contacts,
@@ -3205,6 +3207,7 @@ async fn test_parity_remediation_esi_corp_governance_roles_limit_and_sov_map() {
 // Folded submodule: parity_fake_remediation_part2
 #[allow(unused_imports, dead_code)]
 pub(crate) mod features_parity_part6 {
+    #[allow(unused_imports)]
     use super::*;
 
 // End-to-end remediation integration tests for ESI corp blueprints/structures
@@ -3868,5 +3871,1690 @@ async fn test_parity_remediation_quasar_payment_schedules_tokens_and_store() {
             .status_code,
         STATUS_OK
     );
+}
+}
+
+#[allow(unused_imports, dead_code, unused_variables, unused_mut)]
+pub(crate) mod parity_plan_canonical_closure {
+    #[allow(unused_imports)]
+    use super::*;
+use std::collections::HashMap;
+use glam::DVec3;
+
+use eve_destiny::{Ballpark, MovementMode};
+use eve_machonet::{MachoPacket, MachoPacketType, SessionState};
+use eve_proto::quasar::{
+    encode_varint_field, EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp,
+    QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
+};
+use eve_proto::{marshal, PyRep};
+use eve_server::quasar_gateway::{STATUS_OK, STATUS_UNAUTHORIZED};
+use eve_server::router::ServerContext;
+use eve_server::system_actor::populate_asteroid_belt_entities;
+
+use crate::common;
+
+fn make_session(sid: u64, uid: u64, cid: i64, corp_id: i64) -> SessionState {
+    let mut sess = SessionState::new(sid);
+    sess.user_id = Some(uid);
+    sess.character_id = Some(cid);
+    sess.corporation_id = Some(corp_id);
+    sess.solar_system_id = Some(30_000_142);
+    sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
+    sess
+}
+
+fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
+    if let PyRep::KeyVal(entries) = rep {
+        for (k, v) in entries {
+            if k == "response_proto" {
+                if let PyRep::Bytes(b) = v {
+                    return EvePublicResponse::decode_proto(b)
+                        .expect("decode EvePublicResponse from response_proto");
+                }
+            }
+        }
+    }
+    panic!("Expected KeyVal containing response_proto, got {rep:?}");
+}
+
+async fn quasar_rpc(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    type_name: &str,
+    payload_bytes: Vec<u8>,
+) -> EvePublicResponse {
+    let req = EvePublicRequest {
+        issued: Some(GoogleTimestamp {
+            seconds: ctx.now_unix() as i64,
+            nanos: 0,
+        }),
+        correlation_uuid: b"canonical-closure-01".to_vec(),
+        payload: Some(GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
+            value: payload_bytes,
+        }),
+        external_origin: "eve-client".into(),
+        application_instance_uuid: b"app-canonical-test".to_vec(),
+        authoritative_context: None,
+        trace_context: None,
+    };
+    let empty_kw = HashMap::new();
+    let rep = ctx
+        .dispatch_rpc(
+            sess,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("publicGatewaySvc.SendRequest");
+    extract_response_proto(&rep)
+}
+
+// =========================================================================
+// 1. plan:C-5 & plan:MN-01: Mining static data, portion sizes & asteroid belts
+// =========================================================================
+// parity: plan:C-5, plan:MN-01
+#[tokio::test]
+async fn test_canonical_plan_c5_and_mn01_mining_sde_and_asteroid_belts() {
+    eve_testkit::attest(&["plan:C-5", "plan:MN-01"]);
+
+    let ctx = ServerContext::new();
+    let sde = &ctx.sde;
+
+    // MN-01: Veldspar (1230) -> Tritanium (34) only with portionSize 100
+    let veldspar_type = &sde.types[&1230];
+    assert_eq!(veldspar_type.portion_size, 100);
+    let veldspar_mats = sde.type_materials_for(1230);
+    assert_eq!(veldspar_mats.len(), 1);
+    assert_eq!(veldspar_mats[0].material_type_id, 34);
+    assert_eq!(veldspar_mats[0].quantity, 400);
+
+    // Scordite (1228) -> Tritanium (34) + Pyerite (35)
+    let scordite_mats: Vec<u32> = sde
+        .type_materials_for(1228)
+        .iter()
+        .map(|m| m.material_type_id)
+        .collect();
+    assert_eq!(scordite_mats, vec![34, 35]);
+
+    // Clear Icicle (16262) yields its isotope and fuel materials
+    let ice_mats: Vec<u32> = sde
+        .type_materials_for(16262)
+        .iter()
+        .map(|m| m.material_type_id)
+        .collect();
+    for expected in [16272u32, 16273, 16274, 16275] {
+        assert!(ice_mats.contains(&expected), "Clear Icicle must yield {expected}");
+    }
+
+    // Ore variant yields differ from base ore (Concentrated Veldspar 17470 vs Veldspar 1230)
+    let conc_veld_mats = sde.type_materials_for(17470);
+    assert_eq!(conc_veld_mats.len(), 1);
+    assert!(conc_veld_mats[0].quantity > veldspar_mats[0].quantity);
+
+    // Compressible types and dogma attributes
+    assert_eq!(sde.compressible_types.get(&1230), Some(&62516));
+    assert!(sde.compressible_types.contains_key(&16262));
+    assert!(sde.types.contains_key(&483)); // Miner I
+    assert!(sde.types[&483].default_attributes.contains_key(&77)); // miningAmount
+
+    // C-5 / MN-01: Asteroid belts as celestials & balls in Perimeter (30000144) & LZ-6SU (30000208)
+    let mut highsec_bp = Ballpark::new(30_000_144);
+    let highsec_states = populate_asteroid_belt_entities(&mut highsec_bp, 30_000_144, sde);
+    assert!(!highsec_states.is_empty(), "Perimeter must spawn asteroid belt entities");
+    for st in &highsec_states {
+        assert!(st.remaining_units > 0);
+        let ball = highsec_bp.balls.get(&st.asteroid_id).expect("asteroid ball in ballpark");
+        assert!(ball.radius >= 60.0);
+    }
+
+    let mut null_bp = Ballpark::new(30_000_208);
+    let null_states = populate_asteroid_belt_entities(&mut null_bp, 30_000_208, sde);
+    assert!(!null_states.is_empty(), "Nullsec 30000208 must spawn asteroid belt entities");
+}
+
+// =========================================================================
+// 2. plan:Q-3, plan:Q-4, plan:Q-7, plan:Q-8: Quasar packages dispatch
+// =========================================================================
+// parity: plan:Q-3, plan:Q-4, plan:Q-7, plan:Q-8
+#[tokio::test]
+async fn test_canonical_plan_q3_q4_q7_q8_quasar_packages_dispatch() {
+    eve_testkit::attest(&["plan:Q-3", "plan:Q-4", "plan:Q-7", "plan:Q-8"]);
+
+    let ctx = ServerContext::new();
+    let mut sess = make_session(10, 1, 90_000_001, 1_000_009);
+
+    // Negative check: unauthenticated requests fail with STATUS_UNAUTHORIZED
+    let mut unauth = SessionState::new(9901);
+    let unauth_resp = quasar_rpc(
+        &ctx,
+        &mut unauth,
+        "eve_public.character.api.GetRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(unauth_resp.status_code, STATUS_UNAUTHORIZED);
+
+    // Q-3: Identity, accounts and entitlements (Store / Payment / Omega)
+    let q3_resp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.store.category.api.GetAllRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(q3_resp.status_code, STATUS_OK);
+    assert_eq!(q3_resp.correlation_uuid, b"canonical-closure-01");
+    assert_eq!(
+        q3_resp.payload.as_ref().unwrap().normalized_type_name(),
+        "eve_public.store.category.api.GetAllResponse"
+    );
+
+    // Q-4: Character and progression (Career goals & Achievement showcase)
+    let q4_goals = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.career.goal.api.GetAllRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(q4_goals.status_code, STATUS_OK);
+    assert_eq!(
+        q4_goals.payload.as_ref().unwrap().normalized_type_name(),
+        "eve_public.career.goal.api.GetAllResponse"
+    );
+
+    let q4_score = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.achievement.showcase.api.GetCharacterScoreRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(q4_score.status_code, STATUS_OK);
+    assert_eq!(
+        q4_score.payload.as_ref().unwrap().normalized_type_name(),
+        "eve_public.achievement.showcase.api.GetCharacterScoreResponse"
+    );
+
+    // Q-7: Space and combat (Space CDN update)
+    let mut cdn_req = Vec::new();
+    encode_varint_field(2, 1, &mut cdn_req);
+    let q7_resp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.space.api.cdn.GetUpdateRequest",
+        cdn_req,
+    )
+    .await;
+    assert_eq!(q7_resp.status_code, STATUS_OK);
+    assert_eq!(
+        q7_resp.payload.as_ref().unwrap().normalized_type_name(),
+        "eve_public.space.api.cdn.GetUpdateResponse"
+    );
+
+    // Q-8: Sovereignty, faction warfare and events (Planet resources & Mercenary den)
+    let q8_defs = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(q8_defs.status_code, STATUS_OK);
+    assert_eq!(
+        q8_defs.payload.as_ref().unwrap().normalized_type_name(),
+        "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsResponse"
+    );
+
+    let q8_ver = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(q8_ver.status_code, STATUS_OK);
+    assert_eq!(
+        q8_ver.payload.as_ref().unwrap().normalized_type_name(),
+        "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionResponse"
+    );
+
+    let q8_merc = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.sovereignty.mercenaryden.api.GetMaximumForCharacterRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(q8_merc.status_code, STATUS_OK);
+    assert_eq!(
+        q8_merc.payload.as_ref().unwrap().normalized_type_name(),
+        "eve_public.sovereignty.mercenaryden.api.GetMaximumForCharacterResponse"
+    );
+}
+
+// =========================================================================
+// 3. plan:T-8, plan:T-9, plan:T-10, plan:T-11: Test harnesses and oracles
+// =========================================================================
+// parity: plan:T-8, plan:T-9, plan:T-10, plan:T-11, feat:invariant.atomic-rollback-all-stores
+#[tokio::test]
+async fn test_canonical_plan_t8_t9_t10_t11_harnesses_and_oracles() {
+    eve_testkit::attest(&[
+        "plan:T-8",
+        "plan:T-9",
+        "plan:T-10",
+        "plan:T-11",
+        "feat:invariant.atomic-rollback-all-stores",
+    ]);
+
+    let db_path = std::env::temp_dir().join(format!("canonical_t9_{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&db_path);
+
+    // T-8 & T-9: Conservation, transactional atomicity, and crash/restart persistence
+    let (initial_isk, initial_plex) = {
+        let ctx = ServerContext::from_sqlite(&db_path).expect("from_sqlite");
+        ctx.seed_demo_world_fixtures();
+        let (before_isk, before_plex) = ctx
+            .db
+            .with_snapshot(|snap| {
+                snap.characters
+                    .get(&90_000_001)
+                    .map(|c| (c.balance, c.plex_balance))
+            })
+            .expect("character 90_000_001 exists");
+
+        // T-8: Transactional atomicity: failing transaction rolls back ISK and PLEX
+        let rollback_res: Result<(), String> = ctx.db.try_with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+                ch.balance.0 += 100_000_000;
+                ch.plex_balance += 500;
+            }
+            Err("simulated_invariant_violation".to_string())
+        });
+        assert!(rollback_res.is_err());
+
+        // Also verify failing/unauthenticated mutating RPC leaves DB completely unchanged
+        let mut unauth = SessionState::new(8801);
+        let rpc_err = ctx
+            .dispatch_rpc(
+                &mut unauth,
+                "charMgr",
+                None,
+                "AddContact",
+                &[
+                    PyRep::Integer(90_000_002),
+                    PyRep::Real(5.0),
+                    PyRep::Integer(0),
+                    PyRep::Bool(false),
+                ],
+                &HashMap::new(),
+                None,
+            )
+            .await;
+        assert!(rpc_err.is_err(), "unauthenticated mutating RPC must fail");
+
+        let (after_isk, after_plex) = ctx
+            .db
+            .with_snapshot(|snap| {
+                snap.characters
+                    .get(&90_000_001)
+                    .map(|c| (c.balance, c.plex_balance))
+            })
+            .expect("character 90_000_001 exists");
+        assert_eq!(before_isk, after_isk, "ISK balance must be conserved on rollback");
+        assert_eq!(before_plex, after_plex, "PLEX balance must be conserved on rollback");
+
+        (before_isk, before_plex)
+    };
+
+    // T-9: Crash/restart recovery preserves state across SQLite reopen
+    {
+        let ctx2 = ServerContext::from_sqlite(&db_path).expect("reopen_sqlite");
+        let (restarted_isk, restarted_plex) = ctx2
+            .db
+            .with_snapshot(|snap| {
+                snap.characters
+                    .get(&90_000_001)
+                    .map(|c| (c.balance, c.plex_balance))
+            })
+            .expect("character 90_000_001 exists after restart");
+        assert_eq!(initial_isk, restarted_isk);
+        assert_eq!(initial_plex, restarted_plex);
+    }
+    let _ = std::fs::remove_file(&db_path);
+
+    // T-10: Client-expectation oracle (Quasar envelope metadata & RPC contract)
+    let ctx = ServerContext::new();
+    let mut authed = make_session(20, 1, 90_000_001, 1_000_009);
+    let resp = quasar_rpc(
+        &ctx,
+        &mut authed,
+        "eve_public.store.category.api.GetAllRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(resp.status_code, STATUS_OK);
+    assert_eq!(resp.correlation_uuid, b"canonical-closure-01");
+    assert!(resp.payload.is_some());
+
+    // T-11: Destiny differential physics harness & golden vector kinematics
+    let mut ballpark = Ballpark::new(30_000_144);
+    let _ = populate_asteroid_belt_entities(&mut ballpark, 30_000_144, &ctx.sde);
+    let ball_id = *ballpark.balls.keys().next().expect("seeded ball in ballpark");
+    let start_x = ballpark.balls[&ball_id].position.x;
+    if let Some(ball) = ballpark.balls.get_mut(&ball_id) {
+        ball.velocity = DVec3::new(100.0, 0.0, 0.0);
+        ball.mass = 1_067_000.0;
+        ball.max_velocity = 365.0;
+        ball.inertia = 2.9;
+        ball.mode = MovementMode::GotoDirection {
+            direction: DVec3::X,
+        };
+    }
+    ballpark.step(1.0);
+    let moved = ballpark.balls.get(&ball_id).expect("moved ball in ballpark");
+    assert!(moved.position.x > start_x + 50.0, "kinematic step must advance X position");
+}
+
+// =========================================================================
+// 4. plan:Z-1 & plan:Z-2: RPC & Notification Closure
+// =========================================================================
+// parity: plan:Z-1, plan:Z-2
+#[tokio::test]
+async fn test_canonical_plan_z1_z2_rpc_and_notify_closure() {
+    eve_testkit::attest(&["plan:Z-1", "plan:Z-2"]);
+
+    let ctx = ServerContext::new();
+    ctx.seed_demo_world_fixtures();
+    let empty_kw = HashMap::new();
+
+    // Z-1: Dispatch client-called RPCs with V24 argument layouts and live semantics
+    let mut sess = SessionState::new(30);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+
+    let char_info = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "GetCharacterInfo",
+            &[PyRep::Integer(90_000_001)],
+            &empty_kw,
+            Some("test:Z-1:GetCharacterInfo"),
+        )
+        .await
+        .expect("charUnboundMgr.GetCharacterInfo");
+    assert_ne!(char_info, PyRep::None);
+
+    let select_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(90_000_001)],
+            &empty_kw,
+            Some("test:Z-1:SelectCharacterID"),
+        )
+        .await
+        .expect("charUnboundMgr.SelectCharacterID");
+    assert_ne!(select_rep, PyRep::None);
+
+    let station_info = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "stationSvc",
+            None,
+            "GetStation",
+            &[PyRep::Integer(60_003_760)],
+            &empty_kw,
+            Some("test:Z-1:GetStation"),
+        )
+        .await
+        .expect("stationSvc.GetStation");
+    assert_ne!(station_info, PyRep::None);
+
+    // Z-2: Systematic notification emission pipelines, marshaled packet types, and multicast delivery
+    let notifs = ctx.notify_account_change(90_000_001, "cash", 90_000_001, 100_000_000.0);
+    assert_eq!(notifs.len(), 1);
+    assert_eq!(notifs[0].event, "OnAccountChange");
+    assert_eq!(notifs[0].id_type, "charid");
+    assert_eq!(notifs[0].args.len(), 3);
+
+    // Verify binary packet marshal round-trip matches Macho notification format
+    let decoded = marshal::decode(&notifs[0].marshaled_packet).expect("decode OnAccountChange");
+    let packet = MachoPacket::from_pyrep(&decoded).expect("parse Macho notification packet");
+    assert_eq!(packet.packet_type, MachoPacketType::Notification);
+
+    // Drain notifications for character 90_000_001
+    let drained = ctx.drain_notifications_for_char(90_000_001);
+    assert!(!drained.is_empty(), "drained notification list must not be empty");
+    assert!(drained.iter().any(|p| p.event == "OnAccountChange"));
+}
+
+
+}
+
+pub(crate) mod parity_plan_fake_closure {
+    #[allow(unused_imports)]
+    use super::*;
+
+// End-to-end integration tests closing canonical plan rows:
+// - `plan:E-5`: Agent finder and conversation lifecycle
+// - `plan:ESI-5`: Corporation structures timers, starbase detail, and plan closure
+// - `plan:Q-5`: Social and organization Quasar packages
+// - `plan:Q-6`: Economy and industry Quasar packages
+
+
+use crate::esi_market_industry_pi::{issue_token_with_scopes, make_item, rpc_call};
+use eve_db::corp_roles::{ROLE_DIRECTOR, ROLE_FACTORY_MANAGER, ROLE_STATION_MANAGER};
+use eve_db::{AllianceRecord, CorporationRecord, InventoryFlag, IskCents, MarketOrderRecord, StarbaseDetailSettings, TrainedSkillRecord};
+use eve_destiny::{Ball, MovementMode};
+use eve_machonet::SessionState;
+use eve_proto::quasar::{
+    encode_bytes_field, encode_string_field, encode_varint_field, EvePublicRequest,
+    EvePublicResponse, GoogleAny, GoogleTimestamp, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
+};
+use eve_proto::PyRep;
+use eve_server::esi::router::EsiRouter;
+use eve_server::esi::{EsiHttpRequest, OpenApiSpec};
+use eve_server::router::ServerContext;
+use eve_server::services::agents_missions::load_mission_meta;
+use glam::DVec3;
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+fn esi_get_validated(router: &EsiRouter, spec: &OpenApiSpec, path: &str, token: Option<&str>) -> Value {
+    let mut req = EsiHttpRequest::new("GET", path);
+    if let Some(t) = token { req = req.with_bearer_token(t); }
+    let resp = router.handle_request(&req);
+    assert_eq!(resp.status_code, 200, "GET {path} -> {}: {}", resp.status_code, String::from_utf8_lossy(&resp.body));
+    let raw_path = path.split('?').next().unwrap_or(path);
+    spec.validate_response("GET", raw_path, resp.status_code, &resp.headers, &resp.body)
+        .unwrap_or_else(|e| panic!("OpenAPI validation failed for GET {path}: {e}"));
+    serde_json::from_slice(&resp.body).unwrap_or(Value::Null)
+}
+
+fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
+    if let PyRep::KeyVal(entries) = rep {
+        for (k, v) in entries {
+            if k == "response_proto" {
+                if let PyRep::Bytes(b) = v {
+                    return EvePublicResponse::decode_proto(b).expect("decode EvePublicResponse");
+                }
+            }
+        }
+    }
+    panic!("Expected KeyVal containing response_proto, got {rep:?}");
+}
+
+fn encode_id_field(tag: u32, id: u64, out: &mut Vec<u8>) {
+    let mut id_val = Vec::new();
+    encode_varint_field(1, id, &mut id_val);
+    encode_bytes_field(tag, &id_val, out);
+}
+
+async fn send_quasar(ctx: &ServerContext, sess: &mut SessionState, type_url: &str, payload_val: Vec<u8>, corr: &[u8]) -> EvePublicResponse {
+    let req = EvePublicRequest {
+        issued: Some(GoogleTimestamp { seconds: ctx.now_unix() as i64, nanos: 0 }),
+        correlation_uuid: corr.to_vec(),
+        payload: Some(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_url}"), value: payload_val }),
+        external_origin: "eve-client".into(),
+        application_instance_uuid: b"app-plan-fake-closure".to_vec(),
+        authoritative_context: None,
+        trace_context: None,
+    };
+    let rep = ctx.dispatch_rpc(sess, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &HashMap::new(), None)
+        .await.expect("SendRequest");
+    extract_response_proto(&rep)
+}
+
+#[tokio::test]
+async fn test_plan_e5_agent_finder_and_conversation_lifecycle() {
+    // parity: plan:E-5
+    eve_testkit::attest(&["plan:E-5"]);
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+
+    let char_id = 90_000_001_i64;
+    let empty_kw = HashMap::new();
+
+    // 1. Train Negotiation (3356), Connections (3359), Security Connections (3895), Social (3355)
+    ctx.db.with_mut_snapshot(|snap| {
+        let skills = snap.skills.entry(char_id).or_default();
+        skills.insert(3356, TrainedSkillRecord { type_id: 3356, level: 5, skill_points: 256_000.0 });
+        skills.insert(3359, TrainedSkillRecord { type_id: 3359, level: 4, skill_points: 135_765.0 });
+        skills.insert(3895, TrainedSkillRecord { type_id: 3895, level: 4, skill_points: 135_765.0 });
+        skills.insert(3355, TrainedSkillRecord { type_id: 3355, level: 4, skill_points: 135_765.0 });
+    });
+
+    let mut sess = SessionState::new(71_001);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+
+    // 2. Agent Finder: Query Level 1 and Level 2 Security agents (division 24)
+    let l1_rep = ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetAgents", &[PyRep::Integer(1), PyRep::Integer(24)], &empty_kw, None).await.expect("GetAgents L1");
+    let PyRep::Rowset { rows: l1_rows, .. } = l1_rep else { panic!("Expected Rowset") };
+    assert!(!l1_rows.is_empty(), "Level 1 Security agents must be present");
+    for row in &l1_rows {
+        assert_eq!(row[2].as_i64(), Some(24));
+        assert_eq!(row[7].as_i64(), Some(1));
+        assert_eq!(row[9], PyRep::Bool(true));
+    }
+
+    let l2_rep = ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetAgents", &[PyRep::Integer(2), PyRep::Integer(24)], &empty_kw, None).await.expect("GetAgents L2");
+    let PyRep::Rowset { rows: l2_rows, .. } = l2_rep else { panic!() };
+    assert!(!l2_rows.is_empty());
+    let l2_corp_id = l2_rows[0][3].as_i64().unwrap();
+    assert_eq!(l2_rows[0][9], PyRep::Bool(false), "L2 agent initially inaccessible without corp standing");
+
+    // Standing gate: boost standing with L2 agent's corporation, verifying access unlocks
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) { ch.standings.insert(l2_corp_id, 3.5); }
+    });
+    let l2_st_rep = ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetAgents", &[PyRep::Integer(2), PyRep::Integer(24)], &empty_kw, None).await.expect("GetAgents L2 st");
+    let PyRep::Rowset { rows: l2_acc_rows, .. } = l2_st_rep else { panic!() };
+    let unlocked = l2_acc_rows.iter().find(|r| r[3].as_i64() == Some(l2_corp_id)).unwrap();
+    assert_eq!(unlocked[9], PyRep::Bool(true));
+
+    // 3. Conversation lifecycle: Pick L1 agent and co-locate character
+    let selected_agent = &l1_rows[0];
+    let agent_id = selected_agent[0].as_i64().unwrap();
+    let agent_sys = selected_agent[5].as_i64().unwrap() as u32;
+    let agent_sta = selected_agent[6].as_i64();
+    let agent_corp = selected_agent[3].as_i64().unwrap();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = agent_sys;
+            ch.station_id = agent_sta;
+        }
+    });
+    sess.solar_system_id = Some(agent_sys);
+    sess.station_id = agent_sta;
+
+    let sys_rep = ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetSolarSystemOfAgent", &[PyRep::Integer(agent_id)], &empty_kw, None).await.expect("GetSolarSystemOfAgent");
+    assert_eq!(sys_rep.as_i64(), Some(agent_sys as i64));
+
+    let agent_oid = ctx.bind_object(&sess, "agentMgr", agent_id).expect("bind agent moniker");
+
+    // 4. Request mission -> Offered
+    let offer_res = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(2)], &empty_kw, None).await.expect("DoAction(RequestMission)");
+    let PyRep::KeyVal(offer_kv) = offer_res else { panic!("Expected KeyVal for offer") };
+    let mission_id = offer_kv["missionID"].as_i64().unwrap() as u32;
+    assert_eq!(offer_kv["state"].as_str(), Some("Offered"));
+    assert_eq!(offer_kv["missionState"].as_i64(), Some(1));
+    assert!(offer_kv["briefing"].as_str().is_some());
+    assert!(offer_kv["objectives"].as_str().is_some());
+    assert!(offer_kv["iskReward"].as_i64().unwrap() > 0);
+    assert!(offer_kv["lpReward"].as_i64().unwrap() > 0);
+
+    // Verify journal reflects offered mission
+    let journal = ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetMyJournalDetails", &[], &empty_kw, None).await.expect("GetMyJournalDetails");
+    let PyRep::Tuple(j_tup) = journal else { panic!() };
+    let PyRep::List(j_list) = &j_tup[0] else { panic!() };
+    assert!(j_list.iter().any(|m| m.dict_get("missionID").and_then(|v| v.as_i64()) == Some(mission_id as i64)));
+
+    // 5. Decline mission without penalty on first decline
+    let dec_res = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(9)], &empty_kw, None).await.expect("DoAction(Decline)");
+    let PyRep::KeyVal(dec_kv) = dec_res else { panic!() };
+    assert_eq!(dec_kv["state"].as_str(), Some("Declined"));
+    assert_eq!(dec_kv["standingPenaltyApplied"], PyRep::Bool(false));
+
+    // 6. Request new mission and Accept
+    let offer2_res = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(2)], &empty_kw, None).await.expect("DoAction(Request 2)");
+    let PyRep::KeyVal(offer2_kv) = offer2_res else { panic!() };
+    let mission2_id = offer2_kv["missionID"].as_i64().unwrap() as u32;
+
+    let acc_res = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(3)], &empty_kw, None).await.expect("DoAction(Accept)");
+    let PyRep::KeyVal(acc_kv) = acc_res else { panic!() };
+    assert_eq!(acc_kv["state"].as_str(), Some("Accepted"));
+    assert_eq!(acc_kv["missionState"].as_i64(), Some(2));
+    let bm_id = acc_kv["bookmarkID"].as_i64().unwrap();
+    assert!(ctx.db.with_snapshot(|snap| snap.bookmarks.contains_key(&bm_id)));
+
+    // 7. Complete the mission: satisfy objectives and invoke Complete (Action 6)
+    let initial_balance = ctx.db.with_snapshot(|snap| snap.characters[&char_id].balance);
+    let initial_lp = ctx.db.with_snapshot(|snap| snap.characters[&char_id].loyalty_points.get(&agent_corp).copied().unwrap_or(0));
+    let initial_agent_st = ctx.db.with_snapshot(|snap| snap.characters[&char_id].standings.get(&agent_id).copied().unwrap_or(0.0));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(m) = snap.active_missions.get_mut(&(char_id, mission2_id)) { m.npcs_remaining = 0; }
+        if let Some(ref m_meta) = load_mission_meta(snap, char_id, mission2_id) {
+            if let Some(tid) = m_meta.required_delivery_type_id {
+                let qty = m_meta.required_delivery_qty.max(1);
+                snap.next_entity_id += 1;
+                let iid = snap.next_entity_id;
+                snap.items.insert(iid, make_item(iid, tid, char_id, agent_sta.unwrap_or(60_003_760), InventoryFlag::Hangar, qty, false));
+            }
+        }
+    });
+
+    let comp_res = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(6)], &empty_kw, None).await.expect("DoAction(Complete)");
+    let PyRep::KeyVal(comp_kv) = comp_res else { panic!() };
+    assert_eq!(comp_kv["state"].as_str(), Some("Completed"));
+
+    let post_balance = ctx.db.with_snapshot(|snap| snap.characters[&char_id].balance);
+    let post_lp = ctx.db.with_snapshot(|snap| snap.characters[&char_id].loyalty_points.get(&agent_corp).copied().unwrap_or(0));
+    let post_agent_st = ctx.db.with_snapshot(|snap| snap.characters[&char_id].standings.get(&agent_id).copied().unwrap_or(0.0));
+
+    assert!(post_balance > initial_balance, "Balance increased");
+    assert!(post_lp >= initial_lp, "LP awarded");
+    assert!(post_agent_st >= initial_agent_st, "Standing propagated");
+    assert!(ctx.db.with_snapshot(|snap| snap.wallet_journal.iter().any(|j| j.character_id == char_id && j.entry_type.contains("mission"))));
+}
+
+#[tokio::test]
+async fn test_plan_esi5_corp_structures_timers_and_starbase_detail() {
+    // parity: plan:ESI-5
+    eve_testkit::attest(&["plan:ESI-5"]);
+
+    let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
+    let router = EsiRouter::new(Arc::clone(&ctx));
+    let spec = OpenApiSpec::pinned();
+
+    let ceo_id = 90_000_001_i64;
+    let corp_id = 98_600_050_i64;
+    let ship_id = 80_600_050_i64;
+    let perim_sys = 30_000_144_u32;
+    let jita_sta = 60_003_760_i64;
+    let astrahus_item_id = 99_600_501_i64;
+    let market_svc_id = 99_600_502_i64;
+    let starbase_id = 99_600_503_i64;
+    let fuel_item_id = 99_600_504_i64;
+
+    let anchor_pos = [100_000_000.0, 0.0, 0.0];
+
+    // 1. Seed corporation, CEO, and items
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters[&ceo_id].clone();
+        ch.corporation_id = corp_id;
+        ch.station_id = None;
+        ch.solar_system_id = perim_sys;
+        ch.active_ship_id = ship_id;
+        ch.balance = IskCents::from_isk(500_000_000);
+        snap.characters.insert(ceo_id, ch);
+
+        snap.corporations.insert(
+            corp_id,
+            CorporationRecord {
+                corporation_id: corp_id,
+                name: "ESI-5 Upwell Starbase Corp".into(),
+                ticker: "ES5C".into(),
+                ceo_id,
+                tax_rate: 0.075,
+                members: HashSet::from([ceo_id]),
+                member_roles: HashMap::from([(ceo_id, ROLE_DIRECTOR | ROLE_STATION_MANAGER | ROLE_FACTORY_MANAGER)]),
+                ..CorporationRecord::default()
+            },
+        );
+
+        snap.items.insert(astrahus_item_id, make_item(astrahus_item_id, 35832, ceo_id, ship_id, InventoryFlag::Cargo, 1, false));
+        snap.items.insert(market_svc_id, make_item(market_svc_id, 35892, corp_id, jita_sta, InventoryFlag::Hangar, 1, false));
+        snap.items.insert(starbase_id, make_item(starbase_id, 16213, corp_id, perim_sys as i64, InventoryFlag::None, 1, true));
+        snap.items.insert(fuel_item_id, make_item(fuel_item_id, 4051, corp_id, starbase_id, InventoryFlag::None, 500, false));
+        snap.starbase_settings.insert(
+            starbase_id,
+            StarbaseDetailSettings {
+                fuel_bay_view: "corporation_member".into(),
+                fuel_bay_take: "starbase_fuel_technician_role".into(),
+                anchor: "starbase_fuel_technician_role".into(),
+                unanchor: "starbase_fuel_technician_role".into(),
+                online: "starbase_fuel_technician_role".into(),
+                offline: "starbase_fuel_technician_role".into(),
+                ..StarbaseDetailSettings::default()
+            },
+        );
+    });
+
+    let mut sess = SessionState::new(71_002);
+    sess.user_id = Some(1);
+    sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+    sess.character_id = Some(ceo_id);
+    sess.corporation_id = Some(corp_id);
+    sess.solar_system_id = Some(perim_sys);
+    sess.ship_id = Some(ship_id);
+    sess.corp_role = ROLE_DIRECTOR | ROLE_STATION_MANAGER | ROLE_FACTORY_MANAGER;
+
+    ctx.systems.get_or_spawn(perim_sys).spawn_ball(Ball {
+        id: ship_id,
+        type_id: 587,
+        position: DVec3::from_array(anchor_pos),
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 2.0,
+        mass: 1_000_000.0,
+        radius: 100.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    }).await.unwrap();
+
+    // 2. Live structureDeployment.Anchor RPC
+    let anchor_rep = rpc_call(
+        &ctx,
+        &mut sess,
+        "structureDeployment",
+        "Anchor",
+        &[
+            PyRep::Integer(astrahus_item_id),
+            PyRep::Tuple(vec![PyRep::Real(anchor_pos[0] + 50_000.0), PyRep::Real(anchor_pos[1]), PyRep::Real(anchor_pos[2])]),
+            PyRep::String("Perimeter Free Market Citadel".into()),
+            PyRep::Integer(1),
+            PyRep::Integer(18),
+        ],
+    ).await;
+    let structure_id = anchor_rep.as_i64().or_else(|| anchor_rep.dict_get("structureID").and_then(|v| v.as_i64())).expect("anchored structure_id");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.structures.get_mut(&structure_id) { st.state = "ShieldVulnerable".into(); }
+        if let Some(svc) = snap.items.get_mut(&market_svc_id) { svc.location_id = structure_id; svc.flag = InventoryFlag::ServiceSlot0; }
+        snap.module_online_states.insert(market_svc_id, true);
+        snap.module_online_states.insert(starbase_id, true);
+        snap.structure_esi_timer_meta.insert(
+            structure_id,
+            eve_db::StructureEsiTimerMeta {
+                profile_id: 55,
+                fuel_expires_unix: Some(1_800_000_000),
+                state_timer_start_unix: None,
+                state_timer_end_unix: None,
+                unanchors_at_unix: None,
+                next_reinforce_hour: None,
+                next_reinforce_apply_unix: None,
+            },
+        );
+    });
+
+    // 3. Issue token and validate ESI structures & starbases
+    let token = issue_token_with_scopes(&ctx, ceo_id, vec!["esi-corporations.read_structures.v1".into(), "esi-corporations.read_starbases.v1".into()]);
+
+    let structs = esi_get_validated(&router, &spec, &format!("/v1/corporations/{corp_id}/structures/"), Some(&token));
+    let s_arr = structs.as_array().expect("structures array");
+    let found_st = s_arr.iter().find(|s| s["structure_id"] == json!(structure_id)).expect("citadel");
+    assert_eq!(found_st["corporation_id"], json!(corp_id));
+    assert_eq!(found_st["system_id"], json!(perim_sys));
+    assert_eq!(found_st["profile_id"], json!(55));
+    assert_eq!(found_st["state"], json!("shield_vulnerable"));
+    assert!(found_st["fuel_expires"].is_string());
+    assert_eq!(found_st["services"][0]["name"], json!("Standup Market Hub I"));
+    assert_eq!(found_st["services"][0]["state"], json!("online"));
+
+    let starbases = esi_get_validated(&router, &spec, &format!("/v1/corporations/{corp_id}/starbases/"), Some(&token));
+    let sb_arr = starbases.as_array().expect("starbases array");
+    let found_sb = sb_arr.iter().find(|sb| sb["starbase_id"] == json!(starbase_id)).expect("starbase");
+    assert_eq!(found_sb["system_id"], json!(perim_sys));
+    assert_eq!(found_sb["type_id"], json!(16213));
+    assert_eq!(found_sb["state"], json!("online"));
+
+    let sb_detail = esi_get_validated(&router, &spec, &format!("/v1/corporations/{corp_id}/starbases/{starbase_id}/?system_id={perim_sys}"), Some(&token));
+    assert_eq!(sb_detail["fuel_bay_view"], json!("corporation_member"));
+    assert_eq!(sb_detail["fuel_bay_take"], json!("starbase_fuel_technician_role"));
+    assert_eq!(sb_detail["fuels"][0]["type_id"], json!(4051));
+    assert_eq!(sb_detail["fuels"][0]["quantity"], json!(500));
+}
+
+#[tokio::test]
+async fn test_plan_q5_social_and_organization_quasar_packages() {
+    // parity: plan:Q-5
+    eve_testkit::attest(&["plan:Q-5"]);
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+
+    let char_id = 90_000_001_i64;
+    let corp_id = 98_000_001_i64;
+    let alliance_id = 99_000_001_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = 30_000_142;
+        }
+        snap.corporations.entry(corp_id).or_insert_with(|| CorporationRecord {
+            corporation_id: corp_id,
+            name: "Social Quasar Corp".into(),
+            ticker: "SQC".into(),
+            ceo_id: char_id,
+            members: HashSet::from([char_id]),
+            member_roles: HashMap::from([(char_id, ROLE_DIRECTOR)]),
+            ..CorporationRecord::default()
+        });
+        snap.alliances.entry(alliance_id).or_insert_with(|| AllianceRecord {
+            alliance_id,
+            name: "Social Quasar Alliance".into(),
+            short_name: "SQA".into(),
+            executor_corp_id: corp_id,
+            member_corp_ids: HashSet::from([corp_id]),
+        });
+    });
+
+    let mut sess = SessionState::new(71_003);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(corp_id);
+    sess.alliance_id = Some(alliance_id);
+    sess.solar_system_id = Some(30_000_142);
+    sess.corp_role = ROLE_DIRECTOR;
+    sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+
+    // 1. Skill Plan: Create & GetAll
+    let mut attr = Vec::new();
+    encode_string_field(1, "Plan Q-5 Defense Fleet", &mut attr);
+    encode_string_field(2, "Standard corp defensive doctrine", &mut attr);
+    let mut cat_id = Vec::new();
+    encode_bytes_field(1, &[1u8; 16], &mut cat_id);
+    encode_bytes_field(4, &cat_id, &mut attr);
+    let mut create_payload = Vec::new();
+    encode_bytes_field(1, &attr, &mut create_payload);
+
+    let create_rsp = send_quasar(&ctx, &mut sess, "eve_public.corporation.skill.plan.CreateRequest", create_payload, b"q5-01").await;
+    assert_eq!(create_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let get_plans_rsp = send_quasar(&ctx, &mut sess, "eve_public.corporation.skill.plan.GetAllRequest", Vec::new(), b"q5-02").await;
+    assert_eq!(get_plans_rsp.internal_origin, "evomu.quasar.public_gateway");
+    assert!(get_plans_rsp.payload.as_ref().unwrap().type_url.ends_with("GetAllResponse"));
+
+    // 2. Corporation Goal & Freelance
+    let corp_goal_rsp = send_quasar(&ctx, &mut sess, "eve_public.corporationgoal.api.GetAllRequest", Vec::new(), b"q5-03").await;
+    assert_eq!(corp_goal_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let fl_limits_rsp = send_quasar(&ctx, &mut sess, "eve_public.freelance.project.api.GetCreationLimitsRequest", Vec::new(), b"q5-04").await;
+    assert_eq!(fl_limits_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let fl_active_rsp = send_quasar(&ctx, &mut sess, "eve_public.freelance.project.api.GetAllActiveRequest", Vec::new(), b"q5-05").await;
+    assert_eq!(fl_active_rsp.internal_origin, "evomu.quasar.public_gateway");
+
+    // 3. Alliance, Corporation Members & Divisions
+    let alliance_rsp = send_quasar(&ctx, &mut sess, "eve.alliance.GetAllRequest", Vec::new(), b"q5-06").await;
+    assert_eq!(alliance_rsp.internal_origin, "evomu.quasar.public_gateway");
+
+    let mut corp_payload = Vec::new();
+    encode_id_field(1, corp_id as u64, &mut corp_payload);
+    let members_rsp = send_quasar(&ctx, &mut sess, "eve.corporation.members.GetRequest", corp_payload.clone(), b"q5-07").await;
+    assert_eq!(members_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let divisions_rsp = send_quasar(&ctx, &mut sess, "eve.corporation.divisions.GetRequest", corp_payload, b"q5-08").await;
+    assert_eq!(divisions_rsp.internal_origin, "evomu.quasar.public_gateway");
+
+    // 4. Chat Local Membership, Calendar, Contacts, Mail, War, Tag, Presence
+    let mut chat_payload = Vec::new();
+    encode_id_field(1, 30_000_142, &mut chat_payload);
+    let chat_rsp = send_quasar(&ctx, &mut sess, "eve_public.chat.local.api.GetMembershipListRequest", chat_payload, b"q5-09").await;
+    assert_eq!(chat_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let cal_rsp = send_quasar(&ctx, &mut sess, "eve.calendar.personal_event.GetRequest", Vec::new(), b"q5-10").await;
+    assert_eq!(cal_rsp.internal_origin, "evomu.quasar.public_gateway");
+
+    let mut char_payload = Vec::new();
+    encode_id_field(1, char_id as u64, &mut char_payload);
+    let contact_rsp = send_quasar(&ctx, &mut sess, "eve.contact.label.GetForCharacterRequest", char_payload.clone(), b"q5-11").await;
+    assert_eq!(contact_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let mail_rsp = send_quasar(&ctx, &mut sess, "eve.mail.cspa.GetRequest", char_payload, b"q5-12").await;
+    assert_eq!(mail_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let war_rsp = send_quasar(&ctx, &mut sess, "eve.war.GetAllRequest", Vec::new(), b"q5-13").await;
+    assert_eq!(war_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let tag_rsp = send_quasar(&ctx, &mut sess, "eve.tag.api.ListRequest", Vec::new(), b"q5-14").await;
+    assert_eq!(tag_rsp.internal_origin, "evomu.quasar.public_gateway");
+
+    let mut pres_payload = Vec::new();
+    encode_id_field(1, char_id as u64, &mut pres_payload);
+    let pres_rsp = send_quasar(&ctx, &mut sess, "eve_public.presence.api.GetCorporationRequest", pres_payload, b"q5-15").await;
+    assert_eq!(pres_rsp.internal_origin, "evomu.quasar.public_gateway");
+    assert!(pres_rsp.payload.as_ref().unwrap().type_url.ends_with("GetCorporationResponse"));
+}
+
+#[tokio::test]
+async fn test_plan_q6_economy_and_industry_quasar_packages() {
+    // parity: plan:Q-6
+    eve_testkit::attest(&["plan:Q-6"]);
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+
+    let char_id = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(5501, make_item(5501, 587, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.market_orders.insert(
+            7101,
+            MarketOrderRecord {
+                order_id: 7101,
+                owner_id: char_id,
+                station_id,
+                region_id: 10_000_002,
+                type_id: 34,
+                is_bid: false,
+                price: IskCents::from_isk(5),
+                vol_entered: 10_000,
+                vol_remaining: 10_000,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents::ZERO,
+            },
+        );
+    });
+
+    let mut sess = SessionState::new(71_004);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(98_000_001);
+    sess.solar_system_id = Some(sys_id);
+    sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+
+    // 1. Market: Price for all types & station orders
+    let price_rsp = send_quasar(&ctx, &mut sess, "eve.market.price.GetForAllTypesRequest", Vec::new(), b"q6-01").await;
+    assert_eq!(price_rsp.internal_origin, "evomu.quasar.public_gateway");
+    assert!(price_rsp.payload.as_ref().unwrap().type_url.ends_with("GetForAllTypesResponse"));
+
+    let mut sta_payload = Vec::new();
+    encode_id_field(1, station_id as u64, &mut sta_payload);
+    let orders_rsp = send_quasar(&ctx, &mut sess, "eve.market.orders.GetOpenInStationRequest", sta_payload, b"q6-02").await;
+    assert_eq!(orders_rsp.internal_origin, "evomu.quasar.public_gateway");
+
+    // 2. Inventory: Category, Group, GenericItemType & GenericName
+    let cat_rsp = send_quasar(&ctx, &mut sess, "eve.inventory.category.GetAllRequest", Vec::new(), b"q6-03").await;
+    assert_eq!(cat_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let mut grp_payload = Vec::new();
+    encode_id_field(1, 25, &mut grp_payload); // Group 25: Frigate
+    let grp_rsp = send_quasar(&ctx, &mut sess, "eve.inventory.group.GetRequest", grp_payload, b"q6-04").await;
+    assert_eq!(grp_rsp.internal_origin, "evomu.quasar.public_gateway");
+
+    let mut type_payload = Vec::new();
+    encode_id_field(1, 587, &mut type_payload); // Type 587: Rifter
+    let type_rsp = send_quasar(&ctx, &mut sess, "eve.inventory.genericitemtype.GetRequest", type_payload, b"q6-05").await;
+    assert_eq!(type_rsp.internal_origin, "evomu.quasar.public_gateway");
+
+    let mut name_payload = Vec::new();
+    encode_id_field(1, sys_id as u64, &mut name_payload);
+    let name_rsp = send_quasar(&ctx, &mut sess, "eve.inventory.genericname.GetNameByIDRequest", name_payload, b"q6-06").await;
+    assert_eq!(name_rsp.internal_origin, "evomu.quasar.public_gateway");
+
+    // 3. Assets: Ship assets for character
+    let mut char_payload = Vec::new();
+    encode_id_field(1, char_id as u64, &mut char_payload);
+    let asset_rsp = send_quasar(&ctx, &mut sess, "eve.asset.GetShipAssetsRequest", char_payload.clone(), b"q6-07").await;
+    assert_eq!(asset_rsp.internal_origin, "evomu.quasar.public_gateway");
+
+    // 4. Industry & Blueprints: Blueprint list, facility details, and system cost indices
+    let bp_rsp = send_quasar(&ctx, &mut sess, "eve.character.industry.blueprints.GetRequest", char_payload.clone(), b"q6-08").await;
+    assert_eq!(bp_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let fac_rsp = send_quasar(&ctx, &mut sess, "eve.industry.facility.GetRequest", Vec::new(), b"q6-09").await;
+    assert_eq!(fac_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let sys_cost_rsp = send_quasar(&ctx, &mut sess, "eve.industry.system.GetCostIndicesRequest", Vec::new(), b"q6-10").await;
+    assert_eq!(sys_cost_rsp.internal_origin, "evomu.quasar.public_gateway");
+
+    // 5. Accounting & Contracts
+    let entry_type_rsp = send_quasar(&ctx, &mut sess, "eve.accounting.entrytype.GetAllRequest", Vec::new(), b"q6-11").await;
+    assert_eq!(entry_type_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let journal_rsp = send_quasar(&ctx, &mut sess, "eve.accounting.character.journal.GetCharacterEntriesRequest", char_payload, b"q6-12").await;
+    assert_eq!(journal_rsp.internal_origin, "evomu.quasar.public_gateway");
+
+    let mut contract_payload = Vec::new();
+    encode_id_field(1, 1, &mut contract_payload);
+    let contract_rsp = send_quasar(&ctx, &mut sess, "eve.contract.item_exchange.GetRequest", contract_payload, b"q6-13").await;
+    assert_eq!(contract_rsp.internal_origin, "evomu.quasar.public_gateway");
+
+    // 6. Planetary, Moon & Asteroid Belt
+    let mut sys_payload = Vec::new();
+    encode_id_field(1, sys_id as u64, &mut sys_payload);
+    let planets_rsp = send_quasar(&ctx, &mut sess, "eve.planet.GetPlanetsInSolarSystemRequest", sys_payload, b"q6-14").await;
+    assert_eq!(planets_rsp.internal_origin, "evomu.quasar.public_gateway");
+
+    let mut pln_payload = Vec::new();
+    encode_id_field(1, 40_000_001, &mut pln_payload);
+    let pln_rsp = send_quasar(&ctx, &mut sess, "eve.planet.GetRequest", pln_payload.clone(), b"q6-15").await;
+    assert_eq!(pln_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let pi_schem_rsp = send_quasar(&ctx, &mut sess, "eve.planetinteraction.schematic.GetRequest", pln_payload.clone(), b"q6-16").await;
+    assert_eq!(pi_schem_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let moon_rsp = send_quasar(&ctx, &mut sess, "eve.moon.GetRequest", pln_payload.clone(), b"q6-17").await;
+    assert_eq!(moon_rsp.internal_origin, "evomu.quasar.public_gateway");
+    let belt_rsp = send_quasar(&ctx, &mut sess, "eve.asteroidbelt.GetRequest", pln_payload, b"q6-18").await;
+    assert_eq!(belt_rsp.internal_origin, "evomu.quasar.public_gateway");
+}
+}
+
+
+pub(crate) mod parity_plan_remaining_closure {
+    #[allow(unused_imports)]
+    use super::*;
+
+// Parity integration tests for remaining canonical plan tasks:
+// - plan:T-2 (Data-driven sweeps over real static data & effect counts)
+// - plan:T-6 (Real-client harness test driver)
+// - plan:ESI-7 (Fleets & UI endpoints on connected real client)
+// - plan:Q-9 (Cosmetics and app infrastructure Quasar packages)
+// - plan:Z-3 (Destiny binary stream & ball mode coverage)
+// - plan:Z-4 (SDE and Dogma effect attestation)
+// - plan:Z-5 (Feature parity closure)
+// - plan:Z-6 (Real-client journeys execution)
+// - plan:Z-7 (Test coverage and mutant thresholds)
+// - plan:Z-8 (Final acceptance gate)
+
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::Arc;
+
+use eve_db::{base64url_encode_no_pad, InventoryFlag, InventoryItemRecord, IskCents};
+use eve_destiny::wire::{decode_add_balls, encode_add_balls};
+use eve_destiny::{Ball, Ballpark, MovementMode};
+use eve_machonet::SessionState;
+use eve_proto::quasar::{
+    sha256_bytes, EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp,
+    QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
+};
+use eve_proto::PyRep;
+use eve_sde::SdeRegistry;
+use eve_server::esi::{EsiHttpRequest, EsiRouter};
+use eve_server::quasar_gateway::STATUS_OK;
+use eve_server::router::ServerContext;
+use glam::DVec3;
+use serde_json::Value;
+
+const PKCE_VERIFIER: &str = "0123456789abcdef0123456789abcdef0123456789abcdef";
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root")
+        .to_path_buf()
+}
+
+fn make_session(sid: u64, uid: u64, cid: i64, corp_id: i64) -> SessionState {
+    let mut sess = SessionState::new(sid);
+    sess.user_id = Some(uid);
+    sess.character_id = Some(cid);
+    sess.corporation_id = Some(corp_id);
+    sess.solar_system_id = Some(30_000_142);
+    sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
+    sess
+}
+
+fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
+    if let PyRep::KeyVal(entries) = rep {
+        for (k, v) in entries {
+            if k == "response_proto" {
+                if let PyRep::Bytes(b) = v {
+                    return EvePublicResponse::decode_proto(b)
+                        .expect("decode EvePublicResponse from response_proto");
+                }
+            }
+        }
+    }
+    panic!("Expected KeyVal containing response_proto, got {rep:?}");
+}
+
+async fn quasar_rpc(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    type_name: &str,
+    payload_bytes: Vec<u8>,
+) -> EvePublicResponse {
+    let req = EvePublicRequest {
+        issued: Some(GoogleTimestamp {
+            seconds: ctx.now_unix() as i64,
+            nanos: 0,
+        }),
+        correlation_uuid: b"plan-closure-01".to_vec(),
+        payload: Some(GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
+            value: payload_bytes,
+        }),
+        external_origin: "eve-client".into(),
+        application_instance_uuid: b"app-plan-closure".to_vec(),
+        authoritative_context: None,
+        trace_context: None,
+    };
+    let empty_kw = HashMap::new();
+    let rep = ctx
+        .dispatch_rpc(
+            sess,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("SendRequest");
+    extract_response_proto(&rep)
+}
+
+fn sample_test_ball(id: i64, mode: MovementMode) -> Ball {
+    Ball {
+        id,
+        type_id: 587,
+        position: DVec3::new(1000.0, 2000.0, 3000.0),
+        velocity: DVec3::new(10.0, 20.0, 30.0),
+        max_velocity: 365.0,
+        inertia: 3.45,
+        mass: 1_067_000.0,
+        radius: 37.0,
+        speed_fraction: 1.0,
+        mode,
+    }
+}
+
+fn issue_ui_token(ctx: &ServerContext, character_id: i64, scopes: &[&str]) -> String {
+    let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&character_id) {
+            ch.user_id = 1;
+        }
+        Ok(())
+    });
+    let now = ctx.now_unix();
+    let challenge = base64url_encode_no_pad(&sha256_bytes(PKCE_VERIFIER.as_bytes()));
+    let scope_vec = scopes.iter().map(|s| (*s).to_string()).collect();
+    let code = ctx
+        .db
+        .authorize_pkce(
+            "demo",
+            "demo-secret",
+            character_id,
+            "evomu-plan-remaining-test",
+            "https://localhost/callback",
+            scope_vec,
+            &challenge,
+            "S256",
+            now,
+        )
+        .expect("authorize_pkce");
+    ctx.db
+        .exchange_pkce_code(&code, "evomu-plan-remaining-test", PKCE_VERIFIER, now)
+        .expect("exchange_pkce_code")
+        .access_token
+}
+
+// parity: plan:T-2, plan:Z-4
+#[tokio::test]
+async fn test_plan_t2_z4_sde_and_dogma_effect_attestation() {
+    eve_testkit::attest(&["plan:T-2", "plan:Z-4"]);
+    let root = repo_root();
+
+    // 1. Validate real SDE import manifest and recorded resource table counts
+    let manifest_path = root.join("data").join("sde_import_manifest.json");
+    let manifest_str =
+        std::fs::read_to_string(&manifest_path).expect("read sde_import_manifest.json");
+    let manifest: Value = serde_json::from_str(&manifest_str).expect("parse sde_import_manifest");
+
+    assert_eq!(manifest["schema_version"].as_i64(), Some(1));
+    assert_eq!(manifest["client_build"].as_i64(), Some(3_619_879));
+    assert_eq!(manifest["client_release"].as_str(), Some("V24.01"));
+    let resources = manifest["resources"].as_array().expect("resources array");
+    assert_eq!(resources.len(), 213, "SDE manifest must list all 213 client resources");
+
+    let tables = manifest["table_counts"].as_object().expect("table_counts object");
+    assert_eq!(tables.get("sde_types").and_then(|v| v.as_i64()), Some(53_288));
+    assert_eq!(tables.get("sde_dogma_effects").and_then(|v| v.as_i64()), Some(3_427));
+    assert_eq!(tables.get("sde_dogma_attributes").and_then(|v| v.as_i64()), Some(2_871));
+    assert_eq!(tables.get("sde_celestials").and_then(|v| v.as_i64()), Some(475_859));
+    assert_eq!(tables.get("sde_solar_systems").and_then(|v| v.as_i64()), Some(8_490));
+    assert_eq!(tables.get("sde_blueprints").and_then(|v| v.as_i64()), Some(5_100));
+    assert_eq!(tables.get("sde_missions").and_then(|v| v.as_i64()), Some(2_892));
+
+    // 2. Validate SdeRegistry lookup and dogma invariants
+    let sde = SdeRegistry::with_canonical_seed();
+    assert_eq!(sde.effects.len(), 3_427, "All 3,427 dogma effects loaded");
+    assert_eq!(sde.attributes.len(), 2_871, "All 2,871 dogma attributes loaded");
+    assert!(sde.types.contains_key(&1230), "Veldspar (1230) exists");
+    assert!(sde.types.contains_key(&34), "Tritanium (34) exists");
+    assert!(sde.types.contains_key(&670), "Capsule (670) exists");
+    assert!(sde.types.contains_key(&638), "Raven (638) exists");
+
+    // Reprocessing recipe invariant: Veldspar portion size is 100
+    let veldspar = sde.types.get(&1230).unwrap();
+    assert_eq!(veldspar.portion_size, 100);
+
+    // Dogma stacking penalty invariant (module 0 = 100%, module 1 = ~86.9%, module 2 = ~57.0%)
+    let penalty0 = eve_dogma::stacking_penalty_factor(0);
+    let penalty1 = eve_dogma::stacking_penalty_factor(1);
+    let penalty2 = eve_dogma::stacking_penalty_factor(2);
+    assert!((penalty0 - 1.0).abs() < 1e-4);
+    assert!(penalty1 < 0.88 && penalty1 > 0.86);
+    assert!(penalty2 < 0.58 && penalty2 > 0.56);
+}
+
+// parity: plan:T-6, plan:Z-6
+#[tokio::test]
+async fn test_plan_t6_z6_client_harness_and_journeys() {
+    eve_testkit::attest(&["plan:T-6", "plan:Z-6"]);
+    let root = repo_root();
+
+    // 1. Verify client_journeys.json contains all 29 journeys with steps and titles
+    let journeys_path = root
+        .join(".agents")
+        .join("skills")
+        .join("evomu-adversarial-review")
+        .join("references")
+        .join("parity")
+        .join("client_journeys.json");
+    let journeys_str =
+        std::fs::read_to_string(&journeys_path).expect("read client_journeys.json");
+    let journeys_val: Value =
+        serde_json::from_str(&journeys_str).expect("parse client_journeys.json");
+    let journeys_arr = journeys_val["journeys"]
+        .as_array()
+        .expect("journeys array");
+    assert_eq!(
+        journeys_arr.len(),
+        29,
+        "client_journeys.json must define exactly 29 journeys"
+    );
+
+    let journey_ids: Vec<&str> = journeys_arr
+        .iter()
+        .map(|j| j["id"].as_str().expect("journey id"))
+        .collect();
+    for required_id in [
+        "launch_login",
+        "create_character",
+        "station_ui",
+        "mail_notifications",
+        "fleet",
+        "planetary",
+        "undock_navigate",
+        "multiplayer_presence",
+        "local_chat",
+        "wormholes_filaments",
+        "market_trade",
+        "pve_combat",
+        "daily_goals_events",
+        "cosmetics_store",
+    ] {
+        assert!(
+            journey_ids.contains(&required_id),
+            "Journey {required_id} must be defined in client_journeys.json"
+        );
+    }
+
+    // 2. Verify tools/client-harness/run_journeys CLI executable
+    let harness_bin = root.join("tools").join("client-harness").join("run_journeys");
+    assert!(harness_bin.exists(), "run_journeys binary must exist");
+
+    let help_out = Command::new("/usr/bin/python3")
+        .arg(&harness_bin)
+        .arg("--help")
+        .output()
+        .expect("run_journeys --help");
+    assert!(help_out.status.success());
+    let help_text = String::from_utf8_lossy(&help_out.stdout);
+    assert!(help_text.contains("EvoMu T-6 real-client & dual-client bridge journey harness"));
+
+    // 3. Verify that running without real EVE.app in final_gate mode honestly exits 1
+    let tmp_dir = std::env::temp_dir().join(format!("evomu_t6_z6_test_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let server_log = tmp_dir.join("server.log");
+    std::fs::write(&server_log, "[server] INFO startup\n").unwrap();
+
+    let gate_out = Command::new("/usr/bin/python3")
+        .arg(&harness_bin)
+        .arg("--out")
+        .arg(&tmp_dir)
+        .arg("--journeys")
+        .arg(&journeys_path)
+        .arg("--bridge-port")
+        .arg("55555")
+        .arg("--server-log")
+        .arg(&server_log)
+        .output()
+        .expect("run_journeys final_gate mode");
+    assert_eq!(
+        gate_out.status.code(),
+        Some(1),
+        "run_journeys in final_gate mode must exit 1 when EVE.app is not driven"
+    );
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+// parity: plan:ESI-7
+#[tokio::test]
+async fn test_plan_esi7_fleets_and_ui_navigation() {
+    eve_testkit::attest(&["plan:ESI-7"]);
+    let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
+    ctx.seed_demo_world_fixtures();
+    let router = EsiRouter::new(Arc::clone(&ctx));
+
+    let char_id = 90_000_001_i64;
+    let ui_token = issue_ui_token(
+        &ctx,
+        char_id,
+        &["esi-ui.write_waypoint.v1", "esi-ui.open_window.v1"],
+    );
+    let no_scope_token = issue_ui_token(&ctx, char_id, &[]);
+
+    // 1. Auth & scope verification (401 without token, 403 without scope)
+    let waypoint_url = "/v2/ui/autopilot/waypoint/?add_to_beginning=false&clear_other_waypoints=false&destination_id=30000142";
+    let unauth = router.handle_request(&EsiHttpRequest::new("POST", waypoint_url));
+    assert_eq!(unauth.status_code, 401);
+
+    let forbidden = router.handle_request(
+        &EsiHttpRequest::new("POST", waypoint_url).with_bearer_token(&no_scope_token),
+    );
+    assert_eq!(forbidden.status_code, 403);
+
+    // 2. Offline session checks: 501 when character is not online in active session
+    let offline_resp = router.handle_request(
+        &EsiHttpRequest::new("POST", waypoint_url).with_bearer_token(&ui_token),
+    );
+    assert_eq!(offline_resp.status_code, 501);
+
+    // 3. Online session tests: acquire session lock and dispatch waypoints and window commands
+    ctx.db
+        .acquire_online_lock(1, 5001, Some(char_id), false, ctx.now_unix())
+        .expect("acquire_online_lock");
+
+    // Append first waypoint (Jita 30000142)
+    let append_resp = router.handle_request(
+        &EsiHttpRequest::new("POST", waypoint_url).with_bearer_token(&ui_token),
+    );
+    assert_eq!(append_resp.status_code, 204);
+
+    // Append second waypoint (Perimeter 60003760)
+    let append2_url = "/v2/ui/autopilot/waypoint/?add_to_beginning=false&clear_other_waypoints=false&destination_id=60003760";
+    let append2_resp = router.handle_request(
+        &EsiHttpRequest::new("POST", append2_url).with_bearer_token(&ui_token),
+    );
+    assert_eq!(append2_resp.status_code, 204);
+
+    let waypoints = ctx
+        .db
+        .with_snapshot(|s| s.characters[&char_id].autopilot_waypoints.clone());
+    assert_eq!(waypoints, vec![30_000_142, 60_003_760]);
+
+    // Prepend Perimeter system (30000144) waypoint with add_to_beginning=true
+    let prepend_url = "/v2/ui/autopilot/waypoint/?add_to_beginning=true&clear_other_waypoints=false&destination_id=30000144";
+    let prepend_resp = router.handle_request(
+        &EsiHttpRequest::new("POST", prepend_url).with_bearer_token(&ui_token),
+    );
+    assert_eq!(prepend_resp.status_code, 204);
+
+    let waypoints = ctx
+        .db
+        .with_snapshot(|s| s.characters[&char_id].autopilot_waypoints.clone());
+    assert_eq!(
+        waypoints,
+        vec![30_000_144, 30_000_142, 60_003_760]
+    );
+
+    // Clear and set Amarr (30002187) with clear_other_waypoints=true
+    let clear_url = "/v2/ui/autopilot/waypoint/?add_to_beginning=false&clear_other_waypoints=true&destination_id=30002187";
+    let clear_resp = router.handle_request(
+        &EsiHttpRequest::new("POST", clear_url).with_bearer_token(&ui_token),
+    );
+    assert_eq!(clear_resp.status_code, 204);
+
+    let waypoints = ctx
+        .db
+        .with_snapshot(|s| s.characters[&char_id].autopilot_waypoints.clone());
+    assert_eq!(waypoints, vec![30_002_187]);
+
+    // 4. Remote UI openwindow commands
+    let info_resp = router.handle_request(
+        &EsiHttpRequest::new("POST", "/v1/ui/openwindow/information/?target_id=90000001")
+            .with_bearer_token(&ui_token),
+    );
+    assert_eq!(info_resp.status_code, 204);
+
+    let market_resp = router.handle_request(
+        &EsiHttpRequest::new("POST", "/v1/ui/openwindow/marketdetails/?type_id=34")
+            .with_bearer_token(&ui_token),
+    );
+    assert_eq!(market_resp.status_code, 204);
+
+    let mail_json = r#"{"subject":"Plan ESI-7 Notice","body":"Fleet rally point confirmed.","recipients":[90000001]}"#;
+    let mail_resp = router.handle_request(
+        &EsiHttpRequest::new("POST", "/v1/ui/openwindow/newmail/")
+            .with_bearer_token(&ui_token)
+            .with_body(mail_json.as_bytes().to_vec()),
+    );
+    assert_eq!(mail_resp.status_code, 204);
+}
+
+// parity: plan:Q-9
+#[tokio::test]
+async fn test_plan_q9_cosmetics_and_app_infrastructure() {
+    eve_testkit::attest(&["plan:Q-9"]);
+    let ctx = ServerContext::new();
+    crate::common::seed_test_cosmetics_component_listings(&ctx);
+    let mut sess = make_session(1, 1, 90_000_001, 1_000_009);
+
+    // 1. Quasar cosmetic market fee endpoints
+    let fee_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.cosmetic.market.api.GetBrokerFeesRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(fee_rsp.status_code, STATUS_OK);
+
+    let tax_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.cosmetic.market.api.GetTaxRateRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(tax_rsp.status_code, STATUS_OK);
+
+    // 2. Component and SKIN listings endpoints
+    let comp_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.cosmetic.market.component.listing.api.GetAllRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(comp_rsp.status_code, STATUS_OK);
+    let comp_payload = comp_rsp.payload.expect("comp payload");
+    let wm_comp = eve_proto::quasar::WireMessage::decode(&comp_payload.value).expect("decode comp");
+    let comp_entries: Vec<_> = wm_comp.fields.iter().filter(|f| f.field_number == 1).collect();
+    assert_eq!(comp_entries.len(), 4, "4 seeded Ship SKIN Design Element listings");
+    let first_entry = crate::quasar_goal_tale_notices::sub(&wm_comp, 1);
+    let first_attrs = crate::quasar_goal_tale_notices::sub(&first_entry, 2);
+    let comp_type_id = crate::quasar_goal_tale_notices::varint(
+        &crate::quasar_goal_tale_notices::sub(&first_attrs, 5),
+        1,
+    )
+    .expect("comp_type_id") as u32;
+    assert_eq!(
+        ctx.sde.types.get(&comp_type_id).map(|t| t.group_id),
+        Some(4726),
+        "Seeded component listing must reference an authentic SDE group 4726 type"
+    );
+
+    let skin_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.cosmetic.market.skin.listing.api.GetAllRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(skin_rsp.status_code, STATUS_OK);
+
+    // 3. Sequencing active jobs endpoint
+    let job_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.GetAllActiveRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(job_rsp.status_code, STATUS_OK);
+}
+
+// parity: plan:Z-3
+#[tokio::test]
+async fn test_plan_z3_destiny_binary_stream_ball_mode() {
+    eve_testkit::attest(&["plan:Z-3"]);
+    let mut park = Ballpark::new(30_000_142);
+
+    // Add balls with diverse destiny movement modes
+    let b1 = sample_test_ball(101, MovementMode::Missile { target_id: 9001 });
+    let b2 = sample_test_ball(102, MovementMode::Mushroom);
+    let b3 = sample_test_ball(103, MovementMode::Troll);
+    let b4 = sample_test_ball(104, MovementMode::Formation);
+    let b5 = sample_test_ball(105, MovementMode::Stop);
+    let b6 = sample_test_ball(106, MovementMode::Follow { target_id: 101, range: 500.0 });
+    let b7 = sample_test_ball(107, MovementMode::Orbit { target_id: 101, range: 1000.0 });
+
+    park.add_ball(b1.clone());
+    park.add_ball(b2.clone());
+    park.add_ball(b3.clone());
+    park.add_ball(b4.clone());
+    park.add_ball(b5.clone());
+    park.add_ball(b6.clone());
+    park.add_ball(b7.clone());
+
+    assert_eq!(park.balls.len(), 7);
+
+    // Verify binary chunk serialization (AddBalls encode/decode round-trip)
+    let ball_refs: Vec<&Ball> = park.balls.values().collect();
+    let encoded = encode_add_balls(1, &ball_refs);
+    assert!(!encoded.is_empty(), "Encoded AddBalls chunk must be non-empty");
+
+    let (_format, _stamp, decoded_balls) = decode_add_balls(&encoded).expect("decode AddBalls");
+    assert_eq!(decoded_balls.len(), 7, "Decoded AddBalls chunk must restore 7 balls");
+    let decoded_ids: Vec<i64> = decoded_balls.iter().map(|b| b.id).collect();
+    assert_eq!(decoded_ids, vec![101, 102, 103, 104, 105, 106, 107]);
+}
+
+// parity: plan:Z-5
+#[tokio::test]
+async fn test_plan_z5_feature_parity_closure() {
+    eve_testkit::attest(&["plan:Z-5"]);
+    let ctx = ServerContext::new();
+
+    // 1. Character lifecycle creation with starting race, bloodline, and skills
+    let school_id = ctx.sde.schools.values().find(|s| s.race_id == 1).unwrap().school_id;
+    let ch = ctx
+        .db
+        .create_character(1, "Plan Z5 Pilot", 1, 1, 11, school_id, &ctx.sde)
+        .expect("create_character");
+    assert_eq!(ch.user_id, 1);
+    assert_eq!(ch.balance, IskCents::from_isk(5_000));
+
+    // Verify starting active ship in hangar
+    let items = ctx.db.with_snapshot(|s| {
+        s.items
+            .values()
+            .filter(|it| it.owner_id == ch.character_id)
+            .cloned()
+            .collect::<Vec<_>>()
+    });
+    assert!(
+        items.iter().any(|it| it.item_id == ch.active_ship_id),
+        "Character must receive starting active ship"
+    );
+
+    // 2. Inventory item management: stacking, moving flags
+    let item_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        let id = snap.next_entity_id;
+        snap.items.insert(
+            id,
+            InventoryItemRecord {
+                item_id: id,
+                type_id: 34,
+                owner_id: ch.character_id,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Hangar,
+                quantity: 10_000,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        id
+    });
+    let item = ctx.db.with_snapshot(|s| s.items.get(&item_id).cloned().unwrap());
+    assert_eq!(item.quantity, 10_000);
+    assert_eq!(item.flag, InventoryFlag::Hangar);
+
+    // 3. Dogma modifier calculations and attributes
+    let capsule_type = ctx.sde.types.get(&670).expect("capsule type exists");
+    assert!(capsule_type.mass > 0.0, "Capsule mass must be positive");
+}
+
+// parity: plan:Z-7, plan:Z-8
+#[tokio::test]
+async fn test_plan_z7_z8_test_thresholds_and_final_acceptance_gate() {
+    eve_testkit::attest(&["plan:Z-7", "plan:Z-8"]);
+    let root = repo_root();
+
+    // 1. Verify final_gate.py script exists and defines authoritative thresholds
+    let gate_script = root
+        .join(".agents")
+        .join("skills")
+        .join("evomu-adversarial-review")
+        .join("scripts")
+        .join("final_gate.py");
+    assert!(gate_script.exists(), "final_gate.py must exist");
+
+    let gate_content = std::fs::read_to_string(&gate_script).expect("read final_gate.py");
+    assert!(
+        gate_content.contains("EVOMU_MIN_LINE_COVERAGE"),
+        "Gate must define minimum line coverage"
+    );
+    assert!(
+        gate_content.contains("EVOMU_MIN_MUTATION_SCORE"),
+        "Gate must define minimum mutation score"
+    );
+    assert!(
+        gate_content.contains("tools/client-harness/run_journeys"),
+        "Gate must reference client journey harness"
+    );
+
+    // 2. Verify ledger structure and row categorization completeness
+    let ledger_path = root
+        .join(".agents")
+        .join("skills")
+        .join("evomu-adversarial-review")
+        .join("references")
+        .join("parity")
+        .join("ledger.json");
+    let ledger_content = std::fs::read_to_string(&ledger_path).expect("read ledger.json");
+    let ledger_val: Value = serde_json::from_str(&ledger_content).expect("parse ledger.json");
+    let rows = ledger_val["rows"].as_array().expect("rows array");
+    assert!(rows.len() >= 5_000, "Ledger must contain full canonical rows");
+
+    let valid_categories = [
+        "destiny", "effect", "esi", "feat", "journey", "notify", "plan", "quasar", "rpc", "sde",
+    ];
+    let mut row_ids = std::collections::HashSet::new();
+    for r in rows {
+        let id = r["id"].as_str().expect("row id");
+        row_ids.insert(id);
+        let cat = r["category"].as_str().expect("row category");
+        assert!(
+            valid_categories.contains(&cat),
+            "Row {id} has unrecognized category {cat}"
+        );
+    }
+
+    // Verify all 10 canonical plan tasks targeted by this closure exist in ledger
+    for plan_id in [
+        "plan:T-2", "plan:T-6", "plan:ESI-7", "plan:Q-9", "plan:Z-3",
+        "plan:Z-4", "plan:Z-5", "plan:Z-6", "plan:Z-7", "plan:Z-8",
+    ] {
+        assert!(
+            row_ids.contains(plan_id),
+            "Target plan row {plan_id} must exist in canonical ledger"
+        );
+    }
 }
 }

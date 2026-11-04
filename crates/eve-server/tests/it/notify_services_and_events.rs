@@ -1,7 +1,7 @@
 //! Real production server-to-client `notify:On*` emission integration tests (Batch 2).
-//!
-//! Exercises 32 V24.01 server-to-client notifications end-to-end through `ctx.dispatch_rpc`,
-//! asserting exact V24 positional/dict payload arguments and persisted world-state transitions.
+//
+// Exercises 32 V24.01 server-to-client notifications end-to-end through `ctx.dispatch_rpc`,
+// asserting exact V24 positional/dict payload arguments and persisted world-state transitions.
 
 #![forbid(unsafe_code)]
 
@@ -692,6 +692,7 @@ async fn notify_batch2_void_exit_seasons_expert_systems_and_node_graphs() {
 // Folded submodule: notify_real_emitters_batch3
 #[allow(unused_imports, dead_code)]
 mod notify_real_emitters_batch3 {
+    #[allow(unused_imports)]
     use super::*;
 
 // Real server-side emission tests for Batch 3:
@@ -998,6 +999,7 @@ async fn test_batch3_gm_and_admin_rpc_notifications() {
 // Folded submodule: notify_real_emitters_batch5
 #[allow(unused_imports, dead_code)]
 mod notify_real_emitters_batch5 {
+    #[allow(unused_imports)]
     use super::*;
 
 // Real server-side emission tests for Batch 5:
@@ -1338,6 +1340,7 @@ async fn test_batch5_space_combat_arena_and_ess() {
 // Folded submodule: notify_real_emitters_batch6
 #[allow(unused_imports, dead_code)]
 mod notify_real_emitters_batch6 {
+    #[allow(unused_imports)]
     use super::*;
 
 // Real production emitter tests for Notify Batch 6 (`P-5`, `T-1`).
@@ -1943,6 +1946,7 @@ async fn test_batch6_safelogoff_and_crimewatch() {
 // Folded submodule: notify_live_rpc_closure
 #[allow(unused_imports, dead_code)]
 mod notify_live_rpc_closure {
+    #[allow(unused_imports)]
     use super::*;
 
 // Live client-RPC notification closure tests (`notify:On*`).
@@ -2130,6 +2134,7 @@ async fn test_notify_live_hypernet_raffle_notifications() {
 // Folded submodule: notify_p7_sp1_sp2_closure
 #[allow(unused_imports, dead_code)]
 mod notify_p7_sp1_sp2_closure {
+    #[allow(unused_imports)]
     use super::*;
 
 // Integration tests for `track/p7-sp1-sp2` notification parity closure.
@@ -2239,6 +2244,7 @@ async fn test_notify_operations_and_progression_transitions() {
 // Folded submodule: notify_real_emitters_batch8_part5
 #[allow(unused_imports, dead_code)]
 mod notify_real_emitters_batch8_part5 {
+    #[allow(unused_imports)]
     use super::*;
 
 // Real server-side RPC tests for Notify/RPC Batch 8 (Part 5: Session, Localization & LoadService RPCs).
@@ -2545,6 +2551,7 @@ async fn notify_batch8_session_localization_and_load_rpcs() {
 // Folded submodule: parity_notifies_part1
 #[allow(unused_imports, dead_code)]
 mod parity_notifies_part1 {
+    #[allow(unused_imports)]
     use super::*;
 
 // Runtime integration tests for open `notify:*` parity rows (Part 1).
@@ -3088,6 +3095,7 @@ async fn test_parity_notifies_dungeons_cloak_and_space() {
 // Folded submodule: parity_notifies_part2
 #[allow(unused_imports, dead_code)]
 mod parity_notifies_part2 {
+    #[allow(unused_imports)]
     use super::*;
 
 // Runtime integration tests for open `notify:*` parity rows (Part 2).
@@ -5193,4 +5201,2487 @@ async fn test_b36_combat_message_live_weapon_cycle() {
     assert!(!events(&ctx, P2, "OnDamageMessages").is_empty(), "Victim P2 must receive OnDamageMessages when victim_char_opt = None");
 }
 
+}
+
+#[allow(unused_imports, dead_code, unused_variables, unused_mut)]
+pub(crate) mod parity_notify_batch {
+    #[allow(unused_imports)]
+    use super::*;
+
+use crate::common;
+use eve_db::service_roles;
+use eve_machonet::SessionState;
+use eve_proto::quasar::{EvePublicRequest, GoogleAny};
+use eve_proto::PyRep;
+use eve_server::quasar_gateway::STATUS_OK;
+use eve_server::router::ServerContext;
+use eve_server::sp6_lifecycle::tick_background_cluster;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+pub(crate) const PILOT_A: i64 = 90_000_001;
+pub(crate) const PILOT_B: i64 = 90_000_002;
+pub(crate) const JITA_SYSTEM: u32 = 30_000_142;
+
+pub(crate) fn new_ctx() -> Arc<ServerContext> {
+    let sde = Arc::new(
+        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path())
+            .expect("open evomu_sde.sqlite"),
+    );
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(sde, db));
+    common::pin_clock(&ctx);
+    ctx
+}
+
+pub(crate) async fn rpc(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+) -> Result<PyRep, eve_proto::BridgeRpcError> {
+    ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None)
+        .await
+}
+
+pub(crate) fn drain_events(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    char_id: i64,
+) -> Vec<(String, Vec<PyRep>)> {
+    let _ = sess.drain_notifications();
+    ctx.drain_notifications_for_char(char_id)
+        .into_iter()
+        .map(|n| (n.event, n.args))
+        .collect()
+}
+
+fn chat_bcast_req(msg: &str) -> EvePublicRequest {
+    let mut payload = vec![0x0A, msg.len() as u8];
+    payload.extend_from_slice(msg.as_bytes());
+    EvePublicRequest {
+        payload: Some(GoogleAny {
+            type_url: "type.googleapis.com/eve_public.chat.local.api.BroadcastMessageRequest".into(),
+            value: payload,
+        }),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn test_parity_notify_analysis_kredits_and_campaign_enrollment() {
+    // parity: notify:OnAnalysisKreditsChange, notify:OnCampaignEnrollmentChanged
+    eve_testkit::attest(&[
+        "notify:OnAnalysisKreditsChange",
+        "notify:OnCampaignEnrollmentChanged",
+    ]);
+
+    let ctx = new_ctx();
+    let mut s1 = SessionState::new(92_001);
+    common::login_pilot(&ctx, &mut s1, "demo", "demo-secret").await;
+    s1.role = service_roles::ROLE_GM_DEFAULT;
+    rpc(&ctx, &mut s1, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_A)])
+        .await
+        .expect("select PILOT_A");
+    s1.role = service_roles::ROLE_GM_DEFAULT;
+
+    let mut s2 = SessionState::new(92_002);
+    common::login_pilot(&ctx, &mut s2, "other", "other-secret").await;
+    rpc(&ctx, &mut s2, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_B)])
+        .await
+        .expect("select PILOT_B");
+
+    let _ = drain_events(&ctx, &mut s1, PILOT_A);
+    let _ = drain_events(&ctx, &mut s2, PILOT_B);
+
+    // 1. OnAnalysisKreditsChange: negative check on invalid classification
+    let err = rpc(
+        &ctx,
+        &mut s1,
+        "ProjectDiscovery",
+        "post_classification",
+        &[PyRep::String("task_1".into()), PyRep::String("   ".into())],
+    )
+    .await
+    .expect_err("empty classification must fail");
+    assert_eq!(err.code, "InvalidClassification");
+    assert!(
+        !drain_events(&ctx, &mut s1, PILOT_A)
+            .iter()
+            .any(|(e, _)| e == "OnAnalysisKreditsChange"),
+        "failed classification must not emit OnAnalysisKreditsChange"
+    );
+
+    // Positive: get_new_task -> post_classification with production data (no with_mut_snapshot)
+    let ak_before = rpc(&ctx, &mut s1, "ProjectDiscovery", "get_player_analysis_kredits", &[])
+        .await
+        .expect("get_player_analysis_kredits before")
+        .as_i64()
+        .unwrap_or(-1);
+    assert_eq!(ak_before, 0);
+
+    let task = rpc(&ctx, &mut s1, "ProjectDiscovery", "get_new_task", &[])
+        .await
+        .expect("get_new_task");
+    let task_id = task
+        .dict_get("task_id")
+        .and_then(|v| v.as_str())
+        .expect("task_id")
+        .to_string();
+
+    let post_rep = rpc(
+        &ctx,
+        &mut s1,
+        "ProjectDiscovery",
+        "post_classification",
+        &[
+            PyRep::String(task_id),
+            PyRep::List(vec![PyRep::Real(0.42), PyRep::Real(0.88)]),
+        ],
+    )
+    .await
+    .expect("post_classification");
+    let ak_reward = post_rep
+        .dict_get("AK_Reward")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    assert!(ak_reward > 0, "post_classification must grant AK_Reward > 0");
+
+    let _ = s1.drain_notifications();
+    let ak_notifs: Vec<Vec<PyRep>> = ctx
+        .drain_notifications_for_char(PILOT_A)
+        .into_iter()
+        .filter(|n| n.event == "OnAnalysisKreditsChange")
+        .map(|n| n.args)
+        .collect();
+    assert_eq!(ak_notifs.len(), 1, "must emit 1 OnAnalysisKreditsChange");
+    assert_eq!(ak_notifs[0].len(), 0, "OnAnalysisKreditsChange expects 0 args");
+
+    let ak_after = rpc(&ctx, &mut s1, "ProjectDiscovery", "get_player_analysis_kredits", &[])
+        .await
+        .expect("get_player_analysis_kredits after")
+        .as_i64()
+        .unwrap_or(0);
+    assert_eq!(ak_after, ak_before + ak_reward);
+
+    // 2. OnCampaignEnrollmentChanged: negative check on non-existent campaign
+    let bad_camp = rpc(
+        &ctx,
+        &mut s1,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/campaign enroll 999999999".into())],
+    )
+    .await
+    .expect_err("unknown campaign must fail");
+    assert_eq!(bad_camp.code, "CampaignNotFound");
+
+    // Positive: enroll PILOT_A in an alternate SDE campaign; verify PILOT_B is unaffected
+    let campaigns = eve_server::services::campaigns_and_milestones::get_sde_login_campaigns(&ctx.sde);
+    let alt_campaign = campaigns
+        .keys()
+        .copied()
+        .find(|&id| id != 2261)
+        .expect("at least 2 SDE login campaigns");
+    let p2_before = rpc(&ctx, &mut s2, "loginCampaignManager", "get_client_campaign_state", &[])
+        .await
+        .expect("p2 campaign state before");
+
+    rpc(
+        &ctx,
+        &mut s1,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/campaign enroll {alt_campaign} {PILOT_A}"))],
+    )
+    .await
+    .expect("/campaign enroll");
+
+    let camp_notifs: Vec<Vec<PyRep>> = drain_events(&ctx, &mut s1, PILOT_A)
+        .into_iter()
+        .filter(|(e, _)| e == "OnCampaignEnrollmentChanged")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(camp_notifs.len(), 1, "PILOT_A must receive OnCampaignEnrollmentChanged");
+    assert_eq!(camp_notifs[0].len(), 0, "OnCampaignEnrollmentChanged expects 0 args");
+    assert!(
+        !drain_events(&ctx, &mut s2, PILOT_B)
+            .iter()
+            .any(|(e, _)| e == "OnCampaignEnrollmentChanged"),
+        "PILOT_B must not receive OnCampaignEnrollmentChanged"
+    );
+
+    let p1_after = rpc(&ctx, &mut s1, "loginCampaignManager", "get_client_campaign_state", &[])
+        .await
+        .expect("p1 campaign state after");
+    let p2_after = rpc(&ctx, &mut s2, "loginCampaignManager", "get_client_campaign_state", &[])
+        .await
+        .expect("p2 campaign state after");
+    assert_eq!(p1_after.dict_get("campaignID"), Some(&PyRep::Integer(alt_campaign)));
+    assert_eq!(p2_after.dict_get("campaignID"), p2_before.dict_get("campaignID"));
+}
+
+#[tokio::test]
+async fn test_parity_notify_chat_bans_and_cluster_shutdown() {
+    // parity: notify:OnCharacterPermanentlyBanned, notify:OnCharacterTemporarilyBanned
+    // parity: notify:OnCharacterUnbanned, notify:OnClusterShutdownInitiated
+    eve_testkit::attest(&[
+        "notify:OnCharacterPermanentlyBanned",
+        "notify:OnCharacterTemporarilyBanned",
+        "notify:OnCharacterUnbanned",
+        "notify:OnClusterShutdownInitiated",
+    ]);
+
+    let ctx = new_ctx();
+    let mut gm = SessionState::new(92_003);
+    common::login_pilot(&ctx, &mut gm, "demo", "demo-secret").await;
+    gm.role = service_roles::ROLE_GM_DEFAULT;
+    rpc(&ctx, &mut gm, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_A)])
+        .await
+        .expect("select PILOT_A");
+    gm.role = service_roles::ROLE_GM_DEFAULT;
+
+    let mut p2 = SessionState::new(92_004);
+    common::login_pilot(&ctx, &mut p2, "other", "other-secret").await;
+    rpc(&ctx, &mut p2, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_B)])
+        .await
+        .expect("select PILOT_B");
+
+    let _ = drain_events(&ctx, &mut gm, PILOT_A);
+    let _ = drain_events(&ctx, &mut p2, PILOT_B);
+
+    // 1. Permanent chat ban: blocks both Quasar BroadcastMessageRequest and MachoNet LSC.SendMessage
+    rpc(
+        &ctx,
+        &mut gm,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/chatban {PILOT_B} perm"))],
+    )
+    .await
+    .expect("/chatban perm");
+
+    let perm_notifs: Vec<Vec<PyRep>> = drain_events(&ctx, &mut p2, PILOT_B)
+        .into_iter()
+        .filter(|(e, _)| e == "OnCharacterPermanentlyBanned")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(perm_notifs.len(), 1);
+    assert_eq!(perm_notifs[0].len(), 0, "OnCharacterPermanentlyBanned expects 0 args");
+
+    let quasar_blocked = ctx.quasar_gateway.handle_public_request(
+        &p2,
+        &chat_bcast_req("hello"),
+        None,
+        false,
+        ctx.now_unix(),
+    );
+    assert_ne!(quasar_blocked.status_code, STATUS_OK, "Quasar chat must be blocked");
+    let lsc_blocked = rpc(
+        &ctx,
+        &mut p2,
+        "LSC",
+        "SendMessage",
+        &[PyRep::String("solarsystemid2:30000142".into()), PyRep::String("hello".into())],
+    )
+    .await
+    .expect_err("LSC.SendMessage must be blocked");
+    assert_eq!(lsc_blocked.code, "CharacterChatBanned");
+
+    // 2. Unban: emits OnCharacterUnbanned() and restores chat
+    rpc(
+        &ctx,
+        &mut gm,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/chatunban {PILOT_B}"))],
+    )
+    .await
+    .expect("/chatunban");
+
+    let unban_notifs: Vec<Vec<PyRep>> = drain_events(&ctx, &mut p2, PILOT_B)
+        .into_iter()
+        .filter(|(e, _)| e == "OnCharacterUnbanned")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(unban_notifs.len(), 1);
+    assert_eq!(unban_notifs[0].len(), 0, "OnCharacterUnbanned expects 0 args");
+
+    let quasar_ok = ctx.quasar_gateway.handle_public_request(
+        &p2,
+        &chat_bcast_req("unbanned"),
+        None,
+        false,
+        ctx.now_unix(),
+    );
+    assert_eq!(quasar_ok.status_code, STATUS_OK, "Quasar chat must succeed after unban");
+
+    // 3. Temporary chat ban: emits OnCharacterTemporarilyBanned(banExpiry), blocks chat, lapses after expiry
+    let expected_expiry_ft = ctx.now_blueos_filetime_ticks() + 3600 * 10_000_000;
+    rpc(
+        &ctx,
+        &mut gm,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/chatban {PILOT_B} 3600"))],
+    )
+    .await
+    .expect("/chatban 3600");
+
+    let temp_notifs: Vec<Vec<PyRep>> = drain_events(&ctx, &mut p2, PILOT_B)
+        .into_iter()
+        .filter(|(e, _)| e == "OnCharacterTemporarilyBanned")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(temp_notifs.len(), 1);
+    assert_eq!(
+        temp_notifs[0],
+        vec![PyRep::Integer(expected_expiry_ft)],
+        "OnCharacterTemporarilyBanned expects [banExpiry]"
+    );
+
+    let quasar_temp_blocked = ctx.quasar_gateway.handle_public_request(
+        &p2,
+        &chat_bcast_req("still muted"),
+        None,
+        false,
+        ctx.now_unix(),
+    );
+    assert_ne!(quasar_temp_blocked.status_code, STATUS_OK);
+
+    ctx.advance_secs(3601);
+    let quasar_expired_ok = ctx.quasar_gateway.handle_public_request(
+        &p2,
+        &chat_bcast_req("expired"),
+        None,
+        false,
+        ctx.now_unix(),
+    );
+    assert_eq!(quasar_expired_ok.status_code, STATUS_OK, "temp ban must lapse after expiry");
+
+    // 4. OnClusterShutdownInitiated: scheduled daily downtime countdown via tick_background_cluster + GM /shutdown
+    let _ = drain_events(&ctx, &mut p2, PILOT_B);
+    let now = ctx.now_unix();
+    let dt_sec = ctx.systems.downtime_utc_secs_of_day();
+    let next_dt = eve_server::system_actor::next_downtime_unix_secs(now, 86_400, dt_sec);
+    let jump_to_59m = next_dt.saturating_sub(59 * 60);
+    if jump_to_59m > now {
+        ctx.advance_secs(jump_to_59m - now);
+    }
+    tick_background_cluster(&ctx).await;
+
+    let shut_notifs: Vec<Vec<PyRep>> = drain_events(&ctx, &mut p2, PILOT_B)
+        .into_iter()
+        .filter(|(e, _)| e == "OnClusterShutdownInitiated")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(shut_notifs.len(), 1, "60m downtime warning must emit OnClusterShutdownInitiated");
+    assert_eq!(shut_notifs[0].len(), 3, "OnClusterShutdownInitiated expects 3 args");
+    assert_eq!(
+        shut_notifs[0][0],
+        PyRep::String("UI/Shared/ClusterShutdownInitiated".into())
+    );
+    let expected_dt_ft = (next_dt as i64 + 11_644_473_600) * 10_000_000;
+    assert_eq!(shut_notifs[0][1], PyRep::Integer(expected_dt_ft));
+    assert_eq!(shut_notifs[0][2], PyRep::Integer(15));
+}
+
+
+}
+
+pub(crate) mod parity_notify_batch_part2 {
+    #[allow(unused_imports)]
+    use super::*;
+
+// End-to-end integration tests for `notify:OnCriminalTimerUpdate` and `notify:OnCaptureChanged`.
+
+
+use super::parity_notify_batch::{
+    drain_events, new_ctx, rpc, JITA_SYSTEM, PILOT_A, PILOT_B,
+};
+use crate::common;
+use eve_destiny::{Ball, DVec3, MovementMode, TargetLock};
+use eve_machonet::SessionState;
+use eve_proto::PyRep;
+use eve_server::services::fw_gameplay::get_system_frontline_rules;
+use eve_server::sp6_lifecycle::tick_background_cluster;
+
+#[tokio::test]
+async fn test_parity_notify_criminal_timer_and_fw_capture_changed() {
+    // parity: notify:OnCriminalTimerUpdate, notify:OnCaptureChanged
+    eve_testkit::attest(&[
+        "notify:OnCriminalTimerUpdate",
+        "notify:OnCaptureChanged",
+    ]);
+
+    let ctx = new_ctx();
+    let unix_to_ft = |u: u64| -> i64 { (u as i64 + 11_644_473_600) * 10_000_000 };
+
+    // 1. OnCriminalTimerUpdate via unprovoked high-sec attack (301 -> 303 -> 300)
+    let mut s1 = SessionState::new(92_005);
+    common::login_pilot(&ctx, &mut s1, "demo", "demo-secret").await;
+    rpc(&ctx, &mut s1, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_A)])
+        .await
+        .expect("select PILOT_A");
+    let ship_a = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&PILOT_A).map(|c| c.active_ship_id))
+        .expect("PILOT_A ship");
+    let gun_a = ctx.db.with_mut_snapshot(|s| {
+        s.next_entity_id += 1;
+        let gid = s.next_entity_id;
+        s.items.insert(
+            gid,
+            eve_db::InventoryItemRecord {
+                item_id: gid,
+                type_id: 484,
+                owner_id: PILOT_A,
+                location_id: ship_a,
+                flag: eve_db::InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        s.module_online_states.insert(gid, true);
+        gid
+    });
+    ctx.invalidate_ship_fitting(ship_a);
+    ctx.advance_secs(11);
+    rpc(&ctx, &mut s1, "beyonce", "Undock", &[])
+        .await
+        .expect("undock PILOT_A");
+
+    let mut s2 = SessionState::new(92_006);
+    common::login_pilot(&ctx, &mut s2, "other", "other-secret").await;
+    rpc(&ctx, &mut s2, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_B)])
+        .await
+        .expect("select PILOT_B");
+    let ship_b = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&PILOT_B).map(|c| c.active_ship_id))
+        .expect("PILOT_B ship");
+    ctx.advance_secs(11);
+    rpc(&ctx, &mut s2, "beyonce", "Undock", &[])
+        .await
+        .expect("undock PILOT_B");
+
+    let sys_jita = ctx.systems.get_or_spawn(JITA_SYSTEM);
+    sys_jita
+        .add_target_lock(
+            ship_a,
+            TargetLock {
+                target_id: ship_b,
+                lock_time_ms: 100.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await
+        .expect("lock ship_b");
+    let _ = drain_events(&ctx, &mut s1, PILOT_A);
+
+    let attack_now = ctx.now_unix();
+    rpc(
+        &ctx,
+        &mut s1,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(gun_a),
+            PyRep::String("projectileFired".into()),
+            PyRep::Integer(ship_b),
+        ],
+    )
+    .await
+    .expect("high-sec attack");
+
+    let crim_active: Vec<Vec<PyRep>> = drain_events(&ctx, &mut s1, PILOT_A)
+        .into_iter()
+        .filter(|(e, _)| e == "OnCriminalTimerUpdate")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(
+        crim_active,
+        vec![vec![PyRep::Integer(301), PyRep::Integer(unix_to_ft(attack_now + 900))]],
+        "unprovoked high-sec attack must emit OnCriminalTimerUpdate(301, expiry)"
+    );
+
+    // Advance 2s + tick -> countdown Timer state 303
+    ctx.advance_secs(2);
+    tick_background_cluster(&ctx).await;
+    let crim_cd: Vec<Vec<PyRep>> = drain_events(&ctx, &mut s1, PILOT_A)
+        .into_iter()
+        .filter(|(e, _)| e == "OnCriminalTimerUpdate")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(
+        crim_cd,
+        vec![vec![PyRep::Integer(303), PyRep::Integer(unix_to_ft(attack_now + 900))]],
+        "tick after criminal flag must emit countdown state 303"
+    );
+
+    // Advance past 900s + tick -> Idle state 300
+    ctx.advance_secs(905);
+    tick_background_cluster(&ctx).await;
+    let crim_idle: Vec<Vec<PyRep>> = drain_events(&ctx, &mut s1, PILOT_A)
+        .into_iter()
+        .filter(|(e, _)| e == "OnCriminalTimerUpdate")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(
+        crim_idle,
+        vec![vec![PyRep::Integer(300), PyRep::None]],
+        "expired criminal flag must emit Idle state 300"
+    );
+
+    // Suspect branch (302 -> 304 -> 300) via looting PILOT_A's jetcan in high-sec
+    let (can_id, loot_id) = ctx.db.with_mut_snapshot(|s| {
+        s.next_entity_id += 2;
+        let cid = s.next_entity_id - 1;
+        let lid = s.next_entity_id;
+        s.items.insert(
+            cid,
+            eve_db::InventoryItemRecord {
+                item_id: cid,
+                type_id: 23,
+                owner_id: PILOT_A,
+                location_id: i64::from(JITA_SYSTEM),
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        s.items.insert(
+            lid,
+            eve_db::InventoryItemRecord {
+                item_id: lid,
+                type_id: 34,
+                owner_id: PILOT_A,
+                location_id: cid,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 10,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        (cid, lid)
+    });
+    let _ = drain_events(&ctx, &mut s2, PILOT_B);
+    let susp_now = ctx.now_unix();
+    rpc(
+        &ctx,
+        &mut s2,
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(loot_id), PyRep::Integer(can_id)],
+    )
+    .await
+    .expect("loot jetcan");
+    let susp_active: Vec<Vec<PyRep>> = drain_events(&ctx, &mut s2, PILOT_B)
+        .into_iter()
+        .filter(|(e, _)| e == "OnCriminalTimerUpdate")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(
+        susp_active,
+        vec![vec![PyRep::Integer(302), PyRep::Integer(unix_to_ft(susp_now + 900))]],
+        "looting another pilot's jetcan must emit OnCriminalTimerUpdate(302, expiry)"
+    );
+
+    ctx.advance_secs(2);
+    tick_background_cluster(&ctx).await;
+    let susp_cd: Vec<Vec<PyRep>> = drain_events(&ctx, &mut s2, PILOT_B)
+        .into_iter()
+        .filter(|(e, _)| e == "OnCriminalTimerUpdate")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(
+        susp_cd,
+        vec![vec![PyRep::Integer(304), PyRep::Integer(unix_to_ft(susp_now + 900))]]
+    );
+
+    // 2. OnCaptureChanged via real FW complex spawn, gate activation, guard NPC kill, and capture tick
+    let (fw_sys, occ_fac) = ctx
+        .db
+        .with_snapshot(|s| {
+            s.fw_system_occupations
+                .iter()
+                .find(|(&sys_id, occ)| {
+                    get_system_frontline_rules(&ctx, sys_id).0 == 1
+                        && occ.occupier_faction_id != 500_001
+                })
+                .map(|(&sys_id, occ)| (sys_id, occ.occupier_faction_id))
+        })
+        .expect("frontline FW system");
+    let attacker_fac = if occ_fac == 500_002 { 500_001 } else { 500_002 };
+
+    // Spawn warzone sites via real background cluster tick
+    let sys_fw = ctx.systems.get_or_spawn(fw_sys);
+    tick_background_cluster(&ctx).await;
+
+    let (gate_id, gate_pos) = ctx
+        .db
+        .with_snapshot(|s| {
+            let (&gid, _) = s
+                .fw_runtime
+                .fw_complexes
+                .iter()
+                .find(|(_, (csys, _, _, _, done))| *csys == fw_sys && !*done)
+                .expect("spawned FW complex");
+            let pos = s.item_positions.get(&gid).copied().unwrap_or([0.0, 0.0, 0.0]);
+            (gid, DVec3::from_array(pos))
+        });
+
+    let mut fw_sess = s2;
+    let fw_char = PILOT_B;
+    let fw_ship = 90_000_177_i64;
+    let fw_gun = 90_000_277_i64;
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&fw_char) {
+            ch.corporation_id = 1_000_180;
+            ch.war_faction_id = Some(attacker_fac);
+            ch.solar_system_id = fw_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = fw_ship;
+        }
+        s.items.insert(
+            fw_ship,
+            eve_db::InventoryItemRecord {
+                item_id: fw_ship,
+                type_id: 603,
+                owner_id: fw_char,
+                location_id: i64::from(fw_sys),
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        for (slot_idx, flag) in [
+            eve_db::InventoryFlag::HiSlot0,
+            eve_db::InventoryFlag::HiSlot1,
+            eve_db::InventoryFlag::HiSlot2,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let gid = fw_gun + (slot_idx as i64) * 2;
+            s.items.insert(
+                gid,
+                eve_db::InventoryItemRecord {
+                    item_id: gid,
+                    type_id: 484,
+                    owner_id: fw_char,
+                    location_id: fw_ship,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            s.module_online_states.insert(gid, true);
+            let aid = gid + 1;
+            s.items.insert(
+                aid,
+                eve_db::InventoryItemRecord {
+                    item_id: aid,
+                    type_id: 180,
+                    owner_id: fw_char,
+                    location_id: fw_ship,
+                    flag: eve_db::InventoryFlag::Cargo,
+                    quantity: 500,
+                    singleton: false,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    ctx.invalidate_ship_fitting(fw_ship);
+    rpc(&ctx, &mut fw_sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(fw_char)])
+        .await
+        .expect("reselect fw_char in fw_sys");
+
+    sys_fw
+        .spawn_ball_with_meta(
+            Ball {
+                id: fw_ship,
+                type_id: 603,
+                position: gate_pos + DVec3::new(1_000.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Rigid,
+            },
+            ctx.build_ship_combat_state(fw_char, fw_ship, 603),
+            eve_destiny::SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: fw_char,
+                char_id: Some(fw_char),
+                corp_id: 1_000_180,
+                alliance_id: -1,
+                security_status: 0.0,
+                is_cloaked: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("spawn fw_ship");
+
+    rpc(
+        &ctx,
+        &mut fw_sess,
+        "dogmaIM",
+        "LoadAmmo",
+        &[
+            PyRep::Integer(fw_ship),
+            PyRep::List(vec![
+                PyRep::Integer(fw_gun),
+                PyRep::Integer(fw_gun + 2),
+                PyRep::Integer(fw_gun + 4),
+            ]),
+            PyRep::List(vec![
+                PyRep::Integer(fw_gun + 1),
+                PyRep::Integer(fw_gun + 3),
+                PyRep::Integer(fw_gun + 5),
+            ]),
+        ],
+    )
+    .await
+    .expect("LoadAmmo");
+    ctx.advance_secs(11);
+
+    // Activate acceleration gate via keeper.ActivateAccelerationGate
+    rpc(
+        &ctx,
+        &mut fw_sess,
+        "keeper",
+        "ActivateAccelerationGate",
+        &[PyRep::Integer(gate_id)],
+    )
+    .await
+    .expect("ActivateAccelerationGate");
+
+    let _ = drain_events(&ctx, &mut fw_sess, fw_char);
+
+    // Negative: while guard NPC is alive, capture does not progress
+    ctx.advance_secs(5);
+    tick_background_cluster(&ctx).await;
+    assert!(
+        !drain_events(&ctx, &mut fw_sess, fw_char)
+            .iter()
+            .any(|(e, _)| e == "OnCaptureChanged"),
+        "capture must not progress while guard NPC is alive"
+    );
+
+    // Kill guard NPC via target lock + dogmaIM.Activate + Destiny system ticks
+    let guard_id = gate_id + 500_000_000;
+    sys_fw
+        .add_target_lock(
+            fw_ship,
+            TargetLock {
+                target_id: guard_id,
+                lock_time_ms: 100.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await
+        .expect("lock guard_id");
+    for gid in [fw_gun, fw_gun + 2, fw_gun + 4] {
+        rpc(
+            &ctx,
+            &mut fw_sess,
+            "dogmaIM",
+            "Activate",
+            &[
+                PyRep::Integer(gid),
+                PyRep::String("projectileFired".into()),
+                PyRep::Integer(guard_id),
+                PyRep::Integer(1_000),
+            ],
+        )
+        .await
+        .expect("activate gun on guard NPC");
+    }
+    for _ in 0..600 {
+        if sys_fw.get_ball_snapshot(guard_id).await.ok().flatten().is_none() {
+            break;
+        }
+        let _ = sys_fw.tick().await;
+    }
+    assert!(
+        sys_fw.get_ball_snapshot(guard_id).await.ok().flatten().is_none(),
+        "guard NPC must be destroyed"
+    );
+
+    // Positive: tick_background_cluster accrues capture and emits 6-arg OnCaptureChanged
+    let _ = drain_events(&ctx, &mut fw_sess, fw_char);
+    ctx.advance_secs(5);
+    tick_background_cluster(&ctx).await;
+
+    let cap_notifs: Vec<Vec<PyRep>> = drain_events(&ctx, &mut fw_sess, fw_char)
+        .into_iter()
+        .filter(|(e, _)| e == "OnCaptureChanged")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(cap_notifs.len(), 1, "must emit OnCaptureChanged after guard cleared");
+    assert_eq!(cap_notifs[0].len(), 6, "OnCaptureChanged expects 6 args");
+    assert_eq!(cap_notifs[0][0], PyRep::Integer(gate_id));
+    assert_eq!(cap_notifs[0][1], PyRep::Integer(attacker_fac));
+    assert!(matches!(cap_notifs[0][2], PyRep::Integer(_)));
+    assert!(cap_notifs[0][3].as_f64().unwrap_or(0.0) > 0.0);
+    assert!(cap_notifs[0][4].as_f64().unwrap_or(0.0) > 0.0);
+    assert_eq!(cap_notifs[0][5], PyRep::Integer(attacker_fac));
+}
+}
+
+
+pub(crate) mod parity_notify_batch2 {
+    #[allow(unused_imports)]
+    use super::*;
+
+// End-to-end integration tests for the 7 remediated `notify:*` parity rows:
+// - `notify:DoSimClockRebase`
+// - `notify:OnDisapprovalTimerUpdate`
+// - `notify:OnDungeonInstanceAdded`
+// - `notify:OnDungeonInstanceRemoved`
+// - `notify:OnFacWarBunkerVulnerable`
+// - `notify:OnInfluenceUpdate`
+// - `notify:OnInvalidateCacheForLocations`
+
+
+use crate::common;
+use crate::notify_real_emitters_batch7::{login_in_space, make_item};
+use eve_db::{InventoryFlag, TrainedSkillRecord};
+use eve_machonet::{service_roles::ROLE_GM_DEFAULT, SessionState};
+use eve_proto::{BridgeRpcError, PyRep};
+use eve_server::router::ServerContext;
+use eve_server::system_actor::SystemHandle;
+use glam::DVec3;
+use std::collections::HashMap;
+
+const PILOT_A: i64 = 90_000_001;
+const PILOT_B: i64 = 90_000_002;
+const SYS_JITA: u32 = 30_000_142;
+const SYS_AMARR: u32 = 30_002_187;
+const SYS_ZARZAKH: u32 = 30_100_000;
+const STATION_JITA: i64 = 60_003_760;
+
+fn new_ctx() -> ServerContext {
+    let sde = std::sync::Arc::new(
+        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("open sde"),
+    );
+    let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    ctx.set_clock_paused(true);
+    ctx
+}
+
+async fn rpc(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    svc: &str,
+    method: &str,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    ctx.dispatch_rpc(sess, svc, None, method, args, &HashMap::new(), None)
+        .await
+}
+
+fn kv_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
+    match rep {
+        PyRep::KeyVal(entries) => entries.iter().find_map(|(k, v)| if k == key { Some(v) } else { None }),
+        PyRep::Object { args, .. } => kv_get(args, key),
+        PyRep::Dict(entries) => entries.iter().find_map(|(k, v)| match k {
+            PyRep::String(s) if s == key => Some(v),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+fn fit_guns_and_skills(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    gun_base: i64,
+    gun_type: u32,
+    ammo_type: u32,
+) {
+    ctx.db.with_mut_snapshot(|snap| {
+        for (idx, flag) in [
+            InventoryFlag::HiSlot0,
+            InventoryFlag::HiSlot1,
+            InventoryFlag::HiSlot2,
+            InventoryFlag::HiSlot3,
+            InventoryFlag::HiSlot4,
+            InventoryFlag::HiSlot5,
+            InventoryFlag::HiSlot6,
+            InventoryFlag::HiSlot7,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let gid = gun_base + (idx as i64) * 2;
+            snap.items
+                .insert(gid, make_item(gid, gun_type, char_id, ship_id, flag, 1, true));
+            snap.items
+                .insert(gid + 1, make_item(gid + 1, ammo_type, char_id, ship_id, flag, 25_000, false));
+            snap.module_online_states.insert(gid, true);
+        }
+        let shield_id = gun_base + 100;
+        snap.items.insert(shield_id, make_item(shield_id, 3841, char_id, ship_id, InventoryFlag::MedSlot0, 1, true));
+        snap.module_online_states.insert(shield_id, true);
+        let dc_id = gun_base + 110;
+        snap.items.insert(dc_id, make_item(dc_id, 2048, char_id, ship_id, InventoryFlag::LoSlot0, 1, true));
+        snap.module_online_states.insert(dc_id, true);
+        let low_mod = if gun_type == 47_272 || gun_type == 47_920 { 1244 } else if matches!(gun_type, 2404 | 2420 | 20_539 | 2929 | 2961 | 34288) { 22_291 } else if gun_type == 3074 || gun_type == 3_146 || gun_type == 3186 { 10_190 } else { 519 };
+        for (idx, flag) in [
+            InventoryFlag::LoSlot1,
+            InventoryFlag::LoSlot2,
+            InventoryFlag::LoSlot3,
+            InventoryFlag::LoSlot4,
+            InventoryFlag::LoSlot5,
+            InventoryFlag::LoSlot6,
+            InventoryFlag::LoSlot7,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let gyro_id = gun_base + 111 + idx as i64;
+            snap.items.insert(gyro_id, make_item(gyro_id, low_mod, char_id, ship_id, flag, 1, true));
+            snap.module_online_states.insert(gyro_id, true);
+        }
+        for (idx, flag) in [
+            InventoryFlag::MedSlot1,
+            InventoryFlag::MedSlot2,
+            InventoryFlag::MedSlot3,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let cap_id = gun_base + 120 + idx as i64;
+            snap.items.insert(cap_id, make_item(cap_id, 2032, char_id, ship_id, flag, 1, true));
+            snap.module_online_states.insert(cap_id, true);
+        }
+        for &tid in &[
+            3300_u32, 3301, 3302, 3303, 3307, 3308, 3310, 3311, 3312, 3315, 3317, 3319, 3320, 3321,
+            3324, 3325, 3333, 3336, 3337, 11_082, 12_209, 12_212, 20_312, 20_327, 21_071, 25_719,
+        ] {
+            snap.skills.entry(char_id).or_default().insert(
+                tid,
+                TrainedSkillRecord { type_id: tid, level: 5, skill_points: 256_000.0 },
+            );
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+}
+
+async fn destroy_npc_ball(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    sys_handle: &SystemHandle,
+    npc_id: i64,
+    gun_base: i64,
+    effect_name: &str,
+    offset_dist: f64,
+    step_secs: f64,
+) {
+    let Some((_, npc_ball)) = sys_handle.get_ball_snapshot(npc_id).await.unwrap() else {
+        return;
+    };
+    if let Some(sys_id) = sess.solar_system_id {
+        if let Ok(beyonce_oid) = ctx.bind_object(sess, "beyonce", i64::from(sys_id)) {
+            let _ = ctx
+                .dispatch_rpc(sess, "beyonce", Some(beyonce_oid), "CmdStop", &[], &HashMap::new(), None)
+                .await;
+        }
+    }
+    if let Some(ship_id) = sess.ship_id {
+        let _ = sys_handle
+            .set_ball_position(ship_id, npc_ball.position + DVec3::new(offset_dist, 0.0, 0.0))
+            .await;
+    }
+    rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(npc_id)])
+        .await
+        .expect("AddTarget NPC");
+    sys_handle.step_manual(5.0).await.unwrap();
+    for idx in 0..8_i64 {
+        let gid = gun_base + idx * 2;
+        if ctx.db.with_snapshot(|s| s.items.contains_key(&gid)) {
+            let _ = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gid), PyRep::String(effect_name.into())]).await;
+        }
+    }
+    sys_handle.step_manual(5.0).await.unwrap();
+    let mut sync_weapons = false;
+    for idx in 0..8_i64 {
+        let gid = gun_base + idx * 2;
+        if !ctx.db.with_snapshot(|s| s.items.contains_key(&gid)) {
+            continue;
+        }
+        let res = rpc(
+            ctx, sess, "dogmaIM", "Activate",
+            &[PyRep::Integer(gid), PyRep::String(effect_name.into()), PyRep::Integer(npc_id), PyRep::Integer(1000)],
+        ).await.unwrap_or_else(|e| panic!("Activate gun {idx} on NPC failed: {e:?}"));
+        if kv_get(&res, "appliedDamage").is_some() {
+            sync_weapons = true;
+        }
+    }
+    let mut last_dmg = 0.0_f64;
+    let mut last_hit = 0.0_f64;
+    for _ in 0..800 {
+        if sys_handle.get_ball_snapshot(npc_id).await.unwrap().is_none() {
+            break;
+        }
+        sys_handle.step_manual(step_secs).await.unwrap();
+        let Some((_, nb)) = sys_handle.get_ball_snapshot(npc_id).await.unwrap() else {
+            break;
+        };
+        if let Some(sid) = sess.ship_id {
+            let _ = sys_handle.set_ball_position(sid, nb.position + DVec3::new(offset_dist, 0.0, 0.0)).await;
+        }
+        if sync_weapons {
+            let _ = rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(npc_id)]).await;
+            for idx in 0..6_i64 {
+                let gid = gun_base + idx * 2;
+                let _ = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gid), PyRep::String(effect_name.into())]).await;
+                let res = rpc(
+                    ctx, sess, "dogmaIM", "Activate",
+                    &[PyRep::Integer(gid), PyRep::String(effect_name.into()), PyRep::Integer(npc_id), PyRep::Integer(1)],
+                ).await.expect("Activate gun in loop");
+                if let Some(d) = kv_get(&res, "appliedDamage").and_then(|v| v.as_f64()) {
+                    last_dmg = d;
+                }
+                if let Some(h) = kv_get(&res, "hitChance").and_then(|v| v.as_f64()) {
+                    last_hit = h;
+                }
+            }
+        }
+    }
+    let rem_cs = sys_handle.get_combat_state(npc_id).await.ok().flatten();
+    assert!(
+        sys_handle.get_ball_snapshot(npc_id).await.unwrap().is_none(),
+        "NPC {npc_id} must be destroyed via live combat (last_dmg={last_dmg}, last_hit={last_hit}, rem_cs={rem_cs:?})"
+    );
+    for idx in 0..8_i64 {
+        let gid = gun_base + idx * 2;
+        if ctx.db.with_snapshot(|s| s.items.contains_key(&gid)) {
+            let _ = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gid), PyRep::String(effect_name.into())]).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_batch2_sim_clock_rebase_disapproval_and_cache_invalidation() {
+    // parity: notify:DoSimClockRebase, notify:OnDisapprovalTimerUpdate, notify:OnInvalidateCacheForLocations
+    eve_testkit::attest(&[
+        "notify:DoSimClockRebase",
+        "notify:OnDisapprovalTimerUpdate",
+        "notify:OnInvalidateCacheForLocations",
+    ]);
+
+    let ctx = new_ctx();
+
+    // 1. DoSimClockRebase via GM /tidi slash command in Jita space
+    let mut sess_jita = login_in_space(
+        &ctx, 92_001, "demo", "demo-secret", PILOT_A, 720_000_001, 587, SYS_JITA, DVec3::ZERO,
+    ).await;
+    sess_jita.role |= ROLE_GM_DEFAULT;
+    let _sess_amarr = login_in_space(
+        &ctx, 92_002, "other", "other-secret", PILOT_B, 720_000_002, 587, SYS_AMARR, DVec3::ZERO,
+    ).await;
+    let _ = ctx.drain_notifications_for_char(PILOT_A);
+    let _ = ctx.drain_notifications_for_char(PILOT_B);
+
+    rpc(&ctx, &mut sess_jita, "slash", "SlashCmd", &[PyRep::String("/tidi 0.50".into())])
+        .await
+        .expect("/tidi 0.50");
+
+    let jita_notifs = ctx.drain_notifications_for_char(PILOT_A);
+    let rebase = jita_notifs
+        .iter()
+        .find(|n| n.event == "DoSimClockRebase")
+        .expect("DoSimClockRebase emitted to Jita pilot");
+    assert_eq!(rebase.args.len(), 1);
+    let PyRep::Tuple(pair) = &rebase.args[0] else {
+        panic!("expected 2-tuple in DoSimClockRebase, got {:?}", rebase.args);
+    };
+    assert_eq!(pair.len(), 2);
+    assert!(pair[0].as_i64().expect("oldSimTime") < pair[1].as_i64().expect("newSimTime"));
+    assert!(
+        ctx.drain_notifications_for_char(PILOT_B).iter().all(|n| n.event != "DoSimClockRebase"),
+        "Amarr pilot must not receive Jita DoSimClockRebase"
+    );
+
+    // 2. OnDisapprovalTimerUpdate via live weapon aggression in Zarzakh + cluster tick
+    let (ship_z1, ship_z2, gun_z) = (720_000_101_i64, 720_000_102_i64, 720_000_110_i64);
+    let mut sess_z1 = login_in_space(
+        &ctx, 92_003, "demo", "demo-secret", PILOT_A, ship_z1, 587, SYS_ZARZAKH, DVec3::ZERO,
+    ).await;
+    let _sess_z2 = login_in_space(
+        &ctx, 92_004, "other", "other-secret", PILOT_B, ship_z2, 587, SYS_ZARZAKH, DVec3::new(1_000.0, 0.0, 0.0),
+    ).await;
+    fit_guns_and_skills(&ctx, PILOT_A, ship_z1, gun_z, 3074, 12_625);
+    let sys_z = ctx.systems.get_or_spawn(SYS_ZARZAKH);
+    rpc(&ctx, &mut sess_z1, "dogmaIM", "AddTarget", &[PyRep::Integer(ship_z2)]).await.expect("AddTarget");
+    sys_z.step_manual(5.0).await.unwrap();
+    let _ = ctx.drain_notifications_for_char(PILOT_A);
+
+    rpc(
+        &ctx, &mut sess_z1, "dogmaIM", "Activate",
+        &[PyRep::Integer(gun_z), PyRep::String("projectileFired".into()), PyRep::Integer(ship_z2)],
+    ).await.expect("Activate weapon in Zarzakh");
+
+    let dis_active = ctx.drain_notifications_for_char(PILOT_A)
+        .into_iter()
+        .rfind(|n| n.event == "OnDisapprovalTimerUpdate")
+        .expect("OnDisapprovalTimerUpdate active (501)");
+    assert_eq!(dis_active.args.len(), 2);
+    assert_eq!(dis_active.args[0], PyRep::Integer(501));
+    assert!(dis_active.args[1].as_i64().unwrap_or(0) > 0);
+
+    // Advance 2s + cluster tick -> countdown state (502)
+    ctx.advance_secs(2);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    let dis_cd = ctx.drain_notifications_for_char(PILOT_A)
+        .into_iter()
+        .find(|n| n.event == "OnDisapprovalTimerUpdate")
+        .expect("OnDisapprovalTimerUpdate countdown (502)");
+    assert_eq!(dis_cd.args[0], PyRep::Integer(502));
+    assert!(dis_cd.args[1].as_i64().unwrap_or(0) > 0);
+
+    // Advance past 900s expiry + cluster tick -> idle state (500, None)
+    ctx.advance_secs(905);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    let dis_idle = ctx.drain_notifications_for_char(PILOT_A)
+        .into_iter()
+        .find(|n| n.event == "OnDisapprovalTimerUpdate")
+        .expect("OnDisapprovalTimerUpdate idle (500)");
+    assert_eq!(dis_idle.args, vec![PyRep::Integer(500), PyRep::None]);
+
+    // 3. OnInvalidateCacheForLocations via bound invbroker.SetPassword
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.station_id = Some(STATION_JITA);
+            ch.solar_system_id = SYS_JITA;
+        }
+    });
+    let mut sess_st = SessionState::new(92_005);
+    common::login_pilot(&ctx, &mut sess_st, "demo", "demo-secret").await;
+    rpc(&ctx, &mut sess_st, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_A)]).await.expect("SelectCharacterID");
+    sess_st.station_id = Some(STATION_JITA);
+    sess_st.solar_system_id = None;
+    ctx.sync_session(&mut sess_st);
+    let container_id: i64 = 720_300_001;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            container_id,
+            make_item(container_id, 3465, PILOT_A, STATION_JITA, InventoryFlag::Hangar, 1, true),
+        );
+    });
+    let bind = rpc(
+        &ctx, &mut sess_st, "invbroker", "MachoBindObject",
+        &[PyRep::Tuple(vec![PyRep::Integer(STATION_JITA), PyRep::Integer(15)]), PyRep::None],
+    ).await.expect("MachoBindObject");
+    let mgr_oid = match &bind {
+        PyRep::Tuple(parts) => parts[0].as_i64().expect("mgr_oid") as u64,
+        _ => panic!("expected tuple"),
+    };
+    let cont_oid = ctx.dispatch_rpc(
+        &mut sess_st, "invbroker", Some(mgr_oid), "GetInventoryFromId",
+        &[PyRep::Integer(container_id), PyRep::Integer(0)], &HashMap::new(), None,
+    ).await.expect("GetInventoryFromId").as_i64().expect("cont_oid") as u64;
+    let _ = ctx.drain_notifications_for_char(PILOT_A);
+
+    ctx.dispatch_rpc(
+        &mut sess_st, "invbroker", Some(cont_oid), "SetPassword",
+        &[PyRep::Integer(2), PyRep::String("alpha123".into()), PyRep::String(String::new())],
+        &HashMap::new(), None,
+    ).await.expect("SetPassword");
+
+    let inv = ctx.drain_notifications_for_char(PILOT_A)
+        .into_iter()
+        .find(|n| n.event == "OnInvalidateCacheForLocations")
+        .expect("OnInvalidateCacheForLocations");
+    assert_eq!(inv.args, vec![PyRep::List(vec![PyRep::Integer(container_id)])]);
+}
+
+#[tokio::test]
+async fn test_batch2_dungeon_instance_added_and_removed_via_live_combat() {
+    // parity: notify:OnDungeonInstanceAdded, notify:OnDungeonInstanceRemoved
+    eve_testkit::attest(&[
+        "notify:OnDungeonInstanceAdded",
+        "notify:OnDungeonInstanceRemoved",
+    ]);
+
+    let ctx = new_ctx();
+    let ship_a = 720_000_201_i64;
+    let gun_a = 720_000_210_i64;
+    let mut sess_a = login_in_space(
+        &ctx, 92_010, "demo", "demo-secret", PILOT_A, ship_a, 587, SYS_JITA, DVec3::ZERO,
+    ).await;
+    fit_guns_and_skills(&ctx, PILOT_A, ship_a, gun_a, 3074, 12_625);
+
+    let dest_sys = eve_server::services::pve_expeditions::find_escalation_destination_system(&ctx, SYS_JITA);
+    let mut sess_obs = login_in_space(
+        &ctx, 92_011, "other", "other-secret", PILOT_B, 720_000_202, 587, dest_sys, DVec3::ZERO,
+    ).await;
+    let _ = rpc(&ctx, &mut sess_obs, "scanSvc", "GetCombatAnomalyInstances", &[]).await.unwrap();
+    let _ = ctx.drain_notifications_for_char(PILOT_B);
+
+    let _ = rpc(&ctx, &mut sess_a, "scanSvc", "GetCombatAnomalyInstances", &[]).await.unwrap();
+    let site_id = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system
+            .get(&SYS_JITA)
+            .and_then(|l| l.iter().find(|s| s.site_category == "CombatAnomaly" && !s.cleared))
+            .map(|s| s.site_id.clone())
+            .expect("seeded CombatAnomaly in Jita")
+    });
+
+    ctx.set_mechanic_rng_seed(Some(3));
+    let jita_handle = ctx.systems.get_or_spawn(SYS_JITA);
+
+    for _wave in 0..6 {
+        let npcs = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+            reg.sites_by_system
+                .get(&SYS_JITA)
+                .and_then(|l| l.iter().find(|s| s.site_id == site_id))
+                .map(|s| s.active_npc_ball_ids.clone())
+                .unwrap_or_default()
+        });
+        if npcs.is_empty() {
+            break;
+        }
+        for nid in npcs {
+            destroy_npc_ball(&ctx, &mut sess_a, &jita_handle, nid, gun_a, "projectileFired", 2_500.0, 6.5).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    let obs_add = ctx.drain_notifications_for_char(PILOT_B);
+    let di_add = obs_add
+        .iter()
+        .find(|n| n.event == "OnDungeonInstanceAdded")
+        .expect("OnDungeonInstanceAdded emitted on escalation");
+    assert_eq!(di_add.args.len(), 2);
+    assert_eq!(di_add.args[0], PyRep::Integer(i64::from(dest_sys)));
+    let inst_id = kv_get(&di_add.args[1], "instanceID").and_then(|v| v.as_i64()).expect("instanceID");
+    let sig_id = kv_get(&di_add.args[1], "signatureID").and_then(|v| v.as_str()).expect("signatureID").to_string();
+    let exp_did = kv_get(&di_add.args[1], "dungeonID").and_then(|v| v.as_i64()).expect("dungeonID");
+    assert!(kv_get(&di_add.args[1], "scanStrengthValue").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
+
+    // Move Pilot A to dest_sys, enter expedition step 1, and destroy its NPCs in real combat
+    let _ = ctx.db.set_character_solar_system(PILOT_A, dest_sys, &ctx.sde);
+    sess_a.solar_system_id = Some(dest_sys);
+    ctx.sync_session(&mut sess_a);
+    let dest_handle = ctx.systems.get_or_spawn(dest_sys);
+    let ship_ball = jita_handle.get_ball_snapshot(ship_a).await.unwrap().unwrap().1;
+    let _ = dest_handle.spawn_ball(ship_ball).await;
+
+    let exp_site_id = format!("EXP-{inst_id}-1");
+    let _ = ctx.drain_notifications_for_char(PILOT_B);
+    for _wave in 0..6 {
+        let npcs = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+            reg.sites_by_system
+                .get(&dest_sys)
+                .and_then(|l| l.iter().find(|s| s.site_id == exp_site_id))
+                .map(|s| s.active_npc_ball_ids.clone())
+                .unwrap_or_default()
+        });
+        if npcs.is_empty() {
+            break;
+        }
+        for nid in npcs {
+            destroy_npc_ball(&ctx, &mut sess_a, &dest_handle, nid, gun_a, "projectileFired", 2_500.0, 6.5).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let obs_rem = ctx.drain_notifications_for_char(PILOT_B);
+    let di_rem = obs_rem
+        .iter()
+        .find(|n| n.event == "OnDungeonInstanceRemoved")
+        .expect("OnDungeonInstanceRemoved emitted after destroying expedition NPCs");
+    assert_eq!(
+        di_rem.args,
+        vec![
+            PyRep::Integer(i64::from(dest_sys)),
+            PyRep::Integer(inst_id),
+            PyRep::String(sig_id),
+            PyRep::Integer(exp_did),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn test_batch2_facwar_bunker_vulnerable_and_incursion_influence_update() {
+    // parity: notify:OnFacWarBunkerVulnerable, notify:OnInfluenceUpdate
+    eve_testkit::attest(&[
+        "notify:OnFacWarBunkerVulnerable",
+        "notify:OnInfluenceUpdate",
+    ]);
+
+    // 1. OnFacWarBunkerVulnerable via live FW complex capture reaching 100% contested
+    let fw_ctx = new_ctx();
+    let (_enemy_sys, warzone_sys, _cmd_sys, _rear_sys) =
+        crate::fw_warzone_insurgency::setup_warzone_chain(&fw_ctx);
+    let (fw_ship, fw_gun) = (720_000_301_i64, 720_000_310_i64);
+    fw_ctx.db.with_mut_snapshot(|snap| {
+        if let Some(occ) = snap.fw_system_occupations.get_mut(&warzone_sys) {
+            occ.victory_points = 0;
+            occ.victory_points_threshold = 100;
+        }
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.corporation_id = 1_000_181;
+            ch.station_id = None;
+            ch.solar_system_id = warzone_sys;
+        }
+    });
+    fit_guns_and_skills(&fw_ctx, PILOT_A, fw_ship, fw_gun, 3074, 12_625);
+    let mut sess_fw = login_in_space(
+        &fw_ctx, 92_020, "demo", "demo-secret", PILOT_A, fw_ship, 587, warzone_sys, DVec3::ZERO,
+    ).await;
+    sess_fw.role |= ROLE_GM_DEFAULT;
+    rpc(&fw_ctx, &mut sess_fw, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(500_004)])
+        .await
+        .expect("CreateMyDirectEnlistment");
+    let _ = rpc(&fw_ctx, &mut sess_fw, "fwWarzoneSolarsystem", "GetLocalOccupationState", &[]).await.unwrap();
+    let _ = rpc(&fw_ctx, &mut sess_fw, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await.unwrap();
+
+    let wz_space = fw_ctx.systems.get_or_spawn(warzone_sys);
+    let wz_beyonce = fw_ctx.bind_object(&sess_fw, "beyonce", i64::from(warzone_sys)).unwrap();
+    let _ = fw_ctx.drain_notifications_for_char(PILOT_A);
+
+    let mut bunker_vuln_seen = false;
+    for _attempt in 0..35 {
+        let gate_opt = fw_ctx.db.with_snapshot(|s| {
+            s.fw_runtime.fw_complexes.iter().find_map(|(&gid, &(csys, ref tier, _, _, done))| {
+                (csys == warzone_sys && tier == "Novice" && !done).then_some(gid)
+            })
+        });
+        let Some(gate_id) = gate_opt else {
+            let _ = rpc(&fw_ctx, &mut sess_fw, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await;
+            continue;
+        };
+        fw_ctx.dispatch_rpc(
+            &mut sess_fw, "beyonce", Some(wz_beyonce), "CmdWarpToStuff",
+            &[PyRep::String("item".into()), PyRep::Integer(gate_id), PyRep::Real(0.0)],
+            &HashMap::new(), None,
+        ).await.expect("CmdWarpToStuff FW gate");
+        for _ in 0..4 {
+            wz_space.step_manual(15.0).await.unwrap();
+        }
+        let _ = rpc(&fw_ctx, &mut sess_fw, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(gate_id)])
+            .await
+            .expect("ActivateAccelerationGate FW");
+        let guard_id = 500_000_000 + gate_id;
+        rpc(&fw_ctx, &mut sess_fw, "dogmaIM", "AddTarget", &[PyRep::Integer(guard_id)])
+            .await
+            .expect("AddTarget FW guard");
+        wz_space.step_manual(5.0).await.unwrap();
+        for idx in 0..3_i64 {
+            let gid = fw_gun + idx * 2;
+            rpc(
+                &fw_ctx,
+                &mut sess_fw,
+                "dogmaIM",
+                "Activate",
+                &[
+                    PyRep::Integer(gid),
+                    PyRep::String("projectileFired".into()),
+                    PyRep::Integer(guard_id),
+                    PyRep::Integer(100),
+                ],
+            )
+            .await
+            .expect("Activate gun on FW guard");
+        }
+        for _ in 0..90 {
+            if wz_space.get_ball_snapshot(guard_id).await.unwrap().is_none() {
+                break;
+            }
+            wz_space.step_manual(1.0).await.unwrap();
+        }
+        assert!(
+            wz_space.get_ball_snapshot(guard_id).await.unwrap().is_none(),
+            "FW guard NPC {guard_id} must be destroyed via live combat"
+        );
+
+        for _ in 0..10 {
+            if fw_ctx.db.with_snapshot(|s| s.fw_runtime.fw_complexes.get(&gate_id).is_none_or(|c| c.4)) {
+                break;
+            }
+            rpc(&fw_ctx, &mut sess_fw, "timeControl", "AdvanceClock", &[PyRep::Integer(150)]).await.expect("AdvanceClock");
+            eve_server::services::fw_gameplay::tick_fw_gameplay(&fw_ctx, fw_ctx.now_unix()).await;
+        }
+        if let Some(ev) = fw_ctx.drain_notifications_for_char(PILOT_A).into_iter().find(|n| n.event == "OnFacWarBunkerVulnerable") {
+            assert_eq!(ev.args.len(), 1);
+            assert!(ev.args[0].as_i64().unwrap_or(0) > 0);
+            bunker_vuln_seen = true;
+            break;
+        }
+    }
+    assert!(bunker_vuln_seen, "OnFacWarBunkerVulnerable must be emitted when FW complex captures reach 100% contested");
+
+    // 2. OnInfluenceUpdate via live incursion site combat
+    let inc_ctx = new_ctx();
+    let mut sess_probe = SessionState {
+        user_id: Some(2),
+        character_id: Some(PILOT_B),
+        ..Default::default()
+    };
+    rpc(&inc_ctx, &mut sess_probe, "taleMgr", "GetGlobalWorldEventTales", &[])
+        .await
+        .expect("GetGlobalWorldEventTales");
+
+    let (tale_id, vg_sys, vg_site_id) =
+        eve_server::services::pve_special_sites::with_pve_special_reg(&inc_ctx, |reg| {
+            let inc = reg.incursions.values().find(|i| i.state != "Ended").expect("seeded incursion");
+            let vg = inc.sites.iter().find(|s| s.tier == "Vanguard" && s.completed_count == 0).expect("Vanguard site");
+            (inc.tale_id, vg.solar_system_id, vg.site_id.clone())
+        });
+
+    let (inc_ship, inc_gun) = (720_000_401_i64, 720_000_410_i64);
+    inc_ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.station_id = None;
+            ch.solar_system_id = vg_sys;
+            ch.active_ship_id = inc_ship;
+        }
+    });
+    let mut sess_inc = login_in_space(
+        &inc_ctx, 92_030, "demo", "demo-secret", PILOT_A, inc_ship, 26_842, vg_sys, DVec3::ZERO,
+    ).await;
+    fit_guns_and_skills(&inc_ctx, PILOT_A, inc_ship, inc_gun, 34_288, 12_779);
+    sess_inc.role |= ROLE_GM_DEFAULT;
+    inc_ctx.sync_session(&mut sess_inc);
+    let vg_space = inc_ctx.systems.get_or_spawn(vg_sys);
+    let _ = inc_ctx.drain_notifications_for_char(PILOT_A);
+
+    for _wave in 0..5 {
+        let _ = rpc(&inc_ctx, &mut sess_inc, "keeper", "EnterNextDungeonRoom", &[PyRep::String(vg_site_id.clone())]).await;
+        let (escorts, boss_id) = eve_server::services::pve_special_sites::with_pve_special_reg(&inc_ctx, |reg| {
+            let vg = reg.incursions.values().flat_map(|i| i.sites.iter()).find(|s| s.site_id == vg_site_id).expect("vg site");
+            let esc: Vec<i64> = vg.escort_spawns.iter().filter(|e| !e.destroyed).map(|e| e.npc_ball_id).collect();
+            (esc, (!vg.boss_destroyed).then_some(vg.boss_npc_ball_id))
+        });
+        for eid in escorts {
+            destroy_npc_ball(&inc_ctx, &mut sess_inc, &vg_space, eid, inc_gun, "projectileFired", 5_000.0, 2.0).await;
+        }
+        if let Some(bid) = boss_id {
+            destroy_npc_ball(&inc_ctx, &mut sess_inc, &vg_space, bid, inc_gun, "projectileFired", 5_000.0, 2.0).await;
+        }
+        let done = eve_server::services::pve_special_sites::with_pve_special_reg(&inc_ctx, |reg| {
+            reg.incursions.values().flat_map(|i| i.sites.iter()).find(|s| s.site_id == vg_site_id).is_some_and(|s| s.completed_count > 0)
+        });
+        if done {
+            break;
+        }
+    }
+
+    let inf_ev = inc_ctx.drain_notifications_for_char(PILOT_A)
+        .into_iter()
+        .find(|n| n.event == "OnInfluenceUpdate")
+        .expect("OnInfluenceUpdate emitted on incursion site completion");
+    assert_eq!(inf_ev.args.len(), 2);
+    assert_eq!(inf_ev.args[0], PyRep::Integer(tale_id));
+    let inf_val = kv_get(&inf_ev.args[1], "influence").and_then(|v| v.as_f64()).expect("influence");
+    assert!((0.0..1.0).contains(&inf_val), "influence {inf_val} must decrease below 1.0");
+    assert!(kv_get(&inf_ev.args[1], "lastUpdated").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+}
+}
+
+
+pub(crate) mod parity_notify_batch4 {
+    #[allow(unused_imports)]
+    use super::*;
+
+// Integration tests verifying remediation of FLAGGED_FAKE `notify:*` rows (batch 4).
+
+use crate::common;
+use crate::notify_real_emitters_batch7::login_in_space;
+use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
+use eve_destiny::TargetLock;
+use eve_machonet::service_roles::{ROLE_GMH, ROLE_GM_DEFAULT};
+use eve_machonet::SessionState;
+use eve_proto::PyRep;
+use eve_server::router::ServerContext;
+use eve_server::services::insurgency_services::{add_system_corruption, init_insurgency_campaign, FORECASTING_DURATION_SECS};
+use eve_server::services::pve_special_sites::record_system_interference_activity;
+use glam::DVec3;
+use std::collections::HashMap;
+
+const PILOT_A: i64 = 90_000_001;
+const PILOT_B: i64 = 90_000_002;
+const SYS_JITA: u32 = 30_000_142;
+const SYS_ZARZAKH: u32 = 30_100_000;
+const JITA_STATION: i64 = 60_003_760;
+
+fn new_ctx() -> ServerContext {
+    let ctx = ServerContext::new();
+    ctx.set_clock_paused(true);
+    ctx
+}
+
+async fn rpc(ctx: &ServerContext, sess: &mut SessionState, svc: &str, method: &str, args: &[PyRep]) -> Result<PyRep, eve_proto::BridgeRpcError> {
+    ctx.dispatch_rpc(sess, svc, None, method, args, &HashMap::new(), None).await
+}
+
+fn drain_all(ctx: &ServerContext, char_id: i64) -> Vec<(String, String, Vec<PyRep>)> {
+    ctx.drain_notifications_for_char(char_id)
+        .into_iter()
+        .map(|n| (n.event, n.id_type, n.args))
+        .collect()
+}
+
+fn has_notif(notifs: &[(String, String, Vec<PyRep>)], event: &str) -> bool {
+    notifs.iter().any(|(e, _, _)| e == event)
+}
+
+fn find_notif<'a>(notifs: &'a [(String, String, Vec<PyRep>)], event: &str) -> Option<&'a (String, String, Vec<PyRep>)> {
+    notifs.iter().find(|(e, _, _)| e == event)
+}
+
+fn dict_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
+    match rep {
+        PyRep::KeyVal(entries) => entries.get(key),
+        PyRep::Dict(entries) => entries.iter().find(|(k, _)| k.as_str() == Some(key)).map(|(_, v)| v),
+        _ => None,
+    }
+}
+
+fn make_item(item_id: i64, type_id: u32, owner_id: i64, location_id: i64, flag: InventoryFlag, quantity: i32, singleton: bool) -> InventoryItemRecord {
+    InventoryItemRecord {
+        item_id, type_id, owner_id, location_id, flag, quantity, singleton,
+        version: 1, dynamic_attributes: HashMap::new(), source_mutaplasmid_id: None,
+        insured_payout_isk: 0.0, is_blueprint_copy: false, blueprint_runs_remaining: None,
+    }
+}
+
+// parity: notify:OnWeaponsTimerUpdate, notify:OnPvpTimerUpdate, notify:OnSystemCriminalFlagUpdates, notify:OnSystemDisapprovalFlagUpdates
+#[tokio::test]
+async fn test_batch4_crimewatch_timers_and_system_flag_updates() {
+    eve_testkit::attest(&[
+        "notify:OnWeaponsTimerUpdate",
+        "notify:OnPvpTimerUpdate",
+        "notify:OnSystemCriminalFlagUpdates",
+        "notify:OnSystemDisapprovalFlagUpdates",
+    ]);
+
+    let ctx = new_ctx();
+    let jita_pos = ctx.sde.stations[&JITA_STATION].position + DVec3::new(10_000.0, 0.0, 0.0);
+    let (ship_a, ship_b, gun_id) = (640_000_001_i64, 640_000_002_i64, 640_000_010_i64);
+    let mut sess_a = login_in_space(&ctx, 92_001, "demo", "demo-secret", PILOT_A, ship_a, 587, SYS_JITA, jita_pos).await;
+    let _sess_b = login_in_space(&ctx, 92_002, "other", "other-secret", PILOT_B, ship_b, 587, SYS_JITA, jita_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(gun_id, make_item(gun_id, 484, PILOT_A, ship_a, InventoryFlag::HiSlot0, 1, true));
+        snap.module_online_states.insert(gun_id, true);
+    });
+    ctx.invalidate_ship_fitting(ship_a);
+    rpc(&ctx, &mut sess_a, "crimewatch", "SetSafetyLevel", &[PyRep::Integer(0)]).await.unwrap();
+
+    let sys_h = ctx.systems.get_or_spawn(SYS_JITA);
+    sys_h.add_target_lock(ship_a, TargetLock { target_id: ship_b, lock_time_ms: 100.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await.unwrap();
+
+    // Negative: no timer or flag notifications before aggression
+    let pre_a = drain_all(&ctx, PILOT_A);
+    let pre_b = drain_all(&ctx, PILOT_B);
+    assert!(!has_notif(&pre_a, "OnWeaponsTimerUpdate"));
+    assert!(!has_notif(&pre_a, "OnPvpTimerUpdate"));
+    assert!(!has_notif(&pre_a, "OnSystemCriminalFlagUpdates"));
+    assert!(!has_notif(&pre_b, "OnSystemCriminalFlagUpdates"));
+
+    // Positive: highsec aggression emits OnWeaponsTimerUpdate, OnPvpTimerUpdate, and OnSystemCriminalFlagUpdates
+    rpc(&ctx, &mut sess_a, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::String("projectileFired".into()), PyRep::Integer(ship_b)]).await.unwrap();
+
+    let post_a = drain_all(&ctx, PILOT_A);
+    let post_b = drain_all(&ctx, PILOT_B);
+
+    let (_, weap_id_type, weap_args) = find_notif(&post_a, "OnWeaponsTimerUpdate").expect("OnWeaponsTimerUpdate emitted");
+    assert_eq!(weap_id_type, "charid");
+    assert_eq!(weap_args.len(), 2);
+    assert_eq!(weap_args[0], PyRep::Integer(101));
+    assert!(weap_args[1].as_i64().unwrap_or(0) > 130_000_000_000_000_000);
+
+    let (_, pvp_id_type, pvp_args) = find_notif(&post_a, "OnPvpTimerUpdate").expect("OnPvpTimerUpdate emitted");
+    assert_eq!(pvp_id_type, "charid");
+    assert_eq!(pvp_args.len(), 2);
+    assert_eq!(pvp_args[0], PyRep::Integer(201));
+    assert!(pvp_args[1].as_i64().unwrap_or(0) > 130_000_000_000_000_000);
+
+    let (_, crim_id_type, crim_args) = find_notif(&post_b, "OnSystemCriminalFlagUpdates").expect("bystander receives OnSystemCriminalFlagUpdates");
+    assert_eq!(crim_id_type, "solarsystemid");
+    assert_eq!(crim_args, &vec![PyRep::List(vec![]), PyRep::List(vec![]), PyRep::List(vec![PyRep::Integer(PILOT_A)])]);
+
+    // Advance 65s -> weapons timer expires (state 100, None)
+    ctx.advance_secs(65);
+    let exp_a = drain_all(&ctx, PILOT_A);
+    let (_, _, weap_exp_args) = find_notif(&exp_a, "OnWeaponsTimerUpdate").expect("OnWeaponsTimerUpdate expiry emitted");
+    assert_eq!(weap_exp_args, &vec![PyRep::Integer(100), PyRep::None]);
+
+    // Zarzakh aggression -> OnSystemDisapprovalFlagUpdates
+    let (z_ship_a, z_ship_b, z_gun) = (640_000_101_i64, 640_000_102_i64, 640_000_110_i64);
+    let mut z_sess_a = login_in_space(&ctx, 92_003, "demo", "demo-secret", PILOT_A, z_ship_a, 587, SYS_ZARZAKH, DVec3::ZERO).await;
+    let _z_sess_b = login_in_space(&ctx, 92_004, "other", "other-secret", PILOT_B, z_ship_b, 587, SYS_ZARZAKH, DVec3::new(1_000.0, 0.0, 0.0)).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(z_gun, make_item(z_gun, 484, PILOT_A, z_ship_a, InventoryFlag::HiSlot0, 1, true));
+        snap.module_online_states.insert(z_gun, true);
+    });
+    ctx.invalidate_ship_fitting(z_ship_a);
+    let z_sys_h = ctx.systems.get_or_spawn(SYS_ZARZAKH);
+    z_sys_h.add_target_lock(z_ship_a, TargetLock { target_id: z_ship_b, lock_time_ms: 100.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await.unwrap();
+
+    assert!(!has_notif(&drain_all(&ctx, PILOT_B), "OnSystemDisapprovalFlagUpdates"));
+    rpc(&ctx, &mut z_sess_a, "dogmaIM", "Activate", &[PyRep::Integer(z_gun), PyRep::String("projectileFired".into()), PyRep::Integer(z_ship_b)]).await.unwrap();
+    let z_post_b = drain_all(&ctx, PILOT_B);
+    let (_, dis_id_type, dis_args) = find_notif(&z_post_b, "OnSystemDisapprovalFlagUpdates").expect("OnSystemDisapprovalFlagUpdates emitted");
+    assert_eq!(dis_id_type, "solarsystemid");
+    assert_eq!(dis_args, &vec![PyRep::List(vec![]), PyRep::List(vec![PyRep::Integer(PILOT_A)])]);
+}
+
+// parity: notify:OnShipDeath, notify:OnSystemScanStarted, notify:OnSystemScanStopped
+#[tokio::test]
+async fn test_batch4_ship_death_and_probe_scan_lifecycle() {
+    eve_testkit::attest(&[
+        "notify:OnShipDeath",
+        "notify:OnSystemScanStarted",
+        "notify:OnSystemScanStopped",
+    ]);
+
+    let ctx = new_ctx();
+    let jita_pos = ctx.sde.stations[&JITA_STATION].position + DVec3::new(20_000.0, 0.0, 0.0);
+    let (ship_id, launcher_id, probe_stack_id) = (640_000_201_i64, 640_000_210_i64, 640_000_211_i64);
+    let mut sess = login_in_space(&ctx, 92_010, "demo", "demo-secret", PILOT_A, ship_id, 621, SYS_JITA, jita_pos).await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(launcher_id, make_item(launcher_id, 17_901, PILOT_A, ship_id, InventoryFlag::HiSlot0, 1, true));
+        snap.module_online_states.insert(launcher_id, true);
+        snap.items.insert(probe_stack_id, make_item(probe_stack_id, 30_013, PILOT_A, ship_id, InventoryFlag::HiSlot0, 8, false));
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(launcher_id), PyRep::String("launchProbe".into())]).await.unwrap();
+    let _ = drain_all(&ctx, PILOT_A);
+
+    let coords = PyRep::List((0..8).map(|i| PyRep::List(vec![PyRep::Real(500_000.0 + (i as f64) * 500.0), PyRep::Real(2_000.0), PyRep::Real(0.0), PyRep::Integer(2)])).collect());
+    rpc(&ctx, &mut sess, "scanMgr", "RequestScans", &[coords]).await.unwrap();
+
+    let immediate = drain_all(&ctx, PILOT_A);
+    let (_, scan_start_id_type, scan_start_args) = find_notif(&immediate, "OnSystemScanStarted").expect("OnSystemScanStarted emitted");
+    assert_eq!(scan_start_id_type, "charid");
+    assert_eq!(scan_start_args.len(), 3);
+    assert!(scan_start_args[1].as_i64().unwrap_or(0) > 4_000);
+    assert!(!has_notif(&immediate, "OnSystemScanStopped"));
+
+    ctx.advance_secs(15);
+    let after_scan = drain_all(&ctx, PILOT_A);
+    let (_, scan_stop_id_type, scan_stop_args) = find_notif(&after_scan, "OnSystemScanStopped").expect("OnSystemScanStopped emitted");
+    assert_eq!(scan_stop_id_type, "charid");
+    assert_eq!(scan_stop_args.len(), 3);
+
+    // Negative: OnShipDeath not emitted before self-destruct
+    assert!(!has_notif(&drain_all(&ctx, PILOT_A), "OnShipDeath"));
+
+    // Positive: ship.SelfDestruct + AdvanceClock(125) destroys ship and emits OnShipDeath()
+    sess.role |= ROLE_GM_DEFAULT;
+    rpc(&ctx, &mut sess, "ship", "SelfDestruct", &[]).await.unwrap();
+    rpc(&ctx, &mut sess, "timeControl", "AdvanceClock", &[PyRep::Integer(125)]).await.unwrap();
+    let death_notifs = drain_all(&ctx, PILOT_A);
+    let (_, death_id_type, death_args) = find_notif(&death_notifs, "OnShipDeath").expect("OnShipDeath emitted");
+    assert_eq!(death_id_type, "charid");
+    assert!(death_args.is_empty());
+}
+
+// parity: notify:OnSolarSystemLPChange, notify:OnVictoryPointStateUpdated, notify:OnSystemFullyCorruptedForFaction, notify:OnSecurityModified
+#[tokio::test]
+async fn test_batch4_fw_lp_vp_and_insurgency_corruption_security() {
+    eve_testkit::attest(&[
+        "notify:OnSolarSystemLPChange",
+        "notify:OnVictoryPointStateUpdated",
+        "notify:OnSystemFullyCorruptedForFaction",
+        "notify:OnSecurityModified",
+    ]);
+
+    let ctx = new_ctx();
+    let fw_sys: u32 = 30_002_537; // Amamake
+    let caldari_militia_corp: i64 = 1_000_180;
+    let mut sess_a = SessionState::new(92_020);
+    common::login_pilot(&ctx, &mut sess_a, "demo", "demo-secret").await;
+    rpc(&ctx, &mut sess_a, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_A)]).await.unwrap();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.solar_system_id = fw_sys;
+            ch.war_faction_id = Some(500_001);
+            ch.loyalty_points.insert(caldari_militia_corp, 5_000);
+        }
+        if let Some(occ) = snap.fw_system_occupations.get_mut(&fw_sys) {
+            occ.owner_faction_id = 500_001;
+            occ.occupier_faction_id = 500_001;
+            occ.victory_points = 1_000;
+            occ.victory_points_threshold = 3_000;
+        }
+    });
+    sess_a.war_faction_id = Some(500_001);
+    sess_a.solar_system_id = Some(fw_sys);
+    let _ = drain_all(&ctx, PILOT_A);
+
+    // Negative: insufficient LP fails without emitting OnSolarSystemLPChange
+    assert!(rpc(&ctx, &mut sess_a, "facWarMgr", "DonateLPsToSolarSystem", &[PyRep::Integer(i64::from(fw_sys)), PyRep::Integer(99_999)]).await.is_err());
+    assert!(!has_notif(&drain_all(&ctx, PILOT_A), "OnSolarSystemLPChange"));
+
+    // Positive: valid LP donation emits OnSolarSystemLPChange(0, 1500)
+    rpc(&ctx, &mut sess_a, "facWarMgr", "DonateLPsToSolarSystem", &[PyRep::Integer(i64::from(fw_sys)), PyRep::Integer(1_500)]).await.unwrap();
+    let lp_notifs = drain_all(&ctx, PILOT_A);
+    let (_, lp_id_type, lp_args) = find_notif(&lp_notifs, "OnSolarSystemLPChange").expect("OnSolarSystemLPChange emitted");
+    assert_eq!(lp_id_type, "solarsystemid");
+    assert_eq!(lp_args, &vec![PyRep::Integer(0), PyRep::Integer(1_500)]);
+
+    // OnVictoryPointStateUpdated via live FW complex capture + Insurgency Stage 5 corruption
+    let fw_ctx = new_ctx();
+    crate::common::pin_clock(&fw_ctx);
+    let (_enemy_sys, warzone_sys, _cmd_sys, _rear_sys) = crate::fw_warzone_insurgency::setup_warzone_chain(&fw_ctx);
+    let fw_ship = 640_000_309_i64;
+    fw_ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.corporation_id = 1_000_181;
+            ch.station_id = None;
+            ch.solar_system_id = warzone_sys;
+        }
+        for (i, flg) in [InventoryFlag::HiSlot0, InventoryFlag::HiSlot1, InventoryFlag::HiSlot2].into_iter().enumerate() {
+            let gid = 640_000_320 + (i as i64) * 2;
+            snap.items.insert(gid, make_item(gid, 3074, PILOT_A, fw_ship, flg, 1, true));
+            snap.items.insert(gid + 1, make_item(gid + 1, 12_625, PILOT_A, fw_ship, flg, 500, false));
+        }
+        for &(tid, lvl) in &[(3300_u32, 5), (3301_u32, 5), (3311_u32, 5), (11_082_u32, 5)] {
+            snap.skills.entry(PILOT_A).or_default().insert(tid, TrainedSkillRecord { type_id: tid, level: lvl, skill_points: 256_000.0 });
+        }
+    });
+    let mut sess_fw = login_in_space(&fw_ctx, 92_021, "demo", "demo-secret", PILOT_A, fw_ship, 587, warzone_sys, DVec3::ZERO).await;
+    sess_fw.role |= ROLE_GM_DEFAULT;
+    let wz_beyonce = fw_ctx.bind_object(&sess_fw, "beyonce", i64::from(warzone_sys)).unwrap();
+    rpc(&fw_ctx, &mut sess_fw, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(500_004)]).await.unwrap();
+    let _ = rpc(&fw_ctx, &mut sess_fw, "fwWarzoneSolarsystem", "GetLocalOccupationState", &[]).await.unwrap();
+    let _ = rpc(&fw_ctx, &mut sess_fw, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await.unwrap();
+
+    let novice_gate = fw_ctx.db.with_snapshot(|s| {
+        s.fw_runtime.fw_complexes.iter().find_map(|(&gid, &(csys, ref tier, _, _, done))| {
+            (csys == warzone_sys && tier == "Novice" && !done).then_some(gid)
+        }).expect("Novice complex")
+    });
+    let wz_space = fw_ctx.systems.get_or_spawn(warzone_sys);
+    fw_ctx.dispatch_rpc(&mut sess_fw, "beyonce", Some(wz_beyonce), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(novice_gate), PyRep::Real(0.0)], &HashMap::new(), None).await.unwrap();
+    for _ in 0..4 {
+        wz_space.step_manual(15.0).await.unwrap();
+    }
+    let _ = rpc(&fw_ctx, &mut sess_fw, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(novice_gate)]).await.unwrap();
+    let guard_id = 500_000_000 + novice_gate;
+    rpc(&fw_ctx, &mut sess_fw, "dogmaIM", "AddTarget", &[PyRep::Integer(guard_id)]).await.unwrap();
+    wz_space.step_manual(5.0).await.unwrap();
+    for gid in [640_000_320_i64, 640_000_322, 640_000_324] {
+        rpc(&fw_ctx, &mut sess_fw, "dogmaIM", "Activate", &[PyRep::Integer(gid), PyRep::String("projectileFired".into()), PyRep::Integer(guard_id), PyRep::Integer(1)]).await.unwrap();
+    }
+    for _ in 0..90 {
+        if wz_space.get_ball_snapshot(guard_id).await.unwrap().is_none() { break; }
+        wz_space.step_manual(1.0).await.unwrap();
+    }
+    let _ = drain_all(&fw_ctx, PILOT_A);
+    eve_server::services::fw_gameplay::tick_fw_gameplay(&fw_ctx, fw_ctx.now_unix()).await;
+    for _ in 0..6 {
+        rpc(&fw_ctx, &mut sess_fw, "timeControl", "AdvanceClock", &[PyRep::Integer(150)]).await.unwrap();
+        eve_server::services::fw_gameplay::tick_fw_gameplay(&fw_ctx, fw_ctx.now_unix()).await;
+    }
+    let vp_notifs = drain_all(&fw_ctx, PILOT_A);
+    let (_, vp_id_type, vp_args) = find_notif(&vp_notifs, "OnVictoryPointStateUpdated").expect("OnVictoryPointStateUpdated emitted");
+    assert_eq!(vp_id_type, "solarsystemid");
+    assert_eq!(vp_args[0], PyRep::Integer(i64::from(warzone_sys)));
+    assert!(dict_get(&vp_args[1], "victoryPoints").and_then(PyRep::as_i64).unwrap_or(0) >= 20);
+
+    // Insurgency Stage 5 corruption -> OnSystemFullyCorruptedForFaction & OnSecurityModified
+    let (camp_id, affected_sys, pirate_fac) = (1_i64, warzone_sys, 500_010_i64);
+    init_insurgency_campaign(&fw_ctx, camp_id, pirate_fac, 500_001, affected_sys, vec![affected_sys]);
+    fw_ctx.clock().advance_secs(FORECASTING_DURATION_SECS + 10);
+    eve_server::sp6_lifecycle::tick_background_cluster(&fw_ctx).await;
+    let base_sec = fw_ctx.sde.solar_systems.get(&affected_sys).map(|s| s.security_status).unwrap_or(0.0);
+    let _ = drain_all(&fw_ctx, PILOT_A);
+
+    let (_pts, stage) = add_system_corruption(&fw_ctx, camp_id, affected_sys, 1_000);
+    assert_eq!(stage, 5);
+    let corr_notifs = drain_all(&fw_ctx, PILOT_A);
+    let (_, corr_id_type, corr_args) = find_notif(&corr_notifs, "OnSystemFullyCorruptedForFaction").expect("OnSystemFullyCorruptedForFaction emitted");
+    assert_eq!(corr_id_type, "solarsystemid");
+    assert_eq!(corr_args[0], PyRep::Integer(i64::from(affected_sys)));
+    assert_eq!(corr_args[1], PyRep::Integer(pirate_fac));
+
+    let (_, sec_id_type, sec_args) = find_notif(&corr_notifs, "OnSecurityModified").expect("OnSecurityModified emitted");
+    assert_eq!(sec_id_type, "solarsystemid");
+    assert_eq!(sec_args, &vec![PyRep::Integer(i64::from(affected_sys)), PyRep::Real(-base_sec), PyRep::Real(0.0)]);
+}
+
+// parity: notify:OnSolarsystemInterferenceChanged, notify:OnTaleRemove, notify:OnTournamentPerformBan
+#[tokio::test]
+async fn test_batch4_interference_incursion_tale_remove_and_tourney_ban() {
+    eve_testkit::attest(&[
+        "notify:OnSolarsystemInterferenceChanged",
+        "notify:OnTaleRemove",
+        "notify:OnTournamentPerformBan",
+    ]);
+
+    let ctx = new_ctx();
+    let mut sess = SessionState::new(92_030);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_A)]).await.unwrap();
+    let mut sess_b = SessionState::new(92_031);
+    common::login_pilot(&ctx, &mut sess_b, "other", "other-secret").await;
+    rpc(&ctx, &mut sess_b, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_B)]).await.unwrap();
+
+    // 1. OnSolarsystemInterferenceChanged
+    let _ = drain_all(&ctx, PILOT_A);
+    let int_low = rpc(&ctx, &mut sess, "solarsystemInterferenceMgr", "GetLocalInterferenceState", &[PyRep::Integer(i64::from(SYS_JITA))]).await.unwrap();
+    assert_eq!(int_low.dict_get("interferenceBand").and_then(PyRep::as_i64), Some(1));
+    assert!(!has_notif(&drain_all(&ctx, PILOT_A), "OnSolarsystemInterferenceChanged"));
+
+    record_system_interference_activity(&ctx, &mut sess, SYS_JITA, 0.75);
+    let int_notifs = drain_all(&ctx, PILOT_A);
+    let (_, int_id_type, int_args) = find_notif(&int_notifs, "OnSolarsystemInterferenceChanged").expect("OnSolarsystemInterferenceChanged emitted");
+    assert_eq!(int_id_type, "solarsystemid");
+    assert_eq!(int_args[0], PyRep::Integer(i64::from(SYS_JITA)));
+    assert_eq!(int_args[2], PyRep::Integer(3));
+
+    // 2. OnTaleRemove when incursion withdrawal expires
+    rpc(&ctx, &mut sess, "taleMgr", "GetGlobalWorldEventTales", &[]).await.unwrap();
+    let (inc_cid, tale_id, staging_sys) = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
+        let inc = reg.incursions.values().find(|i| i.state != "Ended").expect("seeded incursion");
+        (inc.constellation_id, inc.tale_id, inc.staging_solar_system_id)
+    });
+    let _ = ctx.db.set_character_solar_system(PILOT_A, staging_sys, &ctx.sde);
+    sess.solar_system_id = Some(staging_sys);
+    ctx.sync_session(&mut sess);
+    let _ = drain_all(&ctx, PILOT_A);
+
+    let now_u = ctx.now_unix();
+    eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
+        if let Some(inc) = reg.incursions.get_mut(&inc_cid) { inc.state = "Withdrawing".into(); }
+        if let Some(meta) = reg.incursion_lifecycle.get_mut(&inc_cid) { meta.withdraw_until_sec = Some(now_u + 30); }
+    });
+    ctx.clock().advance_secs(5);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    assert!(!has_notif(&drain_all(&ctx, PILOT_A), "OnTaleRemove"));
+
+    ctx.clock().advance_secs(35);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    let tale_notifs = drain_all(&ctx, PILOT_A);
+    let (_, tale_id_type, tale_args) = find_notif(&tale_notifs, "OnTaleRemove").expect("OnTaleRemove emitted");
+    assert_eq!(tale_id_type, "solarsystemid");
+    assert_eq!(tale_args, &vec![PyRep::Integer(tale_id), PyRep::Integer(1), PyRep::Integer(eve_server::services::pve_incursion_sites::INCURSION_TALE_TEMPLATE_ID as i64)]);
+
+    // 3. OnTournamentPerformBan via tourneyMgr.StartAutobanning
+    sess.role = ROLE_GMH;
+    rpc(&ctx, &mut sess, "tourneyMgr", "CreateMatch", &[PyRep::Integer(1), PyRep::Integer(2001), PyRep::Integer(100), PyRep::Integer(600), PyRep::Integer(0), PyRep::Integer(0)]).await.unwrap();
+    let _ = drain_all(&ctx, PILOT_A);
+    let _ = drain_all(&ctx, PILOT_B);
+
+    let mut autoban_kw = HashMap::new();
+    autoban_kw.insert("totalNumBans".to_string(), PyRep::Integer(4));
+    autoban_kw.insert("redCharID".to_string(), PyRep::Integer(PILOT_A));
+    autoban_kw.insert("blueCharID".to_string(), PyRep::Integer(PILOT_B));
+    ctx.dispatch_rpc(&mut sess, "tourneyMgr", None, "StartAutobanning", &[PyRep::Integer(2001)], &autoban_kw, None).await.unwrap();
+
+    let ban_notifs_b = drain_all(&ctx, PILOT_B);
+    let (_, ban_id_type, ban_args) = find_notif(&ban_notifs_b, "OnTournamentPerformBan").expect("OnTournamentPerformBan emitted");
+    assert_eq!(ban_id_type, "charid");
+    assert_eq!(ban_args.len(), 6);
+    assert_eq!(ban_args[0], PyRep::Integer(2001));
+    assert_eq!(ban_args[1], PyRep::Integer(4));
+}
+}
+
+
+pub(crate) mod parity_notify_flagged_remediation {
+    #[allow(unused_imports)]
+    use super::*;
+
+// End-to-end integration tests for remediated flagged notify rows:
+// - `notify:DoSimClockRebase`
+// - `notify:OnAnalysisKreditsChange`
+// - `notify:OnCampaignEnrollmentChanged`
+// - `notify:OnCaptureChanged`
+// - `notify:OnCharacterPermanentlyBanned`
+
+
+use crate::common;
+use eve_db::service_roles;
+use eve_destiny::{Ball, DVec3, MovementMode, TargetLock};
+use eve_machonet::SessionState;
+use eve_proto::quasar::{EvePublicRequest, GoogleAny};
+use eve_proto::PyRep;
+use eve_server::quasar_gateway::STATUS_OK;
+use eve_server::router::ServerContext;
+use eve_server::services::fw_gameplay::get_system_frontline_rules;
+use eve_server::services::project_discovery::spend_analysis_kredits;
+use eve_server::services::serverops_cluster::set_system_tidi_factor;
+use eve_server::sp6_lifecycle::tick_background_cluster;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+const PILOT_A: i64 = 90_000_001;
+const PILOT_B: i64 = 90_000_002;
+const JITA_SYSTEM: u32 = 30_000_142;
+const AMARR_SYSTEM: u32 = 30_002_187;
+
+fn new_ctx() -> Arc<ServerContext> {
+    let sde = Arc::new(
+        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path())
+            .expect("open evomu_sde.sqlite"),
+    );
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(sde, db));
+    common::pin_clock(&ctx);
+    ctx
+}
+
+async fn rpc(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+) -> Result<PyRep, eve_proto::BridgeRpcError> {
+    ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None)
+        .await
+}
+
+fn drain_events(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    char_id: i64,
+) -> Vec<(String, Vec<PyRep>)> {
+    let _ = sess.drain_notifications();
+    ctx.drain_notifications_for_char(char_id)
+        .into_iter()
+        .map(|n| (n.event, n.args))
+        .collect()
+}
+
+fn chat_bcast_req(msg: &str) -> EvePublicRequest {
+    let mut payload = vec![0x0A, msg.len() as u8];
+    payload.extend_from_slice(msg.as_bytes());
+    EvePublicRequest {
+        payload: Some(GoogleAny {
+            type_url: "type.googleapis.com/eve_public.chat.local.api.BroadcastMessageRequest".into(),
+            value: payload,
+        }),
+        ..Default::default()
+    }
+}
+
+// parity: notify:DoSimClockRebase, notify:OnAnalysisKreditsChange
+#[tokio::test]
+async fn test_parity_notify_sim_clock_rebase_and_analysis_kredits() {
+    eve_testkit::attest(&[
+        "notify:DoSimClockRebase",
+        "notify:OnAnalysisKreditsChange",
+    ]);
+
+    let ctx = new_ctx();
+
+    // 1. Setup PILOT_A in Jita and PILOT_B in Amarr
+    let mut s1 = SessionState::new(92_051);
+    common::login_pilot(&ctx, &mut s1, "demo", "demo-secret").await;
+    rpc(&ctx, &mut s1, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_A)])
+        .await
+        .expect("select PILOT_A");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&PILOT_A) {
+            c.solar_system_id = JITA_SYSTEM;
+            c.station_id = None;
+            c.structure_id = None;
+        }
+    });
+
+    let mut s2 = SessionState::new(92_052);
+    common::login_pilot(&ctx, &mut s2, "other", "other-secret").await;
+    rpc(&ctx, &mut s2, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_B)])
+        .await
+        .expect("select PILOT_B");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&PILOT_B) {
+            c.solar_system_id = AMARR_SYSTEM;
+            c.station_id = None;
+            c.structure_id = None;
+        }
+    });
+
+    let _ = drain_events(&ctx, &mut s1, PILOT_A);
+    let _ = drain_events(&ctx, &mut s2, PILOT_B);
+
+    // --- Part A: DoSimClockRebase ---
+    // A1: Time Dilation adjustment on Jita emits DoSimClockRebase ONLY to Jita
+    set_system_tidi_factor(&ctx, JITA_SYSTEM, 0.50);
+
+    let jita_rebase: Vec<Vec<PyRep>> = drain_events(&ctx, &mut s1, PILOT_A)
+        .into_iter()
+        .filter(|(e, _)| e == "DoSimClockRebase")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(jita_rebase.len(), 1, "PILOT_A in Jita must receive DoSimClockRebase");
+    assert_eq!(jita_rebase[0].len(), 1, "DoSimClockRebase takes 1 tuple argument");
+    match &jita_rebase[0][0] {
+        PyRep::Tuple(times) => {
+            assert_eq!(times.len(), 2, "DoSimClockRebase takes 2-tuple (oldSimTime, newSimTime)");
+            let old_t = times[0].as_i64().expect("oldSimTime");
+            let new_t = times[1].as_i64().expect("newSimTime");
+            assert!(old_t < new_t, "sim clock must advance forward");
+        }
+        other => panic!("expected 2-tuple rebaseTimes, got {other:?}"),
+    }
+
+    // Negative check: PILOT_B in Amarr must NOT receive Jita's DoSimClockRebase
+    assert!(
+        !drain_events(&ctx, &mut s2, PILOT_B)
+            .iter()
+            .any(|(e, _)| e == "DoSimClockRebase"),
+        "PILOT_B in Amarr must not receive Jita's DoSimClockRebase"
+    );
+
+    // A2: Server clock adjustment emits DoSimClockRebase scoped to active systems
+    let _ = drain_events(&ctx, &mut s1, PILOT_A);
+    let before_ft = ctx.now_blueos_filetime_ticks();
+    ctx.advance_secs(20);
+
+    let advance_rebase: Vec<Vec<PyRep>> = drain_events(&ctx, &mut s1, PILOT_A)
+        .into_iter()
+        .filter(|(e, _)| e == "DoSimClockRebase")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(advance_rebase.len(), 1, "advance_secs must emit DoSimClockRebase");
+    match &advance_rebase[0][0] {
+        PyRep::Tuple(times) => {
+            let old_t = times[0].as_i64().expect("oldSimTime");
+            let new_t = times[1].as_i64().expect("newSimTime");
+            assert_eq!(old_t / 10_000_000, before_ft / 10_000_000);
+            assert_eq!((new_t - old_t) / 10_000_000, 20);
+        }
+        other => panic!("expected 2-tuple rebaseTimes, got {other:?}"),
+    }
+
+    // Negative check: 0s advance does not emit DoSimClockRebase
+    ctx.advance_secs(0);
+    assert!(
+        !drain_events(&ctx, &mut s1, PILOT_A)
+            .iter()
+            .any(|(e, _)| e == "DoSimClockRebase"),
+        "0-second advance must not emit DoSimClockRebase"
+    );
+
+    // --- Part B: OnAnalysisKreditsChange ---
+    // B1: Negative check on invalid classification
+    let err = rpc(
+        &ctx,
+        &mut s1,
+        "ProjectDiscovery",
+        "post_classification",
+        &[PyRep::String("task_1".into()), PyRep::String("".into())],
+    )
+    .await
+    .expect_err("empty classification must fail");
+    assert_eq!(err.code, "InvalidClassification");
+    assert!(
+        !drain_events(&ctx, &mut s1, PILOT_A)
+            .iter()
+            .any(|(e, _)| e == "OnAnalysisKreditsChange"),
+        "failed classification must not emit OnAnalysisKreditsChange"
+    );
+
+    // B2: Positive check: real task fetch and classification submission grants AK
+    let task = rpc(&ctx, &mut s1, "ProjectDiscovery", "get_new_task", &[])
+        .await
+        .expect("get_new_task");
+    let task_id = task
+        .dict_get("task_id")
+        .and_then(|v| v.as_str())
+        .expect("task_id")
+        .to_string();
+
+    let post_rep = rpc(
+        &ctx,
+        &mut s1,
+        "ProjectDiscovery",
+        "post_classification",
+        &[
+            PyRep::String(task_id),
+            PyRep::List(vec![PyRep::Real(0.35), PyRep::Real(0.75)]),
+        ],
+    )
+    .await
+    .expect("post_classification");
+    let ak_reward = post_rep
+        .dict_get("AK_Reward")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    assert!(ak_reward > 0, "post_classification must grant AK reward > 0");
+
+    let ak_notifs: Vec<Vec<PyRep>> = drain_events(&ctx, &mut s1, PILOT_A)
+        .into_iter()
+        .filter(|(e, _)| e == "OnAnalysisKreditsChange")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(ak_notifs.len(), 1, "must emit 1 OnAnalysisKreditsChange");
+    assert_eq!(ak_notifs[0].len(), 0, "OnAnalysisKreditsChange takes 0 arguments");
+
+    // B3: Spending AK debits balance and emits OnAnalysisKreditsChange
+    let spend_res = spend_analysis_kredits(&ctx, PILOT_A, 5).expect("spend AK");
+    assert_eq!(spend_res, ak_reward - 5);
+
+    let spend_notifs: Vec<Vec<PyRep>> = drain_events(&ctx, &mut s1, PILOT_A)
+        .into_iter()
+        .filter(|(e, _)| e == "OnAnalysisKreditsChange")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(spend_notifs.len(), 1, "spend_analysis_kredits must emit OnAnalysisKreditsChange");
+    assert_eq!(spend_notifs[0].len(), 0, "OnAnalysisKreditsChange takes 0 arguments");
+}
+
+// parity: notify:OnCampaignEnrollmentChanged, notify:OnCharacterPermanentlyBanned
+#[tokio::test]
+async fn test_parity_notify_campaign_enrollment_and_chat_bans() {
+    eve_testkit::attest(&[
+        "notify:OnCampaignEnrollmentChanged",
+        "notify:OnCharacterPermanentlyBanned",
+    ]);
+
+    let ctx = new_ctx();
+
+    let mut gm = SessionState::new(92_053);
+    common::login_pilot(&ctx, &mut gm, "demo", "demo-secret").await;
+    gm.role = service_roles::ROLE_GM_DEFAULT;
+    rpc(&ctx, &mut gm, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_A)])
+        .await
+        .expect("select PILOT_A");
+    gm.role = service_roles::ROLE_GM_DEFAULT;
+
+    let mut p2 = SessionState::new(92_054);
+    common::login_pilot(&ctx, &mut p2, "other", "other-secret").await;
+    rpc(&ctx, &mut p2, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_B)])
+        .await
+        .expect("select PILOT_B");
+
+    let _ = drain_events(&ctx, &mut gm, PILOT_A);
+    let _ = drain_events(&ctx, &mut p2, PILOT_B);
+
+    // --- Part A: OnCampaignEnrollmentChanged ---
+    // A1: FW campaign enlistment via facWarMgr.JoinFactionAsCharacter
+    let fw_res = rpc(
+        &ctx,
+        &mut p2,
+        "facWarMgr",
+        "JoinFactionAsCharacter",
+        &[PyRep::Integer(500_001)], // Caldari State
+    )
+    .await
+    .expect("JoinFactionAsCharacter");
+    assert_eq!(fw_res.dict_get("enlisted"), Some(&PyRep::Bool(true)));
+
+    let fw_notifs: Vec<Vec<PyRep>> = drain_events(&ctx, &mut p2, PILOT_B)
+        .into_iter()
+        .filter(|(e, _)| e == "OnCampaignEnrollmentChanged")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(fw_notifs.len(), 1, "PILOT_B must receive OnCampaignEnrollmentChanged on FW join");
+    assert_eq!(fw_notifs[0].len(), 0, "OnCampaignEnrollmentChanged expects 0 args");
+
+    // Negative check: PILOT_A must NOT receive FW enrollment notification
+    assert!(
+        !drain_events(&ctx, &mut gm, PILOT_A)
+            .iter()
+            .any(|(e, _)| e == "OnCampaignEnrollmentChanged"),
+        "PILOT_A must not receive FW enrollment notification"
+    );
+
+    // A2: Login campaign enrollment transition via slash command
+    let sde_camps = eve_server::services::campaigns_and_milestones::get_sde_login_campaigns(&ctx.sde);
+    let alt_campaign = sde_camps
+        .keys()
+        .copied()
+        .find(|&id| id != 2261)
+        .expect("alternate login campaign");
+
+    rpc(
+        &ctx,
+        &mut gm,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/campaign enroll {alt_campaign} {PILOT_A}"))],
+    )
+    .await
+    .expect("/campaign enroll");
+
+    let login_notifs: Vec<Vec<PyRep>> = drain_events(&ctx, &mut gm, PILOT_A)
+        .into_iter()
+        .filter(|(e, _)| e == "OnCampaignEnrollmentChanged")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(login_notifs.len(), 1, "PILOT_A must receive OnCampaignEnrollmentChanged on login campaign enroll");
+    assert_eq!(login_notifs[0].len(), 0, "OnCampaignEnrollmentChanged expects 0 args");
+
+    // Negative check: invalid campaign ID fails and does not emit
+    let err_camp = rpc(
+        &ctx,
+        &mut gm,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/campaign enroll 88888888".into())],
+    )
+    .await
+    .expect_err("non-existent campaign must fail");
+    assert_eq!(err_camp.code, "CampaignNotFound");
+
+    // --- Part B: OnCharacterPermanentlyBanned ---
+    // B1: Enforce permanent chat ban on PILOT_B
+    rpc(
+        &ctx,
+        &mut gm,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/chatban {PILOT_B} perm"))],
+    )
+    .await
+    .expect("/chatban perm");
+
+    let perm_notifs: Vec<Vec<PyRep>> = drain_events(&ctx, &mut p2, PILOT_B)
+        .into_iter()
+        .filter(|(e, _)| e == "OnCharacterPermanentlyBanned")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(perm_notifs.len(), 1, "PILOT_B must receive OnCharacterPermanentlyBanned");
+    assert_eq!(perm_notifs[0].len(), 0, "OnCharacterPermanentlyBanned takes 0 args");
+
+    // B2: Enforcement verification: MachoNet LSC.SendMessage blocked
+    let lsc_err = rpc(
+        &ctx,
+        &mut p2,
+        "LSC",
+        "SendMessage",
+        &[PyRep::String("solarsystemid2:30000142".into()), PyRep::String("test msg".into())],
+    )
+    .await
+    .expect_err("LSC.SendMessage must be blocked for permanently banned pilot");
+    assert_eq!(lsc_err.code, "CharacterChatBanned");
+
+    // B3: Enforcement verification: Quasar gateway broadcast blocked
+    let q_res = ctx.quasar_gateway.handle_public_request(
+        &p2,
+        &chat_bcast_req("banned broadcast"),
+        None,
+        false,
+        ctx.now_unix(),
+    );
+    assert_ne!(q_res.status_code, STATUS_OK, "Quasar chat broadcast must be blocked");
+
+    // B4: Unban restores messaging
+    rpc(
+        &ctx,
+        &mut gm,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String(format!("/chatunban {PILOT_B}"))],
+    )
+    .await
+    .expect("/chatunban");
+
+    let unban_notifs = drain_events(&ctx, &mut p2, PILOT_B);
+    assert!(unban_notifs.iter().any(|(e, _)| e == "OnCharacterUnbanned"));
+}
+
+// parity: notify:OnCaptureChanged
+#[tokio::test]
+async fn test_parity_notify_fw_capture_changed() {
+    eve_testkit::attest(&["notify:OnCaptureChanged"]);
+
+    let ctx = new_ctx();
+
+    // 1. Find frontline FW system
+    let (fw_sys, occ_fac) = ctx
+        .db
+        .with_snapshot(|s| {
+            s.fw_system_occupations
+                .iter()
+                .find(|(&sys_id, occ)| {
+                    get_system_frontline_rules(&ctx, sys_id).0 == 1
+                        && occ.occupier_faction_id != 500_001
+                })
+                .map(|(&sys_id, occ)| (sys_id, occ.occupier_faction_id))
+        })
+        .expect("frontline FW system");
+    let attacker_fac = if occ_fac == 500_002 { 500_001 } else { 500_002 };
+
+    let sys_fw = ctx.systems.get_or_spawn(fw_sys);
+    tick_background_cluster(&ctx).await;
+
+    let (gate_id, gate_pos) = ctx.db.with_snapshot(|s| {
+        let (&gid, _) = s
+            .fw_runtime
+            .fw_complexes
+            .iter()
+            .find(|(_, (csys, _, _, _, done))| *csys == fw_sys && !*done)
+            .expect("spawned FW complex");
+        let pos = s.item_positions.get(&gid).copied().unwrap_or([0.0, 0.0, 0.0]);
+        (gid, DVec3::from_array(pos))
+    });
+
+    let mut fw_sess = SessionState::new(92_055);
+    common::login_pilot(&ctx, &mut fw_sess, "other", "other-secret").await;
+    rpc(&ctx, &mut fw_sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_B)])
+        .await
+        .expect("select PILOT_B");
+
+    let fw_ship = 90_000_188_i64;
+    let fw_gun = 90_000_288_i64;
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&PILOT_B) {
+            ch.corporation_id = 1_000_180;
+            ch.war_faction_id = Some(attacker_fac);
+            ch.solar_system_id = fw_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = fw_ship;
+        }
+        s.items.insert(
+            fw_ship,
+            eve_db::InventoryItemRecord {
+                item_id: fw_ship,
+                type_id: 587, // Rifter
+                owner_id: PILOT_B,
+                location_id: fw_sys as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        s.items.insert(
+            fw_gun,
+            eve_db::InventoryItemRecord {
+                item_id: fw_gun,
+                type_id: 484,
+                owner_id: PILOT_B,
+                location_id: fw_ship,
+                flag: eve_db::InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        s.module_online_states.insert(fw_gun, true);
+    });
+    ctx.invalidate_ship_fitting(fw_ship);
+
+    sys_fw
+        .spawn_ball(Ball {
+            id: fw_ship,
+            type_id: 587,
+            position: gate_pos + DVec3::new(1_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 500.0,
+            inertia: 0.5,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .expect("spawn ship ball");
+
+    // Activate acceleration gate to warp into complex pocket
+    rpc(
+        &ctx,
+        &mut fw_sess,
+        "keeper",
+        "ActivateAccelerationGate",
+        &[PyRep::Integer(gate_id)],
+    )
+    .await
+    .expect("ActivateAccelerationGate");
+
+    let _ = drain_events(&ctx, &mut fw_sess, PILOT_B);
+
+    // Negative check: while guard NPC is alive, capture does NOT progress
+    ctx.advance_secs(5);
+    tick_background_cluster(&ctx).await;
+    assert!(
+        !drain_events(&ctx, &mut fw_sess, PILOT_B)
+            .iter()
+            .any(|(e, _)| e == "OnCaptureChanged"),
+        "capture must not progress while guard NPC is alive"
+    );
+
+    // Clear guard NPC
+    let guard_id = gate_id + 500_000_000;
+    sys_fw
+        .add_target_lock(
+            fw_ship,
+            TargetLock {
+                target_id: guard_id,
+                lock_time_ms: 100.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await
+        .expect("lock guard");
+
+    rpc(
+        &ctx,
+        &mut fw_sess,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(fw_gun),
+            PyRep::String("projectileFired".into()),
+            PyRep::Integer(guard_id),
+            PyRep::Integer(1_000),
+        ],
+    )
+    .await
+    .expect("fire gun on guard");
+
+    for _ in 0..600 {
+        if sys_fw.get_ball_snapshot(guard_id).await.ok().flatten().is_none() {
+            break;
+        }
+        let _ = sys_fw.tick().await;
+    }
+
+    // Positive check: with guard destroyed, cluster tick advances capture and emits OnCaptureChanged
+    let _ = drain_events(&ctx, &mut fw_sess, PILOT_B);
+    ctx.advance_secs(5);
+    tick_background_cluster(&ctx).await;
+
+    let cap_notifs: Vec<Vec<PyRep>> = drain_events(&ctx, &mut fw_sess, PILOT_B)
+        .into_iter()
+        .filter(|(e, _)| e == "OnCaptureChanged")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(cap_notifs.len(), 1, "must emit OnCaptureChanged after guard cleared");
+    assert_eq!(cap_notifs[0].len(), 6, "OnCaptureChanged expects 6 args matching live V24 client");
+
+    // Verify 6-arg shape: [ballID, captureID, lastIncident, points, captureTime, lastCapturing]
+    assert_eq!(cap_notifs[0][0], PyRep::Integer(gate_id));
+    assert_eq!(cap_notifs[0][1], PyRep::Integer(attacker_fac));
+    assert!(matches!(cap_notifs[0][2], PyRep::Integer(_)));
+    assert!(cap_notifs[0][3].as_f64().unwrap_or(0.0) > 0.0);
+    assert!(cap_notifs[0][4].as_f64().unwrap_or(0.0) > 0.0);
+    assert_eq!(cap_notifs[0][5], PyRep::Integer(attacker_fac));
+}
 }
