@@ -109,17 +109,30 @@ pub fn handle(
             let catalog = ctx
                 .db
                 .with_snapshot(crate::services::quasar_payment_store::read_store_catalog);
-            let items: Vec<PyRep> = catalog
-                .categories
-                .into_iter()
-                .map(|c| {
-                    PyRep::keyval([
-                        ("id", PyRep::Integer(c.id as i64)),
-                        ("name", PyRep::String(c.name)),
-                        ("description", PyRep::String(c.description)),
-                    ])
-                })
-                .collect();
+            let mut items: Vec<PyRep> = Vec::new();
+            for c in catalog.categories {
+                let root_id = c.id as i64;
+                let sub_id = root_id * 100 + 1;
+                items.push(PyRep::keyval([
+                    ("id", PyRep::Integer(root_id)),
+                    ("name", PyRep::String(c.name.clone())),
+                    ("description", PyRep::String(c.description.clone())),
+                    ("href", PyRep::String(String::new())),
+                    ("parent", PyRep::None),
+                    ("tags", PyRep::List(Vec::new())),
+                ]));
+                items.push(PyRep::keyval([
+                    ("id", PyRep::Integer(sub_id)),
+                    ("name", PyRep::String(c.name)),
+                    ("description", PyRep::String(c.description)),
+                    ("href", PyRep::String(String::new())),
+                    (
+                        "parent",
+                        PyRep::keyval([("id", PyRep::Integer(root_id))]),
+                    ),
+                    ("tags", PyRep::List(Vec::new())),
+                ]));
+            }
             Some(Ok(PyRep::List(items)))
         }
         ("storeManager", "get_products") => {
@@ -133,10 +146,14 @@ pub fn handle(
                     PyRep::keyval([
                         ("id", PyRep::Integer(p.id as i64)),
                         ("productID", PyRep::Integer(p.id as i64)),
-                        ("name", PyRep::String(p.name)),
+                        ("name", PyRep::String(p.name.clone())),
+                        ("productName", PyRep::String(p.name)),
                         ("description", PyRep::String(p.description)),
                         ("typeID", PyRep::Integer(p.type_id as i64)),
+                        ("typeId", PyRep::Integer(p.type_id as i64)),
                         ("quantity", PyRep::Integer(p.quantity as i64)),
+                        ("href", PyRep::String(String::new())),
+                        ("imageUrl", PyRep::String(String::new())),
                     ])
                 })
                 .collect();
@@ -146,6 +163,13 @@ pub fn handle(
             let catalog = ctx
                 .db
                 .with_snapshot(crate::services::quasar_payment_store::read_store_catalog);
+            let products_by_id: HashMap<_, _> =
+                catalog
+                    .products
+                    .iter()
+                    .cloned()
+                    .map(|p| (p.id, p))
+                    .collect();
             let offers: Vec<PyRep> = catalog
                 .offers
                 .into_iter()
@@ -154,17 +178,63 @@ pub fn handle(
                     let prod_reps: Vec<PyRep> = o
                         .product_ids
                         .iter()
-                        .map(|pid| PyRep::Integer(*pid as i64))
+                        .map(|pid| {
+                            if let Some(p) = products_by_id.get(pid) {
+                                PyRep::keyval([
+                                    ("id", PyRep::Integer(p.id as i64)),
+                                    ("productID", PyRep::Integer(p.id as i64)),
+                                    ("typeID", PyRep::Integer(p.type_id as i64)),
+                                    ("typeId", PyRep::Integer(p.type_id as i64)),
+                                    ("quantity", PyRep::Integer(p.quantity as i64)),
+                                    ("name", PyRep::String(p.name.clone())),
+                                    ("productName", PyRep::String(p.name.clone())),
+                                    ("imageUrl", PyRep::String(String::new())),
+                                ])
+                            } else {
+                                PyRep::keyval([
+                                    ("id", PyRep::Integer(*pid as i64)),
+                                    ("productID", PyRep::Integer(*pid as i64)),
+                                    ("typeID", PyRep::Integer(*pid as i64)),
+                                    ("typeId", PyRep::Integer(*pid as i64)),
+                                    ("quantity", PyRep::Integer(1)),
+                                    ("name", PyRep::String(format!("Product {pid}"))),
+                                    ("productName", PyRep::String(format!("Product {pid}"))),
+                                    ("imageUrl", PyRep::String(String::new())),
+                                ])
+                            }
+                        })
                         .collect();
+                    let root_cat_id = o.category_id as i64;
+                    let sub_cat_id = root_cat_id * 100 + 1;
                     PyRep::keyval([
                         ("id", PyRep::Integer(o.id as i64)),
                         ("offerID", PyRep::Integer(o.id as i64)),
                         ("name", PyRep::String(o.name)),
                         ("description", PyRep::String(o.description)),
-                        ("categoryID", PyRep::Integer(o.category_id as i64)),
+                        ("href", PyRep::String(String::new())),
+                        ("imageUrl", PyRep::String(String::new())),
+                        ("label", PyRep::None),
+                        ("canPurchase", PyRep::Bool(true)),
+                        ("singlePurchase", PyRep::Bool(false)),
+                        ("categoryID", PyRep::Integer(root_cat_id)),
+                        (
+                            "categories",
+                            PyRep::List(vec![
+                                PyRep::keyval([("id", PyRep::Integer(root_cat_id))]),
+                                PyRep::keyval([("id", PyRep::Integer(sub_cat_id))]),
+                            ]),
+                        ),
                         ("currency", PyRep::String("PLX".into())),
                         ("price", PyRep::Integer(o.price_plex)),
                         ("plexPrice", PyRep::Integer(o.price_plex)),
+                        (
+                            "offerPricings",
+                            PyRep::List(vec![PyRep::keyval([
+                                ("currency", PyRep::String("PLX".into())),
+                                ("price", PyRep::Integer(o.price_plex)),
+                                ("basePrice", PyRep::Integer(o.price_plex)),
+                            ])]),
+                        ),
                         ("products", PyRep::List(prod_reps)),
                         ("quantity", PyRep::Integer(1)),
                     ])

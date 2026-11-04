@@ -1053,6 +1053,12 @@ fn handle_title_def_get_latest(
             .filter(|s| !s.trim().is_empty())
             .is_none()
     {
+        let fb = crate::services::quasar_achievements::empty_root_table_flatbuffer();
+        crate::services::quasar_achievements::ensure_client_flatbuffer_storage_seeded(
+            "character_titles",
+            "24.1.1",
+            &fb,
+        );
         return Ok(GoogleAny {
             type_url: String::new(),
             value: Vec::new(),

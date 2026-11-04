@@ -550,6 +550,24 @@ def find_existing_issue(repo: str, stack_hash: int, dry_run: bool = False) -> Op
     return None
 
 
+def _effective_bundle_hash(bundle: Dict[str, Any]) -> int:
+    stack_hash = int(bundle.get("stack_hash", 0))
+    stack_key = str(bundle.get("stack_key", ""))
+    trace = str(bundle.get("trace", ""))
+    if stack_hash == -1040548311 or "MollycoddledUthread" in stack_key:
+        exc_class, msg, location = parse_traceback_summary(trace, stack_key)
+        sig = f"{stack_hash}:{location}:{exc_class}:{msg}"
+        h = 0xCBF29CE484222325
+        for b in sig.encode("utf-8", errors="replace"):
+            h ^= b
+            h = (h * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+        if h >= (1 << 63):
+            h -= 1 << 64
+        bundle["stack_hash"] = h
+        return h
+    return stack_hash
+
+
 def create_or_update_issue(
     repo: str,
     bundle: Dict[str, Any],
@@ -558,7 +576,7 @@ def create_or_update_issue(
     dry_run: bool = False,
 ) -> Optional[int]:
     """Creates a new issue or comments on an existing one (reopening if closed)."""
-    stack_hash = bundle.get("stack_hash", 0)
+    stack_hash = _effective_bundle_hash(bundle)
     unsigned_hash = stack_hash & 0xFFFFFFFFFFFFFFFF
     title, labels = build_issue_title_and_labels(bundle)
 

@@ -222,10 +222,10 @@ pub fn encode_single_ball_with_park(
             buf.extend_from_slice(&(*range as f32).to_le_bytes());
         }
         MovementMode::Orbit { target_id, range } => {
-            // ORBIT_Struct (13 bytes, `DestinyStructs.h:164-168`): uint8 formationID, uint32 targetID, double followRange
+            // ORBIT_Struct (13 bytes, V24.01 `_destiny.so` `0x74da8`): uint8 formationID, int64 targetID, float followRange
             buf.push(0xFFu8);
-            buf.extend_from_slice(&(*target_id as u32).to_le_bytes());
-            buf.extend_from_slice(&range.to_le_bytes());
+            buf.extend_from_slice(&target_id.to_le_bytes());
+            buf.extend_from_slice(&(*range as f32).to_le_bytes());
         }
         MovementMode::Stop | MovementMode::Field | MovementMode::Rigid | MovementMode::Boid | MovementMode::Miniball => {
             // STOP_Struct / FIELD_Struct / RIGID_Struct (1 byte): uint8 formationID
@@ -236,8 +236,8 @@ pub fn encode_single_ball_with_park(
             warp_speed_au_s,
             ..
         } => {
-            // WARP_Struct (49 bytes, `DestinyStructs.h:153-162`):
-            // uint8 formationID, double targX, targY, targZ, int32 effectStamp, int64 followRange, int64 followID, int32 speed
+            // WARP_Struct (53 bytes, V24.01 `_destiny.so` `0x74eeb..0x74f53`):
+            // uint8 formationID, double targX, targY, targZ, int32 effectStamp, double followRange, int64 followID, int64 warpSpeed
             buf.push(0xFFu8);
             buf.extend_from_slice(&destination.x.to_le_bytes());
             buf.extend_from_slice(&destination.y.to_le_bytes());
@@ -245,7 +245,7 @@ pub fn encode_single_ball_with_park(
             buf.extend_from_slice(&effect_stamp.to_le_bytes());
             buf.extend_from_slice(&((-1.0f64).to_bits() as i64).to_le_bytes());
             buf.extend_from_slice(&(15_000.0f64.to_bits() as i64).to_le_bytes());
-            buf.extend_from_slice(&((*warp_speed_au_s * 10.0) as i32).to_le_bytes());
+            buf.extend_from_slice(&((*warp_speed_au_s * 10.0) as i64).to_le_bytes());
         }
         MovementMode::Missile { target_id } => {
             // MISSILE_Struct (49 bytes, `DestinyStructs.h:170-179`):
@@ -331,14 +331,6 @@ pub fn decode_add_balls(bytes: &[u8]) -> Result<(u8, u32, Vec<DecodedBall>), Str
             return Err(format!("Unexpected EOF reading i32 at offset {}", *off));
         }
         let v = i32::from_le_bytes(buf[*off..*off + 4].try_into().unwrap());
-        *off += 4;
-        Ok(v)
-    };
-    let read_u32 = |buf: &[u8], off: &mut usize| -> Result<u32, String> {
-        if *off + 4 > buf.len() {
-            return Err(format!("Unexpected EOF reading u32 at offset {}", *off));
-        }
-        let v = u32::from_le_bytes(buf[*off..*off + 4].try_into().unwrap());
         *off += 4;
         Ok(v)
     };
@@ -431,8 +423,8 @@ pub fn decode_add_balls(bytes: &[u8]) -> Result<(u8, u32, Vec<DecodedBall>), Str
                 follow_range = Some(rng);
             }
             DST_BALL_ORBIT => {
-                let tid = read_u32(bytes, &mut offset)? as i64;
-                let rng = read_f64(bytes, &mut offset)? as f32;
+                let tid = read_i64(bytes, &mut offset)?;
+                let rng = read_f32(bytes, &mut offset)?;
                 target_id = Some(tid);
                 follow_range = Some(rng);
             }
@@ -443,7 +435,7 @@ pub fn decode_add_balls(bytes: &[u8]) -> Result<(u8, u32, Vec<DecodedBall>), Str
                 let est = read_i32(bytes, &mut offset)?;
                 let _follow_range = read_f64(bytes, &mut offset)?;
                 let _follow_id = read_i64(bytes, &mut offset)?;
-                let ws = read_u32(bytes, &mut offset)?;
+                let ws = read_i64(bytes, &mut offset)? as u32;
                 effect_stamp = Some(est);
                 warp_destination = Some(DVec3::new(wx, wy, wz));
                 warp_speed_tenth_au_s = Some(ws);

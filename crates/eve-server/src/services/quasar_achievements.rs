@@ -1145,9 +1145,9 @@ pub fn register_achievement_handlers(
             //   succeed cleanly with 0 exceptions.
             // - When `current_version` is absent (`None`) on the real V24.01 desktop client
             //   (`type.evetech.net/...`) and no external TLS CDN is configured (`EVOMU_CDN_BASE_URL`),
-            //   returning an empty `200 OK` response (`payload = None`) makes `FlatbufferContentProvider.fetch`
-            //   take the `if response:` false branch and return `[None, None]` cleanly without attempting
-            //   an HTTPS fetch or raising `GenericNotFoundError` / `SSLError`.
+            //   seed `cache/Storage/achievements/{version.txt,data.bin}` and return an empty `200 OK`
+            //   response (`payload = None`) so `VersionCachedFlatbufferRepository._request_update_task`
+            //   loads a valid empty FlatBuffer from `_disk_storage.get()`.
             if dyn_msg.get(1).is_none()
                 && any.type_url.starts_with("type.evetech.net/")
                 && std::env::var("EVOMU_CDN_BASE_URL")
@@ -1155,6 +1155,8 @@ pub fn register_achievement_handlers(
                     .filter(|s| !s.trim().is_empty())
                     .is_none()
             {
+                let fb = empty_achievement_flatbuffer();
+                ensure_client_flatbuffer_storage_seeded("achievements", "24.1.60", &fb);
                 return Ok(GoogleAny {
                     type_url: String::new(),
                     value: Vec::new(),
@@ -1383,3 +1385,98 @@ pub use super::quasar_achievements_ops::{
     publish_achievement_category_milestone_notice, publish_achievement_category_progress_notice,
     publish_achievement_milestone_reached_notice, publish_achievement_version_check_notice,
 };
+
+/// Minimal valid FlatBuffer for `AchievementData` (`achievements` / `character_titles` disk cache):
+/// - Root table (`Pos = 16`) with `slot0 = 0`, `slot1 = 4` (`Challenges`), `slot2 = 8` (`TimeLimited`).
+/// - Both `Challenges` and `TimeLimited` point to `Category` tables whose `Id` (`slot0`) is a valid
+///   UUID string (`00000000-0000-0000-0000-000000000001` and `...0002`) and all vector offsets are `0`.
+pub(crate) fn empty_achievement_flatbuffer() -> Vec<u8> {
+    let mut buf = Vec::with_capacity(140);
+    // 0..4: root table offset = 16
+    buf.extend_from_slice(&16u32.to_le_bytes());
+    // 4..16: root vtable (vtable_len = 10, table_len = 12, slot0 = 0, slot1 = 4, slot2 = 8, pad = 0)
+    for w in [10u16, 12, 0, 4, 8, 0] {
+        buf.extend_from_slice(&w.to_le_bytes());
+    }
+    // 16..28: root table (soffset = 12 -> vtable at 4; slot1 uoffset = 16 -> table at 36; slot2 uoffset = 20 -> table at 44)
+    buf.extend_from_slice(&12i32.to_le_bytes());
+    buf.extend_from_slice(&16u32.to_le_bytes());
+    buf.extend_from_slice(&20u32.to_le_bytes());
+    // 28..36: Category vtable (vtable_len = 6, table_len = 8, slot0 = 4, pad = 0)
+    for w in [6u16, 8, 4, 0] {
+        buf.extend_from_slice(&w.to_le_bytes());
+    }
+    // 36..44: Challenges Category table (soffset = 8 -> vtable at 28; slot0 uoffset = 12 -> string at 52)
+    buf.extend_from_slice(&8i32.to_le_bytes());
+    buf.extend_from_slice(&12u32.to_le_bytes());
+    // 44..52: TimeLimited Category table (soffset = 16 -> vtable at 28; slot0 uoffset = 48 -> string at 96)
+    buf.extend_from_slice(&16i32.to_le_bytes());
+    buf.extend_from_slice(&48u32.to_le_bytes());
+    // 52..96: UUID string 1 (36 bytes + 4 zero pad bytes)
+    let u1 = b"00000000-0000-0000-0000-000000000001";
+    buf.extend_from_slice(&(u1.len() as u32).to_le_bytes());
+    buf.extend_from_slice(u1);
+    buf.extend_from_slice(&[0u8; 4]);
+    // 96..140: UUID string 2 (36 bytes + 4 zero pad bytes)
+    let u2 = b"00000000-0000-0000-0000-000000000002";
+    buf.extend_from_slice(&(u2.len() as u32).to_le_bytes());
+    buf.extend_from_slice(u2);
+    buf.extend_from_slice(&[0u8; 4]);
+    buf
+}
+
+/// Minimal valid FlatBuffer root table with all field offsets `0` (for `content_map_tags` `Universe`).
+pub(crate) fn empty_root_table_flatbuffer() -> Vec<u8> {
+    let mut buf = Vec::with_capacity(16);
+    buf.extend_from_slice(&12u32.to_le_bytes());
+    for w in [4u16, 4, 0, 0] {
+        buf.extend_from_slice(&w.to_le_bytes());
+    }
+    buf.extend_from_slice(&8i32.to_le_bytes());
+    buf
+}
+
+/// Ensures `version.txt` and `data.bin` exist in any local EVE client `cache/Storage/<content_id>/`
+/// directory so `VersionCachedFlatbufferRepository._request_update_task` can read `_disk_storage.get()`
+/// when `FlatbufferContentProvider.fetch` returns `[None, None]` on first run without an external TLS CDN.
+pub(crate) fn ensure_client_flatbuffer_storage_seeded(
+    content_id: &str,
+    version_str: &str,
+    data_bytes: &[u8],
+) {
+    let mut candidate_roots = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        candidate_roots.push(
+            std::path::PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("CCP")
+                .join("EVE"),
+        );
+    }
+    if let Ok(local_appdata) = std::env::var("LOCALAPPDATA") {
+        candidate_roots.push(std::path::PathBuf::from(local_appdata).join("CCP").join("EVE"));
+    }
+    for eve_root in candidate_roots {
+        let Ok(entries) = std::fs::read_dir(&eve_root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let storage_root = entry.path().join("cache").join("Storage");
+            if !storage_root.is_dir() {
+                continue;
+            }
+            let content_dir = storage_root.join(content_id);
+            let _ = std::fs::create_dir_all(&content_dir);
+            let data_path = content_dir.join("data.bin");
+            let ver_path = content_dir.join("version.txt");
+            let needs_seed = std::fs::metadata(&data_path)
+                .map(|m| m.len() == 0)
+                .unwrap_or(true);
+            if needs_seed {
+                let _ = std::fs::write(&data_path, data_bytes);
+                let _ = std::fs::write(&ver_path, version_str.as_bytes());
+            }
+        }
+    }
+}

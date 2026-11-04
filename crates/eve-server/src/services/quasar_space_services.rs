@@ -1040,6 +1040,12 @@ pub fn register_handlers(
                         .filter(|s| !s.trim().is_empty())
                         .is_none()
                 {
+                    let fb = crate::services::quasar_achievements::empty_root_table_flatbuffer();
+                    crate::services::quasar_achievements::ensure_client_flatbuffer_storage_seeded(
+                        "content_map_tags",
+                        "24.1.5432",
+                        &fb,
+                    );
                     return Ok(GoogleAny {
                         type_url: String::new(),
                         value: Vec::new(),

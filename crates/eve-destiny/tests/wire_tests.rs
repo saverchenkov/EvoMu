@@ -48,7 +48,7 @@ fn test_binary_add_balls_roundtrip_all_13_modes() {
         DSTBALL_MISSILE, DSTBALL_MUSHROOM, DSTBALL_BOID, DSTBALL_TROLL, DSTBALL_MINIBALL,
         DSTBALL_FIELD, DSTBALL_RIGID, DSTBALL_FORMATION,
     ];
-    let expected_ball_sizes = [124, 112, 100, 148, 112, 148, 124, 100, 104, 100, 64, 39, 116];
+    let expected_ball_sizes = [124, 112, 100, 152, 112, 148, 124, 100, 104, 100, 64, 39, 116];
     for (i, dec) in decoded.iter().enumerate() {
         assert_eq!((dec.id, dec.mode), (balls[i].id, expected_modes[i]));
         assert!((dec.position - balls[i].position).length() < 1e-6);
@@ -77,8 +77,8 @@ fn test_binary_add_balls_roundtrip_all_13_modes() {
     let mut orbit_buf = Vec::new();
     encode_single_ball_with_meta(&mut orbit_buf, &balls[4], 42, Some(&meta));
     assert_eq!(orbit_buf[99], 0xFF);
-    assert_eq!(u32::from_le_bytes(orbit_buf[100..104].try_into().unwrap()), 60_003_760);
-    assert_eq!(f64::from_le_bytes(orbit_buf[104..112].try_into().unwrap()), 5_000.0);
+    assert_eq!(i64::from_le_bytes(orbit_buf[100..108].try_into().unwrap()), 60_003_760);
+    assert_eq!(f32::from_le_bytes(orbit_buf[108..112].try_into().unwrap()), 5_000.0);
 
     let mut warp_buf = Vec::new();
     encode_single_ball_with_meta(&mut warp_buf, &balls[3], 42, Some(&meta));
@@ -86,7 +86,7 @@ fn test_binary_add_balls_roundtrip_all_13_modes() {
     assert_eq!(i32::from_le_bytes(warp_buf[124..128].try_into().unwrap()), 42);
     assert_eq!(i64::from_le_bytes(warp_buf[128..136].try_into().unwrap()), (-1.0f64).to_bits() as i64);
     assert_eq!(i64::from_le_bytes(warp_buf[136..144].try_into().unwrap()), 15_000.0f64.to_bits() as i64);
-    assert_eq!(i32::from_le_bytes(warp_buf[144..148].try_into().unwrap()), 30);
+    assert_eq!(i64::from_le_bytes(warp_buf[144..152].try_into().unwrap()), 30);
 
     let mut missile_buf = Vec::new();
     encode_single_ball_with_meta(&mut missile_buf, &balls[5], 42, Some(&meta));
