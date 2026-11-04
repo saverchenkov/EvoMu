@@ -62,7 +62,7 @@ pub async fn handle(
     }
 }
 
-fn handle_get_profiles(ctx: &ServerContext, session: &SessionState) -> Result<PyRep, BridgeRpcError> {
+pub(crate) fn handle_get_profiles(ctx: &ServerContext, session: &SessionState) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let rows = ctx.db.with_snapshot(|snap| {
         let corp_id = snap
@@ -93,7 +93,7 @@ fn handle_get_profiles(ctx: &ServerContext, session: &SessionState) -> Result<Py
     Ok(PyRep::List(rows))
 }
 
-fn handle_create_profile(
+pub(crate) fn handle_create_profile(
     ctx: &ServerContext,
     session: &SessionState,
     args: &[PyRep],
@@ -134,7 +134,7 @@ fn handle_create_profile(
     })
 }
 
-fn handle_update_profile(
+pub(crate) fn handle_update_profile(
     ctx: &ServerContext,
     session: &SessionState,
     args: &[PyRep],
@@ -166,7 +166,7 @@ fn handle_update_profile(
     })
 }
 
-fn handle_delete_profile(
+pub(crate) fn handle_delete_profile(
     ctx: &ServerContext,
     session: &SessionState,
     args: &[PyRep],
@@ -201,7 +201,7 @@ fn handle_delete_profile(
     })
 }
 
-fn handle_duplicate_profile(
+pub(crate) fn handle_duplicate_profile(
     ctx: &ServerContext,
     session: &SessionState,
     args: &[PyRep],
@@ -229,7 +229,7 @@ fn handle_duplicate_profile(
     })
 }
 
-fn handle_set_default_profile(
+pub(crate) fn handle_set_default_profile(
     ctx: &ServerContext,
     session: &SessionState,
     args: &[PyRep],
@@ -255,7 +255,7 @@ fn handle_set_default_profile(
     })
 }
 
-fn handle_get_profile_settings(
+pub(crate) fn handle_get_profile_settings(
     ctx: &ServerContext,
     session: &SessionState,
     args: &[PyRep],
@@ -365,7 +365,7 @@ fn handle_get_profile_settings(
     })
 }
 
-fn handle_change_profiles(
+pub(crate) fn handle_change_profiles(
     ctx: &ServerContext,
     session: &SessionState,
     args: &[PyRep],
@@ -614,7 +614,7 @@ fn push_service_acl_row(
     }
 }
 
-fn handle_save_profile_settings(
+pub(crate) fn handle_save_profile_settings(
     ctx: &ServerContext,
     session: &SessionState,
     args: &[PyRep],

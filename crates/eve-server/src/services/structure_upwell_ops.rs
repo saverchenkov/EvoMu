@@ -222,30 +222,44 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
             // const-ok: client-side memoized cache invalidation notifications return None
             Some(Ok(PyRep::None))
         }
-        // V24 client structureProfiles RPCs
-        ("structureProfiles", "GetProfiles")
-        | ("structureProfiles", "CreateProfile")
-        | ("structureProfiles", "SaveProfileSettings")
-        | ("structureProfiles", "UpdateProfile")
-        | ("structureProfiles", "ChangeProfiles")
-        | ("structureProfiles", "DeleteProfile")
-        | ("structureProfiles", "DuplicateProfile")
-        | ("structureProfiles", "SetDefaultProfile")
-        | ("structureProfiles", "GetProfileSettings") => {
-            super::structure_profiles_rpc::handle(ctx, session, service, method, args, _kwargs).await
+        // V24 client structureProfiles RPCs & structureSettings profile aliases
+        ("structureProfiles", "GetProfiles") => {
+            Some(super::structure_profiles_rpc::handle_get_profiles(ctx, session))
         }
-        // structureSettings profile aliases
-        ("structureSettings", "CreateProfile")
-        | ("structureSettings", "SaveProfileSettings")
-        | ("structureSettings", "UpdateProfile")
-        | ("structureSettings", "ChangeProfiles") => {
-            super::structure_profiles_rpc::handle(ctx, session, service, method, args, _kwargs).await
+        ("structureProfiles", "GetProfileSettings") => {
+            Some(super::structure_profiles_rpc::handle_get_profile_settings(ctx, session, args))
+        }
+        ("structureProfiles", "CreateProfile") | ("structureSettings", "CreateProfile") => {
+            Some(super::structure_profiles_rpc::handle_create_profile(ctx, session, args))
+        }
+        ("structureProfiles", "DuplicateProfile") => {
+            Some(super::structure_profiles_rpc::handle_duplicate_profile(ctx, session, args))
+        }
+        ("structureProfiles", "SetDefaultProfile") => {
+            Some(super::structure_profiles_rpc::handle_set_default_profile(ctx, session, args))
+        }
+        ("structureProfiles", "SaveProfileSettings")
+        | ("structureSettings", "SaveProfileSettings") => {
+            Some(super::structure_profiles_rpc::handle_save_profile_settings(ctx, session, args))
+        }
+        ("structureProfiles", "UpdateProfile") | ("structureSettings", "UpdateProfile") => {
+            Some(super::structure_profiles_rpc::handle_update_profile(ctx, session, args))
+        }
+        ("structureProfiles", "ChangeProfiles") | ("structureSettings", "ChangeProfiles") => {
+            Some(super::structure_profiles_rpc::handle_change_profiles(ctx, session, args))
+        }
+        ("structureProfiles", "DeleteProfile") => {
+            Some(super::structure_profiles_rpc::handle_delete_profile(ctx, session, args))
         }
         // ownerGroupManager RPCs
-        ("ownerGroupManager", "Create")
-        | ("ownerGroupManager", "AddMembers")
-        | ("ownerGroupManager", "DeleteMembers") => {
-            super::structure_profiles_rpc::handle(ctx, session, service, method, args, _kwargs).await
+        ("ownerGroupManager", "Create") => {
+            Some(crate::services::structure_profile_services::handle_create_owner_group(ctx, session, args))
+        }
+        ("ownerGroupManager", "AddMembers") => {
+            Some(crate::services::structure_profile_services::apply_group_member_batch(ctx, session, args, true))
+        }
+        ("ownerGroupManager", "DeleteMembers") => {
+            Some(crate::services::structure_profile_services::apply_group_member_batch(ctx, session, args, false))
         }
         // parity: feat:structures.structure-description
         ("structureDirectory", "SetStructureDescription") => Some(handle_set_structure_description(ctx, session, args)),
