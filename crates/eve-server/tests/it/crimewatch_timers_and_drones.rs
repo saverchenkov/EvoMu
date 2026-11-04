@@ -1135,6 +1135,9 @@ async fn test_crimewatch_duel_limited_engagement_and_suspect_looting_ess() {
     assert!(e1 >= t_ref + 300 && e2 >= t_ref + 300);
 
     ctx.advance_virtual_clock(301);
+    let _ = rpc(&ctx, &mut sess1, "dogmaIM", None, "Deactivate", &[PyRep::Integer(83_000_101)]).await;
+    ctx.advance_secs(10);
+    let _ = sys_h.step_manual(1.0).await;
     let post_le_err = rpc(&ctx, &mut sess1, "dogmaIM", None, "Activate", &[PyRep::Integer(83_000_101), PyRep::Integer(s2)]).await.unwrap_err();
     assert_eq!(post_le_err.code, "CantDoInCurrentSafetyLevel");
 
