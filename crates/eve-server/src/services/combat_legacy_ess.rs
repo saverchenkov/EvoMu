@@ -72,26 +72,31 @@ pub async fn handle_legacy_and_ess(
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        // Dogma Phase 4 Exit Gate: dogmaIM.FireWeapon(ship_id, target_id) is deleted in favor of dogmaIM.Activate
+        // Dogma Phase 4 Exit Gate: dogmaIM.FireWeapon and beyonce.CmdAttackTarget are deleted in favor of dogmaIM.Activate
         // rpc-lint: allow Phase 4 exit gate explicitly rejects deleted dogmaIM.FireWeapon
-        ("dogmaIM", "FireWeapon") if args.len() >= 2 => {
+        ("dogmaIM", "FireWeapon") => {
             Some(Err(BridgeRpcError {
                 code: "UnimplementedRPC".into(),
                 message: "dogmaIM.FireWeapon is deleted; use dogmaIM.Activate".into(),
             }))
         }
+        // rpc-lint: allow Phase 4 exit gate explicitly rejects deleted beyonce.CmdAttackTarget
+        ("beyonce", "CmdAttackTarget") => {
+            Some(Err(BridgeRpcError {
+                code: "UnimplementedRPC".into(),
+                message: "beyonce.CmdAttackTarget is deleted; use dogmaIM.Activate".into(),
+            }))
+        }
 
         // Turret / Missile / Vorton / Entropic / Breacher Combat Engagement & CrimeWatch 2.0 Enforcement
-        // rpc-lint: allow legacy combat_death_crimewatch test alias
-        ("dogmaIM", "FireWeapon") | ("beyonce", "CmdAttackTarget") | ("dogmaIM", "Activate")
-            if method != "Activate"
-                || (args.len() == 1
-                    && session.ship_id.is_some_and(|sid| {
-                        let first_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-                        !ctx.db.with_snapshot(|snap| {
-                            snap.items.get(&first_id).is_some_and(|i| i.location_id == sid)
-                        })
-                    })) =>
+        ("dogmaIM", "Activate")
+            if args.len() == 1
+                && session.ship_id.is_some_and(|sid| {
+                    let first_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+                    !ctx.db.with_snapshot(|snap| {
+                        snap.items.get(&first_id).is_some_and(|i| i.location_id == sid)
+                    })
+                }) =>
         {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -112,7 +117,7 @@ pub async fn handle_legacy_and_ess(
             let Some(target_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidTarget".into(),
-                    message: "FireWeapon requires an explicit integer targetID".into(),
+                    message: "dogmaIM.Activate target requires an explicit integer targetID".into(),
                 }));
             };
             if target_id <= 0 || target_id == char_id || target_id == ship_id {

@@ -263,11 +263,9 @@ async fn ship_insurance_quotes_purchase_contracts_void_link_and_payout_vs_concor
     let concord_kv = kv_map(
         &ctx.dispatch_rpc(
             &mut s_killer,
-            // rpc-lint: allow legacy CmdAttackTarget test alias
-            "beyonce",
+            "dogmaIM",
             None,
-            // rpc-lint: allow legacy CmdAttackTarget test alias
-            "CmdAttackTarget",
+            "Activate",
             &[PyRep::Integer(victim_id)],
             &kw,
             None,
@@ -278,6 +276,16 @@ async fn ship_insurance_quotes_purchase_contracts_void_link_and_payout_vs_concor
     assert_eq!(concord_kv.get("criminalCharacterID"), Some(&PyRep::Integer(killer_id)));
     let criminal_bal_after_concord = ctx.db.with_snapshot(|s| s.characters[&killer_id].balance.to_wire_f64());
     assert!((criminal_bal_after_concord - criminal_bal_before_concord).abs() < 1e-2, "CONCORD destruction of a criminal ship must void insurance payout (0 ISK paid)");
+
+    // BF-05: Verify legacy FireWeapon and CmdAttackTarget return UnimplementedRPC regardless of arity
+    // rpc-lint: allow negative test (pre-existing): a non-client method must return UnimplementedRPC
+    let fw_err = ctx.dispatch_rpc(&mut s_killer, "dogmaIM", None, "FireWeapon", &[PyRep::Integer(victim_id)], &kw, None)
+        .await.expect_err("dogmaIM.FireWeapon must return UnimplementedRPC");
+    assert_eq!(fw_err.code, "UnimplementedRPC");
+    // rpc-lint: allow negative test (pre-existing): a non-client method must return UnimplementedRPC
+    let cmd_err = ctx.dispatch_rpc(&mut s_killer, "beyonce", None, "CmdAttackTarget", &[PyRep::Integer(victim_id)], &kw, None)
+        .await.expect_err("beyonce.CmdAttackTarget must return UnimplementedRPC");
+    assert_eq!(cmd_err.code, "UnimplementedRPC");
 }
 
 #[tokio::test]

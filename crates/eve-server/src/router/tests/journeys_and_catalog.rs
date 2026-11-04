@@ -397,7 +397,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
         &mut session,
         "dogmaIM",
         None,
-        "FireWeapon", // rpc-lint: allow legacy/negative-test RPC (dogmaIM.FireWeapon)
+        "Activate",
         &[PyRep::Integer(700_000_001)],
         &empty,
         None,
@@ -694,7 +694,7 @@ async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionState) {
                 session,
                 "dogmaIM",
                 None,
-                "FireWeapon", // rpc-lint: allow legacy/negative-test RPC (dogmaIM.FireWeapon)
+                "Activate",
                 &[PyRep::Integer(800_000_001)],
                 &empty,
                 None,
@@ -797,7 +797,7 @@ async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionState) {
                     session,
                     "dogmaIM",
                     None,
-                    "FireWeapon", // rpc-lint: allow legacy/negative-test RPC (dogmaIM.FireWeapon)
+                    "Activate",
                     &[PyRep::Integer(npc_ball_id)],
                     &empty,
                     None,
@@ -962,7 +962,7 @@ async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionState) {
             session,
             "dogmaIM",
             None,
-            "FireWeapon", // rpc-lint: allow legacy/negative-test RPC (dogmaIM.FireWeapon)
+            "Activate",
             &[PyRep::Integer(90_000_002)],
             &empty,
             None,
@@ -1034,7 +1034,7 @@ async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionState) {
                 &mut sess2,
                 "dogmaIM",
                 None,
-                "FireWeapon", // rpc-lint: allow legacy/negative-test RPC (dogmaIM.FireWeapon)
+                "Activate",
                 &[PyRep::Integer(90_000_001)],
                 &empty,
                 None,

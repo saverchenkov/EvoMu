@@ -1174,22 +1174,20 @@ async fn test_crimewatch_kill_rights_gain_and_sell_closure() {
         if i > 0 {
             for _ in 0..10 { let _ = lowsec_handle.step_manual(1.0).await; }
         }
-        // rpc-lint: allow legacy CmdAttackTarget
-        let _ = rpc(&ctx, &mut sess_crim_low, "beyonce", "CmdAttackTarget", &[PyRep::Integer(low_vic_pod)])
+        let _ = rpc(&ctx, &mut sess_crim_low, "dogmaIM", "Activate", &[PyRep::Integer(low_vic_pod)])
             .await
-            .expect("CmdAttackTarget lowsec pod");
+            .expect("Activate lowsec pod");
     }
     let (sec_after_cmd, kr_count_cmd) = ctx.db.with_snapshot(|s| {
         let krs: Vec<_> = s.kill_rights.values().filter(|kr| kr.owner_id == victim_id && kr.target_id == criminal_id).collect();
         (s.characters[&criminal_id].security_status, krs.len())
     });
-    assert!(sec_after_cmd < sec_before_cmd, "CmdAttackTarget low-sec pod must deduct sec status");
-    assert_eq!(kr_count_cmd, 1, "two CmdAttackTarget cycles must create only 1 kill right");
+    assert!(sec_after_cmd < sec_before_cmd, "Activate low-sec pod must deduct sec status");
+    assert_eq!(kr_count_cmd, 1, "two Activate cycles must create only 1 kill right");
     // Verify second cycle did not re-deduct security status
     let sec_before_cycle2 = sec_after_cmd;
     for _ in 0..10 { let _ = lowsec_handle.step_manual(1.0).await; }
-    // rpc-lint: allow legacy CmdAttackTarget
-    let _ = rpc(&ctx, &mut sess_crim_low, "beyonce", "CmdAttackTarget", &[PyRep::Integer(low_vic_pod)]).await.expect("CmdAttackTarget cycle 3");
+    let _ = rpc(&ctx, &mut sess_crim_low, "dogmaIM", "Activate", &[PyRep::Integer(low_vic_pod)]).await.expect("Activate cycle 3");
     assert!((ctx.db.with_snapshot(|s| s.characters[&criminal_id].security_status) - sec_before_cycle2).abs() < 1e-9);
 
     // 1c. Main weapon path (dogmaIM.Activate) ship-then-pod in low-sec grants pod penalty + kill right
@@ -1217,6 +1215,14 @@ async fn test_crimewatch_kill_rights_gain_and_sell_closure() {
     let (sec_post_ship, kr_after_ship) = ctx.db.with_snapshot(|s| (s.characters[&criminal_id].security_status, s.kill_rights.len()));
     assert!(sec_post_ship < sec_pre_ship && kr_after_ship == 0, "low-sec ship hit deducts sec without kill right");
     for _ in 0..10 { let _ = lowsec_handle.step_manual(1.0).await; }
+    let _ = rpc(
+        &ctx,
+        &mut sess_crim_low,
+        "dogmaIM",
+        "Deactivate",
+        &[PyRep::Integer(gun_id)],
+    )
+    .await;
     ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&victim_id).unwrap().active_ship_id = low_vic_pod);
     let _ = rpc(&ctx, &mut sess_crim_low, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::String("targetAttack".into()), PyRep::Integer(low_vic_pod)]).await.expect("Activate pod");
     let (sec_post_pod, kr_after_pod, dogma_kr_id) = ctx.db.with_snapshot(|s| {
@@ -1446,7 +1452,7 @@ async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions_closure() {
     let sec_after_aggr = ctx.db.with_snapshot(|s| s.characters[&char_id].security_status);
     assert!((sec_after_aggr - (-expected_jita_loss)).abs() < 1e-6, "live character security_status must drop once by exact ship loss formula");
 
-    // 1b. Verify beyonce.CmdAttackTarget legacy high-sec path uses compute_sec_status_loss with real victim sec status (not flat -0.5)
+    // 1b. Verify dogmaIM.Activate high-sec path uses compute_sec_status_loss with real victim sec status (not flat -0.5)
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.security_status = 0.0;
@@ -1473,17 +1479,16 @@ async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions_closure() {
     let _ = rpc(
         &ctx,
         &mut sess_cmd,
-        "beyonce",
-        // rpc-lint: allow legacy CmdAttackTarget
-        "CmdAttackTarget",
+        "dogmaIM",
+        "Activate",
         &[PyRep::Integer(vic_ship)],
     )
     .await
-    .expect("CmdAttackTarget highsec");
+    .expect("Activate highsec");
     let sec_after_cmd = ctx.db.with_snapshot(|s| s.characters[&char_id].security_status);
     assert!(
         (sec_after_cmd - (-expected_jita_loss)).abs() < 1e-6,
-        "CmdAttackTarget high-sec must use compute_sec_status_loss ({}) instead of flat -0.5 (got {})",
+        "dogmaIM.Activate high-sec must use compute_sec_status_loss ({}) instead of flat -0.5 (got {})",
         -expected_jita_loss,
         sec_after_cmd
     );
