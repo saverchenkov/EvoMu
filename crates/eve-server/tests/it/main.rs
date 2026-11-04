@@ -637,3 +637,4 @@ mod structures_upwell_and_acl;
 mod exploration_hacking_and_minigame;
 mod wormhole_phenomena_and_lifecycle;
 
+mod sovereignty_skyhooks_and_mercenary_dens;
