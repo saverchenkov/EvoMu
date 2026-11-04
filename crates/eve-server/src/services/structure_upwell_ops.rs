@@ -222,7 +222,7 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
             // const-ok: client-side memoized cache invalidation notifications return None
             Some(Ok(PyRep::None))
         }
-        // V24 client structureProfiles RPCs (plus backwards-compatible structureSettings aliases) and ownerGroupManager
+        // V24 client structureProfiles RPCs
         ("structureProfiles", "GetProfiles")
         | ("structureProfiles", "CreateProfile")
         | ("structureProfiles", "SaveProfileSettings")
@@ -231,12 +231,18 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         | ("structureProfiles", "DeleteProfile")
         | ("structureProfiles", "DuplicateProfile")
         | ("structureProfiles", "SetDefaultProfile")
-        | ("structureProfiles", "GetProfileSettings")
-        | ("structureSettings", "CreateProfile")
+        | ("structureProfiles", "GetProfileSettings") => {
+            super::structure_profiles_rpc::handle(ctx, session, service, method, args, _kwargs).await
+        }
+        // structureSettings profile aliases
+        ("structureSettings", "CreateProfile")
         | ("structureSettings", "SaveProfileSettings")
         | ("structureSettings", "UpdateProfile")
-        | ("structureSettings", "ChangeProfiles")
-        | ("ownerGroupManager", "Create")
+        | ("structureSettings", "ChangeProfiles") => {
+            super::structure_profiles_rpc::handle(ctx, session, service, method, args, _kwargs).await
+        }
+        // ownerGroupManager RPCs
+        ("ownerGroupManager", "Create")
         | ("ownerGroupManager", "AddMembers")
         | ("ownerGroupManager", "DeleteMembers") => {
             super::structure_profiles_rpc::handle(ctx, session, service, method, args, _kwargs).await
