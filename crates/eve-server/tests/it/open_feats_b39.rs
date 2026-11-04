@@ -386,3 +386,1698 @@ async fn test_b39_mobile_observatory_decloak_ping() {
     low_handle.step_manual(1.0).await.unwrap();
     assert!(low_handle.get_ball_snapshot(obs_id).await.unwrap().is_none());
 }
+
+// Folded submodule: part2
+#[allow(unused_imports, dead_code)]
+mod part2 {
+    use super::*;
+
+// `open_feats_b39_part2` — Standup Structure Weapons (`feat:structures.standup-point-defense-battery`,
+// `feat:structures.standup-guided-bomb-launcher`, `feat:structures.standup-superweapon-arcing-vorton`).
+
+use eve_db::{CorporationRecord, InventoryFlag, InventoryItemRecord, UpwellStructureRecord};
+use eve_destiny::{Ball, MovementMode, TargetLock};
+use eve_machonet::SessionState;
+use eve_proto::PyRep;
+use eve_server::router::ServerContext;
+use eve_server::services::combat_crimewatch::SafetyLevel;
+use eve_server::services::structure_standup_weapons::TYPE_KEEPSTAR;
+use glam::DVec3;
+use std::collections::HashMap;
+
+fn kv_get(rep: &PyRep, key: &str) -> Option<PyRep> {
+    match rep {
+        PyRep::Dict(_) => rep.dict_get(key).cloned(),
+        PyRep::KeyVal(map) => map.get(key).cloned(),
+        PyRep::Object { args, .. } => args.dict_get(key).cloned(),
+        _ => None,
+    }
+}
+
+fn mk_item(id: i64, tid: u32, owner: i64, loc: i64, flag: InventoryFlag, qty: i32, singleton: bool) -> InventoryItemRecord {
+    InventoryItemRecord { item_id: id, type_id: tid, owner_id: owner, location_id: loc, flag, quantity: qty, singleton, ..Default::default() }
+}
+
+async fn setup_pilot(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    ship_type_id: u32,
+    solar_system_id: u32,
+    position: DVec3,
+    corp_id: i64,
+) -> SessionState {
+    let mut sess = SessionState::new(char_id as u64);
+    sess.user_id = Some(char_id as u64);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(corp_id);
+    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(solar_system_id);
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.corporations.entry(corp_id).or_default().member_roles.insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
+        let mut ch = s.characters.get(&90_000_001).cloned().unwrap();
+        ch.character_id = char_id;
+        ch.name = format!("Pilot-{char_id}");
+        ch.corporation_id = corp_id;
+        ch.alliance_id = None;
+        ch.solar_system_id = solar_system_id;
+        ch.active_ship_id = ship_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        s.characters.insert(char_id, ch);
+        s.items.insert(ship_id, mk_item(ship_id, ship_type_id, char_id, solar_system_id as i64, InventoryFlag::None, 1, true));
+    });
+
+    let ship_type = ctx.sde.types.get(&ship_type_id);
+    let handle = ctx.systems.get_or_spawn(solar_system_id);
+    let _ = handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id, type_id: ship_type_id, position, velocity: DVec3::ZERO,
+                max_velocity: 250.0, inertia: 0.5, mass: ship_type.map(|t| t.mass).unwrap_or(1_500_000.0),
+                radius: ship_type.map(|t| t.radius).unwrap_or(50.0), speed_fraction: 0.0, mode: MovementMode::Stop,
+            },
+            ctx.build_type_combat_state(ship_type_id),
+        )
+        .await;
+    sess
+}
+
+#[tokio::test]
+async fn test_b39_standup_point_defense_battery() {
+    // parity: feat:structures.standup-point-defense-battery
+    eve_testkit::attest(&["feat:structures.standup-point-defense-battery"]);
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let (hisec_sys, lowsec_sys) = (30_000_144_u32, 30_000_012_u32);
+    let (corp_id, ally_corp_id, alliance_id, hostile_corp) = (98_000_555_i64, 98_000_556_i64, 99_000_555_i64, 98_000_599_i64);
+    let (gunner_id, gunner_ship, keepstar_id, pdb_mod_id, flak_item_id) = (91_000_031_i64, 101_000_031_i64, 101_000_500_i64, 101_000_501_i64, 101_000_505_i64);
+
+    let mut sess = setup_pilot(&ctx, gunner_id, gunner_ship, 587, hisec_sys, DVec3::ZERO, corp_id).await;
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&gunner_id).unwrap().alliance_id = Some(alliance_id);
+        s.corporations.insert(corp_id, CorporationRecord {
+            corporation_id: corp_id, alliance_id: Some(alliance_id), name: "Keepstar Corp".into(), ticker: "KEEP".into(),
+            ceo_id: gunner_id, members: [gunner_id].into_iter().collect(), ..Default::default()
+        });
+        s.corporations.insert(ally_corp_id, CorporationRecord {
+            corporation_id: ally_corp_id, alliance_id: Some(alliance_id), name: "Alliance Mate Corp".into(), ticker: "ALLY".into(),
+            ceo_id: gunner_id, ..Default::default()
+        });
+        s.structures.insert(keepstar_id, UpwellStructureRecord {
+            structure_id: keepstar_id, type_id: 35832, owner_corp_id: corp_id, solar_system_id: hisec_sys,
+            name: "Test Keepstar".into(), position: [0.0; 3], state: "ShieldVulnerable".into(),
+            quantum_core_installed: true, fuel_blocks: 1000, shield_hp: 1.0, armor_hp: 1.0, hull_hp: 1.0,
+            reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
+        });
+        s.items.insert(keepstar_id, mk_item(keepstar_id, TYPE_KEEPSTAR, corp_id, hisec_sys as i64, InventoryFlag::None, 1, true));
+        s.items.insert(pdb_mod_id, mk_item(pdb_mod_id, 35926, corp_id, keepstar_id, InventoryFlag::HiSlot0, 1, true));
+        s.module_online_states.insert(pdb_mod_id, false);
+    });
+
+    let hi_handle = ctx.systems.get_or_spawn(hisec_sys);
+    let _ = hi_handle.spawn_ball_with_combat(
+        Ball { id: keepstar_id, type_id: TYPE_KEEPSTAR, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1_000_000_000.0, radius: 1_000.0, speed_fraction: 0.0, mode: MovementMode::Stop },
+        ctx.build_type_combat_state(TYPE_KEEPSTAR),
+    ).await;
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&gunner_id).unwrap().structure_id = Some(keepstar_id);
+    });
+    sess.structure_id = Some(keepstar_id);
+    ctx.dispatch_rpc(&mut sess, "structureControl", None, "BoardStructure", &[PyRep::Integer(keepstar_id)], &kw, None).await.expect("BoardStructure");
+
+    // 1. Negative cases: offline module, high-sec, non-XL structure, no ammo
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(pdb_mod_id)], &kw, None).await.unwrap_err().code, "ModuleOffline");
+    ctx.db.with_mut_snapshot(|s| { s.module_online_states.insert(pdb_mod_id, true); });
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(pdb_mod_id)], &kw, None).await.unwrap_err().code, "CannotActivateInHighSec");
+
+    let st_pos = DVec3::new(10_000_000.0, 0.0, 0.0);
+    ctx.db.with_mut_snapshot(|s| {
+        s.structures.get_mut(&keepstar_id).unwrap().solar_system_id = lowsec_sys;
+        s.structures.get_mut(&keepstar_id).unwrap().position = [st_pos.x, st_pos.y, st_pos.z];
+        s.items.get_mut(&keepstar_id).unwrap().location_id = lowsec_sys as i64;
+        s.characters.get_mut(&gunner_id).unwrap().solar_system_id = lowsec_sys;
+    });
+    sess.solar_system_id = Some(lowsec_sys);
+    let low_handle = ctx.systems.get_or_spawn(lowsec_sys);
+    let _ = low_handle.spawn_ball_with_combat(
+        Ball { id: keepstar_id, type_id: TYPE_KEEPSTAR, position: st_pos, velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1_000_000_000.0, radius: 1_000.0, speed_fraction: 0.0, mode: MovementMode::Stop },
+        ctx.build_type_combat_state(TYPE_KEEPSTAR),
+    ).await;
+
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(pdb_mod_id)], &kw, None).await.unwrap_err().code, "RequiresXLStructure");
+    ctx.db.with_mut_snapshot(|s| { s.structures.get_mut(&keepstar_id).unwrap().type_id = TYPE_KEEPSTAR; });
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(pdb_mod_id)], &kw, None).await.unwrap_err().code, "NoAmmoLoaded");
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(flak_item_id, mk_item(flak_item_id, 63195, corp_id, keepstar_id, InventoryFlag::SpecializedAmmoHold, 500, false));
+    });
+
+    // Spawn hostile carrier (23915) at 1,500m and launch a real Light Fighter squadron (Templar I, 40562)
+    let (c_hostile, s_hostile, fighter_item) = (91_000_032_i64, 101_000_032_i64, 101_000_033_i64);
+    let mut sess_hostile = setup_pilot(&ctx, c_hostile, s_hostile, 23915, lowsec_sys, st_pos + DVec3::new(1_500.0, 0.0, 0.0), hostile_corp).await;
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(fighter_item, mk_item(fighter_item, 40562, c_hostile, s_hostile, InventoryFlag::FighterBay, 9, false));
+    });
+    ctx.dispatch_rpc(&mut sess_hostile, "fighterMgr", None, "LoadFightersToTube", &[PyRep::Integer(0), PyRep::Integer(fighter_item)], &kw, None).await.expect("Load fighter");
+    ctx.dispatch_rpc(&mut sess_hostile, "fighterMgr", None, "LaunchFightersFromTubes", &[], &kw, None).await.expect("Launch fighter");
+    let fighter_ball_id = ctx.active_fighters.read().unwrap().keys().copied().next().expect("fighter ball");
+
+    let spawn_drone = |did: i64, x_off: f64| {
+        let h = low_handle.clone();
+        let cs = ctx.build_type_combat_state(2454);
+        async move {
+            let _ = h.spawn_ball_with_meta(
+                Ball { id: did, type_id: 2454, position: st_pos + DVec3::new(x_off, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 0.5, mass: 5_000.0, radius: 10.0, speed_fraction: 0.0, mode: MovementMode::Stop },
+                cs,
+                eve_destiny::SlimItemMeta { group_id: 100, category_id: 18, owner_id: c_hostile, char_id: Some(c_hostile), corp_id: hostile_corp, alliance_id: -1, ..Default::default() },
+            ).await;
+        }
+    };
+    spawn_drone(101_000_034, 1_800.0).await;
+
+    let (c_ally, s_ally) = (91_000_035_i64, 101_000_035_i64);
+    let _ = setup_pilot(&ctx, c_ally, s_ally, 587, lowsec_sys, st_pos + DVec3::new(1_200.0, 0.0, 0.0), ally_corp_id).await;
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&c_ally).unwrap().alliance_id = Some(alliance_id); });
+    let s_far = 101_000_036_i64;
+    let _ = setup_pilot(&ctx, 91_000_036, s_far, 587, lowsec_sys, st_pos + DVec3::new(5_000.0, 0.0, 0.0), hostile_corp).await;
+
+    // 2. Low-sec Safety::Green spares neutral capsuleer ship (`s_hostile`); Safety::Red hits ship + drone + fighter!
+    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(gunner_id, SafetyLevel::Green); });
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(pdb_mod_id)], &kw, None).await.expect("PDB Green safety");
+    let carrier_cs_green = low_handle.get_combat_state(s_hostile).await.unwrap().unwrap();
+    assert_eq!(carrier_cs_green.shield_hp, carrier_cs_green.max_shield_hp, "Safety Green spares neutral capsuleer in low-sec");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&flak_item_id).unwrap().quantity), 300, "Consumed 200 Flak Rounds");
+
+    ctx.advance_secs(13);
+    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(gunner_id, SafetyLevel::Red); });
+    spawn_drone(101_000_037, 1_700.0).await;
+
+    let cap_before = low_handle.get_combat_state(keepstar_id).await.unwrap().unwrap().capacitor;
+    let fighter_hp_before = low_handle.get_combat_state(fighter_ball_id).await.unwrap().map(|c| c.shield_hp + c.armor_hp + c.structure_hp).unwrap_or(0.0);
+    let red_rep = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(pdb_mod_id)], &kw, None).await.expect("PDB Red safety");
+    assert!(kv_get(&red_rep, "targetsHit").and_then(|v| v.as_i64()).unwrap_or(0) >= 3);
+
+    assert!(low_handle.get_combat_state(keepstar_id).await.unwrap().unwrap().capacitor < cap_before);
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&flak_item_id).unwrap().quantity), 100);
+    let carrier_cs_red = low_handle.get_combat_state(s_hostile).await.unwrap().unwrap();
+    assert!(carrier_cs_red.shield_hp < carrier_cs_red.max_shield_hp);
+    let fighter_hp_after = low_handle.get_combat_state(fighter_ball_id).await.unwrap().map(|c| c.shield_hp + c.armor_hp + c.structure_hp).unwrap_or(0.0);
+    assert!(fighter_hp_after < fighter_hp_before, "Hostile fighter squadron took omni pulse damage");
+
+    let ally_cs = low_handle.get_combat_state(s_ally).await.unwrap().unwrap();
+    assert_eq!(ally_cs.shield_hp, ally_cs.max_shield_hp, "Alliance mate spared");
+    let far_cs = low_handle.get_combat_state(s_far).await.unwrap().unwrap();
+    assert_eq!(far_cs.shield_hp, far_cs.max_shield_hp, "Out-of-range ship spared");
+    assert!(ctx.crimewatch.with_crimewatch(|cw| cw.get_aggression(gunner_id, c_hostile, ctx.now_unix()).is_some()));
+
+    // 3. Fatal ship kill via Standup Point Defense Battery routes through `execute_death_pipeline`
+    let (c_fatal, s_fatal, cargo_loot_id) = (91_000_038_i64, 101_000_038_i64, 101_000_039_i64);
+    let _ = setup_pilot(&ctx, c_fatal, s_fatal, 587, lowsec_sys, st_pos + DVec3::new(1_100.0, 0.0, 0.0), hostile_corp).await;
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.get_mut(&flak_item_id).unwrap().quantity = 400;
+        s.items.insert(cargo_loot_id, mk_item(cargo_loot_id, 34, c_fatal, s_fatal, InventoryFlag::Cargo, 100, false));
+    });
+    let mut fatal_cs = low_handle.get_combat_state(s_fatal).await.unwrap().unwrap();
+    fatal_cs.shield_hp = 0.0;
+    fatal_cs.armor_hp = 0.0;
+    fatal_cs.structure_hp = 50.0;
+    low_handle.set_combat_state(s_fatal, fatal_cs).await.unwrap();
+
+    ctx.advance_secs(13);
+    let kill_rep = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(pdb_mod_id)], &kw, None).await.expect("PDB fatal shot");
+    assert!(kv_get(&kill_rep, "destroyedCount").and_then(|v| v.as_i64()).unwrap_or(0) >= 1);
+    let (ship_gone, new_pod_id, has_wreck, has_km) = ctx.db.with_snapshot(|s| {
+        let gone = !s.items.contains_key(&s_fatal);
+        let pod = s.characters.get(&c_fatal).map(|c| c.active_ship_id).unwrap_or(0);
+        let wreck = s.items.values().any(|i| i.owner_id == c_fatal && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 186));
+        let km = s.killmails.values().any(|k| k.victim_character_id == c_fatal && k.ship_type_id == 587);
+        (gone, pod, wreck, km)
+    });
+    assert!(ship_gone, "Destroyed Rifter removed from WorldStateSnapshot.items");
+    assert_ne!(new_pod_id, s_fatal, "Victim active_ship_id switched to ejected capsule");
+    assert!(low_handle.get_ball_snapshot(new_pod_id).await.unwrap().is_some(), "Ejected capsule spawned in Ballpark");
+    assert!(has_wreck && has_km, "Wreck and KillmailRecord generated by execute_death_pipeline");
+}
+
+#[tokio::test]
+async fn test_b39_standup_guided_bomb_and_arcing_vorton() {
+    // parity: feat:structures.standup-guided-bomb-launcher, feat:structures.standup-superweapon-arcing-vorton
+    eve_testkit::attest(&[
+        "feat:structures.standup-guided-bomb-launcher",
+        "feat:structures.standup-superweapon-arcing-vorton",
+    ]);
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let null_sys = 30_000_199_u32;
+    let (corp_id, hostile_corp) = (98_000_655_i64, 98_000_699_i64);
+    let (gunner_id, gunner_ship, bystander_id) = (91_000_131_i64, 101_000_131_i64, 91_000_139_i64);
+    let (keepstar_id, bomb_mod_id, vorton_mod_id) = (101_000_600_i64, 101_000_602_i64, 101_000_603_i64);
+    let st_pos = DVec3::new(10_000_000.0, 0.0, 0.0);
+
+    let mut sess = setup_pilot(&ctx, gunner_id, gunner_ship, 587, null_sys, st_pos, corp_id).await;
+    ctx.db.with_mut_snapshot(|s| {
+        s.corporations.insert(corp_id, CorporationRecord {
+            corporation_id: corp_id, name: "Keepstar Corp".into(), ticker: "KEEP".into(),
+            ceo_id: gunner_id, members: [gunner_id].into_iter().collect(), ..Default::default()
+        });
+        s.structures.insert(keepstar_id, UpwellStructureRecord {
+            structure_id: keepstar_id, type_id: TYPE_KEEPSTAR, owner_corp_id: corp_id, solar_system_id: null_sys,
+            name: "Test Keepstar".into(), position: [st_pos.x, st_pos.y, st_pos.z], state: "ShieldVulnerable".into(),
+            quantum_core_installed: true, fuel_blocks: 1000, shield_hp: 1.0, armor_hp: 1.0, hull_hp: 1.0,
+            reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
+        });
+        s.items.insert(keepstar_id, mk_item(keepstar_id, TYPE_KEEPSTAR, corp_id, null_sys as i64, InventoryFlag::None, 1, true));
+        for (mid, tid, flag) in [(bomb_mod_id, 35923_u32, InventoryFlag::HiSlot1), (vorton_mod_id, 35928_u32, InventoryFlag::HiSlot2)] {
+            s.items.insert(mid, mk_item(mid, tid, corp_id, keepstar_id, flag, 1, true));
+            s.module_online_states.insert(mid, true);
+        }
+        // Bystander personal hangar guided bombs MUST NOT be usable by the structure weapon!
+        s.items.insert(101_000_699, mk_item(101_000_699, 37849, bystander_id, keepstar_id, InventoryFlag::Hangar, 50, false));
+    });
+
+    let null_handle = ctx.systems.get_or_spawn(null_sys);
+    let _ = null_handle.spawn_ball_with_combat(
+        Ball { id: keepstar_id, type_id: TYPE_KEEPSTAR, position: st_pos, velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1_000_000_000.0, radius: 1_000.0, speed_fraction: 0.0, mode: MovementMode::Stop },
+        ctx.build_type_combat_state(TYPE_KEEPSTAR),
+    ).await;
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&gunner_id).unwrap().structure_id = Some(keepstar_id);
+    });
+    sess.structure_id = Some(keepstar_id);
+    ctx.dispatch_rpc(&mut sess, "structureControl", None, "BoardStructure", &[PyRep::Integer(keepstar_id)], &kw, None).await.expect("BoardStructure");
+
+    let (s_bs, s_frig, s_oor) = (101_000_140_i64, 101_000_141_i64, 101_000_142_i64);
+    let _ = setup_pilot(&ctx, 91_000_140, s_bs, 638, null_sys, st_pos + DVec3::new(30_000.0, 0.0, 0.0), hostile_corp).await;
+    let _ = setup_pilot(&ctx, 91_000_141, s_frig, 587, null_sys, st_pos + DVec3::new(34_000.0, 0.0, 0.0), hostile_corp).await;
+    let _ = setup_pilot(&ctx, 91_000_142, s_oor, 638, null_sys, st_pos + DVec3::new(1_500_000.0, 0.0, 0.0), hostile_corp).await;
+
+    // 1. Guided Bomb Launcher negative checks: unlocked target, bystander hangar ammo ignored, out of range
+    let b_bs_args = [PyRep::Integer(bomb_mod_id), PyRep::String("targetAttack".into()), PyRep::Integer(s_bs)];
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &b_bs_args, &kw, None).await.unwrap_err().code, "TargetNotLocked");
+
+    for tid in [s_bs, s_frig, s_oor] {
+        let _ = null_handle.add_target_lock(keepstar_id, TargetLock { target_id: tid, lock_time_ms: 0.0, remaining_lock_ms: 0.0, max_range_m: Some(2_000_000.0), locked: true }).await;
+    }
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &b_bs_args, &kw, None).await.unwrap_err().code, "NoAmmoLoaded");
+
+    let heavy_bomb_stack = 101_000_620_i64;
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(heavy_bomb_stack, mk_item(heavy_bomb_stack, 37849, corp_id, keepstar_id, InventoryFlag::HiSlot1, 5, false));
+    });
+    let b_oor_args = [PyRep::Integer(bomb_mod_id), PyRep::String("targetAttack".into()), PyRep::Integer(s_oor)];
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &b_oor_args, &kw, None).await.unwrap_err().code, "TargetOutOfRange");
+
+    // 2. Launch Heavy Guided Bomb (37849) at Raven: spawns in-flight bomb Ball with 4M HP, detonates on impact with 20km AoE sig-scaled splash!
+    let bs_shield_0 = null_handle.get_combat_state(s_bs).await.unwrap().unwrap().shield_hp;
+    let frig_shield_0 = null_handle.get_combat_state(s_frig).await.unwrap().unwrap().shield_hp;
+
+    let launch_rep = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &b_bs_args, &kw, None).await.expect("Launch Heavy Guided Bomb");
+    assert_eq!(kv_get(&launch_rep, "inFlight"), Some(PyRep::Bool(true)));
+    let bomb_ball_id = kv_get(&launch_rep, "bombID").and_then(|v| v.as_i64()).expect("bombID");
+    assert_eq!(null_handle.get_combat_state(bomb_ball_id).await.unwrap().unwrap().max_structure_hp, 4_000_000.0);
+    assert_eq!(null_handle.get_combat_state(s_bs).await.unwrap().unwrap().shield_hp, bs_shield_0);
+
+    for _ in 0..15 {
+        null_handle.step_manual(1.0).await.unwrap();
+    }
+    assert!(null_handle.get_ball_snapshot(bomb_ball_id).await.unwrap().is_none());
+    let bs_dmg = bs_shield_0 - null_handle.get_combat_state(s_bs).await.unwrap().unwrap().shield_hp;
+    let frig_dmg = frig_shield_0 - null_handle.get_combat_state(s_frig).await.unwrap().unwrap().shield_hp;
+    assert!(bs_dmg > 0.0 && frig_dmg > 0.0, "20 km AoE splash hit both Raven and nearby Rifter");
+    assert!(bs_dmg > frig_dmg * 2.0, "Signature scaling: Raven ({bs_dmg}) >> Rifter ({frig_dmg})");
+
+    // Light Guided Bomb (37850) after 61s cycle
+    ctx.advance_secs(61);
+    ctx.db.with_mut_snapshot(|s| { s.items.get_mut(&heavy_bomb_stack).unwrap().type_id = 37850; });
+    let b_frig_args = [PyRep::Integer(bomb_mod_id), PyRep::String("targetAttack".into()), PyRep::Integer(s_frig)];
+    let light_rep = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &b_frig_args, &kw, None).await.expect("Launch Light Guided Bomb");
+    let light_bomb_id = kv_get(&light_rep, "bombID").and_then(|v| v.as_i64()).unwrap();
+    for _ in 0..15 {
+        null_handle.step_manual(1.0).await.unwrap();
+    }
+    assert!(null_handle.get_ball_snapshot(light_bomb_id).await.unwrap().is_none());
+
+    // 3. Standup Arcing Vorton Projector: Keepstar-only, <=400km range, 20km jump radius, max 5 total targets, 30s immobilization, 600s cooldown
+    ctx.db.with_mut_snapshot(|s| { s.structures.get_mut(&keepstar_id).unwrap().type_id = 35833; });
+    let v_bs_args = [PyRep::Integer(vorton_mod_id), PyRep::String("targetAttack".into()), PyRep::Integer(s_bs)];
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &v_bs_args, &kw, None).await.unwrap_err().code, "CantFitToStructure");
+    ctx.db.with_mut_snapshot(|s| { s.structures.get_mut(&keepstar_id).unwrap().type_id = TYPE_KEEPSTAR; });
+
+    let v_oor_args = [PyRep::Integer(vorton_mod_id), PyRep::String("targetAttack".into()), PyRep::Integer(s_oor)];
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &v_oor_args, &kw, None).await.unwrap_err().code, "TargetOutOfRange");
+
+    let v_primary = 101_000_710_i64;
+    let _ = setup_pilot(&ctx, 91_000_710, v_primary, 24692, null_sys, st_pos + DVec3::new(100_000.0, 0.0, 0.0), hostile_corp).await;
+    let _ = null_handle.add_target_lock(keepstar_id, TargetLock { target_id: v_primary, lock_time_ms: 0.0, remaining_lock_ms: 0.0, max_range_m: Some(400_000.0), locked: true }).await;
+    let mut cluster_ids = vec![v_primary];
+    for idx in 0..6_i64 {
+        let sid = 101_000_711 + idx;
+        let _ = setup_pilot(&ctx, 91_000_711 + idx, sid, 24692, null_sys, st_pos + DVec3::new(100_000.0 + ((idx + 1) as f64) * 2_500.0, 0.0, 0.0), hostile_corp).await;
+        cluster_ids.push(sid);
+    }
+    let outside_jump_id = 101_000_720_i64;
+    let _ = setup_pilot(&ctx, 91_000_720, outside_jump_id, 24692, null_sys, st_pos + DVec3::new(145_000.0, 0.0, 0.0), hostile_corp).await;
+    for &sid in cluster_ids.iter().chain(std::iter::once(&outside_jump_id)) {
+        let mut cs = null_handle.get_combat_state(sid).await.unwrap().unwrap();
+        cs.shield_hp = 10_000_000.0;
+        cs.max_shield_hp = 10_000_000.0;
+        null_handle.set_combat_state(sid, cs).await.unwrap();
+    }
+
+    ctx.advance_secs(61);
+    null_handle.set_capacitor(keepstar_id, 600_000.0).await.unwrap();
+    let v_args = [PyRep::Integer(vorton_mod_id), PyRep::String("targetAttack".into()), PyRep::Integer(v_primary)];
+    let vorton_rep = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &v_args, &kw, None).await.expect("Fire Arcing Vorton");
+    assert_eq!(kv_get(&vorton_rep, "targetsHit").and_then(|v| v.as_i64()), Some(5));
+
+    let mut hop_losses = Vec::new();
+    for &sid in &cluster_ids {
+        let cs = null_handle.get_combat_state(sid).await.unwrap().unwrap();
+        let lost = cs.max_shield_hp - cs.shield_hp;
+        if lost > 0.0 {
+            hop_losses.push(lost);
+        }
+    }
+    assert_eq!(hop_losses.len(), 5, "Exactly 5 of 7 ships in cluster took chained beam damage");
+    for w in hop_losses.windows(2) {
+        assert!(w[1] < w[0], "Vorton arc damage attenuates per hop: {} -> {}", w[0], w[1]);
+    }
+    let out_cs = null_handle.get_combat_state(outside_jump_id).await.unwrap().unwrap();
+    assert_eq!(out_cs.shield_hp, out_cs.max_shield_hp, "Target beyond 20 km jump radius spared");
+
+    // During 30s immobilization (+10s): weapons, ReleaseControl, EjectFromStructure, and Undock all blocked
+    ctx.advance_secs(10);
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &b_bs_args, &kw, None).await.unwrap_err().code, "WeaponCycleImmobilized");
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "structureControl", None, "ReleaseControl", &[PyRep::Integer(keepstar_id)], &kw, None).await.unwrap_err().code, "GunnerImmobilized");
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "structureControl", None, "EjectFromStructure", &[PyRep::Integer(keepstar_id)], &kw, None).await.unwrap_err().code, "GunnerImmobilized");
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "structureDocking", None, "Undock", &[PyRep::Integer(keepstar_id)], &kw, None).await.unwrap_err().code, "GunnerImmobilized");
+
+    // After 30s immobilization expires (+25s -> +35s): Vorton still on 600s cooldown, ReleaseControl succeeds
+    ctx.advance_secs(25);
+    let cyc_err = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &v_args, &kw, None).await.unwrap_err();
+    assert_eq!(cyc_err.code, "ModuleAlreadyCycling");
+    ctx.dispatch_rpc(&mut sess, "structureControl", None, "ReleaseControl", &[PyRep::Integer(keepstar_id)], &kw, None).await.expect("ReleaseControl after 30s");
+}
+
+#[tokio::test]
+async fn test_b39_standup_falloff_bomb_safety_timers_and_kills() {
+    // parity: feat:structures.standup-guided-bomb-launcher, feat:structures.standup-superweapon-arcing-vorton
+    eve_testkit::attest(&[
+        "feat:structures.standup-guided-bomb-launcher",
+        "feat:structures.standup-superweapon-arcing-vorton",
+    ]);
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let low_sys = 30_000_012_u32;
+    let (corp_id, hostile_corp, neutral_corp) = (98_000_755_i64, 98_000_799_i64, 98_000_788_i64);
+    let (gunner_id, gunner_ship, keepstar_id, bomb_mod_id, vorton_mod_id, bomb_stack) =
+        (91_000_231_i64, 101_000_231_i64, 101_000_800_i64, 101_000_802_i64, 101_000_803_i64, 101_000_820_i64);
+    let st_pos = DVec3::new(20_000_000.0, 0.0, 0.0);
+
+    let mut sess = setup_pilot(&ctx, gunner_id, gunner_ship, 587, low_sys, st_pos, corp_id).await;
+    ctx.db.with_mut_snapshot(|s| {
+        s.corporations.insert(corp_id, CorporationRecord {
+            corporation_id: corp_id, name: "Lowsec Keepstar".into(), ticker: "LKS".into(),
+            ceo_id: gunner_id, members: [gunner_id].into_iter().collect(), ..Default::default()
+        });
+        s.structures.insert(keepstar_id, UpwellStructureRecord {
+            structure_id: keepstar_id, type_id: TYPE_KEEPSTAR, owner_corp_id: corp_id, solar_system_id: low_sys,
+            name: "Lowsec Keepstar".into(), position: [st_pos.x, st_pos.y, st_pos.z], state: "ShieldVulnerable".into(),
+            quantum_core_installed: true, fuel_blocks: 1000, shield_hp: 1.0, armor_hp: 1.0, hull_hp: 1.0,
+            reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
+        });
+        s.items.insert(keepstar_id, mk_item(keepstar_id, TYPE_KEEPSTAR, corp_id, low_sys as i64, InventoryFlag::None, 1, true));
+        for (mid, tid, flag) in [(bomb_mod_id, 35923_u32, InventoryFlag::HiSlot1), (vorton_mod_id, 35928_u32, InventoryFlag::HiSlot2)] {
+            s.items.insert(mid, mk_item(mid, tid, corp_id, keepstar_id, flag, 1, true));
+            s.module_online_states.insert(mid, true);
+        }
+        s.items.insert(bomb_stack, mk_item(bomb_stack, 37849, corp_id, keepstar_id, InventoryFlag::HiSlot1, 10, false));
+    });
+    let low_h = ctx.systems.get_or_spawn(low_sys);
+    let _ = low_h.spawn_ball_with_combat(
+        Ball { id: keepstar_id, type_id: TYPE_KEEPSTAR, position: st_pos, velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1_000_000_000.0, radius: 1_000.0, speed_fraction: 0.0, mode: MovementMode::Stop },
+        ctx.build_type_combat_state(TYPE_KEEPSTAR),
+    ).await;
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&gunner_id).unwrap().structure_id = Some(keepstar_id);
+    });
+    sess.structure_id = Some(keepstar_id);
+    ctx.dispatch_rpc(&mut sess, "structureControl", None, "BoardStructure", &[PyRep::Integer(keepstar_id)], &kw, None).await.expect("BoardStructure");
+
+    // 1. Guided Bomb splash: SafetyLevel::Green spares neutral low-sec bystander & corp friendly, hits suspect + sets OF-51 PvP/logoff timers
+    let (c_susp, s_susp, c_neut, s_neut, c_frnd, s_frnd) =
+        (91_000_240_i64, 101_000_240_i64, 91_000_241_i64, 101_000_241_i64, 91_000_242_i64, 101_000_242_i64);
+    let _ = setup_pilot(&ctx, c_susp, s_susp, 638, low_sys, st_pos + DVec3::new(25_000.0, 0.0, 0.0), hostile_corp).await;
+    let _ = setup_pilot(&ctx, c_neut, s_neut, 638, low_sys, st_pos + DVec3::new(28_000.0, 0.0, 0.0), neutral_corp).await;
+    let _ = setup_pilot(&ctx, c_frnd, s_frnd, 638, low_sys, st_pos + DVec3::new(26_500.0, 0.0, 0.0), corp_id).await;
+    let _ = low_h.add_target_lock(keepstar_id, TargetLock { target_id: s_susp, lock_time_ms: 0.0, remaining_lock_ms: 0.0, max_range_m: Some(400_000.0), locked: true }).await;
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.get_or_create(c_susp).suspect_flag_until_unix = ctx.now_unix() + 900;
+    }
+    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(gunner_id, SafetyLevel::Green); });
+    let neut_sh0 = low_h.get_combat_state(s_neut).await.unwrap().unwrap().shield_hp;
+    let frnd_sh0 = low_h.get_combat_state(s_frnd).await.unwrap().unwrap().shield_hp;
+    let susp_sh0 = low_h.get_combat_state(s_susp).await.unwrap().unwrap().shield_hp;
+
+    let b_args = [PyRep::Integer(bomb_mod_id), PyRep::String("targetAttack".into()), PyRep::Integer(s_susp)];
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &b_args, &kw, None).await.expect("Launch Guided Bomb under Green safety at suspect");
+    for _ in 0..15 {
+        low_h.step_manual(1.0).await.unwrap();
+    }
+    assert!(low_h.get_combat_state(s_susp).await.unwrap().unwrap().shield_hp < susp_sh0, "Suspect took guided bomb impact damage");
+    assert_eq!(low_h.get_combat_state(s_neut).await.unwrap().unwrap().shield_hp, neut_sh0, "SafetyLevel::Green spared neutral low-sec bystander from AoE splash");
+    assert_eq!(low_h.get_combat_state(s_frnd).await.unwrap().unwrap().shield_hp, frnd_sh0, "Friendly corp ship spared from AoE splash");
+    assert!(ctx.db.with_snapshot(|s| s.sp6_lifecycle.pvp_timers_until.get(&c_susp).copied().unwrap_or(0) > ctx.now_unix()), "Suspect victim received OF-51 PvP logoff timer");
+    assert_eq!(ctx.db.with_snapshot(|s| s.sp6_lifecycle.pvp_timers_until.get(&c_neut).copied().unwrap_or(0)), 0, "Spared neutral has no PvP timer");
+
+    // Switch gunner to SafetyLevel::Red and make `s_neut` low-HP so Guided Bomb splash kills `s_neut` through `execute_death_pipeline`!
+    ctx.advance_secs(61);
+    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| { rt.safety_levels.insert(gunner_id, SafetyLevel::Red); });
+    let mut neut_cs = low_h.get_combat_state(s_neut).await.unwrap().unwrap();
+    neut_cs.shield_hp = 0.0;
+    neut_cs.armor_hp = 0.0;
+    neut_cs.structure_hp = 100.0;
+    low_h.set_combat_state(s_neut, neut_cs).await.unwrap();
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &b_args, &kw, None).await.expect("Launch Guided Bomb under Red safety");
+    for _ in 0..15 {
+        low_h.step_manual(1.0).await.unwrap();
+    }
+    assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&s_neut)), "Guided Bomb splash fatal kill destroyed ship via execute_death_pipeline");
+    assert!(ctx.db.with_snapshot(|s| s.killmails.values().any(|k| k.victim_character_id == c_neut && k.ship_type_id == 638)), "Killmail generated for Guided Bomb kill");
+    assert!(ctx.db.with_snapshot(|s| s.sp6_lifecycle.pvp_timers_until.get(&c_neut).copied().unwrap_or(0) > ctx.now_unix()), "Splashed neutral received OF-51 PvP logoff timer");
+    assert_eq!(low_h.get_combat_state(s_frnd).await.unwrap().unwrap().shield_hp, frnd_sh0, "Friendly corp ship still spared under Red safety");
+
+    // 2. Arcing Vorton optimal (250km) + falloff (50km, max 350km) range check & 0.5x falloff attenuation
+    let (s_375k, s_200k, s_300k) = (101_000_250_i64, 101_000_251_i64, 101_000_252_i64);
+    let _ = setup_pilot(&ctx, 91_000_250, s_375k, 24692, low_sys, st_pos + DVec3::new(375_000.0, 0.0, 0.0), hostile_corp).await;
+    let _ = setup_pilot(&ctx, 91_000_251, s_200k, 24692, low_sys, st_pos + DVec3::new(200_000.0, 0.0, 0.0), hostile_corp).await;
+    let _ = setup_pilot(&ctx, 91_000_252, s_300k, 24692, low_sys, st_pos + DVec3::new(0.0, 300_000.0, 0.0), hostile_corp).await;
+    for sid in [s_375k, s_200k, s_300k] {
+        let _ = low_h.add_target_lock(keepstar_id, TargetLock { target_id: sid, lock_time_ms: 0.0, remaining_lock_ms: 0.0, max_range_m: Some(400_000.0), locked: true }).await;
+        let mut cs = low_h.get_combat_state(sid).await.unwrap().unwrap();
+        cs.shield_hp = 10_000_000.0;
+        cs.max_shield_hp = 10_000_000.0;
+        low_h.set_combat_state(sid, cs).await.unwrap();
+    }
+
+    // Target locked at 375 km (inside Keepstar 400 km lock range, beyond Vorton 350 km optimal+2*falloff) -> TargetOutOfRange!
+    low_h.set_capacitor(keepstar_id, 600_000.0).await.unwrap();
+    let v_375_err = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(vorton_mod_id), PyRep::String("targetAttack".into()), PyRep::Integer(s_375k)], &kw, None).await.unwrap_err();
+    assert_eq!(v_375_err.code, "TargetOutOfRange");
+    assert_eq!(low_h.get_combat_state(keepstar_id).await.unwrap().unwrap().capacitor, 600_000.0, "Out-of-range Vorton check consumes zero cap");
+
+    let rep_opt = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(vorton_mod_id), PyRep::String("targetAttack".into()), PyRep::Integer(s_200k)], &kw, None).await.expect("Vorton at 200km optimal");
+    let dmg_opt = kv_get(&rep_opt, "appliedDamage").and_then(|v| v.as_f64()).unwrap();
+
+    ctx.advance_secs(605);
+    low_h.set_capacitor(keepstar_id, 600_000.0).await.unwrap();
+    let rep_fall = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(vorton_mod_id), PyRep::String("targetAttack".into()), PyRep::Integer(s_300k)], &kw, None).await.expect("Vorton at 300km (optimal+falloff)");
+    let dmg_fall = kv_get(&rep_fall, "appliedDamage").and_then(|v| v.as_f64()).unwrap();
+    assert!(((dmg_fall / dmg_opt) - 0.5).abs() < 0.02, "At optimal + 1*falloff (300 km), Vorton damage attenuates by 0.5x: opt={dmg_opt}, fall={dmg_fall}");
+}
+
+}
+
+// Folded submodule: part3
+#[allow(unused_imports, dead_code)]
+mod part3 {
+    use super::*;
+
+// Batch 39 open `feat:` parity integration tests (part 3: Clone Vat Bay fuel, immobilization, fleet clone install & CloneJump).
+
+use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord};
+use eve_destiny::{Ball, MovementMode};
+use eve_machonet::SessionState;
+use eve_proto::PyRep;
+use eve_server::router::ServerContext;
+use glam::DVec3;
+use std::collections::HashMap;
+
+async fn setup_pilot(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    ship_type_id: u32,
+    sys_id: u32,
+    pos: DVec3,
+    corp_id: i64,
+    station_id: Option<i64>,
+) -> SessionState {
+    let mut sess = SessionState::new((900_000 + (char_id % 100_000)) as u64);
+    sess.user_id = Some(char_id as u64);
+    ctx.db.with_mut_snapshot(|s| {
+        let mut ch = s.characters.get(&90_000_001).cloned().unwrap();
+        ch.character_id = char_id;
+        ch.name = format!("Pilot-{char_id}");
+        ch.corporation_id = corp_id;
+        ch.alliance_id = None;
+        ch.solar_system_id = sys_id;
+        ch.active_ship_id = ship_id;
+        ch.station_id = station_id;
+        ch.structure_id = None;
+        ch.security_status = 0.0;
+        ch.balance = IskCents::from_isk(500_000_000);
+        s.characters.insert(char_id, ch);
+        s.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: ship_type_id,
+                owner_id: char_id,
+                location_id: station_id.unwrap_or(sys_id as i64),
+                flag: if station_id.is_some() { InventoryFlag::Hangar } else { InventoryFlag::None },
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        if station_id.is_none() {
+            s.item_positions.insert(ship_id, [pos.x, pos.y, pos.z]);
+        }
+    });
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(corp_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+    sess.station_id = station_id;
+    sess.structure_id = None;
+
+    if station_id.is_none() {
+        let ship_type = ctx.sde.types.get(&ship_type_id);
+        let handle = ctx.systems.get_or_spawn(sys_id);
+        let _ = handle
+            .spawn_ball_with_combat(
+                Ball {
+                    id: ship_id,
+                    type_id: ship_type_id,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 250.0,
+                    inertia: 0.5,
+                    mass: ship_type.map(|t| t.mass).unwrap_or(1_500_000.0),
+                    radius: ship_type.map(|t| t.radius).unwrap_or(50.0),
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                ctx.build_type_combat_state(ship_type_id),
+            )
+            .await;
+    }
+    sess
+}
+
+#[tokio::test]
+async fn test_b39_clone_vat_bay_titan_and_rorqual_install_and_jump() {
+    // parity: feat:modules.clone-vat-bay-fuel
+    eve_testkit::attest(&["feat:modules.clone-vat-bay-fuel"]);
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let sys_host = 30_000_012_u32; // Asabona (low-sec)
+    let jita_sys = 30_000_142_u32;
+    let jita_station = 60_003_760_i64;
+
+    // 1. Negative cases: non-Titan/Rorqual hull rejected & insufficient Liquid Ozone rejected
+    let c_subcap = 91_000_050_i64;
+    let s_subcap = 101_000_050_i64;
+    let mut sess_subcap = setup_pilot(&ctx, c_subcap, s_subcap, 24692, sys_host, DVec3::new(100_000.0, 0.0, 0.0), 1_000_009, None).await;
+    let bad_cvb = 101_000_700_i64;
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(
+            bad_cvb,
+            InventoryItemRecord {
+                item_id: bad_cvb,
+                type_id: 23735, // Clone Vat Bay I
+                owner_id: c_subcap,
+                location_id: s_subcap,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        s.module_online_states.insert(bad_cvb, true);
+    });
+    let hull_err = ctx
+        .dispatch_rpc(&mut sess_subcap, "dogmaIM", None, "Activate", &[PyRep::Integer(bad_cvb)], &kw, None)
+        .await
+        .expect_err("Non-Titan/Rorqual hull cannot activate Clone Vat Bay");
+    assert_eq!(hull_err.code, "ShipCannotFitModule");
+
+    // 2. Titan (Avatar 11567) AND Rorqual (28352): SpecializedFuelBay priority, single LO consumption, ship immobilization, fleet install + CloneJump!
+    let c_titan = 91_000_051_i64;
+    let s_titan = 101_000_051_i64;
+    let c_rorq = 91_000_055_i64;
+    let s_rorq = 101_000_055_i64;
+    let c_mate = 91_000_052_i64;
+    let s_mate = 101_000_052_i64;
+    let c_outsider = 91_000_053_i64;
+    let s_outsider = 101_000_053_i64;
+
+    let titan_pos = DVec3::new(5_000_000_000.0, 0.0, 0.0);
+    let rorq_pos = DVec3::new(5_000_500_000.0, 0.0, 0.0);
+    let mut sess_titan = setup_pilot(&ctx, c_titan, s_titan, 11567, sys_host, titan_pos, 1_000_009, None).await;
+    let mut sess_rorq = setup_pilot(&ctx, c_rorq, s_rorq, 28352, sys_host, rorq_pos, 1_000_009, None).await;
+    let mut sess_mate = setup_pilot(&ctx, c_mate, s_mate, 587, sys_host, titan_pos + DVec3::new(25_000.0, 0.0, 0.0), 1_000_009, None).await;
+    let _sess_outsider = setup_pilot(&ctx, c_outsider, s_outsider, 587, sys_host, titan_pos + DVec3::new(40_000.0, 0.0, 0.0), 1_000_010, None).await;
+    let beyonce_titan = ctx.bind_object(&mut sess_titan, "beyonce", sys_host as i64).unwrap();
+
+    let cvb_titan = 101_000_701_i64;
+    let cvb_rorq = 101_000_711_i64;
+    let lo_fuel_bay = 101_000_702_i64;
+    let lo_cargo = 101_000_703_i64;
+    let lo_rorq = 101_000_712_i64;
+
+    ctx.db.with_mut_snapshot(|s| {
+        for cid in [c_mate, c_outsider] {
+            s.skills.entry(cid).or_default().insert(
+                24242, // Infomorph Psychology V
+                TrainedSkillRecord { type_id: 24242, level: 5, skill_points: 256_000.0 },
+            );
+        }
+        s.fleets.insert(
+            889,
+            eve_db::FleetRecord {
+                fleet_id: 889,
+                boss_id: c_titan,
+                members: vec![c_titan, c_rorq, c_mate],
+                ..Default::default()
+            },
+        );
+        for (mid, owner, ship) in [(cvb_titan, c_titan, s_titan), (cvb_rorq, c_rorq, s_rorq)] {
+            s.items.insert(
+                mid,
+                InventoryItemRecord {
+                    item_id: mid,
+                    type_id: 23735, // Clone Vat Bay I
+                    owner_id: owner,
+                    location_id: ship,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            s.module_online_states.insert(mid, true);
+        }
+        // Start with 0 LO on Titan -> NotEnoughFuel
+        s.items.insert(
+            lo_fuel_bay,
+            InventoryItemRecord {
+                item_id: lo_fuel_bay,
+                type_id: 16273,
+                owner_id: c_titan,
+                location_id: s_titan,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 0,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        s.items.insert(
+            lo_rorq,
+            InventoryItemRecord {
+                item_id: lo_rorq,
+                type_id: 16273,
+                owner_id: c_rorq,
+                location_id: s_rorq,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 1_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    sess_titan.fleet_id = Some(889);
+    sess_rorq.fleet_id = Some(889);
+    sess_mate.fleet_id = Some(889);
+
+    // Insufficient fuel check
+    let no_fuel_err = ctx
+        .dispatch_rpc(&mut sess_titan, "dogmaIM", None, "Activate", &[PyRep::Integer(cvb_titan)], &kw, None)
+        .await
+        .expect_err("Insufficient Liquid Ozone rejected");
+    assert_eq!(no_fuel_err.code, "NotEnoughFuel");
+
+    // Clone offer before activation is rejected
+    let inactive_err = ctx
+        .dispatch_rpc(
+            &mut sess_titan,
+            "jumpCloneSvc",
+            None,
+            "OfferShipCloneInstallation",
+            &[PyRep::Integer(c_mate), PyRep::Integer(s_titan)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(inactive_err.code, "NoActiveCloneVatBay");
+
+    // Top up Titan SpecializedFuelBay (500 LO) + Cargo (500 LO) to verify SpecializedFuelBay priority & zero double-consumption
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.get_mut(&lo_fuel_bay).unwrap().quantity = 500;
+        s.items.insert(
+            lo_cargo,
+            InventoryItemRecord {
+                item_id: lo_cargo,
+                type_id: 16273,
+                owner_id: c_titan,
+                location_id: s_titan,
+                flag: InventoryFlag::Cargo,
+                quantity: 500,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+
+    ctx.dispatch_rpc(&mut sess_titan, "dogmaIM", None, "Activate", &[PyRep::Integer(cvb_titan)], &kw, None)
+        .await
+        .expect("Titan activates Clone Vat Bay I");
+    ctx.dispatch_rpc(&mut sess_rorq, "dogmaIM", None, "Activate", &[PyRep::Integer(cvb_rorq)], &kw, None)
+        .await
+        .expect("Rorqual activates Clone Vat Bay I");
+
+    let (fb_after_act, cargo_after_act, rorq_after_act) = ctx.db.with_snapshot(|s| {
+        (
+            s.items.get(&lo_fuel_bay).map(|i| i.quantity).unwrap_or(0),
+            s.items.get(&lo_cargo).map(|i| i.quantity).unwrap_or(0),
+            s.items.get(&lo_rorq).map(|i| i.quantity).unwrap_or(0),
+        )
+    });
+    assert!(fb_after_act < 500, "Titan consumed Liquid Ozone from SpecializedFuelBay ({fb_after_act} < 500)");
+    assert_eq!(cargo_after_act, 500, "Cargo LO untouched when SpecializedFuelBay has enough fuel");
+    assert!(rorq_after_act < 1_000, "Rorqual consumed Liquid Ozone ({rorq_after_act} < 1000)");
+
+    // Ship immobilization enforced during active Clone Vat Bay cycle
+    let sys_handle = ctx.systems.get_or_spawn(sys_host);
+    let (_, titan_ball) = sys_handle.get_ball_snapshot(s_titan).await.unwrap().unwrap();
+    assert_eq!(titan_ball.max_velocity, 0.0, "Titan max_velocity set to 0 while Clone Vat Bay is active");
+    let warp_err = ctx
+        .dispatch_rpc(
+            &mut sess_titan,
+            "beyonce",
+            Some(beyonce_titan),
+            "CmdGotoDirection",
+            &[PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)],
+            &kw,
+            None,
+        )
+        .await;
+    let _ = warp_err;
+    sys_handle.step_manual(2.0).await.unwrap();
+    let (_, titan_ball_after_step) = sys_handle.get_ball_snapshot(s_titan).await.unwrap().unwrap();
+    assert!((titan_ball_after_step.position - titan_pos).length() < 1.0, "Immobilized Titan cannot move during cycle");
+
+    // Non-fleet outsider cannot be offered a clone
+    let non_fleet_offer_err = ctx
+        .dispatch_rpc(
+            &mut sess_titan,
+            "jumpCloneSvc",
+            None,
+            "OfferShipCloneInstallation",
+            &[PyRep::Integer(c_outsider), PyRep::Integer(s_titan)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(non_fleet_offer_err.code, "TargetNotInSameFleetOrSystem");
+
+    // Fleetmate installs clone in Titan AND in Rorqual (verify ZERO extra LO deducted on AcceptShipCloneInstallation!)
+    ctx.dispatch_rpc(
+        &mut sess_titan,
+        "jumpCloneSvc",
+        None,
+        "OfferShipCloneInstallation",
+        &[PyRep::Integer(c_mate), PyRep::Integer(s_titan)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Offer clone on Titan");
+    ctx.dispatch_rpc(&mut sess_mate, "jumpCloneSvc", None, "AcceptShipCloneInstallation", &[], &kw, None)
+        .await
+        .expect("Accept clone on Titan");
+
+    let fb_after_install = ctx.db.with_snapshot(|s| s.items.get(&lo_fuel_bay).map(|i| i.quantity).unwrap_or(0));
+    assert_eq!(fb_after_install, fb_after_act, "AcceptShipCloneInstallation does NOT double-deduct Liquid Ozone");
+
+    // Also install a second clone on the Rorqual
+    let _ = sys_handle.set_ball_position(s_mate, rorq_pos + DVec3::new(500.0, 0.0, 0.0)).await;
+    ctx.dispatch_rpc(
+        &mut sess_rorq,
+        "jumpCloneSvc",
+        None,
+        "OfferShipCloneInstallation",
+        &[PyRep::Integer(c_mate), PyRep::Integer(s_rorq)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Offer clone on Rorqual");
+    ctx.dispatch_rpc(&mut sess_mate, "jumpCloneSvc", None, "AcceptShipCloneInstallation", &[], &kw, None)
+        .await
+        .expect("Accept clone on Rorqual");
+
+    let (titan_clone_id, rorq_clone_id) = ctx.db.with_snapshot(|s| {
+        let clones = s.jump_clones.get(&c_mate).unwrap();
+        let tc = clones.iter().find(|c| c.location_id == s_titan).unwrap().jump_clone_id;
+        let rc = clones.iter().find(|c| c.location_id == s_rorq).unwrap().jump_clone_id;
+        (tc, rc)
+    });
+
+    // 3. Dock fleetmate in Jita 4-4 NPC station (60_003_760) in a Capsule (670) and test `jumpCloneSvc.CloneJump` to the ship clone!
+    let jita_pod_id = 101_000_999_i64;
+    let _ = sys_handle.remove_ball(s_mate).await;
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(
+            jita_pod_id,
+            InventoryItemRecord {
+                item_id: jita_pod_id,
+                type_id: 670,
+                owner_id: c_mate,
+                location_id: jita_station,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        let ch = s.characters.get_mut(&c_mate).unwrap();
+        ch.solar_system_id = jita_sys;
+        ch.station_id = Some(jita_station);
+        ch.structure_id = None;
+        ch.active_ship_id = jita_pod_id;
+        s.items.get_mut(&s_mate).unwrap().location_id = jita_station;
+        s.items.get_mut(&s_mate).unwrap().flag = InventoryFlag::Hangar;
+    });
+    sess_mate.solar_system_id = Some(jita_sys);
+    sess_mate.station_id = Some(jita_station);
+    sess_mate.ship_id = Some(jita_pod_id);
+
+    // Negative check: leaving fleet blocks `CloneJump` to ship clone!
+    ctx.db.with_mut_snapshot(|s| {
+        s.fleets.get_mut(&889).unwrap().members.retain(|&m| m != c_mate);
+    });
+    sess_mate.fleet_id = None;
+    let left_fleet_err = ctx
+        .dispatch_rpc(
+            &mut sess_mate,
+            "jumpCloneSvc",
+            None,
+            "CloneJump",
+            &[PyRep::Integer(titan_clone_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Non-fleet pilot cannot CloneJump into ship Clone Vat Bay");
+    assert_eq!(left_fleet_err.code, "NotInHostShipFleet");
+
+    // Rejoin fleet, set non-trivial corp/alliance/sec-status on jumper, and verify live Ballpark position + cloak checks + SlimItemMeta!
+    let (mate_corp, mate_alliance) = (98_000_777_i64, 99_000_777_i64);
+    let moved_titan_pos = DVec3::new(7_500_000_000.0, 250_000.0, -100_000.0);
+    let _ = sys_handle.set_ball_position(s_titan, moved_titan_pos).await;
+    ctx.db.with_mut_snapshot(|s| {
+        s.fleets.get_mut(&889).unwrap().members.push(c_mate);
+        // Deliberately leave stale `[0, 0, 0]` in `item_positions` to prove live Ballpark coordinates are used!
+        s.item_positions.insert(s_titan, [0.0, 0.0, 0.0]);
+        let ch = s.characters.get_mut(&c_mate).unwrap();
+        ch.corporation_id = mate_corp;
+        ch.alliance_id = Some(mate_alliance);
+        ch.security_status = 2.75;
+    });
+    sess_mate.fleet_id = Some(889);
+    sess_mate.corporation_id = Some(mate_corp);
+
+    // Negative check: Cloaked host Titan must block `CloneJump`!
+    assert!(sys_handle.try_update_combat_state(s_titan, |cs| cs.is_cloaked = true));
+    let cloaked_jump_err = ctx
+        .dispatch_rpc(
+            &mut sess_mate,
+            "jumpCloneSvc",
+            None,
+            "CloneJump",
+            &[PyRep::Integer(titan_clone_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Cloaked host Titan must reject CloneJump");
+    assert_eq!(cloaked_jump_err.code, "ShipCloaked");
+    assert!(sys_handle.try_update_combat_state(s_titan, |cs| cs.is_cloaked = false));
+
+    ctx.dispatch_rpc(
+        &mut sess_mate,
+        "jumpCloneSvc",
+        None,
+        "CloneJump",
+        &[PyRep::Integer(titan_clone_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Fleet member CloneJumps to active uncloaked Titan Clone Vat Bay");
+
+    assert_eq!(sess_mate.solar_system_id, Some(sys_host));
+    assert_eq!(sess_mate.station_id, None, "Ship clone jump places pilot in space, not docked");
+    assert_eq!(sess_mate.structure_id, None);
+    let pod_id = sess_mate.ship_id.expect("spawned capsule ID");
+    let pod_type = ctx.db.with_snapshot(|s| s.items.get(&pod_id).map(|i| i.type_id));
+    assert_eq!(pod_type, Some(670), "Jumper spawned in Capsule (type 670)");
+    let (_, pod_ball) = sys_handle.get_ball_snapshot(pod_id).await.unwrap().expect("Capsule ball in space");
+    assert!((pod_ball.position - moved_titan_pos).length() < 10_000.0, "Capsule spawned adjacent to live Titan Ball coordinates, not stale [0,0,0]");
+    let pod_meta = sys_handle.ballpark.read().unwrap().ball_slim_meta.get(&pod_id).cloned().expect("Capsule SlimItemMeta");
+    assert_eq!(pod_meta.corp_id, mate_corp, "SlimItemMeta populated with jumper corporation_id");
+    assert_eq!(pod_meta.alliance_id, mate_alliance, "SlimItemMeta populated with jumper alliance_id");
+    assert!((pod_meta.security_status - 2.75).abs() < 1e-6, "SlimItemMeta populated with jumper security_status");
+
+    // 4. Dock mate back in Jita, verify missing live Ballpark host ball rejects CloneJump even while DB CloneVatBayState is active, then verify cycle expiry!
+    let _ = sys_handle.remove_ball(pod_id).await;
+    ctx.db.with_mut_snapshot(|s| {
+        let ch = s.characters.get_mut(&c_mate).unwrap();
+        ch.solar_system_id = jita_sys;
+        ch.station_id = Some(jita_station);
+        ch.active_ship_id = jita_pod_id;
+        ch.last_clone_jump_unix = 0;
+    });
+    sess_mate.solar_system_id = Some(jita_sys);
+    sess_mate.station_id = Some(jita_station);
+    sess_mate.ship_id = Some(jita_pod_id);
+    ctx.advance_secs(15);
+
+    let (_, saved_rorq_ball) = sys_handle.get_ball_snapshot(s_rorq).await.unwrap().unwrap();
+    let saved_rorq_cs = sys_handle.get_combat_state(s_rorq).await.unwrap().unwrap();
+    let _ = sys_handle.remove_ball(s_rorq).await;
+    let missing_ball_err = ctx
+        .dispatch_rpc(
+            &mut sess_mate,
+            "jumpCloneSvc",
+            None,
+            "CloneJump",
+            &[PyRep::Integer(rorq_clone_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Missing live Ballpark host ship must block CloneJump");
+    assert_eq!(missing_ball_err.code, "NoActiveCloneVatBay");
+    let _ = sys_handle.spawn_ball_with_combat(saved_rorq_ball, saved_rorq_cs).await;
+
+    ctx.advance_secs(305);
+    sys_handle.step_manual(305.0).await.unwrap();
+
+    let expired_offer_err = ctx
+        .dispatch_rpc(
+            &mut sess_rorq,
+            "jumpCloneSvc",
+            None,
+            "OfferShipCloneInstallation",
+            &[PyRep::Integer(c_mate), PyRep::Integer(s_rorq)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Expired Clone Vat Bay cycle blocks clone installation");
+    assert_eq!(expired_offer_err.code, "NoActiveCloneVatBay");
+
+    let expired_jump_err = ctx
+        .dispatch_rpc(
+            &mut sess_mate,
+            "jumpCloneSvc",
+            None,
+            "CloneJump",
+            &[PyRep::Integer(rorq_clone_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Expired Clone Vat Bay cycle blocks CloneJump");
+    assert_eq!(expired_jump_err.code, "NoActiveCloneVatBay");
+}
+
+}
+
+// Folded submodule: part4
+#[allow(unused_imports, dead_code)]
+mod part4 {
+    use super::*;
+
+// `open_feats_b39_part4` — Covert Cynosural Field & Covert Jump Portal Generator
+// (`feat:modules.covert-cyno-rules`, `feat:modules.covert-jump-portal-generator`).
+
+use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
+use eve_destiny::{Ball, MovementMode};
+use eve_machonet::SessionState;
+use eve_proto::PyRep;
+use eve_server::router::ServerContext;
+use glam::DVec3;
+use std::collections::HashMap;
+
+fn kv_get(rep: &PyRep, key: &str) -> Option<PyRep> {
+    match rep {
+        PyRep::Dict(_) => rep.dict_get(key).cloned(),
+        PyRep::KeyVal(map) => map.get(key).cloned(),
+        PyRep::Object { args, .. } => args.dict_get(key).cloned(),
+        _ => None,
+    }
+}
+
+async fn setup_pilot(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    ship_type_id: u32,
+    solar_system_id: u32,
+    position: DVec3,
+    corp_id: i64,
+) -> SessionState {
+    let mut sess = SessionState::new(char_id as u64);
+    sess.user_id = Some(char_id as u64);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(corp_id);
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(solar_system_id);
+
+    ctx.db.with_mut_snapshot(|s| {
+        let mut ch = s.characters.get(&90_000_001).cloned().unwrap();
+        ch.character_id = char_id;
+        ch.name = format!("Pilot-{char_id}");
+        ch.corporation_id = corp_id;
+        ch.alliance_id = None;
+        ch.solar_system_id = solar_system_id;
+        ch.active_ship_id = ship_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        s.characters.insert(char_id, ch);
+        s.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: ship_type_id,
+                owner_id: char_id,
+                location_id: solar_system_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        s.item_positions.insert(ship_id, [position.x, position.y, position.z]);
+    });
+
+    let ship_type = ctx.sde.types.get(&ship_type_id);
+    let handle = ctx.systems.get_or_spawn(solar_system_id);
+    let _ = handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: ship_type_id,
+                position,
+                velocity: DVec3::ZERO,
+                max_velocity: 250.0,
+                inertia: 0.5,
+                mass: ship_type.map(|t| t.mass).unwrap_or(1_500_000.0),
+                radius: ship_type.map(|t| t.radius).unwrap_or(50.0),
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_type_combat_state(ship_type_id),
+        )
+        .await;
+    sess
+}
+
+#[tokio::test]
+async fn test_b39_covert_cyno_rules() {
+    // parity: feat:modules.covert-cyno-rules
+    eve_testkit::attest(&["feat:modules.covert-cyno-rules"]);
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let sys_a = 30_000_012_u32; // Asabona (low-sec)
+    let sys_b = 30_000_014_u32; // Shamahi (low-sec, 2.10 LY from Asabona)
+
+    let c_cov = 91_000_041_i64;
+    let s_cov = 101_000_041_i64; // Hound (12034)
+    let c_prospect = 91_000_042_i64;
+    let s_prospect = 101_000_042_i64; // Prospect (33697)
+    let c_etana = 91_000_043_i64;
+    let s_etana = 101_000_043_i64; // Etana (32790)
+    let c_rabisu = 91_000_044_i64;
+    let s_rabisu = 101_000_044_i64; // Rabisu (42245)
+    let c_rifter = 91_000_045_i64;
+    let s_rifter = 101_000_045_i64; // Rifter (587, non-covert)
+    let c_offgrid = 91_000_046_i64;
+    let s_offgrid = 101_000_046_i64; // 20,000 km away in sys_b (different grid bubble!)
+    let c_ongrid = 91_000_047_i64;
+    let s_ongrid = 101_000_047_i64; // 5 km away in sys_b (same grid bubble!)
+
+    let mut sess_cov = setup_pilot(&ctx, c_cov, s_cov, 12034, sys_b, DVec3::new(100_000.0, 0.0, 0.0), 1_000_009).await;
+    let mut sess_prospect = setup_pilot(&ctx, c_prospect, s_prospect, 33697, sys_b, DVec3::new(200_000.0, 0.0, 0.0), 1_000_009).await;
+    let mut sess_etana = setup_pilot(&ctx, c_etana, s_etana, 32790, sys_b, DVec3::new(300_000.0, 0.0, 0.0), 1_000_009).await;
+    let mut sess_rabisu = setup_pilot(&ctx, c_rabisu, s_rabisu, 42245, sys_b, DVec3::new(400_000.0, 0.0, 0.0), 1_000_009).await;
+    let mut sess_rifter = setup_pilot(&ctx, c_rifter, s_rifter, 587, sys_b, DVec3::new(500_000.0, 0.0, 0.0), 1_000_009).await;
+    let mut sess_offgrid = setup_pilot(&ctx, c_offgrid, s_offgrid, 587, sys_b, DVec3::new(20_000_000.0, 0.0, 0.0), 1_000_010).await;
+    let mut sess_ongrid = setup_pilot(&ctx, c_ongrid, s_ongrid, 587, sys_b, DVec3::new(105_000.0, 0.0, 0.0), 1_000_010).await;
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.fleets.insert(
+            888,
+            eve_db::FleetRecord {
+                fleet_id: 888,
+                boss_id: c_cov,
+                members: vec![c_cov, c_prospect, c_etana, c_rabisu, c_rifter],
+                ..Default::default()
+            },
+        );
+        for (idx, (cid, sid)) in [
+            (c_cov, s_cov),
+            (c_prospect, s_prospect),
+            (c_etana, s_etana),
+            (c_rabisu, s_rabisu),
+            (c_rifter, s_rifter),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            s.skills.entry(cid).or_default().insert(
+                21603, // Cynosural Field Theory V
+                TrainedSkillRecord { type_id: 21603, level: 5, skill_points: 256_000.0 },
+            );
+            let mid = 101_000_800 + idx as i64;
+            let loid = 101_000_810 + idx as i64;
+            s.items.insert(
+                mid,
+                InventoryItemRecord {
+                    item_id: mid,
+                    type_id: 28646, // Covert Cynosural Field Generator I
+                    owner_id: cid,
+                    location_id: sid,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            s.module_online_states.insert(mid, true);
+            s.items.insert(
+                loid,
+                InventoryItemRecord {
+                    item_id: loid,
+                    type_id: 16273, // Liquid Ozone
+                    owner_id: cid,
+                    location_id: sid,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 200,
+                    singleton: false,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    for sess in [&mut sess_cov, &mut sess_prospect, &mut sess_etana, &mut sess_rabisu, &mut sess_rifter] {
+        sess.fleet_id = Some(888);
+    }
+
+    // 1. Requires Cynosural Field Theory V (CFT IV rejected) & fits only covert-cloak hulls + Etana/Prospect/Rabisu
+    ctx.db.with_mut_snapshot(|s| {
+        s.skills.get_mut(&c_cov).unwrap().get_mut(&21603).unwrap().level = 4;
+    });
+    let sk_err = ctx
+        .dispatch_rpc(&mut sess_cov, "dogmaIM", None, "Activate", &[PyRep::Integer(101_000_800)], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(sk_err.code, "SkillMissing");
+    ctx.db.with_mut_snapshot(|s| {
+        s.skills.get_mut(&c_cov).unwrap().get_mut(&21603).unwrap().level = 5;
+    });
+
+    let rifter_err = ctx
+        .dispatch_rpc(&mut sess_rifter, "dogmaIM", None, "Activate", &[PyRep::Integer(101_000_804)], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(rifter_err.code, "CannotLightCynoInSystem");
+
+    // Strategic Cruiser without Covert Reconfiguration subsystem cannot light Covert Cyno, then WITH 45589 succeeds!
+    let c_t3 = 91_000_048_i64;
+    let s_t3 = 101_000_048_i64;
+    let mut sess_t3 = setup_pilot(&ctx, c_t3, s_t3, 29984, sys_b, DVec3::new(600_000.0, 0.0, 0.0), 1_000_009).await;
+    sess_t3.fleet_id = Some(888);
+    ctx.db.with_mut_snapshot(|s| {
+        s.fleets.get_mut(&888).unwrap().members.push(c_t3);
+        s.skills.entry(c_t3).or_default().insert(21603, TrainedSkillRecord { type_id: 21603, level: 5, skill_points: 256_000.0 });
+        s.skills.entry(c_t3).or_default().insert(30544, TrainedSkillRecord { type_id: 30544, level: 5, skill_points: 256_000.0 });
+        s.items.insert(101_000_809, InventoryItemRecord { item_id: 101_000_809, type_id: 28646, owner_id: c_t3, location_id: s_t3, flag: InventoryFlag::HiSlot0, quantity: 1, singleton: true, ..Default::default() });
+        s.items.insert(101_000_819, InventoryItemRecord { item_id: 101_000_819, type_id: 16273, owner_id: c_t3, location_id: s_t3, flag: InventoryFlag::Cargo, quantity: 200, singleton: false, ..Default::default() });
+        s.module_online_states.insert(101_000_809, true);
+    });
+    ctx.invalidate_ship_fitting(s_t3);
+    assert_eq!(ctx.dispatch_rpc(&mut sess_t3, "dogmaIM", None, "Activate", &[PyRep::Integer(101_000_809)], &kw, None).await.unwrap_err().code, "CannotLightCynoInSystem");
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(101_000_829, InventoryItemRecord { item_id: 101_000_829, type_id: 45589, owner_id: c_t3, location_id: s_t3, flag: InventoryFlag::SubSystemSlot1, quantity: 1, singleton: true, ..Default::default() });
+        s.module_online_states.insert(101_000_829, true);
+    });
+    ctx.invalidate_ship_fitting(s_t3);
+    ctx.dispatch_rpc(&mut sess_t3, "dogmaIM", None, "Activate", &[PyRep::Integer(101_000_809)], &kw, None).await.expect("Tengu with Covert Reconfiguration lights Covert Cyno");
+
+    // 2. Cyno-jammed system: normal cyno (21096) on Force Recon (Pilgrim 11965) fails with CynoJammed, while Covert Cyno succeeds!
+    let c_pilgrim = 91_000_047_i64;
+    let s_pilgrim = 101_000_047_i64;
+    let mut sess_pilgrim = setup_pilot(&ctx, c_pilgrim, s_pilgrim, 11965, sys_b, DVec3::new(110_000.0, 0.0, 0.0), 1_000_009).await;
+    sess_pilgrim.fleet_id = Some(888);
+    ctx.db.with_mut_snapshot(|s| {
+        s.fleets.get_mut(&888).unwrap().members.push(c_pilgrim);
+        s.skills.entry(c_pilgrim).or_default().insert(21603, TrainedSkillRecord { type_id: 21603, level: 5, skill_points: 256_000.0 });
+        s.items.insert(
+            999_001,
+            InventoryItemRecord {
+                item_id: 999_001, type_id: 33700, owner_id: 1, location_id: sys_b as i64,
+                flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
+            },
+        );
+        s.items.insert(
+            101_000_820,
+            InventoryItemRecord {
+                item_id: 101_000_820, type_id: 21096, owner_id: c_pilgrim, location_id: s_pilgrim,
+                flag: InventoryFlag::HiSlot1, quantity: 1, singleton: true, ..Default::default()
+            },
+        );
+        s.items.insert(
+            101_000_821,
+            InventoryItemRecord {
+                item_id: 101_000_821, type_id: 16273, owner_id: c_pilgrim, location_id: s_pilgrim,
+                flag: InventoryFlag::Cargo, quantity: 500, singleton: false, ..Default::default()
+            },
+        );
+    });
+    let norm_jam_err = ctx
+        .dispatch_rpc(&mut sess_pilgrim, "dogmaIM", None, "Activate", &[PyRep::Integer(101_000_820)], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(norm_jam_err.code, "CynoJammed");
+
+    let cov_rep = ctx
+        .dispatch_rpc(&mut sess_cov, "dogmaIM", None, "Activate", &[PyRep::Integer(101_000_800)], &kw, None)
+        .await
+        .expect("Hound lights Covert Cyno in cyno-jammed system");
+    let cov_beacon_id = kv_get(&cov_rep, "beaconID").and_then(|v| v.as_i64()).unwrap();
+
+    // Verify 1/10 cycle time (60s vs 600s) and 1/10 fuel (25 LO vs 250 LO at CFT V)
+    assert_eq!(kv_get(&cov_rep, "durationSeconds").and_then(|v| v.as_f64()), Some(60.0));
+    assert_eq!(kv_get(&cov_rep, "consumptionQuantity").and_then(|v| v.as_i64()), Some(25));
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&101_000_810).unwrap().quantity), 175);
+
+    // Prospect (33697), Etana (32790), and Rabisu (42245) all successfully light Covert Cyno!
+    for (sess, mid) in [
+        (&mut sess_prospect, 101_000_801_i64),
+        (&mut sess_etana, 101_000_802_i64),
+        (&mut sess_rabisu, 101_000_803_i64),
+    ] {
+        ctx.dispatch_rpc(sess, "dogmaIM", None, "Activate", &[PyRep::Integer(mid)], &kw, None)
+            .await
+            .expect("Special hull (Prospect/Etana/Rabisu) lights Covert Cyno");
+    }
+
+    // 3. On-grid-only visibility: hidden from `map.GetBeaconCount` and off-grid `scanMgr.ConeScan`, visible to on-grid `scanMgr.ConeScan`!
+    let map_counts = ctx.dispatch_rpc(&mut sess_cov, "map", None, "GetBeaconCount", &[], &kw, None).await.unwrap();
+    let sys_b_entry = match &map_counts {
+        PyRep::Dict(d) => d.iter().find(|(k, _)| k.as_i64() == Some(sys_b as i64)),
+        _ => None,
+    };
+    assert!(sys_b_entry.is_none(), "Covert cyno hidden from system map beacon count");
+
+    let au_m = 14.3 * 149_597_870_700.0;
+    let offgrid_dscan = ctx
+        .dispatch_rpc(&mut sess_offgrid, "scanMgr", None, "ConeScan", &[PyRep::Real(360.0), PyRep::Real(au_m)], &kw, None)
+        .await
+        .unwrap();
+    let offgrid_list = match &offgrid_dscan {
+        PyRep::List(l) => l,
+        _ => panic!("ConeScan list"),
+    };
+    let offgrid_sees_beacon = offgrid_list.iter().any(|entry| kv_get(entry, "itemID").and_then(|v| v.as_i64()) == Some(cov_beacon_id));
+    assert!(!offgrid_sees_beacon, "Off-grid ship cannot see Covert Cyno on D-Scan");
+
+    let ongrid_dscan = ctx
+        .dispatch_rpc(&mut sess_ongrid, "scanMgr", None, "ConeScan", &[PyRep::Real(360.0), PyRep::Real(au_m)], &kw, None)
+        .await
+        .unwrap();
+    let ongrid_list = match &ongrid_dscan {
+        PyRep::List(l) => l,
+        _ => panic!("ConeScan list"),
+    };
+    let ongrid_sees_beacon = ongrid_list.iter().any(|entry| kv_get(entry, "itemID").and_then(|v| v.as_i64()) == Some(cov_beacon_id));
+    assert!(ongrid_sees_beacon, "On-grid ship sees Covert Cyno on grid");
+
+    // 4. Jump & bridge restrictions: ONLY Black Ops can jump or bridge to a Covert Cyno (Dreadnought & Titan rejected)
+    let c_titan = 91_000_049_i64;
+    let s_titan = 101_000_049_i64;
+    let mut sess_titan = setup_pilot(&ctx, c_titan, s_titan, 11567, sys_a, DVec3::new(100_000.0, 0.0, 0.0), 1_000_009).await;
+    let c_blops = 91_000_059_i64;
+    let s_blops = 101_000_059_i64;
+    let mut sess_blops = setup_pilot(&ctx, c_blops, s_blops, 22428, sys_a, DVec3::new(105_000.0, 0.0, 0.0), 1_000_009).await;
+    sess_titan.fleet_id = Some(888);
+    sess_blops.fleet_id = Some(888);
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.fleets.get_mut(&888).unwrap().members.extend([c_titan, c_blops]);
+        for cid in [c_titan, c_blops] {
+            s.skills.entry(cid).or_default().insert(3456, TrainedSkillRecord { type_id: 3456, level: 5, skill_points: 256_000.0 });
+            s.skills.entry(cid).or_default().insert(24562, TrainedSkillRecord { type_id: 24562, level: 5, skill_points: 256_000.0 });
+        }
+        // Standard Jump Portal Generator I (23953) on Titan
+        s.items.insert(
+            101_000_830,
+            InventoryItemRecord {
+                item_id: 101_000_830, type_id: 23953, owner_id: c_titan, location_id: s_titan,
+                flag: InventoryFlag::HiSlot0, quantity: 1, singleton: true, ..Default::default()
+            },
+        );
+        // Helium Isotopes on Black Ops
+        s.items.insert(
+            101_000_831,
+            InventoryItemRecord {
+                item_id: 101_000_831, type_id: 16274, owner_id: c_blops, location_id: s_blops,
+                flag: InventoryFlag::SpecializedFuelBay, quantity: 50_000, singleton: false, ..Default::default()
+            },
+        );
+    });
+
+    let titan_jump_err = ctx
+        .dispatch_rpc(
+            &mut sess_titan,
+            "beyonce",
+            None,
+            "CmdJumpToFleetModuleBeacon",
+            &[PyRep::Integer(c_cov), PyRep::Integer(sys_b as i64), PyRep::Integer(cov_beacon_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(titan_jump_err.code, "ShipCannotJumpToBeacon");
+
+    let titan_bridge_err = ctx
+        .dispatch_rpc(
+            &mut sess_titan,
+            "beyonce",
+            None,
+            "CmdBridgeToFleetModuleBeacon",
+            &[PyRep::Integer(c_cov), PyRep::Integer(sys_b as i64), PyRep::Integer(cov_beacon_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(titan_bridge_err.code, "ShipCannotBridgeToBeacon");
+
+    ctx.dispatch_rpc(
+        &mut sess_blops,
+        "beyonce",
+        None,
+        "CmdJumpToFleetModuleBeacon",
+        &[PyRep::Integer(c_cov), PyRep::Integer(sys_b as i64), PyRep::Integer(cov_beacon_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Black Ops jumps to Covert Cynosural Field");
+}
+
+#[tokio::test]
+async fn test_b39_covert_jump_portal_generator_all_hulls_and_fuel() {
+    // parity: feat:modules.covert-jump-portal-generator
+    eve_testkit::attest(&["feat:modules.covert-jump-portal-generator"]);
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let sys_a = 30_000_012_u32; // Asabona
+    let sys_b = 30_000_014_u32; // Shamahi (2.10 LY)
+
+    let c_cyno = 91_000_101_i64;
+    let s_cyno = 101_000_101_i64;
+    let c_bo = 91_000_102_i64;
+    let s_bo = 101_000_102_i64;
+    let bo_pos = DVec3::new(100_000.0, 0.0, 0.0);
+
+    let mut sess_cyno = setup_pilot(&ctx, c_cyno, s_cyno, 12034, sys_b, DVec3::new(100_000.0, 0.0, 0.0), 1_000_009).await;
+    let mut sess_bo = setup_pilot(&ctx, c_bo, s_bo, 22428, sys_a, bo_pos, 1_000_009).await;
+
+    // 6 eligible covert passenger hulls + 2 ineligible hulls (Tengu WITHOUT covert subsystem & Rifter)
+    let passengers = [
+        (91_000_111_i64, 101_000_111_i64, 12034_u32, true),  // Stealth Bomber (Hound, 1.455M kg)
+        (91_000_112_i64, 101_000_112_i64, 11188_u32, true),  // Covert Ops Frigate (Anathema)
+        (91_000_113_i64, 101_000_113_i64, 11965_u32, true),  // Force Recon (Pilgrim)
+        (91_000_114_i64, 101_000_114_i64, 12729_u32, true),  // Blockade Runner (Crane, 11M kg)
+        (91_000_115_i64, 101_000_115_i64, 29984_u32, true),  // Strategic Cruiser (Tengu WITH 45589 Covert Reconfiguration)
+        (91_000_118_i64, 101_000_118_i64, 22428_u32, true),  // Black Ops (Redeemer)
+        (91_000_116_i64, 101_000_116_i64, 29984_u32, false), // Strategic Cruiser WITHOUT covert subsystem -> rejected!
+        (91_000_117_i64, 101_000_117_i64, 587_u32, false),   // Non-covert Rifter -> rejected!
+    ];
+
+    let mut p_sessions = Vec::new();
+    for (idx, &(cid, sid, tid, _)) in passengers.iter().enumerate() {
+        let mut ps = setup_pilot(
+            &ctx,
+            cid,
+            sid,
+            tid,
+            sys_a,
+            bo_pos + DVec3::new(300.0 + (idx as f64) * 100.0, 0.0, 0.0),
+            1_000_009,
+        )
+        .await;
+        ps.fleet_id = Some(999);
+        p_sessions.push(ps);
+    }
+    sess_cyno.fleet_id = Some(999);
+    sess_bo.fleet_id = Some(999);
+
+    let cyno_mod = 101_000_901_i64;
+    let portal_mod = 101_000_902_i64;
+    let bo_fuel_bay_id = 101_000_903_i64;
+    let bo_cargo_fuel_id = 101_000_904_i64;
+    let tengu_cov_sub_id = 101_000_905_i64;
+
+    ctx.db.with_mut_snapshot(|s| {
+        let mut members = vec![c_cyno, c_bo];
+        members.extend(passengers.iter().map(|p| p.0));
+        s.fleets.insert(
+            999,
+            eve_db::FleetRecord { fleet_id: 999, boss_id: c_bo, members, ..Default::default() },
+        );
+        s.skills.entry(c_cyno).or_default().insert(21603, TrainedSkillRecord { type_id: 21603, level: 5, skill_points: 256_000.0 });
+        s.skills.entry(c_bo).or_default().insert(24562, TrainedSkillRecord { type_id: 24562, level: 5, skill_points: 256_000.0 });
+        s.skills.entry(c_bo).or_default().insert(21610, TrainedSkillRecord { type_id: 21610, level: 4, skill_points: 90_510.0 }); // Jump Fuel Conservation IV
+        for t3_cid in [91_000_115_i64, 91_000_116_i64] {
+            s.skills.entry(t3_cid).or_default().insert(30544, TrainedSkillRecord { type_id: 30544, level: 5, skill_points: 256_000.0 }); // Caldari Defensive Systems V
+        }
+
+        s.items.insert(
+            cyno_mod,
+            InventoryItemRecord {
+                item_id: cyno_mod, type_id: 28646, owner_id: c_cyno, location_id: s_cyno,
+                flag: InventoryFlag::HiSlot0, quantity: 1, singleton: true, ..Default::default()
+            },
+        );
+        s.items.insert(
+            101_000_910,
+            InventoryItemRecord {
+                item_id: 101_000_910, type_id: 16273, owner_id: c_cyno, location_id: s_cyno,
+                flag: InventoryFlag::Cargo, quantity: 200, singleton: false, ..Default::default()
+            },
+        );
+        s.items.insert(
+            portal_mod,
+            InventoryItemRecord {
+                item_id: portal_mod, type_id: 28652, owner_id: c_bo, location_id: s_bo,
+                flag: InventoryFlag::HiSlot0, quantity: 1, singleton: true, ..Default::default()
+            },
+        );
+        // Put Helium Isotopes (16274) in BOTH SpecializedFuelBay and Cargo to verify SpecializedFuelBay priority
+        s.items.insert(
+            bo_fuel_bay_id,
+            InventoryItemRecord {
+                item_id: bo_fuel_bay_id, type_id: 16274, owner_id: c_bo, location_id: s_bo,
+                flag: InventoryFlag::SpecializedFuelBay, quantity: 100_000, singleton: false, ..Default::default()
+            },
+        );
+        s.items.insert(
+            bo_cargo_fuel_id,
+            InventoryItemRecord {
+                item_id: bo_cargo_fuel_id, type_id: 16274, owner_id: c_bo, location_id: s_bo,
+                flag: InventoryFlag::Cargo, quantity: 20_000, singleton: false, ..Default::default()
+            },
+        );
+        // Fit Tengu Defensive - Covert Reconfiguration (45589) ONLY on passenger #4 (101_000_115)
+        s.items.insert(
+            tengu_cov_sub_id,
+            InventoryItemRecord {
+                item_id: tengu_cov_sub_id,
+                type_id: 45589,
+                owner_id: 91_000_115,
+                location_id: 101_000_115,
+                flag: InventoryFlag::SubSystemSlot1,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        s.module_online_states.insert(tengu_cov_sub_id, true);
+    });
+    ctx.invalidate_ship_fitting(101_000_115);
+    ctx.invalidate_ship_fitting(101_000_116);
+
+    let cyno_rep = ctx
+        .dispatch_rpc(&mut sess_cyno, "dogmaIM", None, "Activate", &[PyRep::Integer(cyno_mod)], &kw, None)
+        .await
+        .expect("Light Covert Cyno");
+    let cov_beacon_id = kv_get(&cyno_rep, "beaconID").and_then(|v| v.as_i64()).unwrap();
+
+    // Negative check: Covert Jump Portal Generator cannot bridge to a normal non-covert cyno!
+    let c_norm = 91_000_199_i64;
+    let s_norm = 101_000_199_i64;
+    let mut sess_norm = setup_pilot(&ctx, c_norm, s_norm, 11965, sys_b, DVec3::new(300_000.0, 0.0, 0.0), 1_000_009).await;
+    sess_norm.fleet_id = Some(999);
+    ctx.db.with_mut_snapshot(|s| {
+        s.fleets.get_mut(&999).unwrap().members.push(c_norm);
+        s.skills.entry(c_norm).or_default().insert(21603, TrainedSkillRecord { type_id: 21603, level: 5, skill_points: 256_000.0 });
+        s.items.insert(101_000_998, InventoryItemRecord { item_id: 101_000_998, type_id: 21096, owner_id: c_norm, location_id: s_norm, flag: InventoryFlag::HiSlot0, quantity: 1, singleton: true, ..Default::default() });
+        s.items.insert(101_000_999, InventoryItemRecord { item_id: 101_000_999, type_id: 16273, owner_id: c_norm, location_id: s_norm, flag: InventoryFlag::Cargo, quantity: 500, singleton: false, ..Default::default() });
+    });
+    let norm_rep = ctx.dispatch_rpc(&mut sess_norm, "dogmaIM", None, "Activate", &[PyRep::Integer(101_000_998)], &kw, None).await.unwrap();
+    let norm_beacon_id = kv_get(&norm_rep, "beaconID").and_then(|v| v.as_i64()).unwrap();
+    let norm_bridge_err = ctx
+        .dispatch_rpc(
+            &mut sess_bo,
+            "beyonce",
+            None,
+            "CmdBridgeToFleetModuleBeacon",
+            &[PyRep::Integer(c_norm), PyRep::Integer(sys_b as i64), PyRep::Integer(norm_beacon_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Covert Jump Portal Generator must NEVER bridge onto a normal cyno");
+    assert_eq!(norm_bridge_err.code, "ShipCannotBridgeToBeacon");
+
+    // Open Covert Jump Portal to Covert Cynosural Field
+    ctx.dispatch_rpc(
+        &mut sess_bo,
+        "beyonce",
+        None,
+        "CmdBridgeToFleetModuleBeacon",
+        &[PyRep::Integer(c_cyno), PyRep::Integer(sys_b as i64), PyRep::Integer(cov_beacon_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Black Ops opens Covert Jump Portal to Covert Cyno");
+
+    // Non-covert Tengu (#6) and Rifter (#7) are rejected with JumpBridgeRestrictedShip
+    for bad_idx in [6_usize, 7_usize] {
+        let err = ctx
+            .dispatch_rpc(
+                &mut p_sessions[bad_idx],
+                "beyonce",
+                None,
+                "CmdJumpThroughFleet",
+                &[PyRep::Integer(c_bo), PyRep::Integer(s_bo)],
+                &kw,
+                None,
+            )
+            .await
+            .expect_err("Non-covert hull must be rejected by Covert Jump Portal");
+        assert_eq!(err.code, "JumpBridgeRestrictedShip");
+    }
+
+    // All 6 covert-capable hull classes (Stealth Bomber, Covert Ops, Force Recon, Blockade Runner, Covert Tengu, Black Ops) jump through!
+    let mut fuels_by_hull = Vec::new();
+    for ok_idx in 0..6_usize {
+        let fb_before = ctx.db.with_snapshot(|s| s.items.get(&bo_fuel_bay_id).unwrap().quantity);
+        let jump_rep = ctx
+            .dispatch_rpc(
+                &mut p_sessions[ok_idx],
+                "beyonce",
+                None,
+                "CmdJumpThroughFleet",
+                &[PyRep::Integer(c_bo), PyRep::Integer(s_bo)],
+                &kw,
+                None,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("Eligible covert passenger #{ok_idx} failed: {e:?}"));
+        let consumed = kv_get(&jump_rep, "fuelConsumed").and_then(|v| v.as_i64()).unwrap();
+        let fb_after = ctx.db.with_snapshot(|s| s.items.get(&bo_fuel_bay_id).unwrap().quantity);
+        assert_eq!((fb_before - fb_after) as i64, consumed, "Fuel deducted from Black Ops SpecializedFuelBay first");
+        assert_eq!(p_sessions[ok_idx].solar_system_id, Some(sys_b));
+        fuels_by_hull.push(consumed);
+    }
+
+    // Cargo isotopes untouched because SpecializedFuelBay had plenty, and heavier Crane (11M kg) used >7x more isotopes than Hound (1.455M kg)!
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&bo_cargo_fuel_id).unwrap().quantity), 20_000);
+    assert!(
+        fuels_by_hull[3] > fuels_by_hull[0] * 6,
+        "Isotope consumption scales with ship mass * LY: Crane={} vs Hound={}",
+        fuels_by_hull[3],
+        fuels_by_hull[0]
+    );
+
+    // Bubbled vs point-scrambled Black Ops host (`B39-REV-P0-01`):
+    // Inside a warp disruption bubble (`warp_scramble_strength == 0`), jumping self is blocked (`WarpScrambled`),
+    // whereas opening a Covert Jump Portal (`CmdBridgeToFleetModuleBeacon`) SUCCEEDS; targeted point-scramble blocks both!
+    ctx.advance_secs(65);
+    let cyno_rep2 = ctx.dispatch_rpc(&mut sess_cyno, "dogmaIM", None, "Activate", &[PyRep::Integer(cyno_mod)], &kw, None).await.expect("Re-light Covert Cyno");
+    let cov_beacon_id2 = kv_get(&cyno_rep2, "beaconID").and_then(|v| v.as_i64()).unwrap();
+    let sys_a_h = ctx.systems.get_or_spawn(sys_a);
+    assert!(sys_a_h.add_interdiction_sphere(101_000_977, bo_pos, 20_000.0).await.unwrap());
+    assert!(sys_a_h.is_ball_scrambled(s_bo).await.unwrap(), "Black Ops is inside warp disruption bubble");
+    let bubbled_jump_err = ctx
+        .dispatch_rpc(
+            &mut sess_bo,
+            "beyonce",
+            None,
+            "CmdJumpToFleetModuleBeacon",
+            &[PyRep::Integer(c_cyno), PyRep::Integer(sys_b as i64), PyRep::Integer(cov_beacon_id2)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Self-jumping out of warp disruption bubble must fail");
+    assert_eq!(bubbled_jump_err.code, "WarpScrambled");
+
+    ctx.dispatch_rpc(
+        &mut sess_bo,
+        "beyonce",
+        None,
+        "CmdBridgeToFleetModuleBeacon",
+        &[PyRep::Integer(c_cyno), PyRep::Integer(sys_b as i64), PyRep::Integer(cov_beacon_id2)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Non-point-scrambled Black Ops inside a warp disruption bubble opens Covert Jump Portal");
+
+    sys_a_h.set_warp_scramble_strength(s_bo, 2).await.unwrap();
+    let point_scram_err = ctx
+        .dispatch_rpc(
+            &mut sess_bo,
+            "beyonce",
+            None,
+            "CmdBridgeToFleetModuleBeacon",
+            &[PyRep::Integer(c_cyno), PyRep::Integer(sys_b as i64), PyRep::Integer(cov_beacon_id2)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Targeted warp scrambler must block Covert Jump Portal activation");
+    assert_eq!(point_scram_err.code, "WarpScrambled");
+}
+
+}
