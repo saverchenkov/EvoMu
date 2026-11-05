@@ -1278,15 +1278,28 @@ pub fn dispatch_operation(
         }
 
         // Delegate Universe, Routes, Search, Sovereignty, and User Interface tags
-        _ => super::universe_routes::dispatch_universe_and_nav(
-            ctx,
-            method,
-            path_pattern,
-            path_params,
-            query_params,
-            claims,
-            page,
-            req_body,
-        ),
+        _ => {
+            if let Some(res) = super::ui_routes::dispatch_ui_route(
+                ctx,
+                method,
+                path_pattern,
+                path_params,
+                query_params,
+                claims,
+                req_body,
+            ) {
+                return res;
+            }
+            super::universe_routes::dispatch_universe_and_nav(
+                ctx,
+                method,
+                path_pattern,
+                path_params,
+                query_params,
+                claims,
+                page,
+                req_body,
+            )
+        }
     }
 }

@@ -212,7 +212,7 @@ pub async fn handle(
         ("cache", "Rowset") => {
             let table_name = args.first().and_then(|a| a.as_str()).unwrap_or("roles");
             let rowset = match table_name {
-                "roles" => {
+                "corpmgt__roles" | "roles" => {
                     let rows = crate::esi::corp_governance_routes::CORP_ROLE_DEFINITIONS
                         .iter()
                         .map(|&(bit, client_name, _)| {

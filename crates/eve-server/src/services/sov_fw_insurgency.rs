@@ -1020,19 +1020,51 @@ pub async fn handle(
                             .corporations
                             .get(&s.owner_corp_id)
                             .and_then(|c| c.alliance_id);
-                        PyRep::keyval([
+
+                        let sys_state = snap.system_states.get(&sys_id);
+                        let adm = sys_state
+                            .map(|st| {
+                                crate::services::sov_services::calculate_adm(
+                                    st.military_index,
+                                    st.industrial_index,
+                                    st.strategic_index,
+                                )
+                            })
+                            .unwrap_or(1.0);
+
+                        let mut shield_frac = 1.0;
+                        let mut armor_frac = 1.0;
+                        let mut hull_frac = 1.0;
+                        if s.shield_hp <= 0.0 { shield_frac = 0.0; }
+                        if s.armor_hp <= 0.0 { armor_frac = 0.0; }
+                        if s.hull_hp <= 0.0 { hull_frac = 0.0; }
+
+                        let mut rep_map = vec![
                             ("itemID", PyRep::Integer(s.structure_id)),
                             ("structureID", PyRep::Integer(s.structure_id)),
                             ("typeID", PyRep::Integer(s.type_id as i64)),
-                            ("corporationID", PyRep::Integer(s.owner_corp_id)),
-                            (
-                                "allianceID",
-                                struct_aid.map(PyRep::Integer).unwrap_or(PyRep::None),
-                            ),
+                            ("ownerID", PyRep::Integer(s.owner_corp_id)),
+                            ("allianceID", struct_aid.map(PyRep::Integer).unwrap_or(PyRep::None)),
                             ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                            ("vulnerabilityOccupancyLevel", PyRep::Real(adm)),
                             ("vulnerableStartTime", PyRep::Integer(vuln_start_ft)),
                             ("vulnerableEndTime", PyRep::Integer(vuln_end_ft)),
-                        ])
+                            ("shieldFraction", PyRep::Real(shield_frac)),
+                            ("armorFraction", PyRep::Real(armor_frac)),
+                            ("hullFraction", PyRep::Real(hull_frac)),
+                        ];
+
+                        if let Some(_c) = snap.sov_campaign_scores.get(&s.structure_id) {
+                            rep_map.push(("campaignEventType", PyRep::Integer(s.type_id as i64)));
+                            rep_map.push(("campaignOccupancyLevel", PyRep::Real(adm)));
+                            rep_map.push(("campaignStartTime", PyRep::Integer(0))); // Not currently tracked in campaign score
+                        } else {
+                            rep_map.push(("campaignEventType", PyRep::None));
+                            rep_map.push(("campaignOccupancyLevel", PyRep::None));
+                            rep_map.push(("campaignStartTime", PyRep::None));
+                        }
+
+                        PyRep::keyval(rep_map)
                     })
                     .collect::<Vec<PyRep>>()
             });

@@ -120,7 +120,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
         "eve.plex.vault.assetholding.operation.api.DepositRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             require_admin_role(ctx)?;
-            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+            let uid = ctx.effective_user_id().filter(|&u| u > 0).ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))? as u64;
             let deposit_amount = if let Some(DynamicValue::Message(c)) = dyn_msg.get(3) {
                 if let Some(DynamicValue::Int64(amt)) | Some(DynamicValue::Sint64(amt)) = c.get(1) {
                     *amt / 100
@@ -185,7 +185,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
         "eve.plex.vault.assetholding.operation.api.WithdrawRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             require_admin_role(ctx)?;
-            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+            let uid = ctx.effective_user_id().filter(|&u| u > 0).ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))? as u64;
             let withdraw_amount = if let Some(DynamicValue::Message(c)) = dyn_msg.get(3) {
                 if let Some(DynamicValue::Int64(amt)) | Some(DynamicValue::Sint64(amt)) = c.get(1) {
                     *amt / 100
@@ -471,7 +471,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     router.register_handler(
         "eve_public.store.targetaudience.offer.api.ListRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+            let uid = ctx.effective_user_id().filter(|&u| u > 0).ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))? as u64;
             let cat = db_ta_list.with_snapshot(read_store_catalog);
             let out = encode_targeted_offer_list_response(&cat.offers, uid, dyn_msg);
             Ok(GoogleAny {
@@ -782,7 +782,7 @@ fn register_payment_token_and_purchase_handlers(
         "eve.fulfillment.api.DeliverItemRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             require_admin_role(ctx)?;
-            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+            let uid = ctx.effective_user_id().filter(|&u| u > 0).ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))? as u64;
             let type_id = if let Some(DynamicValue::Message(item_type)) = dyn_msg.get(2) {
                 if let Some(DynamicValue::Int32(t)) = item_type.get(1) { *t as u32 } else { 44992 }
             } else {

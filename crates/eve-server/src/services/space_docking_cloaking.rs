@@ -116,23 +116,25 @@ pub fn derive_wormhole_buckets_for_type(
         ">1 day"
     };
 
-    // Show-info lifetime strings for the 3 remaining-lifetime bands (>24h, 4h-24h, <4h).
+    // Show-info lifetime strings for the 4 remaining-lifetime bands (>24h, 4h-24h, <4h, <1h).
     let lifetime_description = if remaining_seconds > 24 * 3_600 && !collapsed {
-        "This wormhole has not yet begun to decay"
+        "This wormhole has not yet begun its natural cycle of decay and should last at least another day."
     } else if remaining_seconds >= 4 * 3_600 && !collapsed {
-        "This wormhole is beginning to decay, and probably won't last another day"
+        "This wormhole is beginning to decay, and probably won't last another day."
+    } else if remaining_seconds >= 3_600 && !collapsed {
+        "This wormhole is reaching the end of its natural lifetime."
     } else {
-        "This wormhole is reaching the end of its natural lifetime"
+        "This wormhole is on the verge of dissipating into the ether."
     };
 
     // DERIVED: Mass stability bucket threshold derived from remaining_mass_kg / sde_wormhole_types.max_stable_mass
     let mass_ratio = if eff_max_mass > 0.0 { remaining_mass_kg / eff_max_mass } else { 0.0 };
     let (mass_stability_bucket, mass_stability_description) = if remaining_mass_kg <= 0.0 || mass_ratio < 0.10 {
-        ("<10%", "This wormhole has had its stability critically disrupted")
+        ("<10%", "This wormhole has had its stability critically disrupted by the mass of numerous ships passing through and is on the verge of collapse.")
     } else if mass_ratio < 0.50 {
-        ("<50%", "This wormhole has had its stability reduced by ships passing through it")
+        ("<50%", "This wormhole has had its stability reduced by ships passing through it, but not to a critical degree yet.")
     } else {
-        (">50%", "This wormhole has not yet had its stability significantly disrupted")
+        (">50%", "This wormhole has not yet had its stability significantly disrupted by ships passing through it.")
     };
 
     WormholeBuckets {

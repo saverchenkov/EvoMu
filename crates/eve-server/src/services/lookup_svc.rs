@@ -428,6 +428,15 @@ pub fn handle(
                         .and_then(|cid| snap.corporations.get(&cid))
                         .and_then(|c| c.alliance_id)
                 });
+                let caller_ident = effective_caller_alliance.or(caller_corp_id).unwrap_or(0);
+                let is_disqualified = |target_id: i64| -> bool {
+                    snap.wars.values().any(|w| {
+                        w.active && (
+                            (w.aggressor_corp_id == caller_ident && w.defender_corp_id == target_id) ||
+                            (w.aggressor_corp_id == target_id && w.defender_corp_id == caller_ident)
+                        )
+                    })
+                };
                 let is_corp_war_eligible = |corp_id: i64| -> bool {
                     snap.structures
                         .values()
@@ -443,6 +452,7 @@ pub fn handle(
                         && (effective_caller_alliance.is_none()
                             || corp.alliance_id != effective_caller_alliance)
                         && is_corp_war_eligible(corp.corporation_id)
+                        && !is_disqualified(corp.corporation_id)
                         && (matches_query(&corp.name, &query, exact)
                             || matches_query(&corp.ticker, &query, exact))
                     {
@@ -467,8 +477,10 @@ pub fn handle(
                             c.alliance_id == Some(al.alliance_id)
                                 && is_corp_war_eligible(c.corporation_id)
                         });
-                    if Some(al.alliance_id) != effective_caller_alliance
+                    if al.alliance_id >= 99_000_000
+                        && Some(al.alliance_id) != effective_caller_alliance
                         && al_war_eligible
+                        && !is_disqualified(al.alliance_id)
                         && (matches_query(&al.name, &query, exact)
                             || matches_query(&al.short_name, &query, exact))
                     {
