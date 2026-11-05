@@ -354,7 +354,7 @@ impl WorldRepository {
                         corporation_id: 1_000_006, alliance_id: None, war_faction_id: None,
                         station_id: Some(60_003_760), structure_id: None, solar_system_id: 30_000_142,
                         constellation_id: 20_000_020, region_id: 10_000_002, active_ship_id: ship_id,
-                        balance: IskCents::from_isk(1_000_000_000), plex_balance: 0,
+                        balance: IskCents::from_isk(1_000_000_000), plex_balance: 10_000,
                         loyalty_points: HashMap::new(), standings: HashMap::new(),
                         security_status: 5.0, clone_grade: 2, home_station_id: 60_003_760,
                         race_id: 1, bloodline_id: 1, ancestry_id: 11, school_id: 17,
@@ -377,6 +377,7 @@ impl WorldRepository {
                         is_blueprint_copy: false, blueprint_runs_remaining: None,
                     },
                 );
+                snap.account_plex_vault.insert(user_id, 10_000);
             }
             Ok::<(), std::convert::Infallible>(())
         });

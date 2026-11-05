@@ -9,6 +9,7 @@
 //! - `feat:cosmetics.skinr-sequencing-studio`
 //! - `feat:cosmetics.skinr-paragon-hub-listing`
 //! - `feat:cosmetics.skinr-market`
+//! - `feat:economy.paragon-hub`
 
 #![forbid(unsafe_code)]
 
@@ -16,9 +17,11 @@ use crate::common;
 use crate::quasar_goal_tale_notices::{bytes, sub};
 use crate::quasar_progression_complete::{build_sess, quasar_rpc};
 use crate::quasar_sov_equinox_hub::{field, fields, varint};
-use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord};
+use eve_db::IskCents;
+use eve_machonet::{service_roles, SessionState};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, GoogleAny, WireMessage,
+    encode_bytes_field, encode_string_field, encode_varint_field, EvePublicRequest, GoogleAny,
+    WireMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_server::quasar_gateway::STATUS_OK;
 use eve_server::router::ServerContext;
@@ -27,7 +30,56 @@ use eve_server::services::quasar_cosmetics_skinr::{
     encode_component_id, SkinrStaticCatalog, COMP_CAT_MATERIAL, COMP_CAT_METALLIC, COMP_CAT_PATTERN,
 };
 
-const JITA_STATION_ID: i64 = 60_003_760;
+async fn deposit_evermarks_quasar(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    char_id: i64,
+    amount: u64,
+) {
+    let mut dep_req = Vec::new();
+    let mut op_id_m = Vec::new();
+    encode_bytes_field(1, b"paragon-em-op-01", &mut op_id_m);
+    let mut cid_msg = Vec::new();
+    encode_varint_field(1, char_id as u64, &mut cid_msg);
+    let mut issuer_msg = Vec::new();
+    encode_varint_field(1, PARAGON_CORP_ID as u64, &mut issuer_msg);
+    let mut wallet_id = Vec::new();
+    encode_bytes_field(1, &cid_msg, &mut wallet_id);
+    encode_bytes_field(3, &issuer_msg, &mut wallet_id);
+    let mut curr_m = Vec::new();
+    encode_varint_field(1, amount, &mut curr_m);
+    let mut op_attr = Vec::new();
+    encode_bytes_field(1, &wallet_id, &mut op_attr);
+    encode_bytes_field(2, &curr_m, &mut op_attr);
+    encode_bytes_field(1, &op_id_m, &mut dep_req);
+    encode_bytes_field(2, &op_attr, &mut dep_req);
+
+    let prev_role = sess.role;
+    sess.role = service_roles::ROLE_GM_DEFAULT;
+    let req = EvePublicRequest {
+        issued: Some(eve_proto::quasar::types::GoogleTimestamp {
+            seconds: ctx.now_unix() as i64,
+            nanos: 0,
+        }),
+        correlation_uuid: b"corr-em-live".to_vec(),
+        payload: Some(GoogleAny {
+            type_url: format!(
+                "{}eve.loyaltypoints.assetholding.operation.api.DepositRequest",
+                TYPE_GOOGLEAPIS_PREFIX
+            ),
+            value: dep_req,
+        }),
+        external_origin: "eve-client".into(),
+        application_instance_uuid: b"em-live-app".to_vec(),
+        authoritative_context: None,
+        trace_context: None,
+    };
+    let rsp = ctx
+        .quasar_gateway
+        .handle_public_request(sess, &req, None, false, ctx.now_unix());
+    sess.role = prev_role;
+    assert_eq!(rsp.status_code, STATUS_OK, "DepositRequest must succeed");
+}
 
 fn decode_wm(payload: Option<&GoogleAny>) -> Option<WireMessage> {
     WireMessage::decode(&payload?.value).ok()
@@ -83,41 +135,16 @@ async fn test_cosmetics_skinr_designer_and_sequencing_studio_live() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let designer_cid = 90_000_901u32;
-    let ship_id = 890_101i64;
     let rifter_type = 587u32;
 
-    ctx.db.with_mut_snapshot(|s| {
-        let mut ch = s.characters.get(&90_000_001).cloned().expect("template char");
-        ch.character_id = designer_cid as i64;
-        ch.corporation_id = 98_000_001;
-        ch.active_ship_id = ship_id;
-        ch.balance = IskCents::from_isk(50_000_000);
-        ch.plex_balance = 2_000;
-        ch.station_id = Some(JITA_STATION_ID);
-        s.characters.insert(designer_cid as i64, ch);
+    ctx.db.provision_gm_account("gm_designer", "gm-pass", designer_cid as i64, "GM Designer");
 
-        let sk_map = s.skills.entry(designer_cid as i64).or_default();
-        for sid in [81377u32, 81046, 81366] {
-            sk_map.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
-        }
-
-        s.items.insert(
-            ship_id,
-            InventoryItemRecord {
-                item_id: ship_id,
-                type_id: rifter_type,
-                owner_id: designer_cid as i64,
-                location_id: JITA_STATION_ID,
-                flag: InventoryFlag::Hangar,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                ..Default::default()
-            },
-        );
-    });
-
-    let mut designer_sess = build_sess(65_101, designer_cid, 98_000_001);
+    let mut designer_sess = build_sess(65_101, designer_cid, 1_000_006);
+    designer_sess.role = service_roles::ROLE_GM_DEFAULT;
+    for sid in [81377u32, 81370, 81366] {
+        common::slash_cmd(&ctx, &mut designer_sess, &format!("/giveskill {sid} 5")).await;
+    }
+    designer_sess.role = 0;
 
     // 1. Verify sequencing tier durations and pricing via Quasar RPC
     let dur_rsp = quasar_rpc(
@@ -291,9 +318,11 @@ async fn test_cosmetics_skinr_designer_and_sequencing_studio_live() {
 async fn test_cosmetics_skinr_paragon_hub_market_and_skills_live() {
     // parity: feat:cosmetics.skinr-market
     // parity: feat:cosmetics.skinr-paragon-hub-listing
+    // parity: feat:economy.paragon-hub
     eve_testkit::attest(&[
         "feat:cosmetics.skinr-market",
         "feat:cosmetics.skinr-paragon-hub-listing",
+        "feat:economy.paragon-hub",
     ]);
 
     let ctx = ServerContext::new();
@@ -301,48 +330,17 @@ async fn test_cosmetics_skinr_paragon_hub_market_and_skills_live() {
 
     let seller_cid = 90_000_911u32;
     let buyer_cid = 90_000_912u32;
-    let ship_id = 890_102i64;
     let rifter_type = 587u32;
 
-    ctx.db.with_mut_snapshot(|s| {
-        let mut ch_s = s.characters.get(&90_000_001).cloned().expect("template char");
-        ch_s.character_id = seller_cid as i64;
-        ch_s.corporation_id = 98_000_001;
-        ch_s.active_ship_id = ship_id;
-        ch_s.balance = IskCents::from_isk(50_000_000);
-        ch_s.plex_balance = 5_000;
-        ch_s.station_id = Some(JITA_STATION_ID);
-        s.characters.insert(seller_cid as i64, ch_s);
+    ctx.db.provision_gm_account("gm_seller", "gm-pass", seller_cid as i64, "GM Seller");
+    ctx.db.provision_gm_account("gm_buyer", "gm-pass", buyer_cid as i64, "GM Buyer");
 
-        let mut ch_b = s.characters.get(&90_000_001).cloned().expect("template char");
-        ch_b.character_id = buyer_cid as i64;
-        ch_b.corporation_id = 98_000_002;
-        ch_b.balance = IskCents::from_isk(50_000_000);
-        ch_b.plex_balance = 2_000;
-        ch_b.station_id = Some(JITA_STATION_ID);
-        ch_b.loyalty_points.insert(PARAGON_CORP_ID as i64, 500_000);
-        s.characters.insert(buyer_cid as i64, ch_b);
-
-        s.items.insert(
-            ship_id,
-            InventoryItemRecord {
-                item_id: ship_id,
-                type_id: rifter_type,
-                owner_id: seller_cid as i64,
-                location_id: JITA_STATION_ID,
-                flag: InventoryFlag::Hangar,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                ..Default::default()
-            },
-        );
-    });
-
-    let mut seller_sess = build_sess(65_111, seller_cid, 98_000_001);
+    let mut seller_sess = build_sess(65_111, seller_cid, 1_000_006);
     seller_sess.role = 0;
-    let mut buyer_sess = build_sess(65_112, buyer_cid, 98_000_002);
+    let mut buyer_sess = build_sess(65_112, buyer_cid, 1_000_006);
     buyer_sess.role = 0;
+
+    deposit_evermarks_quasar(&ctx, &mut buyer_sess, buyer_cid as i64, 500_000).await;
 
     // 1. Skill scaling: verify public tax rate before and after Paragon skill training
     let mut pub_target = Vec::new();
@@ -366,12 +364,11 @@ async fn test_cosmetics_skinr_paragon_hub_market_and_skills_live() {
     // 84217 Paragon Relations (V -> -5%), 84218 Paragon Partnership (V -> -5%), 84220 Executive Paragon Partnership (V -> -5%)
     // Total reduction = 15%, reducing public tax down to 5%!
     // Also train 81368 Hub Promotion (V -> +5) and 81369 Hub Algorithm Optimization (V -> +25)
-    ctx.db.with_mut_snapshot(|s| {
-        let sk_map = s.skills.entry(seller_cid as i64).or_default();
-        for sid in [84217u32, 84218, 84220, 81368, 81369] {
-            sk_map.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
-        }
-    });
+    seller_sess.role = service_roles::ROLE_GM_DEFAULT;
+    for sid in [84217u32, 84218, 84220, 81368, 81369] {
+        common::slash_cmd(&ctx, &mut seller_sess, &format!("/giveskill {sid} 5")).await;
+    }
+    seller_sess.role = 0;
 
     let tax_rsp_trained = quasar_rpc(
         &ctx,

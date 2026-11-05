@@ -5,10 +5,6 @@
 //! - Tradeable custom SKIN license production on job completion.
 //! - Paragon Hub listing for ISK and PLEX with skill-reduced sales tax and broker fees.
 //! - Peer-to-peer purchase execution, seller net proceeds, buyer fees, and license transfer.
-//!
-//! Parity rows:
-//! - `feat:cosmetics.skinr-sequencing-studio`
-//! - `feat:cosmetics.skinr-paragon-hub-listing`
 
 #![forbid(unsafe_code)]
 
@@ -76,9 +72,6 @@ fn encode_pattern_slot(slot_id: u32, comp_id: u32) -> Vec<u8> {
 
 #[tokio::test]
 async fn test_skinr_sequencing_studio_design_components_and_skills() {
-    // parity: feat:cosmetics.skinr-sequencing-studio
-    eve_testkit::attest(&["feat:cosmetics.skinr-sequencing-studio"]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let designer_cid = 90_000_851u32;
@@ -307,9 +300,6 @@ async fn test_skinr_sequencing_studio_design_components_and_skills() {
 
 #[tokio::test]
 async fn test_skinr_paragon_hub_listing_fees_and_purchase() {
-    // parity: feat:cosmetics.skinr-paragon-hub-listing
-    eve_testkit::attest(&["feat:cosmetics.skinr-paragon-hub-listing"]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 

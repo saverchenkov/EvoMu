@@ -64,13 +64,6 @@ fn decode_wm(payload: Option<&eve_proto::quasar::GoogleAny>) -> Option<WireMessa
 
 #[tokio::test]
 async fn test_skinr_sequencing_studio_and_paragon_hub_listing() {
-    // parity: feat:cosmetics.skinr-sequencing-studio
-    // parity: feat:cosmetics.skinr-paragon-hub-listing
-    eve_testkit::attest(&[
-        "feat:cosmetics.skinr-sequencing-studio",
-        "feat:cosmetics.skinr-paragon-hub-listing",
-    ]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let seller_cid = 90_000_831u32;
