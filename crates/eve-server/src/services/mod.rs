@@ -208,9 +208,21 @@ pub use inventory_fitting::fitting_containers_ships;
 pub use space_destiny::space_probe_scanning;
 
 #[cfg(test)]
+mod combat_fighters_extra_unit_tests;
+#[cfg(test)]
+mod combat_weapons_spool_extra_unit_tests;
+#[cfg(test)]
+mod contracts_service_extra_unit_tests;
+#[cfg(test)]
 mod fitting_containers_ships_extra_unit_tests;
 #[cfg(test)]
 mod fitting_containers_ships_unit_tests;
+#[cfg(test)]
+mod fitting_module_cycles_helpers_extra_unit_tests;
+#[cfg(test)]
+mod pve_dungeon_runtime_extra_unit_tests;
+#[cfg(test)]
+mod pve_ess_reserve_banks_extra_unit_tests;
 #[cfg(test)]
 mod space_probe_scanning_extra_unit_tests;
 #[cfg(test)]
