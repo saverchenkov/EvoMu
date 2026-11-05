@@ -759,3 +759,7 @@ pub(super) fn apply_destiny_event_in_actor(
     }
     known
 }
+
+#[cfg(test)]
+#[path = "cycles_tackle_tests.rs"]
+mod cycles_tackle_tests;

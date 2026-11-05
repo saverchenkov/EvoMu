@@ -1,0 +1,335 @@
+use super::*;
+use eve_destiny::{Ball, Ballpark, CombatState, DamageVector, MovementMode};
+use eve_sde::{InvType, SdeRegistry};
+use glam::DVec3;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+
+#[path = "cycles_thermodynamics_tests.rs"]
+mod cycles_thermodynamics_tests;
+
+fn make_ship(id: BallId, type_id: u32, pos: DVec3) -> Ball {
+    Ball {
+        id,
+        type_id,
+        position: pos,
+        velocity: DVec3::ZERO,
+        max_velocity: 350.0,
+        inertia: 2.5,
+        mass: 1_500_000.0,
+        radius: 50.0,
+        speed_fraction: 1.0,
+        mode: MovementMode::Stop,
+    }
+}
+
+fn make_sde_for_cycles() -> Arc<SdeRegistry> {
+    let mut sde = SdeRegistry::with_canonical_seed();
+    sde.types.insert(
+        587,
+        InvType {
+            type_id: 587,
+            group_id: 25,
+            category_id: 6,
+            name: "Rifter".into(),
+            mass: 1_067_000.0,
+            volume: 27_000.0,
+            capacity: 140.0,
+            portion_size: 1,
+            radius: 39.0,
+            base_price: 250_000.0,
+            published: true,
+            market_group_id: None,
+            race_id: Some(2),
+            faction_id: None,
+            variation_parent_type_id: None,
+            description_id: None,
+            icon_id: None,
+            graphic_id: None,
+            sound_id: None,
+            meta_group_id: None,
+            meta_level: None,
+            tech_level: Some(1),
+            default_effect_id: None,
+            description: String::new(),
+            effect_ids: Vec::new(),
+            default_attributes: HashMap::from([(54u16, 6_000.0), (158u16, 12_000.0), (20u16, -80.0)]),
+        },
+    );
+    Arc::new(sde)
+}
+
+#[test]
+fn step_cycles_handles_range_warp_mjd_nosferatu_grappler_and_lethality() {
+    let sde_opt = Some(make_sde_for_cycles());
+    let mut bp = Ballpark::new(30_000_142);
+
+    // 1001: attacker at origin
+    bp.add_ball(make_ship(1001, 587, DVec3::ZERO));
+    bp.combat_states.insert(
+        1001,
+        CombatState {
+            capacitor: 200.0,
+            max_capacitor: 1_000.0,
+            shield_hp: 100.0,
+            max_shield_hp: 500.0,
+            shield_recharge_time_ms: 200_000.0,
+            armor_hp: 100.0,
+            max_armor_hp: 500.0,
+            structure_hp: 100.0,
+            max_structure_hp: 500.0,
+            ..CombatState::default()
+        },
+    );
+
+    // 1002: within 10km, high capacitor (800 GJ -> Nosferatu transfers to 1001)
+    bp.add_ball(make_ship(1002, 587, DVec3::new(10_000.0, 0.0, 0.0)));
+    bp.combat_states.insert(
+        1002,
+        CombatState {
+            capacitor: 800.0,
+            max_capacitor: 1_000.0,
+            shield_hp: 400.0,
+            max_shield_hp: 500.0,
+            ..CombatState::default()
+        },
+    );
+
+    // 1003: far away (60km) -> out-of-range targeted module auto-deactivates
+    bp.add_ball(make_ship(1003, 587, DVec3::new(60_000.0, 0.0, 0.0)));
+    bp.combat_states.insert(1003, CombatState::default());
+
+    // 1004: warping -> targeted module auto-deactivates
+    let mut warp_ball = make_ship(1004, 587, DVec3::new(15_000.0, 0.0, 0.0));
+    warp_ball.mode = MovementMode::new_warp(
+        DVec3::new(15_000.0, 0.0, 0.0),
+        DVec3::new(150_000.0, 0.0, 0.0),
+        3.0,
+    );
+    bp.add_ball(warp_ball);
+    bp.combat_states.insert(1004, CombatState::default());
+
+    // 1005: low HP target killed by weapon cycle on 1001
+    bp.add_ball(make_ship(1005, 587, DVec3::new(5_000.0, 0.0, 0.0)));
+    bp.combat_states.insert(
+        1005,
+        CombatState {
+            shield_hp: 1.0,
+            max_shield_hp: 10.0,
+            armor_hp: 1.0,
+            max_armor_hp: 10.0,
+            structure_hp: 1.0,
+            max_structure_hp: 10.0,
+            ..CombatState::default()
+        },
+    );
+
+    let deactivated = Arc::new(std::sync::Mutex::new(Vec::<i64>::new()));
+    let deact_clone = Arc::clone(&deactivated);
+    let hook: ModuleDeactivationHook = Arc::new(move |_cid, cycle| {
+        deact_clone.lock().unwrap().push(cycle.module_id);
+    });
+
+    let mut cycles = vec![
+        // Missing source ship 9999 -> removed immediately
+        ActiveModuleCycle {
+            ship_id: 9999,
+            owner_char_id: Some(90_000_001),
+            module_id: 4001,
+            duration_s: 5.0,
+            ..ActiveModuleCycle::default()
+        },
+        // Out-of-range module on 1003 (max_effective_range_m = 20km, dist = 60km) -> removed
+        ActiveModuleCycle {
+            ship_id: 1001,
+            owner_char_id: Some(90_000_001),
+            module_id: 4002,
+            target_id: Some(1003),
+            max_effective_range_m: Some(20_000.0),
+            duration_s: 5.0,
+            ..ActiveModuleCycle::default()
+        },
+        // Warping target 1004 -> removed
+        ActiveModuleCycle {
+            ship_id: 1001,
+            owner_char_id: Some(90_000_001),
+            module_id: 4003,
+            target_id: Some(1004),
+            duration_s: 5.0,
+            ..ActiveModuleCycle::default()
+        },
+        // Grappler + Nosferatu + Local Armor + Hull Repair on 1001 -> 1002
+        ActiveModuleCycle {
+            ship_id: 1001,
+            owner_char_id: Some(90_000_001),
+            module_id: 4004,
+            module_type_id: 587,
+            target_id: Some(1002),
+            target_velocity_multiplier: Some(0.2),
+            grappler_optimal_m: 5_000.0,
+            grappler_falloff_m: 10_000.0,
+            grappler_speed_factor_pct: -80.0,
+            cap_transfer_target: 150.0,
+            armor_repair_amount: 50.0,
+            hull_repair_amount: 40.0,
+            shield_boost_amount: 60.0,
+            duration_s: 5.0,
+            repeat: -1,
+            pending_overloaded: Some(true),
+            ..ActiveModuleCycle::default()
+        },
+        // Weapon killing 1005
+        ActiveModuleCycle {
+            ship_id: 1001,
+            owner_char_id: Some(90_000_001),
+            module_id: 4005,
+            target_id: Some(1005),
+            damage_vector: DamageVector::new(100.0, 100.0, 100.0, 100.0),
+            duration_s: 5.0,
+            repeat: 0,
+            ..ActiveModuleCycle::default()
+        },
+        // MJD completing spool on 1001 (jumps 100km along heading)
+        ActiveModuleCycle {
+            ship_id: 1001,
+            owner_char_id: Some(90_000_001),
+            module_id: 4006,
+            mjd_jump_distance_m: Some(100_000.0),
+            duration_s: 5.0,
+            repeat: 0,
+            ..ActiveModuleCycle::default()
+        },
+    ];
+
+    let mut pending_actions = Vec::new();
+    let destroyed = step_cycles_and_capacitor(
+        &mut bp,
+        &mut cycles,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &sde_opt,
+        &None,
+        &None,
+        &Arc::new(RwLock::new(Default::default())),
+        &mut pending_actions,
+        5.0,
+        Some(&hook),
+    );
+
+    assert_eq!(destroyed, vec![(1005, Some(90_000_001))]);
+    // Local armor (100 + 50 = 150), hull (100 + 40 = 140), start-of-next-cycle overloaded shield boost (100 + 60 * 1.2 = 172)
+    let cs1 = &bp.combat_states[&1001];
+    assert!((cs1.armor_hp - 150.0).abs() < 1e-6);
+    assert!((cs1.structure_hp - 140.0).abs() < 1e-6);
+    assert!((cs1.shield_hp - 172.0).abs() < 1e-6);
+    // Nosferatu transferred 150 GJ from 1002 to 1001 (200 -> 350)
+    assert!((cs1.capacitor - 350.0).abs() < 1e-6);
+    assert!((bp.combat_states[&1002].capacitor - 650.0).abs() < 1e-6);
+    // MJD jumped ~100km from origin
+    assert!(bp.balls[&1001].position.length() > 90_000.0);
+    // SyncOverloadState emitted when pending_overloaded was consumed
+    assert!(pending_actions
+        .iter()
+        .any(|a| matches!(a, PendingCycleAction::SyncOverloadState { module_id: 4004, is_overloaded: true, .. })));
+    // Deactivated modules include 4001, 4002, 4003, 4005, 4006
+    let deact = deactivated.lock().unwrap();
+    for mid in [4001, 4002, 4003, 4005, 4006] {
+        assert!(deact.contains(&mid), "expected module {mid} deactivated");
+    }
+}
+
+#[tokio::test]
+async fn cleanup_and_ship_cycle_removal_restore_ship_attributes_and_handle_warp() {
+    let reg = crate::system_actor::SystemRegistry::new();
+    let handle = reg.get_or_spawn(30_000_142);
+
+    // Prepare and reconcile disconnected warp
+    handle.prepare_disconnected_warp_sync(
+        2001,
+        587,
+        40.0,
+        1_200_000.0,
+        2.5,
+        350.0,
+        4.0,
+        DVec3::ZERO,
+        DVec3::new(100_000.0, 0.0, 0.0),
+    );
+    let (_, arrived_early) =
+        handle.reconcile_disconnected_warp_sync(2001, DVec3::new(100_000.0, 0.0, 0.0));
+    assert!(!arrived_early);
+    handle.try_set_ball_position(2001, DVec3::new(100_000.0, 0.0, 0.0));
+    let (final_pos, arrived_now) =
+        handle.reconcile_disconnected_warp_sync(2001, DVec3::new(100_000.0, 0.0, 0.0));
+    assert!(arrived_now);
+    assert!((final_pos.x - 100_000.0).abs() < 1e-3);
+
+    // Add both a nullified cycle and a normal cycle, then verify remove_non_warp_ship_module_cycles keeps nullifier
+    {
+        let mut bp = handle.ballpark.write().unwrap();
+        bp.combat_states.insert(2001, CombatState::default());
+        if let Some(b) = bp.balls.get_mut(&2001) {
+            b.max_velocity = 1_200.0;
+            b.mass = 50_000_000.0;
+        }
+        let mut st = handle.actor_state.write().unwrap();
+        let st_mut = &mut *st;
+        st_mut.active_module_cycles.push(ActiveModuleCycle {
+            ship_id: 2001,
+            owner_char_id: Some(90_000_001),
+            module_id: 7001,
+            original_max_velocity: Some(350.0),
+            original_mass: Some(1_200_000.0),
+            original_signature_radius: Some(39.0),
+            adc_saved_resists: Some(([0.9, 0.9, 0.9, 0.9], [0.8, 0.8, 0.8, 0.8], [0.7, 0.7, 0.7, 0.7])),
+            duration_s: 10.0,
+            ..ActiveModuleCycle::default()
+        });
+        st_mut.active_module_cycles.push(ActiveModuleCycle {
+            ship_id: 2001,
+            owner_char_id: Some(90_000_001),
+            module_id: 7002,
+            grants_interdiction_nullification: true,
+            duration_s: 10.0,
+            ..ActiveModuleCycle::default()
+        });
+
+        remove_non_warp_ship_module_cycles(
+            &mut bp,
+            &mut st_mut.active_module_cycles,
+            &st_mut.base_scramble_strengths,
+            &st_mut.base_core_strengths,
+            &None,
+            2001,
+            None,
+        );
+        assert_eq!(st_mut.active_module_cycles.len(), 1);
+        assert_eq!(st_mut.active_module_cycles[0].module_id, 7002);
+        assert!((bp.balls[&2001].max_velocity - 350.0).abs() < 1e-6);
+        assert!((bp.balls[&2001].mass - 1_200_000.0).abs() < 1e-3);
+
+        // Now remove all remaining cycles on 2001
+        let removed_all = remove_all_ship_module_cycles(
+            &mut bp,
+            &mut st_mut.active_module_cycles,
+            &st_mut.base_scramble_strengths,
+            &st_mut.base_core_strengths,
+            &None,
+            2001,
+            None,
+        );
+        assert_eq!(removed_all.len(), 1);
+        assert!(st_mut.active_module_cycles.is_empty());
+    }
+
+    // Step full tick + auto-stepped timestamp helpers
+    handle.set_last_auto_stepped_unix(1_700_000_000);
+    assert!(handle.take_auto_stepped_at(1_700_000_000));
+    assert!(!handle.take_auto_stepped_at(1_700_000_000));
+    assert!(!handle.has_active_modules_or_cloak_sync(2001));
+    assert!(handle.try_step_full_tick(1.0) >= 1);
+}

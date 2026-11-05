@@ -682,3 +682,7 @@ pub(super) fn sync_player_slim_items(
         ballpark.change_slim_item(ball_id, updated_meta);
     }
 }
+
+#[cfg(test)]
+#[path = "belts_tests.rs"]
+mod belts_tests;

@@ -218,3 +218,7 @@ impl super::SystemHandle {
     }
 }
 
+#[cfg(test)]
+#[path = "disruptors_tests.rs"]
+mod disruptors_tests;
+

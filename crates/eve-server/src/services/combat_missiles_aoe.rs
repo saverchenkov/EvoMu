@@ -1308,3 +1308,7 @@ pub async fn activate_missile_or_breacher_launcher(
                     ("breacherTickDPS", PyRep::Real(dot_tick_applied)),
                 ]));
 }
+
+#[cfg(test)]
+#[path = "combat_missiles_aoe_tests.rs"]
+mod combat_missiles_aoe_tests;

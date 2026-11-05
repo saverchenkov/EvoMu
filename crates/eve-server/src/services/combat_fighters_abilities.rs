@@ -1342,3 +1342,7 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
         ("success", PyRep::Bool(true)),
     ])))
 }
+
+#[cfg(test)]
+#[path = "combat_fighters_abilities_tests.rs"]
+mod combat_fighters_abilities_tests;

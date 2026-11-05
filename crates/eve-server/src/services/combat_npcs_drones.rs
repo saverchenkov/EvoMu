@@ -1345,3 +1345,7 @@ pub async fn handle_npcs_drones(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "combat_npcs_drones_tests.rs"]
+mod combat_npcs_drones_tests;

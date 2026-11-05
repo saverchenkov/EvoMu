@@ -1383,3 +1383,7 @@ impl SystemHandle {
         (final_pos, arrived)
     }
 }
+
+#[cfg(test)]
+#[path = "cycles_tests.rs"]
+mod cycles_tests;

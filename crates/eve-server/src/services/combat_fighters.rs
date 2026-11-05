@@ -1378,3 +1378,7 @@ async fn handle_scoop_abandoned_fighter(
     let _ = sys_handle.remove_ball(squad.ball_id).await;
     Some(Ok(PyRep::Bool(true)))
 }
+
+#[cfg(test)]
+#[path = "combat_fighters_tests.rs"]
+pub(in crate::services) mod combat_fighters_tests;

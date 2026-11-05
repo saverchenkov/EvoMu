@@ -1387,3 +1387,7 @@ impl SystemRegistry {
         handle
     }
 }
+
+#[cfg(test)]
+#[path = "system_actor_tests.rs"]
+mod system_actor_tests;

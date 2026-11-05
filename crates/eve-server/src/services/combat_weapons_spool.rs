@@ -1375,3 +1375,7 @@ pub fn handle_link_all_weapons(
     notify_weapon_banks_updated(ctx, char_id, ship_id, &[], &info);
     Ok(info)
 }
+
+#[cfg(test)]
+#[path = "combat_weapons_spool_tests.rs"]
+mod combat_weapons_spool_tests;
