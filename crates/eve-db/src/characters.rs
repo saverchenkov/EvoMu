@@ -856,4 +856,6 @@ impl WorldRepository {
         ids
     }
 }
+#[cfg(test)] #[path = "characters_unit_tests.rs"] mod characters_unit_tests;
+
 

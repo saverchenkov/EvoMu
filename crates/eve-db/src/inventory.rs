@@ -454,4 +454,6 @@ impl WorldRepository {
         })
     }
 }
+#[cfg(test)] #[path = "inventory_unit_tests.rs"] mod inventory_unit_tests;
+
 

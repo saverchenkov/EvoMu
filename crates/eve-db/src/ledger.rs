@@ -419,3 +419,5 @@ impl WorldStateSnapshot {
         }
     }
 }
+#[cfg(test)] #[path = "ledger_unit_tests.rs"] mod ledger_unit_tests;
+

@@ -1379,3 +1379,5 @@ pub fn unix_secs_to_date_string(secs: u64) -> String {
     let y = if m <= 2 { y + 1 } else { y };
     format!("{y:04}-{m:02}-{d:02}")
 }
+#[cfg(test)] #[path = "snapshot_ext_unit_tests.rs"] mod snapshot_ext_unit_tests;
+
