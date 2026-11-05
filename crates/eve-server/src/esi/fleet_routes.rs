@@ -1333,3 +1333,8 @@ pub fn dispatch_fleet_routes(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "fleet_routes_unit_tests.rs"]
+mod fleet_routes_unit_tests;
+

@@ -1267,3 +1267,8 @@ pub fn dispatch_economy_route(
         ),
     }
 }
+
+#[cfg(test)]
+#[path = "economy_routes_unit_tests.rs"]
+mod economy_routes_unit_tests;
+

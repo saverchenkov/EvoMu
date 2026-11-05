@@ -743,3 +743,8 @@ pub fn dispatch_corp_governance_route(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "corp_governance_routes_unit_tests.rs"]
+mod corp_governance_routes_unit_tests;
+

@@ -1207,3 +1207,8 @@ pub fn dispatch_character_routes(
         ),
     }
 }
+
+#[cfg(test)]
+#[path = "character_routes_unit_tests.rs"]
+mod character_routes_unit_tests;
+

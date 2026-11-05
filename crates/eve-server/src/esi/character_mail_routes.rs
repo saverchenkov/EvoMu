@@ -895,3 +895,8 @@ fn notify_esi_mail_sent(ctx: &ServerContext, sender_id: i64, mail_id: i64, subje
     };
     crate::services::mail_notify::emit_mail_sent(ctx, &sent, &recipients);
 }
+
+#[cfg(test)]
+#[path = "character_mail_routes_unit_tests.rs"]
+mod character_mail_routes_unit_tests;
+

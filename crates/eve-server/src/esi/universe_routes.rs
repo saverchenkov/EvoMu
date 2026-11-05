@@ -1303,3 +1303,8 @@ pub fn dispatch_universe_and_nav(
         ),
     }
 }
+
+#[cfg(test)]
+#[path = "universe_routes_unit_tests.rs"]
+mod universe_routes_unit_tests;
+

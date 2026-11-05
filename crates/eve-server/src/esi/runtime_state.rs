@@ -208,3 +208,8 @@ impl EsiRuntimeState {
             .cloned()
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_state_unit_tests.rs"]
+mod runtime_state_unit_tests;
+

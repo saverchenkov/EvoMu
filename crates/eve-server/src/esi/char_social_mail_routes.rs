@@ -853,3 +853,8 @@ pub fn dispatch_char_social_mail_route(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "char_social_mail_routes_unit_tests.rs"]
+mod char_social_mail_routes_unit_tests;
+

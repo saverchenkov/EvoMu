@@ -449,3 +449,8 @@ pub fn dispatch_char_calendar_route(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "char_calendar_routes_unit_tests.rs"]
+mod char_calendar_routes_unit_tests;
+

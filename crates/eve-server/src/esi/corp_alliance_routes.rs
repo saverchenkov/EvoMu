@@ -908,3 +908,8 @@ pub fn dispatch_corp_alliance_route(
         ),
     }
 }
+
+#[cfg(test)]
+#[path = "corp_alliance_routes_unit_tests.rs"]
+mod corp_alliance_routes_unit_tests;
+

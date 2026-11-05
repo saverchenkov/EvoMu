@@ -883,3 +883,8 @@ pub fn legacy_operations() -> Vec<OperationSpec> {
         ),
     ]
 }
+
+#[cfg(test)]
+#[path = "openapi_unit_tests.rs"]
+mod openapi_unit_tests;
+

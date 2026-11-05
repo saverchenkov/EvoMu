@@ -948,3 +948,8 @@ pub fn dispatch_char_social_route(
         ),
     }
 }
+
+#[cfg(test)]
+#[path = "char_social_routes_unit_tests.rs"]
+mod char_social_routes_unit_tests;
+

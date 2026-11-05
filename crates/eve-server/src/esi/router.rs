@@ -1103,3 +1103,8 @@ fn required_corp_roles_for_route(method: &str, path_pattern: &str) -> u64 {
         _ => ROLE_DIRECTOR,
     }
 }
+
+#[cfg(test)]
+#[path = "router_unit_tests.rs"]
+mod router_unit_tests;
+

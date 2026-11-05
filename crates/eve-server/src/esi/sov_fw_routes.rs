@@ -354,3 +354,8 @@ pub fn dispatch_sov_route(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "sov_fw_routes_unit_tests.rs"]
+mod sov_fw_routes_unit_tests;
+
