@@ -395,6 +395,7 @@ mod notify_structures_clones_pi;
 mod notify_mining_scanners_space_emission;
 mod notify_progression_and_activities;
 mod notify_space_corp_market;
+mod notify_fw_and_ship_combat_live;
 mod world_space_exploration;
 mod character_progression_and_attributes;
 mod pve_npc_encounters_and_missions;

@@ -1483,11 +1483,9 @@ async fn test_batch6_station_scanners_mining_cloak_and_hack() {
 
 #[tokio::test]
 async fn test_batch6_ship_and_pod_destruction_pipeline() {
-    // parity: notify:OnKillNotification, notify:OnShipDeath, notify:OnPodDeath
+    // parity: notify:OnPodDeath
     // parity: notify:OnPodKilled, notify:OnPlayerPodDeath, notify:OnPlayerPodRespawn
     eve_testkit::attest(&[
-        "notify:OnKillNotification",
-        "notify:OnShipDeath",
         "notify:OnPodDeath",
         "notify:OnPodKilled",
         "notify:OnPlayerPodDeath",
@@ -1733,21 +1731,17 @@ async fn test_batch6_ess_and_dynamic_bounty() {
 
 #[tokio::test]
 async fn test_batch6_faction_warfare_and_insurgency() {
-    // parity: notify:OnFacWarBunkerVulnerable, notify:OnFacWarBunkerNonVulnerable
-    // parity: notify:OnFwObjectiveCompletedInSolarSystem, notify:OnFwScoreboardWon, notify:OnSolarSystemLPChange
-    // parity: notify:OnSolarsystemInterferenceChanged, notify:OnSystemFullyCorruptedForFaction
-    // parity: notify:OnSystemFullySuppressedForFaction, notify:OnVictoryPointStateUpdated
+    // parity: notify:OnFacWarBunkerNonVulnerable
+    // parity: notify:OnFwObjectiveCompletedInSolarSystem, notify:OnFwScoreboardWon
+    // parity: notify:OnSolarsystemInterferenceChanged
+    // parity: notify:OnSystemFullySuppressedForFaction
     // DATA GAP: notify:OnCaptureChanged requires real-time FW complex capture timer progression wiring
     eve_testkit::attest(&[
-        "notify:OnFacWarBunkerVulnerable",
         "notify:OnFacWarBunkerNonVulnerable",
         "notify:OnFwObjectiveCompletedInSolarSystem",
         "notify:OnFwScoreboardWon",
-        "notify:OnSolarSystemLPChange",
         "notify:OnSolarsystemInterferenceChanged",
-        "notify:OnSystemFullyCorruptedForFaction",
         "notify:OnSystemFullySuppressedForFaction",
-        "notify:OnVictoryPointStateUpdated",
     ]);
 
     let ctx = new_ctx();
@@ -4209,13 +4203,11 @@ async fn notify_b30_operations_and_container_password() {
     assert_eq!(rpc(&ctx, &mut sess_space, "invbroker", "SetPassword", &[PyRep::Integer(far_cont_id), PyRep::Integer(1), PyRep::String("pw".into())]).await.unwrap_err().code, "OutsideOperationalRange");
 }
 
-// parity: notify:OnMultiEvent, notify:OnSolarSystemLPChange, notify:OnVictoryPointStateUpdated
+// parity: notify:OnMultiEvent
 #[tokio::test]
 async fn notify_b30_target_multi_event_and_fw_warzone() {
     eve_testkit::attest(&[
         "notify:OnMultiEvent",
-        "notify:OnSolarSystemLPChange",
-        "notify:OnVictoryPointStateUpdated",
     ]);
 
     let ctx = new_ctx();
@@ -4422,12 +4414,11 @@ async fn notify_b30_target_multi_event_and_fw_warzone() {
     assert!(kv_get(&vp_ev.args[1], "victoryPoints").and_then(PyRep::as_i64).unwrap_or(0) >= 20);
 }
 
-// parity: notify:OnSystemCriminalFlagUpdates, notify:OnShipDeath
+// parity: notify:OnSystemCriminalFlagUpdates
 #[tokio::test]
 async fn notify_b30_crimewatch_timers_and_ship_death() {
     eve_testkit::attest(&[
         "notify:OnSystemCriminalFlagUpdates",
-        "notify:OnShipDeath",
     ]);
 
     let ctx = new_ctx();
@@ -6512,9 +6503,8 @@ async fn test_batch2_dungeon_instance_added_and_removed_via_live_combat() {
 
 #[tokio::test]
 async fn test_batch2_facwar_bunker_vulnerable_and_incursion_influence_update() {
-    // parity: notify:OnFacWarBunkerVulnerable, notify:OnInfluenceUpdate
+    // parity: notify:OnInfluenceUpdate
     eve_testkit::attest(&[
-        "notify:OnFacWarBunkerVulnerable",
         "notify:OnInfluenceUpdate",
     ]);
 
@@ -6835,11 +6825,10 @@ async fn test_batch4_crimewatch_timers_and_system_flag_updates() {
     assert_eq!(dis_args, &vec![PyRep::List(vec![]), PyRep::List(vec![PyRep::Integer(PILOT_A)])]);
 }
 
-// parity: notify:OnShipDeath, notify:OnSystemScanStarted, notify:OnSystemScanStopped
+// parity: notify:OnSystemScanStarted, notify:OnSystemScanStopped
 #[tokio::test]
 async fn test_batch4_ship_death_and_probe_scan_lifecycle() {
     eve_testkit::attest(&[
-        "notify:OnShipDeath",
         "notify:OnSystemScanStarted",
         "notify:OnSystemScanStopped",
     ]);
@@ -6888,13 +6877,10 @@ async fn test_batch4_ship_death_and_probe_scan_lifecycle() {
     assert!(death_args.is_empty());
 }
 
-// parity: notify:OnSolarSystemLPChange, notify:OnVictoryPointStateUpdated, notify:OnSystemFullyCorruptedForFaction, notify:OnSecurityModified
+// parity: notify:OnSecurityModified
 #[tokio::test]
 async fn test_batch4_fw_lp_vp_and_insurgency_corruption_security() {
     eve_testkit::attest(&[
-        "notify:OnSolarSystemLPChange",
-        "notify:OnVictoryPointStateUpdated",
-        "notify:OnSystemFullyCorruptedForFaction",
         "notify:OnSecurityModified",
     ]);
 

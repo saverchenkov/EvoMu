@@ -3122,10 +3122,10 @@ async fn test_batch3_container_password_and_cache_invalidation() {
     assert_eq!(bad.unwrap_err().code, "InvalidPassword");
 }
 
-// parity: notify:OnMultiEvent, notify:OnKillNotification
+// parity: notify:OnMultiEvent
 #[tokio::test]
 async fn test_batch3_target_multi_event_and_kill_notification() {
-    eve_testkit::attest(&["notify:OnMultiEvent", "notify:OnKillNotification"]);
+    eve_testkit::attest(&["notify:OnMultiEvent"]);
 
     let ctx = new_ctx();
     let (ship_a, ship_b, gun_id, ammo_id) = (640_000_301_i64, 640_000_302_i64, 640_000_310_i64, 640_000_311_i64);
@@ -4018,10 +4018,8 @@ async fn test_batch3_dungeon_instance_added_and_removed() {
     );
 }
 
-// parity: notify:OnFacWarBunkerVulnerable
 #[tokio::test]
 async fn test_batch3_facwar_bunker_vulnerable() {
-    eve_testkit::attest(&["notify:OnFacWarBunkerVulnerable"]);
 
     let ctx = new_ctx();
     let ship_a = 640_000_601_i64;
