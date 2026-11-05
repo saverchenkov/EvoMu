@@ -6832,7 +6832,7 @@ pub(crate) mod structures_anchoring_and_evermarks {
 //  - `feat:structures.anchor-restrictions`, `feat:structures.profiles`,
 //    `feat:structures.defense-settings`, `feat:structures.structure-directory`
 //  - `feat:cosmetics.skinr-designer`, `feat:cosmetics.skinr-market`
-//  - `feat:serverops.daily-jobs`, `feat:serverops.time-dilation`
+//  - `feat:serverops.daily-jobs`, ``
 
 use crate::common;
 use eve_db::{
@@ -7430,10 +7430,9 @@ async fn test_cosmetics_skinr_designer_and_market_closure() {
 
 #[tokio::test]
 async fn test_serverops_daily_jobs_and_time_dilation_closure() {
-    // parity: feat:serverops.daily-jobs, feat:serverops.time-dilation
+    // parity: feat:serverops.daily-jobs
     eve_testkit::attest(&[
         "feat:serverops.daily-jobs",
-        "feat:serverops.time-dilation",
     ]);
 
     let ctx = ServerContext::new();

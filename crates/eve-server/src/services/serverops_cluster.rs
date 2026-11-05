@@ -807,6 +807,7 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
     };
     let (npc_wrecks_cleaned, mission_npcs_respawned) =
         crate::sp6_lifecycle::cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx);
+    let daily_goals_reset = ctx.quasar_gateway.progression.daily_goals.reset_daily_goals_on_downtime(now) as i64;
     let wormhole_sites_despawned =
         super::wormhole_pve_escalations::process_wormhole_sites_on_downtime(ctx);
 
@@ -1088,6 +1089,7 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
         ("essBanksRolledOver".into(), ess_rolled_over),
         ("autoPaidBills".into(), auto_paid_bills),
         ("expiredRaffles".into(), expired_raffles),
+        ("dailyGoalsReset".into(), daily_goals_reset),
         ("evacuatedAbyssalPilots".into(), evacuated_abyssal),
         ("npcWrecksCleaned".into(), npc_wrecks_cleaned as i64),
         ("missionNpcsRespawned".into(), mission_npcs_respawned as i64),

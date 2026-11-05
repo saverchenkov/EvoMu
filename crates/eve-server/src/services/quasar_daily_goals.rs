@@ -377,6 +377,23 @@ impl DailyGoalManager {
         }
     }
 
+    
+    pub fn reset_daily_goals_on_downtime(&self, now_unix: u64) -> usize {
+        let mut count = 0;
+        let tpls = self.templates.read().unwrap().clone();
+        let mut chars = self.character_goals.write().unwrap();
+        for goals in chars.values_mut() {
+            if ensure_character_daily_goals_with_templates(goals, &tpls, now_unix) {
+                count += 1;
+            }
+        }
+        if count > 0 {
+            drop(chars);
+            self.save_to_db();
+        }
+        count
+    }
+
     pub fn save_to_db(&self) {
         if let Some(ref db) = self.db {
             let templates = self.templates.read().unwrap_or_else(|e| e.into_inner()).clone();

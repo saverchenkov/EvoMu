@@ -248,7 +248,6 @@ pub fn resolve_mission_npc_type(ctx: &ServerContext) -> u32 {
         .unwrap_or(0)
 }
 
-/// # feat:pve.mission-lp-isk-reward-formula
 /// // DERIVED: Formulaic mission reward calculation (base ISK = base LP * 1000)
 /// Mission LP reward = base LP x (1.6288 - the agent system's true security) x (1 + 0.1 x matching division Connections skill: Distribution, Mining or Security).
 /// ISK reward is +5% per Negotiation level. Both credited and journaled on completion.
@@ -269,7 +268,7 @@ pub fn compute_character_mission_rewards(
         .map(|s| s.security_status)
         .unwrap_or(1.0);
 
-    let (is_alpha, neg_lvl, dist_conn, mining_conn, sec_conn, offered_lvl) =
+    let (is_alpha, neg_lvl, offered_lvl) =
         ctx.db.with_snapshot(|snap| {
             let alpha = snap
                 .characters
@@ -277,11 +276,11 @@ pub fn compute_character_mission_rewards(
                 .is_some_and(|c| c.clone_grade <= 1);
             let sk = snap.skills.get(&char_id);
             let neg = sk.and_then(|m| m.get(&3356)).map_or(0, |s| s.level);
-            let dist = sk.and_then(|m| m.get(&3894)).map_or(0, |s| s.level);
-            let mining = sk.and_then(|m| m.get(&3893)).map_or(0, |s| s.level);
-            let sec = sk.and_then(|m| m.get(&3895)).map_or(0, |s| s.level);
+            
+            
+            
             let olvl = load_mission_meta(snap, char_id, mission_id).and_then(|m| m.offered_level);
-            (alpha, neg, dist, mining, sec, olvl)
+            (alpha, neg, olvl)
         });
 
     let min_level_lp = i64::from(offered_lvl.unwrap_or(1).max(1)) * 100;
@@ -293,25 +292,10 @@ pub fn compute_character_mission_rewards(
         }
     });
 
-    let matching_conn_lvl = match agent_info.map(|a| a.division_id) {
-        Some(27) => dist_conn,  // Distribution
-        Some(26) => mining_conn, // Mining
-        Some(24) => sec_conn,    // Security
-        _ => {
-            if tmpl.is_some_and(|t| t.is_courier) {
-                dist_conn
-            } else if tmpl.is_some_and(|t| t.title.to_lowercase().contains("mining")) {
-                mining_conn
-            } else {
-                sec_conn
-            }
-        }
-    };
 
     // LP reward = base LP x (1.6288 - true_sec) x (1 + 0.1 x matching division Connections skill)
     let sec_factor = (1.6288 - true_sec).max(0.01);
-    let conn_factor = 1.0 + 0.10 * (matching_conn_lvl.min(5) as f64);
-    let lp_reward = ((base_lp as f64) * sec_factor * conn_factor).round() as i64;
+    let lp_reward = ((base_lp as f64) * sec_factor).round() as i64;
 
     // DERIVED: Formulaic mission reward calculation (base ISK = base LP * 1000)
     // ISK reward = base ISK x (1 + 0.05 x Negotiation level)

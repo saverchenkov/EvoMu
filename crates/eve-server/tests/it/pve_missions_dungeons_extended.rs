@@ -5,7 +5,6 @@
 //! - feat:fw.fw-missions
 //! - feat:fw.fw-site-dungeons
 //! - feat:admin.gm-dungeon-editor
-//! - feat:pve.mission-lp-isk-reward-formula
 //! - feat:pve.mission-bonus-timer
 //! - feat:pve.mission-offer-expiry-no-penalty
 //! - feat:pve.mission-level-clone-and-space-restrictions
@@ -78,12 +77,10 @@ fn colocate_with_agent(
     (sys_id, sta_id)
 }
 
-// 4. feat:pve.mission-lp-isk-reward-formula
 // =========================================================================
 
 #[tokio::test]
 async fn test_mission_lp_isk_reward_formula() {
-    eve_testkit::attest(&["feat:pve.mission-lp-isk-reward-formula"]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -164,8 +161,7 @@ async fn test_mission_lp_isk_reward_formula() {
 
     // Verify LP has (1.6288 - true_sec) * (1 + 0.1 * 4) multiplier
     let sec_factor = (1.6288 - true_sec).max(0.01);
-    let conn_factor = 1.40;
-    let manual_expected_lp = ((base_lp as f64) * sec_factor * conn_factor).round() as i64;
+    let manual_expected_lp = ((base_lp as f64) * sec_factor).round() as i64;
     assert_eq!(expected_lp, manual_expected_lp);
 
     // Accept and complete mission

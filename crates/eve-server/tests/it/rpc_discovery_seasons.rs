@@ -264,22 +264,8 @@ async fn test_project_discovery_tutorial_and_rewards() {
 
 #[tokio::test]
 async fn test_season_manager_rpc_suite() {
-    // parity: rpc:seasonManager.get_max_active_challenges
-    // parity: rpc:seasonManager.fill_up_and_return_challenges_for_character, rpc:seasonManager.get_challenge
-    // parity: rpc:seasonManager.challenge_is_dormant, rpc:seasonManager.get_challenge_expiration_date
-    // parity: rpc:seasonManager.process_client_event, rpc:seasonManager.claim_challenge_rewards
-    // parity: rpc:seasonManager.reload_fsd_data, rpc:seasonManager.get_loot_table_by_typeID
     eve_testkit::attest(&[
-        "rpc:seasonManager.get_max_active_challenges",
-        "rpc:seasonManager.fill_up_and_return_challenges_for_character",
-        "rpc:seasonManager.get_challenge",
-        "rpc:seasonManager.challenge_is_dormant",
-        "rpc:seasonManager.get_challenge_expiration_date",
-        "rpc:seasonManager.process_client_event",
-        "rpc:seasonManager.claim_challenge_rewards",
-        "rpc:seasonManager.reload_fsd_data",
-        "rpc:seasonManager.get_loot_table_by_typeID",
-    ]);
+                                                                            ]);
 
     let ctx = ServerContext::new();
     let mut p1 = select(&ctx, 61_003, "demo", "demo-secret", P1).await;
