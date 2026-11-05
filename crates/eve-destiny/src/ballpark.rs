@@ -408,21 +408,25 @@ impl Ballpark {
     }
 
     /// Queues a `SetState` destiny update for `observer_ball_id` (`P-7`).
+    ///
+    /// DERIVED: V24.01 `eve/client/script/remote/michelle.pyj` (`Park.FlushState` & `Park.RealFlushState`)
+    /// only checks `if state[0][1][0] == 'SetState':` at index `0` of the `DoDestinyUpdate` action list
+    /// and explicitly skips `'SetState'` at any non-zero index (`if funcName == 'SetState': continue`).
+    /// Therefore `SetState` must always be placed at index `0` of the observer's event queue.
     pub fn queue_set_state(&mut self, observer_ball_id: BallId) -> bool {
         if !self.balls.contains_key(&observer_ball_id) {
             return false;
         }
         let events = self.observer_events.entry(observer_ball_id).or_default();
-        if !events.iter().any(|e| {
-            matches!(
+        events.retain(|e| {
+            !matches!(
                 e,
                 DestinyEvent::SetState {
                     observer_ball_id: id
                 } if *id == observer_ball_id
             )
-        }) {
-            events.push(DestinyEvent::SetState { observer_ball_id });
-        }
+        });
+        events.insert(0, DestinyEvent::SetState { observer_ball_id });
         true
     }
 

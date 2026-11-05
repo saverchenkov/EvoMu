@@ -604,9 +604,13 @@ pub async fn handle(
                 for (&sys_id, st) in &snap.system_states {
                     if st.sov_alliance_id.is_some() || st.military_index > 0 || st.industrial_index > 0 {
                         let indices = PyRep::keyval([
+                            ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
                             ("military", PyRep::Integer(i64::from(st.military_index))),
                             ("industrial", PyRep::Integer(i64::from(st.industrial_index))),
                             ("strategic", PyRep::Integer(i64::from(st.strategic_index))),
+                            ("militaryPoints", PyRep::Integer(i64::from(st.military_index) * 1_000)),
+                            ("industrialPoints", PyRep::Integer(i64::from(st.industrial_index) * 1_000)),
+                            ("claimedFor", PyRep::Integer(i64::from(st.strategic_index))),
                             ("adm", PyRep::Real(calculate_adm(st.military_index, st.industrial_index, st.strategic_index))),
                         ]);
                         map.push((PyRep::Integer(i64::from(sys_id)), indices));

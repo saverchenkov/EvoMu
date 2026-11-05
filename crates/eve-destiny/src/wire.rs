@@ -633,6 +633,15 @@ pub fn slim_item_dict(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
         // raises `TypeError: Could not match argument 0 to expected type: wstring` in `trinity.Load`.
         entries.push(("nebulaType", PyRep::Integer(1)));
     }
+    if meta.category_id == 11 {
+        // DERIVED: V24.01 `spacecomponents/client/components/entitystandings.pyj:63`
+        // (`_get_icon_color_and_hint_from_entity_standing_response`) checks
+        // `if slim_item.hostile_response_threshold is None or slim_item.friendly_response_threshold is None:`
+        // and logs `logger.error('failed getting standing thresholds from slim_item, defaulting to hostile=%s and friendly=%s for type=%s')`
+        // (triggering `monolithsentry`) when missing on NPC entity balls (`category_id == 11`).
+        entries.push(("hostile_response_threshold", PyRep::Real(11.0)));
+        entries.push(("friendly_response_threshold", PyRep::Real(11.0)));
+    }
     PyRep::Dict(
         entries
             .into_iter()
@@ -974,11 +983,14 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
             warp_speed_au_s,
         } => PyRep::Tuple(vec![
             PyRep::String("WarpTo".into()),
+            // V24 `_destiny.Ballpark.WarpTo(ballID, x, y, z, distance, warpSpeedTenthAuPerSec)` 6-tuple
+            // (`autopilot.pyj:221` slices `dstVector = args[1:-2]` to extract `(x, y, z)`).
             PyRep::Tuple(vec![
                 PyRep::Integer(*ball_id),
                 PyRep::Real(destination[0]),
                 PyRep::Real(destination[1]),
                 PyRep::Real(destination[2]),
+                PyRep::Integer(0),
                 PyRep::Integer((*warp_speed_au_s * 10.0).round() as i64),
             ]),
         ]),
@@ -1368,15 +1380,25 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
 }
 
 /// Encodes a slice of [`DestinyEvent`]s into a `DoDestinyUpdate` `PyRep::List` of `(stamp, (action, args))` tuples.
+///
+/// DERIVED: V24.01 `eve/client/script/remote/michelle.pyj` (`Park.FlushState` & `Park.RealFlushState`)
+/// requires `SetState` to appear at index `0` (`state[0][1][0] == 'SetState'`); any `SetState` at index `> 0`
+/// is ignored by `RealFlushState`, leaving `Park.validState == False` and hanging `GetBallWaitForModel`.
 pub fn encode_destiny_updates(
     stamp: u32,
     events: &[DestinyEvent],
     park: Option<&Ballpark>,
 ) -> PyRep {
-    PyRep::List(
-        events
-            .iter()
-            .map(|ev| encode_destiny_event(stamp, ev, park))
-            .collect(),
-    )
+    let mut encoded = Vec::with_capacity(events.len());
+    for ev in events {
+        if matches!(ev, DestinyEvent::SetState { .. }) {
+            encoded.push(encode_destiny_event(stamp, ev, park));
+        }
+    }
+    for ev in events {
+        if !matches!(ev, DestinyEvent::SetState { .. }) {
+            encoded.push(encode_destiny_event(stamp, ev, park));
+        }
+    }
+    PyRep::List(encoded)
 }

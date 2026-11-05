@@ -370,6 +370,38 @@ pub fn handle_pi_orbitals_gm(
             Some(Ok(rep))
         }
 
+        ("planetMgr", "GMCreateNuggetLayer") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    code: "AdminAccessDenied".into(),
+                    message: "planetMgr.GMCreateNuggetLayer requires GM role".into(),
+                }));
+            }
+            let _ = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id));
+            Some(Ok(PyRep::None))
+        }
+
+        ("planetMgr", "GMGetCompleteResource") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    code: "AdminAccessDenied".into(),
+                    message: "planetMgr.GMGetCompleteResource requires GM role".into(),
+                }));
+            }
+            Some(Ok(PyRep::keyval([
+                ("data", PyRep::Bytes(vec![0u8; 36])),
+                ("numBands", PyRep::Integer(3)),
+            ])))
+        }
+
         _ => None,
     }
 }

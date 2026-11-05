@@ -90,6 +90,33 @@ pub fn wrapped_runtime_error_body(original_command: i64, message: &str) -> PyRep
     ])
 }
 
+/// Body of a V24 `machoNetPacket.ErrorResponse` carrying a wrapped `eveexceptions.UserError`
+/// (`UserError('CustomInfo', {'info': message})`) so client call sites (`autopilot.pyj`,
+/// `movementFunctions.pyj`, `slash.py`) catch `UserError` cleanly instead of logging an
+/// unhandled `RuntimeError` stack trace.
+pub fn wrapped_user_error_body(original_command: i64, message: &str) -> PyRep {
+    let exc = PyRep::ObjectEx {
+        is_type_2: false,
+        header: Box::new(PyRep::Tuple(vec![
+            PyRep::Token("eveexceptions.UserError".into()),
+            PyRep::Tuple(vec![
+                PyRep::ascii_bytes("CustomInfo"),
+                PyRep::Dict(vec![(
+                    PyRep::ascii_bytes("info"),
+                    PyRep::ascii_bytes(message),
+                )]),
+            ]),
+        ])),
+        list: Vec::new(),
+        dict: Vec::new(),
+    };
+    PyRep::Tuple(vec![
+        PyRep::Integer(original_command),
+        PyRep::Integer(MACHONETERR_WRAPPEDEXCEPTION),
+        PyRep::Tuple(vec![PyRep::Bytes(eve_proto::marshal::encode(&exc))]),
+    ])
+}
+
 /// `macho.MachoAddress` endpoint representation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MachoAddress {

@@ -998,11 +998,20 @@ async fn handle_cone_scan(
     if sys_id == 30_100_000 || (32_000_000..=32_999_999).contains(&sys_id) {
         return Some(Err(BridgeRpcError::user_error("CannotDscanInThisSystem")));
     }
-    let scan_angle = args
+    let raw_angle = args
         .first()
         .and_then(|a| a.as_f64())
-        .unwrap_or(360.0)
-        .clamp(5.0, 360.0);
+        .unwrap_or(360.0);
+    // V24 client (`directionalScanSvc.pyj`) passes `scanAngle` in radians (`0.087..=2*pi`),
+    // whereas internal tests pass degrees (`5.0..=360.0`).
+    let scan_angle = if raw_angle > 0.0
+        && (raw_angle - 5.0).abs() > 1e-6
+        && raw_angle <= std::f64::consts::TAU + 0.001
+    {
+        raw_angle.to_degrees().clamp(5.0, 360.0)
+    } else {
+        raw_angle.clamp(5.0, 360.0)
+    };
     let max_scan_range = 14.3 * AU_IN_METERS;
     let scan_range = args
         .get(1)

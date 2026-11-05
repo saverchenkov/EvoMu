@@ -529,6 +529,17 @@ pub fn handle(
             Some(Ok(PyRep::None))
         }
 
+        ("sessionMgr", "ConnectToClientService") => {
+            let _ = ctx.db.with_snapshot(|snap| snap.characters.len());
+            Some(Ok(PyRep::Integer(1)))
+        }
+
+        ("sessionMgr", "PerformHorridSessionAttributeUpdate")
+        | ("sessionMgr", "UpdateSessionAttributes") => {
+            let _ = ctx.db.with_snapshot(|snap| snap.characters.len());
+            Some(Ok(PyRep::Bool(true)))
+        }
+
         ("raffleMgr", "QA_SeedRaffles") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,

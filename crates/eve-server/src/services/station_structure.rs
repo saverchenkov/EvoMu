@@ -178,13 +178,28 @@ pub async fn handle(
                     .map(|(_, svcs)| svcs.into_iter().map(|s| PyRep::String(s.into())).collect())
                     .unwrap_or_default();
                 let is_war_hq = !hq_services.is_empty();
+                let desc_text = st.name.clone();
+                let sys_sec = ctx
+                    .sde
+                    .solar_systems
+                    .get(&sys_id)
+                    .map(|s| s.security_status)
+                    .unwrap_or(0.0);
                 Some(Ok(PyRep::keyval([
                     ("stationID", PyRep::Integer(st.station_id)),
                     ("stationName", PyRep::String(st.name)),
+                    ("description", PyRep::String(desc_text)),
                     ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                    ("constellationID", PyRep::Integer(i64::from(st.constellation_id))),
+                    ("regionID", PyRep::Integer(i64::from(st.region_id))),
                     ("stationTypeID", PyRep::Integer(i64::from(st.station_type_id))),
                     ("ownerID", PyRep::Integer(st.owner_corporation_id)),
                     ("operationID", PyRep::Integer(i64::from(st.operation_id))),
+                    ("orbitID", st.orbit_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                    ("x", PyRep::Real(st.position.x)),
+                    ("y", PyRep::Real(st.position.y)),
+                    ("z", PyRep::Real(st.position.z)),
+                    ("security", PyRep::Real(sys_sec)),
                     ("serviceMask", PyRep::Integer(service_mask)),
                     ("services", PyRep::List(services)),
                     ("isWarHQ", PyRep::Bool(is_war_hq)),
@@ -763,13 +778,18 @@ pub async fn handle(
                 .filter(|&r| r > 0.0)
                 .unwrap_or(sde_target_radius);
             let dist = ball.position.distance(target_pos);
-            if dist > target_radius + 2_500.0 {
+            let max_dock_dist = if !session.address.is_empty() {
+                target_radius + 35_000.0
+            } else {
+                target_radius + 2_500.0
+            };
+            if dist > max_dock_dist {
                 return Some(Err(BridgeRpcError {
                     code: "OutsideDockingPerimeter".into(),
                     message: format!(
                         "Ship is {:.1} m from docking target (must be <= {:.1} m)",
                         dist,
-                        target_radius + 2_500.0
+                        max_dock_dist
                     ),
                 }));
             }

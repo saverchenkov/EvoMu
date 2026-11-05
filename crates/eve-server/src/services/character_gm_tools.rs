@@ -1171,6 +1171,31 @@ pub async fn handle_gm_slash_ext(
         ])));
     }
 
+    if cmd == "/whoami" || cmd.starts_with("/whoami ") {
+        let ch = match ctx.db.get_character(cid) {
+            Ok(c) => c,
+            Err(e) => {
+                return Some(Err(BridgeRpcError {
+                    code: "CharacterNotFound".into(),
+                    message: e.to_string(),
+                }))
+            }
+        };
+        let summary = format!(
+            "userID={} charID={} ({}) corpID={} solarSystemID={} stationID={:?} structureID={:?} shipID={} role=0x{:x}",
+            session.user_id.unwrap_or(0),
+            cid,
+            ch.name,
+            ch.corporation_id,
+            ch.solar_system_id,
+            ch.station_id,
+            ch.structure_id,
+            ch.active_ship_id,
+            session.role,
+        );
+        return Some(Ok(PyRep::String(summary)));
+    }
+
     if cmd == "/online" || cmd.starts_with("/online ") {
         let user_ids: Vec<u64> = ctx.db.with_snapshot(|snap| snap.accounts.values().map(|a| a.user_id).collect());
         let mut online_pairs = Vec::new();

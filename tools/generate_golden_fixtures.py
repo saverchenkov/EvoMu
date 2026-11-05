@@ -186,14 +186,14 @@ def encode_destiny_ball(mode, pos, vel, max_vel, mass=1067000.0, radius=37.0, in
     elif mode == 2:  # Stop
         pass
     elif mode == 4:  # Orbit
-        buf.extend(struct.pack("<Id", extra["target_id"], extra["range"]))
+        buf.extend(struct.pack("<qf", extra["target_id"], extra["range"]))
     elif mode == 3:  # Warp
         dest = extra["destination"]
         buf.extend(struct.pack("<ddd", dest.x, dest.y, dest.z))
         buf.extend(struct.pack("<i", 0))  # effect_stamp
         buf.extend(struct.pack("<q", struct.unpack("<q", struct.pack("<d", -1.0))[0]))
         buf.extend(struct.pack("<q", struct.unpack("<q", struct.pack("<d", 15000.0))[0]))
-        buf.extend(struct.pack("<i", int(extra["warp_speed_au_s"] * 10.0)))
+        buf.extend(struct.pack("<q", int(extra["warp_speed_au_s"] * 10.0)))
     return bytes(buf)
 
 

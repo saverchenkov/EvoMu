@@ -206,14 +206,29 @@ pub(crate) fn emit_server_skills_changed(
             .iter()
             .filter_map(|&tid| {
                 let rec = skills.get(&tid)?;
+                let rank = ctx
+                    .sde
+                    .types
+                    .get(&tid)
+                    .and_then(|t| {
+                        t.default_attributes
+                            .get(&eve_sde::attr_ids::SKILL_TIME_CONSTANT)
+                            .copied()
+                    })
+                    .unwrap_or(1.0);
+                let lvl = rec.level as i64;
                 Some((
                     PyRep::Integer(tid as i64),
                     PyRep::keyval([
                         ("typeID", PyRep::Integer(tid as i64)),
-                        ("trainedSkillPoints", PyRep::Real(rec.skill_points)),
-                        ("trainedSkillLevel", PyRep::Integer(rec.level as i64)),
-                        ("effectiveSkillLevel", PyRep::Integer(rec.level as i64)),
+                        ("skillLevel", PyRep::Integer(lvl)),
+                        ("trainedSkillLevel", PyRep::Integer(lvl)),
+                        ("effectiveSkillLevel", PyRep::Integer(lvl)),
+                        ("activeSkillLevel", PyRep::Integer(lvl)),
                         ("virtualSkillLevel", PyRep::None),
+                        ("skillPoints", PyRep::Real(rec.skill_points)),
+                        ("trainedSkillPoints", PyRep::Real(rec.skill_points)),
+                        ("skillRank", PyRep::Real(rank)),
                     ]),
                 ))
             })
@@ -245,14 +260,30 @@ pub(crate) fn emit_server_skills_removed(ctx: &ServerContext, char_id: i64, remo
     let entries: Vec<(PyRep, PyRep)> = removed
         .iter()
         .map(|&(tid, lvl)| {
+            let rank = ctx
+                .sde
+                .types
+                .get(&tid)
+                .and_then(|t| {
+                    t.default_attributes
+                        .get(&eve_sde::attr_ids::SKILL_TIME_CONSTANT)
+                        .copied()
+                })
+                .unwrap_or(1.0);
+            let sp = crate::formulas::sp_for_skill_level(rank, lvl);
+            let lvl_i64 = lvl as i64;
             (
                 PyRep::Integer(tid as i64),
                 PyRep::keyval([
                     ("typeID", PyRep::Integer(tid as i64)),
-                    ("trainedSkillPoints", PyRep::None),
-                    ("trainedSkillLevel", PyRep::Integer(lvl as i64)),
-                    ("effectiveSkillLevel", PyRep::Integer(lvl as i64)),
+                    ("skillLevel", PyRep::Integer(lvl_i64)),
+                    ("trainedSkillLevel", PyRep::Integer(lvl_i64)),
+                    ("effectiveSkillLevel", PyRep::Integer(lvl_i64)),
+                    ("activeSkillLevel", PyRep::Integer(lvl_i64)),
                     ("virtualSkillLevel", PyRep::None),
+                    ("skillPoints", PyRep::Real(sp)),
+                    ("trainedSkillPoints", PyRep::Real(sp)),
+                    ("skillRank", PyRep::Real(rank)),
                 ]),
             )
         })

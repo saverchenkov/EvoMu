@@ -11,7 +11,7 @@ pub(crate) async fn handle_mining_and_deactivate(
     service: &str,
     method: &str,
     args: &[PyRep],
-    kwargs: &HashMap<String, PyRep>,
+    _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("dogmaIM", "Deactivate") => {
@@ -707,7 +707,7 @@ pub(crate) async fn handle_mining_and_deactivate(
         }
 
         ("miningScanMgr", "perform_scan") => {
-            if args.is_empty() && kwargs.is_empty() {
+            if args.is_empty() && _kwargs.is_empty() {
                 return None;
             }
             let (_, char_id) = match ServerContext::require_character(session) {

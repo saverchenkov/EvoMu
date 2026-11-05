@@ -714,6 +714,7 @@ fn handle_char_mgr(
             Some(Ok(PyRep::keyval([
                 ("stationID", PyRep::Integer(station_id)),
                 ("typeID", PyRep::Integer(type_id)),
+                ("stationTypeID", PyRep::Integer(type_id)),
                 ("solarSystemID", PyRep::Integer(solar_system_id)),
             ])))
         }
@@ -736,12 +737,14 @@ fn handle_char_mgr(
                         let ch = snap.characters.get(&cid);
                         let corp = ch.map(|c| c.corporation_id).unwrap_or(1000044);
                         let ally = ch.and_then(|c| c.alliance_id);
+                        let wf = ch.and_then(|c| c.war_faction_id);
                         (
                             PyRep::Integer(cid),
                             PyRep::keyval([
                                 ("characterID", PyRep::Integer(cid)),
                                 ("corporationID", PyRep::Integer(corp)),
                                 ("allianceID", ally.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                                ("warFactionID", wf.map(PyRep::Integer).unwrap_or(PyRep::None)),
                             ]),
                         )
                     })
@@ -900,7 +903,12 @@ fn handle_char_mgr(
                     .collect()
             });
             Some(Ok(PyRep::Rowset {
-                columns: vec!["killID".into(), "victimID".into(), "solarSystemID".into(), "killTime".into()],
+                columns: vec![
+                    "killID".into(),
+                    "victimID".into(),
+                    "solarSystemID".into(),
+                    "killTime".into(),
+                ],
                 rows,
             }))
         }

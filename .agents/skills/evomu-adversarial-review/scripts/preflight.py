@@ -524,6 +524,24 @@ def run_early_gate(root, base, added, claims_path):
     # 2d. New standalone eve-server test binaries after the single-binary refactor
     violations += lint_new_test_files(root, base)
 
+    # 2e. Client RPC & notification contract suite integrity check
+    contract_test_rel = "crates/eve-server/tests/it/rpc_client_contracts.rs"
+    contract_test_full = os.path.join(root, contract_test_rel)
+    it_main_full = os.path.join(root, "crates/eve-server/tests/it/main.rs")
+    exp_json_full = os.path.join(os.path.dirname(HERE), "references", "parity", "sources", "client_expectations.json")
+    if not os.path.isfile(contract_test_full):
+        violations.append(("MISSING_RPC_CONTRACT_SUITE",
+                           "Required client RPC/notification acceptance test suite is missing",
+                           contract_test_rel, 1))
+    elif os.path.isfile(it_main_full) and "mod rpc_client_contracts;" not in open(it_main_full, errors="replace").read():
+        violations.append(("UNREGISTERED_RPC_CONTRACT_SUITE",
+                           "rpc_client_contracts module must be registered in crates/eve-server/tests/it/main.rs",
+                           "crates/eve-server/tests/it/main.rs", 1))
+    if not os.path.isfile(exp_json_full):
+        violations.append(("MISSING_CLIENT_EXPECTATIONS",
+                           "client_expectations.json is missing from references/parity/sources/",
+                           exp_json_full, 1))
+
     # 3. Claims citations & quotes check (if draft claims provided)
     if claims_path and os.path.exists(claims_path):
         claims_text = open(claims_path, errors="replace").read()

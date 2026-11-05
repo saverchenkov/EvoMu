@@ -180,13 +180,23 @@ fn handle_petitioner(
                 rows.sort_by_key(|p| p.petition_id);
                 rows.into_iter()
                     .map(|p| {
+                        let created_ft = p
+                            .logs
+                            .first()
+                            .map(|(_, _, ts)| crate::session_cluster_lifecycle::unix_to_filetime(*ts))
+                            .unwrap_or_else(|| crate::session_cluster_lifecycle::unix_to_filetime(ctx.now_unix()));
                         PyRep::keyval([
                             ("petitionID", PyRep::Integer(p.petition_id)),
+                            ("petitionerID", PyRep::Integer(p.petitioner_cid)),
                             ("subject", PyRep::String(p.subject)),
                             ("description", PyRep::String(p.description)),
                             ("categoryID", PyRep::Integer(p.category_id)),
                             ("status", PyRep::String(p.status)),
                             ("escalated", PyRep::Bool(p.escalated)),
+                            ("unread", PyRep::Integer(i64::from(p.unread))),
+                            ("createDate", PyRep::Integer(created_ft)),
+                            ("updatedDate", PyRep::Integer(created_ft)),
+                            ("properties", PyRep::String(String::new())),
                             (
                                 "claimedBy",
                                 p.claimed_by.map(PyRep::Integer).unwrap_or(PyRep::None),
@@ -591,6 +601,7 @@ fn handle_petitioner(
                     PyRep::keyval([
                         ("categoryID", PyRep::Integer(id)),
                         ("categoryName", PyRep::String(name.into())),
+                        ("displayName", PyRep::String(name.into())),
                     ])
                 })
                 .collect();

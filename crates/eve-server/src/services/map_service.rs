@@ -522,6 +522,10 @@ pub fn handle(
                                     "solarSystemID",
                                     PyRep::Integer(i64::from(other.solar_system_id)),
                                 ),
+                                (
+                                    "locationID",
+                                    PyRep::Integer(i64::from(other.solar_system_id)),
+                                ),
                             ]));
                         }
                     }

@@ -485,6 +485,7 @@ pub fn handle_project_discovery(
                     ("accuracy", PyRep::Real(st.accuracy)),
                     ("score", PyRep::Real(st.score)),
                     ("analysisKredits", PyRep::Integer(st.analysis_kredits)),
+                    ("tutorialLevel", PyRep::Integer(st.tutorial_level)),
                     ("finishedTutorial", PyRep::Bool(st.tutorial_complete || st.tutorial_skipped)),
                 ])
             });
@@ -537,23 +538,42 @@ pub fn handle_project_discovery(
         }
 
         "increase_tutorial_level" => {
-            let new_lvl = with_player_state(ctx, char_id, |st, _snap| {
+            let res = with_player_state(ctx, char_id, |st, _snap| {
                 st.tutorial_level += 1;
                 if !st.tutorial_skipped && st.tutorial_level >= 5 {
                     st.tutorial_complete = true;
                 }
-                st.tutorial_level
+                PyRep::keyval([
+                    ("rank", PyRep::Integer(st.rank)),
+                    ("experience", PyRep::Real(st.experience)),
+                    ("totalXP", PyRep::Real(st.experience)),
+                    ("accuracy", PyRep::Real(st.accuracy)),
+                    ("score", PyRep::Real(st.score)),
+                    ("analysisKredits", PyRep::Integer(st.analysis_kredits)),
+                    ("tutorialLevel", PyRep::Integer(st.tutorial_level)),
+                    ("finishedTutorial", PyRep::Bool(st.tutorial_complete || st.tutorial_skipped)),
+                ])
             });
-            Some(Ok(PyRep::Integer(new_lvl)))
+            Some(Ok(res))
         }
 
         "reset_tutorial" => {
-            with_player_state(ctx, char_id, |st, _snap| {
+            let res = with_player_state(ctx, char_id, |st, _snap| {
                 st.tutorial_level = 1;
                 st.tutorial_skipped = false;
                 st.tutorial_complete = false;
+                PyRep::keyval([
+                    ("rank", PyRep::Integer(st.rank)),
+                    ("experience", PyRep::Real(st.experience)),
+                    ("totalXP", PyRep::Real(st.experience)),
+                    ("accuracy", PyRep::Real(st.accuracy)),
+                    ("score", PyRep::Real(st.score)),
+                    ("analysisKredits", PyRep::Integer(st.analysis_kredits)),
+                    ("tutorialLevel", PyRep::Integer(st.tutorial_level)),
+                    ("finishedTutorial", PyRep::Bool(st.tutorial_complete || st.tutorial_skipped)),
+                ])
             });
-            Some(Ok(PyRep::Bool(true)))
+            Some(Ok(res))
         }
 
         "skip_tutorial" => {

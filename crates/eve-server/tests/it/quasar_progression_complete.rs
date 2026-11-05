@@ -654,14 +654,16 @@ async fn quasar_skills_plans_extractors_and_implants() {
     let act1 = quasar_rpc(&ctx, &mut sess, "eve_public.skill.plan.GetActiveRequest", Vec::new()).await;
     assert!(act1.status_code == STATUS_OK && !act1.payload.unwrap().value.is_empty());
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.skill.plan.SetActiveRequest", Vec::new()).await.status_code, STATUS_OK);
-    assert!(quasar_rpc(&ctx, &mut sess, "eve_public.skill.plan.GetActiveRequest", Vec::new()).await.payload.unwrap().value.is_empty());
+    let cleared_sp = WireMessage::decode(&quasar_rpc(&ctx, &mut sess, "eve_public.skill.plan.GetActiveRequest", Vec::new()).await.payload.unwrap().value).unwrap();
+    assert_eq!(WireMessage::decode(cleared_sp.fields[0].value.as_bytes().unwrap()).unwrap().fields[0].value.as_bytes().unwrap(), &[0u8; 16]);
     let (mut f2_id, mut f2_req) = (Vec::new(), Vec::new());
     encode_bytes_field(1, &plan_uuid, &mut f2_id);
     encode_bytes_field(2, &f2_id, &mut f2_req);
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.character.skill.plan.SetActiveRequest", f2_req).await.status_code, STATUS_OK);
     assert!(!quasar_rpc(&ctx, &mut sess, "eve_public.character.skill.plan.GetActiveRequest", Vec::new()).await.payload.unwrap().value.is_empty());
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.character.skill.plan.SetActiveRequest", Vec::new()).await.status_code, STATUS_OK);
-    assert!(quasar_rpc(&ctx, &mut sess, "eve_public.character.skill.plan.GetActiveRequest", Vec::new()).await.payload.unwrap().value.is_empty());
+    let cleared_ch_sp = WireMessage::decode(&quasar_rpc(&ctx, &mut sess, "eve_public.character.skill.plan.GetActiveRequest", Vec::new()).await.payload.unwrap().value).unwrap();
+    assert_eq!(WireMessage::decode(cleared_ch_sp.fields[0].value.as_bytes().unwrap()).unwrap().fields[0].value.as_bytes().unwrap(), &[0u8; 16]);
     let cat_rsp = quasar_rpc(&ctx, &mut sess, "eve.skillcategory.GetAllRequest", Vec::new()).await;
     assert!(cat_rsp.status_code == STATUS_OK && cat_rsp.payload.as_ref().unwrap().normalized_type_name() == "eve.skillcategory.GetAllResponse");
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.skilltype.GetRequest", make_id_request(3300)).await.status_code, STATUS_OK);

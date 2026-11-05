@@ -10,7 +10,8 @@ LEDGER = '/Users/sergeya/ai/EvoMu-supervisor/.agents/skills/evomu-adversarial-re
 
 
 def main():
-    exp = json.load(open(os.path.join(HERE, 'client_expectations.json')))
+    exp_path = os.path.join(HERE, '..', '..', 'references', 'parity', 'sources', 'client_expectations.json')
+    exp = json.load(open(exp_path))
     rows = json.load(open(LEDGER))['rows']
     rpc_rows = sorted(r['id'][4:] for r in rows if r['category'] == 'rpc')
     ntf_rows = sorted(r['id'][7:] for r in rows if r['category'] == 'notify')

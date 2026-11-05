@@ -352,6 +352,7 @@ async fn test_warp_to_and_special_fx_on_warp_start_and_exit() {
             PyRep::Real(dest.x),
             PyRep::Real(dest.y),
             PyRep::Real(dest.z),
+            PyRep::Integer(0),
             PyRep::Integer(50),
         ]);
         // Client `Park.OnSpecialFX(shipID, moduleID, moduleTypeID, targetID, otherTypeID, guid,

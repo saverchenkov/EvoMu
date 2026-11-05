@@ -192,7 +192,7 @@ async fn test_project_discovery_tutorial_and_rewards() {
     assert_eq!(rpc(&ctx, &mut p1, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("rew initial"), PyRep::Bool(false));
     let _ = rpc(&ctx, &mut p1, "ProjectDiscovery", "skip_tutorial", &[]).await.expect("skip");
     let inc = rpc(&ctx, &mut p1, "ProjectDiscovery", "increase_tutorial_level", &[]).await.expect("inc");
-    assert_eq!(inc, PyRep::Integer(6));
+    assert_eq!(inc.dict_get("tutorialLevel"), Some(&PyRep::Integer(6)));
     assert_eq!(rpc(&ctx, &mut p1, "ProjectDiscovery", "get_is_player_entitled_to_tutorial_reward", &[]).await.expect("ent"), PyRep::Bool(false));
     assert_eq!(rpc(&ctx, &mut p1, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("rew"), PyRep::Bool(false));
     let _ = rpc(&ctx, &mut p1, "ProjectDiscovery", "reset_tutorial", &[]).await.expect("reset");
@@ -212,7 +212,7 @@ async fn test_project_discovery_tutorial_and_rewards() {
     assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "get_tutorial_level", &[]).await.expect("get_tutorial_level"), PyRep::Integer(1));
 
     // 6. increase_tutorial_level to level 2 — still incomplete and not entitled to tutorial reward
-    assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "increase_tutorial_level", &[]).await.expect("inc lvl 2"), PyRep::Integer(2));
+    assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "increase_tutorial_level", &[]).await.expect("inc lvl 2").dict_get("tutorialLevel"), Some(&PyRep::Integer(2)));
     assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "get_tutorial_completion_status", &[]).await.expect("comp lvl 2"), PyRep::Bool(false));
     assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "get_is_player_entitled_to_tutorial_reward", &[]).await.expect("ent lvl 2"), PyRep::Bool(false));
     assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("rew lvl 2"), PyRep::Bool(false));
@@ -228,7 +228,7 @@ async fn test_project_discovery_tutorial_and_rewards() {
 
     // Complete levels 3, 4, 5 to finish tutorial without skipping
     for expected_lvl in 3..=5 {
-        assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "increase_tutorial_level", &[]).await.expect("inc to 5"), PyRep::Integer(expected_lvl));
+        assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "increase_tutorial_level", &[]).await.expect("inc to 5").dict_get("tutorialLevel"), Some(&PyRep::Integer(expected_lvl)));
     }
     assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "get_tutorial_completion_status", &[]).await.expect("comp lvl 5"), PyRep::Bool(true));
     assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "get_is_player_entitled_to_tutorial_reward", &[]).await.expect("ent lvl 5"), PyRep::Bool(true));
@@ -250,7 +250,7 @@ async fn test_project_discovery_tutorial_and_rewards() {
     assert_eq!(st_reloaded.dict_get("experience").and_then(|v| v.as_f64()), Some(250.0));
 
     // 9. reset_tutorial & 10. skip_tutorial
-    assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "reset_tutorial", &[]).await.expect("reset_tutorial"), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "reset_tutorial", &[]).await.expect("reset_tutorial").dict_get("tutorialLevel"), Some(&PyRep::Integer(1)));
     assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "get_tutorial_level", &[]).await.expect("lvl after reset"), PyRep::Integer(1));
     assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "skip_tutorial", &[]).await.expect("skip_tutorial"), PyRep::Bool(true));
     assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "get_tutorial_completion_status", &[]).await.expect("comp_after_skip"), PyRep::Bool(true));

@@ -296,7 +296,38 @@ impl PyRep {
                 .iter()
                 .find(|(k, _)| k.as_str() == Some(key))
                 .map(|(_, v)| v),
-            Self::Object { args, .. } => args.dict_get(key),
+            Self::DBRow { columns, .. } => columns
+                .iter()
+                .find(|(n, _)| n == key)
+                .map(|(_, v)| v),
+            Self::Rowset { columns, rows } | Self::TupleSet { columns, rows } => columns
+                .iter()
+                .position(|c| c == key)
+                .and_then(|idx| rows.first().and_then(|r| r.get(idx))),
+            Self::Object { type_name, args } => {
+                if type_name.ends_with(".Row") || type_name == "Row" {
+                    if let Self::Tuple(parts) = args.as_ref() {
+                        if let (Some(Self::List(cols)), Some(Self::List(vals))) =
+                            (parts.first(), parts.get(1))
+                        {
+                            for (i, c) in cols.iter().enumerate() {
+                                if c.as_str() == Some(key) {
+                                    return vals.get(i);
+                                }
+                            }
+                        }
+                    }
+                }
+                args.dict_get(key)
+            }
+            Self::ObjectEx { dict, list, .. } => dict
+                .iter()
+                .find(|(k, _)| k.as_str() == Some(key))
+                .map(|(_, v)| v)
+                .or_else(|| list.first().and_then(|r| r.dict_get(key))),
+            Self::Tuple(items) | Self::List(items) => {
+                items.iter().find_map(|it| it.dict_get(key))
+            }
             _ => None,
         }
     }

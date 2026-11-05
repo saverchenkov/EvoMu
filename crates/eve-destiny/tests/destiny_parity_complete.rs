@@ -285,7 +285,7 @@ async fn test_destiny_steering_navigation_and_warp() {
     let PyRep::Tuple(wp_outer) = &warp_rep else { panic!("Expected tuple") };
     let PyRep::Tuple(wp_action) = &wp_outer[1] else { panic!("Expected action tuple") };
     assert_eq!(wp_action[0].as_str(), Some("WarpTo"));
-    assert_eq!(wp_action[1], PyRep::Tuple(vec![PyRep::Integer(ship_id), PyRep::Real(2.0 * AU_METERS), PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Integer(30)]));
+    assert_eq!(wp_action[1], PyRep::Tuple(vec![PyRep::Integer(ship_id), PyRep::Real(2.0 * AU_METERS), PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Integer(0), PyRep::Integer(30)]));
 
     let act_rep = encode_destiny_event(36, &DestinyEvent::OnActivatingWarp { ball_id: ship_id }, Some(&park));
     let PyRep::Tuple(ac_outer) = &act_rep else { panic!("Expected tuple") };

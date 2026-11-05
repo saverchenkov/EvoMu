@@ -1035,6 +1035,63 @@ pub(crate) async fn handle_dogma_im(
 
         ("dogmaIM", "UnloadAmmo") => Some(handle_unload_ammo(ctx, session, args)),
 
+        ("dogmaIM", "GetLayerDamageValuesByItems") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let mut item_ids: Vec<i64> = match args.first() {
+                Some(PyRep::List(l) | PyRep::Tuple(l)) => l.iter().filter_map(|x| x.as_i64()).collect(),
+                Some(PyRep::Integer(id)) if *id > 0 => vec![*id],
+                _ => Vec::new(),
+            };
+            if item_ids.is_empty() {
+                if let Some(sid) = session.ship_id {
+                    item_ids.push(sid);
+                } else {
+                    item_ids.push(1);
+                }
+            }
+            let now_ft = ctx.now_blueos_filetime_ticks();
+            let entries: Vec<(PyRep, PyRep)> = ctx.db.with_snapshot(|snap| {
+                item_ids
+                    .into_iter()
+                    .map(|iid| {
+                        let (armor_dmg, hull_dmg, shield_cap) = snap
+                            .items
+                            .get(&iid)
+                            .filter(|it| it.owner_id == char_id || session.has_gm_role())
+                            .map(|it| {
+                                let ad = it.dynamic_attributes.get(&attr_ids::ARMOR_DAMAGE).copied().unwrap_or(0.0);
+                                let hd = it.dynamic_attributes.get(&attr_ids::DAMAGE).copied().unwrap_or(0.0);
+                                let sc = ctx
+                                    .sde
+                                    .types
+                                    .get(&it.type_id)
+                                    .and_then(|t| t.default_attributes.get(&attr_ids::SHIELD_CAPACITY).copied())
+                                    .unwrap_or(400.0);
+                                (ad, hd, sc)
+                            })
+                            .unwrap_or((0.0, 0.0, 400.0));
+                        let kv = PyRep::keyval([
+                            (
+                                "shieldInfo",
+                                PyRep::Tuple(vec![
+                                    PyRep::Real(shield_cap),
+                                    PyRep::Real(shield_cap),
+                                    PyRep::Integer(now_ft),
+                                ]),
+                            ),
+                            ("armorDamage", PyRep::Real(armor_dmg)),
+                            ("hullDamage", PyRep::Real(hull_dmg)),
+                        ]);
+                        (PyRep::Integer(iid), kv)
+                    })
+                    .collect()
+            });
+            Some(Ok(PyRep::Dict(entries)))
+        }
+
         _ => None,
     }
 }

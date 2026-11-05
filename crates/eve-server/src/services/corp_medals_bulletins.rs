@@ -343,16 +343,18 @@ pub(crate) fn handle_medal_queries(
                         let info_row = vec![
                             PyRep::Integer(*mid), PyRep::String(title.clone()), PyRep::String(desc.clone()),
                             PyRep::Integer(*creator), PyRep::Integer(*ts as i64), PyRep::Integer(cid), PyRep::Integer(recip_cnt),
+                            PyRep::Integer(cid),
                         ];
                         return Ok(PyRep::keyval([
                             ("medalID", PyRep::Integer(*mid)),
                             ("corporationID", PyRep::Integer(cid)),
+                            ("ownerID", PyRep::Integer(cid)),
                             ("title", PyRep::String(title.clone())),
                             ("description", PyRep::String(desc.clone())),
                             ("creatorID", PyRep::Integer(*creator)),
                             ("date", PyRep::Integer(*ts as i64)),
                             ("numberOfRecipients", PyRep::Integer(recip_cnt)),
-                            ("info", PyRep::rowset(vec!["medalID", "title", "description", "creatorID", "date", "corporationID", "numberOfRecipients"], vec![info_row])),
+                            ("info", PyRep::rowset(vec!["medalID", "title", "description", "creatorID", "date", "corporationID", "numberOfRecipients", "ownerID"], vec![info_row])),
                             ("graphics", PyRep::rowset(vec!["medalID", "part", "layer", "graphic", "color"], g_rows)),
                         ]));
                     }

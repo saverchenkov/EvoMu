@@ -341,6 +341,7 @@ pub fn handle(
                             ("ownerID", PyRep::Integer(c.character_id)),
                             ("ownerName", PyRep::String(c.name.clone())),
                             ("groupID", PyRep::Integer(1)),
+                            ("typeID", PyRep::Integer(1373)),
                         ]));
                     }
                 }
@@ -353,6 +354,7 @@ pub fn handle(
                             ("ownerID", PyRep::Integer(corp.corporation_id)),
                             ("ownerName", PyRep::String(corp.name.clone())),
                             ("groupID", PyRep::Integer(2)),
+                            ("typeID", PyRep::Integer(2)),
                         ]));
                     }
                 }
@@ -365,6 +367,7 @@ pub fn handle(
                             ("ownerID", PyRep::Integer(al.alliance_id)),
                             ("ownerName", PyRep::String(al.name.clone())),
                             ("groupID", PyRep::Integer(32)),
+                            ("typeID", PyRep::Integer(16159)),
                         ]));
                     }
                 }
@@ -379,6 +382,7 @@ pub fn handle(
                         ("ownerID", PyRep::Integer(npc.corporation_id)),
                         ("ownerName", PyRep::String(npc.name.clone())),
                         ("groupID", PyRep::Integer(2)),
+                        ("typeID", PyRep::Integer(2)),
                     ]));
                 }
             }

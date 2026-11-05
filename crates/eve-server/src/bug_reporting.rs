@@ -115,7 +115,19 @@ pub fn build_client_global_config(
         Some(url)
     } else if ctx.esi_port > 0 {
         let host = match local_host_hint.map(str::trim).filter(|h| !h.is_empty()) {
-            Some("0.0.0.0") | Some("::") | Some("[::]") | None => "127.0.0.1".to_string(),
+            Some("0.0.0.0")
+            | Some("::")
+            | Some("[::]")
+            | Some("::1")
+            | Some("[::1]")
+            | Some("0:0:0:0:0:0:0:1")
+            | Some("[0:0:0:0:0:0:0:1]")
+            | None => "127.0.0.1".to_string(),
+            Some(h) if h.starts_with("::ffff:") || h.starts_with("[::ffff:") => h
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .trim_start_matches("::ffff:")
+                .to_string(),
             Some(h) if h.contains(':') && !h.starts_with('[') => format!("[{h}]"),
             Some(h) => h.to_string(),
         };

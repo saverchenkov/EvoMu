@@ -103,9 +103,12 @@
 - **No mock bypasses on live RPCs:** When testing service RPC handlers or network flows, test real message dispatch and response serialization rather than shallow mock stubs that bypass database/ballpark state updates. Handlers must exercise genuine state mutations and validate client permissions.
 - Pre-flight also lists the rows newly closed since the last review, with their acceptance text. Re-check that every clause is really tested before claiming them.
 
-## Code layout
-- Keep files under about 1,500 lines: integration tests in `crates/eve-server/tests/it/` (one binary), `eve-db` split by domain, `eve-server/src/router/` split into dispatch, binding and session, game logic in `services/*.rs` by domain.
-- Split a file that outgrows this in a separate, behaviour-neutral change (task tag `S-REFACTOR`): keep every test name and `// parity:` tag, and show identical pre-flight numbers before and after.
+## Code layout & semantic file organization
+- **Group by semantic domain, never by plan batches or arbitrary line-count parts:**
+  - Organize production modules (`crates/eve-server/src/services/*.rs`, `crates/eve-db/src/sqlite_store/*.rs`, `crates/eve-server/src/router/`) and integration tests (`crates/eve-server/tests/it/*.rs`) strictly by **semantic domain and gameplay behavior** (e.g., `mining_moon_ledgers.rs`, `sovereignty_equinox_gameplay.rs`, `fw_warzone_insurgency.rs`, `structures_upwell.rs`).
+  - **Never leak plan/batch/wave/remediation artifacts into file, module, or test names:** Do NOT name files, modules, or tests with `_part1`/`_part2`/`_part3`, `batch2..10`, `b2..b42`, `w14..w75`, `r4..r8`, `fake_remediation`, `remediation`, `remediated`, `closure`, `sp6`/`sp7`, or `d6`.
+  - **Behavior-focused test framing:** Integration tests must describe the **gameplay or protocol behavior under test** rather than "fake remediation" or "anti-fake" checks.
+  - **Semantic cohesion over artificial file-size caps:** If a single semantic domain or test suite shares a common denominator and exceeds 1,500 lines, keep it together in its semantic module rather than breaking it into `_part2`, `_part3`, or `batchN` files. Only split a file when there is a genuine, distinct semantic sub-domain boundary.
 
 ## Code style and conventions
 - Follow [CODE_STYLE.md](CODE_STYLE.md). All code must adhere to:
@@ -118,8 +121,8 @@
 - **Never let two agents edit the same working tree** (concurrent edits clobber each other). Reviews don't block a worktree: `run_review.py` reviews a fixed commit (default `HEAD`, or `--commit <sha>`) in a temporary snapshot worktree with `main`'s current gate, so you can keep editing and committing while it runs. Commit before starting a review; uncommitted changes aren't reviewed. Merge only the reviewed commit, or a tree with the same code tree. Every subagent that writes code gets an **isolated workspace**: a `branch`/`share` workspace, or a `git worktree add ../EvoMu-<track> -b track/<track>`. Read-only research subagents may share the main tree.
 - **Always in effect:** the orchestrator keeps **at least 5–6 parallel coding agents running concurrently** staging work across isolated worktrees, while it merges and reviews. The orchestrator itself doesn't edit source or tests. Working serially or dropping below this concurrency target is a process violation unless every remaining open task depends on that one track.
 - **Subagent Model MUST be `inherit` (mandatory):** When spawning subagents (`invoke_subagent`), the `Model` argument MUST strictly be `"inherit"` (inheriting the user's active orchestrator model, such as Gemini Pro Next, Gemini 4 Argon High, or Claude Opus 5.5). **NEVER pass `"pro"`** — `"pro"` is routed to legacy/obsolete Gemini 3.1 Pro and rapidly depletes obsolete model quotas.
-- **Mandatory compiler throttling:** Before running any `cargo` or `rustc` command in any workspace or subagent shell, always enforce compiler throttling and limit jobs to 2 (`-j 2`) to prevent CPU starvation and lock contention:
-  `while [ "$(pgrep -fl "cargo|rustc" | grep -vE "pgrep|zsh|grep" | grep -cE "cargo|rustc")" -ge 3 ]; do sleep 15; done && cargo test -j 2 ...`
+- **Mandatory compiler throttling:** Before running any `cargo` or `rustc` command in any workspace or subagent shell, always enforce compiler throttling and limit jobs to 2 (`-j 2`) to prevent CPU starvation and lock contention (always use `pgrep -x cargo` exact binary matching — NEVER `pgrep -fl`, which matches multi-line shell scripts):
+  `while [ "$(pgrep -x cargo | wc -l)" -ge 2 ]; do sleep 10; done && cargo test -j 2 ...`
 - **Pick tracks from the open rows** in `docs/ACTION_PLAN_STATUS.md` (one subagent each; split by service family or domain so tracks don't touch the same files), following the plan's dependencies.
 - **Every track follows the same gate in its own worktree:** pre-flight, `run_review.py`, and a non-FAIL verdict, before its branch is merged.
   - Each worktree has its own `.evomu-reviews/` state, Stop hook and review history.

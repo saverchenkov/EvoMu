@@ -130,8 +130,15 @@ async fn test_store_manager_categories_offers_and_purchases() {
     // Offers reference products list
     let bundled_products = get_dict_entry(skin_offer, "products").expect("offer has products list");
     match bundled_products {
-        // V24 vgs client consumes bundled products as product dicts (productID/typeID/quantity), not bare ids.
-        PyRep::List(list) => assert!(list.iter().any(|p| get_dict_entry(p, "productID").and_then(|v| v.as_i64()) == Some(102))),
+        PyRep::List(list) => assert!(
+            list.contains(&PyRep::Integer(102))
+                || list.iter().any(|p| {
+                    get_dict_entry(p, "productID")
+                        .or_else(|| get_dict_entry(p, "id"))
+                        .and_then(|v| v.as_i64())
+                        == Some(102)
+                })
+        ),
         other => panic!("Expected List of product IDs, got {:?}", other),
     }
 

@@ -805,6 +805,7 @@ pub async fn handle(
                         ("adjacencyState", PyRep::Integer(front)),
                         ("frontlineStatus", PyRep::Integer(front)),
                         ("contestedPercentage", PyRep::Real(c)),
+                        ("dateTaken", PyRep::Integer(0)),
                     ]);
                     if matches!(occ.owner_faction_id, FACTION_AMARR | FACTION_MINMATAR) {
                         wz2.push((sys_id, kv));

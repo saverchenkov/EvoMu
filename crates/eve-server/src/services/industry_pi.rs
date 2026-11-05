@@ -413,6 +413,8 @@ pub fn handle(
                 ("planetID", PyRep::Integer(planet_id)),
                 ("solarSystemID", PyRep::Integer(sys_id as i64)),
                 ("planetTypeID", PyRep::Integer(planet_type_id as i64)),
+                ("celestialIndex", PyRep::Integer(1)),
+                ("currentSimTime", PyRep::Integer(ctx.now_blueos_filetime_ticks())),
                 ("radius", PyRep::Real(5_000_000.0)),
                 ("hasColony", PyRep::Bool(colony_opt.is_some())),
                 (
