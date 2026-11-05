@@ -191,3 +191,7 @@ fn sanitize_pyrep(rep: &PyRep) -> String {
 #[cfg(test)]
 #[path = "flight_recorder_tests.rs"]
 mod flight_recorder_tests;
+
+#[cfg(test)]
+#[path = "flight_recorder_extra_tests.rs"]
+mod flight_recorder_extra_tests;

@@ -160,3 +160,7 @@ where
 #[cfg(test)]
 #[path = "log_ring_buffer_tests.rs"]
 mod log_ring_buffer_tests;
+
+#[cfg(test)]
+#[path = "log_ring_buffer_extra_tests.rs"]
+mod log_ring_buffer_extra_tests;

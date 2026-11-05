@@ -657,7 +657,8 @@ async fn test_project_discovery_parity_closure() {
     // Advance tutorial through levels 2, 3, 4, 5
     for lvl in 2..=5 {
         let advanced = rpc(&ctx, &mut sess, "ProjectDiscovery", "increase_tutorial_level", &[]).await.expect("increase_tutorial_level");
-        assert_eq!(advanced, PyRep::Integer(lvl));
+        assert_eq!(advanced.dict_get("tutorialLevel").and_then(|v| v.as_i64()), Some(lvl));
+        assert_eq!(advanced.dict_get("finishedTutorial").and_then(|v| v.as_bool()), Some(lvl >= 5));
     }
 
     let comp_status = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_tutorial_completion_status", &[]).await.expect("get_tutorial_completion_status at lvl 5");
@@ -685,7 +686,8 @@ async fn test_project_discovery_parity_closure() {
     // =========================================================================
     // Reset tutorial level to 1 to test clean level-based task generation
     let reset_res = rpc(&ctx, &mut sess, "ProjectDiscovery", "reset_tutorial", &[]).await.expect("reset_tutorial");
-    assert_eq!(reset_res, PyRep::Bool(true));
+    assert_eq!(reset_res.dict_get("tutorialLevel").and_then(|v| v.as_i64()), Some(1));
+    assert_eq!(reset_res.dict_get("finishedTutorial").and_then(|v| v.as_bool()), Some(false));
 
     let lvl_after_reset = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_tutorial_level", &[]).await.expect("get_tutorial_level reset");
     assert_eq!(lvl_after_reset, PyRep::Integer(1));

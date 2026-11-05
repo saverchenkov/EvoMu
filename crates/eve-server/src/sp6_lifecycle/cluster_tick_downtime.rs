@@ -283,3 +283,7 @@ pub fn spawn_mission_wave_on_pocket_entry_if_needed(
 #[cfg(test)]
 #[path = "downtime_cleanup_tests.rs"]
 mod downtime_cleanup_tests;
+
+#[cfg(test)]
+#[path = "cluster_tick_downtime_extra_tests.rs"]
+mod cluster_tick_downtime_extra_tests;

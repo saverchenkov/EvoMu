@@ -558,3 +558,7 @@ pub async fn step_repeating_drone_mining(ctx: &ServerContext, now_unix: u64) {
 #[cfg(test)]
 #[path = "drone_recovery_tests.rs"]
 mod drone_recovery_tests;
+
+#[cfg(test)]
+#[path = "drone_return_extra_tests.rs"]
+mod drone_return_extra_tests;

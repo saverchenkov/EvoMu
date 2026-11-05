@@ -222,12 +222,17 @@ async fn test_store_manager_categories_and_products_live() {
     assert_eq!(
         rpc(&ctx, &mut unauth, "storeManager", "get_categories", &[])
             .await
-            .unwrap_err()
-            .code,
-        "Unauthorized"
+            .expect("empty get_categories before seeding"),
+        PyRep::List(Vec::new())
     );
     assert_eq!(
         rpc(&ctx, &mut unauth, "storeManager", "get_products", &[])
+            .await
+            .expect("empty get_products before seeding"),
+        PyRep::List(Vec::new())
+    );
+    assert_eq!(
+        rpc(&ctx, &mut unauth, "storeManager", "buy_offer", &[PyRep::Integer(1)])
             .await
             .unwrap_err()
             .code,

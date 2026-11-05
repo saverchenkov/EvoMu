@@ -181,3 +181,7 @@ mod tests {
         assert_eq!(MechanicRng::seeded(9).roll(u), false);
     }
 }
+
+#[cfg(test)]
+#[path = "rng_extra_tests.rs"]
+mod rng_extra_tests;
