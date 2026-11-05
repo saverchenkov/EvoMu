@@ -36,10 +36,6 @@ fn dict_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 
 #[tokio::test]
 async fn test_login_campaign_and_milestone_claim_lifecycle() {
-    // parity: rpc:loginCampaignManager.get_client_campaign_state
-    // parity: rpc:loginCampaignManager.claim_reward
-    // parity: rpc:milestoneMgr.ProcessCharacterLogon
-    // parity: rpc:milestoneMgr.ClaimRewards
     let ctx = new_ctx();
     let mut unauth = SessionState::default();
     assert!(rpc(

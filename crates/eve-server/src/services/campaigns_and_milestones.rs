@@ -362,11 +362,9 @@ pub async fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        // parity: feat:pve.login-campaign, rpc:loginCampaignManager.get_client_campaign_state
         ("loginCampaignManager", "get_client_campaign_state") => {
             Some(handle_login_campaign_get_state(ctx, session))
         }
-        // parity: feat:pve.login-campaign, rpc:loginCampaignManager.claim_reward
         ("loginCampaignManager", "claim_reward") => {
             Some(handle_login_campaign_claim_reward(ctx, session))
         }

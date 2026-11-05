@@ -4049,11 +4049,7 @@ async fn batch3_dungeon_instance_cache_homefront_and_triglavian() {
 
 #[tokio::test]
 async fn batch3_season_manager_challenges_and_queries() {
-    // parity: rpc:seasonManager.get_max_active_challenges
     // parity: rpc:seasonManager.get_season_end_time
-    // parity: rpc:seasonManager.fill_up_and_return_challenges_for_character
-    // parity: rpc:seasonManager.get_challenge
-    // parity: rpc:seasonManager.challenge_is_dormant
     let ctx = new_ctx();
     let mut sess = login_char(&ctx, 103, PILOT_ID).await;
 
@@ -4140,10 +4136,6 @@ async fn batch3_season_manager_challenges_and_queries() {
 
 #[tokio::test]
 async fn batch3_season_manager_events_claim_reload_and_npc_standings() {
-    // parity: rpc:seasonManager.get_challenge_expiration_date
-    // parity: rpc:seasonManager.process_client_event
-    // parity: rpc:seasonManager.claim_challenge_rewards
-    // parity: rpc:seasonManager.reload_fsd_data
     // parity: rpc:standingMgr.GetNPCNPCStandings
     let ctx = new_ctx();
     let mut sess = login_char(&ctx, 104, PILOT_ID).await;

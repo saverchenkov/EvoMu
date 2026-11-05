@@ -615,7 +615,7 @@ pub(crate) mod milestone_logon_browser_lockdown_policy {
 
     #[tokio::test]
     async fn test_milestone_logon_and_browser_lockdown_policy() {
-        // parity: rpc:milestoneMgr.ProcessCharacterLogon, feat:ui.browser-lockdown
+        // parity: feat:ui.browser-lockdown
         let ctx = ServerContext::new();
         ctx.seed_demo_world_fixtures();
         common::pin_clock(&ctx);
