@@ -1277,9 +1277,8 @@ async fn test_esi_b2_character_planets_and_orders_live_http_and_sqlite() {
 
 #[tokio::test]
 async fn test_esi_b2_market_history_structure_and_corp_orders_live_http_and_sqlite() {
-    // parity: esi:GET /markets/structures/{structure_id}, esi:GET /corporations/{corporation_id}/orders, esi:GET /corporations/{corporation_id}/orders/history
+    // parity: esi:GET /corporations/{corporation_id}/orders, esi:GET /corporations/{corporation_id}/orders/history
     eve_testkit::attest(&[
-        "esi:GET /markets/structures/{structure_id}",
         "esi:GET /corporations/{corporation_id}/orders",
         "esi:GET /corporations/{corporation_id}/orders/history",
     ]);
@@ -1891,11 +1890,6 @@ async fn test_esi_b6_fw_stats_systems_leaderboards_and_wars_live_rpc_driven() {
 
 #[tokio::test]
 async fn test_esi_b6_incursions_and_sovereignty_campaigns_structures_live_state() {
-    // parity: esi:GET /sovereignty/structures
-    eve_testkit::attest(&[
-        "esi:GET /sovereignty/structures",
-    ]);
-
     let db_path = std::env::temp_dir().join(format!("esi_b6_sov_{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&db_path);
     let ctx = Arc::new(ServerContext::from_sqlite(&db_path).expect("sqlite ctx"));

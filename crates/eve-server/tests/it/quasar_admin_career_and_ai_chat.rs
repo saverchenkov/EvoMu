@@ -147,13 +147,6 @@ fn make_u32_ident_req(id: u32) -> Vec<u8> {
 
 #[tokio::test]
 async fn test_quasar_achievements_admin_notices_and_queries() {
-    // parity: quasar:eveProto/generated/eve_public/achievement/api/admin/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/achievement/api/notices_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/achievement/api/admin/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/achievement/api/notices_pb2.pyj",
-    ]);
-
     let ctx = std::sync::Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let mut sess = build_sess(&ctx, 51_001, 91_000_001, 98_000_001);
@@ -268,11 +261,6 @@ async fn test_quasar_achievements_admin_notices_and_queries() {
 
 #[tokio::test]
 async fn test_quasar_career_goals_requests_admin_and_notices() {
-    // parity: quasar:eveProto/generated/eve_public/career/goal/api/admin/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/career/goal/api/admin/requests_pb2.pyj",
-    ]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut sess = build_sess(&ctx, 51_002, 91_000_002, 98_000_001);

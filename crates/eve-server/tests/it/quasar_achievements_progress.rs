@@ -125,13 +125,6 @@ fn make_u32_ident_req(id: u32) -> Vec<u8> {
 
 #[tokio::test]
 async fn test_parity_quasar_achievement_remediation_suite() {
-    // parity: quasar:eveProto/generated/eve_public/achievement/api/admin/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/achievement/api/notices_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/achievement/api/admin/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/achievement/api/notices_pb2.pyj",
-    ]);
-
     // 1. Verify all 5 descriptor schemas match quasar_descriptors.sqlite
     let reg = QuasarDescriptorRegistry::open_default().expect("open QuasarDescriptorRegistry");
     let has_msg = |fd: &eve_proto::quasar::FileDescriptorProto, name: &str| {

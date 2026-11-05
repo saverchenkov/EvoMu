@@ -216,18 +216,15 @@ pub(crate) async fn rpc_call(
 #[tokio::test]
 async fn test_esi6_market_public_and_structure_routes() {
     // parity: esi:GET /markets/groups, esi:GET /markets/groups/{market_group_id}
-    // parity: esi:GET /markets/prices, esi:GET /markets/{region_id}/orders
+    // parity: esi:GET /markets/{region_id}/orders
     // parity: esi:GET /markets/{region_id}/types
-    // parity: esi:GET /markets/structures/{structure_id}
     // parity: feat:esi.market.groups, feat:esi.market.region-orders
     // parity: feat:esi.market.types
     eve_testkit::attest(&[
         "esi:GET /markets/groups",
         "esi:GET /markets/groups/{market_group_id}",
-        "esi:GET /markets/prices",
         "esi:GET /markets/{region_id}/orders",
         "esi:GET /markets/{region_id}/types",
-        "esi:GET /markets/structures/{structure_id}",
         "feat:esi.market.groups",
         "feat:esi.market.region-orders",
         "feat:esi.market.types",
@@ -677,11 +674,10 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn test_esi_market_groups_sde_descriptions_and_structure_orders_acl_hub() {
-    // parity: esi:GET /markets/groups/{market_group_id}, feat:esi.market.groups, esi:GET /markets/structures/{structure_id}
+    // parity: esi:GET /markets/groups/{market_group_id}, feat:esi.market.groups
     eve_testkit::attest(&[
         "esi:GET /markets/groups/{market_group_id}",
         "feat:esi.market.groups",
-        "esi:GET /markets/structures/{structure_id}",
     ]);
 
     let ctx = Arc::new(ServerContext::new());
@@ -2451,11 +2447,10 @@ pub(crate) mod esi_market_groups_sde_descriptions {
 
     #[tokio::test]
     async fn test_esi_market_groups_sde_descriptions_and_structure_orders_acl_hub() {
-        // parity: esi:GET /markets/groups/{market_group_id}, feat:esi.market.groups, esi:GET /markets/structures/{structure_id}
+        // parity: esi:GET /markets/groups/{market_group_id}, feat:esi.market.groups
         eve_testkit::attest(&[
             "esi:GET /markets/groups/{market_group_id}",
             "feat:esi.market.groups",
-            "esi:GET /markets/structures/{structure_id}",
         ]);
 
         let ctx = Arc::new(ServerContext::new());
@@ -4412,16 +4407,13 @@ pub(crate) mod esi_corp_role_gated_mining {
 
     #[tokio::test]
     async fn test_esi_market_history_prices_structures_and_industry_jobs() {
-        // parity: esi:GET /industry/facilities, esi:GET /markets/prices, esi:GET /markets/structures/{structure_id}, esi:GET /markets/{region_id}/history
-        // parity: feat:esi.industry.facilities, feat:esi.market.history, feat:esi.market.prices
+        // parity: esi:GET /industry/facilities, esi:GET /markets/{region_id}/history
+        // parity: feat:esi.industry.facilities, feat:esi.market.history
         eve_testkit::attest(&[
             "esi:GET /industry/facilities",
-            "esi:GET /markets/prices",
-            "esi:GET /markets/structures/{structure_id}",
             "esi:GET /markets/{region_id}/history",
             "feat:esi.industry.facilities",
             "feat:esi.market.history",
-            "feat:esi.market.prices",
         ]);
 
         let ctx = Arc::new(ServerContext::new());
@@ -5191,10 +5183,9 @@ pub(crate) mod esi_corp_mining_customs_offices {
 
     #[tokio::test]
     async fn test_esi_b2_market_history_structure_and_corp_orders_live_http_and_sqlite() {
-        // parity: esi:GET /markets/{region_id}/history, esi:GET /markets/structures/{structure_id}, esi:GET /corporations/{corporation_id}/orders, esi:GET /corporations/{corporation_id}/orders/history
+        // parity: esi:GET /markets/{region_id}/history, esi:GET /corporations/{corporation_id}/orders, esi:GET /corporations/{corporation_id}/orders/history
         eve_testkit::attest(&[
             "esi:GET /markets/{region_id}/history",
-            "esi:GET /markets/structures/{structure_id}",
             "esi:GET /corporations/{corporation_id}/orders",
             "esi:GET /corporations/{corporation_id}/orders/history",
         ]);
@@ -7347,14 +7338,6 @@ pub(crate) mod esi_calendar_rpc_http_persistence {
 
     #[tokio::test]
     async fn test_esi_calendar_rpc_and_http_persistence() {
-        // parity: esi:GET /characters/{character_id}/calendar, esi:GET /characters/{character_id}/calendar/{event_id}, esi:PUT /characters/{character_id}/calendar/{event_id}, esi:GET /characters/{character_id}/calendar/{event_id}/attendees
-        eve_testkit::attest(&[
-            "esi:GET /characters/{character_id}/calendar",
-            "esi:GET /characters/{character_id}/calendar/{event_id}",
-            "esi:PUT /characters/{character_id}/calendar/{event_id}",
-            "esi:GET /characters/{character_id}/calendar/{event_id}/attendees",
-        ]);
-
         let ctx = Arc::new(ServerContext::new());
         crate::common::pin_clock(&ctx);
         let router = EsiRouter::new(Arc::clone(&ctx));
@@ -7501,16 +7484,6 @@ pub(crate) mod esi_calendar_rpc_http_persistence {
 
     #[tokio::test]
     async fn test_esi_contacts_labels_and_mail_lists() {
-        // parity: esi:GET /characters/{character_id}/contacts/labels, esi:GET /corporations/{corporation_id}/contacts, esi:GET /corporations/{corporation_id}/contacts/labels, esi:GET /alliances/{alliance_id}/contacts, esi:GET /alliances/{alliance_id}/contacts/labels, esi:GET /characters/{character_id}/mail/lists
-        eve_testkit::attest(&[
-            "esi:GET /characters/{character_id}/contacts/labels",
-            "esi:GET /corporations/{corporation_id}/contacts",
-            "esi:GET /corporations/{corporation_id}/contacts/labels",
-            "esi:GET /alliances/{alliance_id}/contacts",
-            "esi:GET /alliances/{alliance_id}/contacts/labels",
-            "esi:GET /characters/{character_id}/mail/lists",
-        ]);
-
         let ctx = Arc::new(ServerContext::new());
         crate::common::pin_clock(&ctx);
         let router = EsiRouter::new(Arc::clone(&ctx));
@@ -7667,13 +7640,6 @@ pub(crate) mod esi_calendar_rpc_http_persistence {
 
     #[tokio::test]
     async fn test_esi_corp_governance_roles_limit_and_sov_map() {
-        // parity: esi:GET /corporations/{corporation_id}/members/limit, esi:GET /corporations/{corporation_id}/roles, esi:GET /corporations/{corporation_id}/roles/history
-        eve_testkit::attest(&[
-            "esi:GET /corporations/{corporation_id}/members/limit",
-            "esi:GET /corporations/{corporation_id}/roles",
-            "esi:GET /corporations/{corporation_id}/roles/history",
-        ]);
-
         let ctx = Arc::new(ServerContext::new());
         crate::common::pin_clock(&ctx);
         let router = EsiRouter::new(Arc::clone(&ctx));
@@ -7933,12 +7899,6 @@ pub(crate) mod esi_corp_blueprints_structures_live {
 
     #[tokio::test]
     async fn test_esi_corp_blueprints_and_structures_live_rpcs() {
-        // parity: esi:GET /corporations/{corporation_id}/blueprints, esi:GET /corporations/{corporation_id}/structures
-        eve_testkit::attest(&[
-            "esi:GET /corporations/{corporation_id}/blueprints",
-            "esi:GET /corporations/{corporation_id}/structures",
-        ]);
-
         let ctx = Arc::new(ServerContext::new());
         crate::common::pin_clock(&ctx);
         let router = EsiRouter::new(Arc::clone(&ctx));
@@ -8377,13 +8337,6 @@ pub(crate) mod esi_corp_blueprints_structures_live {
 
     #[tokio::test]
     async fn test_quasar_payment_schedules_tokens_and_store() {
-        // parity: quasar:eveProto/generated/eve_public/payment/schedule/notices_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api/notices_pb2.pyj
-        eve_testkit::attest(&[
-            "quasar:eveProto/generated/eve_public/payment/schedule/notices_pb2.pyj",
-            "quasar:eveProto/generated/eve_public/payment/token/api_pb2.pyj",
-            "quasar:eveProto/generated/eve_public/payment/token/api/notices_pb2.pyj",
-        ]);
-
         let ctx = ServerContext::new();
         crate::common::pin_clock(&ctx);
 

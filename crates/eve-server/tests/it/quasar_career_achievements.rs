@@ -140,11 +140,6 @@ fn drain_notices(rx: &mut Receiver<EvePublicNotice>) -> Vec<EvePublicNotice> {
 #[tokio::test]
 async fn test_authentic_career_goals_and_milestones_remediated() {
     // DATA GAP: Individual AIR Career Program goal UUIDs, targets, and rewards are server-authored and not shipped in V24 client FSD.
-    // parity: quasar:eveProto/generated/eve_public/career/goal/api/admin/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/career/goal/api/admin/requests_pb2.pyj",
-    ]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut sess = build_sess(&ctx, 41_001, 90_000_010, 98_000_001);

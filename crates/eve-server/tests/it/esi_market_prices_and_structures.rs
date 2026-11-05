@@ -207,10 +207,8 @@ fn find_hangar_items(ctx: &ServerContext, owner_id: i64, loc_id: i64, type_id: u
 
 #[tokio::test]
 async fn test_esi_live_market_prices_eiv_insurance_and_structure_orders() {
-    // parity: esi:GET /markets/prices
     // parity: esi:GET /markets/structures/{structure_id}
     eve_testkit::attest(&[
-        "esi:GET /markets/prices",
         "esi:GET /markets/structures/{structure_id}",
     ]);
 

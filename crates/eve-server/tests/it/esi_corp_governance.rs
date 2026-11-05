@@ -396,14 +396,13 @@ async fn test_esi5_alliance_info_history_divisions_and_shareholders() {
 async fn test_esi5_corporation_medals_container_logs_and_projects() {
     // parity: esi:GET /corporations/{corporation_id}/containers/logs, feat:esi.corporation.container-logs
     // parity: esi:GET /corporations/{corporation_id}/medals, esi:GET /corporations/{corporation_id}/medals/issued
-    // parity: feat:esi.corporation.medals, feat:esi.corporation.projects
+    // parity: feat:esi.corporation.medals
     eve_testkit::attest(&[
         "esi:GET /corporations/{corporation_id}/containers/logs",
         "feat:esi.corporation.container-logs",
         "esi:GET /corporations/{corporation_id}/medals",
         "esi:GET /corporations/{corporation_id}/medals/issued",
         "feat:esi.corporation.medals",
-        "feat:esi.corporation.projects",
     ]);
 
     let ctx = Arc::new(ServerContext::new());
@@ -656,20 +655,12 @@ async fn test_esi5_corporation_medals_container_logs_and_projects() {
 
 #[tokio::test]
 async fn test_esi5_corporation_members_limit_titles_and_roles_history() {
-    // parity: esi:GET /corporations/{corporation_id}/members/limit
     // parity: esi:GET /corporations/{corporation_id}/members/titles, esi:GET /corporations/{corporation_id}/titles
-    // parity: feat:esi.corporation.members, feat:esi.corporation.titles
-    // parity: esi:GET /corporations/{corporation_id}/roles, esi:GET /corporations/{corporation_id}/roles/history
-    // parity: feat:esi.corporation.roles
+    // parity: feat:esi.corporation.titles
     eve_testkit::attest(&[
-        "esi:GET /corporations/{corporation_id}/members/limit",
         "esi:GET /corporations/{corporation_id}/members/titles",
         "esi:GET /corporations/{corporation_id}/titles",
-        "feat:esi.corporation.members",
         "feat:esi.corporation.titles",
-        "esi:GET /corporations/{corporation_id}/roles",
-        "esi:GET /corporations/{corporation_id}/roles/history",
-        "feat:esi.corporation.roles",
     ]);
 
     let ctx = Arc::new(ServerContext::new());
@@ -897,16 +888,9 @@ async fn test_esi5_corporation_members_limit_titles_and_roles_history() {
 
 #[tokio::test]
 async fn test_esi5_corporation_structures_timers_starbase_detail_and_plan_closure() {
-    // parity: esi:GET /corporations/{corporation_id}/structures
-    // parity: feat:esi.corporation.structures, feat:esi.corporations.structures-services-timers
     // parity: esi:GET /corporations/{corporation_id}/starbases/{starbase_id}
-    // parity: plan:ESI-5
     eve_testkit::attest(&[
-        "esi:GET /corporations/{corporation_id}/structures",
-        "feat:esi.corporation.structures",
-        "feat:esi.corporations.structures-services-timers",
         "esi:GET /corporations/{corporation_id}/starbases/{starbase_id}",
-        "plan:ESI-5",
     ]);
 
     let ctx = Arc::new(ServerContext::new());

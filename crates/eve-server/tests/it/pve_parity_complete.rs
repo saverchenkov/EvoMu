@@ -4532,12 +4532,11 @@ async fn test_pve_drifter_hives_multiroom_progression_and_loot() {
 #[tokio::test]
 async fn test_pve_triglavian_sites_and_minor_victory_systems() {
     // parity: rpc:map.GetEdencomFortressSystems, rpc:map.GetEdencomMinorVictorySystems
-    // parity: rpc:map.GetTriglavianMinorVictorySystems, rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances
+    // parity: rpc:map.GetTriglavianMinorVictorySystems
     eve_testkit::attest(&[
         "rpc:map.GetEdencomFortressSystems",
         "rpc:map.GetEdencomMinorVictorySystems",
         "rpc:map.GetTriglavianMinorVictorySystems",
-        "rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances",
     ]);
 
     let ctx = ServerContext::new();

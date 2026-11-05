@@ -358,20 +358,6 @@ async fn test_esi4_assets_char_and_corp_locations_and_names() {
 
 #[tokio::test]
 async fn test_esi4_calendar_list_event_respond_and_attendees() {
-    // parity: esi:GET /characters/{character_id}/calendar, esi:GET /characters/{character_id}/calendar/{event_id}
-    // parity: esi:PUT /characters/{character_id}/calendar/{event_id}, esi:GET /characters/{character_id}/calendar/{event_id}/attendees
-    // parity: feat:esi.calendar.list, feat:esi.calendar.event, feat:esi.calendar.respond, feat:esi.calendar.attendees
-    eve_testkit::attest(&[
-        "esi:GET /characters/{character_id}/calendar",
-        "esi:GET /characters/{character_id}/calendar/{event_id}",
-        "esi:PUT /characters/{character_id}/calendar/{event_id}",
-        "esi:GET /characters/{character_id}/calendar/{event_id}/attendees",
-        "feat:esi.calendar.list",
-        "feat:esi.calendar.event",
-        "feat:esi.calendar.respond",
-        "feat:esi.calendar.attendees",
-    ]);
-
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
@@ -976,14 +962,12 @@ async fn rpc_call(
 async fn test_esi4_contacts_char_crud_and_labels() {
     // parity: esi:GET /characters/{character_id}/contacts, esi:POST /characters/{character_id}/contacts
     // parity: esi:PUT /characters/{character_id}/contacts, esi:DELETE /characters/{character_id}/contacts
-    // parity: esi:GET /characters/{character_id}/contacts/labels
     // parity: feat:esi.contacts.char-get, feat:esi.contacts.char-write, feat:esi.contacts.char-labels
     eve_testkit::attest(&[
         "esi:GET /characters/{character_id}/contacts",
         "esi:POST /characters/{character_id}/contacts",
         "esi:PUT /characters/{character_id}/contacts",
         "esi:DELETE /characters/{character_id}/contacts",
-        "esi:GET /characters/{character_id}/contacts/labels",
         "feat:esi.contacts.char-get",
         "feat:esi.contacts.char-write",
         "feat:esi.contacts.char-labels",
@@ -1114,18 +1098,6 @@ async fn test_esi4_contacts_char_crud_and_labels() {
 
 #[tokio::test]
 async fn test_esi4_contacts_corp_and_alliance() {
-    // parity: esi:GET /corporations/{corporation_id}/contacts, esi:GET /corporations/{corporation_id}/contacts/labels
-    // parity: esi:GET /alliances/{alliance_id}/contacts, esi:GET /alliances/{alliance_id}/contacts/labels
-    // parity: feat:esi.contacts.corp, feat:esi.contacts.alliance
-    eve_testkit::attest(&[
-        "esi:GET /corporations/{corporation_id}/contacts",
-        "esi:GET /corporations/{corporation_id}/contacts/labels",
-        "esi:GET /alliances/{alliance_id}/contacts",
-        "esi:GET /alliances/{alliance_id}/contacts/labels",
-        "feat:esi.contacts.corp",
-        "feat:esi.contacts.alliance",
-    ]);
-
     let db_path = temp_sqlite_path("corp_alliance_contacts");
     let char_id = 90_000_001;
     let outsider_id = 90_000_002;
@@ -1322,20 +1294,18 @@ async fn test_esi4_contacts_corp_and_alliance() {
 async fn test_esi4_mail_send_list_read_update_delete_labels_lists() {
     // parity: esi:PUT /characters/{character_id}/mail/{mail_id}, esi:DELETE /characters/{character_id}/mail/{mail_id}
     // parity: esi:GET /characters/{character_id}/mail/labels, esi:POST /characters/{character_id}/mail/labels
-    // parity: esi:DELETE /characters/{character_id}/mail/labels/{label_id}, esi:GET /characters/{character_id}/mail/lists
-    // parity: feat:esi.mail.list, feat:esi.mail.send, feat:esi.mail.read-update-delete, feat:esi.mail.labels, feat:esi.mail.lists
+    // parity: esi:DELETE /characters/{character_id}/mail/labels/{label_id}
+    // parity: feat:esi.mail.list, feat:esi.mail.send, feat:esi.mail.read-update-delete, feat:esi.mail.labels
     eve_testkit::attest(&[
         "esi:PUT /characters/{character_id}/mail/{mail_id}",
         "esi:DELETE /characters/{character_id}/mail/{mail_id}",
         "esi:GET /characters/{character_id}/mail/labels",
         "esi:POST /characters/{character_id}/mail/labels",
         "esi:DELETE /characters/{character_id}/mail/labels/{label_id}",
-        "esi:GET /characters/{character_id}/mail/lists",
         "feat:esi.mail.list",
         "feat:esi.mail.send",
         "feat:esi.mail.read-update-delete",
         "feat:esi.mail.labels",
-        "feat:esi.mail.lists",
     ]);
 
     let db_path = temp_sqlite_path("mail_lists");

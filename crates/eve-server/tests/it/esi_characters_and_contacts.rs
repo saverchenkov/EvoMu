@@ -161,13 +161,6 @@ fn make_session(
 
 #[tokio::test]
 async fn test_parity_remediation_alliance_contacts_and_labels() {
-    // parity: esi:GET /alliances/{alliance_id}/contacts
-    // parity: esi:GET /alliances/{alliance_id}/contacts/labels
-    eve_testkit::attest(&[
-        "esi:GET /alliances/{alliance_id}/contacts",
-        "esi:GET /alliances/{alliance_id}/contacts/labels",
-    ]);
-
     let db_path = temp_db_path("ally_contacts");
     let spec = OpenApiSpec::pinned();
 

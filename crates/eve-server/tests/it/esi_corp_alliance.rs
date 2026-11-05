@@ -671,13 +671,9 @@ async fn rpc_call(
 
 #[tokio::test]
 async fn test_esi5_corporation_divisions_blueprints_and_standings() {
-    // parity: esi:GET /corporations/{corporation_id}/blueprints
-    // parity: esi:GET /corporations/{corporation_id}/standings, feat:esi.corporation.blueprints
-    // parity: feat:esi.corporation.standings
+    // parity: esi:GET /corporations/{corporation_id}/standings, feat:esi.corporation.standings
     eve_testkit::attest(&[
-        "esi:GET /corporations/{corporation_id}/blueprints",
         "esi:GET /corporations/{corporation_id}/standings",
-        "feat:esi.corporation.blueprints",
         "feat:esi.corporation.standings",
     ]);
 
@@ -1569,12 +1565,6 @@ async fn test_esi_corp_role_gated_mining_customs_and_orders() {
 
 #[tokio::test]
 async fn test_esi_market_history_prices_structures_and_industry_jobs() {
-    // parity: esi:GET /markets/prices, esi:GET /markets/structures/{structure_id}
-    eve_testkit::attest(&[
-        "esi:GET /markets/prices",
-        "esi:GET /markets/structures/{structure_id}",
-    ]);
-
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));

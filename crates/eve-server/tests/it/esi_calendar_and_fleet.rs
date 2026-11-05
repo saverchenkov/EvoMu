@@ -91,15 +91,6 @@ fn make_sess(sess_id: u64, uid: u64, cid: i64, corp_id: i64) -> SessionState {
 
 #[tokio::test]
 async fn test_parity_esi_calendar_full_lifecycle_and_schema_validation() {
-    // parity: esi:GET /characters/{character_id}/calendar, esi:GET /characters/{character_id}/calendar/{event_id}
-    // parity: esi:PUT /characters/{character_id}/calendar/{event_id}, esi:GET /characters/{character_id}/calendar/{event_id}/attendees
-    eve_testkit::attest(&[
-        "esi:GET /characters/{character_id}/calendar",
-        "esi:GET /characters/{character_id}/calendar/{event_id}",
-        "esi:PUT /characters/{character_id}/calendar/{event_id}",
-        "esi:GET /characters/{character_id}/calendar/{event_id}/attendees",
-    ]);
-
     let ctx = Arc::new(ServerContext::new());
     common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
@@ -230,8 +221,6 @@ async fn test_parity_esi_calendar_full_lifecycle_and_schema_validation() {
 
 #[tokio::test]
 async fn test_parity_esi_calendar_sqlite_durability_across_restarts() {
-    // parity: esi:GET /characters/{character_id}/calendar, esi:GET /characters/{character_id}/calendar/{event_id}
-    // parity: esi:PUT /characters/{character_id}/calendar/{event_id}, esi:GET /characters/{character_id}/calendar/{event_id}/attendees
     let db_path = temp_db("durability");
     let spec = OpenApiSpec::pinned();
     let (ceo_id, mem_id, corp_id) = (90_000_001_i64, 90_000_002_i64, 98_000_001_i64);
@@ -477,17 +466,6 @@ fn make_session(
 
 #[tokio::test]
 async fn test_parity_remediation_character_calendar_lifecycle_and_sqlite() {
-    // parity: esi:GET /characters/{character_id}/calendar
-    // parity: esi:GET /characters/{character_id}/calendar/{event_id}
-    // parity: esi:PUT /characters/{character_id}/calendar/{event_id}
-    // parity: esi:GET /characters/{character_id}/calendar/{event_id}/attendees
-    eve_testkit::attest(&[
-        "esi:GET /characters/{character_id}/calendar",
-        "esi:GET /characters/{character_id}/calendar/{event_id}",
-        "esi:PUT /characters/{character_id}/calendar/{event_id}",
-        "esi:GET /characters/{character_id}/calendar/{event_id}/attendees",
-    ]);
-
     let db_path = temp_db_path("char_cal");
     let spec = OpenApiSpec::pinned();
 
