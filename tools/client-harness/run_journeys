@@ -85,9 +85,14 @@ def scan_logs_for_errors(paths):
     bad = []
     for p in paths:
         if p and os.path.exists(p):
+            seen_client_started = False
             with open(p, "r", errors="replace") as f:
                 for ln in f:
+                    if "EVE Client version" in ln and "started" in ln:
+                        seen_client_started = True
                     if ERROR_LINE_RE.search(ln):
+                        bad.append(ln.strip()[:300])
+                    elif seen_client_started and "#nolog: An exception has occurred" in ln:
                         bad.append(ln.strip()[:300])
     return bad
 
@@ -661,7 +666,8 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
 
         # Verify in-space disconnect + reconnect (`SelectCharacterID` -> `beyonce.MachoBindObject` WITHOUT
         # `UpdateStateRequest`, matching V24.01 `Michelle.AddBallpark` -> `Park.InitializeRemoteBallpark`)
-        # delivers `SetState` via `DoDestinyUpdate` even when the ship entered emergency warp on disconnect.
+        # delivers `SetState` at index 0 (`state[0][1][0] == "SetState"`) via `DoDestinyUpdate` even when
+        # a 1Hz tick fires between `SelectCharacterID` and `beyonce.MachoBindObject` while stopping an emergency warp.
         b1.close()
         time.sleep(0.1)
         sm1.events.clear()
@@ -669,14 +675,16 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         sm1.RemoteSvc("authentication").Login("demo", "demo-secret")
         sel1_reconn = sm1.RemoteSvc("charUnboundMgr").SelectCharacterID(char1_id)
         log1.info("In-space reconnect SelectCharacterID(%d) -> %r" % (int(char1_id), sel1_reconn))
+        time.sleep(1.1)
         beyonce1_reconn, _ = sm1.RemoteSvc("beyonce").MachoBindObject(abyssal_sys, None)
         time.sleep(0.2)
         reconnect_set_state = False
+        reconnect_set_state_at_index_zero = False
         for ev in sm1.events:
             if ev[0] == "DoDestinyUpdate" and len(ev) > 1:
                 for arg in ev[1]:
                     entries = arg if isinstance(arg, list) else [arg]
-                    for entry in entries:
+                    for idx, entry in enumerate(entries):
                         if (
                             isinstance(entry, (tuple, list))
                             and len(entry) >= 2
@@ -686,10 +694,15 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
                             and _destiny_update_contains_ball(entry, client1_ship_id)
                         ):
                             reconnect_set_state = True
-        log1.info("In-space reconnect beyonce.MachoBindObject SetState verified=%r" % (reconnect_set_state,))
-        if not reconnect_set_state:
+                            if idx == 0:
+                                reconnect_set_state_at_index_zero = True
+        log1.info(
+            "In-space reconnect beyonce.MachoBindObject SetState verified=%r index_zero=%r"
+            % (reconnect_set_state, reconnect_set_state_at_index_zero)
+        )
+        if not (reconnect_set_state and reconnect_set_state_at_index_zero):
             raise RuntimeError(
-                "In-space reconnect beyonce.MachoBindObject failed to emit SetState for ship %d (causes V24.01 CharSelectCreateToSpaceTransition black screen)"
+                "In-space reconnect beyonce.MachoBindObject failed to emit SetState at index 0 for ship %d (causes V24.01 CharSelectCreateToSpaceTransition black screen)"
                 % client1_ship_id
             )
         beyonce1_reconn.CmdStop()

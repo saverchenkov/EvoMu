@@ -118,20 +118,36 @@ pub fn sde_ball_and_combat(
     )
 }
 
-/// Resolves the empire/faction industrial hauler `TypeId` for `solar_system_id` from SDE (`group_id == 28`).
-pub fn hauler_type_for_system(sde: &eve_sde::SdeRegistry, solar_system_id: SolarSystemId) -> TypeId {
-    let faction_id = sde
-        .solar_systems
+fn system_faction_id(sde: &eve_sde::SdeRegistry, solar_system_id: SolarSystemId) -> u32 {
+    sde.solar_systems
         .get(&solar_system_id)
         .and_then(|sys| {
-            sys.stations
-                .first()
-                .and_then(|st| st.owner_faction_id.map(|f| f as u32))
-                .or_else(|| sde.constellations.get(&sys.constellation_id).and_then(|c| c.faction_id))
+            sde.constellations
+                .get(&sys.constellation_id)
+                .and_then(|c| c.faction_id)
                 .or_else(|| sde.regions.get(&sys.region_id).and_then(|r| r.faction_id))
+                .or_else(|| {
+                    sys.stations.iter().find_map(|st| {
+                        st.owner_faction_id.map(|f| f as u32).or_else(|| {
+                            sde.npc_corporations
+                                .get(&st.owner_corporation_id)
+                                .and_then(|c| c.faction_id)
+                        })
+                    })
+                })
         })
-        .unwrap_or(500_001);
-    match faction_id {
+        .or_else(|| {
+            sde.factions
+                .values()
+                .find(|f| f.solar_system_id == Some(solar_system_id))
+                .map(|f| f.faction_id)
+        })
+        .unwrap_or(500_001)
+}
+
+/// Resolves the empire/faction industrial hauler `TypeId` for `solar_system_id` from SDE (`group_id == 28`).
+pub fn hauler_type_for_system(sde: &eve_sde::SdeRegistry, solar_system_id: SolarSystemId) -> TypeId {
+    match system_faction_id(sde, solar_system_id) {
         500_002 => 653, // Minmatar (Wreathe)
         500_003 => 649, // Amarr
         500_004 => 651, // Gallente
@@ -140,18 +156,7 @@ pub fn hauler_type_for_system(sde: &eve_sde::SdeRegistry, solar_system_id: Solar
 }
 
 pub fn miner_type_for_system(sde: &eve_sde::SdeRegistry, solar_system_id: SolarSystemId) -> TypeId {
-    let faction_id = sde
-        .solar_systems
-        .get(&solar_system_id)
-        .and_then(|sys| {
-            sys.stations
-                .first()
-                .and_then(|st| st.owner_faction_id.map(|f| f as u32))
-                .or_else(|| sde.constellations.get(&sys.constellation_id).and_then(|c| c.faction_id))
-                .or_else(|| sde.regions.get(&sys.region_id).and_then(|r| r.faction_id))
-        })
-        .unwrap_or(500_001);
-    match faction_id {
+    match system_faction_id(sde, solar_system_id) {
         500_002 => 20163, // Minmatar Miner
         500_003 => 26750, // Sansha Miner (fallback)
         500_004 => 21840, // Gallente Miner

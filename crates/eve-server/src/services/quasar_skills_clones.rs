@@ -525,6 +525,10 @@ pub fn register_skill_handlers(
                 let mut attr_bytes = Vec::new();
                 encode_skill_plan_attributes(&active, &mut attr_bytes);
                 encode_bytes_field(2, &attr_bytes, &mut out);
+            } else {
+                let mut id_bytes = Vec::new();
+                encode_bytes_field(1, &[0u8; 16], &mut id_bytes);
+                encode_bytes_field(1, &id_bytes, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.skill.plan.GetActiveResponse"),
@@ -1002,6 +1006,14 @@ pub fn register_skill_handlers(
                 let mut attr_bytes = Vec::new();
                 encode_skill_plan_attributes(p, &mut attr_bytes);
                 encode_bytes_field(2, &attr_bytes, &mut out);
+            } else {
+                // DERIVED: V24.01 `skills/skillplan/grpc/personalSkillPlanRequest.pyj:38` (`GetActive`)
+                // calls `uuid.UUID(bytes=response.skill_plan.uuid)` unconditionally, and
+                // `skills/skillplan/skillPlanService.pyj` (`_GetTrackedSkillPlanID`) checks
+                // `if self.trackedPlanID == uuid.UUID(int=0): return None`.
+                let mut id_bytes = Vec::new();
+                encode_bytes_field(1, &[0u8; 16], &mut id_bytes);
+                encode_bytes_field(1, &id_bytes, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.skill.plan.GetActiveResponse"),

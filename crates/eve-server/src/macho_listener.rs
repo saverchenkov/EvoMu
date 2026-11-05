@@ -112,6 +112,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
     let mut sys_rx = ctx.systems.get_or_spawn(30000142).subscribe();
     let mut notify_rx = ctx.notify_tx.subscribe();
     let mut ballpark_ready = false;
+    let mut last_destiny_tick: u64 = 0;
 
     let (mut reader, mut writer) = stream.into_split();
     let (frame_tx, mut frame_rx) =
@@ -193,9 +194,11 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                     && session.station_id.is_none()
                     && session.structure_id.is_none()
                     && session.solar_system_id == Some(tick_msg.solar_system_id)
+                    && tick_msg.tick >= last_destiny_tick
                 {
                     if let Some(ship_id) = session.ship_id {
                         if let Some(updates_pyrep) = tick_msg.observer_updates_pyrep.get(&ship_id) {
+                            last_destiny_tick = tick_msg.tick;
                             let notif_pkt = MachoPacket::new_broadcast_notification(
                                 MACHO_PROXY_NODE_ID,
                                 client_id,
@@ -229,12 +232,14 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 ctx.sync_session(&mut session);
                                 if session.solar_system_id != prev_sys {
                                     ballpark_ready = false;
+                                    last_destiny_tick = 0;
                                     if let Some(new_sys) = session.solar_system_id {
                                         sys_rx = ctx.systems.get_or_spawn(new_sys).subscribe();
                                     }
                                 }
                                 if session.station_id.is_some() || session.structure_id.is_some() {
                                     ballpark_ready = false;
+                                    last_destiny_tick = 0;
                                 }
                             }
                             let notif_pkt = MachoPacket::new_broadcast_notification(
@@ -581,6 +586,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
 
                         if session.solar_system_id != prev_session.solar_system_id {
                             ballpark_ready = false;
+                            last_destiny_tick = 0;
                             if let Some(new_sys) = session.solar_system_id {
                                 sys_rx = ctx.systems.get_or_spawn(new_sys).subscribe();
                             }
@@ -590,6 +596,12 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             && session.station_id.is_none()
                             && session.structure_id.is_none()
                         {
+                            if !ballpark_ready {
+                                // Drain any pre-bind 1Hz ticks buffered in `sys_rx` between `SelectCharacterID`
+                                // and `beyonce.MachoBindObject` / `UpdateStateRequest` so stale ticks (e.g. tick N-1)
+                                // are never flushed out-of-order after the synchronous post-bind `SetState` drain (tick N).
+                                while sys_rx.try_recv().is_ok() {}
+                            }
                             ballpark_ready = true;
                         }
 
@@ -735,10 +747,11 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 session.ship_id.or(prev_session.ship_id),
                             ) {
                                 let sys_handle = ctx.systems.get_or_spawn(sys_id);
-                                if let Ok((_tick, obs_evs, updates_pyrep)) =
+                                if let Ok((tick, obs_evs, updates_pyrep)) =
                                     sys_handle.drain_observer_updates(ship_id).await
                                 {
                                     if !obs_evs.is_empty() {
+                                        last_destiny_tick = last_destiny_tick.max(tick);
                                         let notif_pkt = MachoPacket::new_broadcast_notification(
                                             MACHO_PROXY_NODE_ID,
                                             client_id,
@@ -761,6 +774,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         }
                         if !is_in_space {
                             ballpark_ready = false;
+                            last_destiny_tick = 0;
                         }
 
                         if let Some(cid) = session.character_id {

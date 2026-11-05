@@ -2786,4 +2786,159 @@ async fn test_v24_live_client_bug_report_regressions_330_to_352() {
             }
         }
     }
+
+    // 6. #353: In-space reconnect (`SelectCharacterID` -> 1Hz tick -> `beyonce.MachoBindObject`)
+    // must always emit `SetState` at index 0 of `DoDestinyUpdate` (`state[0][1][0] == "SetState"`),
+    // even when stopping an emergency return-warp queues `DestinyEvent::Stop` before `push_set_state`.
+    ctx.advance_secs(11);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "stationSvc",
+        None,
+        "Undock",
+        &[PyRep::Integer(STATION_ID)],
+        &kw,
+        Some("machoNet:26000"),
+    )
+    .await
+    .expect("Undock for #353");
+    let undocked_ship_id = sess.ship_id.expect("ship_id in space");
+    let undocked_sys_id = sess.solar_system_id.expect("solar_system_id in space");
+    let sys_handle = ctx.systems.get_or_spawn(undocked_sys_id);
+    // Simulate disconnect emergency warp + reconnect return-warp active when `beyonce.MachoBindObject` runs:
+    if let Ok(mut bp) = sys_handle.ballpark.write() {
+        bp.observer_events.remove(&undocked_ship_id);
+        let cur_pos = bp
+            .balls
+            .get(&undocked_ship_id)
+            .map(|b| b.position)
+            .unwrap_or(glam::DVec3::ZERO);
+        let _ = bp.set_mode(
+            undocked_ship_id,
+            eve_destiny::MovementMode::new_warp(
+                cur_pos,
+                cur_pos + glam::DVec3::new(500_000.0, 0.0, 0.0),
+                3.0,
+            ),
+        );
+        // Simulate 1Hz tick draining the pre-bind `observer_events` before `beyonce.MachoBindObject`
+        bp.observer_events.remove(&undocked_ship_id);
+    }
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        None,
+        "MachoBindObject",
+        &[PyRep::Integer(undocked_sys_id as i64), PyRep::None],
+        &kw,
+        Some("machoNet:26000"),
+    )
+    .await
+    .expect("beyonce.MachoBindObject on in-space reconnect");
+    let (_tick, obs_evs, updates_pyrep) = sys_handle
+        .drain_observer_updates(undocked_ship_id)
+        .await
+        .expect("drain_observer_updates after MachoBindObject");
+    assert!(
+        matches!(
+            obs_evs.first(),
+            Some(eve_destiny::DestinyEvent::SetState { observer_ball_id }) if *observer_ball_id == undocked_ship_id
+        ),
+        "#353: SetState must be at index 0 of observer_events after MachoBindObject stops emergency return-warp, got {obs_evs:?}"
+    );
+    if let PyRep::List(entries) = &updates_pyrep {
+        let first_action = entries
+            .first()
+            .and_then(|e| match e {
+                PyRep::Tuple(t) => t.get(1),
+                _ => None,
+            })
+            .and_then(|a| match a {
+                PyRep::Tuple(t) => t.first(),
+                _ => None,
+            })
+            .and_then(|n| n.as_str());
+        assert_eq!(
+            first_action,
+            Some("SetState"),
+            "#353: V24.01 michelle.Park.FlushState & RealFlushState require state[0][1][0] == 'SetState' at index 0, got {updates_pyrep:?}"
+        );
+    } else {
+        panic!("Expected PyRep::List from drain_observer_updates");
+    }
+
+    // Verify NPC entity SlimItem (`category_id == 11`) includes standing thresholds required by
+    // `spacecomponents/client/components/entitystandings.pyj:63`.
+    let npc_ball = eve_destiny::Ball {
+        id: 800_000_001,
+        type_id: 4025,
+        position: glam::DVec3::ZERO,
+        velocity: glam::DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 1.0,
+        mass: 1_000_000.0,
+        radius: 553.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    };
+    let npc_slim = eve_destiny::wire::slim_item_dict(
+        &npc_ball,
+        &eve_destiny::SlimItemMeta {
+            group_id: 523,
+            category_id: 11,
+            owner_id: 1000125,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        npc_slim.dict_get("hostile_response_threshold"),
+        Some(&PyRep::Real(11.0)),
+        "#353: NPC SlimItem must include hostile_response_threshold"
+    );
+    assert_eq!(
+        npc_slim.dict_get("friendly_response_threshold"),
+        Some(&PyRep::Real(11.0)),
+        "#353: NPC SlimItem must include friendly_response_threshold"
+    );
+
+    // Verify `eve_public.character.skill.plan.GetActiveRequest` returns a 16-zero-byte nil UUID
+    // when no skill plan is tracked (`uuid.UUID(bytes=response.skill_plan.uuid) == uuid.UUID(int=0)`).
+    let _ = crate::quasar_progression_complete::quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.character.skill.plan.SetActiveRequest",
+        Vec::new(),
+    )
+    .await;
+    let active_sp_rsp = crate::quasar_progression_complete::quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.character.skill.plan.GetActiveRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(active_sp_rsp.status_code, 200);
+    let active_sp_wm = eve_proto::quasar::WireMessage::decode(
+        &active_sp_rsp.payload.expect("GetActiveResponse payload").value,
+    )
+    .expect("decode GetActiveResponse");
+    let sp_id_bytes = active_sp_wm
+        .fields
+        .iter()
+        .find(|f| f.field_number == 1)
+        .and_then(|f| f.value.as_bytes())
+        .expect("GetActiveResponse.skill_plan field 1");
+    let sp_id_wm = eve_proto::quasar::WireMessage::decode(sp_id_bytes)
+        .expect("decode GetActiveResponse.skill_plan Identifier");
+    let uuid_bytes = sp_id_wm
+        .fields
+        .iter()
+        .find(|f| f.field_number == 1)
+        .and_then(|f| f.value.as_bytes())
+        .expect("GetActiveResponse.skill_plan.uuid field 1");
+    assert_eq!(
+        uuid_bytes,
+        &[0u8; 16],
+        "#353: Untracked skill plan must return 16-byte nil UUID (uuid.UUID(int=0)), not empty bytes"
+    );
 }
