@@ -618,8 +618,11 @@ async fn test_esi_live_market_history_and_loyalty_offers() {
         .find(|d| d["volume"].as_i64().unwrap_or(0) >= 500)
         .expect("market history day with traded volume");
     assert_eq!(matched_day["volume"].as_i64(), Some(500));
-    assert_eq!(matched_day["order_count"].as_i64().unwrap() >= 1, true);
-    assert!(matched_day["average"].as_f64().unwrap() > 0.0);
+    assert_eq!(matched_day["highest"].as_f64(), Some(6.50));
+    assert_eq!(matched_day["lowest"].as_f64(), Some(6.50));
+    assert_eq!(matched_day["average"].as_f64(), Some(6.50));
+    assert!(matched_day["order_count"].as_i64().unwrap() >= 1);
+    assert_eq!(matched_day["highest"].as_f64() >= matched_day["lowest"].as_f64(), true);
 
     assert_esi_status(&router, "/v1/loyalty/stores/not_a_corp/offers/", None, 400);
     assert_esi_status(&router, "/v1/loyalty/stores/999999999/offers/", None, 404);
