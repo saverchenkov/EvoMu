@@ -2103,9 +2103,8 @@ fn make_session(char_id: i64, sys_id: u32, ship_id: i64) -> SessionState {
 
 #[tokio::test]
 async fn test_wormhole_lifetime_decay_stages_and_info_buckets() {
-    // parity: feat:wormholes.lifetime-decay-stages, feat:navigation.wormhole-info-buckets
+    // parity: feat:navigation.wormhole-info-buckets
     eve_testkit::attest(&[
-        "feat:wormholes.lifetime-decay-stages",
         "feat:navigation.wormhole-info-buckets",
     ]);
 
@@ -2131,7 +2130,7 @@ async fn test_wormhole_lifetime_decay_stages_and_info_buckets() {
     assert_eq!(fresh.max_ship_size, "Extra Large");
     assert_eq!(
         fresh.lifetime_description,
-        "This wormhole has not yet begun to decay"
+        "This wormhole has not yet begun its natural cycle of decay and is not likely to disappear for some time"
     );
 
     // 4h..=24h remaining (12h left): <1 day bucket, beginning to decay
@@ -2167,7 +2166,7 @@ async fn test_wormhole_lifetime_decay_stages_and_info_buckets() {
     assert_eq!(eol.lifetime_bucket, "<4h");
     assert_eq!(
         eol.lifetime_description,
-        "This wormhole is reaching the end of its natural lifetime"
+        "This wormhole is reaching the end of its natural lifetime and is likely to collapse very soon"
     );
 
     // Verify SDE wormhole type attributes drive ship size & destination class buckets
@@ -2332,7 +2331,7 @@ async fn test_wormhole_lifetime_decay_stages_and_info_buckets() {
     assert_eq!(
         jump_rep.dict_get("lifetimeDescription"),
         Some(&PyRep::String(
-            "This wormhole is reaching the end of its natural lifetime".into()
+            "This wormhole is reaching the end of its natural lifetime and is likely to collapse very soon".into()
         ))
     );
 }

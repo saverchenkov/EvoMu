@@ -116,15 +116,13 @@ pub fn derive_wormhole_buckets_for_type(
         ">1 day"
     };
 
-    // Show-info lifetime strings for the 4 remaining-lifetime bands (>24h, 4h-24h, <4h, <1h).
+    // Show-info lifetime strings for the 3 canonical remaining-lifetime bands (>24h, 4h-24h, <4h).
     let lifetime_description = if remaining_seconds > 24 * 3_600 && !collapsed {
-        "This wormhole has not yet begun its natural cycle of decay and should last at least another day."
+        "This wormhole has not yet begun its natural cycle of decay and is not likely to disappear for some time"
     } else if remaining_seconds >= 4 * 3_600 && !collapsed {
-        "This wormhole is beginning to decay, and probably won't last another day."
-    } else if remaining_seconds >= 3_600 && !collapsed {
-        "This wormhole is reaching the end of its natural lifetime."
+        "This wormhole is beginning to decay, and probably won't last another day"
     } else {
-        "This wormhole is on the verge of dissipating into the ether."
+        "This wormhole is reaching the end of its natural lifetime and is likely to collapse very soon"
     };
 
     // DERIVED: Mass stability bucket threshold derived from remaining_mass_kg / sde_wormhole_types.max_stable_mass
@@ -704,9 +702,9 @@ pub fn compute_wormhole_stages_with_sde(
         } else if remaining_seconds < 4 * 3_600 {
             ("ReachingEndOfLifetime", 2)
         } else if remaining_seconds <= 24 * 3_600 {
-            ("Healthy", 1)
+            ("BeginningToDecay", 1)
         } else {
-            ("BeginningToDecay", 0)
+            ("Healthy", 0)
         };
 
     let mass_pct = if eff_max_mass > 0.0 { wh.remaining_mass_kg / eff_max_mass } else { 0.0 };

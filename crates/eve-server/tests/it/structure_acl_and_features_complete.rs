@@ -446,9 +446,6 @@ async fn test_structure_access_lists_and_docking_acl() {
 
 #[tokio::test]
 async fn test_structure_board_eject_and_defense_acl_control() {
-    // parity: feat:structures.board-structure
-    eve_testkit::attest(&["feat:structures.board-structure"]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
 
@@ -764,10 +761,9 @@ async fn test_structure_anchor_restrictions_and_fitting_state_locks() {
 
 #[tokio::test]
 async fn test_structure_ewar_immunity_and_mobile_cyno_inhibitor() {
-    // parity: feat:structures.ewar-immunity, feat:structures.mobile-cyno-inhibitor
+    // parity: feat:structures.ewar-immunity
     eve_testkit::attest(&[
         "feat:structures.ewar-immunity",
-        "feat:structures.mobile-cyno-inhibitor",
     ]);
 
     let ctx = ServerContext::new();

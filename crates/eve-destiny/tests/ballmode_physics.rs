@@ -617,8 +617,8 @@ async fn test_warp_full_lifecycle_align_accelerate_cruise_decelerate_and_dropout
 
 #[tokio::test]
 async fn test_upwell_structure_and_static_balls_cannot_navigate_warp_or_micro_jump() {
-    // parity: feat:structures.board-structure, destiny:GotoPoint
-    eve_testkit::attest(&["feat:structures.board-structure", "destiny:GotoPoint"]);
+    // parity: destiny:GotoPoint
+    eve_testkit::attest(&["destiny:GotoPoint"]);
     let mut park = Ballpark::new(30_000_142);
     let struct_id: BallId = 1_040_000_000_001;
     let static_id: BallId = 40_000_001;

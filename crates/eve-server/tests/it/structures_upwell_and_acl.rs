@@ -1347,9 +1347,8 @@ async fn move_pilot_to_system(ctx: &ServerContext, sess: &mut SessionState, sys_
 
 #[tokio::test]
 async fn test_remediated_structure_control_and_boarding_lifecycle() {
-    // parity: feat:structures.board-structure, rpc:structureControl.BoardStructure, rpc:structureControl.EjectFromStructure, rpc:structureControl.GetStructurePilot, rpc:structureControl.ReleaseControl, rpc:structureControl.TakeControl
+    // parity: rpc:structureControl.BoardStructure, rpc:structureControl.EjectFromStructure, rpc:structureControl.GetStructurePilot, rpc:structureControl.ReleaseControl, rpc:structureControl.TakeControl
     eve_testkit::attest(&[
-        "feat:structures.board-structure",
         "rpc:structureControl.BoardStructure",
         "rpc:structureControl.EjectFromStructure",
         "rpc:structureControl.GetStructurePilot",
@@ -2382,9 +2381,6 @@ async fn test_remediated_repairshop_service_quotes_and_restoration() {
 
 #[tokio::test]
 async fn test_remediated_mobile_cyno_inhibitor_lifecycle_and_activation() {
-    // parity: feat:structures.mobile-cyno-inhibitor
-    eve_testkit::attest(&["feat:structures.mobile-cyno-inhibitor"]);
-
     let ctx = new_ctx();
     let mut sess = setup_owner_corp(&ctx, 8220, PERIMETER, "Cyno Inhibitor Corp", "CINH").await;
     let corp_id = sess.corporation_id.expect("corp");
@@ -2929,9 +2925,8 @@ async fn test_remediated_structure_directory_and_profiles_visibility() {
 
 #[tokio::test]
 async fn test_remediated_structure_control_release_and_flex_zero_arg_release() {
-    // parity: feat:structures.board-structure, rpc:structureControl.TakeControl, rpc:structureControl.ReleaseControl, rpc:structureControl.GetStructurePilot
+    // parity: rpc:structureControl.TakeControl, rpc:structureControl.ReleaseControl, rpc:structureControl.GetStructurePilot
     eve_testkit::attest(&[
-        "feat:structures.board-structure",
         "rpc:structureControl.TakeControl",
         "rpc:structureControl.ReleaseControl",
         "rpc:structureControl.GetStructurePilot",
@@ -3246,9 +3241,8 @@ fn has_shipid_session_change(notifs: &[eve_server::router::PendingMachoNotificat
 
 #[tokio::test]
 async fn test_remediated_involuntary_structure_control_release_session_sync() {
-    // parity: feat:structures.board-structure, rpc:structureControl.TakeControl, rpc:structureControl.GetStructurePilot
+    // parity: rpc:structureControl.TakeControl, rpc:structureControl.GetStructurePilot
     eve_testkit::attest(&[
-        "feat:structures.board-structure",
         "rpc:structureControl.TakeControl",
         "rpc:structureControl.GetStructurePilot",
     ]);
@@ -3672,9 +3666,8 @@ async fn test_remediated_bf01_bf02_upwell_market_acl_offline_filter_and_corp_div
 
 #[tokio::test]
 async fn test_remediated_bf03_bf04_structure_control_immobility_and_direct_structure_profile_save() {
-    // parity: feat:structures.board-structure, rpc:structureControl.TakeControl, rpc:beyonce.CmdWarpToStuff, rpc:structureDocking.Dock, rpc:abyssalMgr.AbyssalEntranceDeployment
+    // parity: rpc:structureControl.TakeControl, rpc:beyonce.CmdWarpToStuff, rpc:structureDocking.Dock, rpc:abyssalMgr.AbyssalEntranceDeployment
     eve_testkit::attest(&[
-        "feat:structures.board-structure",
         "rpc:structureControl.TakeControl",
         "rpc:beyonce.CmdWarpToStuff",
         "rpc:structureDocking.Dock",
@@ -4659,9 +4652,8 @@ async fn test_bf03_anchor_orbital_undocked_corp_planet_and_effective_pochven_sta
 
 #[tokio::test]
 async fn test_bf04_structure_control_alliance_grant_and_corp_alliance_block_revocation() {
-    // parity: feat:structures.board-structure, rpc:structureControl.TakeControl, rpc:structureControl.BoardStructure
+    // parity: rpc:structureControl.TakeControl, rpc:structureControl.BoardStructure
     eve_testkit::attest(&[
-        "feat:structures.board-structure",
         "rpc:structureControl.TakeControl",
         "rpc:structureControl.BoardStructure",
     ]);
@@ -4788,8 +4780,8 @@ async fn test_bf04_structure_control_alliance_grant_and_corp_alliance_block_revo
 
 #[tokio::test]
 async fn test_bf05_mobile_cyno_inhibitor_upwell_50km_clearance_and_space_bans() {
-    // parity: feat:structures.mobile-cyno-inhibitor, feat:structures.mobile-deploy-restrictions, rpc:posMgr.AnchorStructure
-    eve_testkit::attest(&["feat:structures.mobile-cyno-inhibitor", "feat:structures.mobile-deploy-restrictions", "rpc:posMgr.AnchorStructure"]);
+    // parity: feat:structures.mobile-deploy-restrictions, rpc:posMgr.AnchorStructure
+    eve_testkit::attest(&["feat:structures.mobile-deploy-restrictions", "rpc:posMgr.AnchorStructure"]);
 
     let ctx = new_ctx();
     // Exercises 50km Upwell clearance, high-sec/W-space/Zarzakh MCI ban, and MMJU lifetime.
@@ -4884,9 +4876,8 @@ async fn test_bf05_mobile_cyno_inhibitor_upwell_50km_clearance_and_space_bans() 
 
 #[tokio::test]
 async fn test_r_struct_ctrl_ship_bypass_01_saved_ship_locks_and_flex_pod_fallback() {
-    // parity: feat:structures.board-structure, rpc:structureControl.TakeControl, rpc:structureControl.ReleaseControl, rpc:structureDeliveries.Deliver, rpc:contractProxy.CreateContract, rpc:repackagingSvc.RepackageItems
+    // parity: rpc:structureControl.TakeControl, rpc:structureControl.ReleaseControl, rpc:structureDeliveries.Deliver, rpc:contractProxy.CreateContract, rpc:repackagingSvc.RepackageItems
     eve_testkit::attest(&[
-        "feat:structures.board-structure",
         "rpc:structureControl.TakeControl",
         "rpc:structureControl.ReleaseControl",
         "rpc:structureDeliveries.Deliver",

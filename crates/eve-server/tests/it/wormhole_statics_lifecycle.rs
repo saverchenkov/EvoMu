@@ -104,12 +104,11 @@ async fn setup_pilot_in_space(
     sess
 }
 
-// parity: feat:navigation.wormhole-statics, feat:wormholes.lifetime-decay-stages, feat:wormholes.static-wormhole-respawn, feat:navigation.wormhole-k162-exit-materialization
+// parity: feat:navigation.wormhole-statics, feat:wormholes.static-wormhole-respawn, feat:navigation.wormhole-k162-exit-materialization
 #[tokio::test]
 async fn test_wormhole_statics_decay_stages_respawn_and_k162_materialization() {
     eve_testkit::attest(&[
         "feat:navigation.wormhole-statics",
-        "feat:wormholes.lifetime-decay-stages",
         "feat:wormholes.static-wormhole-respawn",
         "feat:navigation.wormhole-k162-exit-materialization",
     ]);
@@ -422,11 +421,11 @@ async fn test_wormhole_statics_decay_stages_respawn_and_k162_materialization() {
     };
     assert_eq!(
         find_sig_desc(early_sigs, "WST-DEC-48H").as_deref(),
-        Some("This wormhole has not yet begun to decay")
+        Some("This wormhole has not yet begun its natural cycle of decay and is not likely to disappear for some time")
     );
     assert_eq!(
         find_sig_desc(early_sigs, "WND-DEC-36H").as_deref(),
-        Some("This wormhole has not yet begun to decay")
+        Some("This wormhole has not yet begun its natural cycle of decay and is not likely to disappear for some time")
     );
     assert_eq!(
         find_sig_desc(early_sigs, "WND-DEC-24H").as_deref(),
@@ -475,7 +474,7 @@ async fn test_wormhole_statics_decay_stages_respawn_and_k162_materialization() {
     let PyRep::List(eol_sigs) = scan_eol.dict_get("signatures").unwrap() else { panic!() };
     assert_eq!(
         find_sig_desc(eol_sigs, "WND-DEC-16H").as_deref(),
-        Some("This wormhole is reaching the end of its natural lifetime")
+        Some("This wormhole is reaching the end of its natural lifetime and is likely to collapse very soon")
     );
 
     // Advance +35h (total +49h): step ONLY the SystemActor periodic tick (no client scan/jump RPC!)

@@ -67,11 +67,8 @@ async fn setup_pilot_in_space(
     sess
 }
 
-// parity: feat:wormholes.lifetime-decay-stages
 #[tokio::test]
 async fn test_wormhole_lifetime_decay_stages_and_expiry_despawn() {
-    eve_testkit::attest(&["feat:wormholes.lifetime-decay-stages"]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
@@ -117,7 +114,7 @@ async fn test_wormhole_lifetime_decay_stages_and_expiry_despawn() {
         let b = derive_wormhole_buckets(sig, t_1h, &ctx.sde);
         let rem_hours = sig.lifetime_seconds.saturating_sub(3600) / 3600;
         let expected = if rem_hours > 24 {
-            "This wormhole has not yet begun to decay"
+            "This wormhole has not yet begun its natural cycle of decay and is not likely to disappear for some time"
         } else {
             "This wormhole is beginning to decay, and probably won't last another day"
         };
@@ -127,7 +124,7 @@ async fn test_wormhole_lifetime_decay_stages_and_expiry_despawn() {
     // At t = now0 + 14h: 16h wormhole has 2h remaining (<4h)
     let t_14h = now0 + 14 * 3600;
     let b_16h_eol = derive_wormhole_buckets(&test_sigs[2], t_14h, &ctx.sde);
-    assert_eq!(b_16h_eol.lifetime_description, "This wormhole is reaching the end of its natural lifetime");
+    assert_eq!(b_16h_eol.lifetime_description, "This wormhole is reaching the end of its natural lifetime and is likely to collapse very soon");
     let (_, _, _, wh_age, _) = compute_wormhole_stages_with_sde(&test_sigs[2], t_14h, Some(&ctx.sde));
     assert_eq!(wh_age, 2, "Age stage must be 2 (<4h)");
 
@@ -135,7 +132,7 @@ async fn test_wormhole_lifetime_decay_stages_and_expiry_despawn() {
     let t_33h = now0 + 33 * 3600;
     assert_eq!(
         derive_wormhole_buckets(&test_sigs[3], t_33h, &ctx.sde).lifetime_description,
-        "This wormhole is reaching the end of its natural lifetime"
+        "This wormhole is reaching the end of its natural lifetime and is likely to collapse very soon"
     );
 
     // 2. Setup pilot and verify scanMgr.GetSystemScanMgr reports lifetimeDescription
@@ -154,7 +151,7 @@ async fn test_wormhole_lifetime_decay_stages_and_expiry_despawn() {
             .and_then(|v| v.as_str())
             .map(str::to_string)
     };
-    assert_eq!(find_desc("WST-DEC-48H").as_deref(), Some("This wormhole has not yet begun to decay"));
+    assert_eq!(find_desc("WST-DEC-48H").as_deref(), Some("This wormhole has not yet begun its natural cycle of decay and is not likely to disappear for some time"));
     assert_eq!(find_desc("WND-DEC-24H").as_deref(), Some("This wormhole is beginning to decay, and probably won't last another day"));
 
     // 3. Verify despawn of entrance and exit balls on timer expiration
