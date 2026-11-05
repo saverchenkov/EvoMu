@@ -293,3 +293,7 @@ pub async fn step_hauler_convoy_internal(
 #[cfg(test)]
 #[path = "living_world_haulers_tests.rs"]
 mod living_world_haulers_tests;
+
+#[cfg(test)] #[path = "living_world_haulers_extra_tests.rs"]
+mod living_world_haulers_extra_tests;
+

@@ -1371,3 +1371,7 @@ mod quasar_gateway_tests;
 #[cfg(test)]
 #[path = "quasar_gateway_rpc_tests.rs"]
 mod quasar_gateway_rpc_tests;
+
+#[cfg(test)] #[path = "quasar_gateway_extra_tests.rs"]
+mod quasar_gateway_extra_tests;
+

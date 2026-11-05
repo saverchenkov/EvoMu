@@ -741,3 +741,7 @@ mod tests {
         assert!(compute_living_world_fair_price(230_000.0, 250_000.0, 1.0) >= 287_500.0);
     }
 }
+
+#[cfg(test)] #[path = "formulas_extra_tests.rs"]
+mod formulas_extra_tests;
+

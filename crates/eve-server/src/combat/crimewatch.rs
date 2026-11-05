@@ -825,3 +825,7 @@ pub fn credit_specialized_npc_bounty_and_sec_status(
         }
     }
 }
+
+#[cfg(test)] #[path = "crimewatch_unit_tests.rs"]
+mod crimewatch_unit_tests;
+

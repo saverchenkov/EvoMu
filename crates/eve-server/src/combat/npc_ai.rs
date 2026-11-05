@@ -1059,3 +1059,7 @@ impl NpcSpawnManager {
         res
     }
 }
+
+#[cfg(test)] #[path = "npc_ai_unit_tests.rs"]
+mod npc_ai_unit_tests;
+

@@ -1100,3 +1100,7 @@ impl SelfDestructManager {
     }
 }
 
+#[cfg(test)] #[path = "death_pipeline_unit_tests.rs"]
+mod death_pipeline_unit_tests;
+
+
