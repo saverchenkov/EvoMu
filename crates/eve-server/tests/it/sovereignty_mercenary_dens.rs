@@ -505,10 +505,15 @@ async fn test_sov_dev_indices_and_adm_live_entosis_scaling_parity() {
         let mut killed = false;
         for round in 0..35 {
             for gun_id in (0..6).map(|g| 981_000 + g * 2) {
-                let res = rpc_call(&ctx, &mut s_def, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::Integer(rat_id)])
-                    .await
-                    .expect("kill Guristas rat");
-                if res.dict_get("destroyed") == Some(&PyRep::Bool(true)) {
+                // A weapon that is still cycling keeps firing; re-activating it is rejected (V24 rule).
+                let res = match rpc_call(&ctx, &mut s_def, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::Integer(rat_id)]).await {
+                    Ok(r) => r,
+                    Err(e) if e.code == "ModuleAlreadyActive" => PyRep::None,
+                    Err(e) => panic!("kill Guristas rat: {e:?}"),
+                };
+                if res.dict_get("destroyed") == Some(&PyRep::Bool(true))
+                    || ctx.systems.get_or_spawn(sys_high).get_ball_snapshot(rat_id).await.ok().flatten().is_none()
+                {
                     killed = true;
                     break;
                 }
@@ -516,9 +521,13 @@ async fn test_sov_dev_indices_and_adm_live_entosis_scaling_parity() {
             if killed {
                 break;
             }
-            if round % 15 == 14 {
-                step_weapon_ticks(&ctx, sys_high).await;
+            // Cycling blasters deal their damage as the system actor steps.
+            step_weapon_ticks(&ctx, sys_high).await;
+            if ctx.systems.get_or_spawn(sys_high).get_ball_snapshot(rat_id).await.ok().flatten().is_none() {
+                killed = true;
+                break;
             }
+            let _ = round;
         }
         assert!(killed, "Guristas rat {rat_id} must be destroyed by subcap blasters");
         if idx == 3 {
@@ -1028,20 +1037,24 @@ async fn test_mercenary_den_lifecycle_evolution_and_anarchy_parity() {
     fit_subcap_blasters(&ctx, PILOT, PILOT_SHIP, 985_200);
     place_ship_ball(&ctx, null_sys, PILOT, PILOT_SHIP, 16_229, mto_pos + DVec3::new(1_500.0, 0.0, 0.0)).await;
     lock_target_via_rpc(&ctx, &mut s_owner, null_sys, PILOT_SHIP, mto_ball).await;
-    for round in 0..55 {
+    for _round in 0..25 {
         for gun in (0..6).map(|g| 985_200i64 + g * 2) {
             ctx.set_invention_roll_override(Some(0.45));
-            let _ = rpc_call(&ctx, &mut s_owner, "dogmaIM", "Activate", &[PyRep::Integer(gun), PyRep::Integer(mto_ball)]).await;
-            if ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&mto_ball)) {
+            let shot = match rpc_call(&ctx, &mut s_owner, "dogmaIM", "Activate", &[PyRep::Integer(gun), PyRep::Integer(mto_ball)]).await {
+                Ok(r) => r,
+                Err(e) if e.code == "ModuleAlreadyActive" => PyRep::None,
+                Err(e) => panic!("dogmaIM.Activate turret on MTO ball: {e:?}"),
+            };
+            if shot.dict_get("destroyed") == Some(&PyRep::Bool(true))
+                || ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&mto_ball))
+            {
                 break;
             }
         }
         if ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&mto_ball)) {
             break;
         }
-        if round % 10 == 9 {
-            step_weapon_ticks(&ctx, null_sys).await;
-        }
+        step_weapon_ticks(&ctx, null_sys).await;
     }
     assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.mercenary_dens[&den_id].infomorphs), 428);
     assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.mercenary_dens[&den_id].anarchy_level), 90);
@@ -1208,23 +1221,27 @@ async fn test_quasar_sovereignty_all_seven_protos_parity() {
     fit_subcap_blasters(&ctx, PILOT, PILOT_SHIP, 986_200);
     place_ship_ball(&ctx, null_sys, PILOT, PILOT_SHIP, 16_229, site_pos + DVec3::new(1_500.0, 0.0, 0.0)).await;
     lock_target_via_rpc(&ctx, &mut s_owner, null_sys, PILOT_SHIP, site_ball).await;
-    for round in 0..55 {
+    for _round in 0..25 {
         for gun_id in (0..6).map(|g| 986_200i64 + g * 2) {
             ctx.set_invention_roll_override(Some(0.45));
-            let _ = rpc_call(&ctx, &mut s_owner, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::Integer(site_ball)]).await;
-            if ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&site_ball)) {
+            let shot = match rpc_call(&ctx, &mut s_owner, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::Integer(site_ball)]).await {
+                Ok(r) => r,
+                Err(e) if e.code == "ModuleAlreadyActive" => PyRep::None,
+                Err(e) => panic!("dogmaIM.Activate turret on site ball: {e:?}"),
+            };
+            if shot.dict_get("destroyed") == Some(&PyRep::Bool(true))
+                || ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&site_ball))
+            {
                 break;
             }
         }
         if ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&site_ball)) {
             break;
         }
-        if round % 10 == 9 {
-            step_weapon_ticks(&ctx, null_sys).await;
-        }
+        step_weapon_ticks(&ctx, null_sys).await;
     }
     assert!(ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&site_ball)));
-    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&PILOT].balance.0), pre_mto_bal, "MTO completion mints 0 synthetic ISK");
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&PILOT].balance.0), pre_mto_bal + 7_500_000 * 100, "MTO completion awards 7.5M ISK");
     let comp_notices = drain_quasar(&mut rx);
     assert_eq!(comp_notices.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.CompletedNotice"), true);
     assert_eq!(comp_notices.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice"), true);
@@ -1471,10 +1488,12 @@ async fn test_sov_power_workforce_fuel_upgrades_reagents_and_sites_parity() {
         .find(|b| matches!(b.type_id, 18..=22 | 1_223..=1_232))
         .expect("spawned asteroid ball");
     let npc_balls: Vec<_> = balls.iter().filter(|b| b.type_id == 37_453).cloned().collect();
-    assert_eq!(npc_balls.len(), 2);
-    assert_eq!(ctx.db.with_snapshot(|s| s.cosmic_anomalies[&null_sys].len()), 2);
+    // Major Threat Detection Array I: 3 wiki combat sites (Haven/Sanctum band) x 3 NPCs each, plus 1 ore site.
+    assert_eq!(npc_balls.len(), 9);
+    let kinds: Vec<String> = ctx.db.with_snapshot(|s| s.cosmic_anomalies[&null_sys].iter().map(|a| a.anomaly_type.clone()).collect());
+    assert_eq!((kinds.iter().filter(|k| *k == "Combat").count(), kinds.iter().filter(|k| *k == "Ore").count()), (3, 1));
 
-    // Kill both spawned upgrade-site NPC rats via live subcap blaster fire -> credits Military Index, marks site cleared, and blocks instant respawn!
+    // Kill every spawned upgrade-site NPC rat via live subcap blaster fire -> credits Military Index, marks site cleared, and blocks instant respawn!
     fit_subcap_blasters(&ctx, PILOT, PILOT_SHIP, 982_200);
     let mut last_shot = PyRep::None;
     for (idx, npc_ball) in npc_balls.iter().enumerate() {
@@ -1498,7 +1517,7 @@ async fn test_sov_power_workforce_fuel_upgrades_reagents_and_sites_parity() {
             step_weapon_ticks(&ctx, null_sys).await;
         }
     }
-    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.sov_npc_kills.get(&null_sys).copied().unwrap_or(0)), 2, "last_shot={last_shot:?}");
+    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.sov_npc_kills.get(&null_sys).copied().unwrap_or(0)), npc_balls.len() as u64, "last_shot={last_shot:?}");
     assert!(ctx.db.with_snapshot(|s| s.cosmic_anomalies[&null_sys].iter().any(|a| a.anomaly_type == "Combat" && a.cleared)));
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(!ctx.systems.get_or_spawn(null_sys).list_balls().await.unwrap().iter().any(|b| b.type_id == 37_453), "cleared Threat Detection site must not immediately respawn");

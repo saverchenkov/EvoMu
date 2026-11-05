@@ -803,11 +803,15 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
             PyRep::Integer(ihub_id),
         ]).await;
         step_weapon_ticks(&ctx, front_sys).await;
-        if ctx.db.with_snapshot(|s| s.fw_system_occupations[&front_sys].occupier_faction_id == 500_004) {
+        if ctx.db.with_snapshot(|s| s.fw_runtime.pending_downtime_captures.get(&front_sys) == Some(&500_004)) {
             break;
         }
         ctx.advance_secs(25);
     }
+    // Destroyed I-Hub only queues the capture; the occupier flips at the next daily downtime.
+    assert_eq!(ctx.db.with_snapshot(|s| s.fw_system_occupations[&front_sys].occupier_faction_id), 500_001);
+    let dt_sec = ctx.systems.downtime_utc_secs_of_day();
+    ctx.advance_secs((86_400 + dt_sec - ctx.now_unix() % 86_400) % 86_400 + 5);
     assert_eq!(ctx.db.with_snapshot(|s| s.fw_system_occupations[&front_sys].occupier_faction_id), 500_004);
     assert!(drain_notif_events(&ctx, gal_cid).iter().any(|e| e == "OnWarzoneOccupationStateUpdated"));
     set_pilot_location(&ctx, &mut s_gal, cmd_sys, None);
@@ -1245,6 +1249,9 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
     ).await;
     ctx.advance_secs(25);
     lock_target_via_rpc(&ctx, &mut s_pir, hs_sys, pir_ship, pod_id).await;
+    // The turret is still cycling on the ship target: stop it before re-targeting the capsule.
+    let _ = rpc_call(&ctx, &mut s_pir, "dogmaIM", "Deactivate", &[PyRep::Integer(999_200)]).await;
+    ctx.advance_secs(15);
     rpc_call(&ctx, &mut s_pir, "dogmaIM", "Activate", &[PyRep::Integer(999_200), PyRep::Integer(pod_id)])
         .await.expect("attack capsule in High-Sec Stage 5");
     let now_pod = ctx.now_unix();

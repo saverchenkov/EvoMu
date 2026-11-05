@@ -655,6 +655,7 @@ async fn test_npc_mining_ops_and_hauler_convoy_lifecycle() {
         .into_iter()
         .find(|c| {
             c.archetype == NpcArchetype::HaulerConvoy
+                && c.origin_system_id == sys_id
                 && !c.destroyed
                 && !ctx.living_world.is_convoy_docked(c.convoy_id)
         })
@@ -663,7 +664,12 @@ async fn test_npc_mining_ops_and_hauler_convoy_lifecycle() {
             ctx.living_world.get_convoy(cid).unwrap()
         });
     if active_hauler.current_system_id == sys_id {
-        ctx.advance_secs(15);
+        let _ = ctx
+            .living_world
+            .materialize_system_lod2(sys_id, &ctx.systems, &ctx.sde)
+            .await;
+        tick_background_cluster(&ctx).await;
+        ctx.advance_secs(60);
         tick_background_cluster(&ctx).await;
     }
     let jumped_hauler = ctx.living_world.get_convoy(active_hauler.convoy_id).unwrap();

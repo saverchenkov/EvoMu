@@ -469,6 +469,8 @@ pub fn evaluate_and_resolve_insurgency_campaign(
             if let Some(occ) = snap.fw_system_occupations.get_mut(&fob_sys) {
                 occ.occupier_faction_id = pirate_fac;
             }
+            // The I-Hub stays invulnerable under temporary pirate control until the surrender timer elapses.
+            snap.fw_runtime.ihub_vulnerable.insert(fob_sys, false);
         }
         for &(cid, fid, lp_award) in &payouts {
             if lp_award > 0 {
@@ -792,6 +794,10 @@ pub async fn tick_insurgency_campaigns(ctx: &ServerContext, now_unix: u64) {
         let mut out = Vec::new();
         for sys in due {
             if let Some(occ) = snap.fw_system_occupations.get_mut(&sys) {
+                // Pirates surrender their temporarily held FOB system back to its Empire owner (`Insurgency.md:64`).
+                if !(500_001..=500_004).contains(&occ.occupier_faction_id) {
+                    occ.occupier_faction_id = occ.owner_faction_id;
+                }
                 occ.victory_points = occ.victory_points_threshold;
                 let occ_fac = occ.occupier_faction_id;
                 snap.fw_runtime

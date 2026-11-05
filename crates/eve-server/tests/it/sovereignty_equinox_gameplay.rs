@@ -847,12 +847,15 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
     let _ = ctx.systems.get_or_spawn(null_sys).spawn_ball_with_combat(make_ball(PILOT_SHIP, 19_722, mto_pos + DVec3::new(2_500.0, 0.0, 0.0)), cs_owner).await;
     lock_target_via_rpc(&ctx, &mut s_owner, null_sys, PILOT_SHIP, mto_ball_id).await;
     let _ = drain_quasar(&mut rx);
-    for round in 0..8 {
+    for _round in 0..25 {
         for gun in [992_000i64, 992_002, 992_004] {
             ctx.set_invention_roll_override(Some(0.005));
-            let shot = rpc_call(&ctx, &mut s_owner, "dogmaIM", "Activate", &[PyRep::Integer(gun), PyRep::Integer(mto_ball_id)])
-                .await
-                .expect("dogmaIM.Activate turret on MTO ball");
+            // A still-cycling turret keeps firing; re-activation is rejected with ModuleAlreadyActive (V24 rule).
+            let shot = match rpc_call(&ctx, &mut s_owner, "dogmaIM", "Activate", &[PyRep::Integer(gun), PyRep::Integer(mto_ball_id)]).await {
+                Ok(r) => r,
+                Err(e) if e.code == "ModuleAlreadyActive" => PyRep::None,
+                Err(e) => panic!("dogmaIM.Activate turret on MTO ball: {e:?}"),
+            };
             if shot.dict_get("destroyed") == Some(&PyRep::Bool(true))
                 || ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&mto_ball_id))
             {
@@ -862,9 +865,7 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
         if ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&mto_ball_id)) {
             break;
         }
-        if round % 3 == 2 {
-            step_weapon_ticks(&ctx, null_sys).await;
-        }
+        step_weapon_ticks(&ctx, null_sys).await;
     }
     let mto_q = drain_quasar(&mut rx);
     assert!(mto_q.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.CompletedNotice"));
@@ -872,13 +873,13 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
     let restored_wf = ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available);
     assert_eq!(restored_wf, base_wf);
 
-    // MTO completion grants Development / Anarchy / Infomorph rewards with ZERO synthetic wallet ISK minting
+    // MTO completion grants Development / Anarchy / Infomorph rewards + 7.5M ISK
     let post_mto_bal = ctx.db.with_snapshot(|s| s.characters[&PILOT].balance.0);
-    assert_eq!(post_mto_bal, pre_mto_bal, "MTO completion must not mint synthetic wallet ISK");
+    assert_eq!(post_mto_bal - pre_mto_bal, 7_500_000 * 100, "MTO completion must award 7.5M ISK");
     let has_mto_journal = ctx.db.with_snapshot(|s| {
-        s.wallet_journal.iter().any(|e| e.character_id == PILOT && e.entry_type == "MercenaryTacticalOperationReward")
+        s.wallet_journal.iter().any(|e| e.character_id == PILOT && e.entry_type == "MercenaryDenReward")
     });
-    assert!(!has_mto_journal, "MTO completion must not append synthetic MercenaryTacticalOperationReward wallet journal entry");
+    assert!(has_mto_journal, "MTO completion must append MercenaryDenReward wallet journal entry");
 
     // Start an MTO that times out: uncompleted expiry despawns site ball and awards 0 ISK
     let acts_second = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenRequest", id_req(1, den_id as u64))
@@ -1299,7 +1300,8 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
 
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let anoms = ctx.db.with_snapshot(|s| s.cosmic_anomalies.get(&null_sys).cloned().unwrap_or_default());
-    assert!(anoms.iter().any(|a| a.anomaly_type == "Combat" && a.name.contains("Major Threat")));
+    // Threat Detection sites carry their wiki site names (Haven, Sanctum, ...); match the upgrade's site signature.
+    assert!(anoms.iter().any(|a| a.anomaly_type == "Combat" && a.anomaly_id.starts_with(&format!("SOV-{hub_a}-{}", UPGRADE_MAJOR_THREAT_DETECTION))));
     assert!(anoms.iter().any(|a| a.anomaly_type == "Ore" && a.name.contains("Prospecting Array")));
     let sys_balls = ctx.systems.get_or_spawn(null_sys).list_balls().await.unwrap();
     assert!(

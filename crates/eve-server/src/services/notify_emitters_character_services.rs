@@ -1010,6 +1010,23 @@ pub fn handle_batch3_gm_slash_cmd(
                 ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
             ])))
         }
+        "/fwcapture" => {
+            let sys_id = parts
+                .get(1)
+                .and_then(|s| s.parse::<u32>().ok())
+                .or(caller_sys)
+                .unwrap_or(0);
+            let vp = parts
+                .get(2)
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(75_000);
+            let (new_vp, contested) = crate::services::fw_services::add_victory_points(ctx, sys_id, vp);
+            Some(Ok(PyRep::keyval([
+                ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+                ("victoryPoints", PyRep::Integer(new_vp)),
+                ("contestedPercentage", PyRep::Real(contested)),
+            ])))
+        }
         _ => None,
     }
 }

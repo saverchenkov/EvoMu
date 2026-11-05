@@ -427,33 +427,24 @@ async fn test_mercenary_den_development_anarchy_and_skyhook_workforce() {
     )
     .await;
     lock_target_via_rpc(&ctx, &mut s_owner, null_sys, PILOT_SHIP, mto_ball).await;
-    for round in 0..55 {
+    for _round in 0..25 {
         for gun in (0..6).map(|g| 985_200i64 + g * 2) {
             ctx.set_invention_roll_override(Some(0.45));
-            let _ = rpc_call(
-                &ctx,
-                &mut s_owner,
-                "dogmaIM",
-                "Activate",
-                &[PyRep::Integer(gun), PyRep::Integer(mto_ball)],
-            )
-            .await;
-            if ctx
-                .db
-                .with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&mto_ball))
+            let shot = match rpc_call(&ctx, &mut s_owner, "dogmaIM", "Activate", &[PyRep::Integer(gun), PyRep::Integer(mto_ball)]).await {
+                Ok(r) => r,
+                Err(e) if e.code == "ModuleAlreadyActive" => PyRep::None,
+                Err(e) => panic!("dogmaIM.Activate turret on MTO ball: {e:?}"),
+            };
+            if shot.dict_get("destroyed") == Some(&PyRep::Bool(true))
+                || ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&mto_ball))
             {
                 break;
             }
         }
-        if ctx
-            .db
-            .with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&mto_ball))
-        {
+        if ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&mto_ball)) {
             break;
         }
-        if round % 10 == 9 {
-            step_weapon_ticks(&ctx, null_sys).await;
-        }
+        step_weapon_ticks(&ctx, null_sys).await;
     }
     ctx.db.with_snapshot(|snap| {
         let den = snap.sov_runtime.mercenary_dens.get(&den_id).unwrap();

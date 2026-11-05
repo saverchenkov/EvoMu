@@ -807,12 +807,18 @@ pub fn on_space_entity_destroyed_ext(
                         .into_iter()
                         .flat_map(move |h| h.upgrades.iter().map(move |u| (hid, u.type_id)))
                 })
-                .filter_map(|(hid, tid)| {
-                    let base = 1_940_000_000 + (hid.unsigned_abs() as i64 % 100_000) * 100 + i64::from(tid % 100) * 2;
-                    let matched = target_ball_id == base + 1 || target_ball_id == base + 2;
-                    let any_left = snap.sov_runtime.sov_upgrade_combat_npcs.contains(&(base + 1))
-                        || snap.sov_runtime.sov_upgrade_combat_npcs.contains(&(base + 2));
-                    (matched && !any_left).then(|| format!("SOV-{hid}-{tid}"))
+                .flat_map(|(hid, tid)| {
+                    // Same ID layout as the upgrade-site spawner: `base + s_idx * 10 + 1..=9` per site.
+                    let base = 1_940_000_000 + (hid.unsigned_abs() as i64 % 100_000) * 100 + i64::from(tid % 100) * 10;
+                    let npcs = &snap.sov_runtime.sov_upgrade_combat_npcs;
+                    (0..8i64).filter_map(move |s_idx| {
+                        let site = base + s_idx * 10;
+                        let matched = (site + 1..=site + 9).contains(&target_ball_id);
+                        let any_left = (site + 1..=site + 9).any(|n| npcs.contains(&n));
+                        (matched && !any_left).then(|| {
+                            if s_idx == 0 { format!("SOV-{hid}-{tid}") } else { format!("SOV-{hid}-{tid}-{s_idx}") }
+                        })
+                    })
                 })
                 .collect();
             if let Some(list) = snap.cosmic_anomalies.get_mut(&solar_system_id) {

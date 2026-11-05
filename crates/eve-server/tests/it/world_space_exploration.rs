@@ -1491,20 +1491,24 @@ async fn test_mercenary_den_anarchy_development_mto_and_ui_photo_mode() {
     fit_subcap_blasters(&ctx, PILOT, PILOT_SHIP, 987_200);
     place_ship_ball(&ctx, null_sys, PILOT, PILOT_SHIP, 16_229, site_pos + DVec3::new(1_500.0, 0.0, 0.0)).await;
     lock_target_via_rpc(&ctx, &mut s_owner, null_sys, PILOT_SHIP, site_ball).await;
-    for round in 0..55 {
+    for _round in 0..25 {
         for gun_id in (0..6).map(|g| 987_200_i64 + g * 2) {
             ctx.set_invention_roll_override(Some(0.45));
-            let _ = rpc_call(&ctx, &mut s_owner, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::Integer(site_ball)]).await;
-            if ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&site_ball)) {
+            let shot = match rpc_call(&ctx, &mut s_owner, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::Integer(site_ball)]).await {
+                Ok(r) => r,
+                Err(e) if e.code == "ModuleAlreadyActive" => PyRep::None,
+                Err(e) => panic!("dogmaIM.Activate turret on site ball: {e:?}"),
+            };
+            if shot.dict_get("destroyed") == Some(&PyRep::Bool(true))
+                || ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&site_ball))
+            {
                 break;
             }
         }
         if ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&site_ball)) {
             break;
         }
-        if round % 10 == 9 {
-            step_weapon_ticks(&ctx, null_sys).await;
-        }
+        step_weapon_ticks(&ctx, null_sys).await;
     }
     assert!(ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&site_ball)));
     let comp_notices = drain_quasar(&mut rx);

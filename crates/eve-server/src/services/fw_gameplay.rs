@@ -65,6 +65,19 @@ pub fn complex_base_capture_duration_seconds(tier: &str) -> u64 {
     }
 }
 
+/// Post-Uprising victory points per completed complex by size (`wiki:Faction_warfare` VP table:
+/// Scout 50, Small 75, Moderate 600, Large 300, Open 350).
+pub fn complex_victory_points(tier: &str) -> i64 {
+    match tier {
+        "Novice" | "Scout" => 50,
+        "Small" => 75,
+        "Medium" => 600,
+        "Large" => 300,
+        "Open" => 350,
+        _ => 50,
+    }
+}
+
 /// Derives authentic Battlefield 3-zone centers in `sys_id` from an SDE celestial anchor.
 pub fn battlefield_zone_centers_for_system(ctx: &ServerContext, sys_id: u32) -> [[f64; 3]; 3] {
     let (cel_pos, _) = crate::services::space_destiny::space_docking_cloaking::pick_system_celestial_position(ctx, sys_id, 99);
@@ -730,22 +743,7 @@ pub async fn apply_fw_or_insurgency_structure_damage(
             message: format!("System {sys_id} is not an FW warzone system"),
         })?;
         let occ_fac = occ.occupier_faction_id;
-        let att_fac = snap
-            .characters
-            .get(&attacker_char_id)
-            .and_then(|c| c.war_faction_id)
-            .ok_or_else(|| BridgeRpcError {
-                code: "NotEnlistedInOpposingMilitia".into(),
-                message: "Only opposing militia pilots can attack an FW Infrastructure Hub".into(),
-            })?;
-        if fw_opposing_faction(occ_fac) != Some(att_fac) {
-            return Err(BridgeRpcError {
-                code: "NotEnlistedInOpposingMilitia".into(),
-                message: format!(
-                    "Pilot faction {att_fac} is not the opposing militia for occupier {occ_fac}"
-                ),
-            });
-        }
+        // An invulnerable I-Hub rejects every attacker before militia checks (client shows it as invulnerable).
         let surr_vuln = snap
             .insurgency_runtime
             .surrender_ihub_vulnerable_unix
@@ -763,6 +761,22 @@ pub async fn apply_fw_or_insurgency_structure_damage(
                 code: "IHubInvulnerable".into(),
                 message: format!(
                     "FW Infrastructure Hub in system {sys_id} is invulnerable until 100% contested or post-surrender window"
+                ),
+            });
+        }
+        let att_fac = snap
+            .characters
+            .get(&attacker_char_id)
+            .and_then(|c| c.war_faction_id)
+            .ok_or_else(|| BridgeRpcError {
+                code: "NotEnlistedInOpposingMilitia".into(),
+                message: "Only opposing militia pilots can attack an FW Infrastructure Hub".into(),
+            })?;
+        if fw_opposing_faction(occ_fac) != Some(att_fac) {
+            return Err(BridgeRpcError {
+                code: "NotEnlistedInOpposingMilitia".into(),
+                message: format!(
+                    "Pilot faction {att_fac} is not the opposing militia for occupier {occ_fac}"
                 ),
             });
         }
@@ -989,7 +1003,7 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
             let per_pilot_lp = total_lp / (present.len().max(1) as i64);
             let lp_corp = militia_lp_corp_id(&ctx.sde, first_fac);
             let net_adv = (my_adv - their_adv).max(0.0);
-            let base_vp = ((100.0 * (1.0 + net_adv * 0.01)).round() as i64).max(50);
+            let base_vp = ((complex_victory_points(&tier) as f64 * (1.0 + net_adv * 0.01)).round() as i64).max(1);
             let vp_earned = match status {
                 STATUS_FRONTLINE => base_vp,
                 STATUS_COMMAND => (base_vp * 3) / 4,

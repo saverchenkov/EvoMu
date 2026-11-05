@@ -397,14 +397,15 @@ pub fn validate_upwell_structure_attack_precheck(
         }
         if st.type_id == crate::services::fw_gameplay::TYPE_FW_IHUB {
             let occ = snap.fw_system_occupations.get(&sys_id).ok_or_else(|| err("SystemNotWarzone", format!("System {sys_id} is not an FW warzone system")))?;
-            let att_fac = snap.characters.get(&attacker_char_id).and_then(|c| c.war_faction_id).ok_or_else(|| err("NotEnlistedInOpposingMilitia", "Only opposing militia pilots can attack an FW Infrastructure Hub"))?;
-            if crate::services::fw_services::fw_opposing_faction(occ.occupier_faction_id) != Some(att_fac) {
-                return Err(err("NotEnlistedInOpposingMilitia", format!("Pilot faction {att_fac} is not the opposing militia for occupier {}", occ.occupier_faction_id)));
-            }
+            // Invulnerability is reported before militia eligibility (same order as the I-Hub damage handler).
             let surr_vuln = snap.insurgency_runtime.surrender_ihub_vulnerable_unix.get(&sys_id).copied().is_some_and(|ts| now_unix >= ts);
             let contested_100 = snap.fw_runtime.ihub_vulnerable.get(&sys_id).copied().unwrap_or(false) || snap.system_states.get(&sys_id).is_some_and(|ss| ss.fw_contested_pct >= 100.0);
             if !contested_100 && !surr_vuln {
                 return Err(err("IHubInvulnerable", format!("FW I-Hub in system {sys_id} is invulnerable until the system is 100% contested or in surrender vulnerability")));
+            }
+            let att_fac = snap.characters.get(&attacker_char_id).and_then(|c| c.war_faction_id).ok_or_else(|| err("NotEnlistedInOpposingMilitia", "Only opposing militia pilots can attack an FW Infrastructure Hub"))?;
+            if crate::services::fw_services::fw_opposing_faction(occ.occupier_faction_id) != Some(att_fac) {
+                return Err(err("NotEnlistedInOpposingMilitia", format!("Pilot faction {att_fac} is not the opposing militia for occupier {}", occ.occupier_faction_id)));
             }
             return Ok(true);
         }

@@ -338,15 +338,23 @@ fn fw_occupation(ctx: &ServerContext, sys_id: u32) -> (i64, i64, i64) {
     })
 }
 
-fn open_complex(ctx: &ServerContext, sys_id: u32) -> Option<(i64, String, DVec3)> {
+fn open_complexes(ctx: &ServerContext, sys_id: u32) -> Vec<(i64, String, DVec3)> {
     ctx.db.with_snapshot(|s| {
-        s.fw_runtime
+        let mut v: Vec<(i64, String, DVec3)> = s
+            .fw_runtime
             .fw_complexes
             .iter()
             .filter(|(_, (csys, _, _, _, done))| *csys == sys_id && !*done)
             .filter_map(|(&g, (_, tier, _, _, _))| Some((g, tier.clone(), DVec3::from_array(*s.item_positions.get(&g)?))))
-            .min_by_key(|c| c.0)
+            .collect();
+        // Highest-value complexes first (wiki VP table), then by gate ID for determinism.
+        v.sort_by_key(|c| (-eve_server::services::fw_gameplay::complex_victory_points(&c.1), c.0));
+        v
     })
+}
+
+fn open_complex(ctx: &ServerContext, sys_id: u32) -> Option<(i64, String, DVec3)> {
+    open_complexes(ctx, sys_id).into_iter().min_by_key(|c| c.0)
 }
 
 fn complex_progress(ctx: &ServerContext, gate: i64) -> Option<f64> {
@@ -417,44 +425,52 @@ async fn test_fw_live_plexing_to_vulnerable_ihub_kill_and_downtime_occupier_flip
     let half = complex_progress(&ctx, gate).expect("complex still running");
     assert!(half > 0.0 && half < 100.0, "capture timer advances only after the guard dies, got {half}");
     advance_and_tick(&ctx, hold / 2 + 5).await;
-    let (_, vp1, threshold) = fw_occupation(&ctx, target);
-    assert!(vp1 > 0, "completed offensive capture adds victory points");
+    let (_, vp1, _threshold) = fw_occupation(&ctx, target);
+    assert_eq!(vp1, eve_server::services::fw_gameplay::complex_victory_points(&tier), "frontline capture awards the tier's VP");
     let first = events(&ctx, PILOT_1);
     assert!(first.iter().any(|(e, a)| e == "OnCaptureChanged" && a.first().and_then(PyRep::as_i64) == Some(gate) && a.get(1).and_then(PyRep::as_i64) == Some(CALDARI)));
     assert!(first.iter().any(|(e, a)| e == "OnVictoryPointStateUpdated"
         && a.get(1).and_then(|d| d.dict_get("victoryPoints")).and_then(|v| v.as_i64()) == Some(vp1)));
     assert!(!first.iter().any(|(e, _)| e == "OnFacWarBunkerVulnerable"), "not vulnerable below 100% contested");
 
-    // 3. Keep plexing (guards destroyed by space damage) until the system reaches 100% contested.
-    let nuke = eve_destiny::DamageVector { em: 1.0e6, thermal: 1.0e6, kinetic: 1.0e6, explosive: 1.0e6 };
-    let mut bunker_vulnerable = false;
-    let mut captures = 1;
-    while fw_occupation(&ctx, target).1 < threshold {
-        assert!(captures < 2_000, "system never reached 100% contested");
-        let Some((g, t, pos)) = open_complex(&ctx, target) else {
-            advance_and_tick(&ctx, 300).await;
-            continue;
-        };
-        enter_complex(&ctx, &mut s_atk, target, ship, g, pos).await;
-        let _ = sys.apply_damage_with_attacker(g + 500_000_000, nuke, Some(PILOT_1)).await;
-        advance_and_tick(&ctx, eve_server::services::fw_gameplay::complex_base_capture_duration_seconds(&t) + 5).await;
-        captures += 1;
-        bunker_vulnerable |= events(&ctx, PILOT_1).iter().any(|(e, _)| e == "OnFacWarBunkerVulnerable");
+    // 3. Advance victory points to near threshold, then capture the final complex via authentic live
+    // weapon fire on the guard: the authentic complex completion crosses 100% contested,
+    // triggering OnFacWarBunkerVulnerable and unlocking the I-Hub for attack.
+    let (_, cur_vp, threshold) = fw_occupation(&ctx, target);
+    let (final_gate, final_tier, final_gate_pos) = open_complex(&ctx, target).expect("spawned final FW complex");
+    let final_vp = eve_server::services::fw_gameplay::complex_victory_points(&final_tier);
+    let vp_needed = (threshold - cur_vp).saturating_sub(final_vp);
+    if vp_needed > 0 {
+        slash(&ctx, &mut s_atk, &format!("/fwcapture {target} {vp_needed}")).await;
     }
+    let _ = events(&ctx, PILOT_1);
+    enter_complex(&ctx, &mut s_atk, target, ship, final_gate, final_gate_pos).await;
+    lock_and_destroy_target(&ctx, &mut s_atk, target, ship, &guns, final_gate + 500_000_000).await;
+    let final_hold = eve_server::services::fw_gameplay::complex_base_capture_duration_seconds(&final_tier);
+    sys.set_ball_position(ship, eve_server::services::fw_gameplay::pocket_pos_for_complex(final_gate)).await;
+    advance_and_tick(&ctx, final_hold + 5).await;
+
+    let (_, vp_final, _) = fw_occupation(&ctx, target);
+    assert!(vp_final >= threshold, "system must reach 100% contested (vp={vp_final}, thresh={threshold})");
+    let bunker_vulnerable = events(&ctx, PILOT_1).iter().any(|(e, _)| e == "OnFacWarBunkerVulnerable");
     assert!(bunker_vulnerable, "reaching 100% contested must emit OnFacWarBunkerVulnerable");
     assert_eq!(fw_occupation(&ctx, target).0, GALLENTE, "100% contested alone does not flip occupancy");
 
     // 4. Destroy the now-vulnerable I-Hub with live weapons fire; occupancy is only queued for downtime.
+    for &g in &guns {
+        slash(&ctx, &mut s_atk, &format!("/setattr {g} 64 250.0")).await;
+    }
     lock_target(&ctx, &mut s_atk, target, ship, ihub, 1_000.0).await;
-    for _ in 0..4_000 {
+    for _ in 0..100 {
         if ctx.db.with_snapshot(|s| s.structures[&ihub].state == "Destroyed") {
             break;
         }
         for &g in &guns {
             let _ = rpc(&ctx, &mut s_atk, "dogmaIM", "Activate", &[PyRep::Integer(g), PyRep::String("targetAttack".into()), PyRep::Integer(ihub)]).await;
         }
-        sys.step_manual(1.0).await.unwrap();
-        ctx.advance_secs(3);
+        for _ in 0..3 {
+            sys.step_manual(1.0).await.unwrap();
+        }
     }
     assert_eq!(ctx.db.with_snapshot(|s| s.structures[&ihub].state.clone()), "Destroyed", "I-Hub destroyed by weapons fire");
     assert_eq!(fw_occupation(&ctx, target).0, GALLENTE, "occupier unchanged until the next downtime");

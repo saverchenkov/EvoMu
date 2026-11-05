@@ -1146,6 +1146,7 @@ async fn test_specialized_npc_destroy_grants_sec_status_with_suppression_multipl
     assert_eq!(tx_count, 1, "Must record 'NPC Pirate Bounty' SecStatusTransaction");
 
     // 2. Suppression Stage 5 (1.25x sec-status multiplier)
+    fast_forward_secs(&ctx, 905);
     let now = ctx.now_unix_secs();
     ctx.db.with_mut_snapshot(|s| {
         if let Some(ch) = s.characters.get_mut(&char_id) {

@@ -1017,7 +1017,7 @@ impl LivingWorldDirector {
         {
             let convoys = self.convoys.read().unwrap_or_else(|e| e.into_inner());
             if let Some(existing) = convoys.get(&convoy_id) {
-                if !existing.destroyed {
+                if !existing.destroyed && !self.is_convoy_docked(convoy_id) {
                     return existing.convoy_id;
                 }
                 // Hauler respawn cooldown: if destroyed, enforce respawn delay before recreation

@@ -801,7 +801,12 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
     let has_anom = ctx.db.with_snapshot(|s| {
         s.cosmic_anomalies
             .get(&sys_id)
-            .is_some_and(|list| list.iter().any(|a| a.name.contains("Major Threat Detection")))
+            .is_some_and(|list| {
+                list.iter().any(|a| {
+                    a.anomaly_type == "Combat"
+                        && a.anomaly_id.ends_with(&eve_server::services::sov_gameplay::UPGRADE_MAJOR_THREAT_DETECTION.to_string())
+                })
+            })
     });
     assert!(has_anom, "combat anomaly spawned by online Major Threat Detection upgrade");
     let sys_balls = ctx.systems.get_or_spawn(sys_id).list_balls().await.unwrap();
