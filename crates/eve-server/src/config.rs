@@ -51,6 +51,8 @@ pub struct StarterCharacterConfig {
     pub station_id: Option<i64>,
     #[serde(default)]
     pub initial_balance_isk: Option<i64>,
+    #[serde(default)]
+    pub initial_balance_plex: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +71,10 @@ pub struct FeatureFlagsConfig {
     pub enable_info_gathering: bool,
     #[serde(default = "default_info_gathering_interval_secs")]
     pub info_gathering_interval_secs: u64,
+    #[serde(default)]
+    pub free_fast_checkout_plex: bool,
+    #[serde(default)]
+    pub starter_plex_balance: i64,
 }
 
 fn default_true() -> bool {
@@ -89,6 +95,8 @@ impl Default for FeatureFlagsConfig {
             enable_project_discovery: true,
             enable_info_gathering: true,
             info_gathering_interval_secs: default_info_gathering_interval_secs(),
+            free_fast_checkout_plex: false,
+            starter_plex_balance: 0,
         }
     }
 }
@@ -199,6 +207,23 @@ impl ServerConfig {
         }
         if cfg.feature_flags.info_gathering_interval_secs == 0 {
             return Err("feature_flags.info_gathering_interval_secs in evomu.toml must be >= 1".into());
+        }
+        if cfg.feature_flags.starter_plex_balance < 0 {
+            return Err("feature_flags.starter_plex_balance in evomu.toml must be >= 0".into());
+        }
+        for acc in &cfg.player_accounts {
+            if let Some(plex) = acc
+                .starter_character
+                .as_ref()
+                .and_then(|s| s.initial_balance_plex)
+            {
+                if plex < 0 {
+                    return Err(format!(
+                        "player_accounts[{}].starter_character.initial_balance_plex in evomu.toml must be >= 0",
+                        acc.username
+                    ));
+                }
+            }
         }
         Ok(cfg)
     }

@@ -24,3 +24,6 @@ pub mod system_actor;
 pub mod world_seeder;
 
 pub use services::inventory_fitting::{dna_to_fitting, fitting_to_dna, saved_fitting_to_dna};
+
+#[cfg(test)]
+mod fast_checkout_plex_tests;

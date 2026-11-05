@@ -416,17 +416,87 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
             % (len(inv_list), len(ship_attrs), bal, len(skills), len(stations_list)),
         }
 
-        # Cosmetics store & VGS storeManager queries while docked
-        cosmetics = sm1.RemoteSvc("shipCosmeticsMgr").GetEnabledCosmetics()
-        skins = sm1.RemoteSvc("shipCosmeticsMgr").GetLicencedSkins()
+        # Journey 25: Starter PLEX grant (Client 2) + Free Fast-Checkout PLEX packs, VGS storeManager purchase & shipCosmeticsMgr SKIN activation
+        fc2_buy = sm2.RemoteSvc("FastCheckoutService").BuyOffer(1, 1)
+        assert fc2_buy.get("status") == "COMPLETED"
+        assert int(fc2_buy["newPlexBalance"]) >= 50100
+
+        fc_enabled = sm1.RemoteSvc("FastCheckoutService").IsFastCheckoutEnabledForUser()
+        assert fc_enabled is True
+        fc_res = sm1.RemoteSvc("FastCheckoutService").GetOffersForUser()
+        fc_offers = fc_res.get("offers", []) if isinstance(fc_res, dict) else getattr(fc_res, "offers", [])
+        assert len(fc_offers) >= 4
+        first_pack = fc_offers[0]
+        third_pack = fc_offers[2]
+        assert float(first_pack["price"]) == 0.0 and float(third_pack["price"]) == 0.0
+        fc_buy1 = sm1.RemoteSvc("FastCheckoutService").BuyOffer(int(first_pack["offerId"]), 1)
+        assert fc_buy1.get("status") == "COMPLETED"
+        assert fc_buy1.get("Message") == "OK"
+        bal_after_1 = int(fc_buy1["newPlexBalance"])
+        assert bal_after_1 >= int(first_pack["plexAmount"])
+
+        fc_buy3 = sm1.RemoteSvc("FastCheckoutService").BuyOffer(int(third_pack["offerId"]), 1)
+        assert fc_buy3.get("status") == "COMPLETED"
+        new_plex_bal = int(fc_buy3["newPlexBalance"])
+        assert new_plex_bal == bal_after_1 + int(third_pack["plexAmount"])
+
         vgs_cats = sm1.RemoteSvc("storeManager").get_categories()
         vgs_prods = sm1.RemoteSvc("storeManager").get_products()
         vgs_offers = sm1.RemoteSvc("storeManager").get_offers()
-        assert isinstance(vgs_cats, list) and isinstance(vgs_prods, list) and isinstance(vgs_offers, list)
-        log1.info("shipCosmeticsMgr: cosmetics=%r skins=%r vgs_cats=%d" % (cosmetics, skins, len(vgs_cats)))
+        assert isinstance(vgs_cats, list) and isinstance(vgs_prods, list) and isinstance(vgs_offers, list) and len(vgs_offers) >= 1
+        nes_offer = vgs_offers[0]
+        nes_offer_id = int(getattr(nes_offer, "offerID", nes_offer.get("offerID") if isinstance(nes_offer, dict) else 0))
+        nes_price = int(getattr(nes_offer, "price", nes_offer.get("price") if isinstance(nes_offer, dict) else 0))
+        assert nes_offer_id > 0 and nes_price > 0 and new_plex_bal >= nes_price
+        can_buy = sm1.RemoteSvc("storeManager").can_purchase_offer(nes_offer_id, "PLX", 1)
+        assert can_buy is True
+        nes_buy = sm1.RemoteSvc("storeManager").buy_offer(nes_offer_id, "PLX", 1)
+        assert getattr(nes_buy, "success", False) is True
+        assert int(getattr(nes_buy, "offerID", 0)) == nes_offer_id
+        assert int(getattr(nes_buy, "plexSpent", 0)) == nes_price
+        assert int(getattr(nes_buy, "plexRemaining", -1)) == new_plex_bal - nes_price
+        delivered_item_id = int(getattr(nes_buy, "deliveredItemID", 0))
+        assert delivered_item_id > 0
+
+        nes_products = getattr(nes_offer, "products", [])
+        delivered_type_id = int(nes_products[0].get("typeID", 34599)) if nes_products else 34599
+        sm1.RemoteSvc("shipCosmeticsMgr").ActivateSkinLicense(delivered_type_id)
+        skins = sm1.RemoteSvc("shipCosmeticsMgr").GetLicencedSkins()
+        cosmetics = sm1.RemoteSvc("shipCosmeticsMgr").GetEnabledCosmetics()
+        assert isinstance(skins, list) and len(skins) >= 1 and cosmetics is not None
+        log1.info(
+            "Journey 25 cosmetics_store: client2_plex=%d client1_plex=%d nes_offer=%d rem=%d item=%d skins=%d"
+            % (int(fc2_buy["newPlexBalance"]), new_plex_bal, nes_offer_id, int(getattr(nes_buy, "plexRemaining", -1)), delivered_item_id, len(skins))
+        )
         outcomes["cosmetics_store"] = {
-            "bridge_verified": cosmetics is not None and skins is not None and vgs_cats is not None,
-            "evidence": "Client 1 queried cosmetics & VGS storeManager services (GetEnabledCosmetics, GetLicencedSkins, get_categories/get_products/get_offers)",
+            "bridge_verified": (
+                int(fc2_buy["newPlexBalance"]) >= 50100
+                and fc_enabled is True
+                and float(first_pack["price"]) == 0.0
+                and fc_buy3.get("status") == "COMPLETED"
+                and can_buy is True
+                and getattr(nes_buy, "success", False) is True
+                and int(getattr(nes_buy, "plexRemaining", -1)) == new_plex_bal - nes_price
+                and delivered_item_id > 0
+                and cosmetics is not None
+                and isinstance(skins, list)
+                and len(skins) >= 1
+            ),
+            "evidence": (
+                "Client 2 starter PLEX + pack (%d PLEX); Client 1 $0.00 FastCheckout PLEX (%d PLEX), "
+                "NES storeManager.buy_offer(offer=%d, price=%d -> plexRemaining=%d, item=%d), "
+                "and shipCosmeticsMgr SKIN activation (%d licensed skins, vgs_cats=%d)"
+                % (
+                    int(fc2_buy["newPlexBalance"]),
+                    new_plex_bal,
+                    nes_offer_id,
+                    nes_price,
+                    int(getattr(nes_buy, "plexRemaining", -1)),
+                    delivered_item_id,
+                    len(skins),
+                    len(vgs_cats),
+                )
+            ),
         }
 
         # AIR daily goals & career progression
@@ -812,11 +882,14 @@ def main():
                 cf.write("enable_esi_http = true\n")
                 cf.write("enable_living_world = true\n")
                 cf.write("seed_demo = true\n")
+                cf.write("free_fast_checkout_plex = true\n")
+                cf.write("starter_plex_balance = 50000\n")
                 # Accounts are only provisioned from config (`ServerContext` starts empty).
                 cf.write('\n[[player_accounts]]\nusername = "demo"\npassword_token = "demo-secret"\n')
                 cf.write('[player_accounts.starter_character]\nname = "Demo Pilot"\n'
                          'bloodline_id = 1\ngender = 0\nancestry_id = 11\nschool_id = 17\n'
-                         'solar_system_id = 30000142\nstation_id = 60003760\ninitial_balance_isk = 1000000000\n')
+                         'solar_system_id = 30000142\nstation_id = 60003760\n'
+                         'initial_balance_isk = 1000000000\ninitial_balance_plex = 50000\n')
                 cf.write('\n[[admin_accounts]]\nusername = "demo"\npassword_token = "demo-secret"\n')
                 cf.write('\n[[admin_accounts]]\nusername = "other"\npassword_token = "other-secret"\ncharacter_id = 90000004\ncharacter_name = "ISD Other"\n')
             srv_bin = find_server_binary(args.server_bin)

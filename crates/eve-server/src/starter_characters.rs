@@ -14,6 +14,48 @@ use eve_proto::PyRep;
 use std::collections::HashMap;
 use tracing::{info, warn};
 
+tokio::task_local! {
+    static SKIP_DEFAULT_STARTER_PLEX: ();
+}
+
+/// Returns `true` when `CreateCharacterWithDoll` should apply `feature_flags.starter_plex_balance`
+/// directly (disabled while `provision_starter_characters` runs so `initial_balance_plex` wins).
+pub(crate) fn should_grant_default_starter_plex() -> bool {
+    SKIP_DEFAULT_STARTER_PLEX.try_with(|_| ()).is_err()
+}
+
+/// Credits `plex_grant` PLEX (if positive) to `(user_id, char_id)` inside an active
+/// world-state snapshot mutation and records a `"Starter PLEX Grant"` ledger entry.
+pub(crate) fn grant_starter_plex_in_snapshot(
+    snap: &mut eve_db::WorldStateSnapshot,
+    user_id: u64,
+    char_id: i64,
+    plex_grant: i64,
+    now_unix: u64,
+) {
+    if plex_grant <= 0 {
+        return;
+    }
+    let new_bal = snap
+        .adjust_plex_vault(char_id, plex_grant)
+        .unwrap_or_else(|| {
+            let cur = snap.account_plex_vault.get(&user_id).copied().unwrap_or(0);
+            let next = cur.saturating_add(plex_grant);
+            snap.account_plex_vault.insert(user_id, next);
+            next
+        });
+    snap.account_plex_vault.insert(user_id, new_bal);
+    crate::services::quasar_payment_store::record_plex_transaction(
+        snap,
+        0,
+        user_id,
+        plex_grant,
+        new_bal,
+        "Starter PLEX Grant",
+        now_unix,
+    );
+}
+
 /// Creates each configured starter character whose account has no characters.
 /// Returns the IDs of the characters created.
 pub async fn provision_starter_characters(ctx: &ServerContext, cfg: &ServerConfig) -> Vec<i64> {
@@ -53,9 +95,19 @@ pub async fn provision_starter_characters(ctx: &ServerContext, cfg: &ServerConfi
             args.push(PyRep::None);
             args.push(PyRep::Integer(sys_id));
         }
-        let res = ctx
-            .dispatch_rpc(&mut session, "charUnboundMgr", None, "CreateCharacterWithDoll", &args,
-                &HashMap::new(), Some("startup"))
+        let res = SKIP_DEFAULT_STARTER_PLEX
+            .scope(
+                (),
+                ctx.dispatch_rpc(
+                    &mut session,
+                    "charUnboundMgr",
+                    None,
+                    "CreateCharacterWithDoll",
+                    &args,
+                    &HashMap::new(),
+                    Some("startup"),
+                ),
+            )
             .await;
         match res {
             Ok(rep) => {
@@ -77,6 +129,25 @@ pub async fn provision_starter_characters(ctx: &ServerContext, cfg: &ServerConfi
                         if let Some(ch) = snap.characters.get_mut(&char_id) {
                             ch.balance = eve_db::IskCents::from_isk(bal);
                         }
+                    });
+                }
+                let default_plex = if ctx.feature_flags.starter_plex_balance > 0 {
+                    ctx.feature_flags.starter_plex_balance
+                } else {
+                    cfg.feature_flags.starter_plex_balance
+                };
+                let plex_grant = starter.initial_balance_plex.unwrap_or(default_plex);
+                if plex_grant > 0 {
+                    let now_unix = ctx.now_unix();
+                    let user_id = account.user_id;
+                    ctx.db.with_mut_snapshot(|snap| {
+                        grant_starter_plex_in_snapshot(
+                            snap,
+                            user_id,
+                            char_id,
+                            plex_grant,
+                            now_unix,
+                        );
                     });
                 }
                 info!(username = %player.username, char_id, "starter character created");

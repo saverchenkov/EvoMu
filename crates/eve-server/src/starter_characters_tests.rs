@@ -88,6 +88,7 @@ async fn provision_starter_characters_creates_overrides_and_skips_invalid_or_exi
                 solar_system_id: Some(30_000_142),
                 station_id: Some(60_008_494),
                 initial_balance_isk: Some(12_345_678),
+                initial_balance_plex: None,
             }),
         },
         // Valid starter character with default station & balance (None overrides)
@@ -103,6 +104,7 @@ async fn provision_starter_characters_creates_overrides_and_skips_invalid_or_exi
                 solar_system_id: None,
                 station_id: None,
                 initial_balance_isk: None,
+                initial_balance_plex: None,
             }),
         },
     ];

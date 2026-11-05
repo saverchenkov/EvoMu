@@ -14,6 +14,8 @@ enable_quasar_gateway = true
 enable_esi_http = true
 enable_living_world = true
 seed_demo = false
+free_fast_checkout_plex = true
+starter_plex_balance = 50000
 
 # Example operator-provisioned accounts (passwords are hashed at rest with Argon2id):
 # [[admin_accounts]]
@@ -25,3 +27,12 @@ seed_demo = false
 # [[player_accounts]]
 # username = "pilot1"
 # password_token = "replace-with-strong-secret"
+#
+# [player_accounts.starter_character]
+# name = "Pilot One"
+# bloodline_id = 1
+# gender = 0
+# ancestry_id = 11
+# school_id = 17
+# initial_balance_isk = 1000000000
+# initial_balance_plex = 50000

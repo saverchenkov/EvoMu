@@ -278,9 +278,14 @@ async fn write_bounded_frame<W: tokio::io::AsyncWrite + Unpin>(
 /// Uses a dedicated reader task feeding a cancel-safe `mpsc::channel` so 1 Hz `sys_rx` broadcast ticks
 /// inside `tokio::select!` can never cancel an in-flight `read_exact` call.
 async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Result<()> {
+    let peer_addr = stream
+        .peer_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| "127.0.0.1:0".to_string());
     let session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
     // New sessions start strictly unauthenticated (`user_id: None`, `role: 0`)
     let mut session = SessionState::new(session_id);
+    session.address = peer_addr;
     let mut sys_rx = ctx.systems.get_or_spawn(30000142).subscribe();
     let mut notify_rx = ctx.notify_tx.subscribe();
 

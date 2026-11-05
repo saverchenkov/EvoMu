@@ -345,6 +345,15 @@ pub fn handle_char_unbound(
                                 });
                             }
                         }
+                        if crate::starter_characters::should_grant_default_starter_plex() {
+                            crate::starter_characters::grant_starter_plex_in_snapshot(
+                                snap,
+                                user_id,
+                                ch.character_id,
+                                ctx.feature_flags.starter_plex_balance,
+                                now_unix,
+                            );
+                        }
                     });
                     Some(Ok(PyRep::Integer(ch.character_id)))
                 }

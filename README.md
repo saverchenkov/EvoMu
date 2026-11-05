@@ -225,6 +225,8 @@ enable_quasar_gateway = true
 enable_esi_http = true
 enable_living_world = true
 seed_demo = false
+free_fast_checkout_plex = true # $0.00 1-click FastCheckout PLEX packs (100/250/500/1100 PLEX)
+starter_plex_balance = 50000   # Default PLEX vault grant on character creation
 
 # Optional: provision an admin / GM account at startup (passwords hashed at rest with Argon2id)
 [[admin_accounts]]
@@ -247,7 +249,10 @@ school_id = 17            # 17 = State War Academy
 solar_system_id = 30000142 # Jita
 station_id = 60003760      # Jita IV - Moon 4 - Caldari Navy Assembly Plant
 initial_balance_isk = 100000000
+initial_balance_plex = 50000
 ```
+
+> **Free Fast-Checkout PLEX & New Eden Store (NES) sandbox defaults:** When `free_fast_checkout_plex = true` and `starter_plex_balance = 50000`, newly created characters receive `50,000` PLEX in their account PLEX Vault (`"Starter PLEX Grant"` ledger entry) and can claim additional `$0.00` 1-click PLEX packs (`100`, `250`, `500`, `1100` PLEX) via `FastCheckoutService` without a payment token or password prompt, while `storeManager` (NES) continues pricing store items in PLEX (`"PLX"`). See [PLEX Vault, Fast Checkout & New Eden Store](./docs/wiki/economy_and_markets/plex_and_new_eden_store.md) for full details.
 
 #### Environment variable overrides
 All settings can be overridden via environment variables without editing `evomu.toml`:

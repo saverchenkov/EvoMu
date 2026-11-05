@@ -121,6 +121,73 @@ fn load_catalog_plex_offers(snap: &eve_db::WorldStateSnapshot) -> Vec<FastChecko
         .collect()
 }
 
+fn default_free_plex_pack_offers() -> Vec<FastCheckoutOfferRecord> {
+    vec![
+        FastCheckoutOfferRecord {
+            offer_id: 1,
+            plex_amount: 100,
+            price_usd: 4.99,
+            price_plex: 0,
+            name: "100 PLEX".into(),
+            description: "100 PLEX Vault Pack".into(),
+            tags: vec!["plex".into(), "popular".into()],
+            products: Vec::new(),
+            category_id: 0,
+        },
+        FastCheckoutOfferRecord {
+            offer_id: 2,
+            plex_amount: 250,
+            price_usd: 12.49,
+            price_plex: 0,
+            name: "250 PLEX".into(),
+            description: "250 PLEX Vault Pack".into(),
+            tags: vec!["plex".into()],
+            products: Vec::new(),
+            category_id: 0,
+        },
+        FastCheckoutOfferRecord {
+            offer_id: 3,
+            plex_amount: 500,
+            price_usd: 24.99,
+            price_plex: 0,
+            name: "500 PLEX".into(),
+            description: "500 PLEX Vault Pack".into(),
+            tags: vec!["plex".into(), "bestseller".into()],
+            products: Vec::new(),
+            category_id: 0,
+        },
+        FastCheckoutOfferRecord {
+            offer_id: 4,
+            plex_amount: 1100,
+            price_usd: 49.99,
+            price_plex: 0,
+            name: "1100 PLEX".into(),
+            description: "1100 PLEX Vault Pack".into(),
+            tags: vec!["plex".into()],
+            products: Vec::new(),
+            category_id: 0,
+        },
+    ]
+}
+
+fn load_fast_checkout_offers_for_ctx(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+) -> Vec<FastCheckoutOfferRecord> {
+    let mut offers = load_catalog_plex_offers(snap);
+    let need_default_packs = offers.is_empty()
+        || (ctx.feature_flags.free_fast_checkout_plex
+            && !offers.iter().any(|o| o.plex_amount > 0));
+    if need_default_packs {
+        for pack in default_free_plex_pack_offers() {
+            if !offers.iter().any(|o| o.offer_id == pack.offer_id) {
+                offers.push(pack);
+            }
+        }
+    }
+    offers
+}
+
 pub fn get_user_fast_checkout_state(ctx: &ServerContext, user_id: u64) -> UserFastCheckoutState {
     let key = format!("{FAST_CHECKOUT_PREFIX}{user_id}");
     ctx.db.with_snapshot(|snap| {
@@ -746,7 +813,7 @@ pub fn is_fast_checkout_enabled_for_user(ctx: &ServerContext, user_id: u64) -> b
             };
         }
     }
-    false
+    ctx.feature_flags.free_fast_checkout_plex
 }
 
 fn handle_is_fast_checkout_enabled_for_user(
@@ -765,10 +832,18 @@ fn handle_get_offers_for_user(
     if !is_fast_checkout_enabled_for_user(ctx, user_id) {
         return Ok(PyRep::List(Vec::new()));
     }
+    let free_plex_mode = ctx.feature_flags.free_fast_checkout_plex;
     let mut st = get_user_fast_checkout_state(ctx, user_id);
     let offers = match st.cached_offers.clone() {
-        Some(cached) if !cached.is_empty() => cached,
-        _ => ctx.db.with_snapshot(load_catalog_plex_offers),
+        Some(cached)
+            if !cached.is_empty()
+                && (!free_plex_mode || cached.iter().any(|o| o.plex_amount > 0)) =>
+        {
+            cached
+        }
+        _ => ctx
+            .db
+            .with_snapshot(|snap| load_fast_checkout_offers_for_ctx(ctx, snap)),
     };
     let session_token = format!("fc_token_{}_{}", user_id, ctx.now_unix());
     st.cached_session_token = Some(session_token);
@@ -785,12 +860,14 @@ fn handle_get_offers_for_user(
             } else {
                 o.products.first().map(|p| p.quantity as i64).unwrap_or(1)
             };
-            let display_price = if o.price_usd > 0.0 {
+            let display_price = if free_plex_mode {
+                0.0
+            } else if o.price_usd > 0.0 {
                 o.price_usd
             } else {
                 o.price_plex as f64
             };
-            let prod_reps: Vec<PyRep> = o
+            let mut prod_reps: Vec<PyRep> = o
                 .products
                 .iter()
                 .map(|p| {
@@ -800,9 +877,20 @@ fn handle_get_offers_for_user(
                     ])
                 })
                 .collect();
+            if prod_reps.is_empty() && o.plex_amount > 0 {
+                prod_reps.push(PyRep::Dict(vec![
+                    (
+                        PyRep::String("typeId".into()),
+                        PyRep::Integer(i64::from(crate::services::market_contracts::PLEX_TYPE_ID)),
+                    ),
+                    (PyRep::String("quantity".into()), PyRep::Integer(base_qty)),
+                ]));
+            }
             PyRep::Dict(vec![
                 (PyRep::String("offerId".into()), PyRep::Integer(o.offer_id)),
+                (PyRep::String("offerID".into()), PyRep::Integer(o.offer_id)),
                 (PyRep::String("baseQuantity".into()), PyRep::Integer(base_qty)),
+                (PyRep::String("plexAmount".into()), PyRep::Integer(o.plex_amount)),
                 (PyRep::String("price".into()), PyRep::Real(display_price)),
                 (PyRep::String("pricePlex".into()), PyRep::Integer(o.price_plex)),
                 (
@@ -907,10 +995,11 @@ fn handle_buy_offer(
         });
     }
 
+    let free_plex_mode = ctx.feature_flags.free_fast_checkout_plex;
     let password = password_opt
         .or_else(|| kwargs.get("password").and_then(|a| a.as_str()))
         .unwrap_or("");
-    if password.is_empty() {
+    if !free_plex_mode && password.is_empty() {
         return Err(BridgeRpcError {
             code: "InvalidPassword".into(),
             message: "Password required for FastCheckout purchase".into(),
@@ -947,8 +1036,15 @@ fn handle_buy_offer(
 
     let st = get_user_fast_checkout_state(ctx, user_id);
     let offers = match st.cached_offers {
-        Some(cached) if !cached.is_empty() => cached,
-        _ => ctx.db.with_snapshot(load_catalog_plex_offers),
+        Some(cached)
+            if !cached.is_empty()
+                && (!free_plex_mode || cached.iter().any(|o| o.plex_amount > 0)) =>
+        {
+            cached
+        }
+        _ => ctx
+            .db
+            .with_snapshot(|snap| load_fast_checkout_offers_for_ctx(ctx, snap)),
     };
     let Some(offer) = offers.iter().find(|o| o.offer_id == offer_id).cloned() else {
         return Err(BridgeRpcError {
@@ -957,10 +1053,11 @@ fn handle_buy_offer(
         });
     };
 
-    if ctx
-        .db
-        .authenticate_at(&acc.username, password, ctx.now_unix())
-        .is_err()
+    if (!free_plex_mode || !password.is_empty())
+        && ctx
+            .db
+            .authenticate_at(&acc.username, password, ctx.now_unix())
+            .is_err()
     {
         return Err(BridgeRpcError {
             code: "InvalidPassword".into(),
@@ -997,7 +1094,11 @@ fn handle_buy_offer(
     }
 
     let now_unix = ctx.now_unix();
-    let unit_cents = (offer.price_usd * 100.0).round().max(0.0) as u32;
+    let unit_cents = if free_plex_mode {
+        0
+    } else {
+        (offer.price_usd * 100.0).round().max(0.0) as u32
+    };
     let amount_in_cents = unit_cents.saturating_mul(quantity.min(i64::from(u32::MAX)) as u32);
     let (tx_id, rem_plex, delivered_items_count) = ctx.db.try_with_mut_snapshot(|snap| {
         if amount_in_cents > 0 {
@@ -1017,7 +1118,10 @@ fn handle_buy_offer(
             }
         }
 
-        let mut cur_rem = 0_i64;
+        let mut cur_rem = active_char_id
+            .map(|cid| snap.plex_vault_balance(cid))
+            .or_else(|| snap.account_plex_vault.get(&user_id).copied())
+            .unwrap_or(0);
         if offer.price_plex > 0 {
             let total_cost_plex = offer.price_plex.checked_mul(quantity).ok_or_else(|| BridgeRpcError {
                 code: "ArithmeticOverflow".into(),
@@ -1153,13 +1257,23 @@ fn handle_buy_offer(
             ctx.now_unix(),
         );
     }
+    if let Some(char_id) = active_char_id {
+        let _ = ctx.notify_account_change(char_id, "plex", char_id, rem_plex as f64);
+    }
 
+    let status_str = if free_plex_mode {
+        "COMPLETED"
+    } else {
+        "CONFIRMED"
+    };
     Ok(PyRep::Dict(vec![
-        (PyRep::String("status".into()), PyRep::String("CONFIRMED".into())),
+        (PyRep::String("status".into()), PyRep::String(status_str.into())),
         (PyRep::String("transactionID".into()), PyRep::Integer(tx_id as i64)),
         (PyRep::String("offerID".into()), PyRep::Integer(offer_id)),
         (PyRep::String("plexAmount".into()), PyRep::Integer(total_plex)),
         (PyRep::String("itemsDelivered".into()), PyRep::Integer(delivered_items_count)),
+        (PyRep::String("newPlexBalance".into()), PyRep::Integer(rem_plex)),
+        (PyRep::String("Message".into()), PyRep::String("OK".into())),
     ]))
 }
 
