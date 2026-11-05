@@ -378,8 +378,8 @@ pub fn sync_stage_gated_insurgency_sites_in_snap(
     if let Some(&(pirate_fac, fob_sys)) = covering.first() {
         let beacon_pos = {
             let celestials = sde.celestials_in_system(sys_id);
-            if let Some(c) = celestials.first() {
-                [c.position.x + 250_000.0, c.position.y, c.position.z - 150_000.0]
+            if let Some(c) = celestials.iter().find(|c| c.group_id == 8).or_else(|| celestials.last()) {
+                [c.position.x + c.radius.max(0.0) + 15_000.0, c.position.y, c.position.z]
             } else {
                 [250_000.0, 0.0, -150_000.0]
             }

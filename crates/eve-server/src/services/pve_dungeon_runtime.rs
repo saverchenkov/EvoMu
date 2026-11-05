@@ -511,6 +511,14 @@ pub fn resolve_deadspace_or_escalation_warp_target(
         if site_pos.is_some() {
             return Ok(site_pos);
         }
+        let fw_pos = ctx.db.with_snapshot(|snap| {
+            let has_fw = snap.fw_runtime.fw_complexes.iter().any(|(&gid, (csys, _, _, _, done))| gid == target_id && *csys == sys_id && !*done)
+                || snap.insurgency_runtime.insurgency_instances.iter().any(|s| s.instance_id == target_id && s.solar_system_id == sys_id && !s.completed);
+            has_fw.then(|| snap.system_states.get(&sys_id).and_then(|st| st.fw_complex_position).map(DVec3::from_array)).flatten()
+        });
+        if fw_pos.is_some() {
+            return Ok(fw_pos);
+        }
     }
 
     Ok(None)

@@ -1182,7 +1182,7 @@ fn handle_list_impl(
             let cat = ctx.sde.types.get(&it.type_id).map(|t| t.category_id).unwrap_or(0);
             let grp = ctx.sde.types.get(&it.type_id).map(|t| t.group_id).unwrap_or(0);
             let is_personal = cat == 22 || grp == 340;
-            let is_unit = cat == 22 || matches!(grp, 12 | 340 | 448 | 649 | 4137) || it.type_id == 23;
+            let is_unit = cat == 22 || matches!(grp, 12 | 186 | 340 | 448 | 649 | 4137) || it.type_id == 23;
             let is_fleet_auth = !is_personal
                 && snap.fleets.values().any(|f| f.members.contains(&char_id) && f.members.contains(&it.owner_id))
                 && crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {

@@ -600,7 +600,8 @@ impl ServerContext {
             let shield = get_attr(eve_sde::attr_ids::SHIELD_CAPACITY, 450.0);
             let armor = get_attr(eve_sde::attr_ids::ARMOR_HP, 350.0);
             let hull = get_attr(eve_sde::attr_ids::HP_STRUCT, 350.0);
-            let cap = get_attr(eve_sde::attr_ids::CAPACITOR_CAPACITY, 250.0);
+            let raw_cap = get_attr(eve_sde::attr_ids::CAPACITOR_CAPACITY, 250.0);
+            let cap = if raw_cap <= 0.0 { if type_id == 670 { 100.0 } else { 250.0 } } else { raw_cap };
             let sig = get_attr(eve_sde::attr_ids::SIGNATURE_RADIUS, 35.0);
             let shield_rech = get_attr(eve_sde::attr_ids::SHIELD_RECHARGE_RATE, 120_000.0);
             let cap_rech = get_attr(eve_sde::attr_ids::RECHARGE_RATE, 120_000.0);

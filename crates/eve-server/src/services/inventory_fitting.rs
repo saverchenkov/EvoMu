@@ -642,7 +642,7 @@ pub async fn handle(
                         message: "Courier cargo cannot be moved into corporation hangar divisions or foreign containers/ships".into(),
                     });
                 }
-                let ch_sys = if char_sys > 0 { char_sys } else { session.solar_system_id.map(|s| s as i64).unwrap_or(0) };
+                let ch_sys = session.solar_system_id.filter(|&id| id > 0).map(|s| s as i64).unwrap_or(char_sys);
                 let ch_dock = if session.station_id.is_none() && session.structure_id.is_none() && session.solar_system_id.is_some() { 0 } else { char_dock };
                 let caller_ship_id = session.ship_id.filter(|&id| id > 0).unwrap_or(active_ship_id);
                 let ball_or_snap_pos = |id: i64| -> Option<DVec3> {

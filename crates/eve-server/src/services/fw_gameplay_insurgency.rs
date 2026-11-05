@@ -1076,7 +1076,14 @@ fn system_roamer_waypoints(ctx: &ServerContext, sys_id: u32) -> Vec<DVec3> {
         .into_iter()
         .filter(|c| matches!(c.group_id, 7 | 8 | 9 | 10 | 15))
         .take(6)
-        .map(|c| c.position)
+        .map(|c| {
+            let safe_r = if matches!(c.group_id, 6 | 7 | 8) {
+                c.radius.max(0.0) + 50_000.0
+            } else {
+                0.0
+            };
+            DVec3::new(c.position.x + safe_r, c.position.y, c.position.z)
+        })
         .collect();
     if wps.len() < 2 {
         // DERIVED (synthetic): fallback patrol grid waypoints around system origin when SDE celestials < 2.

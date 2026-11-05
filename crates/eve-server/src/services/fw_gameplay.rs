@@ -219,10 +219,11 @@ pub async fn ensure_warzone_sites_spawned(ctx: &ServerContext, sys_id: u32) {
             balls_to_spawn.push((gid, TYPE_ACCELERATION_GATE, pos, 250.0));
         }
         if let Some(complex_pos) = first_complex_pos {
-            let anchor = ctx.sde.celestials_in_system(sys_id).first().map(|c| c.position.to_array()).unwrap_or(complex_pos);
+            let cels = ctx.sde.celestials_in_system(sys_id);
+            let anchor = cels.iter().find(|c| c.group_id == 8).or_else(|| cels.last()).map(|c| [c.position.x + c.radius.max(0.0) + 15_000.0, c.position.y, c.position.z]).unwrap_or(complex_pos);
             let st = snap.system_states.entry(sys_id).or_default();
             st.solar_system_id = sys_id;
-            st.fw_complex_position.get_or_insert([anchor[0] + 250_000.0, anchor[1], anchor[2] - 150_000.0]);
+            st.fw_complex_position.get_or_insert(anchor);
         }
 
         // 3. Ensure SupplyCache, SupplyDepot, ListeningPost, and Propaganda tactical objectives exist for Advantage.

@@ -484,3 +484,4 @@ mod pve_escalations_expeditions_arena_live;
 mod load_notify_zarzakh_payment_live;
 mod mining_modules_pve_sites_live;
 mod pve_crab_storms_special_sites_live;
+mod pve_insurgency_complexes_live;

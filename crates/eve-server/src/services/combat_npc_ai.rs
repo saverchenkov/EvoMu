@@ -517,6 +517,10 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 let is_insurgency_pirate = npc.archetype == "InsurgencyPirateRoamer";
                 let is_insurgency_enforcer = npc.archetype == "InsurgencyEnforcer";
                 let is_ci_sentry = npc.archetype == "CounterInsurgencySentry" || npc.type_id == 79_507;
+                let is_ambush_tackler = npc.archetype == "InsurgencyAmbushTackler";
+                let is_ore_defender = npc.archetype == "InsurgencyAmbushOreDefender";
+                let is_ore_rorqual = npc.type_id == 79_589 || npc.archetype == "InsurgencyOreRorqual";
+                let is_outpost_defender = npc.archetype == "InsurgencyOutpostDefender";
                 let is_navy = matches!(
                     npc.archetype.as_str(),
                     "Navy" | "CaldariNavy" | "MinmatarNavy" | "AmarrNavy" | "GallenteNavy"
@@ -588,6 +592,14 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                     s_stage < 3 || !pilot_is_pirate
                 } else if is_ci_sentry {
                     !pilot_is_pirate && !has_criminal_flag
+                } else if is_ambush_tackler {
+                    pilot_is_same_pirate
+                } else if is_ore_defender {
+                    !pilot_is_pirate
+                } else if is_ore_rorqual {
+                    true
+                } else if is_outpost_defender {
+                    if npc.faction_id == 500_018 { !pilot_is_pirate } else { pilot_is_same_pirate }
                 } else if is_zarzakh_gun {
                     !has_criminal_flag && !has_suspect_flag
                 } else if is_navy {
