@@ -1333,4 +1333,30 @@ mod tests {
             "sde:res:/staticdata/types.fsdbinary",
         ]);
     }
+
+    #[test]
+    fn test_cfsd_layout_constructors_json_parse_and_paths() {
+        let _ = crate::cfsd_nested_layouts::a(
+            "lvl",
+            0,
+            crate::cfsd_nested_tables::CfsdType::U32,
+            1,
+        );
+        let o = crate::cfsd_nested_layouts::obj(8, None, &[]);
+        let _ = crate::cfsd_nested_layouts::rec(
+            "res:/staticdata/test.fsdbinary",
+            crate::cfsd_nested_tables::CfsdType::U32,
+            o,
+            false,
+        );
+        let parsed: Vec<u32> =
+            crate::sqlite_loader_skins::parse_json_col(1, "[10, 20]").unwrap();
+        assert_eq!(parsed, vec![10, 20]);
+        assert!(crate::sqlite_loader_skins::parse_json_col::<Vec<u32>>(2, "{bad").is_err());
+        let _ = SdeRegistry::default_db_path();
+        let sde = SdeRegistry::with_canonical_seed();
+        assert!(sde.load_cfsd_table("res:/missing_flat_table.fsdbinary").is_err());
+        assert!(sde.load_cfsd_nested("res:/missing_nested_table.fsdbinary").is_err());
+    }
 }
+
