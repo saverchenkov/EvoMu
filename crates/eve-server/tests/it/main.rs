@@ -428,3 +428,4 @@ mod mining_ice_and_drones;
 mod notifications_and_mining_live;
 mod crimewatch_security_and_killrights;
 pub mod navigation_sov_lookup_payment_live;
+mod navigation_repair_anchor_omega_sp_live;

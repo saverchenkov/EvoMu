@@ -279,6 +279,15 @@ pub fn pochven_static_wormholes(
             .map(|s| s.solar_system_id)
             .unwrap_or(sys_id)
     };
+    let get_wh_attrs = |tid: u32| {
+        sde.wormhole_types.get(&tid).map(|w| (
+            w.max_stable_time_min as u64 * 60,
+            w.max_stable_mass,
+            w.max_jump_mass
+        )).unwrap_or((43_200, 1_000_000_000.0, 410_000_000.0))
+    };
+    let (life_c729, mass_c729, jump_c729) = get_wh_attrs(56_026);
+    let (life_r081, mass_r081, jump_r081) = get_wh_attrs(56_541);
     vec![
         make_wh_sig(
             format!("PCH-{}", 100 + ((sys_id + seq * 19) % 900)),
@@ -288,9 +297,9 @@ pub fn pochven_static_wormholes(
             56_026,
             k_dest,
             now_unix,
-            43_200,
-            1_000_000_000.0,
-            410_000_000.0,
+            life_c729,
+            mass_c729,
+            jump_c729,
         ),
         make_wh_sig(
             format!("PCW-{}", 200 + ((sys_id + seq * 23) % 700)),
@@ -300,9 +309,9 @@ pub fn pochven_static_wormholes(
             56_541,
             c4_dest,
             now_unix,
-            43_200,
-            1_000_000_000.0,
-            375_000_000.0,
+            life_r081,
+            mass_r081,
+            jump_r081,
         ),
     ]
 }
