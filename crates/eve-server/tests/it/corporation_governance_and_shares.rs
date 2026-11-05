@@ -2,7 +2,6 @@
 //
 // Parity rows:
 // - `feat:corporation.member-audit`
-// - `feat:corporation.corp-project-contribution-methods`
 // - `feat:corporation.structure-reinforce-default`
 
 #![forbid(unsafe_code)]
@@ -145,9 +144,6 @@ async fn test_corporation_member_roles_and_audit_log_tracking() {
 
 #[tokio::test]
 async fn test_corporation_project_contribution_methods_and_milestones() {
-    // parity: feat:corporation.corp-project-contribution-methods
-    eve_testkit::attest(&["feat:corporation.corp-project-contribution-methods"]);
-
     let ctx = ServerContext::new();
     let _sess1 = select_pilot(&ctx, 60_041, "demo", "demo-secret", CEO_PILOT).await;
     let mut sess2 = select_pilot(&ctx, 60_042, "other", "other-secret", MEMBER_PILOT).await;
@@ -560,7 +556,6 @@ mod corp_projects_welcome_alliance {
 // - `feat:corporation.structure-reinforce-default`
 // - `feat:corporation.corp-project-reward-pool`
 // - `feat:corporation.corp-project-close-expiry`
-// - `feat:corporation.corp-project-contribution-methods`
 // - `feat:corporation.corp-goals`
 // - `feat:corporation.freelance-jobs`
 // - `feat:alliance.alliance-logo`
@@ -886,14 +881,12 @@ async fn test_corp_governance_welcome_mails_structures_alliance() {
 async fn test_corp_projects_goals_freelance_and_plan_closure() {
     // parity: feat:corporation.corp-project-reward-pool
     // parity: feat:corporation.corp-project-close-expiry
-    // parity: feat:corporation.corp-project-contribution-methods
     // parity: feat:corporation.corp-goals
     // parity: feat:corporation.freelance-jobs
     // parity: plan:SO-3
     eve_testkit::attest(&[
         "feat:corporation.corp-project-reward-pool",
         "feat:corporation.corp-project-close-expiry",
-        "feat:corporation.corp-project-contribution-methods",
         "feat:corporation.corp-goals",
         "feat:corporation.freelance-jobs",
         "plan:SO-3",
@@ -1005,7 +998,7 @@ async fn test_corp_projects_goals_freelance_and_plan_closure() {
         "Project must appear in corporationgoal.api.GetActiveRequest"
     );
 
-    // 2. feat:corporation.corp-project-contribution-methods
+    // 2. Project contribution progress
     // Add Pilot 2 to corp
     ctx.db.with_mut_snapshot(|s| {
         s.corporations.get_mut(&corp_id).unwrap().members.insert(PILOT_2);

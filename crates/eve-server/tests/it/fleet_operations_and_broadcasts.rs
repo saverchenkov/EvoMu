@@ -1,7 +1,4 @@
-//! End-to-end integration tests for Fleet parity features:
-//! - `feat:fleet.boss-handover`
-//! - `feat:fleet.stored-formations-and-warp-shapes`
-//! - `feat:fleet.target-tagging`
+//! End-to-end integration tests for Fleet operations and broadcasts.
 
 #![forbid(unsafe_code)]
 
@@ -68,7 +65,6 @@ async fn form_fleet_with_two(ctx: &ServerContext, s1: &mut SessionState, s2: &mu
 
 #[tokio::test]
 async fn test_fleet_boss_handover_on_leave_and_disconnect() {
-    // parity: feat:fleet.boss-handover
     let ctx = ServerContext::new();
     let p3: i64 = 90_000_003;
     ctx.db.provision_gm_account("pilot3", "pilot3-secret", p3, "PilotThree");
@@ -112,7 +108,6 @@ async fn test_fleet_boss_handover_on_leave_and_disconnect() {
 
 #[tokio::test]
 async fn test_fleet_stored_formations_and_warp_shapes() {
-    // parity: feat:fleet.stored-formations-and-warp-shapes
     let ctx = ServerContext::new();
     let mut s1 = select_pilot(&ctx, 11, "demo", "demo-secret", PILOT_1).await;
     let mut s2 = select_pilot(&ctx, 12, "other", "other-secret", PILOT_2).await;
@@ -190,7 +185,6 @@ async fn test_fleet_stored_formations_and_warp_shapes() {
 
 #[tokio::test]
 async fn test_fleet_target_tagging_validation_lock_and_destruction() {
-    // parity: feat:fleet.target-tagging
     let ctx = ServerContext::new();
     let mut s1 = select_pilot(&ctx, 21, "demo", "demo-secret", PILOT_1).await;
     let mut s2 = select_pilot(&ctx, 22, "other", "other-secret", PILOT_2).await;

@@ -1578,7 +1578,6 @@ pub(crate) mod pochven_loot_and_corp_audit {
 //!
 //! Parity rows:
 //! - `feat:combat.pochven-loot-drop`
-//! - `feat:corporation.corp-project-contribution-methods`
 //! - `feat:corporation.member-audit`
 //! - `feat:corporation.structure-reinforce-default`
 
@@ -1951,9 +1950,6 @@ async fn test_feat_combat_pochven_loot_drop_e2e() {
 
 #[tokio::test]
 async fn test_feat_corporation_corp_project_contribution_methods_e2e() {
-    // parity: feat:corporation.corp-project-contribution-methods
-    eve_testkit::attest(&["feat:corporation.corp-project-contribution-methods"]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 

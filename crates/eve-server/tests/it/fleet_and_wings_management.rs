@@ -10,7 +10,6 @@ pub(crate) mod fleet_tactical_movement {
 // - `feat:fleet.watchlist-broadcast-tracking`
 // - `feat:fleet.broadcast-scope-and-filter`
 // - `feat:fleet.takes-fleet-warp-toggle`
-// - `feat:fleet.target-tagging`
 
 
 use std::collections::HashMap;
@@ -159,7 +158,6 @@ async fn test_fleet_movement_optins_formations_and_setups() {
         assert!(!m2.accepts_conduit_jumps, "Member accepts_conduit_jumps must be false");
     });
 
-    // 2. feat:fleet.stored-formations-and-warp-shapes
     // Set Arrow formation (id 3, spacing 5000m, size 10000m)
     let form_rep = rpc(
         &ctx,
@@ -233,7 +231,6 @@ async fn test_fleet_movement_optins_formations_and_setups() {
     .expect("DeleteFleetSetup");
     assert_eq!(field(&del_setup, "deleted"), PyRep::Bool(true));
 
-    // 4. feat:fleet.boss-handover
     // Non-boss Pilot 2 cannot call MakeLeader
     let unauth_lead = rpc(
         &ctx,
@@ -267,12 +264,10 @@ async fn test_tactical_fleet_join_watchlist_and_broadcasts() {
     // parity: feat:fleet.join-requests
     // parity: feat:fleet.watchlist-broadcast-tracking
     // parity: feat:fleet.broadcast-scope-and-filter
-    // parity: feat:fleet.target-tagging
     eve_testkit::attest(&[
         "feat:fleet.join-requests",
         "feat:fleet.watchlist-broadcast-tracking",
         "feat:fleet.broadcast-scope-and-filter",
-        "feat:fleet.target-tagging",
     ]);
 
     let ctx = ServerContext::new();
@@ -460,7 +455,7 @@ async fn test_tactical_fleet_join_watchlist_and_broadcasts() {
     let err = unauth_bc.expect_err("Unauthorized member must not send restricted broadcast");
     assert_eq!(err.code, "CannotBroadcastInFleet");
 
-    // 4. feat:fleet.target-tagging
+    // Target tagging
     // Boss spawns and locks target entity 999001 on grid, then assigns tag 'A'
     let sys_id = sess1.solar_system_id.unwrap_or(30_000_142);
     let ship1 = sess1.ship_id.unwrap_or(1);
@@ -519,7 +514,6 @@ async fn test_tactical_fleet_join_watchlist_and_broadcasts() {
 
 #[tokio::test]
 async fn test_fleet_boss_handover_closure() {
-    // parity: feat:fleet.boss-handover
     let ctx = std::sync::Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
 
@@ -575,7 +569,7 @@ async fn test_fleet_boss_handover_closure() {
         .expect("AcceptInvite");
     sess2.fleet_id = Some(fid);
 
-    // Boss handover (`feat:fleet.boss-handover`): MakeLeader, LeaveFleet, and disconnect handover
+    // Boss handover: MakeLeader, LeaveFleet, and disconnect handover
     let _ = rpc(&ctx, &mut sess1, "fleetObjectHandler", "MakeLeader", &[PyRep::Integer(fc_id)])
         .await
         .expect("MakeLeader");

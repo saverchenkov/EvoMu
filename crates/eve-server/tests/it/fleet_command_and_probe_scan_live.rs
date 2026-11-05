@@ -88,10 +88,8 @@ async fn step(ctx: &ServerContext, secs: usize) {
     }
 }
 
-// parity: feat:fleet.boss-handover
 #[tokio::test]
 async fn test_live_fleet_boss_handover_via_make_leader_leave_and_disconnect() {
-    eve_testkit::attest(&["feat:fleet.boss-handover"]);
     let ctx = paused_ctx();
     let mut p1 = common::gm_pilot_in_space(&ctx, 21, 91_200_001, VEXOR, HIGHSEC).await;
     let mut p2 = common::gm_pilot_in_space(&ctx, 22, 91_200_002, VEXOR, HIGHSEC).await;
@@ -138,10 +136,8 @@ async fn test_live_fleet_boss_handover_via_make_leader_leave_and_disconnect() {
     assert!(!members.contains(&p2_id) && members.contains(&p4.char_id), "offline members expire after the 120 s grace: {members:?}");
 }
 
-// parity: feat:fleet.stored-formations-and-warp-shapes, feat:fleet.target-tagging
 #[tokio::test]
 async fn test_live_fleet_formation_warps_and_target_tagging() {
-    eve_testkit::attest(&["feat:fleet.stored-formations-and-warp-shapes", "feat:fleet.target-tagging"]);
     let ctx = paused_ctx();
     let mut fc = common::gm_pilot_in_space(&ctx, 31, 91_200_011, ARCHON, HIGHSEC).await;
     let mut p2 = common::gm_pilot_in_space(&ctx, 32, 91_200_012, VEXOR, HIGHSEC).await;
