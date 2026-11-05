@@ -959,8 +959,6 @@ async fn test_c4_npc_archetypes_triglavian_drifter_sleeper_edencom_clone_soldier
     // parity: feat:npc.edencom-npc
     // parity: feat:npc.rogue-drones
     // parity: feat:npc.incursion-npc
-    // parity: feat:npc.navy-npc
-    // parity: feat:npc.npc-hauler
     // parity: feat:npc.npc-standings-aggression
     // parity: feat:npc.officer-npc
     // parity: feat:npc.npc-ewar-application
@@ -974,8 +972,6 @@ async fn test_c4_npc_archetypes_triglavian_drifter_sleeper_edencom_clone_soldier
         "feat:npc.edencom-npc",
         "feat:npc.rogue-drones",
         "feat:npc.incursion-npc",
-        "feat:npc.navy-npc",
-        "feat:npc.npc-hauler",
         "feat:npc.npc-standings-aggression",
         "feat:npc.officer-npc",
         "feat:npc.npc-ewar-application",

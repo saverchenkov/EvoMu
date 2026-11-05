@@ -900,13 +900,12 @@ async fn test_rpc_missing_batch3_part1() {
 
 #[tokio::test]
 async fn test_rpc_missing_batch3_part2() {
-    // parity: rpc:cache.Rowset, rpc:cache.Setting
+    // parity: rpc:cache.Rowset
     // parity: rpc:sessionMgr.EndAllGameSessions, rpc:sessionMgr.RemoveSessionsFromServer
     // parity: rpc:userSvc.ProcessEVESessionCreated, rpc:raffleMgr.QA_SeedRaffles, rpc:DB2.CallProc
     // DATA GAP: Triaged NA in docs/parity/triage.json (dev/QA/cluster RPCs): rpc:debug.Exec
     eve_testkit::attest(&[
         "rpc:cache.Rowset",
-        "rpc:cache.Setting",
         "rpc:sessionMgr.EndAllGameSessions",
         "rpc:sessionMgr.RemoveSessionsFromServer",
         "rpc:userSvc.ProcessEVESessionCreated",

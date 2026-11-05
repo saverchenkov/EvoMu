@@ -106,7 +106,8 @@ pub async fn handle(
             let caller_cid = require_cid!(session);
             let ban_id = extract_id(args, 0).unwrap_or(1);
             let ban_types = extract_list_i64(args.get(1));
-            ctx.db.try_with_mut_snapshot(|snap| {
+            let mut notify_info = None;
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let target_mid = store.matches.contains_key(&ban_id).then_some(ban_id);
                 let m = store.resolve_match_mut(target_mid)?;
@@ -115,16 +116,50 @@ pub async fn handle(
                 if m.bans_finalized || !matches!(m.state, TourneyMatchState::Setup | TourneyMatchState::Banning) {
                     return Err(BridgeRpcError { code: "TourneyBansFinalized".into(), message: "Cannot ban ships after bans are finalized or match has started".into() });
                 }
+                m.state = TourneyMatchState::Banning;
                 let is_blue_capt = m.blue_fleet_boss_id == Some(caller_cid) && m.red_fleet_boss_id != Some(caller_cid);
                 for &bt in &ban_types {
                     if !m.banned_ships.contains(&bt) { m.banned_ships.push(bt); }
                     let team_bans = if is_blue_capt { &mut m.banned_ship_types_blue } else { &mut m.banned_ship_types_red };
                     if !team_bans.contains(&bt) { team_bans.push(bt); }
                 }
+                let qty = (ban_types.len() as i64).max(m.autoban_qty).max(1);
+                let mid = m.match_id;
+                let cur_bans = m.banned_ships.clone();
+                let tid = m.tourney_id;
+                let r_boss = m.red_fleet_boss_id;
+                let b_boss = m.blue_fleet_boss_id;
+                let round = (store.ban_sessions.len() as i64) + 1;
                 store.ban_sessions.insert(ban_id, ban_types);
+                notify_info = Some((mid, qty, cur_bans, round, tid, r_boss, b_boss));
                 save_store(snap, &store, now_unix);
                 Ok(PyRep::Bool(true))
-            })
+            });
+            if let Some((mid, qty, cur_bans, round, tid, r_boss, b_boss)) = notify_info {
+                let ban_args = vec![
+                    PyRep::Integer(mid),
+                    PyRep::Integer(qty),
+                    PyRep::List(cur_bans.into_iter().map(PyRep::Integer).collect()),
+                    PyRep::Integer((now_unix + 60) as i64),
+                    PyRep::Integer(round),
+                    PyRep::Integer(tid),
+                ];
+                let mut recipients = vec![caller_cid];
+                for cid in [r_boss, b_boss].into_iter().flatten() {
+                    if !recipients.contains(&cid) {
+                        recipients.push(cid);
+                    }
+                }
+                for cid in recipients {
+                    ctx.notify(
+                        crate::router::NotificationTarget::Character(cid),
+                        "OnTournamentPerformBan",
+                        "charid",
+                        ban_args.clone(),
+                    );
+                }
+            }
+            res
         }
         ("tourneyMgr", "BanShipType") => {
             let caller_cid = require_cid!(session);

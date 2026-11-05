@@ -100,6 +100,7 @@ mod mining_advanced;
 mod mining_belts_drones_sites;
 mod mining_complete;
 mod mining_moon_ledgers;
+mod mining_npc_misc_notify_live;
 mod mining_reprocessing;
 mod mining_survey_scanner;
 mod mining_prismaticite_scrapmetal_wh;

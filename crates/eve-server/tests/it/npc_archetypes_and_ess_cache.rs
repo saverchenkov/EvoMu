@@ -451,10 +451,8 @@ async fn test_ess_mgr_prime_cache_result_canonical() {
 #[tokio::test]
 async fn test_npc_standings_aggression_player_drones_and_navy_police() {
     // parity: feat:npc.npc-standings-aggression
-    // parity: feat:npc.navy-npc
     eve_testkit::attest(&[
         "feat:npc.npc-standings-aggression",
-        "feat:npc.navy-npc",
     ]);
 
     let ctx = ServerContext::new();

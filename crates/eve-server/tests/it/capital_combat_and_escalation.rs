@@ -1094,12 +1094,6 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
 
 #[tokio::test]
 async fn test_npc_navy_police_hauler_convoy_and_serverops_downtime() {
-    // parity: feat:npc.navy-npc, feat:npc.npc-hauler
-    eve_testkit::attest(&[
-        "feat:npc.navy-npc",
-        "feat:npc.npc-hauler",
-    ]);
-
     let ctx = ServerContext::new();
     ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_700_045_970))); // 10:59:30 UTC
     let char_id = 90_000_001i64;

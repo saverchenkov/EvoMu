@@ -1219,6 +1219,13 @@ pub async fn handle_gm_slash_ext(
                 });
             }
         }
+        if ctx.sde.npc_corporations.contains_key(&target_id) || ctx.sde.factions.contains_key(&(target_id as u32)) {
+            ctx.db.with_mut_snapshot(|snap| {
+                if let Some(c) = snap.characters.get_mut(&cid) {
+                    c.standings.insert(target_id, standing);
+                }
+            });
+        }
         ctx.notify(crate::router::NotificationTarget::Character(cid), "OnSetPlayerStanding", "charid", vec![PyRep::Integer(target_id), PyRep::Real(standing)]);
         return Some(Ok(PyRep::keyval([("contactID", PyRep::Integer(target_id)), ("standing", PyRep::Real(standing))])));
     }

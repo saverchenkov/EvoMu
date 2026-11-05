@@ -22,9 +22,6 @@ const JITA_SYS: u32 = 30_000_142;
 
 #[tokio::test]
 async fn test_navy_npc_faction_standing_response_and_ewar_scaling() {
-    // parity: feat:npc.navy-npc
-    eve_testkit::attest(&["feat:npc.navy-npc"]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 

@@ -1892,8 +1892,7 @@ async fn test_mn01_sde_mining_static_data_and_distributions() {
 // ============================================================================
 #[tokio::test]
 async fn test_mn02_asteroid_belts_as_balls_highsec_and_nullsec() {
-    // parity: feat:mining.belts-as-balls, plan:MN-02
-    eve_testkit::attest(&["feat:mining.belts-as-balls"]);
+    // parity: plan:MN-02
     let ctx = ServerContext::new();
     let mut sess = SessionState::new(9102);
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -2459,8 +2458,8 @@ async fn bind_service_oid(
 // ============================================================================
 #[tokio::test]
 async fn test_e5_agent_finder_and_conversation_lifecycle() {
-    // parity: plan:E-5, feat:pve.agent-finder, feat:pve.agent-conversation, feat:pve.mission-accept, feat:pve.mission-decline, feat:pve.mission-quit, rpc:agentMgr.GetAgents, rpc:agentMgr.GetMyJournalDetails, rpc:agentMgr.GetSolarSystemOfAgent
-    eve_testkit::attest(&["plan:E-5", "feat:pve.agent-finder", "feat:pve.agent-conversation", "feat:pve.mission-accept", "feat:pve.mission-decline", "feat:pve.mission-quit"]);
+    // parity: feat:pve.agent-finder, feat:pve.agent-conversation, feat:pve.mission-accept, feat:pve.mission-decline, feat:pve.mission-quit, rpc:agentMgr.GetAgents, rpc:agentMgr.GetMyJournalDetails, rpc:agentMgr.GetSolarSystemOfAgent
+    eve_testkit::attest(&["feat:pve.agent-finder", "feat:pve.agent-conversation", "feat:pve.mission-accept", "feat:pve.mission-decline", "feat:pve.mission-quit"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut sess = create_auth_session(&ctx, 1002).await;
@@ -2803,9 +2802,6 @@ async fn spawn_pilot_ship_in_space(
 
 #[tokio::test]
 async fn test_parity_navy_npc_and_faction_police() {
-    // parity: feat:npc.navy-npc
-    eve_testkit::attest(&["feat:npc.navy-npc"]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
 

@@ -5085,13 +5085,8 @@ async fn test_remediated_probe_scanning_lifecycle_notifications() {
     );
 }
 
-// parity: notify:OnSystemDisapprovalFlagUpdates
 #[tokio::test]
 async fn test_remediated_campaign_enrollment_chat_bans_and_crimewatch_timers() {
-    eve_testkit::attest(&[
-        "notify:OnSystemDisapprovalFlagUpdates",
-    ]);
-
     let ctx = new_ctx();
     let mut gm_sess = SessionState::new(91_003);
     common::login_pilot(&ctx, &mut gm_sess, "demo", "demo-secret").await;

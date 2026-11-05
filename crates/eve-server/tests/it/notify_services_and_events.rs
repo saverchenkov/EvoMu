@@ -1833,14 +1833,12 @@ async fn test_batch6_faction_warfare_and_insurgency() {
 #[tokio::test]
 async fn test_batch6_safelogoff_and_crimewatch() {
     // parity: notify:OnSafeLogoffActivated, notify:OnSafeLogoffTimerStarted, notify:OnSafeLogoffAborted
-    // parity: notify:OnSafeLogoffFailed, notify:OnSystemCriminalFlagUpdates, notify:OnSystemDisapprovalFlagUpdates
+    // parity: notify:OnSafeLogoffFailed
     eve_testkit::attest(&[
         "notify:OnSafeLogoffActivated",
         "notify:OnSafeLogoffTimerStarted",
         "notify:OnSafeLogoffAborted",
         "notify:OnSafeLogoffFailed",
-        "notify:OnSystemCriminalFlagUpdates",
-        "notify:OnSystemDisapprovalFlagUpdates",
     ]);
 
     let ctx = new_ctx();
@@ -4409,13 +4407,8 @@ async fn notify_b30_target_multi_event_and_fw_warzone() {
     assert!(kv_get(&vp_ev.args[1], "victoryPoints").and_then(PyRep::as_i64).unwrap_or(0) >= 20);
 }
 
-// parity: notify:OnSystemCriminalFlagUpdates
 #[tokio::test]
 async fn notify_b30_crimewatch_timers_and_ship_death() {
-    eve_testkit::attest(&[
-        "notify:OnSystemCriminalFlagUpdates",
-    ]);
-
     let ctx = new_ctx();
     let (ship_a, ship_b) = (960_000_201_i64, 960_000_202_i64);
     let gun_a: i64 = 960_000_211;
@@ -5247,10 +5240,9 @@ fn chat_bcast_req(msg: &str) -> EvePublicRequest {
 
 #[tokio::test]
 async fn test_parity_notify_analysis_kredits_and_campaign_enrollment() {
-    // parity: notify:OnAnalysisKreditsChange, notify:OnCampaignEnrollmentChanged
+    // parity: notify:OnAnalysisKreditsChange
     eve_testkit::attest(&[
         "notify:OnAnalysisKreditsChange",
-        "notify:OnCampaignEnrollmentChanged",
     ]);
 
     let ctx = new_ctx();
@@ -6992,12 +6984,11 @@ async fn test_batch4_fw_lp_vp_and_insurgency_corruption_security() {
     assert_eq!(sec_args, &vec![PyRep::Integer(i64::from(affected_sys)), PyRep::Real(-base_sec), PyRep::Real(0.0)]);
 }
 
-// parity: notify:OnTaleRemove, notify:OnTournamentPerformBan
+// parity: notify:OnTaleRemove
 #[tokio::test]
 async fn test_batch4_interference_incursion_tale_remove_and_tourney_ban() {
     eve_testkit::attest(&[
         "notify:OnTaleRemove",
-        "notify:OnTournamentPerformBan",
     ]);
 
     let ctx = new_ctx();
@@ -7316,11 +7307,10 @@ async fn test_parity_notify_sim_clock_rebase_and_analysis_kredits() {
     assert_eq!(spend_notifs[0].len(), 0, "OnAnalysisKreditsChange takes 0 arguments");
 }
 
-// parity: notify:OnCampaignEnrollmentChanged, notify:OnCharacterPermanentlyBanned
+// parity: notify:OnCharacterPermanentlyBanned
 #[tokio::test]
 async fn test_parity_notify_campaign_enrollment_and_chat_bans() {
     eve_testkit::attest(&[
-        "notify:OnCampaignEnrollmentChanged",
         "notify:OnCharacterPermanentlyBanned",
     ]);
 
