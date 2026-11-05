@@ -495,4 +495,13 @@ mod http_transport_and_auth_tests;
 mod universe_fw_sov_openapi_tests;
 #[cfg(test)]
 mod universe_sov_fw_killmail_tests;
+#[cfg(test)]
+mod esi_char_social_calendar_mail_tests;
+#[cfg(test)]
+mod esi_corp_fleet_governance_tests;
+#[cfg(test)]
+mod esi_economy_industry_sample_tests;
+#[cfg(test)]
+mod esi_universe_fw_sov_router_tests;
+
 

@@ -61,3 +61,8 @@ impl ServerContext {
         Ok(entry.object_id as SolarSystemId)
     }
 }
+
+#[cfg(test)]
+#[path = "session_tests.rs"]
+mod session_tests;
+
