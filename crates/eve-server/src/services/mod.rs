@@ -223,6 +223,13 @@ mod fitting_module_cycles_helpers_extra_unit_tests;
 mod pve_dungeon_runtime_extra_unit_tests;
 #[cfg(test)]
 mod pve_ess_reserve_banks_extra_unit_tests;
+mod fitting_ship_bays_extra_unit_tests;
+#[cfg(test)]
+mod insurgency_complex_ops_extra_unit_tests;
+#[cfg(test)]
+mod pve_exploration_extra_unit_tests;
+#[cfg(test)]
+mod space_destiny_extra_unit_tests;
 #[cfg(test)]
 mod space_probe_scanning_extra_unit_tests;
 #[cfg(test)]
@@ -251,4 +258,8 @@ mod sov_gameplay_entosis_extra_unit_tests;
 mod fitting_module_cycles_extra_unit_tests;
 #[cfg(test)]
 mod combat_npc_ai_extra_unit_tests;
+mod station_structure_extra_unit_tests;
+#[cfg(test)]
+mod structure_lifecycle_extra_unit_tests;
+
 
