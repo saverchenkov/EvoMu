@@ -107,6 +107,7 @@ mod modules_advanced_tactical;
 mod modules_lances_depots_and_nanite;
 mod modules_cyno_portal;
 mod modules_scanners_mutaplasmids_dbuffs;
+mod navigation_shipcaster_rpcs_live;
 mod notify_contacts_emission;
 mod notify_corp_emission;
 mod notify_corp_emission_alliances;

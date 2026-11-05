@@ -224,14 +224,8 @@ async fn seed_and_build_caldari_beacon(
 
 #[tokio::test]
 async fn test_shipcaster_dynamic_fw_beacon_construction_linking_limit_and_disruption() {
-    // parity: rpc:shipCasterLandingPadMgr.GetAllLandingPads
-    // parity: rpc:shipCasterLandingPadMgr.GetFactionLandingPads
-    // parity: rpc:shipCasterLauncherMgr.GetFactionsWithShipcaster
     // parity: notify:OnShipcasterTargetStateChanged
     eve_testkit::attest(&[
-        "rpc:shipCasterLandingPadMgr.GetAllLandingPads",
-        "rpc:shipCasterLandingPadMgr.GetFactionLandingPads",
-        "rpc:shipCasterLauncherMgr.GetFactionsWithShipcaster",
         "notify:OnShipcasterTargetStateChanged",
     ]);
 
@@ -445,12 +439,6 @@ async fn test_shipcaster_dynamic_fw_beacon_construction_linking_limit_and_disrup
 
 #[tokio::test]
 async fn test_starter_shipcaster_sde_systems_rookie_age_one_time_use_and_timers() {
-    // parity: rpc:starterShipcasterTravelMgr.CanCharacterJump
-    // parity: rpc:starterShipcasterTravelMgr.CmdJumpThroughStarterShipcaster
-    eve_testkit::attest(&[
-        "rpc:starterShipcasterTravelMgr.CanCharacterJump",
-        "rpc:starterShipcasterTravelMgr.CmdJumpThroughStarterShipcaster",
-    ]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -576,10 +564,6 @@ async fn test_starter_shipcaster_sde_systems_rookie_age_one_time_use_and_timers(
 
 #[tokio::test]
 async fn test_interstellar_shipcaster_war_hq_jump_and_six_minute_cycle_rotation() {
-    // parity: rpc:shipcasterTravelMgr.CmdJumpThroughShipcaster
-    eve_testkit::attest(&[
-        "rpc:shipcasterTravelMgr.CmdJumpThroughShipcaster",
-    ]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);

@@ -194,7 +194,8 @@ pub struct ClusterMiscRuntimeState {
 
 /// Pirate Insurgency Forward Operating Base landing pads linked to the Zarzakh Deathless Shipcaster.
 /// Empire FW landing pads (`500001..=500004`) start empty and must be dynamically deployed, constructed, and linked.
-pub fn default_pirate_fob_pads() -> Vec<LandingPadRecord> {
+pub fn default_pirate_fob_pads(now_unix: u64) -> Vec<LandingPadRecord> {
+    let link_ts = now_unix.max(1) as i64;
     vec![
         LandingPadRecord {
             item_id: 104_000_020,
@@ -203,7 +204,7 @@ pub fn default_pirate_fob_pads() -> Vec<LandingPadRecord> {
             solar_system_id: 30002056,
             faction_id: 500010,
             is_built: true,
-            link_timestamp: 1_700_000_000,
+            link_timestamp: link_ts,
             is_disrupted: false,
             position: glam::DVec3::new(120_000.0, 0.0, 0.0),
             required_materials: BTreeMap::new(),
@@ -216,7 +217,7 @@ pub fn default_pirate_fob_pads() -> Vec<LandingPadRecord> {
             solar_system_id: 30002811,
             faction_id: 500011,
             is_built: true,
-            link_timestamp: 1_700_000_000,
+            link_timestamp: link_ts,
             is_disrupted: false,
             position: glam::DVec3::new(120_000.0, 0.0, 0.0),
             required_materials: BTreeMap::new(),
@@ -231,7 +232,7 @@ pub fn default_pirate_fob_pads() -> Vec<LandingPadRecord> {
             solar_system_id: 30_100_000, // Zarzakh
             faction_id: 0,
             is_built: true,
-            link_timestamp: 1_700_000_000,
+            link_timestamp: link_ts,
             is_disrupted: false,
             position: glam::DVec3::new(250_000.0, 0.0, 0.0),
             required_materials: BTreeMap::new(),
@@ -352,7 +353,7 @@ impl ClusterMiscRuntimeState {
         let mut st = Self {
             sde_initialized: false,
             char_settings: HashMap::new(),
-            landing_pads: default_pirate_fob_pads(),
+            landing_pads: default_pirate_fob_pads(db.clock().now_unix_secs()),
             launchers: Vec::new(),
             starter_launchers: Vec::new(),
             used_starter_shipcaster_chars: BTreeSet::new(),
@@ -531,10 +532,11 @@ pub fn populate_shipcaster_balls_with_sde(
         .map(|p| p.starter_launchers.clone())
         .or_else(|| sde.map(sde_starter_launchers))
         .unwrap_or_default();
+    let now_unix = db.map(|d| d.clock().now_unix_secs()).unwrap_or(0);
     let pads = persisted
         .filter(|p| p.persisted_shipcaster_state)
         .map(|p| p.landing_pads)
-        .unwrap_or_else(default_pirate_fob_pads);
+        .unwrap_or_else(|| default_pirate_fob_pads(now_unix));
     for l in launchers {
         if l.solar_system_id == solar_system_id {
             let (group_id, category_id) = if l.type_id == 79_018 {
