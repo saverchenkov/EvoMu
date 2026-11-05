@@ -197,7 +197,7 @@ fn seed_structure(snap: &mut eve_db::WorldStateSnapshot, id: i64, owner: i64, sy
 
 #[tokio::test]
 async fn test_b33_faction_activity_admin_and_payment_schedule() {
-    // parity: quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj, quasar:eveProto/generated/eve_public/payment/schedule/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/payment/schedule/requests_pb2.pyj
     let ctx = ServerContext::new();
     let mut admin_sess = make_session(1, 10, 90_000_010, 1_000_009, true);
     let mut player_sess = make_session(2, 11, 90_000_011, 1_000_009, false);

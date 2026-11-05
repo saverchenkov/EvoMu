@@ -158,11 +158,8 @@ fn configure_test_daily_goals(ctx: &ServerContext) {
 
 #[tokio::test]
 async fn quasar_daily_goals_lifecycle_and_rewards() {
-    // parity: feat:quasar.dailygoal, quasar:eveProto/generated/eve_public/dailygoal/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/dailygoal/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/dailygoal/api/admin/admin_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/dailygoal/api/admin/admin_pb2.pyj
     eve_testkit::attest(&[
-        "feat:quasar.dailygoal",
-        "quasar:eveProto/generated/eve_public/dailygoal/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/dailygoal/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/dailygoal/api/admin/admin_pb2.pyj",
     ]);
 

@@ -97,10 +97,9 @@ async fn dispatch_and_verify_request(
 
 #[tokio::test]
 async fn test_quasar_campaign_definition_requests() {
-    // parity: quasar:eveProto/generated/eve_public/campaign/contributionmethod/definition/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/trigger/eventmatch/definition/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/campaign/contributionmethod/definition/api/requests_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/campaign/contributionmethod/definition/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/campaign/trigger/eventmatch/definition/api/requests_pb2.pyj",
     ]);
 
     let ctx = ServerContext::new();
@@ -143,10 +142,6 @@ async fn test_quasar_campaign_definition_requests() {
 
 #[tokio::test]
 async fn test_quasar_sovereignty_resources_mercenaryden_stargate_and_admin_requests() {
-    // parity: quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj",
-    ]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

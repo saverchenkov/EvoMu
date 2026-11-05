@@ -128,6 +128,7 @@ mod pve_escalations_and_dungeon_notifs;
 mod pve_mining_sites;
 mod pve_missions_dungeons_extended;
 mod pve_homefront_drifter_triglavian_live;
+mod quasar_achievement_career_cosmetic_live;
 mod quasar_career_achievements;
 mod quasar_economy_complete;
 mod quasar_feature_packages_complete;

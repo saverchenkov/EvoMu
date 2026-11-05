@@ -518,7 +518,6 @@ async fn test_payment_schedules_tokens_and_user_license() {
 #[tokio::test]
 async fn test_quasar_achievements_progression_and_claims() {
     // DATA GAP: Achievement categories, showcase scores, and milestone rewards are server-only and not present in res:/staticdata/achievements.static.
-    // parity: quasar:eveProto/generated/eve_public/achievement/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/api/admin/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/api/notices_pb2.pyj
     let ctx = ServerContext::new();

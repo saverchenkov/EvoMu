@@ -55,12 +55,6 @@ fn uuid_field(field: u32, uuid: &[u8], out: &mut Vec<u8>) {
 
 #[tokio::test]
 async fn paragon_hub_cosmetic_market_fees_and_component_listings() {
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/market/api/api_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/market/component/listing/api/api_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/cosmetic/market/api/api_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/cosmetic/market/component/listing/api/api_pb2.pyj",
-    ]);
 
     let reg = QuasarDescriptorRegistry::open_default().expect("registry");
     let ctx = ServerContext::new();
@@ -227,13 +221,9 @@ async fn paragon_hub_cosmetic_market_fees_and_component_listings() {
 
 #[tokio::test]
 async fn paragon_hub_skin_listings_lifecycle_admin_and_transaction_notices() {
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/api_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/admin/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/market/transaction/api/notices_pb2.pyj
     eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/api_pb2.pyj",
         "quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/admin/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/cosmetic/market/transaction/api/notices_pb2.pyj",
     ]);
 
     let ctx = ServerContext::new();

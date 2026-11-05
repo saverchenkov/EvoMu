@@ -36,7 +36,6 @@ fn encode_admin_score_req(sys_id: u32, faction_id: u32, score_or_delta: u64) -> 
 
 #[tokio::test]
 async fn test_faction_activity_admin_increment_set_notices_and_auth() {
-    // parity: quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj
     let ctx = ServerContext::new();
     ctx.db.with_mut_snapshot(|snap| {
         snap.fw_system_occupations.insert(

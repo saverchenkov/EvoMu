@@ -3444,11 +3444,9 @@ async fn test_parity_remediation_esi_corp_blueprints_and_structures_live_rpcs() 
 
 #[tokio::test]
 async fn test_parity_remediation_quasar_title_definitions_and_space_cdn() {
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/character/title/definition/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj, quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj
     eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/cosmetic/character/title/definition/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj",
     ]);
 
     let ctx = Arc::new(ServerContext::new());

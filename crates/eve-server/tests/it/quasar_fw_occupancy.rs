@@ -87,11 +87,10 @@ fn encode_id_field(field_num: u32, id: u64, out: &mut Vec<u8>) {
 
 #[tokio::test]
 async fn test_fw_occupancy_warzone_scope_and_dynamic_threshold() {
-    // parity: feat:quasar.faction, quasar:eveProto/generated/eve_public/faction/activity/activity_pb2.pyj, quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj
+    // parity: feat:quasar.faction, quasar:eveProto/generated/eve_public/faction/activity/activity_pb2.pyj
     eve_testkit::attest(&[
         "feat:quasar.faction",
         "quasar:eveProto/generated/eve_public/faction/activity/activity_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj",
     ]);
     let reg = QuasarDescriptorRegistry::open_default().expect("registry");
     let ctx = ServerContext::new();

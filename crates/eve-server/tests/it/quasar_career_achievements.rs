@@ -304,10 +304,8 @@ async fn test_authentic_career_goals_and_milestones_remediated() {
 #[tokio::test]
 async fn test_authentic_campaign_definitions_remediated() {
     // parity: quasar:eveProto/generated/eve_public/campaign/contributionmethod/definition/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/campaign/trigger/eventmatch/definition/api/requests_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/campaign/contributionmethod/definition/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/campaign/trigger/eventmatch/definition/api/requests_pb2.pyj",
     ]);
 
     let ctx = ServerContext::new();
@@ -348,10 +346,6 @@ async fn test_authentic_campaign_definitions_remediated() {
 #[tokio::test]
 async fn test_authentic_achievements_and_cdn_metadata_remediated() {
     // DATA GAP: Achievement showcase scores, category bucketing, and milestone reward amounts are server-authored CDN Checkpoint data in V24 and not present in res:/staticdata/achievements.static.
-    // parity: quasar:eveProto/generated/eve_public/achievement/api/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/achievement/api/requests_pb2.pyj",
-    ]);
 
     let ctx = std::sync::Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);

@@ -149,19 +149,9 @@ fn make_u32_ident_req(id: u32) -> Vec<u8> {
 async fn test_quasar_achievements_admin_notices_and_queries() {
     // parity: quasar:eveProto/generated/eve_public/achievement/api/admin/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/api/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/achievement/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/achievement/category/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/achievement/reward/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/achievement/showcase/api/requests_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/achievement/api/admin/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/achievement/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/achievement/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/achievement/category/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/achievement/reward/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/achievement/showcase/api/requests_pb2.pyj",
     ]);
 
     let ctx = std::sync::Arc::new(ServerContext::new());
@@ -279,12 +269,8 @@ async fn test_quasar_achievements_admin_notices_and_queries() {
 #[tokio::test]
 async fn test_quasar_career_goals_requests_admin_and_notices() {
     // parity: quasar:eveProto/generated/eve_public/career/goal/api/admin/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/career/goal/api/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/career/goal/api/requests_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/career/goal/api/admin/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/career/goal/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/career/goal/api/requests_pb2.pyj",
     ]);
 
     let ctx = ServerContext::new();
@@ -370,10 +356,6 @@ async fn test_quasar_career_goals_requests_admin_and_notices() {
 
 #[tokio::test]
 async fn test_quasar_ai_assistant_chat_requests() {
-    // parity: quasar:eveProto/generated/eve_public/ai/assistant/chat/api/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/ai/assistant/chat/api/requests_pb2.pyj",
-    ]);
 
     let ctx = ServerContext::new();
     let mut sess = build_sess(&ctx, 51_003, 91_000_003, 98_000_001);
@@ -428,10 +410,6 @@ async fn test_quasar_ai_assistant_chat_requests() {
 
 #[tokio::test]
 async fn test_quasar_campaign_trigger_eventmatch_definitions() {
-    // parity: quasar:eveProto/generated/eve_public/campaign/trigger/eventmatch/definition/api/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/campaign/trigger/eventmatch/definition/api/requests_pb2.pyj",
-    ]);
 
     let ctx = ServerContext::new();
     let mut sess = build_sess(&ctx, 51_004, 91_000_004, 98_000_001);

@@ -170,15 +170,11 @@ fn extract_uuid_from_entry(entry: &DynamicQuasarMessage) -> Vec<u8> {
 
 #[tokio::test]
 async fn test_quasar_cosmetics_market_sde_and_skill_fees() {
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/market/api/api_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/market/component/listing/api/api_pb2.pyj, quasar:eveProto/generated/eve/cosmetic/market/component/listing/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/market/skin/search/search_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/api_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/admin/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/market/transaction/api/notices_pb2.pyj
+    // parity: quasar:eveProto/generated/eve/cosmetic/market/component/listing/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/market/skin/search/search_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/admin/requests_pb2.pyj
     eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/cosmetic/market/api/api_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/cosmetic/market/component/listing/api/api_pb2.pyj",
         "quasar:eveProto/generated/eve/cosmetic/market/component/listing/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/cosmetic/market/skin/search/search_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/api_pb2.pyj",
         "quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/admin/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/cosmetic/market/transaction/api/notices_pb2.pyj",
     ]);
 
     let ctx = ServerContext::new();
@@ -324,12 +320,6 @@ async fn test_quasar_cosmetics_market_sde_and_skill_fees() {
 
 #[tokio::test]
 async fn test_quasar_skinr_sequencing_natural_and_early_completion() {
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/job/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/job/api/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/job/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/job/api/requests_pb2.pyj",
-    ]);
 
     let ctx = ServerContext::new();
     let clock = Arc::new(VirtualServerClock::with_fixed_base(common::TEST_CLOCK_BASE_UNIX));

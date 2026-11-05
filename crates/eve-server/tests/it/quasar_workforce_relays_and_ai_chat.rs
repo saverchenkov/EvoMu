@@ -245,10 +245,6 @@ async fn test_sov_hub_workforce_transit_relay_network() {
 
 #[tokio::test]
 async fn test_skinr_sequencing_job_natural_completion_notice() {
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/job/api/notices_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/job/api/notices_pb2.pyj",
-    ]);
 
     let ctx = ServerContext::new();
     ctx.db.with_mut_snapshot(|snap| {
@@ -375,10 +371,8 @@ async fn test_skinr_sequencing_job_natural_completion_notice() {
 #[tokio::test]
 async fn test_payment_schedule_omega_purchase_and_faction_activity_admin() {
     // parity: quasar:eveProto/generated/eve_public/payment/schedule/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/payment/schedule/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj",
     ]);
 
     let ctx = ServerContext::new();

@@ -91,8 +91,6 @@ fn make_admin_grant_char_and_title(char_id: u32, title_id: u32) -> Vec<u8> {
 
 #[tokio::test]
 async fn test_parity_quasar_achievement_closure() {
-    // parity: feat:quasar.achievement
-    eve_testkit::attest(&["feat:quasar.achievement"]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -189,8 +187,6 @@ async fn test_parity_quasar_achievement_closure() {
 
 #[tokio::test]
 async fn test_parity_quasar_career_closure() {
-    // parity: feat:quasar.career
-    eve_testkit::attest(&["feat:quasar.career"]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -316,8 +312,6 @@ async fn test_parity_quasar_career_closure() {
 
 #[tokio::test]
 async fn test_parity_quasar_cosmetic_closure() {
-    // parity: feat:quasar.cosmetic
-    eve_testkit::attest(&["feat:quasar.cosmetic"]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
