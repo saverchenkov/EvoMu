@@ -1032,3 +1032,7 @@ fn percent_encode_query_component(s: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+#[path = "sso_tests.rs"]
+mod sso_tests;

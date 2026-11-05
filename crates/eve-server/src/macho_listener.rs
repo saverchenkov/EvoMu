@@ -909,3 +909,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
 }
 
 pub use eve_machonet::extract_macho_call_req;
+
+#[cfg(test)]
+#[path = "macho_listener_tests.rs"]
+mod macho_listener_tests;

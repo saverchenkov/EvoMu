@@ -1195,3 +1195,7 @@ pub struct NpcMiningStepResult {
     pub convoy_cargo_units: u64,
     pub hauled_to_station: bool,
 }
+
+#[cfg(test)]
+#[path = "living_world_tests.rs"]
+mod living_world_tests;
