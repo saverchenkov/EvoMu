@@ -748,14 +748,6 @@ async fn seed_ship_in_space(
 
 #[tokio::test]
 async fn test_crimewatch_sec_status_loss_transactions_and_kill_rights() {
-    // parity: feat:crimewatch.sec-status-loss, feat:crimewatch.sec-status-transactions, feat:crimewatch.kill-rights-gain, feat:crimewatch.kill-rights-sell
-    eve_testkit::attest(&[
-        "feat:crimewatch.sec-status-loss",
-        "feat:crimewatch.sec-status-transactions",
-        "feat:crimewatch.kill-rights-gain",
-        "feat:crimewatch.kill-rights-sell",
-    ]);
-
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let aggressor_id = 90_000_001i64;
@@ -950,12 +942,6 @@ async fn test_crimewatch_sec_status_loss_transactions_and_kill_rights() {
 
 #[tokio::test]
 async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
-    // parity: feat:crimewatch.sec-status-gain-caps, feat:crimewatch.sec-tag-tier-bands
-    eve_testkit::attest(&[
-        "feat:crimewatch.sec-status-gain-caps",
-        "feat:crimewatch.sec-tag-tier-bands",
-    ]);
-
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let char_id = 90_000_001i64;

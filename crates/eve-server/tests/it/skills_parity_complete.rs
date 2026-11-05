@@ -557,11 +557,10 @@ fn make_quasar_req(char_id: i64, user_id: i32, role_mask: u64, type_name: &str, 
 
 #[tokio::test]
 async fn test_skills_alpha_5m_cap_direct_purchase_weekly_sp_and_history() {
-    // parity: feat:skills.alpha-5m-training-limit, feat:skills.direct-purchase-inject, feat:skills.omega-weekly-free-sp, feat:skills.skill-history-events
+    // parity: feat:skills.alpha-5m-training-limit, feat:skills.direct-purchase-inject, feat:skills.skill-history-events
     eve_testkit::attest(&[
         "feat:skills.alpha-5m-training-limit",
         "feat:skills.direct-purchase-inject",
-        "feat:skills.omega-weekly-free-sp",
         "feat:skills.skill-history-events",
     ]);
 

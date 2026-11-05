@@ -472,3 +472,5 @@ mod quasar_pirate_sov_store_live;
 mod esi_fw_incursions_and_sovereignty_live;
 mod industry_corp_cosmetics_wallet_live;
 mod industry_corp_cosmetics_wallet_part2_live;
+mod crimewatch_fleet_lifecycle_live;
+mod skills_notify_industry_live;

@@ -167,13 +167,8 @@ async fn gm_pilot_docked(ctx: &ServerContext, sess_id: u64, char_id: i64) -> Ses
     sess
 }
 
-// parity: feat:fleet.boss-handover, feat:fleet.stored-formations-and-warp-shapes
 #[tokio::test]
 async fn test_live_fleet_boss_handover_and_formations() {
-    eve_testkit::attest(&[
-        "feat:fleet.boss-handover",
-        "feat:fleet.stored-formations-and-warp-shapes",
-    ]);
     let ctx = paused_ctx();
     let mut fc = common::gm_pilot_in_space(&ctx, 31, 91_300_001, ARCHON, HIGHSEC).await;
     let mut p2 = common::gm_pilot_in_space(&ctx, 32, 91_300_002, VEXOR, HIGHSEC).await;

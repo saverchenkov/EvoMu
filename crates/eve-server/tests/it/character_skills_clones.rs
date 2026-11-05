@@ -1183,11 +1183,10 @@ async fn test_ch1_ch2_effective_attributes_catchup_and_2arg_free_sp() {
 
 #[tokio::test]
 async fn test_skills_alpha_cap_direct_purchase_omega_sp_and_history() {
-    // parity: feat:skills.alpha-5m-training-limit, feat:skills.direct-purchase-inject, feat:skills.omega-weekly-free-sp, feat:skills.skill-history-events
+    // parity: feat:skills.alpha-5m-training-limit, feat:skills.direct-purchase-inject, feat:skills.skill-history-events
     eve_testkit::attest(&[
         "feat:skills.alpha-5m-training-limit",
         "feat:skills.direct-purchase-inject",
-        "feat:skills.omega-weekly-free-sp",
         "feat:skills.skill-history-events",
     ]);
 

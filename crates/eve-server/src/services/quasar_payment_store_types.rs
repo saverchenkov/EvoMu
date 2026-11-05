@@ -935,6 +935,31 @@ pub fn register_plex_vault_extra_handlers(router: &PublicGatewayRouter, db: Arc<
                 },
                 _ => 0,
             };
+            let parse_dyn_u32 = |v: &DynamicValue| -> Option<u32> {
+                match v {
+                    DynamicValue::Uint32(n) => Some(*n),
+                    DynamicValue::Uint64(n) => Some(*n as u32),
+                    DynamicValue::Int32(n) if *n > 0 => Some(*n as u32),
+                    DynamicValue::Int64(n) if *n > 0 => Some(*n as u32),
+                    DynamicValue::Message(m) => match m.get(1) {
+                        Some(DynamicValue::Uint32(n)) => Some(*n),
+                        Some(DynamicValue::Uint64(n)) => Some(*n as u32),
+                        Some(DynamicValue::Int32(n)) if *n > 0 => Some(*n as u32),
+                        Some(DynamicValue::Int64(n)) if *n > 0 => Some(*n as u32),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            };
+            let quantity = attrs
+                .get(2)
+                .and_then(|v| match v {
+                    DynamicValue::Message(item) => item.get(2).and_then(parse_dyn_u32),
+                    _ => None,
+                })
+                .or_else(|| attrs.get(3).and_then(parse_dyn_u32))
+                .filter(|&q| q > 0)
+                .unwrap_or(1);
             let id = db_adm_prod.with_mut_snapshot(|snap| {
                 let mut catalog = read_store_catalog(snap);
                 let next_id = catalog.products.iter().map(|p| p.id).max().unwrap_or(100) + 1;
@@ -943,7 +968,7 @@ pub fn register_plex_vault_extra_handlers(router: &PublicGatewayRouter, db: Arc<
                     name: name.clone(),
                     description: name,
                     type_id,
-                    quantity: 1,
+                    quantity,
                 });
                 save_store_catalog(snap, &catalog);
                 next_id
@@ -1011,47 +1036,90 @@ pub fn register_plex_vault_extra_handlers(router: &PublicGatewayRouter, db: Arc<
                 _ => (None, None),
             };
             let tags: Vec<String> = match attrs.get(16) {
+                Some(DynamicValue::String(s)) if !s.trim().is_empty() => {
+                    vec![s.trim().to_string()]
+                }
                 Some(DynamicValue::Repeated(list)) => list
                     .iter()
                     .filter_map(|v| match v {
-                        DynamicValue::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+                        DynamicValue::String(s) if !s.trim().is_empty() => {
+                            Some(s.trim().to_string())
+                        }
                         _ => None,
                     })
                     .collect(),
                 _ => Vec::new(),
             };
+            fn parse_proto_varint_field1(mut bytes: &[u8]) -> Option<u32> {
+                if bytes.len() < 2 || bytes[0] != 0x08 {
+                    return None;
+                }
+                bytes = &bytes[1..];
+                let mut val = 0_u64;
+                let mut shift = 0_u32;
+                for &b in bytes {
+                    val |= u64::from(b & 0x7f) << shift;
+                    if b & 0x80 == 0 {
+                        return u32::try_from(val).ok().filter(|&v| v > 0);
+                    }
+                    shift = shift.saturating_add(7);
+                    if shift >= 64 {
+                        break;
+                    }
+                }
+                None
+            }
+            fn parse_nested_proto_varint_field1(bytes: &[u8]) -> Option<u32> {
+                if bytes.len() >= 4 && bytes[0] == 0x0a {
+                    let len = usize::from(bytes[1]);
+                    if bytes.len() >= 2 + len {
+                        return parse_proto_varint_field1(&bytes[2..2 + len]);
+                    }
+                }
+                parse_proto_varint_field1(bytes)
+            }
+            let extract_cat_id = |v: &DynamicValue| -> Option<u32> {
+                match v {
+                    DynamicValue::Message(m) => match m.get(1) {
+                        Some(DynamicValue::Uint32(u)) => Some(*u),
+                        Some(DynamicValue::Uint64(u)) => Some(*u as u32),
+                        Some(DynamicValue::Int32(i)) if *i > 0 => Some(*i as u32),
+                        Some(DynamicValue::Int64(i)) if *i > 0 => Some(*i as u32),
+                        _ => None,
+                    },
+                    DynamicValue::String(s) => parse_proto_varint_field1(s.as_bytes()),
+                    DynamicValue::Bytes(b) => parse_proto_varint_field1(b),
+                    _ => None,
+                }
+            };
             let category_id = match attrs.get(17) {
-                Some(DynamicValue::Repeated(list)) => list
-                    .first()
-                    .and_then(|v| match v {
-                        DynamicValue::Message(m) => match m.get(1) {
+                Some(DynamicValue::Repeated(list)) => list.first().and_then(extract_cat_id).unwrap_or(1),
+                Some(single) => extract_cat_id(single).unwrap_or(1),
+                None => 1,
+            };
+            let extract_prod_id = |v: &DynamicValue| -> Option<u32> {
+                match v {
+                    DynamicValue::Message(pm) => match pm.get(1) {
+                        Some(DynamicValue::Message(pid)) => match pid.get(1) {
                             Some(DynamicValue::Uint32(u)) => Some(*u),
                             Some(DynamicValue::Uint64(u)) => Some(*u as u32),
                             Some(DynamicValue::Int32(i)) if *i > 0 => Some(*i as u32),
+                            Some(DynamicValue::Int64(i)) if *i > 0 => Some(*i as u32),
                             _ => None,
                         },
+                        Some(DynamicValue::String(s)) => parse_proto_varint_field1(s.as_bytes()),
+                        Some(DynamicValue::Bytes(b)) => parse_proto_varint_field1(b),
                         _ => None,
-                    })
-                    .unwrap_or(1),
-                _ => 1,
+                    },
+                    DynamicValue::String(s) => parse_nested_proto_varint_field1(s.as_bytes()),
+                    DynamicValue::Bytes(b) => parse_nested_proto_varint_field1(b),
+                    _ => None,
+                }
             };
             let product_ids: Vec<u32> = match attrs.get(18) {
-                Some(DynamicValue::Repeated(list)) => list
-                    .iter()
-                    .filter_map(|v| match v {
-                        DynamicValue::Message(pm) => match pm.get(1) {
-                            Some(DynamicValue::Message(pid)) => match pid.get(1) {
-                                Some(DynamicValue::Uint32(u)) => Some(*u),
-                                Some(DynamicValue::Uint64(u)) => Some(*u as u32),
-                                Some(DynamicValue::Int32(i)) if *i > 0 => Some(*i as u32),
-                                _ => None,
-                            },
-                            _ => None,
-                        },
-                        _ => None,
-                    })
-                    .collect(),
-                _ => Vec::new(),
+                Some(DynamicValue::Repeated(list)) => list.iter().filter_map(extract_prod_id).collect(),
+                Some(single) => extract_prod_id(single).into_iter().collect(),
+                None => Vec::new(),
             };
             let id = db_adm_off.with_mut_snapshot(|snap| {
                 let mut catalog = read_store_catalog(snap);

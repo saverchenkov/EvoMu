@@ -1011,6 +1011,9 @@ pub async fn handle(
                 ctx.release_user_bindings(uid);
                 if let Some(ref s) = kicked_sess {
                     ctx.disconnect_session(s.session_id, "SessionKicked", reason);
+                    if let Some(kicked_cid) = s.character_id {
+                        crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(ctx, kicked_cid);
+                    }
                 }
                 Some(Ok(PyRep::keyval([
                     ("command", PyRep::String(cmd.to_string())),
@@ -1246,28 +1249,34 @@ pub async fn handle(
                     })),
                 };
 
-                if old_sys_id != dest_sys_id && ship_id > 0 {
+                if ship_id > 0 {
                     let old_handle = ctx.systems.get_or_spawn(old_sys_id);
-                    let existing_ball = old_handle.remove_ball(ship_id).await;
+                    let existing_ball = if old_sys_id != dest_sys_id {
+                        old_handle.remove_ball(ship_id).await
+                    } else {
+                        old_handle.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b)
+                    };
                     let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
-                    let ship_tid = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(587);
-                    let mut new_ball = existing_ball.unwrap_or(Ball {
-                        id: ship_id,
-                        type_id: ship_tid,
-                        position: DVec3::ZERO,
-                        velocity: DVec3::ZERO,
-                        max_velocity: 300.0,
-                        inertia: 0.5,
-                        mass: 1_000_000.0,
-                        radius: 50.0,
-                        speed_fraction: 0.0,
-                        mode: MovementMode::Stop,
-                    });
-                    new_ball.position = DVec3::new(10_000.0, 0.0, 0.0);
-                    new_ball.velocity = DVec3::ZERO;
-                    let combat_state = ctx.build_ship_combat_state(cid, ship_id, new_ball.type_id);
-                    let slim_meta = ctx.build_ship_slim_meta(cid, new_ball.type_id);
-                    let _ = new_handle.spawn_ball_with_meta(new_ball, combat_state, slim_meta).await;
+                    if old_sys_id != dest_sys_id || existing_ball.is_none() {
+                        let ship_tid = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(587);
+                        let mut new_ball = existing_ball.unwrap_or(Ball {
+                            id: ship_id,
+                            type_id: ship_tid,
+                            position: DVec3::ZERO,
+                            velocity: DVec3::ZERO,
+                            max_velocity: 300.0,
+                            inertia: 0.5,
+                            mass: 1_000_000.0,
+                            radius: 50.0,
+                            speed_fraction: 0.0,
+                            mode: MovementMode::Stop,
+                        });
+                        new_ball.position = DVec3::new(10_000.0, 0.0, 0.0);
+                        new_ball.velocity = DVec3::ZERO;
+                        let combat_state = ctx.build_ship_combat_state(cid, ship_id, new_ball.type_id);
+                        let slim_meta = ctx.build_ship_slim_meta(cid, new_ball.type_id);
+                        let _ = new_handle.spawn_ball_with_meta(new_ball, combat_state, slim_meta).await;
+                    }
                 }
 
                 session.solar_system_id = Some(dest_sys_id);

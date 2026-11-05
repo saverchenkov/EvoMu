@@ -71,10 +71,36 @@ pub(crate) fn formation_name(formation_id: i64) -> &'static str {
         1 => "Plane",
         2 => "Sphere",
         3 => "Arrow",
-        4 => "Wall",
+        4 => "Diamond",
         5 => "Relative",
         _ => "Point",
     }
+}
+
+fn parse_formation_input(args: &[PyRep], kwargs: &HashMap<String, PyRep>) -> (i64, &'static str) {
+    let str_arg = args
+        .first()
+        .and_then(|a| a.as_str())
+        .or_else(|| kwargs.get("formationName").or_else(|| kwargs.get("formation")).and_then(|a| a.as_str()));
+    if let Some(s) = str_arg {
+        return match s.trim().to_ascii_lowercase().as_str() {
+            "point" | "point_formation" => (0, "Point"),
+            "wall" | "wall_formation" => (1, "Wall"),
+            "plane" | "plane_formation" => (1, "Plane"),
+            "sphere" | "sphere_formation" => (2, "Sphere"),
+            "arrow" | "arrow_formation" => (3, "Arrow"),
+            "diamond" | "diamond_formation" => (4, "Diamond"),
+            "relative" | "relative_formation" => (5, "Relative"),
+            _ => (0, "Point"),
+        };
+    }
+    let fid = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .or_else(|| kwargs.get("formationID").or_else(|| kwargs.get("formation")).and_then(|a| a.as_i64()))
+        .unwrap_or(0)
+        .clamp(0, 5);
+    (fid, formation_name(fid))
 }
 
 async fn resolve_ship_hp_ratios(ctx: &ServerContext, target_char_id: i64) -> (Option<i64>, f64, f64, f64) {
@@ -1006,7 +1032,7 @@ pub(super) async fn handle_finder_and_tactical(
             // parity: feat:fleet.stored-formations-and-warp-shapes
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             ensure_fleet_formations_loaded(ctx);
-            let formation_id = args.first().and_then(|a| a.as_i64()).or_else(|| kwargs.get("formationID").and_then(|a| a.as_i64())).unwrap_or(0).clamp(0, 5);
+            let (formation_id, resolved_name) = parse_formation_input(args, kwargs);
             let default_spacing = match formation_id { 1 | 3 | 4 => 5_000.0, 2 => 10_000.0, _ => 0.0 };
             let spacing = args.get(1).and_then(|a| a.as_f64()).or_else(|| kwargs.get("formationSpacing").and_then(|a| a.as_f64())).unwrap_or(default_spacing).clamp(0.0, 100_000.0);
             let size = args.get(2).and_then(|a| a.as_f64()).or_else(|| kwargs.get("formationSize").and_then(|a| a.as_f64())).unwrap_or(spacing.max(10_000.0)).clamp(0.0, 100_000.0);
@@ -1015,7 +1041,7 @@ pub(super) async fn handle_finder_and_tactical(
             ctx.notify(NotificationTarget::Character(char_id), "OnFleetFormationWndChanged", "charid", vec![]);
             Some(Ok(PyRep::keyval([
                 ("formationID", PyRep::Integer(formation_id)),
-                ("formationName", PyRep::String(formation_name(formation_id).into())),
+                ("formationName", PyRep::String(resolved_name.into())),
                 ("formationSpacing", PyRep::Real(spacing)),
                 ("formationSize", PyRep::Real(size)),
             ])))

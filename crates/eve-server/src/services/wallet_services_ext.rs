@@ -308,9 +308,12 @@ pub fn handle(
                 None => 1,
             };
 
-            let catalog = ctx
-                .db
-                .with_snapshot(crate::services::quasar_payment_store::read_store_catalog);
+            let (catalog, offer_tags) = ctx.db.with_snapshot(|snap| {
+                (
+                    crate::services::quasar_payment_store::read_store_catalog(snap),
+                    crate::services::quasar_payment_store::read_store_offer_tags(snap),
+                )
+            });
             let offer = match catalog.offers.iter().find(|o| o.id as i64 == offer_id) {
                 Some(o) => o.clone(),
                 None => {
@@ -325,6 +328,28 @@ pub fn handle(
                     "TargetedOfferNotEligible",
                     format!("Character {char_id} is not eligible for targeted offer {offer_id}"),
                 )));
+            }
+            let has_omega_weekly_tag = offer_tags.get(&offer.id).is_some_and(|tags| {
+                tags.iter().any(|t| {
+                    let lc = t.to_ascii_lowercase();
+                    lc == "omega-weekly-free-sp" || lc == "omega-weekly"
+                })
+            });
+            let free_sp_from_products: i64 = catalog
+                .products
+                .iter()
+                .filter(|p| offer.product_ids.contains(&p.id) && p.type_id == 0 && p.quantity > 1)
+                .map(|p| i64::from(p.quantity))
+                .sum();
+            if offer.price_plex == 0 && (has_omega_weekly_tag || free_sp_from_products > 0) {
+                let sp_grant = if free_sp_from_products > 0 { free_sp_from_products } else { 15_000 };
+                return Some(super::character_skill_ops::handle_omega_weekly_free_sp_offer(
+                    ctx,
+                    session,
+                    offer_id,
+                    sp_grant,
+                    method == "buy_offer",
+                ));
             }
             let total_plex = offer.price_plex.saturating_mul(qty);
             if method == "can_purchase_offer" {

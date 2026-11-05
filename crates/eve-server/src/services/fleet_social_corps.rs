@@ -1236,8 +1236,10 @@ pub(super) fn handle_corps(
             Some(Ok(PyRep::Bool(can_kick)))
         }
 
+        ("corpRegistry", "ResignFromCorp")
+        | ("corpmgr", "ResignFromCorp")
         // rpc-lint: allow alias for corp quit cleanup
-        ("corpRegistry", "LeaveCorporation")
+        | ("corpRegistry", "LeaveCorporation")
         | ("corpRegistry", "KickOutMember")
         | ("corpRegistry", "KickOutMembers") => {
             super::fleet_social_persistence::handle_kick_out_members(ctx, session, args)

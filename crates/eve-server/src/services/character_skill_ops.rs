@@ -125,7 +125,7 @@ pub fn handle(
                 .or_else(|| kwargs.get("offer_id").or_else(|| kwargs.get("offerID")).and_then(|v| v.as_i64()))
                 .unwrap_or(0);
             if offer_id == 1005 {
-                Some(handle_omega_weekly_free_sp(ctx, session, method == "buy_offer"))
+                Some(handle_omega_weekly_free_sp_offer(ctx, session, 1005, 15_000, method == "buy_offer"))
             } else {
                 None
             }
@@ -325,9 +325,11 @@ fn current_tuesday_downtime_week_id(now_unix: u64) -> u64 {
     now_unix.saturating_add(604_800 - 471_600) / 604_800
 }
 
-fn handle_omega_weekly_free_sp(
+pub(crate) fn handle_omega_weekly_free_sp_offer(
     ctx: &ServerContext,
     session: &mut SessionState,
+    offer_id: i64,
+    sp_grant: i64,
     is_buy: bool,
 ) -> Result<PyRep, BridgeRpcError> {
     let (user_id, char_id) = ServerContext::require_character(session)?;
@@ -354,6 +356,7 @@ fn handle_omega_weekly_free_sp(
         return Ok(PyRep::Bool(can_claim));
     }
 
+    let grant = sp_grant.max(1);
     let new_free_sp = ctx.db.try_with_mut_snapshot(|snap| {
         let exp_opt = super::account_services::subscription_expiry_for_user(snap, user_id);
         let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
@@ -364,7 +367,7 @@ fn handle_omega_weekly_free_sp(
         if !is_omega {
             return Err(BridgeRpcError {
                 code: "OmegaRequired".into(),
-                message: "Omega clone state is required to claim the weekly free 15,000 SP offer".into(),
+                message: "Omega clone state is required to claim the weekly free SP offer".into(),
             });
         }
         let last_week = snap
@@ -374,10 +377,10 @@ fn handle_omega_weekly_free_sp(
         if last_week == Some(week_id) {
             return Err(BridgeRpcError {
                 code: "WeeklyOfferAlreadyClaimed".into(),
-                message: "Weekly free 15,000 SP offer has already been claimed this week".into(),
+                message: "Weekly free SP offer has already been claimed this week".into(),
             });
         }
-        ch.free_skill_points += 15_000.0;
+        ch.free_skill_points += grant as f64;
         let updated_sp = ch.free_skill_points;
         snap.service_state_blobs
             .insert(blob_key, week_id.to_string());
@@ -391,8 +394,8 @@ fn handle_omega_weekly_free_sp(
         vec![PyRep::Real(new_free_sp)],
     );
     Ok(PyRep::keyval([
-        ("offerID", PyRep::Integer(1005)),
-        ("freeSkillPointsGranted", PyRep::Integer(15_000)),
+        ("offerID", PyRep::Integer(offer_id)),
+        ("freeSkillPointsGranted", PyRep::Integer(grant)),
         ("freeSkillPoints", PyRep::Real(new_free_sp)),
     ]))
 }

@@ -171,11 +171,8 @@ async fn test_live_serverops_time_dilation_and_node_balancing() {
     let _ = rebalance_overloaded_worker_nodes(&ctx);
 }
 
-// parity: feat:lifecycle.industry-pause-and-many
 #[tokio::test]
 async fn test_live_industry_pause_resume_and_batch_complete() {
-    eve_testkit::attest(&["feat:lifecycle.industry-pause-and-many"]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     seed_full_market_catalog(&ctx.db, &ctx.sde);

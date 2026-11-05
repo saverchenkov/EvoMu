@@ -59,7 +59,6 @@ fn spawn_ship(ctx: &ServerContext, owner_id: i64, sys_id: u32, type_id: u32, _po
 
 #[tokio::test]
 async fn test_crimewatch_sec_status_loss_and_kill_rights_lifecycle_e2e() {
-    // parity: feat:crimewatch.sec-status-loss, feat:crimewatch.kill-rights-gain, feat:crimewatch.kill-rights-sell, feat:crimewatch.sec-status-transactions
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let now = ctx.now_unix();
@@ -429,7 +428,6 @@ async fn test_crimewatch_sec_status_loss_and_kill_rights_lifecycle_e2e() {
 
 #[tokio::test]
 async fn test_crimewatch_npc_sec_gain_caps_intervals_and_tag_bands_e2e() {
-    // parity: feat:crimewatch.sec-status-gain-caps, feat:crimewatch.sec-tag-tier-bands, feat:crimewatch.sec-status-transactions
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let _now = ctx.now_unix();

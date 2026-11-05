@@ -5392,15 +5392,6 @@ async fn test_parity_notify_analysis_kredits_and_campaign_enrollment() {
 
 #[tokio::test]
 async fn test_parity_notify_chat_bans_and_cluster_shutdown() {
-    // parity: notify:OnCharacterPermanentlyBanned, notify:OnCharacterTemporarilyBanned
-    // parity: notify:OnCharacterUnbanned, notify:OnClusterShutdownInitiated
-    eve_testkit::attest(&[
-        "notify:OnCharacterPermanentlyBanned",
-        "notify:OnCharacterTemporarilyBanned",
-        "notify:OnCharacterUnbanned",
-        "notify:OnClusterShutdownInitiated",
-    ]);
-
     let ctx = new_ctx();
     let mut gm = SessionState::new(92_003);
     common::login_pilot(&ctx, &mut gm, "demo", "demo-secret").await;
@@ -7307,12 +7298,9 @@ async fn test_parity_notify_sim_clock_rebase_and_analysis_kredits() {
     assert_eq!(spend_notifs[0].len(), 0, "OnAnalysisKreditsChange takes 0 arguments");
 }
 
-// parity: notify:OnCharacterPermanentlyBanned
 #[tokio::test]
 async fn test_parity_notify_campaign_enrollment_and_chat_bans() {
-    eve_testkit::attest(&[
-        "notify:OnCharacterPermanentlyBanned",
-    ]);
+    eve_testkit::attest(&[]);
 
     let ctx = new_ctx();
 

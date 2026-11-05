@@ -1274,6 +1274,30 @@ pub async fn handle_gm_slash_ext(
         let st = crate::services::character_energy::set_character_energy(ctx, target_cid, energy_val);
         return Some(Ok(crate::services::character_energy::energy_to_keyval(&st)));
     }
+    if let Some(rest) = cmd.strip_prefix("/secstatus ") {
+        let parts: Vec<&str> = rest.split_whitespace().collect();
+        let (target_cid, new_sec) = match parts.as_slice() {
+            [val_s] => (Some(cid), val_s.parse::<f64>().ok()),
+            [cid_s, val_s] => (cid_s.parse::<i64>().ok(), val_s.parse::<f64>().ok()),
+            _ => (None, None),
+        };
+        let (Some(target_cid), Some(sec_val)) = (target_cid.filter(|&id| id > 0), new_sec.filter(|v| v.is_finite())) else {
+            return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /secstatus [char_id] <value>".into() }));
+        };
+        let clamped = sec_val.clamp(-10.0, 10.0);
+        let updated = ctx.db.with_mut_snapshot(|snap| {
+            let Some(ch) = snap.characters.get_mut(&target_cid) else {
+                return false;
+            };
+            ch.security_status = clamped;
+            true
+        });
+        if !updated {
+            return Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {target_cid} not found") }));
+        }
+        ctx.notify(crate::router::NotificationTarget::Character(target_cid), "OnSecurityStatusUpdate", "charid", vec![PyRep::Real(clamped)]);
+        return Some(Ok(PyRep::Real(clamped)));
+    }
 
     if let Some(res) = crate::services::notify_emitters_character_services::handle_batch3_gm_slash_cmd(ctx, cid, session.solar_system_id, cmd) {
         return Some(res);

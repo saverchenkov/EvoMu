@@ -252,12 +252,6 @@ async fn warp_to_item_and_stop(ctx: &ServerContext, sess: &mut SessionState, sys
 
 #[tokio::test]
 async fn test_illegal_pvp_sec_status_loss_formula_and_kill_rights_gain() {
-    // parity: feat:crimewatch.sec-status-loss
-    // parity: feat:crimewatch.kill-rights-gain
-    eve_testkit::attest(&[
-        "feat:crimewatch.sec-status-loss",
-        "feat:crimewatch.kill-rights-gain",
-    ]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let mut gm = setup_gm_session(&ctx, 91_001).await;
@@ -355,8 +349,6 @@ async fn test_illegal_pvp_sec_status_loss_formula_and_kill_rights_gain() {
 
 #[tokio::test]
 async fn test_kill_rights_trading_and_activation() {
-    // parity: feat:crimewatch.kill-rights-sell
-    eve_testkit::attest(&["feat:crimewatch.kill-rights-sell"]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let mut gm = setup_gm_session(&ctx, 92_001).await;
@@ -443,14 +435,6 @@ async fn test_kill_rights_trading_and_activation() {
 
 #[tokio::test]
 async fn test_security_status_gain_caps_tag_bands_and_transactions() {
-    // parity: feat:crimewatch.sec-tag-tier-bands
-    // parity: feat:crimewatch.sec-status-gain-caps
-    // parity: feat:crimewatch.sec-status-transactions
-    eve_testkit::attest(&[
-        "feat:crimewatch.sec-tag-tier-bands",
-        "feat:crimewatch.sec-status-gain-caps",
-        "feat:crimewatch.sec-status-transactions",
-    ]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let mut gm = setup_gm_session(&ctx, 93_001).await;

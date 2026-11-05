@@ -118,7 +118,6 @@ async fn test_anchor_restrictions() {
 
 #[tokio::test]
 async fn test_omega_weekly_free_sp() {
-    eve_testkit::attest(&["feat:skills.omega-weekly-free-sp"]);
     let ctx = ServerContext::new();
     let p = common::gm_pilot_in_space(&ctx, 4, P1, 606, 30_000_142).await;
     let mut s = p.sess.clone();

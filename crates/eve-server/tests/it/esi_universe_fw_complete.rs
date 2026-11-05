@@ -1048,7 +1048,6 @@ fn spawn_ship(
 
 #[tokio::test]
 async fn test_crimewatch_kill_rights_gain_and_sell_closure() {
-    // parity: feat:crimewatch.kill-rights-gain, feat:crimewatch.kill-rights-sell
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let now = ctx.now_unix();
@@ -1349,7 +1348,6 @@ async fn test_crimewatch_kill_rights_gain_and_sell_closure() {
 
 #[tokio::test]
 async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions_closure() {
-    // parity: feat:crimewatch.sec-status-loss, feat:crimewatch.sec-status-gain-caps, feat:crimewatch.sec-status-transactions, feat:crimewatch.sec-tag-tier-bands
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let now = ctx.now_unix();
