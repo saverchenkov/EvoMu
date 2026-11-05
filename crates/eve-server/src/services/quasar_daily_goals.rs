@@ -557,6 +557,16 @@ impl DailyGoalManager {
             };
             ch.balance = new_bal;
             ch.free_skill_points += sp;
+
+            // AIR Daily Goals: Each goal grants 500 EverMarks to character, duplicated to character's corp
+            let char_corp = ch.corporation_id;
+            let em_cur = ch.loyalty_points.entry(1_000_419).or_insert(0);
+            *em_cur = em_cur.saturating_add(500);
+            if char_corp > 0 {
+                let corp_em = snap.corp_lp_balances.entry((char_corp, 1_000_419)).or_insert(0);
+                *corp_em = corp_em.saturating_add(500);
+            }
+
             snap.append_journal(
                 character_id as i64,
                 "DailyGoalReward",
@@ -671,6 +681,19 @@ impl DailyGoalManager {
                             g.completed_at_unix = Some(now_unix);
                             found = Some(Ok(g.clone()));
                         }
+                        let num_completed_regular = goals
+                            .iter()
+                            .filter(|goal| goal.template.category != 6 && goal.completed && !goal.expired)
+                            .count() as u64;
+                        for bonus in goals.iter_mut() {
+                            if bonus.template.category == 6 && !bonus.completed && !bonus.expired {
+                                bonus.current_progress = num_completed_regular;
+                                if bonus.current_progress >= bonus.template.target {
+                                    bonus.completed = true;
+                                    bonus.completed_at_unix = Some(now_unix);
+                                }
+                            }
+                        }
                         break;
                     }
                 }
@@ -738,6 +761,25 @@ impl DailyGoalManager {
                     }
                     let just_completed = !prev && g.completed;
                     progressed.push((g.uuid, g.current_progress, just_completed));
+                }
+            }
+
+            let num_completed_regular = goals
+                .iter()
+                .filter(|g| g.template.category != 6 && g.completed && !g.expired)
+                .count() as u64;
+            for g in goals.iter_mut() {
+                if g.template.category == 6 && !g.completed && !g.expired {
+                    let prev = g.completed;
+                    g.current_progress = num_completed_regular;
+                    if g.current_progress >= g.template.target {
+                        g.completed = true;
+                        g.completed_at_unix = Some(now_unix);
+                    }
+                    let just_completed = !prev && g.completed;
+                    if g.current_progress > 0 {
+                        progressed.push((g.uuid, g.current_progress, just_completed));
+                    }
                 }
             }
         }

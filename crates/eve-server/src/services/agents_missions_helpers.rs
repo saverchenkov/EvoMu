@@ -268,7 +268,14 @@ pub fn compute_character_mission_rewards(
         .map(|s| s.security_status)
         .unwrap_or(1.0);
 
-    let (is_alpha, neg_lvl, offered_lvl) =
+    let conn_skill_id = match agent_info.map(|a| a.division_id) {
+        Some(22) => Some(3893), // Distribution Connections
+        Some(23) => Some(3894), // Mining Connections
+        Some(24 | 20 | 21 | 25..=28) => Some(3895), // Security Connections
+        _ => None,
+    };
+
+    let (is_alpha, neg_lvl, conn_lvl, offered_lvl) =
         ctx.db.with_snapshot(|snap| {
             let alpha = snap
                 .characters
@@ -276,11 +283,11 @@ pub fn compute_character_mission_rewards(
                 .is_some_and(|c| c.clone_grade <= 1);
             let sk = snap.skills.get(&char_id);
             let neg = sk.and_then(|m| m.get(&3356)).map_or(0, |s| s.level);
-            
-            
-            
+            let conn = conn_skill_id
+                .and_then(|sid| sk.and_then(|m| m.get(&sid)))
+                .map_or(0, |s| s.level);
             let olvl = load_mission_meta(snap, char_id, mission_id).and_then(|m| m.offered_level);
-            (alpha, neg, olvl)
+            (alpha, neg, conn, olvl)
         });
 
     let min_level_lp = i64::from(offered_lvl.unwrap_or(1).max(1)) * 100;
@@ -292,10 +299,10 @@ pub fn compute_character_mission_rewards(
         }
     });
 
-
     // LP reward = base LP x (1.6288 - true_sec) x (1 + 0.1 x matching division Connections skill)
     let sec_factor = (1.6288 - true_sec).max(0.01);
-    let lp_reward = ((base_lp as f64) * sec_factor).round() as i64;
+    let conn_factor = 1.0 + 0.10 * (conn_lvl.min(5) as f64);
+    let lp_reward = ((base_lp as f64) * sec_factor * conn_factor).round() as i64;
 
     // DERIVED: Formulaic mission reward calculation (base ISK = base LP * 1000)
     // ISK reward = base ISK x (1 + 0.05 x Negotiation level)

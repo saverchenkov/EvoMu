@@ -450,3 +450,4 @@ mod structures_defense_cyno_wh_decay_live;
 mod structures_anchor_repair_profiles_live;
 mod mining_operations_phased_fields_live;
 mod fw_insurgency_campaign_lifecycle_live;
+mod pve_daily_goals_login_air_live;

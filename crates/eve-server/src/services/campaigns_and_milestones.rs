@@ -405,6 +405,16 @@ pub async fn handle(
     }
 }
 
+/// Returns the current EVE downtime day index (turnover at 11:00 UTC = 39,600s past midnight).
+pub fn eve_downtime_day_bucket(now_unix: u64) -> u64 {
+    let downtime_offset_secs: u64 = 11 * 3600;
+    if now_unix >= downtime_offset_secs {
+        (now_unix - downtime_offset_secs) / 86_400
+    } else {
+        now_unix / 86_400
+    }
+}
+
 fn handle_login_campaign_get_state(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -416,7 +426,7 @@ fn handle_login_campaign_get_state(
         return Ok(PyRep::None);
     };
 
-    let today = ctx.now_unix() / 86_400;
+    let today = eve_downtime_day_bucket(ctx.now_unix());
     let campaigns = get_sde_login_campaigns(&ctx.sde);
 
     ctx.db.with_snapshot(|snap| {
@@ -510,7 +520,7 @@ fn handle_login_campaign_claim_reward(
 ) -> Result<PyRep, BridgeRpcError> {
     let (uid, char_id) = ServerContext::require_character(session)?;
     let now = ctx.now_unix();
-    let today = now / 86_400;
+    let today = eve_downtime_day_bucket(now);
     let campaigns = get_sde_login_campaigns(&ctx.sde);
     let sess_docked = session.station_id.or(session.structure_id);
 
