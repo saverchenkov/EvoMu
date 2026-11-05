@@ -1103,3 +1103,8 @@ fn _keep_extract_col_defs_ref() {
     let _ = extract_dbrow_col_defs;
 }
 
+#[cfg(test)]
+#[path = "marshal_unit_tests.rs"]
+mod marshal_unit_tests;
+
+

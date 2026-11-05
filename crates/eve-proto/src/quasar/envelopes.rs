@@ -1252,3 +1252,8 @@ impl QuasarMessage for InternalGatewayResponse {
         Ok(res)
     }
 }
+
+#[cfg(test)]
+#[path = "envelopes_unit_tests.rs"]
+mod envelopes_unit_tests;
+

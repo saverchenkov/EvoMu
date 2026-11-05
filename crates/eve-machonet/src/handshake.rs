@@ -1289,3 +1289,8 @@ impl MachoHandshakeStateMachine {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "handshake_unit_tests.rs"]
+mod handshake_unit_tests;
+

@@ -1047,3 +1047,8 @@ impl QuasarDescriptorRegistry {
         out
     }
 }
+
+#[cfg(test)]
+#[path = "registry_unit_tests.rs"]
+mod registry_unit_tests;
+

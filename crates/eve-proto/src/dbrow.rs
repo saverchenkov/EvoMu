@@ -928,3 +928,8 @@ pub fn try_unpack_packed_row_columns(
         .map(|(_, name, val)| (name, val))
         .collect())
 }
+
+#[cfg(test)]
+#[path = "dbrow_unit_tests.rs"]
+mod dbrow_unit_tests;
+

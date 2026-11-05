@@ -1180,3 +1180,7 @@ mod tests {
         assert!(s1.has_gm_role());
     }
 }
+
+#[cfg(test)]
+mod lib_unit_tests;
+

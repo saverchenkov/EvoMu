@@ -162,3 +162,8 @@ pub fn decode_envelope(bytes: &[u8]) -> Result<QuasarGatewayEnvelope, ProtoError
         payload,
     })
 }
+
+#[cfg(test)]
+#[path = "quasar_wire_unit_tests.rs"]
+mod quasar_wire_unit_tests;
+
