@@ -269,6 +269,19 @@ mod quasar_cosmetics_market_extra_unit_tests;
 mod quasar_cosmetics_skinr_extra_unit_tests;
 #[cfg(test)]
 mod quasar_skills_clones_extra_unit_tests;
+#[cfg(test)]
+mod pve_dungeon_runtime_rpc_extra_unit_tests;
+#[cfg(test)]
+mod fitting_saved_multifit_extra_unit_tests;
+#[cfg(test)]
+mod combat_wrecks_killmails_extra_unit_tests;
+#[cfg(test)]
+mod industry_jobs_extra_unit_tests;
+#[cfg(test)]
+mod character_clones_implants_extra_unit_tests;
+#[cfg(test)]
+mod pve_incursion_sites_extra_unit_tests;
+
 
 mod fw_gameplay_extra_unit_tests;
 #[cfg(test)]
