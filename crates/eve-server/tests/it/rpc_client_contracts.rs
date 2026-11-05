@@ -252,6 +252,7 @@ fn seed_comprehensive_world(ctx: &ServerContext) {
                 status: "Active".into(),
                 duration_seconds: 3600,
                 start_unix: now.saturating_sub(7200),
+                ..Default::default()
             },
         );
         snap.planetary_colonies.insert(

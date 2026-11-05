@@ -5042,7 +5042,7 @@ pub(crate) mod esi_corp_mining_customs_offices {
         handle.abort();
 
         // Reload from SQLite and verify persistence over live HTTP
-        let ctx2 = Arc::new(crate::session_logoff_and_cluster_tick::persist_and_reopen_sqlite(&ctx, "esi_b2_corp_mining_poco"));
+        let ctx2 = Arc::new(crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "esi_b2_corp_mining_poco"));
         let (addr2, _router2, handle2) = EsiServer::spawn(Arc::clone(&ctx2), "127.0.0.1:0").await.expect("spawn ESI 2");
         let tok_dir2 = issue_token_with_scopes(&ctx2, ceo_id, vec!["esi-industry.read_corporation_mining.v1", "esi-planets.read_customs_offices.v1"]);
         let exts2 = http_get_json(addr2, &spec, &ext_path, Some(&tok_dir2)).await;
@@ -5180,7 +5180,7 @@ pub(crate) mod esi_corp_mining_customs_offices {
 
         handle.abort();
 
-        let ctx2 = Arc::new(crate::session_logoff_and_cluster_tick::persist_and_reopen_sqlite(&ctx, "esi_b2_char_pi_orders"));
+        let ctx2 = Arc::new(crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "esi_b2_char_pi_orders"));
         let (addr2, _router2, handle2) = EsiServer::spawn(Arc::clone(&ctx2), "127.0.0.1:0").await.expect("spawn ESI 2");
         let tok_owner2 = issue_token_with_scopes(
             &ctx2,
@@ -5375,7 +5375,7 @@ pub(crate) mod esi_corp_mining_customs_offices {
 
         handle.abort();
 
-        let ctx2 = Arc::new(crate::session_logoff_and_cluster_tick::persist_and_reopen_sqlite(&ctx, "esi_b2_market_struct_corp"));
+        let ctx2 = Arc::new(crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "esi_b2_market_struct_corp"));
         let (addr2, _router2, handle2) = EsiServer::spawn(Arc::clone(&ctx2), "127.0.0.1:0").await.expect("spawn ESI 2");
         let tok_trader2 = issue_token_with_scopes(&ctx2, trader_id, vec!["esi-markets.structure_markets.v1", "esi-markets.read_corporation_orders.v1"]);
         let hist2 = http_get_json(addr2, &spec, &format!("/v1/markets/{JITA_REGION_ID}/history/?type_id={TRITANIUM_TYPE_ID}"), None,).await;
@@ -8552,7 +8552,7 @@ pub(crate) mod esi_corp_blueprints_structures_live {
         });
         assert_eq!(receipts_before_tick, 1);
 
-        eve_server::session_cluster_lifecycle::tick_background_cluster(&ctx).await;
+        eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
         let (renewed_due, receipts_after_tick) = ctx.db.with_snapshot(|snap| {
             let due = snap
                 .service_state_blobs
@@ -8583,7 +8583,7 @@ pub(crate) mod esi_corp_blueprints_structures_live {
 
         let advance2 = renewed_due.saturating_add(60).saturating_sub(ctx.now_unix() as u64);
         ctx.advance_secs(advance2);
-        eve_server::session_cluster_lifecycle::tick_background_cluster(&ctx).await;
+        eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
         let sched_notices = drain(&mut rx);
         assert!(sched_notices.iter().any(|(t, _)| t.ends_with("PaymentFailedNotice")));
         assert!(sched_notices.iter().any(|(t, _)| t.ends_with("CancelledNotice")));
