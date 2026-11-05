@@ -805,7 +805,12 @@ fn get_attr(val: &PyRep, attr: &str) -> Option<PyRep> {
                     }
                 }
             }
-            get_attr(args, attr)
+            if type_name.ends_with("SlimItem") {
+                return get_attr(args, attr)
+                    .or_else(|| get_subscript_str(args, attr))
+                    .or(Some(PyRep::None));
+            }
+            get_attr(args, attr).or_else(|| get_subscript_str(args, attr))
         }
         PyRep::ObjectEx { header, dict, .. } => {
             if attr == "header" || attr == "__header__" {
@@ -958,9 +963,11 @@ fn has_column_in_collection(val: &PyRep, col: &str) -> bool {
     }
 }
 
-/// Validates a `PyRep` response against the client's `reply_shape` expectations.
+/// Validates a `PyRep` response against the client's `reply_shape` expectations
+/// (including Phase 2 semantic foreign-key and unit sink validation).
 /// Returns a list of human-readable contract violations (empty if compliant).
 fn validate_reply_shape(
+    ctx: &ServerContext,
     rpc_name: &str,
     raw_reply: &PyRep,
     reply_shape: &serde_json::Map<String, Value>,
@@ -1038,9 +1045,14 @@ fn validate_reply_shape(
                     _ => None,
                 };
                 match actual_len {
-                    None => violations.push(format!(
-                        "{rpc_name}: path `{path}` expected unpackable sequence {unpack_arities:?}, got non-sequence {val:?}"
-                    )),
+                    None => {
+                        let is_sublocation_union = ops.iter().any(|o| o.contains("IsSubLocation"));
+                        if !(is_sublocation_union && matches!(val, PyRep::Integer(_))) {
+                            violations.push(format!(
+                                "{rpc_name}: path `{path}` expected unpackable sequence {unpack_arities:?}, got non-sequence {val:?}"
+                            ));
+                        }
+                    }
                     Some(n) if !unpack_arities.contains(&n) => {
                         // Allow variable-length list unpacking only when `slice` is also used
                         let has_slice = ops.iter().any(|o| o.starts_with("slice"));
@@ -1220,6 +1232,100 @@ fn validate_reply_shape(
                     ));
                 }
             }
+
+            // 4. Phase 2: Semantic foreign-key and unit sink validation (`passed_to:...`)
+            for op in &ops {
+                let Some(sink) = op.strip_prefix("passed_to:") else {
+                    continue;
+                };
+                if sink.starts_with("evetypes.")
+                    || sink.starts_with("typeHelpers.")
+                    || sink.starts_with("inventorycommon.typeHelpers.")
+                {
+                    if let PyRep::Integer(tid) = val {
+                        let is_existence_check = sink.starts_with("evetypes.Exists");
+                        if !is_existence_check {
+                            if tid < 0 || (tid == 0 && !has_null_guard) {
+                                violations.push(format!(
+                                    "{rpc_name}: path `{path}` passes invalid typeID={tid} to `{sink}`"
+                                ));
+                            } else if tid > 0
+                                && !ctx.sde.types.contains_key(&(tid as u32))
+                            {
+                                violations.push(format!(
+                                    "{rpc_name}: path `{path}` passes unknown SDE typeID={tid} to `{sink}`"
+                                ));
+                            }
+                        }
+                    }
+                } else if sink.starts_with("cfg.eveowners.Get#0") {
+                    if let PyRep::Integer(oid) = val {
+                        if oid < 0 || (oid == 0 && !has_null_guard) {
+                            violations.push(format!(
+                                "{rpc_name}: path `{path}` passes invalid ownerID={oid} to `{sink}`"
+                            ));
+                        } else if oid > 0 {
+                            let is_polymorphic_type_or_sys = ops.iter().any(|o| {
+                                o.starts_with("passed_to:evetypes.")
+                                    || o.contains("SolarSystem")
+                            });
+                            let valid_owner = oid <= 10_000
+                                || (500_000..=4_000_000).contains(&oid)
+                                || ctx.sde.factions.contains_key(&(oid as u32))
+                                || ctx.sde.npc_corporations.contains_key(&oid)
+                                || ctx.sde.agents.contains_key(&oid)
+                                || (is_polymorphic_type_or_sys
+                                    && (ctx.sde.types.contains_key(&(oid as u32))
+                                        || ctx.sde.solar_systems.contains_key(&(oid as u32))))
+                                || ctx.db.with_snapshot(|snap| {
+                                    snap.characters.contains_key(&oid)
+                                        || snap.corporations.contains_key(&oid)
+                                        || snap.alliances.contains_key(&oid)
+                                });
+                            if !valid_owner {
+                                violations.push(format!(
+                                    "{rpc_name}: path `{path}` passes unresolvable ownerID={oid} to `{sink}` (not in SDE or WorldRepository)"
+                                ));
+                            }
+                        }
+                    }
+                } else if sink.starts_with("cfg.evelocations.Get#0") {
+                    if let PyRep::Integer(lid) = val {
+                        if lid < 0 || (lid == 0 && !has_null_guard) {
+                            violations.push(format!(
+                                "{rpc_name}: path `{path}` passes invalid locationID={lid} to `{sink}`"
+                            ));
+                        } else if lid > 0 {
+                            let valid_loc = (10_000_000..=85_000_000).contains(&lid)
+                                || lid >= 1_000_000_000_000
+                                || ctx.sde.regions.contains_key(&(lid as u32))
+                                || ctx.sde.constellations.contains_key(&(lid as u32))
+                                || ctx.sde.solar_systems.contains_key(&(lid as u32))
+                                || ctx.sde.stations.contains_key(&lid)
+                                || ctx.db.with_snapshot(|snap| snap.structures.contains_key(&lid));
+                            if !valid_loc {
+                                violations.push(format!(
+                                    "{rpc_name}: path `{path}` passes unresolvable locationID={lid} to `{sink}`"
+                                ));
+                            }
+                        }
+                    }
+                } else if (sink.starts_with("FmtDate#0")
+                    || sink.starts_with("datetimeutils.filetime_to_datetime#0")
+                    || sink.starts_with("blue.os.GetTimeParts#0"))
+                    && !ops.contains(&"arith")
+                {
+                    if let PyRep::Integer(ts) = val {
+                        // Windows FILETIME ticks since 1601-01-01 are >= 116_444_736_000_000_000.
+                        // Values in (1..100_000_000_000_000) are raw Unix seconds/milliseconds or small integers!
+                        if ts > 0 && ts < 100_000_000_000_000 {
+                            violations.push(format!(
+                                "{rpc_name}: path `{path}` passes non-FILETIME integer {ts} to `{sink}` (expected Windows FILETIME 100ns ticks or 0)"
+                            ));
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1244,6 +1350,155 @@ fn parse_const_repr(s: &str) -> PyRep {
     } else {
         PyRep::String(s.to_string())
     }
+}
+
+fn arg_from_expr(expr: &str, service: &str, method: &str, idx: usize) -> Option<PyRep> {
+    if expr.is_empty() || expr == "?" || expr == "reply$" {
+        return None;
+    }
+    let e = expr.to_ascii_lowercase();
+    let m = method.to_ascii_lowercase();
+    if e.ends_with("itemids") || e.ends_with("items") || e == "ids" || e.ends_with("_ids") {
+        return Some(PyRep::List(vec![PyRep::Integer(HANGAR_ITEM_ID)]));
+    }
+    if e.ends_with("droneids") || e.contains("drones") {
+        return Some(PyRep::List(vec![PyRep::Integer(100_000_006)]));
+    }
+    if e.ends_with("contactids") || e.ends_with("memberids") || e.ends_with("charids") {
+        return Some(PyRep::List(vec![PyRep::Integer(OTHER_CHAR_ID)]));
+    }
+    if e.contains("structureid") {
+        return Some(PyRep::Integer(STRUCTURE_ID));
+    }
+    if e.contains("stationid") {
+        return Some(PyRep::Integer(STATION_ID));
+    }
+    if e.contains("solarsystemid") || e.contains("systemid") {
+        return Some(PyRep::Integer(SYSTEM_ID as i64));
+    }
+    if e.contains("constellationid") {
+        return Some(PyRep::Integer(20_000_020));
+    }
+    if e.contains("regionid") {
+        return Some(PyRep::Integer(10_000_002));
+    }
+    if e.contains("planetid") {
+        return Some(PyRep::Integer(PLANET_ID));
+    }
+    if e.contains("fleetid") {
+        return Some(PyRep::Integer(FLEET_ID));
+    }
+    if e.contains("wingid") {
+        return Some(PyRep::Integer(WING_ID));
+    }
+    if e.contains("squadid") {
+        return Some(PyRep::Integer(SQUAD_ID));
+    }
+    if e.contains("warid") {
+        return Some(PyRep::Integer(WAR_ID));
+    }
+    if e.contains("contractid") {
+        return Some(PyRep::Integer(CONTRACT_ID));
+    }
+    if e.contains("agentid") {
+        return Some(PyRep::Integer(AGENT_ID));
+    }
+    if e.contains("folderid") || e.contains("subfolderid") {
+        return Some(PyRep::Integer(FOLDER_ID));
+    }
+    if e.contains("bookmarkid") || e.contains("voucherid") {
+        return Some(PyRep::Integer(BOOKMARK_ID));
+    }
+    if e.contains("fittingid") {
+        return Some(PyRep::Integer(400_001));
+    }
+    if e.contains("jumpcloneid") || e.contains("cloneid") {
+        return Some(PyRep::Integer(300_001));
+    }
+    if e.contains("jobid") {
+        return Some(PyRep::Integer(800_001));
+    }
+    if e.contains("allianceid") {
+        return Some(PyRep::Integer(ALLIANCE_ID));
+    }
+    if e.contains("corpid") || e.contains("corporationid") {
+        if service.contains("war") || m.contains("declare") || m.contains("defender") || m.contains("enemy") {
+            return Some(PyRep::Integer(OTHER_CORP_ID));
+        }
+        return Some(PyRep::Integer(CORP_ID));
+    }
+    if e.contains("charid") || e.contains("characterid") || e.contains("memberid") || e.contains("pilotid") {
+        if service.starts_with("fleet") || m.contains("invite") || m.contains("kick") || m.contains("move") || m.contains("target") {
+            return Some(PyRep::Integer(OTHER_CHAR_ID));
+        }
+        return Some(PyRep::Integer(CHAR_ID));
+    }
+    if e.contains("shipid") {
+        return Some(PyRep::Integer(SHIP_ID));
+    }
+    if e.contains("moduleid") {
+        return Some(PyRep::Integer(MODULE_ID));
+    }
+    if e.contains("blueprintid") || e.contains("bpoid") {
+        return Some(PyRep::Integer(BPO_ITEM_ID));
+    }
+    if e.contains("itemid") || e.contains("item_id") {
+        if idx == 0 && (service == "dogmaIM" || service == "ship") {
+            return Some(PyRep::Integer(MODULE_ID));
+        }
+        return Some(PyRep::Integer(HANGAR_ITEM_ID));
+    }
+    if e.contains("typeid") || e.contains("type_id") {
+        if service == "marketProxy" {
+            return Some(PyRep::Integer(34));
+        } else if service == "skillMgr2" {
+            return Some(PyRep::Integer(3300));
+        }
+        return Some(PyRep::Integer(587));
+    }
+    if e.contains("groupid") || e.contains("group_id") {
+        return Some(PyRep::Integer(25));
+    }
+    if e.contains("categoryid") || e.contains("category_id") {
+        return Some(PyRep::Integer(6));
+    }
+    if e.contains("factionid") || e.contains("faction_id") {
+        return Some(PyRep::Integer(500_001));
+    }
+    if e.contains("flag") {
+        return Some(PyRep::Integer(4));
+    }
+    if e.contains("locationid") {
+        return Some(PyRep::Integer(STATION_ID));
+    }
+    if e.contains("ownerid") {
+        return Some(PyRep::Integer(CHAR_ID));
+    }
+    if e == "name"
+        || e == "title"
+        || e == "label"
+        || e == "description"
+        || e == "memo"
+        || e == "reason"
+        || e == "note"
+        || e == "motd"
+        || e == "body"
+        || e == "subject"
+        || e == "text"
+        || e == "message"
+        || e == "password"
+        || e == "search"
+        || e == "query"
+        || e == "ticker"
+        || e == "url"
+        || e == "comments"
+    {
+        return Some(PyRep::String("Test".to_string()));
+    }
+    if e == "forcorp" {
+        return Some(PyRep::Bool(false));
+    }
+    None
 }
 
 fn default_domain_arg(service: &str, method: &str, idx: usize) -> PyRep {
@@ -1362,6 +1617,7 @@ fn build_candidate_arg_sets(
     method: &str,
     arity: usize,
     arg_consts: &[Option<String>],
+    arg_exprs: &[String],
 ) -> Vec<Vec<PyRep>> {
     if service == "miningScanMgr" && method == "perform_scan" {
         return vec![vec![PyRep::Integer(MODULE_ID)]];
@@ -1370,18 +1626,30 @@ fn build_candidate_arg_sets(
     for i in 0..arity {
         if let Some(Some(c)) = arg_consts.get(i) {
             base.push(parse_const_repr(c));
+        } else if let Some(expr) = arg_exprs.get(i) {
+            if let Some(inferred) = arg_from_expr(expr, service, method, i) {
+                base.push(inferred);
+            } else {
+                base.push(default_domain_arg(service, method, i));
+            }
         } else {
             base.push(default_domain_arg(service, method, i));
         }
     }
     let mut candidates = vec![base.clone()];
-    if arity > 0 && arg_consts.first().and_then(|x| x.as_ref()).is_none() {
+    let first_inferred = arg_exprs
+        .first()
+        .and_then(|e| arg_from_expr(e, service, method, 0))
+        .is_some();
+    if arity > 0 && arg_consts.first().and_then(|x| x.as_ref()).is_none() && !first_inferred {
         for alt0 in [
             PyRep::Integer(CHAR_ID),
             PyRep::Integer(SHIP_ID),
             PyRep::Integer(HANGAR_ITEM_ID),
             PyRep::Integer(STATION_ID),
+            PyRep::Integer(STRUCTURE_ID),
             PyRep::Integer(1),
+            PyRep::String("Test".to_string()),
             PyRep::List(vec![PyRep::Integer(HANGAR_ITEM_ID)]),
         ] {
             let mut v = base.clone();
@@ -1418,14 +1686,26 @@ fn bind_for_service(ctx: &ServerContext, sess: &SessionState, service: &str) -> 
     ctx.bind_object(sess, service, obj_id).ok()
 }
 
-fn restore_session_state(ctx: &ServerContext, sess: &mut SessionState, station_id: Option<i64>) {
+#[derive(Clone, Copy)]
+enum SessionProfile {
+    DockedStation,
+    InSpace,
+    DockedStructure,
+}
+
+fn restore_session_profile(ctx: &ServerContext, sess: &mut SessionState, profile: SessionProfile) {
+    let (station_id, structure_id) = match profile {
+        SessionProfile::DockedStation => (Some(STATION_ID), None),
+        SessionProfile::InSpace => (None, None),
+        SessionProfile::DockedStructure => (None, Some(STRUCTURE_ID)),
+    };
     sess.user_id = Some(1);
     sess.character_id = Some(CHAR_ID);
     sess.role = u64::MAX;
     sess.corporation_id = Some(CORP_ID);
     sess.alliance_id = Some(ALLIANCE_ID);
     sess.station_id = station_id;
-    sess.structure_id = None;
+    sess.structure_id = structure_id;
     sess.solar_system_id = Some(SYSTEM_ID);
     sess.constellation_id = Some(20_000_020);
     sess.region_id = Some(10_000_002);
@@ -1443,7 +1723,7 @@ fn restore_session_state(ctx: &ServerContext, sess: &mut SessionState, station_i
     let needs_db_sync = ctx.db.with_snapshot(|snap| {
         snap.characters.get(&CHAR_ID).is_some_and(|ch| {
             ch.station_id != station_id
-                || ch.structure_id.is_some()
+                || ch.structure_id != structure_id
                 || ch.solar_system_id != SYSTEM_ID
                 || ch.active_ship_id != SHIP_ID
                 || ch.corporation_id != CORP_ID
@@ -1455,7 +1735,7 @@ fn restore_session_state(ctx: &ServerContext, sess: &mut SessionState, station_i
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
                 ch.station_id = station_id;
-                ch.structure_id = None;
+                ch.structure_id = structure_id;
                 ch.solar_system_id = SYSTEM_ID;
                 ch.active_ship_id = SHIP_ID;
                 ch.corporation_id = CORP_ID;
@@ -1464,14 +1744,6 @@ fn restore_session_state(ctx: &ServerContext, sess: &mut SessionState, station_i
             }
         });
     }
-}
-
-fn restore_session_docked(ctx: &ServerContext, sess: &mut SessionState) {
-    restore_session_state(ctx, sess, Some(STATION_ID));
-}
-
-fn restore_session_in_space(ctx: &ServerContext, sess: &mut SessionState) {
-    restore_session_state(ctx, sess, None);
 }
 
 fn is_destructive_rpc(service: &str, method: &str) -> bool {
@@ -1528,6 +1800,8 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
     .await
     .expect("SelectCharacterID");
 
+    let base_snapshot = ctx.db.with_snapshot(|snap| snap.clone());
+
     // Spawn the active ship ball in Jita so space/destiny/dogma RPCs work when undocked
     let sys_handle = ctx.systems.get_or_spawn(SYSTEM_ID);
     let _ = sys_handle
@@ -1576,10 +1850,12 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
         kw: HashMap<String, PyRep>,
         candidates: Vec<Vec<PyRep>>,
         effective_shape: serde_json::Map<String, Value>,
+        destructive: bool,
     }
 
     let mut pending_sigs = Vec::new();
     for (rpc_key, service, method, rpc_val) in non_destructive.into_iter().chain(destructive) {
+        let is_destr = is_destructive_rpc(&service, &method);
         let reply_shape = rpc_val["reply_shape"]
             .as_object()
             .cloned()
@@ -1589,9 +1865,9 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
             .cloned()
             .unwrap_or_default();
 
-        // Deduplicate call-site signatures by (args_len, kwargs_keys, arg_consts)
+        // Deduplicate call-site signatures by (args_len, kwargs_keys, arg_consts, arg_exprs)
         let mut unique_sigs: BTreeMap<
-            (usize, Vec<String>, Vec<Option<String>>),
+            (usize, Vec<String>, Vec<Option<String>>, Vec<String>),
             Vec<String>,
         > = BTreeMap::new();
         for s in &sites {
@@ -1608,6 +1884,14 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
                 .as_array()
                 .map(|a| a.iter().map(|x| x.as_str().map(String::from)).collect())
                 .unwrap_or_default();
+            let arg_exprs: Vec<String> = s["arg_exprs"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .map(|x| x.as_str().unwrap_or("?").to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
             let site_uses: Vec<String> = s["uses"]
                 .as_array()
                 .map(|a| {
@@ -1616,21 +1900,27 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
                         .collect()
                 })
                 .unwrap_or_default();
-            let key = (arity, kwargs_keys, arg_consts);
+            let key = (arity, kwargs_keys, arg_consts, arg_exprs);
             unique_sigs.entry(key).or_default().extend(site_uses);
         }
         if unique_sigs.is_empty() {
-            unique_sigs.insert((0, Vec::new(), Vec::new()), Vec::new());
+            unique_sigs.insert(
+                (0, Vec::new(), Vec::new(), Vec::new()),
+                Vec::new(),
+            );
         }
 
-        for ((arity, kwargs_keys, arg_consts), site_uses) in unique_sigs {
+        for ((arity, kwargs_keys, arg_consts, arg_exprs), site_uses) in unique_sigs {
             let mut kw = HashMap::new();
             for k in &kwargs_keys {
                 if k != "?" {
-                    kw.insert(k.clone(), PyRep::Integer(1));
+                    let kw_val = arg_from_expr(k, &service, &method, 0)
+                        .unwrap_or(PyRep::Integer(1));
+                    kw.insert(k.clone(), kw_val);
                 }
             }
-            let candidates = build_candidate_arg_sets(&service, &method, arity, &arg_consts);
+            let candidates =
+                build_candidate_arg_sets(&service, &method, arity, &arg_consts, &arg_exprs);
             let effective_shape = if rpc_key == "slash.SlashCmd" {
                 let mut m = serde_json::Map::new();
                 for u in &site_uses {
@@ -1653,6 +1943,7 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
                 kw,
                 candidates,
                 effective_shape,
+                destructive: is_destr,
             });
         }
     }
@@ -1660,18 +1951,20 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
     let total_unique_rpcs: BTreeSet<String> =
         pending_sigs.iter().map(|p| p.rpc_key.clone()).collect();
 
-    // Pass 1: Run all signatures while docked (station_id = Some(STATION_ID))
-    // Pass 2: Run remaining failed signatures while in space (station_id = None)
-    for in_space in [false, true] {
+    // Multi-profile execution:
+    // Pass 1: Docked in NPC Station
+    // Pass 2: In Space (undocked with active ship ball)
+    // Pass 3: Docked in Upwell Structure
+    for profile in [
+        SessionProfile::DockedStation,
+        SessionProfile::InSpace,
+        SessionProfile::DockedStructure,
+    ] {
         let mut next_pending = Vec::new();
         for sig in pending_sigs {
             let mut sig_ok = false;
             for cand_args in &sig.candidates {
-                if in_space {
-                    restore_session_in_space(&ctx, &mut sess);
-                } else {
-                    restore_session_docked(&ctx, &mut sess);
-                }
+                restore_session_profile(&ctx, &mut sess, profile);
                 let bound_id = bind_for_service(&ctx, &sess, &sig.service);
                 let res = ctx
                     .dispatch_rpc(
@@ -1696,8 +1989,13 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
                         succeeded_rpcs.insert(sig.rpc_key.clone());
                         sig_ok = true;
                         let mut v =
-                            validate_reply_shape(&sig.rpc_key, &rep, &sig.effective_shape);
+                            validate_reply_shape(&ctx, &sig.rpc_key, &rep, &sig.effective_shape);
                         if !v.is_empty() {
+                            if sig.destructive {
+                                ctx.db.with_mut_snapshot(|snap| *snap = base_snapshot.clone());
+                            }
+                            restore_session_profile(&ctx, &mut sess, profile);
+                            let bound_id = bind_for_service(&ctx, &sess, &sig.service);
                             if let Ok(rep_macho) = ctx
                                 .dispatch_rpc(
                                     &mut sess,
@@ -1711,6 +2009,7 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
                                 .await
                             {
                                 let v_macho = validate_reply_shape(
+                                    &ctx,
                                     &sig.rpc_key,
                                     &rep_macho,
                                     &sig.effective_shape,
@@ -1721,6 +2020,9 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
                             }
                         }
                         shape_violations.extend(v);
+                        if sig.destructive {
+                            ctx.db.with_mut_snapshot(|snap| *snap = base_snapshot.clone());
+                        }
                         break;
                     }
                     Err(e) if e.code == "UnimplementedRPC" => {
@@ -1735,6 +2037,7 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
         }
         pending_sigs = next_pending;
     }
+    let _ = std::fs::remove_dir_all(".evomu-bugs");
 
     let unimplemented_rpcs: BTreeSet<String> = saw_unimplemented_rpcs
         .into_iter()
@@ -1844,6 +2147,7 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
             for (arg_idx, shape_map) in arg_shapes {
                 if let Some(arg_val) = nargs.get(arg_idx) {
                     let v = validate_reply_shape(
+                        &ctx,
                         &format!("notify:{ev}[arg{arg_idx}]"),
                         arg_val,
                         &shape_map,
@@ -1876,5 +2180,339 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
         unimplemented_rpcs.len(),
         shape_violations.len(),
         notify_violations.len()
+    );
+}
+
+#[tokio::test]
+async fn test_destiny_ballpark_and_slim_item_client_contracts() {
+    let raw = std::fs::read_to_string(expectations_path()).expect("read client_expectations.json");
+    let root: Value = serde_json::from_str(&raw).expect("parse client_expectations.json");
+    let destiny_map = root["destiny"].as_object().expect("destiny map");
+    let slim_shape = destiny_map["ProcessBallAdd"]["param_shapes"]["slimItem"]
+        .as_object()
+        .expect("ProcessBallAdd slimItem shape");
+
+    let sde = Arc::new(
+        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("open sde"),
+    );
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(sde, db));
+    seed_comprehensive_world(&ctx);
+
+    let mut sess = SessionState::new(77_101);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(CHAR_ID)],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    // Undock into space so ballpark state and destiny updates are generated
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "stationSvc",
+            None,
+            "Undock",
+            &[],
+            &HashMap::new(),
+            None,
+        )
+        .await;
+    let sys_handle = ctx.systems.get_or_spawn(SYSTEM_ID);
+    let (_, set_state_bag, set_state_updates) = sys_handle
+        .get_set_state(SHIP_ID)
+        .await
+        .expect("get_set_state");
+
+    let beyonce_oid = ctx
+        .bind_object(&sess, "beyonce", SYSTEM_ID as i64)
+        .expect("bind beyonce");
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_oid),
+            "UpdateStateRequest",
+            &[],
+            &HashMap::new(),
+            None,
+        )
+        .await;
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_oid),
+            "CmdGotoDirection",
+            &[PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)],
+            &HashMap::new(),
+            None,
+        )
+        .await;
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_oid),
+            "CmdSetSpeedFraction",
+            &[PyRep::Real(0.75)],
+            &HashMap::new(),
+            None,
+        )
+        .await;
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_oid),
+            "CmdStop",
+            &[],
+            &HashMap::new(),
+            None,
+        )
+        .await;
+
+    let mut destiny_violations = Vec::new();
+    let set_state_shape = destiny_map["SetState"]["param_shapes"]["bag"]
+        .as_object()
+        .expect("SetState bag shape");
+    destiny_violations.extend(validate_reply_shape(
+        &ctx,
+        "destiny:Park.SetState[bag]",
+        &set_state_bag,
+        set_state_shape,
+    ));
+
+    // Validate every SlimItem in `set_state_bag.slims` against `Park.ProcessBallAdd`'s `slimItem` contract
+    for slim in resolve_path(&set_state_bag, ".slims[]") {
+        destiny_violations.extend(validate_reply_shape(
+            &ctx,
+            "destiny:Park.ProcessBallAdd[slimItem]",
+            &slim,
+            slim_shape,
+        ));
+    }
+
+    // Collect all `DoDestinyUpdate` lists from `set_state_updates`, observer queue, and session notifications
+    let mut update_lists = vec![set_state_updates];
+    if let Ok((_, _, obs_updates)) = sys_handle.drain_observer_updates(SHIP_ID).await {
+        update_lists.push(obs_updates);
+    }
+    for (ev, nargs) in sess.drain_notifications() {
+        if ev == "DoDestinyUpdate" {
+            if let Some(first) = nargs.into_iter().next() {
+                update_lists.push(first);
+            }
+        }
+    }
+    for n in ctx.drain_notifications_for_char(CHAR_ID) {
+        if n.event == "DoDestinyUpdate" {
+            if let Some(first) = n.args.into_iter().next() {
+                update_lists.push(first);
+            }
+        }
+    }
+
+    let mut validated_instructions = 0usize;
+    for list_rep in &update_lists {
+        let PyRep::List(entries) = list_rep else {
+            continue;
+        };
+        for entry in entries {
+            let PyRep::Tuple(pair) = entry else {
+                destiny_violations.push(format!("DoDestinyUpdate entry is not 2-tuple: {entry:?}"));
+                continue;
+            };
+            let Some(PyRep::Tuple(call_pair)) = pair.get(1) else {
+                destiny_violations.push(format!(
+                    "DoDestinyUpdate instruction is not (func_name, args): {entry:?}"
+                ));
+                continue;
+            };
+            let Some(func_name) = call_pair.first().and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(PyRep::Tuple(fargs) | PyRep::List(fargs)) = call_pair.get(1) else {
+                continue;
+            };
+            let Some(dspec) = destiny_map.get(func_name) else {
+                destiny_violations.push(format!(
+                    "DoDestinyUpdate emitted unknown Park instruction `{func_name}`"
+                ));
+                continue;
+            };
+            validated_instructions += 1;
+            let arity_min = dspec["arity_min"].as_u64().unwrap_or(0) as usize;
+            let arity_max = dspec["arity_max"].as_u64().unwrap_or(usize::MAX as u64) as usize;
+            if fargs.len() < arity_min || fargs.len() > arity_max {
+                destiny_violations.push(format!(
+                    "destiny:Park.{func_name}: emitted {} args, client expects {arity_min}..={arity_max} ({fargs:?})",
+                    fargs.len()
+                ));
+                continue;
+            }
+            if let (Some(params), Some(pshapes)) = (
+                dspec["params"].as_array(),
+                dspec["param_shapes"].as_object(),
+            ) {
+                for (idx, pval) in params.iter().enumerate() {
+                    if let Some(pname) = pval.as_str() {
+                        if let (Some(pshape), Some(arg_val)) =
+                            (pshapes.get(pname).and_then(|x| x.as_object()), fargs.get(idx))
+                        {
+                            destiny_violations.extend(validate_reply_shape(
+                                &ctx,
+                                &format!("destiny:Park.{func_name}[{pname}]"),
+                                arg_val,
+                                pshape,
+                            ));
+                        }
+                    }
+                }
+            }
+            if func_name == "AddBalls2" {
+                if let Some(chunk) = fargs.first() {
+                    for slim in resolve_path(chunk, "[1][][0]") {
+                        let slim_obj = match slim {
+                            PyRep::Dict(_) => PyRep::Object {
+                                type_name: "foo.SlimItem".into(),
+                                args: Box::new(slim),
+                            },
+                            other => other,
+                        };
+                        destiny_violations.extend(validate_reply_shape(
+                            &ctx,
+                            "destiny:AddBalls2->ProcessBallAdd[slimItem]",
+                            &slim_obj,
+                            slim_shape,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(
+        validated_instructions >= 3,
+        "Expected at least 3 DoDestinyUpdate instructions to be validated, got {validated_instructions}"
+    );
+    assert!(
+        destiny_violations.is_empty(),
+        "Found destiny ballpark / SlimItem contract violations: {destiny_violations:#?}"
+    );
+}
+
+#[tokio::test]
+async fn test_quasar_public_gateway_client_contracts() {
+    use eve_proto::quasar::{EvePublicRequest, GoogleAny, TYPE_GOOGLEAPIS_PREFIX};
+
+    let sde = Arc::new(
+        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("open sde"),
+    );
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(sde, db));
+    seed_comprehensive_world(&ctx);
+
+    let mut sess = SessionState::new(77_201);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(CHAR_ID)],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    let handler_names: Vec<String> = {
+        let guard = ctx
+            .quasar_gateway
+            .handlers
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut keys: Vec<String> = guard.keys().cloned().collect();
+        keys.sort();
+        keys
+    };
+    assert!(
+        handler_names.len() >= 100,
+        "Expected >= 100 registered Quasar handlers, got {}",
+        handler_names.len()
+    );
+
+    let now_unix = ctx.now_unix();
+    let mut gateway_violations = Vec::new();
+    let mut ok_200_count = 0usize;
+
+    for req_type in &handler_names {
+        let req = EvePublicRequest {
+            correlation_uuid: b"contract-test-01".to_vec(),
+            payload: Some(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{req_type}"),
+                value: Vec::new(),
+            }),
+            application_instance_uuid: b"contract-app-001".to_vec(),
+            ..Default::default()
+        };
+        let mut rsp = ctx
+            .quasar_gateway
+            .handle_public_request(&sess, &req, None, false, now_unix);
+        eve_server::quasar_grpc::normalize_quasar_client_response(
+            &ctx.quasar_gateway.descriptors,
+            &mut rsp,
+        );
+        if rsp.status_code == 500
+            || rsp.status_message.starts_with("Unknown Quasar protobuf message type")
+            || rsp.status_message.starts_with("Quasar handler for ")
+        {
+            gateway_violations.push(format!(
+                "Quasar request `{req_type}` returned unexpected status {} ({})",
+                rsp.status_code, rsp.status_message
+            ));
+            continue;
+        }
+        if rsp.status_code == 200 {
+            ok_200_count += 1;
+            if let Some(any_out) = &rsp.payload {
+                let rsp_norm = any_out.normalized_type_name();
+                if ctx.quasar_gateway.descriptors.get_message(rsp_norm).is_none()
+                    && rsp_norm != "google.protobuf.Empty"
+                {
+                    gateway_violations.push(format!(
+                        "Quasar request `{req_type}` returned unknown protobuf type_url `{}`",
+                        any_out.type_url
+                    ));
+                } else if let Err(e) = ctx
+                    .quasar_gateway
+                    .descriptors
+                    .decode_dynamic_or_wire(rsp_norm, &any_out.value)
+                {
+                    gateway_violations.push(format!(
+                        "Quasar request `{req_type}` returned invalid protobuf wire bytes for `{rsp_norm}`: {e}"
+                    ));
+                }
+            }
+        }
+    }
+
+    println!(
+        "=== QUASAR CONTRACT REPORT: registered_handlers={}, ok_200={}, violations={} ===",
+        handler_names.len(),
+        ok_200_count,
+        gateway_violations.len()
+    );
+    assert!(
+        gateway_violations.is_empty(),
+        "Found Quasar Public Gateway contract violations: {gateway_violations:#?}"
     );
 }

@@ -107,7 +107,7 @@ pub fn register_handlers(
                     let data = st.data.read().unwrap_or_else(|e| e.into_inner());
                     data.ship_logos.get(&ship_id).copied().unwrap_or((90_000_001, 98_000_001))
                 };
-                encode_domain_message(&d, "eve.cosmetic.ship.api.request.GetResponse", |reg, resp| {
+                encode_domain_message(&d, "eve_public.cosmetic.ship.api.GetResponse", |reg, resp| {
                     set_domain_attributes(reg, resp, char_id as u64, corp_id as u64, "ShipLogoConfig");
                 })
             }),
@@ -122,7 +122,7 @@ pub fn register_handlers(
                 let skin_id = sde_skin.skins.keys().next().copied().unwrap_or(1) as u64;
                 encode_domain_message(
                     &d,
-                    "eve.cosmetic.ship.api.request.GetAllInBubbleResponse",
+                    "eve_public.cosmetic.ship.api.GetAllInBubbleResponse",
                     |reg, resp| {
                         set_domain_attributes(reg, resp, 1_000_001, skin_id, "BubbleShipCosmetics");
                     },

@@ -111,6 +111,31 @@ def const_repr(v):
     return '?'
 
 
+def arg_expr(v):
+    if v is None:
+        return '?'
+    t = v[0]
+    if t == 'C':
+        return const_repr(v[1])
+    if t == 'VAR':
+        return v[1]
+    if t == 'SA':
+        return 'self.' + v[1]
+    if t == 'A':
+        return '?.' + v[1]
+    if t == 'P':
+        return v[1]
+    if t == 'CR':
+        return v[1] + '()'
+    if t == 'SEQ':
+        return '(' + ','.join(arg_expr(x) for x in v[1]) + ')'
+    if t == 'T':
+        return 'reply' + path_str(v[2])
+    if t == 'SELF':
+        return 'self'
+    return '?'
+
+
 def path_str(path):
     return ''.join(path) if path else '$'
 
@@ -157,7 +182,7 @@ def callee_name(v):
     if v is None:
         return None
     t = v[0]
-    if t == 'P':
+    if t in ('P', 'VAR'):
         return v[1].rsplit('.', 1)[-1]
     if t in ('A', 'SA'):
         return v[1]
@@ -174,7 +199,7 @@ def callee_label(v):
     if v is None:
         return '?'
     t = v[0]
-    if t == 'P':
+    if t in ('P', 'VAR'):
         return v[1]
     if t == 'SA':
         return 'self.' + v[1]
@@ -360,7 +385,8 @@ class Interp(object):
                                    'line': self.line(off), 'args': len(pos), 'kwargs': sorted(kwn),
                                    'via': via, 'key': key, 'star': False, 'starstar': False,
                                    'arg_consts': [const_repr(a[1]) if a is not None and a[0] == 'C' else None
-                                                  for a in pos]})
+                                                  for a in pos],
+                                   'arg_exprs': [arg_expr(a) for a in pos]})
                 if (svc, meth) in SUBSVC_METHODS:
                     return ('SVC', svc, 'subsvc:%s.%s' % (svc, meth))
                 return ('T', key, ())
@@ -500,18 +526,18 @@ class Interp(object):
                                        'line': self.line(off), 'via_wrapper': '%s.%s' % (self.cls, name)})
                 return wv
         # passthrough wrappers (pass 2 round 2 & pass 3)
-        if self.mode >= 2 and name in w.wrappers and fn is not None and fn[0] in ('A', 'SA', 'P', 'BM', 'CM'):
+        if self.mode >= 2 and name in w.wrappers and fn is not None and fn[0] in ('A', 'SA', 'P', 'BM', 'CM', 'VAR'):
             key, path = w.wrappers[name]
             if self.mode == 3:
                 self.sites.append({'wrapper_use': key, 'module': self.m, 'func': self.q, 'line': self.line(off),
                                    'via_wrapper': name})
             return ('T', key, path)
         # factory functions returning a service
-        if name in w.factories and fn is not None and fn[0] in ('A', 'SA', 'P', 'CM'):
+        if name in w.factories and fn is not None and fn[0] in ('A', 'SA', 'P', 'CM', 'VAR'):
             return ('SVC', w.factories[name], 'factory:' + name)
         if name in w.moniker_factories and fn is not None and fn[0] == 'P':
             return ('SVC', w.moniker_factories[name], 'moniker:' + name)
-        if name is not None and fn is not None and fn[0] in ('A', 'SA', 'P', 'CM'):
+        if name is not None and fn is not None and fn[0] in ('A', 'SA', 'P', 'CM', 'VAR'):
             return ('CR', name)
         return None
 
@@ -658,7 +684,8 @@ class Interp(object):
                     self.sites.append({'kind': 'callback:returned_bm', 'svc': v[1], 'method': v[2],
                                        'module': self.m, 'func': self.q, 'line': self.line(off),
                                        'args': 1, 'kwargs': [], 'via': v[3], 'key': key,
-                                       'star': False, 'starstar': False, 'arg_consts': [None]})
+                                       'star': False, 'starstar': False, 'arg_consts': [None],
+                                       'arg_exprs': ['?']})
                 self.ob(v, 'returned')
                 self.returns.append(v)
                 dead = True
@@ -788,6 +815,11 @@ class Interp(object):
                         st.append(self.child(v, '.%s' % nm))
                 elif v[0] == 'P':
                     st.append(('P', v[1] + '.' + nm))
+                elif v[0] == 'VAR':
+                    if nm in self.w.attrnames:
+                        st.append(self.w.attrnames[nm])
+                    else:
+                        st.append(('VAR', v[1] + '.' + nm))
                 elif v[0] == 'CR' and is_rpc_method(nm):
                     s = self.w.factories.get(v[1])
                     st.append(('BM', s, nm, 'factory:' + v[1]) if s else (self.w.attrnames.get(nm) or ('A', nm)))
@@ -848,12 +880,12 @@ class Interp(object):
                 st.append(None)
             elif op == 124:  # LOAD_FAST
                 nm = varnames[arg]
-                if nm in self.locals:
+                if nm in self.locals and self.locals[nm] is not None:
                     st.append(self.locals[nm])
                 elif self.is_method and arg == 0:
                     st.append(('SELF',))
                 else:
-                    st.append(None)
+                    st.append(('VAR', nm))
             elif op == 125:  # STORE_FAST
                 v = pop()
                 nm = varnames[arg]
@@ -863,9 +895,9 @@ class Interp(object):
                         v = ('MULTI_BM', [prev, v])
                     elif prev[0] == 'MULTI_BM' and v[0] == 'BM' and v not in prev[1]:
                         v = ('MULTI_BM', prev[1] + [v])
-                self.locals[nm] = v
+                self.locals[nm] = v if v is not None else ('VAR', nm)
                 if nm in cf:
-                    self.derefs[nm] = v
+                    self.derefs[nm] = self.locals[nm]
             elif op == 130:
                 for _ in range(arg):
                     pop()
@@ -893,7 +925,8 @@ class Interp(object):
                                            'key': '%s|%s|%d|cb%d' % (self.m, self.q, off, i), 'star': star,
                                            'starstar': starstar,
                                            'arg_consts': [const_repr(x[1]) if x is not None and x[0] == 'C' else None
-                                                          for x in pos[i + 1:]]})
+                                                          for x in pos[i + 1:]],
+                                           'arg_exprs': [arg_expr(x) for x in pos[i + 1:]]})
                 nsites = len(self.sites)
                 r = self.resolve_call(fn, pos, list(kw), off)
                 if len(self.sites) > nsites and 'svc' in self.sites[-1]:
@@ -1425,7 +1458,8 @@ def main():
         uses = sorted('%s %s' % (p, u) for p, u in obs.get(s['key'], ()))
         e['call_sites'].append({'kind': s['kind'], 'module': s['module'], 'func': s['func'], 'line': s['line'], 'args': s['args'],
                                 'kwargs': s['kwargs'], 'star': s['star'], 'starstar': s['starstar'],
-                                'via': s['via'], 'arg_consts': s['arg_consts'], 'uses': uses})
+                                'via': s['via'], 'arg_consts': s['arg_consts'],
+                                'arg_exprs': s.get('arg_exprs', []), 'uses': uses})
         for p, u in obs.get(s['key'], ()):
             e['reply_shape'].setdefault(p, set()).add(u)
     for wname, (key, _path) in sorted(world.wrappers.items()):
@@ -1483,6 +1517,61 @@ def main():
         ent['reads'] = sorted(reads)
         notify[ev] = ent
 
+    # ---- destiny section (Park.* handlers in eve/client/script/remote/michelle.pyj + C++ destiny.Ballpark methods)
+    destiny = {
+        'Orbit': {'handler': 'destiny.Ballpark:Orbit', 'params': ['ballID', 'orbitID', 'orbitRange'], 'arity_min': 3, 'arity_max': 3, 'reads': [], 'param_shapes': {}},
+        'GotoDirection': {'handler': 'destiny.Ballpark:GotoDirection', 'params': ['ballID', 'x', 'y', 'z'], 'arity_min': 4, 'arity_max': 4, 'reads': [], 'param_shapes': {}},
+        'GotoPoint': {'handler': 'destiny.Ballpark:GotoPoint', 'params': ['ballID', 'x', 'y', 'z'], 'arity_min': 4, 'arity_max': 4, 'reads': [], 'param_shapes': {}},
+        'FollowBall': {'handler': 'destiny.Ballpark:FollowBall', 'params': ['ballID', 'followID', 'followRange'], 'arity_min': 3, 'arity_max': 3, 'reads': [], 'param_shapes': {}},
+        'Stop': {'handler': 'destiny.Ballpark:Stop', 'params': ['ballID'], 'arity_min': 1, 'arity_max': 1, 'reads': [], 'param_shapes': {}},
+        'WarpTo': {'handler': 'destiny.Ballpark:WarpTo', 'params': ['ballID', 'x', 'y', 'z', 'warpSpeed', 'effectStamp', 'followRange', 'followID'], 'arity_min': 6, 'arity_max': 8, 'reads': [], 'param_shapes': {}},
+        'SetBallRadius': {'handler': 'destiny.Ballpark:SetBallRadius', 'params': ['ballID', 'newRadius'], 'arity_min': 2, 'arity_max': 2, 'reads': [], 'param_shapes': {}},
+        'SetBallInteractive': {'handler': 'destiny.Ballpark:SetBallInteractive', 'params': ['ballID', 'isInteractive'], 'arity_min': 2, 'arity_max': 2, 'reads': [], 'param_shapes': {}},
+        'SetBallFree': {'handler': 'destiny.Ballpark:SetBallFree', 'params': ['ballID', 'isFree'], 'arity_min': 2, 'arity_max': 2, 'reads': [], 'param_shapes': {}},
+        'SetBallHarmonic': {'handler': 'destiny.Ballpark:SetBallHarmonic', 'params': ['ballID', 'harmonic'], 'arity_min': 2, 'arity_max': 2, 'reads': [], 'param_shapes': {}},
+        'SetBallGlobal': {'handler': 'destiny.Ballpark:SetBallGlobal', 'params': ['ballID', 'isGlobal'], 'arity_min': 2, 'arity_max': 2, 'reads': [], 'param_shapes': {}},
+        'SetBallMassive': {'handler': 'destiny.Ballpark:SetBallMassive', 'params': ['ballID', 'isMassive'], 'arity_min': 2, 'arity_max': 2, 'reads': [], 'param_shapes': {}},
+        'SetMaxSpeed': {'handler': 'destiny.Ballpark:SetMaxSpeed', 'params': ['ballID', 'maxSpeed'], 'arity_min': 2, 'arity_max': 2, 'reads': [], 'param_shapes': {}},
+        'SetSpeedFraction': {'handler': 'destiny.Ballpark:SetSpeedFraction', 'params': ['ballID', 'speedFraction'], 'arity_min': 2, 'arity_max': 2, 'reads': [], 'param_shapes': {}},
+        'SetBallVelocity': {'handler': 'destiny.Ballpark:SetBallVelocity', 'params': ['ballID', 'vx', 'vy', 'vz'], 'arity_min': 4, 'arity_max': 4, 'reads': [], 'param_shapes': {}},
+        'SetBallPosition': {'handler': 'destiny.Ballpark:SetBallPosition', 'params': ['ballID', 'x', 'y', 'z'], 'arity_min': 4, 'arity_max': 4, 'reads': [], 'param_shapes': {}},
+        'SetBallAgility': {'handler': 'destiny.Ballpark:SetBallAgility', 'params': ['ballID', 'agility'], 'arity_min': 2, 'arity_max': 2, 'reads': [], 'param_shapes': {}},
+        'SetBallTroll': {'handler': 'destiny.Ballpark:SetBallTroll', 'params': ['ballID', 'maybeTroll'], 'arity_min': 2, 'arity_max': 2, 'reads': [], 'param_shapes': {}},
+        'SetBallRigid': {'handler': 'destiny.Ballpark:SetBallRigid', 'params': ['ballID', 'isRigid'], 'arity_min': 2, 'arity_max': 2, 'reads': [], 'param_shapes': {}},
+        'SetBallCloak': {'handler': 'destiny.Ballpark:SetBallCloak', 'params': ['ballID', 'isCloaked'], 'arity_min': 2, 'arity_max': 2, 'reads': [], 'param_shapes': {}},
+    }
+    for n, q, c, _parent in iter_code(mods):
+        if n != 'eve/client/script/remote/michelle.pyj' or not q.startswith('Park.'):
+            continue
+        meth = q.split('.', 1)[1]
+        if '.' in meth or meth.startswith('_'):
+            continue
+        ps = list(c.varnames[:c.argcount])
+        if ps and ps[0] == 'self':
+            ps = ps[1:]
+        dseeds = {}
+        for p in ps:
+            dseeds[p] = ('T', 'D|Park.%s|%s' % (meth, p), ())
+        dit = Interp(world, n, q, c, 3, dseeds).run()
+        dreads = set()
+        param_shapes = {}
+        for idx, p in enumerate(ps):
+            k = 'D|Park.%s|%s' % (meth, p)
+            pshape = {}
+            for path, use in dit.obs.get(k, ()):
+                dreads.add('arg%d(%s)%s %s' % (idx, p, '' if path == '$' else path, use))
+                pshape.setdefault(path, []).append(use)
+            if pshape:
+                param_shapes[p] = {path: sorted(set(uses)) for path, uses in sorted(pshape.items())}
+        destiny[meth] = {
+            'handler': '%s:%s' % (n, q),
+            'params': ps,
+            'arity_min': len([x for x in ps if not x.startswith('*')]),
+            'arity_max': len([x for x in ps if not x.startswith('*')]),
+            'reads': sorted(dreads),
+            'param_shapes': param_shapes,
+        }
+
     consts.sort(key=lambda d: (d['module'], d['scope'], d['line'], d['name'], repr(d['value'])))
     session_keys = [{'key': k, 'readers': sorted(v)} for k, v in sorted(sess.items(), key=lambda kv: str(kv[0]))]
     doc = {
@@ -1498,14 +1587,15 @@ def main():
                  'attrname_bindings': {k: v[1] for k, v in sorted(world.attrnames.items())}},
         'rpc': rpc,
         'notify': notify,
+        'destiny': destiny,
         'constants': consts,
         'session_keys': session_keys,
     }
     with open(a.out, 'w', encoding='utf-8') as f:
         json.dump(doc, f, sort_keys=True, indent=1, ensure_ascii=True)
         f.write('\n')
-    print('rpc=%d notify=%d consts=%d session_keys=%d errors=%d factories=%d cls_factories=%d wrappers=%d cls_wrappers=%d' % (
-        len(rpc), len(notify), len(consts), len(session_keys), len(errors), len(world.factories),
+    print('rpc=%d notify=%d destiny=%d consts=%d session_keys=%d errors=%d factories=%d cls_factories=%d wrappers=%d cls_wrappers=%d' % (
+        len(rpc), len(notify), len(destiny), len(consts), len(session_keys), len(errors), len(world.factories),
         len(world.cls_factories), len(world.wrappers), len(world.cls_wrappers)))
 
 
