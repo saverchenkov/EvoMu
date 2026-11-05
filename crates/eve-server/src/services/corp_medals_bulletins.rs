@@ -598,3 +598,8 @@ pub(crate) fn handle_corp_bulletins(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "corp_medals_bulletins_tests.rs"]
+mod corp_medals_bulletins_tests;
+

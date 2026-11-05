@@ -705,3 +705,8 @@ async fn execute_scheduled_gtfo_teleport(
         });
     }
 }
+
+#[cfg(test)]
+#[path = "doomsday_aoe_tick_tests.rs"]
+mod doomsday_aoe_tick_tests;
+

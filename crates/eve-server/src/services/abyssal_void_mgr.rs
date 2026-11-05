@@ -661,3 +661,8 @@ fn emit_abyssal_entry_notifications(
         vec![PyRep::Integer(end_ft)],
     );
 }
+
+#[cfg(test)]
+#[path = "abyssal_void_mgr_tests.rs"]
+mod abyssal_void_mgr_tests;
+

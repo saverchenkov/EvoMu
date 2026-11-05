@@ -1132,3 +1132,8 @@ fn handle_mailing_list_ops(
 fn caller_has_operator_or_owner_role(ml: &MailingListState, char_id: i64) -> bool {
     ml.owner_id == char_id || ml.members.get(&char_id).copied().unwrap_or(0) >= 2
 }
+
+#[cfg(test)]
+#[path = "mailing_lists_ops_tests.rs"]
+mod mailing_lists_ops_tests;
+

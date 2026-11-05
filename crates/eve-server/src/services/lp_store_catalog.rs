@@ -308,3 +308,8 @@ pub(crate) fn offer_to_pyrep(o: &LPOffer) -> PyRep {
     }
     PyRep::keyval(fields)
 }
+
+#[cfg(test)]
+#[path = "lp_store_catalog_tests.rs"]
+mod lp_store_catalog_tests;
+

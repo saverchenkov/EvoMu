@@ -696,3 +696,8 @@ pub fn handle(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "map_service_tests.rs"]
+mod map_service_tests;
+

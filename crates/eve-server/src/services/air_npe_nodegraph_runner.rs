@@ -1313,3 +1313,8 @@ pub fn complete_air_npe(
         ],
     );
 }
+
+#[cfg(test)]
+#[path = "air_npe_nodegraph_runner_tests.rs"]
+mod air_npe_nodegraph_runner_tests;
+

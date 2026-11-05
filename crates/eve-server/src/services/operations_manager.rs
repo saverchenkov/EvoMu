@@ -1285,3 +1285,8 @@ pub fn handle(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "operations_manager_tests.rs"]
+mod operations_manager_tests;
+

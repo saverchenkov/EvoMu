@@ -550,3 +550,8 @@ pub fn check_mails_authorized(
     mids.iter().all(|&mid| is_mail_authorized(ctx, snap, mid, char_id))
 }
 
+#[cfg(test)]
+#[path = "mail_notify_tests.rs"]
+mod mail_notify_tests;
+
+

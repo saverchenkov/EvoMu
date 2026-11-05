@@ -544,3 +544,8 @@ pub fn nearest_sentry_gun_origin(ctx: &ServerContext, sys_id: u32, pos: DVec3) -
         .min_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
         .map(|(_, _, p)| p)
 }
+
+#[cfg(test)]
+#[path = "security_mgr_tests.rs"]
+mod security_mgr_tests;
+

@@ -1351,3 +1351,8 @@ pub fn handle_edit_project(
         Err(e) => Some(Err(e)),
     }
 }
+
+#[cfg(test)]
+#[path = "social_corp_projects_tests.rs"]
+mod social_corp_projects_tests;
+

@@ -1388,4 +1388,5 @@ pub use crate::services::combat_crimewatch::combat_npc_encounters::{
     create_custom_encounter_site, create_encounter_wave_site, flush_npc_bounty_tick,
     step_encounter_wave_on_kill,
 };
-
+#[cfg(test)]
+#[path = "combat_npc_ai_tests.rs"] pub(crate) mod combat_npc_ai_tests;

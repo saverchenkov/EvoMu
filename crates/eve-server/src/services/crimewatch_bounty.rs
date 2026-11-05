@@ -1067,3 +1067,7 @@ pub fn handle_apply_tags_for_sec_status(
         Err(e) => Some(Err(e)),
     }
 }
+
+#[cfg(test)]
+#[path = "crimewatch_bounty_tests.rs"] mod crimewatch_bounty_tests;
+

@@ -1223,3 +1223,7 @@ pub async fn handle_legacy_and_ess(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "combat_legacy_ess_tests.rs"] mod combat_legacy_ess_tests;
+

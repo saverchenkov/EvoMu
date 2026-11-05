@@ -906,3 +906,8 @@ pub fn build_specialized_npc_components(
     };
     (ball, cs, entity)
 }
+
+#[cfg(test)]
+#[path = "wormhole_pve_seeding_tests.rs"]
+mod wormhole_pve_seeding_tests;
+

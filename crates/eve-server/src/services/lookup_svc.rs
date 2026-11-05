@@ -819,3 +819,8 @@ pub fn handle_search_quick_query(
     }
     Ok(PyRep::List(out))
 }
+
+#[cfg(test)]
+#[path = "lookup_svc_tests.rs"]
+mod lookup_svc_tests;
+

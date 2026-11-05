@@ -1012,3 +1012,8 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         ("gateID", PyRep::Integer(gate_id)),
     ]))
 }
+
+#[cfg(test)]
+#[path = "abyssal_void_gates_tests.rs"]
+mod abyssal_void_gates_tests;
+

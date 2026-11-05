@@ -1368,3 +1368,8 @@ pub fn break_courier_plastic_wrap(
     snap.items.remove(&wrap_id);
     Ok((cid, issuer_id, item_ids))
 }
+
+#[cfg(test)]
+#[path = "contracts_service_tests.rs"]
+mod contracts_service_tests;
+

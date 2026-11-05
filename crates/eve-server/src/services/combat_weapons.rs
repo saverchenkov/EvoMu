@@ -1372,3 +1372,7 @@ pub async fn handle_weapons(
 }
 
 pub use super::combat_weapons_spool::{clear_entropic_spool, get_entropic_spool_multiplier, handle_link_all_weapons, reset_entropic_spool};
+
+#[cfg(test)]
+#[path = "combat_weapons_tests.rs"] mod combat_weapons_tests;
+

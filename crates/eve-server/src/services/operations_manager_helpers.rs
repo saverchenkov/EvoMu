@@ -1074,3 +1074,8 @@ static OPERATION_DEFS_CACHE: std::sync::OnceLock<OperationDefinitions> = std::sy
 pub fn get_operation_defs(sde: &eve_sde::SdeRegistry) -> &'static OperationDefinitions {
     OPERATION_DEFS_CACHE.get_or_init(|| load_operation_definitions(sde))
 }
+
+#[cfg(test)]
+#[path = "operations_manager_helpers_tests.rs"]
+mod operations_manager_helpers_tests;
+

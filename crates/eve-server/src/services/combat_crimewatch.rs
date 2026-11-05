@@ -1363,3 +1363,7 @@ pub fn update_crimewatch_engagement_timers(ctx: &ServerContext, char_id: i64, ot
         vec![PyRep::Integer(other_char_id)],
     );
 }
+
+#[cfg(test)]
+#[path = "combat_crimewatch_tests.rs"] mod combat_crimewatch_tests;
+

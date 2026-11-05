@@ -720,3 +720,8 @@ pub fn handle_repair_items_in_location(
         ("totalCostISK", PyRep::Real(total_cost)),
     ]))
 }
+
+#[cfg(test)]
+#[path = "repair_service_tests.rs"]
+mod repair_service_tests;
+

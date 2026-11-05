@@ -1338,3 +1338,8 @@ pub async fn ensure_drifter_kspace_guards(
     }
     guard_ids
 }
+
+#[cfg(test)]
+#[path = "wormhole_lifecycle_ops_tests.rs"]
+mod wormhole_lifecycle_ops_tests;
+

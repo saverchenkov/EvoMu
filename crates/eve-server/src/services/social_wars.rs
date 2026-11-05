@@ -1281,3 +1281,8 @@ pub(super) fn handle_wars(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "social_wars_tests.rs"]
+mod social_wars_tests;
+

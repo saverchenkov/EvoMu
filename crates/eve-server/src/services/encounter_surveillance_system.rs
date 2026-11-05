@@ -668,3 +668,8 @@ pub async fn handle_ess_link(
         ("suspectTimerUntilUnix", PyRep::Integer(suspect_until as i64)),
     ]))
 }
+
+#[cfg(test)]
+#[path = "encounter_surveillance_system_tests.rs"]
+mod encounter_surveillance_system_tests;
+

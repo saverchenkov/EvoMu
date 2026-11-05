@@ -1327,3 +1327,7 @@ pub fn handle(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "lp_store_tests.rs"]
+mod lp_store_tests;

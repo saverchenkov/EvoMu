@@ -981,3 +981,8 @@ pub async fn activate_multipoint_reaper_doomsday(
         ),
     ]))
 }
+
+#[cfg(test)]
+#[path = "doomsday_aoe_ops_tests.rs"]
+mod doomsday_aoe_ops_tests;
+

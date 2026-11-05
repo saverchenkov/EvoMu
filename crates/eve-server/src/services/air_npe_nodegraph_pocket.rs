@@ -390,3 +390,8 @@ pub(crate) fn cleanup_npe_pocket_and_restore_ui(
 
     (stopped_instances, stop_master_by_id)
 }
+
+#[cfg(test)]
+#[path = "air_npe_nodegraph_pocket_tests.rs"]
+mod air_npe_nodegraph_pocket_tests;
+

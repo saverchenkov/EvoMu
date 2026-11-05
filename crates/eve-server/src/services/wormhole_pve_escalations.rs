@@ -1076,3 +1076,8 @@ pub fn process_wormhole_sites_on_downtime(ctx: &ServerContext) -> usize {
 
     despawned_sites.len()
 }
+
+#[cfg(test)]
+#[path = "wormhole_pve_escalations_tests.rs"]
+mod wormhole_pve_escalations_tests;
+

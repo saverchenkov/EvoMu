@@ -1359,3 +1359,7 @@ pub async fn handle_wrecks_killmails(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "combat_wrecks_killmails_tests.rs"] mod combat_wrecks_killmails_tests;
+

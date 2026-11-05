@@ -1199,3 +1199,8 @@ pub(crate) fn handle_get_member_tracking_info(
     )))
 }
 
+#[cfg(test)]
+#[path = "corp_registry_ops_tests.rs"]
+mod corp_registry_ops_tests;
+
+

@@ -393,6 +393,7 @@ pub fn check_crimewatch_action_restriction(
     Ok(())
 }
 
+
 /// Triggers or steps gate/station Sentry Gun grid aggression in high-sec/low-sec (`feat:npc.sentry-gun-grid-aggression`).
 /// Sentries have 500 km optimal range, are invulnerable and untargetable, engage offenders while on grid,
 /// drop aggression when the offender warps off-grid (> 500 km), and re-trigger on a new sec-status-loss action.
@@ -1175,6 +1176,7 @@ pub fn evaluate_and_record_pvp_aggression(
     Ok(())
 }
 
+
 /// Evaluates ship safety and flag inheritance when applying remote assistance (repair / cap transfer) to another pilot.
 pub fn evaluate_and_record_remote_assistance(
     ctx: &ServerContext, helper_char_id: i64, helper_ship_id: i64, sys_id: u32, target_id: i64,
@@ -1284,3 +1286,8 @@ pub fn evaluate_and_record_remote_assistance(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "crimewatch_timers_tests.rs"]
+mod crimewatch_timers_tests;
+

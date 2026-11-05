@@ -673,3 +673,7 @@ pub async fn step_empire_navy_patrols(
     }
     spawned
 }
+
+#[cfg(test)]
+#[path = "combat_npc_police_tests.rs"] mod combat_npc_police_tests;
+

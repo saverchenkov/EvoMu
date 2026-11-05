@@ -553,3 +553,8 @@ pub fn handle_survey_claim_rewards(
     emit_operation_reward_notifications(ctx, char_id, &outcome);
     Ok(rep)
 }
+
+#[cfg(test)]
+#[path = "operations_survey_handlers_tests.rs"]
+mod operations_survey_handlers_tests;
+
