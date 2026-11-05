@@ -430,7 +430,7 @@ mod sov_fw_capture_live;
 mod npc_sleepers_wormhole_class_live;
 mod mining_ice_and_drones;
 mod notifications_and_mining_live;
-mod crimewatch_security_and_killrights;
+mod crimewatch_kill_rights_sec_status_live;
 pub mod navigation_sov_lookup_payment_live;
 mod navigation_repair_anchor_omega_sp_live;
 mod corp_member_audit_reinforce_and_quit;

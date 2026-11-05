@@ -220,7 +220,7 @@ pub fn handle_bounty_proxy(
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("bountyProxy", "SellKillRight") => {
+        ("bountyProxy", "SellKillRight") | ("killRightMgr", "SellKillRight") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -320,7 +320,7 @@ pub fn handle_bounty_proxy(
             }
         }
 
-        ("bountyProxy", "CancelSellKillRight") => {
+        ("bountyProxy", "CancelSellKillRight") | ("killRightMgr", "CancelSellKillRight") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),

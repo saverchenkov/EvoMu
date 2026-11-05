@@ -1058,7 +1058,11 @@ pub async fn handle_crimewatch(
             )
         }
 
-        ("bountyProxy", _) => handle_bounty_proxy(ctx, session, service, method, args),
+        ("bountyProxy", _)
+        | ("killRightMgr", "SellKillRight")
+        | ("killRightMgr", "CancelSellKillRight") => {
+            handle_bounty_proxy(ctx, session, service, method, args)
+        }
 
 
         ("securityMgr", method) => {

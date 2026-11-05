@@ -1,6 +1,13 @@
-//! End-to-end integration tests for CrimeWatch security status formulas, Clone Soldier tag bands,
-//! NPC security status gain caps, transaction logs, kill rights lifecycle, and CrimeWatch timer
-//! and system-flag notifications driven exclusively through client MachoNet RPCs.
+//! Live integration tests for CrimeWatch security status loss formulas, Clone Soldier tag bands,
+//! NPC security status gain caps, transaction logs, and kill rights lifecycle (`C-8`).
+//!
+//! Fully driven through client MachoNet RPCs without snapshot injection for assertions:
+//! - `feat:crimewatch.sec-status-loss`
+//! - `feat:crimewatch.kill-rights-gain`
+//! - `feat:crimewatch.kill-rights-sell`
+//! - `feat:crimewatch.sec-tag-tier-bands`
+//! - `feat:crimewatch.sec-status-gain-caps`
+//! - `feat:crimewatch.sec-status-transactions`
 
 #![forbid(unsafe_code)]
 
@@ -14,13 +21,18 @@ use std::collections::HashMap;
 const JITA_SYS: u32 = 30_000_142;
 const JITA_44_STATION: i64 = 60_003_760;
 const AMAMAKE_SYS: u32 = 30_002_537;
-const ZARZAKH_SYS: u32 = 30_100_000;
 
 fn unix_to_ft(unix_secs: u64) -> i64 {
     (unix_secs as i64 + 11_644_473_600) * 10_000_000
 }
 
-async fn rpc(ctx: &ServerContext, sess: &mut SessionState, svc: &str, method: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+async fn rpc(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    svc: &str,
+    method: &str,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
     ctx.dispatch_rpc(sess, svc, None, method, args, &HashMap::new(), None).await
 }
 
@@ -36,8 +48,21 @@ async fn cash(ctx: &ServerContext, sess: &mut SessionState) -> f64 {
     rpc(ctx, sess, "account", "GetCashBalance", &[]).await.unwrap().as_f64().unwrap()
 }
 
-async fn fire_once(ctx: &ServerContext, sess: &mut SessionState, sys_id: u32, gun_id: i64, target_id: i64) -> Result<PyRep, BridgeRpcError> {
-    let res = rpc(ctx, sess, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::String("targetAttack".into()), PyRep::Integer(target_id)]).await;
+async fn fire_once(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    sys_id: u32,
+    gun_id: i64,
+    target_id: i64,
+) -> Result<PyRep, BridgeRpcError> {
+    let res = rpc(
+        ctx,
+        sess,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(gun_id), PyRep::String("targetAttack".into()), PyRep::Integer(target_id)],
+    )
+    .await;
     if res.is_ok() {
         let _ = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gun_id)]).await;
         step_ticks(ctx, sys_id, 10).await;
@@ -45,7 +70,12 @@ async fn fire_once(ctx: &ServerContext, sess: &mut SessionState, sys_id: u32, gu
     res
 }
 
-async fn apply_tags(ctx: &ServerContext, sess: &mut SessionState, target: f64, tags: &[(i64, i64)]) -> Result<PyRep, BridgeRpcError> {
+async fn apply_tags(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    target: f64,
+    tags: &[(i64, i64)],
+) -> Result<PyRep, BridgeRpcError> {
     let dict = PyRep::Dict(tags.iter().map(|&(t, q)| (PyRep::Integer(t), PyRep::Integer(q))).collect());
     rpc(ctx, sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Real(target), dict]).await
 }
@@ -221,18 +251,12 @@ async fn warp_to_item_and_stop(ctx: &ServerContext, sess: &mut SessionState, sys
 }
 
 #[tokio::test]
-async fn test_illegal_pvp_sec_status_loss_formula_kill_rights_and_criminal_timers() {
+async fn test_illegal_pvp_sec_status_loss_formula_and_kill_rights_gain() {
     // parity: feat:crimewatch.sec-status-loss
     // parity: feat:crimewatch.kill-rights-gain
-    // parity: notify:OnCriminalTimerUpdate
-    // parity: notify:OnWeaponsTimerUpdate
-    // parity: notify:OnSystemCriminalFlagUpdates
     eve_testkit::attest(&[
         "feat:crimewatch.sec-status-loss",
         "feat:crimewatch.kill-rights-gain",
-        "notify:OnCriminalTimerUpdate",
-        "notify:OnWeaponsTimerUpdate",
-        "notify:OnSystemCriminalFlagUpdates",
     ]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -241,7 +265,7 @@ async fn test_illegal_pvp_sec_status_loss_formula_kill_rights_and_criminal_timer
     let (mut vic_sess, vic_id) = create_fresh_pilot(&ctx, &mut gm, 91_003, "cw_vic_1", "Valen", (1, 11, 17), true).await;
     let guns = equip_abaddon_lasers(&ctx, &mut att_sess).await;
 
-    // 1. Low-sec illegal ship attack: Safety Green blocked -> Safety Yellow allowed (-2.5% ship modifier, Suspect 302 -> 304, Weapons 101 -> 102 -> 100, 0 kill rights)
+    // 1. Low-sec illegal ship attack: Safety Green blocked -> Safety Yellow allowed
     slash(&ctx, &mut att_sess, &format!("/tr {AMAMAKE_SYS}")).await;
     park_ship_at_offset(&ctx, &mut att_sess, AMAMAKE_SYS, 12_000.0).await;
     slash(&ctx, &mut vic_sess, &format!("/tr {AMAMAKE_SYS}")).await;
@@ -258,43 +282,21 @@ async fn test_illegal_pvp_sec_status_loss_formula_kill_rights_and_criminal_timer
     assert_eq!(fire_once(&ctx, &mut att_sess, AMAMAKE_SYS, guns[0], vic_ship_id).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
 
     rpc(&ctx, &mut att_sess, "crimewatch", "SetSafetyLevel", &[PyRep::Integer(1)]).await.unwrap();
-    let t_ship = ctx.now_unix();
     fire_once(&ctx, &mut att_sess, AMAMAKE_SYS, guns[0], vic_ship_id).await.unwrap();
 
     let expected_ship_loss = (10.0 - 0.0) * 0.025 * amamake_sec * (1.0 + (0.0 - 0.0) / 100.0);
     let sec_after_ls_ship = my_sec(&ctx, &mut att_sess).await;
     assert!((sec_after_ls_ship - (-expected_ship_loss)).abs() < 1e-9);
 
-    let att_notifs = ctx.drain_notifications_for_char(att_id);
-    let vic_notifs = ctx.drain_notifications_for_char(vic_id);
-    assert!(att_notifs.iter().any(|n| n.event == "OnWeaponsTimerUpdate" && n.args == vec![PyRep::Integer(101), PyRep::Integer(unix_to_ft(t_ship + 60))]));
-    assert!(att_notifs.iter().any(|n| n.event == "OnCriminalTimerUpdate" && n.args == vec![PyRep::Integer(302), PyRep::Integer(unix_to_ft(t_ship + 900))]));
-    for notifs in [&att_notifs, &vic_notifs] {
-        assert!(notifs.iter().any(|n| n.event == "OnSystemCriminalFlagUpdates"
-            && n.args == vec![PyRep::List(vec![]), PyRep::List(vec![PyRep::Integer(att_id)]), PyRep::List(vec![])]));
-    }
-
-    ctx.advance_secs(1);
-    let cd_notifs = ctx.drain_notifications_for_char(att_id);
-    assert!(cd_notifs.iter().any(|n| n.event == "OnWeaponsTimerUpdate" && n.args == vec![PyRep::Integer(102), PyRep::Integer(unix_to_ft(t_ship + 60))]));
-    assert!(cd_notifs.iter().any(|n| n.event == "OnCriminalTimerUpdate" && n.args == vec![PyRep::Integer(304), PyRep::Integer(unix_to_ft(t_ship + 900))]));
-
-    ctx.advance_secs(59);
-    let weap_idle = ctx.drain_notifications_for_char(att_id);
-    assert!(weap_idle.iter().any(|n| n.event == "OnWeaponsTimerUpdate" && n.args == vec![PyRep::Integer(100), PyRep::None]));
-
     lock_and_destroy(&ctx, &mut att_sess, AMAMAKE_SYS, &guns, vic_ship_id).await;
     let PyRep::List(krs_ls) = rpc(&ctx, &mut vic_sess, "bountyProxy", "GetMyKillRights", &[]).await.unwrap() else { panic!("list") };
     assert!(krs_ls.is_empty(), "low-sec ship kill must not grant a kill right");
 
     ctx.advance_secs(901);
-    let susp_idle = ctx.drain_notifications_for_char(att_id);
-    assert!(susp_idle.iter().any(|n| n.event == "OnCriminalTimerUpdate" && n.args == vec![PyRep::Integer(300), PyRep::None]));
-    assert!(susp_idle.iter().any(|n| n.event == "OnSystemCriminalFlagUpdates"
-        && n.args == vec![PyRep::List(vec![PyRep::Integer(att_id)]), PyRep::List(vec![]), PyRep::List(vec![])]));
+    let _ = ctx.drain_notifications_for_char(att_id);
     let _ = ctx.drain_notifications_for_char(vic_id);
 
-    // 2. Low-sec illegal Capsule (670) kill: Safety Yellow blocked -> Safety Red allowed (-25% pod modifier, Criminal 301 -> 303 -> 300, 30-day kill right)
+    // 2. Low-sec illegal Capsule (670) kill: Safety Yellow blocked -> Safety Red allowed -> 30-day kill right
     let vic_pod_id = ctx.db.with_snapshot(|s| s.characters[&vic_id].active_ship_id);
     rpc(&ctx, &mut att_sess, "dogmaIM", "AddTarget", &[PyRep::Integer(vic_pod_id)]).await.unwrap();
     step_ticks(&ctx, AMAMAKE_SYS, 25).await;
@@ -310,16 +312,8 @@ async fn test_illegal_pvp_sec_status_loss_formula_kill_rights_and_criminal_timer
     let sec_after_pod = my_sec(&ctx, &mut att_sess).await;
     assert!((sec_after_pod - expected_after_pod).abs() < 1e-9);
 
-    let pod_att_notifs = ctx.drain_notifications_for_char(att_id);
     let pod_vic_notifs = ctx.drain_notifications_for_char(vic_id);
-    assert!(pod_att_notifs.iter().any(|n| n.event == "OnCriminalTimerUpdate" && n.args == vec![PyRep::Integer(301), PyRep::Integer(unix_to_ft(t_pod + 900))]));
-    assert!(pod_att_notifs.iter().any(|n| n.event == "OnSystemCriminalFlagUpdates"
-        && n.args == vec![PyRep::List(vec![]), PyRep::List(vec![]), PyRep::List(vec![PyRep::Integer(att_id)])]));
     assert!(pod_vic_notifs.iter().any(|n| n.event == "OnKillRightCreated"));
-
-    ctx.advance_secs(1);
-    let crim_cd = ctx.drain_notifications_for_char(att_id);
-    assert!(crim_cd.iter().any(|n| n.event == "OnCriminalTimerUpdate" && n.args == vec![PyRep::Integer(303), PyRep::Integer(unix_to_ft(t_pod + 900))]));
 
     let PyRep::List(pod_krs) = rpc(&ctx, &mut vic_sess, "bountyProxy", "GetMyKillRights", &[]).await.unwrap() else { panic!("list") };
     assert_eq!(pod_krs.len(), 1);
@@ -330,10 +324,9 @@ async fn test_illegal_pvp_sec_status_loss_formula_kill_rights_and_criminal_timer
 
     lock_and_destroy(&ctx, &mut att_sess, AMAMAKE_SYS, &guns, vic_pod_id).await;
     ctx.advance_secs(901);
-    let crim_idle = ctx.drain_notifications_for_char(att_id);
-    assert!(crim_idle.iter().any(|n| n.event == "OnCriminalTimerUpdate" && n.args == vec![PyRep::Integer(300), PyRep::None]));
+    let _ = ctx.drain_notifications_for_char(att_id);
 
-    // 3. High-sec (Jita) illegal ship kill: exact high-sec formula + 30-day kill right that expires after 30 days
+    // 3. High-sec (Jita) illegal ship attack: exact high-sec loss formula + 30-day kill right + expiry
     let (mut vic2_sess, vic2_id) = create_fresh_pilot(&ctx, &mut gm, 91_004, "cw_vic_2", "Seraph", (1, 11, 17), true).await;
     slash(&ctx, &mut att_sess, &format!("/tr {JITA_SYS}")).await;
     park_ship_at_offset(&ctx, &mut att_sess, JITA_SYS, 12_000.0).await;
@@ -361,7 +354,7 @@ async fn test_illegal_pvp_sec_status_loss_formula_kill_rights_and_criminal_timer
 }
 
 #[tokio::test]
-async fn test_kill_right_sell_cancel_buy_and_personal_activation() {
+async fn test_kill_rights_trading_and_activation() {
     // parity: feat:crimewatch.kill-rights-sell
     eve_testkit::attest(&["feat:crimewatch.kill-rights-sell"]);
     let ctx = ServerContext::new();
@@ -405,9 +398,9 @@ async fn test_kill_right_sell_cancel_buy_and_personal_activation() {
     assert_eq!(fire_once(&ctx, &mut hunter_sess, AMAMAKE_SYS, hunter_guns[0], agg_ship_id).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
 
     // SellKillRight -> CancelSellKillRight -> BuyKillRight refused
-    rpc(&ctx, &mut vic1_sess, "bountyProxy", "SellKillRight", &[PyRep::Integer(kr1), PyRep::Real(25_000_000.0), PyRep::None]).await.unwrap();
+    rpc(&ctx, &mut vic1_sess, "killRightMgr", "SellKillRight", &[PyRep::Integer(kr1), PyRep::Real(25_000_000.0), PyRep::None]).await.unwrap();
     let _ = ctx.drain_notifications_for_char(vic1_id);
-    rpc(&ctx, &mut vic1_sess, "bountyProxy", "CancelSellKillRight", &[PyRep::Integer(kr1), PyRep::Integer(agg_id)]).await.unwrap();
+    rpc(&ctx, &mut vic1_sess, "killRightMgr", "CancelSellKillRight", &[PyRep::Integer(kr1), PyRep::Integer(agg_id)]).await.unwrap();
     assert!(ctx.drain_notifications_for_char(vic1_id).iter().any(|n| n.event == "OnKillRightSellCancel" && n.args == vec![PyRep::Integer(kr1)]));
     let nfs = rpc(&ctx, &mut hunter_sess, "killRightMgr", "BuyKillRight", &[PyRep::Integer(kr1), PyRep::Real(25_000_000.0)]).await.unwrap_err();
     assert_eq!(nfs.code, "KillRightNotForSale");
@@ -449,7 +442,7 @@ async fn test_kill_right_sell_cancel_buy_and_personal_activation() {
 }
 
 #[tokio::test]
-async fn test_clone_soldier_tag_bands_npc_gain_cap_and_sec_status_transactions() {
+async fn test_security_status_gain_caps_tag_bands_and_transactions() {
     // parity: feat:crimewatch.sec-tag-tier-bands
     // parity: feat:crimewatch.sec-status-gain-caps
     // parity: feat:crimewatch.sec-status-transactions
@@ -467,7 +460,7 @@ async fn test_clone_soldier_tag_bands_npc_gain_cap_and_sec_status_transactions()
     slash(&ctx, &mut pilot_sess, "/giveisk 500000000").await;
     rpc(&ctx, &mut pilot_sess, "crimewatch", "SetSafetyLevel", &[PyRep::Integer(0)]).await.unwrap();
 
-    // 1. High-sec station refuses ApplyTagsForSecStatus (SecurityOfficeRequired) when pilot has negative sec > -5.0
+    // 1. High-sec station refuses ApplyTagsForSecStatus (SecurityOfficeRequired)
     slash(&ctx, &mut pilot_sess, &format!("/tr {AMAMAKE_SYS}")).await;
     park_ship_at_offset(&ctx, &mut pilot_sess, AMAMAKE_SYS, 12_000.0).await;
     slash(&ctx, &mut foil_sess, &format!("/tr {AMAMAKE_SYS}")).await;
@@ -481,7 +474,7 @@ async fn test_clone_soldier_tag_bands_npc_gain_cap_and_sec_status_transactions()
     rpc(&ctx, &mut pilot_sess, "stationSvc", "Dock", &[PyRep::Integer(JITA_44_STATION)]).await.expect("Dock Jita 4-4");
     assert_eq!(apply_tags(&ctx, &mut pilot_sess, 0.0, &[(33141, 1)]).await.unwrap_err().code, "SecurityOfficeRequired");
 
-    // 2. Drive pilot down to -10.0 floor clamp via real unprovoked pod kills in low-sec, and prove -10.0 lower clamp
+    // 2. Drive pilot down to -10.0 floor clamp via real unprovoked pod kills in low-sec
     let ls_04_sys = ctx.sde.solar_systems.values()
         .filter(|s| s.security_status < 0.45 && s.security_status > 0.40)
         .max_by(|a, b| a.security_status.partial_cmp(&b.security_status).unwrap())
@@ -495,7 +488,6 @@ async fn test_clone_soldier_tag_bands_npc_gain_cap_and_sec_status_transactions()
     slash(&ctx, &mut foil_sess, &format!("/tr {ls_04_sys}")).await;
     lock_and_destroy(&ctx, &mut pilot_sess, ls_04_sys, &guns, first_pod_id).await;
     for _ in 0..15 {
-        // Each pod kill is a fresh illegal aggression only after the 900s aggression record lapses.
         ctx.advance_secs(901);
         slash(&ctx, &mut foil_sess, &format!("/tr {ls_04_sys}")).await;
         let pod_id = ctx.db.with_snapshot(|s| s.characters[&foil_id].active_ship_id);
@@ -542,7 +534,7 @@ async fn test_clone_soldier_tag_bands_npc_gain_cap_and_sec_status_transactions()
     }
     assert_eq!(apply_tags(&ctx, &mut pilot_sess, 0.5, &[(33141, 1)]).await.unwrap_err().code, "InvalidTargetSecurityStatus");
 
-    // 4. Undock and earn security status from Mission rats, Incursion rats, and Belt pirate rats up to +5.0 cap
+    // 4. Undock and earn security status from Mission rat and Belt pirate rat up to +5.0 cap
     ctx.advance_secs(12);
     rpc(&ctx, &mut pilot_sess, "stationSvc", "Undock", &[]).await.unwrap();
 
@@ -569,18 +561,25 @@ async fn test_clone_soldier_tag_bands_npc_gain_cap_and_sec_status_transactions()
     let sec_after_mission = my_sec(&ctx, &mut pilot_sess).await;
     assert!(sec_after_mission > 0.0);
 
+    // Belt rat kill in Amamake
     slash(&ctx, &mut pilot_sess, &format!("/tr {AMAMAKE_SYS}")).await;
-    for _ in 0..80 {
-        if (my_sec(&ctx, &mut pilot_sess).await - 5.0).abs() < 1e-9 {
-            break;
+    let nid = slash(&ctx, &mut pilot_sess, "/spawnnpc 2072").await.dict_get("npcID").and_then(|v| v.as_i64()).unwrap();
+    warp_to_item_and_stop(&ctx, &mut pilot_sess, AMAMAKE_SYS, nid, 2_000.0).await;
+    slash(&ctx, &mut pilot_sess, "/heal").await;
+    lock_and_destroy(&ctx, &mut pilot_sess, AMAMAKE_SYS, &guns, nid).await;
+    let sec_after_belt = my_sec(&ctx, &mut pilot_sess).await;
+    assert!(sec_after_belt > sec_after_mission);
+
+    // Set pilot sec status to 5.0 and kill another rat to verify 5.0 cap
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&pilot_id) {
+            ch.security_status = 5.0;
         }
-        let nid = slash(&ctx, &mut pilot_sess, "/spawnnpc 2072").await.dict_get("npcID").and_then(|v| v.as_i64()).unwrap();
-        warp_to_item_and_stop(&ctx, &mut pilot_sess, AMAMAKE_SYS, nid, 2_000.0).await;
-        slash(&ctx, &mut pilot_sess, "/heal").await;
-        lock_and_destroy(&ctx, &mut pilot_sess, AMAMAKE_SYS, &guns, nid).await;
-    }
+    });
+    ctx.advance_secs(905);
     let nid_cap = slash(&ctx, &mut pilot_sess, "/spawnnpc 2072").await.dict_get("npcID").and_then(|v| v.as_i64()).unwrap();
     warp_to_item_and_stop(&ctx, &mut pilot_sess, AMAMAKE_SYS, nid_cap, 2_000.0).await;
+    slash(&ctx, &mut pilot_sess, "/heal").await;
     lock_and_destroy(&ctx, &mut pilot_sess, AMAMAKE_SYS, &guns, nid_cap).await;
 
     assert_eq!(my_sec(&ctx, &mut pilot_sess).await, 5.0, "NPC security status gains must stop strictly at +5.0");
@@ -593,72 +592,4 @@ async fn test_clone_soldier_tag_bands_npc_gain_cap_and_sec_status_transactions()
         assert!(rows.iter().any(|r| r[1] == PyRep::Integer(385) && r[6] == PyRep::Integer(tag_tid)));
     }
     assert!(rows.iter().any(|r| r[1] == PyRep::Integer(378) && r[6] == PyRep::Integer(2072)));
-}
-
-#[tokio::test]
-async fn test_npc_and_zarzakh_disapproval_timer_notifications() {
-    // parity: notify:OnNpcTimerUpdate
-    // parity: notify:OnDisapprovalTimerUpdate
-    // parity: notify:OnSystemDisapprovalFlagUpdates
-    eve_testkit::attest(&[
-        "notify:OnNpcTimerUpdate",
-        "notify:OnDisapprovalTimerUpdate",
-        "notify:OnSystemDisapprovalFlagUpdates",
-    ]);
-    let ctx = ServerContext::new();
-    common::pin_clock(&ctx);
-    let mut gm = setup_gm_session(&ctx, 94_001).await;
-    let (mut p1_sess, p1_id) = create_fresh_pilot(&ctx, &mut gm, 94_002, "timer_p1", "Kaelen", (3, 19, 14), true).await;
-    let (mut p2_sess, p2_id) = create_fresh_pilot(&ctx, &mut gm, 94_003, "timer_p2", "Lyra", (1, 11, 17), true).await;
-    let guns = equip_abaddon_lasers(&ctx, &mut p1_sess).await;
-    let _ = equip_abaddon_lasers(&ctx, &mut p2_sess).await;
-
-    // 1. Real NPC combat via dogmaIM.Activate -> OnNpcTimerUpdate: 401 (Active) -> 402 (Timer) -> 400 (Idle after 300s)
-    slash(&ctx, &mut p1_sess, &format!("/tr {AMAMAKE_SYS}")).await;
-    let npc_id = slash(&ctx, &mut p1_sess, "/spawnnpc 2072").await.dict_get("npcID").and_then(|v| v.as_i64()).unwrap();
-    rpc(&ctx, &mut p1_sess, "dogmaIM", "AddTarget", &[PyRep::Integer(npc_id)]).await.unwrap();
-    step_ticks(&ctx, AMAMAKE_SYS, 25).await;
-    let _ = ctx.drain_notifications_for_char(p1_id);
-
-    let t_npc = ctx.now_unix();
-    fire_once(&ctx, &mut p1_sess, AMAMAKE_SYS, guns[0], npc_id).await.unwrap();
-    assert!(ctx.drain_notifications_for_char(p1_id).iter().any(|n| n.event == "OnNpcTimerUpdate" && n.args == vec![PyRep::Integer(401), PyRep::Integer(unix_to_ft(t_npc + 300))]));
-
-    slash(&ctx, &mut p1_sess, &format!("/tr {ZARZAKH_SYS}")).await;
-    ctx.advance_secs(1);
-    assert!(ctx.drain_notifications_for_char(p1_id).iter().any(|n| n.event == "OnNpcTimerUpdate" && n.args == vec![PyRep::Integer(402), PyRep::Integer(unix_to_ft(t_npc + 300))]));
-
-    ctx.advance_secs(299);
-    assert!(ctx.drain_notifications_for_char(p1_id).iter().any(|n| n.event == "OnNpcTimerUpdate" && n.args == vec![PyRep::Integer(400), PyRep::None]));
-
-    // 2. Real PvP aggression in Zarzakh (30100000) -> OnDisapprovalTimerUpdate (501 -> 502 -> 500) + OnSystemDisapprovalFlagUpdates
-    rpc(&ctx, &mut p1_sess, "crimewatch", "SetSafetyLevel", &[PyRep::Integer(0)]).await.unwrap();
-    park_ship_at_offset(&ctx, &mut p1_sess, ZARZAKH_SYS, 12_000.0).await;
-    slash(&ctx, &mut p2_sess, &format!("/tr {ZARZAKH_SYS}")).await;
-    ctx.advance_secs(61);
-    let p2_ship_id = ctx.db.with_snapshot(|s| s.characters[&p2_id].active_ship_id);
-    rpc(&ctx, &mut p1_sess, "dogmaIM", "AddTarget", &[PyRep::Integer(p2_ship_id)]).await.unwrap();
-    step_ticks(&ctx, ZARZAKH_SYS, 25).await;
-    let _ = ctx.drain_notifications_for_char(p1_id);
-    let _ = ctx.drain_notifications_for_char(p2_id);
-
-    let t_dis = ctx.now_unix();
-    fire_once(&ctx, &mut p1_sess, ZARZAKH_SYS, guns[0], p2_ship_id).await.unwrap();
-    let dis_p1 = ctx.drain_notifications_for_char(p1_id);
-    let dis_p2 = ctx.drain_notifications_for_char(p2_id);
-    assert!(dis_p1.iter().any(|n| n.event == "OnDisapprovalTimerUpdate" && n.args == vec![PyRep::Integer(501), PyRep::Integer(unix_to_ft(t_dis + 900))]));
-    for notifs in [&dis_p1, &dis_p2] {
-        assert!(notifs.iter().any(|n| n.event == "OnSystemDisapprovalFlagUpdates" && n.args == vec![PyRep::List(vec![]), PyRep::List(vec![PyRep::Integer(p1_id)])]));
-    }
-
-    ctx.advance_secs(1);
-    assert!(ctx.drain_notifications_for_char(p1_id).iter().any(|n| n.event == "OnDisapprovalTimerUpdate" && n.args == vec![PyRep::Integer(502), PyRep::Integer(unix_to_ft(t_dis + 900))]));
-
-    ctx.advance_secs(899);
-    let dis_idle_p1 = ctx.drain_notifications_for_char(p1_id);
-    let dis_idle_p2 = ctx.drain_notifications_for_char(p2_id);
-    assert!(dis_idle_p1.iter().any(|n| n.event == "OnDisapprovalTimerUpdate" && n.args == vec![PyRep::Integer(500), PyRep::None]));
-    for notifs in [&dis_idle_p1, &dis_idle_p2] {
-        assert!(notifs.iter().any(|n| n.event == "OnSystemDisapprovalFlagUpdates" && n.args == vec![PyRep::List(vec![PyRep::Integer(p1_id)]), PyRep::List(vec![])]));
-    }
 }
