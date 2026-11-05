@@ -757,3 +757,7 @@ pub fn register_achievement_handlers(
         }),
     );
 }
+
+#[cfg(test)] #[path = "quasar_achievements_ops_tests.rs"]
+mod quasar_achievements_ops_tests;
+

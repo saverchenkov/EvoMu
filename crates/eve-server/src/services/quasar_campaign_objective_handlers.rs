@@ -207,3 +207,7 @@ pub fn register_objective_and_track_handlers(router: &PublicGatewayRouter, manag
         }),
     );
 }
+
+#[cfg(test)] #[path = "quasar_campaign_objective_handlers_tests.rs"]
+mod quasar_campaign_objective_handlers_tests;
+

@@ -336,3 +336,7 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
     let new_beyonce = ctx.bind_object(session, "beyonce", dest_sys_id as i64)?;
     Ok(PyRep::keyval([("solarSystemID", PyRep::Integer(dest_sys_id as i64)), ("beyonceBoundID", PyRep::Integer(new_beyonce as i64))]))
 }
+
+#[cfg(test)] #[path = "structure_ansiblex_navigation_tests.rs"]
+mod structure_ansiblex_navigation_tests;
+

@@ -737,3 +737,7 @@ impl ProgressionExtraManager {
 pub fn require_id(id: Option<u64>, what: &str) -> Result<u64, (u32, String)> {
     id.ok_or((STATUS_BAD_REQUEST, format!("Missing {what} identifier")))
 }
+
+#[cfg(test)] #[path = "quasar_campaign_state_tests.rs"]
+mod quasar_campaign_state_tests;
+

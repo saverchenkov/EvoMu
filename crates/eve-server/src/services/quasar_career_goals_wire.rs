@@ -338,3 +338,7 @@ pub fn extract_target_character(
     }
     None
 }
+
+#[cfg(test)] #[path = "quasar_career_goals_wire_tests.rs"]
+mod quasar_career_goals_wire_tests;
+

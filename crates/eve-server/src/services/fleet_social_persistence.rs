@@ -935,3 +935,6 @@ pub(super) fn handle_vote_queries(
     });
     Some(Ok(PyRep::rowset(columns, rows)))
 }
+
+#[cfg(test)] #[path = "fleet_social_persistence_tests.rs"]
+mod fleet_social_persistence_tests;

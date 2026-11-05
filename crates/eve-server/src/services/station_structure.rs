@@ -1377,3 +1377,7 @@ pub fn npc_station_offers_service(sde: &eve_sde::SdeRegistry, station_id: i64, s
         .unwrap_or(false)
 }
 
+#[cfg(test)] #[path = "station_structure_tests.rs"]
+mod station_structure_tests;
+
+

@@ -515,3 +515,7 @@ fn register_pochven_guard_npc(
         );
     });
 }
+
+#[cfg(test)] #[path = "space_pochven_wormholes_tests.rs"]
+mod space_pochven_wormholes_tests;
+

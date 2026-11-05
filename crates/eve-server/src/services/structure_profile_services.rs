@@ -927,3 +927,7 @@ pub fn apply_group_member_batch(
     }
     Ok(PyRep::List(Vec::new()))
 }
+
+#[cfg(test)] #[path = "structure_profile_services_tests.rs"]
+mod structure_profile_services_tests;
+

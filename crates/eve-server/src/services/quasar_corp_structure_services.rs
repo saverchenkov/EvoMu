@@ -1021,3 +1021,7 @@ fn register_commerce_admin_handlers(
         );
     }
 }
+
+#[cfg(test)] #[path = "quasar_corp_structure_services_tests.rs"]
+mod quasar_corp_structure_services_tests;
+

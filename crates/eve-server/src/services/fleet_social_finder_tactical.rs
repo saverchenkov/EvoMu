@@ -1117,3 +1117,7 @@ pub fn clear_destroyed_target_tag(ctx: &ServerContext, target_id: i64) {
         );
     }
 }
+
+#[cfg(test)] #[path = "fleet_social_finder_tactical_tests.rs"]
+mod fleet_social_finder_tactical_tests;
+

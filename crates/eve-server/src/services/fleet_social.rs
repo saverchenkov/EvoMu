@@ -961,4 +961,7 @@ pub(super) fn handle_get_init_state(
 
 pub(super) use fleet_social_finder_tactical::handle_fleet_watchlist_ops;
 
+#[cfg(test)] #[path = "fleet_social_tests.rs"]
+mod fleet_social_tests;
+
 

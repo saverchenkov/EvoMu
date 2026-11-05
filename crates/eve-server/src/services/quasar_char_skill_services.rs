@@ -1161,4 +1161,8 @@ pub fn decode_wire_dynamic(full_name: &str, buf: &[u8]) -> DynamicQuasarMessage 
     msg
 }
 
+#[cfg(test)] #[path = "quasar_char_skill_services_tests.rs"]
+mod quasar_char_skill_services_tests;
+
+
 

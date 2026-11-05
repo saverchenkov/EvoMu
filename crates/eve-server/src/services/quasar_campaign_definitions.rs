@@ -372,3 +372,7 @@ pub fn register_campaign_definition_handlers(
         }),
     );
 }
+
+#[cfg(test)] #[path = "quasar_campaign_definitions_tests.rs"]
+mod quasar_campaign_definitions_tests;
+

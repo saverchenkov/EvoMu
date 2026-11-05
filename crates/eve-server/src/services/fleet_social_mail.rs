@@ -1164,3 +1164,7 @@ fn extract_label_bits(arg: Option<&PyRep>) -> Vec<i64> {
     bits.dedup();
     bits
 }
+
+#[cfg(test)] #[path = "fleet_social_mail_tests.rs"]
+mod fleet_social_mail_tests;
+

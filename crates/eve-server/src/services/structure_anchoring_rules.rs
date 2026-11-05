@@ -372,3 +372,7 @@ pub fn validate_pochven_customs_office_standing(
     }
     Ok(())
 }
+
+#[cfg(test)] #[path = "structure_anchoring_rules_tests.rs"]
+mod structure_anchoring_rules_tests;
+

@@ -1270,3 +1270,7 @@ pub(crate) fn emit_signal_tracker_site_removed_with_db(
         }
     }
 }
+
+#[cfg(test)] #[path = "fleet_social_scanning_tests.rs"]
+mod fleet_social_scanning_tests;
+

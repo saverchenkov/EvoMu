@@ -1166,3 +1166,7 @@ pub fn register_career_goal_handlers(
         }),
     );
 }
+
+#[cfg(test)] #[path = "quasar_career_goals_tests.rs"]
+mod quasar_career_goals_tests;
+

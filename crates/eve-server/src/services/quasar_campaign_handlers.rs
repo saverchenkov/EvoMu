@@ -580,3 +580,7 @@ pub fn encode_ticking_prediction(t: &CampaignTrackRecord, units: u64) -> Vec<u8>
     }
     out
 }
+
+#[cfg(test)] #[path = "quasar_campaign_handlers_tests.rs"]
+mod quasar_campaign_handlers_tests;
+

@@ -558,3 +558,7 @@ pub fn step_zarzakh_gravity_hazard_in_ballpark(
     }
     destroyed
 }
+
+#[cfg(test)] #[path = "space_navigation_advanced_tests.rs"]
+mod space_navigation_advanced_tests;
+

@@ -1257,3 +1257,7 @@ pub(super) async fn handle_fleets(
         }
     }
 }
+
+#[cfg(test)] #[path = "fleet_social_fleets_tests.rs"]
+mod fleet_social_fleets_tests;
+

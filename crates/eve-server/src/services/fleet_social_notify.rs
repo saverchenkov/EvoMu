@@ -1274,3 +1274,7 @@ pub(super) fn handle_corp_contacts_and_labels(
         }
     }
 }
+
+#[cfg(test)] #[path = "fleet_social_notify_tests.rs"]
+mod fleet_social_notify_tests;
+

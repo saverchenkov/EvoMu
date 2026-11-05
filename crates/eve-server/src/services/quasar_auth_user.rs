@@ -1111,3 +1111,7 @@ fn register_federated_and_transfer_handlers(
         }),
     );
 }
+
+#[cfg(test)] #[path = "quasar_auth_user_tests.rs"]
+mod quasar_auth_user_tests;
+

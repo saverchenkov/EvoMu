@@ -1208,3 +1208,7 @@ async fn handle_search_folders_with_admin_access(
         rows,
     ))
 }
+
+#[cfg(test)] #[path = "fleet_social_access_group_bookmarks_tests.rs"]
+mod fleet_social_access_group_bookmarks_tests;
+

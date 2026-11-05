@@ -907,3 +907,7 @@ pub async fn handle_structure_module_activate(
         )),
     }
 }
+
+#[cfg(test)] #[path = "structure_weapons_ops_tests.rs"]
+mod structure_weapons_ops_tests;
+

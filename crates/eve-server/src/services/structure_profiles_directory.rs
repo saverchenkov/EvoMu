@@ -259,3 +259,7 @@ fn handle_get_valid_war_hqs(
         Ok(PyRep::List(ids.into_iter().map(PyRep::Integer).collect()))
     })
 }
+
+#[cfg(test)] #[path = "structure_profiles_directory_tests.rs"]
+mod structure_profiles_directory_tests;
+

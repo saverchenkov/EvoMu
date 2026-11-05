@@ -1087,3 +1087,7 @@ pub fn handle_calendar_get(
         Some(Ok(rowset))
     }
 }
+
+#[cfg(test)] #[path = "fleet_social_calendar_ops_tests.rs"]
+mod fleet_social_calendar_ops_tests;
+

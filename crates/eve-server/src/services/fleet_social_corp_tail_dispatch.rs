@@ -789,3 +789,7 @@ pub(crate) fn handle_get_corp_applications_rpc(
         Err(e) => Some(Err(e)),
     }
 }
+
+#[cfg(test)] #[path = "fleet_social_corp_tail_dispatch_tests.rs"]
+mod fleet_social_corp_tail_dispatch_tests;
+

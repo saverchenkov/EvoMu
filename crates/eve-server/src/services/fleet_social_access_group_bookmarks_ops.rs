@@ -995,3 +995,7 @@ pub(crate) async fn handle_copy_move_bookmarks(
         Ok(PyRep::Tuple(vec![PyRep::Dict(copied_dict), PyRep::None]))
     }
 }
+
+#[cfg(test)] #[path = "fleet_social_access_group_bookmarks_ops_tests.rs"]
+mod fleet_social_access_group_bookmarks_ops_tests;
+
