@@ -318,13 +318,7 @@ async fn hack_container_to_core_live(
 // parity: feat:pve.wormhole-capital-escalations, feat:pve.wormhole-drifter-response-escalation, feat:pve.wormhole-site-downtime-despawn, feat:pve.sleeper-sentry-towers, feat:pve.wormhole-site-capital-escalation-cap
 #[tokio::test]
 async fn test_wormhole_capital_escalations_sentries_drifter_relay_and_downtime_despawn() {
-    eve_testkit::attest(&[
-        "feat:pve.wormhole-capital-escalations",
-        "feat:pve.wormhole-drifter-response-escalation",
-        "feat:pve.wormhole-site-downtime-despawn",
-        "feat:pve.sleeper-sentry-towers",
-        "feat:pve.wormhole-site-capital-escalation-cap",
-    ]);
+    eve_testkit::attest(&["feat:pve.sleeper-sentry-towers", "feat:pve.wormhole-capital-escalations", "feat:pve.wormhole-drifter-response-escalation", "feat:pve.wormhole-site-capital-escalation-cap", "feat:pve.wormhole-site-downtime-despawn"]);
     let ctx = ctx_with_real_sde();
     let kw = HashMap::new();
     let char_id = 90_000_001_i64;
@@ -455,7 +449,7 @@ async fn test_wormhole_capital_escalations_sentries_drifter_relay_and_downtime_d
         let e = rt.npc_entities.get(&avenger_bid).unwrap();
         (e.web_speed_factor, e.scram_strength, e.neut_amount)
     });
-    assert!(av_web < 0.0 && av_scram > 0.0 && av_neut > 0.0);
+    assert_eq!((av_web, av_scram, av_neut), (-50.0, 15.0, 1500.0));
 
     // Warp 1st Dreadnought off-grid to a system celestial via live CmdWarpToStuff -> its 3 Avengers despawn (9 left)
     let mut dread1_sess = dread1_sess_opt.unwrap();

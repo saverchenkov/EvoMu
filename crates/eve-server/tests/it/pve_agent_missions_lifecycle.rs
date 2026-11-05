@@ -178,8 +178,8 @@ async fn test_pve_agent_finder_and_conversation() {
 
 #[tokio::test]
 async fn test_pve_mission_lifecycle_accept_tracker_complete_journal() {
-    // parity: feat:pve.mission-accept, feat:pve.mission-journal, feat:pve.mission-tracker, feat:pve.mission-complete
-    eve_testkit::attest(&["feat:pve.mission-accept", "feat:pve.mission-journal", "feat:pve.mission-tracker", "feat:pve.mission-complete"]);
+    // parity: feat:pve.mission-accept, feat:pve.mission-journal, feat:pve.mission-tracker
+    eve_testkit::attest(&["feat:pve.mission-accept", "feat:pve.mission-journal", "feat:pve.mission-tracker"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let char_id = 90_000_001_i64;
@@ -275,6 +275,7 @@ async fn test_pve_mission_lifecycle_accept_tracker_complete_journal() {
     assert_eq!(trk_done.dict_get("npcsRemaining").and_then(|v| v.as_i64()), Some(0));
 
     // 5. Complete mission (feat:pve.mission-complete)
+    eve_testkit::attest(&["feat:pve.mission-complete"]);
     let initial_isk = ctx.db.with_snapshot(|snap| snap.characters[&char_id].balance.0 / 100);
     let initial_lp = ctx.db.with_snapshot(|snap| snap.characters[&char_id].loyalty_points.get(&corp_id).copied().unwrap_or(0));
     let initial_standing = ctx.db.with_snapshot(|snap| snap.characters[&char_id].standings.get(&corp_id).copied().unwrap_or(0.0));

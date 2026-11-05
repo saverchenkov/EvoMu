@@ -69,34 +69,16 @@ pub fn build_sleeper_sentry_entity(
     let attr = |aid: u16| -> Option<f64> {
         sde_type.and_then(|t| t.default_attributes.get(&aid).copied())
     };
-    let opt_range = attr(54).unwrap_or(250_000.0);
-    let dmg_mult = attr(64).unwrap_or(match type_id {
-        30_460 => 13.0,
-        30_461 => 18.2,
-        _ => 23.4,
-    });
-    let em = attr(114).unwrap_or(30.0) * dmg_mult;
-    let thm = attr(118).unwrap_or(30.0) * dmg_mult;
+    // All tower stats come from the SDE type (`54` range, `64` damage multiplier, `114`/`116`/`117`/`118`
+    // damage, `552` signature, `9`/`265` HP); a missing attribute contributes nothing.
+    let opt_range = attr(54).unwrap_or(0.0);
+    let dmg_mult = attr(64).unwrap_or(0.0);
+    let em = attr(114).unwrap_or(0.0) * dmg_mult;
+    let thm = attr(118).unwrap_or(0.0) * dmg_mult;
+    let kin = attr(117).unwrap_or(0.0) * dmg_mult;
+    let exp = attr(116).unwrap_or(0.0) * dmg_mult;
     let mut cs = build_type_combat_state_from_sde(sde, type_id);
-    cs.signature_radius = attr(552).unwrap_or(50.0);
-    if cs.max_armor_hp <= 50.0 {
-        let fallback_armor = match type_id {
-            30_460 => 5_000.0,
-            30_461 => 7_000.0,
-            _ => 11_000.0,
-        };
-        cs.max_armor_hp = fallback_armor;
-        cs.armor_hp = fallback_armor;
-    }
-    if cs.max_structure_hp <= 50.0 {
-        let fallback_hull = match type_id {
-            30_460 => 2_500.0,
-            30_461 => 3_500.0,
-            _ => 5_500.0,
-        };
-        cs.max_structure_hp = fallback_hull;
-        cs.structure_hp = fallback_hull;
-    }
+    cs.signature_radius = attr(552).unwrap_or(0.0);
     let ball = Ball {
         id: ball_id,
         type_id,
@@ -104,8 +86,8 @@ pub fn build_sleeper_sentry_entity(
         velocity: DVec3::ZERO,
         max_velocity: 0.0,
         inertia: 1.0,
-        mass: sde_type.map(|t| t.mass).unwrap_or(1_000.0),
-        radius: sde_type.map(|t| t.radius).unwrap_or(45.0),
+        mass: sde_type.map_or(0.0, |t| t.mass),
+        radius: sde_type.map_or(0.0, |t| t.radius),
         speed_fraction: 0.0,
         mode: MovementMode::Stop,
     };
@@ -125,8 +107,8 @@ pub fn build_sleeper_sentry_entity(
         damage_vector: DamageVector {
             em,
             thermal: thm,
-            kinetic: 0.0,
-            explosive: 0.0,
+            kinetic: kin,
+            explosive: exp,
         },
         entropic_cycles: 0,
         drifter_overshield_hp: 0.0,

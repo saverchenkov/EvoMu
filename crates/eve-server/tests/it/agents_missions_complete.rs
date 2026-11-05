@@ -801,8 +801,8 @@ fn make_mission(char_id: i64, mission_id: u32, agent_id: i64, sys_id: u32, state
 
 #[tokio::test]
 async fn test_mission_lifecycle_offer_accept_complete_decline_abandon_and_expiration() {
-    // parity: feat:pve.mission-accept, feat:pve.mission-decline, feat:pve.mission-quit, feat:pve.mission-complete, feat:pve.mission-expire, feat:pve.mission-journal, feat:pve.mission-tracker
-    eve_testkit::attest(&["feat:pve.mission-accept", "feat:pve.mission-decline", "feat:pve.mission-quit", "feat:pve.mission-complete", "feat:pve.mission-expire", "feat:pve.mission-journal", "feat:pve.mission-tracker"]);
+    // parity: feat:pve.mission-accept, feat:pve.mission-decline, feat:pve.mission-quit, feat:pve.mission-expire, feat:pve.mission-journal, feat:pve.mission-tracker
+    eve_testkit::attest(&["feat:pve.mission-accept", "feat:pve.mission-decline", "feat:pve.mission-quit", "feat:pve.mission-expire", "feat:pve.mission-journal", "feat:pve.mission-tracker"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;

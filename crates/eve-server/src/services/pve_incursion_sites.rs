@@ -205,16 +205,43 @@ pub fn get_sansha_encounter_composition(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// `(min_pilots, max_optimal_pilots, max ISK, max CONCORD LP)` per wiki:Incursion_sites for the site tier and
+/// the system's security band (high-sec `>= 0.45` vs low/null-sec). Staging sites pay the top five contributors.
+pub fn incursion_site_payout_band(sde: &eve_sde::SdeRegistry, sys: SolarSystemId, tier: &str) -> (usize, usize, i64, i64) {
+    let highsec = sde.solar_systems.get(&sys).is_some_and(|s| s.security_status >= 0.45);
+    match (tier, highsec) {
+        ("Staging", _) => (1, 5, 3_500_000, 400),
+        ("Vanguard", true) => (5, 10, 10_395_000, 1_400),
+        ("Vanguard", false) => (5, 15, 15_000_000, 2_000),
+        ("Assault", true) => (1, 20, 18_200_000, 3_500),
+        ("Assault", false) => (1, 30, 26_000_000, 5_000),
+        ("Headquarters", true) => (20, 40, 31_500_000, 7_000),
+        ("Headquarters", false) => (20, 60, 45_000_000, 10_000),
+        (_, true) => (40, 80, 63_000_000, 14_000),
+        (_, false) => (40, 120, 90_000_000, 20_000),
+    }
+}
+
+/// Per-pilot payout ratio for `over` pilots above the site's maximum, from the wiki:Incursion_sites tables
+/// (e.g. high-sec Vanguard 10,395,000 -> 9,615,375 / 8,783,775 / 7,900,200 ISK for 11 / 12 / 13 pilots).
+/// Larger overstacks are not listed and pay nothing ("you end up not getting anything").
+pub fn incursion_overstack_ratio(over: usize) -> f64 {
+    match over {
+        0 => 1.0,
+        1 => 0.925,
+        2 => 0.845,
+        3 => 0.76,
+        _ => 0.0,
+    }
+}
+
 pub fn make_incursion_site(
     const_id: ConstellationId,
     dungeon_id: u32,
     dungeon_name: &str,
     solar_system_id: SolarSystemId,
     tier: &str,
-    min_pilots: usize,
-    max_optimal_pilots: usize,
-    base_isk: i64,
-    base_concord_lp: i64,
+    (min_pilots, max_optimal_pilots, base_isk, base_concord_lp): (usize, usize, i64, i64),
     influence_delta: f64,
     locked_until_low_influence: bool,
     position: DVec3,
@@ -301,48 +328,47 @@ pub fn seed_incursion_for_constellation(
     let as_sys = assault_solar_system_ids[0];
     let as_sys2 = assault_solar_system_ids.get(1).copied().unwrap_or(as_sys);
 
-    // DERIVED: High-sec Sansha Incursion site base ISK, CONCORD LP, optimal pilot caps, and influence deltas
-    // per EVE University Wiki `Incursion_sites` (Vanguard 10.395M/1,400 LP, Assault 18.2M/3,500 LP,
-    // HQ 31.5M/7,000 LP, Kundalini Manifest Mothership 63.0M/14,000 LP).
+    // Site payouts and pilot bands per wiki:Incursion_sites (high-sec vs low/null-sec); influence deltas DERIVED.
+    let band = |sys: SolarSystemId, tier: &str| incursion_site_payout_band(&ctx.sde, sys, tier);
     let sites = vec![
         make_incursion_site(
             constellation_id, 5164, "Override Transfer Array (Staging)", staging_solar_system_id,
-            "Staging", 3, 5, 3_500_000, 400, 0.05, false,
+            "Staging", band(staging_solar_system_id, "Staging"), 0.05, false,
             derive_incursion_site_position(&ctx.sde, staging_solar_system_id, 0),
         ),
         make_incursion_site(
             constellation_id, 5165, "Nation Mining Colony", vg_sys,
-            "Vanguard", 5, 10, 10_395_000, 1_400, 0.05, false,
+            "Vanguard", band(vg_sys, "Vanguard"), 0.05, false,
             derive_incursion_site_position(&ctx.sde, vg_sys, 1),
         ),
         make_incursion_site(
             constellation_id, 5168, "Nation Commander Stronghold", as_sys,
-            "Assault", 10, 20, 18_200_000, 3_500, 0.20, false,
+            "Assault", band(as_sys, "Assault"), 0.20, false,
             derive_incursion_site_position(&ctx.sde, as_sys, 2),
         ),
         make_incursion_site(
             constellation_id, 5175, "True Creations Research Center", hq_solar_system_id,
-            "Headquarters", 20, 40, 31_500_000, 7_000, 0.25, false,
+            "Headquarters", band(hq_solar_system_id, "Headquarters"), 0.25, false,
             derive_incursion_site_position(&ctx.sde, hq_solar_system_id, 3),
         ),
         make_incursion_site(
             constellation_id, 5158, "The Kundalini Manifest", hq_solar_system_id,
-            "Mothership", 40, 80, 63_000_000, 14_000, 1.0, true,
+            "Mothership", band(hq_solar_system_id, "Mothership"), 1.0, true,
             derive_incursion_site_position(&ctx.sde, hq_solar_system_id, 4),
         ),
         make_incursion_site(
             constellation_id, 5166, "Nation Commander Outpost", vg_sys2,
-            "Vanguard", 5, 10, 10_395_000, 1_400, 0.05, false,
+            "Vanguard", band(vg_sys2, "Vanguard"), 0.05, false,
             derive_incursion_site_position(&ctx.sde, vg_sys2, 5),
         ),
         make_incursion_site(
             constellation_id, 5167, "Overwhelmed Civilian Facility", as_sys2,
-            "Assault", 10, 20, 18_200_000, 3_500, 0.20, false,
+            "Assault", band(as_sys2, "Assault"), 0.20, false,
             derive_incursion_site_position(&ctx.sde, as_sys2, 6),
         ),
         make_incursion_site(
             constellation_id, 5171, "Nation Rebirth Facility", hq_solar_system_id,
-            "Headquarters", 20, 40, 31_500_000, 7_000, 0.25, false,
+            "Headquarters", band(hq_solar_system_id, "Headquarters"), 0.25, false,
             derive_incursion_site_position(&ctx.sde, hq_solar_system_id, 7),
         ),
     ];
@@ -860,41 +886,22 @@ pub async fn process_incursion_site_completion_and_payout_core(
         });
     }
 
-    // DERIVED: Fleet hard-cap payout cutoff per EVE University Wiki `Incursion_sites`:
-    // Staging 5, Vanguard 15 (optimal 10), Assault 30 (optimal 20), HQ 60 (optimal 40), Mothership 120 (optimal 80).
-    // Exceeding the hard cap yields 0 ISK and 0 CONCORD LP.
-    let hard_cap = match tier.as_str() {
-        "Staging" => 5,
-        "Vanguard" => 15,
-        "Assault" => 30,
-        "Headquarters" => 60,
-        "Mothership" | "Boss" => 120,
-        _ => max_opt.saturating_mul(3) / 2,
-    };
-
+    // Payout scales only with on-grid fleet size (wiki:Incursion_sites); influence does not change payouts.
     let (pilot_isk, pilot_lp, fleet_count, fleet_scale) = if verified_pilots.is_empty() {
         (0, 0, 0, 0.0)
-    } else if verified_pilots.len() > hard_cap {
-        (0, 0, verified_pilots.len(), 0.0)
     } else {
         let count = verified_pilots.len();
-        let under_scale = if count < min_pilots {
-            ((count as f64) / (min_pilots as f64)).clamp(0.20, 1.0)
-        } else {
+        // Under-sized fleets: the wiki states the reward is reduced but publishes no ratios (data gap);
+        // EvoMu keeps the linear count / min_pilots share for those.
+        let under_scale = if count < min_pilots { (count as f64) / (min_pilots as f64) } else { 1.0 };
+        let scale = if tier == "Staging" {
             1.0
+        } else {
+            under_scale * incursion_overstack_ratio(count.saturating_sub(max_opt))
         };
-        // DERIVED: Linear 12% per-pilot overstack decay between max_optimal_pilots and hard_cap.
-        let over_pilots = count.saturating_sub(max_opt);
-        let over_scale = (1.0_f64 - (over_pilots as f64) * 0.12).clamp(0.15, 1.0);
-        let f_scale = (over_scale * under_scale).clamp(0.15, 1.0);
-
-        // DERIVED: Constellation influence scaling (50% payout penalty at 1.0 influence, 100% at 0.0 influence).
-        let influence_scale = (1.0 - (new_influence.clamp(0.0, 1.0) * 0.50)).clamp(0.50, 1.0);
-        let total_scale = (f_scale * influence_scale).clamp(0.10, 1.0);
-
-        let isk = ((base_isk as f64) * total_scale).round() as i64;
-        let lp = ((base_lp as f64) * total_scale).round() as i64;
-        (isk, lp, count, total_scale)
+        let isk = ((base_isk as f64) * scale).round() as i64;
+        let lp = ((base_lp as f64) * scale).round() as i64;
+        (isk, lp, count, scale)
     };
     let concord_corp_id: i64 = 1_000_125;
 

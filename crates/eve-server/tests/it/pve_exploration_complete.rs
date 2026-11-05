@@ -75,8 +75,8 @@ async fn create_in_space_session(
 // ============================================================================
 #[tokio::test]
 async fn test_pve_combat_anomalies_waves_and_escalations() {
-    // parity: feat:pve.combat-anomalies, feat:pve.escalations, feat:pve.expeditions, rpc:dungeonExplorationMgr.GetMyEscalatingPathDetails
-    eve_testkit::attest(&["feat:pve.combat-anomalies", "feat:pve.escalations", "feat:pve.expeditions"]);
+    // parity: feat:pve.combat-anomalies, rpc:dungeonExplorationMgr.GetMyEscalatingPathDetails
+    eve_testkit::attest(&["feat:pve.combat-anomalies"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -205,8 +205,8 @@ async fn test_pve_combat_signatures_and_ded_complexes_restrictions_and_loot() {
 // ============================================================================
 #[tokio::test]
 async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
-    // parity: feat:pve.homefront-ops, feat:pve.metaliminal-storms, feat:pve.interference, rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances, rpc:map.GetAllRoamingWeatherSystems, rpc:solarsystemInterferenceMgr.GetLocalInterferenceState
-    eve_testkit::attest(&["feat:pve.homefront-ops", "feat:pve.metaliminal-storms", "feat:pve.interference"]);
+    // parity: feat:pve.metaliminal-storms, feat:pve.interference, rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances, rpc:map.GetAllRoamingWeatherSystems, rpc:solarsystemInterferenceMgr.GetLocalInterferenceState
+    eve_testkit::attest(&["feat:pve.metaliminal-storms", "feat:pve.interference"]);
 
     let ctx = ServerContext::new();
     ensure_special_sites_spawned(&ctx).await;

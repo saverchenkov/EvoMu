@@ -368,11 +368,6 @@ async fn test_pochven_capital_and_cyno_restrictions() {
 
 #[tokio::test]
 async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
-    // parity: feat:pve.wormhole-capital-escalations, feat:pve.wormhole-site-capital-escalation-cap
-    eve_testkit::attest(&[
-        "feat:pve.wormhole-capital-escalations",
-        "feat:pve.wormhole-site-capital-escalation-cap",
-    ]);
 
     let sde = match eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()) {
         Ok(reg) => std::sync::Arc::new(reg),

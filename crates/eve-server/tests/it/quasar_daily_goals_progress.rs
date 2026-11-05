@@ -90,9 +90,8 @@ fn drain_notices(rx: &mut Receiver<EvePublicNotice>) -> Vec<GoogleAny> {
 
 #[tokio::test]
 async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() {
-    // parity: feat:pve.daily-goals, feat:quasar.dailygoal, quasar:eveProto/generated/eve_public/dailygoal/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/dailygoal/api/notices_pb2.pyj
+    // parity: feat:quasar.dailygoal, quasar:eveProto/generated/eve_public/dailygoal/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/dailygoal/api/notices_pb2.pyj
     eve_testkit::attest(&[
-        "feat:pve.daily-goals",
         "feat:quasar.dailygoal",
         "quasar:eveProto/generated/eve_public/dailygoal/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/dailygoal/api/notices_pb2.pyj",

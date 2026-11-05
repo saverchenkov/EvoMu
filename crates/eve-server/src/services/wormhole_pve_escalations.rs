@@ -61,10 +61,10 @@ pub async fn spawn_upgraded_avengers_core(
 ) -> Vec<i64> {
     let count = if wh_class >= 6 { 4 } else { 3 };
     let tid: TypeId = 37_472; // Upgraded Avenger
-    let sde_type = sde.types.get(&tid);
-    let attr = |aid: u16| -> Option<f64> {
-        sde_type.and_then(|t| t.default_attributes.get(&aid).copied())
+    let Some(sde_type) = sde.types.get(&tid) else {
+        return Vec::new();
     };
+    let attr = |aid: u16| -> Option<f64> { sde_type.default_attributes.get(&aid).copied() };
     let sys_handle = systems.get_or_spawn(solar_system_id);
     let mut ids = Vec::with_capacity(count);
     for i in 0..count {
@@ -79,27 +79,21 @@ pub async fn spawn_upgraded_avengers_core(
                 ((i % 2) as f64) * 2_500.0,
             );
         let mut cs = build_type_combat_state_from_sde(sde, tid);
-        cs.signature_radius = attr(552).unwrap_or(30_000.0);
-        if cs.max_armor_hp <= 50.0 {
-            cs.max_armor_hp = 250_000.0;
-            cs.armor_hp = 250_000.0;
-            cs.max_structure_hp = 150_000.0;
-            cs.structure_hp = 150_000.0;
-        }
+        cs.signature_radius = attr(552).unwrap_or(0.0);
         let ball = Ball {
             id: bid,
             type_id: tid,
             position: pos,
             velocity: DVec3::ZERO,
-            max_velocity: attr(37).unwrap_or(3_000.0),
+            max_velocity: attr(37).unwrap_or(0.0),
             inertia: 1.0,
-            mass: sde_type.map(|t| t.mass).unwrap_or(19_000_000.0),
-            radius: sde_type.map(|t| t.radius).unwrap_or(350.0),
+            mass: sde_type.mass,
+            radius: sde_type.radius,
             speed_fraction: 0.0,
             mode: MovementMode::Stop,
         };
         let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
-        let dmg_mult = attr(64).unwrap_or(40.0);
+        let dmg_mult = attr(64).unwrap_or(0.0);
         let entity = ExtendedNpcEntity {
             ball_id: bid,
             type_id: tid,
@@ -111,22 +105,22 @@ pub async fn spawn_upgraded_avengers_core(
             aggression_threat: HashMap::new(),
             threat_table: HashMap::new(),
             bounty_isk: 0.0,
-            optimal_range: attr(54).unwrap_or(320_000.0),
-            orbit_range: 15_000.0,
+            optimal_range: attr(54).unwrap_or(0.0),
+            orbit_range: attr(416).unwrap_or(0.0),
             damage_vector: DamageVector {
-                em: attr(114).unwrap_or(40.0) * dmg_mult,
-                thermal: attr(118).unwrap_or(40.0) * dmg_mult,
-                kinetic: 0.0,
-                explosive: 0.0,
+                em: attr(114).unwrap_or(0.0) * dmg_mult,
+                thermal: attr(118).unwrap_or(0.0) * dmg_mult,
+                kinetic: attr(117).unwrap_or(0.0) * dmg_mult,
+                explosive: attr(116).unwrap_or(0.0) * dmg_mult,
             },
             entropic_cycles: 0,
             drifter_overshield_hp: 0.0,
             drifter_doomsday_fired: false,
-            web_speed_factor: attr(20).unwrap_or(-50.0),
-            web_range: attr(514).or_else(|| attr(580)).unwrap_or(100_000.0),
-            scram_strength: attr(105).unwrap_or(15.0),
-            scram_range: attr(103).or_else(|| attr(582)).unwrap_or(100_000.0),
-            neut_amount: attr(97).unwrap_or(1_500.0),
+            web_speed_factor: attr(20).unwrap_or(0.0),
+            web_range: attr(514).or_else(|| attr(580)).unwrap_or(0.0),
+            scram_strength: attr(105).unwrap_or(0.0),
+            scram_range: attr(103).or_else(|| attr(582)).unwrap_or(0.0),
+            neut_amount: attr(97).unwrap_or(0.0),
             ecm_jammed: false,
             remote_shield_rep: 0.0,
             remote_armor_rep: 0.0,
@@ -202,19 +196,12 @@ pub async fn spawn_decloaked_transmission_relay_core(
     });
 
     let relay_tid: TypeId = 41_589; // Decloaked Transmission Relay
+    let relay_type = sde.types.get(&relay_tid)?;
     let relay_bid = db.with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
         snap.next_entity_id
     });
-    let mut cs = build_type_combat_state_from_sde(sde, relay_tid);
-    if cs.max_structure_hp <= 50.0 {
-        cs.max_shield_hp = 1_000_000.0;
-        cs.shield_hp = 1_000_000.0;
-        cs.max_armor_hp = 500_000.0;
-        cs.armor_hp = 500_000.0;
-        cs.max_structure_hp = 500_000.0;
-        cs.structure_hp = 500_000.0;
-    }
+    let cs = build_type_combat_state_from_sde(sde, relay_tid);
     let ball = Ball {
         id: relay_bid,
         type_id: relay_tid,
@@ -222,8 +209,8 @@ pub async fn spawn_decloaked_transmission_relay_core(
         velocity: DVec3::ZERO,
         max_velocity: 0.0,
         inertia: 1.0,
-        mass: 100_000.0,
-        radius: 500.0,
+        mass: relay_type.mass,
+        radius: relay_type.radius,
         speed_fraction: 0.0,
         mode: MovementMode::Stop,
     };
@@ -304,10 +291,8 @@ pub fn on_decloaked_relay_attacked_sync(
 
     let is_arithmos = relay_info.capital_was_on_grid;
     let drifter_tid: TypeId = if is_arithmos { 37_473 } else { 86_498 };
-    let sde_type = ctx.sde.types.get(&drifter_tid);
-    let attr = |aid: u16| -> Option<f64> {
-        sde_type.and_then(|t| t.default_attributes.get(&aid).copied())
-    };
+    let sde_type = ctx.sde.types.get(&drifter_tid)?;
+    let attr = |aid: u16| -> Option<f64> { sde_type.default_attributes.get(&aid).copied() };
     let drifter_bid = ctx.db.with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
         snap.next_entity_id
@@ -315,23 +300,15 @@ pub fn on_decloaked_relay_attacked_sync(
     let spawn_pos = DVec3::from_array(relay_info.position) + DVec3::new(3_500.0, 0.0, 0.0);
     let mut cs = build_type_combat_state_from_sde(&ctx.sde, drifter_tid);
     cs.warp_core_strength = 3;
-    if cs.max_shield_hp <= 50.0 {
-        cs.max_shield_hp = if is_arithmos { 800_000.0 } else { 270_000.0 };
-        cs.shield_hp = cs.max_shield_hp;
-        cs.max_armor_hp = if is_arithmos { 1_200_000.0 } else { 400_000.0 };
-        cs.armor_hp = cs.max_armor_hp;
-        cs.max_structure_hp = if is_arithmos { 150_000.0 } else { 50_000.0 };
-        cs.structure_hp = cs.max_structure_hp;
-    }
     let ball = Ball {
         id: drifter_bid,
         type_id: drifter_tid,
         position: spawn_pos,
         velocity: DVec3::ZERO,
-        max_velocity: attr(37).unwrap_or(3_500.0),
+        max_velocity: attr(37).unwrap_or(0.0),
         inertia: 1.5,
-        mass: sde_type.map(|t| t.mass).unwrap_or(10_900_000.0),
-        radius: sde_type.map(|t| t.radius).unwrap_or(350.0),
+        mass: sde_type.mass,
+        radius: sde_type.radius,
         speed_fraction: 0.0,
         mode: MovementMode::Stop,
     };
@@ -340,8 +317,8 @@ pub fn on_decloaked_relay_attacked_sync(
         ball,
         cs,
         SlimItemMeta {
-            group_id: sde_type.map(|t| t.group_id).unwrap_or(1530),
-            category_id: sde_type.map(|t| t.category_id).unwrap_or(11),
+            group_id: sde_type.group_id,
+            category_id: sde_type.category_id,
             ..Default::default()
         },
     );
@@ -352,7 +329,7 @@ pub fn on_decloaked_relay_attacked_sync(
         .base_core_strengths
         .insert(drifter_bid, 3);
 
-    let dmg_mult = attr(64).unwrap_or(if is_arithmos { 15.0 } else { 10.0 });
+    let dmg_mult = attr(64).unwrap_or(0.0);
     let entity = ExtendedNpcEntity {
         ball_id: drifter_bid,
         type_id: drifter_tid,
@@ -364,22 +341,22 @@ pub fn on_decloaked_relay_attacked_sync(
         aggression_threat: HashMap::new(),
         threat_table: HashMap::new(),
         bounty_isk: 0.0,
-        optimal_range: attr(54).unwrap_or(250_000.0),
-        orbit_range: 18_000.0,
+        optimal_range: attr(54).unwrap_or(0.0),
+        orbit_range: attr(416).unwrap_or(0.0),
         damage_vector: DamageVector {
-            em: attr(114).unwrap_or(80.0) * dmg_mult,
-            thermal: attr(118).unwrap_or(80.0) * dmg_mult,
-            kinetic: attr(117).unwrap_or(80.0) * dmg_mult,
-            explosive: attr(116).unwrap_or(80.0) * dmg_mult,
+            em: attr(114).unwrap_or(0.0) * dmg_mult,
+            thermal: attr(118).unwrap_or(0.0) * dmg_mult,
+            kinetic: attr(117).unwrap_or(0.0) * dmg_mult,
+            explosive: attr(116).unwrap_or(0.0) * dmg_mult,
         },
         entropic_cycles: 0,
-        drifter_overshield_hp: if is_arithmos { 150_000.0 } else { 50_000.0 },
+        drifter_overshield_hp: 0.0, // no overshield attribute exists in the V24 SDE
         drifter_doomsday_fired: false,
-        web_speed_factor: attr(20).unwrap_or(if is_arithmos { -60.0 } else { -50.0 }),
-        web_range: attr(514).or_else(|| attr(580)).unwrap_or(100_000.0),
-        scram_strength: attr(105).unwrap_or(20.0),
-        scram_range: attr(103).or_else(|| attr(582)).unwrap_or(100_000.0),
-        neut_amount: attr(97).unwrap_or(if is_arithmos { 2_000.0 } else { 1_000.0 }),
+        web_speed_factor: attr(20).unwrap_or(0.0),
+        web_range: attr(514).or_else(|| attr(580)).unwrap_or(0.0),
+        scram_strength: attr(105).unwrap_or(0.0),
+        scram_range: attr(103).or_else(|| attr(582)).unwrap_or(0.0),
+        neut_amount: attr(97).unwrap_or(0.0),
         ecm_jammed: false,
         remote_shield_rep: 0.0,
         remote_armor_rep: 0.0,
@@ -387,11 +364,8 @@ pub fn on_decloaked_relay_attacked_sync(
         tag_drop_type_id: None,
         spawn_position: spawn_pos,
         sleeper_wh_class: 6,
-        custom_cargo_loot: if is_arithmos {
-            Some((30_747, 5))
-        } else {
-            None
-        },
+        // Drifter loot tables are server-side (not in the SDE); no custom cargo is invented.
+        custom_cargo_loot: None,
     };
     ctx.combat_ephemeral
         .write()

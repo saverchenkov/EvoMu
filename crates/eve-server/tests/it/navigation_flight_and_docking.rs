@@ -2124,10 +2124,9 @@ async fn rpc(
 
 #[tokio::test]
 async fn test_air_npe_state_persistence_and_career_goals() {
-    // parity: feat:pve.air-npe, feat:pve.air-career-program
+    // parity: feat:pve.air-npe
     eve_testkit::attest(&[
         "feat:pve.air-npe",
-        "feat:pve.air-career-program",
     ]);
 
     let ctx = ServerContext::new();
@@ -2804,8 +2803,6 @@ async fn test_navigation_waypoints_warp_vector_and_wormhole_statics() {
 
 #[tokio::test]
 async fn test_pve_mission_complete_escalations_and_expeditions() {
-    // parity: feat:pve.mission-complete, feat:pve.escalations, feat:pve.expeditions
-    eve_testkit::attest(&["feat:pve.mission-complete", "feat:pve.escalations", "feat:pve.expeditions"]);
 
     let ctx = ctx_with_real_sde();
     let char_id = 90_000_001_i64;
@@ -2908,8 +2905,6 @@ async fn test_pve_mission_complete_escalations_and_expeditions() {
 
 #[tokio::test]
 async fn test_pve_incursion_payout_and_homefront_ops() {
-    // parity: feat:pve.incursion-payout, feat:pve.homefront-ops
-    eve_testkit::attest(&["feat:pve.incursion-payout", "feat:pve.homefront-ops"]);
 
     let ctx = ctx_with_real_sde();
     ensure_special_sites_spawned(&ctx).await;
@@ -2968,8 +2963,6 @@ async fn test_pve_incursion_payout_and_homefront_ops() {
 
 #[tokio::test]
 async fn test_pve_air_career_program_daily_goals_and_login_campaign() {
-    // parity: feat:pve.air-career-program, feat:pve.daily-goals, feat:pve.login-campaign
-    eve_testkit::attest(&["feat:pve.air-career-program", "feat:pve.daily-goals", "feat:pve.login-campaign"]);
 
     let ctx = ctx_with_real_sde();
     let char_id = 90_000_001_u32;

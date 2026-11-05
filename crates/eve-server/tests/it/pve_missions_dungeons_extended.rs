@@ -83,7 +83,6 @@ fn colocate_with_agent(
 
 #[tokio::test]
 async fn test_mission_lp_isk_reward_formula() {
-    // parity: feat:pve.mission-lp-isk-reward-formula
     eve_testkit::attest(&["feat:pve.mission-lp-isk-reward-formula"]);
 
     let ctx = ServerContext::new();

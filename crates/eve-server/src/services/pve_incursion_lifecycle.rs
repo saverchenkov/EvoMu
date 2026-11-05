@@ -301,12 +301,11 @@ pub fn spawn_incursion_site_in_role_system(
     dungeon_id: u32,
     dungeon_name: &str,
 ) -> Result<IncursionSiteEntry, BridgeRpcError> {
-    let (min_pilots, max_opt, base_isk, base_lp, inf_delta, locked) = match tier {
-        "Staging" => (3, 5, 3_500_000, 400, 0.05, false),
-        "Vanguard" => (5, 10, 10_395_000, 1_400, 0.05, false),
-        "Assault" => (10, 20, 18_200_000, 3_500, 0.20, false),
-        "Headquarters" => (20, 40, 31_500_000, 7_000, 0.25, false),
-        "Mothership" => (40, 80, 63_000_000, 14_000, 1.0, true),
+    let (inf_delta, locked) = match tier {
+        "Staging" | "Vanguard" => (0.05, false),
+        "Assault" => (0.20, false),
+        "Headquarters" => (0.25, false),
+        "Mothership" => (1.0, true),
         _ => {
             return Err(rpc_err(
                 "InvalidIncursionSiteClass",
@@ -329,10 +328,7 @@ pub fn spawn_incursion_site_in_role_system(
             dungeon_name,
             solar_system_id,
             tier,
-            min_pilots,
-            max_opt,
-            base_isk,
-            base_lp,
+            crate::services::pve_incursion_sites::incursion_site_payout_band(&ctx.sde, solar_system_id, tier),
             inf_delta,
             locked,
             pos,

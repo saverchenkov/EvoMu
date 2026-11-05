@@ -482,25 +482,11 @@ pub(crate) fn build_special_site_npc_combat_state(
 ) -> eve_destiny::CombatState {
     if let Some(t) = sde.types.get(&type_id) {
         let a = &t.default_attributes;
-        let shield = a
-            .get(&eve_sde::attr_ids::SHIELD_CAPACITY)
-            .copied()
-            .unwrap_or(1_200.0)
-            .clamp(600.0, 10_000.0);
-        let armor = a
-            .get(&eve_sde::attr_ids::ARMOR_HP)
-            .copied()
-            .unwrap_or(1_200.0)
-            .clamp(600.0, 10_000.0);
-        let hull = a
-            .get(&9)
-            .copied()
-            .unwrap_or(1_000.0)
-            .clamp(600.0, 10_000.0);
-        let cap = a
-            .get(&eve_sde::attr_ids::CAPACITOR_CAPACITY)
-            .copied()
-            .unwrap_or(1_000.0);
+        // HP and capacitor come straight from the SDE type (no clamping to an invented band).
+        let shield = a.get(&eve_sde::attr_ids::SHIELD_CAPACITY).copied().unwrap_or(0.0);
+        let armor = a.get(&eve_sde::attr_ids::ARMOR_HP).copied().unwrap_or(0.0);
+        let hull = a.get(&eve_sde::attr_ids::HP_STRUCT).copied().unwrap_or(0.0);
+        let cap = a.get(&eve_sde::attr_ids::CAPACITOR_CAPACITY).copied().unwrap_or(0.0);
         let sig = a
             .get(&eve_sde::attr_ids::SIGNATURE_RADIUS)
             .copied()
@@ -516,22 +502,22 @@ pub(crate) fn build_special_site_npc_combat_state(
             max_capacitor: cap,
             signature_radius: sig,
             shield_resonance: [
-                a.get(&eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
-                a.get(&eve_sde::attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
-                a.get(&eve_sde::attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
-                a.get(&eve_sde::attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
+                a.get(&eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE).copied().unwrap_or(1.0),
+                a.get(&eve_sde::attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE).copied().unwrap_or(1.0),
+                a.get(&eve_sde::attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE).copied().unwrap_or(1.0),
+                a.get(&eve_sde::attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE).copied().unwrap_or(1.0),
             ],
             armor_resonance: [
-                a.get(&eve_sde::attr_ids::ARMOR_EM_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
-                a.get(&eve_sde::attr_ids::ARMOR_THERMAL_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
-                a.get(&eve_sde::attr_ids::ARMOR_KINETIC_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
-                a.get(&eve_sde::attr_ids::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
+                a.get(&eve_sde::attr_ids::ARMOR_EM_DAMAGE_RESONANCE).copied().unwrap_or(1.0),
+                a.get(&eve_sde::attr_ids::ARMOR_THERMAL_DAMAGE_RESONANCE).copied().unwrap_or(1.0),
+                a.get(&eve_sde::attr_ids::ARMOR_KINETIC_DAMAGE_RESONANCE).copied().unwrap_or(1.0),
+                a.get(&eve_sde::attr_ids::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE).copied().unwrap_or(1.0),
             ],
             structure_resonance: [
-                a.get(&eve_sde::attr_ids::EM_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
-                a.get(&eve_sde::attr_ids::THERMAL_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
-                a.get(&eve_sde::attr_ids::KINETIC_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
-                a.get(&eve_sde::attr_ids::EXPLOSIVE_DAMAGE_RESONANCE).copied().unwrap_or(1.0).max(0.25),
+                a.get(&eve_sde::attr_ids::EM_DAMAGE_RESONANCE).copied().unwrap_or(1.0),
+                a.get(&eve_sde::attr_ids::THERMAL_DAMAGE_RESONANCE).copied().unwrap_or(1.0),
+                a.get(&eve_sde::attr_ids::KINETIC_DAMAGE_RESONANCE).copied().unwrap_or(1.0),
+                a.get(&eve_sde::attr_ids::EXPLOSIVE_DAMAGE_RESONANCE).copied().unwrap_or(1.0),
             ],
             ..eve_destiny::CombatState::default()
         };
@@ -1015,6 +1001,7 @@ pub async fn complete_special_dungeon_instance(
         });
         let (gain_faction, lose_faction) = if trig.faction_owner_id == 500_027 { (500_026_i64, 500_027_i64) } else { (500_027_i64, 500_026_i64) };
         let ship_id = session.ship_id.unwrap_or(0);
+        let mut new_bal_isk = None;
         let spawned_cid = ctx.db.with_mut_snapshot(|snap| {
             if let Some(ch) = snap.characters.get_mut(&char_id) {
                 let g = ch.standings.entry(gain_faction).or_insert(0.0);
@@ -1022,6 +1009,15 @@ pub async fn complete_special_dungeon_instance(
                 let l = ch.standings.entry(lose_faction).or_insert(0.0);
                 *l = (*l - 0.15).clamp(-10.0, 10.0);
                 ch.balance = ch.balance.checked_add(IskCents::from_isk(trig.base_isk)).unwrap_or(ch.balance);
+                let new_bal = ch.balance;
+                new_bal_isk = Some(new_bal.to_wire_f64());
+                snap.append_journal(
+                    char_id,
+                    "CorporateRewardPayout",
+                    IskCents::from_isk(trig.base_isk),
+                    new_bal,
+                    format!("Triglavian site payout ({})", trig.dungeon_name),
+                );
             }
             deposit_loot_into_ship_or_container_in_snapshot(
                 snap,
@@ -1034,6 +1030,9 @@ pub async fn complete_special_dungeon_instance(
         });
         if let Some(cid) = spawned_cid {
             let _ = sys_handle.spawn_ball(make_site_npc_ball(cid, 23, DVec3::new(10_500.0, 0.0, 0.0))).await;
+        }
+        if let Some(bal) = new_bal_isk {
+            let _ = ctx.notify_account_change(char_id, "cash", char_id, bal);
         }
         return Ok(PyRep::keyval([
             ("instanceID", PyRep::Integer(trig.instance_id)),

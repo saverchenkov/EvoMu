@@ -178,8 +178,6 @@ fn find_recipe_for_trader(ctx: &ServerContext, trader_type_id: u32, input_type_i
 
 #[tokio::test]
 async fn test_b41_insurgency_laundering_roamer_drops_fob_and_war_hq_crates() {
-    // parity: feat:pve.insurgency-laundering
-    eve_testkit::attest(&["feat:pve.insurgency-laundering"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -297,8 +295,6 @@ async fn test_b41_insurgency_laundering_roamer_drops_fob_and_war_hq_crates() {
 
 #[tokio::test]
 async fn test_b41_insurgency_mining_ambush_ransom_rescue_destroy_and_lp_split() {
-    // parity: feat:pve.insurgency-mining-ambush
-    eve_testkit::attest(&["feat:pve.insurgency-mining-ambush"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -402,8 +398,6 @@ async fn test_b41_insurgency_mining_ambush_ransom_rescue_destroy_and_lp_split() 
 
 #[tokio::test]
 async fn test_b41_insurgency_outpost_raid_sizes_timers_defenders_bc_and_respawn() {
-    // parity: feat:pve.insurgency-outpost-raid
-    eve_testkit::attest(&["feat:pve.insurgency-outpost-raid"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -516,8 +510,6 @@ async fn test_b41_insurgency_outpost_raid_sizes_timers_defenders_bc_and_respawn(
 
 #[tokio::test]
 async fn test_b41_proving_grounds_fleet_queue_restrictions_boundary_timeout_and_rewards() {
-    // parity: feat:pve.proving-grounds-queue-and-rewards
-    eve_testkit::attest(&["feat:pve.proving-grounds-queue-and-rewards"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -780,8 +772,6 @@ async fn kill_npc_with_turret_rpc(
 
 #[tokio::test]
 async fn test_b41_outpost_raid_deadspace_warp_gate_occupancy_t3_and_warzone_faction() {
-    // parity: feat:pve.insurgency-outpost-raid
-    eve_testkit::attest(&["feat:pve.insurgency-outpost-raid"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -939,8 +929,6 @@ async fn test_b41_outpost_raid_deadspace_warp_gate_occupancy_t3_and_warzone_fact
 
 #[tokio::test]
 async fn test_b41_insurgency_stage3_roamer_probabilistic_rng_promotion() {
-    // parity: feat:pve.insurgency-laundering
-    eve_testkit::attest(&["feat:pve.insurgency-laundering"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -994,8 +982,6 @@ async fn test_b41_insurgency_stage3_roamer_probabilistic_rng_promotion() {
 
 #[tokio::test]
 async fn test_b41_proving_grounds_party_size_boss_range_cargo_implant_and_atomic_ticket() {
-    // parity: feat:pve.proving-grounds-queue-and-rewards
-    eve_testkit::attest(&["feat:pve.proving-grounds-queue-and-rewards"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

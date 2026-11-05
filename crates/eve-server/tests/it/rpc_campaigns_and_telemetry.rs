@@ -70,7 +70,6 @@ async fn login_pilot_char(
 
 #[tokio::test]
 // DATA GAP: requires live login campaign schedule
-// parity: feat:pve.login-campaign
 // parity: rpc:loginCampaignManager.get_client_campaign_state, rpc:loginCampaignManager.claim_reward
 // parity: rpc:seasonalLoginCampaignManager.get_active_campaign, rpc:seasonalLoginCampaignManager.get_claim_history
 // parity: rpc:seasonalLoginCampaignManager.claim_reward

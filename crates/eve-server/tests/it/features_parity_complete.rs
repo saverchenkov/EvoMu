@@ -2066,8 +2066,8 @@ pub(crate) mod features_parity_part4 {
 // Covers:
 // - `feat:wormholes.lifetime-decay-stages`
 // - `feat:navigation.wormhole-info-buckets`
-// - `feat:pve.hacking-node-types`
-// - `feat:pve.hacking-failure-outcome`
+// - ``
+// - ``
 // - `feat:sovereignty.skyhook-reagent-maturity`
 
 use eve_db::{CosmicSignatureRecord, InventoryFlag, InventoryItemRecord};
@@ -2339,10 +2339,10 @@ async fn test_wormhole_lifetime_decay_stages_and_info_buckets() {
 
 #[tokio::test]
 async fn test_hacking_node_types_and_failure_outcome() {
-    // parity: feat:pve.hacking-node-types, feat:pve.hacking-failure-outcome
+    // parity: , 
     eve_testkit::attest(&[
-        "feat:pve.hacking-node-types",
-        "feat:pve.hacking-failure-outcome",
+        
+        
     ]);
 
     // 1. Difficulty 1 (Very Easy) and Difficulty 2 (Easy) must not spawn RestorationNode or VirusSuppressor
