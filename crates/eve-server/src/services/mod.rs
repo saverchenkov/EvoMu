@@ -203,3 +203,12 @@ pub mod wormhole_lifecycle_ops;
 pub mod wormhole_pve_escalations;
 pub mod wormhole_pve_seeding;
 pub mod quasar_vendors_and_war_services;
+
+pub use inventory_fitting::fitting_containers_ships;
+pub use space_destiny::space_probe_scanning;
+
+#[cfg(test)]
+mod fitting_containers_ships_unit_tests;
+#[cfg(test)]
+mod space_probe_scanning_unit_tests;
+

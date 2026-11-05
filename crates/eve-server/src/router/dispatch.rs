@@ -1351,3 +1351,7 @@ mod wal_poison_tests {
         let _ = std::fs::remove_dir_all(&wal_dir);
     }
 }
+
+#[cfg(test)]
+#[path = "dispatch_unit_tests.rs"]
+mod dispatch_unit_tests;

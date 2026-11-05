@@ -503,5 +503,5 @@ mod esi_corp_fleet_governance_tests;
 mod esi_economy_industry_sample_tests;
 #[cfg(test)]
 mod esi_universe_fw_sov_router_tests;
-
-
+#[cfg(test)]
+mod esi_mod_unit_tests;

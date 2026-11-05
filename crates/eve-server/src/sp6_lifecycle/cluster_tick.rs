@@ -1388,6 +1388,6 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     }
 }
 
-#[cfg(test)]
-#[path = "cluster_lifecycle_tests.rs"]
-mod cluster_lifecycle_tests;
+#[cfg(test)] #[path = "cluster_lifecycle_tests.rs"] mod cluster_lifecycle_tests;
+#[cfg(test)] #[path = "cluster_tick_unit_tests.rs"] mod cluster_tick_unit_tests;
+

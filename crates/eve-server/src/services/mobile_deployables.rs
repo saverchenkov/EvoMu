@@ -1261,3 +1261,8 @@ mod tests {
         assert_eq!(parsed.mmju_spools[&8001].unit_id, 7001);
     }
 }
+
+#[cfg(test)]
+#[path = "mobile_deployables_unit_tests.rs"]
+mod mobile_deployables_unit_tests;
+
