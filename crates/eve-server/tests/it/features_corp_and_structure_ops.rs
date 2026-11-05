@@ -206,7 +206,6 @@ async fn test_cluster_session_localization_qa_rpcs_e2e() {
 
 #[tokio::test]
 async fn test_lookup_warable_and_sov_structures_e2e() {
-    // parity: feat:ui.lookup
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
     let kw = HashMap::new();
@@ -366,7 +365,7 @@ async fn test_lookup_warable_and_sov_structures_e2e() {
 
 #[tokio::test]
 async fn test_homefront_sites_and_hypernet_raffle_e2e() {
-    // parity: rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances, rpc:raffleProxy.BuyRandomTickets, rpc:raffleProxy.GetActiveHistoricPrices
+    // parity: rpc:raffleProxy.BuyRandomTickets, rpc:raffleProxy.GetActiveHistoricPrices
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
     let kw = HashMap::new();
@@ -698,7 +697,6 @@ fn keyval_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 
 #[tokio::test]
 async fn test_milestones_seasons_and_cache_setting_e2e() {
-    // parity: rpc:cache.Setting
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
     let kw = HashMap::new();

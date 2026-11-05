@@ -25,7 +25,6 @@ fn as_list(rep: &PyRep) -> &[PyRep] {
 #[tokio::test]
 async fn test_rpc_lookup_svc_batch() {
     // parity: rpc:lookupSvc.LookupCharacters, rpc:lookupSvc.LookupCorporations, rpc:lookupSvc.LookupEvePlayerCharacters, rpc:lookupSvc.LookupFactions, rpc:lookupSvc.LookupKnownLocationsByGroup, rpc:lookupSvc.LookupLocationsByGroup, rpc:lookupSvc.LookupNoneNPCAccountOwners, rpc:lookupSvc.LookupOwners, rpc:lookupSvc.LookupPCOwners
-    // parity: feat:ui.lookup
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
     ctx.db.with_mut_snapshot(|snap| {
@@ -2607,11 +2606,9 @@ async fn login_and_select(
 }
 
 #[tokio::test]
-// parity: rpc:FastCheckoutService.GetOffersForUser, rpc:FastCheckoutService.BuyOffer, rpc:FastCheckoutService.RequestMiningCycleOutput
+// parity: rpc:FastCheckoutService.RequestMiningCycleOutput
 async fn test_parity_fast_checkout_offers_buy_and_mining_output() {
     eve_testkit::attest(&[
-        "rpc:FastCheckoutService.GetOffersForUser",
-        "rpc:FastCheckoutService.BuyOffer",
         "rpc:FastCheckoutService.RequestMiningCycleOutput",
     ]);
 
@@ -2904,11 +2901,10 @@ async fn test_parity_fast_checkout_offers_buy_and_mining_output() {
 }
 
 #[tokio::test]
-// parity: rpc:agentMgr.GetPlausibleMissionIDs, rpc:cache.Rowset
+// parity: rpc:agentMgr.GetPlausibleMissionIDs
 async fn test_parity_agent_plausible_missions_and_cache_rowset() {
     eve_testkit::attest(&[
         "rpc:agentMgr.GetPlausibleMissionIDs",
-        "rpc:cache.Rowset",
     ]);
 
     let ctx = ServerContext::new();
@@ -3244,13 +3240,11 @@ async fn setup_pilot(ctx: &ServerContext, sess_id: u64, user: &str, pass: &str, 
 
 #[tokio::test]
 async fn test_batch2_cache_setting_and_load_service() {
-    // parity: rpc:cache.Setting
     // parity: rpc:loadService.StartLoad
     // parity: rpc:loadService.StopLoad
     // parity: rpc:loadService.SetConfig
     // parity: rpc:loadService.GetTotalStats
     eve_testkit::attest(&[
-        "rpc:cache.Setting",
         "rpc:loadService.StartLoad",
         "rpc:loadService.StopLoad",
         "rpc:loadService.SetConfig",
@@ -3683,21 +3677,6 @@ async fn test_batch2_raffle_character_seeding_and_create() {
 
 #[tokio::test]
 async fn test_batch2_shipcaster_pads_launchers_and_travel() {
-    // parity: rpc:shipCasterLandingPadMgr.GetAllLandingPads
-    // parity: rpc:shipCasterLandingPadMgr.GetFactionLandingPads
-    // parity: rpc:shipCasterLauncherMgr.GetFactionsWithShipcaster
-    // parity: rpc:shipcasterTravelMgr.CmdJumpThroughShipcaster
-    // parity: rpc:starterShipcasterTravelMgr.CanCharacterJump
-    // parity: rpc:starterShipcasterTravelMgr.CmdJumpThroughStarterShipcaster
-    eve_testkit::attest(&[
-        "rpc:shipCasterLandingPadMgr.GetAllLandingPads",
-        "rpc:shipCasterLandingPadMgr.GetFactionLandingPads",
-        "rpc:shipCasterLauncherMgr.GetFactionsWithShipcaster",
-        "rpc:shipcasterTravelMgr.CmdJumpThroughShipcaster",
-        "rpc:starterShipcasterTravelMgr.CanCharacterJump",
-        "rpc:starterShipcasterTravelMgr.CmdJumpThroughStarterShipcaster",
-    ]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let mut sess = setup_pilot(&ctx, 41_006, "demo", "demo-secret", 90_000_001).await;
@@ -3903,7 +3882,6 @@ fn count_nested_instances(rep: &PyRep, expected_sys: u32) -> usize {
 
 #[tokio::test]
 async fn batch3_dungeon_instance_cache_homefront_and_triglavian() {
-    // parity: rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances
     // parity: rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances
     let ctx = new_ctx();
     let mut unauth = SessionState::default();
@@ -4129,7 +4107,6 @@ async fn batch3_season_manager_challenges_and_queries() {
 
 #[tokio::test]
 async fn batch3_season_manager_events_claim_reload_and_npc_standings() {
-    // parity: rpc:standingMgr.GetNPCNPCStandings
     let ctx = new_ctx();
     let mut sess = login_char(&ctx, 104, PILOT_ID).await;
     sess.station_id = Some(JITA_STATION);
@@ -4335,9 +4312,6 @@ fn dict_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 
 #[tokio::test]
 async fn test_batch4_seasonal_login_campaign_manager_rpcs() {
-    // parity: rpc:seasonalLoginCampaignManager.get_active_campaign
-    // parity: rpc:seasonalLoginCampaignManager.get_claim_history
-    // parity: rpc:seasonalLoginCampaignManager.claim_reward
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
@@ -4418,12 +4392,6 @@ async fn test_batch4_seasonal_login_campaign_manager_rpcs() {
 
 #[tokio::test]
 async fn test_batch4_shipcaster_pads_launchers_and_travel_rpcs() {
-    // parity: rpc:shipCasterLandingPadMgr.GetAllLandingPads
-    // parity: rpc:shipCasterLandingPadMgr.GetFactionLandingPads
-    // parity: rpc:shipCasterLauncherMgr.GetFactionsWithShipcaster
-    // parity: rpc:starterShipcasterTravelMgr.CanCharacterJump
-    // parity: rpc:starterShipcasterTravelMgr.CmdJumpThroughStarterShipcaster
-    // parity: rpc:shipcasterTravelMgr.CmdJumpThroughShipcaster
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     ctx.advance_secs(600);
@@ -4645,11 +4613,6 @@ async fn test_batch4_shipcaster_pads_launchers_and_travel_rpcs() {
 
 #[tokio::test]
 async fn test_batch4_store_manager_rpcs() {
-    // parity: rpc:storeManager.get_categories
-    // parity: rpc:storeManager.get_products
-    // parity: rpc:storeManager.get_offers
-    // parity: rpc:storeManager.can_purchase_offer
-    // parity: rpc:storeManager.buy_offer
     let ctx = ServerContext::new();
     common::seed_test_nes_store_catalog(&ctx);
 
@@ -4979,12 +4942,11 @@ fn chat_bcast_req(msg: &str) -> EvePublicRequest {
     }
 }
 
-// parity: rpc:agentMgr.GetPlausibleMissionIDs, rpc:cache.Rowset
+// parity: rpc:agentMgr.GetPlausibleMissionIDs
 #[tokio::test]
 async fn test_remediated_agent_plausible_missions_and_cache_rowset() {
     eve_testkit::attest(&[
         "rpc:agentMgr.GetPlausibleMissionIDs",
-        "rpc:cache.Rowset",
     ]);
 
     let ctx = new_ctx();
@@ -5017,13 +4979,8 @@ async fn test_remediated_agent_plausible_missions_and_cache_rowset() {
     assert_eq!(unknown.unwrap_err().code, "UnknownCacheRowset");
 }
 
-// parity: notify:OnProbeWarpEnd
 #[tokio::test]
 async fn test_remediated_probe_scanning_lifecycle_notifications() {
-    eve_testkit::attest(&[
-        "notify:OnProbeWarpEnd",
-    ]);
-
     let ctx = new_ctx();
     let jita_pos = ctx.sde.stations[&JITA_STATION].position + DVec3::new(1_000.0, 0.0, 0.0);
     let (ship_id, launcher_id, probe_stack_id) = (630_000_001_i64, 630_000_010_i64, 630_000_011_i64);

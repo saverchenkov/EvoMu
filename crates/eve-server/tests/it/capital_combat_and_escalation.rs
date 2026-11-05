@@ -565,9 +565,6 @@ async fn test_wormhole_c5_c6_capital_escalations_and_cap() {
 
 #[tokio::test]
 async fn test_pochven_60pct_loot_drop_vs_highsec_50pct() {
-    // parity: feat:combat.pochven-loot-drop
-    eve_testkit::attest(&["feat:combat.pochven-loot-drop"]);
-
     let sde = match eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()) {
         Ok(reg) => std::sync::Arc::new(reg),
         Err(_) => std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),

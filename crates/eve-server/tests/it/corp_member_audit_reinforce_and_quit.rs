@@ -36,9 +36,6 @@ pub(crate) async fn found_corp_with_member(ctx: &ServerContext, s1: &mut eve_mac
 
 #[tokio::test]
 async fn test_live_member_audit_history_and_corp_quit_cleanup() {
-    // parity: feat:lifecycle.corp-quit-cleanup
-    eve_testkit::attest(&["feat:lifecycle.corp-quit-cleanup"]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     fund_pilots(&ctx, &[(PILOT_1, 5_000_000_000.0), (PILOT_2, 100_000_000.0)]).await;

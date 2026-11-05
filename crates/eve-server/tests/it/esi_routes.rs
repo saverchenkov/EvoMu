@@ -97,8 +97,7 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
     // parity: esi:GET /corporations/{corporation_id}/killmails/recent, feat:esi.killmails.corp-recent
     // parity: esi:GET /route/{origin}/{destination}, feat:esi.routes.route
     // parity: esi:GET /characters/{character_id}/search, feat:esi.search.char-search
-    // parity: esi:GET /sovereignty/map, feat:esi.sovereignty.map
-    // parity: esi:GET /sovereignty/structures, feat:esi.sovereignty.structures
+    // parity: feat:esi.sovereignty.map
     // parity: esi:GET /wars/{war_id}
     // parity: esi:GET /wars/{war_id}/killmails, feat:esi.wars.killmails, rpc:sovMgr.AcquireSkyhooks
     let ctx = Arc::new(ServerContext::new());

@@ -379,8 +379,6 @@ async fn test_b35_01_lance_doomsday_directional_geometry() {
 
 #[tokio::test]
 async fn test_b35_02_energy_nosferatu_relative_capacitor() {
-    // parity: feat:modules.energy-nosferatu-relative-capacitor
-    eve_testkit::attest(&["feat:modules.energy-nosferatu-relative-capacitor"]);
     let ctx = build_ctx();
     let sys = ctx.systems.get_or_spawn(NULL_SYS);
     let kw = HashMap::new();

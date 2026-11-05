@@ -55,12 +55,6 @@ async fn rpc(
 
 #[tokio::test]
 async fn test_fast_checkout_offers_and_buy_remediation() {
-    // parity: rpc:FastCheckoutService.BuyOffer, rpc:FastCheckoutService.GetOffersForUser
-    eve_testkit::attest(&[
-        "rpc:FastCheckoutService.BuyOffer",
-        "rpc:FastCheckoutService.GetOffersForUser",
-    ]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 

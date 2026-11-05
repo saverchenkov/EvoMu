@@ -98,10 +98,8 @@ async fn seed_pilot(ctx: &ServerContext, char_id: i64, ship_id: i64, sys_id: u32
 #[tokio::test]
 async fn test_sleeper_mechanics_infinite_capacitor_spawn_leash_and_ewar_by_class() {
     // parity: feat:npc.sleeper-capacitor-immunity-and-leash
-    // parity: feat:npc.sleeper-ewar-by-wormhole-class
     eve_testkit::attest(&[
         "feat:npc.sleeper-capacitor-immunity-and-leash",
-        "feat:npc.sleeper-ewar-by-wormhole-class",
     ]);
 
     let ctx = ServerContext::new();

@@ -1823,9 +1823,6 @@ pub(super) async fn spawn_ship_in_space(
 
 #[tokio::test]
 async fn test_feat_combat_pochven_loot_drop_e2e() {
-    // parity: feat:combat.pochven-loot-drop
-    eve_testkit::attest(&["feat:combat.pochven-loot-drop"]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 

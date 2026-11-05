@@ -204,15 +204,9 @@ fn find_hangar_items(ctx: &ServerContext, owner_id: i64, loc_id: i64, type_id: u
 #[tokio::test]
 async fn test_esi_live_corp_blueprints_and_char_corp_industry_jobs() {
     // parity: esi:GET /corporations/{corporation_id}/blueprints, feat:esi.corporation.blueprints
-    // parity: esi:GET /characters/{character_id}/industry/jobs, feat:esi.industry.char-jobs
-    // parity: esi:GET /corporations/{corporation_id}/industry/jobs, feat:esi.industry.corp-jobs
     eve_testkit::attest(&[
         "esi:GET /corporations/{corporation_id}/blueprints",
         "feat:esi.corporation.blueprints",
-        "esi:GET /characters/{character_id}/industry/jobs",
-        "feat:esi.industry.char-jobs",
-        "esi:GET /corporations/{corporation_id}/industry/jobs",
-        "feat:esi.industry.corp-jobs",
     ]);
 
     let ctx = Arc::new(ServerContext::new());

@@ -2451,12 +2451,11 @@ pub(crate) mod esi_market_groups_sde_descriptions {
 
     #[tokio::test]
     async fn test_esi_market_groups_sde_descriptions_and_structure_orders_acl_hub() {
-        // parity: esi:GET /markets/groups/{market_group_id}, feat:esi.market.groups, esi:GET /markets/structures/{structure_id}, feat:esi.market.structure-orders
+        // parity: esi:GET /markets/groups/{market_group_id}, feat:esi.market.groups, esi:GET /markets/structures/{structure_id}
         eve_testkit::attest(&[
             "esi:GET /markets/groups/{market_group_id}",
             "feat:esi.market.groups",
             "esi:GET /markets/structures/{structure_id}",
-            "feat:esi.market.structure-orders",
         ]);
 
         let ctx = Arc::new(ServerContext::new());
@@ -3532,26 +3531,22 @@ pub(crate) mod esi6_industry_mining_routes {
     #[tokio::test]
     async fn test_esi6_industry_and_mining_routes() {
         // parity: esi:GET /industry/facilities, esi:GET /industry/systems
-        // parity: esi:GET /characters/{character_id}/industry/jobs, esi:GET /characters/{character_id}/mining
-        // parity: esi:GET /corporations/{corporation_id}/industry/jobs, esi:GET /corporation/{corporation_id}/mining/extractions
+        // parity: esi:GET /characters/{character_id}/mining
+        // parity: esi:GET /corporation/{corporation_id}/mining/extractions
         // parity: esi:GET /corporation/{corporation_id}/mining/observers, esi:GET /corporation/{corporation_id}/mining/observers/{observer_id}
         // parity: feat:esi.industry.facilities, feat:esi.industry.systems
-        // parity: feat:esi.industry.char-jobs, feat:esi.industry.char-mining
-        // parity: feat:esi.industry.corp-jobs, feat:esi.industry.corp-extractions, feat:esi.industry.corp-observers
+        // parity: feat:esi.industry.char-mining
+        // parity: feat:esi.industry.corp-extractions, feat:esi.industry.corp-observers
         eve_testkit::attest(&[
             "esi:GET /industry/facilities",
             "esi:GET /industry/systems",
-            "esi:GET /characters/{character_id}/industry/jobs",
             "esi:GET /characters/{character_id}/mining",
-            "esi:GET /corporations/{corporation_id}/industry/jobs",
             "esi:GET /corporation/{corporation_id}/mining/extractions",
             "esi:GET /corporation/{corporation_id}/mining/observers",
             "esi:GET /corporation/{corporation_id}/mining/observers/{observer_id}",
             "feat:esi.industry.facilities",
             "feat:esi.industry.systems",
-            "feat:esi.industry.char-jobs",
             "feat:esi.industry.char-mining",
-            "feat:esi.industry.corp-jobs",
             "feat:esi.industry.corp-extractions",
             "feat:esi.industry.corp-observers",
         ]);
@@ -4417,18 +4412,14 @@ pub(crate) mod esi_corp_role_gated_mining {
 
     #[tokio::test]
     async fn test_esi_market_history_prices_structures_and_industry_jobs() {
-        // parity: esi:GET /characters/{character_id}/industry/jobs, esi:GET /corporations/{corporation_id}/industry/jobs, esi:GET /industry/facilities, esi:GET /markets/prices, esi:GET /markets/structures/{structure_id}, esi:GET /markets/{region_id}/history
-        // parity: feat:esi.industry.facilities, feat:esi.industry.char-jobs, feat:esi.industry.corp-jobs, feat:esi.market.history, feat:esi.market.prices
+        // parity: esi:GET /industry/facilities, esi:GET /markets/prices, esi:GET /markets/structures/{structure_id}, esi:GET /markets/{region_id}/history
+        // parity: feat:esi.industry.facilities, feat:esi.market.history, feat:esi.market.prices
         eve_testkit::attest(&[
-            "esi:GET /characters/{character_id}/industry/jobs",
-            "esi:GET /corporations/{corporation_id}/industry/jobs",
             "esi:GET /industry/facilities",
             "esi:GET /markets/prices",
             "esi:GET /markets/structures/{structure_id}",
             "esi:GET /markets/{region_id}/history",
             "feat:esi.industry.facilities",
-            "feat:esi.industry.char-jobs",
-            "feat:esi.industry.corp-jobs",
             "feat:esi.market.history",
             "feat:esi.market.prices",
         ]);
@@ -5543,16 +5534,9 @@ pub(crate) mod esi_fw_stats_systems_leaderboards {
 
     #[tokio::test]
     async fn test_esi_b6_fw_stats_systems_leaderboards_and_wars_live_rpc_driven() {
-        // parity: esi:GET /fw/stats, esi:GET /fw/systems, esi:GET /fw/leaderboards, esi:GET /fw/leaderboards/characters, esi:GET /fw/leaderboards/corporations, esi:GET /fw/wars, esi:GET /characters/{character_id}/fw/stats, esi:GET /corporations/{corporation_id}/fw/stats
+        // parity: esi:GET /fw/wars
         eve_testkit::attest(&[
-            "esi:GET /fw/stats",
-            "esi:GET /fw/systems",
-            "esi:GET /fw/leaderboards",
-            "esi:GET /fw/leaderboards/characters",
-            "esi:GET /fw/leaderboards/corporations",
             "esi:GET /fw/wars",
-            "esi:GET /characters/{character_id}/fw/stats",
-            "esi:GET /corporations/{corporation_id}/fw/stats",
         ]);
 
         let db_path = std::env::temp_dir().join(format!("esi_b6_fw_{}.sqlite", std::process::id()));
@@ -5817,13 +5801,6 @@ pub(crate) mod esi_fw_stats_systems_leaderboards {
 
     #[tokio::test]
     async fn test_esi_b6_incursions_and_sovereignty_campaigns_structures_live_state() {
-        // parity: esi:GET /incursions, esi:GET /sovereignty/campaigns, esi:GET /sovereignty/structures
-        eve_testkit::attest(&[
-            "esi:GET /incursions",
-            "esi:GET /sovereignty/campaigns",
-            "esi:GET /sovereignty/structures",
-        ]);
-
         let db_path = std::env::temp_dir().join(format!("esi_b6_sov_{}.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&db_path);
         let ctx = Arc::new(ServerContext::from_sqlite(&db_path).expect("sqlite ctx"));
@@ -6463,7 +6440,7 @@ pub(crate) mod esi_char_public_contracts_live {
         let _ = std::fs::remove_file(&db_path);
     }
 
-    // parity: esi:GET /characters/{character_id}/industry/jobs, esi:GET /corporations/{corporation_id}/industry/jobs, esi:GET /industry/facilities
+    // parity: esi:GET /industry/facilities
     #[tokio::test]
     async fn test_esi_p6_industry_jobs_and_facilities_live_rpc_and_sqlite_persistence() {
         let (db_path, ctx) = open_seeded_sqlite_ctx("industry_jobs_facilities");
@@ -7690,12 +7667,11 @@ pub(crate) mod esi_calendar_rpc_http_persistence {
 
     #[tokio::test]
     async fn test_esi_corp_governance_roles_limit_and_sov_map() {
-        // parity: esi:GET /corporations/{corporation_id}/members/limit, esi:GET /corporations/{corporation_id}/roles, esi:GET /corporations/{corporation_id}/roles/history, esi:GET /sovereignty/map
+        // parity: esi:GET /corporations/{corporation_id}/members/limit, esi:GET /corporations/{corporation_id}/roles, esi:GET /corporations/{corporation_id}/roles/history
         eve_testkit::attest(&[
             "esi:GET /corporations/{corporation_id}/members/limit",
             "esi:GET /corporations/{corporation_id}/roles",
             "esi:GET /corporations/{corporation_id}/roles/history",
-            "esi:GET /sovereignty/map",
         ]);
 
         let ctx = Arc::new(ServerContext::new());
@@ -8160,13 +8136,6 @@ pub(crate) mod esi_corp_blueprints_structures_live {
 
     #[tokio::test]
     async fn test_quasar_title_definitions_and_space_cdn() {
-        // parity: quasar:eveProto/generated/eve_public/cosmetic/character/title/definition/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj, quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj
-        eve_testkit::attest(&[
-            "quasar:eveProto/generated/eve_public/cosmetic/character/title/definition/api/requests_pb2.pyj",
-            "quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj",
-            "quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj",
-        ]);
-
         let ctx = Arc::new(ServerContext::new());
         crate::common::pin_clock(&ctx);
         let router = EsiRouter::new(Arc::clone(&ctx));
@@ -8242,14 +8211,6 @@ pub(crate) mod esi_corp_blueprints_structures_live {
 
     #[tokio::test]
     async fn test_quasar_freelance_projects_and_item_delivery() {
-        // parity: quasar:eveProto/generated/eve_public/freelance/project/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/freelance/project/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/freelance/contributionmethod/itemdelivery/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/freelance/contributionmethod/itemdelivery/api/notices_pb2.pyj
-        eve_testkit::attest(&[
-            "quasar:eveProto/generated/eve_public/freelance/project/api/requests_pb2.pyj",
-            "quasar:eveProto/generated/eve_public/freelance/project/api/notices_pb2.pyj",
-            "quasar:eveProto/generated/eve_public/freelance/contributionmethod/itemdelivery/api/requests_pb2.pyj",
-            "quasar:eveProto/generated/eve_public/freelance/contributionmethod/itemdelivery/api/notices_pb2.pyj",
-        ]);
-
         let ctx = ServerContext::new();
         crate::common::pin_clock(&ctx);
 
@@ -8416,16 +8377,11 @@ pub(crate) mod esi_corp_blueprints_structures_live {
 
     #[tokio::test]
     async fn test_quasar_payment_schedules_tokens_and_store() {
-        // parity: quasar:eveProto/generated/eve_public/payment/schedule/notices_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/payment/purchase/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/category/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/offer/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj
+        // parity: quasar:eveProto/generated/eve_public/payment/schedule/notices_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api/notices_pb2.pyj
         eve_testkit::attest(&[
             "quasar:eveProto/generated/eve_public/payment/schedule/notices_pb2.pyj",
             "quasar:eveProto/generated/eve_public/payment/token/api_pb2.pyj",
             "quasar:eveProto/generated/eve_public/payment/token/api/notices_pb2.pyj",
-            "quasar:eveProto/generated/eve_public/payment/purchase/api_pb2.pyj",
-            "quasar:eveProto/generated/eve_public/store/category/api_pb2.pyj",
-            "quasar:eveProto/generated/eve_public/store/offer/api_pb2.pyj",
-            "quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj",
-            "quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj",
         ]);
 
         let ctx = ServerContext::new();

@@ -3794,13 +3794,6 @@ async fn anchor_and_online_hub(
 
 #[tokio::test]
 async fn test_e2e_sov_entosis_counter_regen_and_command_nodes() {
-    // parity: feat:sovereignty.sov-entosis
-    // parity: feat:sovereignty.sov-command-nodes
-    eve_testkit::attest(&[
-        "feat:sovereignty.sov-entosis",
-        "feat:sovereignty.sov-command-nodes",
-    ]);
-
     let db_path = temp_sqlite_path("e2e_sov_entosis_nodes");
     let ctx = open_sqlite_ctx(&db_path, true);
     let (null_sys, _) = find_claimable_nullsec_and_lava(&ctx);

@@ -25,7 +25,6 @@ fn extract_rowset_lines(rep: &PyRep) -> Vec<Vec<PyRep>> {
 }
 #[tokio::test]
 async fn test_npc_npc_standings_rowset_and_auth() {
-    // parity: rpc:standingMgr.GetNPCNPCStandings
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
     let empty_kw = HashMap::new();

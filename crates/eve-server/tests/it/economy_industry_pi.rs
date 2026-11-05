@@ -1442,7 +1442,6 @@ fn dict_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 
 #[tokio::test]
 async fn test_lookup_warable_corps_and_alliances_enforces_structure_eligibility() {
-    // parity: feat:ui.lookup
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
 
@@ -1649,7 +1648,7 @@ async fn test_sov_structures_info_for_solar_system_filters_to_sov_structures() {
 
 #[tokio::test]
 async fn test_esi_market_history_and_prices_driven_by_real_market_orders() {
-    // parity: esi:GET /markets/prices, feat:esi.market.prices
+    // parity: esi:GET /markets/prices
     let ctx = Arc::new(ServerContext::new());
     ctx.seed_demo_world_fixtures();
     let router = EsiRouter::new(Arc::clone(&ctx));
