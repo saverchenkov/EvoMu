@@ -179,14 +179,27 @@ pub async fn handle(
                     .unwrap_or_default();
                 let is_war_hq = !hq_services.is_empty();
                 let desc_text = st.name.clone();
+                let sys_sec = ctx
+                    .sde
+                    .solar_systems
+                    .get(&sys_id)
+                    .map(|s| s.security_status)
+                    .unwrap_or(0.0);
                 Some(Ok(PyRep::keyval([
                     ("stationID", PyRep::Integer(st.station_id)),
                     ("stationName", PyRep::String(st.name)),
                     ("description", PyRep::String(desc_text)),
                     ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                    ("constellationID", PyRep::Integer(i64::from(st.constellation_id))),
+                    ("regionID", PyRep::Integer(i64::from(st.region_id))),
                     ("stationTypeID", PyRep::Integer(i64::from(st.station_type_id))),
                     ("ownerID", PyRep::Integer(st.owner_corporation_id)),
                     ("operationID", PyRep::Integer(i64::from(st.operation_id))),
+                    ("orbitID", st.orbit_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                    ("x", PyRep::Real(st.position.x)),
+                    ("y", PyRep::Real(st.position.y)),
+                    ("z", PyRep::Real(st.position.z)),
+                    ("security", PyRep::Real(sys_sec)),
                     ("serviceMask", PyRep::Integer(service_mask)),
                     ("services", PyRep::List(services)),
                     ("isWarHQ", PyRep::Bool(is_war_hq)),

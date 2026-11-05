@@ -2941,4 +2941,40 @@ async fn test_v24_live_client_bug_report_regressions_330_to_352() {
         &[0u8; 16],
         "#353: Untracked skill plan must return 16-byte nil UUID (uuid.UUID(int=0)), not empty bytes"
     );
+
+    // 7. #354: `stationSvc.GetStation` (wrapped by `MapSvc.GetStation` and consumed by
+    // `Info.UpdateDataStation` in `eve/client/script/ui/shared/info/infosvc.pyj:2703`)
+    // must include `regionID`, `constellationID`, and `solarSystemID` on the returned `KeyVal`.
+    let station_kv = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "stationSvc",
+            None,
+            "GetStation",
+            &[PyRep::Integer(60_003_466)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("stationSvc.GetStation(60003466)");
+    for req_field in [
+        "stationID",
+        "stationName",
+        "description",
+        "solarSystemID",
+        "constellationID",
+        "regionID",
+        "stationTypeID",
+        "ownerID",
+        "operationID",
+        "serviceMask",
+        "services",
+        "reprocessingEfficiency",
+        "reprocessingStationsTake",
+    ] {
+        assert!(
+            station_kv.dict_get(req_field).is_some(),
+            "#354: stationSvc.GetStation KeyVal missing `{req_field}`: {station_kv:?}"
+        );
+    }
 }
