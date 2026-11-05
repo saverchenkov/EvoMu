@@ -11,6 +11,8 @@ pub mod dispatch;
 pub mod session;
 
 #[cfg(test)]
+mod router_advanced_branches_tests;
+#[cfg(test)]
 mod tests;
 
 pub use cache_notifications::*;

@@ -22,3 +22,9 @@ pub use drones_salvage_tractor::{
 pub use npc_ai::{
     compute_sec_status_gain, faction_damage_vector, NpcAiState, NpcCombatEntity, NpcSpawnManager,
 };
+
+#[cfg(test)]
+mod combat_mechanics_tests;
+#[cfg(test)]
+mod salvage_ai_death_tests;
+

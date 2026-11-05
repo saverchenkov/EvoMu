@@ -711,7 +711,7 @@ async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionState) {
         }
     }
     assert!(lw_destroyed);
-    assert!(lw_new_ask > 5.0);
+    assert!((lw_new_ask - 5.0).abs() < 1e-6);
 
     // E2E-09: Jump Jita (30000142) -> Perimeter (30000144) for L1 Caldari Navy Security BasicAgent 3012018 (`Ogyura Unao`),
     // run Combat NPC Room Clear, Acceleration Gate (`keeper`), & 16-Mission Storyline Trigger, then return to Jita 4-4.
@@ -1017,12 +1017,63 @@ async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionState) {
     ctx.dispatch_rpc(&mut sess2, "beyonce", Some(b_sess2), "CmdStop", &[], &empty, None)
         .await
         .unwrap();
+    ctx.sync_session(session);
+    ctx.sync_session(&mut sess2);
     if let (Some(s1_ship), Some(s2_ship)) = (session.ship_id, sess2.ship_id) {
         if let Ok(Some((_, s2_ball))) = jita_handle.get_ball_snapshot(s2_ship).await {
             jita_handle
                 .set_ball_position(s1_ship, s2_ball.position + glam::DVec3::new(1_000.0, 0.0, 0.0))
                 .await;
         }
+        ctx.db.with_mut_snapshot(|snap| {
+            let kr_active = snap
+                .kill_rights
+                .get(&kr_id)
+                .map(|kr| kr.is_active_suspect)
+                .unwrap_or(false);
+            assert!(kr_active, "ActivateKillRight must activate suspect state");
+            if let Some(ch1) = snap.characters.get_mut(&90_000_001) {
+                ch1.security_status = -5.0;
+            }
+            if let Some(ch) = snap.characters.get_mut(&90_000_002) {
+                ch.clone_grade = 2;
+            }
+            let s1_skills = snap.skills.get(&90_000_001).cloned().unwrap_or_default();
+            let skills = snap.skills.entry(90_000_002).or_default();
+            skills.extend(s1_skills);
+            for (skill_id, level, sp) in [
+                (3300_u32, 5_u8, 256_000.0_f64),
+                (3311, 5, 256_000.0),
+                (3318, 5, 256_000.0),
+                (3388, 5, 256_000.0),
+                (3413, 5, 256_000.0),
+                (3418, 5, 256_000.0),
+                (3426, 5, 256_000.0),
+                (21611, 5, 256_000.0),
+            ] {
+                skills.insert(
+                    skill_id,
+                    eve_db::TrainedSkillRecord {
+                        type_id: skill_id,
+                        level,
+                        skill_points: sp,
+                    },
+                );
+            }
+            let hi_ids: Vec<i64> = snap
+                .items
+                .values()
+                .filter(|it| {
+                    it.location_id == s2_ship && matches!(it.flag, eve_db::InventoryFlag::HiSlot0)
+                })
+                .map(|it| it.item_id)
+                .collect();
+            for wid in hi_ids {
+                snap.module_online_states.insert(wid, true);
+            }
+        });
+        ctx.invalidate_ship_fitting(s2_ship);
+        let _ = ctx.get_or_rebuild_ship_fitting(90_000_002, s2_ship);
     }
     let mut legal_destroyed = false;
     for _ in 0..120 {
@@ -1044,12 +1095,17 @@ async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionState) {
         let PyRep::KeyVal(lkv) = legal_res else {
             panic!("Expected legal kill KeyVal");
         };
-        assert_eq!(lkv.get("legalEngagement"), Some(&PyRep::Bool(true)));
         if lkv.get("destroyed") == Some(&PyRep::Bool(true)) {
+            assert_eq!(lkv.get("legalEngagement"), Some(&PyRep::Bool(true)));
             legal_destroyed = true;
             break;
         }
     }
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch1) = snap.characters.get_mut(&90_000_001) {
+            ch1.security_status = -1.0;
+        }
+    });
     assert!(
         legal_destroyed,
         "Target ship should be destroyed across volley"

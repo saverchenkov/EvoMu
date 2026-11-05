@@ -554,3 +554,7 @@ pub async fn step_repeating_drone_mining(ctx: &ServerContext, now_unix: u64) {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "drone_recovery_tests.rs"]
+mod drone_recovery_tests;

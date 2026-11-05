@@ -279,3 +279,7 @@ pub fn spawn_mission_wave_on_pocket_entry_if_needed(
     }
     count
 }
+
+#[cfg(test)]
+#[path = "downtime_cleanup_tests.rs"]
+mod downtime_cleanup_tests;

@@ -314,6 +314,7 @@ async fn read_http11_request(stream: &mut TcpStream) -> std::io::Result<Option<E
 
     let mut headers = HashMap::new();
     let mut content_len = 0usize;
+    let mut is_chunked = false;
     let mut saw_end_of_headers = false;
     for _ in 0..=MAX_HTTP_HEADERS {
         let line = read_bounded_line(&mut reader).await?;
@@ -335,6 +336,11 @@ async fn read_http11_request(stream: &mut TcpStream) -> std::io::Result<Option<E
         if let Some((k, v)) = clean.split_once(':') {
             let key = k.trim().to_string();
             let val = v.trim().to_string();
+            if key.eq_ignore_ascii_case("transfer-encoding")
+                && val.to_ascii_lowercase().contains("chunked")
+            {
+                is_chunked = true;
+            }
             if key.eq_ignore_ascii_case("content-length") {
                 let parsed = val.parse::<usize>().map_err(|_| {
                     std::io::Error::new(
@@ -360,10 +366,43 @@ async fn read_http11_request(stream: &mut TcpStream) -> std::io::Result<Option<E
         ));
     }
 
-    let mut body = vec![0u8; content_len];
-    if content_len > 0 {
-        reader.read_exact(&mut body).await?;
-    }
+    let body = if is_chunked {
+        let mut decoded = Vec::new();
+        loop {
+            let size_line = read_bounded_line(&mut reader).await?;
+            let hex_part = size_line
+                .trim_end_matches(&['\r', '\n'][..])
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim();
+            let chunk_size = usize::from_str_radix(hex_part, 16).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid HTTP chunk size")
+            })?;
+            if decoded.len().saturating_add(chunk_size) > MAX_HTTP_BODY_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "HTTP chunked body exceeds maximum allowed size",
+                ));
+            }
+            if chunk_size == 0 {
+                // Consume trailing headers / final CRLF if present
+                let _ = read_bounded_line(&mut reader).await?;
+                break;
+            }
+            let start = decoded.len();
+            decoded.resize(start + chunk_size, 0);
+            reader.read_exact(&mut decoded[start..]).await?;
+            let _ = read_bounded_line(&mut reader).await?;
+        }
+        decoded
+    } else {
+        let mut buf = vec![0u8; content_len];
+        if content_len > 0 {
+            reader.read_exact(&mut buf).await?;
+        }
+        buf
+    };
 
     Ok(Some(EsiHttpRequest {
         method,
@@ -439,3 +478,21 @@ pub async fn send_raw_esi_request(
         body,
     })
 }
+
+#[cfg(test)]
+mod character_social_mail_tests;
+#[cfg(test)]
+mod corp_economy_routes_tests;
+#[cfg(test)]
+mod corp_fleet_economy_tests;
+#[cfg(test)]
+mod domain_edge_cases_tests;
+#[cfg(test)]
+mod full_endpoint_catalog_tests;
+#[cfg(test)]
+mod http_transport_and_auth_tests;
+#[cfg(test)]
+mod universe_fw_sov_openapi_tests;
+#[cfg(test)]
+mod universe_sov_fw_killmail_tests;
+
