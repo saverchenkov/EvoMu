@@ -363,3 +363,5 @@ info_gathering_interval_secs = 600
 #[cfg(test)]
 #[path = "config_tests.rs"]
 mod config_tests;
+#[cfg(test)] #[path = "config_extra_tests.rs"] mod config_extra_tests;
+

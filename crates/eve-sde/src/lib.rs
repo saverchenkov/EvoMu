@@ -1360,3 +1360,6 @@ mod tests {
     }
 }
 
+#[cfg(test)] mod sde_lib_extra_tests;
+
+

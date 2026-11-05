@@ -1391,3 +1391,5 @@ impl SystemRegistry {
 #[cfg(test)]
 #[path = "system_actor_tests.rs"]
 mod system_actor_tests;
+#[cfg(test)] #[path = "system_actor_extra_tests.rs"] mod system_actor_extra_tests;
+

@@ -913,3 +913,5 @@ pub use eve_machonet::extract_macho_call_req;
 #[cfg(test)]
 #[path = "macho_listener_tests.rs"]
 mod macho_listener_tests;
+#[cfg(test)] #[path = "macho_listener_extra_tests.rs"] mod macho_listener_extra_tests;
+

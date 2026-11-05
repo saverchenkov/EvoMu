@@ -165,3 +165,6 @@ pub struct Sp6PersistedState {
     #[serde(default)]
     pub mission_initial_npc_types: HashMap<String, Vec<u32>>,
 }
+
+#[cfg(test)] mod db_lib_extra_tests;
+

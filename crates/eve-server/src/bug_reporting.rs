@@ -1094,3 +1094,5 @@ fn handle_post_bug_attachment(
 #[cfg(test)]
 #[path = "bug_reporting_tests.rs"]
 mod bug_reporting_tests;
+#[cfg(test)] #[path = "bug_reporting_extra_tests.rs"] mod bug_reporting_extra_tests;
+
