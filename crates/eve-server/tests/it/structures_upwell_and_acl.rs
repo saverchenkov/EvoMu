@@ -112,8 +112,6 @@ fn seed_citadel(ctx: &ServerContext, sid: i64, tid: u32, corp: i64, sys: u32, po
 
 #[tokio::test]
 async fn test_upwell_anchoring_restrictions_proximity_system_and_roles() {
-    // parity: feat:structures.anchor-restrictions
-    eve_testkit::attest(&["feat:structures.anchor-restrictions"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
 
@@ -782,9 +780,6 @@ async fn try_anchor(
 
 #[tokio::test]
 async fn test_remediated_upwell_anchoring_restrictions_end_to_end() {
-    // parity: feat:structures.anchor-restrictions
-    eve_testkit::attest(&["feat:structures.anchor-restrictions"]);
-
     let ctx = new_ctx();
     let mut sess = login_with_new_corp(&ctx, 8101, PERIMETER, "Anchor Rules Corp", "ANCR").await;
     let open_perim = DVec3::new(0.0, 5.0e9, 0.0);
@@ -2234,9 +2229,6 @@ async fn test_remediated_docking_acl_and_upwell_hull_matrix() {
 
 #[tokio::test]
 async fn test_remediated_repairshop_service_quotes_and_restoration() {
-    // parity: feat:structures.repairshop-service-quotes-and-restoration
-    eve_testkit::attest(&["feat:structures.repairshop-service-quotes-and-restoration"]);
-
     let ctx = new_ctx();
     let mut sess = setup_owner_corp(&ctx, 8210, PERIMETER, "Repair Grid Corp", "REPR").await;
     let corp_id = sess.corporation_id.expect("corp");
@@ -4051,10 +4043,9 @@ fn seed_docked_pilot(
 
 #[tokio::test]
 async fn test_bf01_anchor_cross_corp_profile_rejected_default_attached_and_delete_scoped() {
-    // parity: feat:structures.anchor-restrictions, rpc:structureDeployment.Anchor
+    // parity: rpc:structureDeployment.Anchor
     // Exercises cross-corp profileID rejection, default profile attachment, and DeleteProfile scoping.
     eve_testkit::attest(&[
-        "feat:structures.anchor-restrictions",
         "rpc:structureDeployment.Anchor",
     ]);
 
@@ -4139,10 +4130,9 @@ async fn test_bf01_anchor_cross_corp_profile_rejected_default_attached_and_delet
 
 #[tokio::test]
 async fn test_bf02_per_service_acl_bindings_preserve_docking_and_enforce_group_taxes() {
-    // parity: feat:structures.docking-acl, feat:structures.repairshop-service-quotes-and-restoration, rpc:structureSettings.CharacterHasService, rpc:structureSettings.CharacterCheckService
+    // parity: feat:structures.docking-acl, rpc:structureSettings.CharacterHasService, rpc:structureSettings.CharacterCheckService
     eve_testkit::attest(&[
         "feat:structures.docking-acl",
-        "feat:structures.repairshop-service-quotes-and-restoration",
         "rpc:structureSettings.CharacterHasService",
         "rpc:structureSettings.CharacterCheckService",
     ]);
@@ -5798,11 +5788,10 @@ async fn online_structure(ctx: &ServerContext, sess: &mut SessionState, type_id:
 
 #[tokio::test]
 async fn test_upwell_services_clone_bay_modules_and_repairshop() {
-    // parity: feat:structures.service-clone-bay, feat:structures.service-modules, feat:structures.repairshop-service-quotes-and-restoration
+    // parity: feat:structures.service-clone-bay, feat:structures.service-modules
     eve_testkit::attest(&[
         "feat:structures.service-clone-bay",
         "feat:structures.service-modules",
-        "feat:structures.repairshop-service-quotes-and-restoration",
     ]);
 
     let ctx = new_test_ctx();
@@ -7146,11 +7135,6 @@ async fn test_wallet_nes_evermarks_hypernet_closure() {
 
 #[tokio::test]
 async fn test_structures_anchoring_profiles_defense_directory_closure() {
-    // parity: feat:structures.anchor-restrictions
-    eve_testkit::attest(&[
-        "feat:structures.anchor-restrictions",
-    ]);
-
     let ctx = ServerContext::new();
     let t0 = 1_800_000_000_u64;
     ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(t0)));

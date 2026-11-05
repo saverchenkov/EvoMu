@@ -442,3 +442,6 @@ mod wallet_hypernet_evermarks_store_live;
 mod modules_lances_and_nanite_paste_live;
 // mod rpc_client_contracts;
 // mod npc_navy_zarzakh_sleepers_haulers_live;
+// mod rpc_client_contracts;
+// mod npc_navy_zarzakh_sleepers_haulers_live;
+mod structures_anchor_repair_profiles_live;

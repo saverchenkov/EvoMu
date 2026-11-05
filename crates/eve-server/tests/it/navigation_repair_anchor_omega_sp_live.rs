@@ -55,7 +55,6 @@ async fn test_pochven_wormhole_scan_and_jump() {
 
 #[tokio::test]
 async fn test_repairshop_quotes_and_restoration() {
-    eve_testkit::attest(&["feat:structures.repairshop-service-quotes-and-restoration"]);
     let ctx = ServerContext::new();
     let p = common::gm_pilot_in_space(&ctx, 2, P1, 606, 30_000_142).await;
     let mut s = p.sess.clone();
@@ -87,7 +86,6 @@ async fn test_repairshop_quotes_and_restoration() {
 
 #[tokio::test]
 async fn test_anchor_restrictions() {
-    eve_testkit::attest(&["feat:structures.anchor-restrictions"]);
     let ctx = ServerContext::new();
     let p = common::gm_pilot_in_space(&ctx, 3, P1, 606, 30_000_142).await;
     let mut s = p.sess.clone();

@@ -690,9 +690,8 @@ fn create_test_structure(
 
 #[tokio::test]
 async fn test_structure_anchor_restrictions_and_fitting_state_locks() {
-    // parity: feat:structures.anchor-restrictions, feat:structures.fitting-state-locks
+    // parity: feat:structures.fitting-state-locks
     eve_testkit::attest(&[
-        "feat:structures.anchor-restrictions",
         "feat:structures.fitting-state-locks",
     ]);
 
