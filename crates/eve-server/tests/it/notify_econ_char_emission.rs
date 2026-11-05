@@ -364,14 +364,13 @@ async fn login_docked(
     sess
 }
 
-// parity: rpc:seasonManager.get_season_data_for_character, rpc:seasonManager.get_season_end_time
+// parity: rpc:seasonManager.get_season_data_for_character
 // parity: rpc:seasonManager.select_season, notify:OnSeasonStarted, notify:OnSeasonEnded
 // parity: notify:OnSeasonSelectionCleared, notify:OnChallengeExpired
 #[tokio::test]
 async fn notify_batch8_seasons_lifecycle_and_challenges() {
     eve_testkit::attest(&[
         "rpc:seasonManager.get_season_data_for_character",
-        "rpc:seasonManager.get_season_end_time",
         "rpc:seasonManager.select_season",
         "notify:OnSeasonStarted",
         "notify:OnSeasonEnded",

@@ -1210,6 +1210,16 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     crate::services::mining_advanced::tick_all_moon_extractions(ctx).await;
     crate::services::mining_phased_autotarget::tick_phased_asteroid_fields(ctx, now_unix).await;
     crate::services::quasar_payment_store_types::process_due_payment_schedules(&ctx.db, &ctx.quasar_gateway.pending_notices, now_unix);
+    let pending_gw_notices: Vec<_> = ctx
+        .quasar_gateway
+        .pending_notices
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .drain(..)
+        .collect();
+    for (scope, payload) in pending_gw_notices {
+        let _ = ctx.quasar_gateway.publish_notice(scope, payload, now_unix);
+    }
     for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
         let _ = ctx.quasar_gateway.publish_notice(scope, payload, ts);
     }

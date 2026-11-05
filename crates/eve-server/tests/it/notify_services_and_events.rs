@@ -5232,11 +5232,6 @@ fn chat_bcast_req(msg: &str) -> EvePublicRequest {
 
 #[tokio::test]
 async fn test_parity_notify_analysis_kredits_and_campaign_enrollment() {
-    // parity: notify:OnAnalysisKreditsChange
-    eve_testkit::attest(&[
-        "notify:OnAnalysisKreditsChange",
-    ]);
-
     let ctx = new_ctx();
     let mut s1 = SessionState::new(92_001);
     common::login_pilot(&ctx, &mut s1, "demo", "demo-secret").await;
@@ -6361,12 +6356,6 @@ async fn test_batch2_sim_clock_rebase_disapproval_and_cache_invalidation() {
 
 #[tokio::test]
 async fn test_batch2_dungeon_instance_added_and_removed_via_live_combat() {
-    // parity: notify:OnDungeonInstanceAdded, notify:OnDungeonInstanceRemoved
-    eve_testkit::attest(&[
-        "notify:OnDungeonInstanceAdded",
-        "notify:OnDungeonInstanceRemoved",
-    ]);
-
     let ctx = new_ctx();
     let ship_a = 720_000_201_i64;
     let gun_a = 720_000_210_i64;
@@ -6467,11 +6456,6 @@ async fn test_batch2_dungeon_instance_added_and_removed_via_live_combat() {
 
 #[tokio::test]
 async fn test_batch2_facwar_bunker_vulnerable_and_incursion_influence_update() {
-    // parity: notify:OnInfluenceUpdate
-    eve_testkit::attest(&[
-        "notify:OnInfluenceUpdate",
-    ]);
-
     // 1. OnFacWarBunkerVulnerable via live FW complex capture reaching 100% contested
     let fw_ctx = new_ctx();
     let (_enemy_sys, warzone_sys, _cmd_sys, _rear_sys) =
@@ -6832,13 +6816,8 @@ async fn test_batch4_ship_death_and_probe_scan_lifecycle() {
     assert!(death_args.is_empty());
 }
 
-// parity: notify:OnSecurityModified
 #[tokio::test]
 async fn test_batch4_fw_lp_vp_and_insurgency_corruption_security() {
-    eve_testkit::attest(&[
-        "notify:OnSecurityModified",
-    ]);
-
     let ctx = new_ctx();
     let fw_sys: u32 = 30_002_537; // Amamake
     let caldari_militia_corp: i64 = 1_000_180;
@@ -6955,13 +6934,8 @@ async fn test_batch4_fw_lp_vp_and_insurgency_corruption_security() {
     assert_eq!(sec_args, &vec![PyRep::Integer(i64::from(affected_sys)), PyRep::Real(-base_sec), PyRep::Real(0.0)]);
 }
 
-// parity: notify:OnTaleRemove
 #[tokio::test]
 async fn test_batch4_interference_incursion_tale_remove_and_tourney_ban() {
-    eve_testkit::attest(&[
-        "notify:OnTaleRemove",
-    ]);
-
     let ctx = new_ctx();
     let mut sess = SessionState::new(92_030);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -7111,12 +7085,11 @@ fn chat_bcast_req(msg: &str) -> EvePublicRequest {
     }
 }
 
-// parity: notify:DoSimClockRebase, notify:OnAnalysisKreditsChange
+// parity: notify:DoSimClockRebase
 #[tokio::test]
 async fn test_parity_notify_sim_clock_rebase_and_analysis_kredits() {
     eve_testkit::attest(&[
         "notify:DoSimClockRebase",
-        "notify:OnAnalysisKreditsChange",
     ]);
 
     let ctx = new_ctx();

@@ -713,6 +713,7 @@ fn register_payment_token_and_purchase_handlers(
             let mut attr = Vec::new();
             let mut cc = Vec::new();
             encode_string_field(1, &token.token_str, &mut cc);
+            encode_string_field(2, "12/2030", &mut cc);
             encode_bytes_field(4, &cc, &mut attr); // #4 credit_card
 
             let mut out = Vec::new();

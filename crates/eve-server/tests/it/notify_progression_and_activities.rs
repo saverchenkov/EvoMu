@@ -786,8 +786,6 @@ async fn batch10_dungeon_editor_values_and_room_triggers() {
 
 /// parity: notify:OnSignalTrackerFullState
 /// parity: notify:OnCosmicSignatureAdded
-/// parity: notify:OnDungeonInstanceAdded
-/// parity: notify:OnDungeonInstanceRemoved
 #[tokio::test]
 async fn batch10_expedition_signatures_signal_tracker_and_probes() {
     let ctx = ServerContext::new();
@@ -1202,8 +1200,6 @@ async fn batch10_progression_and_conversations() {
 }
 
 /// parity: notify:OnTaleData
-/// parity: notify:OnInfluenceUpdate
-/// parity: notify:OnTaleRemove
 /// parity: notify:OnCosmicAnomalyAdded
 /// parity: notify:OnSystemEffectStarted
 /// parity: notify:OnSystemWideEffectStop
@@ -1682,7 +1678,6 @@ async fn setup_pilot_in_space(
 }
 
 /// parity: notify:OnLocalHackProgressUpdated
-/// parity: notify:OnSecurityModified
 /// parity: notify:OnSystemDynamicBountyStateChanged
 /// parity: notify:OnOreMinedByOther
 #[tokio::test]

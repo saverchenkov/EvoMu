@@ -3596,7 +3596,6 @@ async fn test_batch3_probe_scanning_lifecycle_notifications() {
         .any(|(e, a)| e == "OnProbeStateChanged" && a.get(1) == Some(&PyRep::Integer(5))));
 }
 
-// parity: notify:OnDungeonInstanceAdded, notify:OnDungeonInstanceRemoved
 }
 
 pub(crate) mod parity_notify_batch3_part3 {
@@ -3759,14 +3758,8 @@ async fn login_in_space(
     sess
 }
 
-// parity: notify:OnDungeonInstanceAdded, notify:OnDungeonInstanceRemoved
 #[tokio::test]
 async fn test_batch3_dungeon_instance_added_and_removed() {
-    eve_testkit::attest(&[
-        "notify:OnDungeonInstanceAdded",
-        "notify:OnDungeonInstanceRemoved",
-    ]);
-
     let ctx = new_ctx();
     let dest_sys =
         eve_server::services::pve_expeditions::find_escalation_destination_system(&ctx, SYS_JITA);
@@ -4117,11 +4110,8 @@ async fn test_batch3_facwar_bunker_vulnerable() {
     );
 }
 
-// parity: notify:OnInfluenceUpdate
 #[tokio::test]
 async fn test_batch3_incursion_influence_update() {
-    eve_testkit::attest(&["notify:OnInfluenceUpdate"]);
-
     let ctx = new_ctx();
     let mut gm_sess = login_in_space(
         &ctx,

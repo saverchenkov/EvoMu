@@ -319,9 +319,6 @@ async fn test_quasar_store_catalog_products_and_offers() {
 #[tokio::test]
 async fn test_payment_schedules_tokens_and_user_license() {
     // DATA GAP: Payment purchase offer catalog (`eve_public/payment/purchase/api_pb2.pyj`) is external store data not in V24 client FSD.
-    // parity: quasar:eveProto/generated/eve_public/payment/schedule/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/payment/token/api/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/payment/token/api_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/user/license/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/user/license/api/notices_pb2.pyj
     let ctx = ServerContext::new();

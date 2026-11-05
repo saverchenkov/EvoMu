@@ -235,8 +235,6 @@ async fn test_b35_13_drifter_wormhole_systems() {
 
 #[tokio::test]
 async fn test_b35_14_gravity_hazard_safe_zones() {
-    // parity: feat:navigation.gravity-hazard-safe-zones
-    eve_testkit::attest(&["feat:navigation.gravity-hazard-safe-zones"]);
     let ctx = build_ctx();
     let z_sys = ctx.systems.get_or_spawn(ZARZAKH_SYS);
 

@@ -64,29 +64,31 @@ pub fn cancel_user_payment_schedule(
     uid: u64,
     sched_id: u64,
 ) -> bool {
-    let removed = db.with_mut_snapshot(|snap| {
+    let removed_type = db.with_mut_snapshot(|snap| {
         let mut scheds: Vec<PaymentScheduleRecord> = snap
             .service_state_blobs
             .get("payment_schedules")
             .and_then(|json| serde_json::from_str(json).ok())
             .unwrap_or_default();
-        let initial_len = scheds.len();
-        scheds.retain(|s| !(s.id == sched_id && s.user_id == uid));
-        if scheds.len() < initial_len {
+        let stype = scheds
+            .iter()
+            .find(|s| s.id == sched_id && s.user_id == uid)
+            .map(|s| s.schedule_type);
+        if stype.is_some() {
+            scheds.retain(|s| !(s.id == sched_id && s.user_id == uid));
             if let Ok(serialized) = serde_json::to_string(&scheds) {
                 snap.service_state_blobs.insert("payment_schedules".to_string(), serialized);
             }
-            true
-        } else {
-            false
         }
+        stype
     });
 
-    if removed {
+    if let Some(sched_type) = removed_type {
         let mut notice_bytes = Vec::new();
         let mut sched_ident = Vec::new();
         encode_varint_field(1, sched_id, &mut sched_ident);
         encode_bytes_field(1, &sched_ident, &mut notice_bytes);
+        encode_varint_field(2, u64::from(sched_type), &mut notice_bytes);
         router_notices
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -100,7 +102,7 @@ pub fn cancel_user_payment_schedule(
                 },
             ));
     }
-    removed
+    removed_type.is_some()
 }
 
 pub fn process_due_payment_schedules(
@@ -108,7 +110,7 @@ pub fn process_due_payment_schedules(
     router_notices: &RwLock<Vec<(NoticeScope, GoogleAny)>>,
     now_unix: u64,
 ) {
-    let failed_scheds: Vec<(u64, u64)> = db.with_mut_snapshot(|snap| {
+    let failed_scheds: Vec<(u64, u64, u32)> = db.with_mut_snapshot(|snap| {
         let mut scheds: Vec<PaymentScheduleRecord> = snap
             .service_state_blobs
             .get("payment_schedules")
@@ -169,7 +171,7 @@ pub fn process_due_payment_schedules(
                 }
                 true
             } else {
-                failed.push((s.user_id, s.id));
+                failed.push((s.user_id, s.id, s.schedule_type));
                 false
             }
         });
@@ -195,11 +197,24 @@ pub fn process_due_payment_schedules(
     });
 
     if !failed_scheds.is_empty() {
-        for (uid, sched_id) in failed_scheds {
+        for (uid, sched_id, sched_type) in failed_scheds {
             let mut notice_bytes = Vec::new();
             let mut sched_ident = Vec::new();
             encode_varint_field(1, sched_id, &mut sched_ident);
             encode_bytes_field(1, &sched_ident, &mut notice_bytes);
+            encode_varint_field(2, u64::from(sched_type), &mut notice_bytes);
+            router_notices
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((
+                    NoticeScope::User(uid as i32),
+                    GoogleAny {
+                        type_url: format!(
+                            "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.schedule.api.PaymentFailedNotice"
+                        ),
+                        value: notice_bytes.clone(),
+                    },
+                ));
             router_notices
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
@@ -398,6 +413,44 @@ pub fn add_user_quick_pay_token(
     });
     if token.is_quick_pay {
         publish_quick_pay_added_notice(pending_notices, uid, token.id);
+    }
+}
+
+pub fn register_user_payment_token(
+    ctx: &crate::router::ServerContext,
+    uid: u64,
+    token: PaymentTokenRecord,
+) {
+    let token_id = token.id;
+    let is_qp = token.is_quick_pay;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut tokens: Vec<PaymentTokenRecord> = snap
+            .service_state_blobs
+            .get("payment_tokens")
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or_default();
+        tokens.retain(|t| !(t.id == token_id && t.user_id == uid));
+        tokens.push(token);
+        if let Ok(serialized) = serde_json::to_string(&tokens) {
+            snap.service_state_blobs
+                .insert("payment_tokens".to_string(), serialized);
+        }
+    });
+    if is_qp {
+        let mut notice_bytes = Vec::new();
+        let mut tok_ident = Vec::new();
+        encode_varint_field(1, u64::from(token_id), &mut tok_ident);
+        encode_bytes_field(1, &tok_ident, &mut notice_bytes);
+        let _ = ctx.quasar_gateway.publish_notice(
+            NoticeScope::User(uid as i32),
+            GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.token.api.QuickPayAddedNotice"
+                ),
+                value: notice_bytes,
+            },
+            ctx.now_unix(),
+        );
     }
 }
 

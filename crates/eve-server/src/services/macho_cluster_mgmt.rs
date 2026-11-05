@@ -119,6 +119,36 @@ pub fn reset_cluster_state(ctx: &ServerContext) {
     *g = MachoClusterState::default();
 }
 
+fn apply_load_setting(
+    key: &str,
+    val: &PyRep,
+    ticks: Option<&mut u64>,
+    target_sys: Option<&mut Option<u32>>,
+    strict: bool,
+) -> Result<(), BridgeRpcError> {
+    let err = || BridgeRpcError { code: "UserError".into(), message: "InvalidConfig".into() };
+    match key {
+        "ticks" | "steps" | "iterations" | "duration" => {
+            if let Some(n) = val.as_i64().filter(|&n| n > 0) {
+                if let Some(t) = ticks { *t = (n as u64).min(100); }
+            } else if let Some(f) = val.as_f64().filter(|f| f.is_finite() && *f > 0.0) {
+                if let Some(t) = ticks { *t = (f.ceil() as u64).clamp(1, 100); }
+            } else if strict {
+                return Err(err());
+            }
+        }
+        "solar_system_id" | "solarSystemID" => {
+            if let Some(sys) = val.as_i64().and_then(|s| u32::try_from(s).ok()).filter(|&s| s > 0) {
+                if let Some(ts) = target_sys { *ts = Some(sys); }
+            } else if strict {
+                return Err(err());
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Handles cluster management and operational RPCs targeting `machoNet` and cluster infrastructure services.
 pub fn handle(
     ctx: &ServerContext,
@@ -230,24 +260,38 @@ pub fn handle(
             let load_spec = args.first().cloned().unwrap_or(PyRep::None);
             let mut target_sys = session.solar_system_id;
             let mut ticks: u64 = 5;
-            if let Some(n) = load_spec.as_i64() {
-                ticks = (n.max(1) as u64).min(100);
-            } else if let PyRep::Dict(entries) = &load_spec {
-                for (k, v) in entries {
-                    match k.as_str() {
-                        Some("ticks") | Some("steps") | Some("iterations") => {
-                            if let Some(n) = v.as_i64() {
-                                ticks = (n.max(1) as u64).min(100);
-                            }
+            let saved_config = ctx.db.with_snapshot(|snap| {
+                snap.service_state_blobs
+                    .get("load_service_state")
+                    .and_then(|s| serde_json::from_str::<LoadServiceState>(s).ok())
+                    .map(|st| st.config)
+                    .unwrap_or_default()
+            });
+            for (k, v) in &saved_config {
+                let _ = apply_load_setting(k, v, Some(&mut ticks), Some(&mut target_sys), false);
+            }
+            match &load_spec {
+                PyRep::Real(d) => {
+                    if !d.is_finite() || *d <= 0.0 {
+                        return Some(Err(BridgeRpcError { code: "UserError".into(), message: "InvalidLoadSpec".into() }));
+                    }
+                    ticks = (d.ceil() as u64).clamp(1, 100);
+                }
+                PyRep::Dict(entries) => {
+                    for (k, v) in entries {
+                        if let Some(ks) = k.as_str() {
+                            let _ = apply_load_setting(ks, v, Some(&mut ticks), Some(&mut target_sys), false);
                         }
-                        Some("solar_system_id") | Some("solarSystemID") => {
-                            if let Some(sys) = v.as_i64().and_then(|s| u32::try_from(s).ok()) {
-                                if sys > 0 {
-                                    target_sys = Some(sys);
-                                }
-                            }
-                        }
-                        _ => {}
+                    }
+                }
+                PyRep::KeyVal(entries) => {
+                    for (k, v) in entries {
+                        let _ = apply_load_setting(k, v, Some(&mut ticks), Some(&mut target_sys), false);
+                    }
+                }
+                other => {
+                    if let Some(n) = other.as_i64() {
+                        ticks = (n.max(1) as u64).min(100);
                     }
                 }
             }
@@ -353,21 +397,51 @@ pub fn handle(
                     message: "NotAuthorized".into(),
                 }));
             }
+            let invalid_cfg = || BridgeRpcError { code: "UserError".into(), message: "InvalidConfig".into() };
+            let mut updates: Vec<(String, PyRep)> = Vec::new();
+            match args.first() {
+                Some(PyRep::Dict(entries)) => {
+                    for (k, v) in entries {
+                        let Some(ks) = k.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                            return Some(Err(invalid_cfg()));
+                        };
+                        if let Err(e) = apply_load_setting(ks, v, None, None, true) { return Some(Err(e)); }
+                        updates.push((ks.to_string(), v.clone()));
+                    }
+                }
+                Some(PyRep::KeyVal(entries)) => {
+                    for (k, v) in entries {
+                        let ks = k.trim();
+                        if ks.is_empty() { return Some(Err(invalid_cfg())); }
+                        if let Err(e) = apply_load_setting(ks, v, None, None, true) { return Some(Err(e)); }
+                        updates.push((ks.to_string(), v.clone()));
+                    }
+                }
+                Some(PyRep::String(key_str)) if !key_str.trim().is_empty() => {
+                    let ks = key_str.trim();
+                    let val = args.get(1).cloned().unwrap_or(PyRep::None);
+                    if let Err(e) = apply_load_setting(ks, &val, None, None, true) { return Some(Err(e)); }
+                    updates.push((ks.to_string(), val));
+                }
+                None | Some(PyRep::None) if !kwargs.is_empty() => {
+                    for (k, v) in kwargs {
+                        let ks = k.trim();
+                        if ks.is_empty() { continue; }
+                        if let Err(e) = apply_load_setting(ks, v, None, None, true) { return Some(Err(e)); }
+                        updates.push((ks.to_string(), v.clone()));
+                    }
+                }
+                _ => return Some(Err(invalid_cfg())),
+            }
+            if updates.is_empty() { return Some(Err(invalid_cfg())); }
             ctx.db.with_mut_snapshot(|snap| {
                 let mut state: LoadServiceState = snap
                     .service_state_blobs
                     .get("load_service_state")
                     .and_then(|s| serde_json::from_str(s).ok())
                     .unwrap_or_default();
-                if let Some(PyRep::Dict(entries)) = args.first() {
-                    for (k, v) in entries {
-                        if let Some(key_str) = k.as_str() {
-                            state.config.insert(key_str.to_string(), v.clone());
-                        }
-                    }
-                } else if let Some(key_str) = args.first().and_then(|a| a.as_str()) {
-                    let val = args.get(1).cloned().unwrap_or(PyRep::None);
-                    state.config.insert(key_str.to_string(), val);
+                for (k, v) in updates {
+                    state.config.insert(k, v);
                 }
                 state.total_requests += 1;
                 if let Ok(json) = serde_json::to_string(&state) {
