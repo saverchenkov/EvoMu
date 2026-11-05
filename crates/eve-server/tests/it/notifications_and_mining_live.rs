@@ -295,8 +295,8 @@ async fn test_live_target_multievent_and_in_space_kill_notification() {
 
 #[tokio::test]
 async fn test_live_excavator_drones_mining_goals_and_market_supply_chain() {
-    // parity: feat:mining.excavator-drones, feat:mining.mining-goals, feat:mining.mining-market
-    eve_testkit::attest(&["feat:mining.excavator-drones", "feat:mining.mining-goals", "feat:mining.mining-market"]);
+    // parity: feat:mining.excavator-drones
+    eve_testkit::attest(&["feat:mining.excavator-drones"]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);

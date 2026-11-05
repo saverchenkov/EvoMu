@@ -409,12 +409,9 @@ async fn test_b33_foreman_bursts_and_harvester_validity() {
 
 #[tokio::test]
 async fn test_b33_phased_asteroid_field_mobile_anchor_and_prismaticite() {
-    // parity: feat:mining.phased-asteroid-field-lifecycle, feat:mining.mobile-phase-anchor, feat:mining.prismaticite-reprocessing-and-unrefined-reactions, feat:mining.wormhole-ore-sites
+    // parity: feat:mining.prismaticite-reprocessing-and-unrefined-reactions
     eve_testkit::attest(&[
-        "feat:mining.phased-asteroid-field-lifecycle",
-        "feat:mining.mobile-phase-anchor",
         "feat:mining.prismaticite-reprocessing-and-unrefined-reactions",
-        "feat:mining.wormhole-ore-sites",
     ]);
 
     let miner_id = 9_300_001_i64;

@@ -14,9 +14,6 @@ const JITA_STATION: i64 = 60_003_760;
 
 #[tokio::test]
 async fn test_b22_mining_goals_and_market_e2e() {
-    // parity: feat:mining.mining-market
-    eve_testkit::attest(&["feat:mining.mining-market"]);
-
     let ctx = ServerContext::new();
     let mut s1 = select_pilot(&ctx, 55_101, "demo", "demo-secret", PILOT_1).await;
     let mut s2 = select_pilot(&ctx, 55_102, "other", "other-secret", PILOT_2).await;

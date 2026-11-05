@@ -1765,14 +1765,6 @@ async fn test_mining_foreman_burst_charges_orca_porpoise_rorqual_and_preservatio
 
 #[tokio::test]
 async fn test_mining_wormhole_sites_phased_fields_and_market_goals() {
-    // parity: feat:mining.wormhole-ore-sites, feat:mining.phased-asteroid-field-lifecycle, feat:mining.mobile-phase-anchor, feat:mining.mining-market, feat:mining.mining-goals
-    eve_testkit::attest(&[
-        "feat:mining.wormhole-ore-sites",
-        "feat:mining.phased-asteroid-field-lifecycle",
-        "feat:mining.mobile-phase-anchor",
-        "feat:mining.mining-market",
-        "feat:mining.mining-goals",
-    ]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
 
@@ -3371,9 +3363,6 @@ const JITA_STATION: i64 = 60_003_760;
 
 #[tokio::test]
 async fn test_parity_mining_market_and_mining_goals() {
-    // parity: feat:mining.mining-market, feat:mining.mining-goals
-    eve_testkit::attest(&["feat:mining.mining-market", "feat:mining.mining-goals"]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
 

@@ -1,10 +1,8 @@
-//! Asteroid belts, ore distribution, mining market, and mining goals parity suite.
+//! Asteroid belts and ore distribution suite.
 //!
 //! Parity rows:
 //! - `feat:mining.belts-as-balls`
 //! - `feat:mining.belt-ore-distribution`
-//! - `feat:mining.mining-market`
-//! - `feat:mining.mining-goals`
 
 #![forbid(unsafe_code)]
 
@@ -242,9 +240,6 @@ async fn test_belt_ore_distribution_across_security_bands() {
 
 #[tokio::test]
 async fn test_mining_market_ore_mineral_compressed() {
-    // parity: feat:mining.mining-market
-    eve_testkit::attest(&["feat:mining.mining-market"]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
@@ -376,9 +371,6 @@ async fn test_mining_market_ore_mineral_compressed() {
 
 #[tokio::test]
 async fn test_mining_goals_from_ledger_events() {
-    // parity: feat:mining.mining-goals
-    eve_testkit::attest(&["feat:mining.mining-goals"]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
