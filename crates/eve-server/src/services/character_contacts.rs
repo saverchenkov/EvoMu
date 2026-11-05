@@ -1414,3 +1414,6 @@ pub fn handle_contacts(
         }
     }
 }
+
+#[cfg(test)] #[path = "character_contacts_unit_tests.rs"] mod character_contacts_unit_tests;
+

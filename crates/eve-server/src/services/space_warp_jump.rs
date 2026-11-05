@@ -1429,3 +1429,5 @@ async fn handle_undock(
 
 
 pub use crate::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space;
+
+#[cfg(test)] #[path = "space_warp_jump_unit_tests.rs"] mod space_warp_jump_unit_tests;

@@ -1466,3 +1466,5 @@ pub async fn handle_gm_qa_rpcs(
         _ => None,
     }
 }
+#[cfg(test)] #[path = "character_gm_tools_unit_tests.rs"] mod character_gm_tools_unit_tests;
+

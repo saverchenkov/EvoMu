@@ -1402,3 +1402,5 @@ pub fn handle_industry_facilities_bps(
         _ => None,
     }
 }
+
+#[cfg(test)] #[path = "industry_facilities_bps_unit_tests.rs"] mod industry_facilities_bps_unit_tests;

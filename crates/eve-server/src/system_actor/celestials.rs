@@ -1438,3 +1438,6 @@ pub(crate) fn persist_landed_warps_in_db(
         }
     });
 }
+
+#[cfg(test)] #[path = "celestials_unit_tests.rs"] mod celestials_unit_tests;
+

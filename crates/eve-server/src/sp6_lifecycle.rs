@@ -1388,3 +1388,6 @@ pub async fn handle_cmd_reconnect_to_drones(
         .collect();
     Ok(PyRep::Dict(errors_py))
 }
+
+#[cfg(test)] #[path = "sp6_lifecycle_unit_tests.rs"] mod sp6_lifecycle_unit_tests;
+

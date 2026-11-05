@@ -1364,3 +1364,5 @@ impl ServerContext {
         )
     }
 }
+
+#[cfg(test)] #[path = "cache_notifications_unit_tests.rs"] mod cache_notifications_unit_tests;

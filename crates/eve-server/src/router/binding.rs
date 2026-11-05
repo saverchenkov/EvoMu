@@ -1391,3 +1391,5 @@ pub fn effect_id_for_module_sde(
     }
     ty.and_then(|t| t.default_effect_id).map(|e| e as i64)
 }
+
+#[cfg(test)] #[path = "binding_unit_tests.rs"] mod binding_unit_tests;
