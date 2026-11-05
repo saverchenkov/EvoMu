@@ -13,7 +13,7 @@ async fn call(ctx: &ServerContext, s: &mut SessionState, svc: &str, m: &str, a: 
 
 #[tokio::test]
 async fn test_warp_vector_item() {
-    eve_testkit::attest(&["feat:navigation.warp-vector"]);
+
     let ctx = ServerContext::new();
     let p = common::gm_pilot_in_space(&ctx, 1, P1, 606, 30_000_142).await;
     let mut s = p.sess.clone();

@@ -170,8 +170,11 @@ pub async fn ensure_system_signatures_and_anomalies(
             let needs_seed = match snap.cosmic_signatures.get(&sys_id) {
                 None => true,
                 Some(existing) => {
-                    !existing.is_empty()
-                        && existing.iter().all(|s| s.signature_id.starts_with("K162-"))
+                    existing.is_empty()
+                        || existing.iter().all(|s| {
+                            s.signature_id.starts_with("K162-")
+                                || s.signature_id.starts_with("DNG-")
+                        })
                 }
             };
             let list = snap.cosmic_signatures.entry(sys_id).or_default();

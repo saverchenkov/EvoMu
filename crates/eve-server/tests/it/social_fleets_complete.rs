@@ -660,8 +660,8 @@ fn is_rowset(rep: &PyRep) -> bool {
 
 #[tokio::test]
 async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
-    // parity: feat:navigation.wormhole-jump, feat:navigation.wormhole-polarization, feat:navigation.wormhole-lifetime, feat:navigation.wormhole-statics, feat:navigation.wormhole-thera, rpc:charUnboundMgr.SelectCharacterID, rpc:scanMgr.GetSystemScanMgr, rpc:structureDeployment.Anchor, rpc:wormholeMgr.GetWormholePolarization, rpc:wormholeMgr.WormholeJump
-    eve_testkit::attest(&["feat:navigation.wormhole-jump", "feat:navigation.wormhole-polarization", "feat:navigation.wormhole-lifetime", "feat:navigation.wormhole-statics", "feat:navigation.wormhole-thera"]);
+    // parity: feat:navigation.wormhole-jump, feat:navigation.wormhole-polarization, feat:navigation.wormhole-lifetime, feat:navigation.wormhole-thera, rpc:charUnboundMgr.SelectCharacterID, rpc:scanMgr.GetSystemScanMgr, rpc:structureDeployment.Anchor, rpc:wormholeMgr.GetWormholePolarization, rpc:wormholeMgr.WormholeJump
+    eve_testkit::attest(&["feat:navigation.wormhole-jump", "feat:navigation.wormhole-polarization", "feat:navigation.wormhole-lifetime", "feat:navigation.wormhole-thera"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
@@ -781,7 +781,7 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
     assert!((wr_cs.max_armor_hp - base_rifter_cs.max_armor_hp * 1.30).abs() < 1.0);
     assert!((wr_cs.signature_radius - base_rifter_cs.signature_radius * 0.85).abs() < 1.0);
 
-    // 6. Mass exhaustion collapse & automatic static wormhole respawn (`feat:navigation.wormhole-statics`)
+    // 6. Mass exhaustion collapse & automatic static wormhole respawn
     ctx.advance_secs(301);
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&90_000_001).unwrap().solar_system_id = 30_000_142;

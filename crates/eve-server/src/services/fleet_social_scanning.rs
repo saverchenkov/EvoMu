@@ -22,24 +22,14 @@ pub(super) async fn handle_scanning_and_wormholes(
         // =====================================================================
         // SO-5: Scanning & Dungeons (`scanMgr`, `keeper`, `dungeon*`)
         // =====================================================================
-        ("scanMgr", "GetSystemScanMgr") | ("scanMgr", "SignalTrackerRegister") => {
+        ("scanMgr", "SignalTrackerRegister") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let sys_id = if method == "SignalTrackerRegister" {
-                match session.solar_system_id {
-                    Some(s) if s > 0 => s,
-                    _ => return Some(Err(BridgeRpcError::user_error("NoSolarSystem"))),
-                }
-            } else {
-                match session.solar_system_id.or_else(|| {
-                    ctx.db
-                        .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
-                }) {
-                    Some(s) if s > 0 => s,
-                    _ => return Some(Err(BridgeRpcError::user_error("NoSolarSystem"))),
-                }
+            let sys_id = match session.solar_system_id {
+                Some(s) if s > 0 => s,
+                _ => return Some(Err(BridgeRpcError::user_error("NoSolarSystem"))),
             };
             let now_unix = ctx.now_unix();
             let sigs = ensure_system_signatures(ctx, sys_id).await;

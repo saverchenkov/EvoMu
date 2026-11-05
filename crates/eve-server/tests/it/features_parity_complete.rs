@@ -2065,7 +2065,6 @@ pub(crate) mod features_parity_part4 {
 //
 // Covers:
 // - `feat:wormholes.lifetime-decay-stages`
-// - `feat:navigation.wormhole-info-buckets`
 
 use eve_db::{CosmicSignatureRecord, InventoryFlag, InventoryItemRecord};
 use eve_machonet::SessionState;
@@ -2100,10 +2099,7 @@ fn make_session(char_id: i64, sys_id: u32, ship_id: i64) -> SessionState {
 
 #[tokio::test]
 async fn test_wormhole_lifetime_decay_stages_and_info_buckets() {
-    // parity: feat:navigation.wormhole-info-buckets
-    eve_testkit::attest(&[
-        "feat:navigation.wormhole-info-buckets",
-    ]);
+
 
     let ctx = make_context();
     crate::common::pin_clock(&ctx);

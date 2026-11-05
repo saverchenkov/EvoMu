@@ -511,8 +511,7 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn test_navigation_route_waypoints() {
-    // parity: feat:navigation.route-waypoints
-    eve_testkit::attest(&["feat:navigation.route-waypoints"]);
+
 
     let sde = match SdeRegistry::open(&SdeRegistry::default_db_path()) {
         Ok(reg) => Arc::new(reg),
@@ -662,8 +661,7 @@ async fn test_navigation_route_waypoints() {
 
 #[tokio::test]
 async fn test_navigation_wormhole_statics() {
-    // parity: feat:navigation.wormhole-statics
-    eve_testkit::attest(&["feat:navigation.wormhole-statics"]);
+
 
     let sde = match SdeRegistry::open(&SdeRegistry::default_db_path()) {
         Ok(reg) => Arc::new(reg),
@@ -1201,8 +1199,7 @@ async fn test_navigation_shipcaster_and_starter() {
 
 #[tokio::test]
 async fn test_navigation_warp_vector() {
-    // parity: feat:navigation.warp-vector
-    eve_testkit::attest(&["feat:navigation.warp-vector"]);
+
 
     let sde = match SdeRegistry::open(&SdeRegistry::default_db_path()) {
         Ok(reg) => Arc::new(reg),
@@ -2518,8 +2515,7 @@ pub(crate) mod pve_nav_batch_closure {
     #[allow(unused_imports)]
     use super::*;
 
-// End-to-End Integration Tests closing 11 Navigation & PvE parity rows:
-// `feat:navigation.route-waypoints`, `feat:navigation.wormhole-statics`, `feat:navigation.warp-vector`,
+// End-to-End Integration Tests closing 8 PvE parity rows:
 // `feat:pve.mission-complete`, `feat:pve.escalations`, `feat:pve.expeditions`,
 // `feat:pve.incursion-payout`, `feat:pve.homefront-ops`, `feat:pve.air-career-program`,
 // `feat:pve.daily-goals`, `feat:pve.login-campaign`.
@@ -2692,12 +2688,7 @@ fn drain_notices(rx: &mut Receiver<EvePublicNotice>) -> Vec<String> {
 
 #[tokio::test]
 async fn test_navigation_waypoints_warp_vector_and_wormhole_statics() {
-    // parity: feat:navigation.route-waypoints, feat:navigation.warp-vector, feat:navigation.wormhole-statics
-    eve_testkit::attest(&[
-        "feat:navigation.route-waypoints",
-        "feat:navigation.warp-vector",
-        "feat:navigation.wormhole-statics",
-    ]);
+
 
     let ctx = Arc::new(ctx_with_real_sde());
     let char_id = 90_000_001_i64;

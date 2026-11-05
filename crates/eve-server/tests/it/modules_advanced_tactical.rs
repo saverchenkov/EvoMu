@@ -1166,7 +1166,6 @@ mod nav_tactical_modules_closure {
     use super::*;
 
 // End-to-End Integration Tests closing Navigation parity rows (Part 1):
-// `feat:navigation.route-waypoints`, `feat:navigation.warp-vector`,
 // `feat:navigation.align-server-tick-rounding`, `feat:navigation.collision-bumping`,
 // and `feat:navigation.cloak-velocity-penalty`.
 
@@ -1181,10 +1180,8 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn test_waypoints_warp_vector_and_align_tick_rounding() {
-    // parity: feat:navigation.route-waypoints, feat:navigation.warp-vector, feat:navigation.align-server-tick-rounding
+    // parity: feat:navigation.align-server-tick-rounding
     eve_testkit::attest(&[
-        "feat:navigation.route-waypoints",
-        "feat:navigation.warp-vector",
         "feat:navigation.align-server-tick-rounding",
     ]);
 
@@ -1421,7 +1418,7 @@ async fn test_waypoints_warp_vector_and_align_tick_rounding() {
         Vec::<i64>::new()
     );
 
-    // 2. Cargo Warp Vector Data (`feat:navigation.warp-vector`): star-centered coordinates + 300s cooldown
+    // 2. Cargo Warp Vector Data: star-centered coordinates + 300s cooldown
     sess.station_id = None;
     let star_cel = ctx
         .sde

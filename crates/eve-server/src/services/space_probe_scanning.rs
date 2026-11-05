@@ -477,15 +477,17 @@ async fn handle_get_system_scan_mgr(
         Err(e) => return Some(Err(e)),
     };
     let caller_sys = resolve_caller_solar_system(ctx, session, char_id);
-    if let Some(arg_sys) = args.first().and_then(|a| a.as_i64()).map(|v| v as u32) {
+    let sys_id = if let Some(arg_sys) = args.first().and_then(|a| a.as_i64()).map(|v| v as u32) {
         if arg_sys != caller_sys && !session.has_gm_role() {
             return Some(Err(BridgeRpcError {
                 code: "AccessDenied".into(),
                 message: "Cannot query scan manager for a remote solar system".into(),
             }));
         }
-    }
-    let sys_id = caller_sys;
+        arg_sys
+    } else {
+        caller_sys
+    };
     let now_unix = ctx.now_unix();
     let _ = expire_overdue_probes_for_char(ctx, char_id, now_unix).await;
     let (sigs, anomalies) = ensure_system_signatures_and_anomalies(ctx, sys_id).await;

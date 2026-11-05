@@ -417,7 +417,6 @@ async fn search_i2_jump_clone_reset_warp_vector_and_dev_indices() {
     // parity: rpc:search.Query, rpc:search.QuickQuery, rpc:i2.GetItem, rpc:i2.IsPrimed
     // parity: rpc:jumpCloneSvc.ResetLastCloneJumpTime, rpc:warpVectorMgr.UseVector
     // parity: rpc:devIndexManager.GetDevelopmentIndicesForSystem
-    // parity: feat:navigation.warp-vector
     eve_testkit::attest(&[
         "rpc:search.Query",
         "rpc:search.QuickQuery",

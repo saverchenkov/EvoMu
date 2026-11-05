@@ -8,7 +8,7 @@ use eve_server::router::ServerContext;
 use glam::DVec3;
 use std::collections::HashMap;
 
-// parity: feat:navigation.wormhole-cyno-supercap-restriction, feat:navigation.wormhole-info-buckets, plan:SO-6
+// parity: feat:navigation.wormhole-cyno-supercap-restriction, plan:SO-6
 #[tokio::test]
 async fn test_wormhole_restrictions_and_buckets() {
 
@@ -557,7 +557,7 @@ async fn test_wormhole_restrictions_and_buckets() {
     assert_eq!(sig_kv.dict_get("massStabilityBucket"), Some(&PyRep::String("<50%".into())));
 }
 
-// parity: feat:navigation.wormhole-jump, feat:navigation.wormhole-lifetime, feat:navigation.wormhole-statics
+// parity: feat:navigation.wormhole-jump, feat:navigation.wormhole-lifetime
 #[tokio::test]
 async fn test_wormhole_expired_static_jump_commits_collapse_and_replacement_balls() {
     let ctx = ServerContext::new();

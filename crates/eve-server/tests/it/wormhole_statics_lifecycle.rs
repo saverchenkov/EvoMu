@@ -104,11 +104,10 @@ async fn setup_pilot_in_space(
     sess
 }
 
-// parity: feat:navigation.wormhole-statics, feat:wormholes.static-wormhole-respawn, feat:navigation.wormhole-k162-exit-materialization
+// parity: feat:wormholes.static-wormhole-respawn, feat:navigation.wormhole-k162-exit-materialization
 #[tokio::test]
 async fn test_wormhole_statics_decay_stages_respawn_and_k162_materialization() {
     eve_testkit::attest(&[
-        "feat:navigation.wormhole-statics",
         "feat:wormholes.static-wormhole-respawn",
         "feat:navigation.wormhole-k162-exit-materialization",
     ]);
