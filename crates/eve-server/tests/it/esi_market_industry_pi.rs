@@ -2420,6 +2420,7 @@ async fn test_esi6_market_character_and_corporation_orders_routes() {
     assert_eq!(corp_hist_arr[0]["wallet_division"], json!(3));
     assert_eq!(corp_hist_arr[0]["state"], json!("cancelled"));
     assert_eq!(corp_hist_arr[0]["duration"], json!(90));
+    }
 }
 
 pub(crate) mod esi_market_groups_sde_descriptions {

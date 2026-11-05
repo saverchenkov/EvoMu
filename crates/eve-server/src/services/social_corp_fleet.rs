@@ -1358,8 +1358,7 @@ pub async fn handle(
             Some(Ok(PyRep::Bool(true)))
         }
 
-        _ => social_corp_projects::handle_corp_projects_rpc(ctx, session, service, method, args)
-            .or_else(|| social_wars::handle_wars(ctx, session, service, method, args, bound_obj_id)),
+        _ => social_wars::handle_wars(ctx, session, service, method, args, bound_obj_id),
     }
 }
 

@@ -526,6 +526,12 @@ pub fn is_new_pvp_aggression(ctx: &ServerContext, attacker_char_id: i64, victim_
         .unwrap_or(true)
 }
 
+fn is_disapproval_system(sde: &eve_sde::SdeRegistry, sys_id: u32) -> bool {
+    sde.solar_systems.get(&sys_id).is_some_and(|s| {
+        s.region_id == 10_001_000 || s.name.eq_ignore_ascii_case("Zarzakh")
+    })
+}
+
 pub fn on_weapon_aggression_post_hook(
     ctx: &ServerContext,
     attacker_char_id: i64,

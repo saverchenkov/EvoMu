@@ -183,8 +183,8 @@ fn handle_petitioner(
                         let created_ft = p
                             .logs
                             .first()
-                            .map(|(_, _, ts)| crate::session_cluster_lifecycle::unix_to_filetime(*ts))
-                            .unwrap_or_else(|| crate::session_cluster_lifecycle::unix_to_filetime(ctx.now_unix()));
+                            .map(|(_, _, ts)| crate::sp6_lifecycle::unix_to_filetime(*ts))
+                            .unwrap_or_else(|| crate::sp6_lifecycle::unix_to_filetime(ctx.now_unix()));
                         PyRep::keyval([
                             ("petitionID", PyRep::Integer(p.petition_id)),
                             ("petitionerID", PyRep::Integer(p.petitioner_cid)),

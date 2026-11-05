@@ -755,13 +755,10 @@ pub(super) fn handle_wars(
             | "GMSetWarFinishTime",
         ) => Some(Ok(PyRep::Bool(true))),
 
-        (
-            "warsInfoMgr" | "warRegistry",
-            "AcceptSurrender"
-            | "DeclineSurrender"
-            | "AcceptAllyNegotiation"
-            | "DeclineAllyOffer"
-            | "RetractWarAllyOffer",
+        ("warsInfoMgr" | "warRegistry", "AcceptSurrender" | "DeclineSurrender")
+        | (
+            "warRegistry",
+            "AcceptAllyNegotiation" | "DeclineAllyOffer" | "RetractWarAllyOffer",
         ) => {
             if !has_war_director_role {
                 return err("CorpRoleDenied", "Acting on war negotiations requires CEO or Director role");
