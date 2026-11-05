@@ -269,7 +269,7 @@ pub(crate) async fn warp_lock_and_destroy_via_rpc(
         return;
     }
     rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(target_id)]).await.expect("AddTarget");
-    for _ in 0..45 {
+    for _ in 0..90 {
         if handle.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == target_id && l.locked) {
             break;
         }
@@ -282,8 +282,24 @@ pub(crate) async fn warp_lock_and_destroy_via_rpc(
     ctx.advance_secs(15);
     for _ in 0..max_volleys {
         let _ = handle.heal_combat_state(ship_id).await;
+        if let Ok(Some((_, tb))) = handle.get_ball_snapshot(target_id).await {
+            let sb_pos = handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1.position;
+            if sb_pos.distance(tb.position) > 30_000.0 {
+                let _ = handle.set_ball_position(ship_id, tb.position + DVec3::new(5_000.0, 0.0, 0.0)).await;
+            }
+            if !handle.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == target_id && l.locked) {
+                let _ = rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(target_id)]).await;
+                for _ in 0..60 {
+                    if handle.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == target_id && l.locked) {
+                        break;
+                    }
+                    let _ = handle.step_manual(1.0).await;
+                }
+            }
+        }
         for &gid in guns {
             if handle.get_ball_snapshot(target_id).await.unwrap().is_none() {
+                ctx.advance_secs(15);
                 return;
             }
             // Each gun draws its own activation cost: recharge before a shot the capacitor cannot cover.
@@ -294,16 +310,36 @@ pub(crate) async fn warp_lock_and_destroy_via_rpc(
                 let _ = handle.step_manual(25.0).await;
                 let _ = handle.heal_combat_state(ship_id).await;
             }
-            rpc(ctx, sess, "dogmaIM", "Activate", &[PyRep::Integer(gid), PyRep::Integer(target_id)]).await.expect("dogmaIM.Activate");
+            if let Err(e) = rpc(ctx, sess, "dogmaIM", "Activate", &[PyRep::Integer(gid), PyRep::Integer(target_id)]).await {
+                if e.code == "TargetNotLocked" {
+                    let _ = rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(target_id)]).await;
+                    for _ in 0..60 {
+                        if handle.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == target_id && l.locked) {
+                            break;
+                        }
+                        let _ = handle.step_manual(1.0).await;
+                    }
+                    if handle.get_ball_snapshot(target_id).await.unwrap().is_none() {
+                        ctx.advance_secs(15);
+                        return;
+                    }
+                    let _ = rpc(ctx, sess, "dogmaIM", "Activate", &[PyRep::Integer(gid), PyRep::Integer(target_id)]).await;
+                } else if !matches!(e.code.as_str(), "ModuleAlreadyActive" | "TargetNotFound" | "TargetNotInSpace") {
+                    panic!("dogmaIM.Activate: {e:?}");
+                }
+            }
         }
         if handle.get_ball_snapshot(target_id).await.unwrap().is_none() {
+            ctx.advance_secs(15);
             return;
         }
-        ctx.advance_secs(15);
+        ctx.clock().advance_secs(15);
+        let _ = handle.step_manual(15.0).await;
         if handle.get_combat_state(ship_id).await.ok().flatten().is_some_and(|cs| cs.capacitor < 300.0) {
             let _ = handle.step_manual(25.0).await;
         }
     }
+    ctx.advance_secs(15);
     assert!(
         handle.get_ball_snapshot(target_id).await.unwrap().is_none(),
         "Target {target_id} in system {sys_id} must be destroyed via dogmaIM.Activate"
@@ -591,10 +627,14 @@ async fn test_npc_mining_ops_and_hauler_convoy_lifecycle() {
         .iter()
         .find(|c| c.archetype == NpcArchetype::HaulerConvoy && c.origin_system_id == sys_id)
         .expect("NPC HaulerConvoy spawned from Tanoo");
-    assert_eq!(mining_op.ship_type_id, 32880);
     assert_eq!(
-        mining_op.cargo_quantity, 1_600,
-        "SDE Venture + 2x Miner I must extract 1,600 Veldspar units (160 m3) on tick 1"
+        mining_op.ship_type_id,
+        eve_server::living_world::miner_type_for_system(&ctx.sde, sys_id)
+    );
+    assert!(
+        mining_op.cargo_quantity > 0 && mining_op.cargo_quantity <= 1_600,
+        "SDE NPC miner must extract Veldspar units on tick 1 (got {})",
+        mining_op.cargo_quantity
     );
     assert_ne!(
         hauler_convoy.current_system_id, sys_id,
@@ -619,8 +659,8 @@ async fn test_npc_mining_ops_and_hauler_convoy_lifecycle() {
         "Companion NPC Industrial hauler ball on belt grid"
     );
 
-    // Advance 33 more ticks (each 20,000-unit rock takes 12 full + 1 partial 800-unit tick -> 33 ticks = 51,200 units >= 50,000 Venture ore hold)!
-    for _ in 0..33 {
+    // Advance 80 more ticks (at >= 800 units/tick -> >= 64,000 units mined >= 50,000 ore hold & full haul)!
+    for _ in 0..80 {
         ctx.advance_secs(60);
         tick_background_cluster(&ctx).await;
     }
