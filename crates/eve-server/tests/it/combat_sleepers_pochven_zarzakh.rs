@@ -273,9 +273,6 @@ async fn test_sleeper_mechanics_infinite_capacitor_spawn_leash_and_ewar_by_class
 
 #[tokio::test]
 async fn test_zarzakh_gate_guns_and_deathless_patrols() {
-    // parity: feat:npc.zarzakh-gate-guns-patrols
-    eve_testkit::attest(&["feat:npc.zarzakh-gate-guns-patrols"]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let zarzakh_sys_id = 30_100_000; // Zarzakh solar system
@@ -328,11 +325,6 @@ async fn test_zarzakh_gate_guns_and_deathless_patrols() {
 
 #[tokio::test]
 async fn test_pochven_hypnosian_sleepers_and_60pct_loot_drop() {
-    // parity: feat:npc.pochven-hypnosian-sleepers
-    eve_testkit::attest(&[
-        "feat:npc.pochven-hypnosian-sleepers",
-    ]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let pochven_sys_id = 30_000_157; // System in Pochven region (10_000_070, Otela)

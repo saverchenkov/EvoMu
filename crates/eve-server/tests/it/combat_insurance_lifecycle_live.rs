@@ -56,9 +56,6 @@ async fn lose_ship(ctx: &ServerContext, sess: &mut eve_machonet::SessionState, s
 
 #[tokio::test]
 async fn test_live_insurance_void_triggers_expiry_and_loss_payout_mail() {
-    // parity: feat:combat.insurance-void-and-expiry
-    eve_testkit::attest(&["feat:combat.insurance-void-and-expiry"]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     seed_full_market_catalog(&ctx.db, &ctx.sde);

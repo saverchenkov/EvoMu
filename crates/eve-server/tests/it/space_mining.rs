@@ -2899,8 +2899,8 @@ async fn test_parity_navy_npc_and_faction_police() {
 
 #[tokio::test]
 async fn test_parity_mining_op_npc_and_hauler_convoy() {
-    // parity: feat:npc.mining-op-npc, feat:npc.npc-hauler
-    eve_testkit::attest(&["feat:npc.mining-op-npc", "feat:npc.npc-hauler"]);
+    // parity: feat:npc.npc-hauler
+    eve_testkit::attest(&["feat:npc.npc-hauler"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
