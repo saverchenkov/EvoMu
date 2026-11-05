@@ -198,6 +198,16 @@ pub async fn handle(
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));
             }
+            if let Some(PyRep::Dict(entries)) = args.first() {
+                let mut modes = Vec::with_capacity(entries.len());
+                for (k, _) in entries {
+                    modes.push((k.clone(), PyRep::ascii_bytes("M")));
+                }
+                return Some(Ok(PyRep::Tuple(vec![
+                    PyRep::Dict(modes),
+                    PyRep::Dict(Vec::new()),
+                ])));
+            }
             let err_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             if let Some(mode) = ctx.db.with_snapshot(|snap| {
                 snap.service_state_blobs

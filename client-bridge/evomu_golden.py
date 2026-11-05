@@ -60,14 +60,14 @@ def decode_add_balls(raw_bytes):
             pos += 12
             extra = {"target_id": tid, "range": float(rng)}
         elif mode_byte == 4:
-            tid = struct.unpack("<I", bytes(ba[pos:pos + 4]))[0]
-            rng = struct.unpack("<d", bytes(ba[pos + 4:pos + 12]))[0]
+            tid = struct.unpack("<q", bytes(ba[pos:pos + 8]))[0]
+            rng = struct.unpack("<f", bytes(ba[pos + 8:pos + 12]))[0]
             pos += 12
             extra = {"target_id": tid, "range": float(rng)}
         elif mode_byte == 3:
             dx, dy, dz = struct.unpack("<ddd", bytes(ba[pos:pos + 24]))
-            ws = struct.unpack("<I", bytes(ba[pos + 44:pos + 48]))[0]
-            pos += 48
+            ws = struct.unpack("<q", bytes(ba[pos + 44:pos + 52]))[0]
+            pos += 52
             extra = {"destination": [dx, dy, dz], "warp_speed_au_s": float(ws) / 10.0}
         elif mode_byte == 5:
             tid = struct.unpack("<q", bytes(ba[pos:pos + 8]))[0]

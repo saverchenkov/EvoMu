@@ -1233,7 +1233,11 @@ async fn handle_dock(
         .filter(|&r| r > 0.0)
         .unwrap_or(sde_target_radius);
     let dist = ball.position.distance(target_pos);
-    let max_dock_dist = target_radius + 2_500.0;
+    let max_dock_dist = if !session.address.is_empty() {
+        target_radius + 35_000.0
+    } else {
+        target_radius + 2_500.0
+    };
     if dist > max_dock_dist {
         return Err(BridgeRpcError {
             code: "OutsideDockingPerimeter".into(),
@@ -1262,10 +1266,83 @@ async fn handle_dock(
                 session.station_id = Some(dock_id);
                 session.structure_id = None;
             }
+            ctx.invalidate_bound_objects_for_session_transition(char_id, sys_id, Some(dock_id), "dock");
             record_session_change_timer(ctx, char_id, now_unix, sys_id, cur_tick, "dock");
             crate::services::nav_warp_interdiction::advance_waypoints_on_arrival(
                 ctx, char_id, dock_id,
             );
+            let sess_rep = PyRep::keyval([
+                ("userid", session.user_id.map(|u| PyRep::Integer(u as i64)).unwrap_or(PyRep::None)),
+                ("charid", PyRep::Integer(char_id)),
+                ("corpid", session.corporation_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("allianceid", session.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("shipid", session.ship_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("stationid", session.station_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("structureid", session.structure_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("solarsystemid2", session.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None)),
+                ("solarsystemid", PyRep::None),
+                ("locationid", PyRep::Integer(dock_id)),
+                ("constellationid", session.constellation_id.map(|c| PyRep::Integer(c as i64)).unwrap_or(PyRep::None)),
+                ("regionid", session.region_id.map(|r| PyRep::Integer(r as i64)).unwrap_or(PyRep::None)),
+            ]);
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnSessionChanged",
+                "charid",
+                vec![
+                    PyRep::Bool(false),
+                    sess_rep,
+                    PyRep::Dict(vec![(
+                        PyRep::String(if is_structure { "structureid" } else { "stationid" }.into()),
+                        PyRep::Tuple(vec![PyRep::None, PyRep::Integer(dock_id)]),
+                    )]),
+                ],
+            );
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnDockingAccepted",
+                "charid",
+                vec![PyRep::Integer(dock_id)],
+            );
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnDockingFinished",
+                "charid",
+                vec![PyRep::Integer(dock_id)],
+            );
+            if is_structure {
+                let (corp_id, ally_id, fac_id, st_type_id) = ctx.db.with_snapshot(|snap| {
+                    let c = snap.characters.get(&char_id);
+                    let corp = c.map(|ch| ch.corporation_id).unwrap_or(0);
+                    let ally = c.and_then(|ch| ch.alliance_id);
+                    let fac = c.and_then(|ch| ch.war_faction_id);
+                    let st_tid = snap.structures.get(&dock_id).map(|s| s.type_id).unwrap_or(35832);
+                    (corp, ally, fac, st_tid)
+                });
+                ctx.notify(
+                    crate::router::NotificationTarget::Station(dock_id),
+                    "OnCharacterEnteredStructure",
+                    "stationid",
+                    vec![
+                        PyRep::Integer(char_id),
+                        PyRep::Integer(corp_id),
+                        ally_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                        fac_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    ],
+                );
+                let hv_state = PyRep::keyval([
+                    ("characterID", PyRep::Integer(char_id)),
+                    ("structureID", PyRep::Integer(dock_id)),
+                    ("structureTypeID", PyRep::Integer(i64::from(st_type_id))),
+                    ("shipID", PyRep::Integer(ship_id)),
+                ]);
+                ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnHangarViewStateUpdated",
+                    "charid",
+                    vec![PyRep::Integer(dock_id), hv_state],
+                );
+            }
             ctx.quasar_gateway.on_session_changed(session, now_unix);
             ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["dockInStation"], 1, now_unix, &ctx.quasar_gateway);
             Ok(PyRep::keyval([

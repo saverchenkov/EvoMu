@@ -892,14 +892,74 @@ pub fn normalize_macho_rpc_reply(
             }
             return Ok(rep);
         }
+    } else if service == "storeManager"
+        && matches!(method, "get_categories" | "get_products" | "get_offers")
+    {
+        if let Ok(rep) = rpc_res {
+            return Ok(keyval_to_dict_recursive(rep));
+        }
     }
     rpc_res
+}
+
+fn keyval_to_dict_recursive(rep: PyRep) -> PyRep {
+    match rep {
+        PyRep::KeyVal(entries) => PyRep::Dict(
+            entries
+                .into_iter()
+                .map(|(k, v)| (PyRep::String(k), keyval_to_dict_recursive(v)))
+                .collect(),
+        ),
+        PyRep::List(items) => {
+            PyRep::List(items.into_iter().map(keyval_to_dict_recursive).collect())
+        }
+        PyRep::Tuple(items) => {
+            PyRep::Tuple(items.into_iter().map(keyval_to_dict_recursive).collect())
+        }
+        PyRep::Dict(entries) => PyRep::Dict(
+            entries
+                .into_iter()
+                .map(|(k, v)| (k, keyval_to_dict_recursive(v)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn normalize_destiny_update_arg(rep: PyRep) -> PyRep {
+    match rep {
+        PyRep::List(items) => PyRep::List(items.into_iter().map(normalize_destiny_update_arg).collect()),
+        PyRep::Tuple(mut items) => {
+            if items.len() == 2 {
+                if let (Some(name), Some(PyRep::Tuple(ev_args))) = (items[0].as_str(), items.get(1)) {
+                    if name == "OnDockingAccepted" && ev_args.len() >= 3 {
+                        let station_id = ev_args[2].clone();
+                        items[1] = PyRep::Tuple(vec![station_id]);
+                        return PyRep::Tuple(items);
+                    }
+                }
+            }
+            PyRep::Tuple(items.into_iter().map(normalize_destiny_update_arg).collect())
+        }
+        other => other,
+    }
 }
 
 /// Normalizes `machoNet` notification arguments where the live V24.01 client handler signature
 /// differs from internal test notification tuples.
 pub fn normalize_macho_notification(event: &str, args: Vec<PyRep>) -> Vec<PyRep> {
     match event {
+        "OnDockingAccepted" => {
+            if args.len() >= 3 {
+                vec![args[2].clone()]
+            } else {
+                args
+            }
+        }
+        "DoDestinyUpdate" => args
+            .into_iter()
+            .map(normalize_destiny_update_arg)
+            .collect(),
         "OnChannelJoined" => {
             if let Some(first) = args.into_iter().next() {
                 vec![first]

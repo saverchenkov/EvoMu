@@ -2516,3 +2516,274 @@ async fn test_quasar_public_gateway_client_contracts() {
         "Found Quasar Public Gateway contract violations: {gateway_violations:#?}"
     );
 }
+
+#[tokio::test]
+async fn test_v24_live_client_bug_report_regressions_330_to_352() {
+    let sde = Arc::new(
+        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("open sde"),
+    );
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(sde, db));
+    common::pin_clock(&ctx);
+
+    let mut sess = SessionState::new(77_301);
+    sess.address = "127.0.0.1:54321".into();
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    let kw = HashMap::new();
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(CHAR_ID)],
+        &kw,
+        Some("machoNet:26000"),
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    // 1. #333: BugReportingService IPv6 loopback normalization
+    let cfg_map = eve_server::bug_reporting::build_client_global_config(&ctx, Some("::1"));
+    let url_opt = cfg_map
+        .get("bugReporting_BugReportServer")
+        .and_then(|v| v.as_str());
+    assert!(
+        url_opt.is_none_or(|u| u.starts_with("http://127.0.0.1:")),
+        "IPv6 loopback hint must normalize to 127.0.0.1, got {url_opt:?}"
+    );
+
+    // 2. #330, #336: storeManager auto-seeds on live client session and normalizes to PyRep::Dict on machoNet:26000
+    for method in ["get_categories", "get_products", "get_offers"] {
+        let rep = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "storeManager",
+                None,
+                method,
+                &[PyRep::Integer(4)],
+                &kw,
+                Some("machoNet:26000"),
+            )
+            .await
+            .expect(method);
+        let PyRep::List(items) = rep else {
+            panic!("storeManager.{method} must return non-empty List, got {rep:?}");
+        };
+        assert!(
+            !items.is_empty(),
+            "storeManager.{method} must not be empty for live client"
+        );
+        assert!(
+            matches!(items.first(), Some(PyRep::Dict(_))),
+            "storeManager.{method} items on machoNet:26000 must be PyRep::Dict for VGS json subscripting"
+        );
+    }
+
+    // 3. #338: alert.GetLogModeForError with Dict input returns (Dict, Dict)
+    let log_mode_rsp = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "alert",
+            None,
+            "GetLogModeForError",
+            &[PyRep::Dict(vec![(PyRep::Integer(12345), PyRep::None)])],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("alert.GetLogModeForError");
+    match log_mode_rsp {
+        PyRep::Tuple(items) if items.len() == 2 => {
+            assert!(matches!(items[0], PyRep::Dict(_)));
+            assert!(matches!(items[1], PyRep::Dict(_)));
+        }
+        other => panic!("Expected (Dict, Dict) from alert.GetLogModeForError, got {other:?}"),
+    }
+
+    // 4. #334, #339-#341, #344, #347, #350-#352: /whoami, /setskill, and 9-field OnServerSkillsChanged KeyVal
+    sess.role = eve_db::service_roles::ROLE_GM_DEFAULT;
+    let whoami_rsp = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/whoami".into())],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("/whoami");
+    assert!(
+        whoami_rsp
+            .as_str()
+            .is_some_and(|s| s.contains("charID=90000001")),
+        "/whoami must include charID: {whoami_rsp:?}"
+    );
+
+    let _ = sess.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(CHAR_ID);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "slash",
+        None,
+        "SlashCmd",
+        &[PyRep::String("/setskill me 3300 4".into())],
+        &kw,
+        Some("machoNet:26000"),
+    )
+    .await
+    .expect("/setskill");
+    let mut notifs = sess.drain_notifications();
+    for n in ctx.drain_notifications_for_char(CHAR_ID) {
+        notifs.push((n.event, n.args));
+    }
+    let skill_ev = notifs
+        .iter()
+        .find(|(ev, _)| ev == "OnServerSkillsChanged")
+        .expect("OnServerSkillsChanged must be emitted by /setskill");
+    assert_eq!(skill_ev.1.len(), 3);
+    if let PyRep::Dict(entries) = &skill_ev.1[0] {
+        let info = &entries[0].1;
+        for req_field in [
+            "typeID",
+            "skillLevel",
+            "trainedSkillLevel",
+            "effectiveSkillLevel",
+            "activeSkillLevel",
+            "virtualSkillLevel",
+            "skillPoints",
+            "trainedSkillPoints",
+            "skillRank",
+        ] {
+            assert!(
+                info.dict_get(req_field).is_some(),
+                "OnServerSkillsChanged skillInfo missing `{req_field}`: {info:?}"
+            );
+        }
+    } else {
+        panic!("Expected Dict in OnServerSkillsChanged arg0");
+    }
+
+    // 5. #335, #337, #342, #343, #345, #346: Undock -> GetSystemScanMgr (SubStruct) -> ConeScan (radians) -> WarpTo (6-tuple) -> CmdDock
+    ctx.advance_secs(11);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "stationSvc",
+        None,
+        "Undock",
+        &[PyRep::Integer(STATION_ID)],
+        &kw,
+        Some("machoNet:26000"),
+    )
+    .await
+    .expect("Undock");
+    ctx.advance_secs(11);
+
+    let scan_mgr_sub = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "scanMgr",
+            None,
+            "GetSystemScanMgr",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("scanMgr.GetSystemScanMgr");
+    assert!(
+        matches!(scan_mgr_sub, PyRep::SubStruct(_)),
+        "scanMgr.GetSystemScanMgr on machoNet:26000 must return bound PyRep::SubStruct, got {scan_mgr_sub:?}"
+    );
+    let cone_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "scanMgr",
+            None,
+            "ConeScan",
+            &[
+                PyRep::Real(std::f64::consts::TAU),
+                PyRep::Real(2_147_483_647_000.0),
+                PyRep::Real(0.0),
+                PyRep::Real(0.0),
+                PyRep::Real(1.0),
+            ],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("scanMgr.ConeScan");
+    assert!(matches!(cone_res, PyRep::List(_)));
+
+    let warp_py = eve_destiny::wire::encode_destiny_event(
+        1,
+        &eve_destiny::DestinyEvent::WarpTo {
+            ball_id: sess.ship_id.unwrap_or(SHIP_ID),
+            destination: [100_000.0, 200_000.0, 300_000.0],
+            warp_speed_au_s: 3.0,
+        },
+        None,
+    );
+    if let PyRep::Tuple(outer) = warp_py {
+        if let PyRep::Tuple(items) = &outer[1] {
+            if let PyRep::Tuple(args) = &items[1] {
+                assert_eq!(
+                    args.len(),
+                    6,
+                    "DestinyEvent::WarpTo must marshal 6 arguments (ballID, x, y, z, stopDist, warpSpeed)"
+                );
+            } else {
+                panic!("Expected Tuple args in WarpTo");
+            }
+        }
+    }
+
+    let _ = sess.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(CHAR_ID);
+    let active_ship_id = sess.ship_id.unwrap_or(SHIP_ID);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        None,
+        "CmdDock",
+        &[
+            PyRep::Integer(STATION_ID),
+            PyRep::Integer(active_ship_id),
+        ],
+        &kw,
+        Some("machoNet:26000"),
+    )
+    .await
+    .expect("beyonce.CmdDock");
+    assert_eq!(sess.station_id, Some(STATION_ID));
+    let mut dock_notifs = sess.drain_notifications();
+    for n in ctx.drain_notifications_for_char(CHAR_ID) {
+        dock_notifs.push((n.event, n.args));
+    }
+    assert!(
+        dock_notifs.iter().any(|(ev, _)| ev == "OnDockingAccepted"),
+        "beyonce.CmdDock must emit OnDockingAccepted"
+    );
+    assert!(
+        dock_notifs.iter().any(|(ev, _)| ev == "OnSessionChanged"),
+        "beyonce.CmdDock must emit OnSessionChanged"
+    );
+
+    let user_err = eve_machonet::wrapped_user_error_body(6, "DockingRequestDenied: Too far");
+    if let PyRep::Tuple(outer) = user_err {
+        if let PyRep::Tuple(inner) = &outer[2] {
+            if let PyRep::SubStream(sub) = &inner[0] {
+                if let PyRep::ObjectEx { header, .. } = sub.as_ref() {
+                    if let PyRep::Tuple(hdr) = header.as_ref() {
+                        assert_eq!(
+                            hdr[0].as_str(),
+                            Some("eveexceptions.UserError"),
+                            "Domain RPC errors must wrap as eveexceptions.UserError"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

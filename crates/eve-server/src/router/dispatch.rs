@@ -180,7 +180,7 @@ impl ServerContext {
             &status_desc,
         );
 
-        if res.is_ok() && matches!(service, "stationSvc" | "ship" | "structureDocking") {
+        if res.is_ok() && matches!(service, "stationSvc" | "ship" | "structureDocking" | "beyonce") {
             if let Some(cid) = session.character_id {
                 let guest_row = || {
                     self.db.with_snapshot(|snap| {
@@ -238,6 +238,13 @@ impl ServerContext {
         }
 
         if caller_trace == Some("machoNet:26000") {
+            if service == "scanMgr" && method == "GetSystemScanMgr" {
+                if let Ok(ref rep) = res {
+                    if let Some(bid) = rep.dict_get("boundID").and_then(|v| v.as_i64()) {
+                        res = Ok(self.bound_object_rep(bid as u64, caller_trace));
+                    }
+                }
+            }
             res = crate::quasar_grpc::normalize_macho_rpc_reply(service, method, res);
         }
 

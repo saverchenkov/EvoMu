@@ -95,6 +95,117 @@ pub(super) fn save_json_note<T: serde::Serialize>(
     }
 }
 
+fn read_or_seed_store_catalog(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> crate::services::quasar_payment_store::StoreCatalog {
+    let cat = ctx
+        .db
+        .with_snapshot(crate::services::quasar_payment_store::read_store_catalog);
+    if !cat.categories.is_empty() || session.address.is_empty() {
+        return cat;
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        let existing = crate::services::quasar_payment_store::read_store_catalog(snap);
+        if !existing.categories.is_empty() {
+            return existing;
+        }
+        let type_name = |tid: u32| -> String {
+            ctx.sde
+                .types
+                .get(&tid)
+                .map(|t| t.name.clone())
+                .unwrap_or_default()
+        };
+        let cat_name = |cid: u32| -> String {
+            ctx.sde
+                .categories
+                .get(&cid)
+                .map(|c| c.name.clone())
+                .unwrap_or_default()
+        };
+        let seeded = crate::services::quasar_payment_store::StoreCatalog {
+            categories: vec![
+                crate::services::quasar_payment_store::StoreCategory {
+                    id: 1,
+                    name: cat_name(91),
+                    description: cat_name(91),
+                },
+                crate::services::quasar_payment_store::StoreCategory {
+                    id: 2,
+                    name: cat_name(5),
+                    description: cat_name(5),
+                },
+                crate::services::quasar_payment_store::StoreCategory {
+                    id: 3,
+                    name: cat_name(30),
+                    description: cat_name(30),
+                },
+            ],
+            products: vec![
+                crate::services::quasar_payment_store::StoreProduct {
+                    id: 102,
+                    name: type_name(34599),
+                    description: type_name(34599),
+                    type_id: 34599,
+                    quantity: 1,
+                },
+                crate::services::quasar_payment_store::StoreProduct {
+                    id: 103,
+                    name: type_name(40519),
+                    description: type_name(40519),
+                    type_id: 40519,
+                    quantity: 1,
+                },
+                crate::services::quasar_payment_store::StoreProduct {
+                    id: 104,
+                    name: type_name(3966),
+                    description: type_name(3966),
+                    type_id: 3966,
+                    quantity: 1,
+                },
+            ],
+            offers: vec![
+                crate::services::quasar_payment_store::StoreOffer {
+                    id: 1002,
+                    name: type_name(34599),
+                    description: type_name(34599),
+                    category_id: 1,
+                    price_plex: 110,
+                    product_ids: vec![102],
+                    targeted: false,
+                    price_cents: None,
+                    currency: None,
+                },
+                crate::services::quasar_payment_store::StoreOffer {
+                    id: 1003,
+                    name: type_name(40519),
+                    description: type_name(40519),
+                    category_id: 2,
+                    price_plex: 140,
+                    product_ids: vec![103],
+                    targeted: false,
+                    price_cents: None,
+                    currency: None,
+                },
+                crate::services::quasar_payment_store::StoreOffer {
+                    id: 1004,
+                    name: type_name(3966),
+                    description: type_name(3966),
+                    category_id: 3,
+                    price_plex: 75,
+                    product_ids: vec![104],
+                    targeted: false,
+                    price_cents: None,
+                    currency: None,
+                },
+            ],
+        };
+        crate::services::quasar_payment_store::save_store_catalog(snap, &seeded);
+        seeded
+    })
+}
+
 pub fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -106,9 +217,7 @@ pub fn handle(
     match (service, method) {
         // --- New Eden Store (`storeManager`, `feat:wallet.nes-store` & `feat:removed.aurum-currency`) ---
         ("storeManager", "get_categories") => {
-            let catalog = ctx
-                .db
-                .with_snapshot(crate::services::quasar_payment_store::read_store_catalog);
+            let catalog = read_or_seed_store_catalog(ctx, session);
             let mut items: Vec<PyRep> = Vec::new();
             for c in catalog.categories {
                 let root_id = c.id as i64;
@@ -136,9 +245,7 @@ pub fn handle(
             Some(Ok(PyRep::List(items)))
         }
         ("storeManager", "get_products") => {
-            let catalog = ctx
-                .db
-                .with_snapshot(crate::services::quasar_payment_store::read_store_catalog);
+            let catalog = read_or_seed_store_catalog(ctx, session);
             let prods: Vec<PyRep> = catalog
                 .products
                 .into_iter()
@@ -160,9 +267,7 @@ pub fn handle(
             Some(Ok(PyRep::List(prods)))
         }
         ("storeManager", "get_offers") => {
-            let catalog = ctx
-                .db
-                .with_snapshot(crate::services::quasar_payment_store::read_store_catalog);
+            let catalog = read_or_seed_store_catalog(ctx, session);
             let products_by_id: HashMap<_, _> =
                 catalog
                     .products
@@ -273,9 +378,7 @@ pub fn handle(
                 .unwrap_or(1)
                 .max(1);
 
-            let catalog = ctx
-                .db
-                .with_snapshot(crate::services::quasar_payment_store::read_store_catalog);
+            let catalog = read_or_seed_store_catalog(ctx, session);
             let offer = match catalog.offers.iter().find(|o| o.id as i64 == offer_id) {
                 Some(o) => o.clone(),
                 None => {

@@ -36,7 +36,8 @@ pub fn required_slash_role(cmd: &str) -> u64 {
     };
     let tok = cmd.split_whitespace().next().unwrap_or("");
     match tok {
-        "/online" | "/location" | "/getattr" | "/survey" | "/moveme" | "/translocate" => {
+        "/online" | "/location" | "/getattr" | "/survey" | "/moveme" | "/translocate"
+        | "/whoami" => {
             ROLE_QA | ROLE_GM_MASK
         }
         "/spawn" | "/unspawn" | "/despawn" | "/spawnnpc" => ROLE_SPAWN | ROLE_GM_MASK,
@@ -1070,8 +1071,14 @@ pub async fn handle(
                     Err(e) => Some(Err(e)),
                 }
             } else if let Some(rest) = cmd.strip_prefix("/setskill ").or_else(|| cmd.strip_prefix("/giveskill ")) {
-                let mut parts = rest.trim().split_whitespace();
-                let Some(skill_id_str) = parts.next() else {
+                let tokens: Vec<&str> = rest.trim().split_whitespace().collect();
+                let (skill_id_opt, lvl_opt) = match tokens.as_slice() {
+                    [s, l] => (Some(*s), Some(*l)),
+                    [_target, s, l, ..] => (Some(*s), Some(*l)),
+                    [s] => (Some(*s), None),
+                    [] => (None, None),
+                };
+                let Some(skill_id_str) = skill_id_opt else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Usage: /setskill <skill_id> <level> or /giveskill <skill_id> <level>".into(),
@@ -1083,7 +1090,7 @@ pub async fn handle(
                         message: "Invalid skill_id for /setskill".into(),
                     }));
                 };
-                let Some(lvl_str) = parts.next() else {
+                let Some(lvl_str) = lvl_opt else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Usage: /setskill <skill_id> <level>".into(),
@@ -1127,6 +1134,7 @@ pub async fn handle(
                     })?;
                     let skills_map = snap.skills.entry(cid).or_default();
                     let prev_sp = skills_map.get(&skill_id).map(|s| s.skill_points).unwrap_or(0.0);
+                    let prev_lvl = skills_map.get(&skill_id).map(|s| s.level).unwrap_or(0);
                     let sp_diff = target_sp - prev_sp;
                     ch.skill_points = (ch.skill_points + sp_diff).max(0.0);
 
@@ -1143,11 +1151,27 @@ pub async fn handle(
                         );
                     }
                     let active_ship = ch.active_ship_id;
-                    Ok((target_sp, ch.skill_points, active_ship))
+                    Ok((target_sp, ch.skill_points, active_ship, prev_lvl))
                 });
                 match res {
-                    Ok((sp, total_sp, active_ship)) => {
+                    Ok((sp, total_sp, active_ship, prev_lvl)) => {
                         ctx.invalidate_ship_fitting(active_ship);
+                        if !session.address.is_empty() {
+                            if lvl == 0 {
+                                crate::services::jump_clone_names::emit_server_skills_removed(
+                                    ctx,
+                                    cid,
+                                    &[(skill_id, prev_lvl)],
+                                );
+                            } else {
+                                crate::services::jump_clone_names::emit_server_skills_changed(
+                                    ctx,
+                                    cid,
+                                    &[skill_id],
+                                    Some("GMGiveSkill"),
+                                );
+                            }
+                        }
                         Some(Ok(PyRep::keyval([
                             ("command", PyRep::String(cmd.to_string())),
                             ("skillID", PyRep::Integer(skill_id as i64)),

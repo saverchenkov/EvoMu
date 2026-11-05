@@ -974,11 +974,14 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
             warp_speed_au_s,
         } => PyRep::Tuple(vec![
             PyRep::String("WarpTo".into()),
+            // V24 `_destiny.Ballpark.WarpTo(ballID, x, y, z, distance, warpSpeedTenthAuPerSec)` 6-tuple
+            // (`autopilot.pyj:221` slices `dstVector = args[1:-2]` to extract `(x, y, z)`).
             PyRep::Tuple(vec![
                 PyRep::Integer(*ball_id),
                 PyRep::Real(destination[0]),
                 PyRep::Real(destination[1]),
                 PyRep::Real(destination[2]),
+                PyRep::Integer(0),
                 PyRep::Integer((*warp_speed_au_s * 10.0).round() as i64),
             ]),
         ]),
