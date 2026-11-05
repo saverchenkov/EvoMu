@@ -160,9 +160,6 @@ async fn test_metaliminal_storms_roaming_dogma_effects_and_sites() {
 
 #[tokio::test]
 async fn test_homefront_site_instances_v24_registry_and_completion() {
-    // parity: rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances
-    eve_testkit::attest(&["rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances"]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ensure_special_sites_spawned(&ctx).await;

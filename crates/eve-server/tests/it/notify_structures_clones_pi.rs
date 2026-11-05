@@ -881,7 +881,6 @@ use glam::DVec3;
 // parity: notify:OnAgentMissionObjectivesCompleted, notify:OnAgentMissionObjectivesFailed
 // parity: notify:OnFacWarDungeonCompleted, notify:OnSolarSystemDevIndexChanged
 // parity: notify:OnPVPFilamentsCharacterStatistics, notify:OnPVPFilamentsLeaderboard
-// parity: notify:OnTournamentPerformBan
 // DATA GAP: OnAbyssalLocationEntered, OnAbyssalContentFinished, OnVoidSpaceEntered, OnVoidSpaceRelog, OnVoidSpaceContentFinished remain open (V24 room-index location_id & weather/tier nebula selection pending).
 #[tokio::test]
 async fn notify_batch7_abyssal_void_missions_fw_sov_pvp_and_tourney() {
@@ -892,7 +891,6 @@ async fn notify_batch7_abyssal_void_missions_fw_sov_pvp_and_tourney() {
         "notify:OnSolarSystemDevIndexChanged",
         "notify:OnPVPFilamentsCharacterStatistics",
         "notify:OnPVPFilamentsLeaderboard",
-        "notify:OnTournamentPerformBan",
     ]);
 
     let ctx = new_ctx();

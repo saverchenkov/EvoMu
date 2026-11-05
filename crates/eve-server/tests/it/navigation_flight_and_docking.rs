@@ -838,12 +838,6 @@ fn place_pilot_in_space(
 
 #[tokio::test]
 async fn test_navigation_shipcaster_and_starter() {
-    // parity: feat:navigation.shipcaster, feat:navigation.starter-shipcaster
-    eve_testkit::attest(&[
-        "feat:navigation.shipcaster",
-        "feat:navigation.starter-shipcaster",
-    ]);
-
     let sde = match SdeRegistry::open(&SdeRegistry::default_db_path()) {
         Ok(reg) => Arc::new(reg),
         Err(_) => Arc::new(SdeRegistry::with_canonical_seed()),

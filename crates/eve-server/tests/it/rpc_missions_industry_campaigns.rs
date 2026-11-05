@@ -387,7 +387,6 @@ async fn test_industry_and_campaign_mgr_rpcs() {
 
 #[tokio::test]
 // parity: feat:account.redeem-tokens
-// parity: rpc:seasonalLoginCampaignManager.claim_reward
 // parity: rpc:userSvc.ClaimRedeemTokens
 // parity: rpc:userSvc.GetRedeemTokens
 async fn test_docked_login_reward_does_not_enqueue_redeem_token() {

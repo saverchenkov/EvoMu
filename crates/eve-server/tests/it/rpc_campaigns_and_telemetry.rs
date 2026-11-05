@@ -69,8 +69,6 @@ async fn login_pilot_char(
 }
 
 #[tokio::test]
-// parity: rpc:seasonalLoginCampaignManager.get_active_campaign, rpc:seasonalLoginCampaignManager.get_claim_history
-// parity: rpc:seasonalLoginCampaignManager.claim_reward
 async fn test_login_and_seasonal_campaigns() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);

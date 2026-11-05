@@ -525,9 +525,8 @@ fn sum_sell_order_volume(orders_rep: &PyRep) -> f64 {
 
 #[tokio::test]
 async fn test_npc_mining_ops_and_hauler_convoy_lifecycle() {
-    // parity: feat:npc.npc-hauler, feat:mining.npc-mining-ops
+    // parity: feat:mining.npc-mining-ops
     eve_testkit::attest(&[
-        "feat:npc.npc-hauler",
         "feat:mining.npc-mining-ops",
     ]);
 

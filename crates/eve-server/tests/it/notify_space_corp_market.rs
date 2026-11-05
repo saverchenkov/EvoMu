@@ -639,11 +639,10 @@ async fn notify_batch9_milestones_redeeming_crates_and_assembly() {
     );
 }
 
-// parity: notify:OnPasswordChanged, notify:OnPlayerStateUpdated, notify:OnSubscriptionChangedServer, notify:OnSubscriptionTimeUpdateServer
+// parity: notify:OnPlayerStateUpdated, notify:OnSubscriptionChangedServer, notify:OnSubscriptionTimeUpdateServer
 #[tokio::test]
 async fn notify_batch9_password_player_state_brain_and_subscription() {
     eve_testkit::attest(&[
-        "notify:OnPasswordChanged",
         "notify:OnPlayerStateUpdated",
         "notify:OnSubscriptionChangedServer",
         "notify:OnSubscriptionTimeUpdateServer",
@@ -1582,15 +1581,13 @@ async fn notify_batch9_facilities_industry_trade_and_repackage_errors() {
         .any(|(e, _)| e == "OnSellRepackageErrors"));
 }
 
-// parity: notify:OnGodmaEffectInfo, notify:OnGodmaFlushLocationProfile, notify:OnGodmaPrimeItem, notify:OnInvalidateCacheForLocations, notify:OnMultiEvent
+// parity: notify:OnGodmaEffectInfo, notify:OnGodmaFlushLocationProfile, notify:OnGodmaPrimeItem
 #[tokio::test]
 async fn notify_batch9_godma_and_location_cache_invalidation() {
     eve_testkit::attest(&[
         "notify:OnGodmaEffectInfo",
         "notify:OnGodmaFlushLocationProfile",
         "notify:OnGodmaPrimeItem",
-        "notify:OnInvalidateCacheForLocations",
-        "notify:OnMultiEvent",
     ]);
 
     let ctx = new_ctx();
@@ -2978,14 +2975,8 @@ async fn test_batch3_sim_clock_rebase_and_crimewatch_timers() {
     );
 }
 
-// parity: notify:OnPasswordChanged, notify:OnInvalidateCacheForLocations
 #[tokio::test]
 async fn test_batch3_container_password_and_cache_invalidation() {
-    eve_testkit::attest(&[
-        "notify:OnPasswordChanged",
-        "notify:OnInvalidateCacheForLocations",
-    ]);
-
     let ctx = new_ctx();
     let mut sess = SessionState::new(92_010);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -3122,11 +3113,8 @@ async fn test_batch3_container_password_and_cache_invalidation() {
     assert_eq!(bad.unwrap_err().code, "InvalidPassword");
 }
 
-// parity: notify:OnMultiEvent
 #[tokio::test]
 async fn test_batch3_target_multi_event_and_kill_notification() {
-    eve_testkit::attest(&["notify:OnMultiEvent"]);
-
     let ctx = new_ctx();
     let (ship_a, ship_b, gun_id, ammo_id) = (640_000_301_i64, 640_000_302_i64, 640_000_310_i64, 640_000_311_i64);
     let mut sess_a = login_in_space(

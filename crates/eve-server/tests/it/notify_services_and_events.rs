@@ -3958,14 +3958,11 @@ fn expected_ft(unix_secs: u64) -> i64 {
 }
 
 // parity: notify:OnOperationReplayed, notify:OnUiRevealForced
-// parity: notify:OnPasswordChanged, notify:OnInvalidateCacheForLocations
 #[tokio::test]
 async fn notify_b30_operations_and_container_password() {
     eve_testkit::attest(&[
         "notify:OnOperationReplayed",
         "notify:OnUiRevealForced",
-        "notify:OnPasswordChanged",
-        "notify:OnInvalidateCacheForLocations",
     ]);
 
     let ctx = new_ctx();
@@ -4196,13 +4193,8 @@ async fn notify_b30_operations_and_container_password() {
     assert_eq!(rpc(&ctx, &mut sess_space, "invbroker", "SetPassword", &[PyRep::Integer(far_cont_id), PyRep::Integer(1), PyRep::String("pw".into())]).await.unwrap_err().code, "OutsideOperationalRange");
 }
 
-// parity: notify:OnMultiEvent
 #[tokio::test]
 async fn notify_b30_target_multi_event_and_fw_warzone() {
-    eve_testkit::attest(&[
-        "notify:OnMultiEvent",
-    ]);
-
     let ctx = new_ctx();
     let (ship_a, ship_b) = (960_000_101_i64, 960_000_102_i64);
     let mut sess_a = login_in_space(&ctx, 9_611, "demo", "demo-secret", PILOT_A, ship_a, 587, SYS_JITA, DVec3::ZERO).await;
@@ -5568,11 +5560,6 @@ use eve_server::sp6_lifecycle::tick_background_cluster;
 
 #[tokio::test]
 async fn test_parity_notify_criminal_timer_and_fw_capture_changed() {
-    // parity: notify:OnCaptureChanged
-    eve_testkit::attest(&[
-        "notify:OnCaptureChanged",
-    ]);
-
     let ctx = new_ctx();
     let unix_to_ft = |u: u64| -> i64 { (u as i64 + 11_644_473_600) * 10_000_000 };
 
@@ -6241,10 +6228,9 @@ async fn destroy_npc_ball(
 
 #[tokio::test]
 async fn test_batch2_sim_clock_rebase_disapproval_and_cache_invalidation() {
-    // parity: notify:DoSimClockRebase, notify:OnInvalidateCacheForLocations
+    // parity: notify:DoSimClockRebase
     eve_testkit::attest(&[
         "notify:DoSimClockRebase",
-        "notify:OnInvalidateCacheForLocations",
     ]);
 
     let ctx = new_ctx();
@@ -6723,14 +6709,8 @@ fn make_item(item_id: i64, type_id: u32, owner_id: i64, location_id: i64, flag: 
     }
 }
 
-// parity: notify:OnSystemCriminalFlagUpdates, notify:OnSystemDisapprovalFlagUpdates
 #[tokio::test]
 async fn test_batch4_crimewatch_timers_and_system_flag_updates() {
-    eve_testkit::attest(&[
-        "notify:OnSystemCriminalFlagUpdates",
-        "notify:OnSystemDisapprovalFlagUpdates",
-    ]);
-
     let ctx = new_ctx();
     let jita_pos = ctx.sde.stations[&JITA_STATION].position + DVec3::new(10_000.0, 0.0, 0.0);
     let (ship_a, ship_b, gun_id) = (640_000_001_i64, 640_000_002_i64, 640_000_010_i64);
@@ -7445,11 +7425,8 @@ async fn test_parity_notify_campaign_enrollment_and_chat_bans() {
     assert!(unban_notifs.iter().any(|(e, _)| e == "OnCharacterUnbanned"));
 }
 
-// parity: notify:OnCaptureChanged
 #[tokio::test]
 async fn test_parity_notify_fw_capture_changed() {
-    eve_testkit::attest(&["notify:OnCaptureChanged"]);
-
     let ctx = new_ctx();
 
     // 1. Find frontline FW system

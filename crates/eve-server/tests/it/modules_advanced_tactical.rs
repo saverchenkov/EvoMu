@@ -3197,9 +3197,8 @@ use eve_server::services::combat_npc_police::scan_and_enforce_highsec_contraband
 
 #[tokio::test]
 async fn test_nosferatu_relative_cap_grappler_mutadaptive_rar_and_blockade_runner() {
-    // parity: feat:modules.energy-nosferatu-relative-capacitor, feat:modules.stasis-grappler-mechanics, feat:modules.mutadaptive-remote-armor-repairer
+    // parity: feat:modules.stasis-grappler-mechanics, feat:modules.mutadaptive-remote-armor-repairer
     eve_testkit::attest(&[
-        "feat:modules.energy-nosferatu-relative-capacitor",
         "feat:modules.stasis-grappler-mechanics",
         "feat:modules.mutadaptive-remote-armor-repairer",
     ]);

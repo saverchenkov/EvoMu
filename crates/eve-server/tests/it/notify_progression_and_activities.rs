@@ -785,7 +785,6 @@ async fn batch10_dungeon_editor_values_and_room_triggers() {
 }
 
 /// parity: notify:OnSignalTrackerFullState
-/// parity: notify:OnProbeWarpEnd
 /// parity: notify:OnCosmicSignatureAdded
 /// parity: notify:OnDungeonInstanceAdded
 /// parity: notify:OnDungeonInstanceRemoved

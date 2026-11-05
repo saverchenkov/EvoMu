@@ -132,9 +132,6 @@ async fn register_test_pilot(
 
 #[tokio::test]
 async fn test_navy_npc_and_faction_police_response() {
-    // parity: feat:npc.navy-npc
-    eve_testkit::attest(&["feat:npc.navy-npc"]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
 
@@ -377,9 +374,6 @@ async fn test_npc_standings_aggression_rules() {
 
 #[tokio::test]
 async fn test_hauler_convoy_multi_system_movement_and_cargo_drop() {
-    // parity: feat:npc.npc-hauler
-    eve_testkit::attest(&["feat:npc.npc-hauler"]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
 

@@ -171,8 +171,8 @@ fn make_item(
 // ====================================================================
 #[tokio::test]
 async fn test_mn01_mn02_c5_static_data_and_belt_ore_distribution() {
-    // parity: feat:mining.static-data, feat:mining.belts-as-balls, feat:mining.belt-ore-distribution
-    eve_testkit::attest(&["feat:mining.static-data", "feat:mining.belts-as-balls", "feat:mining.belt-ore-distribution"]);
+    // parity: feat:mining.static-data
+    eve_testkit::attest(&["feat:mining.static-data"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
 

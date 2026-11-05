@@ -60,9 +60,6 @@ async fn rpc(
 
 #[tokio::test]
 async fn test_belts_as_balls_depletion_and_respawn() {
-    // parity: feat:mining.belts-as-balls
-    eve_testkit::attest(&["feat:mining.belts-as-balls"]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
@@ -176,9 +173,6 @@ async fn test_belts_as_balls_depletion_and_respawn() {
 
 #[tokio::test]
 async fn test_belt_ore_distribution_across_security_bands() {
-    // parity: feat:mining.belt-ore-distribution
-    eve_testkit::attest(&["feat:mining.belt-ore-distribution"]);
-
     let ctx = ServerContext::new();
     let ores_for = |sec: f64, reg: u32| -> Vec<u32> {
         ctx.sde.belt_ores_for_security_and_region(sec, reg).into_iter().map(|t| t.type_id).collect()

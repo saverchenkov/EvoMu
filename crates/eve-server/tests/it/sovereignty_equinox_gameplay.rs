@@ -1600,12 +1600,8 @@ async fn entosis_node(
 #[tokio::test]
 async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes() {
     // parity: feat:sovereignty.sov-vulnerability
-    // parity: feat:sovereignty.sov-entosis
-    // parity: feat:sovereignty.sov-command-nodes
     eve_testkit::attest(&[
         "feat:sovereignty.sov-vulnerability",
-        "feat:sovereignty.sov-entosis",
-        "feat:sovereignty.sov-command-nodes",
     ]);
 
     let db_path = temp_sqlite_path("sov_entosis_nodes");
