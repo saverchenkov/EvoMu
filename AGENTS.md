@@ -123,6 +123,7 @@
 - **Subagent Model MUST be `inherit` (mandatory):** When spawning subagents (`invoke_subagent`), the `Model` argument MUST strictly be `"inherit"` (inheriting the user's active orchestrator model, such as Gemini Pro Next, Gemini 4 Argon High, or Claude Opus 5.5). **NEVER pass `"pro"`** — `"pro"` is routed to legacy/obsolete Gemini 3.1 Pro and rapidly depletes obsolete model quotas.
 - **Mandatory compiler throttling:** Before running any `cargo` or `rustc` command in any workspace or subagent shell, always enforce compiler throttling and limit jobs to 2 (`-j 2`) to prevent CPU starvation and lock contention (always use `pgrep -x cargo` exact binary matching — NEVER `pgrep -fl`, which matches multi-line shell scripts):
   `while [ "$(pgrep -x cargo | wc -l)" -ge 2 ]; do sleep 10; done && cargo test -j 2 ...`
+  Never run two `cargo` commands concurrently in the same worktree (`target/.cargo-lock`), and immediately delete `/Users/sergeya/ai/EvoMu/.worktrees/<wt>/target` upon harvesting a subagent's commits so `/System/Volumes/Data` stays above `150 GiB` free.
 - **Pick tracks from the open rows** in `docs/ACTION_PLAN_STATUS.md` (one subagent each; split by service family or domain so tracks don't touch the same files), following the plan's dependencies.
 - **Every track follows the same gate in its own worktree:** pre-flight, `run_review.py`, and a non-FAIL verdict, before its branch is merged.
   - Each worktree has its own `.evomu-reviews/` state, Stop hook and review history.
