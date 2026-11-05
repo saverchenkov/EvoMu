@@ -233,6 +233,7 @@ mod inventory_stacking_extra_unit_tests;
 mod pve_dungeon_runtime_extra_unit_tests;
 #[cfg(test)]
 mod pve_ess_reserve_banks_extra_unit_tests;
+#[cfg(test)]
 mod fitting_ship_bays_extra_unit_tests;
 #[cfg(test)]
 mod insurgency_complex_ops_extra_unit_tests;
@@ -242,6 +243,7 @@ mod pve_exploration_extra_unit_tests;
 mod space_destiny_extra_unit_tests;
 #[cfg(test)]
 mod social_corp_fleet_extra_unit_tests;
+#[cfg(test)]
 mod quasar_cosmetics_drafts_extra_unit_tests;
 #[cfg(test)]
 mod quasar_cosmetics_live_extra_unit_tests;
@@ -295,6 +297,7 @@ mod sov_gameplay_entosis_extra_unit_tests;
 mod fitting_module_cycles_extra_unit_tests;
 #[cfg(test)]
 mod combat_npc_ai_extra_unit_tests;
+#[cfg(test)]
 mod station_structure_extra_unit_tests;
 #[cfg(test)]
 mod structure_lifecycle_extra_unit_tests;
@@ -310,5 +313,17 @@ mod pve_special_sites_extra_unit_tests;
 mod fleet_social_fleet_ops_extra_unit_tests;
 #[cfg(test)]
 mod mining_advanced_extra_unit_tests;
+mod space_docking_cloaking_extra_unit_tests;
+#[cfg(test)]
+mod fitting_ships_mastery_extra_unit_tests;
+#[cfg(test)]
+mod quasar_progression_extra_unit_tests;
+#[cfg(test)]
+mod agents_standings_arcs_extra_unit_tests;
+#[cfg(test)]
+mod sov_gameplay_extra_unit_tests;
+#[cfg(test)]
+mod fleet_social_corps_extra_unit_tests;
+
 
 
