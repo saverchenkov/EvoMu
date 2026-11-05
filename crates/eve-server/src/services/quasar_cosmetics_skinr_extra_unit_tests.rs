@@ -1,0 +1,572 @@
+#![forbid(unsafe_code)]
+
+use super::quasar_cosmetics_skinr::*;
+use crate::quasar_gateway::{
+    PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_OK,
+    STATUS_PRECONDITION_FAILED,
+};
+use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
+use eve_machonet::{service_roles, SessionState};
+use eve_proto::quasar::{
+    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
+    DynamicQuasarMessage, DynamicValue, EvePublicRequest, EvePublicResponse, GoogleAny,
+    QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+};
+use eve_sde::SdeRegistry;
+use std::sync::{Arc, OnceLock};
+
+fn shared_sde() -> Arc<SdeRegistry> {
+    static SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
+    Arc::clone(SDE.get_or_init(|| Arc::new(SdeRegistry::with_canonical_seed())))
+}
+
+fn sess(uid: Option<u64>, cid: Option<i64>, role: u64) -> SessionState {
+    let mut s = SessionState::new(uid.unwrap_or(1) * 100 + cid.unwrap_or(0) as u64);
+    s.user_id = uid;
+    s.character_id = cid;
+    s.corporation_id = Some(98_000_001);
+    s.role = role;
+    s
+}
+
+fn call(
+    router: &PublicGatewayRouter,
+    s: &SessionState,
+    ty: &str,
+    value: Vec<u8>,
+    now: u64,
+) -> EvePublicResponse {
+    router.handle_public_request(
+        s,
+        &EvePublicRequest {
+            correlation_uuid: vec![11; 16],
+            payload: Some(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{ty}"),
+                value,
+            }),
+            ..Default::default()
+        },
+        None,
+        false,
+        now,
+    )
+}
+
+#[test]
+fn test_empty_sde_catalog_fallbacks_tier_boundaries_and_wire_helpers() {
+    let empty_sde = SdeRegistry::default();
+    let mut cat = SkinrStaticCatalog::load(&empty_sde);
+    assert_eq!(cat.point_values.get(&(1, 1)), Some(&25));
+    assert_eq!(cat.point_values.get(&(2, 6)), Some(&750));
+    assert_eq!(cat.tier_thresholds.get(&2), Some(&350));
+    assert_eq!(cat.tier_thresholds.get(&5), Some(&1400));
+    assert_eq!(cat.default_ship_slots, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(cat.slot_allowed_categories.get(&5), Some(&vec![COMP_CAT_PATTERN]));
+
+    cat.ship_slot_overrides.insert(587, vec![1, 2, 5]);
+    assert_eq!(cat.allowed_slots_for_ship(587), &[1, 2, 5]);
+    assert_eq!(cat.allowed_slots_for_ship(999), &[1, 2, 3, 4, 5, 6, 7, 8]);
+
+    // Test exact tier boundaries: 0->1, 349->1, 350->2, 699->2, 700->3, 1049->3, 1050->4, 1399->4, 1400->5
+    for (cid, pts) in [
+        (101u32, 349u32),
+        (102, 350),
+        (103, 699),
+        (104, 700),
+        (105, 1049),
+        (106, 1050),
+        (107, 1399),
+        (108, 1400),
+    ] {
+        cat.components.insert(
+            cid,
+            SdeSkinComponent {
+                component_id: cid,
+                category: 99,
+                rarity: cid,
+                disallowed_slots: Vec::new(),
+                associated_types: Vec::new(),
+                binder_type_id: 0,
+                binder_count: 0,
+            },
+        );
+        cat.point_values.insert((99, cid), pts);
+    }
+    assert_eq!(cat.compute_points_and_tier(&[]), (0, 1));
+    assert_eq!(cat.compute_points_and_tier(&[101]), (349, 1));
+    assert_eq!(cat.compute_points_and_tier(&[102]), (350, 2));
+    assert_eq!(cat.compute_points_and_tier(&[103]), (699, 2));
+    assert_eq!(cat.compute_points_and_tier(&[104]), (700, 3));
+    assert_eq!(cat.compute_points_and_tier(&[105]), (1049, 3));
+    assert_eq!(cat.compute_points_and_tier(&[106]), (1050, 4));
+    assert_eq!(cat.compute_points_and_tier(&[107]), (1399, 4));
+    assert_eq!(cat.compute_points_and_tier(&[108]), (1400, 5));
+
+    // SequencingJobRecord::is_active
+    let mut job = SequencingJobRecord {
+        job_uuid: [1; 16],
+        skin_hex: "abc".into(),
+        quantity: 1,
+        sequencer_id: 100,
+        initiated_unix: 1000,
+        planned_duration_secs: 60,
+        completed_unix: None,
+        failed_reason: None,
+    };
+    assert!(job.is_active());
+    job.completed_unix = Some(1060);
+    assert!(!job.is_active());
+    job.completed_unix = None;
+    job.failed_reason = Some(1);
+    assert!(!job.is_active());
+
+    // Wire helpers: as_u64, put_duration, require_char, sub, seq_of, str_of, parse_component_id
+    assert_eq!(as_u64(&DynamicValue::Uint64(42)), Some(42));
+    assert_eq!(as_u64(&DynamicValue::Uint32(42)), Some(42));
+    assert_eq!(as_u64(&DynamicValue::Int64(42)), Some(42));
+    assert_eq!(as_u64(&DynamicValue::Int64(-1)), None);
+    assert_eq!(as_u64(&DynamicValue::Int32(42)), Some(42));
+    assert_eq!(as_u64(&DynamicValue::Int32(-1)), None);
+    assert_eq!(as_u64(&DynamicValue::Enum(3)), Some(3));
+    assert_eq!(as_u64(&DynamicValue::Enum(-2)), None);
+    assert_eq!(as_u64(&DynamicValue::Bool(true)), None);
+
+    let mut dur_out = Vec::new();
+    put_duration(1, 3600, &mut dur_out);
+    assert!(!dur_out.is_empty());
+
+    let mut ctx = AuthoritativeContext::default();
+    assert_eq!(require_char(&ctx).unwrap_err().0, STATUS_FORBIDDEN);
+    ctx.active_character = Some(eve_proto::quasar::EvePublicCharacterId { sequential: 90_000_001 });
+    assert_eq!(require_char(&ctx).unwrap(), 90_000_001);
+
+    let mut inner_seq = DynamicQuasarMessage::new("Seq");
+    inner_seq.fields.insert(1, DynamicValue::Uint64(77));
+    let mut msg = DynamicQuasarMessage::new("Msg");
+    msg.fields.insert(1, DynamicValue::Message(Box::new(inner_seq.clone())));
+    msg.fields.insert(2, DynamicValue::Bytes(b"utf8_str".to_vec()));
+    assert_eq!(seq_of(&msg, 1), Some(77));
+    assert_eq!(str_of(&msg, 2).as_deref(), Some("utf8_str"));
+    assert_eq!(parse_component_id(&msg), Some((77, false)));
+
+    let mut pat_msg = DynamicQuasarMessage::new("Pat");
+    pat_msg.fields.insert(2, DynamicValue::Message(Box::new(inner_seq)));
+    assert_eq!(parse_component_id(&pat_msg), Some((77, true)));
+    assert_eq!(parse_component_id(&DynamicQuasarMessage::new("Empty")), None);
+}
+
+#[test]
+fn test_component_license_grant_get_revoke_error_and_cross_char_branches() {
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let router = PublicGatewayRouter::new(
+        QuasarDescriptorRegistry::open_default_or_empty(),
+        Arc::clone(&db),
+        Arc::clone(&sde),
+    );
+    let state = SkinrCosmeticsState::load(Arc::clone(&db), Arc::clone(&sde));
+    let (coat_id, _) = state
+        .catalog
+        .components
+        .iter()
+        .find(|(_, c)| !c.is_pattern())
+        .map(|(&id, c)| (id, c.clone()))
+        .expect("coating component");
+    register(&router, Arc::clone(&state));
+
+    let now = 1_710_000_000u64;
+    let player_cid = 2_112_000_801i64;
+    let other_cid = 2_112_000_802i64;
+    let player_sess = sess(Some(10), Some(player_cid), 0);
+    let admin_sess = sess(Some(10), Some(player_cid), service_roles::ROLE_ADMIN);
+
+    // 1. Non-admin cannot grant or revoke finite/infinite licenses
+    assert_eq!(
+        call(
+            &router,
+            &player_sess,
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.admin.GrantRequest",
+            Vec::new(),
+            now,
+        )
+        .status_code,
+        STATUS_FORBIDDEN
+    );
+    assert_eq!(
+        call(
+            &router,
+            &player_sess,
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.api.admin.GrantRequest",
+            Vec::new(),
+            now,
+        )
+        .status_code,
+        STATUS_FORBIDDEN
+    );
+
+    // 2. Admin grant missing component ID / zero capacity / unknown component / category mismatch
+    assert_eq!(
+        call(
+            &router,
+            &admin_sess,
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.admin.GrantRequest",
+            Vec::new(),
+            now,
+        )
+        .status_code,
+        STATUS_BAD_REQUEST
+    );
+    let mut zero_cap_req = Vec::new();
+    encode_bytes_field(1, &encode_component_id(coat_id, false), &mut zero_cap_req);
+    encode_varint_field(2, 0, &mut zero_cap_req);
+    assert_eq!(
+        call(
+            &router,
+            &admin_sess,
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.admin.GrantRequest",
+            zero_cap_req,
+            now,
+        )
+        .status_code,
+        STATUS_BAD_REQUEST
+    );
+    let mut unknown_comp_req = Vec::new();
+    encode_bytes_field(1, &encode_component_id(999_999_999, false), &mut unknown_comp_req);
+    encode_varint_field(2, 2, &mut unknown_comp_req);
+    assert_eq!(
+        call(
+            &router,
+            &admin_sess,
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.admin.GrantRequest",
+            unknown_comp_req,
+            now,
+        )
+        .status_code,
+        STATUS_BAD_REQUEST
+    );
+    // Pass coating component ID marked as pattern (is_pattern = true) -> category mismatch
+    let mut mismatch_req = Vec::new();
+    encode_bytes_field(1, &encode_component_id(coat_id, true), &mut mismatch_req);
+    encode_varint_field(2, 2, &mut mismatch_req);
+    assert_eq!(
+        call(
+            &router,
+            &admin_sess,
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.admin.GrantRequest",
+            mismatch_req,
+            now,
+        )
+        .status_code,
+        STATUS_BAD_REQUEST
+    );
+
+    // 3. Cross-character GetRequest forbidden for player, allowed for admin
+    state.data.write().unwrap().infinite_licenses.insert(
+        SkinrCosmeticsState::comp_key(other_cid as u32, false, coat_id),
+        InfiniteComponentLicense {
+            character_id: other_cid as u32,
+            component_id: coat_id,
+            is_pattern: false,
+            first_acquired_unix: now,
+            is_free: true,
+        },
+    );
+    let mut get_other = Vec::new();
+    encode_bytes_field(
+        1,
+        &encode_comp_license_id(other_cid as u32, coat_id, false),
+        &mut get_other,
+    );
+    assert_eq!(
+        call(
+            &router,
+            &player_sess,
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.api.GetRequest",
+            get_other.clone(),
+            now,
+        )
+        .status_code,
+        STATUS_FORBIDDEN
+    );
+    assert_eq!(
+        call(
+            &router,
+            &admin_sess,
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.api.GetRequest",
+            get_other.clone(),
+            now,
+        )
+        .status_code,
+        STATUS_OK
+    );
+
+    // 4. Revoke missing license -> STATUS_NOT_FOUND
+    assert_eq!(
+        call(
+            &router,
+            &admin_sess,
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.admin.RevokeRequest",
+            get_other,
+            now,
+        )
+        .status_code,
+        STATUS_NOT_FOUND
+    );
+}
+
+#[test]
+fn test_consume_item_branches_and_title_definition_versions() {
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let router = PublicGatewayRouter::new(
+        QuasarDescriptorRegistry::open_default_or_empty(),
+        Arc::clone(&db),
+        Arc::clone(&sde),
+    );
+    let mut state_inner = SkinrCosmeticsState::load(Arc::clone(&db), Arc::clone(&sde));
+    // Find both a finite-use item and an infinite-use item (or inject one into catalog)
+    let (&finite_tid, &(finite_comp, _)) = state_inner
+        .catalog
+        .item_type_to_component
+        .iter()
+        .find(|(_, &(_, uses))| uses > 0)
+        .expect("finite consumable type");
+    let inf_tid = 999_888_777u32;
+    Arc::get_mut(&mut state_inner)
+        .unwrap()
+        .catalog
+        .item_type_to_component
+        .insert(inf_tid, (finite_comp, -1));
+    let state = state_inner;
+    register(&router, Arc::clone(&state));
+
+    let now = 1_710_000_000u64;
+    let cid = 2_112_000_901i64;
+    let station_id = 60_003_760i64;
+    db.with_mut_snapshot(|s| {
+        let mut ch = s.characters.values().next().expect("demo char").clone();
+        ch.character_id = cid;
+        ch.station_id = Some(station_id);
+        s.characters.insert(cid, ch);
+    });
+    let player_sess = sess(Some(11), Some(cid), 0);
+    let admin_sess = sess(Some(11), Some(cid), service_roles::ROLE_ADMIN);
+
+    let encode_consume = |item_id: u64, qty: u64| -> Vec<u8> {
+        let mut id_msg = Vec::new();
+        put_seq(1, item_id, &mut id_msg);
+        let mut out = Vec::new();
+        encode_bytes_field(1, &id_msg, &mut out);
+        encode_varint_field(2, qty, &mut out);
+        out
+    };
+
+    // 1. Missing item_id or qty == 0 -> STATUS_BAD_REQUEST
+    assert_eq!(
+        call(
+            &router,
+            &player_sess,
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.item.api.ConsumeRequest",
+            encode_consume(0, 1),
+            now,
+        )
+        .status_code,
+        STATUS_BAD_REQUEST
+    );
+    // 2. Item not found -> STATUS_NOT_FOUND
+    assert_eq!(
+        call(
+            &router,
+            &player_sess,
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.item.api.ConsumeRequest",
+            encode_consume(888_000_001, 1),
+            now,
+        )
+        .status_code,
+        STATUS_NOT_FOUND
+    );
+
+    // 3. Wrong owner, unreachable location, non-component item type, partial vs exact stack, infinite uses
+    db.with_mut_snapshot(|s| {
+        // Wrong owner
+        s.items.insert(
+            888_000_002,
+            InventoryItemRecord {
+                item_id: 888_000_002,
+                type_id: finite_tid,
+                owner_id: cid + 1,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 5,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        // Unreachable station
+        s.items.insert(
+            888_000_003,
+            InventoryItemRecord {
+                item_id: 888_000_003,
+                type_id: finite_tid,
+                owner_id: cid,
+                location_id: station_id + 999,
+                flag: InventoryFlag::Hangar,
+                quantity: 5,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        // Non-component item (Tritanium 34)
+        s.items.insert(
+            888_000_004,
+            InventoryItemRecord {
+                item_id: 888_000_004,
+                type_id: 34,
+                owner_id: cid,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 5,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        // Infinite uses item (exact stack = 1)
+        s.items.insert(
+            888_000_005,
+            InventoryItemRecord {
+                item_id: 888_000_005,
+                type_id: inf_tid,
+                owner_id: cid,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(
+        call(
+            &router,
+            &player_sess,
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.item.api.ConsumeRequest",
+            encode_consume(888_000_002, 1),
+            now,
+        )
+        .status_code,
+        STATUS_FORBIDDEN
+    );
+    assert_eq!(
+        call(
+            &router,
+            &player_sess,
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.item.api.ConsumeRequest",
+            encode_consume(888_000_003, 1),
+            now,
+        )
+        .status_code,
+        STATUS_PRECONDITION_FAILED
+    );
+    assert_eq!(
+        call(
+            &router,
+            &player_sess,
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.item.api.ConsumeRequest",
+            encode_consume(888_000_004, 1),
+            now,
+        )
+        .status_code,
+        STATUS_BAD_REQUEST
+    );
+    // Insufficient stack (request 10 when only 1 exists)
+    assert_eq!(
+        call(
+            &router,
+            &player_sess,
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.item.api.ConsumeRequest",
+            encode_consume(888_000_005, 10),
+            now,
+        )
+        .status_code,
+        STATUS_BAD_REQUEST
+    );
+    // Exact stack consume of infinite license item removes item and grants infinite license
+    assert_eq!(
+        call(
+            &router,
+            &player_sess,
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.item.api.ConsumeRequest",
+            encode_consume(888_000_005, 1),
+            now,
+        )
+        .status_code,
+        STATUS_OK
+    );
+    assert!(db.with_snapshot(|s| !s.items.contains_key(&888_000_005)));
+    assert!(!state.data.read().unwrap().infinite_licenses.is_empty());
+
+    // 4. Title definitions & version endpoints
+    state.data.write().unwrap().title_definitions.push(TitleDefinitionRecord {
+        title_id: 7,
+        name: "Grand Master".into(),
+        internal_name: "title_gm".into(),
+    });
+    let mut latest_req = Vec::new();
+    let mut cver = Vec::new();
+    encode_varint_field(1, 24, &mut cver);
+    encode_varint_field(2, 2, &mut cver);
+    encode_varint_field(3, 1, &mut cver);
+    encode_string_field(4, "rc1", &mut cver);
+    encode_bytes_field(1, &cver, &mut latest_req);
+    let mut lang_msg = Vec::new();
+    encode_string_field(1, "de", &mut lang_msg);
+    encode_bytes_field(3, &lang_msg, &mut latest_req);
+    assert_eq!(
+        call(
+            &router,
+            &player_sess,
+            "eve.cosmetic.character.title.definition.api.GetLatestRequest",
+            latest_req,
+            now,
+        )
+        .status_code,
+        STATUS_OK
+    );
+    assert_eq!(
+        call(
+            &router,
+            &player_sess,
+            "eve.cosmetic.character.title.definition.api.ListDefinitionsRequest",
+            Vec::new(),
+            now,
+        )
+        .status_code,
+        STATUS_OK
+    );
+    // Admin version error branches: empty payload -> STATUS_BAD_REQUEST, empty tenant -> STATUS_BAD_REQUEST
+    assert_eq!(
+        call(
+            &router,
+            &admin_sess,
+            "eve.cosmetic.character.title.definition.version.api.admin.SetDefaultVersionRequest",
+            Vec::new(),
+            now,
+        )
+        .status_code,
+        STATUS_BAD_REQUEST
+    );
+    let mut empty_tenant = Vec::new();
+    encode_string_field(1, "", &mut empty_tenant);
+    encode_bytes_field(2, &cver, &mut empty_tenant);
+    assert_eq!(
+        call(
+            &router,
+            &admin_sess,
+            "eve.cosmetic.character.title.definition.version.api.admin.OverrideVersionForTenantRequest",
+            empty_tenant,
+            now,
+        )
+        .status_code,
+        STATUS_BAD_REQUEST
+    );
+}

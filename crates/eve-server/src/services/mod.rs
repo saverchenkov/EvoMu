@@ -227,4 +227,17 @@ mod pve_ess_reserve_banks_extra_unit_tests;
 mod space_probe_scanning_extra_unit_tests;
 #[cfg(test)]
 mod space_probe_scanning_unit_tests;
+#[cfg(test)]
+mod fitting_scanners_superweapons_extra_unit_tests;
+#[cfg(test)]
+mod macho_cluster_mgmt_extra_unit_tests;
+#[cfg(test)]
+mod tactical_modules_extra_unit_tests;
+#[cfg(test)]
+mod quasar_cosmetics_market_extra_unit_tests;
+#[cfg(test)]
+mod quasar_cosmetics_skinr_extra_unit_tests;
+#[cfg(test)]
+mod quasar_skills_clones_extra_unit_tests;
+
 
