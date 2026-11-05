@@ -23,6 +23,12 @@ pub use physics::combat;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod ballpark_lifecycle_tests;
+#[cfg(test)]
+mod physics_combat_collision_tests;
+#[cfg(test)]
+mod mutation_math_and_grid_tests;
 
 pub type BallId = i64;
 

@@ -24,6 +24,22 @@ pub mod types;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod accounts_sso_session_tests;
+#[cfg(test)]
+mod characters_inventory_ledger_tests;
+#[cfg(test)]
+mod sqlite_persistence_roundtrip_tests;
+#[cfg(test)]
+mod world_snapshot_sync_rollback_tests;
+#[cfg(test)]
+mod world_snapshot_extended_sync_tests;
+#[cfg(test)]
+mod runtime_states_sync_and_helpers_tests;
+#[cfg(test)]
+mod domain_edges_and_persistence_tests;
+#[cfg(test)]
+mod sqlite_error_and_wal_delta_tests;
 
 pub use accounts::service_roles;
 pub use accounts::{base64url_decode_no_pad, base64url_encode_no_pad};

@@ -240,7 +240,7 @@ fn hash_serde_entry<T: Serialize + ?Sized>(val: &T) -> u64 {
     h.finish()
 }
 
-fn canonical_fp<T: Serialize + ?Sized>(val: &T) -> u64 {
+pub(crate) fn canonical_fp<T: Serialize + ?Sized>(val: &T) -> u64 {
     hash_serde_entry(val)
 }
 
