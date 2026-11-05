@@ -1402,3 +1402,4 @@ pub fn encode_destiny_updates(
     }
     PyRep::List(encoded)
 }
+#[cfg(test)] #[path = "wire_unit_tests.rs"] mod wire_unit_tests;

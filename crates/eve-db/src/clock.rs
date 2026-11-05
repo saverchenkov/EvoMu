@@ -223,3 +223,8 @@ impl ServerClock for VirtualServerClock {
         mult
     }
 }
+
+#[cfg(test)]
+#[path = "clock_unit_tests.rs"]
+mod clock_unit_tests;
+

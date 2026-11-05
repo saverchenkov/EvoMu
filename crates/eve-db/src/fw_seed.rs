@@ -148,3 +148,8 @@ mod tests {
         assert_eq!(snap.fw_system_occupations.len(), 175);
     }
 }
+
+#[cfg(test)]
+#[path = "fw_seed_unit_tests.rs"]
+mod fw_seed_unit_tests;
+

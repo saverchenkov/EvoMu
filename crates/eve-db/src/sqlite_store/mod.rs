@@ -17,3 +17,7 @@ pub use load::*;
 pub use rollback::*;
 pub use schema::*;
 pub use sync::*;
+
+#[cfg(test)]
+mod sqlite_store_extra_unit_tests;
+

@@ -629,3 +629,8 @@ impl WorldRepository {
         repo
     }
 }
+
+#[cfg(test)]
+#[path = "seed_unit_tests.rs"]
+mod seed_unit_tests;
+

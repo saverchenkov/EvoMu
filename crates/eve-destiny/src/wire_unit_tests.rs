@@ -1,0 +1,510 @@
+//! Unit tests for `wire.rs`: binary `AddBalls` / `SetState` encoding & decoding,
+//! all 13 `DST_BALL_*` movement mode blocks, header flags, truncated buffer errors,
+//! `SlimItem` dictionary fields, and `DoDestinyUpdate` action tuples.
+
+use super::*;
+use crate::{
+    Ball, Ballpark, CombatState, DestinyEvent, FormationState, MovementMode, MushroomState,
+    SlimItemMeta, TrollState, WarpPhase,
+};
+use eve_proto::PyRep;
+use glam::DVec3;
+
+fn sample_ball(id: i64, mode: MovementMode) -> Ball {
+    Ball {
+        id,
+        type_id: 587,
+        position: DVec3::new(1000.0, -2000.0, 3000.5),
+        velocity: DVec3::new(10.0, -20.0, 30.0),
+        max_velocity: 350.0,
+        inertia: 2.5,
+        mass: 1_200_000.0,
+        radius: 42.0,
+        speed_fraction: 0.75,
+        mode,
+    }
+}
+
+#[test]
+fn encode_and_decode_all_thirteen_movement_modes_roundtrip() {
+    let modes = vec![
+        (100, MovementMode::GotoDirection { direction: DVec3::new(100.0, 200.0, -300.0) }),
+        (101, MovementMode::Follow { target_id: 9001, range: 2500.0 }),
+        (102, MovementMode::Stop),
+        (
+            103,
+            MovementMode::Warp {
+                origin: DVec3::ZERO,
+                destination: DVec3::new(1.0e9, 2.0e9, -3.0e9),
+                warp_speed_au_s: 3.0,
+                total_distance: 3.74e9,
+                phase: WarpPhase::Cruising,
+                elapsed_warp_time: 4.0,
+            },
+        ),
+        (104, MovementMode::Orbit { target_id: 9002, range: 7500.0 }),
+        (105, MovementMode::Missile { target_id: 9003 }),
+        (106, MovementMode::Mushroom),
+        (107, MovementMode::Boid),
+        (108, MovementMode::Troll),
+        (109, MovementMode::Miniball),
+        (110, MovementMode::Field),
+        (111, MovementMode::Rigid),
+        (112, MovementMode::Formation),
+    ];
+
+    let balls: Vec<Ball> = modes
+        .into_iter()
+        .map(|(id, mode)| sample_ball(id, mode))
+        .collect();
+    let refs: Vec<&Ball> = balls.iter().collect();
+
+    let encoded = encode_add_balls(42, &refs);
+    assert_eq!(encoded[0], 0);
+    assert_eq!(u32::from_le_bytes(encoded[1..5].try_into().unwrap()), 42);
+
+    let (packet_type, stamp, decoded) = decode_add_balls(&encoded).expect("decode all 13 modes");
+    assert_eq!(packet_type, 0);
+    assert_eq!(stamp, 42);
+    assert_eq!(decoded.len(), 13);
+
+    // 0: GotoDirection
+    assert_eq!(decoded[0].id, 100);
+    assert_eq!(decoded[0].mode, DST_BALL_GOTO);
+    assert_eq!(
+        decoded[0].flags,
+        BALL_FLAG_IS_FREE | BALL_FLAG_IS_MASSIVE | BALL_FLAG_IS_INTERACTIVE
+    );
+    assert!(decoded[0].mass.is_some());
+    assert_eq!(decoded[0].formation_id, 0xFF);
+    assert_eq!(decoded[0].direction, Some(DVec3::new(100.0, 200.0, -300.0)));
+
+    // 1: Follow
+    assert_eq!(decoded[1].id, 101);
+    assert_eq!(decoded[1].mode, DST_BALL_FOLLOW);
+    assert_eq!(decoded[1].target_id, Some(9001));
+    assert!((decoded[1].follow_range.unwrap() - 2500.0).abs() < 1e-3);
+
+    // 2: Stop
+    assert_eq!(decoded[2].id, 102);
+    assert_eq!(decoded[2].mode, DST_BALL_STOP);
+    assert!(decoded[2].target_id.is_none());
+
+    // 3: Warp
+    assert_eq!(decoded[3].id, 103);
+    assert_eq!(decoded[3].mode, DST_BALL_WARP);
+    assert_eq!(decoded[3].warp_destination, Some(DVec3::new(1.0e9, 2.0e9, -3.0e9)));
+    assert_eq!(decoded[3].warp_speed_tenth_au_s, Some(30));
+    assert_eq!(decoded[3].effect_stamp, Some(42));
+
+    // 4: Orbit
+    assert_eq!(decoded[4].id, 104);
+    assert_eq!(decoded[4].mode, DST_BALL_ORBIT);
+    assert_eq!(decoded[4].target_id, Some(9002));
+    assert!((decoded[4].follow_range.unwrap() - 7500.0).abs() < 1e-3);
+
+    // 5: Missile
+    assert_eq!(decoded[5].id, 105);
+    assert_eq!(decoded[5].mode, DST_BALL_MISSILE);
+    assert_eq!(decoded[5].target_id, Some(9003));
+    assert_eq!(decoded[5].owner_id, Some(1));
+    assert_eq!(decoded[5].direction, Some(DVec3::new(10.0, -20.0, 30.0)));
+
+    // 6: Mushroom
+    assert_eq!(decoded[6].id, 106);
+    assert_eq!(decoded[6].mode, DST_BALL_MUSHROOM);
+    assert_eq!(decoded[6].flags, BALL_FLAG_IS_FREE);
+    assert_eq!(decoded[6].effect_stamp, Some(42));
+    assert_eq!(decoded[6].owner_id, Some(1));
+
+    // 7: Boid
+    assert_eq!(decoded[7].id, 107);
+    assert_eq!(decoded[7].mode, DST_BALL_BOID);
+    assert_eq!(decoded[7].formation_id, 0xFF);
+
+    // 8: Troll
+    assert_eq!(decoded[8].id, 108);
+    assert_eq!(decoded[8].mode, DST_BALL_TROLL);
+    assert_eq!(decoded[8].flags, BALL_FLAG_IS_FREE);
+    assert_eq!(decoded[8].effect_stamp, Some(42));
+
+    // 9: Miniball
+    assert_eq!(decoded[9].id, 109);
+    assert_eq!(decoded[9].mode, DST_BALL_MINIBALL);
+    assert_eq!(decoded[9].flags, BALL_FLAG_IS_FREE);
+
+    // 10: Field
+    assert_eq!(decoded[10].id, 110);
+    assert_eq!(decoded[10].mode, DST_BALL_FIELD);
+    assert_eq!(decoded[10].flags, BALL_FLAG_IS_GLOBAL);
+    assert!(decoded[10].mass.is_some());
+    assert!(decoded[10].velocity.is_none());
+
+    // 11: Rigid
+    assert_eq!(decoded[11].id, 111);
+    assert_eq!(decoded[11].mode, DST_BALL_RIGID);
+    assert_eq!(decoded[11].flags, BALL_FLAG_IS_GLOBAL);
+    assert!(decoded[11].mass.is_none());
+    assert!(decoded[11].velocity.is_none());
+
+    // 12: Formation
+    assert_eq!(decoded[12].id, 112);
+    assert_eq!(decoded[12].mode, DST_BALL_FORMATION);
+    assert_eq!(decoded[12].target_id, Some(0));
+    assert_eq!(decoded[12].effect_stamp, Some(42));
+}
+
+#[test]
+fn encode_single_ball_with_park_populates_mode_states_and_meta() {
+    let mut park = Ballpark::new(30000142);
+    park.current_tick = 77;
+
+    // 1. Mushroom ball with custom MushroomState and harmonic
+    let mush = sample_ball(201, MovementMode::Mushroom);
+    park.add_ball(mush.clone());
+    park.mushroom_states.insert(
+        201,
+        MushroomState {
+            max_radius: 12_500.0,
+            duration_s: 15.0,
+            effect_stamp: 55,
+            owner_id: 9000001,
+        },
+    );
+    park.ball_harmonics.insert(201, 3);
+    park.set_ball_slim_meta(
+        201,
+        SlimItemMeta {
+            corp_id: 1000125,
+            alliance_id: 99000001,
+            owner_id: 9000001,
+            is_cloaked: true,
+            ..SlimItemMeta::default()
+        },
+    );
+    park.combat_states.remove(&201);
+
+    // 2. Troll ball with custom TrollState
+    let troll = sample_ball(202, MovementMode::Troll);
+    park.add_ball(troll.clone());
+    park.troll_states.insert(202, TrollState { effect_stamp: 88 });
+
+    // 3. Formation ball with custom FormationState
+    let form = sample_ball(203, MovementMode::Formation);
+    park.add_ball(form.clone());
+    park.formation_states.insert(
+        203,
+        FormationState {
+            leader_id: 201,
+            slot_offset: DVec3::new(500.0, -250.0, 1000.0),
+            follow_range: 1500.0,
+            effect_stamp: 66,
+        },
+    );
+
+    // 4. Missile ball with owner_id in slim_meta and combat_states cloaked
+    let missile = sample_ball(204, MovementMode::Missile { target_id: 202 });
+    park.add_ball(missile.clone());
+    park.set_ball_slim_meta(
+        204,
+        SlimItemMeta {
+            owner_id: 7777,
+            is_cloaked: false,
+            ..SlimItemMeta::default()
+        },
+    );
+    park.combat_states.insert(
+        204,
+        CombatState {
+            is_cloaked: true,
+            ..CombatState::default()
+        },
+    );
+
+    let refs = [&mush, &troll, &form, &missile];
+    let bytes = encode_add_balls_with_park(1, park.current_tick as u32, &refs, Some(&park));
+    let (pkt, stamp, decoded) = decode_add_balls(&bytes).expect("decode park balls");
+    assert_eq!(pkt, 1);
+    assert_eq!(stamp, 77);
+    assert_eq!(decoded.len(), 4);
+
+    // Check mushroom
+    assert_eq!(decoded[0].mode, DST_BALL_MUSHROOM);
+    assert_eq!(decoded[0].cloak, Some(1));
+    assert_eq!(decoded[0].corp_id, Some(1000125));
+    assert_eq!(decoded[0].alliance_id, Some(99000001));
+    assert_eq!(decoded[0].harmonic, Some(3));
+    assert!((decoded[0].follow_range.unwrap() - 12_500.0).abs() < 1e-3);
+    assert_eq!(decoded[0].effect_stamp, Some(55));
+    assert_eq!(decoded[0].owner_id, Some(9000001));
+
+    // Check troll
+    assert_eq!(decoded[1].mode, DST_BALL_TROLL);
+    assert_eq!(decoded[1].effect_stamp, Some(88));
+
+    // Check formation
+    assert_eq!(decoded[2].mode, DST_BALL_FORMATION);
+    assert_eq!(decoded[2].target_id, Some(201));
+    assert!((decoded[2].follow_range.unwrap() - 1500.0).abs() < 1e-3);
+    assert_eq!(decoded[2].effect_stamp, Some(66));
+
+    // Check missile (cloaked via combat_states, owner_id from slim_meta)
+    assert_eq!(decoded[3].mode, DST_BALL_MISSILE);
+    assert_eq!(decoded[3].cloak, Some(1));
+    assert_eq!(decoded[3].owner_id, Some(7777));
+}
+
+#[test]
+fn encode_single_ball_and_meta_helpers_roundtrip() {
+    let mut buf = Vec::new();
+    let ball = sample_ball(300, MovementMode::Stop);
+    let meta = SlimItemMeta {
+        corp_id: 500,
+        alliance_id: 600,
+        is_cloaked: true,
+        ..SlimItemMeta::default()
+    };
+    encode_single_ball_with_meta(&mut buf, &ball, 10, Some(&meta));
+    encode_single_ball(&mut buf, &ball);
+    let mut header_and_balls = Vec::new();
+    header_and_balls.push(0u8);
+    header_and_balls.extend_from_slice(&10u32.to_le_bytes());
+    header_and_balls.extend_from_slice(&buf);
+
+    let (_, _, dec) = decode_add_balls(&header_and_balls).expect("decode single with meta");
+    assert_eq!(dec.len(), 2);
+    assert_eq!(dec[0].corp_id, Some(500));
+    assert_eq!(dec[0].alliance_id, Some(600));
+    assert_eq!(dec[0].cloak, Some(1));
+    assert_eq!(dec[1].cloak, Some(0));
+}
+
+#[test]
+fn decode_add_balls_rejects_truncated_and_invalid_buffers() {
+    // 1. Shorter than 5-byte header
+    assert!(decode_add_balls(&[]).is_err());
+    assert!(decode_add_balls(&[0, 1, 2, 3]).is_err());
+
+    // 2. Encode each mode and test every possible truncation prefix from 6..len
+    let all_modes = vec![
+        MovementMode::GotoDirection { direction: DVec3::X },
+        MovementMode::Follow { target_id: 1, range: 100.0 },
+        MovementMode::Stop,
+        MovementMode::Warp {
+            origin: DVec3::ZERO,
+            destination: DVec3::X * 1.0e8,
+            warp_speed_au_s: 3.0,
+            total_distance: 1.0e8,
+            phase: WarpPhase::Accelerating,
+            elapsed_warp_time: 1.0,
+        },
+        MovementMode::Orbit { target_id: 2, range: 200.0 },
+        MovementMode::Missile { target_id: 3 },
+        MovementMode::Mushroom,
+        MovementMode::Boid,
+        MovementMode::Troll,
+        MovementMode::Miniball,
+        MovementMode::Field,
+        MovementMode::Rigid,
+        MovementMode::Formation,
+    ];
+
+    for (idx, mode) in all_modes.into_iter().enumerate() {
+        let ball = sample_ball(1000 + idx as i64, mode);
+        let full = encode_add_balls(1, &[&ball]);
+        for cut in 6..full.len() {
+            assert!(
+                decode_add_balls(&full[..cut]).is_err(),
+                "mode {idx} should fail when truncated at byte {cut}/{}",
+                full.len()
+            );
+        }
+    }
+
+    // 3. Unknown ball mode byte (e.g. 99)
+    let stop_ball = sample_ball(999, MovementMode::Stop);
+    let mut bad_mode = encode_add_balls(1, &[&stop_ball]);
+    bad_mode[13] = 99;
+    let err = decode_add_balls(&bad_mode).expect_err("unknown ball mode should error");
+    assert!(err.contains("99"), "unexpected error: {err}");
+}
+
+#[test]
+fn slim_item_meta_and_dict_covers_stargate_wormhole_npc_and_player_ship() {
+    let mut park = Ballpark::new(30000142);
+
+    // 1. Default ship (not in park)
+    let default_ball = sample_ball(400, MovementMode::Stop);
+    let meta_def = resolve_slim_item_meta(None, &default_ball);
+    assert_eq!(meta_def.group_id, 25);
+    assert_eq!(meta_def.category_id, 6);
+
+    // 2. Rigid ball heuristics when not in park: station (60M..70M), gate (50M..60M), belt (type_id 15), star/planet
+    let station_ball = sample_ball(60_003_760, MovementMode::Rigid);
+    assert_eq!(resolve_slim_item_meta(None, &station_ball).group_id, 15);
+    let gate_heuristic = sample_ball(50_001_234, MovementMode::Rigid);
+    assert_eq!(resolve_slim_item_meta(None, &gate_heuristic).group_id, 10);
+    let mut belt_heuristic = sample_ball(40_000_001, MovementMode::Rigid);
+    belt_heuristic.type_id = 15;
+    assert_eq!(resolve_slim_item_meta(None, &belt_heuristic).group_id, 9);
+    let planet_heuristic = sample_ball(40_000_002, MovementMode::Rigid);
+    assert_eq!(resolve_slim_item_meta(None, &planet_heuristic).group_id, 6);
+    let field_heuristic = sample_ball(40_000_003, MovementMode::Field);
+    assert_eq!(resolve_slim_item_meta(None, &field_heuristic).group_id, 361);
+
+    // 3. Stargate (group_id == 10) with and without jump_target
+    let gate_meta = SlimItemMeta {
+        group_id: 10,
+        category_id: 2,
+        jump_target: Some((50001234, 30000144)),
+        ..SlimItemMeta::default()
+    };
+    let gate_dict = slim_item_dict(&gate_heuristic, &gate_meta);
+    if let PyRep::Dict(entries) = gate_dict {
+        assert!(entries.iter().any(|(k, _)| matches!(k, PyRep::String(s) if s == "jumps")));
+    } else {
+        panic!("expected PyRep::Dict");
+    }
+
+    // 4. Wormhole (group_id == 988) with custom stages in park
+    let wh_ball = sample_ball(403, MovementMode::Rigid);
+    let wh_meta = SlimItemMeta {
+        group_id: 988,
+        category_id: 2,
+        ..SlimItemMeta::default()
+    };
+    park.add_static_ball_with_meta(wh_ball.clone(), wh_meta.clone());
+    park.set_ball_wormhole_stages(403, 2, 0.5);
+    let wh_dict = slim_item_dict_with_park(Some(&park), &wh_ball, &wh_meta);
+    if let PyRep::Dict(entries) = wh_dict {
+        assert!(entries.iter().any(|(k, v)| {
+            matches!(k, PyRep::String(s) if s == "wormholeAge") && matches!(v, PyRep::Integer(2))
+        }));
+        assert!(entries.iter().any(|(k, v)| {
+            matches!(k, PyRep::String(s) if s == "wormholeSize") && matches!(v, PyRep::Real(r) if (*r - 0.5).abs() < 1e-6)
+        }));
+    }
+
+    // 5. NPC entity (category_id == 11) with skin_id and skin_material_set_id
+    let npc_ball = sample_ball(404, MovementMode::Orbit { target_id: 400, range: 5000.0 });
+    let npc_meta = SlimItemMeta {
+        group_id: 500,
+        category_id: 11,
+        owner_id: 500010,
+        char_id: Some(9000123),
+        corp_id: 1000125,
+        alliance_id: 9900001,
+        security_status: -5.0,
+        is_cloaked: false,
+        skin_id: Some(111),
+        skin_material_set_id: Some(222),
+        jump_target: None,
+    };
+    let npc_dict = slim_item_dict(&npc_ball, &npc_meta);
+    if let PyRep::Dict(entries) = npc_dict {
+        assert!(entries.iter().any(|(k, _)| matches!(k, PyRep::String(s) if s == "hostile_response_threshold")));
+        assert!(entries.iter().any(|(k, _)| matches!(k, PyRep::String(s) if s == "charID")));
+        assert!(entries.iter().any(|(k, _)| matches!(k, PyRep::String(s) if s == "skinID")));
+        assert!(entries.iter().any(|(k, _)| matches!(k, PyRep::String(s) if s == "skinMaterialSetID")));
+    }
+
+    let slim_basic = encode_slim_item(&default_ball, 25, 6);
+    assert!(matches!(slim_basic, PyRep::Object { .. }));
+}
+
+#[test]
+fn encode_destiny_events_and_hoist_set_state_in_updates() {
+    let mut park = Ballpark::new(30000142);
+    park.current_tick = 100;
+    let b1 = sample_ball(1, MovementMode::Stop);
+    let b2 = sample_ball(2, MovementMode::GotoDirection { direction: DVec3::X });
+    park.add_ball(b1.clone());
+    park.add_ball(b2.clone());
+
+    let events = vec![
+        DestinyEvent::AddBall { ball: b1.clone() },
+        DestinyEvent::AddBalls { balls: vec![b1.clone(), b2.clone()] },
+        DestinyEvent::AddBalls2 { balls: vec![b2.clone()] },
+        DestinyEvent::RemoveBall { ball_id: 1 },
+        DestinyEvent::RemoveBalls { ball_ids: vec![1, 2] },
+        DestinyEvent::GotoDirection { ball_id: 1, direction: [1.0, 0.0, 0.0] },
+        DestinyEvent::GotoPoint { ball_id: 1, point: [10.0, 20.0, 30.0] },
+        DestinyEvent::Follow { ball_id: 1, target_id: 2, range: 1000.0 },
+        DestinyEvent::SetSpeedFraction { ball_id: 1, fraction: 0.5 },
+        DestinyEvent::Orbit { ball_id: 1, target_id: 2, range: 5000.0 },
+        DestinyEvent::Stop { ball_id: 1 },
+        DestinyEvent::WarpTo { ball_id: 1, destination: [1.0e8, 0.0, 0.0], warp_speed_au_s: 3.0 },
+        DestinyEvent::SetBallMassive { ball_id: 1, is_massive: true },
+        DestinyEvent::SetBallMassive { ball_id: 1, is_massive: false },
+        DestinyEvent::SetBallFree { ball_id: 1, is_free: true },
+        DestinyEvent::SetBallFree { ball_id: 1, is_free: false },
+        DestinyEvent::SetBallHarmonic { ball_id: 1, harmonic: -1 },
+        DestinyEvent::SetBallInteractive { ball_id: 1, is_interactive: true },
+        DestinyEvent::SetBallInteractive { ball_id: 1, is_interactive: false },
+        DestinyEvent::SetBallRadius { ball_id: 1, radius: 120.0 },
+        DestinyEvent::SetBallPosition { ball_id: 1, position: [1.0, 2.0, 3.0] },
+        DestinyEvent::SetBallVelocity { ball_id: 1, velocity: [4.0, 5.0, 6.0] },
+        DestinyEvent::OnDamageStateChange { ball_id: 1, shield_ratio: 0.8, armor_ratio: 0.9, structure_ratio: 1.0 },
+        DestinyEvent::OnFleetDamageStateChange { ball_id: 1, shield_ratio: 0.7, armor_ratio: 0.8, structure_ratio: 0.9 },
+        DestinyEvent::TerminalExplosion { ball_id: 1, destruction_effect_id: None },
+        DestinyEvent::TerminalExplosion { ball_id: 1, destruction_effect_id: Some(42) },
+        DestinyEvent::Collision { ball_a: 1, ball_b: 2 },
+        DestinyEvent::OnTarget { mode: "add".into(), source_id: 1, target_id: 2 },
+        DestinyEvent::OnActivatingWarp { ball_id: 1 },
+        DestinyEvent::OnDeactivatingWarp { ball_id: 1 },
+        DestinyEvent::OnSpecialFX { ball_id: 1, module_id: Some(10), guid: "effects.Laser".into(), is_active: true },
+        DestinyEvent::OnSpecialFX { ball_id: 1, module_id: None, guid: "effects.Warp".into(), is_active: false },
+        DestinyEvent::CloakBall { ball_id: 1, cloaked: 1 },
+        DestinyEvent::OnClientControllerEvent { ball_id: 1, target_id: Some(2), event_name: "ev".into(), value: 3, delay: Some(0.5) },
+        DestinyEvent::OnClientControllerEvent { ball_id: 1, target_id: None, event_name: "ev".into(), value: 0, delay: None },
+        DestinyEvent::OnDbuffUpdated { ball_id: 1, dbuffs: vec![(10, 1.5, 100)] },
+        DestinyEvent::OnDotVictimUpdated { ball_id: 1, flat_dps: 50.0, pct_dps: 0.01, remaining_ticks: 10 },
+        DestinyEvent::OnDroneStateChange { drone_id: 99, owner_id: 1, controller_id: 1, activity_state: 1, type_id: 2456, controller_owner_id: 1, target_id: Some(2) },
+        DestinyEvent::OnDroneStateChange { drone_id: 99, owner_id: 1, controller_id: 1, activity_state: 0, type_id: 2456, controller_owner_id: 1, target_id: None },
+        DestinyEvent::OnDroneStateChange2 { drone_id: 99, owner_id: 1, controller_id: 1, activity_state: 1, type_id: 2456, controller_owner_id: 1, target_id: Some(2) },
+        DestinyEvent::OnDroneActivityChange { drone_id: 99, activity_state: 2 },
+        DestinyEvent::OnDroneControlLost { drone_id: 99 },
+        DestinyEvent::OnShipStateUpdate { module_states: vec![(10, 20, 30, 1, 5.0, 10.0)] },
+        DestinyEvent::OnSlimItemChange { ball_id: 1 },
+        DestinyEvent::OnSlimItemChange { ball_id: 999_999 },
+        DestinyEvent::OnSovereigntyChanged { solar_system_id: 30000142, alliance_id: 9900001 },
+        DestinyEvent::PackagedAction { actions_bytes: vec![1, 2, 3] },
+        DestinyEvent::OnAudioActivated,
+        DestinyEvent::OnDockingAccepted { start_pos: [0.0, 0.0, 0.0], end_pos: [100.0, 0.0, 0.0], station_id: 60003760 },
+        DestinyEvent::OnFleetStateChange { fleet_id: 10, member_id: 20, fleet_state: 1 },
+        DestinyEvent::ScatterEwars { ball_id: 1, effect_states: vec![7, 8] },
+        DestinyEvent::SetControllerVariableOnBall { ball_id: 1, var_name: "state".into(), value: 5 },
+        // Put SetState at the end to verify encode_destiny_updates hoists it to index 0
+        DestinyEvent::SetState { observer_ball_id: 1 },
+    ];
+
+    let updates = encode_destiny_updates(100, &events, Some(&park));
+    let PyRep::List(items) = updates else {
+        panic!("expected PyRep::List");
+    };
+    assert_eq!(items.len(), events.len());
+    if let PyRep::Tuple(pair) = &items[0] {
+        assert_eq!(pair[0], PyRep::Integer(100));
+        if let PyRep::Tuple(action) = &pair[1] {
+            assert_eq!(action[0], PyRep::String("SetState".into()));
+        } else {
+            panic!("expected action tuple");
+        }
+    } else {
+        panic!("expected stamped tuple");
+    }
+
+    // Also test SetState without park fallback
+    let set_state_no_park = encode_destiny_event(100, &DestinyEvent::SetState { observer_ball_id: 1 }, None);
+    assert!(matches!(set_state_no_park, PyRep::Tuple(_)));
+
+    // Verify helper functions directly
+    let set_state_up = encode_set_state_update(&park, 1);
+    assert!(matches!(set_state_up, PyRep::Tuple(_)));
+    let add_ball_act = encode_add_ball_action(100, &b1, Some(&park));
+    assert!(matches!(add_ball_act, PyRep::Tuple(_)));
+    let add_balls_act = encode_add_balls_action(100, &[&b1], Some(&park));
+    assert!(matches!(add_balls_act, PyRep::Tuple(_)));
+    let add_balls2_act = encode_add_balls2_action(100, &[&b1], Some(&park));
+    assert!(matches!(add_balls2_act, PyRep::Tuple(_)));
+}
