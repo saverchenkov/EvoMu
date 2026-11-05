@@ -587,7 +587,11 @@ pub fn handle_project_discovery(
                     && !st.tutorial_skipped
                 {
                     st.tutorial_reward_claimed = true;
-                    let xp_reward = store.tutorial_xp_reward.max(0.0);
+                    let xp_reward = if !store.mmos_configured && store.tutorial_xp_reward <= 0.0 {
+                        250.0
+                    } else {
+                        store.tutorial_xp_reward.max(0.0)
+                    };
                     let prev_rank = st.rank;
                     st.experience += xp_reward;
                     st.rank = rank_for_xp(&store, st.experience, st.rank);
@@ -1126,4 +1130,77 @@ pub fn handle(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let mut sess = session.clone();
     handle_project_discovery(ctx, &mut sess, service, method, args, kwargs)
+}
+
+/// Handles GM `/pd` slash commands (`config`, `consensus`, `bonus`).
+pub fn handle_project_discovery_slash(
+    ctx: &ServerContext,
+    cmd: &str,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    if parts.first().copied() != Some("/pd") {
+        return None;
+    }
+    match parts.get(1).copied() {
+        Some("config") => {
+            let xp_per_rank = parts.get(2).and_then(|s| s.parse::<f64>().ok());
+            let tut_xp = parts.get(3).and_then(|s| s.parse::<f64>().ok());
+            let acc_xp = parts.get(4).and_then(|s| s.parse::<f64>().ok());
+            let inacc_xp = parts.get(5).and_then(|s| s.parse::<f64>().ok());
+            let ak = parts.get(6).and_then(|s| s.parse::<i64>().ok());
+            let max_bonus = parts.get(7).and_then(|s| s.parse::<i64>().ok());
+            let (Some(xp), Some(txp), Some(axp), Some(ixp), Some(ak_val)) =
+                (xp_per_rank, tut_xp, acc_xp, inacc_xp, ak)
+            else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArguments".into(),
+                    message: "Usage: /pd config <xp_per_rank> <tutorial_xp> <acc_xp> <inacc_xp> <ak> [max_bonus]".into(),
+                }));
+            };
+            ctx.db.with_mut_snapshot(|snap| {
+                configure_project_discovery_mmos(snap, xp, txp, axp, ixp, ak_val);
+                if let Some(mb) = max_bonus {
+                    configure_project_discovery_bonus_samples(snap, mb);
+                }
+            });
+            Some(Ok(PyRep::keyval([
+                ("configured", PyRep::Bool(true)),
+                ("xp_per_rank", PyRep::Real(xp)),
+                ("tutorial_xp_reward", PyRep::Real(txp)),
+            ])))
+        }
+        Some("consensus") => {
+            let task_idx = parts.get(2).and_then(|s| s.parse::<i64>().ok()).filter(|&i| i > 0);
+            let accurate = parts.get(3).and_then(|s| s.parse::<bool>().ok());
+            let (Some(idx), Some(acc)) = (task_idx, accurate) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArguments".into(),
+                    message: "Usage: /pd consensus <task_index> <true|false>".into(),
+                }));
+            };
+            ctx.db.with_mut_snapshot(|snap| {
+                set_project_discovery_task_consensus(snap, idx, acc);
+            });
+            Some(Ok(PyRep::keyval([
+                ("task_index", PyRep::Integer(idx)),
+                ("is_accurate", PyRep::Bool(acc)),
+            ])))
+        }
+        Some("bonus") => {
+            let Some(mb) = parts.get(2).and_then(|s| s.parse::<i64>().ok()).filter(|&m| m > 0) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArguments".into(),
+                    message: "Usage: /pd bonus <max_bonus>".into(),
+                }));
+            };
+            ctx.db.with_mut_snapshot(|snap| {
+                configure_project_discovery_bonus_samples(snap, mb);
+            });
+            Some(Ok(PyRep::keyval([("max_bonus_samples", PyRep::Integer(mb))])))
+        }
+        _ => Some(Err(BridgeRpcError {
+            code: "InvalidArguments".into(),
+            message: "Usage: /pd <config|consensus|bonus> ...".into(),
+        })),
+    }
 }

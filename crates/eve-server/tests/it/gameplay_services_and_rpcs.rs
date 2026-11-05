@@ -3044,16 +3044,7 @@ async fn test_parity_agent_plausible_missions_and_cache_rowset() {
 }
 
 #[tokio::test]
-// parity: rpc:ProjectDiscovery.get_new_task, rpc:ProjectDiscovery.post_classification, rpc:ProjectDiscovery.get_player_statistics, rpc:ProjectDiscovery.get_total_needed_xp, rpc:ProjectDiscovery.give_tutorial_rewards
 async fn test_parity_project_discovery_tasks_stats_xp_and_tutorial() {
-    eve_testkit::attest(&[
-        "rpc:ProjectDiscovery.get_new_task",
-        "rpc:ProjectDiscovery.post_classification",
-        "rpc:ProjectDiscovery.get_player_statistics",
-        "rpc:ProjectDiscovery.get_total_needed_xp",
-        "rpc:ProjectDiscovery.give_tutorial_rewards",
-    ]);
-
     let ctx = ServerContext::new();
     let mut sess = login_and_select(&ctx, 91_201, "demo", "demo-secret", PILOT_1).await;
 

@@ -119,6 +119,7 @@ mod features_industry_manufacturing_rpcs;
 mod npc_spawns_pve;
 mod planetary_interaction_complete;
 mod pi_planet_mgr_rpc;
+mod project_discovery_rpcs_live;
 
 mod pve_agency_events_complete;
 mod pve_exploration_complete;

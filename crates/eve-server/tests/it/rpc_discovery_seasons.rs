@@ -28,15 +28,13 @@ async fn rpc(ctx: &ServerContext, sess: &mut SessionState, service: &str, method
 async fn test_project_discovery_state_and_tasks() {
     // DATA GAP: MMOS citizen science tasks, training tasks, and XP/reward tables (`get_new_task`, `get_data_from_url`, `new_training_task`, `get_total_needed_xp`, `get_tutorial_xp_reward`, `give_tutorial_rewards`, `post_classification`) are external backend data not in V24 client FSD.
     // parity: rpc:ProjectDiscovery.fix_task_id, rpc:ProjectDiscovery.get_current_task_index
-    // parity: rpc:ProjectDiscovery.get_player_state, rpc:ProjectDiscovery.get_player_statistics
-    // parity: rpc:ProjectDiscovery.get_project_id, rpc:ProjectDiscovery.get_remaining_bonus_samples
+    // parity: rpc:ProjectDiscovery.get_player_state
+    // parity: rpc:ProjectDiscovery.get_project_id
     eve_testkit::attest(&[
         "rpc:ProjectDiscovery.fix_task_id",
         "rpc:ProjectDiscovery.get_current_task_index",
         "rpc:ProjectDiscovery.get_player_state",
-        "rpc:ProjectDiscovery.get_player_statistics",
         "rpc:ProjectDiscovery.get_project_id",
-        "rpc:ProjectDiscovery.get_remaining_bonus_samples",
     ]);
 
     let ctx = ServerContext::new();
@@ -167,7 +165,6 @@ async fn test_project_discovery_state_and_tasks() {
 #[tokio::test]
 async fn test_project_discovery_tutorial_and_rewards() {
     // parity: rpc:ProjectDiscovery.get_is_player_entitled_to_tutorial_reward
-    // parity: rpc:ProjectDiscovery.get_maximum_bonus_samples
     // parity: rpc:ProjectDiscovery.get_player_analysis_kredits
     // parity: rpc:ProjectDiscovery.get_tutorial_completion_status
     // parity: rpc:ProjectDiscovery.get_tutorial_level
@@ -176,7 +173,6 @@ async fn test_project_discovery_tutorial_and_rewards() {
     // parity: rpc:ProjectDiscovery.skip_tutorial
     eve_testkit::attest(&[
         "rpc:ProjectDiscovery.get_is_player_entitled_to_tutorial_reward",
-        "rpc:ProjectDiscovery.get_maximum_bonus_samples",
         "rpc:ProjectDiscovery.get_player_analysis_kredits",
         "rpc:ProjectDiscovery.get_tutorial_completion_status",
         "rpc:ProjectDiscovery.get_tutorial_level",

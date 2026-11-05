@@ -365,13 +365,6 @@ async fn test_fast_checkout_offers_and_buy_remediation() {
 
 #[tokio::test]
 async fn test_project_discovery_authentic_tasks_and_bonus_samples() {
-    // parity: rpc:ProjectDiscovery.get_data_from_url, rpc:ProjectDiscovery.get_maximum_bonus_samples, rpc:ProjectDiscovery.get_new_task
-    eve_testkit::attest(&[
-        "rpc:ProjectDiscovery.get_data_from_url",
-        "rpc:ProjectDiscovery.get_maximum_bonus_samples",
-        "rpc:ProjectDiscovery.get_new_task",
-    ]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
@@ -628,13 +621,6 @@ fn varint(m: &WireMessage, field: u32) -> Option<u64> {
 
 #[tokio::test]
 async fn test_project_discovery_parity_closure() {
-    // parity: rpc:ProjectDiscovery.get_data_from_url, rpc:ProjectDiscovery.get_tutorial_xp_reward, rpc:ProjectDiscovery.new_training_task
-    eve_testkit::attest(&[
-        "rpc:ProjectDiscovery.get_data_from_url",
-        "rpc:ProjectDiscovery.get_tutorial_xp_reward",
-        "rpc:ProjectDiscovery.new_training_task",
-    ]);
-
     let ctx = ServerContext::new();
     let mut sess = select_pilot(&ctx, 62_001, "demo", "demo-secret", PILOT).await;
 

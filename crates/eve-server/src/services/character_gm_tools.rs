@@ -1247,6 +1247,9 @@ pub async fn handle_gm_slash_ext(
     if cmd == "/operation" || cmd.starts_with("/operation ") {
         return crate::services::notify_emitters_operations_nodegraph::handle_operation_slash(ctx, session, cid, cmd);
     }
+    if cmd == "/pd" || cmd.starts_with("/pd ") {
+        return crate::services::project_discovery::handle_project_discovery_slash(ctx, cmd);
+    }
     if let Some(rest) = cmd.strip_prefix("/energy ") {
         let parts: Vec<&str> = rest.split_whitespace().collect();
         let (target_cid, new_energy) = match parts.as_slice() {
