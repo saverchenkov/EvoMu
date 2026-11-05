@@ -158,11 +158,13 @@ pub(crate) fn can_access_sov_hub_fuel(
     false
 }
 
-/// Broadcasts `OnSolarSystemSovStructuresUpdated(solarsystemID, solarSystemStructuresInfo, changes)`
-/// matching V24 `SovService.OnSolarSystemSovStructuresUpdated` (3 positional arguments: `solarsystemID`,
-/// list of `util.KeyVal` structure rows, and `dict` mapping `sourceItemID -> list` of change tags).
-pub fn emit_sov_structures_updated(ctx: &ServerContext, sys_id: u32, changed_ids: &[i64]) {
-    let structs = collect_sov_structures(ctx, sys_id);
+pub fn emit_sov_structures_updated_with_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    sys_id: u32,
+    changed_ids: &[i64],
+) {
+    let structs = collect_sov_structures_from_snap(snap, sys_id);
     let changes = PyRep::Dict(
         changed_ids
             .iter()
@@ -180,6 +182,15 @@ pub fn emit_sov_structures_updated(ctx: &ServerContext, sys_id: u32, changed_ids
             changes,
         ],
     );
+}
+
+/// Broadcasts `OnSolarSystemSovStructuresUpdated(solarsystemID, solarSystemStructuresInfo, changes)`
+/// matching V24 `SovService.OnSolarSystemSovStructuresUpdated` (3 positional arguments: `solarsystemID`,
+/// list of `util.KeyVal` structure rows, and `dict` mapping `sourceItemID -> list` of change tags).
+pub fn emit_sov_structures_updated(ctx: &ServerContext, sys_id: u32, changed_ids: &[i64]) {
+    ctx.db.with_snapshot(|snap| {
+        emit_sov_structures_updated_with_snap(ctx, snap, sys_id, changed_ids);
+    });
 }
 
 /// Broadcasts `OnSolarSystemDevIndexChanged` notification (single solarsystemID payload matching V24 client expectation).
@@ -362,32 +373,32 @@ pub async fn claim_system_sovereignty_async(
     Ok(())
 }
 
-fn collect_sov_structures(ctx: &ServerContext, sys_id: u32) -> Vec<PyRep> {
-    ctx.db.with_snapshot(|snap| {
-        let aid = snap.system_states.get(&sys_id).and_then(|s| s.sov_alliance_id);
-        snap.structures
-            .values()
-            .filter(|s| s.solar_system_id == sys_id && !s.state.eq_ignore_ascii_case("destroyed"))
-            .map(|s| {
-                let vuln = snap
-                    .structure_vulnerability_windows
-                    .get(&s.structure_id)
-                    .copied()
-                    .unwrap_or((0, 0));
-                PyRep::keyval([
-                    ("itemID", PyRep::Integer(s.structure_id)),
-                    ("structureID", PyRep::Integer(s.structure_id)),
-                    ("typeID", PyRep::Integer(s.type_id as i64)),
-                    ("corporationID", PyRep::Integer(s.owner_corp_id)),
-                    ("allianceID", aid.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                    ("solarSystemID", PyRep::Integer(sys_id as i64)),
-                    ("vulnerableStartTime", PyRep::Integer(vuln.0 as i64)),
-                    ("vulnerableEndTime", PyRep::Integer(vuln.1 as i64)),
-                ])
-            })
-            .collect()
-    })
+pub fn collect_sov_structures_from_snap(snap: &eve_db::WorldStateSnapshot, sys_id: u32) -> Vec<PyRep> {
+    let aid = snap.system_states.get(&sys_id).and_then(|s| s.sov_alliance_id);
+    snap.structures
+        .values()
+        .filter(|s| s.solar_system_id == sys_id && !s.state.eq_ignore_ascii_case("destroyed"))
+        .map(|s| {
+            let vuln = snap
+                .structure_vulnerability_windows
+                .get(&s.structure_id)
+                .copied()
+                .unwrap_or((0, 0));
+            PyRep::keyval([
+                ("itemID", PyRep::Integer(s.structure_id)),
+                ("structureID", PyRep::Integer(s.structure_id)),
+                ("typeID", PyRep::Integer(s.type_id as i64)),
+                ("corporationID", PyRep::Integer(s.owner_corp_id)),
+                ("allianceID", aid.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                ("vulnerableStartTime", PyRep::Integer(vuln.0 as i64)),
+                ("vulnerableEndTime", PyRep::Integer(vuln.1 as i64)),
+            ])
+        })
+        .collect()
 }
+
+
 
 pub async fn handle(
     ctx: &ServerContext,

@@ -115,9 +115,6 @@ async fn anchor_hub(ctx: &ServerContext, sess: &mut SessionState, hub_item: i64)
 
 #[tokio::test]
 async fn test_sov_hub_anchor_from_cargo_claims_system_and_rejects_invalid_space() {
-    // parity: feat:sovereignty.sov-hub-anchor, feat:sovereignty.sov-changed-notifications
-    eve_testkit::attest(&["feat:sovereignty.sov-hub-anchor", "feat:sovereignty.sov-changed-notifications"]);
-
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let mut s_def = select_gm_pilot(&ctx, 74_001, "other", "other-secret", PILOT_2).await;
@@ -190,13 +187,11 @@ async fn test_sov_hub_anchor_from_cargo_claims_system_and_rejects_invalid_space(
 
 #[tokio::test]
 async fn test_sov_adm_scaled_entosis_counter_regen_command_nodes_and_loss() {
-    // parity: feat:sovereignty.sov-adm, feat:sovereignty.sov-entosis
-    // parity: feat:sovereignty.sov-command-nodes, feat:sovereignty.sov-changed-notifications
+    // parity: feat:sovereignty.sov-entosis
+    // parity: feat:sovereignty.sov-command-nodes
     eve_testkit::attest(&[
-        "feat:sovereignty.sov-adm",
         "feat:sovereignty.sov-entosis",
         "feat:sovereignty.sov-command-nodes",
-        "feat:sovereignty.sov-changed-notifications",
     ]);
 
     let ctx = Arc::new(ServerContext::new());

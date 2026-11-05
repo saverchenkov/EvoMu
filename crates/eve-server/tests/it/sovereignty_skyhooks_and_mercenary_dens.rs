@@ -493,9 +493,6 @@ async fn test_mercenary_den_reinforcement_repair_and_destruction_loot() {
 
 #[tokio::test]
 async fn test_skyhook_reagent_maturity_split_and_theft() {
-    // parity: feat:sovereignty.skyhook-reagent-maturity
-    eve_testkit::attest(&["feat:sovereignty.skyhook-reagent-maturity"]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let (sys_id, _, lava_planet, ice_planet, _) = find_nullsec_planets(&ctx);

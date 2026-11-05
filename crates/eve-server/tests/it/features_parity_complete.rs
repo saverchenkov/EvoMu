@@ -2066,9 +2066,6 @@ pub(crate) mod features_parity_part4 {
 // Covers:
 // - `feat:wormholes.lifetime-decay-stages`
 // - `feat:navigation.wormhole-info-buckets`
-// - ``
-// - ``
-// - `feat:sovereignty.skyhook-reagent-maturity`
 
 use eve_db::{CosmicSignatureRecord, InventoryFlag, InventoryItemRecord};
 use eve_machonet::SessionState;
@@ -2569,9 +2566,6 @@ async fn test_hacking_node_types_and_failure_outcome() {
 
 #[tokio::test]
 async fn test_skyhook_reagent_harvest_secure_surplus_split() {
-    // parity: feat:sovereignty.skyhook-reagent-maturity
-    eve_testkit::attest(&["feat:sovereignty.skyhook-reagent-maturity"]);
-
     let ctx = make_context();
     let skyhook_id = 1_040_000_001_i64;
     let t0 = 1_750_000_000_u64;

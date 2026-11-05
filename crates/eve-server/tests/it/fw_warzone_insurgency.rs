@@ -3806,11 +3806,9 @@ async fn anchor_and_online_hub(
 async fn test_e2e_sov_entosis_counter_regen_and_command_nodes() {
     // parity: feat:sovereignty.sov-entosis
     // parity: feat:sovereignty.sov-command-nodes
-    // parity: feat:sovereignty.sov-changed-notifications
     eve_testkit::attest(&[
         "feat:sovereignty.sov-entosis",
         "feat:sovereignty.sov-command-nodes",
-        "feat:sovereignty.sov-changed-notifications",
     ]);
 
     let db_path = temp_sqlite_path("e2e_sov_entosis_nodes");
@@ -3940,15 +3938,6 @@ async fn test_e2e_sov_entosis_counter_regen_and_command_nodes() {
 
 #[tokio::test]
 async fn test_e2e_sov_dev_indices_decay_adm_and_upgrade_sites() {
-    // parity: feat:sovereignty.sov-dev-indices
-    // parity: feat:sovereignty.sov-adm
-    // parity: feat:sovereignty.sov-upgrade-sites
-    eve_testkit::attest(&[
-        "feat:sovereignty.sov-dev-indices",
-        "feat:sovereignty.sov-adm",
-        "feat:sovereignty.sov-upgrade-sites",
-    ]);
-
     let db_path = temp_sqlite_path("e2e_sov_indices_sites");
     let ctx = open_sqlite_ctx(&db_path, true);
     let (null_sys, _) = find_claimable_nullsec_and_lava(&ctx);
@@ -4088,9 +4077,6 @@ async fn test_e2e_sov_dev_indices_decay_adm_and_upgrade_sites() {
 
 #[tokio::test]
 async fn test_e2e_skyhook_reagent_maturity_and_theft() {
-    // parity: feat:sovereignty.skyhook-reagent-maturity
-    eve_testkit::attest(&["feat:sovereignty.skyhook-reagent-maturity"]);
-
     let db_path = temp_sqlite_path("e2e_skyhook_maturity");
     let ctx = open_sqlite_ctx(&db_path, true);
     let (null_sys, lava_planet) = find_claimable_nullsec_and_lava(&ctx);

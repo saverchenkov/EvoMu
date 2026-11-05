@@ -421,13 +421,11 @@ pub(crate) fn find_nullsec_planets(ctx: &ServerContext) -> (u32, i64, i64, i64, 
 async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() {
     // parity: feat:sovereignty.skyhook-acquire
     // DATA GAP: feat:sovereignty.sov-reagents — server-only planetary reagent yield table (docs/BLOCKERS.md §9)
-    // parity: feat:sovereignty.skyhook-reagent-maturity
     // parity: feat:sovereignty.skyhook-theft
     // parity: notify:OnSkyhookFirstActivation
     // parity: notify:OnSkyhookCanBeHacked
     eve_testkit::attest(&[
         "feat:sovereignty.skyhook-acquire",
-        "feat:sovereignty.skyhook-reagent-maturity",
         "feat:sovereignty.skyhook-theft",
         "notify:OnSkyhookFirstActivation",
         "notify:OnSkyhookCanBeHacked",
@@ -1082,7 +1080,6 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
     // DATA GAP: feat:sovereignty.sov-hub-fuel / sov-hub-upgrades — 44 wiki-derived (build 3538132) upgrade definitions & 0 startup-cost placeholder pending V24.01 SDE import (docs/BLOCKERS.md §9)
     // DATA GAP: feat:sovereignty.sov-power — server-only celestial power table (docs/BLOCKERS.md §9)
     // DATA GAP: feat:sovereignty.sov-workforce — server-only celestial workforce table (docs/BLOCKERS.md §9)
-    // parity: feat:sovereignty.sov-upgrade-sites
     // parity: feat:sovereignty.sov-hub-hacking
     // parity: feat:sovereignty.sov-structures-flex
     // parity: feat:modules.cynosural-field-jammer-structure
@@ -1091,7 +1088,6 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
     // parity: notify:OnSovHubHacked
     // parity: notify:OnCynoJammerChanged
     eve_testkit::attest(&[
-        "feat:sovereignty.sov-upgrade-sites",
         "feat:sovereignty.sov-hub-hacking",
         "feat:sovereignty.sov-structures-flex",
         "feat:modules.cynosural-field-jammer-structure",
@@ -1603,12 +1599,10 @@ async fn entosis_node(
 
 #[tokio::test]
 async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes() {
-    // parity: feat:sovereignty.sov-dev-indices
     // parity: feat:sovereignty.sov-vulnerability
     // parity: feat:sovereignty.sov-entosis
     // parity: feat:sovereignty.sov-command-nodes
     eve_testkit::attest(&[
-        "feat:sovereignty.sov-dev-indices",
         "feat:sovereignty.sov-vulnerability",
         "feat:sovereignty.sov-entosis",
         "feat:sovereignty.sov-command-nodes",
@@ -2087,12 +2081,10 @@ use glam::DVec3;
 
 #[tokio::test]
 async fn test_sov_hub_anchor_upgrades_power_and_fuel_closure() {
-    // parity: feat:sovereignty.sov-hub-anchor
     // parity: feat:sovereignty.sov-hub-fuel
     // parity: feat:sovereignty.sov-hub-upgrades
     // parity: feat:sovereignty.sov-power
     eve_testkit::attest(&[
-        "feat:sovereignty.sov-hub-anchor",
         "feat:sovereignty.sov-hub-fuel",
         "feat:sovereignty.sov-hub-upgrades",
         "feat:sovereignty.sov-power",

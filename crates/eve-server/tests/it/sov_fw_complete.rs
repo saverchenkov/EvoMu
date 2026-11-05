@@ -264,11 +264,6 @@ async fn fw_corp_allowed_enlistment_factions_gate_member_enlistment() {
 
 #[tokio::test]
 async fn sov_hub_anchoring_claims_unclaimed_nullsec_and_emits_notifications() {
-    // parity: feat:sovereignty.sov-changed-notifications
-    eve_testkit::attest(&[
-        "feat:sovereignty.sov-changed-notifications",
-    ]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let sys_id: u32 = 30000208; // LZ-6SU (null-sec system)
@@ -364,10 +359,9 @@ async fn sov_hub_anchoring_claims_unclaimed_nullsec_and_emits_notifications() {
 
 #[tokio::test]
 async fn sov_info_adm_scaling_dev_indices_and_map_data() {
-    // parity: feat:sovereignty.sov-info, feat:sovereignty.sov-adm, feat:sovereignty.sov-map-data
+    // parity: feat:sovereignty.sov-info, feat:sovereignty.sov-map-data
     eve_testkit::attest(&[
         "feat:sovereignty.sov-info",
-        "feat:sovereignty.sov-adm",
         "feat:sovereignty.sov-map-data",
     ]);
 

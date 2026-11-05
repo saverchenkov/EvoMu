@@ -50,13 +50,6 @@ fn find_two_claimable_nullsec(ctx: &ServerContext) -> (u32, u32) {
 
 #[tokio::test]
 async fn test_sov_hub_anchor_claim_and_loss_notifications_parity() {
-    // parity: feat:sovereignty.sov-hub-anchor
-    // parity: feat:sovereignty.sov-changed-notifications
-    eve_testkit::attest(&[
-        "feat:sovereignty.sov-hub-anchor",
-        "feat:sovereignty.sov-changed-notifications",
-    ]);
-
     let db_path = temp_sqlite_path("sov_anchor_claim_loss");
     let ctx = open_sqlite_ctx(&db_path, true);
     let (null_sys, alt_null_sys) = find_two_claimable_nullsec(&ctx);
@@ -399,12 +392,8 @@ async fn test_sov_hub_anchor_claim_and_loss_notifications_parity() {
 
 #[tokio::test]
 async fn test_sov_dev_indices_and_adm_live_entosis_scaling_parity() {
-    // parity: feat:sovereignty.sov-dev-indices
-    // parity: feat:sovereignty.sov-adm
     // parity: notify:OnSolarSystemDevIndexChanged
     eve_testkit::attest(&[
-        "feat:sovereignty.sov-dev-indices",
-        "feat:sovereignty.sov-adm",
         "notify:OnSolarSystemDevIndexChanged",
     ]);
 
@@ -1299,10 +1288,6 @@ async fn test_sov_power_workforce_fuel_upgrades_reagents_and_sites_parity() {
     // DATA GAP: feat:sovereignty.sov-power — server-only celestial power table (docs/BLOCKERS.md §9)
     // DATA GAP: feat:sovereignty.sov-workforce — server-only celestial workforce table (docs/BLOCKERS.md §9)
     // DATA GAP: feat:sovereignty.sov-reagents — server-only planetary reagent yield table (docs/BLOCKERS.md §9)
-    // parity: feat:sovereignty.sov-upgrade-sites
-    eve_testkit::attest(&[
-        "feat:sovereignty.sov-upgrade-sites",
-    ]);
 
     let db_path = temp_sqlite_path("sov_power_wf_sites");
     let ctx = open_sqlite_ctx(&db_path, true);

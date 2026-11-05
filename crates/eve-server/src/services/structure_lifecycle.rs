@@ -638,10 +638,10 @@ fn emit_structure_left_space_and_spawn_drops(ctx: &ServerContext, snap: &WorldSt
     corp_recips.dedup_by_key(|(cid, _)| *cid);
     let mut queues = ctx.pending_notifications.write().unwrap_or_else(|e| e.into_inner());
     let sys_args = vec![eve_proto::PyRep::Integer(i64::from(st.solar_system_id)), eve_proto::PyRep::Integer(st.structure_id)];
-    for (cid, uid) in sys_recips {
-        let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(cid, uid, "OnStructureRemoved", "solarsystemid", sys_args.clone());
+    for (cid, uid) in &sys_recips {
+        let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(*cid, *uid, "OnStructureRemoved", "solarsystemid", sys_args.clone());
         let notif = crate::router::PendingMachoNotification {
-            recipient_char_id: cid,
+            recipient_char_id: *cid,
             event: "OnStructureRemoved".into(),
             id_type: "solarsystemid".into(),
             args: sys_args.clone(),
@@ -649,8 +649,8 @@ fn emit_structure_left_space_and_spawn_drops(ctx: &ServerContext, snap: &WorldSt
             marshaled_packet,
             created_filetime: now_ft,
         };
-        queues.entry(cid).or_default().push(notif.clone());
-        let _ = ctx.notify_tx.send((cid, notif));
+        queues.entry(*cid).or_default().push(notif.clone());
+        let _ = ctx.notify_tx.send((*cid, notif));
     }
     let corp_args = vec![eve_proto::PyRep::Integer(st.structure_id)];
     for (cid, uid) in corp_recips {
@@ -667,8 +667,33 @@ fn emit_structure_left_space_and_spawn_drops(ctx: &ServerContext, snap: &WorldSt
         queues.entry(cid).or_default().push(notif.clone());
         let _ = ctx.notify_tx.send((cid, notif));
     }
+    if st.type_id == crate::services::sov_services::TYPE_SOVEREIGNTY_HUB {
+        let sov_args = vec![eve_proto::PyRep::Integer(i64::from(st.solar_system_id)), eve_proto::PyRep::None];
+        let structs = crate::services::sov_services::collect_sov_structures_from_snap(snap, st.solar_system_id);
+        let changes = eve_proto::PyRep::Dict(vec![(eve_proto::PyRep::Integer(st.structure_id), eve_proto::PyRep::List(vec![eve_proto::PyRep::Integer(0)]))]);
+        let structs_args = vec![eve_proto::PyRep::Integer(i64::from(st.solar_system_id)), eve_proto::PyRep::List(structs), changes];
+        for (cid, uid) in &sys_recips {
+            for (ev, args) in [("OnSovereigntyChanged", sov_args.clone()), ("OnSolarSystemSovStructuresUpdated", structs_args.clone())] {
+                let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(*cid, *uid, ev, "solarsystemid", args.clone());
+                let notif = crate::router::PendingMachoNotification { recipient_char_id: *cid, event: ev.into(), id_type: "solarsystemid".into(), args, packet, marshaled_packet, created_filetime: now_ft };
+                queues.entry(*cid).or_default().push(notif.clone());
+                let _ = ctx.notify_tx.send((*cid, notif));
+            }
+        }
+    }
     drop(queues);
     out.pending_signal_tracker_notifs.extend(crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_structure_removed_with_snap(ctx, snap, st.solar_system_id, st.structure_id));
+}
+
+fn cleanup_sov_hub_on_leave_space(snap: &mut WorldStateSnapshot, st: &UpwellStructureRecord) {
+    if st.type_id == crate::services::sov_services::TYPE_SOVEREIGNTY_HUB {
+        snap.sov_runtime.sov_claimed_since_unix.remove(&st.solar_system_id);
+        if let Some(sys_st) = snap.system_states.get_mut(&st.solar_system_id) {
+            sys_st.sov_alliance_id = None;
+            sys_st.strategic_index = 0;
+        }
+        snap.sov_runtime.sov_hubs.remove(&st.structure_id);
+    }
 }
 
 /// Maximum tethering distance from the structure center in meters:
@@ -728,6 +753,7 @@ pub fn destroy_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext
     ext.lifecycle.remove(&structure_id);
     ext.unanchoring_until_unix.remove(&structure_id);
     ext.active_pilot_by_structure.remove(&structure_id); ext.previous_ship_by_structure.remove(&structure_id);
+    cleanup_sov_hub_on_leave_space(snap, &st);
     // feat:clones.clone-destroyed-structure: clones in destroyed structure are moved home (implants lost) per V24 rules.
     relocate_structure_clones_to_home(ctx, snap, &st);
     emit_structure_left_space_and_spawn_drops(ctx, snap, &st, &mut out);
@@ -802,6 +828,7 @@ pub fn package_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext
     ext.active_pilot_by_structure.remove(&structure_id); ext.previous_ship_by_structure.remove(&structure_id);
     ext.descriptions.remove(&structure_id);
     snap.structure_vulnerability_windows.remove(&structure_id);
+    cleanup_sov_hub_on_leave_space(snap, &st);
     // feat:clones.clone-destroyed-structure: clones in unanchored/packaged structure are moved home (implants lost) per V24 rules.
     relocate_structure_clones_to_home(ctx, snap, &st);
     emit_structure_left_space_and_spawn_drops(ctx, snap, &st, &mut out);
