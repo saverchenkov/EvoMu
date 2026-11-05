@@ -240,4 +240,15 @@ mod quasar_cosmetics_skinr_extra_unit_tests;
 #[cfg(test)]
 mod quasar_skills_clones_extra_unit_tests;
 
+mod fw_gameplay_extra_unit_tests;
+#[cfg(test)]
+mod structure_lifecycle_rpc_extra_unit_tests;
+#[cfg(test)]
+mod auth_cache_extra_unit_tests;
+#[cfg(test)]
+mod sov_gameplay_entosis_extra_unit_tests;
+#[cfg(test)]
+mod fitting_module_cycles_extra_unit_tests;
+#[cfg(test)]
+mod combat_npc_ai_extra_unit_tests;
 
