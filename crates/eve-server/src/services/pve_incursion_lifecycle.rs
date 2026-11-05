@@ -66,6 +66,22 @@ fn default_three_u8() -> u8 {
     3
 }
 
+pub(crate) fn build_incursion_npc_combat_state(
+    sde: &eve_sde::SdeRegistry,
+    type_id: u32,
+) -> eve_destiny::CombatState {
+    let mut cs = crate::services::pve_special_sites::build_special_site_npc_combat_state(sde, type_id);
+    if let Some(t) = sde.types.get(&type_id) {
+        if let Some(&sr) = t.default_attributes.get(&eve_sde::attr_ids::SHIELD_RECHARGE_RATE).filter(|&&v| v > 0.0) {
+            cs.shield_recharge_time_ms = sr;
+        }
+        if let Some(&cr) = t.default_attributes.get(&eve_sde::attr_ids::RECHARGE_RATE).filter(|&&v| v > 0.0) {
+            cs.capacitor_recharge_time_ms = cr;
+        }
+    }
+    cs
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorldEventTaleRecord {
     pub tale_id: i64,
@@ -434,7 +450,7 @@ pub async fn advance_incursion_wave_on_escort_kill(
                 let _ = sys_handle
                     .spawn_ball_with_combat(
                         make_site_npc_ball(bid, tid, pos),
-                        crate::services::pve_special_sites::build_special_site_npc_combat_state(sde, tid),
+                        build_incursion_npc_combat_state(sde, tid),
                     )
                     .await;
             }
@@ -819,7 +835,7 @@ pub fn advance_incursion_lifecycles(ctx: &ServerContext) {
                 }
                 let h = systems.get_or_spawn(sys_id);
                 if h.get_ball_snapshot(bid).await.ok().flatten().is_none() {
-                    let cs = crate::services::pve_special_sites::build_special_site_npc_combat_state(&sde, tid);
+                    let cs = build_incursion_npc_combat_state(&sde, tid);
                     let _ = h.spawn_ball_with_combat(make_site_npc_ball(bid, tid, pos), cs).await;
                 }
             }

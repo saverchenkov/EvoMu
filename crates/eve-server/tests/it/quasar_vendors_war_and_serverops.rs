@@ -194,30 +194,15 @@ async fn test_quasar_thirdpartyapi_tournament_and_ui() {
     let tpa_rsp = quasar_rpc(&ctx, &mut sess, "eve.thirdpartyapi.RequestReceived", tpa_req).await;
     assert_eq!(tpa_rsp.status_code, 200, "TPA RequestReceived: {}", tpa_rsp.status_message);
 
-    // 2. Quasar Tournament: arenas, layouts, rulesets & match notices
-    subscribe_to_notices(
-        &ctx,
-        &mut sess,
-        &["eve.tournament.arena.Created"],
-    )
-    .await;
-
-    let published_arena = publish_tournament_arena_created(
-        &ctx.quasar_gateway,
-        NoticeScope::SolarSystem(30_000_142),
-        b"arena-alpha-1234",
-        "Amarr Championship Arena",
-        30_000_142,
-        ctx.now_unix(),
-    )
-    .expect("publish arena notice");
-    assert!(published_arena >= 1);
-
-    let tourney_notices = poll_notices(&ctx, &sess);
-    assert!(
-        tourney_notices.iter().any(|(t, _)| t.ends_with("eve.tournament.arena.Created")),
-        "Must receive arena Created notice"
-    );
+    // 2. Quasar Tournament: arenas, layouts & rulesets
+    let mut create_arena_req = Vec::new();
+    let mut create_attrs = Vec::new();
+    encode_string_field(1, "Amarr Championship Arena", &mut create_attrs);
+    encode_id_field(2, 30_000_142, &mut create_attrs);
+    encode_varint_field(3, 150_000, &mut create_attrs);
+    encode_bytes_field(1, &create_attrs, &mut create_arena_req);
+    let create_arena_rsp = quasar_rpc(&ctx, &mut sess, "eve.tournament.arena.api.CreateRequest", create_arena_req).await;
+    assert_eq!(create_arena_rsp.status_code, 200, "CreateArena: {}", create_arena_rsp.status_message);
 
     let all_arenas_rsp = quasar_rpc(&ctx, &mut sess, "eve.tournament.arena.api.GetAllRequest", Vec::new()).await;
     assert_eq!(all_arenas_rsp.status_code, 200, "GetAllArenas: {}", all_arenas_rsp.status_message);
@@ -298,7 +283,7 @@ async fn test_quasar_universe_vanguard_and_vendors() {
     let loc_rsp = quasar_rpc(
         &ctx,
         &mut sess,
-        "eve.universe.navigation.location.GetShortestGateJumpCountRequest",
+        "eve.universe.navigation.GetShortestGateJumpCountRequest",
         loc_req,
     )
     .await;
@@ -310,7 +295,7 @@ async fn test_quasar_universe_vanguard_and_vendors() {
     let stn_rsp = quasar_rpc(
         &ctx,
         &mut sess,
-        "eve.universe.navigation.station.GetShortestSystemJumpCountRequest",
+        "eve.universe.navigation.GetShortestSystemJumpCountRequest",
         stn_req,
     )
     .await;
@@ -333,7 +318,7 @@ async fn test_quasar_universe_vanguard_and_vendors() {
         &mut sess,
         &[
             "eve.vanguard.commission.assignment.api.Completed",
-            "eve.vanguard.skirmish.api.SkirmishCompleted",
+            "eve.vanguard.insurgency.api.SkirmishCompleted",
             "eve.vanguard.contract.api.CorruptionContractCompleted",
         ],
     )
@@ -377,7 +362,7 @@ async fn test_quasar_universe_vanguard_and_vendors() {
         "Must receive assignment Completed notice"
     );
     assert!(
-        vg_notices.iter().any(|(t, _)| t.ends_with("eve.vanguard.skirmish.api.SkirmishCompleted")),
+        vg_notices.iter().any(|(t, _)| t.ends_with("eve.vanguard.insurgency.api.SkirmishCompleted")),
         "Must receive SkirmishCompleted notice"
     );
 
@@ -581,11 +566,15 @@ async fn test_quasar_war_wormhole_and_serverops() {
     // 2. Quasar Wormhole: Wormhole identifier & attributes
     let wh_wire = encode_wormhole_identifier(100_001);
     assert!(!wh_wire.is_empty(), "Wormhole wire must not be empty");
-
-    let mut wh_req = Vec::new();
-    encode_id_field(1, 100_001, &mut wh_req);
-    let wh_rsp = quasar_rpc(&ctx, &mut sess, "eve.wormhole.GetRequest", wh_req).await;
-    assert_eq!(wh_rsp.status_code, 200, "Wormhole Get: {}", wh_rsp.status_message);
+    let reg = QuasarDescriptorRegistry::open_default().expect("open descriptor registry");
+    let dyn_wh = reg
+        .decode_dynamic("eve.wormhole.Identifier", &wh_wire)
+        .expect("decode wormhole Identifier");
+    assert_eq!(dyn_wh.full_name, "eve.wormhole.Identifier");
+    let dyn_wh_attr = reg
+        .decode_dynamic("eve.wormhole.Attributes", &[])
+        .expect("decode wormhole Attributes");
+    assert_eq!(dyn_wh_attr.full_name, "eve.wormhole.Attributes");
 
     // 3. Serverops Config-File: Ports, DB, cluster layout, feature toggles and startup validation
     let valid_toml = r#"

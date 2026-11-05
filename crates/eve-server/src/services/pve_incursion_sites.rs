@@ -801,7 +801,7 @@ pub async fn process_incursion_site_completion_and_payout_core(
             let _ = sys_handle
                 .spawn_ball_with_combat(
                     make_site_npc_ball(new_bid, new_tid, site_pos),
-                    crate::services::pve_special_sites::build_special_site_npc_combat_state(sde, new_tid),
+                    super::pve_incursion_lifecycle::build_incursion_npc_combat_state(sde, new_tid),
                 )
                 .await;
         }
@@ -811,7 +811,7 @@ pub async fn process_incursion_site_completion_and_payout_core(
             let _ = sys_handle
                 .spawn_ball_with_combat(
                     make_site_npc_ball(esc_bid, esc_tid, esc_pos),
-                    crate::services::pve_special_sites::build_special_site_npc_combat_state(sde, esc_tid),
+                    super::pve_incursion_lifecycle::build_incursion_npc_combat_state(sde, esc_tid),
                 )
                 .await;
         }
@@ -823,7 +823,7 @@ pub async fn process_incursion_site_completion_and_payout_core(
         let _ = ms_handle
             .spawn_ball_with_combat(
                 make_site_npc_ball(ms_bid, ms_tid, ms_pos),
-                crate::services::pve_special_sites::build_special_site_npc_combat_state(sde, ms_tid),
+                super::pve_incursion_lifecycle::build_incursion_npc_combat_state(sde, ms_tid),
             )
             .await;
         for (esc_bid, esc_tid, esc_offset) in ms_escorts {
@@ -832,7 +832,7 @@ pub async fn process_incursion_site_completion_and_payout_core(
             let _ = ms_handle
                 .spawn_ball_with_combat(
                     make_site_npc_ball(esc_bid, esc_tid, esc_pos),
-                    crate::services::pve_special_sites::build_special_site_npc_combat_state(sde, esc_tid),
+                    super::pve_incursion_lifecycle::build_incursion_npc_combat_state(sde, esc_tid),
                 )
                 .await;
         }

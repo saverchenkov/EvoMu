@@ -131,7 +131,16 @@ def encode_add_balls(stamp, balls):
         elif mode_byte == 3:
             dx, dy, dz = extra["destination"]
             ws = int(round(float(extra["warp_speed_au_s"]) * 10.0))
-            out.extend(bytearray(struct.pack("<dddIdqI", float(dx), float(dy), float(dz), 0, 15000.0, 0, ws)))
+            out.extend(bytearray(struct.pack(
+                "<dddiqqq",
+                float(dx),
+                float(dy),
+                float(dz),
+                0,
+                struct.unpack("<q", struct.pack("<d", -1.0))[0],
+                struct.unpack("<q", struct.pack("<d", 15000.0))[0],
+                ws,
+            )))
         elif mode_byte == 5:
             out.extend(bytearray(struct.pack("<q", int(extra["target_id"]))))
     return bytes(out)

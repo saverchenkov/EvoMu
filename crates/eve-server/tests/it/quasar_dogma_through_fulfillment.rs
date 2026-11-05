@@ -4,19 +4,18 @@
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
     encode_bytes_field, encode_varint_field, EvePublicRequest, EvePublicResponse, GoogleAny,
-    GoogleTimestamp, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
+    GoogleTimestamp, QuasarDescriptorRegistry, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
 use eve_server::quasar_gateway::NoticeScope;
 use eve_server::router::ServerContext;
 use eve_server::services::quasar_char_skill_services::{
     encode_dbs_settings, encode_dbs_solar_system_details, encode_duel_challenge_accepted,
-    encode_duel_challenge_issued, encode_epicarc_progress, encode_fighter_squad_state,
-    encode_fighter_type_identifier, publish_duel_challenge_accepted_notice,
-    publish_duel_challenge_issued_notice, publish_epicarc_character_completed_notice,
-    publish_fleet_advert_created_notice, publish_fleet_member_joined_notice,
-    publish_system_wide_dbuff_applied, publish_system_wide_dbuff_removed,
-    publish_warp_scrambling_applied_notice,
+    encode_duel_challenge_issued, encode_fighter_type_identifier,
+    publish_duel_challenge_accepted_notice, publish_duel_challenge_issued_notice,
+    publish_epicarc_character_completed_notice, publish_fleet_advert_created_notice,
+    publish_fleet_member_joined_notice, publish_system_wide_dbuff_applied,
+    publish_system_wide_dbuff_removed, publish_warp_scrambling_applied_notice,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -203,7 +202,8 @@ async fn test_quasar_dogma_duel_dungeon_and_dbs() {
     seed_test_fixtures(&ctx);
     let mut sess = make_session(101, 1001, 90_000_001, 1_000_170);
 
-    // 1. Quasar Dogma: system modifiers, dogma status, and notice fan-out
+    // 1. Quasar Dogma: system modifiers & notice fan-out
+    let reg = QuasarDescriptorRegistry::open_default().expect("open descriptor registry");
     subscribe_to_notices(
         &ctx,
         &mut sess,
@@ -214,29 +214,13 @@ async fn test_quasar_dogma_duel_dungeon_and_dbs() {
     )
     .await;
 
-    let mut sys_req = Vec::new();
-    encode_id_field(1, 30_000_142, &mut sys_req);
-    let mod_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve.dogma.modifier.system_wide.api.GetModifiersRequest",
-        sys_req,
-    )
-    .await;
-    assert_eq!(mod_rsp.status_code, 200, "GetModifiers: {}", mod_rsp.status_message);
-    let mod_any = mod_rsp.payload.expect("GetModifiersResponse payload");
-    assert!(mod_any.type_url.ends_with("GetModifiersResponse"));
-
-    let dogma_rsp = quasar_rpc(&ctx, &mut sess, "eve.dogma.GetRequest", Vec::new()).await;
-    assert_eq!(dogma_rsp.status_code, 200, "DogmaGet: {}", dogma_rsp.status_message);
-
     let published_dogma = publish_system_wide_dbuff_applied(
         &ctx.quasar_gateway,
         NoticeScope::SolarSystem(30_000_142),
         30_000_142,
         101,
-        1,
-        500_000_000,
+        -1,
+        -500_000_000,
         ctx.now_unix(),
     )
     .expect("publish dogma notice");
@@ -253,14 +237,15 @@ async fn test_quasar_dogma_duel_dungeon_and_dbs() {
     assert!(published_dogma_rem >= 1);
 
     let notices = poll_notices(&ctx, &mut sess).await;
-    assert!(
-        notices
-            .iter()
-            .any(|(t, _)| t.ends_with("eve.dogma.modifier.system_wide.api.Applied")),
-        "Must receive Applied notice"
-    );
+    let applied_payload = notices
+        .iter()
+        .find(|(t, _)| t.ends_with("eve.dogma.modifier.system_wide.api.Applied"))
+        .map(|(_, p)| p.as_slice())
+        .expect("Must receive Applied notice");
+    reg.decode_dynamic("eve.dogma.modifier.system_wide.api.Applied", applied_payload)
+        .expect("Applied notice must decode against V24 descriptor");
 
-    // 2. Quasar Duel: model serialization, notice delivery, RPC challenge lifecycle
+    // 2. Quasar Duel: model serialization & notice delivery
     subscribe_to_notices(
         &ctx,
         &mut sess,
@@ -269,9 +254,11 @@ async fn test_quasar_dogma_duel_dungeon_and_dbs() {
     .await;
 
     let duel_issued_bytes = encode_duel_challenge_issued(90_000_001, 90_000_002);
-    assert!(!duel_issued_bytes.is_empty(), "Duel issued payload must be populated");
+    reg.decode_dynamic("eve.duel.ChallengeIssued", &duel_issued_bytes)
+        .expect("Duel issued payload must match V24 schema");
     let duel_accepted_bytes = encode_duel_challenge_accepted(90_000_001, 90_000_002);
-    assert!(!duel_accepted_bytes.is_empty(), "Duel accepted payload must be populated");
+    reg.decode_dynamic("eve.duel.ChallengeAccepted", &duel_accepted_bytes)
+        .expect("Duel accepted payload must match V24 schema");
 
     let published_duel = publish_duel_challenge_issued_notice(
         &ctx.quasar_gateway,
@@ -293,28 +280,17 @@ async fn test_quasar_dogma_duel_dungeon_and_dbs() {
     .expect("publish duel accepted notice");
     assert!(published_accept >= 1);
 
-    let mut issue_req = Vec::new();
-    encode_id_field(1, 90_000_002, &mut issue_req);
-    let issue_rsp = quasar_rpc(&ctx, &mut sess, "eve.duel.IssueChallengeRequest", issue_req).await;
-    assert_eq!(issue_rsp.status_code, 200, "IssueChallenge: {}", issue_rsp.status_message);
-
-    let mut accept_req = Vec::new();
-    encode_id_field(1, 90_000_001, &mut accept_req);
-    let accept_rsp = quasar_rpc(&ctx, &mut sess, "eve.duel.AcceptChallengeRequest", accept_req).await;
-    assert_eq!(accept_rsp.status_code, 200, "AcceptChallenge: {}", accept_rsp.status_message);
-
     let notices2 = poll_notices(&ctx, &mut sess).await;
     assert!(
         notices2.iter().any(|(t, _)| t.ends_with("eve.duel.ChallengeIssued")),
         "Must receive duel notice"
     );
+    assert!(
+        notices2.iter().any(|(t, _)| t.ends_with("eve.duel.ChallengeAccepted")),
+        "Must receive duel accepted notice"
+    );
 
-    // 3. Quasar Dungeon: Encounter routing, sovereignty instances, 404 rejection
-    let mut dng_req = Vec::new();
-    encode_id_field(1, 1, &mut dng_req);
-    let dng_rsp = quasar_rpc(&ctx, &mut sess, "eve.dungeon.GetRequest", dng_req).await;
-    assert_eq!(dng_rsp.status_code, 200, "DungeonGet: {}", dng_rsp.status_message);
-
+    // 3. Quasar Dungeon: sovereignty instances & visibility RPCs
     let mut sov_dng_req = Vec::new();
     encode_id_field(1, 30_000_142, &mut sov_dng_req);
     let sov_dng_rsp = quasar_rpc(
@@ -334,11 +310,6 @@ async fn test_quasar_dogma_duel_dungeon_and_dbs() {
     )
     .await;
     assert_eq!(vis_dng_rsp.status_code, 200, "VisibleSovInstances: {}", vis_dng_rsp.status_message);
-
-    let mut bad_dng = Vec::new();
-    encode_id_field(1, 999_999, &mut bad_dng);
-    let bad_dng_rsp = quasar_rpc(&ctx, &mut sess, "eve.dungeon.GetRequest", bad_dng).await;
-    assert_eq!(bad_dng_rsp.status_code, 404, "Bad dungeon must 404");
 
     // 4. Quasar Dynamic Bounty System (DBS): RPC routing and multiplier models
     let dbs_set_rsp = quasar_rpc(
@@ -395,21 +366,14 @@ async fn test_quasar_effect_epicarc_and_factionwarfare() {
     seed_test_fixtures(&ctx);
     let mut sess = make_session(102, 1002, 90_000_001, 1_000_170);
 
-    // 1. Quasar Effect: active dogma/status effect queries & pvp electronic notices
+    // 1. Quasar Effect: pvp electronic notices & V24 schema decoding
+    let reg = QuasarDescriptorRegistry::open_default().expect("open descriptor registry");
     subscribe_to_notices(
         &ctx,
         &mut sess,
         &["eve.effect.combat.electronic.pvp.WarpScramblingApplied"],
     )
     .await;
-
-    let fx_rsp = quasar_rpc(&ctx, &mut sess, "eve.effect.GetActiveEffectsRequest", Vec::new()).await;
-    assert_eq!(fx_rsp.status_code, 200, "GetActiveEffects: {}", fx_rsp.status_message);
-    let fx_any = fx_rsp.payload.expect("GetActiveEffects payload");
-    assert!(fx_any.type_url.ends_with("GetActiveEffectsResponse"));
-
-    let fx_combat_rsp = quasar_rpc(&ctx, &mut sess, "eve.effect.combat.GetRequest", Vec::new()).await;
-    assert_eq!(fx_combat_rsp.status_code, 200);
 
     let published_scram = publish_warp_scrambling_applied_notice(
         &ctx.quasar_gateway,
@@ -423,26 +387,34 @@ async fn test_quasar_effect_epicarc_and_factionwarfare() {
     assert!(published_scram >= 1, "Must fan-out scram notice to session");
 
     let notices = poll_notices(&ctx, &mut sess).await;
-    assert!(
-        notices
-            .iter()
-            .any(|(t, _)| t.ends_with("eve.effect.combat.electronic.pvp.WarpScramblingApplied")),
-        "Must receive WarpScramblingApplied notice"
-    );
+    let scram_payload = notices
+        .iter()
+        .find(|(t, _)| t.ends_with("eve.effect.combat.electronic.pvp.WarpScramblingApplied"))
+        .map(|(_, p)| p.as_slice())
+        .expect("Must receive WarpScramblingApplied notice");
+    reg.decode_dynamic(
+        "eve.effect.combat.electronic.pvp.WarpScramblingApplied",
+        scram_payload,
+    )
+    .expect("WarpScramblingApplied must match V24 descriptor");
 
-    // 2. Quasar Epic Arc: stage tracking, completion notices, and protobuf models
+    // 2. Quasar Epic Arc & Mission: completed count RPC and CharacterCompleted notice
     subscribe_to_notices(&ctx, &mut sess, &["eve.mission.epicarc.event.CharacterCompleted"]).await;
 
-    let mut arc_req = Vec::new();
-    encode_id_field(1, 90_000_001, &mut arc_req);
-    encode_id_field(2, 1, &mut arc_req);
-    let arc_rsp = quasar_rpc(&ctx, &mut sess, "eve.mission.epicarc.GetProgressRequest", arc_req).await;
-    assert_eq!(arc_rsp.status_code, 200, "EpicArcProgress: {}", arc_rsp.status_message);
-    let arc_any = arc_rsp.payload.expect("GetProgressResponse payload");
-    assert!(arc_any.type_url.ends_with("GetProgressResponse"));
-
-    let arc_wire = encode_epicarc_progress(1, 4, false);
-    assert!(!arc_wire.is_empty(), "Epic arc progress wire payload must be populated");
+    let mut mission_req = Vec::new();
+    encode_id_field(1, 90_000_001, &mut mission_req);
+    let mission_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve.mission.api.GetCompletedCountRequest",
+        mission_req,
+    )
+    .await;
+    assert_eq!(mission_rsp.status_code, 200, "MissionCount: {}", mission_rsp.status_message);
+    let mission_any = mission_rsp.payload.expect("GetCompletedCountResponse payload");
+    assert!(mission_any.type_url.ends_with("GetCompletedCountResponse"));
+    reg.decode_dynamic("eve.mission.api.GetCompletedCountResponse", &mission_any.value)
+        .expect("GetCompletedCountResponse must match V24 descriptor");
 
     let published_arc = publish_epicarc_character_completed_notice(
         &ctx.quasar_gateway,
@@ -455,12 +427,13 @@ async fn test_quasar_effect_epicarc_and_factionwarfare() {
     assert!(published_arc >= 1);
 
     let notices2 = poll_notices(&ctx, &mut sess).await;
-    assert!(
-        notices2
-            .iter()
-            .any(|(t, _)| t.ends_with("eve.mission.epicarc.event.CharacterCompleted")),
-        "Must receive CharacterCompleted notice"
-    );
+    let arc_payload = notices2
+        .iter()
+        .find(|(t, _)| t.ends_with("eve.mission.epicarc.event.CharacterCompleted"))
+        .map(|(_, p)| p.as_slice())
+        .expect("Must receive CharacterCompleted notice");
+    reg.decode_dynamic("eve.mission.epicarc.event.CharacterCompleted", arc_payload)
+        .expect("CharacterCompleted must match V24 descriptor");
 
     // 3. Quasar Faction Warfare: warzones, systems, stats, and leaderboards
     let fw_sys_rsp = quasar_rpc(&ctx, &mut sess, "eve.factionwarfare.systems.GetRequest", Vec::new()).await;
@@ -504,6 +477,10 @@ async fn test_quasar_effect_epicarc_and_factionwarfare() {
     )
     .await;
     assert_eq!(fw_corp_rsp.status_code, 200);
+    if let Some(corp_any) = &fw_corp_rsp.payload {
+        reg.decode_dynamic("eve.factionwarfare.stats.corporation.GetResponse", &corp_any.value)
+            .expect("corp stats response must match V24 schema");
+    }
 
     let fw_fac_rsp = quasar_rpc(
         &ctx,
@@ -513,6 +490,10 @@ async fn test_quasar_effect_epicarc_and_factionwarfare() {
     )
     .await;
     assert_eq!(fw_fac_rsp.status_code, 200, "FW faction stats: {}", fw_fac_rsp.status_message);
+    if let Some(fac_any) = &fw_fac_rsp.payload {
+        reg.decode_dynamic("eve.factionwarfare.stats.factions.GetResponse", &fac_any.value)
+            .expect("faction stats response must match V24 schema");
+    }
 
     let fw_lb_rsp = quasar_rpc(
         &ctx,
@@ -533,45 +514,19 @@ async fn test_quasar_fighter_fleet_and_fulfillment() {
     seed_test_fixtures(&ctx);
     let mut sess = make_session(103, 1003, 90_000_001, 1_000_170);
 
-    // 1. Quasar Fighter: models, squad abilities, and squad status query
+    // 1. Quasar Fighter: fighter type identifier model decoding
+    let reg = QuasarDescriptorRegistry::open_default().expect("open descriptor registry");
     let ft_wire = encode_fighter_type_identifier(40359);
-    assert!(!ft_wire.is_empty(), "Fighter type wire must be populated");
+    reg.decode_dynamic("eve.fighter.fightertype.Identifier", &ft_wire)
+        .expect("Fighter type identifier must match V24 schema");
 
-    let squad_wire = encode_fighter_squad_state(1, 40359, 9, &[0, 1, 2]);
-    assert!(!squad_wire.is_empty(), "Fighter squad state wire must be populated");
-
-    let mut sq_req = Vec::new();
-    encode_id_field(1, 100_001, &mut sq_req);
-    let ft_rsp = quasar_rpc(&ctx, &mut sess, "eve.fighter.GetSquadronsRequest", sq_req).await;
-    assert_eq!(ft_rsp.status_code, 200, "GetSquadrons: {}", ft_rsp.status_message);
-    let ft_any = ft_rsp.payload.expect("GetSquadrons payload");
-    assert!(ft_any.type_url.ends_with("GetSquadronsResponse"));
-
-    // 2. Quasar Fleet: composition, invites, and advert/joined notices
+    // 2. Quasar Fleet: advert/joined notices and V24 schema decoding
     subscribe_to_notices(
         &ctx,
         &mut sess,
         &["eve.fleet.api.AdvertCreated", "eve.fleet.member.Joined"],
     )
     .await;
-
-    let mut comp_req = Vec::new();
-    encode_id_field(1, 1, &mut comp_req);
-    let fl_comp_rsp = quasar_rpc(&ctx, &mut sess, "eve.fleet.GetCompositionRequest", comp_req).await;
-    assert_eq!(fl_comp_rsp.status_code, 200, "FleetComposition: {}", fl_comp_rsp.status_message);
-    let fl_any = fl_comp_rsp.payload.expect("FleetResponse payload");
-    assert!(fl_any.type_url.ends_with("GetResponse"));
-
-    let mut fl_get_req = Vec::new();
-    encode_id_field(1, 1, &mut fl_get_req);
-    let fl_get_rsp = quasar_rpc(&ctx, &mut sess, "eve.fleet.GetRequest", fl_get_req).await;
-    assert_eq!(fl_get_rsp.status_code, 200);
-
-    let mut inv_req = Vec::new();
-    encode_id_field(1, 90_000_002, &mut inv_req);
-    encode_id_field(2, 1, &mut inv_req);
-    let fl_inv_rsp = quasar_rpc(&ctx, &mut sess, "eve.fleet.invite.SendRequest", inv_req).await;
-    assert_eq!(fl_inv_rsp.status_code, 200, "FleetInvite: {}", fl_inv_rsp.status_message);
 
     let published_adv = publish_fleet_advert_created_notice(
         &ctx.quasar_gateway,
@@ -595,14 +550,20 @@ async fn test_quasar_fighter_fleet_and_fulfillment() {
     assert!(published_join >= 1);
 
     let notices = poll_notices(&ctx, &mut sess).await;
-    assert!(
-        notices.iter().any(|(t, _)| t.ends_with("eve.fleet.api.AdvertCreated")),
-        "Must receive AdvertCreated notice"
-    );
-    assert!(
-        notices.iter().any(|(t, _)| t.ends_with("eve.fleet.member.Joined")),
-        "Must receive Joined notice"
-    );
+    let adv_payload = notices
+        .iter()
+        .find(|(t, _)| t.ends_with("eve.fleet.api.AdvertCreated"))
+        .map(|(_, p)| p.as_slice())
+        .expect("Must receive AdvertCreated notice");
+    reg.decode_dynamic("eve.fleet.api.AdvertCreated", adv_payload)
+        .expect("AdvertCreated must match V24 descriptor");
+    let join_payload = notices
+        .iter()
+        .find(|(t, _)| t.ends_with("eve.fleet.member.Joined"))
+        .map(|(_, p)| p.as_slice())
+        .expect("Must receive Joined notice");
+    reg.decode_dynamic("eve.fleet.member.Joined", join_payload)
+        .expect("Joined must match V24 descriptor");
 
     // 3. Quasar Fulfillment: store delivery, offer retrieval, and reward claims
     let mut deliver_req = Vec::new();

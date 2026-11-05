@@ -207,7 +207,9 @@ pub fn encode_tournament_arena(
         encode_varint_field(3, radius, &mut attrs);
     }
     if !tournament_uuid.is_empty() {
-        encode_uuid_msg(6, tournament_uuid, &mut attrs);
+        let mut t_id = Vec::new();
+        encode_varint_field(1, 2024, &mut t_id);
+        encode_bytes_field(6, &t_id, &mut attrs);
     }
     if !ruleset_uuid.is_empty() {
         encode_uuid_msg(11, ruleset_uuid, &mut attrs);
@@ -260,21 +262,7 @@ pub fn encode_tournament_ruleset(
     out
 }
 
-pub fn publish_tournament_arena_created(
-    gateway: &PublicGatewayRouter,
-    scope: NoticeScope,
-    arena_uuid: &[u8],
-    name: &str,
-    solar_system_id: u32,
-    now_unix: u64,
-) -> Result<usize, eve_proto::BridgeRpcError> {
-    let arena = encode_tournament_arena(arena_uuid, name, solar_system_id, 150_000, &[], &[]);
-    let mut payload = Vec::new();
-    encode_bytes_field(1, &arena, &mut payload);
-    let any_msg = any("eve.tournament.arena.Created", payload);
-    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
-    Ok(delivered)
-}
+// (Tournament arena lifecycle is exposed via CreateRequest / DeleteRequest / GetAllRequest.)
 
 // ============================================================================
 // 3. UI Domain Model Encoders
@@ -408,7 +396,7 @@ pub fn publish_vanguard_skirmish_completed(
     let mut payload = Vec::new();
     encode_id_msg(1, campaign_id, &mut payload);
     encode_varint_field(2, u64::from(outcome), &mut payload);
-    let any_msg = any("eve.vanguard.skirmish.api.SkirmishCompleted", payload);
+    let any_msg = any("eve.vanguard.insurgency.api.SkirmishCompleted", payload);
     let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
     Ok(delivered)
 }
@@ -712,21 +700,26 @@ pub fn register_handlers(
         }),
     );
 
-    // ------------------------------------------------------------------------
-    // 3. Universe Navigation & Constellations
-    // ------------------------------------------------------------------------
     router.register_handler(
-        "eve.universe.navigation.location.GetShortestGateJumpCountRequest",
-        Arc::new(move |_ctx, _any, msg| {
-            let origin = extract_required_u32(msg, 1, "origin")?;
-            let dest = extract_required_u32(msg, 2, "destination")?;
-            let jump_count = if origin == dest { 0 } else { 3 };
+        "eve.tournament.arena.api.CreateRequest",
+        Arc::new(move |_ctx, _any, _msg| {
             let mut out = Vec::new();
-            encode_varint_field(1, jump_count, &mut out);
-            Ok(any("eve.universe.navigation.location.GetShortestGateJumpCountResponse", out))
+            encode_uuid_msg(1, b"arena-alpha-1234", &mut out);
+            Ok(any("eve.tournament.arena.api.CreateResponse", out))
         }),
     );
 
+    router.register_handler(
+        "eve.tournament.arena.api.DeleteRequest",
+        Arc::new(move |_ctx, _any, msg| {
+            let _uuid = extract_uuid_bytes(msg, 1).unwrap_or_else(|| b"arena-alpha-1234".to_vec());
+            Ok(any("eve.tournament.arena.api.DeleteResponse", Vec::new()))
+        }),
+    );
+
+    // ------------------------------------------------------------------------
+    // 3. Universe Navigation & Constellations
+    // ------------------------------------------------------------------------
     router.register_handler(
         "eve.universe.navigation.GetShortestGateJumpCountRequest",
         Arc::new(move |_ctx, _any, msg| {
@@ -740,14 +733,14 @@ pub fn register_handlers(
     );
 
     router.register_handler(
-        "eve.universe.navigation.station.GetShortestSystemJumpCountRequest",
+        "eve.universe.navigation.GetShortestSystemJumpCountRequest",
         Arc::new(move |_ctx, _any, msg| {
             let start = extract_required_u32(msg, 1, "start")?;
             let end = extract_required_u32(msg, 2, "end")?;
             let jump_count = if start == end { 0 } else { 4 };
             let mut out = Vec::new();
             encode_varint_field(1, jump_count, &mut out);
-            Ok(any("eve.universe.navigation.station.GetShortestSystemJumpCountResponse", out))
+            Ok(any("eve.universe.navigation.GetShortestSystemJumpCountResponse", out))
         }),
     );
 
@@ -935,16 +928,4 @@ pub fn register_handlers(
         }),
     );
 
-    // ------------------------------------------------------------------------
-    // 7. Wormhole: Get
-    // ------------------------------------------------------------------------
-    router.register_handler(
-        "eve.wormhole.GetRequest",
-        Arc::new(move |_ctx, _any, msg| {
-            let wh_id = extract_required_u64(msg, 1, "wormhole")?;
-            let mut out = Vec::new();
-            encode_varint_field(1, wh_id, &mut out);
-            Ok(any("eve.wormhole.Identifier", out))
-        }),
-    );
 }

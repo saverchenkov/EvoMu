@@ -6495,6 +6495,7 @@ async fn test_batch2_facwar_bunker_vulnerable_and_incursion_influence_update() {
             })
         });
         let Some(gate_id) = gate_opt else {
+            rpc(&fw_ctx, &mut sess_fw, "timeControl", "AdvanceClock", &[PyRep::Integer(1805)]).await.expect("AdvanceClock");
             let _ = rpc(&fw_ctx, &mut sess_fw, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await;
             continue;
         };
