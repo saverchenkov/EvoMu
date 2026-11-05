@@ -217,21 +217,19 @@ pub(crate) async fn rpc_call(
 async fn test_esi6_market_public_and_structure_routes() {
     // parity: esi:GET /markets/groups, esi:GET /markets/groups/{market_group_id}
     // parity: esi:GET /markets/prices, esi:GET /markets/{region_id}/orders
-    // parity: esi:GET /markets/{region_id}/history, esi:GET /markets/{region_id}/types
+    // parity: esi:GET /markets/{region_id}/types
     // parity: esi:GET /markets/structures/{structure_id}
     // parity: feat:esi.market.groups, feat:esi.market.region-orders
-    // parity: feat:esi.market.history, feat:esi.market.types
+    // parity: feat:esi.market.types
     eve_testkit::attest(&[
         "esi:GET /markets/groups",
         "esi:GET /markets/groups/{market_group_id}",
         "esi:GET /markets/prices",
         "esi:GET /markets/{region_id}/orders",
-        "esi:GET /markets/{region_id}/history",
         "esi:GET /markets/{region_id}/types",
         "esi:GET /markets/structures/{structure_id}",
         "feat:esi.market.groups",
         "feat:esi.market.region-orders",
-        "feat:esi.market.history",
         "feat:esi.market.types",
     ]);
 
@@ -461,15 +459,6 @@ async fn test_esi6_market_public_and_structure_routes() {
 
 #[tokio::test]
 async fn test_esi6_industry_jobs_fields_and_completion() {
-    // parity: esi:GET /characters/{character_id}/industry/jobs, esi:GET /corporations/{corporation_id}/industry/jobs
-    // parity: feat:esi.industry.char-jobs, feat:esi.industry.corp-jobs
-    eve_testkit::attest(&[
-        "esi:GET /characters/{character_id}/industry/jobs",
-        "esi:GET /corporations/{corporation_id}/industry/jobs",
-        "feat:esi.industry.char-jobs",
-        "feat:esi.industry.corp-jobs",
-    ]);
-
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
@@ -854,17 +843,10 @@ async fn test_esi_market_groups_sde_descriptions_and_structure_orders_acl_hub() 
 
 #[tokio::test]
 async fn test_esi_corp_endpoint_specific_role_gates_and_routes() {
-    // parity: esi:GET /corporations/{corporation_id}/orders, esi:GET /corporations/{corporation_id}/orders/history, esi:GET /corporation/{corporation_id}/mining/extractions, feat:esi.industry.corp-extractions, esi:GET /corporation/{corporation_id}/mining/observers, esi:GET /corporation/{corporation_id}/mining/observers/{observer_id}, feat:esi.industry.corp-observers, esi:GET /corporations/{corporation_id}/customs_offices, feat:esi.planetary-interaction.customs
+    // parity: esi:GET /corporations/{corporation_id}/orders, esi:GET /corporations/{corporation_id}/orders/history
     eve_testkit::attest(&[
         "esi:GET /corporations/{corporation_id}/orders",
         "esi:GET /corporations/{corporation_id}/orders/history",
-        "esi:GET /corporation/{corporation_id}/mining/extractions",
-        "feat:esi.industry.corp-extractions",
-        "esi:GET /corporation/{corporation_id}/mining/observers",
-        "esi:GET /corporation/{corporation_id}/mining/observers/{observer_id}",
-        "feat:esi.industry.corp-observers",
-        "esi:GET /corporations/{corporation_id}/customs_offices",
-        "feat:esi.planetary-interaction.customs",
     ]);
 
     let ctx = Arc::new(ServerContext::new());
@@ -1485,19 +1467,11 @@ async fn test_esi6_contracts_character_corporation_and_public_routes() {
 
 #[tokio::test]
 async fn test_esi6_planetary_interaction_and_plan_closure() {
-    // parity: esi:GET /characters/{character_id}/planets, esi:GET /characters/{character_id}/planets/{planet_id}
-    // parity: esi:GET /corporations/{corporation_id}/customs_offices, esi:GET /universe/schematics/{schematic_id}
-    // parity: feat:esi.planetary-interaction.colonies, feat:esi.planetary-interaction.layout
-    // parity: feat:esi.planetary-interaction.customs, feat:esi.planetary-interaction.schematics
+    // parity: esi:GET /universe/schematics/{schematic_id}
+    // parity: feat:esi.planetary-interaction.schematics
     // parity: plan:ESI-6
     eve_testkit::attest(&[
-        "esi:GET /characters/{character_id}/planets",
-        "esi:GET /characters/{character_id}/planets/{planet_id}",
-        "esi:GET /corporations/{corporation_id}/customs_offices",
         "esi:GET /universe/schematics/{schematic_id}",
-        "feat:esi.planetary-interaction.colonies",
-        "feat:esi.planetary-interaction.layout",
-        "feat:esi.planetary-interaction.customs",
         "feat:esi.planetary-interaction.schematics",
         "plan:ESI-6",
     ]);
@@ -1771,29 +1745,11 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn test_esi6_industry_and_mining_routes() {
-    // parity: esi:GET /industry/facilities, esi:GET /industry/systems
-    // parity: esi:GET /characters/{character_id}/industry/jobs, esi:GET /characters/{character_id}/mining
-    // parity: esi:GET /corporations/{corporation_id}/industry/jobs, esi:GET /corporation/{corporation_id}/mining/extractions
-    // parity: esi:GET /corporation/{corporation_id}/mining/observers, esi:GET /corporation/{corporation_id}/mining/observers/{observer_id}
-    // parity: feat:esi.industry.facilities, feat:esi.industry.systems
-    // parity: feat:esi.industry.char-jobs, feat:esi.industry.char-mining
-    // parity: feat:esi.industry.corp-jobs, feat:esi.industry.corp-extractions, feat:esi.industry.corp-observers
+    // parity: esi:GET /industry/systems
+    // parity: feat:esi.industry.systems
     eve_testkit::attest(&[
-        "esi:GET /industry/facilities",
         "esi:GET /industry/systems",
-        "esi:GET /characters/{character_id}/industry/jobs",
-        "esi:GET /characters/{character_id}/mining",
-        "esi:GET /corporations/{corporation_id}/industry/jobs",
-        "esi:GET /corporation/{corporation_id}/mining/extractions",
-        "esi:GET /corporation/{corporation_id}/mining/observers",
-        "esi:GET /corporation/{corporation_id}/mining/observers/{observer_id}",
-        "feat:esi.industry.facilities",
         "feat:esi.industry.systems",
-        "feat:esi.industry.char-jobs",
-        "feat:esi.industry.char-mining",
-        "feat:esi.industry.corp-jobs",
-        "feat:esi.industry.corp-extractions",
-        "feat:esi.industry.corp-observers",
     ]);
 
     let ctx = Arc::new(ServerContext::new());

@@ -465,3 +465,4 @@ mod season_login_milestone_rpcs_live;
 mod lp_structures_lookup_dungeons_live;
 mod pve_hacking_incursions_missions_live;
 mod pve_incursions_missions_live;
+mod esi_industry_mining_pi_loyalty_live;

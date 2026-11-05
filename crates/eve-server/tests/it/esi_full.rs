@@ -911,14 +911,6 @@ async fn http_expect_status(
 
 #[tokio::test]
 async fn test_esi_b2_corp_mining_and_customs_offices_live_http_and_sqlite() {
-    // parity: esi:GET /corporation/{corporation_id}/mining/extractions, esi:GET /corporation/{corporation_id}/mining/observers, esi:GET /corporation/{corporation_id}/mining/observers/{observer_id}, esi:GET /corporations/{corporation_id}/customs_offices
-    eve_testkit::attest(&[
-        "esi:GET /corporation/{corporation_id}/mining/extractions",
-        "esi:GET /corporation/{corporation_id}/mining/observers",
-        "esi:GET /corporation/{corporation_id}/mining/observers/{observer_id}",
-        "esi:GET /corporations/{corporation_id}/customs_offices",
-    ]);
-
     let ctx = Arc::new(ServerContext::new());
     common::pin_clock(&ctx);
 
@@ -1144,10 +1136,8 @@ async fn test_esi_b2_corp_mining_and_customs_offices_live_http_and_sqlite() {
 
 #[tokio::test]
 async fn test_esi_b2_character_planets_and_orders_live_http_and_sqlite() {
-    // parity: esi:GET /characters/{character_id}/planets, esi:GET /characters/{character_id}/planets/{planet_id}, esi:GET /characters/{character_id}/orders, esi:GET /characters/{character_id}/orders/history
+    // parity: esi:GET /characters/{character_id}/orders, esi:GET /characters/{character_id}/orders/history
     eve_testkit::attest(&[
-        "esi:GET /characters/{character_id}/planets",
-        "esi:GET /characters/{character_id}/planets/{planet_id}",
         "esi:GET /characters/{character_id}/orders",
         "esi:GET /characters/{character_id}/orders/history",
     ]);
@@ -1287,9 +1277,8 @@ async fn test_esi_b2_character_planets_and_orders_live_http_and_sqlite() {
 
 #[tokio::test]
 async fn test_esi_b2_market_history_structure_and_corp_orders_live_http_and_sqlite() {
-    // parity: esi:GET /markets/{region_id}/history, esi:GET /markets/structures/{structure_id}, esi:GET /corporations/{corporation_id}/orders, esi:GET /corporations/{corporation_id}/orders/history
+    // parity: esi:GET /markets/structures/{structure_id}, esi:GET /corporations/{corporation_id}/orders, esi:GET /corporations/{corporation_id}/orders/history
     eve_testkit::attest(&[
-        "esi:GET /markets/{region_id}/history",
         "esi:GET /markets/structures/{structure_id}",
         "esi:GET /corporations/{corporation_id}/orders",
         "esi:GET /corporations/{corporation_id}/orders/history",
@@ -2062,9 +2051,6 @@ async fn test_esi_b6_incursions_and_sovereignty_campaigns_structures_live_state(
 
 #[tokio::test]
 async fn test_esi_b6_loyalty_store_offers_sde_and_rpc_parity() {
-    // parity: esi:GET /loyalty/stores/{corporation_id}/offers
-    eve_testkit::attest(&["esi:GET /loyalty/stores/{corporation_id}/offers"]);
-
     let ctx = Arc::new(ServerContext::new());
     common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
@@ -2560,7 +2546,6 @@ async fn test_esi_p6_corp_contracts_live_rpc_auth_and_sqlite_persistence() {
 
 #[tokio::test]
 async fn test_esi_p6_industry_jobs_and_facilities_live_rpc_and_sqlite_persistence() {
-    // parity: esi:GET /characters/{character_id}/industry/jobs, esi:GET /corporations/{corporation_id}/industry/jobs, esi:GET /industry/facilities
     let (db_path, ctx) = open_seeded_sqlite_ctx("industry_jobs_facilities");
     let router = EsiRouter::new(ctx.clone());
     let spec = OpenApiSpec::pinned();

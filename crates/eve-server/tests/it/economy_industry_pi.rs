@@ -1650,7 +1650,7 @@ async fn test_sov_structures_info_for_solar_system_filters_to_sov_structures() {
 
 #[tokio::test]
 async fn test_esi_market_history_and_prices_driven_by_real_market_orders() {
-    // parity: esi:GET /markets/{region_id}/history, feat:esi.market.history, esi:GET /markets/prices, feat:esi.market.prices
+    // parity: esi:GET /markets/prices, feat:esi.market.prices
     let ctx = Arc::new(ServerContext::new());
     ctx.seed_demo_world_fixtures();
     let router = EsiRouter::new(Arc::clone(&ctx));
@@ -1773,7 +1773,6 @@ async fn test_esi_market_history_and_prices_driven_by_real_market_orders() {
 
 #[tokio::test]
 async fn test_esi_industry_facilities_and_jobs_driven_by_real_industry_rpcs() {
-    // parity: esi:GET /industry/facilities, feat:esi.industry.facilities, esi:GET /characters/{character_id}/industry/jobs, feat:esi.industry.char-jobs, esi:GET /corporations/{corporation_id}/industry/jobs, feat:esi.industry.corp-jobs
     let ctx = Arc::new(ServerContext::new());
     ctx.seed_demo_world_fixtures();
     let router = EsiRouter::new(Arc::clone(&ctx));

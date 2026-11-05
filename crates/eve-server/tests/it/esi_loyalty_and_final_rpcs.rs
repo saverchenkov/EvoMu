@@ -51,11 +51,6 @@ async fn login_and_select(ctx: &ServerContext, sess: &mut SessionState, char_id:
 
 #[tokio::test]
 async fn test_esi_loyalty_store_offers_route() {
-    // parity: esi:GET /loyalty/stores/{corporation_id}/offers, feat:esi.loyalty.offers
-    eve_testkit::attest(&[
-        "esi:GET /loyalty/stores/{corporation_id}/offers",
-        "feat:esi.loyalty.offers",
-    ]);
     let ctx = Arc::new(ServerContext::new());
     common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));

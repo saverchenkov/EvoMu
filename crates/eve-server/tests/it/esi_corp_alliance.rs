@@ -1217,12 +1217,8 @@ fn call_esi(router: &EsiRouter, path: &str, token: Option<&str>) -> (u16, Value)
 
 #[tokio::test]
 async fn test_esi_corp_role_gated_mining_customs_and_orders() {
-    // parity: esi:GET /corporation/{corporation_id}/mining/extractions, esi:GET /corporation/{corporation_id}/mining/observers, esi:GET /corporation/{corporation_id}/mining/observers/{observer_id}, esi:GET /corporations/{corporation_id}/customs_offices, esi:GET /corporations/{corporation_id}/orders, esi:GET /corporations/{corporation_id}/orders/history
+    // parity: esi:GET /corporations/{corporation_id}/orders, esi:GET /corporations/{corporation_id}/orders/history
     eve_testkit::attest(&[
-        "esi:GET /corporation/{corporation_id}/mining/extractions",
-        "esi:GET /corporation/{corporation_id}/mining/observers",
-        "esi:GET /corporation/{corporation_id}/mining/observers/{observer_id}",
-        "esi:GET /corporations/{corporation_id}/customs_offices",
         "esi:GET /corporations/{corporation_id}/orders",
         "esi:GET /corporations/{corporation_id}/orders/history",
     ]);
@@ -1573,19 +1569,10 @@ async fn test_esi_corp_role_gated_mining_customs_and_orders() {
 
 #[tokio::test]
 async fn test_esi_market_history_prices_structures_and_industry_jobs() {
-    // parity: esi:GET /characters/{character_id}/industry/jobs, esi:GET /corporations/{corporation_id}/industry/jobs, esi:GET /industry/facilities, esi:GET /markets/prices, esi:GET /markets/structures/{structure_id}, esi:GET /markets/{region_id}/history
-    // parity: feat:esi.industry.facilities, feat:esi.industry.char-jobs, feat:esi.industry.corp-jobs, feat:esi.market.history
+    // parity: esi:GET /markets/prices, esi:GET /markets/structures/{structure_id}
     eve_testkit::attest(&[
-        "esi:GET /characters/{character_id}/industry/jobs",
-        "esi:GET /corporations/{corporation_id}/industry/jobs",
-        "esi:GET /industry/facilities",
         "esi:GET /markets/prices",
         "esi:GET /markets/structures/{structure_id}",
-        "esi:GET /markets/{region_id}/history",
-        "feat:esi.industry.facilities",
-        "feat:esi.industry.char-jobs",
-        "feat:esi.industry.corp-jobs",
-        "feat:esi.market.history",
     ]);
 
     let ctx = Arc::new(ServerContext::new());
