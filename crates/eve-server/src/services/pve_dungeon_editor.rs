@@ -967,3 +967,7 @@ pub async fn handle_gm_dungeon_editor_op(
         _ => Err(BridgeRpcError::user_error("UnimplementedRPC")),
     }
 }
+
+#[cfg(test)]
+#[path = "pve_dungeon_editor_tests.rs"]
+mod pve_dungeon_editor_tests;

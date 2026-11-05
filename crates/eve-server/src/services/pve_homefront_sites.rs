@@ -173,3 +173,8 @@ pub fn handle_get_homefront_site_instances(
 
     Ok(reply)
 }
+
+#[cfg(test)]
+#[path = "pve_homefront_sites_tests.rs"]
+mod pve_homefront_sites_tests;
+

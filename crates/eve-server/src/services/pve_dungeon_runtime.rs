@@ -1371,3 +1371,8 @@ pub use crate::services::pve_dungeon_runtime_rpc::{
     on_dungeon_item_looted, spawn_dungeon_instance, spawn_sde_dungeon_runtime_instance,
     try_activate_dungeon_runtime_gate,
 };
+
+#[cfg(test)]
+#[path = "pve_dungeon_runtime_tests.rs"]
+mod pve_dungeon_runtime_tests;
+

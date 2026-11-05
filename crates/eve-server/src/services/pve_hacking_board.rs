@@ -729,3 +729,8 @@ pub async fn detonate_ghost_site(
 ) -> (f64, Vec<i64>) {
     detonate_ghost_site_with_can(ctx, session, solar_system_id, site_id, None).await
 }
+
+#[cfg(test)]
+#[path = "pve_hacking_board_tests.rs"]
+mod pve_hacking_board_tests;
+

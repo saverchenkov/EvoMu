@@ -1380,3 +1380,7 @@ pub async fn handle_pve_exploration(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "pve_exploration_tests.rs"]
+mod pve_exploration_tests;

@@ -1160,3 +1160,7 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
     }
     suppressor_destroyed
 }
+
+#[cfg(test)]
+#[path = "pve_abyssal_pylons_tests.rs"]
+mod pve_abyssal_pylons_tests;

@@ -727,3 +727,8 @@ pub fn reconcile_abyssal_login(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "pve_abyssal_lifecycle_tests.rs"]
+mod pve_abyssal_lifecycle_tests;
+

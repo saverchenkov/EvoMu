@@ -516,3 +516,8 @@ pub async fn drop_sleeper_wreck_core(
         .await;
     wreck_id
 }
+
+#[cfg(test)]
+#[path = "pve_exploration_sites_tests.rs"]
+mod pve_exploration_sites_tests;
+

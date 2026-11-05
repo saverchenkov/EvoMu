@@ -1355,3 +1355,8 @@ pub async fn handle_incursion_rpc(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "pve_incursion_sites_tests.rs"]
+mod pve_incursion_sites_tests;
+

@@ -1324,3 +1324,7 @@ pub fn record_system_interference_activity(
         );
     }
 }
+
+#[cfg(test)]
+#[path = "pve_crab_beacons_tests.rs"]
+mod pve_crab_beacons_tests;

@@ -977,3 +977,7 @@ pub async fn handle_abyssal_entrance_deployment(
         ("maxShips", PyRep::Integer(max_ships as i64)),
     ]))
 }
+
+#[cfg(test)]
+#[path = "pve_special_sites_abyssal_tests.rs"]
+mod pve_special_sites_abyssal_tests;

@@ -639,3 +639,8 @@ pub fn build_type_combat_state_from_sde(sde: &eve_sde::SdeRegistry, type_id: u32
         eve_destiny::CombatState::default()
     }
 }
+
+#[cfg(test)]
+#[path = "pve_exploration_seeding_tests.rs"]
+mod pve_exploration_seeding_tests;
+

@@ -460,3 +460,8 @@ pub fn get_all_roaming_weather_systems(ctx: &ServerContext) -> Vec<PyRep> {
         out
     })
 }
+
+#[cfg(test)]
+#[path = "pve_metaliminal_storms_tests.rs"]
+mod pve_metaliminal_storms_tests;
+

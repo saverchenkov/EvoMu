@@ -1193,3 +1193,7 @@ pub async fn handle(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "pve_dungeon_cache_tests.rs"]
+mod pve_dungeon_cache_tests;

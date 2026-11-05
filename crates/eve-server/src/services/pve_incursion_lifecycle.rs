@@ -1342,3 +1342,7 @@ pub fn emit_incursion_completion_macho_notifications(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "pve_incursion_lifecycle_tests.rs"]
+mod pve_incursion_lifecycle_tests;

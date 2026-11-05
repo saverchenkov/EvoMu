@@ -1350,3 +1350,8 @@ pub fn check_drifter_hive_gate_access(
     })
 }
 
+#[cfg(test)]
+#[path = "pve_special_sites_tests.rs"]
+mod pve_special_sites_tests;
+
+

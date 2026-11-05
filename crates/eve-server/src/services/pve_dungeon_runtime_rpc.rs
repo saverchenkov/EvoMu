@@ -1361,3 +1361,8 @@ pub fn register_sde_operation_dungeon_instance(
     );
     inst_id
 }
+
+#[cfg(test)]
+#[path = "pve_dungeon_runtime_rpc_tests.rs"]
+mod pve_dungeon_runtime_rpc_tests;
+

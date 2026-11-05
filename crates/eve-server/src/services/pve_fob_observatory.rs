@@ -1084,3 +1084,7 @@ pub async fn apply_live_combat_damage_to_pirate_fob(
     }
     (total_dmg, dest, s_r, a_r, h_r, dest)
 }
+
+#[cfg(test)]
+#[path = "pve_fob_observatory_tests.rs"]
+mod pve_fob_observatory_tests;

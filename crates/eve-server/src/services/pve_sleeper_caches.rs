@@ -140,3 +140,8 @@ pub fn activate_ghost_site_timer(
     }
     false
 }
+
+#[cfg(test)]
+#[path = "pve_sleeper_caches_tests.rs"]
+mod pve_sleeper_caches_tests;
+

@@ -914,3 +914,8 @@ pub async fn evaluate_abyssal_spatial_clouds_for_ship(
     });
     label
 }
+
+#[cfg(test)]
+#[path = "pve_abyssal_hazards_tests.rs"]
+mod pve_abyssal_hazards_tests;
+

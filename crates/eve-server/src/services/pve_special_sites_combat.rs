@@ -608,3 +608,8 @@ pub async fn ensure_seasonal_event_sites_for_system(
 
     active_sites
 }
+
+#[cfg(test)]
+#[path = "pve_special_sites_combat_tests.rs"]
+mod pve_special_sites_combat_tests;
+

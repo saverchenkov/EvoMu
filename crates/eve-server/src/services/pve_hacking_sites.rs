@@ -1081,3 +1081,7 @@ pub async fn handle_pve_hacking(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "pve_hacking_sites_tests.rs"]
+mod pve_hacking_sites_tests;

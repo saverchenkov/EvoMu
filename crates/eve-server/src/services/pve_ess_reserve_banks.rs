@@ -1372,3 +1372,7 @@ pub fn credit_ballpark_npc_bounty_with_ess_split(
         );
     }
 }
+
+#[cfg(test)]
+#[path = "pve_ess_reserve_banks_tests.rs"]
+mod pve_ess_reserve_banks_tests;
