@@ -1,0 +1,445 @@
+//! Additional unit and mutation-killing tests for `quasar_payment_store`.
+
+#![forbid(unsafe_code)]
+
+use super::quasar_payment_store::*;
+use crate::quasar_gateway::{
+    PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_OK,
+    STATUS_UNAUTHORIZED,
+};
+use eve_db::WorldRepository;
+use eve_machonet::{service_roles, SessionState};
+use eve_proto::quasar::{
+    encode_bytes_field, encode_string_field, encode_varint_field, EvePublicRequest,
+    EvePublicResponse, GoogleAny, GoogleTimestamp, QuasarDescriptorRegistry,
+    TYPE_GOOGLEAPIS_PREFIX,
+};
+use eve_sde::SdeRegistry;
+use std::sync::{Arc, OnceLock};
+
+fn shared_sde() -> Arc<SdeRegistry> {
+    static SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
+    Arc::clone(SDE.get_or_init(|| Arc::new(SdeRegistry::with_canonical_seed())))
+}
+
+fn shared_descriptors() -> Arc<QuasarDescriptorRegistry> {
+    static DESC: OnceLock<Arc<QuasarDescriptorRegistry>> = OnceLock::new();
+    Arc::clone(DESC.get_or_init(|| {
+        QuasarDescriptorRegistry::open(
+            std::path::Path::new("/Users/sergeya/ai/EvoMu/data/quasar_descriptors.sqlite"),
+            std::path::Path::new("/Users/sergeya/ai/EvoMu/data/quasar_descriptor_manifest.json"),
+        )
+        .map(Arc::new)
+        .unwrap_or_else(|_| QuasarDescriptorRegistry::open_default_or_empty())
+    }))
+}
+
+fn new_router() -> (PublicGatewayRouter, Arc<WorldRepository>) {
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let router = PublicGatewayRouter::new(shared_descriptors(), Arc::clone(&db), shared_sde());
+    (router, db)
+}
+
+fn plex_balance(db: &WorldRepository, uid: u64) -> i64 {
+    db.with_snapshot(|snap| snap.account_plex_vault.get(&uid).copied().unwrap_or(0))
+}
+
+fn make_sess(uid: Option<u64>, cid: Option<i64>, role: u64) -> SessionState {
+    let mut s = SessionState::new(uid.unwrap_or(1));
+    s.user_id = uid;
+    s.character_id = cid;
+    s.corporation_id = Some(98_000_001);
+    s.solar_system_id = Some(30_000_142);
+    s.role = role;
+    s
+}
+
+fn call(
+    router: &PublicGatewayRouter,
+    sess: &SessionState,
+    type_name: &str,
+    value: Vec<u8>,
+    now: u64,
+) -> EvePublicResponse {
+    let req = EvePublicRequest {
+        issued: Some(GoogleTimestamp {
+            seconds: now as i64,
+            nanos: 0,
+        }),
+        correlation_uuid: vec![2; 16],
+        payload: Some(GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
+            value,
+        }),
+        external_origin: "test".into(),
+        application_instance_uuid: Vec::new(),
+        authoritative_context: None,
+        trace_context: None,
+    };
+    router.handle_public_request(sess, &req, None, false, now)
+}
+
+fn seed_store_catalog(db: &WorldRepository) {
+    db.with_mut_snapshot(|snap| {
+        let cat = StoreCatalog {
+            categories: vec![StoreCategory {
+                id: 1,
+                name: "Omega".into(),
+                description: "Sub".into(),
+            }],
+            products: vec![StoreProduct {
+                id: 102,
+                name: "SKIN".into(),
+                description: "Ship SKIN".into(),
+                type_id: 34599,
+                quantity: 2,
+            }],
+            offers: vec![
+                StoreOffer {
+                    id: 1002,
+                    name: "Rifter SKIN".into(),
+                    description: "SKIN offer".into(),
+                    category_id: 1,
+                    price_plex: 120,
+                    product_ids: vec![102],
+                    targeted: true,
+                    price_cents: Some(499),
+                    currency: Some("EUR".into()),
+                },
+                StoreOffer {
+                    id: 1009,
+                    name: "Invalid Negative Offer".into(),
+                    description: "Broken".into(),
+                    category_id: 1,
+                    price_plex: -10,
+                    product_ids: vec![102],
+                    targeted: false,
+                    price_cents: Some(499),
+                    currency: Some("USD".into()),
+                },
+            ],
+        };
+        save_store_catalog(snap, &cat);
+        let tokens = vec![
+            PaymentTokenRecord {
+                id: 77,
+                user_id: 1,
+                token_str: "Disabled Card".into(),
+                is_quick_pay: false,
+                consumed: true,
+            },
+            PaymentTokenRecord {
+                id: 78,
+                user_id: 1,
+                token_str: "Valid Card".into(),
+                is_quick_pay: true,
+                consumed: false,
+            },
+            PaymentTokenRecord {
+                id: 79,
+                user_id: 1,
+                token_str: "Valid Card 2".into(),
+                is_quick_pay: true,
+                consumed: false,
+            },
+            PaymentTokenRecord {
+                id: 80,
+                user_id: 1,
+                token_str: "Valid Card 3".into(),
+                is_quick_pay: true,
+                consumed: false,
+            },
+        ];
+        snap.service_state_blobs.insert(
+            "payment_tokens".to_string(),
+            serde_json::to_string(&tokens).unwrap(),
+        );
+    });
+}
+
+#[test]
+fn unauthenticated_requests_rejected_across_vault_payment_fulfillment_and_log_endpoints() {
+    let (router, _db) = new_router();
+    let unauth_none = make_sess(None, None, service_roles::ROLE_GM_DEFAULT);
+    let unauth_zero = make_sess(Some(0), None, service_roles::ROLE_GM_DEFAULT);
+
+    let protected_types = [
+        "eve_public.plex.vault.api.BalanceRequest",
+        "eve.plex.vault.assetholding.operation.api.DepositRequest",
+        "eve.plex.vault.assetholding.operation.api.WithdrawRequest",
+        "eve_public.store.targetaudience.offer.api.ListRequest",
+        "eve_public.payment.schedule.api.GetRequest",
+        "eve_public.payment.schedule.api.GetActiveByTypeRequest",
+        "eve_public.payment.token.api.GetQuickPayRequest",
+        "eve_public.payment.token.api.GetRequest",
+        "eve_public.payment.token.api.DisableAllRequest",
+        "eve.fulfillment.api.DeliverItemRequest",
+        "eve_public.payment.purchase.api.TokenRequest",
+        "eve_public.plex.vault.transaction.api.GetAllLoggedForUserRequest",
+        "eve_public.plex.vault.transaction.api.GetLogRequest",
+        "eve_public.plex.vault.transaction.api.GetStatisticsRequest",
+    ];
+
+    for t in protected_types {
+        let r1 = call(&router, &unauth_none, t, Vec::new(), 1_700_000_000);
+        assert_eq!(r1.status_code, STATUS_UNAUTHORIZED, "expected 401 for {t}");
+        let r2 = call(&router, &unauth_zero, t, Vec::new(), 1_700_000_000);
+        assert_eq!(
+            r2.status_code, STATUS_UNAUTHORIZED,
+            "expected 401 for uid=0 on {t}"
+        );
+    }
+}
+
+#[test]
+fn deposit_withdraw_default_nested_amounts_and_direct_scalar_catalog_lookups() {
+    let (router, db) = new_router();
+    seed_store_catalog(&db);
+    db.with_mut_snapshot(|s| {
+        s.account_plex_vault.insert(1, 0);
+    });
+    let sess = make_sess(Some(1), Some(90_000_001), service_roles::ROLE_GM_DEFAULT);
+
+    // DepositRequest with empty inner message in field 2 defaults to +100 PLEX
+    let mut dep_empty_nested = Vec::new();
+    encode_bytes_field(2, &[], &mut dep_empty_nested);
+    let r = call(
+        &router,
+        &sess,
+        "eve.plex.vault.assetholding.operation.api.DepositRequest",
+        dep_empty_nested,
+        1_700_000_010,
+    );
+    assert_eq!(r.status_code, STATUS_OK);
+    assert_eq!(plex_balance(&db, 1), 100);
+
+    // WithdrawRequest with empty inner message in field 2 defaults to -50 PLEX
+    let mut wd_empty_nested = Vec::new();
+    encode_bytes_field(2, &[], &mut wd_empty_nested);
+    let r = call(
+        &router,
+        &sess,
+        "eve.plex.vault.assetholding.operation.api.WithdrawRequest",
+        wd_empty_nested,
+        1_700_000_020,
+    );
+    assert_eq!(r.status_code, STATUS_OK);
+    assert_eq!(plex_balance(&db, 1), 50);
+
+    // Nested message field 1 lookups for Category, Product, Offer, TargetAudience Offer
+    let mut cat_inner = Vec::new();
+    encode_varint_field(1, 1, &mut cat_inner);
+    let mut direct_cat = Vec::new();
+    encode_bytes_field(1, &cat_inner, &mut direct_cat);
+    assert_eq!(
+        call(
+            &router,
+            &sess,
+            "eve_public.store.category.api.GetRequest",
+            direct_cat,
+            1_700_000_030
+        )
+        .status_code,
+        STATUS_OK
+    );
+
+    let mut prod_inner = Vec::new();
+    encode_varint_field(1, 102, &mut prod_inner);
+    let mut direct_prod = Vec::new();
+    encode_bytes_field(1, &prod_inner, &mut direct_prod);
+    assert_eq!(
+        call(
+            &router,
+            &sess,
+            "eve_public.store.product.api.GetRequest",
+            direct_prod,
+            1_700_000_031
+        )
+        .status_code,
+        STATUS_OK
+    );
+
+    let mut off_inner = Vec::new();
+    encode_string_field(1, "1002", &mut off_inner);
+    let mut direct_offer = Vec::new();
+    encode_bytes_field(1, &off_inner, &mut direct_offer);
+    assert_eq!(
+        call(
+            &router,
+            &sess,
+            "eve_public.store.offer.api.GetRequest",
+            direct_offer,
+            1_700_000_032
+        )
+        .status_code,
+        STATUS_OK
+    );
+    let mut ta_entry = Vec::new();
+    encode_string_field(1, "1002", &mut ta_entry);
+    let mut ta_id = Vec::new();
+    encode_bytes_field(2, &ta_entry, &mut ta_id);
+    let mut direct_ta_offer = Vec::new();
+    encode_bytes_field(1, &ta_id, &mut direct_ta_offer);
+    assert_eq!(
+        call(
+            &router,
+            &sess,
+            "eve_public.store.targetaudience.offer.api.GetRequest",
+            direct_ta_offer,
+            1_700_000_033
+        )
+        .status_code,
+        STATUS_OK
+    );
+}
+
+#[test]
+fn deliver_item_fallbacks_default_type_qty_and_station_resolution() {
+    let (router, db) = new_router();
+    // 1. Session without character_id falls back to get_characters_for_user(1) -> 90_000_001
+    // Also omit fields 2 and 3 so type_id defaults to 44992 and qty defaults to 1
+    let sess_no_cid = make_sess(Some(1), None, service_roles::ROLE_GM_DEFAULT);
+    let r = call(
+        &router,
+        &sess_no_cid,
+        "eve.fulfillment.api.DeliverItemRequest",
+        Vec::new(),
+        1_700_000_100,
+    );
+    assert_eq!(r.status_code, STATUS_OK);
+
+    let delivered_default = db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .any(|it| it.owner_id == 90_000_001 && it.type_id == 44_992 && it.quantity == 1)
+    });
+    assert!(delivered_default);
+
+    // 2. Non-existent target character ID in session -> STATUS_NOT_FOUND
+    let sess_bad_cid = make_sess(Some(1), Some(999_999_999), service_roles::ROLE_GM_DEFAULT);
+    let r = call(
+        &router,
+        &sess_bad_cid,
+        "eve.fulfillment.api.DeliverItemRequest",
+        Vec::new(),
+        1_700_000_101,
+    );
+    assert_eq!(r.status_code, STATUS_NOT_FOUND);
+
+    // 3. Undocked character with structure_id receives item at structure_id
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = None;
+            ch.structure_id = Some(1_000_000_777_001);
+        }
+    });
+    let sess = make_sess(Some(1), Some(90_000_001), service_roles::ROLE_GM_DEFAULT);
+    let r = call(
+        &router,
+        &sess,
+        "eve.fulfillment.api.DeliverItemRequest",
+        Vec::new(),
+        1_700_000_102,
+    );
+    assert_eq!(r.status_code, STATUS_OK);
+    let at_struct = db.with_snapshot(|snap| {
+        snap.items.values().any(|it| {
+            it.owner_id == 90_000_001
+                && it.location_id == 1_000_000_777_001
+                && it.type_id == 44_992
+        })
+    });
+    assert!(at_struct);
+}
+
+#[test]
+fn cost_and_token_purchase_prefix_stripping_negative_price_and_recipient_validation() {
+    let (router, db) = new_router();
+    seed_store_catalog(&db);
+    let sess = make_sess(Some(1), Some(90_000_001), service_roles::ROLE_PLAYER_DEFAULT);
+
+    // CostRequest for offer 1002 -> STATUS_OK
+    let mut cost_1002 = Vec::new();
+    encode_varint_field(1, 1002, &mut cost_1002);
+    let r = call(
+        &router,
+        &sess,
+        "eve_public.payment.purchase.api.CostRequest",
+        cost_1002,
+        1_700_000_200,
+    );
+    assert_eq!(r.status_code, STATUS_OK);
+
+    // TokenRequest for offer 1009 with negative price_plex -> STATUS_BAD_REQUEST
+    let mut neg_tok = Vec::new();
+    encode_varint_field(1, 1009, &mut neg_tok);
+    encode_varint_field(2, 78, &mut neg_tok);
+    let r = call(
+        &router,
+        &sess,
+        "eve_public.payment.purchase.api.TokenRequest",
+        neg_tok,
+        1_700_000_202,
+    );
+    assert_eq!(r.status_code, STATUS_BAD_REQUEST);
+
+    // TokenRequest with disabled payment_token_id (77) -> STATUS_BAD_REQUEST
+    let mut disabled_tok_req = Vec::new();
+    encode_varint_field(1, 1002, &mut disabled_tok_req);
+    encode_varint_field(2, 77, &mut disabled_tok_req);
+    let r = call(
+        &router,
+        &sess,
+        "eve_public.payment.purchase.api.TokenRequest",
+        disabled_tok_req,
+        1_700_000_203,
+    );
+    assert_eq!(r.status_code, STATUS_BAD_REQUEST);
+
+    // TokenRequest with non-existent active_char_id -> STATUS_NOT_FOUND
+    let sess_missing_cid = make_sess(Some(1), Some(999_888_777), service_roles::ROLE_PLAYER_DEFAULT);
+    let mut valid_tok_req = Vec::new();
+    encode_varint_field(1, 1002, &mut valid_tok_req);
+    encode_varint_field(2, 78, &mut valid_tok_req);
+    let r = call(
+        &router,
+        &sess_missing_cid,
+        "eve_public.payment.purchase.api.TokenRequest",
+        valid_tok_req.clone(),
+        1_700_000_204,
+    );
+    assert_eq!(r.status_code, STATUS_NOT_FOUND);
+
+    // TokenRequest with active_char_id belonging to another user_id -> STATUS_FORBIDDEN
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch2) = snap.characters.get_mut(&90_000_002) {
+            ch2.user_id = 999;
+        }
+    });
+    let sess_wrong_owner = make_sess(Some(1), Some(90_000_002), service_roles::ROLE_PLAYER_DEFAULT);
+    let r = call(
+        &router,
+        &sess_wrong_owner,
+        "eve_public.payment.purchase.api.TokenRequest",
+        valid_tok_req.clone(),
+        1_700_000_205,
+    );
+    assert_eq!(r.status_code, STATUS_FORBIDDEN);
+
+    // TokenRequest where recipient character has no valid station/structure/home_station -> STATUS_BAD_REQUEST
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.home_station_id = 0;
+        }
+    });
+    let r = call(
+        &router,
+        &sess,
+        "eve_public.payment.purchase.api.TokenRequest",
+        valid_tok_req,
+        1_700_000_206,
+    );
+    assert_eq!(r.status_code, STATUS_BAD_REQUEST);
+}

@@ -172,9 +172,13 @@ async fn anchor_guards_palatine_zarzakh_thera_npc_corp_profile_and_stack_quantit
         .sde
         .solar_systems
         .values()
-        .find(|s| s.security_status >= 0.5)
+        .find(|s| {
+            s.security_status >= 0.5
+                && !crate::services::structure_anchoring_rules::is_trade_hub_system(s.solar_system_id)
+                && !crate::services::structure_anchoring_rules::is_starter_or_career_system(&ctx.sde, s.solar_system_id)
+        })
         .map(|s| s.solar_system_id)
-        .unwrap_or(30000142);
+        .unwrap_or(30000144);
     let char_id = 918_101_i64;
     let corp_id = 98_918_101_i64;
     let ship_id = 918_201_i64;
