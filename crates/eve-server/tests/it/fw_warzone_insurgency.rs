@@ -110,7 +110,6 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
     // parity: feat:fw.frontline-system-designation
     // parity: feat:fw.complex-ship-size-gating
     // parity: feat:fw.plexes
-    // parity: feat:fw.supply-caches-depots
     // parity: feat:fw.advantage-mechanics
     // parity: feat:fw.fw-site-dungeons
     // parity: feat:fw.battlefield-capture-rules
@@ -120,7 +119,6 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
         "feat:fw.frontline-system-designation",
         "feat:fw.complex-ship-size-gating",
         "feat:fw.plexes",
-        "feat:fw.supply-caches-depots",
         "feat:fw.advantage-mechanics",
         "feat:fw.fw-site-dungeons",
         "feat:fw.battlefield-capture-rules",
@@ -1322,16 +1320,8 @@ use glam::DVec3;
 
 #[tokio::test]
 async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
-    // parity: feat:fw.insurgency-fob
-    // parity: feat:fw.insurgency-fob-ambition
-    // parity: feat:fw.insurgency-ambition-victory
-    // parity: feat:fw.insurgency-contribution-payout
     // parity: notify:OnInsurgencyCampaignEndingForLocation
     eve_testkit::attest(&[
-        "feat:fw.insurgency-fob",
-        "feat:fw.insurgency-fob-ambition",
-        "feat:fw.insurgency-ambition-victory",
-        "feat:fw.insurgency-contribution-payout",
         "notify:OnInsurgencyCampaignEndingForLocation",
     ]);
 
@@ -4158,12 +4148,8 @@ async fn test_e2e_skyhook_reagent_maturity_and_theft() {
 
 #[tokio::test]
 async fn test_e2e_fw_system_capture_downtime_and_insurgency_fob_lifecycle() {
-    // parity: feat:fw.system-capture
-    // parity: feat:fw.insurgency-fob
     // parity: feat:fw.insurgency-lifecycle
     eve_testkit::attest(&[
-        "feat:fw.system-capture",
-        "feat:fw.insurgency-fob",
         "feat:fw.insurgency-lifecycle",
     ]);
 

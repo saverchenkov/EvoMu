@@ -71,10 +71,8 @@ async fn sov_call(
     ctx.dispatch_rpc(sess, service, None, method, args, &kw, None).await
 }
 
-// parity: feat:fw.insurgency-ambition-victory
 #[tokio::test]
 async fn test_fw_insurgency_ambition_victory_and_surrender_ihub() {
-    eve_testkit::attest(&["feat:fw.insurgency-ambition-victory"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
 
@@ -228,10 +226,8 @@ async fn test_fw_insurgency_ambition_victory_and_surrender_ihub() {
     assert!(payouts4.is_empty(), "Tie produces no bonus payouts");
 }
 
-// parity: feat:fw.insurgency-contribution-payout
 #[tokio::test]
 async fn test_fw_insurgency_contribution_payout_scaling_and_caps() {
-    eve_testkit::attest(&["feat:fw.insurgency-contribution-payout"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
 
@@ -353,10 +349,8 @@ async fn test_fw_insurgency_contribution_payout_scaling_and_caps() {
     }
 }
 
-// parity: feat:fw.insurgency-fob
 #[tokio::test]
 async fn test_fw_insurgency_fob_lifecycle_docking_and_reinforcement() {
-    eve_testkit::attest(&["feat:fw.insurgency-fob"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
 
@@ -496,10 +490,8 @@ async fn test_fw_insurgency_fob_lifecycle_docking_and_reinforcement() {
     assert_eq!(camp_outcome, Some("EmpireWin".into()), "Destroying FOB must end insurgency as EmpireWin");
 }
 
-// parity: feat:fw.insurgency-fob-ambition
 #[tokio::test]
 async fn test_fw_insurgency_fob_ambition_and_stronghold_spawns() {
-    eve_testkit::attest(&["feat:fw.insurgency-fob-ambition"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
 

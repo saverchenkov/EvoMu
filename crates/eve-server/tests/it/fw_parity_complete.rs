@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn test_fw_warzones_victory_points_and_system_capture() {
-    // parity: feat:fw.warzones, feat:fw.victory-points, feat:fw.system-capture
+    // parity: feat:fw.warzones, feat:fw.victory-points
     let ctx = Arc::new(ServerContext::new());
     let mut sess = SessionState::new(10_001);
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -160,7 +160,7 @@ async fn test_fw_warzones_victory_points_and_system_capture() {
     assert_eq!(vp_full.dict_get("contestedPercentage"), Some(&PyRep::Real(100.0)));
 
     // ------------------------------------------------------------------------
-    // 3. feat:fw.system-capture
+    // 3. System capture
     // ------------------------------------------------------------------------
     // At 100% contested, system is vulnerable and capturing changes occupation to Amarr
     let capture_res = capture_warzone_system(&ctx, sys_id, FACTION_AMARR)
