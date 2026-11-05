@@ -135,7 +135,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    pub(super) static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     // parity: plan:T-1
@@ -271,3 +271,7 @@ mod tests {
         assert_eq!(resolve_test_name(None, ""), "unknown_test");
     }
 }
+
+#[cfg(test)]
+mod lib_tests;
+

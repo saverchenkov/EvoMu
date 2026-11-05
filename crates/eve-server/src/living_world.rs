@@ -1199,3 +1199,8 @@ pub struct NpcMiningStepResult {
 #[cfg(test)]
 #[path = "living_world_tests.rs"]
 mod living_world_tests;
+
+#[cfg(test)]
+#[path = "living_world_extra_tests.rs"]
+mod living_world_extra_tests;
+
