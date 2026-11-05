@@ -324,6 +324,17 @@ mod agents_standings_arcs_extra_unit_tests;
 mod sov_gameplay_extra_unit_tests;
 #[cfg(test)]
 mod fleet_social_corps_extra_unit_tests;
+mod pi_orbitals_extra_unit_tests;
+#[cfg(test)]
+mod market_trading_extra_unit_tests;
+#[cfg(test)]
+mod lp_store_extra_unit_tests;
+#[cfg(test)]
+mod config_service_extra_unit_tests;
+#[cfg(test)]
+mod fitting_cyno_portal_extra_unit_tests;
+#[cfg(test)]
+mod pve_crab_beacons_extra_unit_tests;
 
 
 
