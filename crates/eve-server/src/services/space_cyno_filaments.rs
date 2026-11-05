@@ -1343,3 +1343,8 @@ pub fn active_scan_inhibitor_positions(
         .map(|b| b.position)
         .collect()
 }
+
+#[cfg(test)]
+#[path = "space_cyno_filaments_tests.rs"]
+mod space_cyno_filaments_tests;
+

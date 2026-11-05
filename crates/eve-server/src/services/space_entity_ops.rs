@@ -1347,3 +1347,7 @@ async fn handle_open_shipping_unit_storage(
 }
 
 pub(crate) use crate::services::corp_medals_bulletins::{handle_corp_bulletins, handle_corp_medals};
+
+#[cfg(test)]
+#[path = "space_entity_ops_tests.rs"]
+mod space_entity_ops_tests;

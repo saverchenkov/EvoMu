@@ -1374,3 +1374,6 @@ pub fn validate_structure_refit(ctx: &ServerContext, snap: &WorldStateSnapshot, 
     }
     Ok((st, profile))
 }
+#[cfg(test)]
+#[path = "structure_lifecycle_tests.rs"]
+mod structure_lifecycle_tests;

@@ -1011,3 +1011,7 @@ impl PhasedAsteroidFieldState {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "space_mining_harvest_tests.rs"]
+mod space_mining_harvest_tests;

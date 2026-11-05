@@ -988,3 +988,8 @@ pub async fn activate_clone_vat_bay(
         ("activeUntilUnix", PyRep::Integer(until_unix as i64)),
     ]))
 }
+
+#[cfg(test)]
+#[path = "character_clone_jump_rules_tests.rs"]
+mod character_clone_jump_rules_tests;
+

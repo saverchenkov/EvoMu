@@ -1,0 +1,530 @@
+//! Unit tests for `space_destiny` (`essMgr`, session timers, warp speed, `beyonce` state/bubble/components).
+
+#![forbid(unsafe_code)]
+
+use super::*;
+use crate::router::{BoundObjectEntry, ServerContext};
+use crate::services::combat_crimewatch::with_mut_combat_runtime;
+use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldStateSnapshot};
+use eve_destiny::{Ball, MovementMode};
+use eve_machonet::{service_roles, SessionState};
+use eve_proto::PyRep;
+use eve_sde::{InvType, SdeRegistry};
+use glam::DVec3;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+
+fn put_item(
+    snap: &mut WorldStateSnapshot,
+    item_id_opt: Option<i64>,
+    type_id: u32,
+    owner_id: i64,
+    location_id: i64,
+    flag: InventoryFlag,
+    quantity: i32,
+    singleton: bool,
+) -> i64 {
+    let item_id = item_id_opt.unwrap_or_else(|| {
+        snap.next_entity_id += 1;
+        snap.next_entity_id
+    });
+    snap.items.insert(
+        item_id,
+        InventoryItemRecord {
+            item_id,
+            type_id,
+            owner_id,
+            location_id,
+            flag,
+            quantity,
+            singleton,
+            version: 1,
+            ..Default::default()
+        },
+    );
+    item_id
+}
+
+fn rep_list_len(rep: &PyRep) -> Option<usize> {
+    match rep {
+        PyRep::List(v) | PyRep::Tuple(v) => Some(v.len()),
+        _ => None,
+    }
+}
+
+static SHARED_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
+
+fn test_ctx() -> ServerContext {
+    if let Some(sde) = SHARED_SDE.get() {
+        ServerContext::with_sde_and_repository(
+            Arc::clone(sde),
+            Arc::new(eve_db::WorldRepository::with_demo_seed()),
+        )
+        .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED)
+    } else {
+        let ctx = ServerContext::new();
+        let _ = SHARED_SDE.set(Arc::clone(&ctx.sde));
+        ctx
+    }
+}
+
+fn clone_type_with(
+    sde: &mut Arc<SdeRegistry>,
+    base_tid: u32,
+    new_tid: u32,
+    group_id: u32,
+    category_id: u32,
+    volume: f64,
+    capacity: f64,
+    attrs: &[(u16, f64)],
+) {
+    let reg = Arc::make_mut(sde);
+    let mut rec: InvType = reg.types.values().next().cloned().expect("base sde type");
+    if let Some(b) = reg.types.get(&base_tid) {
+        rec = b.clone();
+    }
+    rec.type_id = new_tid;
+    rec.group_id = group_id;
+    rec.category_id = category_id;
+    rec.name = format!("TestType_{new_tid}");
+    rec.volume = volume;
+    rec.capacity = capacity;
+    rec.default_attributes.clear();
+    for &(k, v) in attrs {
+        rec.default_attributes.insert(k, v);
+    }
+    reg.types.insert(new_tid, rec);
+}
+
+fn make_session(
+    char_id: i64,
+    corp_id: i64,
+    sys_id: Option<u32>,
+    ship_id: Option<i64>,
+    role: u64,
+) -> SessionState {
+    let mut s = SessionState::new(710);
+    s.user_id = Some(22);
+    s.character_id = Some(char_id);
+    s.corporation_id = Some(corp_id);
+    s.solar_system_id = sys_id;
+    s.ship_id = ship_id;
+    s.role = role;
+    s
+}
+
+fn bound_sys(sys_id: u32) -> BoundObjectEntry {
+    BoundObjectEntry {
+        bound_id: 1,
+        session_id: 710,
+        user_id: 20,
+        character_id: 9001,
+        service: "beyonce".to_string(),
+        object_id: sys_id as i64,
+        oid_str: format!("N=1:{sys_id}"),
+        ref_id: 1,
+    }
+}
+
+fn test_ship_ball(ship_id: i64, type_id: u32, pos: DVec3) -> Ball {
+    Ball {
+        id: ship_id,
+        type_id,
+        position: pos,
+        velocity: DVec3::new(100.0, 0.0, 0.0),
+        max_velocity: 350.0,
+        inertia: 2.5,
+        mass: 1_200_000.0,
+        radius: 40.0,
+        speed_fraction: 0.5,
+        mode: MovementMode::Stop,
+    }
+}
+
+fn dict_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
+    let PyRep::Dict(entries) = rep else {
+        return None;
+    };
+    entries
+        .iter()
+        .find(|(k, _)| k.as_str() == Some(key))
+        .map(|(_, v)| v)
+}
+
+#[test]
+fn ess_reserve_pulse_blob_and_snapshot_roundtrip() {
+    let ctx = test_ctx();
+    let mut blobs = HashMap::new();
+    let def = get_ess_reserve_pulses_from_blobs(&blobs, 30000142);
+    assert_eq!(def.pulses_total, 0);
+    assert_eq!(def.pulses_remaining, 0);
+    assert!(def.reserve_linked_character_id.is_none());
+
+    let state = EssReservePulseState {
+        last_pulse_sec: Some(1_700_000_123),
+        pulses_remaining: 31,
+        pulses_total: 45,
+        unlocked_until_unix: 1_700_002_823,
+        reserve_linked_character_id: Some(9001),
+        ..Default::default()
+    };
+    set_ess_reserve_pulses_in_blobs(&mut blobs, 30001234, &state);
+    let parsed = get_ess_reserve_pulses_from_blobs(&blobs, 30001234);
+    assert_eq!(parsed.last_pulse_sec, Some(1_700_000_123));
+    assert_eq!(parsed.pulses_remaining, 31);
+    assert_eq!(parsed.pulses_total, 45);
+    assert_eq!(parsed.unlocked_until_unix, 1_700_002_823);
+    assert_eq!(parsed.reserve_linked_character_id, Some(9001));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ess_reserve_pulses(snap, 30001234, &state);
+        let snap_read = get_ess_reserve_pulses(snap, 30001234);
+        assert_eq!(snap_read.pulses_remaining, 31);
+        assert_eq!(snap_read.reserve_linked_character_id, Some(9001));
+    });
+}
+
+#[test]
+fn session_change_timers_and_invulnerability_lifecycle() {
+    let ctx = test_ctx();
+    let char_id = 9101;
+    let t0 = 1_700_010_000;
+
+    record_session_change_timer(&ctx, char_id, t0, 30000142, 1, "jump_drive");
+    assert!(check_session_change_timer_active(&ctx, char_id, t0 + 9, None).is_some());
+    assert!(check_session_change_timer_active(&ctx, char_id, t0 + 10, None).is_none());
+    let stored = get_session_change_timer(&ctx, char_id).expect("timer active");
+    assert_eq!(stored.reason, "jump_drive");
+    assert!(is_location_change_invulnerable(&ctx, char_id, t0 + 59));
+    assert!(!is_location_change_invulnerable(&ctx, char_id, t0 + 60));
+
+    break_location_change_invulnerability(&ctx, char_id);
+    assert!(!is_location_change_invulnerable(&ctx, char_id, t0 + 5));
+
+    grant_location_change_invulnerability(&ctx, char_id, t0 + 120);
+    assert!(is_location_change_invulnerable(&ctx, char_id, t0 + 119));
+
+    clear_session_change_timer(&ctx, char_id);
+    assert!(check_session_change_timer_active(&ctx, char_id, t0 + 1, None).is_none());
+
+    record_client_session_check_timer(&ctx, char_id, t0 + 200, 30000142, 10, "jump");
+    assert!(check_session_change_timer_active(&ctx, char_id, t0 + 205, Some((30000142, 15))).is_some());
+    assert!(check_session_change_timer_active(&ctx, char_id, t0 + 205, Some((30000142, 25))).is_none());
+    let _ = wormhole_item_id_for_signature(31000001, "ABC-123");
+}
+
+#[test]
+fn warp_speed_calculations_apply_subwarpspeed_and_navigation() {
+    let mut ctx = test_ctx();
+    let ship_tid = 99510;
+    clone_type_with(
+        &mut ctx.sde,
+        588,
+        ship_tid,
+        25,
+        6,
+        2500.0,
+        150.0,
+        &[(600, 3.0), (1281, 1.5)], // baseWarpSpeed = 3.0, warpSpeedMultiplier = 1.5 -> 4.5 AU/s
+    );
+    let base = compute_ship_warp_speed_au_s(&ctx, ship_tid);
+    assert!((base - 4.5).abs() < 1e-6);
+    assert!((compute_pilot_warp_speed_au_s(&ctx, 9001, 30000142, ship_tid) - 4.5).abs() < 1e-6);
+
+    // Zero warpSpeedMultiplier falls back to baseWarpSpeed = 3.0 AU/s
+    let ship_zero_mult = 99511;
+    clone_type_with(
+        &mut ctx.sde,
+        588,
+        ship_zero_mult,
+        25,
+        6,
+        2500.0,
+        150.0,
+        &[(600, 3.0), (1281, 0.0)],
+    );
+    assert!((compute_ship_warp_speed_au_s(&ctx, ship_zero_mult) - 3.0).abs() < 1e-6);
+
+    // Role bonus attr 2789 boosts ship warp speed
+    let ship_role_bonus = 99512;
+    clone_type_with(
+        &mut ctx.sde,
+        588,
+        ship_role_bonus,
+        25,
+        6,
+        2500.0,
+        150.0,
+        &[(600, 3.0), (1281, 1.5), (2789, 25.0)],
+    );
+    let boosted = compute_pilot_warp_speed_au_s(&ctx, 9001, 30000142, ship_role_bonus);
+    assert!((boosted - 4.5 * 1.25).abs() < 1e-6);
+}
+
+#[tokio::test]
+async fn ess_mgr_dispatch_covers_data_thefts_unlink_and_unlock() {
+    let mut ctx = test_ctx();
+    let null_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| s.security_status <= -0.5 && s.solar_system_id < 31_000_000)
+        .map(|s| s.solar_system_id)
+        .expect("nullsec system in sde");
+    let high_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| s.security_status >= 0.7 && s.solar_system_id < 31_000_000)
+        .map(|s| s.solar_system_id)
+        .expect("highsec system in sde");
+
+    let mut hs_sess = make_session(9301, 98000001, Some(high_sys), Some(88301), 0);
+    let hs_data = handle(&ctx, &mut hs_sess, None, "essMgr", "GetDataForClientSolarSystem", &[], &HashMap::new())
+        .await
+        .expect("handled")
+        .expect("ok");
+    assert_eq!(hs_data, PyRep::None);
+
+    let now_u = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.system_states.entry(null_sys).or_default();
+        st.ess_main_bank = IskCents::from_isk(125_000_000);
+        st.ess_reserve_bank = IskCents::from_isk(400_000_000);
+        set_ess_reserve_pulses(
+            snap,
+            null_sys,
+            &EssReservePulseState {
+                last_pulse_sec: Some(now_u.saturating_sub(30)),
+                pulses_remaining: 42,
+                pulses_total: 45,
+                unlocked_until_unix: now_u + 2500,
+                reserve_linked_character_id: Some(9301),
+                ..Default::default()
+            },
+        );
+    });
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.ess_main_bank_thefts.insert(null_sys, vec![(9301, 25_000_000.0, now_u)]);
+        rt.ess_reserve_bank_thefts.insert(null_sys, vec![(9301, 10_000_000.0, now_u)]);
+    });
+
+    let mut ns_sess = make_session(9301, 98000001, Some(null_sys), Some(88301), 0);
+    let data = handle(&ctx, &mut ns_sess, None, "essMgr", "GetDataForClientSolarSystem", &[], &HashMap::new())
+        .await
+        .expect("handled")
+        .expect("ok");
+    assert_eq!(dict_get(&data, "essID").and_then(PyRep::as_i64), Some(820_000_000 + null_sys as i64));
+    assert_eq!(dict_get(&data, "reserveBankPulsesRemaining").and_then(PyRep::as_i64), Some(42));
+    assert_eq!(dict_get(&data, "reserveBankActiveLinks").and_then(PyRep::as_i64), Some(1));
+
+    let main_thefts = handle(&ctx, &mut ns_sess, None, "essMgr", "GetMainBankTheftsForClientSolarSystem", &[], &HashMap::new())
+        .await
+        .expect("handled")
+        .expect("ok");
+    assert_eq!(rep_list_len(&main_thefts), Some(1));
+
+    let res_thefts = handle(&ctx, &mut ns_sess, None, "essMgr", "GetReserveBankTheftsForClientSolarSystem", &[], &HashMap::new())
+        .await
+        .expect("handled")
+        .expect("ok");
+    assert_eq!(rep_list_len(&res_thefts), Some(1));
+
+    let linked = handle(&ctx, &mut ns_sess, None, "essMgr", "IsClientLinkedToReserveBank", &[], &HashMap::new())
+        .await
+        .expect("handled")
+        .expect("ok");
+    assert_eq!(linked.as_bool(), Some(true));
+
+    let _ = handle(&ctx, &mut ns_sess, None, "essMgr", "RequestMainBankUnlink", &[], &HashMap::new())
+        .await
+        .expect("handled")
+        .expect("ok");
+    let _ = handle(&ctx, &mut ns_sess, None, "essMgr", "RequestReserveBankUnlink", &[], &HashMap::new())
+        .await
+        .expect("handled")
+        .expect("ok");
+    let linked_after = handle(&ctx, &mut ns_sess, None, "essMgr", "IsClientLinkedToReserveBank", &[], &HashMap::new())
+        .await
+        .expect("handled")
+        .expect("ok");
+    assert_eq!(linked_after.as_bool(), Some(false));
+
+    for key_tid in [57714, 57716, 57718, 57720] {
+        clone_type_with(&mut ctx.sde, 28667, key_tid, 4102, 30, 0.1, 0.0, &[]);
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        set_ess_reserve_pulses(snap, null_sys, &EssReservePulseState::default());
+        put_item(snap, Some(88301), 588, 9301, null_sys as i64, InventoryFlag::None, 1, true);
+        for key_tid in [57714, 57716, 57718, 57720] {
+            put_item(
+                snap,
+                None,
+                key_tid,
+                9301,
+                88301,
+                InventoryFlag::Cargo,
+                1,
+                false,
+            );
+        }
+    });
+    let sys_h = ctx.systems.get_or_spawn(null_sys);
+    let ess_pos = sys_h
+        .list_balls()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|b| b.type_id == 32882 || b.type_id == 56002 || b.id == 820_000_000 + null_sys as i64)
+        .map(|b| b.position)
+        .unwrap_or(DVec3::new(0.0, 0.0, 75_000_000_000.0));
+    let _ = sys_h
+        .spawn_ball(test_ship_ball(88301, 588, ess_pos + DVec3::new(1_000.0, 0.0, 0.0)))
+        .await;
+    let unlocked = handle(
+        &ctx,
+        &mut ns_sess,
+        None,
+        "essMgr",
+        "RequestUnlockReserveBank",
+        &[],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("unlock ok");
+    assert!(matches!(unlocked, PyRep::KeyVal(_)));
+
+    let clear_ok = handle(&ctx, &mut ns_sess, None, "essMgr", "clear_cache", &[], &HashMap::new())
+        .await
+        .expect("handled")
+        .expect("clear_cache");
+    assert_eq!(clear_ok, PyRep::None);
+}
+
+#[tokio::test]
+async fn beyonce_update_state_and_admin_bubble_id_paths() {
+    let ctx = test_ctx();
+    let sys_id = 30000142;
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let b1 = test_ship_ball(88401, 588, DVec3::new(1000.0, 0.0, 0.0));
+    let _ = sys_h.spawn_ball(b1).await;
+    let _ = sys_h
+        .spawn_ball(test_ship_ball(88402, 588, DVec3::new(2500.0, 0.0, 0.0)))
+        .await;
+
+    let mut player_sess = make_session(9401, 98000001, Some(sys_id), Some(88402), 0);
+    let bound = bound_sys(sys_id);
+    let res = handle(
+        &ctx,
+        &mut player_sess,
+        Some(&bound),
+        "beyonce",
+        "UpdateStateRequest",
+        &[],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("UpdateStateRequest ok");
+    assert_eq!(res, PyRep::None);
+
+    let denied = handle(
+        &ctx,
+        &mut player_sess,
+        Some(&bound),
+        "beyonce",
+        "AdminGetBubbleID",
+        &[PyRep::Integer(88402)],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled");
+    assert!(denied.is_err());
+
+    let mut gm_sess = make_session(9402, 98000001, Some(sys_id), Some(88402), service_roles::ROLE_GMH);
+    let bid_ship = handle(
+        &ctx,
+        &mut gm_sess,
+        Some(&bound),
+        "beyonce",
+        "AdminGetBubbleID",
+        &[PyRep::Integer(88402)],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("AdminGetBubbleID ok");
+    assert!(bid_ship.as_i64().unwrap_or(0) > 0);
+}
+
+#[tokio::test]
+async fn call_component_from_client_validates_and_executes_item_trader() {
+    let ctx = test_ctx();
+    let sys_id = 30000142;
+    let char_id = 9501;
+    let ship_id = 88501;
+    let trader_id = 880_123_456;
+    let mut sess = make_session(char_id, 98000001, Some(sys_id), Some(ship_id), 0);
+    let bound = bound_sys(sys_id);
+
+    // Unsupported component returns error
+    let unsupported = handle(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "beyonce",
+        "CallComponentFromClient",
+        &[
+            PyRep::Integer(trader_id),
+            PyRep::String("unknownComponent".into()),
+            PyRep::String("DoThing".into()),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect_err("unsupported component");
+    assert_eq!(unsupported.code, "UnsupportedComponentCall");
+
+    // Missing recipe ID returns InvalidRecipeID
+    let no_recipe = handle(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "beyonce",
+        "CallComponentFromClient",
+        &[
+            PyRep::Integer(trader_id),
+            PyRep::String("itemTrader".into()),
+            PyRep::String("ProcessTrade".into()),
+            PyRep::Integer(0),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect_err("invalid recipe id");
+    assert_eq!(no_recipe.code, "InvalidRecipeID");
+
+    // Missing item trader ball/item in system returns ItemTraderNotFoundInSystem
+    let missing_trader = handle(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "beyonce",
+        "CallComponentFromClient",
+        &[
+            PyRep::Integer(trader_id),
+            PyRep::String("itemTrader".into()),
+            PyRep::String("ProcessTrade".into()),
+            PyRep::Integer(1),
+            PyRep::Integer(1),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect_err("missing trader");
+    assert_eq!(missing_trader.code, "ItemTraderNotFoundInSystem");
+}

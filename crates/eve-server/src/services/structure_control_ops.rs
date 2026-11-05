@@ -1293,4 +1293,7 @@ pub fn reject_if_controlling_structure(
     }
     Ok(())
 }
+#[cfg(test)]
+#[path = "structure_control_ops_tests.rs"]
+mod structure_control_ops_tests;
 

@@ -1394,3 +1394,5 @@ pub(crate) async fn handle_cargo_dropoff(ctx: &ServerContext, session: &mut Sess
 }
 
 pub(crate) use crate::services::station_structure_handlers::{handle_get_structure_info, handle_get_structures};
+#[cfg(test)] #[path = "structure_lifecycle_rpc_tests.rs"]
+mod structure_lifecycle_rpc_tests;

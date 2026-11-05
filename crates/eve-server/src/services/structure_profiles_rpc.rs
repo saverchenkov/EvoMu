@@ -1175,3 +1175,6 @@ pub(crate) fn handle_save_profile_settings(
     );
     Ok(PyRep::Bool(true))
 }
+#[cfg(test)]
+#[path = "structure_profiles_rpc_tests.rs"]
+mod structure_profiles_rpc_tests;

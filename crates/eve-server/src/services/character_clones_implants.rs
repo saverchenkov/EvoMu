@@ -1356,3 +1356,8 @@ pub fn handle_clones_and_sheet(
         _ => super::character_contacts::handle_contacts(ctx, session, service, method, args, _kwargs),
     }
 }
+
+#[cfg(test)]
+#[path = "character_clones_implants_tests.rs"]
+mod character_clones_implants_tests;
+

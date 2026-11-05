@@ -1114,3 +1114,6 @@ fn handle_get_structure_map_data(
     });
     Ok(PyRep::List(rows))
 }
+#[cfg(test)]
+#[path = "structure_upwell_ops_tests.rs"]
+mod structure_upwell_ops_tests;

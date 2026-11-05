@@ -999,3 +999,6 @@ pub async fn try_activate_standup_weapon(
         _ => None,
     }
 }
+#[cfg(test)]
+#[path = "structure_standup_weapons_tests.rs"]
+mod structure_standup_weapons_tests;

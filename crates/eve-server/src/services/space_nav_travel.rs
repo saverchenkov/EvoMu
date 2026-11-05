@@ -1211,3 +1211,8 @@ pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "space_nav_travel_tests.rs"]
+mod space_nav_travel_tests;
+

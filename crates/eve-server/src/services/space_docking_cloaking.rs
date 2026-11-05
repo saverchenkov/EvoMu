@@ -1334,3 +1334,8 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "space_docking_cloaking_tests.rs"]
+mod space_docking_cloaking_tests;
+

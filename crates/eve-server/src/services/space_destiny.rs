@@ -1378,3 +1378,8 @@ async fn handle_call_component_from_client(
     );
     Ok(trade_rep)
 }
+
+#[cfg(test)]
+#[path = "space_destiny_tests.rs"]
+mod space_destiny_tests;
+

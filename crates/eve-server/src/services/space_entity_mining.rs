@@ -1271,3 +1271,7 @@ pub async fn handle(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "space_entity_mining_tests.rs"]
+mod space_entity_mining_tests;
