@@ -236,7 +236,7 @@ async fn test_add_balls_on_grid_entry_and_add_balls2_for_resident() {
     park.drain_all_observer_events();
 
     let (mut a_add, mut b_add2) = (None, None);
-    for _ in 0..40 {
+    for _ in 0..1_200 {
         park.step(1.0);
         let tick = park.current_tick as i64;
         for e in wire_for(&mut park, SHIP_A) {
@@ -381,7 +381,7 @@ async fn test_warp_to_and_special_fx_on_warp_start_and_exit() {
     // Warp exit: the simulation drops the ball to Stop and turns the tunnel effect off
     // (start = active = 0). OnDeactivatingWarp is triaged client-local and must not be on the wire.
     let mut exit = None;
-    for _ in 0..400 {
+    for _ in 0..2_500 {
         park.step(1.0);
         let actions = wire_for(&mut park, SHIP_A);
         if names(&actions).iter().any(|n| n == "Stop") {
@@ -389,7 +389,7 @@ async fn test_warp_to_and_special_fx_on_warp_start_and_exit() {
             break;
         }
     }
-    let actions = exit.expect("warp must finish within 400 ticks");
+    let actions = exit.expect("warp must finish within 2500 ticks");
     assert!(matches!(park.balls[&SHIP_A].mode, MovementMode::Stop));
     assert!((park.balls[&SHIP_A].position - dest).length() < 1.0e6, "landed near destination");
     assert!(!names(&actions).iter().any(|n| n == "OnDeactivatingWarp" || n == "OnActivatingWarp"));

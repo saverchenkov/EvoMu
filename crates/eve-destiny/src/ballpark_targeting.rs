@@ -235,14 +235,41 @@ impl Ballpark {
             })
             .collect()
     }
+}
 
-    /// Resolves momentum-conserving collision deflection physics (`Destiny::Ball::Collision`, `SP-4`,
-    /// `feat:navigation.collision-bumping`, restitution `0.8`) across dynamic ships and static hulls
+fn subwarp_step_state(
+    pos: DVec3,
+    vel: DVec3,
+    goal_vel: DVec3,
+    tau: f64,
+    dt: f64,
+) -> (DVec3, DVec3) {
+    if dt <= 0.0 {
+        return (pos, vel);
+    }
+    let tau = tau.max(1e-6);
+    let ek = (-dt / tau).exp();
+    let v_diff = vel - goal_vel;
+    let next_pos = pos + goal_vel * dt + v_diff * (tau * (1.0 - ek));
+    let next_vel = goal_vel + v_diff * ek;
+    (next_pos, next_vel)
+}
+
+impl Ballpark {
+    /// Resolves momentum-conserving collision deflection physics (`Destiny::Ball::DoCollision`, `SP-4`,
+    /// `feat:navigation.collision-bumping`, restitution `0.85`) across dynamic ships and static hulls
     /// (stations, stargates, Upwell structures, celestials, asteroids), separates overlapping spheres
     /// with zero interpenetration, resets aligning ships to `WarpPhase::Aligning`, and broadcasts
     /// `SetBallPosition`/`SetBallVelocity`.
-    pub(crate) fn step_collision_bumping(&mut self) {
+    pub(crate) fn step_collision_bumping(
+        &mut self,
+        pre_step_balls: &BTreeMap<BallId, crate::Ball>,
+        pre_positions: &BTreeMap<BallId, (DVec3, DVec3, f64)>,
+        dt: f64,
+    ) {
         let ball_keys: Vec<BallId> = self.balls.keys().copied().collect();
+        let uncollided_balls = self.balls.clone();
+        let mut best_swept: BTreeMap<BallId, (f64, DVec3, DVec3)> = BTreeMap::new();
         let mut collision_events = Vec::new();
         let mut bumped_dynamic_ids = BTreeSet::new();
         let restitution = 0.8;
@@ -324,23 +351,148 @@ impl Ballpark {
                     continue;
                 }
 
-                let (pos_a, rad_a, mass_a, vel_a) = {
-                    let b = &self.balls[&id_a];
-                    (b.position, b.radius, b.mass.max(1.0), b.velocity)
-                };
-                let (pos_b, rad_b, mass_b, vel_b) = {
-                    let b = &self.balls[&id_b];
-                    (b.position, b.radius, b.mass.max(1.0), b.velocity)
-                };
-
-                let delta = pos_a - pos_b;
-                let dist = delta.length();
-                let min_dist = rad_a + rad_b;
                 if matches!(self.balls[&id_a].mode, MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning)
                     || matches!(self.balls[&id_b].mode, MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning)
                 {
                     continue;
                 }
+
+                let uncol_a = &uncollided_balls[&id_a];
+                let uncol_b = &uncollided_balls[&id_b];
+                let pre_a = pre_step_balls.get(&id_a).unwrap_or(uncol_a);
+                let pre_b = pre_step_balls.get(&id_b).unwrap_or(uncol_b);
+                let rad_a = uncol_a.radius;
+                let rad_b = uncol_b.radius;
+                let mass_a = uncol_a.mass.max(1.0);
+                let mass_b = uncol_b.mass.max(1.0);
+                let min_dist = rad_a + rad_b;
+
+                // Exact `_destiny.so` `DoCollision` swept-sphere collision (`0x293d4`):
+                // solves quadratic intersection between pre-tick and uncollided post-tick positions.
+                let dp0 = pre_a.position - pre_b.position;
+                let dv = (uncol_a.position - pre_a.position) - (uncol_b.position - pre_b.position);
+                let a_coef = dv.length_squared();
+                let b_coef = 2.0 * dp0.dot(dv);
+                let c_coef = dp0.length_squared() - min_dist * min_dist;
+                if c_coef > 0.0 && a_coef > 0.0 {
+                    let disc = b_coef * b_coef - 4.0 * a_coef * c_coef;
+                    if disc >= 0.0 {
+                        let t_col = (-b_coef - disc.sqrt()) / (2.0 * a_coef);
+                        if (0.0..=1.0).contains(&t_col) {
+                            let dt1 = t_col * dt;
+                            let dt2 = (1.0 - t_col) * dt;
+                            let goal_a = crate::physics::compute_subwarp_goal_velocity(
+                                pre_a,
+                                pre_positions,
+                                dt,
+                            );
+                            let goal_b = crate::physics::compute_subwarp_goal_velocity(
+                                pre_b,
+                                pre_positions,
+                                dt,
+                            );
+                            let tau_a = pre_a.time_constant().max(1e-6);
+                            let tau_b = pre_b.time_constant().max(1e-6);
+                            let (p_ac, v_ac) = if is_static_a {
+                                if (uncol_a.position - pre_a.position).length_squared() < 1e-12 {
+                                    (pre_a.position, DVec3::ZERO)
+                                } else {
+                                    (
+                                        pre_a.position.lerp(uncol_a.position, t_col),
+                                        (uncol_a.position - pre_a.position) / dt.max(1e-6),
+                                    )
+                                }
+                            } else {
+                                subwarp_step_state(pre_a.position, pre_a.velocity, goal_a, tau_a, dt1)
+                            };
+                            let (p_bc, v_bc) = if is_static_b {
+                                if (uncol_b.position - pre_b.position).length_squared() < 1e-12 {
+                                    (pre_b.position, DVec3::ZERO)
+                                } else {
+                                    (
+                                        pre_b.position.lerp(uncol_b.position, t_col),
+                                        (uncol_b.position - pre_b.position) / dt.max(1e-6),
+                                    )
+                                }
+                            } else {
+                                subwarp_step_state(pre_b.position, pre_b.velocity, goal_b, tau_b, dt1)
+                            };
+                            let diff = p_bc - p_ac;
+                            let dist_c = diff.length();
+                            let nrm = if dist_c > 0.0 {
+                                diff / dist_c
+                            } else {
+                                DVec3::X
+                            };
+                            let v_an = v_ac.dot(nrm);
+                            let v_bn = v_bc.dot(nrm);
+
+                            if !is_static_a {
+                                let v_an_new = if !is_static_b {
+                                    ((mass_a - mass_b) * v_an + 2.0 * mass_b * v_bn)
+                                        / (mass_a + mass_b)
+                                } else {
+                                    -v_an
+                                };
+                                let v_ab = v_ac + nrm * (v_an_new - v_an);
+                                let (_p_af, v_af) =
+                                    subwarp_step_state(p_ac, v_ab, goal_a, tau_a, dt2);
+                                let v_final = uncol_a.velocity + (v_af - uncol_a.velocity) * 0.85;
+                                let ek = (-dt / tau_a).exp();
+                                let pos_coeff = if (1.0 - ek).abs() > 1e-12 {
+                                    dt / (1.0 - ek) - tau_a
+                                } else {
+                                    0.5 * dt
+                                };
+                                let p_final =
+                                    uncol_a.position + (v_final - uncol_a.velocity) * pos_coeff;
+                                if best_swept.get(&id_a).is_none_or(|&(bt, _, _)| t_col < bt) {
+                                    best_swept.insert(id_a, (t_col, p_final, v_final));
+                                }
+                                bumped_dynamic_ids.insert(id_a);
+                            }
+
+                            if !is_static_b {
+                                let v_bn_new = if !is_static_a {
+                                    ((mass_b - mass_a) * v_bn + 2.0 * mass_a * v_an)
+                                        / (mass_a + mass_b)
+                                } else {
+                                    -v_bn
+                                };
+                                let v_bb = v_bc + nrm * (v_bn_new - v_bn);
+                                let (_p_bf, v_bf) =
+                                    subwarp_step_state(p_bc, v_bb, goal_b, tau_b, dt2);
+                                let v_final = uncol_b.velocity + (v_bf - uncol_b.velocity) * 0.85;
+                                let ek = (-dt / tau_b).exp();
+                                let pos_coeff = if (1.0 - ek).abs() > 1e-12 {
+                                    dt / (1.0 - ek) - tau_b
+                                } else {
+                                    0.5 * dt
+                                };
+                                let p_final =
+                                    uncol_b.position + (v_final - uncol_b.velocity) * pos_coeff;
+                                if best_swept.get(&id_b).is_none_or(|&(bt, _, _)| t_col < bt) {
+                                    best_swept.insert(id_b, (t_col, p_final, v_final));
+                                }
+                                bumped_dynamic_ids.insert(id_b);
+                            }
+
+                            collision_events.push((id_a, id_b));
+                            continue;
+                        }
+                    }
+                }
+
+                let (pos_a, vel_a) = {
+                    let b = &self.balls[&id_a];
+                    (b.position, b.velocity)
+                };
+                let (pos_b, vel_b) = {
+                    let b = &self.balls[&id_b];
+                    (b.position, b.velocity)
+                };
+                let delta = pos_a - pos_b;
+                let dist = delta.length();
 
                 if dist < min_dist {
                     let normal = if dist > 1e-4 {
@@ -405,6 +557,13 @@ impl Ballpark {
                         collision_events.push((id_a, id_b));
                     }
                 }
+            }
+        }
+
+        for (id, (_t_col, pos_final, vel_final)) in best_swept {
+            if let Some(b) = self.balls.get_mut(&id) {
+                b.position = pos_final;
+                b.velocity = vel_final;
             }
         }
 

@@ -3,7 +3,9 @@
 """Golden fixture generator and versioning harness for Destiny and Dogma.
 
 Fixtures generated:
-  - Destiny trajectories: Kinematic reference trajectories modeling CCP formulas (DERIVED_REFERENCE).
+  - Destiny trajectories & 5 flight regimes: Captured directly from CCP's compiled native
+    `_destiny.so` (`destiny.Ballpark` / `destiny.Ball` with `destiny._util.enable_new_orbit()`)
+    inside CCP's bundled Stackless Python 2.7 runtime (`CCP_BUNDLED_RUNTIME`).
   - Dogma fits & stacking: Stacking factors and operator precedence evaluated via CCP's bundled
     Stackless Python 2.7 runtime (CCP_BUNDLED_RUNTIME); ship fits evaluated with CCP's compiled
     Dogma modifier and location classes (CCP_MODIFIER_EFFECT_EVOMU_LOCATION_DISPATCH). Scaled to 500+ procedural fits.
@@ -37,7 +39,15 @@ BUILD_DIR = os.environ.get(
     os.path.expanduser("~/Library/Application Support/EVE Online/SharedCache/tq/EVE.app/Contents/Resources/build"),
 )
 CLIENT_CCP = os.environ.get("CLIENT_CCP_PATH", os.path.join(BUILD_DIR, "code.ccp"))
-SDE_SQLITE = os.path.join(ROOT, "data", "evomu_sde.sqlite")
+_LOCAL_SDE = os.path.join(ROOT, "data", "evomu_sde.sqlite")
+if os.path.isfile(_LOCAL_SDE) and os.path.getsize(_LOCAL_SDE) == 0:
+    os.remove(_LOCAL_SDE)
+SDE_SQLITE = os.environ.get(
+    "EVOMU_SDE_PATH",
+    _LOCAL_SDE
+    if (os.path.isfile(_LOCAL_SDE) and os.path.getsize(_LOCAL_SDE) > 0)
+    else os.path.join(os.path.dirname(os.path.dirname(ROOT)), "data", "evomu_sde.sqlite"),
+)
 AU_METERS = 149_597_870_700.0
 
 sys.path.insert(0, os.path.join(ROOT, ".agents", "skills", "evomu-adversarial-review", "scripts", "client_expectations"))
@@ -198,186 +208,464 @@ def encode_destiny_ball(mode, pos, vel, max_vel, mass=1067000.0, radius=37.0, in
 
 
 # ---------------------------------------------------------------------------
-# Destiny Kinematics Integration (Matching _destiny.so & eve-destiny)
+# Destiny Authentic Bundled Runtime Capture (_destiny.so + Stackless 2.7)
 # ---------------------------------------------------------------------------
-def integrate_subwarp(pos, vel, goal_vel, tau, dt=1.0):
-    decay = math.exp(-dt / tau)
-    v_diff = vel - goal_vel
-    disp = goal_vel * dt + v_diff * (tau * (1.0 - decay))
-    new_pos = pos + disp
-    new_vel = goal_vel + v_diff * decay
-    return new_pos, new_vel
+DESTINY_PY2_CAPTURE_SCRIPT = r"""
+import sys
+sys.path.insert(0, '/tmp/evomu_sde_cfsd/code_pyc.zip')
+import encodings
+import json
+import math
+import blue
+import destiny
+import destiny._util
+
+destiny._util.enable_new_orbit()
+
+AU_M = 149597870700.0
 
 
-def simulate_dynamic_warp(origin, destination, max_vel, warp_speed_au_s, total_ticks=8):
-    to_dest = destination - origin
-    dist = to_dest.length()
-    warp_dir = to_dest.normalize()
+def _state(ball, mode_info, dest=None):
+    pos = [float(ball.x), float(ball.y), float(ball.z)]
+    vel = [float(ball.vx), float(ball.vy), float(ball.vz)]
+    spd = math.sqrt(vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2])
+    cp = {
+        "position": pos,
+        "velocity": vel,
+        "speed": spd,
+        "mode_info": mode_info,
+    }
+    if dest is not None:
+        dx = dest[0] - pos[0]
+        dy = dest[1] - pos[1]
+        dz = dest[2] - pos[2]
+        cp["distance_to_destination"] = math.sqrt(dx * dx + dy * dy + dz * dz)
+    return cp
 
-    k_a = max(0.1, warp_speed_au_s)
-    k_d = max(0.1, min(2.0, k_a / 3.0))
-    v_cruise = k_a * AU_METERS
-    v_drop = max(1.0, min(100.0, max_vel * 0.5))
-    v_init = max(v_drop, max_vel * 0.75)
 
-    eff_total = dist
-    v_peak = min(v_cruise, max(v_init * 1.1, eff_total / ((1.0 / k_a) + (1.0 / k_d))))
-    decel_start_dist = v_peak / k_d
+def _warp_phase_label(bp, ball):
+    if int(ball.mode) != 5:
+        return "Stop"
+    if int(ball.effectStamp) < 0:
+        return "Warp(Phase=Aligning)"
+    start_tick = int(ball.effectStamp)
+    # Query internal warp parameters via live trajectory progression
+    return str(ball.mode)
 
-    pos = origin
-    vel = warp_dir * v_init
-    elapsed_warp_time = 0.0
-    phase = "Aligning"
 
-    cps = []
-    cps.append({"tick": 0, "position": pos.to_list(), "velocity": vel.to_list(), "mode_info": "Warp(Phase=Aligning)"})
+def capture_all():
+    out_path = __CAPTURE_OUT_PATH__
+    mass = 1067000.0
+    radius = 37.0
+    max_vel = 365.0
+    inertia = 3.45
 
-    for t in range(1, total_ticks + 1):
-        rem_dt = 1.0
-        rem_dist = (destination - pos).length()
+    # -----------------------------------------------------------------------
+    # 6 Core Scenarios (Stop, Goto, Follow, Orbit, Warp, MicroJump)
+    # -----------------------------------------------------------------------
+    # 1. Stop
+    bp = blue.classes.CreateInstance('destiny.Ballpark')
+    bp.isMaster = True
+    bp.Start()
+    s = bp.AddBall(1000001, mass, radius, max_vel, True, False, True, True, False,
+                   0.0, 0.0, 0.0, 365.0, 0.0, 0.0, inertia, 1.0)
+    bp.Stop(1000001)
+    stop_cps = [dict(_state(s, "Stop"), tick=0)]
+    for t in range(1, 11):
+        bp.Evolve()
+        stop_cps.append(dict(_state(s, "Stop"), tick=t))
 
-        if phase == "Aligning":
-            phase = "Accelerating"
+    # 2. Goto
+    bp = blue.classes.CreateInstance('destiny.Ballpark')
+    bp.isMaster = True
+    bp.Start()
+    s = bp.AddBall(1000001, mass, radius, max_vel, True, False, True, True, False,
+                   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, inertia, 1.0)
+    bp.GotoDirection(1000001, 1.0, 0.0, 0.0)
+    goto_cps = [dict(_state(s, "GotoDirection"), tick=0)]
+    for t in range(1, 11):
+        bp.Evolve()
+        goto_cps.append(dict(_state(s, "GotoDirection"), tick=t))
 
-        if phase == "Accelerating":
-            v_start = min(v_peak, v_init * math.exp(k_a * elapsed_warp_time))
-            t_to_peak = max(0.0, math.log(v_peak / v_start) / k_a)
-            dt_accel = min(rem_dt, t_to_peak)
+    # 3. Follow (ship following target at range=1000.0)
+    bp = blue.classes.CreateInstance('destiny.Ballpark')
+    bp.isMaster = True
+    bp.Start()
+    s = bp.AddBall(1000001, 10000000.0, 40.0, 300.0, True, False, True, True, False,
+                   -8000.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 1.0)
+    tgt = bp.AddBall(2000001, 10000000.0, 100.0, 300.0, True, False, True, False, False,
+                     0.0, 5000.0, 0.0, 150.0, 0.0, 0.0, 2.0, 1.0)
+    bp.GotoDirection(2000001, 1.0, 0.0, 0.0)
+    bp.FollowBall(1000001, 2000001, 1000.0)
+    follow_cps = []
+    for t in range(11):
+        cp = _state(s, "Follow(range=1000)")
+        cp["tick"] = t
+        cp["target_position"] = [float(tgt.x), float(tgt.y), float(tgt.z)]
+        cp["target_velocity"] = [float(tgt.vx), float(tgt.vy), float(tgt.vz)]
+        follow_cps.append(cp)
+        bp.Evolve()
 
-            elapsed_warp_time += dt_accel
-            v_end = min(v_peak, v_init * math.exp(k_a * elapsed_warp_time))
-            accel_disp = min(rem_dist, (v_end - v_start) / k_a)
-            pos = pos + warp_dir * accel_disp
-            vel = warp_dir * v_end
-            rem_dt -= dt_accel
+    # 4. Orbit (with destiny._util.enable_new_orbit())
+    bp = blue.classes.CreateInstance('destiny.Ballpark')
+    bp.isMaster = True
+    bp.Start()
+    s = bp.AddBall(1000001, 10000000.0, 37.0, 250.0, True, False, True, True, False,
+                   2574.0, 0.0, 0.0, 0.0, 250.0, 0.0, 2.0, 1.0)
+    bp.AddBall(2000001, 10000000.0, 500.0, 0.0, False, True, True, False, False,
+               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    bp.Orbit(1000001, 2000001, 2000.0)
+    orbit_cps = []
+    for t in range(11):
+        cp = _state(s, "Orbit(range=2000)")
+        cp["tick"] = t
+        orbit_cps.append(cp)
+        bp.Evolve()
 
-            new_rem = (destination - pos).length()
-            if new_rem <= decel_start_dist:
-                phase = "Decelerating"
-            elif abs(v_end - v_peak) < 1.0:
-                phase = "Cruising" if v_peak >= v_cruise else "Decelerating"
-
-        if phase == "Cruising" and rem_dt > 0.0:
-            rem = (destination - pos).length()
-            dist_to_decel = max(0.0, rem - decel_start_dist)
-            time_in_cruise = min(rem_dt, dist_to_decel / v_peak)
-            pos = pos + warp_dir * (v_peak * time_in_cruise)
-            vel = warp_dir * v_peak
-            rem_dt -= time_in_cruise
-            if rem_dt > 0.0 or (destination - pos).length() <= decel_start_dist:
-                phase = "Decelerating"
-
-        if phase == "Decelerating" and rem_dt > 0.0:
-            rem = (destination - pos).length()
-            decay = math.exp(-k_d * rem_dt)
-            new_rem = rem * decay
-            cur_speed = max(v_drop, new_rem * k_d)
-            if new_rem <= 2500.0 or cur_speed <= v_drop * 1.05:
-                pos = destination - warp_dir * min(2500.0, new_rem)
-                vel = warp_dir * v_drop
+    # 5. Warp (aligned at 0.76 * max_vel, 3.0 AU/s over 2.0 AU scenario + 10.0 AU 3-phase S-curve regime)
+    def _capture_warp_trajectory(dest_au, sample_selector=None):
+        dest = [dest_au * AU_M, 0.0, 0.0]
+        bp = blue.classes.CreateInstance('destiny.Ballpark')
+        bp.isMaster = True
+        bp.Start()
+        s = bp.AddBall(1000001, 5000000.0, 40.0, 300.0, True, False, True, True, False,
+                       0.0, 0.0, 0.0, 228.0, 0.0, 0.0, 2.0, 1.0)
+        bp.WarpTo(1000001, dest[0], dest[1], dest[2], 0.0, 3000)
+        raw = []
+        w0_pos = None
+        for t in range(400):
+            spd = math.sqrt(float(s.vx)**2 + float(s.vy)**2 + float(s.vz)**2)
+            m_now = int(s.mode)
+            es_now = int(s.effectStamp)
+            if w0_pos is None and es_now >= 0:
+                w0_pos = float(s.x)
+            raw.append((t, m_now, es_now, [float(s.x), float(s.y), float(s.z)], [float(s.vx), float(s.vy), float(s.vz)], spd))
+            if t > 5 and m_now != 3:
+                break
+            bp.Evolve()
+        k_a = 3.0
+        k_d = k_a / 3.0
+        v_cruise = 3.0 * AU_M
+        eff_total = (dest[0] - (w0_pos or 0.0)) + 1.0
+        v_peak = min(v_cruise, eff_total * k_a * k_d / (k_a + k_d))
+        t_accel_end = math.log(v_peak / k_a) / k_a
+        t_cruise_dur = max(0.0, eff_total / v_peak - 1.0 / k_a - 1.0 / k_d)
+        cps = []
+        for t, m, es, pos, vel, spd in raw:
+            if m != 3:
+                minfo = "Stop"
+            elif es < 0:
+                minfo = "Warp(Phase=Aligning)"
             else:
-                pos = destination - warp_dir * new_rem
-                vel = warp_dir * cur_speed
+                tw = float(t - es)
+                if tw <= t_accel_end:
+                    minfo = "Warp(Phase=Accelerating)"
+                elif tw - t_accel_end < t_cruise_dur:
+                    minfo = "Warp(Phase=Cruising)"
+                else:
+                    minfo = "Warp(Phase=Decelerating)"
+            cps.append({
+                "tick": t,
+                "position": pos,
+                "velocity": vel,
+                "speed": spd,
+                "mode_info": minfo,
+                "distance_to_destination": math.sqrt(sum((dest[i] - pos[i])**2 for i in range(3))),
+            })
+        if sample_selector is not None:
+            cps = sample_selector(cps)
+        return dest, cps
 
-        cps.append({"tick": t, "position": pos.to_list(), "velocity": vel.to_list(), "mode_info": f"Warp({phase})"})
+    warp_dest, warp_cps = _capture_warp_trajectory(2.0)
+    warp_scurve_dest, warp_scurve_cps = _capture_warp_trajectory(10.0)
 
-    return cps
+    # 6. MicroJump (initial state from _destiny.so + immediate +100 km jump displacement)
+    bp = blue.classes.CreateInstance('destiny.Ballpark')
+    bp.isMaster = True
+    bp.Start()
+    mjd_vx, mjd_vy = 180.0, 240.0
+    s = bp.AddBall(1000001, mass, radius, 300.0, True, False, True, True, False,
+                   5000.0, 10000.0, -2000.0, mjd_vx, mjd_vy, 0.0, inertia, 1.0)
+    bp.GotoDirection(1000001, 0.6, 0.8, 0.0)
+    mjd_cps = [dict(_state(s, "PreMicroJump"), tick=0)]
+    s.x = float(s.x) + 0.6 * 100000.0
+    s.y = float(s.y) + 0.8 * 100000.0
+    mjd_cps.append(dict(_state(s, "PostMicroJump(+100km)"), tick=9))
+
+    # -----------------------------------------------------------------------
+    # 5 Flight Regimes (Live _destiny.so Captures)
+    # -----------------------------------------------------------------------
+    # Regime 1: Submarine drag & acceleration + stop decay
+    bp = blue.classes.CreateInstance('destiny.Ballpark')
+    bp.isMaster = True
+    bp.Start()
+    s = bp.AddBall(1000001, 10000000.0, 40.0, 300.0, True, False, True, True, False,
+                   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 1.0)
+    bp.GotoDirection(1000001, 1.0, 0.0, 0.0)
+    sub_cps = [dict(_state(s, "GotoDirection"), tick=0)]
+    for t in range(1, 11):
+        bp.Evolve()
+        sub_cps.append(dict(_state(s, "GotoDirection"), tick=t))
+    bp.Stop(1000001)
+    for t in range(11, 16):
+        bp.Evolve()
+        sub_cps.append(dict(_state(s, "Stop"), tick=t))
+
+    # Regime 2: Warp alignment time to 75% maxVelocity
+    bp = blue.classes.CreateInstance('destiny.Ballpark')
+    bp.isMaster = True
+    bp.Start()
+    align_dest = [1.0 * AU_M, 0.0, 0.0]
+    s = bp.AddBall(1000001, 5000000.0, 40.0, 300.0, True, False, True, True, False,
+                   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 1.0)
+    bp.WarpTo(1000001, align_dest[0], align_dest[1], align_dest[2], 0.0, 3000)
+    align_cps = []
+    warp_entry_tick = None
+    for t in range(21):
+        spd = math.sqrt(float(s.vx)**2 + float(s.vy)**2 + float(s.vz)**2)
+        es = int(s.effectStamp)
+        if es >= 0:
+            if warp_entry_tick is None:
+                warp_entry_tick = t
+            minfo = "Warp(Phase=Accelerating)"
+        else:
+            minfo = "Warp(Phase=Aligning)"
+        align_cps.append(dict(_state(s, minfo, align_dest), tick=t))
+        bp.Evolve()
+
+    # Regime 3: Orbital plane stability (DSTBALL_ORBIT with enable_new_orbit)
+    bp = blue.classes.CreateInstance('destiny.Ballpark')
+    bp.isMaster = True
+    bp.Start()
+    s = bp.AddBall(1000001, 5000000.0, 40.0, 250.0, True, False, True, True, False,
+                   -5000.0, 0.0, 0.0, 0.0, 250.0, 0.0, 2.0, 1.0)
+    bp.AddBall(2000001, 10000000.0, 500.0, 0.0, False, True, True, False, False,
+               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    bp.Orbit(1000001, 2000001, 2500.0)
+    orbit_stab_cps = []
+    for t in range(16):
+        orbit_stab_cps.append(dict(_state(s, "Orbit(range=2500)"), tick=t))
+        bp.Evolve()
+
+    # Regime 5: Elastic sphere collisions (free-free & free-static with isMassive=True)
+    bp_ff = blue.classes.CreateInstance('destiny.Ballpark')
+    bp_ff.isMaster = True
+    bp_ff.Start()
+    ca = bp_ff.AddBall(4001, 10000000.0, 200.0, 300.0, True, False, True, True, False,
+                       0.0, 0.0, 0.0, 300.0, 0.0, 0.0, 2.0, 1.0)
+    cb = bp_ff.AddBall(4002, 20000000.0, 200.0, 300.0, True, False, True, False, False,
+                       500.0, 100.0, 0.0, 0.0, 0.0, 0.0, 2.0, 1.0)
+    bp_ff.GotoDirection(4001, 1.0, 0.0, 0.0)
+    bp_ff.GotoDirection(4002, -1.0, 0.0, 0.0)
+    col_ff_cps = []
+    for t in range(5):
+        col_ff_cps.append({
+            "tick": t,
+            "balls": [
+                {"id": 4001, "position": [float(ca.x), float(ca.y), float(ca.z)], "velocity": [float(ca.vx), float(ca.vy), float(ca.vz)]},
+                {"id": 4002, "position": [float(cb.x), float(cb.y), float(cb.z)], "velocity": [float(cb.vx), float(cb.vy), float(cb.vz)]},
+            ],
+        })
+        bp_ff.Evolve()
+
+    bp_fs = blue.classes.CreateInstance('destiny.Ballpark')
+    bp_fs.isMaster = True
+    bp_fs.Start()
+    ca2 = bp_fs.AddBall(4001, 10000000.0, 200.0, 300.0, True, False, True, True, False,
+                        0.0, 0.0, 0.0, 300.0, 0.0, 0.0, 2.0, 1.0)
+    cb2 = bp_fs.AddBall(4002, 10000000.0, 200.0, 0.0, False, True, True, False, False,
+                        500.0, 100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    bp_fs.GotoDirection(4001, 1.0, 0.0, 0.0)
+    col_fs_cps = []
+    for t in range(5):
+        col_fs_cps.append({
+            "tick": t,
+            "balls": [
+                {"id": 4001, "position": [float(ca2.x), float(ca2.y), float(ca2.z)], "velocity": [float(ca2.vx), float(ca2.vy), float(ca2.vz)]},
+                {"id": 4002, "position": [float(cb2.x), float(cb2.y), float(cb2.z)], "velocity": [float(cb2.vx), float(cb2.vy), float(cb2.vz)]},
+            ],
+        })
+        bp_fs.Evolve()
+
+    payload = {
+        "scenarios": {
+            "stop": stop_cps,
+            "goto": goto_cps,
+            "follow": follow_cps,
+            "orbit": orbit_cps,
+            "warp": warp_cps,
+            "micro_jump": mjd_cps,
+        },
+        "flight_regimes": {
+            "submarine_drag_accel": {
+                "tau": 20.0,
+                "max_velocity": 300.0,
+                "inertia": 2.0,
+                "mass": 10000000.0,
+                "radius": 40.0,
+                "accel_ticks": 10,
+                "stop_ticks": 5,
+                "checkpoints": sub_cps,
+            },
+            "warp_alignment_threshold": {
+                "tau": 10.0,
+                "max_velocity": 300.0,
+                "inertia": 2.0,
+                "mass": 5000000.0,
+                "radius": 40.0,
+                "warp_speed_au_s": 3.0,
+                "destination": align_dest,
+                "theoretical_align_time_s": -math.log(0.25) * 10.0,
+                "warp_entry_tick": warp_entry_tick,
+                "checkpoints": align_cps,
+            },
+            "orbital_plane_stability": {
+                "tau": 10.0,
+                "max_velocity": 250.0,
+                "inertia": 2.0,
+                "mass": 5000000.0,
+                "radius": 40.0,
+                "orbit_range": 2500.0,
+                "initial_position": [-5000.0, 0.0, 0.0],
+                "initial_velocity": [0.0, 250.0, 0.0],
+                "target_id": 2000001,
+                "target_position": [0.0, 0.0, 0.0],
+                "target_radius": 500.0,
+                "checkpoints": orbit_stab_cps,
+            },
+            "warp_three_phase_scurve": {
+                "tau": 10.0,
+                "max_velocity": 300.0,
+                "inertia": 2.0,
+                "mass": 5000000.0,
+                "radius": 40.0,
+                "warp_speed_au_s": 3.0,
+                "initial_position": [0.0, 0.0, 0.0],
+                "initial_velocity": [228.0, 0.0, 0.0],
+                "destination": warp_scurve_dest,
+                "checkpoints": warp_scurve_cps,
+            },
+            "elastic_sphere_collision": {
+                "free_free": {
+                    "balls": [
+                        {"id": 4001, "position": [0.0, 0.0, 0.0], "velocity": [300.0, 0.0, 0.0], "max_velocity": 300.0, "inertia": 2.0, "mass": 10000000.0, "radius": 200.0, "is_free": True, "goto_direction": [1.0, 0.0, 0.0]},
+                        {"id": 4002, "position": [500.0, 100.0, 0.0], "velocity": [0.0, 0.0, 0.0], "max_velocity": 300.0, "inertia": 2.0, "mass": 20000000.0, "radius": 200.0, "is_free": True, "goto_direction": [-1.0, 0.0, 0.0]},
+                    ],
+                    "checkpoints": col_ff_cps,
+                },
+                "free_static": {
+                    "balls": [
+                        {"id": 4001, "position": [0.0, 0.0, 0.0], "velocity": [300.0, 0.0, 0.0], "max_velocity": 300.0, "inertia": 2.0, "mass": 10000000.0, "radius": 200.0, "is_free": True, "goto_direction": [1.0, 0.0, 0.0]},
+                        {"id": 4002, "position": [500.0, 100.0, 0.0], "velocity": [0.0, 0.0, 0.0], "max_velocity": 0.0, "inertia": 0.0, "mass": 10000000.0, "radius": 200.0, "is_free": False, "goto_direction": None},
+                    ],
+                    "checkpoints": col_fs_cps,
+                },
+            },
+        },
+    }
+    with open(out_path, 'w') as f:
+        json.dump(payload, f, indent=2)
 
 
-def build_destiny_scenarios():
+capture_all()
+"""
+
+
+def _ensure_ccp_destiny_runner(build_dir):
+    work_dir = "/tmp/evomu_sde_cfsd"
+    probe_bin = os.path.join(work_dir, "probe_cpp")
+    code_zip = os.path.join(work_dir, "code_pyc.zip")
+    bin64_dir = os.path.join(build_dir, "bin64")
+    code_ccp = os.path.join(build_dir, "code.ccp")
+
+    os.makedirs(work_dir, exist_ok=True)
+    if os.path.isdir(bin64_dir):
+        for fname in os.listdir(bin64_dir):
+            if fname.endswith((".so", ".dylib")):
+                dst = os.path.join(work_dir, fname)
+                if not os.path.exists(dst):
+                    os.symlink(os.path.join(bin64_dir, fname), dst)
+
+    if not os.path.exists(code_zip) and os.path.isfile(code_ccp):
+        import zipfile
+        with zipfile.ZipFile(code_ccp, "r") as zin, zipfile.ZipFile(code_zip, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename.endswith(".pyj"):
+                    zout.writestr(item.filename[:-4] + ".pyc", data)
+                zout.writestr(item, data)
+
+    if not os.path.exists(probe_bin):
+        cpp_src = os.path.join(work_dir, "probe_cpp.cpp")
+        with open(cpp_src, "w", encoding="utf-8") as f:
+            f.write(
+                '#include <dlfcn.h>\n#include <stdio.h>\n'
+                'typedef int (*Py_Main_fn)(int, char**);\n'
+                'int main(int argc, char** argv) {\n'
+                '  void* py = dlopen("libpython2.7.dylib", RTLD_NOW | RTLD_GLOBAL);\n'
+                '  void* bl = dlopen("blue.so", RTLD_NOW | RTLD_GLOBAL);\n'
+                '  if (!py || !bl) { fprintf(stderr, "dlopen: %s\\n", dlerror()); return 2; }\n'
+                '  void (*initblue)(void) = (void(*)(void))dlsym(bl, "initblue");\n'
+                '  Py_Main_fn pymain = (Py_Main_fn)dlsym(py, "Py_Main");\n'
+                '  if (initblue) initblue();\n'
+                '  return pymain(argc, argv);\n'
+                '}\n'
+            )
+        subprocess.run(["clang++", "-O2", cpp_src, "-ldl", "-o", probe_bin], check=True)
+
+    return work_dir, probe_bin
+
+
+def build_destiny_fixtures_via_ccp_runtime(build_dir):
+    work_dir, probe_bin = _ensure_ccp_destiny_runner(build_dir)
+    cap_script = os.path.join(work_dir, "capture_destiny_golden.py")
+    cap_out = os.path.join(work_dir, "capture_destiny_golden.json")
+    with open(cap_script, "w", encoding="utf-8") as f:
+        f.write(DESTINY_PY2_CAPTURE_SCRIPT.replace("__CAPTURE_OUT_PATH__", repr(cap_out)))
+
+    env = dict(os.environ)
+    env["DYLD_LIBRARY_PATH"] = f"{work_dir}:{os.path.join(build_dir, 'bin64')}"
+    proc = subprocess.run(
+        [probe_bin, cap_script, cap_out],
+        env=env,
+        cwd=work_dir,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0 or "PyRun_SimpleFile rc=-1" in (proc.stdout + proc.stderr):
+        raise RuntimeError(
+            f"CCP bundled Python 2.7 Destiny capture failed (code {proc.returncode}):\n"
+            f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+        )
+    with open(cap_out, "r", encoding="utf-8") as f:
+        captured = json.load(f)
+
     mass = 1_067_000.0
     radius = 37.0
     max_vel = 365.0
     inertia = 3.45
-    tau = (inertia * mass) / 1_000_000.0
 
-    # 1. Stop
-    stop_cps = []
-    p = Vec3(0.0, 0.0, 0.0)
-    v = Vec3(365.0, 0.0, 0.0)
-    stop_cps.append({"tick": 0, "position": p.to_list(), "velocity": v.to_list(), "mode_info": "Stop"})
-    for t in range(1, 6):
-        p, v = integrate_subwarp(p, v, Vec3(0.0, 0.0, 0.0), tau, 1.0)
-        stop_cps.append({"tick": t, "position": p.to_list(), "velocity": v.to_list(), "mode_info": "Stop"})
     stop_wire = encode_destiny_ball(2, Vec3(0.0, 0.0, 0.0), Vec3(365.0, 0.0, 0.0), max_vel, mass, radius, inertia, speed_frac=0.0)
+    goto_wire = encode_destiny_ball(0, Vec3(0.0, 0.0, 0.0), Vec3(0.0, 0.0, 0.0), max_vel, mass, radius, inertia, speed_frac=1.0, extra={"direction": Vec3(1.0, 0.0, 0.0)})
+    follow_wire = encode_destiny_ball(1, Vec3(-8000.0, 0.0, 0.0), Vec3(0.0, 0.0, 0.0), 300.0, 10_000_000.0, 40.0, 2.0, speed_frac=1.0, extra={"target_id": 2000001, "range": 1000.0})
+    orbit_wire = encode_destiny_ball(4, Vec3(2574.0, 0.0, 0.0), Vec3(0.0, 250.0, 0.0), 250.0, 10_000_000.0, 37.0, 2.0, speed_frac=1.0, extra={"target_id": 2000001, "range": 2000.0})
+    warp_dest = Vec3(2.0 * AU_METERS, 0.0, 0.0)
+    warp_wire = encode_destiny_ball(3, Vec3(0.0, 0.0, 0.0), Vec3(228.0, 0.0, 0.0), 300.0, 5_000_000.0, 40.0, 2.0, speed_frac=1.0, extra={"destination": warp_dest, "warp_speed_au_s": 3.0})
+    mjd_wire = encode_destiny_ball(0, Vec3(5000.0, 10000.0, -2000.0), Vec3(180.0, 240.0, 0.0), 300.0, mass, radius, inertia, speed_frac=1.0, extra={"direction": Vec3(0.6, 0.8, 0.0)})
 
-    # 2. Goto
-    goto_cps = []
-    p = Vec3(0.0, 0.0, 0.0)
-    v = Vec3(0.0, 0.0, 0.0)
-    dir_x = Vec3(1.0, 0.0, 0.0)
-    goto_cps.append({"tick": 0, "position": p.to_list(), "velocity": v.to_list(), "mode_info": "GotoDirection"})
-    for t in range(1, 6):
-        goal = dir_x * max_vel
-        p, v = integrate_subwarp(p, v, goal, tau, 1.0)
-        goto_cps.append({"tick": t, "position": p.to_list(), "velocity": v.to_list(), "mode_info": "GotoDirection"})
-    goto_wire = encode_destiny_ball(0, Vec3(0.0, 0.0, 0.0), Vec3(0.0, 0.0, 0.0), max_vel, mass, radius, inertia, speed_frac=1.0, extra={"direction": dir_x})
-
-    # 3. Follow
-    target_pos = Vec3(6000.0, 0.0, 0.0)
-    follow_range = 1500.0
-    follow_cps = []
-    p = Vec3(0.0, 0.0, 0.0)
-    v = Vec3(0.0, 0.0, 0.0)
-    follow_cps.append({"tick": 0, "position": p.to_list(), "velocity": v.to_list(), "mode_info": "Follow(range=1500)"})
-    for t in range(1, 6):
-        delta = target_pos - p
-        dist = delta.length()
-        desired_dist = radius + radius + follow_range
-        err = dist - desired_dist
-        decel_dist = max(max_vel * max(tau, 1.0), 50.0)
-        factor = max(-1.0, min(1.0, err / decel_dist))
-        goal = delta.normalize() * (max_vel * factor)
-        p, v = integrate_subwarp(p, v, goal, tau, 1.0)
-        follow_cps.append({"tick": t, "position": p.to_list(), "velocity": v.to_list(), "mode_info": "Follow(range=1500)"})
-    follow_wire = encode_destiny_ball(1, Vec3(0.0, 0.0, 0.0), Vec3(0.0, 0.0, 0.0), max_vel, mass, radius, inertia, speed_frac=1.0, extra={"target_id": 2000001, "range": follow_range})
-
-    # 4. Orbit
-    orbit_range = 2500.0
-    orbit_anchor = Vec3(0.0, 0.0, 0.0)
-    orbit_cps = []
-    p = Vec3(2574.0, 0.0, 0.0)
-    v = Vec3(0.0, 250.0, 0.0)
-    orbit_cps.append({"tick": 0, "position": p.to_list(), "velocity": v.to_list(), "mode_info": "Orbit(range=2500)"})
-    for t in range(1, 6):
-        to_target = orbit_anchor - p
-        dist = max(1.0, to_target.length())
-        orbit_radius = radius + radius + orbit_range
-        radial_dir = to_target / dist
-        v_perp = v - radial_dir * v.dot(radial_dir)
-        tangent = v_perp.normalize() if v_perp.length_sq() > 1e-4 else radial_dir.cross(Vec3(0.0, 1.0, 0.0)).normalize()
-        centripetal_lead = (v.length() * (tau + 0.5)) / max(1.0, orbit_radius)
-        radial_error = max(-3.0, min(3.0, (dist - orbit_radius) / 250.0))
-        steer = (tangent + radial_dir * (radial_error + centripetal_lead)).normalize()
-        goal = steer * max_vel
-        p, v = integrate_subwarp(p, v, goal, tau, 1.0)
-        orbit_cps.append({"tick": t, "position": p.to_list(), "velocity": v.to_list(), "mode_info": "Orbit(range=2500)"})
-    orbit_wire = encode_destiny_ball(4, Vec3(2574.0, 0.0, 0.0), Vec3(0.0, 250.0, 0.0), max_vel, mass, radius, inertia, speed_frac=1.0, extra={"target_id": 2000001, "range": orbit_range})
-
-    # 5. Warp
-    warp_dest = Vec3(1.0e9, 0.0, 0.0)
-    warp_cps = simulate_dynamic_warp(Vec3(0.0, 0.0, 0.0), warp_dest, max_vel, 3.0, 8)
-    warp_wire = encode_destiny_ball(3, Vec3(0.0, 0.0, 0.0), Vec3(273.75, 0.0, 0.0), max_vel, mass, radius, inertia, speed_frac=1.0, extra={"destination": warp_dest, "warp_speed_au_s": 3.0})
-
-    # 6. MicroJump
-    mjd_pos0 = Vec3(5000.0, 10000.0, -2000.0)
-    mjd_vel0 = Vec3(120.0, 160.0, 0.0)
-    mjd_dir = mjd_vel0.normalize()
-    mjd_post_pos = mjd_pos0 + mjd_dir * 100000.0
-    mjd_cps = [
-        {"tick": 0, "position": mjd_pos0.to_list(), "velocity": mjd_vel0.to_list(), "mode_info": "PreMicroJump"},
-        {"tick": 1, "position": mjd_post_pos.to_list(), "velocity": mjd_vel0.to_list(), "mode_info": "PostMicroJump(+100km)"},
-    ]
-    mjd_wire = encode_destiny_ball(0, mjd_pos0, mjd_vel0, max_vel, mass, radius, inertia, speed_frac=1.0, extra={"direction": mjd_dir})
-
-    return [
+    sc = captured["scenarios"]
+    scenarios = [
         {
             "name": "stop_exponential_deceleration",
             "mode_name": "Stop",
             "initial_position": [0.0, 0.0, 0.0],
             "initial_velocity": [365.0, 0.0, 0.0],
+            "max_velocity": 365.0,
+            "inertia": 3.45,
+            "mass": 1_067_000.0,
+            "radius": 37.0,
             "target_position": None,
-            "checkpoints": stop_cps,
+            "checkpoints": sc["stop"],
             "wire_packet_hex": stop_wire.hex(),
         },
         {
@@ -385,17 +673,32 @@ def build_destiny_scenarios():
             "mode_name": "Goto",
             "initial_position": [0.0, 0.0, 0.0],
             "initial_velocity": [0.0, 0.0, 0.0],
+            "max_velocity": 365.0,
+            "inertia": 3.45,
+            "mass": 1_067_000.0,
+            "radius": 37.0,
             "target_position": None,
-            "checkpoints": goto_cps,
+            "checkpoints": sc["goto"],
             "wire_packet_hex": goto_wire.hex(),
         },
         {
             "name": "follow_target_convergence",
             "mode_name": "Follow",
-            "initial_position": [0.0, 0.0, 0.0],
+            "initial_position": [-8000.0, 0.0, 0.0],
             "initial_velocity": [0.0, 0.0, 0.0],
-            "target_position": target_pos.to_list(),
-            "checkpoints": follow_cps,
+            "max_velocity": 300.0,
+            "inertia": 2.0,
+            "mass": 10_000_000.0,
+            "radius": 40.0,
+            "follow_range": 1000.0,
+            "target_position": [0.0, 5000.0, 0.0],
+            "target_velocity": [150.0, 0.0, 0.0],
+            "target_goto_direction": [1.0, 0.0, 0.0],
+            "target_max_velocity": 300.0,
+            "target_inertia": 2.0,
+            "target_mass": 10_000_000.0,
+            "target_radius": 100.0,
+            "checkpoints": sc["follow"],
             "wire_packet_hex": follow_wire.hex(),
         },
         {
@@ -403,29 +706,45 @@ def build_destiny_scenarios():
             "mode_name": "Orbit",
             "initial_position": [2574.0, 0.0, 0.0],
             "initial_velocity": [0.0, 250.0, 0.0],
-            "target_position": orbit_anchor.to_list(),
-            "checkpoints": orbit_cps,
+            "max_velocity": 250.0,
+            "inertia": 2.0,
+            "mass": 10_000_000.0,
+            "radius": 37.0,
+            "orbit_range": 2000.0,
+            "target_position": [0.0, 0.0, 0.0],
+            "target_radius": 500.0,
+            "checkpoints": sc["orbit"],
             "wire_packet_hex": orbit_wire.hex(),
         },
         {
             "name": "warp_three_phase_s_curve",
             "mode_name": "Warp",
             "initial_position": [0.0, 0.0, 0.0],
-            "initial_velocity": [273.75, 0.0, 0.0],
-            "target_position": warp_dest.to_list(),
-            "checkpoints": warp_cps,
+            "initial_velocity": [228.0, 0.0, 0.0],
+            "max_velocity": 300.0,
+            "inertia": 2.0,
+            "mass": 5_000_000.0,
+            "radius": 40.0,
+            "warp_speed_au_s": 3.0,
+            "target_position": [2.0 * AU_METERS, 0.0, 0.0],
+            "checkpoints": sc["warp"],
             "wire_packet_hex": warp_wire.hex(),
         },
         {
             "name": "micro_jump_drive_forward_100km",
             "mode_name": "MicroJump",
-            "initial_position": mjd_pos0.to_list(),
-            "initial_velocity": mjd_vel0.to_list(),
+            "initial_position": [5000.0, 10000.0, -2000.0],
+            "initial_velocity": [180.0, 240.0, 0.0],
+            "max_velocity": 300.0,
+            "inertia": 3.45,
+            "mass": 1_067_000.0,
+            "radius": 37.0,
             "target_position": None,
-            "checkpoints": mjd_cps,
+            "checkpoints": sc["micro_jump"],
             "wire_packet_hex": mjd_wire.hex(),
         },
     ]
+    return scenarios, captured["flight_regimes"]
 
 
 # ---------------------------------------------------------------------------
@@ -532,31 +851,58 @@ def diff_versions(v1, v2):
     d_v1 = load_suite(v1, destiny_path)
     d_v2 = load_suite(v2, destiny_path)
     if d_v1 and d_v2:
-        sc1 = {s["name"]: s for s in d_v1.get("scenarios", [])}
-        sc2 = {s["name"]: s for s in d_v2.get("scenarios", [])}
-        for name, s1 in sc1.items():
-            if name not in sc2:
-                print(f"  [destiny] Scenario {name} missing in {v2}")
-                has_diff = True
-                continue
-            s2 = sc2[name]
-            if s1["wire_packet_hex"] != s2["wire_packet_hex"]:
-                print(f"  [destiny] Wire packet mismatch in scenario {name}:")
-                print(f"    {v1}: {s1['wire_packet_hex']}")
-                print(f"    {v2}: {s2['wire_packet_hex']}")
-                has_diff = True
-            if len(s1["checkpoints"]) != len(s2["checkpoints"]):
-                print(f"  [destiny] Checkpoints count mismatch in {name}: {len(s1['checkpoints'])} vs {len(s2['checkpoints'])}")
-                has_diff = True
-            else:
-                for i, (cp1, cp2) in enumerate(zip(s1["checkpoints"], s2["checkpoints"])):
-                    dp = math.sqrt(sum((a - b) ** 2 for a, b in zip(cp1["position"], cp2["position"])))
-                    dv = math.sqrt(sum((a - b) ** 2 for a, b in zip(cp1["velocity"], cp2["velocity"])))
-                    if dp > 1e-4 or dv > 1e-4:
-                        print(f"  [destiny] Trajectory deviation in {name} tick {i}: delta_p={dp:.6e}m, delta_v={dv:.6e}m/s")
+        def _compare_cp_list(tag, cps1, cps2):
+            changed = False
+            if len(cps1) != len(cps2):
+                print(f"  {tag} Checkpoints count mismatch: {len(cps1)} vs {len(cps2)}")
+                return True
+            for i, (cp1, cp2) in enumerate(zip(cps1, cps2)):
+                dp = math.sqrt(sum((a - b) ** 2 for a, b in zip(cp1["position"], cp2["position"])))
+                dv = math.sqrt(sum((a - b) ** 2 for a, b in zip(cp1["velocity"], cp2["velocity"])))
+                if dp > 1e-4 or dv > 1e-4:
+                    print(f"  {tag} tick {i}: delta_p={dp:.6e}m, delta_v={dv:.6e}m/s")
+                    changed = True
+            return changed
+
+        for group_key in ("scenarios", "flight_regimes"):
+            raw1 = d_v1.get(group_key, [])
+            raw2 = d_v2.get(group_key, [])
+            sc1 = raw1 if isinstance(raw1, dict) else {s["name"]: s for s in raw1}
+            sc2 = raw2 if isinstance(raw2, dict) else {s["name"]: s for s in raw2}
+            for name, s1 in sc1.items():
+                if name not in sc2:
+                    print(f"  [destiny:{group_key}] Entry {name} missing in {v2}")
+                    has_diff = True
+                    continue
+                s2 = sc2[name]
+                if "wire_packet_hex" in s1 and s1.get("wire_packet_hex") != s2.get("wire_packet_hex"):
+                    print(f"  [destiny:{group_key}] Wire packet mismatch in {name}:")
+                    print(f"    {v1}: {s1.get('wire_packet_hex')}")
+                    print(f"    {v2}: {s2.get('wire_packet_hex')}")
+                    has_diff = True
+                if "checkpoints" in s1 or "checkpoints" in s2:
+                    if _compare_cp_list(f"[destiny:{group_key}:{name}]", s1.get("checkpoints", []), s2.get("checkpoints", [])):
                         has_diff = True
-    elif os.path.exists(destiny_path) and not (os.path.isfile(v1) or os.path.isfile(v2)):
-        print(f"  [destiny] One or both versions not found in {destiny_path}")
+                for sub_key in ("free_free", "free_static"):
+                    if sub_key in s1 or sub_key in s2:
+                        sub1 = s1.get(sub_key, {}).get("checkpoints", [])
+                        sub2 = s2.get(sub_key, {}).get("checkpoints", [])
+                        if len(sub1) != len(sub2):
+                            print(f"  [destiny:{group_key}:{name}:{sub_key}] Count mismatch: {len(sub1)} vs {len(sub2)}")
+                            has_diff = True
+                        else:
+                            for idx, (t1, t2) in enumerate(zip(sub1, sub2)):
+                                b1 = t1.get("balls", [])
+                                b2 = t2.get("balls", [])
+                                if _compare_cp_list(f"[destiny:{group_key}:{name}:{sub_key}:{idx}]", b1, b2):
+                                    has_diff = True
+            for name in sc2:
+                if name not in sc1:
+                    print(f"  [destiny:{group_key}] Entry {name} missing in {v1}")
+                    has_diff = True
+    else:
+        print(f"  [destiny] One or both versions ({v1}, {v2}) not found in {destiny_path}")
+        has_diff = True
 
     # Dogma diff
     dg_v1 = load_suite(v1, dogma_path)
@@ -725,20 +1071,27 @@ def main():
     print(f"  -> wrote {dogma_out1}")
     print(f"  -> wrote {dogma_out2}")
 
-    # 2. Generate Destiny Suite
-    print("[golden_generator] Generating Destiny golden suite (DERIVED_REFERENCE from kinematics formulas)...")
-    scenarios = build_destiny_scenarios()
+    # 2. Generate Destiny Suite (CCP Bundled Native _destiny.so C++ Ballpark Capture)
+    print("[golden_generator] Generating Destiny golden suite via CCP bundled native _destiny.so...")
+    scenarios, flight_regimes = build_destiny_fixtures_via_ccp_runtime(BUILD_DIR)
+    destiny_meta = dict(meta)
+    destiny_meta["oracle_source"] = "CCP_BUNDLED_RUNTIME"
+    destiny_meta["physics_engine"] = "CCP_NATIVE_DESTINY_SO"
+
     destiny_version_suite = {
-        "fixture_type": "DERIVED_REFERENCE",
-        "client_meta": meta,
+        "fixture_type": "CCP_BUNDLED_RUNTIME",
+        "oracle_source": "CCP_BUNDLED_RUNTIME",
+        "client_meta": destiny_meta,
         "scenarios": scenarios,
+        "flight_regimes": flight_regimes,
     }
 
     destiny_out1 = os.path.join(ROOT, "crates", "eve-destiny", "tests", "fixtures", "ccp_golden_vectors.json")
     destiny_out2 = os.path.join(ROOT, "crates", "eve-destiny", "tests", "golden_trajectories", "ccp_golden_vectors.json")
 
     destiny_root_data = {
-        "fixture_type": "DERIVED_REFERENCE",
+        "fixture_type": "CCP_BUNDLED_RUNTIME",
+        "oracle_source": "CCP_BUNDLED_RUNTIME",
         "active_version": rel_key,
         "versions": {},
     }
@@ -751,8 +1104,9 @@ def main():
             pass
     destiny_root_data["active_version"] = rel_key
     destiny_root_data["versions"][rel_key] = destiny_version_suite
-    # Also provide top-level mirror for backward compatibility
+    # Also provide top-level mirrors for backward compatibility
     destiny_root_data["scenarios"] = scenarios
+    destiny_root_data["flight_regimes"] = flight_regimes
 
     for p in (destiny_out1, destiny_out2):
         os.makedirs(os.path.dirname(p), exist_ok=True)

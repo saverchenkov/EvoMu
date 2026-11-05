@@ -31,11 +31,12 @@ impl Ballpark {
             .filter_map(|&id| self.ball_grid_ids.get(&id).copied().map(|g| (id, g)))
             .collect();
 
-        let positions: BTreeMap<BallId, (DVec3, f64)> = self
+        let positions: BTreeMap<BallId, (DVec3, DVec3, f64)> = self
             .balls
             .iter()
-            .map(|(&id, b)| (id, (b.position, b.radius)))
+            .map(|(&id, b)| (id, (b.position, b.velocity, b.radius)))
             .collect();
+        let pre_step_balls = self.balls.clone();
 
         let leader_frames: BTreeMap<BallId, (DVec3, DVec3, DVec3, DVec3)> = self
             .formation_states
@@ -125,7 +126,7 @@ impl Ballpark {
             }
 
             if let MovementMode::Missile { target_id } = ball.mode {
-                step_missile_ball(ball, positions.get(&target_id).map(|&(p, _)| p), dt);
+                step_missile_ball(ball, positions.get(&target_id).map(|&(p, _, _)| p), dt);
                 continue;
             }
 
@@ -209,7 +210,7 @@ impl Ballpark {
                 continue;
             }
 
-            let goal_velocity = compute_subwarp_goal_velocity(ball, &positions);
+            let goal_velocity = compute_subwarp_goal_velocity(ball, &positions, dt);
             integrate_subwarp(ball, goal_velocity, dt);
         }
 
@@ -235,8 +236,8 @@ impl Ballpark {
             }
         }
 
-        // Collision bounce physics (`Destiny::Ball::Collision`, `SP-4`, `feat:navigation.collision-bumping`)
-        self.step_collision_bumping();
+        // Collision bounce physics (`Destiny::Ball::DoCollision`, `SP-4`, `feat:navigation.collision-bumping`)
+        self.step_collision_bumping(&pre_step_balls, &positions, dt);
 
         // Gate cloak, post-warp invulnerability, and undock invulnerability decay and break on active movement (`SP-3`, `SP-4`, `SP-5`)
         let mut gate_decloaked = Vec::new();
@@ -378,10 +379,10 @@ impl Ballpark {
                     }
                 }
                 if cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0 && !is_in_warp_tunnel_a {
-                    let start_a = positions.get(&id_a).map(|&(p, _)| p).unwrap_or(pos_a);
+                    let start_a = positions.get(&id_a).map(|&(p, _, _)| p).unwrap_or(pos_a);
                     for &(id_b, pos_b, rad_b) in &updated_positions {
                         if id_a != id_b && !is_field_or_bubble_b(id_b) {
-                            let start_b = positions.get(&id_b).map(|&(p, _)| p).unwrap_or(pos_b);
+                            let start_b = positions.get(&id_b).map(|&(p, _, _)| p).unwrap_or(pos_b);
                             let p0 = start_a - start_b;
                             let dp = (pos_a - start_a) - (pos_b - start_b);
                             let dp_len2 = dp.length_squared();
@@ -943,7 +944,8 @@ pub mod combat {
 
 pub(crate) fn compute_subwarp_goal_velocity(
     ball: &Ball,
-    positions: &BTreeMap<BallId, (DVec3, f64)>,
+    positions: &BTreeMap<BallId, (DVec3, DVec3, f64)>,
+    dt: f64,
 ) -> DVec3 {
     match &ball.mode {
         MovementMode::GotoDirection { direction } => {
@@ -951,63 +953,105 @@ pub(crate) fn compute_subwarp_goal_velocity(
             dir * (ball.max_velocity * ball.speed_fraction)
         }
         MovementMode::Follow { target_id, range } => {
-            if let Some(&(target_pos, target_radius)) = positions.get(target_id) {
-                let delta = target_pos - ball.position;
-                let dist = delta.length();
-                let desired_dist = ball.radius + target_radius + *range;
-                let max_spd = ball.max_velocity * ball.speed_fraction;
-                if *range > 0.0 {
-                    let err = dist - desired_dist;
-                    if err.abs() > 1.0 && max_spd > 0.0 {
-                        let decel_dist = (max_spd * ball.time_constant().max(1.0)).max(50.0);
-                        let factor = (err / decel_dist).clamp(-1.0, 1.0);
-                        delta.normalize_or_zero() * (max_spd * factor)
-                    } else {
-                        DVec3::ZERO
-                    }
-                } else if dist > desired_dist + 1e-3 && max_spd > 0.0 {
-                    let err = dist - desired_dist;
-                    let factor = if err < max_spd {
-                        let r = err / max_spd;
-                        r * r
-                    } else {
-                        1.0
-                    };
-                    delta.normalize_or_zero() * (max_spd * factor)
+            if let Some(&(target_pos, _target_vel, target_radius)) = positions.get(target_id) {
+                let r_total = *range + ball.radius + target_radius;
+                let diff = ball.position - target_pos;
+                let dist = diff.length();
+                let stop_point = if dist > 0.0 {
+                    target_pos + (diff / dist) * r_total
                 } else {
+                    target_pos + DVec3::new(r_total, 0.0, 0.0)
+                };
+                let err = stop_point - ball.position;
+                let err_sq = err.length_squared();
+                let max_spd = ball.max_velocity * ball.speed_fraction;
+                let step_dist = max_spd * dt;
+                let step_dist_sq = step_dist * step_dist;
+                if err_sq == 0.0 || max_spd <= 0.0 {
                     DVec3::ZERO
+                } else if err_sq < step_dist_sq && step_dist_sq > 0.0 {
+                    let ratio = err_sq / step_dist_sq;
+                    err.normalize() * (max_spd * ratio * ratio)
+                } else {
+                    err.normalize() * max_spd
                 }
             } else {
                 DVec3::ZERO
             }
         }
         MovementMode::Orbit { target_id, range } => {
-            if let Some(&(target_pos, target_radius)) = positions.get(target_id) {
-                let to_target = target_pos - ball.position;
-                let dist = to_target.length().max(1.0);
-                let orbit_radius = ball.radius + target_radius + *range;
-                let radial_dir = to_target / dist;
-
-                let v_perp = ball.velocity - radial_dir * ball.velocity.dot(radial_dir);
-                let tangent = if v_perp.length_squared() > 1e-4 {
-                    v_perp.normalize()
+            if let Some(&(target_pos, target_vel, target_radius)) = positions.get(target_id) {
+                let v_max = ball.max_velocity * ball.speed_fraction;
+                let to_t = target_pos - ball.position;
+                let dist = to_t.length();
+                if dist <= 1e-9 || v_max <= 0.0 || dt <= 0.0 {
+                    return DVec3::ZERO;
+                }
+                let u = to_t / dist;
+                let cross_vel = u.cross(ball.velocity);
+                let nrm = if cross_vel.length_squared() > 1e-12 {
+                    cross_vel.normalize()
                 } else {
-                    let ref_axis = if radial_dir.y.abs() < 0.9 {
-                        DVec3::Y
+                    let z_cross = u.cross(DVec3::NEG_Z);
+                    if z_cross.length_squared() > 1e-12 {
+                        z_cross.normalize()
                     } else {
-                        DVec3::Z
-                    };
-                    radial_dir.cross(ref_axis).normalize_or_zero()
+                        let angle = (ball.id as f32) as f64;
+                        let (sin_a, cos_a) = (angle.sin(), angle.cos());
+                        let pole_ref = if u.z < 0.0 {
+                            DVec3::new(-cos_a, -sin_a, 0.0)
+                        } else {
+                            DVec3::new(cos_a, sin_a, 0.0)
+                        };
+                        u.cross(pole_ref).normalize_or_zero()
+                    }
                 };
-
-                let max_spd = ball.max_velocity * ball.speed_fraction;
-                let tau = ball.time_constant().max(0.1);
-                let centripetal_lead =
-                    (ball.velocity.length() * (tau + 0.5)) / orbit_radius.max(1.0);
-                let radial_error = ((dist - orbit_radius) / 250.0).clamp(-3.0, 3.0);
-                let steer =
-                    (tangent + radial_dir * (radial_error + centripetal_lead)).normalize_or_zero();
-                steer * max_spd
+                let tang = nrm.cross(u).normalize_or_zero();
+                let r_des = *range + ball.radius + target_radius;
+                let tau = ball.time_constant().max(1e-6);
+                let a_max = v_max / tau;
+                let d12 = ((r_des - dist) * 0.1 / v_max).clamp(-1.0, 1.0);
+                let d15 = dist.max(0.1);
+                let d11 = (a_max * d15).sqrt().min(v_max);
+                let arc = dt * d11;
+                let x = (arc * d12 / d15) / (d12 * d12 + 1.0).sqrt();
+                let lterm = if x < -0.994_014_667_510_986_3 {
+                    -6.885_381_841_077_475
+                } else if x.abs() > 1e-12 {
+                    (1.0 + x).ln()
+                } else {
+                    x
+                };
+                let phi = if d12.abs() >= 1e-12 {
+                    lterm / d12
+                } else {
+                    arc / d15
+                };
+                let r_new = dist * (d12 * phi).exp();
+                let (sp, cp) = phi.sin_cos();
+                let p_orbit = ball.position + u * (dist - r_new * cp) + tang * (r_new * sp);
+                let v_dir = (u * (sp - d12 * cp) + tang * (cp + d12 * sp)).normalize_or_zero();
+                let v_spiral = v_dir * d11 + target_vel;
+                let ek = (-dt / tau).exp();
+                let omk = 1.0 - ek;
+                let pos_denom = dt - tau * omk;
+                let raw_goal = if v_spiral.length() >= 0.05 * v_max
+                    && pos_denom.abs() > 1e-12
+                    && omk.abs() > 1e-12
+                {
+                    let v_goal_pos =
+                        (p_orbit - ball.position - ball.velocity * (tau * omk)) / pos_denom;
+                    let v_goal_vel = (v_spiral - ball.velocity * ek) / omk;
+                    (v_goal_pos + v_goal_vel) * 0.5
+                } else {
+                    (p_orbit - ball.position) / dt - ball.velocity
+                };
+                let raw_len = raw_goal.length();
+                if raw_len > v_max {
+                    raw_goal * (v_max / raw_len)
+                } else {
+                    raw_goal
+                }
             } else {
                 DVec3::ZERO
             }
@@ -1097,11 +1141,11 @@ pub(crate) fn integrate_subwarp(ball: &mut Ball, goal_velocity: DVec3, dt: f64) 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn step_warp_ball(
     ball: &mut Ball,
-    mut remaining_dt: f64,
-    origin: DVec3,
+    remaining_dt: f64,
+    mut origin: DVec3,
     destination: DVec3,
     warp_speed_au_s: f64,
-    total_distance: f64,
+    mut total_distance: f64,
     phase: &mut WarpPhase,
     elapsed_warp_time: &mut f64,
 ) -> bool {
@@ -1115,14 +1159,21 @@ pub(crate) fn step_warp_ball(
     }
 
     if *phase == WarpPhase::Aligning {
-        let align_threshold = ball.max_velocity * (0.75 - 1e-12);
-        let forward_speed = ball.velocity.dot(warp_dir);
-        if forward_speed < align_threshold {
+        let speed = ball.velocity.length();
+        let vel_dir = if speed > 1e-12 {
+            ball.velocity / speed
+        } else {
+            DVec3::ZERO
+        };
+        let already_aligned = speed > ball.max_velocity * 0.75 && vel_dir.dot(warp_dir) > 0.99;
+        if already_aligned {
+            *phase = WarpPhase::Accelerating;
+            origin = ball.position;
+            total_distance = (destination - origin).length();
+            *elapsed_warp_time = 0.0;
+        } else {
             let goal_vel = warp_dir * ball.max_velocity;
             integrate_subwarp(ball, goal_vel, remaining_dt);
-            if ball.velocity.dot(warp_dir) >= align_threshold {
-                *phase = WarpPhase::Accelerating;
-            }
             ball.mode = MovementMode::Warp {
                 origin,
                 destination,
@@ -1132,98 +1183,80 @@ pub(crate) fn step_warp_ball(
                 elapsed_warp_time: *elapsed_warp_time,
             };
             return false;
-        } else {
-            *phase = WarpPhase::Accelerating;
         }
     }
 
-    let k_a = warp_speed_au_s.max(0.1);
-    let k_d = (k_a / 3.0).clamp(0.1, 2.0);
-    let v_cruise = k_a * AU_METERS;
-    let v_drop = (ball.max_velocity * 0.5).clamp(1.0, 100.0);
-    let v_init = (ball.max_velocity * 0.75).max(v_drop);
+    let k_a = warp_speed_au_s.max(1e-4);
+    let k_d = k_a / 3.0;
+    let v_cruise = warp_speed_au_s * AU_METERS;
+    let raw_dist = total_distance.max((destination - origin).length());
+    let eff_total = raw_dist + 1.0;
+    let active_dir = (destination - origin).normalize_or_zero();
+    let dir = if active_dir != DVec3::ZERO {
+        active_dir
+    } else {
+        warp_dir
+    };
 
-    let eff_total = total_distance.max((destination - ball.position).length());
-    let v_peak = v_cruise
-        .min(eff_total / ((1.0 / k_a) + (1.0 / k_d)))
-        .max(v_init * 1.1);
-    let decel_start_dist = v_peak / k_d;
+    let v_peak = v_cruise.min(eff_total * k_a * k_d / (k_a + k_d));
+    let t_accel_end = if v_peak > k_a {
+        (v_peak / k_a).ln() / k_a
+    } else {
+        0.0
+    };
+    let t_cruise_dur = (eff_total / v_peak - 1.0 / k_a - 1.0 / k_d).max(0.0);
+    let s_decel_start = v_peak / k_d;
 
-    let remaining_dist = (destination - ball.position).length();
-    if *phase != WarpPhase::Accelerating && remaining_dist <= decel_start_dist {
+    let t = *elapsed_warp_time;
+    if t <= t_accel_end {
+        *phase = WarpPhase::Accelerating;
+        let traveled = (k_a * t).exp().min(eff_total);
+        let speed = ball.velocity.length().max(k_a * traveled);
+        ball.position = destination - dir * (raw_dist - traveled);
+        ball.velocity = dir * speed;
+        *elapsed_warp_time += remaining_dt;
+    } else if t - t_accel_end < t_cruise_dur {
+        *phase = WarpPhase::Cruising;
+        let t_cruise = t - t_accel_end;
+        let traveled = (v_peak / k_a + v_peak * t_cruise).min(eff_total);
+        ball.position = destination - dir * (raw_dist - traveled);
+        ball.velocity = dir * v_peak;
+        *elapsed_warp_time += remaining_dt;
+    } else {
         *phase = WarpPhase::Decelerating;
-    }
-
-    if *phase == WarpPhase::Accelerating {
-        let v_start = (v_init * (k_a * *elapsed_warp_time).exp()).min(v_peak);
-        let t_to_peak = ((v_peak / v_start).ln() / k_a).max(0.0);
-        let dt_accel = remaining_dt.min(t_to_peak);
-
-        *elapsed_warp_time += dt_accel;
-        let v_end = (v_init * (k_a * *elapsed_warp_time).exp()).min(v_peak);
-        let accel_disp = ((v_end - v_start) / k_a).min(remaining_dist);
-        ball.position += warp_dir * accel_disp;
-        ball.velocity = warp_dir * v_end;
-        remaining_dt -= dt_accel;
-
-        let new_rem = (destination - ball.position).length();
-        if new_rem <= decel_start_dist {
-            *phase = WarpPhase::Decelerating;
-        } else if (v_end - v_peak).abs() < 1.0 {
-            if v_peak < v_cruise {
-                *phase = WarpPhase::Decelerating;
-            } else {
-                *phase = WarpPhase::Cruising;
-            }
-        }
-    }
-
-    if *phase == WarpPhase::Cruising && remaining_dt > 0.0 {
-        let rem = (destination - ball.position).length();
-        let dist_to_decel = (rem - decel_start_dist).max(0.0);
-        let time_in_cruise = (dist_to_decel / v_peak).min(remaining_dt);
-        ball.position += warp_dir * (v_peak * time_in_cruise);
-        ball.velocity = warp_dir * v_peak;
-        remaining_dt -= time_in_cruise;
-
-        if remaining_dt > 0.0 || (destination - ball.position).length() <= decel_start_dist {
-            *phase = WarpPhase::Decelerating;
-        }
-    }
-
-    if *phase == WarpPhase::Decelerating && remaining_dt > 0.0 {
-        let rem = (destination - ball.position).length();
-        let decay = (-k_d * remaining_dt).exp();
-        let new_rem = rem * decay;
-        let current_warp_speed = (new_rem * k_d).max(v_drop);
-
-        if new_rem <= 2_500.0 || current_warp_speed <= v_drop * 1.05 {
-            let stop_offset = new_rem.min(2_500.0);
-            ball.position = destination - warp_dir * stop_offset;
-            ball.velocity = warp_dir * v_drop;
+        let t_decel = t - (t_accel_end + t_cruise_dur);
+        let rem_plus_1 = s_decel_start * (-k_d * t_decel).exp();
+        let stop_thresh = (0.5 * ball.max_velocity).min(100.0).max(1.0);
+        if rem_plus_1 * k_d < stop_thresh {
+            let rem_dist = (rem_plus_1 - 1.0).max(0.0);
+            let speed = rem_plus_1 * k_d;
+            ball.position = destination - dir * rem_dist;
+            ball.velocity = dir * speed;
             ball.speed_fraction = 0.0;
             ball.mode = MovementMode::Stop;
+            integrate_subwarp(ball, DVec3::ZERO, remaining_dt);
             return true;
-        } else {
-            ball.position = destination - warp_dir * new_rem;
-            ball.velocity = warp_dir * current_warp_speed;
         }
+        let rem_dist = (rem_plus_1 - 1.0).max(0.0);
+        let speed = rem_plus_1 * k_d;
+        ball.position = destination - dir * rem_dist;
+        ball.velocity = dir * speed;
+        *elapsed_warp_time += remaining_dt;
     }
 
-    if (destination - ball.position).length() <= 2_500.0 {
-        ball.velocity = warp_dir * v_drop;
-        ball.speed_fraction = 0.0;
-        ball.mode = MovementMode::Stop;
-        true
-    } else {
-        ball.mode = MovementMode::Warp {
-            origin,
-            destination,
-            warp_speed_au_s,
-            total_distance,
-            phase: *phase,
-            elapsed_warp_time: *elapsed_warp_time,
-        };
-        false
-    }
+    ball.mode = MovementMode::Warp {
+        origin,
+        destination,
+        warp_speed_au_s,
+        total_distance: raw_dist,
+        phase: if *elapsed_warp_time <= t_accel_end {
+            WarpPhase::Accelerating
+        } else if *elapsed_warp_time - t_accel_end < t_cruise_dur {
+            WarpPhase::Cruising
+        } else {
+            WarpPhase::Decelerating
+        },
+        elapsed_warp_time: *elapsed_warp_time,
+    };
+    false
 }
