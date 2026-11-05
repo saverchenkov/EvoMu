@@ -242,6 +242,17 @@ mod pve_exploration_extra_unit_tests;
 mod space_destiny_extra_unit_tests;
 #[cfg(test)]
 mod social_corp_fleet_extra_unit_tests;
+mod quasar_cosmetics_drafts_extra_unit_tests;
+#[cfg(test)]
+mod quasar_cosmetics_live_extra_unit_tests;
+#[cfg(test)]
+mod quasar_cosmetics_skinr_seq_extra_unit_tests;
+#[cfg(test)]
+mod quasar_daily_goals_extra_unit_tests;
+#[cfg(test)]
+mod quasar_economy_planetary_industry_extra_unit_tests;
+#[cfg(test)]
+mod quasar_fleet_navigation_services_extra_unit_tests;
 #[cfg(test)]
 mod space_probe_scanning_extra_unit_tests;
 #[cfg(test)]
