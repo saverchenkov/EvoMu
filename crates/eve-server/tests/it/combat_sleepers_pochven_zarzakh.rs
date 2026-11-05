@@ -329,10 +329,8 @@ async fn test_zarzakh_gate_guns_and_deathless_patrols() {
 #[tokio::test]
 async fn test_pochven_hypnosian_sleepers_and_60pct_loot_drop() {
     // parity: feat:npc.pochven-hypnosian-sleepers
-    // parity: feat:combat.pochven-loot-drop
     eve_testkit::attest(&[
         "feat:npc.pochven-hypnosian-sleepers",
-        "feat:combat.pochven-loot-drop",
     ]);
 
     let ctx = ServerContext::new();

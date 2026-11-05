@@ -447,11 +447,9 @@ async fn test_shipcaster_dynamic_fw_beacon_construction_linking_limit_and_disrup
 async fn test_starter_shipcaster_sde_systems_rookie_age_one_time_use_and_timers() {
     // parity: rpc:starterShipcasterTravelMgr.CanCharacterJump
     // parity: rpc:starterShipcasterTravelMgr.CmdJumpThroughStarterShipcaster
-    // parity: feat:navigation.starter-shipcaster
     eve_testkit::attest(&[
         "rpc:starterShipcasterTravelMgr.CanCharacterJump",
         "rpc:starterShipcasterTravelMgr.CmdJumpThroughStarterShipcaster",
-        "feat:navigation.starter-shipcaster",
     ]);
 
     let ctx = ServerContext::new();
@@ -579,10 +577,8 @@ async fn test_starter_shipcaster_sde_systems_rookie_age_one_time_use_and_timers(
 #[tokio::test]
 async fn test_interstellar_shipcaster_war_hq_jump_and_six_minute_cycle_rotation() {
     // parity: rpc:shipcasterTravelMgr.CmdJumpThroughShipcaster
-    // parity: feat:navigation.shipcaster
     eve_testkit::attest(&[
         "rpc:shipcasterTravelMgr.CmdJumpThroughShipcaster",
-        "feat:navigation.shipcaster",
     ]);
 
     let ctx = ServerContext::new();
