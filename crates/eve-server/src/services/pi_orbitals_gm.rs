@@ -405,3 +405,8 @@ pub fn handle_pi_orbitals_gm(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "pi_orbitals_gm_tests.rs"]
+mod pi_orbitals_gm_tests;
+

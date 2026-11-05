@@ -434,3 +434,8 @@ pub(crate) async fn handle_set_password(
         ("passwordSet", PyRep::Bool(!password.is_empty())),
     ]))
 }
+
+#[cfg(test)]
+#[path = "notify_emitters_fleet_combat_tests.rs"]
+mod notify_emitters_fleet_combat_tests;
+

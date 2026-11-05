@@ -164,3 +164,8 @@ pub(crate) fn emit_combat_message(
         vec![PyRep::String(message_name.into()), message_args],
     );
 }
+
+#[cfg(test)]
+#[path = "notify_emitters_ess_bounties_tests.rs"]
+mod notify_emitters_ess_bounties_tests;
+

@@ -1356,3 +1356,8 @@ pub fn handle_industry_jobs(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "industry_jobs_tests.rs"]
+mod industry_jobs_tests;
+

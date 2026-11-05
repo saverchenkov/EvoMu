@@ -331,3 +331,8 @@ pub fn handle_pi_orbital_registry(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "pi_orbital_registry_tests.rs"]
+mod pi_orbital_registry_tests;
+

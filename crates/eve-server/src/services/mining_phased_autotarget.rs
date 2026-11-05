@@ -854,3 +854,8 @@ pub fn run_auto_targeter_ballpark_tick(
         lock_count += 1;
     }
 }
+
+#[cfg(test)]
+#[path = "mining_phased_autotarget_tests.rs"]
+mod mining_phased_autotarget_tests;
+

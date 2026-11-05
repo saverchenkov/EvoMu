@@ -1114,3 +1114,8 @@ fn handle_trade_action(
         Err(e) => Some(Err(e)),
     }
 }
+
+#[cfg(test)]
+#[path = "wallet_services_ext_tests.rs"]
+mod wallet_services_ext_tests;
+

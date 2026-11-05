@@ -124,3 +124,8 @@ pub fn emit_mission_item_reward_notification(
         vec![item_row, PyRep::Dict(Vec::new())],
     );
 }
+
+#[cfg(test)]
+#[path = "agents_mission_rewards_tests.rs"]
+mod agents_mission_rewards_tests;
+

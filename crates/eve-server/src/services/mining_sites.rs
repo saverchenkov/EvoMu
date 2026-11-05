@@ -1230,3 +1230,8 @@ pub async fn handle(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "mining_sites_tests.rs"]
+mod mining_sites_tests;
+

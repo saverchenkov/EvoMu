@@ -1249,3 +1249,8 @@ pub fn emit_jump_queue_update(
         ],
     );
 }
+
+#[cfg(test)]
+#[path = "notify_emitters_space_dungeons_tests.rs"]
+mod notify_emitters_space_dungeons_tests;
+

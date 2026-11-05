@@ -1020,3 +1020,8 @@ pub fn compute_reprocessing_rates_for_item_at(
     };
     (station_base_yield, yield_rate, station_tax_rate)
 }
+
+#[cfg(test)]
+#[path = "mining_cycle_tests.rs"]
+mod mining_cycle_tests;
+

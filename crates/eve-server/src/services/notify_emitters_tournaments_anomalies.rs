@@ -1037,3 +1037,8 @@ pub fn emit_expedition_combat_notifications(
         );
     }
 }
+
+#[cfg(test)]
+#[path = "notify_emitters_tournaments_anomalies_tests.rs"]
+mod notify_emitters_tournaments_anomalies_tests;
+

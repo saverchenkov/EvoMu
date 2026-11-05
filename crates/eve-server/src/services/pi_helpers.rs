@@ -1341,3 +1341,8 @@ pub fn user_transfer_commodities_logic(
         ("cooldownSeconds", PyRep::Integer(cooldown_secs as i64)),
     ]))
 }
+
+#[cfg(test)]
+#[path = "pi_helpers_tests.rs"]
+mod pi_helpers_tests;
+

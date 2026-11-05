@@ -283,3 +283,8 @@ pub fn parse_theta_phi(theta_rep: Option<&PyRep>, phi_rep: Option<&PyRep>) -> (f
         _ => (0.0, 0.0),
     }
 }
+
+#[cfg(test)]
+#[path = "pi_resource_helpers_tests.rs"]
+mod pi_resource_helpers_tests;
+

@@ -1311,3 +1311,8 @@ pub use crate::services::space_mining_harvest::{
     resolve_reprocessable_materials, resolve_reprocessable_materials_for_portions,
 };
 
+#[cfg(test)]
+#[path = "mining_compression_tests.rs"]
+mod mining_compression_tests;
+
+

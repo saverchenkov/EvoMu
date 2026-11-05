@@ -235,3 +235,8 @@ pub fn emit_update_service_mapping(
     );
 }
 
+#[cfg(test)]
+#[path = "notify_emitters_missing2_tests.rs"]
+mod notify_emitters_missing2_tests;
+
+

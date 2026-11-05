@@ -1182,3 +1182,8 @@ pub fn finalize_completed_industry_job_response(
         ("inventionSucceeded", PyRep::Bool(job.activity_id == 8 && prod_item_id > 0)),
     ]))
 }
+
+#[cfg(test)]
+#[path = "industry_pi_tests.rs"]
+mod industry_pi_tests;
+

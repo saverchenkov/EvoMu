@@ -1330,3 +1330,8 @@ fn handle_get_replay_timestamp(session: &SessionState, _args: &[PyRep]) -> Optio
     let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
     Some(Ok(PyRep::None))
 }
+
+#[cfg(test)]
+#[path = "agents_standings_arcs_tests.rs"]
+mod agents_standings_arcs_tests;
+

@@ -1031,3 +1031,8 @@ pub fn handle_batch3_gm_slash_cmd(
     }
 }
 
+#[cfg(test)]
+#[path = "notify_emitters_character_services_tests.rs"]
+mod notify_emitters_character_services_tests;
+
+

@@ -1349,3 +1349,8 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
         }
     });
 }
+
+#[cfg(test)]
+#[path = "mining_advanced_tests.rs"]
+mod mining_advanced_tests;
+

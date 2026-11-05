@@ -604,3 +604,8 @@ fn withdraw_plex(
     );
     Ok(rep)
 }
+
+#[cfg(test)]
+#[path = "wallet_ledger_tests.rs"]
+mod wallet_ledger_tests;
+

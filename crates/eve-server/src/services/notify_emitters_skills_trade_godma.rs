@@ -1139,3 +1139,8 @@ pub fn emit_plex_withdraw_failed(
         vec![PyRep::String(error_key.to_string()), reference],
     );
 }
+
+#[cfg(test)]
+#[path = "notify_emitters_skills_trade_godma_tests.rs"]
+mod notify_emitters_skills_trade_godma_tests;
+

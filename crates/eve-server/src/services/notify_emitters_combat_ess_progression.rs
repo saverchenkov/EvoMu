@@ -549,3 +549,8 @@ pub fn emit_security_modified(
         ],
     );
 }
+
+#[cfg(test)]
+#[path = "notify_emitters_combat_ess_progression_tests.rs"]
+mod notify_emitters_combat_ess_progression_tests;
+

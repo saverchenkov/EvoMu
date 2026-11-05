@@ -1257,3 +1257,8 @@ pub fn handle_pi_colonies(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "pi_colonies_tests.rs"]
+mod pi_colonies_tests;
+

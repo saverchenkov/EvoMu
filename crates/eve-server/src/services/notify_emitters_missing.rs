@@ -263,3 +263,8 @@ pub fn emit_dungeon_trigger_music(
     );
 }
 
+#[cfg(test)]
+#[path = "notify_emitters_missing_tests.rs"]
+mod notify_emitters_missing_tests;
+
+

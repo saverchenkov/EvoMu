@@ -982,3 +982,8 @@ pub(crate) fn handle_load_ammo(
         ("totalLoaded", PyRep::Integer(total_needed as i64)),
     ]))
 }
+
+#[cfg(test)]
+#[path = "notify_emitters_seasons_tactical_tests.rs"]
+mod notify_emitters_seasons_tactical_tests;
+

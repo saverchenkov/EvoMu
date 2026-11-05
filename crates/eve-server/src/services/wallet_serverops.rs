@@ -1142,4 +1142,9 @@ fn cluster_statistics(ctx: &ServerContext) -> PyRep {
     PyRep::Tuple(vec![PyRep::Dict(pilots), PyRep::Dict(docked), PyRep::Real(1.0)])
 }
 
+#[cfg(test)]
+#[path = "wallet_serverops_tests.rs"]
+mod wallet_serverops_tests;
+
+
 

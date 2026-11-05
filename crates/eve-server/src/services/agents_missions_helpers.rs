@@ -1142,3 +1142,8 @@ pub fn on_mission_npc_destroyed_core(
     });
 }
 
+#[cfg(test)]
+#[path = "agents_missions_helpers_tests.rs"]
+mod agents_missions_helpers_tests;
+
+

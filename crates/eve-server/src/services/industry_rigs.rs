@@ -673,3 +673,8 @@ pub fn compute_activity_ptv_multiplier(activity_id: u8, start_step: usize, runs:
     }
 }
 
+#[cfg(test)]
+#[path = "industry_rigs_tests.rs"]
+mod industry_rigs_tests;
+
+

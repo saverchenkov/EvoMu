@@ -565,3 +565,8 @@ pub fn handle_operation_slash(
         ))),
     }
 }
+
+#[cfg(test)]
+#[path = "notify_emitters_operations_nodegraph_tests.rs"]
+mod notify_emitters_operations_nodegraph_tests;
+
