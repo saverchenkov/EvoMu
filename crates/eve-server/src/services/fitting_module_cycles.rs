@@ -971,49 +971,73 @@ pub(crate) async fn handle_module_cycles(
 
             let mut active_burst_charge_tid = m.charge_type_id;
             let mut crystal_volatility_chance = 0.0;
-            let mut crystal_volatility_damage = 0.0;
+            let mut crystal_volatility_damage = -1.0;
             if !linked_turrets.is_empty() && mod_type.group_id != 899 {
-                ctx.db.with_mut_snapshot(|snap| {
-                    for &tid in &linked_turrets {
-                        let tflag = snap.items.get(&tid).map(|i| i.flag);
-                        if let Some(tf) = tflag {
-                            let mut remove_cid: Option<i64> = None;
-                            if let Some(charge_item) = snap.items.values_mut().find(|i| {
+                let first_charge_tid = ctx.db.with_snapshot(|snap| {
+                    linked_turrets.iter().find_map(|&tid| {
+                        let tf = snap.items.get(&tid).map(|i| i.flag)?;
+                        snap.items
+                            .values()
+                            .find(|i| {
                                 i.location_id == ship_id
                                     && i.flag == tf
                                     && i.item_id != tid
                                     && i.quantity > 0
                                     && ctx.sde.types.get(&i.type_id).is_none_or(|t| t.group_id != 908)
-                            }) {
-                                active_burst_charge_tid = Some(charge_item.type_id);
-                                let c_sde = ctx.sde.types.get(&charge_item.type_id);
-                                let vol_dmg = c_sde
-                                    .and_then(|t| t.default_attributes.get(&784).copied())
-                                    .unwrap_or(0.0);
-                                let vol_chance = c_sde
-                                    .and_then(|t| t.default_attributes.get(&783).copied())
-                                    .unwrap_or(100.0);
-                                if vol_dmg > 0.0 {
-                                    crystal_volatility_damage = vol_dmg;
-                                    crystal_volatility_chance = if vol_chance > 1.0 {
-                                        (vol_chance / 100.0).clamp(0.0, 1.0)
+                            })
+                            .map(|i| i.type_id)
+                    })
+                });
+                let is_non_volatile_crystal = first_charge_tid
+                    .and_then(|ctid| ctx.sde.types.get(&ctid))
+                    .is_some_and(|t| {
+                        matches!(t.group_id, 86 | 374 | 375 | 482 | 663)
+                            && t.default_attributes.get(&784).copied().unwrap_or(0.0) <= 0.0
+                    });
+                if let Some(ctid) = first_charge_tid {
+                    active_burst_charge_tid = Some(ctid);
+                }
+                if !is_non_volatile_crystal
+                    && (first_charge_tid.is_some() || active_burst_charge_tid.is_some())
+                {
+                    ctx.db.with_mut_snapshot(|snap| {
+                        for &tid in &linked_turrets {
+                            if let Some(tf) = snap.items.get(&tid).map(|i| i.flag) {
+                                let mut remove_cid: Option<i64> = None;
+                                if let Some(charge_item) = snap.items.values_mut().find(|i| {
+                                    i.location_id == ship_id
+                                        && i.flag == tf
+                                        && i.item_id != tid
+                                        && i.quantity > 0
+                                        && ctx.sde.types.get(&i.type_id).is_none_or(|t| t.group_id != 908)
+                                }) {
+                                    active_burst_charge_tid = Some(charge_item.type_id);
+                                    let c_sde = ctx.sde.types.get(&charge_item.type_id);
+                                    let vol_dmg = c_sde.and_then(|t| t.default_attributes.get(&784).copied()).unwrap_or(0.0);
+                                    let vol_chance = c_sde.and_then(|t| t.default_attributes.get(&783).copied()).unwrap_or(100.0);
+                                    if vol_dmg > 0.0 {
+                                        crystal_volatility_damage = vol_dmg;
+                                        crystal_volatility_chance = if vol_chance > 1.0 { (vol_chance / 100.0).clamp(0.0, 1.0) } else { vol_chance.clamp(0.0, 1.0) };
+                                    } else if c_sde.is_some_and(|t| matches!(t.group_id, 86 | 374 | 375 | 482 | 663)) {
+                                        crystal_volatility_damage = -1.0;
                                     } else {
-                                        vol_chance.clamp(0.0, 1.0)
-                                    };
-                                } else {
-                                    charge_item.quantity = charge_item.quantity.saturating_sub(1);
-                                    if charge_item.quantity == 0 {
-                                        remove_cid = Some(charge_item.item_id);
+                                        crystal_volatility_damage = 0.0;
+                                        charge_item.quantity = charge_item.quantity.saturating_sub(1);
+                                        if charge_item.quantity == 0 {
+                                            remove_cid = Some(charge_item.item_id);
+                                        }
                                     }
+                                } else if active_burst_charge_tid.is_some() && crystal_volatility_damage < 0.0 {
+                                    crystal_volatility_damage = 0.0;
+                                }
+                                if let Some(rcid) = remove_cid {
+                                    snap.items.remove(&rcid);
+                                    snap.module_active_charges.remove(&tid);
                                 }
                             }
-                            if let Some(rcid) = remove_cid {
-                                snap.items.remove(&rcid);
-                                snap.module_active_charges.remove(&tid);
-                            }
                         }
-                    }
-                });
+                    });
+                }
             }
 
             let raw_cap_drain = mod_state.get_attribute(97, &ctx.sde);

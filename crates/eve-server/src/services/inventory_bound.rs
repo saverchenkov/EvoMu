@@ -164,18 +164,36 @@ pub fn handle(
             } else {
                 false
             };
+            let crab_allowed = match crate::services::pve_crab_beacons::check_crab_loot_access(
+                ctx,
+                item_id,
+                char_id,
+                session.has_gm_role(),
+            ) {
+                Ok(Some(true)) => true,
+                Ok(_) => false,
+                Err(e) => return Some(Err(e)),
+            };
             let accessible = item_id == char_id
                 || is_storage_auth
                 || ctx.db.with_snapshot(|snap| {
                     snap.items.get(&item_id).is_some_and(|it| {
-                        let has_inventory = ctx.sde.types.get(&it.type_id).is_some_and(|t| t.capacity > 0.0);
+                        let has_inventory = crab_allowed
+                            || ctx.sde.types.get(&it.type_id).is_some_and(|t| t.capacity > 0.0);
                         if !has_inventory {
                             return false;
                         }
                         let is_corp_owned = session
                             .corporation_id
                             .is_some_and(|cid| cid > 0 && it.owner_id == cid);
-                        if it.owner_id == char_id || is_corp_owned || session.has_gm_role() {
+                        let is_open_space_container =
+                            docked.is_none() && it.type_id == 23 && it.owner_id == 0;
+                        if crab_allowed
+                            || it.owner_id == char_id
+                            || is_corp_owned
+                            || is_open_space_container
+                            || session.has_gm_role()
+                        {
                             let in_corp_office_here = at_location
                                 && snap
                                     .items

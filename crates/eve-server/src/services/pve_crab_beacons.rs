@@ -6,9 +6,9 @@
 
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::pve_special_sites::{
-    advance_roaming_storms, ensure_special_sites_initialized, next_spec_seq, spec_now_sec,
-    sync_metaliminal_storm_effects_and_sites, with_pve_special_reg, with_pve_special_reg_db,
-    SystemInterferenceRecord,
+    advance_roaming_storms, ensure_special_sites_initialized, next_spec_seq,
+    read_pve_special_reg, spec_now_sec, sync_metaliminal_storm_effects_and_sites,
+    with_pve_special_reg, with_pve_special_reg_db, SystemInterferenceRecord,
 };
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
 use eve_destiny::{Ball, CombatState, MovementMode};
@@ -108,7 +108,7 @@ pub fn is_crab_beacon_item(ctx: &ServerContext, item_id: i64) -> bool {
     if in_snap {
         return true;
     }
-    with_pve_special_reg(ctx, |reg| reg.crab_beacons.contains_key(&item_id))
+    read_pve_special_reg(ctx, |reg| reg.crab_beacons.contains_key(&item_id))
 }
 
 /// Validates that `sys_id` is a known-space Low-Sec (`0.0 < sec < 0.45`) or Null-Sec (`sec <= 0.0`) system.
@@ -221,7 +221,7 @@ pub fn check_crab_loot_access(
     }
     tick_all_crab_beacons(ctx);
     let now = ctx.now_unix();
-    let rec_opt = with_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&container_id).cloned());
+    let rec_opt = read_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&container_id).cloned());
     let Some(rec) = rec_opt else {
         return Err(BridgeRpcError::user_error("CrabScanInProgress"));
     };
@@ -250,6 +250,13 @@ fn apply_crab_link_ship_effects(
     ship_id: i64,
     expires_at_unix: u64,
 ) -> Option<([f64; 4], [f64; 4], [f64; 4])> {
+    let base_res_opt = ctx
+        .db
+        .with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id))
+        .map(|tid| {
+            let base_cs = ctx.build_ship_combat_state(char_id, ship_id, tid);
+            (base_cs.shield_resonance, base_cs.armor_resonance, base_cs.structure_resonance)
+        });
     {
         let mut st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
             .write()
@@ -266,12 +273,12 @@ fn apply_crab_link_ship_effects(
         }
     }
     ctx.invalidate_ship_fitting(ship_id);
-    let base_res_opt = ctx
+    let linked_res_opt = ctx
         .db
         .with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id))
         .map(|tid| {
-            let base_cs = ctx.build_ship_combat_state(char_id, ship_id, tid);
-            (base_cs.shield_resonance, base_cs.armor_resonance, base_cs.structure_resonance)
+            let linked_cs = ctx.build_ship_combat_state(char_id, ship_id, tid);
+            (linked_cs.shield_resonance, linked_cs.armor_resonance, linked_cs.structure_resonance)
         });
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let mut orig_res = base_res_opt;
@@ -281,9 +288,15 @@ fn apply_crab_link_ship_effects(
             cs.armor_resonance,
             cs.structure_resonance,
         ));
-        cs.shield_resonance = sr.map(|r| r * 0.90);
-        cs.armor_resonance = ar.map(|r| r * 0.90);
-        cs.structure_resonance = hr.map(|r| r * 0.90);
+        if let Some((lsr, lar, lhr)) = linked_res_opt {
+            cs.shield_resonance = lsr;
+            cs.armor_resonance = lar;
+            cs.structure_resonance = lhr;
+        } else {
+            cs.shield_resonance = sr.map(|r| r * 0.90);
+            cs.armor_resonance = ar.map(|r| r * 0.90);
+            cs.structure_resonance = hr.map(|r| r * 0.90);
+        }
         cs.is_tethered = false;
     });
     ctx.notify(
@@ -345,6 +358,32 @@ fn build_rogue_drone_combat(sde: &SdeRegistry, type_id: TypeId) -> CombatState {
         let sh = a.get(&263).copied().unwrap_or(1_200.0).max(300.0);
         let ar = a.get(&265).copied().unwrap_or(1_200.0).max(300.0);
         let st = a.get(&9).copied().unwrap_or(1_000.0).max(300.0);
+        let cap = a
+            .get(&eve_sde::attr_ids::CAPACITOR_CAPACITY)
+            .copied()
+            .unwrap_or(0.0);
+        let sig = a
+            .get(&eve_sde::attr_ids::SIGNATURE_RADIUS)
+            .copied()
+            .unwrap_or_else(|| t.radius.max(35.0));
+        let shield_rech = a
+            .get(&eve_sde::attr_ids::SHIELD_RECHARGE_RATE)
+            .copied()
+            .unwrap_or_else(|| {
+                sde.attributes
+                    .get(&eve_sde::attr_ids::SHIELD_RECHARGE_RATE)
+                    .map(|d| d.default_value)
+                    .unwrap_or(0.0)
+            });
+        let cap_rech = a
+            .get(&eve_sde::attr_ids::RECHARGE_RATE)
+            .copied()
+            .unwrap_or_else(|| {
+                sde.attributes
+                    .get(&eve_sde::attr_ids::RECHARGE_RATE)
+                    .map(|d| d.default_value)
+                    .unwrap_or(0.0)
+            });
         return CombatState {
             shield_hp: sh,
             max_shield_hp: sh,
@@ -352,6 +391,11 @@ fn build_rogue_drone_combat(sde: &SdeRegistry, type_id: TypeId) -> CombatState {
             max_armor_hp: ar,
             structure_hp: st,
             max_structure_hp: st,
+            capacitor: cap,
+            max_capacitor: cap,
+            signature_radius: sig,
+            shield_recharge_time_ms: shield_rech,
+            capacitor_recharge_time_ms: cap_rech,
             shield_resonance: [
                 a.get(&271).copied().unwrap_or(1.0).max(0.25),
                 a.get(&274).copied().unwrap_or(1.0).max(0.25),
@@ -448,7 +492,7 @@ fn spawn_crab_rogue_drone_wave(ctx: &ServerContext, beacon_id: i64, wave_num: u8
 }
 
 fn prune_dead_crab_wave_drones(ctx: &ServerContext, beacon_id: i64) -> (u8, usize) {
-    let info = with_pve_special_reg(ctx, |reg| {
+    let info = read_pve_special_reg(ctx, |reg| {
         let rec = reg.crab_beacons.get(&beacon_id)?;
         Some((rec.solar_system_id, rec.waves_spawned, rec.wave_npc_ball_ids.clone()))
     });
@@ -458,8 +502,9 @@ fn prune_dead_crab_wave_drones(ctx: &ServerContext, beacon_id: i64) -> (u8, usiz
     if ball_ids.is_empty() {
         return (waves_spawned, 0);
     }
+    let orig_len = ball_ids.len();
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let mut alive_ids = Vec::with_capacity(ball_ids.len());
+    let mut alive_ids = Vec::with_capacity(orig_len);
     for bid in ball_ids {
         let mut alive = false;
         sys_handle.try_update_combat_state(bid, |cs| {
@@ -468,6 +513,9 @@ fn prune_dead_crab_wave_drones(ctx: &ServerContext, beacon_id: i64) -> (u8, usiz
         if alive {
             alive_ids.push(bid);
         }
+    }
+    if alive_ids.len() == orig_len {
+        return (waves_spawned, orig_len);
     }
     with_pve_special_reg(ctx, |reg| {
         if let Some(rec) = reg.crab_beacons.get_mut(&beacon_id) {
@@ -704,28 +752,28 @@ fn self_destruct_crab_beacon(ctx: &ServerContext, beacon_id: i64) {
 }
 
 fn advance_single_crab_beacon(ctx: &ServerContext, beacon_id: i64, now: u64) {
-    let snap_rec = with_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&beacon_id).cloned());
-    let Some(rec) = snap_rec else { return };
-    if rec.phase == CrabBeaconPhase::SelfDestructed {
+    let snap_rec = read_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&beacon_id).cloned());
+    let Some(mut cur) = snap_rec else { return };
+    if cur.phase == CrabBeaconPhase::SelfDestructed {
         return;
     }
 
-    if rec.phase == CrabBeaconPhase::Idle
-        && rec.deployed_at_sec > 0
-        && now >= rec.deployed_at_sec.saturating_add(CRAB_BEACON_IDLE_LIFETIME_SECS)
+    if cur.phase == CrabBeaconPhase::Idle
+        && cur.deployed_at_sec > 0
+        && now >= cur.deployed_at_sec.saturating_add(CRAB_BEACON_IDLE_LIFETIME_SECS)
     {
         self_destruct_crab_beacon(ctx, beacon_id);
         return;
     }
 
-    if rec.phase == CrabBeaconPhase::Linking && now >= rec.link_completes_at_sec {
+    if cur.phase == CrabBeaconPhase::Linking && now >= cur.link_completes_at_sec {
         clear_crab_link_ship_effects(
             ctx,
-            rec.solar_system_id,
+            cur.solar_system_id,
             beacon_id,
-            rec.linked_char_id,
-            rec.linked_ship_id,
-            rec.orig_resonances,
+            cur.linked_char_id,
+            cur.linked_ship_id,
+            cur.orig_resonances,
         );
         with_pve_special_reg(ctx, |reg| {
             if let Some(b) = reg.crab_beacons.get_mut(&beacon_id) {
@@ -734,10 +782,12 @@ fn advance_single_crab_beacon(ctx: &ServerContext, beacon_id: i64, now: u64) {
             }
         });
         spawn_crab_rogue_drone_wave(ctx, beacon_id, 1);
+        let Some(updated) = read_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&beacon_id).cloned()) else {
+            return;
+        };
+        cur = updated;
     }
 
-    let cur = with_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&beacon_id).cloned());
-    let Some(cur) = cur else { return };
     if cur.phase == CrabBeaconPhase::Scanning {
         let wave2_at = cur.link_completes_at_sec.saturating_add(200);
         let wave3_at = cur.link_completes_at_sec.saturating_add(400);
@@ -748,20 +798,22 @@ fn advance_single_crab_beacon(ctx: &ServerContext, beacon_id: i64, now: u64) {
             spawn_crab_rogue_drone_wave(ctx, beacon_id, 3);
         }
         let (waves_spawned, alive_drones) = prune_dead_crab_wave_drones(ctx, beacon_id);
-        if alive_drones == 0 && waves_spawned > 0 && waves_spawned < 3 {
+        let (waves_after, alive_after) = if alive_drones == 0 && waves_spawned > 0 && waves_spawned < 3 {
             spawn_crab_rogue_drone_wave(ctx, beacon_id, waves_spawned + 1);
-        }
-        let (waves_after, alive_after) = prune_dead_crab_wave_drones(ctx, beacon_id);
+            prune_dead_crab_wave_drones(ctx, beacon_id)
+        } else {
+            (waves_spawned, alive_drones)
+        };
         if now >= cur.scan_completes_at_sec && waves_after >= 3 && alive_after == 0 {
             finalize_crab_scan_success(ctx, beacon_id, now);
+            if let Some(updated) = read_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&beacon_id).cloned()) {
+                cur = updated;
+            }
         }
     }
 
-    let after_scan = with_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&beacon_id).cloned());
-    if let Some(b) = after_scan {
-        if b.phase == CrabBeaconPhase::LootRestricted && now >= b.self_destruct_at_sec {
-            self_destruct_crab_beacon(ctx, beacon_id);
-        }
+    if cur.phase == CrabBeaconPhase::LootRestricted && now >= cur.self_destruct_at_sec {
+        self_destruct_crab_beacon(ctx, beacon_id);
     }
 }
 
@@ -786,7 +838,7 @@ pub fn tick_all_crab_beacons(ctx: &ServerContext) {
         return;
     }
     let now = ctx.now_unix();
-    let ids: Vec<i64> = with_pve_special_reg(ctx, |reg| {
+    let ids: Vec<i64> = read_pve_special_reg(ctx, |reg| {
         reg.crab_beacons
             .values()
             .filter(|b| b.phase != CrabBeaconPhase::SelfDestructed)
@@ -804,7 +856,7 @@ pub async fn tick_crab_beacons_in_system(ctx: &ServerContext, sys_id: SolarSyste
         return;
     }
     let now = ctx.now_unix();
-    let ids: Vec<i64> = with_pve_special_reg(ctx, |reg| {
+    let ids: Vec<i64> = read_pve_special_reg(ctx, |reg| {
         reg.crab_beacons
             .values()
             .filter(|b| {
@@ -893,7 +945,7 @@ fn ensure_beacon_registered_from_item(
     sys_id: SolarSystemId,
     beacon_id: i64,
 ) -> Option<CrabBeaconRecord> {
-    if let Some(rec) = with_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&beacon_id).cloned()) {
+    if let Some(rec) = read_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&beacon_id).cloned()) {
         return Some(rec);
     }
     let item_info = ctx.db.with_snapshot(|snap| {
@@ -909,7 +961,7 @@ fn ensure_beacon_registered_from_item(
     });
     let (type_id, owner_id, pos) = item_info?;
     register_crab_beacon(ctx, beacon_id, type_id, owner_id, sys_id, pos);
-    with_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&beacon_id).cloned())
+    read_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&beacon_id).cloned())
 }
 
 fn beacon_state_keyval(rec: &CrabBeaconRecord, now: u64) -> PyRep {
@@ -976,12 +1028,15 @@ pub async fn handle_crab_component_call(
 
     match (comp_name, comp_method) {
         ("linkWithShip" | "crabBeacon", "GetLinkState" | "GetState") => {
-            let rec = with_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&beacon_id).cloned())
+            let rec = read_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&beacon_id).cloned())
                 .unwrap_or(initial_rec);
             Ok(beacon_state_keyval(&rec, now))
         }
         ("linkWithShip", "InitiateLink" | "InitiateLinkQuick") => {
             validate_crab_deployment_system(&ctx.sde, sys_id)?;
+            if crate::services::inventory_fitting::fitting_cyno_portal::active_cyno_jammer(ctx, sys_id).is_some() {
+                return Err(BridgeRpcError::user_error("CynoJammed"));
+            }
 
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let (_, ship_ball) = sys_handle
@@ -1026,7 +1081,7 @@ pub async fn handle_crab_component_call(
                 return Err(BridgeRpcError::user_error("ExcessInterference"));
             }
 
-            let already_active = with_pve_special_reg(ctx, |reg| {
+            let already_active = read_pve_special_reg(ctx, |reg| {
                 reg.crab_beacons
                     .get(&beacon_id)
                     .is_none_or(|b| b.phase != CrabBeaconPhase::Idle)
@@ -1122,19 +1177,28 @@ pub fn on_server_clock_advanced(ctx: &ServerContext, delta_sec: u64) {
         return;
     }
     let now_u = ctx.now_unix();
-    let should_move_storms = with_pve_special_reg(ctx, |reg| {
-        let any_due = reg
-            .roaming_storms
+    let any_due = read_pve_special_reg(ctx, |reg| {
+        reg.roaming_storms
             .iter()
-            .any(|s| s.next_move_at_sec > 0 && now_u >= s.next_move_at_sec);
-        if any_due {
-            if reg.sim_clock_sec < now_u {
-                reg.sim_clock_sec = now_u;
-            }
-            advance_roaming_storms(ctx, reg, delta_sec);
-        }
-        any_due
+            .any(|s| s.next_move_at_sec > 0 && now_u >= s.next_move_at_sec)
     });
+    let should_move_storms = if any_due {
+        with_pve_special_reg(ctx, |reg| {
+            let still_due = reg
+                .roaming_storms
+                .iter()
+                .any(|s| s.next_move_at_sec > 0 && now_u >= s.next_move_at_sec);
+            if still_due {
+                if reg.sim_clock_sec < now_u {
+                    reg.sim_clock_sec = now_u;
+                }
+                advance_roaming_storms(ctx, reg, delta_sec);
+            }
+            still_due
+        })
+    } else {
+        false
+    };
     tick_all_crab_beacons(ctx);
     if delta_sec > 0 {
         crate::services::pve_incursion_lifecycle::advance_incursion_lifecycles(ctx);

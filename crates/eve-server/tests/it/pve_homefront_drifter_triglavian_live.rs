@@ -18,8 +18,6 @@ use eve_server::services::pve_special_sites::{
 
 #[tokio::test]
 async fn test_homefront_operations_live() {
-    // parity: feat:pve.homefront-ops
-    eve_testkit::attest(&["feat:pve.homefront-ops"]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -169,8 +167,6 @@ async fn test_homefront_operations_live() {
 
 #[tokio::test]
 async fn test_drifter_hives_exploration_and_loot_live() {
-    // parity: feat:pve.drifter-hives
-    eve_testkit::attest(&["feat:pve.drifter-hives"]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -327,8 +323,6 @@ async fn test_drifter_hives_exploration_and_loot_live() {
 
 #[tokio::test]
 async fn test_triglavian_edencom_sites_and_standings_live() {
-    // parity: feat:pve.triglavian-sites
-    eve_testkit::attest(&["feat:pve.triglavian-sites"]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);

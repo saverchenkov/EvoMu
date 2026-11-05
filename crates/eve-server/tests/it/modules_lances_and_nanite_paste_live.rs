@@ -302,8 +302,6 @@ async fn test_live_nanite_repair_paste_in_space() {
 
 #[tokio::test]
 async fn test_live_disruptive_lance() {
-    // parity: feat:modules.disruptive-lance
-    eve_testkit::attest(&["feat:modules.disruptive-lance"]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);

@@ -219,9 +219,9 @@ fn anomaly_instances(ctx: &ServerContext, sys_id: SolarSystemId, kind: &str) -> 
             {
                 continue;
             }
-            if let Some((did, iid)) = parse_dng_site_id(&a.anomaly_id) {
-                out.entry(did).or_default().push(iid);
-            }
+            let (did, iid) = parse_dng_site_id(&a.anomaly_id)
+                .unwrap_or_else(|| (0, registry_instance_id(&a.anomaly_id)));
+            out.entry(did).or_default().push(iid);
         }
     });
     out
@@ -1006,6 +1006,7 @@ pub async fn handle(
     match method {
         "GetCombatAnomalyInstances" => {
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
+            crate::services::pve_special_sites::ensure_special_sites_spawned(ctx).await;
             let _ = crate::services::pve_special_sites::ensure_seasonal_event_sites_for_system(ctx, sys_id).await;
             let mut by_dungeon = registry_instances(ctx, sys_id, false);
             for (did, iids) in anomaly_instances(ctx, sys_id, "SeasonalEventSite") {

@@ -703,7 +703,8 @@ pub async fn activate_superweapon_with_args(
 
         let ship_type_opt = ctx.sde.types.get(&ship_type_id);
         let base_cap = mod_type.default_attributes.get(&6).copied().unwrap_or(30_000.0);
-        let cap_cost = base_cap * (1.0 - 0.05 * (op_lvl.min(5) as f64));
+        let cap_bonus_pct = ctx.sde.types.get(&77_739).and_then(|t| t.default_attributes.get(&5419).copied()).unwrap_or(-5.0).abs() / 100.0;
+        let cap_cost = base_cap * (1.0 - cap_bonus_pct * (op_lvl.min(5) as f64));
         let cur_cap_opt = if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
             if cs.capacitor + 1e-4 < cap_cost {
                 return Err(BridgeRpcError { code: "NotEnoughCapacitor".into(), message: format!("Insufficient capacitor for Disruptive Lance: need {cap_cost:.1} GJ") });
@@ -767,23 +768,28 @@ pub async fn activate_superweapon_with_args(
         let beam_delta = target_pos - ship_pos;
         let beam_dir = if beam_delta.length_squared() > 1e-4 { beam_delta.normalize() } else { DVec3::new(1.0, 0.0, 0.0) };
         let beam_radius = mod_type.default_attributes.get(&2263).copied().unwrap_or(2_500.0);
+        let neut_radius = mod_type.default_attributes.get(&2259).copied().unwrap_or(10_000.0).max(beam_radius);
+        let caster_lock_secs = (mod_type.default_attributes.get(&73).copied().unwrap_or(300_000.0) / 1_000.0).round() as u64;
         let mut hit_targets = Vec::new();
         for b in all_balls {
             if b.id != ship_id && (is_combatant_ship_or_entity_ball(Some(&ctx.sde), Some(&ctx.db), b.id, b.type_id) || (b.id >= 1_895_000_000 && b.id < 1_900_000_000)) {
                 let to_ball = b.position - ship_pos;
                 let along_beam = to_ball.dot(beam_dir);
-                if along_beam >= 100.0 && along_beam <= effective_range && (to_ball - beam_dir * along_beam).length() <= beam_radius {
-                    let (applied, destroyed) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys, sys_id, char_id, b.id, total_dmg_vec, 10.0, now_unix).await.ok().flatten().map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
-                    crate::services::combat_crimewatch::record_killmail_assist_action(ctx, b.id, char_id, ship_type_id, mod_type_id, applied, false, now_unix);
+                let perp_dist = (to_ball - beam_dir * along_beam).length();
+                if along_beam >= 100.0 && along_beam <= effective_range && perp_dist <= neut_radius {
+                    if perp_dist <= beam_radius {
+                        let (applied, destroyed) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys, sys_id, char_id, b.id, total_dmg_vec, 10.0, now_unix).await.ok().flatten().map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
+                        crate::services::combat_crimewatch::record_killmail_assist_action(ctx, b.id, char_id, ship_type_id, mod_type_id, applied, false, now_unix);
+                        if destroyed {
+                            crate::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(ctx, sys_id, char_id, b.id, b.type_id, b.position, now_unix).await;
+                        }
+                    }
                     if let Ok(Some(mut v_cs)) = sys.get_combat_state(b.id).await {
                         v_cs.capacitor = (v_cs.capacitor - neut_amount_gj).max(0.0);
                         v_cs.warp_scramble_strength = v_cs.warp_scramble_strength.max(100);
                         v_cs.is_mwd_mjd_disabled = true;
                         v_cs.is_tethered = false;
                         let _ = sys.set_combat_state(b.id, v_cs).await;
-                    }
-                    if destroyed {
-                        crate::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(ctx, sys_id, char_id, b.id, b.type_id, b.position, now_unix).await;
                     }
                     hit_targets.push(b.id);
                 }
@@ -792,13 +798,13 @@ pub async fn activate_superweapon_with_args(
         let db_key = db_key_of(ctx);
         {
             let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
-            st.lance_caster_lock_until.insert((db_key, ship_id), now_unix + 300);
+            st.lance_caster_lock_until.insert((db_key, ship_id), now_unix + caster_lock_secs);
             for &vid in &hit_targets {
                 st.lance_victim_debuff_until.insert((db_key, vid), now_unix + victim_debuff_secs);
             }
         }
         ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).get_or_create(char_id).weapon_timer_until_unix = now_unix + 60;
-        ctx.record_module_reactivation_delay(ship_id, module_id, 300.0);
+        ctx.record_module_reactivation_delay(ship_id, module_id, caster_lock_secs as f64);
 
         return Ok(PyRep::keyval([
             ("moduleID", PyRep::Integer(module_id)), ("shipID", PyRep::Integer(ship_id)), ("slashMode", PyRep::Bool(true)),

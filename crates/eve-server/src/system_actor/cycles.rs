@@ -569,7 +569,15 @@ pub(crate) fn step_cycles_and_capacitor(
             // 4. Weapon ammo & T2/Faction/Mining crystal volatility damage (`feat:modules.t2-crystal-volatility-destruction`)
             let mut crystal_shattered_empty = false;
             if let Some(db_ref) = db_opt {
-                if !cycle.linked_turrets.is_empty() {
+                let ammo_is_non_volatile_crystal = cycle
+                    .ammo_type_id
+                    .and_then(|tid| sde_opt.as_ref().and_then(|sde| sde.types.get(&tid)))
+                    .is_some_and(|t| matches!(t.group_id, 86 | 374 | 375 | 482 | 663))
+                    && cycle.crystal_volatility_damage <= 0.0;
+                if !cycle.linked_turrets.is_empty()
+                    && cycle.crystal_volatility_damage >= 0.0
+                    && !ammo_is_non_volatile_crystal
+                {
                     db_ref.with_mut_snapshot(|snap| {
                         for &turret_id in &cycle.linked_turrets {
                             let turret_flag = snap.items.get(&turret_id).map(|i| i.flag);

@@ -3116,8 +3116,6 @@ async fn test_parity_mining_belts_as_balls_and_ore_distribution() {
 
 #[tokio::test]
 async fn test_parity_excavator_drones_ore_and_ice() {
-    // parity: feat:mining.excavator-drones
-    eve_testkit::attest(&["feat:mining.excavator-drones"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

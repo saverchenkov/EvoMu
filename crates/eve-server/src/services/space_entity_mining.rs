@@ -390,7 +390,11 @@ pub(crate) async fn handle_mine(
                 let ice_op = sk.and_then(|m| m.get(&43702)).map(|s| s.level).unwrap_or(0);
                 let int3442 = sk.and_then(|m| m.get(&3442)).map(|s| s.level).unwrap_or(0);
                 let int3436 = sk.and_then(|m| m.get(&3436)).map(|s| s.level).unwrap_or(0);
-                let int = int3442.max(int3436);
+                let int = if sk.is_some_and(|m| m.contains_key(&3442)) {
+                    int3442
+                } else {
+                    int3436
+                };
                 let spec = sk.and_then(|m| m.get(&22541)).map(|s| s.level).unwrap_or(0);
                 let ice_spec = sk.and_then(|m| m.get(&43703)).map(|s| s.level).unwrap_or(0);
                 let cap_ind = sk.and_then(|m| m.get(&28374)).map(|s| s.level).unwrap_or(0);
@@ -549,7 +553,13 @@ pub(crate) async fn handle_mine(
         InventoryFlag::SpecializedIceHold
     } else if ore_group_id == 711 && has_gas_hold {
         InventoryFlag::SpecializedGasHold
-    } else if ore_category_id == 25 && has_ore_hold {
+    } else if (ore_category_id == 25
+        || crate::services::mining_phased_autotarget::is_prismaticite_ore(
+            &ctx.sde,
+            ast_state.type_id,
+        ))
+        && has_ore_hold
+    {
         InventoryFlag::SpecializedOreHold
     } else {
         InventoryFlag::Cargo
@@ -640,7 +650,19 @@ pub(crate) async fn handle_mine(
             message: "Target mining hold is full".into(),
         });
     }
-    let requested_units = (((base_yield_m3 / unit_vol).floor() as u64).max(1)).min(max_fit_units);
+    let phase_eff =
+        crate::services::mining_phased_autotarget::phased_field_efficiency_for_asteroid(
+            ctx,
+            sys_id,
+            asteroid_id,
+            ast_state.type_id,
+        );
+    let effective_yield_m3 = base_yield_m3 * phase_eff;
+    let requested_units = if effective_yield_m3 <= 0.0 {
+        0
+    } else {
+        (((effective_yield_m3 / unit_vol).floor() as u64).max(1)).min(max_fit_units)
+    };
 
     let extraction = match handle.mine_asteroid(asteroid_id, requested_units, waste_prob).await {
         Ok(e) => e,

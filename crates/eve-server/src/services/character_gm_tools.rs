@@ -566,6 +566,12 @@ pub async fn handle_gm_slash_ext(
 
         let mut spawned_ids = Vec::with_capacity(qty as usize);
         for idx in 0..qty {
+            let pos = origin + DVec3::new(1_500.0 + (idx as f64) * 250.0, 0.0, 0.0);
+            let ball_radius = if inv_type.category_id == 25 {
+                inv_type.radius.max(200.0)
+            } else {
+                inv_type.radius.max(1.0)
+            };
             let entity_id = ctx.db.with_mut_snapshot(|snap| {
                 snap.next_entity_id += 1;
                 let id = snap.next_entity_id;
@@ -587,9 +593,23 @@ pub async fn handle_gm_slash_ext(
                         blueprint_runs_remaining: None,
                     },
                 );
+                if inv_type.category_id == 25 {
+                    snap.asteroids.insert(
+                        id,
+                        eve_db::AsteroidRecord {
+                            asteroid_id: id,
+                            solar_system_id: sys_id,
+                            belt_id: 0,
+                            type_id,
+                            quantity: 200_000,
+                            initial_quantity: 200_000,
+                            position: (pos.x, pos.y, pos.z),
+                            radius: ball_radius,
+                        },
+                    );
+                }
                 id
             });
-            let pos = origin + DVec3::new(1_500.0 + (idx as f64) * 250.0, 0.0, 0.0);
             let ball = Ball {
                 id: entity_id,
                 type_id,
@@ -598,7 +618,7 @@ pub async fn handle_gm_slash_ext(
                 max_velocity: 300.0,
                 inertia: 1.0,
                 mass: inv_type.mass.max(1.0),
-                radius: inv_type.radius.max(1.0),
+                radius: ball_radius,
                 speed_fraction: 0.0,
                 mode: MovementMode::Stop,
             };

@@ -785,9 +785,14 @@ async fn handle_cmd_stargate_jump(
 
     let is_pochven_gate = ctx.sde.solar_systems.get(&old_sys).map(|s| s.region_id) == Some(10_000_070)
         || ctx.sde.solar_systems.get(&jump.to_solar_system_id).map(|s| s.region_id) == Some(10_000_070);
-    let is_pochven_restricted = is_pochven_gate && (is_restricted_capital || is_freighter);
+    let is_highsec_gate = ctx.sde.solar_systems.get(&old_sys).is_some_and(|s| s.security_status >= 0.45)
+        || ctx.sde.solar_systems.get(&jump.to_solar_system_id).is_some_and(|s| s.security_status >= 0.45);
+    let is_supercapital = matches!(ship_group_id, 30 | 659);
 
-    if is_pochven_restricted || is_restricted_capital {
+    if (is_pochven_gate && (is_restricted_capital || is_freighter))
+        || is_supercapital
+        || (is_highsec_gate && is_restricted_capital)
+    {
         return Err(BridgeRpcError {
             code: "CapitalShipCannotJumpStargate".into(),
             message: format!(

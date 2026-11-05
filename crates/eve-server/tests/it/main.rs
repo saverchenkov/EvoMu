@@ -482,3 +482,5 @@ mod structures_lookup_raffle_live;
 mod npc_navy_zarzakh_sleepers_haulers_live;
 mod pve_escalations_expeditions_arena_live;
 mod load_notify_zarzakh_payment_live;
+mod mining_modules_pve_sites_live;
+mod pve_crab_storms_special_sites_live;

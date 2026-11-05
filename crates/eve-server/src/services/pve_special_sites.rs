@@ -252,6 +252,24 @@ pub fn with_pve_special_reg_db<R>(
     })
 }
 
+pub fn read_pve_special_reg<R>(
+    ctx: &ServerContext,
+    f: impl FnOnce(&PveSpecialSitesRegistry) -> R,
+) -> R {
+    ctx.db.with_snapshot(|snap| {
+        let mut reg = if let Some(blob) = snap.service_state_blobs.get(INCURSIONS_BLOB_KEY) {
+            serde_json::from_str::<PveSpecialSitesRegistry>(blob).unwrap_or_default()
+        } else if let Some(note) = snap.owner_notes.get(&PVE_SPECIAL_NOTE_ID) {
+            serde_json::from_str::<PveSpecialSitesRegistry>(&note.note).unwrap_or_default()
+        } else {
+            PveSpecialSitesRegistry::default()
+        };
+        reg.db_weak = std::sync::Arc::downgrade(&ctx.db);
+        reg.current_now_sec = ctx.now_unix();
+        f(&reg)
+    })
+}
+
 pub fn with_pve_special_reg<R>(
     ctx: &ServerContext,
     f: impl FnOnce(&mut PveSpecialSitesRegistry) -> R,
@@ -369,6 +387,9 @@ pub fn ensure_triglavian_sites_for_system(reg: &mut PveSpecialSitesRegistry, sys
 }
 
 pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
+    if read_pve_special_reg(ctx, |reg| reg.initialized) {
+        return;
+    }
     let started_tales: Vec<(i64, SolarSystemId)> = with_pve_special_reg(ctx, |reg| {
         if reg.initialized {
             return Vec::new();
@@ -491,6 +512,24 @@ pub(crate) fn build_special_site_npc_combat_state(
             .get(&eve_sde::attr_ids::SIGNATURE_RADIUS)
             .copied()
             .unwrap_or_else(|| t.radius.max(35.0));
+        let shield_rech = a
+            .get(&eve_sde::attr_ids::SHIELD_RECHARGE_RATE)
+            .copied()
+            .unwrap_or_else(|| {
+                sde.attributes
+                    .get(&eve_sde::attr_ids::SHIELD_RECHARGE_RATE)
+                    .map(|d| d.default_value)
+                    .unwrap_or(0.0)
+            });
+        let cap_rech = a
+            .get(&eve_sde::attr_ids::RECHARGE_RATE)
+            .copied()
+            .unwrap_or_else(|| {
+                sde.attributes
+                    .get(&eve_sde::attr_ids::RECHARGE_RATE)
+                    .map(|d| d.default_value)
+                    .unwrap_or(0.0)
+            });
         return eve_destiny::CombatState {
             shield_hp: shield,
             max_shield_hp: shield,
@@ -501,6 +540,8 @@ pub(crate) fn build_special_site_npc_combat_state(
             capacitor: cap,
             max_capacitor: cap,
             signature_radius: sig,
+            shield_recharge_time_ms: shield_rech,
+            capacitor_recharge_time_ms: cap_rech,
             shield_resonance: [
                 a.get(&eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE).copied().unwrap_or(1.0),
                 a.get(&eve_sde::attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE).copied().unwrap_or(1.0),
@@ -731,7 +772,7 @@ pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
             if tid == 42_538 {
                 let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, tid, pos)).await;
             } else {
-                let cs = ctx.build_type_combat_state(tid);
+                let cs = build_special_site_npc_combat_state(&ctx.sde, tid);
                 let _ = sys_handle.spawn_ball_with_combat(make_site_npc_ball(bid, tid, pos), cs).await;
             }
         }
@@ -1290,3 +1331,22 @@ fn handle_solarsystem_interference_rpc(
     }
     Some(Ok(local_state))
 }
+
+pub fn check_drifter_hive_gate_access(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    gate_id: i64,
+) -> Result<(), BridgeRpcError> {
+    read_pve_special_reg(ctx, |reg| {
+        if let Some(hive) = reg.drifter_hives.get(&sys_id) {
+            if let Some(room) = hive.rooms.iter().find(|r| r.beacon_ball_id == gate_id) {
+                let remaining = room.npc_ball_ids.iter().filter(|id| !room.destroyed_npc_ball_ids.contains(id)).count();
+                if !room.cleared && remaining > 0 {
+                    return Err(rpc_err("RoomNotCleared", format!("Room {} NPCs must be cleared before activating acceleration gate", room.room_index)));
+                }
+            }
+        }
+        Ok(())
+    })
+}
+

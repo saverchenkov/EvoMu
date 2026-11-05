@@ -763,6 +763,9 @@ pub(super) async fn handle_scanning_and_wormholes(
                     message: "Capital ships cannot activate this acceleration gate".into(),
                 }));
             }
+            if let Err(e) = crate::services::pve_special_sites::check_drifter_hive_gate_access(ctx, sys_id, gate_id) {
+                return Some(Err(e));
+            }
 
             if gate_id > 0 {
                 if let Ok(Some((_, gate_ball))) = sys_handle.get_ball_snapshot(gate_id).await {

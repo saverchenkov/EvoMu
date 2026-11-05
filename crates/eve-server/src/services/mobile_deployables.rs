@@ -311,6 +311,9 @@ pub fn check_mobile_deployment_restrictions(
         ctx, session, item_id, type_id, group_id, sys_id, anchor_pos,
     )?;
     if group_id == GROUP_CRAB_BEACON {
+        if crate::services::inventory_fitting::fitting_cyno_portal::active_cyno_jammer(ctx, sys_id).is_some() {
+            return Err(BridgeRpcError::user_error("CynoJammed"));
+        }
         crate::services::pve_crab_beacons::validate_crab_deployment_system(&ctx.sde, sys_id)?;
     }
     if group_id == GROUP_MOBILE_CYNO_INHIBITOR {

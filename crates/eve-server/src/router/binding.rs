@@ -576,20 +576,27 @@ impl ServerContext {
         type_id: u32,
     ) -> eve_destiny::CombatState {
         if let Ok(fit) = self.get_or_rebuild_ship_fitting(char_id, ship_id) {
-            let get_attr = |attr_id: u16, fallback: f64| -> f64 {
-                if fit.ship.base_attributes.contains_key(&attr_id)
-                    || self.sde.attributes.contains_key(&attr_id)
-                    || fit
-                        .ship
-                        .modifiers
-                        .iter()
-                        .any(|m| m.target_attribute_id == attr_id)
-                {
-                    fit.ship.get_attribute(attr_id, &self.sde)
-                } else {
-                    fallback
-                }
-            };
+            use eve_sde::attr_ids as a;
+            let mut eff_attrs: std::collections::HashMap<u16, f64> = [
+                a::SHIELD_CAPACITY, a::ARMOR_HP, a::HP_STRUCT, a::CAPACITOR_CAPACITY,
+                a::SIGNATURE_RADIUS, a::SHIELD_RECHARGE_RATE, a::RECHARGE_RATE,
+                a::SHIELD_EM_DAMAGE_RESONANCE, a::SHIELD_THERMAL_DAMAGE_RESONANCE,
+                a::SHIELD_KINETIC_DAMAGE_RESONANCE, a::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE,
+                a::ARMOR_EM_DAMAGE_RESONANCE, a::ARMOR_THERMAL_DAMAGE_RESONANCE,
+                a::ARMOR_KINETIC_DAMAGE_RESONANCE, a::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE,
+                a::EM_DAMAGE_RESONANCE, a::THERMAL_DAMAGE_RESONANCE,
+                a::KINETIC_DAMAGE_RESONANCE, a::EXPLOSIVE_DAMAGE_RESONANCE,
+            ]
+            .into_iter()
+            .filter(|&aid| {
+                fit.ship.base_attributes.contains_key(&aid)
+                    || self.sde.attributes.contains_key(&aid)
+                    || fit.ship.modifiers.iter().any(|m| m.target_attribute_id == aid)
+            })
+            .map(|aid| (aid, fit.ship.get_attribute(aid, &self.sde)))
+            .collect();
+            crate::services::inventory_fitting::fitting_scanners_superweapons::apply_active_dbuffs_and_system_effects_to_ship_attrs(self, ship_id, &mut eff_attrs);
+            let get_attr = |attr_id: u16, fallback: f64| eff_attrs.get(&attr_id).copied().unwrap_or(fallback);
             let shield = get_attr(eve_sde::attr_ids::SHIELD_CAPACITY, 450.0);
             let armor = get_attr(eve_sde::attr_ids::ARMOR_HP, 350.0);
             let hull = get_attr(eve_sde::attr_ids::HP_STRUCT, 350.0);

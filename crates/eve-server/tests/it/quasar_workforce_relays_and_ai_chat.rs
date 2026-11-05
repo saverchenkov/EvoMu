@@ -364,7 +364,6 @@ async fn test_skinr_sequencing_job_natural_completion_notice() {
 
 #[tokio::test]
 async fn test_payment_schedule_omega_purchase_and_faction_activity_admin() {
-
     let ctx = ServerContext::new();
     common::seed_test_nes_store_catalog(&ctx);
     ctx.db.with_mut_snapshot(|snap| {

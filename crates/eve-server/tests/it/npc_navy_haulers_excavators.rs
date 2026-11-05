@@ -278,8 +278,6 @@ async fn test_hauler_convoy_trade_routes_warp_gates_and_loot() {
 
 #[tokio::test]
 async fn test_excavator_drones_rorqual_bay_speed_and_yield_scaling() {
-    // parity: feat:mining.excavator-drones
-    eve_testkit::attest(&["feat:mining.excavator-drones"]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);

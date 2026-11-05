@@ -105,6 +105,10 @@ pub fn spawn_phased_asteroid_field(
     let now = ctx.now_unix_secs();
     let snapshot_clone = ctx.db.with_mut_snapshot(|snap| {
         let mut fields = load_phased_fields(snap);
+        if fields.is_empty() {
+            snap.service_state_blobs
+                .insert("phased_field_last_tick_unix".into(), now.to_string());
+        }
         fields.insert(solar_system_id, state.clone());
         persist_phased_fields(snap, &fields);
         let sigs = snap.cosmic_signatures.entry(solar_system_id).or_default();
@@ -521,6 +525,7 @@ async fn reconcile_phased_field_connections(ctx: &ServerContext, solar_system_id
 /// Periodic cluster tick for active Phased Asteroid Fields (`MN-08`).
 pub async fn tick_phased_asteroid_fields(ctx: &ServerContext, now_unix: u64) {
     let (elapsed_secs, sys_ids) = ctx.db.with_mut_snapshot(|snap| {
+        let fields = load_phased_fields(snap);
         let prev = snap
             .service_state_blobs
             .get("phased_field_last_tick_unix")
@@ -528,7 +533,6 @@ pub async fn tick_phased_asteroid_fields(ctx: &ServerContext, now_unix: u64) {
             .unwrap_or(now_unix);
         snap.service_state_blobs
             .insert("phased_field_last_tick_unix".into(), now_unix.to_string());
-        let fields = load_phased_fields(snap);
         let ids: Vec<u32> = fields.keys().copied().collect();
         (now_unix.saturating_sub(prev), ids)
     });

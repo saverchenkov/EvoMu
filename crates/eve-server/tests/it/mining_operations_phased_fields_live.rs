@@ -32,14 +32,8 @@ async fn rpc(
         .await
 }
 
-// parity: feat:mining.mining-goals
-// parity: feat:mining.mining-market
 #[tokio::test]
 async fn test_live_mining_goals_and_market() {
-    eve_testkit::attest(&[
-        "feat:mining.mining-goals",
-        "feat:mining.mining-market",
-    ]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -387,14 +381,10 @@ async fn test_live_mining_goals_and_market() {
     );
 }
 
-// parity: feat:mining.mobile-phase-anchor
-// parity: feat:mining.phased-asteroid-field-lifecycle
 // parity: feat:mining.wormhole-ore-sites
 #[tokio::test]
 async fn test_live_phased_asteroid_fields_anchor_and_wormhole_sites() {
     eve_testkit::attest(&[
-        "feat:mining.mobile-phase-anchor",
-        "feat:mining.phased-asteroid-field-lifecycle",
         "feat:mining.wormhole-ore-sites",
     ]);
 

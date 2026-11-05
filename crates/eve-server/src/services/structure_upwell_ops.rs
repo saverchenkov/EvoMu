@@ -1011,6 +1011,15 @@ pub(crate) fn is_structure_service_online(ctx: &ServerContext, snap: &WorldState
 
 pub fn sync_pending_profiles_in_ctx(ctx: &ServerContext) {
     let now_unix = ctx.now_unix();
+    let has_due = ctx.db.with_snapshot(|snap| {
+        load_ext_state(snap)
+            .pending_profile_applications
+            .values()
+            .any(|&(_, t)| now_unix >= t)
+    });
+    if !has_due {
+        return;
+    }
     let released = ctx.db.with_mut_snapshot(|snap| {
         let mut ext = load_ext_state(snap);
         if ext.pending_profile_applications.values().any(|&(_, t)| now_unix >= t) {

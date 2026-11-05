@@ -10,7 +10,7 @@
 
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity;
-use crate::services::combat_crimewatch::{with_mut_combat_runtime, CombatRuntimeState, EncounterWaveDirector, ExtendedNpcEntity};
+use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, CombatRuntimeState, EncounterWaveDirector, ExtendedNpcEntity};
 use crate::system_actor::SystemRegistry;
 use eve_db::WorldRepository;
 use eve_sde::{SdeRegistry, SolarSystemId};
@@ -801,6 +801,14 @@ pub async fn populate_npc_wreck_on_turret_kill(
 
 /// Spawns space wrecks and specialized loot for NPCs destroyed by `ActiveModuleCycle` weapon ticks.
 pub async fn finalize_cycle_destroyed_npcs(ctx: &ServerContext, solar_system_id: SolarSystemId) {
+    let has_pending = with_combat_runtime(ctx, |rt| {
+        rt.destroyed_npc_cache
+            .values()
+            .any(|n| n.solar_system_id == solar_system_id)
+    });
+    if !has_pending {
+        return;
+    }
     let pending: Vec<ExtendedNpcEntity> = with_mut_combat_runtime(ctx, |rt| {
         let ids: Vec<i64> = rt
             .destroyed_npc_cache

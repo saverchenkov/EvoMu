@@ -308,14 +308,8 @@ async fn test_live_fleet_target_tagging() {
     }
 }
 
-// parity: feat:pve.metaliminal-storm-movement, feat:pve.crab-link-activation, feat:pve.crab-ceq-signal-interference
 #[tokio::test]
 async fn test_live_crab_beacon_activation_interference_and_metaliminal_storms() {
-    eve_testkit::attest(&[
-        "feat:pve.metaliminal-storm-movement",
-        "feat:pve.crab-link-activation",
-        "feat:pve.crab-ceq-signal-interference",
-    ]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
