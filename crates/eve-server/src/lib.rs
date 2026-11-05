@@ -28,5 +28,7 @@ pub use services::inventory_fitting::{dna_to_fitting, fitting_to_dna, saved_fitt
 #[cfg(test)]
 mod fast_checkout_plex_tests;
 #[cfg(test)]
+mod quasar_grpc_extra_unit_tests;
+#[cfg(test)]
 mod quasar_grpc_unit_tests;
 

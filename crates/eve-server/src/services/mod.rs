@@ -208,7 +208,11 @@ pub use inventory_fitting::fitting_containers_ships;
 pub use space_destiny::space_probe_scanning;
 
 #[cfg(test)]
+mod fitting_containers_ships_extra_unit_tests;
+#[cfg(test)]
 mod fitting_containers_ships_unit_tests;
+#[cfg(test)]
+mod space_probe_scanning_extra_unit_tests;
 #[cfg(test)]
 mod space_probe_scanning_unit_tests;
 
