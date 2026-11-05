@@ -798,13 +798,8 @@ pub fn register_handlers(
         }),
     );
 
-    router.register_handler(
-        "eve.vendors.epic.api.DeliverEntitlementRequest",
-        Arc::new(move |_ctx, _any, msg| {
-            let _user = extract_required_u64(msg, 1, "user")?;
-            Ok(any("eve.vendors.epic.api.DeliverEntitlementResponse", Vec::new()))
-        }),
-    );
+    // eve.vendors.epic.api.DeliverEntitlementRequest is served by quasar_auth_user (admin-gated, idempotent
+    // redeem-token delivery); registering a stub here would shadow it because vendors register later.
 
     router.register_handler(
         "eve.vendors.epic.api.GetEntitlementsRequest",

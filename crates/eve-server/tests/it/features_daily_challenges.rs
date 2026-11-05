@@ -660,6 +660,8 @@ async fn complete_live_fw_mission(
             }
             let _ = sys_h.step_manual(1.0).await;
         }
+        // Rate of fire: wait for any running weapon cycle to end before re-activating.
+        ctx.advance_secs(10);
         ctx.dispatch_rpc(
             sess,
             "dogmaIM",
@@ -1063,6 +1065,8 @@ async fn test_b36_storyline_offer_counter() {
                 if sys_h.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == nid && l.locked) { break; }
                 let _ = sys_h.step_manual(1.0).await;
             }
+            // Rate of fire: let the previous target's reactivation delay elapse before re-activating.
+            ctx.advance_secs(10);
             ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(weapon_id), PyRep::Integer(nid)], &kw, None).await.unwrap();
             for _ in 0..180 {
                 if sys_h.get_ball_snapshot(nid).await.unwrap().is_none() { break; }
@@ -2536,6 +2540,14 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
         for _ in 0..20 {
             if sys_h.get_ball_snapshot(npc_bid).await.unwrap().is_none() {
                 break;
+            }
+            // Rate of fire: the weapon can only be re-activated once its running cycle has ended.
+            for _ in 0..30 {
+                if !sys_h.has_module_cycle(attacker_sid, w_id).await && !ctx.is_module_in_reactivation_delay(attacker_sid, w_id) {
+                    break;
+                }
+                let _ = sys_h.step_manual(1.0).await;
+                ctx.advance_secs(1);
             }
             let r = kv_map(
                 &ctx.dispatch_rpc(s_ref, "dogmaIM", None, "Activate", &[PyRep::Integer(w_id), PyRep::Integer(npc_bid)], &kw, None)

@@ -333,8 +333,10 @@ async fn test_q3_payment_purchase_and_store_catalog_closure() {
     .await;
     assert_eq!(ta_list.status_code, STATUS_OK);
     let ta_list_msg = decode_rsp_fields(&ta_list);
+    // V24 targetaudience.offer.Identifier = { user_id (1): user.Identifier, catalogue_entry (2): { name (1) } }
     let ta_entry = raw_msg(&ta_list_msg, 1).expect("targeted offer 5002 in targetaudience");
-    assert_eq!(raw_u64(&ta_entry, 1), Some(5002));
+    let ta_catalogue = raw_msg(&ta_entry, 2).expect("catalogue_entry identifier");
+    assert_eq!(raw_str(&ta_catalogue, 1).as_deref(), Some("5002"));
 
     // 3. CostRequest and TokenRequest fail closed with STATUS_NOT_IMPLEMENTED when price_cents is None
     let mut cost_no_fiat = Vec::new();

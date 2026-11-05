@@ -334,7 +334,9 @@ async fn test_dg4_overheat_heat_damage_and_reactivation_delay() {
     assert_eq!(fit.modules.get(&t1_id).unwrap().damage_hp, report.module_damage);
 
     // Verify Thermodynamics skill level 3 reduced heat damage by 15%
-    let base_heat_dmg = fit.build_effective_module_state(t1_id, 2889, true, &ctx.sde).get_attribute(1211, &ctx.sde);
+    // Thermodynamics is applied exactly once to the SDE heatDamage (attr 1211): the effective module state
+    // already carries the skill modifier, so scaling it again would double-count the reduction.
+    let base_heat_dmg = ctx.sde.types[&2889].default_attributes[&1211];
     let expected_dmg = base_heat_dmg * (1.0 - 0.05 * 3.0);
     assert!((report.module_damage - expected_dmg).abs() < 1e-4);
 

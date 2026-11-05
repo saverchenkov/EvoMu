@@ -2527,7 +2527,8 @@ async fn test_hacking_node_types_and_failure_outcome() {
     );
     assert_eq!(rem_sr, None, "self_repair_turns must be cleaned up after 3 turns");
 
-    // Trigger 2nd failure on a standard container in low-sec -> self-destructs with 0.0 explosionDamage
+    // Trigger 2nd failure on a standard container in low-sec -> self-destructs with the low-sec band
+    // explosive blast (2,500 HP; null-sec 3,500, wormhole 4,500, high-sec 0)
     for attempt in 1..=2 {
         let _ = ctx
             .dispatch_rpc(
@@ -2562,7 +2563,7 @@ async fn test_hacking_node_types_and_failure_outcome() {
             .expect("ClickedOnTile fail");
         if attempt == 2 {
             assert_eq!(rep.dict_get("containerExploded"), Some(&PyRep::Bool(true)));
-            assert_eq!(rep.dict_get("explosionDamage"), Some(&PyRep::Real(0.0)));
+            assert_eq!(rep.dict_get("explosionDamage"), Some(&PyRep::Real(2_500.0)));
         }
     }
 }

@@ -612,25 +612,25 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
             },
         );
     });
-    ctx.esi_state
-        .calendar_events
-        .write()
-        .unwrap()
-        .insert(
+    // ESI calendar routes read the canonical calendarMgr store (persisted calendar events).
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.calendar_events.insert(
             700_001,
-            eve_server::esi::runtime_state::EsiCalendarEvent {
+            eve_db::CalendarEventRecord {
                 event_id: 700_001,
-                event_date_unix: 1_710_000_000,
-                title: "CTA Fleet Op".to_string(),
-                text: "Formup in Jita 4-4".to_string(),
-                duration_minutes: 60,
-                importance: 1,
                 owner_id: 98_000_001,
-                owner_name: "Test Corp".to_string(),
-                owner_type: "corporation".to_string(),
-                attendees: vec![char_id],
+                creator_id: char_id,
+                event_date_time: 1_710_000_000,
+                duration: 60,
+                importance: 1,
+                title: "CTA Fleet Op".to_string(),
+                description: "Formup in Jita 4-4".to_string(),
+                scope: "Corporation".to_string(),
+                responses: HashMap::from([(char_id, 4)]),
+                is_deleted: false,
             },
         );
+    });
 
     let token = issue_token_with_scopes(
         &ctx,

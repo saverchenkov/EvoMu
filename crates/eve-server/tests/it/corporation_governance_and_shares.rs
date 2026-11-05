@@ -380,6 +380,14 @@ async fn test_corporation_project_contribution_methods_and_milestones() {
     let salvage_status = ctx.db.with_snapshot(|s| s.alliance_war_state.project_details.get(&p_salvage_id).map(|d| d.status.clone())).unwrap();
     assert_eq!(salvage_status, "Completed");
 
+    // Corporation goal rewards are claimed by the contributor (backing store of
+    // eve_public.corporationgoal.api.RedeemAllMyRewardsRequest), not auto-paid on contribution.
+    let redeemed = eve_server::services::social_corp_fleet::social_corp_projects::redeem_all_corp_goal_rewards_for_char(
+        &ctx.db, MEMBER_PILOT, ctx.now_unix(),
+    )
+    .expect("redeem corporation goal rewards");
+    assert_eq!(redeemed.len(), 3, "mining, damage and salvage goals must all pay out: {redeemed:?}");
+
     // Verify Member ISK rewards credited
     let bal = ctx.db.with_snapshot(|s| s.characters.get(&MEMBER_PILOT).map(|c| c.balance)).unwrap();
     assert!(bal > IskCents(100_000_00), "Member balance must increase from project rewards");

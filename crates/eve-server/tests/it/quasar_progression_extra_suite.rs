@@ -108,13 +108,10 @@ async fn quasar_achievements_categories_scores_and_claims() {
     .await;
     assert_eq!(cdn_rsp.status_code, STATUS_OK);
 
-    let prog_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.achievement.api.admin.AddProgressRequest",
-        make_id_request(2),
-    )
-    .await;
+    // V24 AddProgressRequest = { achievement (1), progress_delta (2): int64, ... }
+    let mut add_prog_req = make_id_request(2);
+    eve_proto::quasar::encode_varint_field(2, 1, &mut add_prog_req);
+    let prog_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.AddProgressRequest", add_prog_req).await;
     assert_eq!(prog_rsp.status_code, STATUS_OK);
 
     let comp_rsp = quasar_rpc(
@@ -158,7 +155,7 @@ async fn quasar_achievements_categories_scores_and_claims() {
         &ctx,
         &mut sess,
         "eve_public.achievement.api.admin.ResetRequest",
-        Vec::new(),
+        make_id_request(2), // V24 ResetRequest carries the achievement Identifier (field 1)
     )
     .await;
     assert_eq!(reset_rsp.status_code, STATUS_OK);

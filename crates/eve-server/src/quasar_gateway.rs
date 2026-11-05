@@ -907,6 +907,11 @@ impl PublicGatewayRouter {
 
         let dyn_msg = match self.descriptors.decode_dynamic_or_wire(&norm_type, &payload_any.value) {
             Ok(m) => m,
+            // Descriptor-schema mismatches on routed messages fall back to raw wire decoding, but a payload
+            // that is not even well-formed protobuf wire (e.g. truncated length-delimited field) is rejected.
+            Err(e) if has_handler && WireMessage::decode(&payload_any.value).is_err() => {
+                return build_response(STATUS_BAD_REQUEST, format!("Invalid protobuf wire payload for '{norm_type}': {e}"), None);
+            }
             Err(_) if has_handler => crate::services::quasar_char_skill_services::decode_wire_dynamic(&norm_type, &payload_any.value),
             Err(e) => return build_response(STATUS_BAD_REQUEST, format!("Invalid protobuf wire payload for '{norm_type}': {e}"), None),
         };

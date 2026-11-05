@@ -14,7 +14,6 @@ use eve_proto::quasar::{
     EvePublicRequest, GoogleAny, GoogleTimestamp, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
-use eve_server::esi::runtime_state::EsiCalendarEvent;
 use eve_server::quasar_gateway::STATUS_OK;
 use eve_server::router::ServerContext;
 use std::collections::{HashMap, HashSet};
@@ -983,26 +982,26 @@ async fn test_r4_197_esi_calendar_blocks_uninvited_rsvp_and_allows_corp_event_ac
         snap.characters.insert(stranger, ch99);
     });
 
-    // Seed a corporation calendar event where c1 already RSVPed (so attendees = [c1])
-    ctx.esi_state
-        .calendar_events
-        .write()
-        .unwrap()
-        .insert(
+    // Seed a corporation calendar event where c1 already RSVPed (so attendees = [c1]) in the canonical
+    // calendarMgr store that the ESI calendar routes read.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.calendar_events.insert(
             corp_ev_id,
-            EsiCalendarEvent {
+            eve_db::CalendarEventRecord {
                 event_id: corp_ev_id,
                 owner_id: corp_id,
-                owner_name: "Caldari Provisions".into(),
-                owner_type: "corporation".into(),
-                event_date_unix: 1_800_000_000,
-                title: "Corp Fleet Op".into(),
-                duration_minutes: 60,
+                creator_id: c1,
+                event_date_time: 1_800_000_000,
+                duration: 60,
                 importance: 1,
-                text: "Form up in Jita".into(),
-                attendees: vec![c1],
+                title: "Corp Fleet Op".into(),
+                description: "Form up in Jita".into(),
+                scope: "Corporation".into(),
+                responses: HashMap::from([(c1, 4)]),
+                is_deleted: false,
             },
         );
+    });
 
     // 1. Fellow corporation member c2 CAN view the event details and attendees even though attendees is non-empty ([c1])
     let c2_get = eve_server::esi::char_social_routes::dispatch_char_social_route(

@@ -488,6 +488,14 @@ async fn test_journey_pve_combat() {
     ctx.set_invention_roll_override(Some(0.001));
     let mut kill_res = None;
     for _ in 0..4 {
+        // Rate of fire: the turret can only be re-activated once its running cycle has ended.
+        for _ in 0..30 {
+            if !sys_handle.has_module_cycle(ship_id, turret_mod_id).await && !ctx.is_module_in_reactivation_delay(ship_id, turret_mod_id) {
+                break;
+            }
+            let _ = sys_handle.step_manual(1.0).await;
+            ctx.advance_secs(1);
+        }
         let res = dispatch_combat_rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(turret_mod_id), PyRep::Integer(target_id)], &kw).await.expect("Subsequent Activate");
         if dict_get(&res, "destroyed") == Some(&PyRep::Bool(true)) {
             kill_res = Some(res);

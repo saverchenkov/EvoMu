@@ -275,11 +275,24 @@ pub(crate) async fn warp_lock_and_destroy_via_rpc(
         }
         let _ = handle.step_manual(1.0).await;
     }
+    // This helper verifies NPC destruction through real weapon RPCs, not attacker survival: live NPC AI
+    // (officer / faction rat fire during rate-of-fire and capacitor waits) would otherwise destroy the
+    // attacker mid-fight, so it is topped up between volleys.
+    let _ = handle.heal_combat_state(ship_id).await;
     ctx.advance_secs(15);
     for _ in 0..max_volleys {
+        let _ = handle.heal_combat_state(ship_id).await;
         for &gid in guns {
             if handle.get_ball_snapshot(target_id).await.unwrap().is_none() {
                 return;
+            }
+            // Each gun draws its own activation cost: recharge before a shot the capacitor cannot cover.
+            for _ in 0..8 {
+                if handle.get_combat_state(ship_id).await.ok().flatten().is_none_or(|cs| cs.capacitor >= 600.0) {
+                    break;
+                }
+                let _ = handle.step_manual(25.0).await;
+                let _ = handle.heal_combat_state(ship_id).await;
             }
             rpc(ctx, sess, "dogmaIM", "Activate", &[PyRep::Integer(gid), PyRep::Integer(target_id)]).await.expect("dogmaIM.Activate");
         }
@@ -452,6 +465,14 @@ async fn test_drifters_overshield_lux_kontos_doomsday_and_wreck() {
     };
     assert!(ship_hp_before_dd - ship_hp_after_dd >= 4_500.0, "Lux Kontos Doomsday must deal massive omni damage to target tank");
 
+    // The doomsday/overshield assertions are done; the remaining step only verifies the Drifter wreck. Live
+    // Drifter + Sleeper fire out-damages the fixture hull during the rate-of-fire waits, so give the attacker
+    // a deep buffer for the kill phase.
+    if let Ok(Some(mut cs)) = handle.get_combat_state(910_101).await {
+        cs.max_structure_hp = 10_000_000.0;
+        cs.structure_hp = 10_000_000.0;
+        let _ = handle.set_combat_state(910_101, cs).await;
+    }
     warp_lock_and_destroy_via_rpc(&ctx, &mut sess, beyonce_id, wh_sys, 910_101, &guns, bs_bid, None, 35).await;
     let has_drifter_wreck = ctx.db.with_snapshot(|snap| {
         snap.items.values().any(|i| {

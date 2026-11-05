@@ -410,7 +410,7 @@ pub fn create_canonical_project(
         return Err((STATUS_BAD_REQUEST, "Invalid project target or escrow amount".into()));
     }
     let div = spec.wallet_division.clamp(1, 7);
-    db.with_mut_snapshot(|snap| {
+    db.try_with_mut_snapshot(|snap| {
         let _ = sweep_expired_corp_projects_in_snap(snap, spec.now_unix);
         if spec.is_freelance {
             let active_fl_count = snap
@@ -605,7 +605,7 @@ pub fn redeem_corp_goal_reward_for_char(
     char_id: i64,
     now_unix: u64,
 ) -> Result<i64, (u32, String)> {
-    db.with_mut_snapshot(|snap| {
+    db.try_with_mut_snapshot(|snap| {
         let is_fl = snap.alliance_war_state.project_meta.get(&project_id).is_some_and(|m| m.1);
         let Some(proj) = snap.corp_projects.get(&project_id).cloned() else {
             return Err((STATUS_NOT_FOUND, "Corporation goal not found".into()));
@@ -709,7 +709,7 @@ pub fn redeem_freelance_reward_for_char(
     char_id: i64,
     now_unix: u64,
 ) -> Result<(u64, i64), (u32, String)> {
-    db.with_mut_snapshot(|snap| {
+    db.try_with_mut_snapshot(|snap| {
         let is_fl = snap.alliance_war_state.project_meta.get(&project_id).is_some_and(|m| m.1);
         let Some(proj) = snap.corp_projects.get(&project_id).cloned() else {
             return Err((STATUS_NOT_FOUND, "Freelance project not found".into()));

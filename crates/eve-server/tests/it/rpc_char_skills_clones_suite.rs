@@ -101,9 +101,13 @@ async fn test_char_skill_queue_prerequisites_and_alpha_caps() {
 
     // 5. Enforce Alpha clone limits (clone_grade = 1):
     // Alpha clones cannot queue skills beyond their per-skill Alpha cap
+    // Keep total SP under the 5,000,000 Alpha training limit so the per-skill cap is what rejects the queue
+    // (an Alpha already at/above 5M SP is refused outright with AlphaCloneSpCapExceeded, checked in step 6).
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.clone_grade = 1;
+            ch.skill_points = 1_000_000.0;
+            ch.free_skill_points = 0.0;
         }
     });
 
