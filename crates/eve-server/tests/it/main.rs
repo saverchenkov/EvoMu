@@ -362,7 +362,7 @@ mod drones_fighters_and_abilities;
 mod cosmetics_skinr_studio_and_hub;
 mod cosmetics_skinr_hub_live;
 mod pve_agent_missions_lifecycle;
-mod industry_costs_taxes_and_capital;
+mod industry_me_eiv_taxes_live;
 mod quasar_belts_battlepass_and_campaigns;
 mod quasar_academy_accounting_and_assets;
 mod structures_quantum_core_and_services;

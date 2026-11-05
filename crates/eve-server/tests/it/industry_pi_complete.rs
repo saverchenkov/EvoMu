@@ -69,10 +69,9 @@ fn seed_bp_materials(ctx: &ServerContext, bp_type_id: TypeId, owner_id: i64, loc
 
 #[tokio::test]
 async fn test_industry_blueprint_data_owner_limits_facilities_taxes_and_sci() {
-    // parity: feat:industry.blueprint-data, feat:industry.blueprint-limits, feat:industry.facilities, feat:industry.facility-tax, feat:industry.job-cost, feat:industry.eiv-adjusted-prices, feat:industry.cost-index, feat:industry.structure-rigs, feat:industry.structure-standup-rig-security-multipliers, feat:industry.job-slots, feat:industry.corp-industry, rpc:blueprintManager.GetLimits, rpc:facilityManager.GetFacility, rpc:facilityManager.GetFacilityTaxes, rpc:map.GetIndustryCostModifier
+    // parity: feat:industry.blueprint-data, feat:industry.blueprint-limits, feat:industry.facilities, feat:industry.cost-index, feat:industry.structure-rigs, feat:industry.structure-standup-rig-security-multipliers, feat:industry.job-slots, feat:industry.corp-industry, rpc:blueprintManager.GetLimits, rpc:facilityManager.GetFacility, rpc:facilityManager.GetFacilityTaxes, rpc:map.GetIndustryCostModifier
     eve_testkit::attest(&[
         "feat:industry.blueprint-data", "feat:industry.blueprint-limits", "feat:industry.facilities",
-        "feat:industry.facility-tax", "feat:industry.job-cost", "feat:industry.eiv-adjusted-prices",
         "feat:industry.cost-index", "feat:industry.structure-rigs", "feat:industry.structure-standup-rig-security-multipliers",
         "feat:industry.job-slots", "feat:industry.corp-industry",
     ]);
@@ -195,8 +194,6 @@ async fn test_industry_blueprint_data_owner_limits_facilities_taxes_and_sci() {
 
 #[tokio::test]
 async fn test_industry_capital_construction_restrictions() {
-    // parity: feat:industry.capital-construction-restrictions
-    eve_testkit::attest(&["feat:industry.capital-construction-restrictions"]);
     let ctx = ServerContext::new();
     let p = 90_000_001;
     let corp = 98_000_001;

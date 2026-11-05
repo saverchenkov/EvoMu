@@ -392,8 +392,8 @@ async fn test_e5_planetary_interaction_lifecycle() {
 
 #[tokio::test]
 async fn test_industry_blueprint_data_facilities_jobs() {
-    // parity: feat:industry.blueprint-data, feat:industry.facilities, feat:industry.facility-tax, feat:industry.install-job, feat:industry.job-cost
-    eve_testkit::attest(&["feat:industry.blueprint-data", "feat:industry.facilities", "feat:industry.facility-tax", "feat:industry.install-job", "feat:industry.job-cost"]);
+    // parity: feat:industry.blueprint-data, feat:industry.facilities, feat:industry.install-job
+    eve_testkit::attest(&["feat:industry.blueprint-data", "feat:industry.facilities", "feat:industry.install-job"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut s1 = setup_pilot(&ctx, 402, "demo", "demo-secret", 90_000_001).await;

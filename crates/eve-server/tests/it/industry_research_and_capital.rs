@@ -1,7 +1,5 @@
 //! Live end-to-end integration tests for blueprint ME research exponential curves,
 //! lab bonuses, material reduction, and capital/Jump Freighter/supercapital construction gates:
-//! - `feat:industry.blueprint-me-research`
-//! - `feat:industry.capital-construction-restrictions`
 //! - `plan:E-4`
 //!
 //! Industrialists are regular player sessions: blueprints come from the Jita market (the Jump
@@ -34,8 +32,8 @@ async fn complete(ctx: &ServerContext, sess: &mut eve_machonet::SessionState, jo
 
 #[tokio::test]
 async fn test_live_exponential_me_research_durations_costs_and_material_reduction() {
-    // parity: feat:industry.blueprint-me-research, plan:E-4
-    eve_testkit::attest(&["feat:industry.blueprint-me-research", "plan:E-4"]);
+    // parity: plan:E-4
+    eve_testkit::attest(&["plan:E-4"]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -120,8 +118,8 @@ async fn test_live_exponential_me_research_durations_costs_and_material_reductio
 
 #[tokio::test]
 async fn test_live_capital_and_jump_freighter_construction_matrix() {
-    // parity: feat:industry.capital-construction-restrictions, plan:E-4
-    eve_testkit::attest(&["feat:industry.capital-construction-restrictions", "plan:E-4"]);
+    // parity: plan:E-4
+    eve_testkit::attest(&["plan:E-4"]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);

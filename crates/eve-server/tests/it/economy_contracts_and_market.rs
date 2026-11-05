@@ -1,8 +1,7 @@
 //! Integration tests for Economy, Industry, Agents/R&D, HyperNet, and D-6 Persistence closure.
 //!
 //! Covers:
-//! - `plan:E-4`, `feat:industry.facilities`, `feat:industry.facility-tax`, `feat:industry.job-cost`,
-//!   `feat:industry.blueprint-me-research`, `feat:industry.capital-construction-restrictions`,
+//! - `plan:E-4`, `feat:industry.facilities`,
 //!   `feat:lifecycle.industry-pause-and-many`
 //! - `feat:wallet.hypernet-relay`, `feat:wallet.hypernet-hypercore-sizing-expiry`,
 //!   `rpc:raffleProxy.CreateRaffle`, `rpc:raffleProxy.BuyRandomTickets`, `rpc:raffleProxy.GetActiveHistoricPrices`
@@ -108,7 +107,7 @@ fn seed_minerals(ctx: &ServerContext, owner_id: i64, loc_id: i64, base_id: i64, 
     });
 }
 
-// parity: feat:industry.facilities, feat:industry.facility-tax, feat:industry.job-cost
+// parity: feat:industry.facilities
 #[tokio::test]
 async fn test_e4_sde_facility_bonuses_taxes_and_job_cost() {
     let ctx = setup_test_context();
@@ -181,7 +180,7 @@ async fn test_e4_sde_facility_bonuses_taxes_and_job_cost() {
     assert!((cost_meta.scc_surcharge_isk - (cost_meta.eiv_isk * 0.04 * 100.0).round() / 100.0).abs() < 0.02);
 }
 
-// parity: feat:industry.capital-construction-restrictions, feat:industry.blueprint-me-research, feat:lifecycle.industry-pause-and-many, plan:E-4
+// parity: feat:lifecycle.industry-pause-and-many, plan:E-4
 #[tokio::test]
 async fn test_e4_capital_shipyard_restrictions_and_exponential_research() {
     let ctx = setup_test_context();

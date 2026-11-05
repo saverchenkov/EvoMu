@@ -462,18 +462,8 @@ async fn rpc(
 
 #[tokio::test]
 async fn test_industry_research_cost_tax_capital_and_lifecycle_pause() {
-    // parity: feat:industry.blueprint-me-research
-    // parity: feat:industry.capital-construction-restrictions
-    // parity: feat:industry.eiv-adjusted-prices
-    // parity: feat:industry.facility-tax
-    // parity: feat:industry.job-cost
     // parity: feat:lifecycle.industry-pause-and-many
     eve_testkit::attest(&[
-        "feat:industry.blueprint-me-research",
-        "feat:industry.capital-construction-restrictions",
-        "feat:industry.eiv-adjusted-prices",
-        "feat:industry.facility-tax",
-        "feat:industry.job-cost",
         "feat:lifecycle.industry-pause-and-many",
     ]);
 

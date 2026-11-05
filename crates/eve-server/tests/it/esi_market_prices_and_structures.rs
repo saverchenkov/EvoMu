@@ -1,5 +1,5 @@
 //! End-to-end live-RPC ESI integration tests for market prices, rolling EIV, ship insurance, and structure markets:
-//! - `esi:GET /markets/prices`, `feat:esi.market.prices`, `feat:industry.eiv-adjusted-prices`
+//! - `esi:GET /markets/prices`, `feat:esi.market.prices`
 //! - `esi:GET /markets/structures/{structure_id}`, `feat:esi.market.structure-orders`
 
 #![forbid(unsafe_code)]
@@ -207,12 +207,11 @@ fn find_hangar_items(ctx: &ServerContext, owner_id: i64, loc_id: i64, type_id: u
 
 #[tokio::test]
 async fn test_esi_live_market_prices_eiv_insurance_and_structure_orders() {
-    // parity: esi:GET /markets/prices, feat:esi.market.prices, feat:industry.eiv-adjusted-prices
+    // parity: esi:GET /markets/prices, feat:esi.market.prices
     // parity: esi:GET /markets/structures/{structure_id}, feat:esi.market.structure-orders
     eve_testkit::attest(&[
         "esi:GET /markets/prices",
         "feat:esi.market.prices",
-        "feat:industry.eiv-adjusted-prices",
         "esi:GET /markets/structures/{structure_id}",
         "feat:esi.market.structure-orders",
     ]);

@@ -130,10 +130,9 @@ fn seed_item(
 
 #[tokio::test]
 async fn test_industry_blueprint_copying_me_te_and_repackage() {
-    // parity: feat:industry.blueprint-copying-runs, feat:industry.blueprint-me-research, feat:industry.blueprint-te-research, feat:industry.blueprint-pack-unpack
+    // parity: feat:industry.blueprint-copying-runs, feat:industry.blueprint-te-research, feat:industry.blueprint-pack-unpack
     eve_testkit::attest(&[
         "feat:industry.blueprint-copying-runs",
-        "feat:industry.blueprint-me-research",
         "feat:industry.blueprint-te-research",
         "feat:industry.blueprint-pack-unpack",
     ]);
@@ -285,10 +284,9 @@ async fn test_industry_blueprint_copying_me_te_and_repackage() {
 
 #[tokio::test]
 async fn test_industry_capital_components_restrictions_and_core_temp() {
-    // parity: feat:industry.capital-component-construction, feat:industry.capital-construction-restrictions, feat:industry.capital-core-temperature-components
+    // parity: feat:industry.capital-component-construction, feat:industry.capital-core-temperature-components
     eve_testkit::attest(&[
         "feat:industry.capital-component-construction",
-        "feat:industry.capital-construction-restrictions",
         "feat:industry.capital-core-temperature-components",
     ]);
     let ctx = ServerContext::new();
@@ -1957,9 +1955,8 @@ pub(crate) mod industry_eiv_scc_surcharge_alpha {
 
     #[tokio::test]
     async fn test_industry_eiv_scc_surcharge_alpha_tax_and_fulcrum_pirate_bonus() {
-        // parity: feat:industry.eiv-adjusted-prices, feat:industry.scc-surcharge-alpha-tax, feat:industry.fulcrum-pirate-ship-bonus
+        // parity: feat:industry.scc-surcharge-alpha-tax, feat:industry.fulcrum-pirate-ship-bonus
         eve_testkit::attest(&[
-            "feat:industry.eiv-adjusted-prices",
             "feat:industry.scc-surcharge-alpha-tax",
             "feat:industry.fulcrum-pirate-ship-bonus",
         ]);

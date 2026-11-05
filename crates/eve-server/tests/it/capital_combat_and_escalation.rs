@@ -4,7 +4,6 @@
 //! - `feat:pve.wormhole-site-capital-escalation-cap`
 //! - `feat:combat.pochven-loot-drop`
 //! - `feat:combat.insurance-void-and-expiry`
-//! - `feat:industry.capital-construction-restrictions`
 
 use crate::common::*;
 use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
@@ -1173,11 +1172,6 @@ async fn test_npc_navy_police_hauler_convoy_and_serverops_downtime() {
 
 #[tokio::test]
 async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle() {
-    // parity: feat:industry.capital-construction-restrictions
-    eve_testkit::attest(&[
-        "feat:industry.capital-construction-restrictions",
-    ]);
-
     let sde = match eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()) {
         Ok(reg) => std::sync::Arc::new(reg),
         Err(_) => std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),
