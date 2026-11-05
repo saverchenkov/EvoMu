@@ -654,14 +654,10 @@ pub(crate) fn resolve_upwell_dock_target(
             format!("Structure {dock_id} is in state '{}' and cannot be docked at", st.state),
         ));
     }
-    let acl_denied = ctx.db.with_snapshot(|snap| {
-        !structure_upwell_ops::evaluate_character_structure_access(ctx, snap, dock_id, char_id)
-    });
-    if acl_denied {
-        return Err(err(
-            "StructureDockingAccessDenied",
-            format!("Character {char_id} is denied docking access by structure {dock_id} ACL"),
-        ));
+    if let Err(e) = ctx.db.with_snapshot(|snap| {
+        super::structure_acl_defense_rules::verify_structure_docking_acl(ctx, snap, dock_id, char_id)
+    }) {
+        return Err(e);
     }
     // Freighters (513) and Jump Freighters (902) dock at every Upwell hull (SDE Raitaru/Astrahus text:
     // "docking capabilities for subcapital ships and freighters"), so they are not capital-sized here.

@@ -346,8 +346,29 @@ pub const SYNTHESIZED_NPC_FACTION_STANDINGS: &[(i64, i64, f64)] = &[
     (500_026, 500_027, -10.0), (500_027, 500_026, -10.0),
 ];
 pub fn static_npc_faction_standings() -> &'static [(i64, i64, f64)] { SYNTHESIZED_NPC_FACTION_STANDINGS }
-// SYNTHESIZED / DATA GAP: returns approximated inter-faction standings only (no synthesized corporation rows).
-pub fn get_sde_npc_npc_standings(_sde: &eve_sde::SdeRegistry) -> Vec<(i64, i64, f64)> { SYNTHESIZED_NPC_FACTION_STANDINGS.to_vec() }
+pub fn get_sde_npc_npc_standings(sde: &eve_sde::SdeRegistry) -> Vec<(i64, i64, f64)> {
+    let mut rows: Vec<(i64, i64, f64)> = SYNTHESIZED_NPC_FACTION_STANDINGS
+        .iter()
+        .copied()
+        .filter(|&(from_f, to_f, _)| {
+            sde.factions.is_empty()
+                || (sde.factions.contains_key(&(from_f as u32))
+                    && sde.factions.contains_key(&(to_f as u32)))
+        })
+        .collect();
+    if !sde.npc_corporations.is_empty() {
+        let mut corp_ids: Vec<i64> = sde.npc_corporations.keys().copied().collect();
+        corp_ids.sort_unstable();
+        for cid in corp_ids {
+            if let Some(fid) = sde.npc_corporations.get(&cid).and_then(|c| c.faction_id) {
+                let fid_i64 = i64::from(fid);
+                rows.push((cid, fid_i64, 10.0));
+                rows.push((fid_i64, cid, 10.0));
+            }
+        }
+    }
+    rows
+}
 
 /// Applies a primary faction standing percentage change (`fac_pct`, positive for gain or
 /// negative for loss) and, when `apply_derived` is true, propagates derived faction standings
