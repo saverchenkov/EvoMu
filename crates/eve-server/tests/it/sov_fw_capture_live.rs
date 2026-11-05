@@ -447,8 +447,10 @@ async fn test_fw_live_plexing_to_vulnerable_ihub_kill_and_downtime_occupier_flip
 
     let (_, vp_final, _) = fw_occupation(&ctx, target);
     assert!(vp_final >= threshold, "system must reach 100% contested (vp={vp_final}, thresh={threshold})");
-    let bunker_vulnerable = events(&ctx, PILOT_1).iter().any(|(e, _)| e == "OnFacWarBunkerVulnerable");
-    assert!(bunker_vulnerable, "reaching 100% contested must emit OnFacWarBunkerVulnerable");
+    let bunker_vulnerable = events(&ctx, PILOT_1).iter().any(|(e, a)| {
+        e == "OnFacWarBunkerVulnerable" && a.first().and_then(PyRep::as_i64) == Some(GALLENTE)
+    });
+    assert!(bunker_vulnerable, "reaching 100% contested must emit OnFacWarBunkerVulnerable with occupier factionID");
     assert_eq!(fw_occupation(&ctx, target).0, GALLENTE, "100% contested alone does not flip occupancy");
 
     // 4. Destroy the now-vulnerable I-Hub with live weapons fire; occupancy is only queued for downtime.

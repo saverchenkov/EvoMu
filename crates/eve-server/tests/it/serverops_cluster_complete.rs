@@ -74,8 +74,6 @@ fn spawn_test_ship_ball(ball_id: i64) -> Ball {
 
 #[tokio::test]
 async fn test_time_dilation_scales_physics_and_module_cycles_and_emits_clock_rebase() {
-    // parity: notify:DoSimClockRebase
-    eve_testkit::attest(&["", "notify:DoSimClockRebase"]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 

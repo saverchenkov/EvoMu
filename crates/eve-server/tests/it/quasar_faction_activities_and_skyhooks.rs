@@ -316,7 +316,6 @@ async fn test_b33_faction_activity_admin_and_payment_schedule() {
 
 #[tokio::test]
 async fn test_b33_achievement_and_goal_admin_closure() {
-    // parity: quasar:eveProto/generated/eve_public/dailygoal/api/admin/admin_pb2.pyj
     let ctx = ServerContext::new();
     let cid = 90_000_020i64;
     let mut admin_sess = make_session(4, 20, cid, 1_000_009, true);
@@ -524,7 +523,6 @@ async fn test_b33_sovereignty_hub_resources_and_fuel_closure() {
 
 #[tokio::test]
 async fn test_b33_mercenary_den_activities_and_notices_closure() {
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj
     let ctx = ServerContext::new();
     let cid = 90_000_040i64;
     let corp_id = 1_000_009i64;

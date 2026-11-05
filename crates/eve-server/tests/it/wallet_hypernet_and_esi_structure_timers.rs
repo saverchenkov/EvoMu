@@ -255,9 +255,7 @@ async fn test_item_trader_atomic_exchange_per_recipe() {
 }
 
 #[tokio::test]
-// parity: feat:esi.corporations.structures-services-timers
 async fn test_esi_corporation_structures_timers_and_online_services() {
-    eve_testkit::attest(&["feat:esi.corporations.structures-services-timers"]);
     let ctx = std::sync::Arc::new(ServerContext::new());
     common::pin_clock(&ctx);
 

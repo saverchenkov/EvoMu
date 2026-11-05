@@ -66,10 +66,9 @@ fn dict_get<'a>(dict_rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 }
 
 #[tokio::test]
-// parity: rpc:FastCheckoutService.RequestMiningCycleOutput, rpc:FastCheckoutService.RequestMiningDetails, rpc:FastCheckoutService.get_tutorial_completion_status, rpc:FastCheckoutService.initialize_tutorial_status, rpc:FastCheckoutService.is_enabled, rpc:FastCheckoutService.reset_tutorial, rpc:FastCheckoutService.skip_tutorial, rpc:activityMgr.ActivitySeen, rpc:activityMgr.GetActivitiesPopState, rpc:activityMgr.GetActivityBadgeStatuses, rpc:activityMgr.SetActivitiesPopState
+// parity: rpc:FastCheckoutService.RequestMiningDetails, rpc:FastCheckoutService.get_tutorial_completion_status, rpc:FastCheckoutService.initialize_tutorial_status, rpc:FastCheckoutService.is_enabled, rpc:FastCheckoutService.reset_tutorial, rpc:FastCheckoutService.skip_tutorial, rpc:activityMgr.ActivitySeen, rpc:activityMgr.GetActivitiesPopState, rpc:activityMgr.GetActivityBadgeStatuses, rpc:activityMgr.SetActivitiesPopState
 async fn test_fast_checkout_and_activity_complete() {
     eve_testkit::attest(&[
-        "rpc:FastCheckoutService.RequestMiningCycleOutput",
         "rpc:FastCheckoutService.RequestMiningDetails",
         "rpc:FastCheckoutService.get_tutorial_completion_status",
         "rpc:FastCheckoutService.initialize_tutorial_status",

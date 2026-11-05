@@ -548,11 +548,10 @@ async fn test_live_crimewatch_sec_gain_caps_and_tag_tier_bands() {
 
 #[tokio::test]
 async fn test_live_fleet_boss_handover_formations_and_tagging() {
-    // parity: feat:fleet.boss-handover, feat:fleet.stored-formations-and-warp-shapes, feat:fleet.target-tagging
+    // parity: feat:fleet.boss-handover, feat:fleet.stored-formations-and-warp-shapes
     eve_testkit::attest(&[
         "feat:fleet.boss-handover",
         "feat:fleet.stored-formations-and-warp-shapes",
-        "feat:fleet.target-tagging",
     ]);
 
     let ctx = ServerContext::new();

@@ -558,11 +558,8 @@ async fn test_live_insurgency_campaign_lifecycle_and_stargate_spread() {
     );
 }
 
-// parity: feat:fw.system-capture
 #[tokio::test]
 async fn test_live_fw_system_capture_post_surrender_ihub_and_downtime() {
-    eve_testkit::attest(&["feat:fw.system-capture"]);
-
     let ctx = Arc::new(ServerContext::new());
     common::pin_clock(&ctx);
 

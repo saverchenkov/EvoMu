@@ -4,7 +4,6 @@
 
 use eve_server::router::ServerContext;
 
-// parity: feat:npc.navy-npc, feat:npc.zarzakh-gate-guns-patrols, feat:npc.pochven-hypnosian-sleepers, feat:npc.npc-hauler, feat:npc.mining-op-npc
 #[tokio::test]
 async fn test_npc_navy_zarzakh_sleepers_haulers_live() {
     let ctx = ServerContext::new();

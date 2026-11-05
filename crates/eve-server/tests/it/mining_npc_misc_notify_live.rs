@@ -165,8 +165,8 @@ async fn test_live_mining_belts_as_balls_and_sec_band_ore_distribution() {
 
 #[tokio::test]
 async fn test_live_navy_npc_standing_response_and_npc_hauler_convoy() {
-    // parity: feat:npc.navy-npc, feat:npc.npc-hauler
-    eve_testkit::attest(&["feat:npc.navy-npc", "feat:npc.npc-hauler"]);
+    // parity: feat:npc.navy-npc
+    eve_testkit::attest(&["feat:npc.navy-npc"]);
 
     let clock = Arc::new(VirtualServerClock::with_fixed_base(1_700_000_000));
     let ctx = ServerContext::new();
@@ -542,11 +542,10 @@ async fn test_live_campaign_enrollment_and_tournament_ban_notifications() {
 
 #[tokio::test]
 async fn test_live_cache_setting_raffle_seeding_and_plan_e5_missions() {
-    // parity: rpc:cache.Setting, rpc:raffleMgr.QA_SeedRaffles, plan:E-5
+    // parity: rpc:cache.Setting, rpc:raffleMgr.QA_SeedRaffles
     eve_testkit::attest(&[
         "rpc:cache.Setting",
         "rpc:raffleMgr.QA_SeedRaffles",
-        "plan:E-5",
     ]);
 
     let ctx = ServerContext::new();

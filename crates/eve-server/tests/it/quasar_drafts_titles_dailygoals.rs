@@ -403,11 +403,6 @@ async fn quasar_skinr_drafts_and_titles_full_lifecycle() {
 
 #[tokio::test]
 async fn quasar_daily_goals_configurable_and_admin_targeting() {
-    // parity: quasar:eveProto/generated/eve_public/dailygoal/api/admin/admin_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/dailygoal/api/admin/admin_pb2.pyj",
-    ]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 

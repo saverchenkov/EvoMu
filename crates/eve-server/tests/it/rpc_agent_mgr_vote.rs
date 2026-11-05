@@ -171,7 +171,7 @@ async fn test_agent_mgr_attributes_and_system() {
 
 #[tokio::test]
 async fn test_agent_mgr_career_and_epic_arcs() {
-    // parity: rpc:agentMgr.GetCompletedCareerAgentIDs, rpc:agentMgr.GetDisabledMissions, rpc:agentMgr.GetMessagesForEpicArcMissions, rpc:agentMgr.GetMyEpicArcStatus, rpc:agentMgr.GetPlausibleMissionIDs
+    // parity: rpc:agentMgr.GetCompletedCareerAgentIDs, rpc:agentMgr.GetDisabledMissions, rpc:agentMgr.GetMessagesForEpicArcMissions, rpc:agentMgr.GetMyEpicArcStatus
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 

@@ -77,10 +77,9 @@ async fn login_pilot_undocked(
 }
 
 // parity: notify:OnShipDeath
-// parity: notify:OnKillNotification
 #[tokio::test]
 async fn test_live_notify_ship_death_and_kill_notification() {
-    eve_testkit::attest(&["notify:OnShipDeath", "notify:OnKillNotification"]);
+    eve_testkit::attest(&["notify:OnShipDeath"]);
 
     let ctx = new_ctx();
     let mut sess_a = login_pilot_undocked(&ctx, 94_001, "demo", "demo-secret", PILOT_A).await;
@@ -162,11 +161,8 @@ async fn test_live_notify_ship_death_and_kill_notification() {
     );
 }
 
-// parity: notify:OnVictoryPointStateUpdated
-// parity: notify:OnFacWarBunkerVulnerable
 #[tokio::test]
 async fn test_live_notify_fw_victory_points_and_bunker_vulnerable() {
-    eve_testkit::attest(&["notify:OnVictoryPointStateUpdated", "notify:OnFacWarBunkerVulnerable"]);
 
     let ctx = new_ctx();
     let (fw_sys, occupier_fac, threshold) = ctx.db.with_snapshot(|snap| {

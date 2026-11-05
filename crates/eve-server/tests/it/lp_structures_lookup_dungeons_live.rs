@@ -411,6 +411,70 @@ async fn test_lookup_warable_and_npc_standings_live() {
         "Caller's own corporation must be excluded"
     );
 
+    let PyRep::List(char_list) = ok(
+        &ctx,
+        &mut pilot_a,
+        "lookupSvc",
+        "LookupCharacters",
+        &[PyRep::String("".into()), PyRep::Bool(false)],
+    )
+    .await
+    else {
+        panic!("Expected List from LookupCharacters");
+    };
+    assert!(
+        char_list.iter().any(|r| r.dict_get("characterID").and_then(|v| v.as_i64()) == Some(pilot_a.char_id)),
+        "Live character must appear in LookupCharacters"
+    );
+
+    let PyRep::List(corp_list) = ok(
+        &ctx,
+        &mut pilot_a,
+        "lookupSvc",
+        "LookupCorporations",
+        &[PyRep::String("Beta Target".into()), PyRep::Bool(false)],
+    )
+    .await
+    else {
+        panic!("Expected List from LookupCorporations");
+    };
+    assert_eq!(
+        corp_list.first().and_then(|r| r.dict_get("corporationID")).and_then(|v| v.as_i64()),
+        Some(corp_b)
+    );
+
+    let PyRep::List(owner_list) = ok(
+        &ctx,
+        &mut pilot_a,
+        "lookupSvc",
+        "LookupOwners",
+        &[PyRep::String("Beta Target".into()), PyRep::Bool(false)],
+    )
+    .await
+    else {
+        panic!("Expected List from LookupOwners");
+    };
+    assert!(
+        owner_list.iter().any(|r| r.dict_get("ownerID").and_then(|v| v.as_i64()) == Some(corp_b)),
+        "Live corporation must appear in LookupOwners"
+    );
+
+    let PyRep::List(loc_list) = ok(
+        &ctx,
+        &mut pilot_a,
+        "lookupSvc",
+        "LookupLocationsByGroup",
+        &[PyRep::Integer(5), PyRep::String("Jita".into())],
+    )
+    .await
+    else {
+        panic!("Expected List from LookupLocationsByGroup");
+    };
+    assert!(
+        loc_list.iter().any(|r| r.dict_get("itemID").and_then(|v| v.as_i64()) == Some(JITA as i64)),
+        "Jita must appear in LookupLocationsByGroup(5, 'Jita')"
+    );
+
     let mut unauth = SessionState::new(399);
     rpc(&ctx, &mut unauth, "standingMgr", "GetNPCNPCStandings", &[])
         .await

@@ -475,3 +475,200 @@ async fn test_pve_mission_decline_quit_and_expiration() {
     assert_eq!(comp_expired.code, "MissionExpired");
     assert_eq!(ctx.db.with_snapshot(|snap| snap.active_missions[&(char_id, mid_5)].state.clone()), "Failed");
 }
+
+async fn dock_pilot_at_station(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    station_id: i64,
+) {
+    let kw = HashMap::new();
+    let cur_station = ctx.db.with_snapshot(|s| s.characters[&char_id].station_id);
+    if cur_station == Some(station_id) {
+        return;
+    }
+    if cur_station.is_some() {
+        crate::common::slash_cmd(ctx, sess, "/giveskill 3332 5").await;
+        ctx.advance_secs(31);
+        ctx.dispatch_rpc(sess, "stationSvc", None, "Undock", &[], &kw, None).await.expect("Undock");
+    }
+    if sess.solar_system_id != Some(sys_id) {
+        crate::common::slash_cmd(ctx, sess, &format!("/tr {sys_id}")).await;
+    }
+    if let Some(st) = ctx.sde.stations.get(&station_id) {
+        let sys = ctx.systems.get_or_spawn(sys_id);
+        sys.set_ball_position(ship_id, st.position + glam::DVec3::new(500.0, 0.0, 0.0)).await;
+        sys.step_manual(0.1).await.unwrap();
+    }
+    ctx.dispatch_rpc(sess, "stationSvc", None, "Dock", &[PyRep::Integer(station_id)], &kw, None).await.expect("Dock");
+}
+
+// parity: plan:E-5
+#[tokio::test]
+async fn test_live_plan_e5_agent_missions_end_to_end() {
+    eve_testkit::attest(&["plan:E-5"]);
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let char_id = 96_005_001_i64;
+    ctx.db.provision_gm_account("e5pilot", "e5-secret", char_id, "E5 Mission Pilot");
+    let mut sess = SessionState::new(9605);
+    crate::common::login_pilot(&ctx, &mut sess, "e5pilot", "e5-secret").await;
+    let kw = HashMap::new();
+    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None).await.expect("SelectCharacterID");
+
+    let ship_id = ctx.db.with_snapshot(|s| s.characters[&char_id].active_ship_id);
+
+    // 1. Level 2 agent rejects character at 0.0 standing
+    let l2_agent = ctx.sde.agents.values()
+        .find(|a| a.level == 2 && a.division_id == 24 && a.agent_type_id == 2 && a.station_id.is_some() && a.solar_system_id.is_some())
+        .expect("L2 Security agent")
+        .clone();
+    dock_pilot_at_station(&ctx, &mut sess, char_id, ship_id, l2_agent.solar_system_id.unwrap(), l2_agent.station_id.unwrap()).await;
+    let l2_oid = bind_service_oid(&ctx, &mut sess, "agentMgr", PyRep::Integer(l2_agent.agent_id)).await;
+    let gate_err = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(l2_oid), "DoAction", &[PyRep::Integer(2)], &kw, None).await.unwrap_err();
+    assert_eq!(gate_err.code, "InsufficientAgentStanding");
+
+    // 2. Security encounter mission: skill scaling, ambient NPC non-interference, spawned NPC kills, and standing propagation
+    let sec_agent = ctx.sde.agents.values()
+        .find(|a| a.level == 1 && a.division_id == 24 && a.agent_type_id == 2 && a.station_id.is_some() && a.solar_system_id.is_some())
+        .expect("L1 Security agent")
+        .clone();
+    let sec_sys = sec_agent.solar_system_id.unwrap();
+    let sec_sta = sec_agent.station_id.unwrap();
+    dock_pilot_at_station(&ctx, &mut sess, char_id, ship_id, sec_sys, sec_sta).await;
+    let sec_oid = bind_service_oid(&ctx, &mut sess, "agentMgr", PyRep::Integer(sec_agent.agent_id)).await;
+
+    let offer_unskilled = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(sec_oid), "DoAction", &[PyRep::Integer(2)], &kw, None).await.expect("Unskilled offer");
+    let base_isk = offer_unskilled.dict_get("iskReward").and_then(|v| v.as_i64()).unwrap();
+    let base_lp = offer_unskilled.dict_get("lpReward").and_then(|v| v.as_i64()).unwrap();
+    ctx.dispatch_rpc(&mut sess, "agentMgr", Some(sec_oid), "DoAction", &[PyRep::Integer(10)], &kw, None).await.expect("Defer unskilled offer");
+
+    // Train Negotiation V (3356), Security Connections V (3895), Social V (3355)
+    crate::common::slash_cmd(&ctx, &mut sess, "/giveskill 3356 5").await;
+    crate::common::slash_cmd(&ctx, &mut sess, "/giveskill 3895 5").await;
+    crate::common::slash_cmd(&ctx, &mut sess, "/giveskill 3355 5").await;
+
+    let mut chosen_mid = 0_u32;
+    let mut skilled_isk = 0_i64;
+    let mut skilled_lp = 0_i64;
+    for _ in 0..8 {
+        let off = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(sec_oid), "DoAction", &[PyRep::Integer(2)], &kw, None).await.expect("Skilled offer");
+        let mid = off.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+        skilled_isk = off.dict_get("iskReward").and_then(|v| v.as_i64()).unwrap();
+        skilled_lp = off.dict_get("lpReward").and_then(|v| v.as_i64()).unwrap();
+        let npc_cnt = ctx.db.with_snapshot(|s| s.active_missions.get(&(char_id, mid)).map_or(0, |m| m.npcs_remaining));
+        if npc_cnt > 0 {
+            chosen_mid = mid;
+            break;
+        }
+        ctx.dispatch_rpc(&mut sess, "agentMgr", Some(sec_oid), "DoAction", &[PyRep::Integer(10)], &kw, None).await.expect("Defer non-combat mission");
+    }
+    assert!(chosen_mid > 0, "Expected combat security mission");
+    assert!(skilled_isk > base_isk, "Negotiation skill must increase ISK reward");
+    assert!(skilled_lp > base_lp, "Connections skill must increase LP reward");
+
+    ctx.dispatch_rpc(&mut sess, "agentMgr", Some(sec_oid), "DoAction", &[PyRep::Integer(3)], &kw, None).await.expect("Accept combat mission");
+    ctx.advance_secs(31);
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None).await.expect("Undock for combat mission");
+
+    let (expected_rem, mission_npc_ids) = ctx.db.with_snapshot(|s| {
+        let m = &s.active_missions[&(char_id, chosen_mid)];
+        (m.npcs_remaining, m.spawned_npc_ball_ids.clone())
+    });
+    assert!(!mission_npc_ids.is_empty(), "Mission must spawn its own NPCs");
+
+    // Kill an ambient non-mission NPC in the same system -> must NOT decrement mission npcs_remaining
+    let ambient_rep = crate::common::slash_cmd(&ctx, &mut sess, "/spawnnpc 10035").await;
+    let ambient_id = ambient_rep.dict_get("npcID").or_else(|| ambient_rep.dict_get("ballID")).or_else(|| ambient_rep.dict_get("itemID")).and_then(|v| v.as_i64()).unwrap();
+    let sys_h = ctx.systems.get_or_spawn(sec_sys);
+    let lethal = eve_destiny::DamageVector { em: 100_000.0, thermal: 100_000.0, kinetic: 100_000.0, explosive: 100_000.0 };
+    sys_h.apply_damage_with_attacker(ambient_id, lethal, Some(char_id)).await.unwrap().unwrap();
+    let after_ambient = ctx.db.with_snapshot(|s| s.active_missions[&(char_id, chosen_mid)].npcs_remaining);
+    assert_eq!(after_ambient, expected_rem, "Non-mission NPC kill must not advance mission objective");
+
+    // Destroy mission's own spawned NPCs
+    for npc_bid in mission_npc_ids {
+        sys_h.apply_damage_with_attacker(npc_bid, lethal, Some(char_id)).await.unwrap().unwrap();
+    }
+    dock_pilot_at_station(&ctx, &mut sess, char_id, ship_id, sec_sys, sec_sta).await;
+
+    let corp_id = sec_agent.corporation_id;
+    let fac_id = ctx.sde.npc_corporations[&corp_id].faction_id.unwrap() as i64;
+    let (ag_before, corp_before, fac_before) = ctx.db.with_snapshot(|s| {
+        let st = &s.characters[&char_id].standings;
+        (st.get(&sec_agent.agent_id).copied().unwrap_or(0.0), st.get(&corp_id).copied().unwrap_or(0.0), st.get(&fac_id).copied().unwrap_or(0.0))
+    });
+    let comp_sec = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(sec_oid), "DoAction", &[PyRep::Integer(6)], &kw, None).await.expect("Complete security mission");
+    assert_eq!(comp_sec.dict_get("state").and_then(|v| v.as_str()), Some("Completed"));
+    let (ag_after, corp_after, fac_after) = ctx.db.with_snapshot(|s| {
+        let st = &s.characters[&char_id].standings;
+        (st.get(&sec_agent.agent_id).copied().unwrap_or(0.0), st.get(&corp_id).copied().unwrap_or(0.0), st.get(&fac_id).copied().unwrap_or(0.0))
+    });
+    assert!(ag_after > ag_before && corp_after > corp_before && fac_after > fac_before, "Standing must propagate to agent, corp, and faction");
+
+    // Re-requesting from same agent does not re-offer completed mission
+    let next_offer = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(sec_oid), "DoAction", &[PyRep::Integer(2)], &kw, None).await.expect("Next offer");
+    assert_ne!(next_offer.dict_get("missionID").and_then(|v| v.as_i64()), Some(chosen_mid as i64));
+    let _ = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(sec_oid), "DoAction", &[PyRep::Integer(10)], &kw, None).await;
+
+    // 2b. Connections V (3359) lifts positive standing above 1.0 to unlock Level 2 agent, plus Defer/Decline/Accept/Quit
+    let l2_same_fac = ctx.sde.agents.values()
+        .find(|a| a.level == 2 && a.agent_type_id == 2 && a.station_id.is_some() && a.solar_system_id.is_some()
+            && ctx.sde.npc_corporations.get(&a.corporation_id).and_then(|c| c.faction_id) == Some(fac_id as u32))
+        .unwrap_or(&l2_agent).clone();
+    dock_pilot_at_station(&ctx, &mut sess, char_id, ship_id, l2_same_fac.solar_system_id.unwrap(), l2_same_fac.station_id.unwrap()).await;
+    let l2_fac_oid = bind_service_oid(&ctx, &mut sess, "agentMgr", PyRep::Integer(l2_same_fac.agent_id)).await;
+    crate::common::slash_cmd(&ctx, &mut sess, "/giveskill 3359 5").await;
+    let l2_offer = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(l2_fac_oid), "DoAction", &[PyRep::Integer(2)], &kw, None).await.expect("L2 offer unlocked by Connections V");
+    assert_eq!(l2_offer.dict_get("state").and_then(|v| v.as_str()), Some("Offered"));
+    ctx.advance_secs(14_401);
+    let def_rep = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(l2_fac_oid), "DoAction", &[PyRep::Integer(10)], &kw, None).await.expect("DoAction(Defer)");
+    assert_eq!(def_rep.dict_get("standingPenaltyApplied"), Some(&PyRep::Bool(false)));
+    ctx.dispatch_rpc(&mut sess, "agentMgr", Some(l2_fac_oid), "DoAction", &[PyRep::Integer(2)], &kw, None).await.expect("Re-offer after defer");
+    ctx.dispatch_rpc(&mut sess, "agentMgr", Some(l2_fac_oid), "DoAction", &[PyRep::Integer(9)], &kw, None).await.expect("DoAction(Decline)");
+    ctx.dispatch_rpc(&mut sess, "agentMgr", Some(l2_fac_oid), "DoAction", &[PyRep::Integer(2)], &kw, None).await.expect("Re-offer before quit");
+    ctx.dispatch_rpc(&mut sess, "agentMgr", Some(l2_fac_oid), "DoAction", &[PyRep::Integer(3)], &kw, None).await.expect("DoAction(Accept)");
+    let quit_rep = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(l2_fac_oid), "DoAction", &[PyRep::Integer(11)], &kw, None).await.expect("DoAction(Quit)");
+    assert_eq!(quit_rep.dict_get("state").and_then(|v| v.as_str()), Some("Quit"));
+
+    // 3. Courier mission requires delivery at destination station
+    let dist_agent = ctx.sde.agents.values()
+        .find(|a| a.level == 1 && a.division_id == 22 && a.agent_type_id == 2 && a.station_id.is_some() && a.solar_system_id.is_some())
+        .expect("L1 Distribution agent")
+        .clone();
+    dock_pilot_at_station(&ctx, &mut sess, char_id, ship_id, dist_agent.solar_system_id.unwrap(), dist_agent.station_id.unwrap()).await;
+    let dist_oid = bind_service_oid(&ctx, &mut sess, "agentMgr", PyRep::Integer(dist_agent.agent_id)).await;
+    let mut courier_dest = 0_i64;
+    for _ in 0..8 {
+        let off = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(dist_oid), "DoAction", &[PyRep::Integer(2)], &kw, None).await.expect("Courier offer");
+        if let Some(dest) = off.dict_get("destinationStationID").and_then(|v| v.as_i64()) {
+            if dest != dist_agent.station_id.unwrap() {
+                courier_dest = dest;
+                break;
+            }
+        }
+        let _ = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(dist_oid), "DoAction", &[PyRep::Integer(10)], &kw, None).await;
+    }
+    assert!(courier_dest > 0, "Expected courier mission with remote destinationStationID");
+    ctx.dispatch_rpc(&mut sess, "agentMgr", Some(dist_oid), "DoAction", &[PyRep::Integer(3)], &kw, None).await.expect("Accept courier mission");
+    let not_at_dest = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(dist_oid), "DoAction", &[PyRep::Integer(6)], &kw, None).await.unwrap_err();
+    assert_eq!(not_at_dest.code, "CourierNotAtDestinationStation");
+
+    let courier_iid = ctx.db.with_snapshot(|s| {
+        s.item_custom_names
+            .iter()
+            .find(|(iid, tag)| tag.starts_with(&format!("courier_cargo:{char_id}:")) && s.items.contains_key(iid))
+            .map(|(iid, _)| *iid)
+            .expect("Granted courier cargo item in station hangar")
+    });
+    ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(courier_iid), PyRep::Integer(ship_id), PyRep::Integer(5)], &kw, None)
+        .await
+        .expect("Load courier cargo into active ship cargo hold");
+
+    let dest_sys = ctx.sde.stations[&courier_dest].solar_system_id;
+    dock_pilot_at_station(&ctx, &mut sess, char_id, ship_id, dest_sys, courier_dest).await;
+    let courier_comp = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(dist_oid), "DoAction", &[PyRep::Integer(6)], &kw, None).await.expect("Complete courier mission at destination");
+    assert_eq!(courier_comp.dict_get("state").and_then(|v| v.as_str()), Some("Completed"));
+}

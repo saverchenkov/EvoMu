@@ -44,7 +44,6 @@ async fn test_warp_vector_item() {
 
 #[tokio::test]
 async fn test_pochven_wormhole_scan_and_jump() {
-    eve_testkit::attest(&["feat:navigation.pochven-wormholes", "feat:navigation.drifter-wormhole-systems"]);
     let ctx = ServerContext::new();
     
     let sigs = eve_server::services::space_destiny::space_pochven_wormholes::pochven_static_wormholes(&ctx.sde, 30_000_142, 1, 1234567);

@@ -430,14 +430,6 @@ async fn test_live_skills_omega_weekly_free_sp() {
 
 #[tokio::test]
 async fn test_live_notify_chat_bans_and_cluster_shutdown() {
-    // parity: notify:OnCharacterPermanentlyBanned, notify:OnCharacterTemporarilyBanned
-    // parity: notify:OnCharacterUnbanned, notify:OnClusterShutdownInitiated
-    eve_testkit::attest(&[
-        "notify:OnCharacterPermanentlyBanned",
-        "notify:OnCharacterTemporarilyBanned",
-        "notify:OnCharacterUnbanned",
-        "notify:OnClusterShutdownInitiated",
-    ]);
 
     let ctx = ServerContext::new();
     pin_clock(&ctx);
