@@ -458,3 +458,4 @@ mod pve_daily_goals_login_air_live;
 mod navigation_waypoints_vectors_wormholes_live;
 mod npc_pochven_zarzakh_insurance_live;
 mod esi_contracts_and_market_orders_live;
+mod store_fastcheckout_seasonal_live;
