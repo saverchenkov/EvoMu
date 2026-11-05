@@ -434,3 +434,7 @@ mod corp_member_audit_reinforce_and_quit;
 mod combat_insurance_lifecycle_live;
 mod modules_mobile_depot_live;
 mod modules_nosferatu_absolute_capacitor_live;
+mod mining_goals_market_wh_sites_live;
+mod rpc_client_contracts;
+mod npc_navy_zarzakh_sleepers_haulers_live;
+mod wallet_hypernet_evermarks_store_live;

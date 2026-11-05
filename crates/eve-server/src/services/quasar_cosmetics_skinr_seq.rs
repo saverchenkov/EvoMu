@@ -25,7 +25,6 @@ use eve_proto::quasar::{
 use std::sync::Arc;
 
 const DEFAULT_SHIP_TYPE_ID: u32 = 587; // Rifter
-const EVERMARK_CORP_ID: i64 = 1_000_419;
 
 fn hex_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -940,7 +939,6 @@ fn handle_job_initiate(
 
     let base_secs = tier_base_duration_secs(tier_level);
     let planned_secs = (base_secs.saturating_mul(100 - dur_disc as u64) / 100).max(600);
-    let award_evermarks = !slots.is_empty() && !required_comps.is_empty();
 
     let (job_uuid, skin_hex, job_rec) = {
         let mut data = state.data.write().unwrap_or_else(|e| e.into_inner());
@@ -1011,27 +1009,6 @@ fn handle_job_initiate(
         if let Some(ch) = s.characters.get_mut(&(cid as i64)) {
             if let Some(rem_plex) = ch.plex_balance.checked_sub(total_plex_cost) {
                 ch.plex_balance = rem_plex;
-                if award_evermarks {
-                    let em_reward = 500_i64.saturating_mul(i64::from(licenses_qty));
-                    let corp_id = ch.corporation_id;
-                    let cur = ch.loyalty_points.entry(EVERMARK_CORP_ID).or_insert(0);
-                    *cur = cur.saturating_add(em_reward);
-                    if corp_id >= 98_000_000 {
-                        let corp_cur = s
-                            .corp_lp_balances
-                            .entry((corp_id, EVERMARK_CORP_ID))
-                            .or_insert(0);
-                        *corp_cur = corp_cur.saturating_add(em_reward);
-                    }
-                    crate::services::lp_store::record_lp_reward_log(
-                        s,
-                        cid as i64,
-                        EVERMARK_CORP_ID,
-                        em_reward,
-                        "SKINR sequencing EverMarks reward".into(),
-                        0,
-                    );
-                }
             } else {
                 insufficient_funds = true;
             }

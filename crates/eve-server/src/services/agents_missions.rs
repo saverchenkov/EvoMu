@@ -1154,6 +1154,10 @@ pub async fn handle(
 
                             let lp_entry = ch.loyalty_points.entry(corp_id).or_insert(0);
                             *lp_entry = lp_entry.saturating_add(credited_lp);
+                            if corp_id == crate::services::lp_store_catalog::PARAGON_CORP_ID && ch.corporation_id >= 98_000_000 {
+                                let c_lp = snap.corp_lp_balances.entry((ch.corporation_id, corp_id)).or_insert(0);
+                                *c_lp = c_lp.saturating_add(credited_lp);
+                            }
                         }
                         crate::services::lp_store::record_lp_reward_log(
                             snap,

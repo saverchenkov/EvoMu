@@ -199,13 +199,7 @@ fn compute_active_historic_prices(
             }
         }
 
-        let sde_fallback = ctx
-            .sde
-            .types
-            .get(&tid)
-            .map(|t| t.base_price)
-            .filter(|&p| p > 0.0)
-            .unwrap_or(0.0);
+        let sde_fallback = crate::services::industry_pi::industry_rigs::resolve_material_adjusted_price(ctx, Some(snap), tid);
 
         let active_avg = if !active_prices.is_empty() {
             active_prices.iter().sum::<f64>() / (active_prices.len() as f64)
@@ -415,38 +409,41 @@ pub fn handle(
                 Some(d) => d as u64,
                 None => RAFFLE_DURATION_SECS,
             };
-            if session.structure_id.is_some() {
+            if session.structure_id.is_some() || session.station_id.is_none() {
                 return Some(Err(rpc_err(
                     "InvalidRaffleLocation",
-                    "HyperNet raffles can only be created in NPC stations",
+                    "Must be docked in an NPC station to create a HyperNet raffle",
                 )));
             }
-            let est_value_isk = ticket_price_isk * (ticket_count as f64);
-            let required_cores = match compute_required_hypercores(est_value_isk, ticket_count) {
-                Ok(c) => c,
-                Err(e) => return Some(Err(e)),
+            let station_id = session.station_id.unwrap();
+            let Some(station_info) = ctx.sde.stations.get(&station_id) else {
+                return Some(Err(rpc_err(
+                    "InvalidRaffleLocation",
+                    format!("Location {station_id} is not an NPC station"),
+                )));
             };
+            let sys_id = station_info.solar_system_id;
+            let is_wh = crate::services::quasar_social_chat::is_wormhole_system(sys_id)
+                || ctx.sde.solar_systems.get(&sys_id).is_some_and(|sys| {
+                    sys.wormhole_class_id
+                        .or_else(|| ctx.sde.constellations.get(&sys.constellation_id).and_then(|c| c.wormhole_class_id))
+                        .or_else(|| ctx.sde.regions.get(&sys.region_id).and_then(|r| r.wormhole_class_id))
+                        .is_some_and(|c| matches!(c, 1..=6 | 12..=18))
+                });
+            if is_wh {
+                return Some(Err(rpc_err(
+                    "InvalidRaffleLocation",
+                    "HyperNet raffles cannot be created in wormhole space",
+                )));
+            }
             let ticket_price_cents = IskCents::from_f64_isk(ticket_price_isk).0;
             let now = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let ch_rec = snap.characters.get(&char_id);
-                if ch_rec.is_some_and(|c| c.structure_id.is_some()) {
-                    return Err(rpc_err(
-                        "InvalidRaffleLocation",
-                        "HyperNet raffles can only be created in NPC stations",
-                    ));
-                }
-                let char_station_id = ch_rec.and_then(|c| c.station_id);
-                let Some(station_id) = session.station_id.or(char_station_id) else {
+                if ch_rec.is_some_and(|c| c.structure_id.is_some() || c.station_id != Some(station_id)) {
                     return Err(rpc_err(
                         "InvalidRaffleLocation",
                         "Must be docked in an NPC station to create a HyperNet raffle",
-                    ));
-                };
-                if station_id >= 1_000_000_000_000 || !ctx.sde.stations.contains_key(&station_id) {
-                    return Err(rpc_err(
-                        "InvalidRaffleLocation",
-                        format!("Location {station_id} is not an NPC station"),
                     ));
                 }
                 let item = snap
@@ -454,6 +451,9 @@ pub fn handle(
                     .get(&item_id)
                     .cloned()
                     .ok_or_else(|| rpc_err("ItemNotFound", "Raffle item not found"))?;
+                let item_adj_price = crate::services::industry_pi::industry_rigs::resolve_material_adjusted_price(ctx, Some(snap), item.type_id);
+                let est_value_isk = (ticket_price_isk * (ticket_count as f64)).max(item_adj_price);
+                let required_cores = compute_required_hypercores(est_value_isk, ticket_count)?;
                 let active_ship_id = snap
                     .characters
                     .get(&char_id)
@@ -612,15 +612,19 @@ pub fn handle(
                     if unsold.len() < count {
                         return Err(rpc_err("NotEnoughTickets", "Not enough remaining tickets in raffle"));
                     }
-                    // Randomly select `count` unsold ticket indices using MechanicRng Fisher-Yates partial shuffle
-                    let sel_seed = rng_entropy_draw
-                        ^ (raffle_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                        ^ (char_id as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9)
-                        ^ (r.sold_tickets.len() as u64).wrapping_mul(0x94D0_49BB_1331_11EB);
-                    let sel_rng = crate::rng::MechanicRng::seeded(sel_seed);
+                    // Randomly select `count` unsold ticket indices using getrandom-backed Fisher-Yates partial shuffle
                     for i in 0..count {
                         let rem = unsold.len() - i;
-                        let draw = sel_rng.try_next_u64().unwrap_or(i as u64);
+                        let draw = if ctx.mechanic_rng.is_seeded() {
+                            ctx.mechanic_rng.try_next_u64().unwrap_or(i as u64)
+                        } else {
+                            let mut rnd_bytes = [0u8; 8];
+                            if getrandom::getrandom(&mut rnd_bytes).is_ok() {
+                                u64::from_le_bytes(rnd_bytes)
+                            } else {
+                                ctx.mechanic_rng.try_next_u64().unwrap_or(now ^ (i as u64))
+                            }
+                        };
                         let swap_idx = i + ((draw as usize) % rem);
                         unsold.swap(i, swap_idx);
                     }
