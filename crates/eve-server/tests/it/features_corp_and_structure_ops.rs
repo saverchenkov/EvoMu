@@ -1074,7 +1074,6 @@ async fn test_search_and_paperdoll_apparel_e2e() {
 
 #[tokio::test]
 async fn test_insurance_void_expiry_and_mission_rewards_e2e() {
-    // parity: feat:combat.insurance-void-and-expiry
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
     let kw = HashMap::new();

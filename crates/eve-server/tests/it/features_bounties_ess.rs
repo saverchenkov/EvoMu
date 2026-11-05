@@ -535,8 +535,6 @@ async fn test_b35_02_energy_nosferatu_relative_capacitor() {
 
 #[tokio::test]
 async fn test_b35_03_mobile_depot_deployment_and_refitting() {
-    // parity: feat:modules.mobile-depot-deployment-and-refitting
-    eve_testkit::attest(&["feat:modules.mobile-depot-deployment-and-refitting"]);
     let ctx = build_ctx();
     let sys = ctx.systems.get_or_spawn(NULL_SYS);
     let kw = HashMap::new();

@@ -2265,8 +2265,6 @@ use glam::DVec3;
 
 #[tokio::test]
 async fn test_feat_corporation_member_audit_e2e() {
-    // parity: feat:corporation.member-audit
-    eve_testkit::attest(&["feat:corporation.member-audit"]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -2401,8 +2399,6 @@ async fn test_feat_corporation_member_audit_e2e() {
 
 #[tokio::test]
 async fn test_feat_corporation_structure_reinforce_default_e2e() {
-    // parity: feat:corporation.structure-reinforce-default
-    eve_testkit::attest(&["feat:corporation.structure-reinforce-default"]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);

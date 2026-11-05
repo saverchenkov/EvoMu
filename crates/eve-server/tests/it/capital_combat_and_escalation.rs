@@ -1173,10 +1173,9 @@ async fn test_npc_navy_police_hauler_convoy_and_serverops_downtime() {
 
 #[tokio::test]
 async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle() {
-    // parity: feat:industry.capital-construction-restrictions, feat:combat.insurance-void-and-expiry
+    // parity: feat:industry.capital-construction-restrictions
     eve_testkit::attest(&[
         "feat:industry.capital-construction-restrictions",
-        "feat:combat.insurance-void-and-expiry",
     ]);
 
     let sde = match eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()) {

@@ -238,12 +238,10 @@ async fn test_b29_corp_invite_join_kick_quit_lifecycle() {
     // parity: feat:lifecycle.corp-invite-consent
     // parity: feat:lifecycle.corp-join-leaves-old-corp
     // parity: feat:lifecycle.corp-kick-online-session
-    // parity: feat:lifecycle.corp-quit-cleanup
     eve_testkit::attest(&[
         "feat:lifecycle.corp-invite-consent",
         "feat:lifecycle.corp-join-leaves-old-corp",
         "feat:lifecycle.corp-kick-online-session",
-        "feat:lifecycle.corp-quit-cleanup",
     ]);
 
     let ctx = ServerContext::new();

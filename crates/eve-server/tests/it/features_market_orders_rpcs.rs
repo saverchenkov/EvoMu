@@ -274,11 +274,10 @@ async fn test_b22_contracts_blueprints_and_plastic_wrap_break() {
 
 #[tokio::test]
 async fn test_b22_corp_settings_mail_and_structure_defaults() {
-    // parity: feat:corporation.accept-structures-setting, feat:corporation.corp-mail-restriction, feat:corporation.structure-reinforce-default, feat:corporation.welcome-mail
+    // parity: feat:corporation.accept-structures-setting, feat:corporation.corp-mail-restriction, feat:corporation.welcome-mail
     eve_testkit::attest(&[
         "feat:corporation.accept-structures-setting",
         "feat:corporation.corp-mail-restriction",
-        "feat:corporation.structure-reinforce-default",
         "feat:corporation.welcome-mail",
     ]);
 

@@ -732,13 +732,9 @@ async fn test_industry_research_cost_tax_capital_and_lifecycle_pause() {
 
 #[tokio::test]
 async fn test_corp_member_audit_reinforce_default_and_fleet_handover_formations() {
-    // parity: feat:corporation.member-audit
-    // parity: feat:corporation.structure-reinforce-default
     // parity: feat:fleet.boss-handover
     // parity: feat:fleet.stored-formations-and-warp-shapes
     eve_testkit::attest(&[
-        "feat:corporation.member-audit",
-        "feat:corporation.structure-reinforce-default",
         "feat:fleet.boss-handover",
         "feat:fleet.stored-formations-and-warp-shapes",
     ]);

@@ -455,8 +455,6 @@ async fn test_pochven_hypnosian_sleepers_and_60pct_loot_drop() {
 
 #[tokio::test]
 async fn test_insurance_voiding_and_12_week_expiry() {
-    // parity: feat:combat.insurance-void-and-expiry
-    eve_testkit::attest(&["feat:combat.insurance-void-and-expiry"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

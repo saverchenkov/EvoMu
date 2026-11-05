@@ -1722,7 +1722,6 @@ async fn insure_new_ship(
 
 #[tokio::test]
 async fn test_e2e_insurance_void_and_expiry() {
-    // parity: feat:combat.insurance-void-and-expiry
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let char_id = 90_000_001_i64;
@@ -2624,8 +2623,7 @@ async fn test_parity_fighters_support_and_space_superiority() {
 #[tokio::test]
 async fn test_parity_lifecycle_industry_and_corp_quit() {
     // parity: feat:lifecycle.industry-pause-and-many
-    // parity: feat:lifecycle.corp-quit-cleanup
-    eve_testkit::attest(&["feat:lifecycle.industry-pause-and-many", "feat:lifecycle.corp-quit-cleanup"]);
+    eve_testkit::attest(&["feat:lifecycle.industry-pause-and-many"]);
 
     let ctx = crate::modules_advanced_tactical::build_ctx();
     let pilot_char_id = 92_300_001i64;

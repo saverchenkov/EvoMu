@@ -429,3 +429,7 @@ mod notifications_and_mining_live;
 mod crimewatch_security_and_killrights;
 pub mod navigation_sov_lookup_payment_live;
 mod navigation_repair_anchor_omega_sp_live;
+mod corp_member_audit_reinforce_and_quit;
+mod combat_insurance_lifecycle_live;
+mod modules_mobile_depot_live;
+mod modules_nosferatu_absolute_capacitor_live;

@@ -58,8 +58,6 @@ async fn rpc(
 
 #[tokio::test]
 async fn test_corporation_member_roles_and_audit_log_tracking() {
-    // parity: feat:corporation.member-audit
-    eve_testkit::attest(&["feat:corporation.member-audit"]);
 
     let ctx = ServerContext::new();
     let mut sess1 = select_pilot(&ctx, 60_031, "demo", "demo-secret", CEO_PILOT).await;
@@ -395,8 +393,6 @@ async fn test_corporation_project_contribution_methods_and_milestones() {
 
 #[tokio::test]
 async fn test_corporation_structure_default_reinforcement_and_anchoring_inheritance() {
-    // parity: feat:corporation.structure-reinforce-default
-    eve_testkit::attest(&["feat:corporation.structure-reinforce-default"]);
 
     let ctx = ServerContext::new();
     let mut sess1 = select_pilot(&ctx, 60_051, "demo", "demo-secret", CEO_PILOT).await;
@@ -633,14 +629,12 @@ async fn test_corp_governance_welcome_mails_structures_alliance() {
     // parity: feat:corporation.welcome-mail
     // parity: feat:corporation.corp-mail-restriction
     // parity: feat:corporation.accept-structures-setting
-    // parity: feat:corporation.structure-reinforce-default
     // parity: feat:alliance.alliance-logo
     // parity: feat:corporation.corp-logo
     eve_testkit::attest(&[
         "feat:corporation.welcome-mail",
         "feat:corporation.corp-mail-restriction",
         "feat:corporation.accept-structures-setting",
-        "feat:corporation.structure-reinforce-default",
         "feat:alliance.alliance-logo",
         "feat:corporation.corp-logo",
     ]);
@@ -1188,13 +1182,11 @@ async fn test_corp_lifecycle_kick_join_invite_quit() {
     // parity: feat:lifecycle.corp-autokick-queue
     // parity: feat:lifecycle.corp-join-leaves-old-corp
     // parity: feat:lifecycle.corp-invite-consent
-    // parity: feat:lifecycle.corp-quit-cleanup
     eve_testkit::attest(&[
         "feat:lifecycle.corp-kick-online-session",
         "feat:lifecycle.corp-autokick-queue",
         "feat:lifecycle.corp-join-leaves-old-corp",
         "feat:lifecycle.corp-invite-consent",
-        "feat:lifecycle.corp-quit-cleanup",
     ]);
 
     let ctx = ServerContext::new();

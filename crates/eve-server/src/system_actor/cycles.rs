@@ -412,7 +412,11 @@ pub(crate) fn step_cycles_and_capacitor(
             // 2. Target interactions: damage, cap drain, Nosferatu cap transfer, remote shield/armor/hull/cap (`DG-4`, `DG-5`)
             if let Some(target_id) = cycle.target_id {
                 if cycle.damage_vector.total() > 0.0 {
-                    let dmg_res = ballpark.apply_damage_to_ball(target_id, cycle.damage_vector);
+                    // Mobile Depot / MTU targets follow their deployable rules (anchoring, 25% reinforcement).
+                    let now_unix = db_opt.as_ref().map_or(0, |db| db.clock().now_unix_secs());
+                    let sys_id = ballpark.solar_system_id;
+                    let dmg_res = crate::services::mobile_deployables::handle_ball_damage_in_actor(db_opt, sde_opt, sys_id, target_id, cycle.damage_vector, ballpark, now_unix)
+                        .or_else(|| ballpark.apply_damage_to_ball(target_id, cycle.damage_vector));
                     let entry = rah_incoming_damage.entry(target_id).or_insert([0.0; 4]);
                     entry[0] += cycle.damage_vector.em;
                     entry[1] += cycle.damage_vector.thermal;
@@ -481,10 +485,9 @@ pub(crate) fn step_cycles_and_capacitor(
                         }
                         let effective_transfer = cycle.cap_transfer_target * att;
                         if let Some((src_cap, src_max_cap)) = src_cap_info {
-                            let src_pct = if src_max_cap > 0.0 { src_cap / src_max_cap } else { 1.0 };
-                            let tgt_pct = if cs.max_capacitor > 0.0 { cs.capacitor / cs.max_capacitor } else { 0.0 };
+                            // wiki:Capacitor_warfare: compared by absolute capacitor, not percentage.
                             let can_drain = is_sleeper_target || cycle.nosferatu_blood_raider_override
-                                || (src_pct < tgt_pct && src_cap < cs.capacitor && cs.capacitor > 0.0);
+                                || (src_cap < cs.capacitor && cs.capacitor > 0.0);
                             if can_drain {
                                 let max_pull = if is_sleeper_target { effective_transfer } else { cs.capacitor };
                                 let transferred = effective_transfer.min(max_pull).min((src_max_cap - src_cap).max(0.0));

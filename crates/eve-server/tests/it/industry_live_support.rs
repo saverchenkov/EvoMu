@@ -83,11 +83,16 @@ pub(crate) async fn train_skills(ctx: &ServerContext, sess: &mut SessionState, t
             continue;
         }
         let _ = rpc(ctx, sess, "skillMgr2", "PurchaseSkills", &[PyRep::List(vec![PyRep::Integer(i64::from(sid))])]).await;
-        let q: Vec<PyRep> = ((curr + 1)..=5).map(|l| PyRep::Tuple(vec![PyRep::Integer(i64::from(sid)), PyRep::Integer(i64::from(l))])).collect();
-        match rpc(ctx, sess, "skillMgr2", "SaveNewQueue", &[PyRep::List(q)]).await {
-            Err(e) if strict => panic!("SaveNewQueue skill {sid} failed: {e:?}"),
-            _ => {}
+        // Alpha clones cap some skills below V: fall back to the highest level the clone accepts.
+        let mut queued = false;
+        for top in ((curr + 1)..=5).rev() {
+            let q: Vec<PyRep> = ((curr + 1)..=top).map(|l| PyRep::Tuple(vec![PyRep::Integer(i64::from(sid)), PyRep::Integer(i64::from(l))])).collect();
+            if rpc(ctx, sess, "skillMgr2", "SaveNewQueue", &[PyRep::List(q)]).await.is_ok() {
+                queued = true;
+                break;
+            }
         }
+        assert!(queued || !strict, "SaveNewQueue skill {sid} failed");
         ctx.advance_virtual_clock(90 * 86_400);
         let _ = rpc(ctx, sess, "skillMgr2", "GetSkillQueueAndFreePoints", &[]).await;
     }
@@ -230,7 +235,7 @@ async fn settle(ctx: &ServerContext, sess: &SessionState, max_steps: usize) {
     ctx.advance_secs(15);
 }
 
-async fn warp_to(ctx: &ServerContext, sess: &mut SessionState, target: i64, dist: f64) {
+pub(crate) async fn warp_to(ctx: &ServerContext, sess: &mut SessionState, target: i64, dist: f64) {
     match rpc(ctx, sess, "beyonce", "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(target), PyRep::Real(dist)]).await {
         Ok(_) => settle(ctx, sess, 600).await,
         Err(e) if e.code == "WarpDistanceTooShort" => {}
