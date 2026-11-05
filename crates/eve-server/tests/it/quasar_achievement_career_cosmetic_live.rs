@@ -353,29 +353,23 @@ async fn test_quasar_cosmetics_market_and_skinr_live() {
     // parity: quasar:eveProto/generated/eve_public/cosmetic/character/title/definition/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/cosmetic/market/api/api_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/cosmetic/market/component/listing/api/api_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/market/component/listing/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/market/skin/Order_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/api_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve/cosmetic/market/skin/listing/api/request_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/cosmetic/market/transaction/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/job/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/job/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/skin/thirdparty/sequencing/job/api/requests_pb2.pyj
     eve_testkit::attest(&[
         "feat:quasar.cosmetic",
         "quasar:eveProto/generated/eve_public/cosmetic/character/title/definition/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/cosmetic/market/api/api_pb2.pyj",
         "quasar:eveProto/generated/eve_public/cosmetic/market/component/listing/api/api_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/cosmetic/market/component/listing/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/cosmetic/market/skin/Order_pb2.pyj",
         "quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/api_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve/cosmetic/market/skin/listing/api/request_pb2.pyj",
         "quasar:eveProto/generated/eve_public/cosmetic/market/transaction/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/job/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/job/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/cosmetic/skin/thirdparty/sequencing/job/api/requests_pb2.pyj",
     ]);
 
     let ctx = ServerContext::new();

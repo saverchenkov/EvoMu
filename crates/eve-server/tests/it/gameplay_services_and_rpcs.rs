@@ -3528,11 +3528,6 @@ async fn test_batch2_lookup_warable_and_sov_structures() {
 
 #[tokio::test]
 async fn test_batch2_raffle_character_seeding_and_create() {
-    // parity: rpc:raffleMgr.QA_SeedRaffles
-    eve_testkit::attest(&[
-        "rpc:raffleMgr.QA_SeedRaffles",
-    ]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let mut player = setup_pilot(&ctx, 41_004, "demo", "demo-secret", 90_000_001).await;

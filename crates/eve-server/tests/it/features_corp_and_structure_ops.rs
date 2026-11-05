@@ -52,7 +52,7 @@ fn make_player_session(
 #[tokio::test]
 async fn test_cluster_session_localization_qa_rpcs_e2e() {
     // parity: rpc:DB2.CallProc
-    // parity: rpc:raffleMgr.QA_SeedRaffles, rpc:sessionMgr.EndAllGameSessions, rpc:sessionMgr.RemoveSessionsFromServer, rpc:userSvc.ProcessEVESessionCreated
+    // parity: rpc:sessionMgr.EndAllGameSessions, rpc:sessionMgr.RemoveSessionsFromServer, rpc:userSvc.ProcessEVESessionCreated
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
     let kw = HashMap::new();

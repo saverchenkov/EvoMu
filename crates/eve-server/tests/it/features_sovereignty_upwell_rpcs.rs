@@ -72,7 +72,6 @@ pub(crate) mod part2 {
 //
 // Covers:
 // - Ship SKIN application in space with observer slim/cosmetic updates & SQLite persistence (`feat:cosmetics.skin-apply`)
-// - Structure directory listing accessible structures with online services & ACL gating (`feat:structures.structure-directory`)
 
 
 use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord};

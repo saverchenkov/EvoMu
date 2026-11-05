@@ -286,15 +286,6 @@ async fn test_q3_user_license_and_subscription() {
 
 #[tokio::test]
 async fn test_q3_entitlements_omega_and_membership() {
-    // parity: quasar:eveProto/generated/eve_public/entitlement/character/character_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/alliancelogo_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/corplogo_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/alliancelogo_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/corplogo_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/entitlement/character/character_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/alliancelogo_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/corplogo_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/entitlement/character/ship/alliancelogo_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/entitlement/character/ship/corplogo_pb2.pyj",
-    ]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();

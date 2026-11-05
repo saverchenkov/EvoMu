@@ -1,6 +1,5 @@
-//! End-to-end V24 RPC integration tests for Upwell structure profiles, structure directory
-//! visibility & sensitive masking, and automated grid defense retaliation (`feat:structures.profiles`,
-//! `feat:structures.structure-directory`, `feat:structures.defense-settings`).
+//! End-to-end V24 RPC integration tests for automated grid defense retaliation
+//! (`feat:structures.defense-settings`).
 
 use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord};
 use eve_destiny::{Ball, MovementMode, TargetLock};

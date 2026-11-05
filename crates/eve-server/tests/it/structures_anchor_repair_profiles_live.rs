@@ -368,6 +368,7 @@ async fn test_structures_repairshop_service_quotes_and_restoration_live() {
     assert_eq!(kv_f64(ship_row_cleared, "totalRepairCost"), 0.0);
 }
 
+// parity: feat:structures.profiles, feat:structures.structure-directory
 #[tokio::test]
 async fn test_structures_profiles_and_directory_live() {
     eve_testkit::attest(&[
@@ -381,7 +382,7 @@ async fn test_structures_profiles_and_directory_live() {
     ctx.advance_secs(31);
 
     // Create corporation and advance past 7-day age gate.
-    let _ = ok(
+    let corp_rep = ok(
         &ctx,
         &mut pilot,
         "corpRegistry",
@@ -392,27 +393,71 @@ async fn test_structures_profiles_and_directory_live() {
         ],
     )
     .await;
+    let corp_id = corp_rep
+        .as_i64()
+        .filter(|&id| id > 0)
+        .or_else(|| pilot.sess.corporation_id)
+        .expect("created corp_id");
+    pilot.sess.corporation_id = Some(corp_id);
+    pilot.sess.corp_role |= eve_db::corp_roles::ROLE_DIRECTOR;
     ctx.advance_secs(7 * 86_400 + 31);
 
-    // Deploy Astrahus and advance through lifecycle to ShieldVulnerable.
+    // Enroll an unprivileged corp member (no Director/Station Manager role) and two outsiders.
+    let member_id = 91_400_004_i64;
+    ctx.db.provision_gm_account("live91400004", "live91400004-secret", member_id, "Member 91400004");
+    let mut corp_member = LivePilot {
+        sess: eve_machonet::SessionState::new(204),
+        char_id: member_id,
+        ship_id: 0,
+        beyonce: 0,
+    };
+    common::login_pilot(&ctx, &mut corp_member.sess, "live91400004", "live91400004-secret").await;
+    let _ = ok(&ctx, &mut corp_member, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(member_id)]).await;
+    corp_member.sess.role = eve_db::service_roles::ROLE_PLAYER;
+    ctx.advance_secs(12);
+    let app_kv = ok(
+        &ctx,
+        &mut corp_member,
+        "corpRegistry",
+        "InsertApplication",
+        &[PyRep::Integer(corp_id), PyRep::String("Applying to LDOC".into())],
+    )
+    .await;
+    let app_id = kv_i64(&app_kv, "applicationID");
+    let _ = ok(
+        &ctx,
+        &mut pilot,
+        "corpRegistry",
+        "UpdateApplicationOffer",
+        &[PyRep::Integer(app_id), PyRep::String("Accepted".into())],
+    )
+    .await;
+    ctx.advance_secs(12);
+    let _ = ok(&ctx, &mut corp_member, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(member_id)]).await;
+    corp_member.sess.role = eve_db::service_roles::ROLE_PLAYER;
+    corp_member.sess.corp_role = 0;
+
+    let mut auth_guest = common::gm_pilot_in_space(&ctx, 205, 91_400_005, CHARON_TYPE, PERIMETER).await;
+    auth_guest.sess.role = eve_db::service_roles::ROLE_PLAYER;
+    let mut stranger = common::gm_pilot_in_space(&ctx, 206, 91_400_006, CHARON_TYPE, KISOGO).await;
+    stranger.sess.role = eve_db::service_roles::ROLE_PLAYER;
+
+    // Deploy Astrahus, advance to ShieldVulnerable, fit Quantum Core, Fuel, and Reprocessing service module.
     common::stock_ship_bay(&ctx, &mut pilot, ASTRAHUS_TYPE, 1, InventoryFlag::Cargo as i64).await;
     let anchor_res = ok(
         &ctx,
         &mut pilot,
         "structureDeployment",
         "Anchor",
-        &[
-            PyRep::Integer(ASTRAHUS_TYPE as i64),
-            PyRep::String("Directory Citadel".into()),
-        ],
+        &[PyRep::Integer(ASTRAHUS_TYPE as i64), PyRep::String("Directory Citadel".into())],
     )
     .await;
     let sid = kv_i64(&anchor_res, "structureID");
     assert!(sid >= 1_000_000_000_000);
 
-    ctx.advance_secs(901); // AnchorVulnerable -> Anchoring
+    ctx.advance_secs(901);
     let _ = ok(&ctx, &mut pilot, "structureGuests", "GetGuests", &[PyRep::Integer(sid)]).await;
-    ctx.advance_secs(86_401); // Anchoring -> NoCore
+    ctx.advance_secs(86_401);
     let _ = ok(&ctx, &mut pilot, "structureGuests", "GetGuests", &[PyRep::Integer(sid)]).await;
 
     let st_pos = ctx.db.with_snapshot(|s| glam::DVec3::from_array(s.structures[&sid].position));
@@ -420,147 +465,172 @@ async fn test_structures_profiles_and_directory_live() {
     let _ = ok(&ctx, &mut pilot, "structureDocking", "Dock", &[PyRep::Integer(sid)]).await;
     ctx.advance_secs(31);
 
-    let created = common::slash_cmd(&ctx, &mut pilot.sess, &format!("/createitem {ASTRAHUS_CORE_TYPE} 1")).await;
-    let core_id = created.dict_get("itemID").and_then(|v| v.as_i64()).expect("core itemID");
-    let _ = ok(
+    let core_id = kv_i64(&common::slash_cmd(&ctx, &mut pilot.sess, &format!("/createitem {ASTRAHUS_CORE_TYPE} 1")).await, "itemID");
+    let _ = ok(&ctx, &mut pilot, "invbroker", "Add", &[PyRep::Integer(core_id), PyRep::Integer(sid), PyRep::Integer(InventoryFlag::StructureDeedBay as i64)]).await;
+    ctx.advance_secs(901);
+    let _ = ok(&ctx, &mut pilot, "structureGuests", "GetGuests", &[PyRep::Integer(sid)]).await;
+
+    let fuel_id = kv_i64(&common::slash_cmd(&ctx, &mut pilot.sess, "/createitem 4247 1000").await, "itemID");
+    let _ = ok(&ctx, &mut pilot, "invbroker", "Add", &[PyRep::Integer(fuel_id), PyRep::Integer(sid), PyRep::Integer(InventoryFlag::StructureFuel as i64)]).await;
+    let repro_id = kv_i64(&common::slash_cmd(&ctx, &mut pilot.sess, "/createitem 35899 1").await, "itemID");
+    let _ = ok(&ctx, &mut pilot, "invbroker", "Add", &[PyRep::Integer(repro_id), PyRep::Integer(sid), PyRep::Integer(InventoryFlag::ServiceSlot0 as i64)]).await;
+    ctx.advance_secs(31);
+
+    // 1. Negative role check & Access Group + Profile CRUD + per-service ACL/tax settings.
+    let err_unpriv = call(&ctx, &mut corp_member, "structureProfiles", "CreateProfile", &[PyRep::String("Denied".into()), PyRep::String("".into())])
+        .await
+        .expect_err("unprivileged corp member must not create structure profiles");
+    assert_eq!(err_unpriv.code, "InsufficientCorpRoles");
+
+    let grp_rep = ok(
         &ctx,
         &mut pilot,
-        "invbroker",
-        "Add",
-        &[
-            PyRep::Integer(core_id),
-            PyRep::Integer(sid),
-            PyRep::Integer(InventoryFlag::StructureDeedBay as i64),
-        ],
+        "ownerGroupManager",
+        "Create",
+        &[PyRep::String("Allied Guest ACL".into()), PyRep::String("Authorized guests".into()), PyRep::Bool(true)],
     )
     .await;
-    let _ = ok(&ctx, &mut pilot, "structureGuests", "GetGuests", &[PyRep::Integer(sid)]).await;
+    let gid = kv_i64(&grp_rep, "groupID");
+    let _ = ok(&ctx, &mut pilot, "ownerGroupManager", "AddMembers", &[PyRep::Integer(gid), PyRep::List(vec![PyRep::Integer(auth_guest.char_id)])]).await;
 
-    ctx.advance_secs(901); // Onlining -> ShieldVulnerable
-    let _ = ok(&ctx, &mut pilot, "structureGuests", "GetGuests", &[PyRep::Integer(sid)]).await;
-
-    // 1. Structure profile CRUD operations.
-    let p2_rep = ok(
+    let p2_id = ok(
         &ctx,
         &mut pilot,
         "structureProfiles",
         "CreateProfile",
-        &[
-            PyRep::String("Staging Outpost Profile".into()),
-            PyRep::String("Custom profile for outpost structures".into()),
-        ],
+        &[PyRep::String("Staging Outpost Profile".into()), PyRep::String("ACL and 8% reprocessing tax".into())],
     )
-    .await;
-    let p2_id = p2_rep.as_i64().expect("created profileID");
+    .await
+    .as_i64()
+    .expect("created profileID");
     assert!(p2_id > 0);
 
-    let list_rep = ok(&ctx, &mut pilot, "structureProfiles", "GetProfiles", &[]).await;
-    let PyRep::List(profiles) = list_rep else { panic!("expected profiles list") };
+    let PyRep::List(profiles) = ok(&ctx, &mut pilot, "structureProfiles", "GetProfiles", &[]).await else { panic!("expected profiles list") };
     assert!(profiles.iter().any(|p| kv_i64(p, "profileID") == p2_id));
-
-    let settings = ok(
-        &ctx,
-        &mut pilot,
-        "structureProfiles",
-        "GetProfileSettings",
-        &[PyRep::Integer(p2_id)],
-    )
-    .await;
-    let PyRep::Dict(s_dict) = settings else { panic!("expected settings dict") };
+    let PyRep::Dict(s_dict) = ok(&ctx, &mut pilot, "structureProfiles", "GetProfileSettings", &[PyRep::Integer(p2_id)]).await else { panic!("expected settings dict") };
     assert!(!s_dict.is_empty());
 
-    let patch = PyRep::List(vec![PyRep::Tuple(vec![
-        PyRep::Integer(13),
-        PyRep::Integer(0),
-        PyRep::Real(0.08),
-    ])]);
-    let _ = ok(
-        &ctx,
-        &mut pilot,
-        "structureProfiles",
-        "SaveProfileSettings",
-        &[PyRep::Integer(p2_id), patch],
-    )
-    .await;
+    // Negative invalid tax (> 1.0) rejected; valid docking ACL (19) + reprocessing service ACL & 8% tax (3) saved.
+    let bad_tax = call(&ctx, &mut pilot, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(p2_id), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(0), PyRep::Real(1.5)])])])
+        .await
+        .expect_err("tax > 100% must fail");
+    assert_eq!(bad_tax.code, "InvalidStructureTaxRate");
 
-    let p3_rep = ok(
-        &ctx,
-        &mut pilot,
-        "structureProfiles",
-        "DuplicateProfile",
-        &[PyRep::Integer(p2_id), PyRep::String("Cloned Profile".into())],
-    )
-    .await;
-    let p3_id = p3_rep.as_i64().expect("duplicated profileID");
+    let patch = PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(gid), PyRep::Bool(true)]),
+        PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(gid), PyRep::Real(0.08)]),
+    ]);
+    let _ = ok(&ctx, &mut pilot, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(p2_id), patch]).await;
+
+    let p3_id = ok(&ctx, &mut pilot, "structureProfiles", "DuplicateProfile", &[PyRep::Integer(p2_id), PyRep::String("Cloned Profile".into())])
+        .await
+        .as_i64()
+        .expect("duplicated profileID");
     assert_ne!(p3_id, p2_id);
-
-    // Set p3 as default, then switch default to p2 so p3 can be deleted.
     let _ = ok(&ctx, &mut pilot, "structureProfiles", "SetDefaultProfile", &[PyRep::Integer(p3_id)]).await;
     let _ = ok(&ctx, &mut pilot, "structureProfiles", "SetDefaultProfile", &[PyRep::Integer(p2_id)]).await;
-    let del_res = ok(&ctx, &mut pilot, "structureProfiles", "DeleteProfile", &[PyRep::Integer(p3_id)]).await;
-    assert_eq!(del_res.as_bool(), Some(true));
+    assert_eq!(ok(&ctx, &mut pilot, "structureProfiles", "DeleteProfile", &[PyRep::Integer(p3_id)]).await.as_bool(), Some(true));
 
-    // 2. Delayed profile application (5-minute transition delay).
-    let _ = ok(
-        &ctx,
-        &mut pilot,
-        "structureProfiles",
-        "ChangeProfiles",
-        &[
-            PyRep::List(vec![PyRep::Integer(sid)]),
-            PyRep::Integer(p2_id),
-        ],
-    )
-    .await;
+    // Activate p2_id on sid and verify per-service ACL + 8% tax for auth_guest vs denial for stranger.
+    let _ = ok(&ctx, &mut pilot, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(sid)]), PyRep::Integer(p2_id)]).await;
+    ctx.advance_secs(305);
+    let _ = ok(&ctx, &mut auth_guest, "structureSettings", "CharacterCheckService", &[PyRep::Integer(sid), PyRep::Integer(4)]).await;
+    let PyRep::Dict(guest_svcs) = ok(&ctx, &mut auth_guest, "structureSettings", "CharacterGetServices", &[PyRep::Integer(sid)]).await else { panic!("expected services dict") };
+    let repro_tax = guest_svcs.iter().find(|(k, _)| k.as_i64() == Some(4)).and_then(|(_, v)| v.as_f64()).expect("reprocessing rate");
+    assert!((repro_tax - 0.08).abs() < 1e-6);
 
-    // Advance 305 seconds (past the 300 s / 5 min transition window) and sync.
+    let err_svc = call(&ctx, &mut stranger, "structureSettings", "CharacterCheckService", &[PyRep::Integer(sid), PyRep::Integer(4)])
+        .await
+        .expect_err("stranger outside ACL must be denied reprocessing service");
+    assert_eq!(err_svc.code, "StructureServiceAccessDenied");
+
+    // 2. Delayed 5-minute (300s) profile transition & negative DeleteProfile while in use.
+    let p_corp_id = ok(&ctx, &mut pilot, "structureProfiles", "CreateProfile", &[PyRep::String("Corp Only Profile".into()), PyRep::String("".into())])
+        .await
+        .as_i64()
+        .expect("corp profileID");
+    let _ = ok(&ctx, &mut pilot, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(p_corp_id), PyRep::Dict(vec![(PyRep::Integer(19), PyRep::Integer(0))])]).await;
+    let _ = ok(&ctx, &mut pilot, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(sid)]), PyRep::Integer(p_corp_id)]).await;
+
+    let err_in_use = call(&ctx, &mut pilot, "structureProfiles", "DeleteProfile", &[PyRep::Integer(p_corp_id)])
+        .await
+        .expect_err("pending assigned profile cannot be deleted");
+    assert_eq!(err_in_use.code, "ProfileInUse");
+
+    // Before 300s (t + 120s): old profile p2_id still grants docking & reprocessing access to auth_guest.
+    ctx.advance_secs(120);
+    let _ = ok(&ctx, &mut auth_guest, "structureSettings", "CharacterCheckService", &[PyRep::Integer(sid), PyRep::Integer(4)]).await;
+
+    // After 300s (t + 305s): p_corp_id is now active; auth_guest loses access.
+    ctx.advance_secs(185);
+    let _ = ok(&ctx, &mut pilot, "structureGuests", "GetGuests", &[PyRep::Integer(sid)]).await;
+    assert_eq!(kv_i64(&ok(&ctx, &mut pilot, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(sid)]).await, "profileID"), p_corp_id);
+    let err_after = call(&ctx, &mut auth_guest, "structureSettings", "CharacterCheckService", &[PyRep::Integer(sid), PyRep::Integer(4)])
+        .await
+        .expect_err("guest loses service access after corp-only profile applies");
+    assert_eq!(err_after.code, "StructureServiceAccessDenied");
+
+    // 3. Structure directory visibility, onlineServiceTypeIDs, and sensitive field masking.
+    let _ = ok(&ctx, &mut pilot, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(sid)]), PyRep::Integer(p2_id)]).await;
     ctx.advance_secs(305);
     let _ = ok(&ctx, &mut pilot, "structureGuests", "GetGuests", &[PyRep::Integer(sid)]).await;
 
-    // 3. Structure directory queries.
-    let corp_structs = ok(&ctx, &mut pilot, "structureDirectory", "GetMyCorporationStructures", &[]).await;
-    let PyRep::Dict(cs_dict) = corp_structs else { panic!("expected dict") };
-    assert!(
-        cs_dict.iter().any(|(k, _)| k.as_i64() == Some(sid)),
-        "Structure must appear in GetMyCorporationStructures"
-    );
+    let PyRep::Dict(cs_dict) = ok(&ctx, &mut pilot, "structureDirectory", "GetMyCorporationStructures", &[]).await else { panic!("expected dict") };
+    assert!(cs_dict.iter().any(|(k, _)| k.as_i64() == Some(sid)));
+    let dir_info = ok(&ctx, &mut pilot, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(sid)]).await;
+    assert_eq!(kv_i64(&dir_info, "fuelBlocks"), 280);
+    assert_eq!(kv_i64(&dir_info, "profileID"), p2_id);
+    assert!(dir_info.dict_get("reinforceHour").and_then(|v| v.as_i64()).is_some());
 
-    let dockable = ok(
-        &ctx,
-        &mut pilot,
-        "structureDirectory",
-        "GetMyDockableStructures",
-        &[PyRep::Integer(PERIMETER as i64)],
-    )
-    .await;
-    let PyRep::List(d_list) = dockable else { panic!("expected dockable list") };
-    assert!(
-        d_list.iter().any(|v| v.as_i64() == Some(sid)),
-        "Structure must appear in GetMyDockableStructures"
-    );
+    let PyRep::List(d_list) = ok(&ctx, &mut auth_guest, "structureDirectory", "GetMyDockableStructures", &[PyRep::Integer(PERIMETER as i64)]).await else { panic!("expected dockable list") };
+    assert!(d_list.iter().any(|v| v.as_i64() == Some(sid)));
+    let PyRep::List(cd_list) = ok(&ctx, &mut auth_guest, "structureDirectory", "CheckMyDockingAccessToStructures", &[PyRep::List(vec![PyRep::Integer(sid)])]).await else { panic!("expected check list") };
+    assert!(cd_list.iter().any(|v| v.as_i64() == Some(sid)));
 
-    let check_docking = ok(
-        &ctx,
-        &mut pilot,
-        "structureDirectory",
-        "CheckMyDockingAccessToStructures",
-        &[PyRep::List(vec![PyRep::Integer(sid)])],
-    )
-    .await;
-    let PyRep::List(cd_list) = check_docking else { panic!("expected check list") };
-    assert!(
-        cd_list.iter().any(|v| v.as_i64() == Some(sid)),
-        "Structure must pass CheckMyDockingAccessToStructures"
-    );
+    // Guest sees basic metadata + onlineServiceTypeIDs, but sensitive fields are masked as None.
+    let guest_info = ok(&ctx, &mut auth_guest, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(sid)]).await;
+    assert_eq!(kv_i64(&guest_info, "structureID"), sid);
+    assert_eq!(kv_str(&guest_info, "itemName"), Some("Directory Citadel"));
+    let PyRep::List(svc_types) = guest_info.dict_get("onlineServiceTypeIDs").cloned().expect("onlineServiceTypeIDs") else { panic!("expected list") };
+    assert!(svc_types.iter().any(|v| v.as_i64() == Some(35899)));
+    assert_eq!(guest_info.dict_get("fuelBlocks"), Some(&PyRep::None));
+    assert_eq!(guest_info.dict_get("profileID"), Some(&PyRep::None));
+    assert_eq!(guest_info.dict_get("reinforceHour"), Some(&PyRep::None));
+    assert_eq!(guest_info.dict_get("nextReinforceHour"), Some(&PyRep::None));
+    assert_eq!(guest_info.dict_get("applyAfterUnix"), Some(&PyRep::None));
 
-    let info = ok(
-        &ctx,
-        &mut pilot,
-        "structureDirectory",
-        "GetStructureInfo",
-        &[PyRep::Integer(sid)],
-    )
-    .await;
-    assert_eq!(kv_i64(&info, "structureID"), sid);
-    assert_eq!(kv_str(&info, "itemName"), Some("Directory Citadel"));
+    // Stranger in another system without ACL is denied GetStructureInfo.
+    let err_dir = call(&ctx, &mut stranger, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(sid)])
+        .await
+        .expect_err("unauthorized outsider outside system must be denied GetStructureInfo");
+    assert_eq!(err_dir.code, "StructureAccessDenied");
+
+    // 4. Live structure self-destruct -> notifications + removal from directory.
+    let _ = ok(&ctx, &mut pilot, "structureDocking", "Undock", &[PyRep::Integer(sid)]).await;
+    ctx.advance_secs(15);
+    let err_sd = call(&ctx, &mut corp_member, "beyonce", "CmdSelfDestructStructure", &[PyRep::Integer(sid)])
+        .await
+        .expect_err("unprivileged corp member cannot self-destruct structure");
+    assert_eq!(err_sd.code, "CrpAccessDenied");
+
+    let _ = ctx.drain_notifications_for_char(pilot.char_id);
+    let _ = ctx.drain_notifications_for_char(member_id);
+    let _ = ok(&ctx, &mut pilot, "beyonce", "CmdSelfDestructStructure", &[PyRep::Integer(sid)]).await;
+    ctx.advance_secs(1205);
+    let PyRep::List(after_dockable) = ok(&ctx, &mut auth_guest, "structureDirectory", "GetMyDockableStructures", &[PyRep::Integer(PERIMETER as i64)]).await else { panic!("expected list") };
+    assert!(!after_dockable.iter().any(|v| v.as_i64() == Some(sid)), "destroyed structure must be removed from dockable directory");
+    let PyRep::Dict(after_corp) = ok(&ctx, &mut pilot, "structureDirectory", "GetMyCorporationStructures", &[]).await else { panic!("expected dict") };
+    assert!(!after_corp.iter().any(|(k, _)| k.as_i64() == Some(sid)), "destroyed structure must be removed from corp directory");
+    let err_gone = call(&ctx, &mut pilot, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(sid)])
+        .await
+        .expect_err("destroyed structure GetStructureInfo must fail");
+    assert_eq!(err_gone.code, "StructureNotFound");
+
+    let notifs_p = ctx.drain_notifications_for_char(pilot.char_id);
+    let notifs_m = ctx.drain_notifications_for_char(member_id);
+    let saw_removed = notifs_p
+        .iter()
+        .chain(notifs_m.iter())
+        .any(|n| n.event == "OnStructureRemoved" || n.event == "OnStructureRemovedFromSpace");
+    assert!(saw_removed, "structure destruction must emit OnStructureRemoved notification");
 }

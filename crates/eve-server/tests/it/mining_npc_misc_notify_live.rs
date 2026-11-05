@@ -1,5 +1,5 @@
 //! Live integration suite for Mining Belts & Ore Distribution, Navy & Hauler NPCs,
-//! Crimewatch/Campaign/Tournament Notifications, `cache.Setting`, `raffleMgr.character_Seeding`,
+//! Crimewatch/Campaign/Tournament Notifications, `cache.Setting`, `raffleMgr.QA_SeedRaffles`,
 //! and `plan:E-5` Agent Missions.
 //!
 //! Uses only live RPCs, GM slash commands, and server ticks (zero direct DB or runtime mutation).
@@ -542,10 +542,10 @@ async fn test_live_campaign_enrollment_and_tournament_ban_notifications() {
 
 #[tokio::test]
 async fn test_live_cache_setting_raffle_seeding_and_plan_e5_missions() {
-    // parity: rpc:cache.Setting, rpc:raffleMgr.character_Seeding, plan:E-5
+    // parity: rpc:cache.Setting, rpc:raffleMgr.QA_SeedRaffles, plan:E-5
     eve_testkit::attest(&[
         "rpc:cache.Setting",
-        "rpc:raffleMgr.character_Seeding",
+        "rpc:raffleMgr.QA_SeedRaffles",
         "plan:E-5",
     ]);
 
@@ -586,21 +586,31 @@ async fn test_live_cache_setting_raffle_seeding_and_plan_e5_missions() {
         .await
         .expect("GM cache.Setting clear");
 
-    // 2. rpc:raffleMgr.character_Seeding: non-GM rejected, GM seeds character-specific raffles
-    rpc(&ctx, &mut non_gm, "raffleMgr", "character_Seeding", &[PyRep::Integer(PILOT_B), PyRep::Integer(1), PyRep::Integer(587), PyRep::Integer(8), PyRep::Real(1000.0)])
+    // 2. rpc:raffleMgr.QA_SeedRaffles: non-GM rejected, undocked GM rejected, docked GM seeds raffles & emits OnRaffleCreatedServer
+    rpc(&ctx, &mut non_gm, "raffleMgr", "QA_SeedRaffles", &[PyRep::Integer(1), PyRep::Integer(587)])
         .await
-        .expect_err("non-GM character_Seeding must fail");
+        .expect_err("non-GM QA_SeedRaffles must fail");
 
-    let seeded = rpc(&ctx, &mut gm, "raffleMgr", "character_Seeding", &[PyRep::Integer(PILOT_B), PyRep::Integer(2), PyRep::Integer(587), PyRep::Integer(8), PyRep::Real(2500.0)])
+    let undocked_gm = common::gm_pilot_in_space(&ctx, 95_403, 95_400_003, 587, JITA_SYS).await;
+    let mut undocked_sess = undocked_gm.sess;
+    let err_undocked = rpc(&ctx, &mut undocked_sess, "raffleMgr", "QA_SeedRaffles", &[PyRep::Integer(1), PyRep::Integer(587)])
         .await
-        .expect("GM character_Seeding");
+        .expect_err("undocked QA_SeedRaffles must fail");
+    assert_eq!(err_undocked.message, "CharacterNotDocked");
+
+    let _ = ctx.drain_notifications_for_char(DEMO_CHAR);
+    let seeded = rpc(&ctx, &mut gm, "raffleMgr", "QA_SeedRaffles", &[PyRep::Integer(2), PyRep::Integer(587)])
+        .await
+        .expect("GM QA_SeedRaffles");
     let raffles = rep_list(&seeded);
     assert_eq!(raffles.len(), 2);
     for r in raffles {
-        assert_eq!(r.dict_get("owner_id").and_then(|v| v.as_i64()), Some(PILOT_B));
+        assert_eq!(r.dict_get("owner_id").and_then(|v| v.as_i64()), Some(DEMO_CHAR));
+        assert_eq!(r.dict_get("location_id").and_then(|v| v.as_i64()), Some(JITA_STN));
         assert_eq!(r.dict_get("type_id").and_then(|v| v.as_i64()), Some(587));
         assert_eq!(r.dict_get("ticket_count").and_then(|v| v.as_i64()), Some(8));
     }
+    assert_eq!(ctx.drain_notifications_for_char(DEMO_CHAR).iter().filter(|n| n.event == "OnRaffleCreatedServer").count(), 2, "OnRaffleCreatedServer emitted");
 
     // 3. plan:E-5: Live Agent Finder, Conversation/Offer, Accept, Journal, and Quit
     let agents_rep = rpc(&ctx, &mut non_gm, "agentMgr", "GetAgents", &[])

@@ -799,7 +799,6 @@ async fn test_tether_eligibility_restrictions_and_docking_lock() {
     assert!(!sys.get_combat_state(ship).await.expect("q").expect("cs").is_tethered, "tether refused when warp-scrambled");
 }
 
-/// `feat:structures.fulcrum-alignment-services`
 #[tokio::test]
 async fn test_asset_safety_fulcrum_and_reprocessing_rigs() {
 

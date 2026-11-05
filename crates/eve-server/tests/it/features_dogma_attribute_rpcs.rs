@@ -173,7 +173,6 @@ async fn test_session_mgr_remove_and_end_all_sessions() {
 
 #[tokio::test]
 async fn test_raffle_qa_seed_db2_callproc_and_debug_exec() {
-    // parity: rpc:raffleMgr.QA_SeedRaffles
     let ctx = new_ctx();
     let mut gm_sess = setup_pilot(&ctx, PILOT_1, ROLE_ADMIN | ROLE_GMH).await;
 

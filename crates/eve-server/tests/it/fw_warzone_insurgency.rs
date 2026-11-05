@@ -974,7 +974,6 @@ use glam::DVec3;
 #[tokio::test]
 async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effects() {
     // parity: feat:fw.fw-pirate
-    // parity: feat:fw.insurgency-lifecycle
     // parity: feat:fw.insurgency-spread
     // parity: feat:fw.corruption-stage5-highsec-bubbles-concord
     // parity: notify:OnInsurgencyCampaignStartedForLocation
@@ -982,7 +981,6 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
     // parity: notify:OnInsurgencyStateChangedForFaction
     eve_testkit::attest(&[
         "feat:fw.fw-pirate",
-        "feat:fw.insurgency-lifecycle",
         "feat:fw.insurgency-spread",
         "feat:fw.corruption-stage5-highsec-bubbles-concord",
         "notify:OnInsurgencyCampaignStartedForLocation",
@@ -4141,11 +4139,6 @@ async fn test_e2e_skyhook_reagent_maturity_and_theft() {
 
 #[tokio::test]
 async fn test_e2e_fw_system_capture_downtime_and_insurgency_fob_lifecycle() {
-    // parity: feat:fw.insurgency-lifecycle
-    eve_testkit::attest(&[
-        "feat:fw.insurgency-lifecycle",
-    ]);
-
     let db_path = temp_sqlite_path("e2e_fw_insurgency");
     let ctx = open_sqlite_ctx(&db_path, true);
     let fw_sys = 30_002_537u32; // Huola (Amarr/Minmatar warzone)

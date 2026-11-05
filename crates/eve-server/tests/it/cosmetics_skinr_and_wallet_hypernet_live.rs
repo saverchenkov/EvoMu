@@ -223,11 +223,10 @@ async fn test_live_skinr_designer_and_sequencing_studio() {
 
 #[tokio::test]
 async fn test_live_skinr_paragon_hub_isk_plex_listings_and_market() {
-    // parity: feat:cosmetics.skinr-market, feat:cosmetics.skinr-paragon-hub-listing, feat:economy.paragon-hub
+    // parity: feat:cosmetics.skinr-market, feat:cosmetics.skinr-paragon-hub-listing
     eve_testkit::attest(&[
         "feat:cosmetics.skinr-market",
         "feat:cosmetics.skinr-paragon-hub-listing",
-        "feat:economy.paragon-hub",
     ]);
 
     let ctx = ServerContext::new();

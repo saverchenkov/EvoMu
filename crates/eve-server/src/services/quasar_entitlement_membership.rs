@@ -64,18 +64,45 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     router.register_handler(
         "eve_public.entitlement.user.api.GetRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
-            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
-            let ents = read_identity_store(&db_ent_get, |st| {
-                st.user_entitlements
-                    .get(&uid)
-                    .cloned()
-                    .unwrap_or_default()
+            let Some(uid) = ctx.effective_user_id().filter(|&u| u > 0).map(|u| u as u64) else {
+                return Err((
+                    crate::quasar_gateway::STATUS_FORBIDDEN,
+                    "Authenticated user session required".to_string(),
+                ));
+            };
+            let now_unix = ctx.now_unix();
+            let active_ents: Vec<(String, Option<u64>)> = read_identity_store(&db_ent_get, |st| {
+                let expiries = st.user_entitlement_expiries.get(&uid);
+                let omega_exp = st.omega_subscriptions.get(&uid).copied().filter(|&e| e > now_unix);
+                let mut out = Vec::new();
+                if let Some(names) = st.user_entitlements.get(&uid) {
+                    for name in names {
+                        let exp = expiries
+                            .and_then(|m| m.get(name).copied())
+                            .or_else(|| if name.eq_ignore_ascii_case("omega") { omega_exp } else { None });
+                        if exp.is_some_and(|e| e <= now_unix) {
+                            continue;
+                        }
+                        out.push((name.clone(), exp));
+                    }
+                }
+                if let Some(exp) = omega_exp {
+                    if !out.iter().any(|(n, _)| n.eq_ignore_ascii_case("omega")) {
+                        out.push(("omega".to_string(), Some(exp)));
+                    }
+                }
+                out
             });
 
             let mut out = Vec::new();
-            for ent_name in ents {
+            for (ent_name, exp_opt) in active_ents {
                 let mut ent_bytes = Vec::new();
                 encode_string_field(1, &ent_name, &mut ent_bytes);
+                if let Some(exp_secs) = exp_opt {
+                    let mut ts_bytes = Vec::new();
+                    encode_varint_field(1, exp_secs, &mut ts_bytes);
+                    encode_bytes_field(2, &ts_bytes, &mut ent_bytes);
+                }
                 encode_bytes_field(1, &ent_bytes, &mut out);
             }
             Ok(GoogleAny {
@@ -87,51 +114,126 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
         }),
     );
 
-    // 2. eve_public.entitlement.character.GetAllRequest -> eve_public.entitlement.character.GetAllResponse
-    // parity: quasar:eveProto/generated/eve_public/entitlement/character/character_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/entitlement/character/ship/alliancelogo_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/entitlement/character/ship/corplogo_pb2.pyj
-    let db_char_ent = Arc::clone(&db);
+    // 2. eve_public.entitlement.character.GetAllRequest & eve.entitlement.character.admin.GetAllRequest
+    for (req_name, rsp_name, require_admin) in [
+        (
+            "eve_public.entitlement.character.GetAllRequest",
+            "eve_public.entitlement.character.GetAllResponse",
+            false,
+        ),
+        (
+            "eve.entitlement.character.admin.GetAllRequest",
+            "eve.entitlement.character.admin.GetAllResponse",
+            true,
+        ),
+    ] {
+        let db_char_ent = Arc::clone(&db);
+        router.register_handler(
+            req_name,
+            Arc::new(move |ctx, _any, dyn_msg| {
+                if require_admin {
+                    require_admin_role(ctx)?;
+                }
+                let char_id = dyn_msg
+                    .get(1)
+                    .and_then(extract_nested_seq_id)
+                    .or_else(|| {
+                        if require_admin {
+                            None
+                        } else {
+                            ctx.effective_character_id().filter(|&c| c > 0).map(|c| c as u64)
+                        }
+                    })
+                    .unwrap_or(0);
+                if char_id == 0 {
+                    let status = if require_admin {
+                        crate::quasar_gateway::STATUS_BAD_REQUEST
+                    } else {
+                        crate::quasar_gateway::STATUS_FORBIDDEN
+                    };
+                    return Err((status, "Character identifier required".to_string()));
+                }
+                let (corp_ships, alliance_ships) = read_identity_store(&db_char_ent, |st| {
+                    let c = st.char_corp_logo_ships.get(&char_id).cloned().unwrap_or_default();
+                    let a = st.char_alliance_logo_ships.get(&char_id).cloned().unwrap_or_default();
+                    (c, a)
+                });
+                let mut out = Vec::new();
+                for ship_type_id in corp_ships {
+                    let ident = encode_logo_identifier(char_id, ship_type_id);
+                    let mut ent_msg = Vec::new();
+                    encode_bytes_field(1, &ident, &mut ent_msg); // field 1: corporation_logo
+                    encode_bytes_field(1, &ent_msg, &mut out); // field 1: repeated entitlements
+                }
+                for ship_type_id in alliance_ships {
+                    let ident = encode_logo_identifier(char_id, ship_type_id);
+                    let mut ent_msg = Vec::new();
+                    encode_bytes_field(2, &ident, &mut ent_msg); // field 2: alliance_logo
+                    encode_bytes_field(1, &ent_msg, &mut out); // field 1: repeated entitlements
+                }
+                Ok(GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rsp_name}"),
+                    value: out,
+                })
+            }),
+        );
+    }
+
+    // 2b. eve.entitlement.character.api.IsEntitledRequest -> IsEntitledResponse
+    let db_is_entitled = Arc::clone(&db);
     router.register_handler(
-        "eve_public.entitlement.character.GetAllRequest",
+        "eve.entitlement.character.api.IsEntitledRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let char_id = dyn_msg
-                .get(1)
-                .and_then(extract_nested_seq_id)
-                .or_else(|| ctx.effective_character_id().map(|c| c as u64))
-                .unwrap_or(0);
-            let (corp_ships, alliance_ships) = read_identity_store(&db_char_ent, |st| {
-                let c = st.char_corp_logo_ships.get(&char_id).cloned().unwrap_or_default();
-                let a = st.char_alliance_logo_ships.get(&char_id).cloned().unwrap_or_default();
-                (c, a)
-            });
-            let mut out = Vec::new();
-            for ship_type_id in corp_ships {
-                let ident = encode_logo_identifier(char_id, ship_type_id);
-                let mut ent_msg = Vec::new();
-                encode_bytes_field(1, &ident, &mut ent_msg); // field 1: corporation_logo
-                encode_bytes_field(1, &ent_msg, &mut out); // field 1: repeated entitlements
+            let (is_alliance, target_cid, ship_type_id) =
+                if let Some(DynamicValue::Message(ident)) = dyn_msg.get(1) {
+                    let cid = ident.get(1).and_then(extract_nested_seq_id).unwrap_or(0);
+                    let stid = ident.get(2).and_then(extract_nested_seq_id).unwrap_or(0);
+                    (false, cid, stid)
+                } else if let Some(DynamicValue::Message(ident)) = dyn_msg.get(2) {
+                    let cid = ident.get(1).and_then(extract_nested_seq_id).unwrap_or(0);
+                    let stid = ident.get(2).and_then(extract_nested_seq_id).unwrap_or(0);
+                    (true, cid, stid)
+                } else {
+                    (false, 0, 0)
+                };
+            if target_cid == 0 || ship_type_id == 0 {
+                return Err((
+                    crate::quasar_gateway::STATUS_BAD_REQUEST,
+                    "IsEntitledRequest requires ship logo identifier with character and ship_type".to_string(),
+                ));
             }
-            for ship_type_id in alliance_ships {
-                let ident = encode_logo_identifier(char_id, ship_type_id);
-                let mut ent_msg = Vec::new();
-                encode_bytes_field(2, &ident, &mut ent_msg); // field 2: alliance_logo
-                encode_bytes_field(1, &ent_msg, &mut out); // field 1: repeated entitlements
+            let caller_cid = ctx.effective_character_id().filter(|&c| c > 0).map(|c| c as u64);
+            if caller_cid != Some(target_cid) && require_admin_role(ctx).is_err() {
+                return Err((
+                    crate::quasar_gateway::STATUS_FORBIDDEN,
+                    "Cannot query another character's entitlements without admin role".to_string(),
+                ));
+            }
+            let entitled = read_identity_store(&db_is_entitled, |st| {
+                let map = if is_alliance {
+                    &st.char_alliance_logo_ships
+                } else {
+                    &st.char_corp_logo_ships
+                };
+                map.get(&target_cid)
+                    .is_some_and(|ships| ships.contains(&ship_type_id))
+            });
+            if !entitled {
+                return Err((
+                    crate::quasar_gateway::STATUS_NOT_FOUND,
+                    "Character does not hold the requested ship logo entitlement".to_string(),
+                ));
             }
             Ok(GoogleAny {
                 type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.entitlement.character.GetAllResponse"
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve.entitlement.character.api.IsEntitledResponse"
                 ),
-                value: out,
+                value: Vec::new(),
             })
         }),
     );
 
-    // 3. eve_public.entitlement.character.ship.admin.{alliancelogo,corplogo}.{Grant,Revoke}Request
-    // parity: quasar:eveProto/generated/eve_public/entitlement/character/ship/alliancelogo_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/entitlement/character/ship/corplogo_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/alliancelogo_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/corplogo_pb2.pyj
+    // 3. {eve,eve_public}.entitlement.character.ship.admin.{alliancelogo,corplogo}.{Grant,Revoke}Request
     for (req_name, rsp_name, is_alliance, is_grant) in [
         (
             "eve_public.entitlement.character.ship.admin.alliancelogo.GrantRequest",
@@ -154,6 +256,30 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
         (
             "eve_public.entitlement.character.ship.admin.corplogo.RevokeRequest",
             "eve_public.entitlement.character.ship.admin.corplogo.RevokeResponse",
+            false,
+            false,
+        ),
+        (
+            "eve.entitlement.character.ship.admin.alliancelogo.GrantRequest",
+            "eve.entitlement.character.ship.admin.alliancelogo.GrantResponse",
+            true,
+            true,
+        ),
+        (
+            "eve.entitlement.character.ship.admin.alliancelogo.RevokeRequest",
+            "eve.entitlement.character.ship.admin.alliancelogo.RevokeResponse",
+            true,
+            false,
+        ),
+        (
+            "eve.entitlement.character.ship.admin.corplogo.GrantRequest",
+            "eve.entitlement.character.ship.admin.corplogo.GrantResponse",
+            false,
+            true,
+        ),
+        (
+            "eve.entitlement.character.ship.admin.corplogo.RevokeRequest",
+            "eve.entitlement.character.ship.admin.corplogo.RevokeResponse",
             false,
             false,
         ),
@@ -227,43 +353,47 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
         );
     }
 
-    // 4. eve.entitlement.user.api.GrantRequest -> enqueues GrantedNotice
+    // 4. eve.entitlement.user.api.GrantRequest -> enqueues GrantedNotice (+ ActivatedNotice if omega)
     let db_ent_grant = Arc::clone(&db);
     let router_pending = Arc::clone(&router.pending_notices);
     router.register_handler(
         "eve.entitlement.user.api.GrantRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             require_admin_role(ctx)?;
+            let now_unix = ctx.now_unix();
             let caller_uid = ctx.effective_user_id().unwrap_or(1) as u64;
-            let (uid, ent_name) = if let Some(DynamicValue::Message(ent_msg)) = dyn_msg.get(1) {
-                let target_uid = ent_msg
-                    .get(2)
-                    .and_then(extract_nested_seq_id)
-                    .filter(|&id| id > 0)
-                    .unwrap_or(caller_uid);
-                let name = if let Some(DynamicValue::String(s)) = ent_msg.get(3) {
-                    s.trim().to_string()
-                } else if let Some(DynamicValue::String(s)) = ent_msg.get(1) {
-                    s.trim().to_string()
+            let (uid, ent_name, duration_opt, expiry_opt) =
+                if let Some(DynamicValue::Message(ent_msg)) = dyn_msg.get(1) {
+                    let target_uid = ent_msg
+                        .get(2)
+                        .and_then(extract_nested_seq_id)
+                        .filter(|&id| id > 0)
+                        .unwrap_or(caller_uid);
+                    let name = if let Some(DynamicValue::String(s)) = ent_msg.get(3) {
+                        s.trim().to_string()
+                    } else if let Some(DynamicValue::String(s)) = ent_msg.get(1) {
+                        s.trim().to_string()
+                    } else {
+                        String::new()
+                    };
+                    let dur = ent_msg.get(4).and_then(extract_nested_seq_id);
+                    let exp = ent_msg.get(5).and_then(extract_nested_seq_id);
+                    (target_uid, name, dur, exp)
+                } else if let Some(DynamicValue::Message(ent_msg)) = dyn_msg.get(2) {
+                    let target_uid = dyn_msg
+                        .get(1)
+                        .and_then(extract_nested_seq_id)
+                        .filter(|&id| id > 0)
+                        .unwrap_or(caller_uid);
+                    let name = if let Some(DynamicValue::String(s)) = ent_msg.get(1) {
+                        s.trim().to_string()
+                    } else {
+                        String::new()
+                    };
+                    (target_uid, name, None, None)
                 } else {
-                    String::new()
+                    (caller_uid, String::new(), None, None)
                 };
-                (target_uid, name)
-            } else if let Some(DynamicValue::Message(ent_msg)) = dyn_msg.get(2) {
-                let target_uid = dyn_msg
-                    .get(1)
-                    .and_then(extract_nested_seq_id)
-                    .filter(|&id| id > 0)
-                    .unwrap_or(caller_uid);
-                let name = if let Some(DynamicValue::String(s)) = ent_msg.get(1) {
-                    s.trim().to_string()
-                } else {
-                    String::new()
-                };
-                (target_uid, name)
-            } else {
-                (caller_uid, String::new())
-            };
             if ent_name.is_empty() {
                 return Err((
                     crate::quasar_gateway::STATUS_BAD_REQUEST,
@@ -271,18 +401,35 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 ));
             }
 
-            with_identity_store(&db_ent_grant, |guard| {
-                let list = guard.user_entitlements.entry(uid).or_default();
-                if !list.contains(&ent_name) {
-                    list.push(ent_name.clone());
-                }
-            });
+            let effective_exp = expiry_opt
+                .filter(|&e| e > now_unix)
+                .or_else(|| duration_opt.map(|d| now_unix.saturating_add(d)));
             if ent_name.eq_ignore_ascii_case("omega") {
-                db_ent_grant.with_mut_snapshot(|snap| {
-                    for ch in snap.characters.values_mut() {
-                        if ch.user_id == uid {
-                            ch.clone_grade = 2;
-                        }
+                let dur_secs = duration_opt
+                    .or_else(|| expiry_opt.map(|e| e.saturating_sub(now_unix)))
+                    .unwrap_or(30 * 86_400)
+                    .max(1);
+                let (_next_exp, activated_notice) = db_ent_grant.with_mut_snapshot(|snap| {
+                    super::quasar_auth_user::activate_user_omega_license_in_snapshot(
+                        snap, uid, dur_secs, now_unix,
+                    )
+                });
+                router_pending
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((NoticeScope::User(uid as i32), activated_notice));
+            } else {
+                with_identity_store(&db_ent_grant, |guard| {
+                    let list = guard.user_entitlements.entry(uid).or_default();
+                    if !list.contains(&ent_name) {
+                        list.push(ent_name.clone());
+                    }
+                    if let Some(exp) = effective_exp {
+                        guard
+                            .user_entitlement_expiries
+                            .entry(uid)
+                            .or_default()
+                            .insert(ent_name.clone(), exp);
                     }
                 });
             }
@@ -306,6 +453,66 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
 
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.entitlement.user.api.GrantResponse"),
+                value: Vec::new(),
+            })
+        }),
+    );
+
+    // 4b. eve.entitlement.user.subscription.api.GrantRequest -> GrantResponse + ActivatedNotice + GrantedNotice
+    let db_sub_grant = Arc::clone(&db);
+    let pending_sub = Arc::clone(&router.pending_notices);
+    router.register_handler(
+        "eve.entitlement.user.subscription.api.GrantRequest",
+        Arc::new(move |ctx, _any, dyn_msg| {
+            require_admin_role(ctx)?;
+            let now_unix = ctx.now_unix();
+            let Some(DynamicValue::Message(sub_msg)) = dyn_msg.get(1) else {
+                return Err((
+                    crate::quasar_gateway::STATUS_BAD_REQUEST,
+                    "subscription_fulfillment is required".to_string(),
+                ));
+            };
+            let uid = sub_msg
+                .get(1)
+                .and_then(extract_nested_seq_id)
+                .or_else(|| ctx.effective_user_id().filter(|&u| u > 0).map(|u| u as u64))
+                .unwrap_or(0);
+            if uid == 0 {
+                return Err((
+                    crate::quasar_gateway::STATUS_BAD_REQUEST,
+                    "Target user identifier is required".to_string(),
+                ));
+            }
+            let days = sub_msg.get(3).and_then(extract_nested_seq_id).unwrap_or(30).max(1);
+            let sub_name = match sub_msg.get(6) {
+                Some(DynamicValue::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
+                _ => "omega".to_string(),
+            };
+            let (_next_exp, activated_notice) = db_sub_grant.with_mut_snapshot(|snap| {
+                super::quasar_auth_user::activate_user_omega_license_in_snapshot(
+                    snap,
+                    uid,
+                    days.saturating_mul(86_400),
+                    now_unix,
+                )
+            });
+            let mut id_bytes = Vec::new();
+            encode_string_field(1, &sub_name, &mut id_bytes);
+            let mut granted_bytes = Vec::new();
+            encode_bytes_field(1, &id_bytes, &mut granted_bytes);
+            let granted_notice = GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.assetholding.entitlement.api.GrantedNotice"
+                ),
+                value: granted_bytes,
+            };
+            let mut q = pending_sub.write().unwrap_or_else(|e| e.into_inner());
+            q.push((NoticeScope::User(uid as i32), activated_notice));
+            q.push((NoticeScope::User(uid as i32), granted_notice));
+            Ok(GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve.entitlement.user.subscription.api.GrantResponse"
+                ),
                 value: Vec::new(),
             })
         }),

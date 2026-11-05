@@ -945,6 +945,9 @@ pub(crate) fn sync_structure_with_released(
     {
         return None;
     }
+    if st.self_destruct_at_unix.is_some_and(|at| now >= at) {
+        return Some(destroy_structure(ctx, snap, ext, structure_id, 0, now));
+    }
     if !st.state.starts_with("Reinforced")
         && !matches!(st.state.as_str(), STATE_ARMOR_REINFORCED | STATE_HULL_REINFORCED | STATE_ARMOR_VULNERABLE | STATE_HULL_VULNERABLE)
         && st.reinforced_until_unix <= now && ext.unanchoring_until_unix.get(&structure_id).is_some_and(|&until| now >= until)

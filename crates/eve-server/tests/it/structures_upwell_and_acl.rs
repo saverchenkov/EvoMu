@@ -1192,8 +1192,7 @@ pub(crate) mod upwell_structures_docking {
 
 //  End-to-end remediation tests for structure boarding/control (`feat:structures.board-structure`,
 //  `rpc:structureControl.{BoardStructure,EjectFromStructure,GetStructurePilot,ReleaseControl,TakeControl}`)
-//  and Upwell defense settings & automated Standup weapon/PDB firing (`feat:structures.defense-settings`,
-//  `feat:structures.profiles`).
+//  and Upwell defense settings & automated Standup weapon/PDB firing (`feat:structures.defense-settings`).
 
 use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord};
 use eve_destiny::{Ball, MovementMode};
@@ -2496,9 +2495,8 @@ async fn test_remediated_mobile_cyno_inhibitor_lifecycle_and_activation() {
 pub(crate) mod upwell_structures_reinforce {
     use super::*;
 
-//  End-to-end remediation tests for Structure Directory visibility & ACL filtering
-//  (`feat:structures.structure-directory`) and Structure Profile lifecycle / 5-minute transition delay
-//  (`feat:structures.profiles`).
+//  End-to-end tests for Structure Directory visibility & ACL filtering
+//  and Structure Profile lifecycle / 5-minute transition delay.
 
 use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord};
 use eve_destiny::{Ball, MovementMode};
@@ -6807,9 +6805,8 @@ async fn test_upwell_tethering_eligibility_restrictions_and_docking_lock() {
 pub(crate) mod structures_anchoring_and_evermarks {
     use super::*;
 
-//  End-to-end parity closure tests for the remediated structure `feat:*` rows:
-//  - `feat:structures.anchor-restrictions`, `feat:structures.profiles`,
-//    `feat:structures.defense-settings`, `feat:structures.structure-directory`
+//  End-to-end parity closure tests for structure `feat:*` rows:
+//  - `feat:structures.anchor-restrictions`, `feat:structures.defense-settings`
 
 use crate::common;
 use eve_db::{

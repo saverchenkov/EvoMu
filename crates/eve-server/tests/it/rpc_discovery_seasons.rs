@@ -258,10 +258,12 @@ async fn test_project_discovery_tutorial_and_rewards() {
     let _ = std::fs::remove_file(&db_path);
 }
 
+// parity: rpc:seasonManager.get_loot_table_by_typeID
 #[tokio::test]
 async fn test_season_manager_rpc_suite() {
     eve_testkit::attest(&[
-                                                                            ]);
+        "rpc:seasonManager.get_loot_table_by_typeID",
+    ]);
 
     let ctx = ServerContext::new();
     let mut p1 = select(&ctx, 61_003, "demo", "demo-secret", P1).await;
@@ -401,10 +403,19 @@ async fn test_season_manager_rpc_suite() {
     });
 
     // 10. get_loot_table_by_typeID (backed by res:/staticdata/crates.fsdbinary fixedLootItems)
-    assert!(rpc(&ctx, &mut p1, "seasonManager", "get_loot_table_by_typeID", &[PyRep::Integer(-1)]).await.is_err());
+    let bad_neg = rpc(&ctx, &mut p1, "seasonManager", "get_loot_table_by_typeID", &[PyRep::Integer(-1)]).await.unwrap_err();
+    assert_eq!(bad_neg.code, "InvalidTypeId"); // rpc-lint: allow error code assertion
+    let bad_missing = rpc(&ctx, &mut p1, "seasonManager", "get_loot_table_by_typeID", &[PyRep::Integer(999_999_999)]).await.unwrap_err();
+    assert_eq!(bad_missing.code, "InvalidTypeId"); // rpc-lint: allow error code assertion
+    let non_crate = rpc(&ctx, &mut p1, "seasonManager", "get_loot_table_by_typeID", &[PyRep::Integer(34)]).await.expect("non-crate type returns empty list");
+    assert_eq!(non_crate, PyRep::List(vec![]));
     let loot = rpc(&ctx, &mut p1, "seasonManager", "get_loot_table_by_typeID", &[PyRep::Integer(50_036)]).await.expect("get_loot_table_by_typeID");
     let PyRep::List(loot_items) = loot else { panic!("expected List of loot items") };
+    assert!(!loot_items.is_empty());
     assert_eq!(loot_items[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(50_051));
+    assert!(loot_items[0].dict_get("quantity").and_then(|v| v.as_i64()).unwrap_or(0) >= 1);
+    let prob = loot_items[0].dict_get("probability").and_then(|v| v.as_f64()).expect("probability Real");
+    assert!(prob > 0.0 && prob <= 1.0);
 
     // 11. reload_fsd_data (requires GM role; reloads real V24 challenges from challenges.fsdbinary)
     assert!(rpc(&ctx, &mut p1, "seasonManager", "reload_fsd_data", &[]).await.is_err());

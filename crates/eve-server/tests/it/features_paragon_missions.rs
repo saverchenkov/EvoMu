@@ -1,8 +1,6 @@
 //! Integration tests for batch 37 exclusive `feat:` parity rows:
 //! - `feat:pve.operations-tutorial`
 //! - `feat:pve.seasonal-login`
-//! - `feat:structures.profiles`
-//! - `feat:structures.structure-directory`
 
 #![forbid(unsafe_code)]
 

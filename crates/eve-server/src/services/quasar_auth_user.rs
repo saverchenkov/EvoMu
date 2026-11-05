@@ -33,6 +33,8 @@ pub struct QuasarIdentityStore {
     pub twitch_links: HashMap<String, u64>,
     #[serde(default)]
     pub delivered_external_grants: HashSet<String>,
+    #[serde(default)]
+    pub user_entitlement_expiries: HashMap<u64, HashMap<String, u64>>,
 }
 
 const QUASAR_IDENTITY_NOTE_ID: i64 = -8_500_000_000_000;
@@ -58,6 +60,14 @@ pub fn activate_user_omega_license_in_snapshot(
     let base = if cur > now_unix { cur } else { now_unix };
     let next = base.saturating_add(duration_seconds);
     st.omega_subscriptions.insert(user_id, next);
+    let ent_list = st.user_entitlements.entry(user_id).or_default();
+    if !ent_list.iter().any(|e| e.eq_ignore_ascii_case("omega")) {
+        ent_list.push("omega".to_string());
+    }
+    st.user_entitlement_expiries
+        .entry(user_id)
+        .or_default()
+        .insert("omega".to_string(), next);
 
     if let Ok(json) = serde_json::to_string(&st) {
         snap.owner_notes.insert(

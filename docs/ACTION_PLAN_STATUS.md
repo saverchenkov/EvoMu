@@ -4,7 +4,7 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 5973 / 6353 ledger rows closed (94.02%)**, 2402 NA, 1637 tagged tests, 2134 passing tests. Flagged fake by the gap auditor: 335.
+**Parity: 5974 / 6353 ledger rows closed (94.03%)**, 2402 NA, 1579 tagged tests, 2311 passing tests. Flagged fake by the gap auditor: 335.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
@@ -16,7 +16,7 @@ The canonical plan is `.agents/skills/evomu-adversarial-review/references/action
 | notify | 1311 | 455 | 819 | 37 |
 | plan | 118 | 92 | 0 | 26 |
 | quasar | 1455 | 72 | 1328 | 55 |
-| rpc | 1373 | 1210 | 109 | 54 |
+| rpc | 1373 | 1211 | 109 | 53 |
 | sde | 213 | 169 | 44 | 0 |
 
 Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = mapped `feat:` rows closed/total; **Assessment** = the agent's own judgement from `docs/parity/task_notes.json` (DONE is accepted only when the ledger row is DONE).
@@ -124,8 +124,8 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | MN-05 | Holds and inventory | DONE | 3/3 | test_action_plan_c5_mn01_to_mn07_mining_data_belts_lasers_holds_crystals_bonuses, test_mn05_special_holds_and_mining_to_ | DONE | Specialized ore/mineral/ice/gas/ammo holds with item-group filtering and capacity attributes (1556/1557/1558/3136/1573), mining hold routing, and 1-hour jetcan lifecycle with Suspect flag tested. | dad76be85 2026-10-21 |
 | MN-06 | Crystals and residue | DONE | 2/2 | test_action_plan_c5_mn01_to_mn07_mining_data_belts_lasers_holds_crystals_bonuses | DONE | Crystals: 6 asteroid tiers + 5 moon classes, mission-ore base yield, LoadAmmo compatibility/skill gating, volatility shatter, and A/B/C residue per SDE effect 1200 (ModAdd 3159 onto 3153). | 1b11cab6c 2026-10-21 |
 | MN-07 | Skills and bonuses applied through the dogma engine | DONE | 5/5 | test_action_plan_c5_mn01_to_mn07_mining_data_belts_lasers_holds_crystals_bonuses, test_mn04_retriever_strip_miner_yield_ | DONE | DG-1 yield/holds across ORE hulls, MLU stacking + CPU, Pioneer + Perseverance, Highwall + Michi implants, and foreman burst dbuffs (Optimization, Field survey range, Efficiency, Mindlink). | 1b11cab6c 2026-10-21 |
-| MN-08 | Ice and gas harvesting | DONE | 3/3 | test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_reprocessing, test_mn08_ice_and_gas_harvesting | DONE | Regional ice belts with 4h respawn, ice harvester 1,000 m3 block cycles and duration modifiers (Ice Harvesting, Barge/Exhumer, IHU II, rig), and K-space/W-space gas harvesting tested. | 09a8485a9 2026-10-21 |
-| MN-09 | Mining drones | BLOCKED_BY_FEATURES | 2/3 | test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_reprocessing, test_mn09_mining_drones_ore_hold_deliv | PARTIAL | Mining drone (I/II, Ice, Harvester) and Rorqual Excavator drone cycle yield, Drone Interfacing + Mining Drone Operation skill scaling, Mining Drone Specialization, and ore hold delivery tested. | e1dfa4615 2026-10-30 |
+| MN-08 | Ice and gas harvesting | DONE | 3/3 | test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_reprocessing, test_mn08_ice_and_gas_harvesting | DONE | Regional ice belts with 4h respawn, ice harvester 1,000 m3 block cycles and duration modifiers (Ice Harvesting, Barge/Exhumer, IHU II, rig), and K-space/W-space gas harvesting tested. | f67e01e28 2026-11-04 |
+| MN-09 | Mining drones | BLOCKED_BY_FEATURES | 2/3 | test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_reprocessing, test_mn09_mining_drones_ore_hold_deliv | PARTIAL | Mining drone (I/II, Ice, Harvester) and Rorqual Excavator drone cycle yield, Drone Interfacing + Mining Drone Operation skill scaling, Mining Drone Specialization, and ore hold delivery tested. | f67e01e28 2026-11-04 |
 | MN-10 | Survey scanner | DONE | 2/2 | test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_reprocessing | DONE | Survey scanner activation and miningScanMgr.perform_scan range filtering, remaining asteroid quantities, OnAsteroidRevealed notifications, and Mining Survey Chipset tested. | — |
 | MN-11 | Compression (all compressible types) | DONE | 3/3 | test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_reprocessing | DONE | In-space compression (Porpoise/Orca/Rorqual Industrial Core + compressor modules via inSpaceCompressionMgr) and Athanor/Tatara compression/gas decompression (structureCompressionMgr) tested. | cdc48d991 2026-10-19 |
 | MN-12 | Reprocessing (real) | DONE | 5/5 | test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_reprocessing | DONE | Station and Upwell reprocessing (reprocessingSvc) with SDE typeMaterials, facility/rig/skill/implant yield curve, standing NPC tax, structure service tax, Scrapmetal, and Prismaticite tested. | d53b6446e 2026-10-18 |
@@ -154,7 +154,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | E-2 | Order lifecycle | DONE | 23/23 | test_e2_market_order_matching_queries_and_cancellation, test_e2_structure_market_service_and_order_expiry | PARTIAL | Limit orders, immediate buy and sell matching against order book, regional order book queries, order cancellation, and escrow refund tested; blocked by remaining features. | 252371f52 2026-10-27 |
 | E-3 | Contracts | DONE | 15/15 | test_e3_contracts_lifecycle_item_exchange_courier_auction, test_e3_corp_contract_wallet_roles_and_issuer_departure | PARTIAL | Item Exchange, Courier with collateral hold and delivery failure, and Auction contracts with bidding and escrow refund tested; blocked by remaining features. | 02ea9ce13 2026-10-21 |
 | E-4 | Industry | BLOCKED_BY_FEATURES | 28/33 | test_e4_capital_shipyard_restrictions_and_exponential_research, test_e4_industry_jobs_lifecycle_manufacturing_research_a | PARTIAL | Industry blueprint data, facilities lookup, job cost with facility tax, manufacturing, TE/ME research, copying, and delivery tested; blocked by remaining features. | 41295bf88 2026-11-03 |
-| E-5 | Agents and missions | FLAGGED_FAKE | 25/26 | test_e5_agent_finder_and_conversation_lifecycle, test_plan_e5_agent_finder_and_conversation_lifecycle | PARTIAL | PVE agent finder, agent conversation, mission offer/accept/decline/quit state machine, and standing calculations; blocked by remaining features. | 3ed24678b 2026-11-03 |
+| E-5 | Agents and missions | FLAGGED_FAKE | 25/26 | test_live_cache_setting_raffle_seeding_and_plan_e5_missions | PARTIAL | PVE agent finder, agent conversation, mission offer/accept/decline/quit state machine, and standing calculations; blocked by remaining features. | e1cbba77e 2026-11-04 |
 | E-6 | PI basics | DONE | 23/23 | test_e6_pi_extractor_expiry_and_launch_canister | PARTIAL | Planetary Interaction planet info, command center placement, colony limit from skill, pin placement, links, and production routing tested; blocked by remaining features. | 252371f52 2026-10-27 |
 | E-7 | AIR NPE server-side node-graph runner & tutorial pocket orchestrator (user-added… | DONE | 3/3 | air_npe_server_nodegraph_runner_full_tutorial_to_completion | — | — | ac4908537 2026-11-02 |
 

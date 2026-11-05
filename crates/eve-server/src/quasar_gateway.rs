@@ -553,6 +553,7 @@ impl PublicGatewayRouter {
             || matches!(
                 normalized_type_name,
                 "eve.entitlement.user.api.GrantRequest"
+                    | "eve.entitlement.user.subscription.api.GrantRequest"
                     | "eve.plex.vault.assetholding.operation.api.DepositRequest"
                     | "eve.plex.vault.assetholding.operation.api.WithdrawRequest"
                     | "eve.fulfillment.api.DeliverItemRequest"
