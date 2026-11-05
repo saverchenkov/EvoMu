@@ -991,7 +991,11 @@ pub fn emit_expedition_combat_notifications(
         }
     }
 
-    for esc in [new_escalation, advanced_step].into_iter().flatten() {
+    for esc in [new_escalation, advanced_step]
+        .into_iter()
+        .flatten()
+        .filter(|e| e.dungeons_entered.len() < usize::from(e.total_steps))
+    {
         let sig_id = crate::services::pve_expeditions::expedition_sig_id(esc.instance_id, esc.step_index);
         let sys_id = esc.destination_solar_system_id;
         let now_u = db.clock().now_unix_secs();
@@ -1004,7 +1008,11 @@ pub fn emit_expedition_combat_notifications(
                     sig_group: "Combat Site".to_string(),
                     type_name: esc.expedition_name.clone(),
                     signal_strength: 0.5,
-                    position: [-45_000_000.0, 15_000_000.0, 30_000_000.0],
+                    position: [
+                        -45_000_000.0 + (esc.step_index as f64) * 5_000_000.0,
+                        15_000_000.0,
+                        30_000_000.0,
+                    ],
                     wormhole_type_id: None,
                     destination_system_id: None,
                     max_jump_mass_kg: 0.0,

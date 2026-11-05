@@ -2623,8 +2623,6 @@ mod pve_exploration_ext_c {
     use super::*;
 
 // Remediation tests for PvE Exploration and Petitioner RPCs:
-// - `feat:pve.escalations`: In-space NPC destruction triggers real escalation chance, journal entry, destination solar system, and notification.
-// - `feat:pve.expeditions`: Multi-step journal progression with dynamic steps, destination encounter spawning, and completion.
 // - `feat:pve.ghost-sites`: Real server countdown timer (90-120s), expired detonation damage, and covert pirate ambush.
 // - `feat:pve.sleeper-caches`: Limited (5604), Standard (5609), Superior (5632) ship restrictions, puzzles, and gas hazard mechanics.
 // - `rpc:petitioner.MayPetition`: Client expectations matching arg schema and error codes (-1 rate-limited, -2 banned/missing, -3 invalid category).

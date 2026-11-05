@@ -2,7 +2,6 @@
 //! - `feat:pve.insurgency-laundering`
 //! - `feat:pve.insurgency-mining-ambush`
 //! - `feat:pve.insurgency-outpost-raid`
-//! - `feat:pve.proving-grounds-queue-and-rewards`
 
 #![forbid(unsafe_code)]
 
@@ -657,7 +656,6 @@ mod part2 {
 // Additional integration tests for batch 41 `B41-P1-01..04` remediations:
 // - `feat:pve.insurgency-outpost-raid`: deadspace warp block, gate-admitted occupancy, T3D/T3C, warzone militia
 // - `feat:pve.insurgency-laundering`: probabilistic `MechanicRng` Stage >= 3 named roamer promotion
-// - `feat:pve.proving-grounds-queue-and-rewards`: party size, boss, <= 30 km range, cargo module, jump-clone implant
 
 
 use crate::fw_warzone_insurgency::setup_warzone_chain;

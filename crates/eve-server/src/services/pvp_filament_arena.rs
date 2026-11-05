@@ -398,6 +398,7 @@ pub fn step_proving_grounds_arena_hazards_in_ballpark(
     };
     let now_unix = db.clock().now_unix_secs();
     let mut respawned_pilots: Vec<(i64, i64, i64, u32, i64)> = Vec::new();
+    let mut ejected_pods: Vec<(i64, i64, i64)> = Vec::new();
     let mut concluded_matches: Vec<(i64, Vec<i64>)> = Vec::new();
 
     crate::sp6_lifecycle::with_mut_sp6_state(db, |sp6, snap| {
@@ -426,19 +427,18 @@ pub fn step_proving_grounds_arena_hazards_in_ballpark(
                 .map(DVec3::from_array)
                 .or_else(|| ballpark.balls.get(&m_snap.end_gate_id).map(|b| b.position))
                 .unwrap_or(DVec3::ZERO);
-            let exceeded_timer = m_snap.active
-                && now_unix > m_snap.started_unix.saturating_add(PROVING_ARENA_DURATION_SECS);
+            let exceeded_timer =
+                now_unix > m_snap.started_unix.saturating_add(PROVING_ARENA_DURATION_SECS);
 
             let mut newly_eliminated: Vec<(i64, i64, u32, DVec3)> = Vec::new();
             for &cid in teams.iter().flatten() {
-                if m_snap.exited_pilots.contains(&cid)
-                    || store
-                        .match_eliminated
-                        .get(&mid)
-                        .is_some_and(|e| e.contains(&cid))
-                {
+                if m_snap.exited_pilots.contains(&cid) {
                     continue;
                 }
+                let already_eliminated = store
+                    .match_eliminated
+                    .get(&mid)
+                    .is_some_and(|e| e.contains(&cid));
                 let Some(ship_id) = snap
                     .characters
                     .get(&cid)
@@ -455,6 +455,9 @@ pub fn step_proving_grounds_arena_hazards_in_ballpark(
                 else {
                     continue;
                 };
+                if already_eliminated && ship_type_id != 670 {
+                    continue;
+                }
                 let outside_sphere = ship_pos.distance(center) > PROVING_ARENA_BOUNDARY_RADIUS_M;
                 if !outside_sphere && !exceeded_timer {
                     if store.hazard_ticks.remove(&ship_id).is_some() {
@@ -522,17 +525,80 @@ pub fn step_proving_grounds_arena_hazards_in_ballpark(
                         },
                         now_unix,
                     );
-                }
-                let (home_station_id, home_sys_id, corvette_id, _, _) =
-                    destroy_pod_and_respawn_faction_corvette_in_snap(
-                        snap,
-                        sde_opt,
-                        cid,
-                        32_000_001,
-                        [pos.x, pos.y, pos.z],
-                        now_unix,
+                    snap.next_entity_id += 1;
+                    let cap_id = snap.next_entity_id;
+                    snap.items.insert(
+                        cap_id,
+                        eve_db::InventoryItemRecord {
+                            item_id: cap_id,
+                            type_id: 670,
+                            owner_id: cid,
+                            location_id: 32_000_001,
+                            flag: eve_db::InventoryFlag::None,
+                            quantity: 1,
+                            singleton: true,
+                            ..Default::default()
+                        },
                     );
-                respawned_pilots.push((cid, ship_id, home_station_id, home_sys_id, corvette_id));
+                    snap.item_positions.insert(cap_id, [pos.x, pos.y, pos.z]);
+                    if let Some(ch) = snap.characters.get_mut(&cid) {
+                        ch.active_ship_id = cap_id;
+                    }
+                    let (mass, radius, inertia, max_vel, shield, armor, hull, sig) = sde_opt
+                        .and_then(|sde| sde.types.get(&670))
+                        .map(|t| {
+                            let a = &t.default_attributes;
+                            (
+                                t.mass.max(12_000.0),
+                                t.radius.max(18.0),
+                                a.get(&eve_sde::attr_ids::AGILITY).copied().unwrap_or(0.5),
+                                a.get(&eve_sde::attr_ids::MAX_VELOCITY).copied().unwrap_or(250.0),
+                                a.get(&eve_sde::attr_ids::SHIELD_CAPACITY).copied().unwrap_or(250.0),
+                                a.get(&eve_sde::attr_ids::ARMOR_HP).copied().unwrap_or(250.0),
+                                a.get(&eve_sde::attr_ids::HP_STRUCT).copied().unwrap_or(250.0),
+                                a.get(&eve_sde::attr_ids::SIGNATURE_RADIUS).copied().unwrap_or(25.0),
+                            )
+                        })
+                        .unwrap_or((12_000.0, 18.0, 0.5, 250.0, 250.0, 250.0, 250.0, 25.0));
+                    ballpark.add_ball(Ball {
+                        id: cap_id,
+                        type_id: 670,
+                        position: pos,
+                        velocity: DVec3::ZERO,
+                        max_velocity: max_vel,
+                        inertia,
+                        mass,
+                        radius,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Stop,
+                    });
+                    ballpark.combat_states.insert(
+                        cap_id,
+                        eve_destiny::CombatState {
+                            shield_hp: shield,
+                            max_shield_hp: shield,
+                            armor_hp: armor,
+                            max_armor_hp: armor,
+                            structure_hp: hull,
+                            max_structure_hp: hull,
+                            signature_radius: sig,
+                            base_signature_radius: Some(sig),
+                            ..eve_destiny::CombatState::default()
+                        },
+                    );
+                    ejected_pods.push((cid, ship_id, cap_id));
+                } else {
+                    let (home_station_id, home_sys_id, corvette_id, _, _) =
+                        destroy_pod_and_respawn_faction_corvette_in_snap(
+                            snap,
+                            sde_opt,
+                            cid,
+                            32_000_001,
+                            [pos.x, pos.y, pos.z],
+                            now_unix,
+                        );
+                    respawned_pilots.push((cid, ship_id, home_station_id, home_sys_id, corvette_id));
+                }
                 store.match_eliminated.entry(mid).or_default().insert(cid);
                 store.queue.remove(&cid);
             }
@@ -644,6 +710,36 @@ pub fn step_proving_grounds_arena_hazards_in_ballpark(
                 PyRep::Tuple(vec![PyRep::Integer(old_ship_id), PyRep::Integer(corvette_id)]),
             ),
         ]);
+        enqueue_pvp_char_notification(
+            db,
+            pending_notifications_opt,
+            notify_tx_opt,
+            cid,
+            "OnSessionChanged",
+            "charid",
+            vec![PyRep::Bool(false), sess_rep, change_dict],
+        );
+    }
+    for (cid, old_ship_id, cap_id) in ejected_pods {
+        let char_meta = db.with_snapshot(|s| {
+            s.characters
+                .get(&cid)
+                .map(|c| (c.user_id as i64, c.corporation_id, c.alliance_id))
+        });
+        let (uid_i64, corp_id, alliance_id) = char_meta.unwrap_or((0, 1_000_009, None));
+        let sess_rep = PyRep::keyval([
+            ("charid", PyRep::Integer(cid)),
+            ("userid", PyRep::Integer(uid_i64)),
+            ("corpid", PyRep::Integer(corp_id)),
+            ("allianceid", alliance_id.map_or(PyRep::None, PyRep::Integer)),
+            ("solarsystemid2", PyRep::Integer(32_000_001)),
+            ("solarsystemid", PyRep::Integer(32_000_001)),
+            ("shipid", PyRep::Integer(cap_id)),
+        ]);
+        let change_dict = PyRep::Dict(vec![(
+            PyRep::String("shipid".into()),
+            PyRep::Tuple(vec![PyRep::Integer(old_ship_id), PyRep::Integer(cap_id)]),
+        )]);
         enqueue_pvp_char_notification(
             db,
             pending_notifications_opt,

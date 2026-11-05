@@ -1055,8 +1055,14 @@ pub async fn handle_pve_exploration(
             };
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
 
+            let char_id = session.character_id.unwrap_or(0);
             let list = with_pve_exploration_reg(ctx, |reg| {
                 let now = now_sec(reg);
+                let owned_exp_ids: std::collections::HashSet<i64> = reg
+                    .escalations_by_char
+                    .get(&char_id)
+                    .map(|list| list.iter().map(|e| e.instance_id).collect())
+                    .unwrap_or_default();
                 reg.sites_by_system
                     .get(&sys_id)
                     .map(|sites| {
@@ -1065,6 +1071,9 @@ pub async fn handle_pve_exploration(
                             .filter(|s| {
                                 !s.probe_required
                                     && !s.cleared
+                                    && (s.site_category != "Expedition"
+                                        || s.expedition_instance_id
+                                            .is_some_and(|id| owned_exp_ids.contains(&id)))
                                     && (s.lifetime_seconds == 0 || now < s.created_unix.saturating_add(s.lifetime_seconds))
                             })
                             .map(|s| {

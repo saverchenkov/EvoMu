@@ -137,7 +137,7 @@ pub async fn create_escalation_expedition_core(
     solar_system_id: SolarSystemId,
     source_dungeon_id: u32,
     dungeon_name: &str,
-    pos: [f64; 3],
+    _pos: [f64; 3],
 ) -> Option<EscalatingPathEntry> {
     let (exp_base_did, exp_default_name, total_steps) = expedition_dungeon_chain(source_dungeon_id);
     let exp_name = sde
@@ -172,6 +172,11 @@ pub async fn create_escalation_expedition_core(
         (e, ts)
     });
 
+    let dest_pos = [
+        -45_000_000.0 + (entry.step_index as f64) * 5_000_000.0,
+        15_000_000.0,
+        30_000_000.0,
+    ];
     db.with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
         let bm_id = snap.next_entity_id;
@@ -182,9 +187,9 @@ pub async fn create_escalation_expedition_core(
                 owner_id: char_id,
                 label: format!("Escalation: {} [Step 1/{total_steps}]", entry.expedition_name),
                 solar_system_id: dest_sys_id,
-                x: pos[0],
-                y: pos[1],
-                z: pos[2],
+                x: dest_pos[0],
+                y: dest_pos[1],
+                z: dest_pos[2],
                 item_id: Some(entry.instance_id),
                 memo: entry.journal_text.clone(),
                 folder_id: None,
@@ -400,6 +405,11 @@ pub async fn advance_expedition_step_core(
     if let Some(ref entry) = updated_entry {
         if !completed {
             spawn_expedition_site_instance_core(sde, systems, db, entry).await;
+            let dest_pos = [
+                -45_000_000.0 + (entry.step_index as f64) * 5_000_000.0,
+                15_000_000.0,
+                30_000_000.0,
+            ];
 
             db.with_mut_snapshot(|snap| {
                 if let Some(bm) = snap
@@ -408,6 +418,9 @@ pub async fn advance_expedition_step_core(
                     .find(|b| b.owner_id == char_id && b.item_id == Some(instance_id))
                 {
                     bm.solar_system_id = entry.destination_solar_system_id;
+                    bm.x = dest_pos[0];
+                    bm.y = dest_pos[1];
+                    bm.z = dest_pos[2];
                     bm.label = format!(
                         "Escalation: {} [Step {}/{}]",
                         entry.expedition_name, entry.step_index, entry.total_steps

@@ -480,3 +480,4 @@ mod structures_serverops_wormholes_live;
 mod structures_defense_cyno_wh_live;
 mod structures_lookup_raffle_live;
 mod npc_navy_zarzakh_sleepers_haulers_live;
+mod pve_escalations_expeditions_arena_live;

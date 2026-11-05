@@ -2509,8 +2509,8 @@ pub(crate) mod pve_nav_batch_closure {
     #[allow(unused_imports)]
     use super::*;
 
-// End-to-End Integration Tests closing 8 PvE parity rows:
-// `feat:pve.mission-complete`, `feat:pve.escalations`, `feat:pve.expeditions`,
+// End-to-End Integration Tests closing PvE parity rows:
+// `feat:pve.mission-complete`,
 // `feat:pve.incursion-payout`, `feat:pve.homefront-ops`, `feat:pve.air-career-program`,
 // `feat:pve.daily-goals`, `feat:pve.login-campaign`.
 

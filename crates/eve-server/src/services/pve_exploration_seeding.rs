@@ -542,7 +542,9 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
 
     with_pve_exploration_reg(ctx, |reg| {
         reg.seeded_systems.insert(solar_system_id, true);
-        reg.sites_by_system.insert(solar_system_id, sites);
+        let existing = reg.sites_by_system.entry(solar_system_id).or_default();
+        existing.retain(|s| s.site_category == "Expedition");
+        existing.extend(sites);
     });
 }
 
