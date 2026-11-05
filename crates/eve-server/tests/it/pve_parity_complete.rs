@@ -2219,8 +2219,8 @@ async fn test_incursion_influence_regen_mothership_unlock_and_system_effects() {
 // ============================================================================
 #[tokio::test]
 async fn test_incursion_payout_on_grid_only_and_world_event_tales() {
-    // parity: feat:pve.incursion-payout, feat:pve.tales
-    eve_testkit::attest(&["feat:pve.incursion-payout", "feat:pve.tales"]);
+    // parity: feat:pve.tales
+    eve_testkit::attest(&["feat:pve.tales"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

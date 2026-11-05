@@ -274,8 +274,7 @@ async fn test_pve_mission_lifecycle_accept_tracker_complete_journal() {
     assert_eq!(trk_done.dict_get("objectivesCompleted"), Some(&PyRep::Bool(true)));
     assert_eq!(trk_done.dict_get("npcsRemaining").and_then(|v| v.as_i64()), Some(0));
 
-    // 5. Complete mission (feat:pve.mission-complete)
-    eve_testkit::attest(&["feat:pve.mission-complete"]);
+    // 5. Complete mission
     let initial_isk = ctx.db.with_snapshot(|snap| snap.characters[&char_id].balance.0 / 100);
     let initial_lp = ctx.db.with_snapshot(|snap| snap.characters[&char_id].loyalty_points.get(&corp_id).copied().unwrap_or(0));
     let initial_standing = ctx.db.with_snapshot(|snap| snap.characters[&char_id].standings.get(&corp_id).copied().unwrap_or(0.0));

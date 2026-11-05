@@ -1423,9 +1423,6 @@ fn build_controlled_v24_board() -> Vec<HackingTileState> {
 // ============================================================================
 #[tokio::test]
 async fn test_hacking_node_types_analyzer_stats_and_v24_combat() {
-    // parity: feat:pve.hacking-node-types, feat:pve.hacking-failure-outcome
-    eve_testkit::attest(&["feat:pve.hacking-node-types", "feat:pve.hacking-failure-outcome"]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
@@ -1610,9 +1607,6 @@ async fn test_hacking_node_types_analyzer_stats_and_v24_combat() {
 // ============================================================================
 #[tokio::test]
 async fn test_hacking_failure_outcomes_and_core_kill_loot_spew() {
-    // parity: feat:pve.hacking-node-types, feat:pve.hacking-failure-outcome
-    eve_testkit::attest(&["feat:pve.hacking-node-types", "feat:pve.hacking-failure-outcome"]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
@@ -1762,12 +1756,8 @@ async fn test_hacking_failure_outcomes_and_core_kill_loot_spew() {
 // ============================================================================
 #[tokio::test]
 async fn test_ghost_blast_radius_cutoff_and_utility_range_cloak_tile_guards() {
-    // parity: feat:pve.hacking-node-types, feat:pve.hacking-failure-outcome, feat:pve.ghost-sites
-    eve_testkit::attest(&[
-        "feat:pve.hacking-node-types",
-        "feat:pve.hacking-failure-outcome",
-        "feat:pve.ghost-sites",
-    ]);
+    // parity: feat:pve.ghost-sites
+    eve_testkit::attest(&["feat:pve.ghost-sites"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
