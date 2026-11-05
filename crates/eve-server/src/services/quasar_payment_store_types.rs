@@ -1237,3 +1237,7 @@ pub fn register_plex_vault_extra_handlers(router: &PublicGatewayRouter, db: Arc<
         }),
     );
 }
+
+#[cfg(test)]
+#[path = "quasar_payment_store_types_tests.rs"]
+mod quasar_payment_store_types_tests;

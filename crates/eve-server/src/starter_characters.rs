@@ -87,3 +87,7 @@ pub async fn provision_starter_characters(ctx: &ServerContext, cfg: &ServerConfi
     }
     created
 }
+
+#[cfg(test)]
+#[path = "starter_characters_tests.rs"]
+mod starter_characters_tests;

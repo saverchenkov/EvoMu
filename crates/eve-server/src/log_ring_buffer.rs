@@ -156,3 +156,7 @@ where
         self.buffer.record(level, target, visitor.0);
     }
 }
+
+#[cfg(test)]
+#[path = "log_ring_buffer_tests.rs"]
+mod log_ring_buffer_tests;

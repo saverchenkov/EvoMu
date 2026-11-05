@@ -785,7 +785,13 @@ fn register_payment_token_and_purchase_handlers(
             require_admin_role(ctx)?;
             let uid = ctx.effective_user_id().filter(|&u| u > 0).ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))? as u64;
             let type_id = if let Some(DynamicValue::Message(item_type)) = dyn_msg.get(2) {
-                if let Some(DynamicValue::Int32(t)) = item_type.get(1) { *t as u32 } else { 44992 }
+                match item_type.get(1) {
+                    Some(DynamicValue::Uint64(t)) => *t as u32,
+                    Some(DynamicValue::Uint32(t)) => *t,
+                    Some(DynamicValue::Int64(t)) => *t as u32,
+                    Some(DynamicValue::Int32(t)) => *t as u32,
+                    _ => 44992,
+                }
             } else {
                 44992
             };
@@ -796,13 +802,13 @@ fn register_payment_token_and_purchase_handlers(
             let requested_cid = dyn_msg.get(1).and_then(|v| match v {
                 DynamicValue::Uint32(u) => Some(*u as i64),
                 DynamicValue::Uint64(u) => Some(*u as i64),
-                DynamicValue::Int32(i) => Some(*i as i64),
-                DynamicValue::Int64(i) => Some(*i),
+                DynamicValue::Int32(i) | DynamicValue::Sint32(i) => Some(*i as i64),
+                DynamicValue::Int64(i) | DynamicValue::Sint64(i) => Some(*i),
                 DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
                     DynamicValue::Uint32(u) => Some(*u as i64),
                     DynamicValue::Uint64(u) => Some(*u as i64),
-                    DynamicValue::Int32(i) => Some(*i as i64),
-                    DynamicValue::Int64(i) => Some(*i),
+                    DynamicValue::Int32(i) | DynamicValue::Sint32(i) => Some(*i as i64),
+                    DynamicValue::Int64(i) | DynamicValue::Sint64(i) => Some(*i),
                     _ => None,
                 }),
                 _ => None,
@@ -1342,3 +1348,7 @@ fn register_payment_token_and_purchase_handlers(
 
     register_plex_vault_extra_handlers(router, Arc::clone(&db));
 }
+
+#[cfg(test)]
+#[path = "quasar_payment_store_tests.rs"]
+mod quasar_payment_store_tests;

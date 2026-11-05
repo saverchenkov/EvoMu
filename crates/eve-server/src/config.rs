@@ -334,3 +334,7 @@ info_gathering_interval_secs = 600
         assert!(ServerConfig::from_toml_str("[feature_flags]\ninfo_gathering_interval_secs = 0").is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "config_tests.rs"]
+mod config_tests;

@@ -1354,6 +1354,11 @@ pub fn register(
     skinr: Arc<SkinrCosmeticsState>,
 ) {
     let state = CosmeticsMarketState::load_with_sink(db, sde, skinr, Arc::clone(&router.macho_notify_sink));
+    register_with_state(router, state);
+}
+
+/// Registers the state-backed Paragon Hub Cosmetic Market handlers using an existing `CosmeticsMarketState`.
+pub fn register_with_state(router: &PublicGatewayRouter, state: Arc<CosmeticsMarketState>) {
     let handlers: &[(&'static str, fn(&CosmeticsMarketState, &AuthoritativeContext, &DynamicQuasarMessage) -> HandlerResult)] = &[
         ("eve_public.cosmetic.market.api.GetBrokerFeesRequest", market_get_broker_fees),
         ("eve_public.cosmetic.market.api.GetTaxRateRequest", market_get_tax_rate),
@@ -1375,3 +1380,7 @@ pub fn register(
         router.register_handler(name, Arc::new(move |ctx, _any, msg| f(&st, ctx, msg)));
     }
 }
+
+#[cfg(test)]
+#[path = "quasar_cosmetics_market_tests.rs"]
+mod quasar_cosmetics_market_tests;

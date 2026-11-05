@@ -187,3 +187,7 @@ fn sanitize_pyrep(rep: &PyRep) -> String {
         _ => "<pyrep>".to_string(),
     }
 }
+
+#[cfg(test)]
+#[path = "flight_recorder_tests.rs"]
+mod flight_recorder_tests;

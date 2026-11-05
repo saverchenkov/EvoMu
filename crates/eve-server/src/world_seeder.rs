@@ -375,3 +375,7 @@ fn seed_npc_skillbooks_and_faction_items(
     }
     inserted
 }
+
+#[cfg(test)]
+#[path = "world_seeder_tests.rs"]
+mod world_seeder_tests;

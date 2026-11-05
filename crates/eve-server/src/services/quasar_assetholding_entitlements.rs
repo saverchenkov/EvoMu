@@ -251,3 +251,7 @@ pub fn publish_asset_deleted_notice(
         gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix)?;
     Ok(delivered)
 }
+
+#[cfg(test)]
+#[path = "quasar_assetholding_entitlements_tests.rs"]
+mod quasar_assetholding_entitlements_tests;

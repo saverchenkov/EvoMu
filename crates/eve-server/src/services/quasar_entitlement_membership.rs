@@ -770,3 +770,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
         }),
     );
 }
+
+#[cfg(test)]
+#[path = "quasar_entitlement_membership_tests.rs"]
+mod quasar_entitlement_membership_tests;
