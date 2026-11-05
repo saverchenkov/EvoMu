@@ -283,6 +283,7 @@ mod character_clones_implants_extra_unit_tests;
 mod pve_incursion_sites_extra_unit_tests;
 
 
+#[cfg(test)]
 mod fw_gameplay_extra_unit_tests;
 #[cfg(test)]
 mod structure_lifecycle_rpc_extra_unit_tests;
@@ -297,5 +298,17 @@ mod combat_npc_ai_extra_unit_tests;
 mod station_structure_extra_unit_tests;
 #[cfg(test)]
 mod structure_lifecycle_extra_unit_tests;
+#[cfg(test)]
+mod inventory_fitting_extra_unit_tests;
+#[cfg(test)]
+mod fleet_social_chat_extra_unit_tests;
+#[cfg(test)]
+mod social_corp_projects_extra_unit_tests;
+#[cfg(test)]
+mod pve_special_sites_extra_unit_tests;
+#[cfg(test)]
+mod fleet_social_fleet_ops_extra_unit_tests;
+#[cfg(test)]
+mod mining_advanced_extra_unit_tests;
 
 
