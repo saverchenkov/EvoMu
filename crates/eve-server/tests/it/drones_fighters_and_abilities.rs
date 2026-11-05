@@ -1,9 +1,4 @@
-//! Integration tests for Fighter Squadrons & Carrier Operations:
-//! - feat:drones.fighter-heavy-long-range-bomb
-//! - feat:drones.fighter-refuel-rearm-repair
-//! - feat:drones.fighter-support-cenotaph-scarab
-//! - feat:drones.light-fighter-space-superiority
-//! - feat:drones.support-fighter-abilities
+//! Integration tests for Fighter Squadrons & Carrier Operations.
 
 #![forbid(unsafe_code)]
 
@@ -138,14 +133,8 @@ async fn setup_pilot_session(
     sess
 }
 
-// parity: feat:drones.fighter-heavy-long-range-bomb, feat:drones.fighter-refuel-rearm-repair
 #[tokio::test]
 async fn test_fighter_heavy_long_range_bomb_and_tube_rearm_repair() {
-    eve_testkit::attest(&[
-        "feat:drones.fighter-heavy-long-range-bomb",
-        "feat:drones.fighter-refuel-rearm-repair",
-    ]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
@@ -400,15 +389,8 @@ async fn test_fighter_heavy_long_range_bomb_and_tube_rearm_repair() {
     assert_eq!(rearmed_dict.get("remainingCharges").and_then(|v| v.as_i64()), Some(2)); // Started at 3 fresh charges
 }
 
-// parity: feat:drones.fighter-support-cenotaph-scarab, feat:drones.support-fighter-abilities, feat:drones.light-fighter-space-superiority
 #[tokio::test]
 async fn test_support_fighter_abilities_and_space_superiority() {
-    eve_testkit::attest(&[
-        "feat:drones.fighter-support-cenotaph-scarab",
-        "feat:drones.support-fighter-abilities",
-        "feat:drones.light-fighter-space-superiority",
-    ]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();

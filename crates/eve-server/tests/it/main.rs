@@ -413,6 +413,7 @@ mod features_homefront_operations;
 mod esi_contacts_labels_and_maillists;
 mod esi_fw_sov_incursions_live;
 mod carrier_fighters_live;
+mod drones_fighters_live;
 mod fleet_command_and_probe_scan_live;
 mod esi_industry_jobs_and_blueprints;
 mod esi_market_prices_and_structures;

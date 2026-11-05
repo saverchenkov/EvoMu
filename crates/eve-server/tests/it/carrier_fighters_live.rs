@@ -116,15 +116,8 @@ fn ewar(res: &PyRep) -> f64 {
     res.dict_get("ewarStrength").and_then(|v| v.as_f64()).expect("ewarStrength")
 }
 
-// parity: feat:drones.fighter-heavy-long-range-bomb, feat:drones.fighter-refuel-rearm-repair
-// parity: feat:drones.light-fighter-space-superiority
 #[tokio::test]
 async fn test_live_heavy_bombs_space_superiority_and_tube_rearm() {
-    eve_testkit::attest(&[
-        "feat:drones.fighter-heavy-long-range-bomb",
-        "feat:drones.fighter-refuel-rearm-repair",
-        "feat:drones.light-fighter-space-superiority",
-    ]);
     let ctx = paused_ctx();
 
     // 1. High-sec: the Ametat point bomb is refused (SDE ability 7 disallowInHighSec).
@@ -238,10 +231,8 @@ async fn test_live_heavy_bombs_space_superiority_and_tube_rearm() {
     assert_eq!(re_bomb.dict_get("remainingCharges"), Some(&PyRep::Integer(2)), "rearmed squadron carries 3 fresh bombs");
 }
 
-// parity: feat:drones.fighter-support-cenotaph-scarab, feat:drones.support-fighter-abilities
 #[tokio::test]
 async fn test_live_support_fighter_ewar_scales_with_surviving_squadron() {
-    eve_testkit::attest(&["feat:drones.fighter-support-cenotaph-scarab", "feat:drones.support-fighter-abilities"]);
     let ctx = paused_ctx();
     let mut aeon = common::gm_pilot_in_space(&ctx, 11, 91_100_011, AEON, NULLSEC).await;
     let mut archon = common::gm_pilot_in_space(&ctx, 12, 91_100_012, ARCHON, NULLSEC).await;

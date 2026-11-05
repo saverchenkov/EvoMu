@@ -1,11 +1,11 @@
-//! Integration tests for Advanced Fighter Squadrons & Carrier Operations (`feat:drones.*`).
+//! Integration tests for Advanced Fighter Squadrons & Carrier Operations.
 //!
 //! Covers:
-//! - Support fighters EWAR scaling: Siren warp disruption, Dromi webs, Cenotaph damp/paint, Scarab ECM (`feat:drones.fighter-support-cenotaph-scarab`)
-//! - Support fighter EWAR abilities: Siren, Dromi, Cenobite neuts, Scarab ECM (`feat:drones.support-fighter-abilities`)
-//! - Heavy fighter point-targeted AoE bomb ability (`feat:drones.fighter-heavy-long-range-bomb`)
-//! - Fighter tube refueling, rearming, HP repair, and squadron replacement (`feat:drones.fighter-refuel-rearm-repair`)
-//! - Space superiority light fighters (Equite, Gram, Locust, Satyr): anti-fighter missile volley and Evasive Maneuvers (`feat:drones.light-fighter-space-superiority`)
+//! - Support fighters EWAR scaling: Siren warp disruption, Dromi webs, Cenotaph damp/paint, Scarab ECM
+//! - Support fighter EWAR abilities: Siren, Dromi, Cenobite neuts, Scarab ECM
+//! - Heavy fighter point-targeted AoE bomb ability
+//! - Fighter tube refueling, rearming, HP repair, and squadron replacement
+//! - Space superiority light fighters (Equite, Gram, Locust, Satyr): anti-fighter missile volley and Evasive Maneuvers
 
 
 use eve_db::{
@@ -177,13 +177,6 @@ async fn seed_carrier_and_target(
 
 #[tokio::test]
 async fn test_support_fighter_squadrons_ewar_scaling_siren_dromi_cenobite_scarab() {
-    // parity: feat:drones.fighter-support-cenotaph-scarab
-    // parity: feat:drones.support-fighter-abilities
-    eve_testkit::attest(&[
-        "feat:drones.fighter-support-cenotaph-scarab",
-        "feat:drones.support-fighter-abilities",
-    ]);
-
     let ctx = ServerContext::new();
     let sys_id = 30_002_187; // Lowsec system
     let carrier_char_id = 90_000_001i64;
@@ -335,9 +328,6 @@ async fn test_support_fighter_squadrons_ewar_scaling_siren_dromi_cenobite_scarab
 
 #[tokio::test]
 async fn test_heavy_fighter_point_targeted_aoe_bomb_ability() {
-    // parity: feat:drones.fighter-heavy-long-range-bomb
-    eve_testkit::attest(&["feat:drones.fighter-heavy-long-range-bomb"]);
-
     let ctx = ServerContext::new();
     let sys_id = 30_000_021; // Kuharah (-1.0 nullsec; point-targeted AoE bombs forbidden in highsec)
     let carrier_char_id = 90_000_001i64;
@@ -433,13 +423,6 @@ async fn test_heavy_fighter_point_targeted_aoe_bomb_ability() {
 
 #[tokio::test]
 async fn test_fighter_tube_refuel_rearm_repair_and_space_superiority() {
-    // parity: feat:drones.fighter-refuel-rearm-repair
-    // parity: feat:drones.light-fighter-space-superiority
-    eve_testkit::attest(&[
-        "feat:drones.fighter-refuel-rearm-repair",
-        "feat:drones.light-fighter-space-superiority",
-    ]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let sys_id = 30_002_187;

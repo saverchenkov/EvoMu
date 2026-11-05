@@ -2039,9 +2039,6 @@ async fn setup_target_cruiser(ctx: &ServerContext, char_id: i64, ship_id: i64, p
 
 #[tokio::test]
 async fn test_fighter_heavy_long_range_bomb() {
-    // parity: feat:drones.fighter-heavy-long-range-bomb
-    eve_testkit::attest(&["feat:drones.fighter-heavy-long-range-bomb"]);
-
     let ctx = crate::modules_advanced_tactical::build_ctx();
     let kw = HashMap::new();
     let char_id = 90_000_001;
@@ -2100,9 +2097,6 @@ async fn test_fighter_heavy_long_range_bomb() {
 
 #[tokio::test]
 async fn test_fighter_refuel_rearm_repair() {
-    // parity: feat:drones.fighter-refuel-rearm-repair
-    eve_testkit::attest(&["feat:drones.fighter-refuel-rearm-repair"]);
-
     let ctx = crate::modules_advanced_tactical::build_ctx();
     let kw = HashMap::new();
     let char_id = 90_000_001;
@@ -2173,13 +2167,6 @@ async fn test_fighter_refuel_rearm_repair() {
 
 #[tokio::test]
 async fn test_fighter_support_abilities_and_squadron_scaling() {
-    // parity: feat:drones.fighter-support-cenotaph-scarab
-    // parity: feat:drones.support-fighter-abilities
-    eve_testkit::attest(&[
-        "feat:drones.fighter-support-cenotaph-scarab",
-        "feat:drones.support-fighter-abilities",
-    ]);
-
     let ctx = crate::modules_advanced_tactical::build_ctx();
     let kw = HashMap::new();
     let char_id = 90_000_001;
@@ -2265,9 +2252,6 @@ async fn test_fighter_support_abilities_and_squadron_scaling() {
 
 #[tokio::test]
 async fn test_light_fighter_space_superiority() {
-    // parity: feat:drones.light-fighter-space-superiority
-    eve_testkit::attest(&["feat:drones.light-fighter-space-superiority"]);
-
     let ctx = crate::modules_advanced_tactical::build_ctx();
     let kw = HashMap::new();
     let char_id = 90_000_001;
@@ -2349,11 +2333,11 @@ async fn test_light_fighter_space_superiority() {
 
 #[allow(unused_imports)]
 pub(crate) mod fighters_lifecycle {
-//! Parity remediation test suite for:
-//! - Heavy fighter point-targeted AoE bomb ability (`feat:drones.fighter-heavy-long-range-bomb`)
-//! - Fighter tube refueling, rearming, and HP repair cycles (`feat:drones.fighter-refuel-rearm-repair`)
-//! - Support fighters EWAR application and scaling (`feat:drones.fighter-support-cenotaph-scarab`, `feat:drones.support-fighter-abilities`)
-//! - Space superiority light fighters anti-fighter bonus & Evasive Maneuvers (`feat:drones.light-fighter-space-superiority`)
+//! Lifecycle test suite for:
+//! - Heavy fighter point-targeted AoE bomb ability
+//! - Fighter tube refueling, rearming, and HP repair cycles
+//! - Support fighters EWAR application and scaling
+//! - Space superiority light fighters anti-fighter bonus & Evasive Maneuvers
 //! - Industry pause timing and CompleteManyJobs (`feat:lifecycle.industry-pause-and-many`)
 //! - Quitting corporation full cleanup and bloodline NPC assignment (`feat:lifecycle.corp-quit-cleanup`)
 
@@ -2428,10 +2412,6 @@ async fn setup_ship_ball(ctx: &ServerContext, ship_id: i64, type_id: u32, char_i
 
 #[tokio::test]
 async fn test_parity_fighters_heavy_bomb_and_tube_rearm_repair() {
-    // parity: feat:drones.fighter-heavy-long-range-bomb
-    // parity: feat:drones.fighter-refuel-rearm-repair
-    eve_testkit::attest(&["feat:drones.fighter-heavy-long-range-bomb", "feat:drones.fighter-refuel-rearm-repair"]);
-
     let ctx = crate::modules_advanced_tactical::build_ctx();
     let carrier_char_id = 92_100_001i64;
     let carrier_ship_id = 92_100_002i64;
@@ -2511,15 +2491,6 @@ async fn test_parity_fighters_heavy_bomb_and_tube_rearm_repair() {
 
 #[tokio::test]
 async fn test_parity_fighters_support_and_space_superiority() {
-    // parity: feat:drones.fighter-support-cenotaph-scarab
-    // parity: feat:drones.support-fighter-abilities
-    // parity: feat:drones.light-fighter-space-superiority
-    eve_testkit::attest(&[
-        "feat:drones.fighter-support-cenotaph-scarab",
-        "feat:drones.support-fighter-abilities",
-        "feat:drones.light-fighter-space-superiority",
-    ]);
-
     let ctx = crate::modules_advanced_tactical::build_ctx();
     let carrier_char_id = 92_200_001i64;
     let carrier_ship_id = 92_200_002i64;
