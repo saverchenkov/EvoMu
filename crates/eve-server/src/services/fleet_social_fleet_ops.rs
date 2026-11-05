@@ -1351,3 +1351,7 @@ pub(crate) async fn handle_fleet_warp(
         ("destinationZ", PyRep::Real(dest_pos.z)),
     ])))
 }
+
+#[cfg(test)]
+#[path = "fleet_social_fleet_ops_tests.rs"]
+pub(crate) mod fleet_social_fleet_ops_tests;

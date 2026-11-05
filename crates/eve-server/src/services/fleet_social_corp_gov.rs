@@ -1370,3 +1370,7 @@ pub(super) fn handle_corp_gov(
         _ => super::fleet_social_corp_tail_dispatch::handle_corp_gov_tail(ctx, session, service, method, args, corp_id, char_id, now_unix),
     }
 }
+
+#[cfg(test)]
+#[path = "fleet_social_corp_gov_tests.rs"]
+pub(crate) mod fleet_social_corp_gov_tests;

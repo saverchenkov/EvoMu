@@ -1329,3 +1329,7 @@ pub(super) fn handle_corps(
 
 pub(super) use super::fleet_social_corp_tail::handle_insert_vote_case;
 
+#[cfg(test)]
+#[path = "fleet_social_corps_tests.rs"]
+pub(crate) mod fleet_social_corps_tests;
+

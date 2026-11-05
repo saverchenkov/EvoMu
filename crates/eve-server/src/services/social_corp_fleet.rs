@@ -1362,3 +1362,7 @@ pub async fn handle(
     }
 }
 
+#[cfg(test)]
+#[path = "social_corp_fleet_tests.rs"]
+mod social_corp_fleet_tests;
+

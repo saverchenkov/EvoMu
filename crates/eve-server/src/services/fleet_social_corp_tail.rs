@@ -1338,3 +1338,7 @@ pub(super) fn handle_insert_vote_case(
     ])))
 }
 
+#[cfg(test)]
+#[path = "fleet_social_corp_tail_tests.rs"]
+pub(crate) mod fleet_social_corp_tail_tests;
+

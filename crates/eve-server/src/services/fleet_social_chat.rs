@@ -1354,3 +1354,7 @@ pub(super) fn extract_id_list(arg: Option<&PyRep>) -> Vec<i64> {
     }
     ids
 }
+
+#[cfg(test)]
+#[path = "fleet_social_chat_tests.rs"]
+pub(crate) mod fleet_social_chat_tests;
