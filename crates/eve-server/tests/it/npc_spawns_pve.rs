@@ -972,10 +972,9 @@ async fn test_concord_response_and_faction_police_enforcement() {
 
 #[tokio::test]
 async fn test_sde_backed_pirate_strongholds_homefront_and_triglavian_sites() {
-    // parity: feat:pve.pirate-strongholds, feat:pve.triglavian-sites
+    // parity: feat:pve.pirate-strongholds
     eve_testkit::attest(&[
         "feat:pve.pirate-strongholds",
-        "feat:pve.triglavian-sites",
     ]);
 
     let ctx = ServerContext::new();

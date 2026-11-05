@@ -1,6 +1,6 @@
 //! Comprehensive remediation tests for Metaliminal Roaming Storms,
 //! Roaming Weather Map RPC, and Homefront Operation Instance Caching
-//! (`feat:pve.metaliminal-storms`, `feat:pve.homefront-ops`, `rpc:map.GetAllRoamingWeatherSystems`, `rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances`).
+//! (`feat:pve.metaliminal-storms`, `rpc:map.GetAllRoamingWeatherSystems`, `rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances`).
 
 use eve_destiny::DamageVector;
 use eve_machonet::SessionState;
@@ -160,8 +160,8 @@ async fn test_metaliminal_storms_roaming_dogma_effects_and_sites() {
 
 #[tokio::test]
 async fn test_homefront_site_instances_v24_registry_and_completion() {
-    // parity: feat:pve.homefront-ops, rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances
-    eve_testkit::attest(&["feat:pve.homefront-ops", "rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances"]);
+    // parity: rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances
+    eve_testkit::attest(&["rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

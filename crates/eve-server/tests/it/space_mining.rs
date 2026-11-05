@@ -3614,9 +3614,6 @@ async fn test_parity_mining_market_and_mining_goals() {
 
 #[tokio::test]
 async fn test_parity_standings_npc_npc_standings() {
-    // parity: feat:standings.npc-npc-standings
-    eve_testkit::attest(&["feat:standings.npc-npc-standings"]);
-
     let ctx = ServerContext::new();
     let mut unauth = SessionState::new(99_999);
     assert!(
