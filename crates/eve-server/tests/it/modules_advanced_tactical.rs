@@ -469,7 +469,7 @@ async fn bastion_effects_and_wormhole_mjd_interactions() {
 
 #[tokio::test]
 async fn siege_triage_and_disruptive_lance_v24_mechanics() {
-    // parity: feat:modules.siege-module-v24-effects, feat:modules.triage-module-v24-effects, feat:modules.disruptive-lance
+    // parity: feat:modules.siege-module-v24-effects, feat:modules.triage-module-v24-effects
     let ctx = build_ctx();
 
     // 1. Siege Module II (4292) on Sarathiel (87381, Angel Dreadnought keeping 10% speed) & Bane (77281, Lancer Dreadnought)
@@ -573,7 +573,6 @@ async fn siege_triage_and_disruptive_lance_v24_mechanics() {
     eve_testkit::attest(&[
         "feat:modules.siege-module-v24-effects",
         "feat:modules.triage-module-v24-effects",
-        "feat:modules.disruptive-lance",
     ]);
 }
 
@@ -3189,9 +3188,9 @@ async fn test_emergency_warp_stopped_by_warp_scrambler_during_alignment() {
 mod nav_tactical_modules_closure_part4 {
     use super::*;
 
-// End-to-End Integration Tests closing Nosferatu, Grappler, Mutadaptive RAR, and Streaming Nanite Paste (Part 4):
+// End-to-End Integration Tests closing Nosferatu, Grappler, and Mutadaptive RAR (Part 4):
 // `feat:modules.energy-nosferatu-relative-capacitor`, `feat:modules.stasis-grappler-mechanics`,
-// `feat:modules.mutadaptive-remote-armor-repairer`, and `feat:modules.nanite-repair-paste-in-space`.
+// and `feat:modules.mutadaptive-remote-armor-repairer`.
 
 use crate::modules_advanced_tactical::*;
 use eve_db::{ContractRecord, InventoryFlag, IskCents};
@@ -3478,9 +3477,6 @@ async fn test_nosferatu_relative_cap_grappler_mutadaptive_rar_and_blockade_runne
 
 #[tokio::test]
 async fn test_nanite_repair_paste_streaming_and_cargo_refund_capacity() {
-    // parity: feat:modules.nanite-repair-paste-in-space
-    eve_testkit::attest(&["feat:modules.nanite-repair-paste-in-space"]);
-
     let ctx = build_ctx();
     let char_a: i64 = 94_161;
     let ship_a: i64 = 84_161;

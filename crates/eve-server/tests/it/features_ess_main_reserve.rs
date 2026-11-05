@@ -9,8 +9,6 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_b35_04_nanite_repair_paste_in_space() {
-    // parity: feat:modules.nanite-repair-paste-in-space
-    eve_testkit::attest(&["feat:modules.nanite-repair-paste-in-space"]);
     let ctx = build_ctx();
     let sys = ctx.systems.get_or_spawn(NULL_SYS);
     let kw = HashMap::new();

@@ -1,9 +1,6 @@
 //! Integration tests for advanced modules, lances, deployables, and nanite paste:
 //! - `feat:modules.energy-nosferatu-relative-capacitor`
 //! - `feat:modules.mobile-depot-deployment-and-refitting`
-//! - `feat:modules.nanite-repair-paste-in-space`
-//! - `feat:modules.disruptive-lance`
-//! - `feat:modules.lance-doomsday-directional-geometry`
 
 #![forbid(unsafe_code)]
 
@@ -226,9 +223,6 @@ async fn test_modules_mobile_depot_deployment_and_refitting() {
 
 #[tokio::test]
 async fn test_modules_nanite_repair_paste_in_space() {
-    // parity:feat:modules.nanite-repair-paste-in-space
-    eve_testkit::attest(&["feat:modules.nanite-repair-paste-in-space"]);
-
     let ctx = build_ctx();
     let sys = ctx.systems.get_or_spawn(NULL_SYS);
     let kw = HashMap::new();
@@ -301,9 +295,6 @@ async fn test_modules_nanite_repair_paste_in_space() {
 
 #[tokio::test]
 async fn test_modules_disruptive_lance() {
-    // parity:feat:modules.disruptive-lance
-    eve_testkit::attest(&["feat:modules.disruptive-lance"]);
-
     let ctx = build_ctx();
     let _sys = ctx.systems.get_or_spawn(NULL_SYS);
     let kw = HashMap::new();
@@ -362,9 +353,6 @@ async fn test_modules_disruptive_lance() {
 
 #[tokio::test]
 async fn test_modules_lance_doomsday_directional_geometry() {
-    // parity:feat:modules.lance-doomsday-directional-geometry
-    eve_testkit::attest(&["feat:modules.lance-doomsday-directional-geometry"]);
-
     let ctx = build_ctx();
     let sys = ctx.systems.get_or_spawn(NULL_SYS);
     let kw = HashMap::new();

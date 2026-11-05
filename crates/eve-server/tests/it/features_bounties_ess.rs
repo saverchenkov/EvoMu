@@ -157,8 +157,6 @@ pub(crate) fn put_in_fleet(
 
 #[tokio::test]
 async fn test_b35_01_lance_doomsday_directional_geometry() {
-    // parity: feat:modules.lance-doomsday-directional-geometry
-    eve_testkit::attest(&["feat:modules.lance-doomsday-directional-geometry"]);
     let ctx = build_ctx();
     let sys = ctx.systems.get_or_spawn(NULL_SYS);
     let kw = HashMap::new();

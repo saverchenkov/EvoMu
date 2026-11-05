@@ -440,3 +440,4 @@ mod mining_goals_market_wh_sites_live;
 // mod rpc_client_contracts;
 // mod npc_navy_zarzakh_sleepers_haulers_live;
 mod wallet_hypernet_evermarks_store_live;
+mod modules_lances_and_nanite_paste_live;
