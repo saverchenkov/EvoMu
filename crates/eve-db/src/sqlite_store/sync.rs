@@ -1309,3 +1309,5 @@ pub fn replace_sqlite_from_snapshot(
     tx.commit().map_err(|e| e.to_string())?;
     Ok(fp)
 }
+#[cfg(test)] #[path = "sync_unit_tests.rs"] mod sync_unit_tests;
+

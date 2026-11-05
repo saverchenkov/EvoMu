@@ -766,3 +766,5 @@ pub fn load_snapshot_from_sqlite(
     snap.backfill_fw_system_occupations();
     Ok((snap, fp))
 }
+#[cfg(test)] #[path = "load_unit_tests.rs"] mod load_unit_tests;
+

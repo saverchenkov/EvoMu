@@ -1115,3 +1115,5 @@ impl FileDescriptorProto {
         out
     }
 }
+#[cfg(test)] #[path = "quasar_mod_unit_tests.rs"] mod quasar_mod_unit_tests;
+

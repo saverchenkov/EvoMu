@@ -843,3 +843,5 @@ pub fn rollback_d6_corp_crimewatch(
         payload.apply_to_snapshot(snap);
     }
 }
+#[cfg(test)] #[path = "corp_crimewatch_store_unit_tests.rs"] mod corp_crimewatch_store_unit_tests;
+

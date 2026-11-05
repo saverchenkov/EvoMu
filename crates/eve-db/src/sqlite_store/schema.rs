@@ -528,3 +528,5 @@ pub fn save_jwt_secret(conn: &Connection, secret: &[u8; 32]) -> Result<(), Strin
     .map_err(|e| e.to_string())?;
     Ok(())
 }
+#[cfg(test)] #[path = "schema_unit_tests.rs"] mod schema_unit_tests;
+

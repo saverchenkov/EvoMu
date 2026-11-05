@@ -824,3 +824,5 @@ pub fn rollback_dirty_from_sqlite(
     super::industry_market_pve_store::rollback_d6_batch4(conn, snap, fp);
     Ok(())
 }
+#[cfg(test)] #[path = "rollback_unit_tests.rs"] mod rollback_unit_tests;
+
