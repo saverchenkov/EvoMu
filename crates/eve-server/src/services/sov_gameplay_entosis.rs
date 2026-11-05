@@ -1387,3 +1387,6 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
     crate::services::sov_warzone_dynamic::regenerate_unattended_command_nodes(ctx, now_unix).await;
     tick_entosis_captures(ctx, now_unix).await;
 }
+
+#[cfg(test)] #[path = "sov_gameplay_entosis_tests.rs"]
+mod sov_gameplay_entosis_tests;

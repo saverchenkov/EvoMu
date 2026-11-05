@@ -1320,3 +1320,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         }));
     }
 }
+
+#[cfg(test)] #[path = "quasar_corp_domain_tests.rs"]
+mod quasar_corp_domain_tests;
+

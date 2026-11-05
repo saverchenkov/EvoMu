@@ -1330,4 +1330,7 @@ pub async fn handle_anchor_sov_hub_rpc(
     Ok(PyRep::keyval([("structureID", PyRep::Integer(hub_id)), ("state", PyRep::String("Onlining".into()))]))
 }
 
+#[cfg(test)] #[path = "sov_gameplay_tests.rs"]
+mod sov_gameplay_tests;
+
 

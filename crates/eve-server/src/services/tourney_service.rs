@@ -1230,3 +1230,7 @@ pub fn check_tourney_move_restricted(ctx: &ServerContext, solarsystem_id: u32, c
     check_tourney_restriction(ctx, solarsystem_id, char_id, TourneyRestriction::Move)
 }
 
+#[cfg(test)] #[path = "tourney_service_tests.rs"]
+mod tourney_service_tests;
+
+

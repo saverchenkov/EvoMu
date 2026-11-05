@@ -1351,3 +1351,6 @@ pub fn handle_orders_escrow(
         _ => None,
     }
 }
+
+#[cfg(test)] #[path = "market_orders_escrow_tests.rs"]
+mod market_orders_escrow_tests;

@@ -1004,3 +1004,6 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
         }
     }
 }
+
+#[cfg(test)] #[path = "sov_gameplay_skyhook_tests.rs"]
+mod sov_gameplay_skyhook_tests;

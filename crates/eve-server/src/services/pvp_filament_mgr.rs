@@ -1308,3 +1308,7 @@ pub async fn handle(
         _ => None,
     }
 }
+
+#[cfg(test)] #[path = "pvp_filament_mgr_tests.rs"]
+mod pvp_filament_mgr_tests;
+

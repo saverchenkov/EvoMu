@@ -1327,3 +1327,7 @@ pub fn get_map_connections(
         rows,
     ))
 }
+
+#[cfg(test)] #[path = "config_service_tests.rs"]
+mod config_service_tests;
+

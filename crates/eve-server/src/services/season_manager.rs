@@ -1337,3 +1337,7 @@ pub fn handle_season_manager(
         _ => None,
     }
 }
+
+#[cfg(test)] #[path = "season_manager_tests.rs"]
+mod season_manager_tests;
+

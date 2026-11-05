@@ -1057,3 +1057,6 @@ pub fn handle_contract_get_items_in_dockable(
 #[path = "repair_service.rs"]
 pub mod repair_service;
 pub use repair_service::*;
+
+#[cfg(test)] #[path = "sov_services_tests.rs"]
+mod sov_services_tests;

@@ -1376,7 +1376,6 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
     tick_insurgency_campaigns(ctx, now_unix).await;
     crate::services::insurgency_complex_ops::tick_insurgency_complex_ops(ctx, now_unix).await;
 }
-
 /// Removes a destroyed FW complex guard NPC ball from space and marks the complex guard cleared.
 pub async fn on_fw_complex_guard_destroyed(
     systems: &crate::system_actor::SystemRegistry,
@@ -1394,3 +1393,7 @@ pub async fn on_fw_complex_guard_destroyed(
         let _ = systems.get_or_spawn(solar_system_id).remove_ball(npc_id).await;
     }
 }
+
+#[cfg(test)] #[path = "fw_gameplay_tests.rs"]
+mod fw_gameplay_tests;
+

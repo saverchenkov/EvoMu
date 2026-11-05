@@ -1149,3 +1149,6 @@ pub async fn handle(
         }
     }
 }
+
+#[cfg(test)] #[path = "sov_fw_insurgency_tests.rs"]
+mod sov_fw_insurgency_tests;

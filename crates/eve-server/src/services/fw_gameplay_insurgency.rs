@@ -1365,3 +1365,7 @@ async fn cleanup_ended_campaign_sites_and_roamers(
     }
     crate::services::insurgency_complex_ops::cleanup_orphan_insurgency_complex_ops(ctx, &orphan_systems).await;
 }
+
+#[cfg(test)] #[path = "fw_gameplay_insurgency_tests.rs"]
+mod fw_gameplay_insurgency_tests;
+

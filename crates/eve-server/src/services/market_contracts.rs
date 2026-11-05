@@ -1322,3 +1322,6 @@ pub fn handle(
         _ => None,
     }
 }
+
+#[cfg(test)] #[path = "market_contracts_tests.rs"]
+mod market_contracts_tests;

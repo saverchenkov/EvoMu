@@ -1328,3 +1328,6 @@ pub fn handle(
         _ => market_orders_escrow::handle_orders_escrow(ctx, session, service, method, args, _kwargs),
     }
 }
+
+#[cfg(test)] #[path = "market_trading_tests.rs"]
+mod market_trading_tests;

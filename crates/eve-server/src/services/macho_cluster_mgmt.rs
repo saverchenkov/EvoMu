@@ -1384,3 +1384,7 @@ fn handle_macho_net(
         _ => None,
     }
 }
+
+#[cfg(test)] #[path = "macho_cluster_mgmt_tests.rs"]
+mod macho_cluster_mgmt_tests;
+
