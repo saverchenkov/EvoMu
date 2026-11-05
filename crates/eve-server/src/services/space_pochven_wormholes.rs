@@ -316,7 +316,7 @@ pub async fn ensure_pochven_side_guards(
 ) -> Vec<i64> {
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let guard_types: &[u32] = if is_pochven_side {
-        &[48_087, 47_958, 48_245, 47_876]
+        &[48_087, 47_958, 56_337, 56_328, 56_319, 47_876]
     } else {
         &[48_087, 48_092]
     };
@@ -463,7 +463,7 @@ fn register_pochven_guard_npc(
     pos: DVec3,
 ) {
     let fac = if tid == 48_087 || tid == 48_092 { 500_026 } else { 500_024 };
-    let archetype = if fac == 500_026 { "Triglavian" } else { "PochvenHostile" };
+    let archetype = crate::services::combat_crimewatch::combat_npc_ai::derive_npc_archetype(ctx, tid);
     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
         rt.npc_entities.insert(
             gid,

@@ -270,3 +270,4 @@ mod wormhole_special_systems;
 mod wormhole_statics_lifecycle;
 mod zarzakh_fulcrum_mechanics_suite;
 mod zarzakh_gate_lock;
+mod npc_navy_zarzakh_sleepers_haulers_live;

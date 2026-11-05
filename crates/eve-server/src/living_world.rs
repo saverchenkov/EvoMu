@@ -131,19 +131,32 @@ pub fn hauler_type_for_system(sde: &eve_sde::SdeRegistry, solar_system_id: Solar
                 .or_else(|| sde.regions.get(&sys.region_id).and_then(|r| r.faction_id))
         })
         .unwrap_or(500_001);
-    let target_race: u32 = match faction_id {
-        500_001 => 1, // Caldari
-        500_002 => 2, // Minmatar
-        500_003 => 4, // Amarr
-        500_004 => 8, // Gallente
-        _ => 1,
-    };
-    sde.types
-        .values()
-        .filter(|t| t.group_id == 28 && t.published && t.race_id == Some(target_race))
-        .map(|t| t.type_id)
-        .min()
-        .unwrap_or(648)
+    match faction_id {
+        500_002 => 653, // Minmatar (Wreathe)
+        500_003 => 649, // Amarr
+        500_004 => 651, // Gallente
+        _ => 648,       // Caldari (Badger)
+    }
+}
+
+pub fn miner_type_for_system(sde: &eve_sde::SdeRegistry, solar_system_id: SolarSystemId) -> TypeId {
+    let faction_id = sde
+        .solar_systems
+        .get(&solar_system_id)
+        .and_then(|sys| {
+            sys.stations
+                .first()
+                .and_then(|st| st.owner_faction_id.map(|f| f as u32))
+                .or_else(|| sde.constellations.get(&sys.constellation_id).and_then(|c| c.faction_id))
+                .or_else(|| sde.regions.get(&sys.region_id).and_then(|r| r.faction_id))
+        })
+        .unwrap_or(500_001);
+    match faction_id {
+        500_002 => 20163, // Minmatar Miner
+        500_003 => 26750, // Sansha Miner (fallback)
+        500_004 => 21840, // Gallente Miner
+        _ => 21654,       // Nugoeihuvi Miner
+    }
 }
 
 impl LivingWorldDirector {
@@ -1117,17 +1130,7 @@ impl LivingWorldDirector {
             .get(&solar_system_id)
             .and_then(|sys| sys.stations.iter().min_by_key(|st| st.station_id).map(|st| st.station_id))
             .unwrap_or(60_003_760);
-        let miner_type_id = sde
-            .types
-            .values()
-            .filter(|t| {
-                t.category_id == 11
-                    && t.published
-                    && t.name.to_ascii_lowercase().contains("mining frigate")
-            })
-            .min_by_key(|t| t.type_id)
-            .map(|t| t.type_id)
-            .unwrap_or(32880);
+        let miner_type_id = miner_type_for_system(sde, solar_system_id);
         let default_ore_id = sde
             .belt_ores_for_system(solar_system_id)
             .first()

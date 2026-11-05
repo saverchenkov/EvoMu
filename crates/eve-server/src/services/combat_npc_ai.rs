@@ -526,6 +526,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                     "BeltRat" | "Pirate" | "Officer" | "CloneSoldier" | "MorduCommander"
                 );
                 let is_edencom = matches!(npc.archetype.as_str(), "EDENCOM" | "Edencom");
+                let is_zarzakh_gun = npc.archetype == "ZarzakhGateGun";
 
                 // Capsules (pods) are never engaged by Faction Police, Empire Navy, Insurgency Enforcers, or Counter-Insurgency Sentries
                 if (is_police || is_navy || is_insurgency_enforcer || is_ci_sentry) && is_capsule {
@@ -552,6 +553,9 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 let now_unix = ctx.now_unix();
                 let has_criminal_flag = ctx.crimewatch.read().ok().and_then(|cw| {
                     cw.states.get(&cid).map(|st| st.is_criminal(now_unix))
+                }).unwrap_or(false);
+                let has_suspect_flag = ctx.crimewatch.read().ok().and_then(|cw| {
+                    cw.states.get(&cid).map(|st| st.is_suspect(now_unix))
                 }).unwrap_or(false);
                 let is_criminal = is_low_sec_criminal || has_criminal_flag;
                 let pilot_is_pirate = war_faction_id.is_some_and(crate::services::security_mgr::is_pirate_militia_faction);
@@ -581,6 +585,8 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                     s_stage < 3 || !pilot_is_pirate
                 } else if is_ci_sentry {
                     !pilot_is_pirate && !has_criminal_flag
+                } else if is_zarzakh_gun {
+                    !has_criminal_flag && !has_suspect_flag
                 } else if is_navy {
                     standing > -5.0 && !is_criminal
                 } else if is_police {
