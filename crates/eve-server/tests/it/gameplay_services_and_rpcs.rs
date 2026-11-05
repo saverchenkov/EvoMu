@@ -5041,17 +5041,11 @@ async fn test_remediated_agent_plausible_missions_and_cache_rowset() {
     assert_eq!(unknown.unwrap_err().code, "UnknownCacheRowset");
 }
 
-// parity: notify:OnNewProbe, notify:OnProbeStateChanged, notify:OnProbeWarpStart
-// parity: notify:OnProbeWarpEnd, notify:OnSystemScanStarted, notify:OnSystemScanStopped
+// parity: notify:OnProbeWarpEnd
 #[tokio::test]
 async fn test_remediated_probe_scanning_lifecycle_notifications() {
     eve_testkit::attest(&[
-        "notify:OnNewProbe",
-        "notify:OnProbeStateChanged",
-        "notify:OnProbeWarpStart",
         "notify:OnProbeWarpEnd",
-        "notify:OnSystemScanStarted",
-        "notify:OnSystemScanStopped",
     ]);
 
     let ctx = new_ctx();

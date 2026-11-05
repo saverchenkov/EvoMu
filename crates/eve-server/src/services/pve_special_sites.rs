@@ -1206,6 +1206,26 @@ pub async fn handle_pve_special_sites(
     }
 }
 
+/// Builds the V24 `newInterferenceState` keyval shared by `GetLocalInterferenceState` and `OnSolarsystemInterferenceChanged`.
+pub(crate) fn build_interference_state_keyval(sys_id: SolarSystemId, level: f64, band: u8) -> PyRep {
+    let band_label = match band {
+        1 => "Low",
+        2 => "Medium",
+        _ => "High",
+    };
+    let crab_remaining = (((1.0 + 1e-6 - level).max(0.0))
+        / crate::services::pve_crab_beacons::CRAB_INTERFERENCE_DELTA)
+        .floor() as i64;
+    PyRep::keyval([
+        ("solarSystemID", PyRep::Integer(sys_id as i64)),
+        ("interferenceLevel", PyRep::Real(level)),
+        ("interferencePct", PyRep::Real(level * 100.0)),
+        ("interferenceBand", PyRep::Integer(band as i64)),
+        ("bandLabel", PyRep::String(band_label.into())),
+        ("crabActivationsRemaining", PyRep::Integer(crab_remaining)),
+    ])
+}
+
 fn handle_solarsystem_interference_rpc(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -1238,29 +1258,19 @@ fn handle_solarsystem_interference_rpc(
         (entry.interference_level, entry.band, changed)
     });
 
+    let local_state = build_interference_state_keyval(sys_id, level, band);
     if changed_from.is_some() {
         session.push_notification(
             "OnSolarsystemInterferenceChanged",
-            vec![PyRep::Integer(sys_id as i64), PyRep::Real(level), PyRep::Integer(band as i64)],
+            vec![PyRep::Integer(sys_id as i64), local_state.clone()],
         );
         ctx.notify(
             crate::router::NotificationTarget::SolarSystem(sys_id),
             "OnSolarsystemInterferenceChanged",
             "solarsystemid",
-            vec![PyRep::Integer(sys_id as i64), PyRep::Real(level), PyRep::Integer(band as i64)],
+            vec![PyRep::Integer(sys_id as i64), local_state.clone()],
         );
     }
-
-    let band_label = match band { 1 => "Low", 2 => "Medium", _ => "High" };
-    let crab_remaining = (((1.0 + 1e-6 - level).max(0.0)) / crate::services::pve_crab_beacons::CRAB_INTERFERENCE_DELTA).floor() as i64;
-    let local_state = PyRep::keyval([
-        ("solarSystemID", PyRep::Integer(sys_id as i64)),
-        ("interferenceLevel", PyRep::Real(level)),
-        ("interferencePct", PyRep::Real(level * 100.0)),
-        ("interferenceBand", PyRep::Integer(band as i64)),
-        ("bandLabel", PyRep::String(band_label.into())),
-        ("crabActivationsRemaining", PyRep::Integer(crab_remaining)),
-    ]);
     if method == "GetAllInterferenceBands" {
         let entries: Vec<(PyRep, PyRep)> = with_pve_special_reg(ctx, |reg| {
             let mut out: Vec<(SolarSystemId, u8)> = reg

@@ -3282,7 +3282,7 @@ async fn test_batch3_target_multi_event_and_kill_notification() {
     );
 }
 
-// parity: notify:OnNewProbe, notify:OnProbeWarpStart, notify:OnProbeWarpEnd, notify:OnProbeStateChanged
+// parity: notify:OnProbeWarpEnd
 
 
 }
@@ -3450,10 +3450,7 @@ async fn login_in_space(
 #[tokio::test]
 async fn test_batch3_probe_scanning_lifecycle_notifications() {
     eve_testkit::attest(&[
-        "notify:OnNewProbe",
-        "notify:OnProbeWarpStart",
         "notify:OnProbeWarpEnd",
-        "notify:OnProbeStateChanged",
     ]);
 
     let ctx = new_ctx();

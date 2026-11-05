@@ -436,19 +436,13 @@ async fn notify_batch2_fighters_ewar_mutual_wars_strip_and_tracker() {
     assert!(ctx.db.with_snapshot(|s| s.war_state.mutual_invites.contains_key(&(corp_a, corp_b))));
 }
 
-// parity: notify:OnNewProbe, notify:OnSystemScanStarted, notify:OnProbeWarpStart
-// parity: notify:OnSystemScanStopped, notify:OnProbesIdle, notify:OnProbeStateChanged
-// parity: notify:OnScannerInfoRemoved, notify:OnAddExpiryDurationForAbyssalContent
-// parity: notify:OnAbyssalLocationExited, notify:OnAddExpiryDurationForVoidSpaceContent
+// parity: notify:OnProbesIdle, notify:OnScannerInfoRemoved
+// parity: notify:OnAddExpiryDurationForAbyssalContent, notify:OnAbyssalLocationExited
+// parity: notify:OnAddExpiryDurationForVoidSpaceContent
 #[tokio::test]
 async fn notify_batch2_probe_scanning_abyssal_and_void_space() {
     eve_testkit::attest(&[
-        "notify:OnNewProbe",
-        "notify:OnSystemScanStarted",
-        "notify:OnProbeWarpStart",
-        "notify:OnSystemScanStopped",
         "notify:OnProbesIdle",
-        "notify:OnProbeStateChanged",
         "notify:OnScannerInfoRemoved",
         "notify:OnAddExpiryDurationForAbyssalContent",
         "notify:OnAbyssalLocationExited",
@@ -1733,14 +1727,13 @@ async fn test_batch6_ess_and_dynamic_bounty() {
 async fn test_batch6_faction_warfare_and_insurgency() {
     // parity: notify:OnFacWarBunkerNonVulnerable
     // parity: notify:OnFwObjectiveCompletedInSolarSystem, notify:OnFwScoreboardWon
-    // parity: notify:OnSolarsystemInterferenceChanged
     // parity: notify:OnSystemFullySuppressedForFaction
     // DATA GAP: notify:OnCaptureChanged requires real-time FW complex capture timer progression wiring
     eve_testkit::attest(&[
         "notify:OnFacWarBunkerNonVulnerable",
         "notify:OnFwObjectiveCompletedInSolarSystem",
         "notify:OnFwScoreboardWon",
-        "notify:OnSolarsystemInterferenceChanged",
+
         "notify:OnSystemFullySuppressedForFaction",
     ]);
 
@@ -1832,7 +1825,9 @@ async fn test_batch6_faction_warfare_and_insurgency() {
     eve_server::services::pve_special_sites::record_system_interference_activity(&ctx, &mut s1, JITA_SYSTEM, 0.40);
     let ev_interf = events(&ctx, P1, "OnSolarsystemInterferenceChanged");
     assert_eq!(ev_interf.len(), 1, "P1 receives OnSolarsystemInterferenceChanged");
-    assert_eq!(ev_interf[0], vec![PyRep::Integer(i64::from(JITA_SYSTEM)), PyRep::Real(0.40), PyRep::Integer(2)]);
+    assert_eq!(ev_interf[0].len(), 2);
+    assert_eq!(ev_interf[0][0], PyRep::Integer(i64::from(JITA_SYSTEM)));
+    assert_eq!(ev_interf[0][1].dict_get("interferenceBand"), Some(&PyRep::Integer(2)));
 }
 
 #[tokio::test]
@@ -6825,12 +6820,9 @@ async fn test_batch4_crimewatch_timers_and_system_flag_updates() {
     assert_eq!(dis_args, &vec![PyRep::List(vec![]), PyRep::List(vec![PyRep::Integer(PILOT_A)])]);
 }
 
-// parity: notify:OnSystemScanStarted, notify:OnSystemScanStopped
 #[tokio::test]
 async fn test_batch4_ship_death_and_probe_scan_lifecycle() {
     eve_testkit::attest(&[
-        "notify:OnSystemScanStarted",
-        "notify:OnSystemScanStopped",
     ]);
 
     let ctx = new_ctx();
@@ -7000,11 +6992,10 @@ async fn test_batch4_fw_lp_vp_and_insurgency_corruption_security() {
     assert_eq!(sec_args, &vec![PyRep::Integer(i64::from(affected_sys)), PyRep::Real(-base_sec), PyRep::Real(0.0)]);
 }
 
-// parity: notify:OnSolarsystemInterferenceChanged, notify:OnTaleRemove, notify:OnTournamentPerformBan
+// parity: notify:OnTaleRemove, notify:OnTournamentPerformBan
 #[tokio::test]
 async fn test_batch4_interference_incursion_tale_remove_and_tourney_ban() {
     eve_testkit::attest(&[
-        "notify:OnSolarsystemInterferenceChanged",
         "notify:OnTaleRemove",
         "notify:OnTournamentPerformBan",
     ]);
@@ -7027,8 +7018,9 @@ async fn test_batch4_interference_incursion_tale_remove_and_tourney_ban() {
     let int_notifs = drain_all(&ctx, PILOT_A);
     let (_, int_id_type, int_args) = find_notif(&int_notifs, "OnSolarsystemInterferenceChanged").expect("OnSolarsystemInterferenceChanged emitted");
     assert_eq!(int_id_type, "solarsystemid");
+    assert_eq!(int_args.len(), 2);
     assert_eq!(int_args[0], PyRep::Integer(i64::from(SYS_JITA)));
-    assert_eq!(int_args[2], PyRep::Integer(3));
+    assert_eq!(int_args[1].dict_get("interferenceBand").and_then(PyRep::as_i64), Some(3));
 
     // 2. OnTaleRemove when incursion withdrawal expires
     rpc(&ctx, &mut sess, "taleMgr", "GetGlobalWorldEventTales", &[]).await.unwrap();

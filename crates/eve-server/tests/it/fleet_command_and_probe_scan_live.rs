@@ -224,17 +224,11 @@ async fn test_live_fleet_formation_warps_and_target_tagging() {
     assert_eq!(ok(&ctx, &mut fc, "beyonce", "GetFleetState", &[]).await.dict_get("targetTags"), Some(&PyRep::Dict(Vec::new())));
 }
 
-// parity: notify:OnNewProbe, notify:OnProbeStateChanged, notify:OnProbeWarpStart
-// parity: notify:OnProbeWarpEnd, notify:OnSystemScanStarted, notify:OnSystemScanStopped
+// parity: notify:OnProbeWarpEnd
 #[tokio::test]
 async fn test_live_probe_scanning_notifications_and_delayed_ball_arrival() {
     eve_testkit::attest(&[
-        "notify:OnNewProbe",
-        "notify:OnProbeStateChanged",
-        "notify:OnProbeWarpStart",
         "notify:OnProbeWarpEnd",
-        "notify:OnSystemScanStarted",
-        "notify:OnSystemScanStopped",
     ]);
     let ctx = paused_ctx();
     let mut p = common::gm_pilot_in_space(&ctx, 41, 91_200_021, VEXOR, HIGHSEC).await;

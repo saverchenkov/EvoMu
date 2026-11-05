@@ -1170,16 +1170,15 @@ pub fn get_system_interference_level_decayed(
     })
 }
 
-pub fn record_system_interference_activity_with_char(
+fn apply_interference_activity(
     ctx: &ServerContext,
-    char_id: i64,
     solar_system_id: SolarSystemId,
     activity_delta: f64,
-) {
+) -> Option<(f64, u8)> {
     ensure_special_sites_initialized(ctx);
     let delta = activity_delta.clamp(0.0, 1.0);
     let now_sec = ctx.now_unix();
-    let (level, old_band, new_band) = with_pve_special_reg(ctx, |reg| {
+    let (prev_level, level, old_band, new_band) = with_pve_special_reg(ctx, |reg| {
         let entry = reg
             .interference_by_system
             .entry(solar_system_id)
@@ -1189,6 +1188,7 @@ pub fn record_system_interference_activity_with_char(
                 band: 1,
                 last_updated_sec: now_sec,
             });
+        let initial_level = entry.interference_level;
         if entry.last_updated_sec > 0 && now_sec > entry.last_updated_sec {
             let elapsed = now_sec - entry.last_updated_sec;
             let decay = (elapsed as f64) / INTERFERENCE_DECAY_WINDOW_SECS;
@@ -1206,28 +1206,32 @@ pub fn record_system_interference_activity_with_char(
             1
         };
         entry.last_updated_sec = now_sec;
-        (entry.interference_level, prev, entry.band)
+        (initial_level, entry.interference_level, prev, entry.band)
     });
-    if new_band != old_band {
-        ctx.notify(
-            NotificationTarget::Character(char_id),
-            "OnSolarsystemInterferenceChanged",
-            "charid",
-            vec![
-                PyRep::Integer(solar_system_id as i64),
-                PyRep::Real(level),
-                PyRep::Integer(new_band as i64),
-            ],
+    if (level - prev_level).abs() > 1e-9 || new_band != old_band {
+        Some((level, new_band))
+    } else {
+        None
+    }
+}
+
+pub fn record_system_interference_activity_with_char(
+    ctx: &ServerContext,
+    _char_id: i64,
+    solar_system_id: SolarSystemId,
+    activity_delta: f64,
+) {
+    if let Some((level, new_band)) = apply_interference_activity(ctx, solar_system_id, activity_delta) {
+        let local_state = crate::services::pve_special_sites::build_interference_state_keyval(
+            solar_system_id,
+            level,
+            new_band,
         );
         ctx.notify(
             NotificationTarget::SolarSystem(solar_system_id),
             "OnSolarsystemInterferenceChanged",
             "solarsystemid",
-            vec![
-                PyRep::Integer(solar_system_id as i64),
-                PyRep::Real(level),
-                PyRep::Integer(new_band as i64),
-            ],
+            vec![PyRep::Integer(solar_system_id as i64), local_state],
         );
     }
 }
@@ -1238,56 +1242,21 @@ pub fn record_system_interference_activity(
     solar_system_id: SolarSystemId,
     activity_delta: f64,
 ) {
-    ensure_special_sites_initialized(ctx);
-    let delta = activity_delta.clamp(0.0, 1.0);
-    let now_sec = ctx.now_unix();
-    let (level, old_band, new_band) = with_pve_special_reg(ctx, |reg| {
-        let entry = reg
-            .interference_by_system
-            .entry(solar_system_id)
-            .or_insert(SystemInterferenceRecord {
-                solar_system_id,
-                interference_level: 0.0,
-                band: 1,
-                last_updated_sec: now_sec,
-            });
-        if entry.last_updated_sec > 0 && now_sec > entry.last_updated_sec {
-            let elapsed = now_sec - entry.last_updated_sec;
-            let decay = (elapsed as f64) / INTERFERENCE_DECAY_WINDOW_SECS;
-            entry.interference_level = (entry.interference_level - decay).max(0.0);
-        }
-        let prev = entry.band;
-        if delta > 0.0 {
-            entry.interference_level = (entry.interference_level + delta).clamp(0.0, 1.0);
-        }
-        entry.band = if entry.interference_level >= 0.70 {
-            3
-        } else if entry.interference_level >= 0.35 {
-            2
-        } else {
-            1
-        };
-        entry.last_updated_sec = now_sec;
-        (entry.interference_level, prev, entry.band)
-    });
-    if new_band != old_band {
+    if let Some((level, new_band)) = apply_interference_activity(ctx, solar_system_id, activity_delta) {
+        let local_state = crate::services::pve_special_sites::build_interference_state_keyval(
+            solar_system_id,
+            level,
+            new_band,
+        );
         session.push_notification(
             "OnSolarsystemInterferenceChanged",
-            vec![
-                PyRep::Integer(solar_system_id as i64),
-                PyRep::Real(level),
-                PyRep::Integer(new_band as i64),
-            ],
+            vec![PyRep::Integer(solar_system_id as i64), local_state.clone()],
         );
         ctx.notify(
             NotificationTarget::SolarSystem(solar_system_id),
             "OnSolarsystemInterferenceChanged",
             "solarsystemid",
-            vec![
-                PyRep::Integer(solar_system_id as i64),
-                PyRep::Real(level),
-                PyRep::Integer(new_band as i64),
-            ],
+            vec![PyRep::Integer(solar_system_id as i64), local_state],
         );
     }
 }
