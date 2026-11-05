@@ -1094,12 +1094,10 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
 
 #[tokio::test]
 async fn test_npc_navy_police_hauler_convoy_and_serverops_downtime() {
-    // parity: feat:npc.navy-npc, feat:npc.npc-hauler, feat:serverops.downtime, feat:serverops.daily-jobs
+    // parity: feat:npc.navy-npc, feat:npc.npc-hauler
     eve_testkit::attest(&[
         "feat:npc.navy-npc",
         "feat:npc.npc-hauler",
-        "feat:serverops.downtime",
-        "feat:serverops.daily-jobs",
     ]);
 
     let ctx = ServerContext::new();

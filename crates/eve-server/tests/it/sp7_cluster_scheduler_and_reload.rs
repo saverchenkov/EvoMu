@@ -570,12 +570,10 @@ async fn test_sp7_restart_reloads_structures_wrecks_jetcans_mwd_bubbles_and_dron
 
 #[tokio::test]
 async fn test_sp7_downtime_cleans_npc_wrecks_and_respawns_accepted_mission_waves() {
-    // parity: feat:lifecycle.wreck-downtime, feat:lifecycle.mission-downtime-respawn, feat:serverops.downtime, feat:serverops.daily-jobs
+    // parity: feat:lifecycle.wreck-downtime, feat:lifecycle.mission-downtime-respawn
     eve_testkit::attest(&[
         "feat:lifecycle.wreck-downtime",
         "feat:lifecycle.mission-downtime-respawn",
-        "feat:serverops.downtime",
-        "feat:serverops.daily-jobs",
     ]);
 
     let ctx = ServerContext::new();

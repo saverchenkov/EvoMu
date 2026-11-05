@@ -1067,17 +1067,9 @@ async fn test_batch5_station_damage_crimewatch_shutdown_scanners() {
     // DATA GAP: notify:OnCharNowInStation requires production dock RPC guest-list wiring
     // DATA GAP: notify:OnCharNoLongerInStation requires production undock RPC guest-list wiring
     // DATA GAP: notify:OnDamageStateChange requires bubble-scoped combat damage wiring
-    // parity: notify:OnWeaponsTimerUpdate, notify:OnPvpTimerUpdate, notify:OnNpcTimerUpdate
-    // parity: notify:OnDisapprovalTimerUpdate
     // DATA GAP: notify:OnCargoScanComplete requires ship scanner module cycle wiring
     // DATA GAP: notify:OnShipScanCompleted requires ship scanner module cycle wiring
     // DATA GAP: notify:OnOreMined requires mining cycle wiring (OF-28)
-    eve_testkit::attest(&[
-        "notify:OnWeaponsTimerUpdate",
-        "notify:OnPvpTimerUpdate",
-        "notify:OnNpcTimerUpdate",
-        "notify:OnDisapprovalTimerUpdate",
-    ]);
 
     let ctx = new_ctx();
     let mut s1 = pilot(&ctx, 811, "demo", "demo-secret", P1).await;
@@ -4430,14 +4422,10 @@ async fn notify_b30_target_multi_event_and_fw_warzone() {
     assert!(kv_get(&vp_ev.args[1], "victoryPoints").and_then(PyRep::as_i64).unwrap_or(0) >= 20);
 }
 
-// parity: notify:OnWeaponsTimerUpdate, notify:OnPvpTimerUpdate, notify:OnCriminalTimerUpdate
 // parity: notify:OnSystemCriminalFlagUpdates, notify:OnShipDeath
 #[tokio::test]
 async fn notify_b30_crimewatch_timers_and_ship_death() {
     eve_testkit::attest(&[
-        "notify:OnWeaponsTimerUpdate",
-        "notify:OnPvpTimerUpdate",
-        "notify:OnCriminalTimerUpdate",
         "notify:OnSystemCriminalFlagUpdates",
         "notify:OnShipDeath",
     ]);
@@ -5596,7 +5584,7 @@ pub(crate) mod parity_notify_batch_part2 {
     #[allow(unused_imports)]
     use super::*;
 
-// End-to-end integration tests for `notify:OnCriminalTimerUpdate` and `notify:OnCaptureChanged`.
+// End-to-end integration tests for `notify:OnCaptureChanged`.
 
 
 use super::parity_notify_batch::{
@@ -5611,9 +5599,8 @@ use eve_server::sp6_lifecycle::tick_background_cluster;
 
 #[tokio::test]
 async fn test_parity_notify_criminal_timer_and_fw_capture_changed() {
-    // parity: notify:OnCriminalTimerUpdate, notify:OnCaptureChanged
+    // parity: notify:OnCaptureChanged
     eve_testkit::attest(&[
-        "notify:OnCriminalTimerUpdate",
         "notify:OnCaptureChanged",
     ]);
 
@@ -6054,7 +6041,6 @@ pub(crate) mod parity_notify_batch2 {
 
 // End-to-end integration tests for the 7 remediated `notify:*` parity rows:
 // - `notify:DoSimClockRebase`
-// - `notify:OnDisapprovalTimerUpdate`
 // - `notify:OnDungeonInstanceAdded`
 // - `notify:OnDungeonInstanceRemoved`
 // - `notify:OnFacWarBunkerVulnerable`
@@ -6286,10 +6272,9 @@ async fn destroy_npc_ball(
 
 #[tokio::test]
 async fn test_batch2_sim_clock_rebase_disapproval_and_cache_invalidation() {
-    // parity: notify:DoSimClockRebase, notify:OnDisapprovalTimerUpdate, notify:OnInvalidateCacheForLocations
+    // parity: notify:DoSimClockRebase, notify:OnInvalidateCacheForLocations
     eve_testkit::attest(&[
         "notify:DoSimClockRebase",
-        "notify:OnDisapprovalTimerUpdate",
         "notify:OnInvalidateCacheForLocations",
     ]);
 
@@ -6770,12 +6755,10 @@ fn make_item(item_id: i64, type_id: u32, owner_id: i64, location_id: i64, flag: 
     }
 }
 
-// parity: notify:OnWeaponsTimerUpdate, notify:OnPvpTimerUpdate, notify:OnSystemCriminalFlagUpdates, notify:OnSystemDisapprovalFlagUpdates
+// parity: notify:OnSystemCriminalFlagUpdates, notify:OnSystemDisapprovalFlagUpdates
 #[tokio::test]
 async fn test_batch4_crimewatch_timers_and_system_flag_updates() {
     eve_testkit::attest(&[
-        "notify:OnWeaponsTimerUpdate",
-        "notify:OnPvpTimerUpdate",
         "notify:OnSystemCriminalFlagUpdates",
         "notify:OnSystemDisapprovalFlagUpdates",
     ]);

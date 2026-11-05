@@ -6811,7 +6811,6 @@ pub(crate) mod structures_anchoring_and_evermarks {
 //  - `feat:wallet.nes-store`, `feat:wallet.evermarks`, `feat:wallet.hypernet-relay`
 //  - `feat:structures.anchor-restrictions`, `feat:structures.profiles`,
 //    `feat:structures.defense-settings`, `feat:structures.structure-directory`
-//  - `feat:serverops.daily-jobs`
 
 use crate::common;
 use eve_db::{
@@ -7398,11 +7397,6 @@ async fn test_cosmetics_skinr_designer_and_market_closure() {
 
 #[tokio::test]
 async fn test_serverops_daily_jobs_and_time_dilation_closure() {
-    // parity: feat:serverops.daily-jobs
-    eve_testkit::attest(&[
-        "feat:serverops.daily-jobs",
-    ]);
-
     let ctx = ServerContext::new();
     let t0 = 1_800_000_000_u64;
     ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(t0)));

@@ -5108,12 +5108,10 @@ async fn test_remediated_probe_scanning_lifecycle_notifications() {
     );
 }
 
-// parity: notify:OnNpcTimerUpdate, notify:OnDisapprovalTimerUpdate, notify:OnSystemDisapprovalFlagUpdates
+// parity: notify:OnSystemDisapprovalFlagUpdates
 #[tokio::test]
 async fn test_remediated_campaign_enrollment_chat_bans_and_crimewatch_timers() {
     eve_testkit::attest(&[
-        "notify:OnNpcTimerUpdate",
-        "notify:OnDisapprovalTimerUpdate",
         "notify:OnSystemDisapprovalFlagUpdates",
     ]);
 

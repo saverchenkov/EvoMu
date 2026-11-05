@@ -283,8 +283,6 @@ async fn test_worker_node_load_balancing_and_reinforced_fleet_fight_isolation() 
 
 #[tokio::test]
 async fn test_downtime_countdown_warnings_session_disconnect_login_rejection_and_restart() {
-    // parity: feat:serverops.downtime
-    eve_testkit::attest(&["feat:serverops.downtime"]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
@@ -395,8 +393,6 @@ async fn test_downtime_countdown_warnings_session_disconnect_login_rejection_and
 
 #[tokio::test]
 async fn test_daily_maintenance_jobs_mutate_belts_ice_market_history_sci_sov_missions_ess_and_orders() {
-    // parity: feat:serverops.daily-jobs
-    eve_testkit::attest(&["feat:serverops.daily-jobs"]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 

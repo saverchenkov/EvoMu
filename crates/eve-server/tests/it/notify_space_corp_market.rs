@@ -2761,13 +2761,11 @@ async fn login_in_space(
     sess
 }
 
-// parity: notify:DoSimClockRebase, notify:OnDisapprovalTimerUpdate, notify:OnNpcTimerUpdate
+// parity: notify:DoSimClockRebase
 #[tokio::test]
 async fn test_batch3_sim_clock_rebase_and_crimewatch_timers() {
     eve_testkit::attest(&[
         "notify:DoSimClockRebase",
-        "notify:OnDisapprovalTimerUpdate",
-        "notify:OnNpcTimerUpdate",
     ]);
 
     let ctx = new_ctx();
@@ -3449,7 +3447,6 @@ async fn login_in_space(
     sess
 }
 
-// parity: notify:DoSimClockRebase, notify:OnDisapprovalTimerUpdate, notify:OnNpcTimerUpdate
 #[tokio::test]
 async fn test_batch3_probe_scanning_lifecycle_notifications() {
     eve_testkit::attest(&[

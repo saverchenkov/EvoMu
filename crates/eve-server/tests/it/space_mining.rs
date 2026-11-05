@@ -3730,9 +3730,6 @@ async fn test_parity_ui_lookup_all_methods() {
 
 #[tokio::test]
 async fn test_parity_serverops_daily_downtime() {
-    // parity: feat:serverops.downtime
-    eve_testkit::attest(&["feat:serverops.downtime"]);
-
     let ctx = ServerContext::new();
     let base_1055 = 1_767_264_900u64;
     ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(
