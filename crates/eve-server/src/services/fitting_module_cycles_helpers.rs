@@ -1374,3 +1374,7 @@ pub(crate) async fn try_handle_mercden_remote_shield_repair(
         ("denEnabled", PyRep::Bool(enabled)),
     ])))
 }
+
+#[cfg(test)]
+#[path = "fitting_module_cycles_helpers_tests.rs"]
+mod fitting_module_cycles_helpers_tests;

@@ -244,3 +244,8 @@ pub fn ship_configuration(
     fitting_containers_ships::save_container_ship_state(ctx, &st);
     Ok(rep)
 }
+
+#[cfg(test)]
+#[path = "fitting_ship_forcefield_tests.rs"]
+mod fitting_ship_forcefield_tests;
+

@@ -1325,3 +1325,7 @@ pub(super) async fn jump_to_fleet_beacon(
         beyonce_bound_id: bound,
     })
 }
+
+#[cfg(test)]
+#[path = "fitting_cyno_portal_tests.rs"]
+mod fitting_cyno_portal_tests;

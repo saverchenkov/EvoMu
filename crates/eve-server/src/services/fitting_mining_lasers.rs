@@ -841,3 +841,8 @@ pub(crate) fn compute_nanite_repair_params(
     let duration_s = (cur_dmg / repair_rate_hp_per_s).max(1.0);
     (paste_needed, repair_rate_hp_per_s, duration_s)
 }
+
+#[cfg(test)]
+#[path = "fitting_mining_lasers_tests.rs"]
+mod fitting_mining_lasers_tests;
+

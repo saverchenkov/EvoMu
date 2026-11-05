@@ -982,3 +982,8 @@ pub fn dna_to_fitting(dna: &str) -> Result<(TypeId, Vec<(TypeId, i32)>), String>
     Ok((ship_type_id, items))
 }
 
+#[cfg(test)]
+#[path = "fitting_saved_apply_tests.rs"]
+mod fitting_saved_apply_tests;
+
+

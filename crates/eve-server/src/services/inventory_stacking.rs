@@ -1366,3 +1366,7 @@ pub async fn despawn_empty_jetcan_if_needed(
     }
     true
 }
+
+#[cfg(test)]
+#[path = "inventory_stacking_tests.rs"]
+mod inventory_stacking_tests;

@@ -703,3 +703,8 @@ pub(crate) fn validate_multiadd_structure_fuel_transfers(
     }
     Ok(src_is_struct_fuel)
 }
+
+#[cfg(test)]
+#[path = "inventory_bound_tests.rs"]
+mod inventory_bound_tests;
+

@@ -1095,3 +1095,8 @@ pub(crate) async fn handle_dogma_im(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "fitting_dogma_im_tests.rs"]
+mod fitting_dogma_im_tests;
+

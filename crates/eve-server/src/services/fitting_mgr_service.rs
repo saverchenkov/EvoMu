@@ -868,3 +868,8 @@ async fn handle_delete_fitting(
         Some(Ok(PyRep::Bool(deleted)))
     }
 }
+
+#[cfg(test)]
+#[path = "fitting_mgr_service_tests.rs"]
+mod fitting_mgr_service_tests;
+

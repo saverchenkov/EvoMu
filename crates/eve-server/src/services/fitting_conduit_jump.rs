@@ -993,3 +993,7 @@ pub(crate) async fn handle_cyno_portal(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "fitting_conduit_jump_tests.rs"]
+mod fitting_conduit_jump_tests;

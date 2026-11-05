@@ -1355,3 +1355,8 @@ pub async fn handle(
 }
 
 pub use super::fitting_saved_apply::{dna_to_fitting, fitting_to_dna, saved_fitting_to_dna};
+
+#[cfg(test)]
+#[path = "inventory_fitting_tests.rs"]
+mod inventory_fitting_tests;
+

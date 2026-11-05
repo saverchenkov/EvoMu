@@ -1361,3 +1361,8 @@ pub const CLIENT_DERIVED_DOGMA_SCATTER_EVENTS: &[&str] = &[
     "OnModuleUnfitted",
     "OnTargets",
 ];
+
+#[cfg(test)]
+#[path = "fitting_saved_multifit_tests.rs"]
+mod fitting_saved_multifit_tests;
+

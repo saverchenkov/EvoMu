@@ -1375,3 +1375,7 @@ pub(crate) async fn ship_scoop_and_store(
 }
 
 pub use super::fitting_ship_forcefield::{can_enter_forcefield, check_pos_forcefield_coverage};
+
+#[cfg(test)]
+#[path = "fitting_ship_bays_tests.rs"]
+mod fitting_ship_bays_tests;

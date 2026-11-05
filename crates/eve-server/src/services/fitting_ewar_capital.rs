@@ -1000,3 +1000,8 @@ pub(crate) fn emit_committed_ewar_and_system_wide_notifications(
     }
 }
 
+#[cfg(test)]
+#[path = "fitting_ewar_capital_tests.rs"]
+mod fitting_ewar_capital_tests;
+
+

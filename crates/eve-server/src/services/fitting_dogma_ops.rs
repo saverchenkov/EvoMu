@@ -1007,3 +1007,8 @@ fn check_dogma_item_access(
         })
     }
 }
+
+#[cfg(test)]
+#[path = "fitting_dogma_ops_tests.rs"]
+mod fitting_dogma_ops_tests;
+

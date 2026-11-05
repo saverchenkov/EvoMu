@@ -1127,3 +1127,7 @@ pub fn apply_overheat_rack_and_damage_on_cycle(
     }
 }
 
+#[cfg(test)]
+#[path = "tactical_module_mechanics_tests.rs"]
+mod tactical_module_mechanics_tests;
+

@@ -252,3 +252,8 @@ pub fn check_nanite_repair_overheat_lockout(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "fitting_cycles_overheat_tests.rs"]
+mod fitting_cycles_overheat_tests;
+

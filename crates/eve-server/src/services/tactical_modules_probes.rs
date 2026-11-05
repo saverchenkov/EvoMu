@@ -243,3 +243,8 @@ pub fn step_wubble_probes_and_debuffs(
         let _ = ballpark.remove_ball(pid);
     }
 }
+
+#[cfg(test)]
+#[path = "tactical_modules_probes_tests.rs"]
+mod tactical_modules_probes_tests;
+

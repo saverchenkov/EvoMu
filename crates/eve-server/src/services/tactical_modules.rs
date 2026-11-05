@@ -1381,3 +1381,8 @@ pub async fn activate_command_burst(
 pub fn apply_transient_item_attrs(ctx: &ServerContext, item_id: i64, merged_attrs: &mut HashMap<u16, f64>) {
     ctx.db.with_snapshot(|snap| if let Some(tr_attrs) = snap.transient_item_attributes.get(&item_id) { merged_attrs.extend(tr_attrs.iter().map(|(&k, &v)| (k, v))); });
 }
+
+#[cfg(test)]
+#[path = "tactical_modules_tests.rs"]
+mod tactical_modules_tests;
+

@@ -1333,3 +1333,8 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "fitting_ships_mastery_tests.rs"]
+mod fitting_ships_mastery_tests;
+

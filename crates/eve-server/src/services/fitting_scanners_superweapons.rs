@@ -1384,3 +1384,8 @@ fn handle_ship_clone_installation(
             // GetShipCloneState
             Some(crate::services::jump_clone_names::get_ship_clone_state(ctx, session, args))
         }
+
+#[cfg(test)]
+#[path = "fitting_scanners_superweapons_tests.rs"]
+mod fitting_scanners_superweapons_tests;
+
