@@ -127,10 +127,8 @@ async fn deposit_evermarks_quasar(
 
 #[tokio::test]
 async fn test_wallet_hypernet_relay_npc_station_enforcement_and_random_tickets_live() {
-    // parity: feat:wallet.hypernet-relay, feat:wallet.hypernet-hypercore-sizing-expiry, rpc:raffleProxy.CreateRaffle, rpc:raffleProxy.BuyRandomTickets, rpc:raffleProxy.GetActiveHistoricPrices
+    // parity: rpc:raffleProxy.CreateRaffle, rpc:raffleProxy.BuyRandomTickets, rpc:raffleProxy.GetActiveHistoricPrices
     eve_testkit::attest(&[
-        "feat:wallet.hypernet-relay",
-        "feat:wallet.hypernet-hypercore-sizing-expiry",
         "rpc:raffleProxy.CreateRaffle",
         "rpc:raffleProxy.BuyRandomTickets",
         "rpc:raffleProxy.GetActiveHistoricPrices",
@@ -343,9 +341,8 @@ async fn test_wallet_hypernet_relay_npc_station_enforcement_and_random_tickets_l
 
 #[tokio::test]
 async fn test_wallet_evermarks_paragon_accrual_and_emblem_store_live() {
-    // parity: feat:wallet.evermarks, rpc:LPStoreMgr.GetAvailableOffersFromCorp, rpc:LPStoreMgr.TakeOfferForCharacter
+    // parity: rpc:LPStoreMgr.GetAvailableOffersFromCorp, rpc:LPStoreMgr.TakeOfferForCharacter
     eve_testkit::attest(&[
-        "feat:wallet.evermarks",
         "rpc:LPStoreMgr.GetAvailableOffersFromCorp",
         "rpc:LPStoreMgr.TakeOfferForCharacter",
     ]);
@@ -521,11 +518,57 @@ async fn test_wallet_evermarks_paragon_accrual_and_emblem_store_live() {
     );
 }
 
+fn decode_nested_id(bytes: &[u8]) -> u32 {
+    eve_proto::quasar::WireMessage::decode(bytes)
+        .ok()
+        .and_then(|wm| wm.fields.into_iter().find(|f| f.field_number == 1))
+        .and_then(|f| f.value.as_bytes().map(|b| b.to_vec()))
+        .and_then(|sub| eve_proto::quasar::WireMessage::decode(&sub).ok())
+        .and_then(|swm| swm.fields.into_iter().find(|f| f.field_number == 1))
+        .and_then(|f| f.value.as_varint())
+        .unwrap_or(0) as u32
+}
+
+pub(crate) async fn seed_nes_store_via_quasar_admin(ctx: &ServerContext, gm: &mut SessionState) {
+    let tag_b = |n: u32, inner: Vec<u8>| {
+        let mut out = Vec::new();
+        encode_bytes_field(n, &inner, &mut out);
+        out
+    };
+    let tag_v = |n: u32, v: u64| {
+        let mut out = Vec::new();
+        encode_varint_field(n, v, &mut out);
+        out
+    };
+    let tag_s = |n: u32, s: &str| {
+        let mut out = Vec::new();
+        eve_proto::quasar::encode_string_field(n, s, &mut out);
+        out
+    };
+    let mut cat_attr = tag_s(1, "New Eden Ships");
+    encode_varint_field(6, 2, &mut cat_attr);
+    let cat_rsp = crate::quasar_progression_complete::quasar_rpc(ctx, gm, "eve.store.admin.api.CreateCategoryRequest", tag_b(1, cat_attr)).await;
+    assert_eq!(cat_rsp.status_code, STATUS_OK);
+    let cat_id = decode_nested_id(&cat_rsp.payload.unwrap().value);
+    let mut prod_attr = tag_s(1, "Paragon Rifter");
+    prod_attr.extend(tag_b(2, tag_b(1, tag_v(1, u64::from(RIFTER_TYPE_ID)))));
+    let mut prod_req = tag_v(1, 2);
+    prod_req.extend(tag_b(2, prod_attr));
+    let prod_rsp = crate::quasar_progression_complete::quasar_rpc(ctx, gm, "eve.store.admin.api.CreateProductRequest", prod_req).await;
+    assert_eq!(prod_rsp.status_code, STATUS_OK);
+    let prod_id = decode_nested_id(&prod_rsp.payload.unwrap().value);
+    let mut off_attr = tag_s(1, "Paragon Rifter Bundle");
+    off_attr.extend(tag_b(5, tag_v(1, 50_000)));
+    off_attr.extend(tag_b(17, tag_v(1, u64::from(cat_id))));
+    off_attr.extend(tag_b(18, tag_b(1, tag_v(1, u64::from(prod_id)))));
+    let off_rsp = crate::quasar_progression_complete::quasar_rpc(ctx, gm, "eve.store.admin.api.CreateOfferRequest", tag_b(1, off_attr)).await;
+    assert_eq!(off_rsp.status_code, STATUS_OK);
+}
+
 #[tokio::test]
 async fn test_wallet_nes_store_catalog_and_purchases_live() {
-    // parity: feat:wallet.nes-store, rpc:storeManager.get_offers, rpc:storeManager.buy_offer, rpc:storeManager.can_purchase_offer
+    // parity: rpc:storeManager.get_offers, rpc:storeManager.buy_offer, rpc:storeManager.can_purchase_offer
     eve_testkit::attest(&[
-        "feat:wallet.nes-store",
         "rpc:storeManager.get_offers",
         "rpc:storeManager.buy_offer",
         "rpc:storeManager.can_purchase_offer",
@@ -533,9 +576,9 @@ async fn test_wallet_nes_store_catalog_and_purchases_live() {
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
-    common::seed_test_nes_store_catalog(&ctx);
 
     let mut s1 = login_select(&ctx, 1504, "demo", "demo-secret", PILOT_1, true).await;
+    seed_nes_store_via_quasar_admin(&ctx, &mut s1).await;
 
     // 1. Query store categories, products, and offers via MachoNet storeManager
     let cats_rep = rpc(&ctx, &mut s1, "storeManager", "get_categories", &[])
@@ -610,70 +653,26 @@ async fn test_wallet_nes_store_catalog_and_purchases_live() {
 
     // 4. Provision PLEX into pilot hangar and deposit to PLEX Vault via invbroker
     let plex_kv = slash(&ctx, &mut s1, &format!("/giveitem {PLEX_TYPE_ID} 500")).await;
-    let plex_item_id = plex_kv
-        .dict_get("itemID")
-        .and_then(|v| v.as_i64())
-        .expect("plex itemID");
-
-    rpc(
-        &ctx,
-        &mut s1,
-        "invbroker",
-        "DepositPlexToVault",
-        &[
-            PyRep::Integer(JITA_STATION),
-            PyRep::Integer(plex_item_id),
-            PyRep::Integer(500),
-        ],
-    )
-    .await
-    .expect("DepositPlexToVault");
+    let plex_item_id = plex_kv.dict_get("itemID").and_then(|v| v.as_i64()).expect("plex itemID");
+    rpc(&ctx, &mut s1, "invbroker", "DepositPlexToVault", &[PyRep::Integer(JITA_STATION), PyRep::Integer(plex_item_id), PyRep::Integer(500)])
+        .await
+        .expect("DepositPlexToVault");
 
     // 5. can_purchase_offer now returns true (pilot now has 1000 PLEX in vault)
-    let can_buy_after = rpc(
-        &ctx,
-        &mut s1,
-        "storeManager",
-        "can_purchase_offer",
-        &[
-            PyRep::Integer(offer_id),
-            PyRep::String("PLX".into()),
-            PyRep::Integer(2),
-        ],
-    )
-    .await
-    .expect("can_purchase_offer after deposit");
-    assert_eq!(
-        can_buy_after,
-        PyRep::Bool(true),
-        "Can purchase after depositing PLEX"
-    );
+    let can_buy_after = rpc(&ctx, &mut s1, "storeManager", "can_purchase_offer", &[PyRep::Integer(offer_id), PyRep::String("PLX".into()), PyRep::Integer(2)])
+        .await
+        .expect("can_purchase_offer after deposit");
+    assert_eq!(can_buy_after, PyRep::Bool(true), "Can purchase after depositing PLEX");
 
     // 6. Buy offer using PLEX (PLX)
-    let buy_rep = rpc(
-        &ctx,
-        &mut s1,
-        "storeManager",
-        "buy_offer",
-        &[
-            PyRep::Integer(offer_id),
-            PyRep::String("PLX".into()),
-            PyRep::Integer(1),
-        ],
-    )
-    .await
-    .expect("buy_offer with PLEX");
+    let buy_rep = rpc(&ctx, &mut s1, "storeManager", "buy_offer", &[PyRep::Integer(offer_id), PyRep::String("PLX".into()), PyRep::Integer(1)])
+        .await
+        .expect("buy_offer with PLEX");
     let PyRep::KeyVal(b_kv) = buy_rep else {
         panic!("buy_offer must return KeyVal");
     };
-    assert_eq!(
-        b_kv.get("offerID").and_then(|v| v.as_i64()),
-        Some(offer_id)
-    );
-    assert_eq!(
-        b_kv.get("plexSpent").and_then(|v| v.as_i64()),
-        Some(price_plex)
-    );
+    assert_eq!(b_kv.get("offerID").and_then(|v| v.as_i64()), Some(offer_id));
+    assert_eq!(b_kv.get("plexSpent").and_then(|v| v.as_i64()), Some(price_plex));
     let rem_vault = b_kv
         .get("plexRemaining")
         .and_then(|v| v.as_i64())

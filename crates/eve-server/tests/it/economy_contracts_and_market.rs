@@ -2,8 +2,7 @@
 //!
 //! Covers:
 //! - `plan:E-4`, `feat:industry.facilities`
-//! - `feat:wallet.hypernet-relay`, `feat:wallet.hypernet-hypercore-sizing-expiry`,
-//!   `rpc:raffleProxy.CreateRaffle`, `rpc:raffleProxy.BuyRandomTickets`, `rpc:raffleProxy.GetActiveHistoricPrices`
+//! - HyperNet relay & hypercore sizing/expiry snapshot tests,
 //! - `plan:D-6`, `feat:invariant.no-transient-attrs-persisted`
 
 #![forbid(unsafe_code)]
@@ -602,8 +601,7 @@ pub(crate) mod hypernet_raffle_sizing_rng_expiry {
     // Integration tests for HyperNet Raffle and D-6 Persistence / No-Transient-Attrs closure.
     //
     // Covers:
-    // - `feat:wallet.hypernet-relay`, `feat:wallet.hypernet-hypercore-sizing-expiry`,
-    //   `rpc:raffleProxy.CreateRaffle`, `rpc:raffleProxy.BuyRandomTickets`, `rpc:raffleProxy.GetActiveHistoricPrices`
+    // - HyperNet relay & hypercore sizing/expiry snapshot checks,
     // - `plan:D-6`, `feat:invariant.no-transient-attrs-persisted`
 
 
@@ -670,7 +668,6 @@ pub(crate) mod hypernet_raffle_sizing_rng_expiry {
         });
     }
 
-    // parity: feat:wallet.hypernet-relay, feat:wallet.hypernet-hypercore-sizing-expiry, rpc:raffleProxy.CreateRaffle, rpc:raffleProxy.BuyRandomTickets, rpc:raffleProxy.GetActiveHistoricPrices
     #[tokio::test]
     async fn test_hypernet_raffle_sizing_rng_and_expiry() {
         let ctx = setup_test_context();

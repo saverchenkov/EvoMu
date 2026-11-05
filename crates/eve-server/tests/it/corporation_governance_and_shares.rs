@@ -1,8 +1,6 @@
 // Corporation governance, member auditing, project contribution methods, and structure defaults.
 //
-// Parity rows:
-// - `feat:corporation.member-audit`
-// - `feat:corporation.structure-reinforce-default`
+// Corporation governance & shares snapshot integration tests.
 
 #![forbid(unsafe_code)]
 
@@ -553,7 +551,6 @@ mod corp_projects_welcome_alliance {
 // - `feat:corporation.welcome-mail`
 // - `feat:corporation.corp-mail-restriction`
 // - `feat:corporation.accept-structures-setting`
-// - `feat:corporation.structure-reinforce-default`
 // - `feat:corporation.corp-project-reward-pool`
 // - `feat:corporation.corp-project-close-expiry`
 // - `feat:corporation.corp-goals`
@@ -783,7 +780,7 @@ async fn test_corp_governance_welcome_mails_structures_alliance() {
     .expect("RegisterNewAcceptStructureSettings true");
     assert_eq!(set_acc_true, PyRep::Bool(true));
 
-    // 4. feat:corporation.structure-reinforce-default
+    // 4. structure reinforce default check
     let set_rf = rpc(
         &ctx,
         &mut sess1,

@@ -18,7 +18,7 @@ use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::world_seeder::seed_full_market_catalog;
 
-async fn found_corp_with_member(ctx: &ServerContext, s1: &mut eve_machonet::SessionState, s2: &mut eve_machonet::SessionState, ticker: &str) -> i64 {
+pub(crate) async fn found_corp_with_member(ctx: &ServerContext, s1: &mut eve_machonet::SessionState, s2: &mut eve_machonet::SessionState, ticker: &str) -> i64 {
     rpc(ctx, s1, "corpRegistry", "AddCorporation", &[PyRep::String(format!("{ticker} Holdings")), PyRep::String(ticker.into())])
         .await
         .expect("AddCorporation");
@@ -36,8 +36,8 @@ async fn found_corp_with_member(ctx: &ServerContext, s1: &mut eve_machonet::Sess
 
 #[tokio::test]
 async fn test_live_member_audit_history_and_corp_quit_cleanup() {
-    // parity: feat:corporation.member-audit, feat:lifecycle.corp-quit-cleanup
-    eve_testkit::attest(&["feat:corporation.member-audit", "feat:lifecycle.corp-quit-cleanup"]);
+    // parity: feat:lifecycle.corp-quit-cleanup
+    eve_testkit::attest(&["feat:lifecycle.corp-quit-cleanup"]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -118,8 +118,6 @@ async fn test_live_member_audit_history_and_corp_quit_cleanup() {
 
 #[tokio::test]
 async fn test_live_structure_reinforce_default_adopted_by_new_structure() {
-    // parity: feat:corporation.structure-reinforce-default
-    eve_testkit::attest(&["feat:corporation.structure-reinforce-default"]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);

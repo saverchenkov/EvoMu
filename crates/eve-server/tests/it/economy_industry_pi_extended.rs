@@ -1551,8 +1551,8 @@ pub(crate) mod pi_poco_gantry_deploy_reinforce {
 
     #[tokio::test]
     async fn test_wallet_evermarks_and_item_trader() {
-        // parity: feat:wallet.evermarks, feat:wallet.item-trader
-        eve_testkit::attest(&["feat:wallet.evermarks", "feat:wallet.item-trader"]);
+        // parity: feat:wallet.item-trader
+        eve_testkit::attest(&["feat:wallet.item-trader"]);
         let ctx = ServerContext::new();
         crate::common::pin_clock(&ctx);
         let kw = HashMap::new();

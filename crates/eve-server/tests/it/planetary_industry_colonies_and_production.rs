@@ -490,8 +490,7 @@ pub(crate) mod planetary_customs_and_evermarks {
     use super::*;
 
 //  Remediation integration tests for PI SDE schematic recipes & facility tier validation
-//  (`feat:pi.factory-cycles`, `feat:pi.schematic-input-output-routing`) and Paragon V24 SDE
-//  EverMarks catalog & SKINR sequencing accrual (`feat:wallet.evermarks`).
+//  (`feat:pi.factory-cycles`, `feat:pi.schematic-input-output-routing`).
 
 
 use crate::common;
@@ -828,8 +827,6 @@ async fn test_pi_sde_schematics_facility_tier_validation_and_routing() {
 
 #[tokio::test]
 async fn test_wallet_evermarks_sde_paragon_catalog_and_redemption() {
-    // parity: feat:wallet.evermarks
-    eve_testkit::attest(&["feat:wallet.evermarks"]);
 
     let ctx = Arc::new(ServerContext::new());
     common::pin_clock(&ctx);

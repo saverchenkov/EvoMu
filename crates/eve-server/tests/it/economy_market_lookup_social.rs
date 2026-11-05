@@ -81,7 +81,6 @@ async fn test_npc_npc_standings_rowset_and_auth() {
 }
 #[tokio::test]
 async fn test_nes_store_plex_purchase_delivery_and_negative_cases() {
-    // parity: feat:wallet.nes-store
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
     let empty_kw = HashMap::new();

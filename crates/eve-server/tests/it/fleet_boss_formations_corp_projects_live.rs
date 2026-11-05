@@ -115,7 +115,7 @@ fn encode_string_field(field_num: u32, s: &str, buf: &mut Vec<u8>) {
     encode_bytes_field(field_num, s.as_bytes(), buf);
 }
 
-fn quasar_call(ctx: &ServerContext, sess: &SessionState, type_name: &str, value: Vec<u8>) -> EvePublicResponse {
+pub(crate) fn quasar_call(ctx: &ServerContext, sess: &SessionState, type_name: &str, value: Vec<u8>) -> EvePublicResponse {
     let req = EvePublicRequest {
         payload: Some(GoogleAny {
             type_url: format!("type.googleapis.com/{type_name}"),
@@ -137,10 +137,12 @@ fn wrap_id(id: u64, path: &[u32]) -> Vec<u8> {
     cur
 }
 
-fn build_project_create_msg(name: &str, target_qty: u64, matcher: &str, filter: i64) -> Vec<u8> {
+pub(crate) fn build_project_create_msg(name: &str, target_qty: u64, matcher: &str, filter: i64) -> Vec<u8> {
     let (cfg_field, sub_bytes) = match matcher {
         "DestroyNPCShips" => (31, wrap_id(filter as u64, &[1, 4, 2, 1])),
         "DeliverItem" => (37, wrap_id(filter as u64, &[1, 3, 2, 1])),
+        "MineMaterials" => (25, wrap_id(filter as u64, &[1, 3, 2, 1])),
+        "ManufactureItems" => (38, wrap_id(filter as u64, &[1, 3, 2, 1])),
         other => panic!("unsupported matcher {other}"),
     };
     let mut req = Vec::new();
@@ -245,10 +247,8 @@ async fn test_live_fleet_boss_handover_and_formations() {
     assert!(drain(&ctx, &mut p4).iter().any(|(ev, a)| ev == "OnChangeFleetBoss" && a.get(1) == Some(&int(p4.char_id))));
 }
 
-// parity: feat:corporation.corp-project-contribution-methods
 #[tokio::test]
 async fn test_live_corp_project_contribution_methods() {
-    eve_testkit::attest(&["feat:corporation.corp-project-contribution-methods"]);
     let ctx = paused_ctx();
 
     // 1. Client spoofing attempt: non-admin SetCurrentProgressRequest must be rejected with STATUS_FORBIDDEN

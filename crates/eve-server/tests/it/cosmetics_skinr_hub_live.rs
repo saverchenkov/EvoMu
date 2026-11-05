@@ -125,12 +125,6 @@ fn encode_pattern_slot(slot_id: u32, comp_id: u32) -> Vec<u8> {
 
 #[tokio::test]
 async fn test_cosmetics_skinr_designer_and_sequencing_studio_live() {
-    // parity: feat:cosmetics.skinr-designer
-    // parity: feat:cosmetics.skinr-sequencing-studio
-    eve_testkit::attest(&[
-        "feat:cosmetics.skinr-designer",
-        "feat:cosmetics.skinr-sequencing-studio",
-    ]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -316,14 +310,6 @@ async fn test_cosmetics_skinr_designer_and_sequencing_studio_live() {
 
 #[tokio::test]
 async fn test_cosmetics_skinr_paragon_hub_market_and_skills_live() {
-    // parity: feat:cosmetics.skinr-market
-    // parity: feat:cosmetics.skinr-paragon-hub-listing
-    // parity: feat:economy.paragon-hub
-    eve_testkit::attest(&[
-        "feat:cosmetics.skinr-market",
-        "feat:cosmetics.skinr-paragon-hub-listing",
-        "feat:economy.paragon-hub",
-    ]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);

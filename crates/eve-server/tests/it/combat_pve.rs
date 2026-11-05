@@ -1578,8 +1578,6 @@ pub(crate) mod pochven_loot_and_corp_audit {
 //!
 //! Parity rows:
 //! - `feat:combat.pochven-loot-drop`
-//! - `feat:corporation.member-audit`
-//! - `feat:corporation.structure-reinforce-default`
 
 
 use std::collections::HashMap;
@@ -2239,11 +2237,7 @@ async fn create_proj(
 #[allow(unused_imports)]
 pub(crate) mod corp_audit_and_reinforce {
 //! Part 2 of end-to-end integration tests for corporation member role audit and
-//! corporation structure reinforce default.
-//!
-//! Parity rows:
-//! - `feat:corporation.member-audit`
-//! - `feat:corporation.structure-reinforce-default`
+//! corporation structure reinforce default (covered in live suite).
 
 
 use std::collections::HashMap;

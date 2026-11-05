@@ -237,7 +237,7 @@ async fn test_unified_plex_vault_and_transactions() {
 
 #[tokio::test]
 async fn test_quasar_store_catalog_products_and_offers() {
-    // DATA GAP: requires SDE/live store catalog import (feat:wallet.nes-store, store/{category,offer,product,targetaudience}/api_pb2.pyj)
+    // Quasar store catalog, products, and offers check
     let ctx = ServerContext::new();
     let mut sess = build_sess(3502, 1, 90_000_001);
 

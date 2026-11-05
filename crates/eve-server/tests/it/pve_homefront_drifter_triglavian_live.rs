@@ -429,8 +429,6 @@ async fn test_triglavian_edencom_sites_and_standings_live() {
 
 #[tokio::test]
 async fn test_npc_npc_standings_table_live() {
-    // parity: feat:standings.npc-npc-standings
-    eve_testkit::attest(&["feat:standings.npc-npc-standings"]);
 
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();

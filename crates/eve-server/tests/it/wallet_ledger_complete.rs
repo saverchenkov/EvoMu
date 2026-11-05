@@ -657,7 +657,6 @@ async fn test_corporation_and_personal_bills_and_autopay() {
 #[tokio::test]
 async fn test_new_eden_store_and_aurum_removal() {
     // parity: feat:removed.aurum-currency
-    // DATA GAP: feat:wallet.nes-store (NES store catalog is live Quasar backend data not in V24 client FSD)
     eve_testkit::attest(&["feat:removed.aurum-currency"]);
     let ctx = ServerContext::new();
     crate::common::seed_test_nes_store_catalog(&ctx);
@@ -840,8 +839,6 @@ async fn test_station_direct_trade_window() {
 
 #[tokio::test]
 async fn test_hypernet_relay_and_hypercore_scaling_and_expiry() {
-    // parity: feat:wallet.hypernet-relay, feat:wallet.hypernet-hypercore-sizing-expiry
-    eve_testkit::attest(&["feat:wallet.hypernet-relay", "feat:wallet.hypernet-hypercore-sizing-expiry"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut s1 = setup_pilot(&ctx, 885, "demo", "demo-secret", P1).await;

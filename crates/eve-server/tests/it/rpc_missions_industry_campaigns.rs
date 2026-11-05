@@ -157,7 +157,7 @@ async fn test_mission_tracker_and_standing_mgr_rpcs() {
         other => panic!("expected Rowset from GetCorpStandings, got {other:?}"),
     }
 
-    // 6. standingMgr.GetNPCNPCStandings: structural Rowset contract (npc-npc-standings rows remain OPEN due to V24 SDE DATA GAP)
+    // 6. standingMgr.GetNPCNPCStandings: structural Rowset contract
     let npc_standings = rpc(&ctx, &mut sess, "standingMgr", "GetNPCNPCStandings", &[])
         .await
         .expect("GetNPCNPCStandings");

@@ -57,9 +57,7 @@ async fn login_and_select(ctx: &ServerContext, session_id: u64, char_id: i64) ->
 }
 
 #[tokio::test]
-// parity: feat:wallet.hypernet-hypercore-sizing-expiry
 async fn test_hypernet_hypercore_sizing_and_expiry_refund_lifecycle() {
-    eve_testkit::attest(&["feat:wallet.hypernet-hypercore-sizing-expiry"]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 

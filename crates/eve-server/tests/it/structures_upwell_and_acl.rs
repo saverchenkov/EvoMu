@@ -6807,8 +6807,7 @@ async fn test_upwell_tethering_eligibility_restrictions_and_docking_lock() {
 pub(crate) mod structures_anchoring_and_evermarks {
     use super::*;
 
-//  End-to-end parity closure tests for the 11 remediated `feat:*` rows:
-//  - `feat:wallet.nes-store`, `feat:wallet.evermarks`, `feat:wallet.hypernet-relay`
+//  End-to-end parity closure tests for the remediated structure `feat:*` rows:
 //  - `feat:structures.anchor-restrictions`, `feat:structures.profiles`,
 //    `feat:structures.defense-settings`, `feat:structures.structure-directory`
 
@@ -6927,12 +6926,6 @@ fn register_char(ctx: &ServerContext, uid: u64, cid: i64, corp_id: i64, sys_id: 
 
 #[tokio::test]
 async fn test_wallet_nes_evermarks_hypernet_closure() {
-    // parity: feat:wallet.nes-store, feat:wallet.evermarks, feat:wallet.hypernet-relay
-    eve_testkit::attest(&[
-        "feat:wallet.nes-store",
-        "feat:wallet.evermarks",
-        "feat:wallet.hypernet-relay",
-    ]);
 
     let ctx = ServerContext::new();
     let t0 = 1_800_000_000_u64;

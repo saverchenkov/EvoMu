@@ -469,3 +469,5 @@ mod pve_incursions_missions_live;
 mod esi_industry_mining_pi_loyalty_live;
 mod quasar_pirate_sov_store_live;
 mod esi_fw_incursions_and_sovereignty_live;
+mod industry_corp_cosmetics_wallet_live;
+mod industry_corp_cosmetics_wallet_part2_live;

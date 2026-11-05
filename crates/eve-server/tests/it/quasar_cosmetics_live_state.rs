@@ -819,7 +819,7 @@ async fn test_cosmetics_skinr_designer_and_paragon_market() {
     buyer_sess.role = 0;
     let mut rx_seller = subscribe_notices(&ctx, &mut seller_sess).await;
 
-    // 1. feat:cosmetics.skinr-designer:
+    // 1. cosmetics skinr-designer:
     // Ship SKINR: designs persisted; sequencing jobs consume components and produce licenses
     let skinr_cat = eve_server::services::quasar_cosmetics_skinr::SkinrStaticCatalog::load(&ctx.sde);
     let coat_comp = skinr_cat
@@ -944,7 +944,7 @@ async fn test_cosmetics_skinr_designer_and_paragon_market() {
     let skin_name = String::from_utf8(bytes(&sub(&skin_wm, 1), 1)).unwrap_or_default();
     assert_eq!(skin_name, "Closure Phoenix Rifter");
 
-    // 2. feat:cosmetics.skinr-market:
+    // 2. cosmetics skinr-market:
     // List custom skin license on Paragon market and purchase
     let mut price_isk = Vec::new();
     encode_varint_field(1, 500_000 * 2, &mut price_isk);

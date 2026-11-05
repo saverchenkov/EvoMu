@@ -43,9 +43,7 @@ fn get_balance(ctx: &ServerContext, char_id: i64) -> IskCents {
 }
 
 #[tokio::test]
-// parity: feat:wallet.hypernet-relay, rpc:raffleProxy.BuyRandomTickets
 async fn test_hypernet_mechanic_rng_multi_buyer_distribution() {
-    eve_testkit::attest(&["feat:wallet.hypernet-relay", "rpc:raffleProxy.BuyRandomTickets"]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
@@ -229,12 +227,7 @@ async fn test_hypernet_mechanic_rng_multi_buyer_distribution() {
 }
 
 #[tokio::test]
-// parity: feat:wallet.hypernet-hypercore-sizing-expiry, rpc:raffleProxy.CreateRaffle
 async fn test_hypernet_create_raffle_validation_and_hypercore_expiry() {
-    eve_testkit::attest(&[
-        "feat:wallet.hypernet-hypercore-sizing-expiry",
-        "rpc:raffleProxy.CreateRaffle",
-    ]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 

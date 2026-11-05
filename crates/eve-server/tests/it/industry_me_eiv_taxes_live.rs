@@ -41,8 +41,6 @@ async fn complete_job(ctx: &ServerContext, sess: &mut eve_machonet::SessionState
 
 #[tokio::test]
 async fn test_live_blueprint_me_te_research_and_increments() {
-    // parity: feat:industry.blueprint-me-research
-    eve_testkit::attest(&["feat:industry.blueprint-me-research"]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -115,8 +113,6 @@ async fn test_live_blueprint_me_te_research_and_increments() {
 
 #[tokio::test]
 async fn test_live_capital_construction_restrictions() {
-    // parity: feat:industry.capital-construction-restrictions
-    eve_testkit::attest(&["feat:industry.capital-construction-restrictions"]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -250,8 +246,6 @@ async fn test_live_eiv_adjusted_prices_and_me_invariance() {
 
 #[tokio::test]
 async fn test_live_industry_job_cost_formula_and_surcharges() {
-    // parity: feat:industry.job-cost
-    eve_testkit::attest(&["feat:industry.job-cost"]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -325,8 +319,6 @@ async fn test_live_industry_job_cost_formula_and_surcharges() {
 
 #[tokio::test]
 async fn test_live_facility_tax_npc_and_upwell_profile() {
-    // parity: feat:industry.facility-tax
-    eve_testkit::attest(&["feat:industry.facility-tax"]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
