@@ -344,3 +344,6 @@ pub(crate) fn resolve_valid_home_station(ctx: &ServerContext, snap: &eve_db::Wor
         (home_st_id.max(1), fallback_sys)
     }
 }
+
+#[cfg(test)] #[path = "tourney_common_tests.rs"] mod tourney_common_tests;
+

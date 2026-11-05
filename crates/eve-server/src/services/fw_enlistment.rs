@@ -400,3 +400,6 @@ fn set_corp_allowed(ctx: &ServerContext, session: &SessionState, args: &[PyRep])
     );
     Ok(PyRep::List(factions.into_iter().map(PyRep::Integer).collect()))
 }
+
+#[cfg(test)] #[path = "fw_enlistment_tests.rs"] mod fw_enlistment_tests;
+

@@ -1070,3 +1070,6 @@ pub fn set_zarzakh_horizon_siege_active(ctx: &ServerContext, active: bool) {
         emit_zarzakh_horizon_siege_changed(ctx, &state);
     }
 }
+
+#[cfg(test)] #[path = "cluster_macho_misc_services_tests.rs"] mod cluster_macho_misc_services_tests;
+

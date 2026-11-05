@@ -1188,3 +1188,6 @@ pub async fn handle(
         _ => None,
     }
 }
+
+#[cfg(test)] #[path = "shipcaster_ops_tests.rs"] mod shipcaster_ops_tests;
+

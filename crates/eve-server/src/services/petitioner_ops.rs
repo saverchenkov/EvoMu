@@ -1034,3 +1034,6 @@ pub fn category_properties_for_id(cat_id: i64) -> Vec<PyRep> {
     props
 }
 
+#[cfg(test)] #[path = "petitioner_ops_tests.rs"] mod petitioner_ops_tests;
+
+

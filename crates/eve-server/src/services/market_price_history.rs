@@ -799,3 +799,6 @@ pub(crate) fn handle_market_transactions_rpc(
         _ => None,
     }
 }
+
+#[cfg(test)] #[path = "market_price_history_tests.rs"] mod market_price_history_tests;
+

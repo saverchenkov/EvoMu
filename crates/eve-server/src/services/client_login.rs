@@ -863,3 +863,6 @@ pub fn alert_registry_sizes(ctx: &ServerContext) -> (usize, usize) {
         .map(|st| (st.stack_traces.len(), st.bean_counts.len()))
         .unwrap_or((0, 0))
 }
+
+#[cfg(test)] #[path = "client_login_tests.rs"] mod client_login_tests;
+

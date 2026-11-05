@@ -1279,3 +1279,6 @@ pub async fn sync_system_deployables(ctx: &ServerContext, solar_system_id: u32) 
     }
     flush_deployable_side_effects(ctx);
 }
+
+#[cfg(test)] #[path = "mobile_deployables_ext_tests.rs"] mod mobile_deployables_ext_tests;
+

@@ -766,3 +766,6 @@ pub(crate) async fn spawn_command_nodes_for_hub(ctx: &ServerContext, hub_id: i64
     });
     spawn_command_node_balls(ctx, spawned).await;
 }
+
+#[cfg(test)] #[path = "sov_warzone_dynamic_tests.rs"] mod sov_warzone_dynamic_tests;
+

@@ -1130,3 +1130,6 @@ pub fn handle_skill_notifications_and_injections(
     }
 }
 
+#[cfg(test)] #[path = "implant_plugging_tests.rs"] mod implant_plugging_tests;
+
+

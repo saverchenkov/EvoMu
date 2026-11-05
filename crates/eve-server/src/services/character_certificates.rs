@@ -593,3 +593,6 @@ pub fn handle(
         _ => None,
     }
 }
+
+#[cfg(test)] #[path = "character_certificates_tests.rs"] mod character_certificates_tests;
+

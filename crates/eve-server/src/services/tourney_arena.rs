@@ -327,3 +327,6 @@ pub async fn handle(
         _ => None,
     }
 }
+
+#[cfg(test)] #[path = "tourney_arena_tests.rs"] mod tourney_arena_tests;
+

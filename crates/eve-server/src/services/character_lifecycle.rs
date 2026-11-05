@@ -971,3 +971,6 @@ fn handle_char_mgr(
         _ => None,
     }
 }
+
+#[cfg(test)] #[path = "character_lifecycle_tests.rs"] mod character_lifecycle_tests;
+

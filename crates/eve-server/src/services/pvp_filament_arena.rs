@@ -1155,3 +1155,6 @@ pub async fn handle_pvp_end_gate_activation(
         ("originSystemID", PyRep::Integer(osys as i64)),
     ]))
 }
+
+#[cfg(test)] #[path = "pvp_filament_arena_tests.rs"] mod pvp_filament_arena_tests;
+

@@ -774,3 +774,6 @@ pub async fn post_inventory_fitting_hook(
         _ => {}
     }
 }
+
+#[cfg(test)] #[path = "character_skill_ops_tests.rs"] mod character_skill_ops_tests;
+

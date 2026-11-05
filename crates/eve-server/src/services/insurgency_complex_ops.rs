@@ -1372,3 +1372,6 @@ pub async fn tick_insurgency_complex_ops(ctx: &ServerContext, now_unix: u64) {
         }
     }
 }
+
+#[cfg(test)] #[path = "insurgency_complex_ops_tests.rs"] mod insurgency_complex_ops_tests;
+

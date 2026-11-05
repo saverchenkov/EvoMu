@@ -1144,3 +1144,6 @@ pub fn run_daily_downtime_and_jobs(ctx: &ServerContext) -> HashMap<String, i64> 
     report.insert("clusterRestartEpoch".into(), restart_epoch);
     report
 }
+
+#[cfg(test)] #[path = "serverops_cluster_tests.rs"] mod serverops_cluster_tests;
+

@@ -971,3 +971,6 @@ pub async fn handle(
         _ => None,
     }
 }
+
+#[cfg(test)] #[path = "fw_services_tests.rs"] mod fw_services_tests;
+

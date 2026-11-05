@@ -893,3 +893,6 @@ fn handle_get_first_party_skin_data(ctx: &ServerContext, session: &mut SessionSt
     })
 }
 
+#[cfg(test)] #[path = "cosmetics_ui_ops_tests.rs"] mod cosmetics_ui_ops_tests;
+
+

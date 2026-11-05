@@ -495,3 +495,6 @@ pub async fn execute_shipcaster_jump(
     Ok(())
 }
 
+#[cfg(test)] #[path = "shipcaster_ops_starter_tests.rs"] mod shipcaster_ops_starter_tests;
+
+

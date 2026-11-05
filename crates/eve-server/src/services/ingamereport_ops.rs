@@ -161,3 +161,6 @@ fn submit_report(
 
     Ok(PyRep::None)
 }
+
+#[cfg(test)] #[path = "ingamereport_ops_tests.rs"] mod ingamereport_ops_tests;
+

@@ -1390,3 +1390,6 @@ fn handle_machonet_noblock(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     Some(Ok(PyRep::Bool(true)))
 }
+
+#[cfg(test)] #[path = "auth_cache_tests.rs"] mod auth_cache_tests;
+

@@ -902,3 +902,6 @@ pub fn handle(
         _ => None,
     }
 }
+
+#[cfg(test)] #[path = "hypernet_raffle_ops_tests.rs"] mod hypernet_raffle_ops_tests;
+

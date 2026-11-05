@@ -1292,3 +1292,6 @@ fn handle_get_testing_configuration(
         PyRep::Bool(is_test),
     ]))
 }
+
+#[cfg(test)] #[path = "fast_checkout_and_activity_tests.rs"] mod fast_checkout_and_activity_tests;
+

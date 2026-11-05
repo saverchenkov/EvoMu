@@ -913,3 +913,7 @@ pub async fn handle_hub_and_scan(
         _ => None,
     }
 }
+
+#[cfg(test)] #[path = "fw_insurgency_tests.rs"] mod fw_insurgency_tests;
+
+

@@ -1104,3 +1104,6 @@ pub(crate) async fn handle_qa_move_me_to(
         ("moved", PyRep::Bool(true)),
     ]))
 }
+
+#[cfg(test)] #[path = "jump_clone_names_tests.rs"] mod jump_clone_names_tests;
+

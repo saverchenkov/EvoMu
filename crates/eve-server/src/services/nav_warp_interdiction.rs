@@ -954,3 +954,6 @@ pub(crate) async fn handle_set_session_check(
         ("expiresUnix", PyRep::Integer((now_unix + 10) as i64)),
     ]))
 }
+
+#[cfg(test)] #[path = "nav_warp_interdiction_tests.rs"] mod nav_warp_interdiction_tests;
+

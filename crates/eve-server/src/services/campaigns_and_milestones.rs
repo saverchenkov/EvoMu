@@ -1245,3 +1245,6 @@ fn handle_community_track_change_qa_mode(
 
     Ok(PyRep::Bool(true))
 }
+
+#[cfg(test)] #[path = "campaigns_and_milestones_tests.rs"] mod campaigns_and_milestones_tests;
+

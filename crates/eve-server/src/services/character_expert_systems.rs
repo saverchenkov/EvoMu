@@ -486,3 +486,6 @@ pub fn skip_air_npe_and_stop_graph(
     }
     Ok((graph_id, curr_node, completed))
 }
+
+#[cfg(test)] #[path = "character_expert_systems_tests.rs"] mod character_expert_systems_tests;
+

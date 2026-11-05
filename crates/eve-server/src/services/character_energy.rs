@@ -213,3 +213,6 @@ pub fn handle(
         _ => None,
     }
 }
+
+#[cfg(test)] #[path = "character_energy_tests.rs"] mod character_energy_tests;
+

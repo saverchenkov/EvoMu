@@ -1220,3 +1220,6 @@ pub async fn handle(
         _ => None,
     }
 }
+
+#[cfg(test)] #[path = "insurgency_services_tests.rs"] mod insurgency_services_tests;
+

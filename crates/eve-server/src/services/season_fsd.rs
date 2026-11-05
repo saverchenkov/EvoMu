@@ -570,3 +570,6 @@ pub fn load_challenge_definitions(snap: &eve_db::WorldStateSnapshot) -> Vec<Seas
     }
     default_seasonal_challenge_definitions()
 }
+
+#[cfg(test)] #[path = "season_fsd_tests.rs"] mod season_fsd_tests;
+

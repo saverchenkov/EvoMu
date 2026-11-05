@@ -176,3 +176,6 @@ pub fn get_character_selection_data(
     });
     Ok(PyRep::Tuple(vec![user_details, training_details, PyRep::List(rows), PyRep::List(wars)]))
 }
+
+#[cfg(test)] #[path = "char_selection_tests.rs"] mod char_selection_tests;
+

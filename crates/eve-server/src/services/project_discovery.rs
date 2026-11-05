@@ -1224,3 +1224,6 @@ pub fn handle_project_discovery_slash(
         })),
     }
 }
+
+#[cfg(test)] #[path = "project_discovery_tests.rs"] mod project_discovery_tests;
+
