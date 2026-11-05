@@ -2338,7 +2338,7 @@ pub(crate) mod fighters_lifecycle {
 //! - Fighter tube refueling, rearming, and HP repair cycles
 //! - Support fighters EWAR application and scaling
 //! - Space superiority light fighters anti-fighter bonus & Evasive Maneuvers
-//! - Industry pause timing and CompleteManyJobs (`feat:lifecycle.industry-pause-and-many`)
+//! - Industry pause timing and CompleteManyJobs
 //! - Quitting corporation full cleanup and bloodline NPC assignment (`feat:lifecycle.corp-quit-cleanup`)
 
 use crate::features_bounties_ess::give_item;
@@ -2593,9 +2593,6 @@ async fn test_parity_fighters_support_and_space_superiority() {
 
 #[tokio::test]
 async fn test_parity_lifecycle_industry_and_corp_quit() {
-    // parity: feat:lifecycle.industry-pause-and-many
-    eve_testkit::attest(&["feat:lifecycle.industry-pause-and-many"]);
-
     let ctx = crate::modules_advanced_tactical::build_ctx();
     let pilot_char_id = 92_300_001i64;
     let player_corp_id = 98_000_101i64;

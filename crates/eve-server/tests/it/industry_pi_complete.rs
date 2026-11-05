@@ -302,8 +302,6 @@ async fn test_industry_capital_construction_restrictions() {
 
 #[tokio::test]
 async fn test_lifecycle_industry_pause_and_many_jobs() {
-    // parity: feat:lifecycle.industry-pause-and-many
-    eve_testkit::attest(&["feat:lifecycle.industry-pause-and-many"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let p = 90_000_001;

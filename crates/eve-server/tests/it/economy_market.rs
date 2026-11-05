@@ -2576,11 +2576,10 @@ async fn test_e2_structure_market_service_and_order_expiry() {
 
 #[tokio::test]
 async fn test_e4_structure_industry_service_pause_and_many_jobs() {
-    // parity: plan:E-4, feat:structures.service-industry, feat:lifecycle.industry-pause-and-many
+    // parity: plan:E-4, feat:structures.service-industry
     eve_testkit::attest(&[
         "plan:E-4",
         "feat:structures.service-industry",
-        "feat:lifecycle.industry-pause-and-many",
     ]);
 
     let ctx = ServerContext::new();

@@ -1,6 +1,5 @@
 //! Live end-to-end integration tests for Industry EIV/SCI job costs, NPC vs Upwell facility taxes,
 //! wallet journal accounting, service-offline pause/resume, batch completion, and ex-corp guards:
-//! - `feat:lifecycle.industry-pause-and-many`
 //! - `plan:E-4`
 //!
 //! Industrialists are regular player sessions: blueprints and materials come from the Jita market,
@@ -156,8 +155,8 @@ async fn test_live_job_cost_sci_progression_facility_taxes_and_wallet_journal() 
 
 #[tokio::test]
 async fn test_live_industry_service_offline_pause_resume_batch_complete_and_ex_corp_guard() {
-    // parity: feat:lifecycle.industry-pause-and-many, plan:E-4
-    eve_testkit::attest(&["feat:lifecycle.industry-pause-and-many", "plan:E-4"]);
+    // parity: plan:E-4
+    eve_testkit::attest(&["plan:E-4"]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);

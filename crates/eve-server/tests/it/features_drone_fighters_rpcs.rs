@@ -3,7 +3,7 @@
 //! Covers:
 //! - `feat:lifecycle.fleet-kick-session`, `feat:lifecycle.fleet-login-consistency`,
 //!   `feat:lifecycle.fleet-logout`, `feat:lifecycle.fleet-server-restart`
-//! - `feat:lifecycle.industry-pause-and-many`, `feat:lifecycle.owner_notes-persistence`
+//! - `feat:lifecycle.owner_notes-persistence`
 //! - `feat:lifecycle.industry-pi-durable`, `feat:lifecycle.market-wallet-history-durable`
 
 #![forbid(unsafe_code)]
@@ -211,9 +211,8 @@ async fn test_b30_fleet_lifecycle_kick_login_logout_and_restart() {
 
 #[tokio::test]
 async fn test_b30_industry_pause_many_and_owner_notes_persistence() {
-    // parity: feat:lifecycle.industry-pause-and-many, feat:lifecycle.owner_notes-persistence
+    // parity: feat:lifecycle.owner_notes-persistence
     eve_testkit::attest(&[
-        "feat:lifecycle.industry-pause-and-many",
         "feat:lifecycle.owner_notes-persistence",
     ]);
 

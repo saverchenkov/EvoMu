@@ -462,11 +462,6 @@ async fn rpc(
 
 #[tokio::test]
 async fn test_industry_research_cost_tax_capital_and_lifecycle_pause() {
-    // parity: feat:lifecycle.industry-pause-and-many
-    eve_testkit::attest(&[
-        "feat:lifecycle.industry-pause-and-many",
-    ]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let mut sess = SessionState::new(40_301);
