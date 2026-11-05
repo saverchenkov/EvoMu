@@ -360,6 +360,7 @@ mod wallet_hypernet_and_esi_structure_timers;
 mod mining_belts_and_ore_distribution;
 mod drones_fighters_and_abilities;
 mod cosmetics_skinr_studio_and_hub;
+mod cosmetics_skinr_hub_live;
 mod pve_agent_missions_lifecycle;
 mod industry_costs_taxes_and_capital;
 mod quasar_belts_battlepass_and_campaigns;

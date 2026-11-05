@@ -769,13 +769,6 @@ async fn test_cosmetics_apparel_broadcast_and_emblems() {
 
 #[tokio::test]
 async fn test_cosmetics_skinr_designer_and_paragon_market() {
-    // parity: feat:cosmetics.skinr-designer
-    // parity: feat:cosmetics.skinr-market
-    eve_testkit::attest(&[
-        "feat:cosmetics.skinr-designer",
-        "feat:cosmetics.skinr-market",
-    ]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let seller_cid = 90_000_821u32;
