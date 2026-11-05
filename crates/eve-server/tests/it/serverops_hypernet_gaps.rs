@@ -426,12 +426,11 @@ async fn test_hypernet_create_raffle_validation_and_hypercore_expiry() {
 }
 
 #[tokio::test]
-// parity: rpc:raffleProxy.GetActiveHistoricPrices, rpc:raffleProxy.BuyRandomTickets, rpc:raffleProxy.CreateRaffle
+// parity: rpc:raffleProxy.GetActiveHistoricPrices, rpc:raffleProxy.BuyRandomTickets
 async fn test_hypernet_active_historic_prices_and_random_tickets() {
     eve_testkit::attest(&[
         "rpc:raffleProxy.GetActiveHistoricPrices",
         "rpc:raffleProxy.BuyRandomTickets",
-        "rpc:raffleProxy.CreateRaffle",
     ]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);

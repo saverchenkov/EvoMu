@@ -56,13 +56,8 @@ async fn unload(ctx: &ServerContext, sess: &mut SessionState, type_id: u32, hang
     }
 }
 
-// parity: feat:serverops.node-balancing, feat:serverops.time-dilation
 #[tokio::test]
 async fn test_live_serverops_time_dilation_and_node_balancing() {
-    eve_testkit::attest(&[
-        "feat:serverops.node-balancing",
-        "feat:serverops.time-dilation",
-    ]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);

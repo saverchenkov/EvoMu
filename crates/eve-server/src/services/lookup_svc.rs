@@ -428,13 +428,18 @@ pub fn handle(
                         .and_then(|cid| snap.corporations.get(&cid))
                         .and_then(|c| c.alliance_id)
                 });
-                let caller_ident = effective_caller_alliance.or(caller_corp_id).unwrap_or(0);
                 let is_disqualified = |target_id: i64| -> bool {
+                    let caller_matches = |id: i64| {
+                        id > 0
+                            && (Some(id) == caller_corp_id
+                                || Some(id) == effective_caller_alliance)
+                    };
                     snap.wars.values().any(|w| {
-                        w.active && (
-                            (w.aggressor_corp_id == caller_ident && w.defender_corp_id == target_id) ||
-                            (w.aggressor_corp_id == target_id && w.defender_corp_id == caller_ident)
-                        )
+                        w.active
+                            && ((caller_matches(w.aggressor_corp_id)
+                                && w.defender_corp_id == target_id)
+                                || (w.aggressor_corp_id == target_id
+                                    && caller_matches(w.defender_corp_id)))
                     })
                 };
                 let is_corp_war_eligible = |corp_id: i64| -> bool {

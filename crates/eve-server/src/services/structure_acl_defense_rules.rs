@@ -416,8 +416,13 @@ pub fn evaluate_auto_defense_target(
     }
     let ext = load_ext_state(snap);
     let legacy = load_defense_settings(snap, structure_id);
+    let eff_prof = crate::services::structure_profile_services::effective_profile_for_structure(
+        &ext,
+        structure_id,
+        Some(ctx.now_unix()),
+    );
     let (enabled, tgt_att, tgt_war, thresh, tgt_blk) =
-        if let Some(ds) = ext.access_profiles.get(&structure_id).and_then(|p| p.defense_settings.as_ref()) {
+        if let Some(ds) = eff_prof.and_then(|p| p.defense_settings.as_ref()) {
             (
                 ds.auto_defense_enabled,
                 ds.auto_target_attackers,
@@ -425,7 +430,7 @@ pub fn evaluate_auto_defense_target(
                 ds.standing_threshold,
                 ds.target_blocked_acl,
             )
-        } else if let Some(prof) = ext.access_profiles.get(&structure_id).filter(|p| p.has_defense_config) {
+        } else if let Some(prof) = eff_prof.filter(|p| p.has_defense_config) {
             (
                 prof.auto_defense_enabled,
                 prof.auto_target_attackers,

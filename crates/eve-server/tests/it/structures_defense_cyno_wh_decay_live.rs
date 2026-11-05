@@ -74,11 +74,6 @@ fn kv_bool(rep: &PyRep, key: &str) -> bool {
 
 #[tokio::test]
 async fn test_structures_board_eject_and_defense_settings_live() {
-    // parity: feat:structures.board-structure, feat:structures.defense-settings
-    eve_testkit::attest(&[
-        "feat:structures.board-structure",
-        "feat:structures.defense-settings",
-    ]);
 
     let ctx = paused_ctx();
     let mut pilot = common::gm_pilot_in_space(&ctx, 230, 91_600_001, CHARON_TYPE, PERIMETER).await;
@@ -296,8 +291,6 @@ async fn test_structures_board_eject_and_defense_settings_live() {
 
 #[tokio::test]
 async fn test_mobile_cyno_inhibitor_deployment_and_suppression_live() {
-    // parity: feat:structures.mobile-cyno-inhibitor
-    eve_testkit::attest(&["feat:structures.mobile-cyno-inhibitor"]);
 
     let ctx = paused_ctx();
     // Spawn pilot in lowsec Rancer (30002718) in a Falcon cruiser.
@@ -380,8 +373,6 @@ async fn test_mobile_cyno_inhibitor_deployment_and_suppression_live() {
 
 #[tokio::test]
 async fn test_wormhole_decay_stages_and_show_info_live() {
-    // parity: feat:wormholes.lifetime-decay-stages
-    eve_testkit::attest(&["feat:wormholes.lifetime-decay-stages"]);
 
     let ctx = paused_ctx();
     let now = ctx.now_unix();

@@ -17,7 +17,6 @@ async fn test_sov_structures_info() {
     assert_eq!(l.len(), 0); // Value assertion
 }
 
-// parity: rpc:lookupSvc.LookupWarableCorporationsOrAlliances
 #[tokio::test]
 async fn test_lookup_warable_entities() {
     let ctx = ServerContext::new();

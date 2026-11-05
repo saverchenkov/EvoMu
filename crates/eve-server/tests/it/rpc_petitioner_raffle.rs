@@ -282,7 +282,7 @@ async fn test_petitioner_meta_and_client_configuration() {
 #[tokio::test]
 async fn test_raffle_lifecycle_creation_and_ticket_sales() {
     // parity: rpc:raffleProxy.AmIBanned, rpc:raffleProxy.AwardItem, rpc:raffleProxy.BuyRandomTickets
-    // parity: rpc:raffleProxy.BuyTicket, rpc:raffleProxy.CreateRaffle, rpc:raffleProxy.GetActiveHistoricPrices
+    // parity: rpc:raffleProxy.BuyTicket, rpc:raffleProxy.GetActiveHistoricPrices
     // parity: rpc:raffleProxy.GetMyActiveTickets, rpc:raffleProxy.GetRaffle
     let ctx = ServerContext::new();
     let mut p1 = select(&ctx, 60_004, "demo", "demo-secret", P1).await;

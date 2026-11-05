@@ -1442,7 +1442,7 @@ fn dict_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 
 #[tokio::test]
 async fn test_lookup_warable_corps_and_alliances_enforces_structure_eligibility() {
-    // parity: rpc:lookupSvc.LookupWarableCorporationsOrAlliances, feat:ui.lookup
+    // parity: feat:ui.lookup
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
 

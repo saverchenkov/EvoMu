@@ -65,7 +65,6 @@ fn kv_str<'a>(rep: &'a PyRep, key: &str) -> Option<&'a str> {
 
 #[tokio::test]
 async fn test_structures_anchoring_restrictions_live() {
-    eve_testkit::attest(&["feat:structures.anchor-restrictions"]);
 
     let ctx = paused_ctx();
     let mut pilot = common::gm_pilot_in_space(&ctx, 201, 91_400_001, CHARON_TYPE, PERIMETER).await;
@@ -180,7 +179,6 @@ async fn test_structures_anchoring_restrictions_live() {
 
 #[tokio::test]
 async fn test_structures_repairshop_service_quotes_and_restoration_live() {
-    eve_testkit::attest(&["feat:structures.repairshop-service-quotes-and-restoration"]);
 
     let ctx = paused_ctx();
     let mut pilot = common::gm_pilot_in_space(&ctx, 202, 91_400_002, CHARON_TYPE, PERIMETER).await;

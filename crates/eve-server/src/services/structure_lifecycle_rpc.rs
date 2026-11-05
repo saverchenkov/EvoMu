@@ -897,6 +897,32 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
             return Err(err("ItemLocked", format!("Module {item_id} is locked and cannot be fitted")));
         }
         let mod_type = ctx.sde.types.get(&src.type_id).ok_or_else(|| err("UnknownType", format!("Type {} not in SDE", src.type_id)))?;
+        if mod_type.category_id == 8 && (11..=34).contains(&flag_u16) {
+            let has_weapon = snap.items.values().any(|i| {
+                i.item_id != item_id
+                    && i.location_id == structure_id
+                    && i.flag == flag
+                    && ctx.sde.types.get(&i.type_id).is_some_and(|wt| wt.category_id != 8)
+            });
+            if !has_weapon {
+                return Err(err("NoWeaponFitted", format!("Structure {structure_id} slot {flag_u16} has no weapon for charge")));
+            }
+            if snap.items.values().any(|i| {
+                i.item_id != item_id
+                    && i.location_id == structure_id
+                    && i.flag == flag
+                    && ctx.sde.types.get(&i.type_id).is_some_and(|ct| ct.category_id == 8)
+            }) {
+                return Err(err("SlotAlreadyOccupied", format!("Structure {structure_id} slot {flag_u16} already has charges loaded")));
+            }
+            if let Some(it) = snap.items.get_mut(&item_id) {
+                it.location_id = structure_id;
+                it.flag = flag;
+                it.owner_id = st.owner_corp_id;
+                it.version += 1;
+            }
+            return Ok((structure_id, item_id, src.type_id, src.flag as i64, false, true, false, released));
+        }
         check_module_fits_structure(mod_type, st.type_id, profile.group_id, &profile, flag_u16)?;
         if snap.items.values().any(|i| i.item_id != item_id && i.location_id == structure_id && i.flag == flag) {
             return Err(err("SlotAlreadyOccupied", format!("Structure {structure_id} slot {flag_u16} is already occupied")));

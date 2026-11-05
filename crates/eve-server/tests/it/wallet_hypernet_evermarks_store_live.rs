@@ -127,9 +127,8 @@ async fn deposit_evermarks_quasar(
 
 #[tokio::test]
 async fn test_wallet_hypernet_relay_npc_station_enforcement_and_random_tickets_live() {
-    // parity: rpc:raffleProxy.CreateRaffle, rpc:raffleProxy.BuyRandomTickets, rpc:raffleProxy.GetActiveHistoricPrices
+    // parity: rpc:raffleProxy.BuyRandomTickets, rpc:raffleProxy.GetActiveHistoricPrices
     eve_testkit::attest(&[
-        "rpc:raffleProxy.CreateRaffle",
         "rpc:raffleProxy.BuyRandomTickets",
         "rpc:raffleProxy.GetActiveHistoricPrices",
     ]);

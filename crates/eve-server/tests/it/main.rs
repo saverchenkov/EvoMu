@@ -474,3 +474,6 @@ mod industry_corp_cosmetics_wallet_live;
 mod industry_corp_cosmetics_wallet_part2_live;
 mod crimewatch_fleet_lifecycle_live;
 mod skills_notify_industry_live;
+mod structures_serverops_wormholes_live;
+mod structures_defense_cyno_wh_live;
+mod structures_lookup_raffle_live;

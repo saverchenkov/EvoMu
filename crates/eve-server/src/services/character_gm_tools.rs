@@ -828,7 +828,7 @@ pub async fn handle_gm_slash_ext(
                 snap.items
                     .get(&first_i64)
                     .and_then(|i| ctx.sde.types.get(&i.type_id))
-                    .is_some_and(|t| t.category_id == 6)
+                    .is_some_and(|t| matches!(t.category_id, 6 | 65))
             });
             if is_known_ship {
                 let Some(tid) = tokens.get(1).and_then(|s| s.parse::<u32>().ok()) else {
@@ -1244,6 +1244,31 @@ pub async fn handle_gm_slash_ext(
             return Some(Err(BridgeRpcError { code: "InvalidLocation".into(), message: "Pilot not in solar system".into() }));
         };
         return Some(Ok(PyRep::Real(crate::services::wallet_serverops::set_system_tidi_factor(ctx, sys_id, f))));
+    }
+    if cmd == "/reinforce" || cmd.starts_with("/reinforce ") {
+        let Some(sys_id) = session.solar_system_id else {
+            return Some(Err(BridgeRpcError { code: "InvalidLocation".into(), message: "Pilot not in solar system".into() }));
+        };
+        let custom_node = cmd.strip_prefix("/reinforce").unwrap_or("").trim().parse::<u32>().ok().filter(|&n| n > 0);
+        let nid = match custom_node {
+            Some(n) => crate::services::serverops_cluster::assign_or_reinforce_system_node(ctx, sys_id, Some(n)),
+            None => crate::services::serverops_cluster::reinforce_solar_system_for_fleet_fight(ctx, sys_id),
+        };
+        return Some(Ok(PyRep::Integer(nid as i64)));
+    }
+    if let Some(r) = cmd.strip_prefix("/autotidi") {
+        let arg = r.trim();
+        if arg.eq_ignore_ascii_case("off") || arg == "0" {
+            crate::services::serverops_cluster::set_auto_cluster_tidi_enabled(ctx, false);
+            return Some(Ok(PyRep::Integer(0)));
+        }
+        let thr = match arg.parse::<usize>() {
+            Ok(v) if v > 0 => v,
+            _ => return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /autotidi <threshold|off>".into() })),
+        };
+        crate::services::serverops_cluster::set_cluster_node_load_threshold(ctx, thr);
+        crate::services::serverops_cluster::set_auto_cluster_tidi_enabled(ctx, true);
+        return Some(Ok(PyRep::Integer(thr as i64)));
     }
     if cmd == "/survey" || cmd.starts_with("/survey ") {
         return crate::services::operations_manager::handle_survey_slash(ctx, cid, cmd);

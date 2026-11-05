@@ -24,7 +24,7 @@ fn as_list(rep: &PyRep) -> &[PyRep] {
 
 #[tokio::test]
 async fn test_rpc_lookup_svc_batch() {
-    // parity: rpc:lookupSvc.LookupCharacters, rpc:lookupSvc.LookupCorporations, rpc:lookupSvc.LookupEvePlayerCharacters, rpc:lookupSvc.LookupFactions, rpc:lookupSvc.LookupKnownLocationsByGroup, rpc:lookupSvc.LookupLocationsByGroup, rpc:lookupSvc.LookupNoneNPCAccountOwners, rpc:lookupSvc.LookupOwners, rpc:lookupSvc.LookupPCOwners, rpc:lookupSvc.LookupWarableCorporationsOrAlliances
+    // parity: rpc:lookupSvc.LookupCharacters, rpc:lookupSvc.LookupCorporations, rpc:lookupSvc.LookupEvePlayerCharacters, rpc:lookupSvc.LookupFactions, rpc:lookupSvc.LookupKnownLocationsByGroup, rpc:lookupSvc.LookupLocationsByGroup, rpc:lookupSvc.LookupNoneNPCAccountOwners, rpc:lookupSvc.LookupOwners, rpc:lookupSvc.LookupPCOwners
     // parity: feat:ui.lookup
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
@@ -3409,10 +3409,7 @@ async fn test_batch2_cache_setting_and_load_service() {
 
 #[tokio::test]
 async fn test_batch2_lookup_warable_and_sov_structures() {
-    // parity: rpc:lookupSvc.LookupWarableCorporationsOrAlliances
-    eve_testkit::attest(&[
-        "rpc:lookupSvc.LookupWarableCorporationsOrAlliances",
-    ]);
+    eve_testkit::attest(&[]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -3538,10 +3535,8 @@ async fn test_batch2_lookup_warable_and_sov_structures() {
 #[tokio::test]
 async fn test_batch2_raffle_character_seeding_and_create() {
     // parity: rpc:raffleMgr.QA_SeedRaffles
-    // parity: rpc:raffleProxy.CreateRaffle
     eve_testkit::attest(&[
         "rpc:raffleMgr.QA_SeedRaffles",
-        "rpc:raffleProxy.CreateRaffle",
     ]);
 
     let ctx = ServerContext::new();
