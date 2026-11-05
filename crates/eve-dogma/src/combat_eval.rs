@@ -829,3 +829,8 @@ impl ShipFittingEngine {
         source_module.get_attribute(attr_id, sde) * att * impedance
     }
 }
+
+#[cfg(test)]
+#[path = "combat_eval_unit_tests.rs"]
+mod combat_eval_unit_tests;
+

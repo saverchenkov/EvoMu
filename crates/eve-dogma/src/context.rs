@@ -780,3 +780,8 @@ fn select_dominant_assignment(values: &[f64], high_is_good: bool) -> Option<f64>
             .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
     }
 }
+
+#[cfg(test)]
+#[path = "context_unit_tests.rs"]
+mod context_unit_tests;
+

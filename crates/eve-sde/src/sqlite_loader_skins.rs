@@ -548,3 +548,8 @@ fn discover_platform_resfiles_dir() -> PathBuf {
     })
 }
 
+#[cfg(test)]
+#[path = "sqlite_loader_skins_unit_tests.rs"]
+mod sqlite_loader_skins_unit_tests;
+
+

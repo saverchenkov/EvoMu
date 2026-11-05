@@ -75,3 +75,8 @@ impl crate::SdeRegistry {
         self.belt_ores_for_security_and_region(sys.security_status, sys.region_id)
     }
 }
+
+#[cfg(test)]
+#[path = "belt_ores_unit_tests.rs"]
+mod belt_ores_unit_tests;
+

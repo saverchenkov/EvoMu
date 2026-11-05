@@ -1207,3 +1207,8 @@ impl SdeRegistry {
         map.get(&solar_system_id).copied()
     }
 }
+
+#[cfg(test)]
+#[path = "static_domain_loaders_unit_tests.rs"]
+mod static_domain_loaders_unit_tests;
+

@@ -1334,3 +1334,8 @@ impl ShipFittingEngine {
         state
     }
 }
+
+#[cfg(test)]
+#[path = "evaluation_unit_tests.rs"]
+mod evaluation_unit_tests;
+

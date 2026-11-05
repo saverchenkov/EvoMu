@@ -1363,3 +1363,8 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "fitting_unit_tests.rs"]
+mod fitting_unit_tests;
+

@@ -480,3 +480,8 @@ impl SdeRegistry {
         map.get(&market_group_id).cloned()
     }
 }
+
+#[cfg(test)]
+#[path = "static_localization_loaders_unit_tests.rs"]
+mod static_localization_loaders_unit_tests;
+
