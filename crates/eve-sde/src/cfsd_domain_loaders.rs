@@ -546,3 +546,6 @@ pub struct RawCfsdTypeRecord {
     pub wreck_type_id: Option<TypeId>,
     pub type_name_id: u32,
 }
+#[cfg(test)] #[path = "cfsd_domain_loaders_unit_tests.rs"] mod cfsd_domain_loaders_unit_tests;
+
+

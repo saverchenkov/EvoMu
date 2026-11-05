@@ -1378,3 +1378,5 @@ pub struct AsteroidRecord {
 
 
 pub use crate::snapshot_ext::*;
+#[cfg(test)] #[path = "types_unit_tests.rs"] mod types_unit_tests;
+

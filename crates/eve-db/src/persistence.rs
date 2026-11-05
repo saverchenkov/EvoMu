@@ -1051,3 +1051,6 @@ mod r4_persistence_tests {
         let _ = std::fs::remove_file(&tmp_path);
     }
 }
+#[cfg(test)] #[path = "persistence_unit_tests.rs"] mod persistence_unit_tests;
+
+

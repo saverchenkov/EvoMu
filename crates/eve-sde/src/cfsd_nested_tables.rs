@@ -607,3 +607,5 @@ pub struct ShipcasterSdeComponents {
     pub starter_shipcasters: BTreeMap<TypeId, (SolarSystemId, i64)>,
     pub under_construction: BTreeMap<TypeId, UnderConstructionSpec>,
 }
+#[cfg(test)] #[path = "cfsd_nested_tables_unit_tests.rs"] mod cfsd_nested_tables_unit_tests;
+

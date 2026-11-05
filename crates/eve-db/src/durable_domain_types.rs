@@ -727,3 +727,6 @@ pub struct SocialContactNotificationRecord {
     pub standing_level: f64,
     pub message: String,
 }
+#[cfg(test)] #[path = "durable_domain_types_unit_tests.rs"] mod durable_domain_types_unit_tests;
+
+

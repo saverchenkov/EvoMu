@@ -429,3 +429,6 @@ impl SdeRegistry {
         Ok(out)
     }
 }
+#[cfg(test)] #[path = "cfsd_flat_tables_unit_tests.rs"] mod cfsd_flat_tables_unit_tests;
+
+

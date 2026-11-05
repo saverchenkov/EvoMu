@@ -1363,3 +1363,5 @@ impl SdeRegistry {
         })
     }
 }
+#[cfg(test)] #[path = "sqlite_loader_unit_tests.rs"] mod sqlite_loader_unit_tests;
+
