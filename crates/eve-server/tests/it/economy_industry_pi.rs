@@ -1580,7 +1580,6 @@ async fn test_lookup_warable_corps_and_alliances_enforces_structure_eligibility(
 
 #[tokio::test]
 async fn test_sov_structures_info_for_solar_system_filters_to_sov_structures() {
-    // parity: rpc:sovMgr.GetSovStructuresInfoForSolarSystem
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
 

@@ -162,9 +162,8 @@ fn pick_node_for_structure(ctx: &ServerContext, structure_id: i64) -> (i64, u32,
 
 #[tokio::test]
 async fn test_esi_sovereignty_campaigns_reflect_live_command_node_events() {
-    // parity: esi:GET /sovereignty/campaigns, feat:esi.sovereignty.campaigns
+    // parity: feat:esi.sovereignty.campaigns
     eve_testkit::attest(&[
-        "esi:GET /sovereignty/campaigns",
         "feat:esi.sovereignty.campaigns",
     ]);
 
@@ -303,10 +302,9 @@ async fn test_esi_sovereignty_campaigns_reflect_live_command_node_events() {
 
 #[tokio::test]
 async fn test_esi_incursions_wars_and_single_killmail_reflect_live_state() {
-    // parity: esi:GET /incursions, feat:esi.incursions.list, esi:GET /killmails/{killmail_id}/{killmail_hash}
+    // parity: feat:esi.incursions.list, esi:GET /killmails/{killmail_id}/{killmail_hash}
     // parity: feat:esi.killmails.single, feat:esi.wars.war
     eve_testkit::attest(&[
-        "esi:GET /incursions",
         "feat:esi.incursions.list",
         "esi:GET /killmails/{killmail_id}/{killmail_hash}",
         "feat:esi.killmails.single",

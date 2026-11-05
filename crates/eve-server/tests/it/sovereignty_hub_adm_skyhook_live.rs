@@ -66,9 +66,6 @@ fn find_nullsec_system_with_power(ctx: &ServerContext) -> (u32, i64) {
 
 #[tokio::test]
 async fn test_live_sov_hub_anchor_and_claim() {
-    // parity: feat:sovereignty.sov-hub-anchor
-    eve_testkit::attest(&["feat:sovereignty.sov-hub-anchor"]);
-
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let (sys_id, _, _, _, _) = crate::sovereignty_equinox_gameplay::find_nullsec_planets(&ctx);
@@ -125,9 +122,6 @@ async fn test_live_sov_hub_anchor_and_claim() {
 
 #[tokio::test]
 async fn test_live_sov_adm_and_entosis_scaling() {
-    // parity: feat:sovereignty.sov-adm
-    eve_testkit::attest(&["feat:sovereignty.sov-adm"]);
-
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let (sys_id, _, _, _, _) = crate::sovereignty_equinox_gameplay::find_nullsec_planets(&ctx);
@@ -184,9 +178,6 @@ async fn test_live_sov_adm_and_entosis_scaling() {
 
 #[tokio::test]
 async fn test_live_sov_dev_indices_progression_and_notifications() {
-    // parity: feat:sovereignty.sov-dev-indices
-    eve_testkit::attest(&["feat:sovereignty.sov-dev-indices"]);
-
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let (sys_id, _, _, _, _) = crate::sovereignty_equinox_gameplay::find_nullsec_planets(&ctx);
@@ -232,9 +223,6 @@ async fn test_live_sov_dev_indices_progression_and_notifications() {
 
 #[tokio::test]
 async fn test_live_sov_upgrade_sites_spawning() {
-    // parity: feat:sovereignty.sov-upgrade-sites
-    eve_testkit::attest(&["feat:sovereignty.sov-upgrade-sites"]);
-
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let (sys_id, temp_planet) = find_nullsec_system_with_power(&ctx);
@@ -332,9 +320,6 @@ async fn test_live_sov_upgrade_sites_spawning() {
 
 #[tokio::test]
 async fn test_live_sov_changed_broadcasts_on_capture_and_loss() {
-    // parity: feat:sovereignty.sov-changed-notifications
-    eve_testkit::attest(&["feat:sovereignty.sov-changed-notifications"]);
-
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let (sys_id, _, _, _, _) = crate::sovereignty_equinox_gameplay::find_nullsec_planets(&ctx);
@@ -395,9 +380,6 @@ async fn test_live_sov_changed_broadcasts_on_capture_and_loss() {
 
 #[tokio::test]
 async fn test_live_skyhook_harvest_split_and_reagent_maturity() {
-    // parity: feat:sovereignty.skyhook-reagent-maturity
-    eve_testkit::attest(&["feat:sovereignty.skyhook-reagent-maturity"]);
-
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let (sys_id, _, lava_planet, _ice_planet, _) = crate::sovereignty_equinox_gameplay::find_nullsec_planets(&ctx);

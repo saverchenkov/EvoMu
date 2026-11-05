@@ -3410,10 +3410,8 @@ async fn test_batch2_cache_setting_and_load_service() {
 #[tokio::test]
 async fn test_batch2_lookup_warable_and_sov_structures() {
     // parity: rpc:lookupSvc.LookupWarableCorporationsOrAlliances
-    // parity: rpc:sovMgr.GetSovStructuresInfoForSolarSystem
     eve_testkit::attest(&[
         "rpc:lookupSvc.LookupWarableCorporationsOrAlliances",
-        "rpc:sovMgr.GetSovStructuresInfoForSolarSystem",
     ]);
 
     let ctx = ServerContext::new();

@@ -198,7 +198,6 @@ async fn test_sov_mgr_structures_and_fuel_access() {
     // parity: rpc:sovMgr.GetInfrastructureHubInfo
     // parity: rpc:sovMgr.GetSovHubFuelAccessGroup
     // parity: rpc:sovMgr.GetSovStructuresInfoForLocalSolarSystem
-    // parity: rpc:sovMgr.GetSovStructuresInfoForSolarSystem
     // parity: rpc:sovMgr.GetSystemSovereigntyInfo
     // parity: rpc:sovMgr.IsOnLocalSovHubFuelAccessGroup
     // parity: rpc:sovMgr.SetSovHubFuelAccessGroup

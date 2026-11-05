@@ -239,19 +239,10 @@ async fn test_esi_meta_changelog_and_universe_races_factions_graphics() {
 
 #[tokio::test]
 async fn test_esi_faction_warfare_routes_reflect_live_state() {
-    // parity: esi:GET /characters/{character_id}/fw/stats, esi:GET /corporations/{corporation_id}/fw/stats
-    // parity: esi:GET /fw/leaderboards, esi:GET /fw/leaderboards/characters, esi:GET /fw/leaderboards/corporations
-    // parity: esi:GET /fw/stats, esi:GET /fw/systems, esi:GET /fw/wars
+    // parity: esi:GET /fw/wars
     // parity: feat:esi.faction-warfare.char-corp-stats, feat:esi.faction-warfare.leaderboards
     // parity: feat:esi.faction-warfare.stats, feat:esi.faction-warfare.systems, feat:esi.faction-warfare.wars
     eve_testkit::attest(&[
-        "esi:GET /characters/{character_id}/fw/stats",
-        "esi:GET /corporations/{corporation_id}/fw/stats",
-        "esi:GET /fw/leaderboards",
-        "esi:GET /fw/leaderboards/characters",
-        "esi:GET /fw/leaderboards/corporations",
-        "esi:GET /fw/stats",
-        "esi:GET /fw/systems",
         "esi:GET /fw/wars",
         "feat:esi.faction-warfare.char-corp-stats",
         "feat:esi.faction-warfare.leaderboards",

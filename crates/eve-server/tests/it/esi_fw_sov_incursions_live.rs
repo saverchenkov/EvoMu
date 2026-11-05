@@ -205,19 +205,9 @@ fn parse_iso8601_unix(s: &str) -> u64 {
 
 #[tokio::test]
 async fn test_esi_fw_live_enlistment_kills_and_complex_captures() {
-    // parity: esi:GET /characters/{character_id}/fw/stats, esi:GET /corporations/{corporation_id}/fw/stats
-    // parity: esi:GET /fw/leaderboards, esi:GET /fw/leaderboards/characters
-    // parity: esi:GET /fw/leaderboards/corporations, esi:GET /fw/stats, esi:GET /fw/systems
     // parity: feat:esi.faction-warfare.char-corp-stats, feat:esi.faction-warfare.leaderboards
     // parity: feat:esi.faction-warfare.stats, feat:esi.faction-warfare.systems
     eve_testkit::attest(&[
-        "esi:GET /characters/{character_id}/fw/stats",
-        "esi:GET /corporations/{corporation_id}/fw/stats",
-        "esi:GET /fw/leaderboards",
-        "esi:GET /fw/leaderboards/characters",
-        "esi:GET /fw/leaderboards/corporations",
-        "esi:GET /fw/stats",
-        "esi:GET /fw/systems",
         "feat:esi.faction-warfare.char-corp-stats",
         "feat:esi.faction-warfare.leaderboards",
         "feat:esi.faction-warfare.stats",
@@ -364,11 +354,10 @@ async fn test_esi_fw_live_enlistment_kills_and_complex_captures() {
 
 #[tokio::test]
 async fn test_esi_sovereignty_live_hub_adm_and_entosis_campaign() {
-    // parity: esi:GET /sovereignty/campaigns, esi:GET /sovereignty/map
+    // parity: esi:GET /sovereignty/map
     // parity: esi:GET /sovereignty/structures, feat:esi.sovereignty.campaigns
     // parity: feat:esi.sovereignty.structures
     eve_testkit::attest(&[
-        "esi:GET /sovereignty/campaigns",
         "esi:GET /sovereignty/map",
         "esi:GET /sovereignty/structures",
         "feat:esi.sovereignty.campaigns",
@@ -524,8 +513,8 @@ async fn test_esi_sovereignty_live_hub_adm_and_entosis_campaign() {
 
 #[tokio::test]
 async fn test_esi_incursions_live_spawn_and_influence_decay() {
-    // parity: esi:GET /incursions, feat:esi.incursions.list
-    eve_testkit::attest(&["esi:GET /incursions", "feat:esi.incursions.list"]);
+    // parity: feat:esi.incursions.list
+    eve_testkit::attest(&["feat:esi.incursions.list"]);
 
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);

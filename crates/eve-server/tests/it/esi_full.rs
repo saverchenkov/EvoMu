@@ -1624,16 +1624,9 @@ async fn create_pilot_in_new_corp(
 
 #[tokio::test]
 async fn test_esi_b6_fw_stats_systems_leaderboards_and_wars_live_rpc_driven() {
-    // parity: esi:GET /fw/stats, esi:GET /fw/systems, esi:GET /fw/leaderboards, esi:GET /fw/leaderboards/characters, esi:GET /fw/leaderboards/corporations, esi:GET /fw/wars, esi:GET /characters/{character_id}/fw/stats, esi:GET /corporations/{corporation_id}/fw/stats
+    // parity: esi:GET /fw/wars
     eve_testkit::attest(&[
-        "esi:GET /fw/stats",
-        "esi:GET /fw/systems",
-        "esi:GET /fw/leaderboards",
-        "esi:GET /fw/leaderboards/characters",
-        "esi:GET /fw/leaderboards/corporations",
         "esi:GET /fw/wars",
-        "esi:GET /characters/{character_id}/fw/stats",
-        "esi:GET /corporations/{corporation_id}/fw/stats",
     ]);
 
     let db_path = std::env::temp_dir().join(format!("esi_b6_fw_{}.sqlite", std::process::id()));
@@ -1898,10 +1891,8 @@ async fn test_esi_b6_fw_stats_systems_leaderboards_and_wars_live_rpc_driven() {
 
 #[tokio::test]
 async fn test_esi_b6_incursions_and_sovereignty_campaigns_structures_live_state() {
-    // parity: esi:GET /incursions, esi:GET /sovereignty/campaigns, esi:GET /sovereignty/structures
+    // parity: esi:GET /sovereignty/structures
     eve_testkit::attest(&[
-        "esi:GET /incursions",
-        "esi:GET /sovereignty/campaigns",
         "esi:GET /sovereignty/structures",
     ]);
 

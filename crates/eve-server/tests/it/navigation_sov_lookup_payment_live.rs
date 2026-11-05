@@ -4,7 +4,6 @@ use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
 
-// parity: rpc:sovMgr.GetSovStructuresInfoForSolarSystem
 #[tokio::test]
 async fn test_sov_structures_info() {
     let ctx = ServerContext::new();
