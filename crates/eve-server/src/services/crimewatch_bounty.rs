@@ -241,6 +241,7 @@ pub fn handle_bounty_proxy(
                     message: "Kill right price must be a non-negative finite number".into(),
                 }));
             }
+            let now_unix = ctx.now_unix();
             let restricted_to = args.get(2).and_then(|a| a.as_i64()).filter(|&r| r > 0);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let valid_target = restricted_to.is_none_or(|r| {
@@ -248,6 +249,12 @@ pub fn handle_bounty_proxy(
                         || snap.corporations.contains_key(&r)
                         || snap.alliances.contains_key(&r)
                 });
+                let exp = snap
+                    .combat_crimewatch_state
+                    .kill_right_expires_unix
+                    .get(&kr_id)
+                    .copied()
+                    .unwrap_or(0);
                 let Some(kr) = snap.kill_rights.get_mut(&kr_id) else {
                     return Err(BridgeRpcError {
                         code: "KillRightNotFound".into(),
@@ -258,6 +265,18 @@ pub fn handle_bounty_proxy(
                     return Err(BridgeRpcError {
                         code: "NotKillRightOwner".into(),
                         message: "Only the kill right owner can list it for sale".into(),
+                    });
+                }
+                if kr.is_active_suspect {
+                    return Err(BridgeRpcError {
+                        code: "KillRightAlreadyActivated".into(),
+                        message: format!("Kill right {kr_id} is already activated"),
+                    });
+                }
+                if exp > 0 && now_unix >= exp {
+                    return Err(BridgeRpcError {
+                        code: "KillRightExpired".into(),
+                        message: format!("Kill right {kr_id} has expired"),
                     });
                 }
                 if !valid_target {
@@ -277,12 +296,6 @@ pub fn handle_bounty_proxy(
                     .write()
                     .unwrap_or_else(|e| e.into_inner())
                     .sync_from_persisted(&snap.combat_crimewatch_state);
-                let exp = snap
-                    .combat_crimewatch_state
-                    .kill_right_expires_unix
-                    .get(&kr_id)
-                    .copied()
-                    .unwrap_or(0);
                 let fee = kr.activation_fee.to_wire_f64();
                 let restr_rep = match restricted_to {
                     Some(id) if id > 0 => PyRep::Integer(id),
@@ -338,10 +351,18 @@ pub fn handle_bounty_proxy(
                 Ok(())
             });
             match res {
-                Ok(()) => Some(Ok(PyRep::keyval([
-                    ("killRightID", PyRep::Integer(kr_id)),
-                    ("forSale", PyRep::Bool(false)),
-                ]))),
+                Ok(()) => {
+                    ctx.notify(
+                        crate::router::NotificationTarget::Character(char_id),
+                        "OnKillRightSellCancel",
+                        "charid",
+                        vec![PyRep::Integer(kr_id)],
+                    );
+                    Some(Ok(PyRep::keyval([
+                        ("killRightID", PyRep::Integer(kr_id)),
+                        ("forSale", PyRep::Bool(false)),
+                    ])))
+                }
                 Err(e) => Some(Err(e)),
             }
         }
@@ -849,10 +870,11 @@ pub fn handle_apply_tags_for_sec_status(
         let mut cur_sec = orig_sec;
         let mut total_fee_isk: i64 = 0;
         let mut total_consumed: i32 = 0;
+        let mut tier_txs: Vec<(u32, f64, f64)> = Vec::new();
         let mut changed_items: Vec<(eve_db::InventoryItemRecord, Option<eve_db::InventoryItemRecord>)> = Vec::new();
         for (idx, (tag_type_id, min_band, max_band, fee_per_tag_isk)) in tag_bands.into_iter().enumerate() {
             let req_qty = requested_by_type[idx];
-            if req_qty <= 0 || cur_sec + 1e-9 >= effective_target {
+            if req_qty <= 0 {
                 continue;
             }
             if cur_sec < min_band - 1e-6 || cur_sec >= max_band - 1e-6 {
@@ -862,6 +884,9 @@ pub fn handle_apply_tags_for_sec_status(
                         "Tag {tag_type_id} is only valid in security band [{min_band:.1}, {max_band:.1}); character is at {cur_sec:.2}"
                     ),
                 });
+            }
+            if cur_sec + 1e-9 >= effective_target {
+                continue;
             }
             let band_cap = ((max_band - cur_sec) / 0.5).ceil().max(1.0) as i32;
             let target_cap = ((effective_target - cur_sec) / 0.5).ceil().max(0.0) as i32;
@@ -915,7 +940,9 @@ pub fn handle_apply_tags_for_sec_status(
                     changed_items.push((old_item, new_item_opt));
                 }
             }
+            let prev_tier_sec = cur_sec;
             cur_sec = (cur_sec + 0.5 * f64::from(consumed_qty)).min(0.0);
+            tier_txs.push((tag_type_id, prev_tier_sec, cur_sec));
             total_fee_isk = total_fee_isk.saturating_add(fee_per_tag_isk.saturating_mul(i64::from(consumed_qty)));
             total_consumed = total_consumed.saturating_add(consumed_qty);
         }
@@ -942,16 +969,15 @@ pub fn handle_apply_tags_for_sec_status(
             new_bal,
             format!("CONCORD Security Office tag turn-in ({total_consumed}x tags)"),
         );
-        Ok((orig_sec, cur_sec, new_bal.to_wire_f64(), changed_items))
+        Ok((orig_sec, cur_sec, new_bal.to_wire_f64(), changed_items, tier_txs))
     });
 
     match res {
-        Ok((old_sec, new_sec, new_bal_f64, changed_items)) => {
+        Ok((old_sec, new_sec, new_bal_f64, changed_items, tier_txs)) => {
             crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-                rt.sec_status_transactions
-                    .entry(char_id)
-                    .or_default()
-                    .push(crate::services::combat_crimewatch::SecStatusTransaction {
+                let list = rt.sec_status_transactions.entry(char_id).or_default();
+                if tier_txs.is_empty() {
+                    list.push(crate::services::combat_crimewatch::SecStatusTransaction {
                         timestamp_unix: now_unix,
                         old_sec,
                         new_sec,
@@ -962,6 +988,21 @@ pub fn handle_apply_tags_for_sec_status(
                         other_owner_id: None,
                         other_type_id: None,
                     });
+                } else {
+                    for (tag_type_id, t_old, t_new) in tier_txs {
+                        list.push(crate::services::combat_crimewatch::SecStatusTransaction {
+                            timestamp_unix: now_unix,
+                            old_sec: t_old,
+                            new_sec: t_new,
+                            delta: t_new - t_old,
+                            reason: "Clone Soldier Security Tag".into(),
+                            solar_system_id: sys_id,
+                            event_type_id: 385,
+                            other_owner_id: None,
+                            other_type_id: Some(tag_type_id),
+                        });
+                    }
+                }
             });
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),

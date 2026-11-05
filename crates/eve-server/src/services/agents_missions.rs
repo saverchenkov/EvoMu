@@ -799,15 +799,12 @@ pub async fn handle(
                             DVec3::ZERO
                         };
                         for (idx, (npc_id, tid)) in spawned_npcs.into_iter().enumerate() {
-                            let (max_velocity, mass, radius) = ctx.sde.types.get(&tid).map(|inv| {
-                                let mv = inv.default_attributes.get(&eve_sde::attr_ids::MAX_VELOCITY).copied().unwrap_or(300.0);
-                                (mv, inv.mass.max(1.0), inv.radius.max(1.0))
-                            }).unwrap_or((300.0, 100_000.0, 30.0));
                             let pocket_offset = ((npc_id % 40) as f64) * 35.0 + (idx as f64) * 350.0;
-                            let _ = handle.spawn_ball_with_combat(
-                                Ball { id: npc_id, type_id: tid, position: origin + DVec3::new(800.0 + pocket_offset, (idx as f64) * 120.0, 0.0), velocity: DVec3::ZERO, max_velocity, inertia: 2.5, mass, radius, speed_fraction: 0.0, mode: MovementMode::Stop },
-                                ctx.build_type_combat_state(tid),
-                            ).await;
+                            let pos = origin + DVec3::new(800.0 + pocket_offset, (idx as f64) * 120.0, 0.0);
+                            let (ball, cs, mut entity) = crate::services::wormhole_pve_seeding::build_specialized_npc_components(ctx, sys_id, npc_id, tid, "Pirate", 1, pos);
+                            entity.bounty_isk = entity.bounty_isk.max(10_000.0);
+                            let _ = handle.spawn_ball_with_combat(ball, cs).await;
+                            ctx.combat_ephemeral.write().unwrap_or_else(|e| e.into_inner()).npc_entities.insert(npc_id, entity);
                         }
                     }
 

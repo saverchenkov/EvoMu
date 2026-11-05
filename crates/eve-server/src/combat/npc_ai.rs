@@ -148,7 +148,7 @@ pub fn compute_sec_status_gain(current_sec: f64, bounty: f64) -> f64 {
         return 0.0;
     }
     let headroom = (5.0 - current_sec).max(0.0);
-    let scale = (bounty / 500_000.0).clamp(0.01, 0.10);
+    let scale = (bounty / 500_000.0).clamp(0.01, 10.0);
     (headroom * 0.01 * scale).clamp(0.001, 0.5).min(headroom)
 }
 
@@ -789,6 +789,7 @@ impl NpcSpawnManager {
             }
         }
 
+        let damaged_target_ids: Vec<i64> = dmg_updates.iter().map(|&(tid, _)| tid).collect();
         if !mode_updates.is_empty() || !dmg_updates.is_empty() {
             let mut bp = sys_handle
                 .ballpark
@@ -826,6 +827,27 @@ impl NpcSpawnManager {
         }
 
         let now_unix = ctx.now_unix();
+        if !damaged_target_ids.is_empty() {
+            let hit_chars: Vec<i64> = ctx.db.with_snapshot(|snap| {
+                damaged_target_ids
+                    .iter()
+                    .filter_map(|&tid| {
+                        snap.characters
+                            .get(&tid)
+                            .map(|c| c.character_id)
+                            .or_else(|| {
+                                snap.characters
+                                    .values()
+                                    .find(|c| c.active_ship_id == tid)
+                                    .map(|c| c.character_id)
+                            })
+                    })
+                    .collect()
+            });
+            for cid in hit_chars {
+                crate::sp6_lifecycle::record_npc_aggression_timer(ctx, cid, now_unix);
+            }
+        }
         for dead_id in to_remove {
             if let Some(dead_ent) = self.entities.remove(&dead_id) {
                 let until = now_unix.saturating_add(1_200);

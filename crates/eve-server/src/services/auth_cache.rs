@@ -1189,50 +1189,30 @@ pub async fn handle(
                         message: "Usage: /spawnnpc <type_id>".into(),
                     }));
                 };
-                let Some(npc_type) = ctx.sde.types.get(&type_id) else {
+                if !ctx.sde.types.contains_key(&type_id) {
                     return Some(Err(BridgeRpcError {
                         code: "TypeNotFound".into(),
                         message: format!("NPC type ID {type_id} not found in SDE"),
                     }));
-                };
+                }
                 let (sys_id, ship_id) = ctx.db.with_snapshot(|snap| {
                     snap.characters.get(&cid).map(|c| (c.solar_system_id, c.active_ship_id))
                 }).or_else(|| session.solar_system_id.map(|s| (s, 0))).unwrap_or((0, 0));
 
-                let mass = npc_type.mass.max(1.0);
-                let radius = npc_type.radius.max(1.0);
                 let handle = ctx.systems.get_or_spawn(sys_id);
                 let origin = if ship_id > 0 {
-                    handle
-                        .get_ball_snapshot(ship_id)
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|(_, b)| b.position)
-                        .unwrap_or(DVec3::ZERO)
+                    handle.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(DVec3::ZERO)
                 } else {
                     DVec3::ZERO
                 };
-
-                let npc_id = ctx.db.with_mut_snapshot(|snap| snap.alloc_entity_id());
-
-                let _ = handle
-                    .spawn_ball_with_combat(
-                        Ball {
-                            id: npc_id,
-                            type_id,
-                            position: origin + DVec3::new(1_000.0, 0.0, 0.0),
-                            velocity: DVec3::ZERO,
-                            max_velocity: 350.0,
-                            inertia: 1.0,
-                            mass,
-                            radius,
-                            speed_fraction: 0.0,
-                            mode: MovementMode::Stop,
-                        },
-                        ctx.build_type_combat_state(type_id),
-                    )
-                    .await;
+                let npc_id = crate::services::combat_crimewatch::combat_npc_ai::spawn_npc_entity_from_sde(
+                    ctx,
+                    sys_id,
+                    type_id,
+                    0,
+                    origin + DVec3::new(1_000.0, 0.0, 0.0),
+                )
+                .await;
 
                 Some(Ok(PyRep::keyval([
                     ("command", PyRep::String(cmd.to_string())),

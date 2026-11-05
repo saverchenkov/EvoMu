@@ -344,6 +344,7 @@ pub async fn handle_npc_destroyed_in_space(
         let drop_pos = npc.spawn_position;
         let drop_cls = npc.sleeper_wh_class.max(5);
         let base_bounty = npc.bounty_isk;
+        let npc_type_id = npc.type_id;
         let mut credited = false;
         {
             let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
@@ -393,7 +394,7 @@ pub async fn handle_npc_destroyed_in_space(
                             solar_system_id,
                             event_type_id: crate::services::combat_crimewatch::crimewatch_timers::EVENT_SEC_STATUS_KILL_PIRATE_NPC,
                             other_owner_id: None,
-                            other_type_id: None,
+                            other_type_id: Some(npc_type_id),
                         });
                     snap.combat_crimewatch_state = rt.to_persisted();
                 }

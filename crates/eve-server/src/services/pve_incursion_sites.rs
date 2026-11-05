@@ -1090,25 +1090,27 @@ pub async fn on_incursion_boss_destroyed_core(
                 if site.solar_system_id == solar_system_id && site.boss_npc_ball_id == npc_ball_id {
                     let locked = site.locked_until_low_influence && (inc.influence > 0.0 || !inc.mothership_spawned);
                     if locked {
-                        return Some((site.site_id.clone(), true, false, false, None));
+                        return Some((site.site_id.clone(), true, false, false, None, None));
                     }
                     let earlier_waves_pending = reg
                         .incursion_site_waves
                         .get(&site.site_id)
                         .is_some_and(|w| w.current_wave < w.total_waves);
                     if earlier_waves_pending {
-                        return Some((site.site_id.clone(), false, false, true, None));
+                        return Some((site.site_id.clone(), false, false, true, None, None));
                     }
+                    let killed_tid = (!site.boss_destroyed).then_some(site.boss_type_id);
                     site.boss_destroyed = true;
                     site.killer_char_id = killer_char_id;
                     site.killer_fleet_id = killer_fleet_id;
                     if site.escort_spawns.iter().any(|e| !e.destroyed) {
-                        return Some((site.site_id.clone(), false, false, true, None));
+                        return Some((site.site_id.clone(), false, false, true, None, killed_tid));
                     }
-                    return Some((site.site_id.clone(), false, false, false, killer_char_id));
+                    return Some((site.site_id.clone(), false, false, false, killer_char_id, killed_tid));
                 }
                 for esc in &mut site.escort_spawns {
                     if site.solar_system_id == solar_system_id && esc.npc_ball_id == npc_ball_id {
+                        let killed_tid = (!esc.destroyed).then_some(esc.type_id);
                         esc.destroyed = true;
                         let waves_done = reg
                             .incursion_site_waves
@@ -1122,9 +1124,10 @@ pub async fn on_incursion_boss_destroyed_core(
                                 false,
                                 false,
                                 site.killer_char_id.or(killer_char_id),
+                                killed_tid,
                             ));
                         }
-                        return Some((site.site_id.clone(), false, true, false, None));
+                        return Some((site.site_id.clone(), false, true, false, None, killed_tid));
                     }
                 }
             }
@@ -1132,7 +1135,39 @@ pub async fn on_incursion_boss_destroyed_core(
         None
     });
 
-    let (site_id, is_locked, is_escort, waves_pending, completion_killer_opt) = site_found?;
+    let (site_id, is_locked, is_escort, waves_pending, completion_killer_opt, killed_npc_tid) = site_found?;
+    if let (Some(killer), Some(tid)) = (killer_char_id.filter(|&k| k > 0), killed_npc_tid) {
+        let (bonus_pct, max_gain) = sde
+            .types
+            .get(&tid)
+            .map(|t| {
+                let b = t.default_attributes.get(&252).copied().unwrap_or(0.10);
+                let cap = t.default_attributes.get(&563).copied().unwrap_or(5.0).min(5.0);
+                (b, cap)
+            })
+            .unwrap_or((0.10, 5.0));
+        db.with_mut_snapshot(|snap| {
+            let Some(old_sec) = snap.characters.get(&killer).map(|c| c.security_status) else {
+                return;
+            };
+            if old_sec < max_gain && bonus_pct > 0.0 {
+                let gain = ((10.0 - old_sec) * bonus_pct / 100.0).max(0.0);
+                if gain > 0.0 {
+                    let new_sec = (old_sec + gain).min(max_gain).clamp(-10.0, 10.0);
+                    if let Some(ch) = snap.characters.get_mut(&killer) {
+                        ch.security_status = new_sec;
+                    }
+                    snap.combat_crimewatch_state.sec_status_transactions.entry(killer).or_default().push(
+                        eve_db::PersistedSecStatusTransaction {
+                            timestamp_unix: now_sec, old_sec, new_sec, delta: new_sec - old_sec,
+                            reason: "NPC Pirate Bounty".into(), solar_system_id,
+                            event_type_id: 378, other_owner_id: None, other_type_id: Some(tid),
+                        },
+                    );
+                }
+            }
+        });
+    }
     if is_locked {
         return Some(Err(rpc_err(
             "MothershipSiteLocked",

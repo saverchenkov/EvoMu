@@ -681,6 +681,7 @@ pub async fn handle_crimewatch(
                 Err(e) => return Some(Err(e)),
             };
             let kr_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let expected_price_opt = args.get(1).and_then(|a| a.as_f64()).filter(|p| p.is_finite());
             let is_docked = session.station_id.is_some() || session.structure_id.is_some();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(kr) = snap.kill_rights.get(&kr_id).cloned() else {
@@ -697,6 +698,11 @@ pub async fn handle_crimewatch(
                 }
                 if kr.activation_fee.0 <= 0 {
                     return Err(BridgeRpcError { code: "KillRightNotForSale".into(), message: format!("Kill right {kr_id} is not listed for public sale") });
+                }
+                if let Some(expected_isk) = expected_price_opt {
+                    if expected_isk < 0.0 || IskCents::from_f64_isk(expected_isk) < kr.activation_fee {
+                        return Err(BridgeRpcError { code: "KillRightPriceChanged".into(), message: "Offered price is lower than current kill right sale price".into() });
+                    }
                 }
                 check_kill_right_restriction(snap, kr_id, char_id)?;
                 if is_docked {
@@ -744,6 +750,7 @@ pub async fn handle_crimewatch(
                     ctx.notify(NotificationTarget::Character(char_id), "OnAccountChange", "charid", vec![PyRep::String("cash".into()), PyRep::Integer(char_id), PyRep::Real(caller_bal)]);
                     ctx.notify(NotificationTarget::Character(owner_id), "OnAccountChange", "charid", vec![PyRep::String("cash".into()), PyRep::Integer(owner_id), PyRep::Real(owner_bal)]);
                     emit_crimewatch_timer_notifications(ctx, target_id, now_unix);
+                    ctx.notify(NotificationTarget::Character(owner_id), "OnKillRightSold", "charid", vec![PyRep::Integer(kr_id)]);
                     ctx.notify(NotificationTarget::Character(owner_id), "OnKillRightForYouSold", "charid", vec![PyRep::Integer(kr_id)]);
                     ctx.notify(NotificationTarget::Character(char_id), "OnKillRightActivated", "charid", vec![]);
                     ctx.notify(NotificationTarget::Character(char_id), "OnKillRightUsed", "charid", vec![PyRep::Integer(kr_id), PyRep::Integer(target_id)]);
@@ -1147,6 +1154,11 @@ pub fn evaluate_and_record_pvp_aggression(
                 st.criminal_flag_until_unix = now_unix.saturating_add(900);
                 st.suspect_flag_until_unix = 0;
             }
+        }
+        if is_disapproval_system(&ctx.sde, sys_id) {
+            with_mut_combat_runtime(ctx, |rt| {
+                rt.disapproval_flags.insert(attacker_char_id, now_unix.saturating_add(900));
+            });
         }
         crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, attacker_char_id, vcid, now_unix);
         let le_created = with_mut_combat_runtime(ctx, |rt| {

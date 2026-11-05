@@ -816,13 +816,6 @@ pub fn is_legal_war_or_suspect_target(
     victim_char_id: i64,
     now_unix: u64,
 ) -> bool {
-    let has_suspect = snap
-        .kill_rights
-        .values()
-        .any(|kr| kr.target_id == victim_char_id && kr.is_active_suspect);
-    if has_suspect {
-        return true;
-    }
     if let Some(vic) = snap.characters.get(&victim_char_id) {
         if vic.security_status <= -4.95 {
             return true;

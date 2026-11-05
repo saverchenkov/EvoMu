@@ -1261,16 +1261,34 @@ pub fn credit_ballpark_npc_bounty_with_ess_split(
         .get(&sys_id)
         .map(|s| s.security_status)
         .unwrap_or(0.5);
+    let apply_sec_gain = |snap: &mut WorldStateSnapshot| {
+        let Some(old_sec) = snap.characters.get(&killer_char_id).map(|c| c.security_status) else {
+            return;
+        };
+        if old_sec < 5.0 {
+            let gain = crate::combat::compute_sec_status_gain(old_sec, base_entity_bounty_isk) * supp_mult;
+            if gain > 0.0 {
+                let new_sec = (old_sec + gain).min(5.0).clamp(-10.0, 10.0);
+                if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
+                    ch.security_status = new_sec;
+                }
+                snap.combat_crimewatch_state.sec_status_transactions.entry(killer_char_id).or_default().push(
+                    eve_db::PersistedSecStatusTransaction {
+                        timestamp_unix: now_unix, old_sec, new_sec, delta: new_sec - old_sec,
+                        reason: "NPC Pirate Bounty".into(), solar_system_id: sys_id,
+                        event_type_id: 378, other_owner_id: None, other_type_id: Some(npc_type_id),
+                    },
+                );
+            }
+        }
+    };
     let is_kspace_nullsec = sys_sec <= 0.0 && sys_id < 31_000_000;
     if !is_kspace_nullsec {
         let bounty_cents = IskCents::from_f64_isk(raw_bounty_isk);
         if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
             ch.balance = ch.balance.checked_add(bounty_cents).unwrap_or(ch.balance);
-            if ch.security_status < 5.0 {
-                let gain = crate::combat::compute_sec_status_gain(ch.security_status, base_entity_bounty_isk) * supp_mult;
-                ch.security_status = (ch.security_status + gain).min(5.0);
-            }
         }
+        apply_sec_gain(snap);
         let bal_after = snap
             .characters
             .get(&killer_char_id)
@@ -1315,11 +1333,8 @@ pub fn credit_ballpark_npc_bounty_with_ess_split(
 
     if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
         ch.balance = ch.balance.checked_add(pilot_cents).unwrap_or(ch.balance);
-        if ch.security_status < 5.0 {
-            let gain = crate::combat::compute_sec_status_gain(ch.security_status, base_entity_bounty_isk) * supp_mult;
-            ch.security_status = (ch.security_status + gain).min(5.0);
-        }
     }
+    apply_sec_gain(snap);
     if is_player_corp && tax_cents.raw_cents() > 0 {
         if let Some(corp) = snap.corporations.get_mut(&char_corp_id) {
             corp.ensure_wallet_divisions();
