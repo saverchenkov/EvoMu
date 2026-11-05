@@ -570,3 +570,8 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
         );
     }
 }
+
+#[cfg(test)]
+#[path = "quasar_sov_workforce_tests.rs"]
+mod quasar_sov_workforce_tests;
+

@@ -756,3 +756,8 @@ pub(crate) fn publish_stargate_lock_deactivated_notice(
     };
     let _ = gateway.publish_notice(NoticeScope::Character(char_id as u32), any, now_unix);
 }
+
+#[cfg(test)]
+#[path = "quasar_sov_services_tests.rs"]
+mod quasar_sov_services_tests;
+

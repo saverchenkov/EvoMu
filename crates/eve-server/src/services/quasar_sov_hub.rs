@@ -1193,3 +1193,8 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
 
     super::quasar_sov_workforce::register_handlers(router, Arc::clone(&db), Arc::clone(&sde));
 }
+
+#[cfg(test)]
+#[path = "quasar_sov_hub_tests.rs"]
+mod quasar_sov_hub_tests;
+

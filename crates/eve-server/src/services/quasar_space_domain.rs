@@ -675,3 +675,8 @@ pub fn register_handlers(
         );
     }
 }
+
+#[cfg(test)]
+#[path = "quasar_space_domain_tests.rs"]
+mod quasar_space_domain_tests;
+

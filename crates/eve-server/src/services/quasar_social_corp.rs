@@ -1216,3 +1216,8 @@ fn extract_id(val: Option<&DynamicValue>) -> Option<u64> {
 fn extract_goal_id(val: Option<&DynamicValue>) -> Option<u64> {
     extract_id_inner(val, true)
 }
+
+#[cfg(test)]
+#[path = "quasar_social_corp_tests.rs"]
+mod quasar_social_corp_tests;
+

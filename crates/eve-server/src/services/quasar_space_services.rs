@@ -1222,3 +1222,8 @@ pub fn register_handlers(
 
     super::quasar_space_domain::register_handlers(router, db, sde);
 }
+
+#[cfg(test)]
+#[path = "quasar_space_services_tests.rs"]
+mod quasar_space_services_tests;
+

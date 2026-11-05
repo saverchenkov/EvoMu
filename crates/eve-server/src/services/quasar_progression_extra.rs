@@ -1330,3 +1330,8 @@ pub fn register_progression_extra_handlers(
 }
 
 pub use super::quasar_goal_tale_notices::handle_opportunity_event;
+
+#[cfg(test)]
+#[path = "quasar_progression_extra_tests.rs"]
+mod quasar_progression_extra_tests;
+

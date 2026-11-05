@@ -219,3 +219,8 @@ pub fn register_query_handlers(router: &PublicGatewayRouter, db: Arc<WorldReposi
         );
     }
 }
+
+#[cfg(test)]
+#[path = "quasar_sov_skyhook_tests.rs"]
+mod quasar_sov_skyhook_tests;
+

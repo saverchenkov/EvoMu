@@ -731,3 +731,8 @@ pub fn on_character_local_chat_membership_refreshed(
     )?;
     Ok(delivered)
 }
+
+#[cfg(test)]
+#[path = "quasar_social_chat_tests.rs"]
+mod quasar_social_chat_tests;
+

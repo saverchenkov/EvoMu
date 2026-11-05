@@ -929,3 +929,8 @@ pub fn register_handlers(
     );
 
 }
+
+#[cfg(test)]
+#[path = "quasar_vendors_and_war_services_tests.rs"]
+mod quasar_vendors_and_war_services_tests;
+

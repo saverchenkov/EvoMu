@@ -1364,3 +1364,8 @@ fn parse_skill_requirements(val: Option<&DynamicValue>, sde: &eve_sde::SdeRegist
     }
     Ok(reqs)
 }
+
+#[cfg(test)]
+#[path = "quasar_skills_clones_tests.rs"]
+mod quasar_skills_clones_tests;
+

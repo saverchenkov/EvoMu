@@ -365,3 +365,8 @@ pub fn register_handlers(
         );
     }
 }
+
+#[cfg(test)]
+#[path = "quasar_sov_resources_tests.rs"]
+mod quasar_sov_resources_tests;
+

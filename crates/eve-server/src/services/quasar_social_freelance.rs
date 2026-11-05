@@ -1170,3 +1170,8 @@ fn extract_id(val: Option<&DynamicValue>) -> Option<u64> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "quasar_social_freelance_tests.rs"]
+mod quasar_social_freelance_tests;
+

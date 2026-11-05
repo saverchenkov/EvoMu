@@ -700,3 +700,8 @@ pub fn publish_notification_notice(
     Ok(delivered)
 }
 
+#[cfg(test)]
+#[path = "quasar_social_community_tests.rs"]
+mod quasar_social_community_tests;
+
+
