@@ -70,7 +70,6 @@ fn encode_configure_req(hub_id: i64, cfg_bytes: &[u8]) -> Vec<u8> {
 
 #[tokio::test]
 async fn test_sov_workforce_transit_relay_traversal_and_notices() {
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/notices_pb2.pyj
     let ctx = ServerContext::new();
     let (sys_a, sys_b, sys_c) = find_transit_chain(&ctx);
     seed_hub(&ctx, HUB_A, sys_a);

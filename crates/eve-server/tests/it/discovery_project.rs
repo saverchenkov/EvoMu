@@ -803,10 +803,6 @@ async fn test_project_discovery_parity_closure() {
 
 #[tokio::test]
 async fn test_quasar_sovereignty_resource_planet_requests() {
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj",
-    ]);
 
     let ctx = ServerContext::new();
 

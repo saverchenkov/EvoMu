@@ -2331,11 +2331,6 @@ async fn test_wormhole_lifetime_decay_stages_and_info_buckets() {
 
 #[tokio::test]
 async fn test_hacking_node_types_and_failure_outcome() {
-    // parity: , 
-    eve_testkit::attest(&[
-        
-        
-    ]);
 
     // 1. Difficulty 1 (Very Easy) and Difficulty 2 (Easy) must not spawn RestorationNode or VirusSuppressor
     for diff in [1_u8, 2_u8] {
@@ -3444,9 +3439,6 @@ async fn test_parity_remediation_esi_corp_blueprints_and_structures_live_rpcs() 
 
 #[tokio::test]
 async fn test_parity_remediation_quasar_title_definitions_and_space_cdn() {
-    // parity: quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj",
     ]);
 
     let ctx = Arc::new(ServerContext::new());
@@ -3676,16 +3668,11 @@ async fn test_parity_remediation_quasar_freelance_projects_and_item_delivery() {
 
 #[tokio::test]
 async fn test_parity_remediation_quasar_payment_schedules_tokens_and_store() {
-    // parity: quasar:eveProto/generated/eve_public/payment/schedule/notices_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/payment/purchase/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/category/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/offer/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/payment/schedule/notices_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api/notices_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/payment/schedule/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/payment/token/api_pb2.pyj",
         "quasar:eveProto/generated/eve_public/payment/token/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/payment/purchase/api_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/store/category/api_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/store/offer/api_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj",
     ]);
 
     let ctx = ServerContext::new();

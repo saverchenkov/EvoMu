@@ -278,11 +278,9 @@ async fn test_quasar_batch2_freelance_projects_and_item_delivery_e2e() {
 
 #[tokio::test]
 async fn test_quasar_batch2_payment_schedules_and_tokens_e2e() {
-    // parity: quasar:eveProto/generated/eve_public/payment/purchase/api_pb2.pyj, quasar:eveProto/generated/eve_public/payment/schedule/notices_pb2.pyj, quasar:eveProto/generated/eve_public/payment/schedule/requests_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/payment/schedule/notices_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api_pb2.pyj
     eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/payment/purchase/api_pb2.pyj",
         "quasar:eveProto/generated/eve_public/payment/schedule/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/payment/schedule/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/payment/token/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/payment/token/api_pb2.pyj",
     ]);
@@ -404,13 +402,6 @@ async fn test_quasar_batch2_payment_schedules_and_tokens_e2e() {
 
 #[tokio::test]
 async fn test_quasar_batch2_store_catalog_and_target_audience_e2e() {
-    // parity: quasar:eveProto/generated/eve_public/store/category/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/offer/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/store/category/api_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/store/offer/api_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj",
-    ]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

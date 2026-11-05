@@ -707,10 +707,9 @@ fn make_ta_offer_request(offer_id: u32) -> Vec<u8> {
 
 #[tokio::test]
 async fn test_q3_payment_purchase_and_schedules() {
-    // parity: quasar:eveProto/generated/eve_public/payment/schedule/notices_pb2.pyj, quasar:eveProto/generated/eve_public/payment/schedule/requests_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/payment/schedule/notices_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/payment/schedule/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/payment/schedule/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/payment/token/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/payment/token/api_pb2.pyj",
     ]);
@@ -1150,10 +1149,6 @@ async fn test_q3_vendors_and_fulfillment() {
 
 #[tokio::test]
 async fn test_q3_legal_pii_cdn_localization() {
-    // parity: quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj",
-    ]);
 
     let ctx = std::sync::Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);

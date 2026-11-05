@@ -987,6 +987,29 @@ pub fn register_plex_vault_extra_handlers(router: &PublicGatewayRouter, db: Arc<
                 _ => 0,
             };
             let targeted = matches!(attrs.get(7), Some(DynamicValue::Bool(true)) | Some(DynamicValue::Uint64(1)));
+            let (price_cents, currency) = match attrs.get(3) {
+                Some(DynamicValue::Repeated(list)) => list
+                    .iter()
+                    .find_map(|v| match v {
+                        DynamicValue::Message(cp) => {
+                            let amt = match cp.get(2) {
+                                Some(DynamicValue::Int64(c)) if *c > 0 => Some(*c as u64),
+                                Some(DynamicValue::Uint64(c)) if *c > 0 => Some(*c),
+                                Some(DynamicValue::Int32(c)) if *c > 0 => Some(*c as u64),
+                                Some(DynamicValue::Uint32(c)) if *c > 0 => Some(*c as u64),
+                                _ => None,
+                            }?;
+                            let code = match cp.get(1) {
+                                Some(DynamicValue::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
+                                _ => "USD".to_string(),
+                            };
+                            Some((Some(amt), Some(code)))
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or((None, None)),
+                _ => (None, None),
+            };
             let tags: Vec<String> = match attrs.get(16) {
                 Some(DynamicValue::Repeated(list)) => list
                     .iter()
@@ -1041,8 +1064,8 @@ pub fn register_plex_vault_extra_handlers(router: &PublicGatewayRouter, db: Arc<
                     price_plex,
                     product_ids,
                     targeted,
-                    price_cents: None,
-                    currency: None,
+                    price_cents,
+                    currency,
                 });
                 save_store_catalog(snap, &catalog);
                 if !tags.is_empty() {

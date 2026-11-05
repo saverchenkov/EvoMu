@@ -79,12 +79,6 @@ async fn test_sov_hub_and_star_resource_configurations() {
 
 #[tokio::test]
 async fn test_sov_hub_workforce_transit_relay_network() {
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/notices_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/notices_pb2.pyj",
-    ]);
 
     let ctx = ServerContext::new();
     let mut s = sess(92_002, PILOT, CORP, JITA, corp_roles::ROLE_STATION_MANAGER);
@@ -370,9 +364,6 @@ async fn test_skinr_sequencing_job_natural_completion_notice() {
 
 #[tokio::test]
 async fn test_payment_schedule_omega_purchase_and_faction_activity_admin() {
-    // parity: quasar:eveProto/generated/eve_public/payment/schedule/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/payment/schedule/requests_pb2.pyj",
     ]);
 
     let ctx = ServerContext::new();

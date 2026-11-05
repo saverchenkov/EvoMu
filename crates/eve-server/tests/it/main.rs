@@ -466,3 +466,4 @@ mod lp_structures_lookup_dungeons_live;
 mod pve_hacking_incursions_missions_live;
 mod pve_incursions_missions_live;
 mod esi_industry_mining_pi_loyalty_live;
+mod quasar_pirate_sov_store_live;

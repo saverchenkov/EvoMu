@@ -164,7 +164,6 @@ fn raw_msg(fields: &[(u32, RawField)], num: u32) -> Option<Vec<(u32, RawField)>>
 
 #[tokio::test]
 async fn test_q3_payment_purchase_and_store_catalog_closure() {
-    // parity: quasar:eveProto/generated/eve_public/payment/purchase/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/category/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/offer/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj
     let ctx = ServerContext::new();
     let mut sess = make_session(1, 1, 90_000_001, 1_000_009);
 

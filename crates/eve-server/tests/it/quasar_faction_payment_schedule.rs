@@ -174,7 +174,6 @@ async fn test_faction_activity_admin_increment_set_notices_and_auth() {
 
 #[tokio::test]
 async fn test_payment_schedule_lifecycle_from_omega_purchase_and_auth() {
-    // parity: quasar:eveProto/generated/eve_public/payment/schedule/requests_pb2.pyj
     let ctx = ServerContext::new();
     ctx.db.with_mut_snapshot(|snap| {
         save_store_catalog(

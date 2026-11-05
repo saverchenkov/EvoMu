@@ -1060,7 +1060,6 @@ async fn test_quasar_sovereignty_all_seven_protos_parity() {
     // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj
     // DATA GAP: quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj — server-only planet resource table (docs/BLOCKERS.md §9)
     // DATA GAP: quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj — server-only star power table (docs/BLOCKERS.md §9)
     eve_testkit::attest(&[
@@ -1068,7 +1067,6 @@ async fn test_quasar_sovereignty_all_seven_protos_parity() {
         "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj",
     ]);
 
     let db_path = temp_sqlite_path("quasar_sov_protos");

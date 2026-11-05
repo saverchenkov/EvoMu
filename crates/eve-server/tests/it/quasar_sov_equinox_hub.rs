@@ -166,14 +166,8 @@ fn has(notices: &[(String, Vec<u8>)], name: &str) -> bool {
 #[tokio::test]
 async fn test_equinox_hub_resources_fuel_and_upgrades_state_backed() {
     // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/requests_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/sovereignty/hub/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/requests_pb2.pyj",
     ]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -319,12 +313,6 @@ async fn test_equinox_hub_resources_fuel_and_upgrades_state_backed() {
 
 #[tokio::test]
 async fn test_equinox_hub_workforce_transfer_network_state_backed() {
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj",
-    ]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut s = sess(61_011, PILOT, CORP, JITA, corp_roles::ROLE_STATION_MANAGER);

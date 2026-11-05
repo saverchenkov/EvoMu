@@ -197,7 +197,6 @@ fn seed_structure(snap: &mut eve_db::WorldStateSnapshot, id: i64, owner: i64, sy
 
 #[tokio::test]
 async fn test_b33_faction_activity_admin_and_payment_schedule() {
-    // parity: quasar:eveProto/generated/eve_public/payment/schedule/requests_pb2.pyj
     let ctx = ServerContext::new();
     let mut admin_sess = make_session(1, 10, 90_000_010, 1_000_009, true);
     let mut player_sess = make_session(2, 11, 90_000_011, 1_000_009, false);
@@ -447,7 +446,7 @@ async fn test_b33_achievement_and_goal_admin_closure() {
 
 #[tokio::test]
 async fn test_b33_sovereignty_hub_resources_and_fuel_closure() {
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj
     let ctx = ServerContext::new();
     let cid = 90_000_030i64;
     let corp_id = 1_000_009i64;
@@ -630,7 +629,6 @@ async fn test_b33_mercenary_den_activities_and_notices_closure() {
 
 #[tokio::test]
 async fn test_b33_skyhook_admin_closure() {
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/admin/admin_pb2.pyj
     let ctx = ServerContext::new();
     let (cid, corp_id, skyhook_id, sys_id) = (90_000_050i64, 1_000_009i64, 1_070_000_001i64, 30_000_142u32);
     let mut player_sess = make_session(9, 50, cid, corp_id, false);

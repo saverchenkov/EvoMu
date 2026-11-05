@@ -378,11 +378,6 @@ async fn test_quasar_skinr_sequencing_natural_and_early_completion() {
 
 #[tokio::test]
 async fn test_quasar_sov_hub_workforce_transit_relay_network() {
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj",
-    ]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -534,12 +529,6 @@ async fn test_quasar_sov_hub_workforce_transit_relay_network() {
 
 #[tokio::test]
 async fn test_quasar_sov_skyhook_workforce_and_admin_lifecycle() {
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/admin/admin_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/admin/admin_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/requests_pb2.pyj",
-    ]);
 
     let ctx = ServerContext::new();
     let clock = Arc::new(VirtualServerClock::with_fixed_base(common::TEST_CLOCK_BASE_UNIX));

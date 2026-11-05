@@ -115,22 +115,13 @@ fn encode_id_req(id: u64) -> Vec<u8> {
 
 #[tokio::test]
 async fn test_authentic_freelance_pirate_stargate_remediated() {
-    // parity: feat:quasar.pirate, feat:quasar.stargate
+    // parity: feat:quasar.stargate
     // parity: quasar:eveProto/generated/eve_public/freelance/contributionmethod/definition/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/pirate/corruption/api/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/pirate/corruption/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/pirate/suppression/api/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/pirate/suppression/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/stargate/lock/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/stargate/lock/api/requests_pb2.pyj
     eve_testkit::attest(&[
-        "feat:quasar.pirate",
         "feat:quasar.stargate",
         "quasar:eveProto/generated/eve_public/freelance/contributionmethod/definition/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/pirate/corruption/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/pirate/corruption/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/pirate/suppression/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/pirate/suppression/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/stargate/lock/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/stargate/lock/api/requests_pb2.pyj",
     ]);
@@ -540,14 +531,6 @@ async fn test_mercenary_den_activities_and_evolution_state_backed() {
 
 #[tokio::test]
 async fn test_skyhook_admin_auth_window_and_star_resources() {
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/admin/admin_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/admin/admin_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/requests_pb2.pyj",
-    ]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let (sys_id, skyhook_id) = (30_000_142u32, 1_000_000_050i64);

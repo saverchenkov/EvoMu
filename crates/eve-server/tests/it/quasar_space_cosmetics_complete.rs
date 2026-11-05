@@ -233,8 +233,6 @@ async fn q7_space_celestials_navigation_and_dbs() {
 
 #[tokio::test]
 async fn q7_bubble_presence_and_pirate_insurgency() {
-    // parity: feat:quasar.pirate
-    eve_testkit::attest(&["feat:quasar.pirate"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut session = SessionState::new(20_002);
