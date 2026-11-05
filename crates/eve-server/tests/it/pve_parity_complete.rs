@@ -1067,8 +1067,7 @@ pub(crate) mod pve_crab_and_storms_closure {
     use super::*;
 
 // Integration tests for CRAB Beacons, Character CEQ, System Signal Interference,
-// and Metaliminal Storm Movement (`feat:pve.crab-link-activation`,
-// `feat:pve.crab-ceq-signal-interference`, `feat:pve.metaliminal-storm-movement`).
+// and Metaliminal Storm Movement.
 
 
 use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord, UpwellStructureRecord};
@@ -2947,8 +2946,7 @@ mod pve_crab_and_storms_ext {
 // Part 2 negative/regression integration tests for CRAB Beacon Exploits
 // (`11019` subcapital rejection, simultaneous double-link refusal, non-compounding
 // dogma resonance bonus/restore, Rogue Drone scan-jamming) and Overlapping Metaliminal
-// Storms with Cross-Instance Isolation (`feat:pve.crab-link-activation`,
-// `feat:pve.crab-ceq-signal-interference`, `feat:pve.metaliminal-storm-movement`).
+// Storms with Cross-Instance Isolation.
 
 
 use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
