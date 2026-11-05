@@ -1574,7 +1574,7 @@ async fn test_esi_corp_role_gated_mining_customs_and_orders() {
 #[tokio::test]
 async fn test_esi_market_history_prices_structures_and_industry_jobs() {
     // parity: esi:GET /characters/{character_id}/industry/jobs, esi:GET /corporations/{corporation_id}/industry/jobs, esi:GET /industry/facilities, esi:GET /markets/prices, esi:GET /markets/structures/{structure_id}, esi:GET /markets/{region_id}/history
-    // parity: feat:esi.industry.facilities, feat:esi.industry.char-jobs, feat:esi.industry.corp-jobs, feat:esi.market.history, feat:esi.market.prices
+    // parity: feat:esi.industry.facilities, feat:esi.industry.char-jobs, feat:esi.industry.corp-jobs, feat:esi.market.history
     eve_testkit::attest(&[
         "esi:GET /characters/{character_id}/industry/jobs",
         "esi:GET /corporations/{corporation_id}/industry/jobs",
@@ -1586,7 +1586,6 @@ async fn test_esi_market_history_prices_structures_and_industry_jobs() {
         "feat:esi.industry.char-jobs",
         "feat:esi.industry.corp-jobs",
         "feat:esi.market.history",
-        "feat:esi.market.prices",
     ]);
 
     let ctx = Arc::new(ServerContext::new());

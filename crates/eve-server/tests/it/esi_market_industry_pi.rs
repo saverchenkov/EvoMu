@@ -219,8 +219,8 @@ async fn test_esi6_market_public_and_structure_routes() {
     // parity: esi:GET /markets/prices, esi:GET /markets/{region_id}/orders
     // parity: esi:GET /markets/{region_id}/history, esi:GET /markets/{region_id}/types
     // parity: esi:GET /markets/structures/{structure_id}
-    // parity: feat:esi.market.groups, feat:esi.market.prices, feat:esi.market.region-orders
-    // parity: feat:esi.market.history, feat:esi.market.types, feat:esi.market.structure-orders
+    // parity: feat:esi.market.groups, feat:esi.market.region-orders
+    // parity: feat:esi.market.history, feat:esi.market.types
     eve_testkit::attest(&[
         "esi:GET /markets/groups",
         "esi:GET /markets/groups/{market_group_id}",
@@ -230,11 +230,9 @@ async fn test_esi6_market_public_and_structure_routes() {
         "esi:GET /markets/{region_id}/types",
         "esi:GET /markets/structures/{structure_id}",
         "feat:esi.market.groups",
-        "feat:esi.market.prices",
         "feat:esi.market.region-orders",
         "feat:esi.market.history",
         "feat:esi.market.types",
-        "feat:esi.market.structure-orders",
     ]);
 
     let ctx = Arc::new(ServerContext::new());
@@ -665,7 +663,7 @@ mod esi_market_industry_pi_ext_2 {
 
 // Remediation integration tests for:
 // - ESI Market Groups localized SDE descriptions (`esi:GET /markets/groups/{market_group_id}`, `feat:esi.market.groups`)
-// - ESI Structure Market Orders Hub & ACL enforcement (`esi:GET /markets/structures/{structure_id}`, `feat:esi.market.structure-orders`)
+// - ESI Structure Market Orders Hub & ACL enforcement (`esi:GET /markets/structures/{structure_id}`)
 // - ESI Corporation endpoint-specific OpenAPI role gates & route registration across all 6 corp endpoints
 
 
@@ -690,12 +688,11 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn test_esi_market_groups_sde_descriptions_and_structure_orders_acl_hub() {
-    // parity: esi:GET /markets/groups/{market_group_id}, feat:esi.market.groups, esi:GET /markets/structures/{structure_id}, feat:esi.market.structure-orders
+    // parity: esi:GET /markets/groups/{market_group_id}, feat:esi.market.groups, esi:GET /markets/structures/{structure_id}
     eve_testkit::attest(&[
         "esi:GET /markets/groups/{market_group_id}",
         "feat:esi.market.groups",
         "esi:GET /markets/structures/{structure_id}",
-        "feat:esi.market.structure-orders",
     ]);
 
     let ctx = Arc::new(ServerContext::new());
@@ -857,11 +854,10 @@ async fn test_esi_market_groups_sde_descriptions_and_structure_orders_acl_hub() 
 
 #[tokio::test]
 async fn test_esi_corp_endpoint_specific_role_gates_and_routes() {
-    // parity: esi:GET /corporations/{corporation_id}/orders, esi:GET /corporations/{corporation_id}/orders/history, feat:esi.market.corp-orders, esi:GET /corporation/{corporation_id}/mining/extractions, feat:esi.industry.corp-extractions, esi:GET /corporation/{corporation_id}/mining/observers, esi:GET /corporation/{corporation_id}/mining/observers/{observer_id}, feat:esi.industry.corp-observers, esi:GET /corporations/{corporation_id}/customs_offices, feat:esi.planetary-interaction.customs
+    // parity: esi:GET /corporations/{corporation_id}/orders, esi:GET /corporations/{corporation_id}/orders/history, esi:GET /corporation/{corporation_id}/mining/extractions, feat:esi.industry.corp-extractions, esi:GET /corporation/{corporation_id}/mining/observers, esi:GET /corporation/{corporation_id}/mining/observers/{observer_id}, feat:esi.industry.corp-observers, esi:GET /corporations/{corporation_id}/customs_offices, feat:esi.planetary-interaction.customs
     eve_testkit::attest(&[
         "esi:GET /corporations/{corporation_id}/orders",
         "esi:GET /corporations/{corporation_id}/orders/history",
-        "feat:esi.market.corp-orders",
         "esi:GET /corporation/{corporation_id}/mining/extractions",
         "feat:esi.industry.corp-extractions",
         "esi:GET /corporation/{corporation_id}/mining/observers",
@@ -1243,7 +1239,6 @@ async fn test_esi6_contracts_character_corporation_and_public_routes() {
     // parity: esi:GET /contracts/public/items/{contract_id}, esi:GET /contracts/public/bids/{contract_id}
     // parity: esi:GET /corporations/{corporation_id}/contracts, esi:GET /corporations/{corporation_id}/contracts/{contract_id}/items
     // parity: esi:GET /corporations/{corporation_id}/contracts/{contract_id}/bids
-    // parity: feat:esi.contracts.char-list, feat:esi.contracts.char-items-bids, feat:esi.contracts.corp, feat:esi.contracts.public
     eve_testkit::attest(&[
         "esi:GET /characters/{character_id}/contracts",
         "esi:GET /characters/{character_id}/contracts/{contract_id}/items",
@@ -1254,10 +1249,6 @@ async fn test_esi6_contracts_character_corporation_and_public_routes() {
         "esi:GET /corporations/{corporation_id}/contracts",
         "esi:GET /corporations/{corporation_id}/contracts/{contract_id}/items",
         "esi:GET /corporations/{corporation_id}/contracts/{contract_id}/bids",
-        "feat:esi.contracts.char-list",
-        "feat:esi.contracts.char-items-bids",
-        "feat:esi.contracts.corp",
-        "feat:esi.contracts.public",
     ]);
 
     let ctx = Arc::new(ServerContext::new());
@@ -2304,14 +2295,11 @@ use std::sync::Arc;
 async fn test_esi6_market_character_and_corporation_orders_routes() {
     // parity: esi:GET /characters/{character_id}/orders, esi:GET /characters/{character_id}/orders/history
     // parity: esi:GET /corporations/{corporation_id}/orders, esi:GET /corporations/{corporation_id}/orders/history
-    // parity: feat:esi.market.char-orders, feat:esi.market.corp-orders
     eve_testkit::attest(&[
         "esi:GET /characters/{character_id}/orders",
         "esi:GET /characters/{character_id}/orders/history",
         "esi:GET /corporations/{corporation_id}/orders",
         "esi:GET /corporations/{corporation_id}/orders/history",
-        "feat:esi.market.char-orders",
-        "feat:esi.market.corp-orders",
     ]);
 
     let ctx = Arc::new(ServerContext::new());
