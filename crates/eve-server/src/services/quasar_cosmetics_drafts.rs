@@ -1219,3 +1219,8 @@ pub fn register_draft_and_title_handlers(
         );
     }
 }
+
+#[cfg(test)]
+#[path = "quasar_cosmetics_drafts_tests.rs"]
+mod quasar_cosmetics_drafts_tests;
+

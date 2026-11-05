@@ -517,8 +517,9 @@ fn create_asset(db: &WorldRepository, sde: &SdeRegistry, ctx: &AuthoritativeCont
     let mut character_title_id = None;
     let mut ship_skin_license_hex = None;
     if let Some(st_u) = sub(unit, 8) {
-        let type_id = sub(st_u, 1).and_then(|t| t.get(1)).and_then(as_u64).unwrap_or(0) as u32;
-        let qty = st_u.get(2).and_then(as_u64).unwrap_or(1).max(1) as u32;
+        let st = sub(st_u, 1).or_else(|| repeated(st_u, 1).into_iter().next()).unwrap_or(st_u);
+        let type_id = sub(st, 1).and_then(|t| t.get(1)).and_then(as_u64).unwrap_or(0) as u32;
+        let qty = st.get(2).and_then(as_u64).unwrap_or(1).max(1) as u32;
         if !sde.types.contains_key(&type_id) {
             return Err((STATUS_BAD_REQUEST, format!("Invalid item type {type_id}")));
         }
@@ -886,3 +887,8 @@ fn redeliver_stale(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &Dynam
     }
     Ok(any("eve.assetholding.entitlement.api.admin.RedeliverStaleEntitlementsResponse", Vec::new()))
 }
+
+#[cfg(test)]
+#[path = "quasar_entitlement_ledger_tests.rs"]
+mod quasar_entitlement_ledger_tests;
+

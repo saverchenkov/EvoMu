@@ -471,3 +471,8 @@ pub fn complete_system_tale_encounter(
     }
     all_progressed
 }
+
+#[cfg(test)]
+#[path = "quasar_goal_tale_notices_tests.rs"]
+mod quasar_goal_tale_notices_tests;
+

@@ -121,3 +121,8 @@ impl CosmeticsMarketData {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "quasar_cosmetics_market_types_tests.rs"]
+mod quasar_cosmetics_market_types_tests;
+

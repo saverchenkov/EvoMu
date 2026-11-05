@@ -396,3 +396,8 @@ pub fn register_handlers(
         );
     }
 }
+
+#[cfg(test)]
+#[path = "quasar_market_contract_services_tests.rs"]
+mod quasar_market_contract_services_tests;
+

@@ -516,3 +516,8 @@ pub fn handle_app_domain_event(
         }
     });
 }
+
+#[cfg(test)]
+#[path = "quasar_cosmetics_services_tests.rs"]
+mod quasar_cosmetics_services_tests;
+

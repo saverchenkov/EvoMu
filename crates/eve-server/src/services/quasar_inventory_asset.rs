@@ -655,3 +655,8 @@ pub fn register_inventory_asset_handlers(
         }),
     );
 }
+
+#[cfg(test)]
+#[path = "quasar_inventory_asset_tests.rs"]
+mod quasar_inventory_asset_tests;
+

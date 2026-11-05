@@ -1068,3 +1068,8 @@ pub fn register_handlers(
         }),
     );
 }
+
+#[cfg(test)]
+#[path = "quasar_fleet_navigation_services_tests.rs"]
+mod quasar_fleet_navigation_services_tests;
+

@@ -328,7 +328,10 @@ impl DailyGoalManager {
                     s.quasar_state_blobs
                         .get("quasar_daily_goals")
                         .and_then(|json| {
-                            if let Ok(st) = serde_json::from_str::<DailyGoalStore>(json) {
+                            if let Some(st) = serde_json::from_str::<DailyGoalStore>(json)
+                                .ok()
+                                .filter(|st| !st.templates.is_empty() || !st.character_goals.is_empty())
+                            {
                                 Some(st)
                             } else if let Ok(cg) =
                                 serde_json::from_str::<HashMap<u32, Vec<CharacterDailyGoal>>>(json)
@@ -1387,3 +1390,6 @@ pub fn register_daily_goal_handlers(
         }),
     );
 }
+
+#[cfg(test)] #[path = "quasar_daily_goals_tests.rs"] mod quasar_daily_goals_tests;
+

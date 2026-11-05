@@ -618,3 +618,8 @@ fn encode_single_freelance_def(name: &str, val: &serde_json::Value, out: &mut Ve
     encode_bytes_field(2, &attr, &mut def_bytes);
     encode_bytes_field(2, &def_bytes, out);
 }
+
+#[cfg(test)]
+#[path = "quasar_freelance_defs_tests.rs"]
+mod quasar_freelance_defs_tests;
+

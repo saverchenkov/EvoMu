@@ -74,3 +74,8 @@ pub fn register_all_progression_handlers(
     register_skill_handlers(router, Arc::clone(&db), Arc::clone(&managers.skill_plans));
     register_progression_extra_handlers(router, Arc::clone(&db), Arc::clone(&managers.extra));
 }
+
+#[cfg(test)]
+#[path = "quasar_progression_tests.rs"]
+mod quasar_progression_tests;
+

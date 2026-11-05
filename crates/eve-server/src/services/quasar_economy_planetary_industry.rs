@@ -966,3 +966,8 @@ pub fn register_economy_planetary_industry_handlers(
         }),
     );
 }
+
+#[cfg(test)]
+#[path = "quasar_economy_planetary_industry_tests.rs"]
+mod quasar_economy_planetary_industry_tests;
+

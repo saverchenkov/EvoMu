@@ -1326,3 +1326,8 @@ pub fn register(router: &PublicGatewayRouter, state: Arc<SkinrCosmeticsState>) {
         |s: &Arc<SkinrCosmeticsState>, ctx, any: &GoogleAny, d| handle_job_complete_early(s, ctx, &any.value, d)
     );
 }
+
+#[cfg(test)]
+#[path = "quasar_cosmetics_skinr_seq_tests.rs"]
+mod quasar_cosmetics_skinr_seq_tests;
+

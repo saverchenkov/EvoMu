@@ -1367,3 +1367,8 @@ pub(super) fn encode_layout_slot(slot: &SkinLayoutSlot) -> Vec<u8> {
     encode_bytes_field(2, &cfg_msg, &mut out);
     out
 }
+
+#[cfg(test)]
+#[path = "quasar_cosmetics_skinr_tests.rs"]
+mod quasar_cosmetics_skinr_tests;
+

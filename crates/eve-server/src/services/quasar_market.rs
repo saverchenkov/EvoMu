@@ -845,3 +845,8 @@ pub fn publish_market_new_entry_notice(
         gateway.publish_notice(NoticeScope::SolarSystem(solar_system_id), payload, now_unix)?;
     Ok(delivered)
 }
+
+#[cfg(test)]
+#[path = "quasar_market_tests.rs"]
+mod quasar_market_tests;
+

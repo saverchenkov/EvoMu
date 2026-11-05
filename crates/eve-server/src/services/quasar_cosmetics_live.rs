@@ -1210,3 +1210,8 @@ fn license_admin_revoke(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg
     revoke(st, &uuid, None, ctx.now_unix())?;
     Ok(any("eve_public.cosmetic.structure.paintwork.license.api.admin.RevokeResponse", Vec::new()))
 }
+
+#[cfg(test)]
+#[path = "quasar_cosmetics_live_tests.rs"]
+mod quasar_cosmetics_live_tests;
+
