@@ -891,6 +891,22 @@ fn format_industry_job_json(
         obj["completed_date"] = json!(format_iso8601_utc(comp_ts));
         obj["completed_character_id"] = json!(comp_char);
         obj["successful_runs"] = json!(j.runs as i64);
+    } else if j.status.eq_ignore_ascii_case("cancelled")
+        || j.status.eq_ignore_ascii_case("reverted")
+        || j.status.eq_ignore_ascii_case("failed")
+    {
+        if let Some(comp_ts) = j
+            .completed_unix
+            .or_else(|| meta.as_ref().and_then(|m| m.completed_unix))
+        {
+            let comp_char = j
+                .completed_character_id
+                .or_else(|| meta.as_ref().and_then(|m| m.completed_character_id))
+                .unwrap_or(j.installer_id);
+            obj["completed_date"] = json!(format_iso8601_utc(comp_ts));
+            obj["completed_character_id"] = json!(comp_char);
+        }
+        obj["successful_runs"] = json!(0);
     }
     obj
 }

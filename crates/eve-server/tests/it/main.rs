@@ -497,3 +497,8 @@ mod parity_shard_3_closure_part2;
 mod parity_shard_3_closure_part2b;
 mod parity_shard_3_closure_part3;
 mod parity_shard_3_closure_part4;
+mod parity_shard_1_support;
+mod parity_shard_1_industry_adv;
+mod parity_shard_1_corp_projects_gov;
+mod parity_shard_1_fw_sov_incursions;
+mod parity_shard_1_closure;

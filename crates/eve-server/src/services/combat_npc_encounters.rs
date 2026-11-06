@@ -183,6 +183,16 @@ pub async fn handle_npc_destroyed_in_space(
 ) {
     let killer = killer_char_id.unwrap_or(0);
     crate::services::space_mining_harvest::on_wormhole_ore_guard_destroyed_db(db, killed_ball_id);
+    if killer > 0 {
+        crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity_in_db(
+            db,
+            None,
+            killer,
+            &["DamageNPCShips", "DestroyNPCShips"],
+            1,
+            Some(i64::from(solar_system_id)),
+        );
+    }
 
     // 1. Advance encounter waves if killed_ball_id belongs to an active encounter
     let triggered_info: Option<(u32, u32, Vec<u32>, DVec3)> = {

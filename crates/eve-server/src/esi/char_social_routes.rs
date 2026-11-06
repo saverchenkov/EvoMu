@@ -856,39 +856,6 @@ pub fn dispatch_char_social_route(
             }))
         }
 
-        ("GET", "/corporations/{corporation_id}/projects") => {
-            let corp_id = match parse_path_i64(path_params, "corporation_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                if !snap.corporations.contains_key(&corp_id) {
-                    return RouteExecutionResult::error(404, format!("Corporation {corp_id} not found"));
-                }
-                let mut projs: Vec<_> = snap
-                    .corp_projects
-                    .values()
-                    .filter(|p| p.corporation_id == corp_id)
-                    .collect();
-                projs.sort_by_key(|p| p.project_id);
-                let out: Vec<Value> = projs
-                    .into_iter()
-                    .map(|p| {
-                        json!({
-                            "project_id": p.project_id,
-                            "corporation_id": p.corporation_id,
-                            "name": p.name,
-                            "target_quantity": p.target_quantity,
-                            "current_quantity": p.current_quantity,
-                            "isk_per_unit": p.isk_per_unit.to_wire_f64(),
-                            "escrow_remaining": p.escrow_remaining.to_wire_f64(),
-                        })
-                    })
-                    .collect();
-                RouteExecutionResult::ok_json(json!(out), 60)
-            }))
-        }
-
         ("GET", "/opportunities/groups") => {
             let mut ids: Vec<i64> = ctx.sde.career_goals.keys().map(|&id| id as i64).collect();
             ids.extend(

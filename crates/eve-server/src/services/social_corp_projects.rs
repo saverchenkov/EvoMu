@@ -889,15 +889,17 @@ pub fn sweep_expired_corp_projects_in_snap(
     expired_list
 }
 
-fn emit_expired_quasar_notices(ctx: &ServerContext, expired: &[(i64, i64)], now_unix: u64) {
-    if expired.is_empty() {
-        return;
-    }
+fn emit_expired_quasar_notices(
+    db: &eve_db::WorldRepository,
+    quasar_gateway: Option<&crate::quasar_gateway::PublicGatewayRouter>,
+    expired: &[(i64, i64)],
+    now_unix: u64,
+) {
+    let Some(gateway) = quasar_gateway else { return; };
+    if expired.is_empty() { return; }
     for &(pid, corp_id) in expired {
-        if corp_id <= 0 {
-            continue;
-        }
-        let (is_fl, uuid) = ctx.db.with_snapshot(|snap| {
+        if corp_id <= 0 { continue; }
+        let (is_fl, uuid) = db.with_snapshot(|snap| {
             let fl = snap.alliance_war_state.project_meta.get(&pid).is_some_and(|m| m.1);
             let u = snap
                 .alliance_war_state
@@ -907,16 +909,15 @@ fn emit_expired_quasar_notices(ctx: &ServerContext, expired: &[(i64, i64)], now_
                 .unwrap_or_else(|| if fl { freelance_uuid(0, pid) } else { corp_goal_uuid(pid) });
             (fl, u)
         });
-        let mut id_b = Vec::with_capacity(18);
+        let (mut id_b, mut out) = (Vec::with_capacity(18), Vec::with_capacity(20));
         encode_bytes_field(1, &uuid, &mut id_b);
-        let mut out = Vec::with_capacity(20);
         encode_bytes_field(1, &id_b, &mut out);
         let type_name = if is_fl {
             "eve_public.freelance.project.api.ExpiredNotice"
         } else {
             "eve_public.corporationgoal.api.ExpiredNotice"
         };
-        let _ = ctx.quasar_gateway.publish_notice(
+        let _ = gateway.publish_notice(
             NoticeScope::Corporation(corp_id as u32),
             GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
@@ -929,10 +930,8 @@ fn emit_expired_quasar_notices(ctx: &ServerContext, expired: &[(i64, i64)], now_
 
 pub fn sweep_expired_corp_projects(ctx: &ServerContext) {
     let now_unix = ctx.now_unix();
-    let expired = ctx
-        .db
-        .with_mut_snapshot(|snap| sweep_expired_corp_projects_in_snap(snap, now_unix));
-    emit_expired_quasar_notices(ctx, &expired, now_unix);
+    let expired = ctx.db.with_mut_snapshot(|snap| sweep_expired_corp_projects_in_snap(snap, now_unix));
+    emit_expired_quasar_notices(&ctx.db, Some(&ctx.quasar_gateway), &expired, now_unix);
 }
 
 struct ProjectActivityUpdate {
@@ -1165,37 +1164,23 @@ pub fn record_server_project_activity_in_snap(
         .collect()
 }
 
-pub fn record_server_project_activity(
-    ctx: &ServerContext,
+pub fn record_server_project_activity_in_db(
+    db: &eve_db::WorldRepository,
+    quasar_gateway: Option<&crate::quasar_gateway::PublicGatewayRouter>,
     char_id: i64,
     matcher_types: &[&str],
     qty: u64,
     filter_opt: Option<i64>,
 ) {
-    let now_unix = ctx.now_unix();
-    let (expired, updates) = ctx.db.with_mut_snapshot(|snap| {
-        record_server_project_activity_detailed(
-            snap,
-            char_id,
-            matcher_types,
-            qty,
-            filter_opt,
-            now_unix,
-        )
+    let now_unix = db.clock().now_unix_secs();
+    let (expired, updates) = db.with_mut_snapshot(|snap| {
+        record_server_project_activity_detailed(snap, char_id, matcher_types, qty, filter_opt, now_unix)
     });
-    emit_expired_quasar_notices(ctx, &expired, now_unix);
-    if updates.is_empty() {
-        return;
-    }
+    emit_expired_quasar_notices(db, quasar_gateway, &expired, now_unix);
+    let Some(gateway) = quasar_gateway.filter(|_| !updates.is_empty()) else { return; };
 
     {
-        let mut ggoals = ctx
-            .quasar_gateway
-            .progression
-            .extra
-            .generic_goals
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut ggoals = gateway.progression.extra.generic_goals.write().unwrap_or_else(|e| e.into_inner());
         let mut changed = false;
         for u in &updates {
             if !u.is_freelance {
@@ -1208,7 +1193,7 @@ pub fn record_server_project_activity(
         }
         drop(ggoals);
         if changed {
-            ctx.quasar_gateway.progression.extra.save_to_db();
+            gateway.progression.extra.save_to_db();
         }
     }
 
@@ -1219,7 +1204,7 @@ pub fn record_server_project_activity(
                 let mut id_b = Vec::with_capacity(18);
                 encode_bytes_field(1, &u.uuid, &mut id_b);
                 if contributor_u32 > 0 {
-                    let char_tot = ctx.db.with_snapshot(|s| {
+                    let char_tot = db.with_snapshot(|s| {
                         s.alliance_war_state
                             .project_details
                             .get(&u.pid)
@@ -1232,7 +1217,7 @@ pub fn record_server_project_activity(
                     encode_bytes_field(1, &id_b, &mut contrib_b);
                     encode_bytes_field(2, &cid_b, &mut contrib_b);
                     encode_varint_field(3, char_tot, &mut contrib_b);
-                    let _ = ctx.quasar_gateway.publish_notice(
+                    let _ = gateway.publish_notice(
                         NoticeScope::Corporation(u.corp_id as u32),
                         GoogleAny {
                             type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.ParticipantContributedNotice"),
@@ -1245,7 +1230,7 @@ pub fn record_server_project_activity(
                 encode_bytes_field(1, &id_b, &mut prog_b);
                 encode_varint_field(2, u.new_cur, &mut prog_b);
                 encode_varint_field(3, u.total_contributors.max(1) as u64, &mut prog_b);
-                let _ = ctx.quasar_gateway.publish_notice(
+                let _ = gateway.publish_notice(
                     NoticeScope::Corporation(u.corp_id as u32),
                     GoogleAny {
                         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.ProgressedNotice"),
@@ -1256,7 +1241,7 @@ pub fn record_server_project_activity(
                 if u.completed && u.prev_cur < u.new_cur {
                     let mut comp_b = Vec::with_capacity(20);
                     encode_bytes_field(1, &id_b, &mut comp_b);
-                    let _ = ctx.quasar_gateway.publish_notice(
+                    let _ = gateway.publish_notice(
                         NoticeScope::Corporation(u.corp_id as u32),
                         GoogleAny {
                             type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.CompletedNotice"),
@@ -1271,23 +1256,20 @@ pub fn record_server_project_activity(
                 (u.corp_id > 0).then_some(u.corp_id as u32),
                 u.creator_id.max(0) as u32,
             );
-            let _ = ctx.quasar_gateway.publish_notice(
+            let _ = gateway.publish_notice(
                 scope.clone(),
                 notices::goal_contributed(&u.uuid, contributor_u32, u.prev_cur, u.new_cur, now_unix),
                 now_unix,
             );
             if u.completed && u.prev_cur < u.new_cur {
-                let _ = ctx
-                    .quasar_gateway
-                    .publish_notice(scope, notices::goal_completed(&u.uuid), now_unix);
+                let _ = gateway.publish_notice(scope, notices::goal_completed(&u.uuid), now_unix);
             }
             if u.auto_paid_isk > 0 && contributor_u32 > 0 {
-                let mut id_b = Vec::with_capacity(18);
+                let (mut id_b, mut red_b) = (Vec::with_capacity(18), Vec::with_capacity(28));
                 encode_bytes_field(1, &u.uuid, &mut id_b);
-                let mut red_b = Vec::with_capacity(28);
                 encode_bytes_field(1, &id_b, &mut red_b);
                 encode_varint_field(2, u.auto_paid_isk, &mut red_b);
-                let _ = ctx.quasar_gateway.publish_notice(
+                let _ = gateway.publish_notice(
                     NoticeScope::Character(contributor_u32),
                     GoogleAny {
                         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.RedeemedNotice"),
@@ -1298,6 +1280,16 @@ pub fn record_server_project_activity(
             }
         }
     }
+}
+
+pub fn record_server_project_activity(
+    ctx: &ServerContext,
+    char_id: i64,
+    matcher_types: &[&str],
+    qty: u64,
+    filter_opt: Option<i64>,
+) {
+    record_server_project_activity_in_db(&ctx.db, Some(&ctx.quasar_gateway), char_id, matcher_types, qty, filter_opt);
 }
 
 pub fn handle_edit_project(

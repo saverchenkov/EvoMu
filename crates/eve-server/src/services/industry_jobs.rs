@@ -806,13 +806,6 @@ pub fn handle_industry_jobs(
                 }
                 cost_meta.consumed_materials = consumed_materials;
 
-                if use_corp && snap.corporations.contains_key(&job_owner_id) {
-                    if let Some(corp_mut) = snap.corporations.get_mut(&job_owner_id) {
-                        let new_bal = corp_mut.division_balance(1).checked_sub(total_debit_cents).unwrap_or(IskCents(0));
-                        corp_mut.set_division_balance(1, new_bal);
-                    }
-                }
-
                 snap.next_entity_id += 1;
                 let jid = snap.next_entity_id;
 
@@ -834,28 +827,31 @@ pub fn handle_industry_jobs(
                             c.master_wallet
                         })
                         .unwrap_or(IskCents(0));
-                    snap.append_journal(job_owner_id, "IndustryJobInstallationFee", base_cents, corp_bal, format!("Base job cost for industry job {jid}"));
-                    if tax_cents.0 > 0 {
-                        snap.append_journal(job_owner_id, "IndustryFacilityTax", tax_cents, corp_bal, format!("Facility tax for industry job {jid}"));
+                    let now_ts = ctx.now_unix();
+                    for (etype, fee, desc) in [
+                        ("IndustryJobInstallationFee", base_cents, format!("Base job cost for industry job {jid}")),
+                        ("IndustryFacilityTax", tax_cents, format!("Facility tax for industry job {jid}")),
+                        ("IndustrySccSurcharge", scc_cents, format!("SCC surcharge for industry job {jid}")),
+                    ] {
+                        if etype != "IndustryJobInstallationFee" && fee.0 <= 0 {
+                            continue;
+                        }
+                        snap.append_journal_entry(eve_db::JournalEntryInput {
+                            owner_id: job_owner_id,
+                            entry_type: etype,
+                            amount: fee,
+                            balance_after: corp_bal,
+                            reason: desc,
+                            meta: eve_db::JournalMeta {
+                                ref_type_id: 56,
+                                first_party_id: job_owner_id,
+                                second_party_id: station_id,
+                                account_key: 1000,
+                                date_unix: now_ts,
+                                ..Default::default()
+                            },
+                        });
                     }
-                    if scc_cents.0 > 0 {
-                        snap.append_journal(job_owner_id, "IndustrySccSurcharge", scc_cents, corp_bal, format!("SCC surcharge for industry job {jid}"));
-                    }
-                    snap.append_journal_entry(eve_db::JournalEntryInput {
-                        owner_id: job_owner_id,
-                        entry_type: "IndustryJobInstallationFee",
-                        amount: total_debit_cents,
-                        balance_after: corp_bal,
-                        reason: format!("Facility/job fee for industry job {jid}"),
-                        meta: eve_db::JournalMeta {
-                            ref_type_id: 56,
-                            first_party_id: job_owner_id,
-                            second_party_id: station_id,
-                            account_key: 1000,
-                            date_unix: ctx.now_unix(),
-                            ..Default::default()
-                        },
-                    });
                 } else {
                     let base_cents = IskCents::from_f64_isk(cost_meta.base_job_cost_isk);
                     let tax_cents = IskCents::from_f64_isk(cost_meta.facility_tax_isk);
@@ -1045,7 +1041,13 @@ pub fn handle_industry_jobs(
                 }
                 if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) {
                     j_mut.status = "Cancelled".into();
+                    j_mut.completed_unix = Some(now_unix);
+                    j_mut.completed_character_id = Some(char_id);
                 }
+                let mut done_meta = meta.clone();
+                done_meta.completed_unix = Some(now_unix);
+                done_meta.completed_character_id = Some(char_id);
+                save_job_cost_meta(snap, job_id, &done_meta);
                 if let Some(bp_mut) = snap.items.get_mut(&job.blueprint_item_id) {
                     bp_mut.flag = restore_blueprint_flag(bp_mut.owner_id, &meta);
                     bp_mut.version += 1;
@@ -1205,6 +1207,7 @@ pub fn handle_industry_jobs(
                         let server_roll = ctx.next_invention_roll(job.job_id as u64, char_id as u64, now_unix);
                         if server_roll >= inv_prob {
                             if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) { j_mut.status = "Failed".into(); j_mut.completed_unix = Some(now_unix); j_mut.completed_character_id = Some(char_id); }
+                            let mut fail_meta = meta.clone(); fail_meta.completed_unix = Some(now_unix); fail_meta.completed_character_id = Some(char_id); save_job_cost_meta(snap, job_id, &fail_meta);
                             return Ok(Ok((0, 0, job)));
                         }
                         if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) { j_mut.status = "Delivered".into(); j_mut.completed_unix = Some(now_unix); j_mut.completed_character_id = Some(char_id); }
