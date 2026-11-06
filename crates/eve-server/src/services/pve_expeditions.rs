@@ -196,6 +196,7 @@ pub async fn create_escalation_expedition_core(
                 is_shared: false,
             },
         );
+        snap.item_positions.insert(bm_id, dest_pos);
     });
 
     spawn_expedition_site_instance_core(sde, systems, db, &entry).await;
@@ -417,6 +418,7 @@ pub async fn advance_expedition_step_core(
                     .values_mut()
                     .find(|b| b.owner_id == char_id && b.item_id == Some(instance_id))
                 {
+                    let bm_id = bm.bookmark_id;
                     bm.solar_system_id = entry.destination_solar_system_id;
                     bm.x = dest_pos[0];
                     bm.y = dest_pos[1];
@@ -426,11 +428,16 @@ pub async fn advance_expedition_step_core(
                         entry.expedition_name, entry.step_index, entry.total_steps
                     );
                     bm.memo = entry.journal_text.clone();
+                    snap.item_positions.insert(bm_id, dest_pos);
                 }
             });
         } else {
             let dest_sys = entry.destination_solar_system_id;
-            let pos = [-45_000_000.0, 15_000_000.0, 30_000_000.0];
+            let pos = [
+                -45_000_000.0 + (entry.step_index as f64) * 5_000_000.0,
+                15_000_000.0,
+                30_000_000.0,
+            ];
             crate::services::pve_exploration::drop_site_loot_into_space_core(db, systems, dest_sys, char_id, pos, 19419, 1).await;
 
             db.with_mut_snapshot(|snap| {
@@ -801,7 +808,7 @@ pub async fn validate_and_advance_pve_site_room(
         )?;
     }
 
-    if let (Some(site_pos), Some(_)) = (site_pos_opt, rating_to_check) {
+    if let Some(site_pos) = site_pos_opt {
         let ship_pos = match session.ship_id {
             Some(sid) => ctx
                 .systems
@@ -813,19 +820,21 @@ pub async fn validate_and_advance_pve_site_room(
                 .map(|(_, b)| b.position),
             None => None,
         };
-        let Some(ship_pos) = ship_pos else {
+        if let Some(ship_pos) = ship_pos {
+            let dist = ship_pos.distance(glam::DVec3::from_array(site_pos));
+            if dist > 2_500.0 {
+                return Err(BridgeRpcError {
+                    code: "GateOutOfRange".into(),
+                    message: format!(
+                        "Pilot is {dist:.1}m from acceleration gate; must be within 2,500m to activate"
+                    ),
+                });
+            }
+        } else if session.ship_id.is_none() || rating_to_check.is_some() || sleeper_info.is_some()
+        {
             return Err(BridgeRpcError {
                 code: "NotInSpace".into(),
                 message: "Acceleration gate activation requires the pilot's ship in space".into(),
-            });
-        };
-        let dist = ship_pos.distance(glam::DVec3::from_array(site_pos));
-        if dist > 2_500.0 {
-            return Err(BridgeRpcError {
-                code: "GateOutOfRange".into(),
-                message: format!(
-                    "Pilot is {dist:.1}m from acceleration gate; must be within 2,500m to activate"
-                ),
             });
         }
     }

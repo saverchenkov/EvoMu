@@ -567,3 +567,9 @@ mod r7_tb_p1a_security_tests;
 mod r7_tb_p1a_security_tests_part2;
 #[cfg(test)]
 mod r7_td_p0b_security_tests;
+#[cfg(test)]
+mod r7_tc_p1_arena_tourney_abyss_tests;
+#[cfg(test)]
+mod r7_tc_p1_insurgency_crab_fob_tests;
+#[cfg(test)]
+mod r7_tc_p1_incursion_dungeon_exp_tests;

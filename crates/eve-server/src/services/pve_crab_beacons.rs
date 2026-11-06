@@ -250,6 +250,15 @@ fn apply_crab_link_ship_effects(
     ship_id: i64,
     expires_at_unix: u64,
 ) -> Option<([f64; 4], [f64; 4], [f64; 4])> {
+    {
+        let mut st = crate::services::inventory_fitting::fitting_scanners_superweapons::scanners_superweapons_state()
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(list) = st.ship_dbuffs.get_mut(&(ctx.instance_id, ship_id)) {
+            list.retain(|e| e.source_module_id != beacon_id);
+        }
+    }
+    ctx.invalidate_ship_fitting(ship_id);
     let base_res_opt = ctx
         .db
         .with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id))
@@ -273,30 +282,17 @@ fn apply_crab_link_ship_effects(
         }
     }
     ctx.invalidate_ship_fitting(ship_id);
-    let linked_res_opt = ctx
-        .db
-        .with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id))
-        .map(|tid| {
-            let linked_cs = ctx.build_ship_combat_state(char_id, ship_id, tid);
-            (linked_cs.shield_resonance, linked_cs.armor_resonance, linked_cs.structure_resonance)
-        });
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let mut orig_res = base_res_opt;
     sys_handle.try_update_combat_state(ship_id, |cs| {
-        let (sr, ar, hr) = orig_res.get_or_insert((
+        let (sr, ar, hr) = *orig_res.get_or_insert((
             cs.shield_resonance,
             cs.armor_resonance,
             cs.structure_resonance,
         ));
-        if let Some((lsr, lar, lhr)) = linked_res_opt {
-            cs.shield_resonance = lsr;
-            cs.armor_resonance = lar;
-            cs.structure_resonance = lhr;
-        } else {
-            cs.shield_resonance = sr.map(|r| r * 0.90);
-            cs.armor_resonance = ar.map(|r| r * 0.90);
-            cs.structure_resonance = hr.map(|r| r * 0.90);
-        }
+        cs.shield_resonance = sr.map(|r| r * 0.90);
+        cs.armor_resonance = ar.map(|r| r * 0.90);
+        cs.structure_resonance = hr.map(|r| r * 0.90);
         cs.is_tethered = false;
     });
     ctx.notify(
@@ -751,18 +747,51 @@ fn self_destruct_crab_beacon(ctx: &ServerContext, beacon_id: i64) {
     );
 }
 
+fn is_crab_linked_ship_valid(ctx: &ServerContext, rec: &CrabBeaconRecord, require_range: bool) -> bool {
+    let Some(sid) = rec.linked_ship_id.filter(|&id| id > 0) else { return false };
+    if let Some(cid) = rec.linked_char_id {
+        let docked = ctx.db.with_snapshot(|snap| {
+            snap.characters.get(&cid).is_none_or(|c| c.station_id.is_some() || c.structure_id.is_some())
+        });
+        if docked { return false; }
+    }
+    let Some(sys_handle) = ctx.systems.active_system_handles().into_iter().find(|(id, _)| *id == rec.solar_system_id).map(|(_, h)| h) else { return false };
+    let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
+    let Some(sb) = bp.balls.get(&sid) else { return false };
+    if matches!(sb.mode, MovementMode::Warp { .. }) || bp.combat_states.get(&sid).is_some_and(|cs| cs.structure_hp <= 0.0) {
+        return false;
+    }
+    if require_range {
+        let bpos = bp.balls.get(&rec.beacon_id).map(|b| b.position).unwrap_or_else(|| DVec3::from_array(rec.position));
+        if (sb.position.distance(bpos) - sb.radius - 400.0).max(0.0) > CRAB_LINK_RANGE_M {
+            return false;
+        }
+    }
+    true
+}
+
 fn advance_single_crab_beacon(ctx: &ServerContext, beacon_id: i64, now: u64) {
-    let snap_rec = read_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&beacon_id).cloned());
-    let Some(mut cur) = snap_rec else { return };
+    let Some(mut cur) = read_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&beacon_id).cloned()) else { return };
     if cur.phase == CrabBeaconPhase::SelfDestructed {
         return;
     }
-
     if cur.phase == CrabBeaconPhase::Idle
         && cur.deployed_at_sec > 0
         && now >= cur.deployed_at_sec.saturating_add(CRAB_BEACON_IDLE_LIFETIME_SECS)
     {
         self_destruct_crab_beacon(ctx, beacon_id);
+        return;
+    }
+    if cur.phase == CrabBeaconPhase::Linking && !is_crab_linked_ship_valid(ctx, &cur, true) {
+        clear_crab_link_ship_effects(ctx, cur.solar_system_id, beacon_id, cur.linked_char_id, cur.linked_ship_id, cur.orig_resonances);
+        with_pve_special_reg(ctx, |reg| {
+            if let Some(b) = reg.crab_beacons.get_mut(&beacon_id) {
+                b.phase = CrabBeaconPhase::Idle;
+                b.linked_char_id = None;
+                b.linked_ship_id = None;
+                b.orig_resonances = None;
+            }
+        });
         return;
     }
 
@@ -804,7 +833,8 @@ fn advance_single_crab_beacon(ctx: &ServerContext, beacon_id: i64, now: u64) {
         } else {
             (waves_spawned, alive_drones)
         };
-        if now >= cur.scan_completes_at_sec && waves_after >= 3 && alive_after == 0 {
+        let scan_ship_ok = is_crab_linked_ship_valid(ctx, &cur, false);
+        if scan_ship_ok && now >= cur.scan_completes_at_sec && waves_after >= 3 && alive_after == 0 {
             finalize_crab_scan_success(ctx, beacon_id, now);
             if let Some(updated) = read_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&beacon_id).cloned()) {
                 cur = updated;

@@ -350,11 +350,66 @@ pub async fn destroy_pirate_fob_and_payout(
     cont_ball.mode = BallMode::Rigid;
     let _ = sys.spawn_ball(cont_ball).await;
 
-    let eligible_attackers: Vec<i64> = on_grid_char_ids
-        .iter()
-        .copied()
-        .filter(|cid| combatants.contains(cid))
-        .collect();
+    let (live_on_grid_combatants, live_ineligible, all_grid_balls) = {
+        let bp = sys.ballpark.read().unwrap_or_else(|e| e.into_inner());
+        let mut eligible_balls = BTreeSet::new();
+        let mut blocked_balls = BTreeSet::new();
+        let mut any_balls = BTreeSet::new();
+        for (&bid, b) in &bp.balls {
+            any_balls.insert(bid);
+            if b.position.distance(fob_pos) > 250_000.0 {
+                blocked_balls.insert(bid);
+                continue;
+            }
+            let is_cloaked = bp.combat_states.get(&bid).is_some_and(|cs| cs.is_cloaked)
+                || bp.ball_slim_meta.get(&bid).is_some_and(|sm| sm.is_cloaked);
+            let is_dead = bp.combat_states.get(&bid).is_some_and(|cs| cs.structure_hp <= 0.0);
+            if is_cloaked || is_dead || b.type_id == 670 {
+                blocked_balls.insert(bid);
+            } else {
+                eligible_balls.insert(bid);
+            }
+        }
+        (eligible_balls, blocked_balls, any_balls)
+    };
+    let eligible_attackers: Vec<i64> = ctx.db.with_snapshot(|snap| {
+        on_grid_char_ids
+            .iter()
+            .copied()
+            .filter(|cid| {
+                if !combatants.contains(cid) {
+                    return false;
+                }
+                let Some(ch) = snap.characters.get(cid) else {
+                    return false;
+                };
+                let sid = ch.active_ship_id;
+                if sid > 0 {
+                    if live_ineligible.contains(&sid) {
+                        return false;
+                    }
+                    if all_grid_balls.contains(&sid) && !live_on_grid_combatants.contains(&sid) {
+                        return false;
+                    }
+                    if let Some(it) = snap.items.get(&sid) {
+                        let is_capsule = it.type_id == 670
+                            || ctx
+                                .sde
+                                .types
+                                .get(&it.type_id)
+                                .is_some_and(|t| t.group_id == 29);
+                        let offgrid_in_other_system = ch.solar_system_id != sys_id
+                            && it.location_id != i64::from(sys_id)
+                            && it.location_id < 60_000_000;
+                        if is_capsule || offgrid_in_other_system {
+                            return false;
+                        }
+                    }
+                }
+                true
+            })
+            .collect()
+    });
     let per_pilot_bounty: i64 = if eligible_attackers.is_empty() {
         0
     } else if eligible_attackers.len() <= FOB_MAX_FULL_PAYOUT_PILOTS {
@@ -370,6 +425,21 @@ pub async fn destroy_pirate_fob_and_payout(
     };
 
     ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            loot_container_id,
+            InventoryItem {
+                item_id: loot_container_id,
+                type_id: 17_366,
+                owner_id: CORP_DED,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.item_positions
+            .insert(loot_container_id, [fob_pos.x, fob_pos.y, fob_pos.z]);
         let loot_item_id = fob_id + 91;
         snap.items.insert(
             loot_item_id,
@@ -920,6 +990,38 @@ pub async fn on_world_ark_boss_killed(ctx: &ServerContext, sys_id: u32, killer_c
                 let _ = sys.remove_ball(wid).await;
             }
         }
+    } else {
+        let boss_is_dead = sys
+            .get_ball_snapshot(obs_state.world_ark_id)
+            .await
+            .ok()
+            .flatten()
+            .is_none()
+            || sys
+                .get_combat_state(obs_state.world_ark_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|cs| cs.structure_hp <= 0.0);
+        if boss_is_dead {
+            let now_unix = ctx.now_unix_secs();
+            let site_id = obs_state.site_id;
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.service_state_blobs
+                    .remove(&format!("observatory_site:{site_id}"));
+                snap.service_state_blobs.insert(
+                    format!("observatory_respawn_until:{sys_id}"),
+                    now_unix.saturating_add(14_400).to_string(),
+                );
+            });
+            with_dungeon_runtime_store(ctx, |store| {
+                store.instances.remove(&obs_state.dungeon_instance_id);
+            });
+            let _ = sys.remove_ball(obs_state.gate_id).await;
+            for wid in obs_state.defense_wave_ids {
+                let _ = sys.remove_ball(wid).await;
+            }
+        }
     }
 }
 
@@ -1022,17 +1124,35 @@ pub async fn apply_live_combat_damage_to_pirate_fob(
     if total_dmg > 0.0 && attacker_char_id > 0 {
         record_fob_combat_participant(ctx, target_ball_id, attacker_char_id);
     }
-    let all_balls = sys_handle.list_balls().await.unwrap_or_default();
+    let (on_grid_combat_ships, ineligible_balls) = {
+        let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
+        let fob_pos = ctx.db.with_snapshot(|snap| {
+            snap.structures
+                .get(&target_ball_id)
+                .map(|s| eve_destiny::DVec3::from_array(s.position))
+                .unwrap_or(eve_destiny::DVec3::ZERO)
+        });
+        let mut combat_ships = std::collections::HashSet::new();
+        let mut blocked_balls = std::collections::HashSet::new();
+        for (&bid, b) in &bp.balls {
+            if b.position.distance(fob_pos) > 250_000.0 {
+                continue;
+            }
+            let is_cloaked = bp.combat_states.get(&bid).is_some_and(|cs| cs.is_cloaked)
+                || bp.ball_slim_meta.get(&bid).is_some_and(|sm| sm.is_cloaked);
+            let is_dead = bp.combat_states.get(&bid).is_some_and(|cs| cs.structure_hp <= 0.0);
+            if is_cloaked || is_dead || b.type_id == 670 {
+                blocked_balls.insert(bid);
+            } else {
+                combat_ships.insert(bid);
+            }
+        }
+        (combat_ships, blocked_balls)
+    };
     let (should_trigger_def, dest, s_r, a_r, h_r, attacker_ships, attacker_chars) =
         ctx.db.with_mut_snapshot(|snap| {
             let mut trig = false;
             if let Some(st) = snap.structures.get_mut(&target_ball_id) {
-                let fob_pos = eve_destiny::DVec3::from_array(st.position);
-                let on_grid_ids: std::collections::HashSet<i64> = all_balls
-                    .iter()
-                    .filter(|b| b.position.distance(fob_pos) <= 250_000.0)
-                    .map(|b| b.id)
-                    .collect();
                 let mut rem = total_dmg;
                 if st.shield_hp > 0.0 {
                     let take = rem.min(st.shield_hp);
@@ -1063,8 +1183,18 @@ pub async fn apply_live_combat_damage_to_pirate_fob(
                     .filter(|c| {
                         c.solar_system_id == sys_id
                             && c.station_id.is_none()
+                            && c.structure_id.is_none()
                             && c.active_ship_id > 0
-                            && on_grid_ids.contains(&c.active_ship_id)
+                            && on_grid_combat_ships.contains(&c.active_ship_id)
+                            && !ineligible_balls.contains(&c.active_ship_id)
+                            && !snap.items.get(&c.active_ship_id).is_some_and(|it| {
+                                it.type_id == 670
+                                    || ctx
+                                        .sde
+                                        .types
+                                        .get(&it.type_id)
+                                        .is_some_and(|t| t.group_id == 29)
+                            })
                     })
                     .map(|c| (c.character_id, c.active_ship_id))
                     .collect();

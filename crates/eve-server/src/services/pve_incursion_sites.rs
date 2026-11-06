@@ -475,6 +475,13 @@ pub async fn process_incursion_site_completion_and_payout_core(
     site_id: &str,
     candidate_pilots: Option<&[CharacterId]>,
 ) -> Result<IncursionCompletionResult, BridgeRpcError> {
+    let site_id = site_id.trim();
+    if site_id.is_empty() {
+        return Err(rpc_err(
+            "IncursionSiteNotFound",
+            "Incursion site_id cannot be empty",
+        ));
+    }
     let now_unix = db.clock().now_unix_secs();
     let now_ft = ((now_unix + 11_644_473_600) * 10_000_000) as i64;
     let incursion_found = with_pve_special_reg_db(db, now_unix, |reg| {
@@ -484,9 +491,9 @@ pub async fn process_incursion_site_completion_and_payout_core(
             }
             for site in &mut inc.sites {
                 let matches_id = site.site_id == site_id
-                    || site.site_id.ends_with(site_id)
+                    || (!site_id.is_empty() && site.site_id.ends_with(site_id))
                     || site_id.ends_with(&format!("-{}", site.dungeon_id))
-                    || site_id.ends_with(&site.dungeon_id.to_string());
+                    || site_id == site.dungeon_id.to_string();
                 if site.solar_system_id == site_sys && matches_id {
                     if site.locked_until_low_influence {
                         if inc.influence > 0.0 || !inc.mothership_spawned {

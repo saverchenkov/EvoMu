@@ -712,11 +712,21 @@ pub fn advance_incursion_lifecycles(ctx: &ServerContext) {
                     if inc.influence > 0.10 && inc.mothership_spawned && !inc.mothership_defeated {
                         inc.mothership_spawned = false;
                         inc.state = "Established".into();
-                        if let Some(ms) = inc.sites.iter().find(|s| s.tier == "Mothership") {
+                        if let Some(ms) = inc.sites.iter_mut().find(|s| s.tier == "Mothership") {
                             despawn.push((ms.solar_system_id, ms.boss_npc_ball_id));
                             for esc in &ms.escort_spawns {
                                 despawn.push((ms.solar_system_id, esc.npc_ball_id));
                             }
+                            ms.boss_npc_ball_id += 1_000;
+                            let next_boss_bid = ms.boss_npc_ball_id;
+                            let (next_b_tid, fresh_escorts) =
+                                super::pve_incursion_sites::get_sansha_encounter_composition(
+                                    next_boss_bid,
+                                    ms.dungeon_id,
+                                    &ms.tier,
+                                );
+                            ms.boss_type_id = next_b_tid;
+                            ms.escort_spawns = fresh_escorts;
                         }
                     }
                 }

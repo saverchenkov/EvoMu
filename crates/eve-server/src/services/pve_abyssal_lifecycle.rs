@@ -72,6 +72,14 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
                 npcs,
             )
         };
+        let mut coop_pilots: Vec<(CharacterId, ItemId)> = vec![(char_id, ship_id)];
+        for other in reg.abyssal_pockets.values_mut() {
+            if other.pocket_id == pid && other.character_id != char_id {
+                other.collapsed_destroyed = true;
+                other.completed = true;
+                coop_pilots.push((other.character_id, other.ship_id));
+            }
+        }
         let any_other_alive = reg
             .abyssal_pockets
             .values()
@@ -123,14 +131,13 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
             caches,
             env_balls,
             npcs,
+            coop_pilots,
         ))
     });
 
     let eff_pocket_sys = pocket_cleanup.as_ref().map(|c| c.0).unwrap_or(abyssal_sys);
-    crate::services::notify_emitters_tournaments_anomalies::emit_space_white_out_start(ctx, char_id, eff_pocket_sys);
     let handle = ctx.systems.get_or_spawn(eff_pocket_sys);
-    handle.try_remove_ball(ship_id);
-    if let Some((_, origin_sys, any_other_alive, ref trace_ids, ref markers, ref caches, ref env_balls, ref npcs)) =
+    if let Some((_, origin_sys, any_other_alive, ref trace_ids, ref markers, ref caches, ref env_balls, ref npcs, _)) =
         pocket_cleanup
     {
         let origin_handle = ctx.systems.get_or_spawn(origin_sys);
@@ -157,88 +164,116 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
             });
         }
     }
-    ctx.invalidate_ship_fitting(ship_id);
-    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-        rt.insurance_contracts.remove(&ship_id);
-    });
-    crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(ctx, |st| {
-        st.insurance_contracts.remove(&ship_id);
-    });
-
-    let (home_sys_id, _home_station_id, _corvette_id, cleared_zarzakh_gate) =
-        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, snap| {
-            st.abyssal_sessions.remove(&char_id);
-            if let Some((_, _, false, _, _, ref caches, _, _)) = pocket_cleanup {
-                for &cid in caches {
-                    snap.items.remove(&cid);
-                    snap.item_positions.remove(&cid);
-                }
-                snap.items.retain(|_, item| !caches.contains(&item.location_id));
-            }
-
-            let ship_type_id = snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(606);
-            let death_pos = snap.item_positions.remove(&ship_id).unwrap_or([0.0, 0.0, 0.0]);
-            let base_price = ctx
-                .sde
-                .types
-                .get(&ship_type_id)
-                .map(|t| t.base_price)
-                .unwrap_or(250_000.0);
-
-            snap.items.remove(&ship_id);
-            snap.module_online_states.remove(&ship_id);
-            st.ship_combat_hp.remove(&ship_id);
-            snap.items.retain(|_, item| item.location_id != ship_id);
-            let cleared_lock = snap.zarzakh_gate_locks.remove(&char_id).map(|(gid, _)| gid);
-
-            if ship_type_id != 670 {
-                snap.next_entity_id += 1;
-                let ship_kid = snap.next_entity_id;
-                snap.record_killmail(
-                    eve_db::KillmailRecord {
-                        kill_id: ship_kid,
-                        victim_character_id: char_id,
-                        attacker_character_id: 0,
-                        attacker_corp_id: 1_000_298,
-                        solar_system_id: eff_pocket_sys,
-                        ship_type_id,
-                        total_value_isk: base_price,
-                        ..Default::default()
-                    },
-                    now_unix,
-                );
-            }
-            let (home_station_id, home_sys_id, corvette_id, _corpse_id, _pod_kid) =
-                destroy_pod_and_respawn_faction_corvette_in_snap(
-                    snap,
-                    Some(&ctx.sde),
-                    char_id,
-                    eff_pocket_sys,
-                    death_pos,
-                    now_unix,
-                );
-            (home_sys_id, home_station_id, corvette_id, cleared_lock)
-        });
-
-    if let Some(locked_gate_id) = cleared_zarzakh_gate {
-        crate::services::quasar_sov_services::publish_stargate_lock_deactivated_notice(
-            &ctx.quasar_gateway,
-            char_id,
-            30_100_000,
-            locked_gate_id,
-            now_unix,
+    let pilots_to_pod: Vec<(CharacterId, ItemId)> = pocket_cleanup
+        .as_ref()
+        .map(|c| c.8.clone())
+        .unwrap_or_else(|| vec![(char_id, ship_id)]);
+    let mut primary_home_sys = eff_pocket_sys;
+    for (idx, (pilot_cid, pilot_sid)) in pilots_to_pod.into_iter().enumerate() {
+        crate::services::notify_emitters_tournaments_anomalies::emit_space_white_out_start(
+            ctx,
+            pilot_cid,
+            eff_pocket_sys,
         );
+        handle.try_remove_ball(pilot_sid);
+        ctx.invalidate_ship_fitting(pilot_sid);
+        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+            rt.insurance_contracts.remove(&pilot_sid);
+        });
+        crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(
+            ctx,
+            |st| {
+                st.insurance_contracts.remove(&pilot_sid);
+            },
+        );
+
+        let (home_sys_id, _home_station_id, _corvette_id, cleared_zarzakh_gate) =
+            crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, snap| {
+                st.abyssal_sessions.remove(&pilot_cid);
+                if idx == 0 {
+                    if let Some((_, _, false, _, _, ref caches, _, _, _)) = pocket_cleanup {
+                        for &cid in caches {
+                            snap.items.remove(&cid);
+                            snap.item_positions.remove(&cid);
+                        }
+                        snap.items.retain(|_, item| !caches.contains(&item.location_id));
+                    }
+                }
+
+                let ship_type_id = snap
+                    .items
+                    .get(&pilot_sid)
+                    .map(|i| i.type_id)
+                    .unwrap_or(606);
+                let death_pos = snap
+                    .item_positions
+                    .remove(&pilot_sid)
+                    .unwrap_or([0.0, 0.0, 0.0]);
+                let base_price = ctx
+                    .sde
+                    .types
+                    .get(&ship_type_id)
+                    .map(|t| t.base_price)
+                    .unwrap_or(250_000.0);
+
+                snap.items.remove(&pilot_sid);
+                snap.module_online_states.remove(&pilot_sid);
+                st.ship_combat_hp.remove(&pilot_sid);
+                snap.items.retain(|_, item| item.location_id != pilot_sid);
+                let cleared_lock = snap.zarzakh_gate_locks.remove(&pilot_cid).map(|(gid, _)| gid);
+
+                if ship_type_id != 670 {
+                    snap.next_entity_id += 1;
+                    let ship_kid = snap.next_entity_id;
+                    snap.record_killmail(
+                        eve_db::KillmailRecord {
+                            kill_id: ship_kid,
+                            victim_character_id: pilot_cid,
+                            attacker_character_id: 0,
+                            attacker_corp_id: 1_000_298,
+                            solar_system_id: eff_pocket_sys,
+                            ship_type_id,
+                            total_value_isk: base_price,
+                            ..Default::default()
+                        },
+                        now_unix,
+                    );
+                }
+                let (home_station_id, home_sys_id, corvette_id, _corpse_id, _pod_kid) =
+                    destroy_pod_and_respawn_faction_corvette_in_snap(
+                        snap,
+                        Some(&ctx.sde),
+                        pilot_cid,
+                        eff_pocket_sys,
+                        death_pos,
+                        now_unix,
+                    );
+                (home_sys_id, home_station_id, corvette_id, cleared_lock)
+            });
+
+        if let Some(locked_gate_id) = cleared_zarzakh_gate {
+            crate::services::quasar_sov_services::publish_stargate_lock_deactivated_notice(
+                &ctx.quasar_gateway,
+                pilot_cid,
+                30_100_000,
+                locked_gate_id,
+                now_unix,
+            );
+        }
+        crate::services::space_destiny::record_session_change_timer(
+            ctx,
+            pilot_cid,
+            now_unix,
+            home_sys_id,
+            0,
+            "podding",
+        );
+        crate::services::map_service::record_solar_system_visit(ctx, pilot_cid, home_sys_id);
+        if pilot_cid == char_id {
+            primary_home_sys = home_sys_id;
+        }
     }
-    crate::services::space_destiny::record_session_change_timer(
-        ctx,
-        char_id,
-        now_unix,
-        home_sys_id,
-        0,
-        "podding",
-    );
-    crate::services::map_service::record_solar_system_visit(ctx, char_id, home_sys_id);
-    home_sys_id
+    primary_home_sys
 }
 
 #[allow(clippy::type_complexity)]

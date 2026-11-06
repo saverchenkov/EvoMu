@@ -737,6 +737,22 @@ pub async fn enter_abyssal_pocket_with_trace(
     let penalty_pct = existing_penalty.unwrap_or_else(|| roll_abyssal_weather_penalty_pct(ctx, tier));
     let bonus_pct = 50.0;
     let diff_mult = 1.0 + (tier as f64) * 1.25;
+    let prior_saved = with_pve_special_reg(ctx, |reg| {
+        let mut merged: HashMap<AttributeId, f64> = HashMap::new();
+        for p in reg.abyssal_pockets.values_mut() {
+            if (p.ship_id == ship_id || p.character_id == char_id)
+                && !p.saved_ship_attrs.is_empty()
+            {
+                for (attr_id, base_val) in std::mem::take(&mut p.saved_ship_attrs) {
+                    merged.entry(attr_id).or_insert(base_val);
+                }
+            }
+        }
+        (!merged.is_empty()).then_some(merged)
+    });
+    if let Some(prev_attrs) = prior_saved {
+        restore_abyssal_weather_dogma_modifiers(ctx, ship_id, &prev_attrs);
+    }
     let saved_attrs = apply_abyssal_weather_dogma_modifiers_to_ship(
         ctx,
         ship_id,

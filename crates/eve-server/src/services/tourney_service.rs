@@ -111,17 +111,41 @@ pub async fn handle(
                 let mut store = load_store(snap);
                 let target_mid = store.matches.contains_key(&ban_id).then_some(ban_id);
                 let m = store.resolve_match_mut(target_mid)?;
-                let is_capt = m.red_fleet_boss_id == Some(caller_cid) || m.blue_fleet_boss_id == Some(caller_cid);
-                if !is_capt { check_referee_auth(session, caller_cid, m)?; }
-                if m.bans_finalized || !matches!(m.state, TourneyMatchState::Setup | TourneyMatchState::Banning) {
-                    return Err(BridgeRpcError { code: "TourneyBansFinalized".into(), message: "Cannot ban ships after bans are finalized or match has started".into() });
+                let is_red_capt = m.red_fleet_boss_id == Some(caller_cid);
+                let is_blue_capt = m.blue_fleet_boss_id == Some(caller_cid);
+                if !is_red_capt && !is_blue_capt {
+                    check_referee_auth(session, caller_cid, m)?;
                 }
-                m.state = TourneyMatchState::Banning;
-                let is_blue_capt = m.blue_fleet_boss_id == Some(caller_cid) && m.red_fleet_boss_id != Some(caller_cid);
+                if m.bans_finalized || !matches!(m.state, TourneyMatchState::Setup | TourneyMatchState::Banning) {
+                    return Err(BridgeRpcError { code: "TourneyBansFinalized".into(), message: "Cannot ban ships outside the Banning phase or after bans are finalized".into() });
+                }
+                let team_slot: i64 = if is_blue_capt && !is_red_capt { 1 } else { 0 };
+                let team_bans = if team_slot == 1 {
+                    &mut m.banned_ship_types_blue
+                } else {
+                    &mut m.banned_ship_types_red
+                };
+                if m.autoban_qty > 0 {
+                    let cap = m.autoban_qty as usize;
+                    let new_unique: usize = ban_types
+                        .iter()
+                        .filter(|bt| !team_bans.contains(bt))
+                        .collect::<std::collections::HashSet<_>>()
+                        .len();
+                    if team_bans.len().saturating_add(new_unique) > cap {
+                        return Err(BridgeRpcError {
+                            code: "TourneyBanLimitExceeded".into(),
+                            message: format!("Team ban count exceeds allowed limit of {}", m.autoban_qty),
+                        });
+                    }
+                }
                 for &bt in &ban_types {
-                    if !m.banned_ships.contains(&bt) { m.banned_ships.push(bt); }
-                    let team_bans = if is_blue_capt { &mut m.banned_ship_types_blue } else { &mut m.banned_ship_types_red };
-                    if !team_bans.contains(&bt) { team_bans.push(bt); }
+                    if !team_bans.contains(&bt) {
+                        team_bans.push(bt);
+                    }
+                    if !m.banned_ships.contains(&bt) {
+                        m.banned_ships.push(bt);
+                    }
                 }
                 let qty = (ban_types.len() as i64).max(m.autoban_qty).max(1);
                 let mid = m.match_id;
@@ -130,7 +154,11 @@ pub async fn handle(
                 let r_boss = m.red_fleet_boss_id;
                 let b_boss = m.blue_fleet_boss_id;
                 let round = (store.ban_sessions.len() as i64) + 1;
-                store.ban_sessions.insert(ban_id, ban_types);
+                let scoped_ban_id = mid
+                    .saturating_mul(1_000_000)
+                    .saturating_add(team_slot.saturating_mul(100_000))
+                    .saturating_add(ban_id.clamp(0, 99_999));
+                store.ban_sessions.insert(scoped_ban_id, ban_types);
                 notify_info = Some((mid, qty, cur_bans, round, tid, r_boss, b_boss));
                 save_store(snap, &store, now_unix);
                 Ok(PyRep::Bool(true))
@@ -163,7 +191,7 @@ pub async fn handle(
         }
         ("tourneyMgr", "BanShipType") => {
             let caller_cid = require_cid!(session);
-            let (target_mid, team_idx, ship_type_id) = if args.len() >= 3 {
+            let (target_mid, requested_team, ship_type_id) = if args.len() >= 3 {
                 (extract_id(args, 0), extract_id(args, 1).unwrap_or(0), extract_id(args, 2).unwrap_or(0))
             } else {
                 (None, extract_id(args, 0).unwrap_or(0), extract_id(args, 1).unwrap_or(0))
@@ -171,11 +199,32 @@ pub async fn handle(
             ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let m = store.resolve_match_mut(target_mid)?;
-                check_referee_auth(session, caller_cid, m)?;
-                if m.bans_finalized || !matches!(m.state, TourneyMatchState::Setup | TourneyMatchState::Banning) {
-                    return Err(BridgeRpcError { code: "TourneyBansFinalized".into(), message: "Cannot ban ship types after bans are finalized or match has started".into() });
+                let is_red_capt = m.red_fleet_boss_id == Some(caller_cid);
+                let is_blue_capt = m.blue_fleet_boss_id == Some(caller_cid);
+                if !is_red_capt && !is_blue_capt {
+                    check_referee_auth(session, caller_cid, m)?;
                 }
+                if m.bans_finalized || !matches!(m.state, TourneyMatchState::Setup | TourneyMatchState::Banning) {
+                    return Err(BridgeRpcError { code: "TourneyBansFinalized".into(), message: "Cannot ban ship types outside the Banning phase or after bans are finalized".into() });
+                }
+                let is_blue_capt = m.blue_fleet_boss_id == Some(caller_cid) && m.red_fleet_boss_id != Some(caller_cid);
+                let team_idx = if session.has_gm_role() || m.referees.contains(&caller_cid) {
+                    requested_team
+                } else if is_blue_capt {
+                    1
+                } else {
+                    0
+                };
                 let team_bans = if team_idx == 0 { &mut m.banned_ship_types_red } else { &mut m.banned_ship_types_blue };
+                if m.autoban_qty > 0
+                    && !team_bans.contains(&ship_type_id)
+                    && team_bans.len() >= m.autoban_qty as usize
+                {
+                    return Err(BridgeRpcError {
+                        code: "TourneyBanLimitExceeded".into(),
+                        message: format!("Team ban count exceeds allowed limit of {}", m.autoban_qty),
+                    });
+                }
                 if !team_bans.contains(&ship_type_id) { team_bans.push(ship_type_id); }
                 if !m.banned_ships.contains(&ship_type_id) { m.banned_ships.push(ship_type_id); }
                 save_store(snap, &store, now_unix);
@@ -369,7 +418,11 @@ pub async fn handle(
                 ctx.db.try_with_mut_snapshot(|snap| -> Result<Result<PyRep, BridgeRpcError>, BridgeRpcError> {
                     let mut store = load_store(snap);
                     let m = store.resolve_match_mut(target_mid)?;
-                    check_referee_auth(session, caller_cid, m)?;
+                    let is_red_capt = m.red_fleet_boss_id == Some(caller_cid);
+                    let is_blue_capt = m.blue_fleet_boss_id == Some(caller_cid);
+                    if !is_red_capt && !is_blue_capt {
+                        check_referee_auth(session, caller_cid, m)?;
+                    }
                     let is_locked = if which_team == 0 { m.member_list_locked_red } else { m.member_list_locked_blue };
                     if is_locked {
                         return Err(BridgeRpcError { code: "MemberListLocked".into(), message: "Cannot modify roster while team member list is locked".into() });
@@ -433,6 +486,15 @@ pub async fn handle(
                     code: "MatchNotFound".into(),
                     message: format!("Match ID {} not found", target_mid.unwrap_or_default()),
                 })?;
+                if !matches!(
+                    m_clone.state,
+                    TourneyMatchState::Countdown
+                        | TourneyMatchState::InProgress
+                        | TourneyMatchState::Completed
+                ) {
+                    let caller_cid = session.character_id.unwrap_or(0);
+                    check_referee_auth(session, caller_cid, &m_clone)?;
+                }
                 let red_bar = compute_team_telemetry(ctx, snap, &m_clone.red_players, m_clone.red_score, m_clone.banned_ship_types_red.len());
                 let blue_bar = compute_team_telemetry(ctx, snap, &m_clone.blue_players, m_clone.blue_score, m_clone.banned_ship_types_blue.len());
                 let red_bans: Vec<PyRep> = m_clone.banned_ship_types_red.iter().copied().map(PyRep::Integer).collect();
@@ -479,6 +541,15 @@ pub async fn handle(
                     code: "MatchNotFound".into(),
                     message: format!("Match ID {} not found", target_mid.unwrap_or_default()),
                 })?;
+                if !matches!(
+                    m.state,
+                    TourneyMatchState::Countdown
+                        | TourneyMatchState::InProgress
+                        | TourneyMatchState::Completed
+                ) {
+                    let caller_cid = session.character_id.unwrap_or(0);
+                    check_referee_auth(session, caller_cid, m)?;
+                }
                 let red_list: Vec<PyRep> = m.red_players.iter().map(|p| PyRep::Tuple(vec![PyRep::Integer(p.character_id), PyRep::Integer(p.ship_type_id), PyRep::Integer(p.ship_id), PyRep::Integer(p.points)])).collect();
                 let blue_list: Vec<PyRep> = m.blue_players.iter().map(|p| PyRep::Tuple(vec![PyRep::Integer(p.character_id), PyRep::Integer(p.ship_type_id), PyRep::Integer(p.ship_id), PyRep::Integer(p.points)])).collect();
                 Ok(PyRep::List(vec![PyRep::List(red_list), PyRep::List(blue_list)]))

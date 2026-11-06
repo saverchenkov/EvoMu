@@ -93,9 +93,23 @@ pub struct PvpFilamentStore {
     #[serde(default)]
     pub queue_refund_targets: HashMap<i64, (i64, i64)>,
     #[serde(default)]
+    pub queue_tickets: HashMap<i64, i64>,
+    #[serde(default)]
+    pub next_ticket_id: i64,
+    #[serde(default)]
     pub origin_positions: HashMap<i64, [f64; 3]>,
     #[serde(default)]
     pub next_match_id: i64,
+}
+
+impl PvpFilamentStore {
+    pub fn ticket_id_for_entry(&self, char_id: i64, entry: &PvpQueueCharacterEntry) -> i64 {
+        self.queue_tickets
+            .get(&char_id)
+            .copied()
+            .filter(|&tid| tid > 0)
+            .unwrap_or(entry.item_id)
+    }
 }
 
 #[inline]
@@ -1062,7 +1076,8 @@ pub async fn handle(
                     if party_origins.iter().any(|&(pcid, _, _)| pcid == cid) || qe.type_id != it_type_id {
                         continue;
                     }
-                    ticket_groups.entry(qe.item_id).or_default().push((
+                    let ticket_id = store.ticket_id_for_entry(cid, qe);
+                    ticket_groups.entry(ticket_id).or_default().push((
                         cid,
                         qe.solar_system_id,
                         qe.location_id,
@@ -1118,6 +1133,7 @@ pub async fn handle(
                         store.queue_refund_targets.remove(&ticket_id);
                         for m in members {
                             store.queue.remove(&m.0);
+                            store.queue_tickets.remove(&m.0);
                             matched_opponents.push(m);
                         }
                     }
@@ -1202,10 +1218,13 @@ pub async fn handle(
 
                     Some((mid, end_gate_id, arena_offset, teams, participants))
                 } else {
+                    store.next_ticket_id += 1;
+                    let ticket_id = store.next_ticket_id;
                     store
                         .queue_refund_targets
-                        .insert(item_id, (char_id, it_location_id));
+                        .insert(ticket_id, (char_id, it_location_id));
                     for &(pcid, pship, _) in &party_origins {
+                        store.queue_tickets.insert(pcid, ticket_id);
                         store.queue.insert(
                             pcid,
                             PvpQueueCharacterEntry {
@@ -1255,10 +1274,25 @@ pub async fn handle(
                         return Err(BridgeRpcError { code: "FilamentNotFound".into(), message: "Filament item does not match queued filament".into() });
                     }
                 }
-                if entry.item_id > 0 {
-                    store.queue.retain(|_, qe| qe.item_id != entry.item_id);
+                let ticket_id = store.ticket_id_for_entry(char_id, &entry);
+                store.queue_tickets.remove(&char_id);
+                if ticket_id > 0 {
+                    let same_ticket_chars: Vec<i64> = store
+                        .queue
+                        .iter()
+                        .filter(|(&cid, qe)| store.ticket_id_for_entry(cid, qe) == ticket_id)
+                        .map(|(&cid, _)| cid)
+                        .collect();
+                    for cid in same_ticket_chars {
+                        store.queue.remove(&cid);
+                        store.queue_tickets.remove(&cid);
+                    }
                 }
-                let (refund_owner, refund_loc) = store.queue_refund_targets.remove(&entry.item_id).unwrap_or((char_id, entry.location_id));
+                let (refund_owner, refund_loc) = store
+                    .queue_refund_targets
+                    .remove(&ticket_id)
+                    .or_else(|| store.queue_refund_targets.remove(&entry.item_id))
+                    .unwrap_or((char_id, entry.location_id));
                 if let Some(it) = snap.items.get_mut(&entry.item_id).filter(|it| it.owner_id == refund_owner && it.type_id == entry.type_id) {
                     it.quantity += 1;
                 } else {

@@ -1173,45 +1173,37 @@ pub(crate) async fn apply_dungeon_trigger_actions(
     apply_dungeon_trigger_actions_core(&ctx.systems, &ctx.db, &ctx.sde, Some(&ctx.pending_notifications), Some(&ctx.notify_tx), sys_id, instance_id, room_vec_idx, actions, char_id).await
 }
 
+/// Validates hull group and mass restrictions for a `DungeonRuntimeInstance` acceleration gate.
+pub fn check_dungeon_runtime_gate_ship_allowed(sde: &eve_sde::SdeRegistry, dungeon_id: u32, ship_type_id: eve_sde::TypeId, ship_mass: f64) -> Result<(), BridgeRpcError> {
+    let st = sde.types.get(&ship_type_id);
+    let gid = st.map(|t| t.group_id).unwrap_or(0);
+    if matches!(gid, 29 | 30 | 485 | 513 | 547 | 659 | 883 | 902 | 941 | 1538) {
+        return Err(BridgeRpcError::user_error("ShipRestrictedByDungeonGate"));
+    }
+    let rig = st.and_then(|t| t.default_attributes.get(&1547).copied()).unwrap_or(0.0);
+    let mass = st.map_or(ship_mass, |t| t.mass.max(ship_mass));
+    let diff = sde.dungeons.get(&dungeon_id).and_then(|d| d.difficulty);
+    let disallowed = match diff {
+        Some(1) => rig > 1.0 || mass > 15_000_000.0 || (gid != 0 && !matches!(gid, 25 | 28 | 237 | 324 | 380 | 420 | 541 | 830 | 831 | 834 | 893 | 1283 | 1305 | 1527)),
+        Some(2..=3) => rig > 2.0 || mass > 50_000_000.0 || (gid != 0 && !matches!(gid, 25 | 26 | 28 | 237 | 324 | 358 | 380 | 420 | 541 | 830 | 831 | 832 | 833 | 834 | 893 | 894 | 906 | 963 | 1283 | 1305 | 1527 | 1972)),
+        Some(4..=5) => rig > 3.0 || mass > 300_000_000.0,
+        _ => rig > 3.0 || mass > 500_000_000.0,
+    };
+    if disallowed { return Err(BridgeRpcError::user_error("ShipRestrictedByDungeonGate")); }
+    Ok(())
+}
+
 /// Evaluates `OnKill` triggers and room/dungeon completion when an NPC ball is destroyed in `sys_id`.
-pub async fn on_dungeon_npc_killed(
-    ctx: &ServerContext,
-    sys_id: SolarSystemId,
-    npc_ball_id: i64,
-    killer_char_id: i64,
-) {
-    on_dungeon_npc_killed_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        Some(&ctx.pending_notifications),
-        Some(&ctx.notify_tx),
-        sys_id,
-        npc_ball_id,
-        killer_char_id,
-    )
-    .await;
+pub async fn on_dungeon_npc_killed(ctx: &ServerContext, sys_id: SolarSystemId, npc_ball_id: i64, killer_char_id: i64) {
+    on_dungeon_npc_killed_core(&ctx.systems, &ctx.db, &ctx.sde, Some(&ctx.pending_notifications), Some(&ctx.notify_tx), sys_id, npc_ball_id, killer_char_id).await;
 }
 
 #[allow(clippy::too_many_arguments)]
 pub async fn on_dungeon_npc_killed_core(
-    systems: &std::sync::Arc<crate::system_actor::SystemRegistry>,
-    db: &std::sync::Arc<eve_db::WorldRepository>,
-    sde: &eve_sde::SdeRegistry,
-    pending_notifications: Option<
-        &std::sync::RwLock<
-            HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>,
-        >,
-    >,
-    notify_tx: Option<
-        &tokio::sync::broadcast::Sender<(
-            i64,
-            crate::router::cache_notifications::PendingMachoNotification,
-        )>,
-    >,
-    sys_id: SolarSystemId,
-    npc_ball_id: i64,
-    killer_char_id: i64,
+    systems: &std::sync::Arc<crate::system_actor::SystemRegistry>, db: &std::sync::Arc<eve_db::WorldRepository>, sde: &eve_sde::SdeRegistry,
+    pending_notifications: Option<&std::sync::RwLock<HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>>>,
+    notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, crate::router::cache_notifications::PendingMachoNotification)>>,
+    sys_id: SolarSystemId, npc_ball_id: i64, killer_char_id: i64,
 ) {
     if !has_dungeon_runtime_store_db(db) {
         return;

@@ -1020,7 +1020,7 @@ async fn evaluate_system_fw_complex_tick(
             .max(MIN_INSURGENCY_CAPTURE_POINTS_DELTA as u64) as i64;
 
         let mut total_lp_awarded = 0i64;
-        if is_lowsec_warzone && camp_info.is_none() {
+        if is_lowsec_warzone {
             let (grid_friendly_adv, grid_enemy_adv) = if !has_occ || is_defender { (occ_adv, attacker_adv) } else { (attacker_adv, occ_adv) };
             let adv_mult = crate::services::fw_services::calculate_capture_speed_multiplier(grid_friendly_adv, grid_enemy_adv);
             let capture_advance = ((delta as f64) * adv_mult).round().max(1.0) as u64;

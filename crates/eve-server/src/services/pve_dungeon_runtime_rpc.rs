@@ -118,19 +118,25 @@ pub async fn try_activate_dungeon_runtime_gate(
         }));
     }
 
-    // Check SDE dungeon difficulty hull restrictions if any
     let dungeon_id = with_dungeon_runtime_store(ctx, |store| {
         store.instances.get(&instance_id).map(|i| i.dungeon_id)
     })
     .unwrap_or(0);
-    if let Some(dungeon) = ctx.sde.dungeons.get(&dungeon_id) {
-        let ship_type = ctx.sde.types.get(&ship_ball.type_id);
-        let ship_rig_size = ship_type
-            .and_then(|t| t.default_attributes.get(&1547).copied())
-            .unwrap_or(0.0);
-        if dungeon.difficulty == Some(1) && (ship_rig_size > 1.0 || ship_ball.mass > 15_000_000.0) {
-            return Some(Err(BridgeRpcError::user_error("ShipRestrictedByDungeonGate")));
-        }
+    let item_mass = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .get(&ship_id)
+            .and_then(|it| ctx.sde.types.get(&it.type_id))
+            .map(|t| t.mass)
+            .unwrap_or(ship_ball.mass)
+    });
+    let effective_mass = item_mass.max(ship_ball.mass);
+    if let Err(e) = crate::services::pve_dungeon_runtime::check_dungeon_runtime_gate_ship_allowed(
+        &ctx.sde,
+        dungeon_id,
+        ship_ball.type_id,
+        effective_mass,
+    ) {
+        return Some(Err(e));
     }
 
     // Materialize target room entities
@@ -1233,9 +1239,8 @@ pub fn check_warp_target_blocked_by_gated_dungeon_room(
                 continue;
             }
             for (r_idx, room) in inst.rooms.iter().enumerate() {
-                // Room 0 with entry gate or any later room (r_idx > 0) not yet entered via gate
                 let is_gated = r_idx > 0 || inst.entry_gate_ball_id.is_some();
-                if !is_gated || inst.current_room_index > r_idx {
+                if !is_gated {
                     continue;
                 }
                 let matches_ball = target_ball_id.is_some_and(|tid| {
