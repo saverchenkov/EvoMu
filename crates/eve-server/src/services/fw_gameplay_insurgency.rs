@@ -748,3 +748,7 @@ async fn cleanup_ended_campaign_sites_and_roamers(
 #[cfg(test)] #[path = "fw_gameplay_insurgency_tests.rs"]
 mod fw_gameplay_insurgency_tests;
 
+#[path = "fw_gameplay_insurgency_cov_unit_tests.rs"]
+#[cfg(test)]
+mod fw_gameplay_insurgency_cov_unit_tests;
+

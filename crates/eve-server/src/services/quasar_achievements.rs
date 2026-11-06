@@ -1085,3 +1085,7 @@ pub(crate) fn ensure_client_flatbuffer_storage_seeded(
 #[cfg(test)] #[path = "quasar_achievements_tests.rs"]
 mod quasar_achievements_tests;
 
+#[path = "quasar_achievements_cov_unit_tests.rs"]
+#[cfg(test)]
+mod quasar_achievements_cov_unit_tests;
+

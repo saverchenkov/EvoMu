@@ -1217,3 +1217,7 @@ pub async fn on_fw_complex_guard_destroyed(
 #[cfg(test)] #[path = "fw_gameplay_tests.rs"]
 mod fw_gameplay_tests;
 
+#[path = "fw_gameplay_cov_unit_tests.rs"]
+#[cfg(test)]
+mod fw_gameplay_cov_unit_tests;
+

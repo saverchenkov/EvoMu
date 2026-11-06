@@ -1388,3 +1388,6 @@ fn register_payment_token_and_purchase_handlers(
 #[cfg(test)]
 #[path = "quasar_payment_store_tests.rs"]
 mod quasar_payment_store_tests;
+#[path = "quasar_payment_store_cov_unit_tests.rs"]
+#[cfg(test)]
+mod quasar_payment_store_cov_unit_tests;

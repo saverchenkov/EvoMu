@@ -1323,3 +1323,7 @@ mod living_world_tests;
 #[path = "living_world_extra_tests.rs"]
 mod living_world_extra_tests;
 
+#[path = "living_world_cov_unit_tests.rs"]
+#[cfg(test)]
+mod living_world_cov_unit_tests;
+
