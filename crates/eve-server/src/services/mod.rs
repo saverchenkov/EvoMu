@@ -314,66 +314,26 @@ mod fleet_social_fleet_ops_extra_unit_tests;
 #[cfg(test)]
 mod mining_advanced_extra_unit_tests;
 #[cfg(test)]
-mod space_docking_cloaking_extra_unit_tests;
+mod market_contracts_extra_unit_tests;
 #[cfg(test)]
-mod fitting_ships_mastery_extra_unit_tests;
+mod quasar_corp_domain_extra_unit_tests;
 #[cfg(test)]
-mod quasar_progression_extra_unit_tests;
+mod air_npe_nodegraph_runner_extra_unit_tests;
 #[cfg(test)]
-mod agents_standings_arcs_extra_unit_tests;
+mod mining_compression_extra_unit_tests;
 #[cfg(test)]
-mod sov_gameplay_extra_unit_tests;
+mod pvp_filament_mgr_extra_unit_tests;
 #[cfg(test)]
-mod fleet_social_corps_extra_unit_tests;
+mod combat_missiles_aoe_extra_unit_tests;
 #[cfg(test)]
-mod pi_orbitals_extra_unit_tests;
+mod pve_dungeon_cache_extra_unit_tests;
 #[cfg(test)]
-mod market_trading_extra_unit_tests;
+mod shipcaster_ops_extra_unit_tests;
 #[cfg(test)]
-mod lp_store_extra_unit_tests;
+mod industry_pi_extra_unit_tests;
 #[cfg(test)]
-mod config_service_extra_unit_tests;
+mod structure_profiles_rpc_extra_unit_tests;
 #[cfg(test)]
-mod fitting_cyno_portal_extra_unit_tests;
+mod quasar_social_freelance_extra_unit_tests;
 #[cfg(test)]
-mod pve_crab_beacons_extra_unit_tests;
-#[cfg(test)]
-mod fleet_social_notify_extra_unit_tests;
-#[cfg(test)]
-mod space_entity_mining_extra_unit_tests;
-#[cfg(test)]
-mod fleet_social_scanning_extra_unit_tests;
-#[cfg(test)]
-mod pi_colonies_extra_unit_tests;
-#[cfg(test)]
-mod fleet_social_fleets_extra_unit_tests;
-#[cfg(test)]
-mod notify_emitters_space_dungeons_extra_unit_tests;
-#[cfg(test)]
-mod insurgency_services_extra_unit_tests;
-#[cfg(test)]
-mod fw_gameplay_rpc_extra_unit_tests;
-#[cfg(test)]
-mod quasar_social_corp_extra_unit_tests;
-#[cfg(test)]
-mod fleet_social_access_group_bookmarks_extra_unit_tests;
-#[cfg(test)]
-mod corp_registry_ops_extra_unit_tests;
-#[cfg(test)]
-mod quasar_sov_hub_extra_unit_tests;
-
-
-
-
-#[cfg(test)]
-mod fleet_social_mail_extra_unit_tests;
-#[cfg(test)]
-mod quasar_char_skill_services_extra_unit_tests;
-#[cfg(test)]
-mod account_services_extra_unit_tests;
-#[cfg(test)]
-mod sov_fw_insurgency_extra_unit_tests;
-#[cfg(test)]
-mod wallet_serverops_extra_unit_tests;
-#[cfg(test)]
-mod quasar_payment_store_types_extra_unit_tests;
+mod quasar_career_goals_extra_unit_tests;
