@@ -27,4 +27,7 @@ pub use npc_ai::{
 mod combat_mechanics_tests;
 #[cfg(test)]
 mod salvage_ai_death_tests;
+#[cfg(test)]
+mod combat_weapons_deep_extra_unit_tests;
+
 
