@@ -376,10 +376,10 @@ async fn paragon_evermarks_store_and_component_licenses() {
 
 // parity: feat:cosmetics.skinr-designer
 // parity: feat:cosmetics.skinr-sequencing-studio
+// parity: quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/api/requests_pb2.pyj
 // parity: quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/job/api/requests_pb2.pyj
-// parity: quasar:eveProto/generated/eve_public/cosmetic/skin/thirdparty/sequencing/job/api/requests_pb2.pyj
 // parity: quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/job/api/notices_pb2.pyj
-// parity: quasar:eveProto/generated/eve_public/cosmetic/market/component/listing/api/requests_pb2.pyj
+// parity: quasar:eveProto/generated/eve_public/cosmetic/market/component/listing/api/api_pb2.pyj
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn skinr_designer_and_sequencing_studio_jobs() {
     let ctx = ServerContext::new();
@@ -402,6 +402,15 @@ async fn skinr_designer_and_sequencing_studio_jobs() {
 
     let mut player = sess(20, 5021, cid, 98_000_001, service_roles::ROLE_PLAYER_DEFAULT);
     let mut rx = subscribe(&ctx, &mut player).await;
+    for ep in [
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingRequest",
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierDurationsRequest",
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.api.GetEarlyCompletionPricingRequest",
+    ] {
+        let rsp = qrpc(&ctx, &mut player, ep, Vec::new()).await;
+        assert_eq!(rsp.status_code, STATUS_OK);
+        assert!(!WireMessage::decode(&rsp.payload.unwrap().value).unwrap().fields.is_empty());
+    }
 
     // Purchase component listing with ISK & verify balance deduction
     let comps_rsp = qrpc(&ctx, &mut player, "eve_public.cosmetic.market.component.listing.api.GetAllRequest", Vec::new()).await;
@@ -479,9 +488,8 @@ async fn skinr_designer_and_sequencing_studio_jobs() {
 
 // parity: feat:cosmetics.skinr-market
 // parity: feat:cosmetics.skinr-paragon-hub-listing
-// parity: quasar:eveProto/generated/eve_public/cosmetic/market/skin/Order_pb2.pyj
+// parity: quasar:eveProto/generated/eve_public/cosmetic/market/api/api_pb2.pyj
 // parity: quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/api_pb2.pyj
-// parity: quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/requests_pb2.pyj
 // parity: quasar:eveProto/generated/eve_public/cosmetic/market/transaction/api/notices_pb2.pyj
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn skinr_market_paragon_hub_skin_listings_and_trades() {
@@ -538,6 +546,16 @@ async fn skinr_market_paragon_hub_skin_listings_and_trades() {
     let mut sh_msg = Vec::new();
     encode_string_field(1, &skin_hex, &mut sh_msg);
     encode_bytes_field(2, &sh_msg, &mut lic_id);
+    for ep in [
+        "eve_public.cosmetic.market.api.GetBrokerFeesRequest",
+        "eve_public.cosmetic.market.api.GetTaxRateRequest",
+        "eve_public.cosmetic.market.api.GetBuyerFeesDefinitionRequest",
+    ] {
+        assert_eq!(qrpc(&ctx, &mut seller, ep, Vec::new()).await.status_code, STATUS_OK);
+    }
+    let mut bf_req = Vec::new();
+    encode_bytes_field(2, &sh_msg, &mut bf_req);
+    assert_eq!(qrpc(&ctx, &mut buyer, "eve_public.cosmetic.market.api.GetBuyerFeeRequest", bf_req).await.status_code, STATUS_OK);
 
     let mut create_req = Vec::new();
     put_isk(1, 1_000_000, &mut create_req);

@@ -81,7 +81,7 @@ async fn test_skinr_sequencing_studio_and_paragon_hub_listing() {
         ch_s.station_id = Some(JITA_STATION_ID);
         s.characters.insert(seller_cid as i64, ch_s);
 
-        let mut ch_b = s.characters.get(&90_000_001).cloned().expect("template char");
+        let mut ch_b = s.characters.get(&90_000_002).cloned().expect("template char");
         ch_b.character_id = buyer_cid as i64;
         ch_b.corporation_id = 98_000_002;
         ch_b.balance = IskCents::from_isk(20_000_000);
@@ -92,7 +92,7 @@ async fn test_skinr_sequencing_studio_and_paragon_hub_listing() {
 
         // Train SKINR sequencing skills + Paragon Hub skills on seller
         let sk_map = s.skills.entry(seller_cid as i64).or_default();
-        for sid in [81044u32, 81377, 81046, 84217, 84218, 81368] {
+        for sid in [81370u32, 81377, 81366, 84217, 84218, 81368] {
             sk_map.insert(
                 sid,
                 TrainedSkillRecord {
@@ -267,7 +267,7 @@ async fn test_skinr_sequencing_studio_and_paragon_hub_listing() {
     assert_eq!(entries.len(), 2);
 
     let seller_isk_before = ctx.db.get_character(seller_cid as i64).unwrap().balance.0;
-    let seller_plex_before = ctx.db.get_character(seller_cid as i64).unwrap().plex_balance;
+    let seller_plex_before = ctx.db.with_snapshot(|s| s.unified_plex_balance(seller_cid as i64));
 
     for em in entries {
         let uuid_bytes = field(&field(&em, 1).unwrap(), 1).unwrap();
@@ -288,7 +288,7 @@ async fn test_skinr_sequencing_studio_and_paragon_hub_listing() {
     }
 
     let seller_isk_after = ctx.db.get_character(seller_cid as i64).unwrap().balance.0;
-    let seller_plex_after = ctx.db.get_character(seller_cid as i64).unwrap().plex_balance;
+    let seller_plex_after = ctx.db.with_snapshot(|s| s.unified_plex_balance(seller_cid as i64));
     assert_eq!(
         seller_isk_after - seller_isk_before,
         IskCents::from_isk(450_000).0

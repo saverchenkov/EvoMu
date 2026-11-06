@@ -145,24 +145,23 @@ pub fn seed_component_listings_if_empty(data: &mut CosmeticsMarketData, sde: &Sd
         .map(|t| t.type_id)
         .collect();
     design_types.sort_unstable();
-    let comp_meta = sde
-        .load_cfsd_table("res:/staticdata/shipskindesigncomponents.fsdbinary")
-        .ok();
-    let component_tier = |tid: u32, idx: usize| -> u64 {
-        comp_meta
-            .as_ref()
-            .and_then(|rows| rows.get(&i64::from(tid)))
-            .and_then(|rec| match rec.fields.get("rarity").or_else(|| rec.fields.get("tier")) {
-                Some(eve_sde::CfsdValue::Int(v)) => u64::try_from(*v).ok(),
-                _ => None,
-            })
-            .unwrap_or(((idx % 5) + 1) as u64)
-            .clamp(1, 5)
-    };
     if design_types.len() > 4 {
+        let mut rarity_by_type = std::collections::HashMap::new();
+        if let Ok(raw) = sde.load_cfsd_nested("res:/staticdata/ship_skin_design_components.fsdbinary") {
+            for v in raw.values() {
+                let rar = v.get("rarity").and_then(|r| r.as_u64()).unwrap_or(1).clamp(1, 5);
+                if let Some(arr) = v.get("associated_type_ids").and_then(|a| a.as_array()) {
+                    for entry in arr {
+                        if let Some(tid) = entry.get("type_id").and_then(|t| t.as_u64()) {
+                            rarity_by_type.insert(tid as u32, rar);
+                        }
+                    }
+                }
+            }
+        }
         let mut seq = 0u64;
         for (idx, type_id) in design_types.into_iter().enumerate() {
-            let tier = component_tier(type_id, idx);
+            let tier = rarity_by_type.get(&type_id).copied().unwrap_or(((idx % 5) + 1) as u64);
             let unit_isk = tier * 250_000;
             let unit_plex = tier * 500;
             let variants = [
@@ -421,6 +420,7 @@ fn next_uuid(data: &mut CosmeticsMarketData, prefix: &[u8; 8]) -> [u8; 16] {
     uuid
 }
 
+// V24 `trading_const.pyj` / `tradingUtil.pyj` duration floors & bps (50% branded target discount).
 fn broker_fee_for(duration_secs: u64, target: &ListingTargetRecord) -> u64 {
     let base = LISTING_DURATIONS_SECS
         .iter()
@@ -440,15 +440,10 @@ fn broker_fee_for_valuation(listing_value_isk: u64, duration_secs: u64, target: 
         _ => 500,
     };
     let scaled = listing_value_isk.saturating_mul(bps) / 10_000;
-    let val_fee = if target.is_branded() { scaled / 2 } else { scaled };
-    floor.max(val_fee)
+    floor.max(if target.is_branded() { scaled / 2 } else { scaled })
 }
 
-fn market_get_broker_fees(
-    _st: &CosmeticsMarketState,
-    ctx: &AuthoritativeContext,
-    msg: &DynamicQuasarMessage,
-) -> HandlerResult {
+fn market_get_broker_fees(_st: &CosmeticsMarketState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {
     let _cid = require_char(ctx)?;
     let target = parse_listing_target(sub(msg, 1));
     let est_value_isk = sub(msg, 2)
@@ -475,9 +470,9 @@ fn paragon_hub_skill_reductions(st: &CosmeticsMarketState, cid: u32) -> (u64, us
     st.db.with_snapshot(|s| {
         let Some(sk_map) = s.skills.get(&(cid as i64)) else { return (0, 5); };
         let lvl = |sid: u32| sk_map.get(&sid).map(|sk| sk.level as u64).unwrap_or(0);
-        // 84217 Paragon Relations, 84218 Paragon Partnership, 84220 Executive Paragon Partnership: -1% vendor fee/lvl
+        // SDE group 4734: 84217 Paragon Relations, 84218 Paragon Partnership, 84220 Executive Paragon Partnership (-1%/lvl).
         let fee_reduction_pct = (lvl(84217) + lvl(84218) + lvl(84220)).min(15);
-        // 81368 Hub Promotion (+1/lvl), 81369 Hub Algorithm Optimization (+5/lvl)
+        // SDE group 4734: 81368 Hub Promotion (+1/lvl), 81369 Hub Algorithm Optimization (+5/lvl), base 5 -> max 35.
         let max_listings = 5 + (lvl(81368) + lvl(81369) * 5) as usize;
         (fee_reduction_pct, max_listings)
     })
@@ -487,21 +482,13 @@ fn paragon_hub_tax_pct(st: &CosmeticsMarketState, cid: u32, target: &ListingTarg
     match target {
         ListingTargetRecord::Character(_) => 30,
         ListingTargetRecord::Corporation(_) | ListingTargetRecord::Alliance(_) => 10,
-        ListingTargetRecord::Public => {
-            let (reduction, _) = paragon_hub_skill_reductions(st, cid);
-            20_u64.saturating_sub(reduction)
-        }
+        ListingTargetRecord::Public => 20_u64.saturating_sub(paragon_hub_skill_reductions(st, cid).0),
     }
 }
 
-fn market_get_tax_rate(
-    st: &CosmeticsMarketState,
-    ctx: &AuthoritativeContext,
-    msg: &DynamicQuasarMessage,
-) -> HandlerResult {
+fn market_get_tax_rate(st: &CosmeticsMarketState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {
     let cid = require_char(ctx)?;
-    let target = parse_listing_target(sub(msg, 1));
-    let rate_units: i64 = paragon_hub_tax_pct(st, cid, &target) as i64;
+    let rate_units = paragon_hub_tax_pct(st, cid, &parse_listing_target(sub(msg, 1))) as i64;
     let mut tr = Vec::new();
     encode_sint_field(1, rate_units, &mut tr);
     encode_sint_field(2, 0, &mut tr);
@@ -510,11 +497,8 @@ fn market_get_tax_rate(
     Ok(any("eve_public.cosmetic.market.api.GetTaxRateResponse", out))
 }
 
-fn market_get_buyer_fee(
-    st: &CosmeticsMarketState,
-    ctx: &AuthoritativeContext,
-    msg: &DynamicQuasarMessage,
-) -> HandlerResult {
+// V24 `skin_listing_buyer_fee.pyj`: EverMarks (Paragon corp 1000419 LP) buyer fee per SKIN tier (1,000 public / 2,500 branded).
+fn market_get_buyer_fee(st: &CosmeticsMarketState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {
     let _cid = require_char(ctx)?;
     let target = parse_listing_target(sub(msg, 1));
     let skin_hex = sub(msg, 2).and_then(|m| m.get(1)).and_then(as_str).unwrap_or("");
@@ -531,11 +515,7 @@ fn market_get_buyer_fee(
     Ok(any("eve_public.cosmetic.market.api.GetBuyerFeeResponse", out))
 }
 
-fn market_get_buyer_fees_definition(
-    _st: &CosmeticsMarketState,
-    ctx: &AuthoritativeContext,
-    _msg: &DynamicQuasarMessage,
-) -> HandlerResult {
+fn market_get_buyer_fees_definition(_st: &CosmeticsMarketState, ctx: &AuthoritativeContext, _msg: &DynamicQuasarMessage) -> HandlerResult {
     let _cid = require_char(ctx)?;
     let mut out = Vec::new();
     for level in 1u64..=10 {

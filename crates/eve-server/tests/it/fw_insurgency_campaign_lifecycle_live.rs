@@ -452,12 +452,12 @@ async fn test_live_fw_supply_caches_depots_and_advantage() {
     assert_eq!(att_adv2, 7.0);
 }
 
-// parity: feat:fw.insurgency-campaign-lifecycle
+// parity: feat:fw.insurgency-lifecycle
 // parity: feat:fw.insurgency-spread
 #[tokio::test]
 async fn test_live_insurgency_campaign_lifecycle_and_stargate_spread() {
     eve_testkit::attest(&[
-        "feat:fw.insurgency-campaign-lifecycle",
+        "feat:fw.insurgency-lifecycle",
         "feat:fw.insurgency-spread",
     ]);
 
@@ -469,7 +469,7 @@ async fn test_live_insurgency_campaign_lifecycle_and_stargate_spread() {
     let ship = pilot.ship_id;
     tick_background_cluster(&ctx).await;
 
-    // 1. Initial campaign is auto-seeded in Forecasting phase via authentic RPC.
+    // 1. Initial campaign is auto-seeded in Forecasting phase via authentic RPC (4+ systems, 0 complex sites, FOB invulnerable).
     let PyRep::List(camps) =
         rpc(&ctx, &mut pilot.sess, "insurgencySolarsystem", "GetAllVisibleCampaigns", &[])
             .await
@@ -478,16 +478,18 @@ async fn test_live_insurgency_campaign_lifecycle_and_stargate_spread() {
         panic!("expected list");
     };
     let camp_rep = camps.first().expect("campaign present");
-    let campaign_id = camp_rep
-        .dict_get("campaignID")
-        .and_then(PyRep::as_i64)
-        .expect("campaignID");
-    assert_eq!(
-        camp_rep.dict_get("phase").and_then(PyRep::as_str),
-        Some("Forecasting")
-    );
+    let campaign_id = camp_rep.dict_get("campaignID").and_then(PyRep::as_i64).expect("campaignID");
+    assert_eq!(camp_rep.dict_get("phase").and_then(PyRep::as_str), Some("Forecasting"));
+    assert_eq!(camp_rep.dict_get("isFobVulnerable").and_then(PyRep::as_bool), Some(false));
+    assert!(camp_rep.dict_get("phaseEndTime").and_then(PyRep::as_i64).unwrap_or(0) > ctx.now_unix() as i64);
+    let Some(PyRep::List(init_sys)) = camp_rep.dict_get("systems") else { panic!("systems list") };
+    assert!(init_sys.len() >= 4, "Forecasting campaign must cover >= 4 starting systems");
+    let non_fob_sites = read_insurgency_runtime(&ctx, |rt| {
+        rt.insurgency_instances.iter().filter(|i| i.site_type != "PirateStronghold").count()
+    });
+    assert_eq!(non_fob_sites, 0, "No insurgency complex sites may spawn during 48h Forecasting");
 
-    // 2. Advancing virtual clock past 48h + cluster tick transitions campaign into Active phase.
+    // 2. Advancing virtual clock past 48h + cluster tick transitions campaign into Active phase (7-day timer).
     ctx.advance_virtual_clock(FORECASTING_DURATION_SECS + 1);
     tick_background_cluster(&ctx).await;
 
@@ -502,12 +504,10 @@ async fn test_live_insurgency_campaign_lifecycle_and_stargate_spread() {
         .iter()
         .find(|c| c.dict_get("campaignID").and_then(PyRep::as_i64) == Some(campaign_id))
         .unwrap();
-    assert_eq!(
-        camp_rep2.dict_get("phase").and_then(PyRep::as_str),
-        Some("Active")
-    );
+    assert_eq!(camp_rep2.dict_get("phase").and_then(PyRep::as_str), Some("Active"));
+    assert!(camp_rep2.dict_get("phaseEndTime").and_then(PyRep::as_i64).unwrap_or(0) > ctx.now_unix() as i64);
 
-    // 3. Local snapshot RPC returns current system corruption & suppression state.
+    // 3. Local snapshot RPC returns current system corruption & suppression state and active timer.
     let PyRep::Tuple(parts) = rpc(
         &ctx,
         &mut pilot.sess,
@@ -521,6 +521,7 @@ async fn test_live_insurgency_campaign_lifecycle_and_stargate_spread() {
         panic!("expected tuple");
     };
     assert_eq!(parts.first().and_then(PyRep::as_i64), Some(hub_sys as i64));
+    assert_eq!(parts.get(1).and_then(|p| p.dict_get("phase")).and_then(PyRep::as_str), Some("Active"));
 
     // 4. Advancing Corruption to Stage 3 (>= 600 pts) triggers stargate-adjacent system spread.
     advance_system_insurgency_pts(&ctx, &mut pilot.sess, campaign_id, hub_sys, ship, &guns, true, 600).await;
@@ -552,10 +553,20 @@ async fn test_live_insurgency_campaign_lifecycle_and_stargate_spread() {
         .jumps
         .values()
         .any(|j| j.from_solar_system_id == hub_sys && j.to_solar_system_id == spread_sys);
-    assert!(
-        is_adjacent,
-        "Spread system {spread_sys} must be stargate-connected to {hub_sys}"
-    );
+    assert!(is_adjacent, "Spread system {spread_sys} must be stargate-connected to {hub_sys}");
+
+    // 5. Advancing past 7-day Active phase transitions campaign into 48h WindDown phase.
+    ctx.advance_virtual_clock(eve_server::services::insurgency_services::ACTIVE_DURATION_SECS + 5);
+    tick_background_cluster(&ctx).await;
+    let PyRep::List(camps_wd) =
+        rpc(&ctx, &mut pilot.sess, "insurgencySolarsystem", "GetAllVisibleCampaigns", &[])
+            .await
+            .expect("GetAllVisibleCampaigns winddown")
+    else {
+        panic!("expected list");
+    };
+    let wd_rep = camps_wd.iter().find(|c| c.dict_get("campaignID").and_then(PyRep::as_i64) == Some(campaign_id)).unwrap();
+    assert_eq!(wd_rep.dict_get("phase").and_then(PyRep::as_str), Some("WindDown"));
 }
 
 #[tokio::test]

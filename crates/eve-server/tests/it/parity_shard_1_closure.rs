@@ -188,7 +188,7 @@ async fn test_shard1_live_calendar_crud_responses_and_attendees_esi() {
 
 #[tokio::test]
 async fn test_shard1_live_contacts_maillists_and_market_prices_structures_esi() {
-    // parity: esi:GET /characters/{character_id}/contacts/labels, esi:GET /corporations/{character_id}/contacts
+    // parity: esi:GET /characters/{character_id}/contacts/labels, esi:GET /corporations/{corporation_id}/contacts
     // parity: esi:GET /corporations/{corporation_id}/contacts/labels, feat:esi.contacts.corp
     // parity: esi:GET /alliances/{alliance_id}/contacts, esi:GET /alliances/{alliance_id}/contacts/labels
     // parity: feat:esi.contacts.alliance, esi:GET /characters/{character_id}/mail/lists
@@ -196,7 +196,7 @@ async fn test_shard1_live_contacts_maillists_and_market_prices_structures_esi() 
     // parity: esi:GET /markets/structures/{structure_id}, feat:esi.market.structure-orders
     eve_testkit::attest(&[
         "esi:GET /characters/{character_id}/contacts/labels",
-        "esi:GET /corporations/{character_id}/contacts",
+        "esi:GET /corporations/{corporation_id}/contacts",
         "esi:GET /corporations/{corporation_id}/contacts/labels",
         "feat:esi.contacts.corp",
         "esi:GET /alliances/{alliance_id}/contacts",
@@ -377,6 +377,9 @@ async fn test_shard1_live_contacts_maillists_and_market_prices_structures_esi() 
         let (clbls, _) = esi_call(&router, &spec, "GET", &format!("/v1/characters/{PILOT_1}/contacts/labels/"), Some(&tok1), None, 200);
         assert!(clbls.as_array().unwrap().iter().any(|l| l["label_name"] == "FCs"));
 
+        assert_etag_304(&router, &spec, &format!("/v2/corporations/{corp_id}/contacts/"), Some(&tok1));
+        let unauth_tok = issue_token(&ctx, PILOT_1, &["esi-characters.read_contacts.v1"]);
+        let _ = esi_call(&router, &spec, "GET", &format!("/v2/corporations/{corp_id}/contacts/"), Some(&unauth_tok), None, 403);
         let (ccont, _) = esi_call(&router, &spec, "GET", &format!("/v2/corporations/{corp_id}/contacts/"), Some(&tok1), None, 200);
         assert!(ccont.as_array().unwrap().iter().any(|c| c["contact_id"] == 1_000_035 && c["standing"] == 5.0));
 
@@ -413,6 +416,8 @@ async fn test_shard1_live_contacts_maillists_and_market_prices_structures_esi() 
                 "esi-markets.structure_markets.v1",
             ],
         );
+        let (cc2, _) = esi_call(&router2, &spec2, "GET", &format!("/v2/corporations/{corp_id}/contacts/"), Some(&tok2), None, 200);
+        assert!(cc2.as_array().unwrap().iter().any(|c| c["contact_id"] == 1_000_035 && c["standing"] == 5.0));
         let (ml2, _) = esi_call(&router2, &spec2, "GET", &format!("/v1/characters/{PILOT_1}/mail/lists/"), Some(&tok2), None, 200);
         assert!(ml2.as_array().unwrap().iter().any(|m| m["mailing_list_id"] == list_id));
         let (so2, _) = esi_call(&router2, &spec2, "GET", &format!("/v1/markets/structures/{fort_id}/"), Some(&tok2), None, 200);

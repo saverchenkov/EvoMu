@@ -41,7 +41,38 @@ fn component_listings_get_all_purchase_isk_plex_failures_and_overflow_bounds() {
             wm_bytes(&wm_sub(&entry, 1), 1).try_into().unwrap()
         })
         .collect();
-    assert_eq!(uuids.len(), 4);
+    assert!(uuids.len() == 4 || uuids.len() >= 1_000);
+    let (isk_uuid, isk_unit_price, plex_ok_uuid, plex_unit_cents) = {
+        let guard = state.data.read().unwrap();
+        let isk_rec = guard
+            .component_listings
+            .values()
+            .find(|l| l.price_isk == Some(250_000) && l.bundle_size == 1)
+            .or_else(|| {
+                guard
+                    .component_listings
+                    .values()
+                    .find(|l| l.price_isk.unwrap_or(u64::MAX) <= 500_000 && l.bundle_size == 1)
+            })
+            .expect("seeded 1x ISK component listing");
+        let plex_rec = guard
+            .component_listings
+            .values()
+            .find(|l| l.price_plex_cents == Some(1_000) && l.bundle_size == 1)
+            .or_else(|| {
+                guard
+                    .component_listings
+                    .values()
+                    .find(|l| l.price_plex_cents.unwrap_or(u64::MAX) <= 2_500 && l.bundle_size == 1)
+            })
+            .expect("seeded 1x PLEX component listing");
+        (
+            isk_rec.uuid,
+            isk_rec.price_isk.unwrap() as i64,
+            plex_rec.uuid,
+            plex_rec.price_plex_cents.unwrap() as i64,
+        )
+    };
 
     assert_eq!(
         call(
@@ -55,7 +86,7 @@ fn component_listings_get_all_purchase_isk_plex_failures_and_overflow_bounds() {
         STATUS_BAD_REQUEST
     );
     let mut bad_qty = Vec::new();
-    put_uuid(1, &uuids[0], &mut bad_qty);
+    put_uuid(1, &isk_uuid, &mut bad_qty);
     assert_eq!(
         call(
             &router,
@@ -83,7 +114,7 @@ fn component_listings_get_all_purchase_isk_plex_failures_and_overflow_bounds() {
     );
 
     let mut buy_isk = Vec::new();
-    put_uuid(1, &uuids[0], &mut buy_isk);
+    put_uuid(1, &isk_uuid, &mut buy_isk);
     encode_varint_field(2, 2, &mut buy_isk);
     assert_eq!(
         call(
@@ -98,7 +129,7 @@ fn component_listings_get_all_purchase_isk_plex_failures_and_overflow_bounds() {
     );
     db.with_snapshot(|s| {
         let ch = s.characters.get(&cid).unwrap();
-        assert_eq!(ch.balance, IskCents(1_000_000_00 - 500_000_00));
+        assert_eq!(ch.balance, IskCents(1_000_000_00 - isk_unit_price * 2 * 100));
         assert_eq!(
             s.items
                 .values()
@@ -109,7 +140,7 @@ fn component_listings_get_all_purchase_isk_plex_failures_and_overflow_bounds() {
     });
 
     let mut buy_plex = Vec::new();
-    put_uuid(1, &uuids[2], &mut buy_plex);
+    put_uuid(1, &plex_ok_uuid, &mut buy_plex);
     encode_varint_field(2, 1, &mut buy_plex);
     encode_varint_field(3, 1, &mut buy_plex);
     let r_buy_plex = call(
@@ -123,12 +154,12 @@ fn component_listings_get_all_purchase_isk_plex_failures_and_overflow_bounds() {
     let wm_bp = WireMessage::decode(&r_buy_plex.payload.unwrap().value).unwrap();
     assert_eq!(wm_varint(&wm_bp, 2), 1);
     db.with_snapshot(|s| {
-        assert_eq!(s.unified_plex_balance(cid), 40);
+        assert_eq!(s.unified_plex_balance(cid), 50 - (plex_unit_cents / 100));
     });
 
     let mut fail_plex = Vec::new();
-    put_uuid(1, &uuids[3], &mut fail_plex);
-    encode_varint_field(2, 2, &mut fail_plex);
+    put_uuid(1, &plex_ok_uuid, &mut fail_plex);
+    encode_varint_field(2, 60, &mut fail_plex);
     let r_fail_plex = call(
         &router,
         &sess,

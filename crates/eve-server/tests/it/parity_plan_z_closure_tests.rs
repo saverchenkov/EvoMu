@@ -271,3 +271,100 @@ async fn test_dogma_im_set_session_check_parity() {
     assert_eq!(sc_clear.dict_get("sessionCheck"), Some(&PyRep::None));
     assert_eq!(sc_clear.dict_get("checkCount"), Some(&PyRep::Integer(0)));
 }
+
+// parity: plan:T-6
+#[test]
+fn test_parity_plan_t6_client_harness_runner_and_journeys() {
+    eve_testkit::attest(&["plan:T-6"]);
+
+    let root = repo_root();
+    let runner = root.join("tools").join("client-harness").join("run_journeys");
+    assert!(runner.is_file(), "tools/client-harness/run_journeys must exist");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&runner).expect("runner metadata").permissions().mode();
+        assert_ne!(mode & 0o111, 0, "run_journeys must be executable");
+    }
+
+    let journeys_spec = root
+        .join(".agents")
+        .join("skills")
+        .join("evomu-adversarial-review")
+        .join("references")
+        .join("parity")
+        .join("client_journeys.json");
+    let spec_json: Value = serde_json::from_str(
+        &std::fs::read_to_string(&journeys_spec).expect("read client_journeys.json"),
+    )
+    .expect("parse client_journeys.json");
+    let expected_ids: HashSet<String> = spec_json["journeys"]
+        .as_array()
+        .expect("journeys array")
+        .iter()
+        .map(|j| j["id"].as_str().expect("journey id").to_string())
+        .collect();
+    assert!(!expected_ids.is_empty(), "client_journeys.json must list journeys");
+
+    let help_out = std::process::Command::new(&runner)
+        .arg("--help")
+        .output()
+        .expect("run_journeys --help");
+    assert!(help_out.status.success(), "--help must exit 0");
+    let help_text = String::from_utf8_lossy(&help_out.stdout);
+    for flag in ["--out", "--journeys", "--bridge-port", "--client-app"] {
+        assert!(help_text.contains(flag), "missing CLI flag {flag} in --help");
+    }
+
+    let missing_args = std::process::Command::new(&runner)
+        .output()
+        .expect("run_journeys without args");
+    assert!(!missing_args.status.success(), "missing --out/--journeys must fail closed");
+
+    let out_dir = std::env::temp_dir().join(format!(
+        "evomu_plan_t6_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&out_dir).expect("create temp out dir");
+
+    let run_out = std::process::Command::new(&runner)
+        .arg("--out")
+        .arg(&out_dir)
+        .arg("--journeys")
+        .arg(&journeys_spec)
+        .arg("--bridge-port")
+        .arg("1")
+        .arg("--client-app")
+        .arg(out_dir.join("nonexistent-EVE.app"))
+        .output()
+        .expect("execute run_journeys contract");
+    assert_eq!(
+        run_out.status.code(),
+        Some(1),
+        "run_journeys must exit 1 when real EVE.app journeys have not passed"
+    );
+
+    for artifact in ["result.json", "server.log", "client_1.log", "client_2.log"] {
+        assert!(out_dir.join(artifact).is_file(), "missing artifact {artifact}");
+    }
+    let result_json: Value = serde_json::from_str(
+        &std::fs::read_to_string(out_dir.join("result.json")).expect("read result.json"),
+    )
+    .expect("parse result.json");
+    assert_eq!(result_json["concurrent_clients_tested"].as_u64(), Some(2));
+    assert_eq!(result_json["log_errors"].as_array().map(Vec::len), Some(0));
+
+    let reported_map = result_json["journeys"].as_object().expect("result journeys object");
+    let reported_ids: HashSet<String> = reported_map.keys().cloned().collect();
+    assert_eq!(reported_ids, expected_ids, "result.json must cover all 29 client journeys");
+    for (jid, entry) in reported_map {
+        assert_eq!(entry["passed"].as_bool(), Some(false), "journey {jid} must not fake-pass");
+        assert_eq!(entry["real_client_verified"].as_bool(), Some(false));
+    }
+
+    let _ = std::fs::remove_dir_all(&out_dir);
+}

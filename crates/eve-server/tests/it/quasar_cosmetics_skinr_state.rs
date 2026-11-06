@@ -277,8 +277,8 @@ async fn skinr_custom_skins_licenses_and_sequencing_jobs() {
         ch.plex_balance = 1_000;
         s.characters.insert(cid as i64, ch);
         let sk_map = s.skills.entry(cid as i64).or_default();
-        sk_map.insert(81044, TrainedSkillRecord { type_id: 81044, level: 4, skill_points: 45_255.0 });
-        sk_map.insert(81040, TrainedSkillRecord { type_id: 81040, level: 5, skill_points: 256_000.0 });
+        sk_map.insert(81370, TrainedSkillRecord { type_id: 81370, level: 4, skill_points: 45_255.0 });
+        sk_map.insert(81377, TrainedSkillRecord { type_id: 81377, level: 5, skill_points: 256_000.0 });
         s.items.insert(ship_id, InventoryItemRecord {
             item_id: ship_id, type_id: rifter_type_id, owner_id: cid as i64, location_id: 60_003_760,
             flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1,
@@ -303,7 +303,7 @@ async fn skinr_custom_skins_licenses_and_sequencing_jobs() {
 
     let early_rsp = rpc(&ctx, &mut sess, "eve_public.cosmetic.ship.skin.thirdparty.sequencing.api.GetEarlyCompletionPricingRequest", Vec::new()).await;
     assert_eq!(early_rsp.status_code, STATUS_OK);
-    assert!(matches!(decode(&reg, early_rsp.payload.as_ref().unwrap()).get(1), Some(DynamicValue::Repeated(v)) if v.len() == 3));
+    assert!(matches!(decode(&reg, early_rsp.payload.as_ref().unwrap()).get(1), Some(DynamicValue::Repeated(v)) if v.len() == 10));
 
     // 2. InitiateRequest without owning required component license fails with 400 and emits FailedNotice
     let skinr_cat = eve_server::services::quasar_cosmetics_skinr::SkinrStaticCatalog::load(&ctx.sde);

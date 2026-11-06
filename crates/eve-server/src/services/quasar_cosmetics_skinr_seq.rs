@@ -615,24 +615,31 @@ fn induction_time_disc_pct(lvl: u32) -> u32 {
 }
 
 fn skill_discounts_and_cap(state: &SkinrCosmeticsState, cid: Option<u32>) -> (u32, u32, usize) {
-    let Some(c) = cid else {
-        return (0, 0, 5);
-    };
+    let Some(c) = cid else { return (0, 0, 5) };
     state.db.with_snapshot(|s| {
-        let Some(sk_map) = s.skills.get(&(c as i64)) else {
-            return (0, 0, 5);
-        };
+        let Some(sk_map) = s.skills.get(&(c as i64)) else { return (0, 0, 5) };
         let lvl = |sid: u32| sk_map.get(&sid).map(|sk| sk.level as u32).unwrap_or(0);
-        // Ship_SKINR.md:54: There are no skills or any other methods to reduce the PLEX cost.
-        let price_disc = 0;
-        let sde_ind_disc = induction_time_disc_pct(lvl(81377))
+        // SDE group 4734: Basic/Efficiency/Advanced/Peak Induction (81377, 81372, 81373, 81374); no PLEX discount skill.
+        let dur_disc = (induction_time_disc_pct(lvl(81377))
             + induction_time_disc_pct(lvl(81372))
             + induction_time_disc_pct(lvl(81373))
-            + induction_time_disc_pct(lvl(81374));
-        let legacy_dur_disc = (lvl(81040) + lvl(81041) + lvl(81042) + lvl(81043)) * 3;
-        let dur_disc = (sde_ind_disc + legacy_dur_disc).min(60);
-        let max_jobs = 5 + (lvl(81046) + lvl(81047) + lvl(81366) * 2 + lvl(81367) * 2) as usize;
-        (price_disc, dur_disc, max_jobs)
+            + induction_time_disc_pct(lvl(81374)))
+        .min(60);
+        // SDE group 4734: Parallel Sequencing (81366) & Multi-thread Sequencing (81367): +2 concurrent jobs/lvl.
+        let max_jobs = 5 + ((lvl(81366) + lvl(81367)) * 2) as usize;
+        (0, dur_disc, max_jobs)
+    })
+}
+
+fn max_runs_per_job(state: &SkinrCosmeticsState, cid: u32) -> u32 {
+    state.db.with_snapshot(|s| {
+        let Some(sk) = s.skills.get(&(cid as i64)) else { return 100 };
+        let lvl = |sid: u32| sk.get(&sid).map(|r| r.level as usize).unwrap_or(0).min(5);
+        // SDE group 4734: Batch (81375), Mass (81364), Industrial Sequencing (81365) -> up to 5,000 SKINs/job.
+        let sde_cap = [0, 5, 10, 20, 30, 50][lvl(81375)]
+            + [0, 25, 50, 100, 150, 250][lvl(81364)]
+            + [0, 200, 450, 700, 1_700, 4_700][lvl(81365)];
+        sde_cap.max(100)
     })
 }
 
@@ -899,13 +906,11 @@ fn handle_job_initiate(
         name = "Custom SKINR Design".to_string();
     }
     let line_name = str_of(dyn_msg, 2).unwrap_or_else(|| "Paragon Custom Line".to_string());
+    let max_runs = max_runs_per_job(state, cid);
     let licenses_qty = if let Some(v) = dyn_msg.get(5).and_then(as_u64) {
-        let Some(q) = u32::try_from(v).ok().filter(|&q| (1..=100).contains(&q)) else {
+        let Some(q) = u32::try_from(v).ok().filter(|&q| (1..=max_runs).contains(&q)) else {
             queue_job_failed_notice(cid, &preview_uuid, 1, now);
-            return Err((
-                STATUS_BAD_REQUEST,
-                "Sequencing job licenses quantity must be between 1 and 100".into(),
-            ));
+            return Err((STATUS_BAD_REQUEST, format!("Sequencing job licenses quantity must be in 1..={max_runs}")));
         };
         q
     } else {

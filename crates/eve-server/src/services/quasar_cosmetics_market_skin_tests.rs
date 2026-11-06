@@ -172,7 +172,7 @@ fn skin_listing_lifecycle_create_cancel_visibility_purchase_and_admin_expiration
         assert_eq!(lic.escrowed, 5);
     }
     db.with_snapshot(|s| {
-        assert_eq!(s.characters.get(&seller).unwrap().balance, IskCents(5_000_000_00 - 150_000_00));
+        assert_eq!(s.characters.get(&seller).unwrap().balance, IskCents(5_000_000_00 - 2_600_000_00));
     });
 
     let r_owned = call(
@@ -310,7 +310,7 @@ fn skin_listing_lifecycle_create_cancel_visibility_purchase_and_admin_expiration
         assert_eq!(b.balance, IskCents(50_000_000_00 - 1_000_000_00));
         assert_eq!(b.loyalty_points.get(&(PARAGON_CORP_ID as i64)).copied(), Some(98_000));
         let sl = s.characters.get(&seller).unwrap();
-        assert_eq!(sl.balance, IskCents(5_000_000_00 - 150_000_00 + 800_000_00));
+        assert_eq!(sl.balance, IskCents(5_000_000_00 - 2_600_000_00 + 800_000_00));
     });
     assert_eq!(
         skinr

@@ -16,7 +16,7 @@ use eve_server::services::insurgency_services::{
 use eve_server::sp6_lifecycle::tick_background_cluster;
 use glam::DVec3;
 
-// parity: feat:fw.insurgency-campaign-lifecycle
+// parity: feat:fw.insurgency-lifecycle
 // parity: feat:fw.insurgency-ambition-victory
 // parity: feat:fw.insurgency-contribution-payout
 // parity: feat:fw.insurgency-fob
@@ -24,7 +24,7 @@ use glam::DVec3;
 #[tokio::test]
 async fn test_e2e_insurgency_lifecycle_fob_ambition_and_contribution_payout() {
     eve_testkit::attest(&[
-        "feat:fw.insurgency-campaign-lifecycle",
+        "feat:fw.insurgency-lifecycle",
         "feat:fw.insurgency-ambition-victory",
         "feat:fw.insurgency-contribution-payout",
         "feat:fw.insurgency-fob",

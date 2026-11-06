@@ -903,5 +903,472 @@ pub fn handle(
     }
 }
 
+pub fn handle_qa_seed_raffles(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let qa_or_gm = eve_machonet::service_roles::ROLE_QA | eve_db::service_roles::ROLE_ADMIN;
+    if !session.has_gm_role() && (session.role & qa_or_gm) == 0 {
+        return Err(rpc_err("UserError", "NotAuthorized"));
+    }
+    let Some(station_id) = session.station_id else {
+        return Err(rpc_err("UserError", "CharacterNotDocked"));
+    };
+    let count = args.first().and_then(|a| a.as_i64()).unwrap_or(1).clamp(1, 100) as usize;
+    let seed_type_id = args
+        .get(1)
+        .and_then(|a| a.as_i64())
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|tid| ctx.sde.types.contains_key(tid))
+        .or_else(|| {
+            ctx.sde
+                .types
+                .values()
+                .filter(|t| t.group_id == 25 && t.published)
+                .map(|t| t.type_id)
+                .min()
+        })
+        .unwrap_or(587);
+    let now = ctx.now_unix();
+    let mut records = Vec::with_capacity(count);
+    ctx.db.with_mut_snapshot(|snap| {
+        for _ in 0..count {
+            snap.next_entity_id += 1;
+            let raffle_id = snap.next_entity_id;
+            snap.next_entity_id += 1;
+            let item_id = snap.next_entity_id;
+            snap.items.insert(
+                item_id,
+                eve_db::InventoryItemRecord {
+                    item_id,
+                    type_id: seed_type_id,
+                    owner_id: -52_568,
+                    location_id: -52_568,
+                    flag: InventoryFlag::Locked,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            let rec = RaffleStateRecord {
+                raffle_id,
+                creator_id: char_id,
+                station_id,
+                item_id,
+                type_id: seed_type_id,
+                ticket_count: 8,
+                ticket_price_cents: 100_000,
+                hypercores_used: 10,
+                created_unix: now,
+                expires_unix: now + RAFFLE_DURATION_SECS,
+                sold_tickets: BTreeMap::new(),
+                winning_ticket: None,
+                winner_id: None,
+                item_awarded: false,
+                expired: false,
+            };
+            save_json_note(
+                snap,
+                raffle_note_id(raffle_id),
+                -74,
+                raffle_id,
+                format!("raffle:{raffle_id}"),
+                &rec,
+                now,
+            );
+            records.push(rec);
+        }
+    });
+    let mut seeded = Vec::with_capacity(records.len());
+    for rec in &records {
+        let kv = raffle_to_keyval(rec);
+        ctx.notify(
+            NotificationTarget::Character(char_id),
+            "OnRaffleCreatedServer",
+            "charid",
+            vec![PyRep::Integer(rec.raffle_id), kv.clone()],
+        );
+        seeded.push(kv);
+    }
+    Ok(PyRep::List(seeded))
+}
+
+fn extract_item_id_list(rep: &PyRep) -> Option<&[PyRep]> {
+    match rep {
+        PyRep::List(v) | PyRep::Tuple(v) => Some(v.as_slice()),
+        _ => None,
+    }
+}
+
+pub fn handle_character_seeding(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let qa_or_gm = eve_machonet::service_roles::ROLE_QA | eve_db::service_roles::ROLE_ADMIN;
+    let is_privileged = session.has_gm_role() || (session.role & qa_or_gm) != 0;
+
+    let hangar_seeding = if let Some(kw_list) = kwargs
+        .get("item_ids")
+        .or_else(|| kwargs.get("itemIDs"))
+        .and_then(extract_item_id_list)
+    {
+        let target = kwargs
+            .get("character_id")
+            .or_else(|| kwargs.get("charID"))
+            .or_else(|| args.first())
+            .and_then(|a| a.as_i64())
+            .unwrap_or(char_id);
+        Some((target, kw_list, args.get(1), args.get(2)))
+    } else if let Some(list0) = args.first().and_then(extract_item_id_list) {
+        Some((char_id, list0, args.get(1), args.get(2)))
+    } else if let (Some(target), Some(list1)) = (
+        args.first().and_then(|a| a.as_i64()),
+        args.get(1).and_then(extract_item_id_list),
+    ) {
+        Some((target, list1, args.get(2), args.get(3)))
+    } else {
+        None
+    };
+
+    if let Some((target_char_id, raw_items, tc_arg, tp_arg)) = hangar_seeding {
+        if target_char_id != char_id && !is_privileged {
+            return Err(rpc_err("UserError", "NotAuthorized"));
+        }
+        if raw_items.is_empty() || raw_items.len() > 50 {
+            return Err(BridgeRpcError::user_error("InvalidArguments"));
+        }
+        let mut item_ids = Vec::with_capacity(raw_items.len());
+        let mut seen = std::collections::BTreeSet::new();
+        for entry in raw_items {
+            let Some(iid) = entry.as_i64().filter(|&id| id > 0) else {
+                return Err(BridgeRpcError::user_error("InvalidArguments"));
+            };
+            if !seen.insert(iid) {
+                return Err(BridgeRpcError::user_error("InvalidArguments"));
+            }
+            item_ids.push(iid);
+        }
+        let tc_i64 = tc_arg
+            .or_else(|| kwargs.get("ticket_count").or_else(|| kwargs.get("ticketCount")))
+            .and_then(|a| a.as_i64())
+            .unwrap_or(8);
+        if !matches!(tc_i64, 8 | 16 | 48 | 512) {
+            return Err(BridgeRpcError::user_error("InvalidTicketCount"));
+        }
+        let ticket_count = tc_i64 as u32;
+        let ticket_price_isk = tp_arg
+            .or_else(|| kwargs.get("ticket_price").or_else(|| kwargs.get("ticketPrice")))
+            .and_then(|a| a.as_f64().or_else(|| a.as_i64().map(|n| n as f64)))
+            .unwrap_or(1_000.0);
+        if !ticket_price_isk.is_finite() || ticket_price_isk <= 0.0 {
+            return Err(BridgeRpcError::user_error("InvalidTicketPrice"));
+        }
+        if target_char_id == char_id && session.structure_id.is_some() {
+            return Err(rpc_err(
+                "InvalidRaffleLocation",
+                "Must be docked in an NPC station to seed HyperNet raffles",
+            ));
+        }
+        let sess_station = (target_char_id == char_id).then_some(session.station_id).flatten();
+        let ticket_price_cents = IskCents::from_f64_isk(ticket_price_isk).0;
+        let now = ctx.now_unix();
+        let records = ctx.db.try_with_mut_snapshot(|snap| {
+            let ch = snap
+                .characters
+                .get(&target_char_id)
+                .ok_or_else(|| BridgeRpcError::user_error("CharacterNotFound"))?;
+            if ch.structure_id.is_some() {
+                return Err(rpc_err(
+                    "InvalidRaffleLocation",
+                    "Must be docked in an NPC station to seed HyperNet raffles",
+                ));
+            }
+            let station_id = sess_station
+                .or(ch.station_id)
+                .ok_or_else(|| BridgeRpcError::user_error("CharacterNotDocked"))?;
+            if ch.station_id != Some(station_id) {
+                return Err(rpc_err(
+                    "InvalidRaffleLocation",
+                    "Must be docked in an NPC station to seed HyperNet raffles",
+                ));
+            }
+            let station_info = ctx.sde.stations.get(&station_id).ok_or_else(|| {
+                rpc_err("InvalidRaffleLocation", format!("Location {station_id} is not an NPC station"))
+            })?;
+            let sys_id = station_info.solar_system_id;
+            let is_wh = crate::services::quasar_social_chat::is_wormhole_system(sys_id)
+                || ctx.sde.solar_systems.get(&sys_id).is_some_and(|sys| {
+                    sys.wormhole_class_id
+                        .or_else(|| ctx.sde.constellations.get(&sys.constellation_id).and_then(|c| c.wormhole_class_id))
+                        .or_else(|| ctx.sde.regions.get(&sys.region_id).and_then(|r| r.wormhole_class_id))
+                        .is_some_and(|c| matches!(c, 1..=6 | 12..=18))
+                });
+            if is_wh {
+                return Err(rpc_err(
+                    "InvalidRaffleLocation",
+                    "HyperNet raffles cannot be created in wormhole space",
+                ));
+            }
+            let active_ship_id = ch.active_ship_id;
+            let mut planned = Vec::with_capacity(item_ids.len());
+            let mut total_cores_needed: i64 = 0;
+            for &iid in &item_ids {
+                let item = snap
+                    .items
+                    .get(&iid)
+                    .cloned()
+                    .ok_or_else(|| rpc_err("ItemNotFound", "Raffle item not found"))?;
+                let has_contents = snap
+                    .items
+                    .values()
+                    .any(|child| child.item_id != iid && child.location_id == iid && child.quantity > 0);
+                if item.owner_id != target_char_id
+                    || item.location_id != station_id
+                    || item.flag != InventoryFlag::Hangar
+                    || item.quantity != 1
+                    || item.type_id == HYPERCORE_TYPE_ID
+                    || iid == active_ship_id
+                    || snap.is_item_locked_in_contract_or_job(iid)
+                    || has_contents
+                {
+                    return Err(rpc_err(
+                        "InvalidRaffleItem",
+                        "Raffle item must be a single unstacked, unlocked, empty item in NPC station hangar",
+                    ));
+                }
+                let adj = crate::services::industry_pi::industry_rigs::resolve_material_adjusted_price(
+                    ctx,
+                    Some(snap),
+                    item.type_id,
+                );
+                let est_val = (ticket_price_isk * (ticket_count as f64)).max(adj);
+                let req_cores = compute_required_hypercores(est_val, ticket_count)?;
+                total_cores_needed += i64::from(req_cores);
+                planned.push((iid, item.type_id, req_cores));
+            }
+            let mut core_stacks: Vec<(i64, i32)> = snap
+                .items
+                .values()
+                .filter(|i| {
+                    i.owner_id == target_char_id
+                        && i.location_id == station_id
+                        && i.flag == InventoryFlag::Hangar
+                        && i.type_id == HYPERCORE_TYPE_ID
+                        && i.quantity > 0
+                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                })
+                .map(|i| (i.item_id, i.quantity))
+                .collect();
+            core_stacks.sort_by_key(|(id, _)| *id);
+            let avail_cores: i64 = core_stacks.iter().map(|(_, q)| i64::from(*q)).sum();
+            if avail_cores < total_cores_needed {
+                return Err(rpc_err(
+                    "InsufficientHyperCores",
+                    format!("Need {total_cores_needed} HyperCores (type 52568) in station hangar"),
+                ));
+            }
+            let mut rem_to_deduct = total_cores_needed as i32;
+            for (cid_stack, qty) in core_stacks {
+                if rem_to_deduct <= 0 {
+                    break;
+                }
+                let take = rem_to_deduct.min(qty);
+                rem_to_deduct -= take;
+                if let Some(ci) = snap.items.get_mut(&cid_stack) {
+                    if ci.quantity > take {
+                        ci.quantity -= take;
+                        ci.version += 1;
+                    } else {
+                        snap.items.remove(&cid_stack);
+                    }
+                }
+            }
+            let mut out_recs = Vec::with_capacity(planned.len());
+            for (iid, item_type_id, req_cores) in planned {
+                if let Some(it) = snap.items.get_mut(&iid) {
+                    it.owner_id = -52_568;
+                    it.location_id = -52_568;
+                    it.flag = InventoryFlag::Locked;
+                    it.version += 1;
+                }
+                snap.next_entity_id += 1;
+                let raffle_id = snap.next_entity_id;
+                let rec = RaffleStateRecord {
+                    raffle_id,
+                    creator_id: target_char_id,
+                    station_id,
+                    item_id: iid,
+                    type_id: item_type_id,
+                    ticket_count,
+                    ticket_price_cents,
+                    hypercores_used: req_cores,
+                    created_unix: now,
+                    expires_unix: now.saturating_add(RAFFLE_DURATION_SECS),
+                    sold_tickets: BTreeMap::new(),
+                    winning_ticket: None,
+                    winner_id: None,
+                    item_awarded: false,
+                    expired: false,
+                };
+                save_json_note(
+                    snap,
+                    raffle_note_id(raffle_id),
+                    -74,
+                    raffle_id,
+                    format!("raffle:{raffle_id}"),
+                    &rec,
+                    now,
+                );
+                out_recs.push(rec);
+            }
+            Ok(out_recs)
+        })?;
+
+        let mut targets = vec![target_char_id];
+        ctx.db.with_snapshot(|snap| {
+            if let Some(s) = snap.service_state_blobs.get("hypernet_subs") {
+                if let Ok(subs) = serde_json::from_str::<HashMap<String, Vec<i64>>>(s) {
+                    if let Some(viewers) = subs.get("raffle:0") {
+                        targets.extend(viewers);
+                    }
+                }
+            }
+        });
+        targets.sort_unstable();
+        targets.dedup();
+        let mut seeded = Vec::with_capacity(records.len());
+        for rec in &records {
+            let kv = raffle_to_keyval(rec);
+            for &t in &targets {
+                ctx.notify(
+                    NotificationTarget::Character(t),
+                    "OnRaffleCreatedServer",
+                    "charid",
+                    vec![PyRep::Integer(rec.raffle_id), kv.clone()],
+                );
+            }
+            seeded.push(kv);
+        }
+        return Ok(PyRep::List(seeded));
+    }
+
+    if !is_privileged {
+        return Err(rpc_err("UserError", "NotAuthorized"));
+    }
+    let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
+    let raw_count = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+    if raw_count <= 0 {
+        return Err(BridgeRpcError::user_error("InvalidArguments"));
+    }
+    let count = raw_count.clamp(1, 50) as usize;
+    let seed_type_id = match args.get(2).and_then(|a| a.as_i64()) {
+        Some(tid) => match u32::try_from(tid).ok().filter(|t| ctx.sde.types.contains_key(t)) {
+            Some(t) => t,
+            None => return Err(BridgeRpcError::user_error("InvalidTypeID")),
+        },
+        None => ctx
+            .sde
+            .types
+            .values()
+            .filter(|t| t.group_id == 25 && t.published)
+            .map(|t| t.type_id)
+            .min()
+            .unwrap_or(587),
+    };
+    let ticket_count_i64 = args.get(3).and_then(|a| a.as_i64()).unwrap_or(8);
+    if !matches!(ticket_count_i64, 8 | 16 | 48 | 512) {
+        return Err(BridgeRpcError::user_error("InvalidTicketCount"));
+    }
+    let ticket_count = ticket_count_i64 as u32;
+    let ticket_price_isk = args.get(4).and_then(|a| a.as_f64()).unwrap_or(1000.0);
+    if !ticket_price_isk.is_finite() || ticket_price_isk <= 0.0 {
+        return Err(BridgeRpcError::user_error("InvalidTicketPrice"));
+    }
+    let hypercores_used = compute_required_hypercores(
+        ticket_price_isk * (ticket_count as f64),
+        ticket_count,
+    )?;
+    let ticket_price_cents = IskCents::from_f64_isk(ticket_price_isk).0;
+    let now = ctx.now_unix();
+    let sess_station = (target_char_id == char_id).then_some(session.station_id).flatten();
+    let records = ctx.db.try_with_mut_snapshot(|snap| {
+        let ch = snap
+            .characters
+            .get(&target_char_id)
+            .ok_or_else(|| BridgeRpcError::user_error("CharacterNotFound"))?;
+        let station_id = ch
+            .station_id
+            .or(sess_station)
+            .ok_or_else(|| BridgeRpcError::user_error("CharacterNotDocked"))?;
+        let mut out = Vec::with_capacity(count);
+        for _ in 0..count {
+            snap.next_entity_id += 1;
+            let raffle_id = snap.next_entity_id;
+            snap.next_entity_id += 1;
+            let item_id = snap.next_entity_id;
+            snap.items.insert(
+                item_id,
+                eve_db::InventoryItemRecord {
+                    item_id,
+                    type_id: seed_type_id,
+                    owner_id: -52_568,
+                    location_id: -52_568,
+                    flag: InventoryFlag::Locked,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            let rec = RaffleStateRecord {
+                raffle_id,
+                creator_id: target_char_id,
+                station_id,
+                item_id,
+                type_id: seed_type_id,
+                ticket_count,
+                ticket_price_cents,
+                hypercores_used,
+                created_unix: now,
+                expires_unix: now + RAFFLE_DURATION_SECS,
+                sold_tickets: BTreeMap::new(),
+                winning_ticket: None,
+                winner_id: None,
+                item_awarded: false,
+                expired: false,
+            };
+            save_json_note(
+                snap,
+                raffle_note_id(raffle_id),
+                -74,
+                raffle_id,
+                format!("raffle:{raffle_id}"),
+                &rec,
+                now,
+            );
+            out.push(rec);
+        }
+        Ok(out)
+    })?;
+    let mut seeded = Vec::with_capacity(records.len());
+    for rec in &records {
+        let kv = raffle_to_keyval(rec);
+        ctx.notify(
+            NotificationTarget::Character(target_char_id),
+            "OnRaffleCreatedServer",
+            "charid",
+            vec![PyRep::Integer(rec.raffle_id), kv.clone()],
+        );
+        seeded.push(kv);
+    }
+    Ok(PyRep::List(seeded))
+}
+
 #[cfg(test)] #[path = "hypernet_raffle_ops_tests.rs"] mod hypernet_raffle_ops_tests;
 
