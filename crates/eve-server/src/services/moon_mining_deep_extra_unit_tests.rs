@@ -326,7 +326,7 @@ fn test_metenox_moon_drill_active_out_of_gas_bay_full_and_out_of_fuel() {
                 type_id: 81143,
                 owner_id: corp_id,
                 location_id: drill_id,
-                flag: InventoryFlag::Cargo,
+                flag: InventoryFlag::StructureFuel,
                 quantity: 1_000,
                 singleton: false,
                 version: 1,

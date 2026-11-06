@@ -634,7 +634,7 @@ async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
         ] {
             snap.structures.insert(sid, make_structure(sid, char_corp_id, st_type, sys_id, name, [1000.0, 2000.0, 3000.0]));
         }
-        snap.items.insert(800_000_305, make_item(800_000_305, 81143, char_corp_id, metenox_id, InventoryFlag::Hangar, 200, false));
+        snap.items.insert(800_000_305, make_item(800_000_305, 81143, char_corp_id, metenox_id, InventoryFlag::StructureFuel, 200, false));
     });
 
     for invalid_dur in [86_400i64, 5_000_000i64] {
@@ -802,7 +802,7 @@ async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.get_mut(&metenox_id).unwrap().fuel_blocks = 100;
         snap.items.retain(|_, i| !(i.location_id == metenox_id && i.flag == InventoryFlag::SpecializedMineralHold));
-        snap.items.insert(800_000_305, make_item(800_000_305, 81143, char_corp_id, metenox_id, InventoryFlag::Hangar, 200, false));
+        snap.items.insert(800_000_305, make_item(800_000_305, 81143, char_corp_id, metenox_id, InventoryFlag::StructureFuel, 200, false));
         snap.auto_moon_miners.remove(&metenox_id);
     });
     let details = ctx

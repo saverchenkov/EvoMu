@@ -102,6 +102,7 @@ pub(crate) struct Caller {
     pub cid: i64,
     pub corp: i64,
     pub alliance: Option<i64>,
+    pub roles: u64,
 }
 
 pub(crate) fn corp_alliance(snap: &WorldStateSnapshot, corp_id: i64) -> Option<i64> {
@@ -120,7 +121,8 @@ pub(crate) fn caller(ctx: &AuthoritativeContext, snap: &WorldStateSnapshot) -> R
         .filter(|c| *c > 0)
         .ok_or((STATUS_FORBIDDEN, format!("Character {cid} has no corporation")))?;
     let alliance = ch.and_then(|c| c.alliance_id).or_else(|| corp_alliance(snap, corp));
-    Ok(Caller { cid, corp, alliance })
+    let roles = effective_roles(ctx);
+    Ok(Caller { cid, corp, alliance, roles })
 }
 
 /// Returns `true` when `corp_id` is the caller's corporation or belongs to the caller's alliance.
@@ -145,6 +147,25 @@ pub(crate) fn owned_structure<'a>(
         return Err((
             STATUS_FORBIDDEN,
             format!("{what} {structure_id} is not owned by your corporation or alliance"),
+        ));
+    }
+    Ok(st)
+}
+
+/// Resolves a structure of one of `types` strictly owned by the caller's active corporation
+/// (preventing same-alliance alt-corp directors from mutating another corporation's infrastructure).
+pub(crate) fn corp_owned_structure<'a>(
+    snap: &'a WorldStateSnapshot,
+    caller: &Caller,
+    structure_id: i64,
+    types: &[u32],
+    what: &str,
+) -> Result<&'a UpwellStructureRecord, RpcError> {
+    let st = owned_structure(snap, caller, structure_id, types, what)?;
+    if st.owner_corp_id != caller.corp {
+        return Err((
+            STATUS_FORBIDDEN,
+            format!("{what} {structure_id} is not owned by your corporation"),
         ));
     }
     Ok(st)
@@ -695,7 +716,7 @@ fn process_configuration(
     config: &[(u32, bool)],
     now: u64,
 ) -> Result<u32, RpcError> {
-    let sys = owned_structure(snap, caller, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?.solar_system_id;
+    let sys = corp_owned_structure(snap, caller, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?.solar_system_id;
     let mut hub = snap.clone_sov_hub(hub_id);
     let mut consumed = Vec::new();
     for item_id in new_items {
@@ -790,15 +811,24 @@ pub(crate) fn item_at_hub(snap: &WorldStateSnapshot, caller: &Caller, it: &Inven
             it.flag,
             eve_db::InventoryFlag::Hangar
                 | eve_db::InventoryFlag::Cargo
-                | eve_db::InventoryFlag::SubSystemSlot0
+                | eve_db::InventoryFlag::SpecializedAsteroidHold
         )
     } else if caller.corp > 0 && it.owner_id == caller.corp {
-        crate::services::mining_advanced::mining_compression::caller_can_take_corp_hangar_item(
+        matches!(
+            it.flag,
+            eve_db::InventoryFlag::CorpSAG1
+                | eve_db::InventoryFlag::CorpSAG2
+                | eve_db::InventoryFlag::CorpSAG3
+                | eve_db::InventoryFlag::CorpSAG4
+                | eve_db::InventoryFlag::CorpSAG5
+                | eve_db::InventoryFlag::CorpSAG6
+                | eve_db::InventoryFlag::CorpSAG7
+        ) && crate::services::mining_advanced::mining_compression::caller_can_take_corp_hangar_item(
             snap,
             caller.cid,
             caller.corp,
             it.flag,
-            0,
+            caller.roles,
         )
     } else {
         false
@@ -1081,7 +1111,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                 let hub_upgrades = transact(&db, |snap| {
                     let c = caller(ctx, snap)?;
                     require_roles(ctx, HUB_MANAGER_ROLES, "configure sovereignty hub upgrades")?;
-                    owned_structure(snap, &c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?;
+                    corp_owned_structure(snap, &c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?;
                     run_simulation(snap, &sde, &pending, hub_id, ctx.now_unix());
                     let before = hub_views(snap, &sde, &[hub_id]);
                     let sys = process_configuration(snap, &sde, &c, hub_id, &new_items, &config, ctx.now_unix())?;
@@ -1109,10 +1139,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                 transact(&db, |snap| {
                     let c = caller(ctx, snap)?;
                     require_roles(ctx, HUB_MANAGER_ROLES, "uninstall sovereignty hub upgrades")?;
-                    let st = owned_structure(snap, &c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?;
-                    if st.owner_corp_id != c.corp {
-                        return Err((STATUS_FORBIDDEN, format!("Sovereignty hub {hub_id} is not owned by your corporation")));
-                    }
+                    let st = corp_owned_structure(snap, &c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?;
                     let sys = st.solar_system_id;
                     run_simulation(snap, &sde, &pending, hub_id, ctx.now_unix());
                     let before = hub_views(snap, &sde, &[hub_id]);

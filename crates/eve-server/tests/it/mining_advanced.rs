@@ -248,7 +248,7 @@ async fn test_mn14_auto_moon_mining_service() {
         );
         snap.items.insert(
             gas_item_id,
-            make_item(gas_item_id, 81143, corp_id, structure_id, InventoryFlag::Hangar, 50, false),
+            make_item(gas_item_id, 81143, corp_id, structure_id, InventoryFlag::StructureFuel, 50, false),
         );
         snap.items.insert(
             gas_item_id + 1,
@@ -421,7 +421,7 @@ async fn test_metenox_moon_drill_fuel_exhaustion_regression() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
             structure_id,
-            make_structure(structure_id, 81826, corp_id, lowsec_system_id, "Asabona Exhaustion Drill", [200_000.0, 0.0, -100_000.0], initial_fuel_blocks),
+            make_structure(structure_id, 81826, corp_id, lowsec_system_id, "Asabona Exhaustion Drill", [200_000.0, 0.0, -100_000.0], 0),
         );
         snap.items.insert(
             fuel_item_id,
@@ -429,7 +429,7 @@ async fn test_metenox_moon_drill_fuel_exhaustion_regression() {
         );
         snap.items.insert(
             gas_item_id,
-            make_item(gas_item_id, 81143, corp_id, structure_id, InventoryFlag::Hangar, initial_gas, false),
+            make_item(gas_item_id, 81143, corp_id, structure_id, InventoryFlag::StructureFuel, initial_gas, false),
         );
         snap.auto_moon_miners.insert(
             structure_id,
@@ -462,7 +462,7 @@ async fn test_metenox_moon_drill_fuel_exhaustion_regression() {
     // Assert bay items and st.fuel_blocks are in sync and not duplicated
     ctx.db.with_snapshot(|snap| {
         let st_fuel = snap.structures.get(&structure_id).unwrap().fuel_blocks;
-        assert_eq!(st_fuel, 3, "st.fuel_blocks must be synced to 3");
+        assert_eq!(st_fuel, 0, "st.fuel_blocks reserve remains 0 when fueled from SpecializedFuelBay item");
         let item_fuel = snap.items.get(&fuel_item_id).map(|i| i.quantity).unwrap_or(0);
         assert_eq!(item_fuel, 3, "InventoryItemRecord quantity must be decremented to 3");
     });
@@ -590,7 +590,7 @@ async fn test_action_plan_mn13_to_mn16_moons_metenox_sites_ledgers() {
         snap.structures.insert(metenox_id, metenox);
         snap.items.insert(
             800_000_701,
-            make_item(800_000_701, 81143, char_corp_id, metenox_id, InventoryFlag::Hangar, 500, false), // 500 Magmatic Gas
+            make_item(800_000_701, 81143, char_corp_id, metenox_id, InventoryFlag::StructureFuel, 500, false), // 500 Magmatic Gas
         );
         let mut outsider_ch = snap.characters[&char_id].clone();
         outsider_ch.character_id = 90_000_002;
@@ -772,7 +772,7 @@ async fn test_action_plan_mn13_to_mn16_moons_metenox_sites_ledgers() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.get_mut(&metenox_id).unwrap().fuel_blocks = 200;
         snap.items.retain(|_, i| !(i.location_id == metenox_id && i.flag == InventoryFlag::SpecializedMineralHold));
-        snap.items.insert(800_000_701, make_item(800_000_701, 81143, char_corp_id, metenox_id, InventoryFlag::Hangar, 500, false));
+        snap.items.insert(800_000_701, make_item(800_000_701, 81143, char_corp_id, metenox_id, InventoryFlag::StructureFuel, 500, false));
         snap.auto_moon_miners.remove(&metenox_id);
         snap.service_state_blobs.insert("metenox_last_tick_unix".into(), ctx.now_unix().to_string());
     });

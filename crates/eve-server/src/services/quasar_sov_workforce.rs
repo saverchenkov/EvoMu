@@ -9,7 +9,7 @@
 #![forbid(unsafe_code)]
 
 use super::quasar_sov_hub::{
-    any, caller, compute_hub_resources, emit_hub_diffs, encode_hub_upgrades,
+    any, caller, compute_hub_resources, corp_owned_structure, emit_hub_diffs, encode_hub_upgrades,
     enforce_hub_power_overload, hub_views, id_field, owned_structure, push_notice, required_id,
     require_roles, run_simulation, same_owner, transact, Caller, RpcError, HUB_MANAGER_ROLES,
 };
@@ -46,7 +46,7 @@ fn mode(snap: &WorldStateSnapshot, hub_id: i64) -> PersistedWorkforceMode {
 fn linked_owners(snap: &WorldStateSnapshot, a: i64, b: i64) -> bool {
     match (hub_owner(snap, a), hub_owner(snap, b)) {
         (Some(ca), Some(cb)) => {
-            let probe = Caller { cid: 0, corp: ca, alliance: super::quasar_sov_hub::corp_alliance(snap, ca) };
+            let probe = Caller { cid: 0, corp: ca, alliance: super::quasar_sov_hub::corp_alliance(snap, ca), roles: 0 };
             same_owner(snap, &probe, cb)
         }
         _ => false,
@@ -353,7 +353,7 @@ fn apply_configuration(
     hub_id: i64,
     new_mode: PersistedWorkforceMode,
 ) -> Result<(u32, PersistedWorkforceMode), RpcError> {
-    let sys = owned_structure(snap, c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?.solar_system_id;
+    let sys = corp_owned_structure(snap, c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?.solar_system_id;
     let reachable: Vec<u32> = networkable_hubs(snap, sde, hub_id).into_iter().map(|h| h.1).collect();
     match &new_mode {
         PersistedWorkforceMode::Import { sources } => {
@@ -437,7 +437,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                 transact(&db, |snap| {
                     let c = caller(ctx, snap)?;
                     require_roles(ctx, HUB_MANAGER_ROLES, "configure sovereignty hub workforce")?;
-                    owned_structure(snap, &c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?;
+                    corp_owned_structure(snap, &c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?;
                     run_simulation(snap, &sde, &pending, hub_id, ctx.now_unix());
                     let mut extra: Vec<i64> = std::iter::once(hub_id)
                         .chain(networkable_hubs(snap, &sde, hub_id).into_iter().map(|h| h.0))

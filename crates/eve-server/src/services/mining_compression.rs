@@ -798,8 +798,9 @@ pub fn handle_structure_compression_mgr(
                         .sde
                         .compressible_types
                         .iter()
-                        .find(|&(_, &c_tid)| c_tid == item.type_id)
-                        .map(|(&r_tid, _)| r_tid);
+                        .filter(|&(_, &c_tid)| c_tid == item.type_id)
+                        .map(|(&r_tid, _)| r_tid)
+                        .max();
 
                     let Some(raw_tid) = raw_type else {
                         return Err(BridgeRpcError {
@@ -1158,13 +1159,18 @@ pub(crate) struct MetenoxDrillInspection {
 }
 
 pub fn caller_can_take_corp_hangar_item(snap: &eve_db::WorldStateSnapshot, char_id: i64, corp_id: i64, flag: InventoryFlag, session_corp_role: u64) -> bool {
+    let div_idx: u32 = match flag {
+        InventoryFlag::CorpSAG1 | InventoryFlag::Hangar => 0,
+        InventoryFlag::CorpSAG2 => 1,
+        InventoryFlag::CorpSAG3 => 2,
+        InventoryFlag::CorpSAG4 => 3,
+        InventoryFlag::CorpSAG5 => 4,
+        InventoryFlag::CorpSAG6 => 5,
+        InventoryFlag::CorpSAG7 => 6,
+        _ => return false,
+    };
     let Some(corp) = snap.corporations.get(&corp_id) else { return true };
     if corp.ceo_id == 0 || corp.ceo_id == char_id { return true; }
-    let div_idx: u32 = match flag {
-        InventoryFlag::CorpSAG2 => 1, InventoryFlag::CorpSAG3 => 2, InventoryFlag::CorpSAG4 => 3,
-        InventoryFlag::CorpSAG5 => 4, InventoryFlag::CorpSAG6 => 5, InventoryFlag::CorpSAG7 => 6,
-        _ => 0,
-    };
     let take_mask = eve_db::corp_roles::ROLE_DIRECTOR | (1u64 << (13 + div_idx)) | (1u64 << (43 + div_idx));
     let mut role = session_corp_role | corp.member_roles.get(&char_id).copied().unwrap_or(0);
     if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
@@ -1227,11 +1233,25 @@ pub(crate) fn inspect_metenox_drill(
         if st_owner_corp != 0 { item_owner_id == st_owner_corp } else { item_owner_id == char_id || item_owner_id == caller_corp }
     };
     let item_fuel_blocks: u32 = snap.items.values()
-        .filter(|it| it.location_id == structure_id && matches_reagent_owner(it.owner_id) && it.quantity > 0 && it.flag != InventoryFlag::Locked && !snap.is_item_locked_in_contract_or_job(it.item_id) && sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136))
+        .filter(|it| {
+            it.location_id == structure_id
+                && matches_reagent_owner(it.owner_id)
+                && it.quantity > 0
+                && matches!(it.flag, InventoryFlag::StructureFuel | InventoryFlag::SpecializedFuelBay)
+                && !snap.is_item_locked_in_contract_or_job(it.item_id)
+                && sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136)
+        })
         .fold(0u32, |acc, it| acc.saturating_add(it.quantity.max(0) as u32));
-    let total_struct_fuel = if item_fuel_blocks > 0 { item_fuel_blocks } else { st.fuel_blocks };
+    let total_struct_fuel = st.fuel_blocks.saturating_add(item_fuel_blocks);
     let total_struct_gas: u32 = snap.items.values()
-        .filter(|it| it.location_id == structure_id && matches_reagent_owner(it.owner_id) && it.quantity > 0 && it.flag != InventoryFlag::Locked && !snap.is_item_locked_in_contract_or_job(it.item_id) && it.type_id == 81143)
+        .filter(|it| {
+            it.location_id == structure_id
+                && matches_reagent_owner(it.owner_id)
+                && it.quantity > 0
+                && matches!(it.flag, InventoryFlag::StructureFuel | InventoryFlag::SpecializedFuelBay)
+                && !snap.is_item_locked_in_contract_or_job(it.item_id)
+                && it.type_id == 81143
+        })
         .fold(0u32, |acc, it| acc.saturating_add(it.quantity.max(0) as u32));
     let Some(moon_id) = super::resolve_structure_moon_id(sde, st_sys_id, st.position) else {
         return Err(BridgeRpcError { code: "NoMoonInSystem".into(), message: format!("No SDE moon celestial found in system {st_sys_id}") });

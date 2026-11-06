@@ -582,9 +582,32 @@ fn clone_jump_reset_and_contract_helpers_kill_mutations() {
     );
 
     assert_eq!(handle_contract_delete_multiple(&ctx, &sess, &[]).unwrap_err().code, "InvalidArgument");
-    let del_single = handle_contract_delete_multiple(&ctx, &sess, &[PyRep::Integer(corp_cid)]).unwrap();
+    let del_expired = handle_contract_delete_multiple(&ctx, &sess, &[PyRep::Integer(corp_cid)]).unwrap();
+    if let PyRep::Tuple(parts) = del_expired {
+        assert_eq!(parts[0], PyRep::List(vec![]));
+        assert_eq!(parts[1], PyRep::List(vec![PyRep::Integer(corp_cid)]));
+    } else {
+        panic!("expected Tuple");
+    }
+    let corp_cid_out = 770_003_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.contracts.insert(
+            corp_cid_out,
+            ContractRecord {
+                contract_id: corp_cid_out,
+                issuer_id: 90_000_888,
+                issuer_corp_id: player_corp,
+                for_corp: true,
+                status: "Outstanding".into(),
+                start_station_id: station_id,
+                reward: IskCents(0),
+                ..Default::default()
+            },
+        );
+    });
+    let del_single = handle_contract_delete_multiple(&ctx, &sess, &[PyRep::Integer(corp_cid_out)]).unwrap();
     if let PyRep::Tuple(parts) = del_single {
-        assert_eq!(parts[0], PyRep::List(vec![PyRep::Integer(corp_cid)]));
+        assert_eq!(parts[0], PyRep::List(vec![PyRep::Integer(corp_cid_out)]));
         assert_eq!(parts[1], PyRep::List(vec![]));
     } else {
         panic!("expected Tuple");

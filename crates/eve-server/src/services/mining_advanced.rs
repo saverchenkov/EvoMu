@@ -1238,9 +1238,16 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.service_state_blobs.insert("metenox_last_tick_unix".into(), now_unix.to_string());
-        // SDE group 4744 (Upwell Moon Drill, type 81826 Metenox Moon Drill); extraction pauses while anchoring or reinforced.
+        // SDE group 4744 (Upwell Moon Drill, type 81826 Metenox Moon Drill); requires Quantum Core and online/anchored state.
         let metenox_ids: Vec<(i64, u32, i64, [f64; 3])> = snap.structures.values()
-            .filter(|st| !matches!(st.state.as_str(), "Destroyed" | "Anchoring" | "Reinforced") && ctx.sde.types.get(&st.type_id).is_some_and(|t| t.group_id == 4744))
+            .filter(|st| {
+                st.quantum_core_installed
+                    && matches!(
+                        st.state.as_str(),
+                        "ShieldVulnerable" | "ArmorReinforce" | "ArmorVulnerable" | "HullReinforce" | "HullVulnerable" | "Online" | "Operating"
+                    )
+                    && ctx.sde.types.get(&st.type_id).is_some_and(|t| t.group_id == 4744)
+            })
             .map(|st| (st.structure_id, st.solar_system_id, st.owner_corp_id, st.position))
             .collect();
         if metenox_ids.is_empty() { return; }
@@ -1261,7 +1268,12 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
                 let mut item_fuel = 0u32;
                 let mut gas = 0u32;
                 for it in snap_ref.items.values() {
-                    if it.location_id == structure_id && (st_owner_corp == 0 || it.owner_id == st_owner_corp) && it.quantity > 0 && it.flag != InventoryFlag::Locked && !snap_ref.is_item_locked_in_contract_or_job(it.item_id) {
+                    if it.location_id == structure_id
+                        && (st_owner_corp == 0 || it.owner_id == st_owner_corp)
+                        && matches!(it.flag, InventoryFlag::StructureFuel | InventoryFlag::SpecializedFuelBay)
+                        && it.quantity > 0
+                        && !snap_ref.is_item_locked_in_contract_or_job(it.item_id)
+                    {
                         if ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136) {
                             item_fuel = item_fuel.saturating_add(it.quantity as u32);
                         } else if it.type_id == 81143 {
@@ -1269,8 +1281,7 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
                         }
                     }
                 }
-                let effective_fuel = if item_fuel > 0 { item_fuel } else { st_fuel };
-                (effective_fuel, gas)
+                (st_fuel.saturating_add(item_fuel), gas)
             };
 
             let (init_fuel, init_gas) = count_reagents(snap);
@@ -1288,13 +1299,19 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
             let runnable_cycles = elapsed_cycles.min(init_fuel / fuel_per_cycle).min(init_gas / gas_per_cycle).min(max_cap_cycles);
 
             if runnable_cycles > 0 {
-                let fuel_to_deduct = runnable_cycles * fuel_per_cycle;
+                let mut rem_fuel = runnable_cycles * fuel_per_cycle;
                 let mut rem_gas = runnable_cycles * gas_per_cycle;
-                let mut rem_fuel = fuel_to_deduct;
                 for (rem_ref, is_fuel) in [(&mut rem_fuel, true), (&mut rem_gas, false)] {
                     if *rem_ref == 0 { continue; }
                     let mut ids: Vec<i64> = snap.items.values()
-                        .filter(|it| it.location_id == structure_id && (st_owner_corp == 0 || it.owner_id == st_owner_corp) && it.quantity > 0 && it.flag != InventoryFlag::Locked && !snap.is_item_locked_in_contract_or_job(it.item_id) && if is_fuel { ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136) } else { it.type_id == 81143 })
+                        .filter(|it| {
+                            it.location_id == structure_id
+                                && (st_owner_corp == 0 || it.owner_id == st_owner_corp)
+                                && matches!(it.flag, InventoryFlag::StructureFuel | InventoryFlag::SpecializedFuelBay)
+                                && it.quantity > 0
+                                && !snap.is_item_locked_in_contract_or_job(it.item_id)
+                                && if is_fuel { ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136) } else { it.type_id == 81143 }
+                        })
                         .map(|it| it.item_id).collect();
                     ids.sort_unstable();
                     for iid in ids {
@@ -1308,16 +1325,9 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
                         }
                     }
                 }
-                let rem_bay: u32 = if fuel_to_deduct > rem_fuel {
-                    snap.items.values()
-                        .filter(|it| it.location_id == structure_id && (st_owner_corp == 0 || it.owner_id == st_owner_corp) && it.quantity > 0 && it.flag != InventoryFlag::Locked && !snap.is_item_locked_in_contract_or_job(it.item_id) && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136))
-                        .map(|it| it.quantity as u32).fold(0u32, u32::saturating_add)
-                } else { 0 };
-                if let Some(st_mut) = snap.structures.get_mut(&structure_id) {
-                    if fuel_to_deduct > rem_fuel {
-                        st_mut.fuel_blocks = rem_bay;
-                    } else {
-                        st_mut.fuel_blocks = st_mut.fuel_blocks.saturating_sub(fuel_to_deduct);
+                if rem_fuel > 0 {
+                    if let Some(st_mut) = snap.structures.get_mut(&structure_id) {
+                        st_mut.fuel_blocks = st_mut.fuel_blocks.saturating_sub(rem_fuel);
                     }
                 }
 

@@ -184,26 +184,20 @@ pub async fn handle_hub_and_scan(
                 let member_role = corp_rec
                     .and_then(|c| c.member_roles.get(&char_id).copied())
                     .unwrap_or(caller_roles);
-                if !is_ceo && (member_role & (1 | 128 | 1024)) == 0 {
+                if !is_ceo && (member_role & (1 | 128 | 1024 | eve_db::corp_roles::ROLE_STATION_MANAGER)) == 0 {
                     return Err(BridgeRpcError {
                         code: "InsufficientCorporationRole".into(),
                         message: "Configuring Sovereignty Hub upgrades requires Director or Station Manager role".into(),
                     });
                 }
 
-                // Lowest qualifying structure ID, so the hub is deterministic when several qualify.
+                // Lowest qualifying structure ID owned by caller's corporation, so the hub is deterministic when several qualify.
                 let hub_struct = snap
                     .structures
                     .values()
                     .filter(|s| {
-                        let same_corp = s.owner_corp_id == caller_corp_id;
-                        let same_alliance = snap
-                            .corporations
-                            .get(&s.owner_corp_id)
-                            .and_then(|c| c.alliance_id)
-                            == Some(caller_aid);
-                        s.solar_system_id == sys_id
-                            && (same_corp || same_alliance)
+                        s.owner_corp_id == caller_corp_id
+                            && s.solar_system_id == sys_id
                             && s.state == "ShieldVulnerable"
                             && s.quantum_core_installed
                             && s.fuel_blocks > 0
@@ -214,7 +208,7 @@ pub async fn handle_hub_and_scan(
                     return Err(BridgeRpcError {
                         code: "NoFriendlySovStructureInSystem".into(),
                         message: format!(
-                            "Configuring Sovereignty Hub upgrades in system {sys_id} requires an online structure owned by alliance {caller_aid}"
+                            "Configuring Sovereignty Hub upgrades in system {sys_id} requires an online structure owned by corporation {caller_corp_id}"
                         ),
                     });
                 };
@@ -223,8 +217,8 @@ pub async fn handle_hub_and_scan(
                     .get(&hub_id)
                     .map(|s| DVec3::from_array(s.position));
 
-                // The upgrade item (SDE group 4768) must be owned by the caller or their corporation (or already
-                // installed in the hub), sit in the hub itself or the caller's active ship (within 50 km of the hub),
+                // The upgrade item (SDE group 4768) must be owned by the caller or an authorized corporate division
+                // (or already installed in the hub), sit in the hub itself or the caller's active ship (within 50 km),
                 // and be unlocked.
                 let mut found_locked_local = false;
                 let mut found_out_of_range_ship = false;
@@ -236,13 +230,40 @@ pub async fn handle_hub_and_scan(
                     if !requested_upgrade_type.map_or(true, |rt| it.type_id == rt) {
                         continue;
                     }
-                    let owned_or_installed = it.owner_id == char_id
-                        || it.owner_id == caller_corp_id
-                        || (it.location_id == hub_id
-                            && it.flag == eve_db::InventoryFlag::SubSystemSlot0);
+                    let already_installed_here =
+                        it.location_id == hub_id && it.flag == eve_db::InventoryFlag::SubSystemSlot0;
+                    let personal_ok = it.owner_id == char_id
+                        && matches!(
+                            it.flag,
+                            eve_db::InventoryFlag::Hangar
+                                | eve_db::InventoryFlag::Cargo
+                                | eve_db::InventoryFlag::SubSystemSlot0
+                                | eve_db::InventoryFlag::Locked
+                        );
+                    let corp_ok = caller_corp_id > 0
+                        && it.owner_id == caller_corp_id
+                        && (already_installed_here
+                            || it.flag == eve_db::InventoryFlag::Locked
+                            || (matches!(
+                                it.flag,
+                                eve_db::InventoryFlag::Hangar
+                                    | eve_db::InventoryFlag::CorpSAG1
+                                    | eve_db::InventoryFlag::CorpSAG2
+                                    | eve_db::InventoryFlag::CorpSAG3
+                                    | eve_db::InventoryFlag::CorpSAG4
+                                    | eve_db::InventoryFlag::CorpSAG5
+                                    | eve_db::InventoryFlag::CorpSAG6
+                                    | eve_db::InventoryFlag::CorpSAG7
+                            ) && crate::services::mining_advanced::mining_compression::caller_can_take_corp_hangar_item(
+                                snap,
+                                char_id,
+                                caller_corp_id,
+                                it.flag,
+                                member_role,
+                            )));
                     let in_hub = it.location_id == hub_id;
                     let in_ship = active_ship_id == Some(it.location_id);
-                    if !owned_or_installed || (!in_hub && !in_ship) {
+                    if (!personal_ok && !corp_ok && !already_installed_here) || (!in_hub && !in_ship) {
                         continue;
                     }
                     if in_ship && !in_hub {
@@ -297,9 +318,37 @@ pub async fn handle_hub_and_scan(
                 let was_already_installed = snap.items.get(&up_iid).is_some_and(|it| {
                     it.location_id == hub_id && it.flag == eve_db::InventoryFlag::SubSystemSlot0
                 });
-                if let Some(up_it) = snap.items.get_mut(&up_iid) {
+                let split_new = snap
+                    .items
+                    .get(&up_iid)
+                    .filter(|it| !was_already_installed && it.quantity > 1)
+                    .cloned();
+                if let Some(src) = split_new {
+                    if let Some(up_it) = snap.items.get_mut(&up_iid) {
+                        up_it.quantity -= 1;
+                        up_it.version += 1;
+                    }
+                    snap.next_entity_id += 1;
+                    let new_iid = snap.next_entity_id;
+                    snap.items.insert(
+                        new_iid,
+                        eve_db::InventoryItemRecord {
+                            item_id: new_iid,
+                            type_id: src.type_id,
+                            owner_id: src.owner_id,
+                            location_id: hub_id,
+                            flag: eve_db::InventoryFlag::SubSystemSlot0,
+                            quantity: 1,
+                            singleton: true,
+                            version: 1,
+                            ..Default::default()
+                        },
+                    );
+                } else if let Some(up_it) = snap.items.get_mut(&up_iid) {
                     up_it.location_id = hub_id;
                     up_it.flag = eve_db::InventoryFlag::SubSystemSlot0;
+                    up_it.singleton = true;
+                    up_it.version += 1;
                 }
                 snap.sov_prospecting_levels.insert(sys_id, u32::from(*level));
                 if let Some(st) = snap.system_states.get_mut(&sys_id) {

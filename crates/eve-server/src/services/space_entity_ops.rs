@@ -938,30 +938,51 @@ async fn handle_cmd_unanchor(
     }
 
     let caller_corp_id = session.corporation_id;
-    let is_owner = with_combat_runtime(ctx, |rt| {
-        if let Some(d) = rt.active_drones_in_space.get(&target_id) {
-            return Some(d.owner_char_id == char_id);
-        }
-        None
-    })
-    .unwrap_or_else(|| {
-        ctx.db.with_snapshot(|snap| {
-            if let Some(item) = snap.items.get(&target_id) {
-                return item.owner_id == char_id
-                    || caller_corp_id.is_some_and(|cid| item.owner_id == cid);
-            }
-            if let Some(st) = snap.structures.get(&target_id) {
-                return caller_corp_id.is_some_and(|cid| st.owner_corp_id == cid);
-            }
-            false
-        })
-    });
-
-    if !is_owner {
+    let deny_access = || BridgeRpcError {
+        code: "AccessDenied".into(),
+        message: format!("Character {char_id} does not own entity {target_id}"),
+    };
+    if ctx.db.with_snapshot(|snap| snap.structures.contains_key(&target_id)) {
         return Err(BridgeRpcError {
-            code: "AccessDenied".into(),
-            message: format!("Character {char_id} does not own entity {target_id}"),
+            code: "CannotUnanchorStructure".into(),
+            message: format!("Structure {target_id} must be unanchored via the structure unanchoring lifecycle"),
         });
+    }
+    match with_combat_runtime(ctx, |rt| rt.active_drones_in_space.get(&target_id).map(|d| d.owner_char_id)) {
+        Some(owner) => {
+            if owner != char_id {
+                return Err(deny_access());
+            }
+        }
+        None => ctx.db.with_snapshot(|snap| {
+            let item = snap.items.get(&target_id).ok_or_else(deny_access)?;
+            if item.owner_id == char_id {
+                return Ok(());
+            }
+            let cid = caller_corp_id.filter(|&cid| cid > 0 && item.owner_id == cid).ok_or_else(deny_access)?;
+            let mut role = session.corp_role;
+            if let Some(corp) = snap.corporations.get(&cid) {
+                if corp.ceo_id == char_id {
+                    return Ok(());
+                }
+                role |= corp.member_roles.get(&char_id).copied().unwrap_or(0);
+            }
+            if let Some(ra) = snap.corp_role_assignments.get(&(cid, char_id)) {
+                role |= ra.roles | ra.roles_at_hq | ra.roles_at_base | ra.roles_at_other;
+            }
+            const UNANCHOR_ROLES: u64 = eve_db::corp_roles::ROLE_DIRECTOR
+                | eve_db::corp_roles::ROLE_STATION_MANAGER
+                | eve_db::corp_roles::ROLE_STARBASE_CONFIG
+                | eve_db::corp_roles::ROLE_CONFIG_EQUIPMENT;
+            if (role & UNANCHOR_ROLES) != 0 {
+                Ok(())
+            } else {
+                Err(BridgeRpcError {
+                    code: "CorpRoleDenied".into(),
+                    message: format!("Character {char_id} lacks corporate role required to unanchor entity {target_id}"),
+                })
+            }
+        })?,
     }
     let target_grp = ctx.sde.types.get(&target_ball.type_id).map(|t| t.group_id).unwrap_or(0);
     if crate::services::mobile_deployables_ext::is_single_use_deployable(target_grp) {

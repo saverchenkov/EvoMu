@@ -315,7 +315,7 @@ async fn test_auto_moon_mining_details_output_and_hourly_tick() {
                 type_id: 81143, // Magmatic Gas
                 owner_id: corp_id,
                 location_id: metenox_id,
-                flag: InventoryFlag::Hangar,
+                flag: InventoryFlag::StructureFuel,
                 quantity: 200,
                 singleton: false,
                 ..Default::default()

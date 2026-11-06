@@ -530,12 +530,15 @@ pub async fn handle(
             let is_corp_director = ctx.db.with_snapshot(|snap| {
                 let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 if let Some(corp) = snap.corporations.get(&corp_id) {
-                    let role = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
+                    let mut role = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
+                    if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
+                        role |= ra.roles | ra.roles_at_hq | ra.roles_at_base | ra.roles_at_other;
+                    }
                     char_id == corp.ceo_id
-                        || eve_db::corp_roles::has_role(
-                            role,
-                            eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER,
-                        )
+                        || (role
+                            & (eve_db::corp_roles::ROLE_DIRECTOR
+                                | eve_db::corp_roles::ROLE_STATION_MANAGER))
+                            != 0
                 } else {
                     false
                 }
@@ -547,19 +550,103 @@ pub async fn handle(
                 }));
             }
 
-            let destroyed_ids = ctx.db.with_mut_snapshot(|snap| {
+            let now_unix = ctx.now_unix();
+            let destroy_res = ctx.db.try_with_mut_snapshot(|snap| {
                 let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                let skyhook_ids: Vec<i64> = snap
+                let targets: Vec<(i64, String, f64, f64, f64, u64)> = snap
                     .structures
                     .values()
-                    .filter(|s| s.solar_system_id == sys_id && s.type_id == TYPE_ORBITAL_SKYHOOK && s.owner_corp_id == char_corp)
-                    .map(|s| s.structure_id)
+                    .filter(|s| {
+                        s.solar_system_id == sys_id
+                            && s.type_id == TYPE_ORBITAL_SKYHOOK
+                            && s.owner_corp_id == char_corp
+                    })
+                    .map(|s| {
+                        (
+                            s.structure_id,
+                            s.state.clone(),
+                            s.shield_hp,
+                            s.armor_hp,
+                            s.hull_hp,
+                            s.reinforced_until_unix,
+                        )
+                    })
                     .collect();
-                for sid in &skyhook_ids {
-                    snap.structures.remove(sid);
+                for (sid, ref state, shield_hp, armor_hp, hull_hp, reinf_until) in &targets {
+                    if snap.sov_runtime.skyhook_silo_links.contains_key(sid) {
+                        return Err(BridgeRpcError {
+                            code: "ActiveReagentHeist".into(),
+                            message: format!(
+                                "Cannot destroy Skyhook {sid} while a reagent siphon link is active"
+                            ),
+                        });
+                    }
+                    let damaged_hp = (*shield_hp > 0.0 && *shield_hp < 4_999.0)
+                        || (*armor_hp > 0.0 && *armor_hp < 4_999.0)
+                        || (*hull_hp > 0.0 && *hull_hp < 4_999.0);
+                    if matches!(
+                        state.as_str(),
+                        "Reinforced"
+                            | "ArmorReinforce"
+                            | "ArmorReinforced"
+                            | "ArmorVulnerable"
+                            | "HullReinforce"
+                            | "HullReinforced"
+                            | "HullVulnerable"
+                    ) || *reinf_until > now_unix
+                        || damaged_hp
+                    {
+                        return Err(BridgeRpcError {
+                            code: "StructureReinforcedOrDamaged".into(),
+                            message: format!(
+                                "Cannot destroy Skyhook {sid} while reinforced or damaged (state={state})"
+                            ),
+                        });
+                    }
                 }
-                skyhook_ids
+                let mut skyhook_ids = Vec::with_capacity(targets.len());
+                let mut removed_den_ids = Vec::new();
+                for (sid, _, _, _, _, _) in targets {
+                    snap.structures.remove(&sid);
+                    snap.sov_runtime.skyhook_planets.remove(&sid);
+                    snap.sov_runtime.skyhook_reagent_bays.remove(&sid);
+                    snap.sov_runtime.skyhook_reagents.remove(&sid);
+                    snap.sov_runtime.skyhook_active.remove(&sid);
+                    snap.sov_runtime.skyhook_theft_windows.remove(&sid);
+                    snap.sov_runtime.skyhook_maturity_rem.remove(&sid);
+                    snap.sov_runtime.skyhook_last_harvest_unix.remove(&sid);
+                    snap.sov_runtime.skyhook_hackable.remove(&sid);
+                    let den_ids: Vec<i64> = snap
+                        .sov_runtime
+                        .mercenary_dens
+                        .values()
+                        .filter(|md| md.skyhook_id == sid)
+                        .map(|md| md.den_id)
+                        .collect();
+                    for did in den_ids {
+                        snap.sov_runtime.mercenary_dens.remove(&did);
+                        snap.sov_runtime.mercenary_den_reinforcement.remove(&did);
+                        snap.sov_runtime.mercenary_den_tax_pct.remove(&did);
+                        snap.sov_runtime.mercenary_den_evo_rem.remove(&did);
+                        removed_den_ids.push(did);
+                    }
+                    skyhook_ids.push(sid);
+                }
+                Ok::<_, BridgeRpcError>((skyhook_ids, removed_den_ids))
             });
+            let (destroyed_ids, removed_den_ids) = match destroy_res {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if !destroyed_ids.is_empty() {
+                let sys_handle = ctx.systems.get_or_spawn(sys_id);
+                for &sid in &destroyed_ids {
+                    let _ = sys_handle.remove_ball(sid).await;
+                }
+                for &did in &removed_den_ids {
+                    let _ = sys_handle.remove_ball(did).await;
+                }
+            }
 
             emit_sov_structures_updated(ctx, sys_id, &destroyed_ids);
             Some(Ok(PyRep::Integer(destroyed_ids.len() as i64)))
@@ -924,42 +1011,69 @@ pub fn handle_contract_delete_multiple(
         });
     }
     let caller_corp = session.corporation_id.unwrap_or(0);
-    let (deleted, failed) = ctx.db.try_with_mut_snapshot(|snap| {
+    let (deleted, failed, item_changes) = ctx.db.try_with_mut_snapshot(|snap| {
         let corp_mgr = snap.corporations.get(&caller_corp).is_some_and(|corp| {
-            let r = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
+            let mut r = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
+            if let Some(ra) = snap.corp_role_assignments.get(&(caller_corp, char_id)) {
+                r |= ra.roles | ra.roles_at_hq | ra.roles_at_base | ra.roles_at_other;
+            }
             char_id == corp.ceo_id
                 || (r & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_CONTRACT_MANAGER)) != 0
         });
         let mut del = Vec::new();
         let mut fail = Vec::new();
+        let mut changes: Vec<(eve_db::InventoryItemRecord, i64, i64, eve_db::InventoryFlag)> = Vec::new();
+        let mut restored_ids = std::collections::HashSet::new();
         for cid in cids {
             let Some(c) = snap.contracts.get(&cid).cloned() else {
                 fail.push(PyRep::Integer(cid));
                 continue;
             };
-            let owns = c.issuer_id == char_id
-                || (c.for_corp && c.issuer_corp_id == caller_corp && corp_mgr);
-            let has_bids = c.status == "Outstanding"
-                && c.contract_type == "Auction"
-                && c.current_bidder_id.is_some();
-            if (c.status == "Outstanding" || c.status == "Expired") && owns && !has_bids {
-                if c.status == "Outstanding" {
-                    snap.credit_contract_issuer(&c, c.reward);
-                    for iid in &c.item_ids {
-                        if let Some(it) = snap.items.get_mut(iid) {
-                            it.owner_id = c.issuer_id;
+            let owns = if c.for_corp {
+                c.issuer_corp_id == caller_corp && corp_mgr
+            } else {
+                c.issuer_id == char_id
+            };
+            let has_bids = c.contract_type == "Auction"
+                && (c.current_bidder_id.is_some() || !c.bid_history.is_empty());
+            if c.status == "Outstanding" && owns && !has_bids {
+                snap.credit_contract_issuer(&c, c.reward);
+                let (restore_owner, restore_flag) = if c.for_corp {
+                    (c.issuer_corp_id, eve_db::InventoryFlag::Deliveries)
+                } else {
+                    (c.issuer_id, eve_db::InventoryFlag::Hangar)
+                };
+                for iid in &c.item_ids {
+                    if restored_ids.contains(iid) {
+                        continue;
+                    }
+                    if let Some(it) = snap.items.get_mut(iid) {
+                        let in_escrow = it.location_id == cid
+                            || (it.location_id == c.start_station_id
+                                && it.flag == eve_db::InventoryFlag::Locked
+                                && (it.owner_id == c.issuer_id
+                                    || (c.for_corp && it.owner_id == c.issuer_corp_id)
+                                    || it.owner_id == 0));
+                        if in_escrow {
+                            let (po, pl, pf) = (it.owner_id, it.location_id, it.flag);
+                            it.owner_id = restore_owner;
                             it.location_id = c.start_station_id;
-                            it.flag = eve_db::InventoryFlag::Hangar;
+                            it.flag = restore_flag;
                             it.version += 1;
+                            restored_ids.insert(it.item_id);
+                            changes.push((it.clone(), po, pl, pf));
                         }
                     }
                 }
                 for it in snap.items.values_mut() {
-                    if it.location_id == cid {
-                        it.owner_id = c.issuer_id;
+                    if !restored_ids.contains(&it.item_id) && it.location_id == cid {
+                        let (po, pl, pf) = (it.owner_id, it.location_id, it.flag);
+                        it.owner_id = restore_owner;
                         it.location_id = c.start_station_id;
-                        it.flag = eve_db::InventoryFlag::Hangar;
+                        it.flag = restore_flag;
                         it.version += 1;
+                        restored_ids.insert(it.item_id);
+                        changes.push((it.clone(), po, pl, pf));
                     }
                 }
                 if let Some(cm) = snap.contracts.get_mut(&cid) {
@@ -970,8 +1084,30 @@ pub fn handle_contract_delete_multiple(
                 fail.push(PyRep::Integer(cid));
             }
         }
-        Ok::<_, BridgeRpcError>((del, fail))
+        Ok::<_, BridgeRpcError>((del, fail, changes))
     })?;
+    for (it, prev_owner, prev_loc, prev_flag) in item_changes {
+        let row = PyRep::keyval([
+            ("itemID", PyRep::Integer(it.item_id)),
+            ("typeID", PyRep::Integer(i64::from(it.type_id))),
+            ("ownerID", PyRep::Integer(it.owner_id)),
+            ("locationID", PyRep::Integer(it.location_id)),
+            ("flagID", PyRep::Integer(it.flag as i64)),
+            ("quantity", PyRep::Integer(i64::from(it.quantity))),
+            ("singleton", PyRep::Bool(it.singleton)),
+        ]);
+        let mut ch = Vec::new();
+        if prev_owner != it.owner_id {
+            ch.push((2, PyRep::Integer(prev_owner)));
+        }
+        if prev_loc != it.location_id {
+            ch.push((3, PyRep::Integer(prev_loc)));
+        }
+        if prev_flag != it.flag {
+            ch.push((4, PyRep::Integer(prev_flag as i64)));
+        }
+        let _ = ctx.notify_item_change(char_id, row, ch);
+    }
     Ok(PyRep::Tuple(vec![PyRep::List(deleted), PyRep::List(failed)]))
 }
 

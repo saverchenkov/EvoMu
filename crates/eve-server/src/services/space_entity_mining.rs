@@ -955,9 +955,30 @@ pub async fn handle(
                     let Some(item) = snap.items.get(&item_id).cloned() else {
                         return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {item_id} does not exist") });
                     };
-                    let valid_owner_and_flag = (item.owner_id == char_id && item.flag == InventoryFlag::Hangar)
-                        || (caller_corp > 0 && item.owner_id == caller_corp && caller_can_take_corp_hangar_item(snap, char_id, caller_corp, item.flag, session.corp_role));
-                    if !valid_owner_and_flag || item.location_id != station_id || item.quantity <= 0 {
+                    let personal_ok = item.owner_id == char_id
+                        && matches!(
+                            item.flag,
+                            InventoryFlag::Hangar
+                                | InventoryFlag::Cargo
+                                | InventoryFlag::SpecializedAsteroidHold
+                                | InventoryFlag::SpecializedOreHold
+                                | InventoryFlag::SpecializedIceHold
+                                | InventoryFlag::SpecializedGasHold
+                        );
+                    let corp_ok = caller_corp > 0
+                        && item.owner_id == caller_corp
+                        && matches!(
+                            item.flag,
+                            InventoryFlag::CorpSAG1
+                                | InventoryFlag::CorpSAG2
+                                | InventoryFlag::CorpSAG3
+                                | InventoryFlag::CorpSAG4
+                                | InventoryFlag::CorpSAG5
+                                | InventoryFlag::CorpSAG6
+                                | InventoryFlag::CorpSAG7
+                        )
+                        && caller_can_take_corp_hangar_item(snap, char_id, caller_corp, item.flag, session.corp_role);
+                    if (!personal_ok && !corp_ok) || item.location_id != station_id || item.quantity <= 0 {
                         return Err(BridgeRpcError {
                             code: "OwnershipOrLocationViolation".into(),
                             message: format!("Item {item_id} must be owned by character {char_id} or an authorized corporate division at station {station_id}"),

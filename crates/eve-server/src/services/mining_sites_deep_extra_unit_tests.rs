@@ -403,7 +403,7 @@ async fn test_sov_hub_prospecting_deposit_seeding_and_respawn_timer() {
                 type_id: 82589,
                 owner_id: corp_id,
                 location_id: hub_id,
-                flag: InventoryFlag::Cargo,
+                flag: InventoryFlag::CorpSAG1,
                 quantity: 1,
                 singleton: true,
                 version: 1,

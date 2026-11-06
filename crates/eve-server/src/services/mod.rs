@@ -524,3 +524,4 @@ mod tactical_scanners_bays_deep_extra_unit_tests;
 #[cfg(test)]
 mod warp_jump_gm_tools_deep_extra_unit_tests;
 mod r6_t3_p0_security_tests;
+mod r6_t2_p0_security_tests;

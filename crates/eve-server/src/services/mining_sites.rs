@@ -789,10 +789,13 @@ pub async fn handle(
 
                 let corp_rec = snap.corporations.get(&caller_corp_id);
                 let is_ceo = corp_rec.is_some_and(|c| c.ceo_id == char_id);
-                let member_role = corp_rec
+                let mut member_role = corp_rec
                     .and_then(|c| c.member_roles.get(&char_id).copied())
                     .unwrap_or(caller_roles);
-                if !is_ceo && (member_role & (1 | 128 | 1024)) == 0 {
+                if let Some(ra) = snap.corp_role_assignments.get(&(caller_corp_id, char_id)) {
+                    member_role |= ra.roles | ra.roles_at_hq | ra.roles_at_base | ra.roles_at_other;
+                }
+                if !is_ceo && (member_role & (1 | 128 | 1024 | eve_db::corp_roles::ROLE_STATION_MANAGER)) == 0 {
                     return Err(BridgeRpcError {
                         code: "InsufficientCorporationRole".into(),
                         message: "Configuring Sovereignty Hub upgrades requires Director or Station Manager role".into(),
@@ -803,14 +806,8 @@ pub async fn handle(
                     .structures
                     .values()
                     .filter(|s| {
-                        let same_corp = s.owner_corp_id == caller_corp_id;
-                        let same_alliance = snap
-                            .corporations
-                            .get(&s.owner_corp_id)
-                            .and_then(|c| c.alliance_id)
-                            == Some(caller_aid);
                         s.solar_system_id == sys_id
-                            && (same_corp || same_alliance)
+                            && s.owner_corp_id == caller_corp_id
                             && s.state == "ShieldVulnerable"
                             && s.quantum_core_installed
                             && s.fuel_blocks > 0
@@ -821,7 +818,7 @@ pub async fn handle(
                     return Err(BridgeRpcError {
                         code: "NoFriendlySovStructureInSystem".into(),
                         message: format!(
-                            "Configuring Sovereignty Hub upgrades in system {sys_id} requires an online structure owned by alliance {caller_aid}"
+                            "Configuring Sovereignty Hub upgrades in system {sys_id} requires an online structure owned by corporation {caller_corp_id}"
                         ),
                     });
                 };
@@ -840,25 +837,40 @@ pub async fn handle(
                     if !requested_upgrade_type.map_or(true, |rt| it.type_id == rt) {
                         continue;
                     }
-                    let owned = it.owner_id == char_id
-                        || (caller_corp_id > 0 && it.owner_id == caller_corp_id);
+                    let already_installed_here =
+                        it.location_id == hub_id && it.flag == eve_db::InventoryFlag::SubSystemSlot0;
+                    let personal_ok = it.owner_id == char_id
+                        && matches!(
+                            it.flag,
+                            eve_db::InventoryFlag::Hangar
+                                | eve_db::InventoryFlag::Cargo
+                                | eve_db::InventoryFlag::SubSystemSlot0
+                                | eve_db::InventoryFlag::Locked
+                        );
+                    let corp_ok = caller_corp_id > 0
+                        && it.owner_id == caller_corp_id
+                        && (already_installed_here
+                            || it.flag == eve_db::InventoryFlag::Locked
+                            || (matches!(
+                                it.flag,
+                                eve_db::InventoryFlag::Hangar
+                                    | eve_db::InventoryFlag::CorpSAG1
+                                    | eve_db::InventoryFlag::CorpSAG2
+                                    | eve_db::InventoryFlag::CorpSAG3
+                                    | eve_db::InventoryFlag::CorpSAG4
+                                    | eve_db::InventoryFlag::CorpSAG5
+                                    | eve_db::InventoryFlag::CorpSAG6
+                                    | eve_db::InventoryFlag::CorpSAG7
+                            ) && crate::services::mining_advanced::mining_compression::caller_can_take_corp_hangar_item(
+                                snap,
+                                char_id,
+                                caller_corp_id,
+                                it.flag,
+                                member_role,
+                            )));
                     let in_hub = it.location_id == hub_id;
                     let in_ship = active_ship_id == Some(it.location_id);
-                    let valid_flag = matches!(
-                        it.flag,
-                        eve_db::InventoryFlag::Hangar
-                            | eve_db::InventoryFlag::Cargo
-                            | eve_db::InventoryFlag::SubSystemSlot0
-                            | eve_db::InventoryFlag::Locked
-                            | eve_db::InventoryFlag::CorpSAG1
-                            | eve_db::InventoryFlag::CorpSAG2
-                            | eve_db::InventoryFlag::CorpSAG3
-                            | eve_db::InventoryFlag::CorpSAG4
-                            | eve_db::InventoryFlag::CorpSAG5
-                            | eve_db::InventoryFlag::CorpSAG6
-                            | eve_db::InventoryFlag::CorpSAG7
-                    );
-                    if !owned || (!in_hub && !in_ship) || !valid_flag {
+                    if (!personal_ok && !corp_ok) || (!in_hub && !in_ship) {
                         continue;
                     }
                     if in_ship && !in_hub {
