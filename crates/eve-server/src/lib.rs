@@ -32,6 +32,8 @@ mod formulas_extra_unit_tests;
 #[cfg(test)]
 mod macho_listener_deep_extra_unit_tests;
 #[cfg(test)]
+mod quasar_gateway_deep_extra_unit_tests;
+#[cfg(test)]
 mod quasar_grpc_extra_unit_tests;
 #[cfg(test)]
 mod quasar_grpc_unit_tests;

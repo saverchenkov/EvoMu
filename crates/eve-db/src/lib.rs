@@ -167,4 +167,5 @@ pub struct Sp6PersistedState {
 }
 
 #[cfg(test)] mod db_lib_extra_tests;
+#[cfg(test)] mod db_deep_extra_unit_tests;
 
