@@ -26,9 +26,13 @@ pub mod world_seeder;
 pub use services::inventory_fitting::{dna_to_fitting, fitting_to_dna, saved_fitting_to_dna};
 
 #[cfg(test)]
+mod config_starter_state_deep_extra_unit_tests;
+#[cfg(test)]
 mod fast_checkout_plex_tests;
 #[cfg(test)]
 mod formulas_extra_unit_tests;
+#[cfg(test)]
+mod lifecycle_bug_reporting_deep_extra_unit_tests;
 #[cfg(test)]
 mod macho_listener_deep_extra_unit_tests;
 #[cfg(test)]
