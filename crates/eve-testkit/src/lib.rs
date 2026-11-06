@@ -276,4 +276,6 @@ mod tests {
 mod lib_tests;
 #[cfg(test)]
 mod testkit_deep_extra_unit_tests;
+#[cfg(test)]
+mod testkit_cov_unit_tests;
 

@@ -34,4 +34,10 @@ mod evedb_sqlite_cov_tests;
 mod evedb_sqlite_cov_tests_part2;
 #[cfg(test)]
 mod evedb_sqlite_cov_tests_part3;
+#[cfg(test)]
+mod notes_lp_sequence_store_cov_unit_tests;
+#[cfg(test)]
+mod sync_ext_cov_unit_tests;
+#[cfg(test)]
+mod ledger_store_cov_unit_tests;
 
