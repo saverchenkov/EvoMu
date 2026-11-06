@@ -1367,3 +1367,7 @@ pub const CLIENT_DERIVED_DOGMA_SCATTER_EVENTS: &[&str] = &[
 #[path = "fitting_saved_multifit_tests.rs"]
 mod fitting_saved_multifit_tests;
 
+#[path = "fitting_saved_multifit_cov_unit_tests.rs"]
+#[cfg(test)]
+mod fitting_saved_multifit_cov_unit_tests;
+

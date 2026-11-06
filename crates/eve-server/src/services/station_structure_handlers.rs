@@ -879,3 +879,7 @@ pub fn fulcrum_alignment_inertia_multiplier(
 #[cfg(test)] #[path = "station_structure_handlers_tests.rs"]
 mod station_structure_handlers_tests;
 
+#[path = "station_structure_handlers_cov_unit_tests.rs"]
+#[cfg(test)]
+mod station_structure_handlers_cov_unit_tests;
+

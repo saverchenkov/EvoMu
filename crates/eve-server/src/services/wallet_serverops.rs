@@ -1149,5 +1149,9 @@ fn cluster_statistics(ctx: &ServerContext) -> PyRep {
 #[path = "wallet_serverops_tests.rs"]
 mod wallet_serverops_tests;
 
+#[path = "wallet_serverops_cov_unit_tests.rs"]
+#[cfg(test)]
+mod wallet_serverops_cov_unit_tests;
+
 
 

@@ -993,3 +993,7 @@ pub async fn activate_clone_vat_bay(
 #[path = "character_clone_jump_rules_tests.rs"]
 mod character_clone_jump_rules_tests;
 
+#[path = "character_clone_jump_rules_cov_unit_tests.rs"]
+#[cfg(test)]
+mod character_clone_jump_rules_cov_unit_tests;
+

@@ -1107,3 +1107,7 @@ pub(crate) async fn handle_qa_move_me_to(
 
 #[cfg(test)] #[path = "jump_clone_names_tests.rs"] mod jump_clone_names_tests;
 
+#[path = "jump_clone_names_cov_unit_tests.rs"]
+#[cfg(test)]
+mod jump_clone_names_cov_unit_tests;
+

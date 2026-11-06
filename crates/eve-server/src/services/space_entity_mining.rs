@@ -1296,3 +1296,7 @@ pub async fn handle(
 #[cfg(test)]
 #[path = "space_entity_mining_tests.rs"]
 mod space_entity_mining_tests;
+
+#[path = "space_entity_mining_cov_unit_tests.rs"]
+#[cfg(test)]
+mod space_entity_mining_cov_unit_tests;
