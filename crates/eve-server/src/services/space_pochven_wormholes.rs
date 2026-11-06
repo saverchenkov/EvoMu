@@ -288,12 +288,14 @@ pub fn pochven_static_wormholes(
     };
     let (life_c729, mass_c729, jump_c729) = get_wh_attrs(56_026);
     let (life_r081, mass_r081, jump_r081) = get_wh_attrs(56_541);
+    let pos_c729 = pochven_celestial_offset_position(sde, sys_id, seq);
+    let pos_r081 = pochven_celestial_offset_position(sde, sys_id, seq.wrapping_add(1));
     vec![
         make_wh_sig(
             format!("PCH-{}", 100 + ((sys_id + seq * 19) % 900)),
             sys_id,
             "Wormhole C729".into(),
-            [11.0, 2.0, -3.5],
+            pos_c729,
             56_026,
             k_dest,
             now_unix,
@@ -305,7 +307,7 @@ pub fn pochven_static_wormholes(
             format!("PCW-{}", 200 + ((sys_id + seq * 23) % 700)),
             sys_id,
             "Wormhole R081".into(),
-            [-9.5, 3.0, 5.5],
+            pos_r081,
             56_541,
             c4_dest,
             now_unix,
@@ -314,6 +316,30 @@ pub fn pochven_static_wormholes(
             jump_r081,
         ),
     ]
+}
+
+fn pochven_celestial_offset_position(
+    sde: &eve_sde::SdeRegistry,
+    sys_id: SolarSystemId,
+    seed: u32,
+) -> [f64; 3] {
+    let celestials: Vec<_> = sde
+        .celestials_in_system(sys_id)
+        .into_iter()
+        .filter(|c| c.position.length() < 1.0e14)
+        .collect();
+    if !celestials.is_empty() {
+        let idx = (sys_id as usize).wrapping_add((seed as usize).wrapping_mul(7)) % celestials.len();
+        let c = &celestials[idx];
+        return [
+            (c.position.x + 15_000.0) / 149_597_870_700.0,
+            (c.position.y - 10_000.0) / 149_597_870_700.0,
+            (c.position.z + 5_000.0) / 149_597_870_700.0,
+        ];
+    }
+    let angle = ((sys_id.wrapping_mul(37).wrapping_add(seed.wrapping_mul(53)) % 360) as f64)
+        .to_radians();
+    [8.0 * angle.cos(), 1.5, 8.0 * angle.sin()]
 }
 
 pub async fn ensure_pochven_side_guards(
@@ -343,24 +369,37 @@ pub async fn ensure_pochven_side_guards(
             continue;
         }
         let g_pos = wh_pos + DVec3::new(2_000.0 + (idx as f64) * 1_500.0, 0.0, 0.0);
-        let _ = sys_handle
-            .spawn_ball_with_combat(
-                Ball {
-                    id: gid,
-                    type_id: npc_tid,
-                    position: g_pos,
-                    velocity: DVec3::ZERO,
-                    max_velocity: 350.0,
-                    inertia: 1.0,
-                    mass: 1_200_000.0,
-                    radius: 65.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                ctx.build_type_combat_state(npc_tid),
-            )
-            .await;
-        register_pochven_guard_npc(ctx, gid, npc_tid, sys_id, g_pos);
+        let archetype =
+            crate::services::combat_crimewatch::combat_npc_ai::derive_npc_archetype(ctx, npc_tid);
+        let (mut ball, cs, mut entity) =
+            crate::services::wormhole_pve_seeding::build_specialized_npc_components(
+                ctx,
+                sys_id,
+                gid,
+                npc_tid,
+                archetype,
+                888_001,
+                g_pos,
+            );
+        if let Some(sde_t) = ctx.sde.types.get(&npc_tid) {
+            if sde_t.mass > 0.0 {
+                ball.mass = sde_t.mass;
+            }
+            if sde_t.radius > 0.0 {
+                ball.radius = sde_t.radius;
+            }
+            if sde_t.faction_id.is_none() {
+                entity.faction_id = if npc_tid == 48_087 || npc_tid == 48_092 {
+                    500_026
+                } else {
+                    500_024
+                };
+            }
+        }
+        let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
+        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+            rt.npc_entities.insert(gid, entity);
+        });
     }
     guard_ids
 }
@@ -462,58 +501,6 @@ pub async fn open_pochven_wormhole_and_spawn_guards(
     }
     let guard_ids = ensure_pochven_side_guards(ctx, sys_id, wh_item_id, wh_pos, is_pochven_side).await;
     (wh_pos, guard_ids)
-}
-
-fn register_pochven_guard_npc(
-    ctx: &ServerContext,
-    gid: i64,
-    tid: u32,
-    sys_id: SolarSystemId,
-    pos: DVec3,
-) {
-    let fac = if tid == 48_087 || tid == 48_092 { 500_026 } else { 500_024 };
-    let archetype = crate::services::combat_crimewatch::combat_npc_ai::derive_npc_archetype(ctx, tid);
-    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-        rt.npc_entities.insert(
-            gid,
-            crate::services::combat_crimewatch::ExtendedNpcEntity {
-                ball_id: gid,
-                type_id: tid,
-                faction_id: fac,
-                archetype: archetype.into(),
-                solar_system_id: sys_id,
-                spawn_group_id: 888_001,
-                target_id: None,
-                aggression_threat: std::collections::HashMap::new(),
-                threat_table: std::collections::HashMap::new(),
-                bounty_isk: 50_000.0,
-                optimal_range: 15_000.0,
-                orbit_range: 10_000.0,
-                damage_vector: eve_destiny::DamageVector {
-                    em: 50.0,
-                    thermal: 50.0,
-                    kinetic: 50.0,
-                    explosive: 50.0,
-                },
-                entropic_cycles: 0,
-                drifter_overshield_hp: 0.0,
-                drifter_doomsday_fired: false,
-                web_speed_factor: 0.0,
-                web_range: 0.0,
-                scram_strength: 0.0,
-                scram_range: 0.0,
-                neut_amount: 0.0,
-                ecm_jammed: false,
-                remote_shield_rep: 0.0,
-                remote_armor_rep: 0.0,
-                remote_rep_range: 0.0,
-                tag_drop_type_id: None,
-                spawn_position: pos,
-                sleeper_wh_class: 0,
-                custom_cargo_loot: None,
-            },
-        );
-    });
 }
 
 #[cfg(test)] #[path = "space_pochven_wormholes_tests.rs"]

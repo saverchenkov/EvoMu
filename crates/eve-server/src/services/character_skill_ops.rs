@@ -124,7 +124,14 @@ pub fn handle(
                 .and_then(|a| a.as_i64())
                 .or_else(|| kwargs.get("offer_id").or_else(|| kwargs.get("offerID")).and_then(|v| v.as_i64()))
                 .unwrap_or(0);
-            if offer_id == 1005 {
+            let in_catalog = offer_id > 0
+                && ctx.db.with_snapshot(|snap| {
+                    crate::services::quasar_payment_store_types::read_store_catalog(snap)
+                        .offers
+                        .iter()
+                        .any(|o| (o.id as i64) == offer_id)
+                });
+            if !in_catalog && offer_id == 1005 {
                 Some(handle_omega_weekly_free_sp_offer(ctx, session, 1005, 15_000, method == "buy_offer"))
             } else {
                 None

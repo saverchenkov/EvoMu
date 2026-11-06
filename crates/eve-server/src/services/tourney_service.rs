@@ -702,9 +702,6 @@ pub async fn handle(
             })
         }
         ("tourneyMgr", "QueryShipList") => {
-            // DERIVED: tournament ship eligibility filtered by match external_ruleset_id (ruleset 1 restricts
-            // to frigate/destroyer hulls; ruleset 2 restricts to cruiser/battlecruiser hulls; default 0 allows
-            // standard subcapital tournament groups) and excludes finalized match bans.
             let query_id = extract_id(args, 0);
             let (ruleset_id, finalized_bans) = ctx.db.with_snapshot(|snap| {
                 let store = load_store(snap);
@@ -716,16 +713,7 @@ pub async fn handle(
                     None => (0, Vec::new()),
                 }
             });
-            let mut allowed: Vec<i64> = ctx.sde.types.values().filter(|t| {
-                let group_ok = match ruleset_id {
-                    1 => matches!(t.group_id, 25 | 324 | 420 | 830 | 831 | 834 | 893 | 1305),
-                    2 => matches!(t.group_id, 26 | 358 | 419 | 540 | 832 | 833 | 894 | 906 | 1201 | 1202),
-                    _ => matches!(t.group_id, 25 | 26 | 27 | 324 | 358 | 419 | 420 | 540 | 830 | 831 | 832 | 833 | 834 | 893 | 894 | 906 | 1201 | 1202 | 1305),
-                };
-                t.category_id == 6 && t.published && group_ok && !finalized_bans.contains(&i64::from(t.type_id))
-            }).map(|t| t.type_id as i64).collect();
-            allowed.sort_unstable();
-            allowed.dedup();
+            let allowed = ruleset_allowed_ship_types(&ctx.sde, ruleset_id, &finalized_bans);
             let ship_reps: Vec<PyRep> = allowed.into_iter().map(PyRep::Integer).collect();
             Ok(PyRep::Dict(vec![(PyRep::String("allowedShipList".into()), PyRep::List(ship_reps))]))
         }
@@ -882,43 +870,61 @@ pub async fn handle(
                 .unwrap_or(3);
             let red_capt_kw = kwargs.get("redCharID").and_then(|v| v.as_i64()).or_else(|| if args.len() >= 4 { extract_id(args, 2) } else { None });
             let blue_capt_kw = kwargs.get("blueCharID").and_then(|v| v.as_i64()).or_else(|| if args.len() >= 4 { extract_id(args, 3) } else { None });
+            let explicit_pool = extract_list_i64(kwargs.get("shipTypeIDs").or_else(|| args.get(5)));
+            let ban_duration_kw = kwargs.get("banDurationSeconds").and_then(|v| v.as_i64());
             let mut notify_info = None;
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
-                let m = store.resolve_match_mut(target_mid)?;
-                check_referee_auth(session, caller_cid, m)?;
-                m.autobanning_active = true;
-                m.autoban_qty = qty;
-                m.state = TourneyMatchState::Banning;
-                if let Some(rc) = red_capt_kw { m.red_fleet_boss_id = Some(rc); }
-                if let Some(bc) = blue_capt_kw { m.blue_fleet_boss_id = Some(bc); }
+                let round = (store.ban_sessions.len() as i64) + 1;
+                let auto_ban_key = {
+                    let m = store.resolve_match_mut(target_mid)?;
+                    check_referee_auth(session, caller_cid, m)?;
+                    m.autobanning_active = true;
+                    m.autoban_qty = qty;
+                    m.state = TourneyMatchState::Banning;
+                    if let Some(rc) = red_capt_kw { m.red_fleet_boss_id = Some(rc); }
+                    if let Some(bc) = blue_capt_kw { m.blue_fleet_boss_id = Some(bc); }
 
-                // DERIVED: deterministic autoban selection from published cruiser hulls in SDE when captains auto-ban.
-                let mut candidate_bans: Vec<i64> = ctx.sde.types.values().filter(|t| t.category_id == 6 && t.group_id == 26 && t.published).map(|t| i64::from(t.type_id)).collect();
-                candidate_bans.sort_unstable();
-                for &ship_tid in &candidate_bans {
-                    if (m.banned_ship_types_red.len() as i64) < qty && !m.banned_ship_types_red.contains(&ship_tid) {
-                        m.banned_ship_types_red.push(ship_tid);
+                    let candidate_bans = if !explicit_pool.is_empty() {
+                        explicit_pool
+                    } else {
+                        ruleset_allowed_ship_types(&ctx.sde, m.external_ruleset_id, &m.banned_ships)
+                    };
+                    for &ship_tid in &candidate_bans {
+                        if (m.banned_ship_types_red.len() as i64) < qty && !m.banned_ship_types_red.contains(&ship_tid) && !m.banned_ship_types_blue.contains(&ship_tid) {
+                            m.banned_ship_types_red.push(ship_tid);
+                        }
                     }
-                }
-                for &ship_tid in candidate_bans.iter().rev() {
-                    if (m.banned_ship_types_blue.len() as i64) < qty && !m.banned_ship_types_blue.contains(&ship_tid) {
-                        m.banned_ship_types_blue.push(ship_tid);
+                    for &ship_tid in candidate_bans.iter().rev() {
+                        if (m.banned_ship_types_blue.len() as i64) < qty && !m.banned_ship_types_blue.contains(&ship_tid) && !m.banned_ship_types_red.contains(&ship_tid) {
+                            m.banned_ship_types_blue.push(ship_tid);
+                        }
                     }
-                }
-                m.banned_ships = m.banned_ship_types_red.iter().chain(m.banned_ship_types_blue.iter()).copied().collect();
-                m.banned_ships.sort_unstable();
-                m.banned_ships.dedup();
-                notify_info = Some((m.match_id, m.tourney_id, m.red_fleet_boss_id, m.blue_fleet_boss_id, m.banned_ships.clone()));
+                    m.banned_ships = m.banned_ship_types_red.iter().chain(m.banned_ship_types_blue.iter()).copied().collect();
+                    m.banned_ships.sort_unstable();
+                    m.banned_ships.dedup();
+                    let dur_s = ban_duration_kw.unwrap_or(m.countdown_seconds.max(1)).clamp(5, 3_600) as u64;
+                    let deadline = now_unix.saturating_add(dur_s) as i64;
+                    let key = m.match_id.saturating_mul(1_000_000).saturating_add(900_000).saturating_add(round);
+                    notify_info = Some((m.match_id, m.tourney_id, m.red_fleet_boss_id, m.blue_fleet_boss_id, m.banned_ships.clone(), round, deadline));
+                    (key, m.banned_ships.clone())
+                };
+                store.ban_sessions.insert(auto_ban_key.0, auto_ban_key.1);
                 save_store(snap, &store, now_unix);
                 Ok(PyRep::Bool(true))
             });
-            if let Some((mid, tid, r_boss, b_boss, cur_bans)) = notify_info {
+            if let Some((mid, tid, r_boss, b_boss, cur_bans, round, deadline)) = notify_info {
                 let ban_args = vec![
                     PyRep::Integer(mid), PyRep::Integer(qty), PyRep::List(cur_bans.into_iter().map(PyRep::Integer).collect()),
-                    PyRep::Integer((now_unix + 60) as i64), PyRep::Integer(1), PyRep::Integer(tid),
+                    PyRep::Integer(deadline), PyRep::Integer(round), PyRep::Integer(tid),
                 ];
-                for cid in [Some(caller_cid), r_boss, b_boss].into_iter().flatten() {
+                let mut recipients = vec![caller_cid];
+                for cid in [r_boss, b_boss].into_iter().flatten() {
+                    if !recipients.contains(&cid) {
+                        recipients.push(cid);
+                    }
+                }
+                for cid in recipients {
                     ctx.notify(crate::router::NotificationTarget::Character(cid), "OnTournamentPerformBan", "charid", ban_args.clone());
                 }
             }
@@ -1299,6 +1305,32 @@ pub fn check_tourney_lock_restricted(ctx: &ServerContext, solarsystem_id: u32, c
 
 pub fn check_tourney_move_restricted(ctx: &ServerContext, solarsystem_id: u32, char_id: i64) -> Result<(), BridgeRpcError> {
     check_tourney_restriction(ctx, solarsystem_id, char_id, TourneyRestriction::Move)
+}
+
+fn ruleset_allowed_ship_types(
+    sde: &eve_sde::SdeRegistry,
+    ruleset_id: i64,
+    excluded_bans: &[i64],
+) -> Vec<i64> {
+    let mut allowed: Vec<i64> = sde
+        .types
+        .values()
+        .filter(|t| {
+            let group_ok = match ruleset_id {
+                1 => matches!(t.group_id, 25 | 324 | 420 | 830 | 831 | 834 | 893 | 1305),
+                2 => matches!(t.group_id, 26 | 358 | 419 | 540 | 832 | 833 | 894 | 906 | 1201 | 1202),
+                _ => matches!(t.group_id, 25 | 26 | 27 | 324 | 358 | 419 | 420 | 540 | 830 | 831 | 832 | 833 | 834 | 893 | 894 | 906 | 1201 | 1202 | 1305),
+            };
+            t.category_id == 6
+                && t.published
+                && group_ok
+                && !excluded_bans.contains(&i64::from(t.type_id))
+        })
+        .map(|t| i64::from(t.type_id))
+        .collect();
+    allowed.sort_unstable();
+    allowed.dedup();
+    allowed
 }
 
 #[cfg(test)] #[path = "tourney_service_tests.rs"]
