@@ -507,4 +507,84 @@ fn encode_destiny_events_and_hoist_set_state_in_updates() {
     assert!(matches!(add_balls_act, PyRep::Tuple(_)));
     let add_balls2_act = encode_add_balls2_action(100, &[&b1], Some(&park));
     assert!(matches!(add_balls2_act, PyRep::Tuple(_)));
+
+    // Exact non-unit damage ratios on encode_damage_state_tuple
+    let custom_cs = CombatState {
+        shield_hp: 50.0,
+        max_shield_hp: 200.0,
+        armor_hp: 150.0,
+        max_armor_hp: 300.0,
+        structure_hp: 300.0,
+        max_structure_hp: 400.0,
+        ..Default::default()
+    };
+    let wire_dmg = encode_damage_state_tuple(Some(&custom_cs), 77);
+    if let PyRep::Tuple(top) = wire_dmg {
+        if let PyRep::Tuple(sh) = &top[0] {
+            assert_eq!(sh[0], PyRep::Real(0.25));
+        } else {
+            panic!("expected shield tuple");
+        }
+        assert_eq!(top[1], PyRep::Real(0.5));
+        assert_eq!(top[2], PyRep::Real(0.75));
+    } else {
+        panic!("expected outer damage tuple");
+    }
+
+    // SetBallHarmonic with zero alliance/corp (-1, -1) vs positive alliance/corp
+    let h_none = encode_destiny_event(
+        10,
+        &DestinyEvent::SetBallHarmonic {
+            ball_id: 999,
+            harmonic: 3,
+        },
+        Some(&park),
+    );
+    if let PyRep::Tuple(outer) = h_none {
+        if let PyRep::Tuple(call) = &outer[1] {
+            if let PyRep::Tuple(args) = &call[1] {
+                assert_eq!(args[1], PyRep::Integer(-1));
+                assert_eq!(args[2], PyRep::Integer(-1));
+            }
+        }
+    }
+
+    // SetState damageState omits static balls and slim_item_dict handles zero alliance_id
+    let mut sp = Ballpark::new(30_000_142);
+    sp.add_ball(b1.clone());
+    sp.add_static_ball(
+        Ball {
+            id: 500_001,
+            type_id: 16,
+            position: DVec3::new(10_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            radius: 1000.0,
+            mass: 1e9,
+            inertia: 1.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Rigid,
+        },
+        16,
+    );
+    sp.ball_slim_meta.insert(
+        1,
+        SlimItemMeta {
+            corp_id: 98_000_001,
+            alliance_id: 0,
+            ..Default::default()
+        },
+    );
+    let state_kv = encode_set_state_payload(&sp, 1);
+    if let PyRep::Dict(entries) = state_kv {
+        let dmg_entry = entries
+            .iter()
+            .find(|(k, _)| matches!(k, PyRep::String(s) if s == "damageState"))
+            .map(|(_, v)| v)
+            .unwrap();
+        if let PyRep::Dict(dmg_rows) = dmg_entry {
+            assert!(dmg_rows.iter().any(|(k, _)| *k == PyRep::Integer(1)));
+            assert!(!dmg_rows.iter().any(|(k, _)| *k == PyRep::Integer(500_001)));
+        }
+    }
 }

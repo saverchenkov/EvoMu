@@ -231,3 +231,109 @@ fn ballpark_special_modes_docking_and_event_helpers() {
     assert!(!park.balls.contains_key(&1));
     assert!(park.observer_events.contains_key(&1));
 }
+
+#[test]
+fn coverage_and_mutants_lib_damage_spillover_invuln_and_bubbles() {
+    // 1. All 4 damage channels & distinct layer resonances across Shield -> Armor -> Structure
+    let mut cs = CombatState {
+        shield_hp: 50.0,
+        max_shield_hp: 200.0,
+        armor_hp: 60.0,
+        max_armor_hp: 200.0,
+        structure_hp: 100.0,
+        max_structure_hp: 200.0,
+        shield_resonance: [0.5, 0.25, 0.5, 1.0],
+        armor_resonance: [0.5, 0.5, 0.5, 0.5],
+        structure_resonance: [1.0, 1.0, 1.0, 1.0],
+        ..Default::default()
+    };
+    // Raw damage across all 4 channels: (40, 80, 40, 20) -> eff on shield = 20 + 20 + 20 + 20 = 80
+    // Shield absorbs 50/80 = 0.625, leaving 0.375 * (40, 80, 40, 20) = (15, 30, 15, 7.5), total = 67.5
+    // Armor eff = 0.5 * 67.5 = 33.75 -> armor = 60 - 33.75 = 26.25, structure = 100
+    let (applied, destroyed) = cs.apply_damage(DamageVector::new(40.0, 80.0, 40.0, 20.0));
+    assert!(!destroyed);
+    assert!((applied - 83.75).abs() < 1e-6);
+    assert_eq!(cs.shield_hp, 0.0);
+    assert!((cs.armor_hp - 26.25).abs() < 1e-6);
+    assert_eq!(cs.structure_hp, 100.0);
+
+    // 2. apply_true_damage through Shield -> Armor -> Structure and boundary survival
+    let mut cs2 = CombatState {
+        shield_hp: 30.0,
+        max_shield_hp: 100.0,
+        armor_hp: 40.0,
+        max_armor_hp: 100.0,
+        structure_hp: 50.0,
+        max_structure_hp: 100.0,
+        ..Default::default()
+    };
+    let (t1, d1) = cs2.apply_true_damage(80.0);
+    assert!(!d1);
+    assert!((t1 - 80.0).abs() < 1e-6);
+    assert_eq!(cs2.shield_hp, 0.0);
+    assert_eq!(cs2.armor_hp, 0.0);
+    assert!((cs2.structure_hp - 40.0).abs() < 1e-6);
+
+    // 3. Each invulnerability source tested individually
+    let mut inv = CombatState::new();
+    inv.gate_cloak_remaining_ticks = 1;
+    assert!(inv.is_invulnerable());
+    inv.gate_cloak_remaining_ticks = 0;
+    inv.undock_invulnerable_remaining_ticks = 1;
+    assert!(inv.is_invulnerable());
+    inv.undock_invulnerable_remaining_ticks = 0;
+    inv.warp_exit_invulnerable_remaining_ticks = 1;
+    assert!(inv.is_warp_exit_invulnerable());
+    assert!(inv.is_invulnerable());
+
+    // 4. WarpBubble exact 500km catch and drag boundaries (t1 = 1_010_000, t0 = 990_000)
+    let wb = WarpBubble::new(1, DVec3::new(1_000_000.0, 0.0, 0.0), 10_000.0);
+    assert!(wb
+        .intercept_warp(DVec3::ZERO, DVec3::new(1_510_000.0, 0.0, 0.0))
+        .is_some());
+    assert!(wb
+        .intercept_warp(DVec3::ZERO, DVec3::new(1_510_001.0, 0.0, 0.0))
+        .is_none());
+    assert!(wb
+        .intercept_warp(DVec3::ZERO, DVec3::new(490_000.0, 0.0, 0.0))
+        .is_some());
+    assert!(wb
+        .intercept_warp(DVec3::ZERO, DVec3::new(489_999.0, 0.0, 0.0))
+        .is_none());
+
+    // 5. formation_follow preserves positive speed_fraction and sets 1.0 when <= 0.0
+    let mut fpark = Ballpark::new(30_000_142);
+    fpark.add_ball(Ball {
+        id: 1,
+        type_id: 587,
+        position: DVec3::ZERO,
+        velocity: DVec3::X * 100.0,
+        max_velocity: 300.0,
+        radius: 40.0,
+        mass: 1_000_000.0,
+        inertia: 3.0,
+        speed_fraction: 1.0,
+        mode: MovementMode::GotoDirection { direction: DVec3::X },
+    });
+    fpark.add_ball(Ball {
+        id: 2,
+        type_id: 587,
+        position: DVec3::new(-500.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        radius: 40.0,
+        mass: 1_000_000.0,
+        inertia: 3.0,
+        speed_fraction: 0.4,
+        mode: MovementMode::Stop,
+    });
+    assert!(fpark
+        .formation_follow(2, 1, DVec3::new(-200.0, 0.0, 0.0), 100.0)
+        .is_ok());
+    assert_eq!(fpark.balls[&2].speed_fraction, 0.4);
+    fpark.balls.get_mut(&2).unwrap().speed_fraction = 0.0;
+    assert!(fpark
+        .formation_follow(2, 1, DVec3::new(-200.0, 0.0, 0.0), 100.0)
+        .is_ok());
+    assert_eq!(fpark.balls[&2].speed_fraction, 1.0);
+}

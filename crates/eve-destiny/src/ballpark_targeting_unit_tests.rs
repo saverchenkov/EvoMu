@@ -351,3 +351,249 @@ fn bubble_immunity_and_scramble_checks() {
     assert!(park.is_ball_scrambled(2));
     assert!(!park.is_ball_scrambled(999_999));
 }
+
+#[test]
+fn coverage_and_mutants_targeting_gate_decloak_and_collision_branches() {
+    let mut park = Ballpark::new(30_000_142);
+
+    // 1. add_target_lock while gate-cloaked breaks gate cloak
+    let mut scout = make_ship(10, DVec3::ZERO, DVec3::ZERO);
+    scout.max_velocity = 50.0;
+    park.add_ball(scout);
+    park.ball_slim_meta.insert(
+        10,
+        crate::SlimItemMeta {
+            is_cloaked: true,
+            ..Default::default()
+        },
+    );
+    park.combat_states.insert(
+        10,
+        CombatState {
+            gate_cloak_remaining_ticks: 20,
+            is_cloaked: true,
+            cloak_original_max_velocity: Some(400.0),
+            ..Default::default()
+        },
+    );
+    let target = make_ship(20, DVec3::new(2_000.0, 0.0, 0.0), DVec3::ZERO);
+    park.add_ball(target);
+    assert!(park.add_target_lock(
+        10,
+        TargetLock {
+            target_id: 20,
+            lock_time_ms: 1_000.0,
+            remaining_lock_ms: 1_000.0,
+            locked: false,
+            max_range_m: None,
+        }
+    ));
+    assert_eq!(park.balls[&10].max_velocity, 400.0);
+    assert!(!park.combat_states[&10].is_cloaked);
+
+    // 2. Stationary static station with LOWER id than incoming ship (hits is_static_a stationary branch & dist_c == 0 branch)
+    let mut st = make_ship(5, DVec3::new(10_000.0, 0.0, 0.0), DVec3::ZERO);
+    st.radius = 500.0;
+    st.mode = MovementMode::Rigid;
+    park.add_static_ball(st.clone(), 15);
+
+    let mut runner_pre = make_ship(30, DVec3::new(9_300.0, 0.0, 0.0), DVec3::new(400.0, 0.0, 0.0));
+    runner_pre.radius = 100.0;
+    let mut runner_post = runner_pre.clone();
+    runner_post.position = DVec3::new(10_000.0, 0.0, 0.0);
+    park.add_ball(runner_post.clone());
+
+    // Exact coincidence at t_col where pre_b == st.position (dist_c == 0 -> DVec3::X fallback normal)
+    let mut coinc_pre = make_ship(31, DVec3::new(9_200.0, 0.0, 0.0), DVec3::new(800.0, 0.0, 0.0));
+    coinc_pre.radius = 100.0;
+    let mut coinc_post = coinc_pre.clone();
+    coinc_post.position = DVec3::new(10_000.0, 0.0, 0.0);
+    park.add_ball(coinc_post.clone());
+
+    // Overlap where is_static_a (5) overlaps dynamic ship (32) with v_rel < 0
+    let mut overlap_dyn = make_ship(32, DVec3::new(10_400.0, 0.0, 0.0), DVec3::new(-100.0, 0.0, 0.0));
+    overlap_dyn.radius = 150.0;
+    park.add_ball(overlap_dyn.clone());
+
+    // Exact momentum conservation check on dynamic-dynamic bounce
+    let mut d1_pre = make_ship(40, DVec3::new(0.0, 20_000.0, 0.0), DVec3::new(300.0, 0.0, 0.0));
+    d1_pre.mass = 2_000_000.0;
+    d1_pre.radius = 80.0;
+    let mut d1_post = d1_pre.clone();
+    d1_post.position = DVec3::new(150.0, 20_000.0, 0.0);
+    park.add_ball(d1_post);
+
+    let mut d2_pre = make_ship(41, DVec3::new(300.0, 20_000.0, 0.0), DVec3::new(-100.0, 0.0, 0.0));
+    d2_pre.mass = 1_000_000.0;
+    d2_pre.radius = 80.0;
+    let mut d2_post = d2_pre.clone();
+    d2_post.position = DVec3::new(180.0, 20_000.0, 0.0);
+    park.add_ball(d2_post);
+
+    let mut pre_balls = BTreeMap::new();
+    pre_balls.insert(5, st.clone());
+    pre_balls.insert(30, runner_pre.clone());
+    pre_balls.insert(31, coinc_pre.clone());
+    pre_balls.insert(32, overlap_dyn.clone());
+    pre_balls.insert(40, d1_pre.clone());
+    pre_balls.insert(41, d2_pre.clone());
+
+    let mut pre_pos = BTreeMap::new();
+    for (&id, b) in &pre_balls {
+        pre_pos.insert(id, (b.position, b.velocity, b.radius));
+    }
+
+    let _ = park.drain_all_observer_events();
+    park.step_collision_bumping(&pre_balls, &pre_pos, 1.0);
+
+    // Overlap_dyn (32) pushed out of static station (5) and velocity reversed (> 0)
+    assert!(park.balls[&32].position.x >= 10_650.0 - 1e-6);
+    assert!(park.balls[&32].velocity.x > 0.0);
+    // Bumped ship observer events emitted
+    assert!(park
+        .drain_observer_events(32)
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::SetBallVelocity { ball_id: 32, .. })));
+
+    // Dynamic pair (40, 41) deflected relative to pre-collision velocities
+    assert!(park.balls[&40].velocity.x < 300.0);
+    assert!(park.balls[&41].velocity.x > -100.0);
+
+    // Exact analytical swept-sphere collision check for two unequal-mass moving dynamic ships
+    let mut p2 = Ballpark::new(30_000_142);
+    let s1_pre = Ball {
+        id: 1,
+        type_id: 587,
+        position: DVec3::ZERO,
+        velocity: DVec3::new(400.0, 100.0, 0.0),
+        max_velocity: 400.0,
+        radius: 60.0,
+        mass: 2_000_000.0,
+        inertia: 3.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    let s2_pre = Ball {
+        id: 2,
+        type_id: 587,
+        position: DVec3::new(500.0, 25.0, 0.0),
+        velocity: DVec3::new(-300.0, 50.0, 0.0),
+        max_velocity: 400.0,
+        radius: 90.0,
+        mass: 5_000_000.0,
+        inertia: 3.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    let s1_post = Ball {
+        position: DVec3::new(400.0, 100.0, 0.0),
+        velocity: DVec3::new(380.0, 95.0, 0.0),
+        ..s1_pre.clone()
+    };
+    let s2_post = Ball {
+        position: DVec3::new(200.0, 75.0, 0.0),
+        velocity: DVec3::new(-285.0, 47.5, 0.0),
+        ..s2_pre.clone()
+    };
+    p2.add_ball(s1_post.clone());
+    p2.add_ball(s2_post.clone());
+    let mut pre2 = BTreeMap::new();
+    pre2.insert(1, s1_pre.clone());
+    pre2.insert(2, s2_pre.clone());
+    let mut pos2 = BTreeMap::new();
+    pos2.insert(1, (s1_pre.position, s1_pre.velocity, s1_pre.radius));
+    pos2.insert(2, (s2_pre.position, s2_pre.velocity, s2_pre.radius));
+    p2.step_collision_bumping(&pre2, &pos2, 1.0);
+
+    // Exact expected t_col = 0.50 -> diff = (0, 0, 0) or exact quadratic root; verify exact final kinematics
+    let min_d = 150.0_f64;
+    let dp0 = s1_pre.position - s2_pre.position;
+    let dv = (s1_post.position - s1_pre.position) - (s2_post.position - s2_pre.position);
+    let a = dv.length_squared();
+    let b = 2.0 * dp0.dot(dv);
+    let c = dp0.length_squared() - min_d * min_d;
+    let tc = (-b - (b * b - 4.0 * a * c).sqrt()) / (2.0 * a);
+    let (pac, vac) = super::subwarp_step_state(s1_pre.position, s1_pre.velocity, DVec3::ZERO, s1_pre.time_constant(), tc);
+    let (pbc, vbc) = super::subwarp_step_state(s2_pre.position, s2_pre.velocity, DVec3::ZERO, s2_pre.time_constant(), tc);
+    let nrm = (pbc - pac).normalize();
+    let van = vac.dot(nrm);
+    let vbn = vbc.dot(nrm);
+    let van_new = ((s1_post.mass - s2_post.mass) * van + 2.0 * s2_post.mass * vbn) / (s1_post.mass + s2_post.mass);
+    let vbn_new = ((s2_post.mass - s1_post.mass) * vbn + 2.0 * s1_post.mass * van) / (s1_post.mass + s2_post.mass);
+    let (_, vaf) = super::subwarp_step_state(pac, vac + nrm * (van_new - van), DVec3::ZERO, s1_pre.time_constant(), 1.0 - tc);
+    let (_, vbf) = super::subwarp_step_state(pbc, vbc + nrm * (vbn_new - vbn), DVec3::ZERO, s2_pre.time_constant(), 1.0 - tc);
+    let vfin_a = s1_post.velocity + (vaf - s1_post.velocity) * 0.85;
+    let vfin_b = s2_post.velocity + (vbf - s2_post.velocity) * 0.85;
+    let tau_a = s1_pre.time_constant();
+    let tau_b = s2_pre.time_constant();
+    let pfin_a = s1_post.position + (vfin_a - s1_post.velocity) * (1.0 / (1.0 - (-1.0 / tau_a).exp()) - tau_a);
+    let pfin_b = s2_post.position + (vfin_b - s2_post.velocity) * (1.0 / (1.0 - (-1.0 / tau_b).exp()) - tau_b);
+    assert!((p2.balls[&1].position - pfin_a).length() < 1e-6);
+    assert!((p2.balls[&1].velocity - vfin_a).length() < 1e-6);
+    assert!((p2.balls[&2].position - pfin_b).length() < 1e-6);
+    assert!((p2.balls[&2].velocity - vfin_b).length() < 1e-6);
+
+    // Exact analytical overlap separation + impulse for unequal-mass dynamic ships
+    let mut p3 = Ballpark::new(30_000_142);
+    let o1 = Ball {
+        id: 1,
+        type_id: 587,
+        position: DVec3::ZERO,
+        velocity: DVec3::new(120.0, 0.0, 0.0),
+        max_velocity: 300.0,
+        radius: 60.0,
+        mass: 2_000_000.0,
+        inertia: 3.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    let o2 = Ball {
+        id: 2,
+        type_id: 587,
+        position: DVec3::new(120.0, 0.0, 0.0),
+        velocity: DVec3::new(-80.0, 0.0, 0.0),
+        max_velocity: 300.0,
+        radius: 90.0,
+        mass: 6_000_000.0,
+        inertia: 3.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    p3.add_ball(o1.clone());
+    p3.add_ball(o2.clone());
+    let mut pre3 = BTreeMap::new();
+    pre3.insert(1, o1.clone());
+    pre3.insert(2, o2);
+    let pos3 = BTreeMap::new();
+    p3.step_collision_bumping(&pre3, &pos3, 1.0);
+    // overlap = 30.0, normal = -X: m1=2e6, m2=6e6 -> p1.x = -30*(6/8) = -22.5, p2.x = 120 + 30*(2/8) = 127.5
+    assert!((p3.balls[&1].position.x - (-22.5)).abs() < 1e-6);
+    assert!((p3.balls[&2].position.x - 127.5).abs() < 1e-6);
+    // v_rel = (120 - (-80)) * (-1) = -200, restitution = 0.8, inv_mass = 2/3e6 -> impulse = 1.8 * 200 * 1.5e6 = 5.4e8
+    assert!((p3.balls[&1].velocity.x - (120.0 - 5.4e8 / 2_000_000.0)).abs() < 1e-6);
+    assert!((p3.balls[&2].velocity.x - (-80.0 + 5.4e8 / 6_000_000.0)).abs() < 1e-6);
+
+    // Static-a vs dynamic-b overlap, non-solid group 1971 hazard skip, category 65 station & visibility queries
+    let mut st_a = o1.clone();
+    st_a.id = 10;
+    st_a.velocity = DVec3::ZERO;
+    st_a.mode = MovementMode::Rigid;
+    p3.add_ball(st_a.clone());
+    p3.ball_slim_meta.insert(
+        10,
+        SlimItemMeta {
+            category_id: 65,
+            ..Default::default()
+        },
+    );
+    let mut hazard = o1.clone();
+    hazard.id = 11;
+    p3.add_ball(hazard.clone());
+    p3.ball_group_ids.insert(11, 1971);
+    p3.combat_states.entry(2).or_default().is_cloaked = true;
+    assert!(p3.visible_balls_for_observer(1).iter().any(|b| b.id == 1));
+    assert!(!p3.visible_balls_for_observer(1).iter().any(|b| b.id == 2));
+    assert!(p3.dynamic_balls_in_bubble(2).iter().any(|b| b.id == 2));
+    assert!(p3.balls_in_bubble(500_001, 200.0).is_empty());
+    p3.step_collision_bumping(&pre3, &pos3, 1.0);
+}
