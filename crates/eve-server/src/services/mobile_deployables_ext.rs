@@ -569,22 +569,19 @@ pub async fn handle_mmju_activate(
             "Cannot activate Mobile Micro Jump Unit while warp scrambled or propulsion-jammed",
         ));
     }
-    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "micro_jump")?;
-    crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "micro_jump")?;
+    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
+    crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "jump")?;
 
-    let dir = if ship_ball.velocity.length_squared() > 1e-4 {
-        ship_ball.velocity.normalize()
-    } else if let MovementMode::GotoDirection { direction } = ship_ball.mode {
-        let dn = direction.normalize_or_zero();
-        if dn.length_squared() > 0.5 { dn } else { DVec3::X }
-    } else {
-        let away = (ship_ball.position - unit_pos).normalize_or_zero();
-        if away.length_squared() > 0.5 {
-            away
-        } else {
-            DVec3::X
-        }
-    };
+    let dir = crate::services::mobile_deployables::mmju_jump_dir(&ship_ball);
+    let dest_pos = ship_ball.position + dir * MMJU_JUMP_DISTANCE_M;
+    crate::services::inventory_fitting::fitting_ship_forcefield::check_pos_forcefield_coverage(
+        ctx,
+        sys_id,
+        char_id,
+        ship_id,
+        &[ship_ball.position, dest_pos],
+    )
+    .await?;
     let complete_at = now_unix.saturating_add(MMJU_SPOOL_SECS_U64);
     write_deployable_state(ctx, |st| {
         st.mmju_spools.insert(
@@ -622,7 +619,14 @@ pub fn step_ext_deployables_in_actor(
     solar_system_id: u32,
     now_unix: u64,
 ) {
-    step_mmju_spools_in_actor(ballpark, db, solar_system_id, now_unix);
+    step_mmju_spools_in_actor(
+        ballpark,
+        active_module_cycles.as_deref().map(Vec::as_slice),
+        sde,
+        db,
+        solar_system_id,
+        now_unix,
+    );
     step_observatories_in_actor(
         ballpark,
         active_module_cycles,
@@ -638,6 +642,8 @@ pub fn step_ext_deployables_in_actor(
 
 fn step_mmju_spools_in_actor(
     ballpark: &mut eve_destiny::Ballpark,
+    active_module_cycles: Option<&[crate::system_actor::ActiveModuleCycle]>,
+    sde: &SdeRegistry,
     db: &std::sync::Arc<eve_db::WorldRepository>,
     solar_system_id: u32,
     now_unix: u64,
@@ -666,21 +672,27 @@ fn step_mmju_spools_in_actor(
                 .collect()
         })
     });
+    let siege_attr = crate::services::space_navigation_advanced::find_attr_id_by_name(sde, "siegeModeWarpStatus");
+    let disallow_dock_attr = crate::services::space_navigation_advanced::find_attr_id_by_name(sde, "disallowDocking");
+    let disallow_jump_attr = crate::services::space_navigation_advanced::find_attr_id_by_name(sde, "disallowDriveJumping");
     for entry in completed {
+        let Some(ship_ball) = ballpark.balls.get(&entry.ship_id).cloned() else {
+            continue;
+        };
+        let jump_dir = crate::services::mobile_deployables::mmju_jump_dir(&ship_ball);
+        let dest_pos = ship_ball.position + jump_dir * MMJU_JUMP_DISTANCE_M;
+        if active_module_cycles.is_some_and(|cycles| cycles.iter().any(|c| c.ship_id == entry.ship_id && c.immobilize_self)) {
+            continue;
+        }
         let valid_in_db = db.with_snapshot(|snap| {
             let st = read_deployable_state_snap(snap);
-            let Some(rec) = st.deployables.get(&entry.unit_id) else {
-                return None;
-            };
+            let rec = st.deployables.get(&entry.unit_id)?;
             let is_active = !rec.is_unanchored
                 && now_unix < rec.expires_at_unix
                 && (rec.anchor_completed
                     || (rec.anchor_start_unix > 0
                         && now_unix >= rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs)));
-            if rec.solar_system_id != solar_system_id
-                || !is_active
-                || !snap.items.contains_key(&entry.unit_id)
-            {
+            if rec.solar_system_id != solar_system_id || !is_active || !snap.items.contains_key(&entry.unit_id) {
                 return None;
             }
             let pilot_aboard = snap.characters.get(&entry.char_id).is_some_and(|c| {
@@ -690,6 +702,36 @@ fn step_mmju_spools_in_actor(
                     && c.solar_system_id == solar_system_id
             });
             if !pilot_aboard {
+                return None;
+            }
+            let skyhook_linked = snap
+                .sov_runtime
+                .skyhook_silo_links
+                .values()
+                .any(|&(_, sid, until, _)| sid == entry.ship_id && now_unix < until);
+            let immobilizer_active = snap.items.values().any(|it| {
+                it.location_id == entry.ship_id
+                    && matches!(it.flag as u16, 11..=34 | 125..=132)
+                    && snap.module_active_states.contains(&it.item_id)
+                    && sde.types.get(&it.type_id).is_some_and(|t| {
+                        let attr_nz = |aid: Option<u16>| {
+                            aid.and_then(|a| t.default_attributes.get(&a).copied()).unwrap_or(0.0) != 0.0
+                        };
+                        attr_nz(siege_attr) || attr_nz(disallow_dock_attr) || attr_nz(disallow_jump_attr)
+                    })
+            });
+            if skyhook_linked
+                || immobilizer_active
+                || crate::services::inventory_fitting::fitting_ship_forcefield::is_pos_forcefield_blocked_in_snap(
+                    snap,
+                    sde,
+                    ballpark,
+                    solar_system_id,
+                    entry.char_id,
+                    entry.ship_id,
+                    &[ship_ball.position, dest_pos],
+                )
+            {
                 return None;
             }
             let pos = snap
@@ -710,13 +752,11 @@ fn step_mmju_spools_in_actor(
         if is_blocked {
             continue;
         }
-        let can_jump = ballpark.balls.get(&entry.ship_id).is_some_and(|ball| {
-            let unit_radius = ballpark.balls.get(&entry.unit_id).map(|u| u.radius).unwrap_or(150.0);
-            let surface_dist = ((ball.position - unit_pos).length() - ball.radius - unit_radius).max(0.0);
-            !matches!(ball.mode, MovementMode::Warp { .. })
-                && surface_dist <= MMJU_ACTIVATION_RANGE_M
-                && ball.mass < MMJU_MAX_SHIP_MASS_KG
-        });
+        let unit_radius = ballpark.balls.get(&entry.unit_id).map(|u| u.radius).unwrap_or(150.0);
+        let surface_dist = ((ship_ball.position - unit_pos).length() - ship_ball.radius - unit_radius).max(0.0);
+        let can_jump = !matches!(ship_ball.mode, MovementMode::Warp { .. })
+            && surface_dist <= MMJU_ACTIVATION_RANGE_M
+            && ship_ball.mass < MMJU_MAX_SHIP_MASS_KG;
         if !can_jump {
             continue;
         }
@@ -1215,6 +1255,24 @@ pub fn step_system_deployables_sync(ctx: &ServerContext, solar_system_id: u32) {
     });
     if !needs_work {
         return;
+    }
+    let blocked_due_ships: Vec<i64> = read_deployable_state(ctx)
+        .mmju_spools
+        .values()
+        .filter(|e| {
+            e.solar_system_id == solar_system_id
+                && now_unix >= e.complete_at_unix
+                && (crate::services::tactical_modules::check_ship_navigation_lock(ctx, e.ship_id, "jump").is_err()
+                    || crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, e.ship_id, "jump").is_err())
+        })
+        .map(|e| e.ship_id)
+        .collect();
+    if !blocked_due_ships.is_empty() {
+        write_deployable_state(ctx, |st| {
+            for sid in blocked_due_ships {
+                st.mmju_spools.remove(&sid);
+            }
+        });
     }
     let handle = ctx.systems.get_or_spawn(solar_system_id);
     let deact_guard = handle

@@ -21,6 +21,271 @@ pub struct DeathPipelineResult {
     pub killmail_id: i64,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct DestroyedShipLootOutcome {
+    pub dropped_ids: Vec<i64>,
+    pub destroyed_ids: Vec<i64>,
+    pub dropped_km: Vec<eve_db::KillmailItemEntry>,
+    pub destroyed_km: Vec<eve_db::KillmailItemEntry>,
+    pub items_isk: f64,
+    pub fw_items_isk: f64,
+}
+
+pub(crate) fn is_item_descendant_of_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    item_id: i64,
+    ancestor_id: i64,
+) -> bool {
+    let mut cur = item_id;
+    for _ in 0..8 {
+        let Some(it) = snap.items.get(&cur) else {
+            return false;
+        };
+        if it.location_id == ancestor_id {
+            return true;
+        }
+        if it.location_id <= 0 || it.location_id == cur {
+            return false;
+        }
+        cur = it.location_id;
+    }
+    false
+}
+
+pub(crate) fn drain_nested_ship_fittings(
+    ctx: &ServerContext,
+    root_ship_id: i64,
+    exclude_escape_bay: bool,
+) -> Vec<(i64, i64, u32, u16)> {
+    let nested_ship_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .filter(|i| {
+                !(exclude_escape_bay
+                    && i.location_id == root_ship_id
+                    && matches!(i.flag as u16, 177 | 179))
+                    && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 6)
+                    && is_item_descendant_of_in_snap(snap, i.item_id, root_ship_id)
+            })
+            .map(|i| i.item_id)
+            .collect()
+    });
+    if nested_ship_ids.is_empty() {
+        return Vec::new();
+    }
+    let mut guard = ctx.ship_fittings.write().unwrap_or_else(|e| e.into_inner());
+    let mut out = Vec::new();
+    for sid in nested_ship_ids {
+        if let Some(fit) = guard.remove(&sid) {
+            for m in fit.modules.values() {
+                out.push((sid, m.item_id, m.type_id, m.flag_id));
+            }
+        }
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_destroyed_ship_contents_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    sde: &eve_sde::SdeRegistry,
+    ship_id: i64,
+    wreck_id: i64,
+    override_owner_id: Option<i64>,
+    escape_frigate_id: Option<i64>,
+    is_pod: bool,
+    drop_threshold: f64,
+    direct_child_filter: impl Fn(&InventoryItemRecord) -> bool,
+    mut roll_fn: impl FnMut(i64) -> f64,
+) -> DestroyedShipLootOutcome {
+    let mut root_children: Vec<i64> = snap
+        .items
+        .values()
+        .filter(|i| {
+            i.location_id == ship_id
+                && Some(i.item_id) != escape_frigate_id
+                && direct_child_filter(i)
+        })
+        .map(|i| i.item_id)
+        .collect();
+    root_children.sort_unstable();
+
+    let mut children_by_parent: HashMap<i64, Vec<i64>> = HashMap::new();
+    for it in snap.items.values() {
+        if it.location_id != ship_id
+            && Some(it.location_id) != escape_frigate_id
+            && snap.items.contains_key(&it.location_id)
+        {
+            children_by_parent
+                .entry(it.location_id)
+                .or_default()
+                .push(it.item_id);
+        }
+    }
+    for list in children_by_parent.values_mut() {
+        list.sort_unstable();
+    }
+
+    let mut out = DestroyedShipLootOutcome::default();
+    let mut visited = std::collections::HashSet::new();
+
+    #[allow(clippy::too_many_arguments)]
+    fn visit_item(
+        iid: i64,
+        survive_loc_id: i64,
+        force_cargo_flag: bool,
+        parent_survived: bool,
+        snap: &mut eve_db::WorldStateSnapshot,
+        sde: &eve_sde::SdeRegistry,
+        children_by_parent: &HashMap<i64, Vec<i64>>,
+        visited: &mut std::collections::HashSet<i64>,
+        wreck_id: i64,
+        override_owner_id: Option<i64>,
+        is_pod: bool,
+        drop_threshold: f64,
+        roll_fn: &mut dyn FnMut(i64) -> f64,
+        out: &mut DestroyedShipLootOutcome,
+    ) {
+        if !visited.insert(iid) {
+            return;
+        }
+        let Some(item_snap) = snap.items.get(&iid).cloned() else {
+            return;
+        };
+        if item_snap.type_id == 3468 {
+            snap.items.remove(&iid);
+            if let Some(kids) = children_by_parent.get(&iid) {
+                for &cid in kids {
+                    visit_item(
+                        cid,
+                        survive_loc_id,
+                        true,
+                        parent_survived,
+                        snap,
+                        sde,
+                        children_by_parent,
+                        visited,
+                        wreck_id,
+                        override_owner_id,
+                        is_pod,
+                        drop_threshold,
+                        roll_fn,
+                        out,
+                    );
+                }
+            }
+            return;
+        }
+        let sde_isk = sde
+            .types
+            .get(&item_snap.type_id)
+            .map(|t| t.base_price.max(0.0))
+            .unwrap_or(0.0);
+        let qty_f = item_snap.quantity.max(1) as f64;
+        out.fw_items_isk += sde_isk * qty_f;
+        let unit_isk = if sde_isk > 0.0 { sde_isk } else { 100.0 };
+        out.items_isk += unit_isk * qty_f;
+
+        let is_rig_or_sub = matches!(item_snap.flag as u16, 89 | 92..=94 | 125..=132);
+        let survives = parent_survived
+            && wreck_id > 0
+            && !is_pod
+            && !is_rig_or_sub
+            && roll_fn(iid) < drop_threshold;
+
+        if survives {
+            if let Some(it_mut) = snap.items.get_mut(&iid) {
+                it_mut.location_id = survive_loc_id;
+                if force_cargo_flag {
+                    it_mut.flag = InventoryFlag::Cargo;
+                }
+                if let Some(oid) = override_owner_id {
+                    it_mut.owner_id = oid;
+                }
+                it_mut.version += 1;
+            }
+            out.dropped_ids.push(iid);
+            out.dropped_km.push(eve_db::KillmailItemEntry {
+                type_id: item_snap.type_id,
+                flag: item_snap.flag as u16,
+                qty_dropped: item_snap.quantity,
+                qty_destroyed: 0,
+                singleton: item_snap.singleton,
+            });
+            if let Some(kids) = children_by_parent.get(&iid) {
+                for &cid in kids {
+                    visit_item(
+                        cid,
+                        iid,
+                        false,
+                        true,
+                        snap,
+                        sde,
+                        children_by_parent,
+                        visited,
+                        wreck_id,
+                        override_owner_id,
+                        is_pod,
+                        drop_threshold,
+                        roll_fn,
+                        out,
+                    );
+                }
+            }
+        } else {
+            snap.items.remove(&iid);
+            if let Some(kids) = children_by_parent.get(&iid) {
+                for &cid in kids {
+                    visit_item(
+                        cid,
+                        survive_loc_id,
+                        false,
+                        false,
+                        snap,
+                        sde,
+                        children_by_parent,
+                        visited,
+                        wreck_id,
+                        override_owner_id,
+                        is_pod,
+                        drop_threshold,
+                        roll_fn,
+                        out,
+                    );
+                }
+            }
+            out.destroyed_ids.push(iid);
+            out.destroyed_km.push(eve_db::KillmailItemEntry {
+                type_id: item_snap.type_id,
+                flag: item_snap.flag as u16,
+                qty_dropped: 0,
+                qty_destroyed: item_snap.quantity,
+                singleton: item_snap.singleton,
+            });
+        }
+    }
+
+    for iid in root_children {
+        visit_item(
+            iid,
+            wreck_id,
+            true,
+            true,
+            snap,
+            sde,
+            &children_by_parent,
+            &mut visited,
+            wreck_id,
+            override_owner_id,
+            is_pod,
+            drop_threshold,
+            &mut roll_fn,
+            &mut out,
+        );
+    }
+    out
+}
+
 /// Synchronously executes the canonical EVE death pipeline (DB mutations, drone/fighter
 /// abandonment, disconnected-ship state cleanup, session-change timer/notification, and
 /// non-blocking `SystemHandle` ball updates).
@@ -111,6 +376,7 @@ pub fn execute_death_pipeline_sync_inner(
         sys_id,
     );
     crate::services::inventory_fitting::fitting_cyno_portal::on_cyno_ship_destroyed(ctx, victim_ship_id);
+    crate::services::doomsday_aoe_ops::cancel_aoe_superweapon_cycles_for_ship(ctx, victim_ship_id);
 
     let is_pod = victim_ship_type_id == 670
         || victim_ship_type_id == 33328
@@ -120,6 +386,7 @@ pub fn execute_death_pipeline_sync_inner(
             .get(&victim_ship_type_id)
             .map(|t| t.group_id == 29)
             .unwrap_or(false);
+    let nested_fitted_mods = drain_nested_ship_fittings(ctx, victim_ship_id, !is_pod);
     let wreck_type_id = if is_pod {
         25
     } else {
@@ -240,14 +507,9 @@ pub fn execute_death_pipeline_sync_inner(
             .filter(|c| {
                 c.contract_type == "Courier"
                     && c.status == "InProgress"
-                    && c.item_ids.iter().any(|iid| {
-                        let Some(it) = snap.items.get(iid) else { return false; };
-                        it.location_id == victim_ship_id
-                            || snap
-                                .items
-                                .get(&it.location_id)
-                                .is_some_and(|p| p.location_id == victim_ship_id)
-                    })
+                    && c.item_ids
+                        .iter()
+                        .any(|iid| is_item_descendant_of_in_snap(snap, *iid, victim_ship_id))
             })
             .map(|c| c.contract_id)
             .collect();
@@ -287,11 +549,20 @@ pub fn execute_death_pipeline_sync_inner(
                 quantity: 1,
                 singleton: true,
                 version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
+                ..Default::default()
+            });
+        }
+        for &(sid, mid, mtype, mflag) in &nested_fitted_mods {
+            snap.items.entry(mid).or_insert_with(|| InventoryItemRecord {
+                item_id: mid,
+                type_id: mtype,
+                owner_id: victim_char_id,
+                location_id: sid,
+                flag: InventoryFlag::from_u16(mflag),
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
             });
         }
 
@@ -327,89 +598,34 @@ pub fn execute_death_pipeline_sync_inner(
             None
         };
 
-        let mut child_item_ids: Vec<i64> = snap
-            .items
-            .values()
-            .filter(|i| {
-                i.location_id == victim_ship_id
-                    && Some(i.item_id) != escape_frigate_id
-                    && matches!(
-                        i.flag as u16,
-                        4 | 5 | 11..=34 | 87 | 89 | 90 | 92..=94 | 125..=185
-                    )
-            })
-            .map(|i| i.item_id)
-            .collect();
-        child_item_ids.sort_unstable();
-
-        let mut dropped = Vec::new();
-        let mut destroyed = Vec::new();
-        let mut dropped_km = Vec::new();
-        let mut destroyed_km = Vec::new();
-        let mut items_isk = 0.0;
-
-        for iid in child_item_ids {
-            let Some(item_snap) = snap.items.get(&iid).cloned() else {
-                continue;
-            };
-            let item_unit_isk = ctx
-                .sde
-                .types
-                .get(&item_snap.type_id)
-                .map(|t| t.base_price)
-                .filter(|&p| p > 0.0)
-                .unwrap_or(100.0);
-            items_isk += item_unit_isk * (item_snap.quantity.max(1) as f64);
-            let is_rig_or_sub = matches!(item_snap.flag as i64, 89 | 92..=94 | 125..=132);
-            let mut rng_buf = [0u8; 8];
-            let _ = getrandom::getrandom(&mut rng_buf);
-            let entropy = rng_seed.wrapping_add(u64::from_le_bytes(rng_buf));
-            let mixed = (entropy ^ (iid as u64)).wrapping_mul(6364136223846793005);
-            let roll = ((mixed ^ (mixed >> 32)) >> 32) as f64 / 4294967296.0;
-            if !is_pod && !is_rig_or_sub && roll < drop_threshold {
-                if let Some(item) = snap.items.get_mut(&iid) {
-                    item.location_id = wreck_id;
-                    item.flag = InventoryFlag::Cargo;
-                    item.version += 1;
-                    dropped.push(iid);
-                }
-                dropped_km.push(eve_db::KillmailItemEntry {
-                    type_id: item_snap.type_id,
-                    flag: item_snap.flag as u16,
-                    qty_dropped: item_snap.quantity,
-                    qty_destroyed: 0,
-                    singleton: item_snap.singleton,
-                });
-            } else {
-                snap.items.remove(&iid);
-                let orphan_ids: Vec<i64> = snap
-                    .items
-                    .values()
-                    .filter(|c| c.location_id == iid)
-                    .map(|c| c.item_id)
-                    .collect();
-                for oid in orphan_ids {
-                    if let Some(orph) = snap.items.remove(&oid) {
-                        destroyed.push(oid);
-                        destroyed_km.push(eve_db::KillmailItemEntry {
-                            type_id: orph.type_id,
-                            flag: orph.flag as u16,
-                            qty_dropped: 0,
-                            qty_destroyed: orph.quantity,
-                            singleton: orph.singleton,
-                        });
-                    }
-                }
-                destroyed.push(iid);
-                destroyed_km.push(eve_db::KillmailItemEntry {
-                    type_id: item_snap.type_id,
-                    flag: item_snap.flag as u16,
-                    qty_dropped: 0,
-                    qty_destroyed: item_snap.quantity,
-                    singleton: item_snap.singleton,
-                });
-            }
-        }
+        let loot_out = resolve_destroyed_ship_contents_in_snap(
+            snap,
+            &ctx.sde,
+            victim_ship_id,
+            wreck_id,
+            None,
+            escape_frigate_id,
+            is_pod,
+            drop_threshold,
+            |i| {
+                matches!(
+                    i.flag as u16,
+                    4 | 5 | 11..=34 | 87 | 89 | 90 | 92..=94 | 125..=185
+                )
+            },
+            |iid| {
+                let mut rng_buf = [0u8; 8];
+                let _ = getrandom::getrandom(&mut rng_buf);
+                let entropy = rng_seed.wrapping_add(u64::from_le_bytes(rng_buf));
+                let mixed = (entropy ^ (iid as u64)).wrapping_mul(6364136223846793005);
+                ((mixed ^ (mixed >> 32)) >> 32) as f64 / 4294967296.0
+            },
+        );
+        let dropped = loot_out.dropped_ids;
+        let destroyed = loot_out.destroyed_ids;
+        let mut dropped_km = loot_out.dropped_km;
+        let mut destroyed_km = loot_out.destroyed_km;
+        let mut items_isk = loot_out.items_isk;
         if let Some(esc_id) = escape_frigate_id {
             if let Some(esc_item) = snap.items.get(&esc_id) {
                 dropped_km.push(eve_db::KillmailItemEntry {
@@ -815,14 +1031,16 @@ pub fn execute_death_pipeline_sync_inner(
         is_criminal,
     );
 
-    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _snap| {
+    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, snap| {
         if is_pod {
             st.disconnected_ships.remove(&victim_char_id);
         } else if let Some(cid) = ejected_cap_id {
+            let esc_tid = snap.items.get(&cid).map(|i| i.type_id).unwrap_or(670);
             if let Some(disc) = st.disconnected_ships.get_mut(&victim_char_id) {
                 if disc.ship_id == victim_ship_id {
                     disc.ship_id = cid;
-                    disc.ship_type_id = 670;
+                    disc.ship_type_id = esc_tid;
+                    disc.emergency_warp_dest = None;
                 }
             }
         }

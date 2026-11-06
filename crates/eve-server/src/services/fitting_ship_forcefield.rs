@@ -13,54 +13,117 @@ fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     }
 }
 
-pub fn can_enter_forcefield(ctx: &ServerContext, char_id: i64, ship_id: i64, tower_id: i64) -> bool {
-    ctx.db.with_snapshot(|snap| {
-        let owner_id = snap
-            .items
-            .get(&tower_id)
-            .map(|i| i.owner_id)
-            .or_else(|| snap.structures.get(&tower_id).map(|s| s.owner_corp_id));
-        let Some(owner_id) = owner_id else { return false; };
-        let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-        let tower_corp_id = if snap.corporations.contains_key(&owner_id) {
-            owner_id
-        } else {
-            snap.characters
-                .get(&owner_id)
-                .map(|c| c.corporation_id)
-                .unwrap_or(owner_id)
-        };
-        if owner_id == char_id || (char_corp != 0 && (owner_id == char_corp || tower_corp_id == char_corp)) {
-            return true;
-        }
-        let Some(settings) = snap.starbase_settings.get(&tower_id) else {
-            return false;
-        };
-        let tower_alliance_id = snap
-            .characters
+pub fn can_enter_forcefield_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    ship_id: i64,
+    tower_id: i64,
+) -> bool {
+    let owner_id = snap
+        .items
+        .get(&tower_id)
+        .map(|i| i.owner_id)
+        .or_else(|| snap.structures.get(&tower_id).map(|s| s.owner_corp_id));
+    let Some(owner_id) = owner_id else { return false; };
+    let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+    let tower_corp_id = if snap.corporations.contains_key(&owner_id) {
+        owner_id
+    } else {
+        snap.characters
             .get(&owner_id)
-            .and_then(|c| c.alliance_id)
-            .or_else(|| snap.corporations.get(&tower_corp_id).and_then(|c| c.alliance_id))
-            .unwrap_or(0);
-        let char_alliance = snap.characters.get(&char_id).and_then(|c| c.alliance_id).unwrap_or(0);
-        if (settings.allow_corporation_members && tower_corp_id != 0 && tower_corp_id == char_corp)
-            || (settings.allow_alliance_members && tower_alliance_id != 0 && tower_alliance_id == char_alliance)
-        {
-            return true;
+            .map(|c| c.corporation_id)
+            .unwrap_or(owner_id)
+    };
+    if owner_id == char_id {
+        return true;
+    }
+    let Some(settings) = snap.starbase_settings.get(&tower_id) else {
+        return char_corp != 0 && (owner_id == char_corp || tower_corp_id == char_corp);
+    };
+    let tower_alliance_id = snap
+        .characters
+        .get(&owner_id)
+        .and_then(|c| c.alliance_id)
+        .or_else(|| snap.corporations.get(&tower_corp_id).and_then(|c| c.alliance_id))
+        .unwrap_or(0);
+    let char_alliance = snap.characters.get(&char_id).and_then(|c| c.alliance_id).unwrap_or(0);
+    if (settings.allow_corporation_members && tower_corp_id != 0 && tower_corp_id == char_corp)
+        || (settings.allow_alliance_members && tower_alliance_id != 0 && tower_alliance_id == char_alliance)
+    {
+        return true;
+    }
+    if let Some(ref pw) = settings.password {
+        if !pw.is_empty() {
+            let cs = fitting_containers_ships::read_container_ship_state_snap(snap);
+            let ship_pw = cs
+                .ship_passwords
+                .get(&ship_id)
+                .map(|s| s.as_str())
+                .or_else(|| cs.ship_configs.get(&ship_id).and_then(|c| c.password.as_deref()));
+            return ship_pw == Some(pw.as_str());
         }
-        if let Some(ref pw) = settings.password {
-            if !pw.is_empty() {
-                let cs = fitting_containers_ships::read_container_ship_state_snap(snap);
-                let ship_pw = cs
-                    .ship_passwords
-                    .get(&ship_id)
-                    .map(|s| s.as_str())
-                    .or_else(|| cs.ship_configs.get(&ship_id).and_then(|c| c.password.as_deref()));
-                return ship_pw == Some(pw.as_str());
+    }
+    false
+}
+
+pub fn can_enter_forcefield(ctx: &ServerContext, char_id: i64, ship_id: i64, tower_id: i64) -> bool {
+    ctx.db
+        .with_snapshot(|snap| can_enter_forcefield_in_snap(snap, char_id, ship_id, tower_id))
+}
+
+pub fn is_pos_forcefield_blocked_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    sde: &eve_sde::SdeRegistry,
+    ballpark: &eve_destiny::Ballpark,
+    sys_id: u32,
+    char_id: i64,
+    ship_id: i64,
+    positions: &[DVec3],
+) -> bool {
+    for item in snap.items.values() {
+        if item.location_id == sys_id as i64
+            && sde.types.get(&item.type_id).is_some_and(|t| t.group_id == 365)
+            && snap.starbase_settings.contains_key(&item.item_id)
+        {
+            let rad = sde
+                .types
+                .get(&item.type_id)
+                .and_then(|t| t.default_attributes.get(&680).copied())
+                .unwrap_or(35_000.0);
+            let tpos = snap
+                .item_positions
+                .get(&item.item_id)
+                .copied()
+                .map(DVec3::from_array)
+                .or_else(|| ballpark.balls.get(&item.item_id).map(|b| b.position));
+            if let Some(tp) = tpos {
+                if positions.iter().any(|p| p.distance(tp) <= rad)
+                    && !can_enter_forcefield_in_snap(snap, char_id, ship_id, item.item_id)
+                {
+                    return true;
+                }
             }
         }
-        false
-    })
+    }
+    for st in snap.structures.values() {
+        if st.solar_system_id == sys_id
+            && sde.types.get(&st.type_id).is_some_and(|t| t.group_id == 365)
+            && snap.starbase_settings.contains_key(&st.structure_id)
+        {
+            let rad = sde
+                .types
+                .get(&st.type_id)
+                .and_then(|t| t.default_attributes.get(&680).copied())
+                .unwrap_or(35_000.0);
+            let tp = DVec3::from_array(st.position);
+            if positions.iter().any(|p| p.distance(tp) <= rad)
+                && !can_enter_forcefield_in_snap(snap, char_id, ship_id, st.structure_id)
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub async fn check_pos_forcefield_coverage(

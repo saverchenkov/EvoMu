@@ -511,11 +511,27 @@ async fn activate_single_fighter_ability(
                 DamageVector::default()
             }
             10 | 36 => {
-                // Siren I: Warp disruption (`feat:drones.fighter-support-cenotaph-scarab`, `feat:drones.support-fighter-abilities`)
+                // Siren I/II: Warp disruption (`feat:drones.fighter-support-cenotaph-scarab`, `feat:drones.support-fighter-abilities`)
                 let base_scram = attr(2205).or_else(|| attr(105)).unwrap_or(1.0) as i32;
                 let scram_pts = (base_scram * (fighter.squadron_size as i32)).max(1);
                 ewar_strength_applied = scram_pts as f64;
-                let _ = sys_handle.set_warp_scramble_strength(tid, scram_pts).await;
+                let synth_id = -(fighter_ball_id * 10 + slot_id as i64);
+                let dur_s = (attr(2203).unwrap_or(5_000.0) / 1_000.0).max(5.0);
+                let _ = sys_handle
+                    .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+                        ship_id: fighter_ball_id,
+                        module_id: synth_id,
+                        module_type_id: fighter.type_id,
+                        effect_name: format!("siren_tackle:{}:{}", fighter.parent_ship_id, fighter.item_id),
+                        target_id: Some(tid),
+                        duration_s: dur_s,
+                        cap_need_per_cycle: 0.0,
+                        repeat: 1_000,
+                        warp_scramble_points: scram_pts,
+                        max_effective_range_m: Some(max_range + fighter_ball.radius + target_ball.radius),
+                        ..Default::default()
+                    })
+                    .await;
                 DamageVector::default()
             }
             11 => {
@@ -1313,7 +1329,9 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
             }
         }
     } else {
-        ctx.remove_projected_ewar_by_module(fighter.parent_ship_id, -(fighter_ball_id * 10 + slot_id as i64));
+        let synth_id = -(fighter_ball_id * 10 + slot_id as i64);
+        ctx.remove_projected_ewar_by_module(fighter.parent_ship_id, synth_id);
+        let _ = sys_handle.remove_module_cycle(fighter_ball_id, synth_id).await;
         if slot_id == 0 {
             if let Some(f) = ctx.active_fighters.write().unwrap().get_mut(&fighter_ball_id) {
                 f.target_id = None;

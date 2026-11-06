@@ -237,6 +237,7 @@ pub async fn handle_ship_or_npc_destruction(
         return (0, 0, 0, String::new());
     }
 
+    crate::services::doomsday_aoe_ops::cancel_aoe_superweapon_cycles_for_ship(ctx, target_ball_id);
     let victim_char_opt = player_target_info.and_then(|(vcid, _)| {
         crate::services::combat_crimewatch::combat_missiles_aoe::active_ship_victim_char_id(
             ctx,
@@ -269,6 +270,8 @@ pub async fn handle_ship_or_npc_destruction(
         .remove(&target_ball_id)
         .map(|f| f.modules.values().map(|m| (m.item_id, m.type_id, m.flag_id)).collect())
         .unwrap_or_default();
+    let nested_fitted_mods =
+        crate::combat::death_pipeline::drain_nested_ship_fittings(ctx, target_ball_id, !is_pod_target);
     let (vic_corp, vic_all, active_implants) = ctx.db.with_snapshot(|snap| {
         let (c, a) = snap
             .characters
@@ -334,19 +337,16 @@ pub async fn handle_ship_or_npc_destruction(
         }
         for &(mid, mtype, mflag) in &fitted_mods {
             snap.items.entry(mid).or_insert_with(|| eve_db::InventoryItemRecord {
-                item_id: mid,
-                type_id: mtype,
-                owner_id: wreck_owner_id,
-                location_id: target_ball_id,
-                flag: eve_db::InventoryFlag::from_u16(mflag),
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
+                item_id: mid, type_id: mtype, owner_id: wreck_owner_id, location_id: target_ball_id,
+                flag: eve_db::InventoryFlag::from_u16(mflag), quantity: 1, singleton: true, version: 1,
+                ..Default::default()
+            });
+        }
+        for &(sid, mid, mtype, mflag) in &nested_fitted_mods {
+            snap.items.entry(mid).or_insert_with(|| eve_db::InventoryItemRecord {
+                item_id: mid, type_id: mtype, owner_id: wreck_owner_id, location_id: sid,
+                flag: eve_db::InventoryFlag::from_u16(mflag), quantity: 1, singleton: true, version: 1,
+                ..Default::default()
             });
         }
 
@@ -357,9 +357,7 @@ pub async fn handle_ship_or_npc_destruction(
                 c.contract_type == "Courier"
                     && c.status == "InProgress"
                     && c.item_ids.iter().any(|iid| {
-                        let Some(it) = snap.items.get(iid) else { return false; };
-                        it.location_id == target_ball_id
-                            || snap.items.get(&it.location_id).is_some_and(|p| p.location_id == target_ball_id)
+                        crate::combat::death_pipeline::is_item_descendant_of_in_snap(snap, *iid, target_ball_id)
                     })
             })
             .map(|c| c.contract_id)
@@ -416,44 +414,25 @@ pub async fn handle_ship_or_npc_destruction(
             None
         };
 
-        let mut contained: Vec<eve_db::InventoryItemRecord> = snap
-            .items
-            .values()
-            .filter(|i| i.location_id == target_ball_id && Some(i.item_id) != escape_frigate_id)
-            .cloned()
-            .collect();
-        contained.sort_by_key(|i| i.item_id);
-
         let hull_isk = ctx.sde.types.get(&target_ball.type_id).map(|t| t.base_price).filter(|&p| p > 0.0).unwrap_or(if is_pod_target { 1_000.0 } else { 250_000.0 });
-        let mut items_isk = 0.0;
-        let mut fw_items_isk = 0.0;
-
-        for item in contained {
-            let sde_isk = ctx.sde.types.get(&item.type_id).map(|t| t.base_price.max(0.0)).unwrap_or(0.0);
-            fw_items_isk += sde_isk * (item.quantity.max(1) as f64);
-            let unit_isk = if sde_isk > 0.0 { sde_isk } else { 100.0 };
-            items_isk += unit_isk * (item.quantity.max(1) as f64);
-            let is_rig_or_sub = matches!(item.flag as i64, 89 | 92..=94 | 125..=132);
-            let roll = (((now_unix ^ (target_ball_id as u64)).wrapping_add((item.item_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))).wrapping_mul(0xBF58_476D_1CE4_E5B9) >> 32) as f64 / 4_294_967_296.0;
-            if !is_pod_target && !is_rig_or_sub && roll < drop_threshold {
-                if let Some(it_mut) = snap.items.get_mut(&item.item_id) {
-                    it_mut.location_id = generated_wreck_id;
-                    it_mut.owner_id = wreck_owner_id;
-                    it_mut.flag = eve_db::InventoryFlag::Cargo;
-                    it_mut.version += 1;
-                }
-                dropped_entries.push(eve_db::KillmailItemEntry { type_id: item.type_id, flag: item.flag as u16, qty_dropped: item.quantity, qty_destroyed: 0, singleton: item.singleton });
-            } else {
-                snap.items.remove(&item.item_id);
-                let orphan_ids: Vec<i64> = snap.items.values().filter(|c| c.location_id == item.item_id).map(|c| c.item_id).collect();
-                for oid in orphan_ids {
-                    if let Some(orph) = snap.items.remove(&oid) {
-                        destroyed_entries.push(eve_db::KillmailItemEntry { type_id: orph.type_id, flag: orph.flag as u16, qty_dropped: 0, qty_destroyed: orph.quantity, singleton: orph.singleton });
-                    }
-                }
-                destroyed_entries.push(eve_db::KillmailItemEntry { type_id: item.type_id, flag: item.flag as u16, qty_dropped: 0, qty_destroyed: item.quantity, singleton: item.singleton });
-            }
-        }
+        let loot_out = crate::combat::death_pipeline::resolve_destroyed_ship_contents_in_snap(
+            snap,
+            &ctx.sde,
+            target_ball_id,
+            generated_wreck_id,
+            Some(wreck_owner_id),
+            escape_frigate_id,
+            is_pod_target,
+            drop_threshold,
+            |_| true,
+            |iid| {
+                (((now_unix ^ (target_ball_id as u64)).wrapping_add((iid as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))).wrapping_mul(0xBF58_476D_1CE4_E5B9) >> 32) as f64 / 4_294_967_296.0
+            },
+        );
+        let mut items_isk = loot_out.items_isk;
+        let fw_items_isk = loot_out.fw_items_isk;
+        dropped_entries.extend(loot_out.dropped_km);
+        destroyed_entries.extend(loot_out.destroyed_km);
         if let Some(esc_id) = escape_frigate_id {
             if let Some(esc_item) = snap.items.get(&esc_id) {
                 // parity: feat:ships.frigate-escape-bay - frigate survives and is recorded on killmail
@@ -606,10 +585,9 @@ pub async fn handle_ship_or_npc_destruction(
         }
     } else if let Some(vcid) = victim_char_opt {
         let vship_id = target_ball_id;
+        crate::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space(ctx, vcid, vship_id);
         crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, vcid, vship_id, sys_id);
-        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {
-            st.disconnected_ships.remove(&vcid);
-        });
+        crate::services::inventory_fitting::fitting_cyno_portal::on_cyno_ship_destroyed(ctx, vship_id);
         fw_ins_payout_isk = crate::services::combat_crimewatch::combat_wrecks_killmails::process_ship_insurance_payout(ctx, vcid, vship_id, target_ball.type_id, false);
         let _ = crate::services::combat_crimewatch::claim_player_bounty_on_kill(ctx, attacker_char_id, vcid, target_ball.type_id);
         crate::services::pvp_filament_mgr::record_proving_grounds_combat_result_if_queued(
@@ -650,19 +628,9 @@ pub async fn handle_ship_or_npc_destruction(
             snap.items.insert(
                 cid,
                 eve_db::InventoryItemRecord {
-                    item_id: cid,
-                    type_id: 670,
-                    owner_id: vcid,
-                    location_id: sys_id as i64,
-                    flag: eve_db::InventoryFlag::None,
-                    quantity: 1,
-                    singleton: true,
-                    version: 1,
-                    dynamic_attributes: HashMap::new(),
-                    source_mutaplasmid_id: None,
-                    insured_payout_isk: 0.0,
-                    is_blueprint_copy: false,
-                    blueprint_runs_remaining: None,
+                    item_id: cid, type_id: 670, owner_id: vcid, location_id: sys_id as i64,
+                    flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true, version: 1,
+                    ..Default::default()
                 },
             );
             snap.item_positions.insert(
@@ -679,6 +647,16 @@ pub async fn handle_ship_or_npc_destruction(
                 vch.system_epoch += 1;
             }
             (cid, 670)
+        });
+        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {
+            if let Some(disc) = st.disconnected_ships.get_mut(&vcid) {
+                if disc.ship_id == vship_id {
+                    disc.ship_id = cap_id;
+                    disc.ship_type_id = esc_type_id;
+                    disc.emergency_warp_dest = None;
+                    disc.last_position = [target_ball.position.x, target_ball.position.y, target_ball.position.z];
+                }
+            }
         });
         let esc_sde = ctx.sde.types.get(&esc_type_id);
         let esc_grp = esc_sde.map(|t| t.group_id).unwrap_or(29);

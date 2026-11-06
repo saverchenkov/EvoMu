@@ -471,6 +471,15 @@ async fn step_bosonic_doomsday_system_warmup_cone_filters_reaper_dedup_and_gtfo_
         )
         .await;
 
+    for caster_id in [ship_id, ship_id + 1, ship_id + 2] {
+        let ball = Ball {
+            id: caster_id, type_id: 11_567, position: DVec3::ZERO, velocity: DVec3::ZERO,
+            max_velocity: 80.0, inertia: 1.0, mass: 1.0e9, radius: 5_000.0, speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        };
+        let _ = sys.spawn_ball_with_combat(ball, make_cs()).await;
+    }
+
     let now = ctx.now_unix_secs();
     mutate_superweapon_runtime(&ctx.db, |rt| {
         // 1. Cycle still in warmup (elapsed < warmup_secs) -> does not fire yet

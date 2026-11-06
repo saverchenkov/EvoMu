@@ -1198,6 +1198,9 @@ pub async fn handle_fighters(
                 });
             }
             for &bid in &abandoned {
+                for slot in 0..3 {
+                    let _ = sys_handle.remove_module_cycle(bid, -(bid * 10 + slot)).await;
+                }
                 sys_handle.try_stop_ball(bid);
                 let _ = sys_handle
                     .set_movement_mode(bid, eve_destiny::MovementMode::Stop)

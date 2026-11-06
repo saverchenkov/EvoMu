@@ -19,7 +19,7 @@ pub(crate) const GTFO_WARP_SUPPRESSION_STRENGTH: i32 = 25;
 pub(crate) const MAX_GTFO_TARGETS: usize = 25;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) enum SuperweaponCycleKind {
+pub enum SuperweaponCycleKind {
     Cone {
         origin_pos: [f64; 3],
         dir_vec: [f64; 3],
@@ -42,7 +42,7 @@ pub(crate) enum SuperweaponCycleKind {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct PersistedSuperweaponCycle {
+pub struct PersistedSuperweaponCycle {
     pub sys_id: u32,
     pub char_id: i64,
     pub ship_id: i64,
@@ -61,7 +61,7 @@ pub(crate) struct PersistedSuperweaponCycle {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct PersistedWarpSuppression {
+pub struct PersistedWarpSuppression {
     pub sys_id: u32,
     pub ship_id: i64,
     pub suppressed_until_unix: u64,
@@ -69,12 +69,12 @@ pub(crate) struct PersistedWarpSuppression {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub(crate) struct PersistedSuperweaponRuntime {
+pub struct PersistedSuperweaponRuntime {
     pub active_cycles: Vec<PersistedSuperweaponCycle>,
     pub warp_suppressions: Vec<PersistedWarpSuppression>,
 }
 
-pub(crate) fn read_superweapon_runtime(
+pub fn read_superweapon_runtime(
     db: &eve_db::WorldRepository,
 ) -> Option<PersistedSuperweaponRuntime> {
     db.with_snapshot(|snap| {
@@ -84,7 +84,7 @@ pub(crate) fn read_superweapon_runtime(
     })
 }
 
-pub(crate) fn mutate_superweapon_runtime<R>(
+pub fn mutate_superweapon_runtime<R>(
     db: &eve_db::WorldRepository,
     f: impl FnOnce(&mut PersistedSuperweaponRuntime) -> R,
 ) -> R {
@@ -347,6 +347,18 @@ pub async fn step_bosonic_doomsday_system(ctx: &ServerContext, sys_id: u32) {
 
     let sys = ctx.systems.get_or_spawn(sys_id);
     for (_, cycle, prev_ticks, target_ticks) in pending_batches {
+        let caster_alive = sys
+            .list_balls()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|b| b.id == cycle.ship_id);
+        if !caster_alive {
+            mutate_superweapon_runtime(&ctx.db, |rt| {
+                rt.active_cycles.retain(|c| c.ship_id != cycle.ship_id);
+            });
+            continue;
+        }
         match cycle.kind.clone() {
             SuperweaponCycleKind::Cone {
                 origin_pos,
@@ -361,6 +373,9 @@ pub async fn step_bosonic_doomsday_system(ctx: &ServerContext, sys_id: u32) {
                     DamageVector::new(tick_dmg[0], tick_dmg[1], tick_dmg[2], tick_dmg[3]);
                 for _ in prev_ticks..target_ticks {
                     let balls = sys.list_balls().await.unwrap_or_default();
+                    if !balls.iter().any(|b| b.id == cycle.ship_id) {
+                        break;
+                    }
                     for b in balls {
                         if b.id == cycle.ship_id
                             || !is_combatant_ship_or_entity_ball(
@@ -438,6 +453,9 @@ pub async fn step_bosonic_doomsday_system(ctx: &ServerContext, sys_id: u32) {
                     let seg = seg_b - seg_a;
                     let seg_len_sq = seg.length_squared();
                     let balls = sys.list_balls().await.unwrap_or_default();
+                    if !balls.iter().any(|b| b.id == cycle.ship_id) {
+                        break;
+                    }
                     for b in balls {
                         if b.id == cycle.ship_id
                             || already_hit_balls.contains(&b.id)
@@ -625,7 +643,6 @@ async fn execute_scheduled_gtfo_teleport(
         ) {
             continue;
         }
-        let mut orig_scram = 0;
         if let Ok(Some(cs)) = sys.get_combat_state(b.id).await {
             if cs.is_tethered
                 || cs.is_invulnerable()
@@ -635,7 +652,6 @@ async fn execute_scheduled_gtfo_teleport(
             {
                 continue;
             }
-            orig_scram = cs.warp_scramble_strength;
         }
         if (b.position - center).length() > sphere_radius_m {
             continue;
@@ -666,15 +682,14 @@ async fn execute_scheduled_gtfo_teleport(
         let _ = sys
             .set_movement_mode(b.id, eve_destiny::MovementMode::Stop)
             .await;
-        let suppressed_strength = orig_scram.max(GTFO_WARP_SUPPRESSION_STRENGTH);
         let _ = sys
-            .set_warp_scramble_strength(b.id, suppressed_strength)
+            .set_warp_scramble_strength(b.id, GTFO_WARP_SUPPRESSION_STRENGTH)
             .await;
         new_suppressions.push(PersistedWarpSuppression {
             sys_id,
             ship_id: b.id,
             suppressed_until_unix: now_unix.saturating_add(GTFO_WARP_SUPPRESSION_SECS),
-            orig_warp_scramble_strength: orig_scram,
+            orig_warp_scramble_strength: 0,
         });
         apply_doomsday_capsuleer_crimewatch(
             ctx,

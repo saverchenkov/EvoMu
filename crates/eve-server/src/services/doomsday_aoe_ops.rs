@@ -7,8 +7,8 @@
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::doomsday_aoe_tick::{
     BOSONIC_CONE_COS_HALF_ANGLE, GTFO_WARP_SUPPRESSION_SECS, PersistedSuperweaponCycle,
-    SuperweaponCycleKind, is_subcapital_ship_for_gtfo, mutate_superweapon_runtime,
-    read_superweapon_runtime,
+    SUPERWEAPON_RUNTIME_BLOB_KEY, SuperweaponCycleKind, is_subcapital_ship_for_gtfo,
+    mutate_superweapon_runtime, read_superweapon_runtime,
 };
 use crate::services::tactical_modules::is_combatant_ship_or_entity_ball;
 use eve_destiny::{DVec3, DamageVector, MovementMode};
@@ -33,6 +33,20 @@ const REAPER_BEAM_RADIUS_M: f64 = 5_000.0;
 const MAX_REAPER_ARC_LENGTH_M: f64 = 100_000.0;
 const SUPERWEAPON_NEUT_PULSE_RADIUS_M: f64 = 10_000.0;
 const SUPERWEAPON_NEUT_PULSE_GJ: f64 = 35_000.0;
+
+/// Cancels any scheduled or firing AoE Titan superweapon cycles (`Cone`, `SpatialGtfo`, `ReaperSweep`)
+/// belonging to `ship_id` when the caster dies or leaves space (`#499`).
+pub fn cancel_aoe_superweapon_cycles_for_ship(ctx: &ServerContext, ship_id: i64) {
+    let has_blob = ctx
+        .db
+        .with_snapshot(|s| s.service_state_blobs.contains_key(SUPERWEAPON_RUNTIME_BLOB_KEY));
+    if !has_blob {
+        return;
+    }
+    mutate_superweapon_runtime(&ctx.db, |rt| {
+        rt.active_cycles.retain(|c| c.ship_id != ship_id);
+    });
+}
 
 pub async fn dispatch_superweapon_aoe_rpc(
     ctx: &ServerContext,
@@ -347,42 +361,51 @@ where
         .unwrap_or(DEFAULT_FUEL_COST);
 
     ctx.db
-        .with_mut_snapshot(|snap| {
+        .try_with_mut_snapshot(|snap| {
             let matches_fuel = |tid: u32| match req_fuel_type {
                 Some(ft) => tid == ft,
                 None => matches!(tid, 16274 | 16275 | 17887..=17889),
             };
-            let cand = snap
+            let mut eligible_stacks: Vec<(u8, i64, i32)> = snap
                 .items
                 .values()
-                .find(|i| {
-                    i.location_id == ship_id && matches_fuel(i.type_id) && i.quantity >= req_fuel_qty
+                .filter(|i| {
+                    i.location_id == ship_id
+                        && matches!(i.flag as u16, 5 | 133)
+                        && i.flag != eve_db::InventoryFlag::Locked
+                        && i.quantity > 0
+                        && matches_fuel(i.type_id)
+                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
                 })
-                .or_else(|| {
-                    snap.items.values().find(|i| {
-                        i.location_id == ship_id && matches_fuel(i.type_id) && i.quantity > 0
-                    })
-                })
-                .map(|i| (i.item_id, i.quantity));
-            match cand {
-                Some((fid, avail)) if avail >= req_fuel_qty => {
-                    let mut rem = 0;
-                    if let Some(it) = snap.items.get_mut(&fid) {
-                        it.quantity -= req_fuel_qty;
-                        rem = it.quantity;
-                    }
-                    if rem <= 0 {
-                        snap.items.remove(&fid);
-                    }
-                    Ok(())
-                }
-                Some((_, avail)) => Err(format!(
-                    "Insufficient superweapon fuel: need {req_fuel_qty}, have {avail}"
-                )),
-                None => Err(format!(
-                    "Missing required superweapon fuel (need {req_fuel_qty})"
-                )),
+                .map(|i| (if i.flag as u16 == 133 { 0 } else { 1 }, i.item_id, i.quantity))
+                .collect();
+            eligible_stacks.sort_by_key(|&(prio, iid, _)| (prio, iid));
+            let total_avail: i64 = eligible_stacks.iter().map(|&(_, _, q)| q as i64).sum();
+            if total_avail < req_fuel_qty as i64 {
+                return Err(if total_avail > 0 {
+                    format!("Insufficient superweapon fuel: need {req_fuel_qty}, have {total_avail}")
+                } else {
+                    format!("Missing required superweapon fuel (need {req_fuel_qty})")
+                });
             }
+            let mut remaining = req_fuel_qty;
+            for (_, fid, _) in eligible_stacks {
+                if remaining <= 0 {
+                    break;
+                }
+                let mut remove_stack = false;
+                if let Some(it) = snap.items.get_mut(&fid) {
+                    let take = remaining.min(it.quantity);
+                    it.quantity -= take;
+                    it.version += 1;
+                    remaining -= take;
+                    remove_stack = it.quantity <= 0;
+                }
+                if remove_stack {
+                    snap.items.remove(&fid);
+                }
+            }
+            Ok(())
         })
         .map_err(|message| BridgeRpcError {
             code: "InsufficientFuel".into(),
@@ -401,12 +424,8 @@ where
                 )
             })
     });
-    let orig_warp_scramble_strength = existing_orig
-        .map(|o| o.1)
-        .unwrap_or(cs.warp_scramble_strength);
-    let orig_disallow_assistance = existing_orig
-        .map(|o| o.2)
-        .unwrap_or(cs.disallow_assistance);
+    let orig_warp_scramble_strength = existing_orig.map(|o| o.1).unwrap_or(0);
+    let orig_disallow_assistance = existing_orig.map(|o| o.2).unwrap_or(false);
     cs.warp_scramble_strength = cs.warp_scramble_strength.max(100);
     cs.disallow_assistance = true;
     cs.is_tethered = false;

@@ -461,6 +461,15 @@ async fn fast_checkout_default_paid_vs_free_one_click_behavior() {
         .expect("ok");
     assert_eq!(can_buy, PyRep::Bool(true));
 
+    let expected_cost = ctx_free.db.with_snapshot(|s| {
+        crate::services::quasar_payment_store_types::read_store_catalog(s)
+            .offers
+            .into_iter()
+            .find(|o| o.id == 1002)
+            .map(|o| o.price_plex)
+            .unwrap_or(110)
+    });
+    assert!(expected_cost > 0);
     let nes_buy = ctx_free
         .dispatch_rpc(
             &mut sess_free,
@@ -473,6 +482,6 @@ async fn fast_checkout_default_paid_vs_free_one_click_behavior() {
         )
         .await
         .expect("nes buy ok");
-    assert_eq!(ctx_free.db.with_snapshot(|s| s.plex_vault_balance(cid_free)), 50_890);
-    assert_eq!(nes_buy.dict_get("plexRemaining").and_then(|v| v.as_i64()), Some(50_890));
+    assert_eq!(ctx_free.db.with_snapshot(|s| s.plex_vault_balance(cid_free)), 51_000 - expected_cost);
+    assert_eq!(nes_buy.dict_get("plexRemaining").and_then(|v| v.as_i64()), Some(51_000 - expected_cost));
 }

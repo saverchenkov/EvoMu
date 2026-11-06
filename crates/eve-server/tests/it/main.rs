@@ -157,6 +157,8 @@ mod sovereignty_equinox_gameplay;
 mod features_regression_suite;
 mod regressions_r6;
 mod regressions_r8;
+mod r8_shard_d_combat_deployables;
+mod r8_shard_d_inventory_tackle;
 mod rpc_char_lifecycle;
 mod rpc_client_contracts;
 mod sde_localization_resources;

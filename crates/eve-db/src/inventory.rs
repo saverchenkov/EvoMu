@@ -311,27 +311,59 @@ impl WorldRepository {
             if guard.is_item_locked_in_contract_or_job(item_id) {
                 return Err(DbError::ItemLocked(item_id));
             }
+            {
+                let item_ref = guard
+                    .items
+                    .get(&item_id)
+                    .ok_or(DbError::ItemNotFound(item_id))?;
+                if item_ref.owner_id != character_id {
+                    return Err(DbError::ItemOwnershipViolation {
+                        character_id,
+                        item_id,
+                    });
+                }
+                if matches!(
+                    item_ref.flag,
+                    InventoryFlag::Locked | InventoryFlag::Impounded
+                ) || matches!(item_ref.flag as u16, 36 | 63 | 72 | 159..=163)
+                    || item_ref.type_id == 3_468
+                {
+                    return Err(DbError::ItemLocked(item_id));
+                }
+                if item_ref.singleton
+                    || item_ref.is_blueprint_copy
+                    || !item_ref.dynamic_attributes.is_empty()
+                    || item_ref.source_mutaplasmid_id.is_some()
+                {
+                    return Err(DbError::ValidationError(
+                        "Cannot split a singleton, BPC, or mutated item".into(),
+                    ));
+                }
+                if split_quantity >= item_ref.quantity {
+                    return Err(DbError::ValidationError(format!(
+                        "Split quantity {} must be strictly less than item quantity {}",
+                        split_quantity, item_ref.quantity
+                    )));
+                }
+                let mut cur_loc = item_ref.location_id;
+                for _ in 0..8 {
+                    let Some(anc) = guard.items.get(&cur_loc) else {
+                        break;
+                    };
+                    if anc.type_id == 3_468
+                        || guard.is_item_locked_in_contract_or_job(anc.item_id)
+                        || matches!(anc.flag, InventoryFlag::Locked | InventoryFlag::Impounded)
+                        || matches!(anc.flag as u16, 36 | 63 | 72)
+                    {
+                        return Err(DbError::ItemLocked(item_id));
+                    }
+                    cur_loc = anc.location_id;
+                }
+            }
             let item = guard
                 .items
                 .get_mut(&item_id)
                 .ok_or(DbError::ItemNotFound(item_id))?;
-            if item.owner_id != character_id {
-                return Err(DbError::ItemOwnershipViolation {
-                    character_id,
-                    item_id,
-                });
-            }
-            if item.singleton {
-                return Err(DbError::ValidationError(
-                    "Cannot split a singleton item".into(),
-                ));
-            }
-            if split_quantity >= item.quantity {
-                return Err(DbError::ValidationError(format!(
-                    "Split quantity {} must be strictly less than item quantity {}",
-                    split_quantity, item.quantity
-                )));
-            }
             item.quantity -= split_quantity;
             item.version += 1;
             let updated_orig = item.clone();

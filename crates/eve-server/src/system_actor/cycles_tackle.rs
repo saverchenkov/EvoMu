@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use super::*;
-use eve_destiny::{BallId, Ballpark, MovementMode};
+use eve_destiny::{BallId, Ballpark, CombatState, MovementMode};
 use glam::DVec3;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,6 +32,198 @@ pub(crate) fn is_sleeper_or_drifter_capacitor_immune(
         })
 }
 
+pub(crate) fn parse_siren_tackle_ids(effect_name: &str) -> Option<(BallId, i64)> {
+    let rest = effect_name.strip_prefix("siren_tackle:")?;
+    let (parent_s, item_s) = rest.split_once(':')?;
+    Some((parent_s.parse().ok()?, item_s.parse().ok()?))
+}
+
+pub(crate) fn active_tackle_and_core_deltas(
+    ball_id: BallId,
+    cs: &CombatState,
+    active_module_cycles: &[ActiveModuleCycle],
+) -> (i32, i32) {
+    let mod_scram: i32 = active_module_cycles
+        .iter()
+        .filter(|c| c.target_id == Some(ball_id))
+        .map(|c| c.warp_scramble_points)
+        .sum::<i32>()
+        + active_module_cycles
+            .iter()
+            .filter(|c| c.ship_id == ball_id && (c.immobilize_self || c.self_disallow_assistance))
+            .map(|_| 100)
+            .sum::<i32>();
+    let mod_core: i32 = active_module_cycles
+        .iter()
+        .filter(|c| c.ship_id == ball_id)
+        .map(|c| c.warp_core_stab_bonus)
+        .sum();
+    let is_protected = cs.is_invulnerable()
+        || cs.undock_invulnerable_remaining_ticks > 0
+        || cs.gate_cloak_remaining_ticks > 0
+        || cs.is_cloaked
+        || cs.is_tethered;
+    let lance_scram = if cs.lance_disrupted_remaining_s > 0.0 && !is_protected {
+        100
+    } else {
+        0
+    };
+    (mod_scram + lance_scram, mod_core)
+}
+
+pub(crate) fn snapshot_active_tackle_totals(
+    ballpark: &Ballpark,
+    active_module_cycles: &[ActiveModuleCycle],
+    last_active_totals: &mut HashMap<BallId, (Option<i32>, Option<i32>)>,
+) {
+    for (&bid, cs) in &ballpark.combat_states {
+        let (scram_d, core_d) = active_tackle_and_core_deltas(bid, cs, active_module_cycles);
+        if scram_d != 0 || core_d != 0 {
+            let entry = last_active_totals.entry(bid).or_insert((None, None));
+            if scram_d != 0 {
+                entry.0 = Some(cs.warp_scramble_strength);
+            }
+            if core_d != 0 {
+                entry.1 = Some(cs.warp_core_strength);
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_ball_with_combat_in_actor(
+    ballpark: &mut Ballpark,
+    active_module_cycles: &mut Vec<ActiveModuleCycle>,
+    base_scramble_strengths: &mut HashMap<BallId, i32>,
+    base_core_strengths: &mut HashMap<BallId, i32>,
+    sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    deactivation_hook: Option<&ModuleDeactivationHook>,
+    ball: Ball,
+    combat_state: CombatState,
+    slim_meta_opt: Option<SlimItemMeta>,
+) -> u64 {
+    let ball_id = ball.id;
+    let had_prev_cs = ballpark.combat_states.contains_key(&ball_id);
+    let existing_meta = ballpark.ball_slim_meta.get(&ball_id).cloned();
+    if ballpark.balls.contains_key(&ball_id) {
+        let _ = ballpark.remove_ball(ball_id);
+    }
+    if let Some(meta) = slim_meta_opt.or(existing_meta) {
+        ballpark.set_ball_slim_meta(ball_id, meta);
+    } else {
+        ensure_default_slim_meta(ballpark, &ball, sde_opt);
+    }
+    let (scram_delta, core_delta) = if had_prev_cs {
+        active_tackle_and_core_deltas(ball_id, &combat_state, active_module_cycles)
+    } else {
+        (0, 0)
+    };
+    base_scramble_strengths.insert(ball_id, (combat_state.warp_scramble_strength - scram_delta).max(0));
+    base_core_strengths.insert(ball_id, combat_state.warp_core_strength - core_delta);
+    let mut cs = combat_state;
+    if cs.base_signature_radius.is_none() {
+        let base = if cs.signature_radius > 0.0 {
+            cs.signature_radius
+        } else {
+            sde_opt
+                .as_ref()
+                .and_then(|s| s.types.get(&ball.type_id)?.default_attributes.get(&552).copied())
+                .unwrap_or(ball.radius.max(35.0))
+        };
+        cs.base_signature_radius = Some(base);
+    }
+    if sde_opt
+        .as_ref()
+        .and_then(|s| s.types.get(&ball.type_id)?.default_attributes.get(&1538).copied())
+        .unwrap_or(0.0)
+        >= 1.0
+    {
+        cs.is_interdiction_nullified = true;
+    }
+    ballpark.add_ball(ball);
+    ballpark.combat_states.insert(ball_id, cs);
+    if !active_module_cycles.is_empty() {
+        reconcile_tackle_and_bubbles(
+            ballpark,
+            active_module_cycles,
+            base_scramble_strengths,
+            base_core_strengths,
+            db_opt,
+            deactivation_hook,
+        );
+    }
+    ballpark.current_tick
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn set_combat_state_in_actor(
+    ballpark: &mut Ballpark,
+    active_module_cycles: &mut Vec<ActiveModuleCycle>,
+    base_scramble_strengths: &mut HashMap<BallId, i32>,
+    base_core_strengths: &mut HashMap<BallId, i32>,
+    last_active_totals: &mut HashMap<BallId, (Option<i32>, Option<i32>)>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    deactivation_hook: Option<&ModuleDeactivationHook>,
+    ball_id: BallId,
+    combat_state: CombatState,
+) {
+    let (scram_delta, core_delta) =
+        active_tackle_and_core_deltas(ball_id, &combat_state, active_module_cycles);
+    match ballpark.combat_states.get(&ball_id) {
+        None => {
+            base_scramble_strengths
+                .insert(ball_id, (combat_state.warp_scramble_strength - scram_delta).max(0));
+            base_core_strengths.insert(ball_id, combat_state.warp_core_strength - core_delta);
+        }
+        Some(prev_cs) => {
+            if combat_state.warp_scramble_strength != prev_cs.warp_scramble_strength {
+                let stale_scram = scram_delta == 0
+                    && last_active_totals
+                        .get(&ball_id)
+                        .and_then(|t| t.0)
+                        == Some(combat_state.warp_scramble_strength);
+                if !stale_scram {
+                    base_scramble_strengths.insert(
+                        ball_id,
+                        (combat_state.warp_scramble_strength - scram_delta).max(0),
+                    );
+                }
+                if let Some(entry) = last_active_totals.get_mut(&ball_id) {
+                    entry.0 = None;
+                }
+            }
+            if combat_state.warp_core_strength != prev_cs.warp_core_strength {
+                let stale_core = core_delta == 0
+                    && last_active_totals
+                        .get(&ball_id)
+                        .and_then(|t| t.1)
+                        == Some(combat_state.warp_core_strength);
+                if !stale_core {
+                    base_core_strengths
+                        .insert(ball_id, combat_state.warp_core_strength - core_delta);
+                }
+                if let Some(entry) = last_active_totals.get_mut(&ball_id) {
+                    entry.1 = None;
+                }
+            }
+        }
+    }
+    if let Some(db) = db_opt {
+        crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, &combat_state);
+    }
+    ballpark.combat_states.insert(ball_id, combat_state);
+    reconcile_tackle_and_bubbles(
+        ballpark,
+        active_module_cycles,
+        base_scramble_strengths,
+        base_core_strengths,
+        db_opt,
+        deactivation_hook,
+    );
+    snapshot_active_tackle_totals(ballpark, active_module_cycles, last_active_totals);
+}
+
 pub(crate) fn reconcile_tackle_and_bubbles(
     ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
@@ -40,6 +232,17 @@ pub(crate) fn reconcile_tackle_and_bubbles(
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     deactivation_hook: Option<&ModuleDeactivationHook>,
 ) {
+    // 0. Prune synthetic Support Fighter Siren tackle cycles when the fighter ball, parent carrier,
+    //    or target ball leaves space (`CmdAbandonFighter` explicitly strips cycles on abandonment).
+    active_module_cycles.retain(|c| {
+        let Some((parent_ship_id, _fighter_item_id)) = parse_siren_tackle_ids(&c.effect_name) else {
+            return true;
+        };
+        ballpark.balls.contains_key(&c.ship_id)
+            && ballpark.balls.contains_key(&parent_ship_id)
+            && c.target_id.is_some_and(|tid| ballpark.balls.contains_key(&tid))
+    });
+
     // 1. Collect all target balls currently subjected to MWD/MJD suppression (Warp Scrambler / Scripted HIC WDFG / Zero-Point Mass Entangler)
     let mut mwd_disabled_targets: Vec<BallId> = Vec::new();
     for cycle in active_module_cycles.iter() {
@@ -352,7 +555,11 @@ pub(crate) fn on_target_unlocked_in_actor(
             Some(tid) => active_module_cycles[idx].target_id == Some(tid),
             None => active_module_cycles[idx].target_id.is_some(),
         };
-        if active_module_cycles[idx].ship_id == source_id && matches_target {
+        if (active_module_cycles[idx].ship_id == source_id
+            || parse_siren_tackle_ids(&active_module_cycles[idx].effect_name)
+                .is_some_and(|(parent_id, _)| parent_id == source_id))
+            && matches_target
+        {
             let removed = active_module_cycles.swap_remove(idx);
             cleanup_removed_module_cycle(ballpark, &removed, db_opt);
             removed_cycles.push(removed);

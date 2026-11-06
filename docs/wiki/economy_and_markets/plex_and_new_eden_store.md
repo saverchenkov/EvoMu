@@ -26,15 +26,28 @@ flowchart LR
   * `[feature_flags] starter_plex_balance` (`i64`, default `0`, must be `>= 0`): credited to every newly created character via `charUnboundMgr.CreateCharacterWithDoll`.
   * `[[player_accounts]] [player_accounts.starter_character] initial_balance_plex` (`Option<i64>`, default `None`, must be `>= 0`): overrides `starter_plex_balance` for that account's startup-provisioned character (including explicit `0`).
 
-### Fast-Checkout PLEX Packs (`FastCheckoutService`)
+### Fast-Checkout (`FastCheckoutService`) — Strict Paid Mode vs `$0.00` Sandbox Mode
 
-* **`free_fast_checkout_plex` (`bool`, default `false`):**
-  * When `false` (strict default), `FastCheckoutService.BuyOffer` requires the user's password and an active quick-pay token (`PaymentTokenRequired`), records a `PaymentReceiptRecord`, and returns `"status": "CONFIRMED"`.
-  * When `true` (enabled in [`evomu.toml`](../../../evomu.toml)), `IsFastCheckoutEnabledForUser` defaults to `true` (still honoring an explicit `global_config_values["fastCheckoutEnabled"] = false`), ensures the 4 canonical PLEX packs (`100`, `250`, `500`, and `1100` PLEX at offer IDs `1`–`4`) are exposed with `price = 0.0`, accepts omitted/`None`/`""` password without requiring a payment token, credits the account PLEX Vault, pushes `OnAccountChange("plex", char_id, new_balance)` + Quasar `BalanceChangedNotice`, and returns `"status": "COMPLETED"`, `"newPlexBalance"`, and `"Message": "OK"`.
+`[feature_flags] free_fast_checkout_plex` (`bool`, code default `false` in `FeatureFlagsConfig`; enabled as `true` in the sample [`evomu.toml`](../../../evomu.toml)) controls how MachoNet `FastCheckoutService` handles real-money USD checkout:
 
-### New Eden Store (`storeManager` & Quasar `eve_public.store.*`)
+| Behavior | Strict Economy Mode (`free_fast_checkout_plex = false`, default) | Self-Hosted Sandbox Mode (`free_fast_checkout_plex = true`) |
+|---|---|---|
+| `IsFastCheckoutEnabledForUser` | `false` unless enabled per-user (`fast_checkout:<uid>`) or via `global_config_values["fastCheckoutEnabled"] = true` | `true` by default (still honors explicit `global_config_values["fastCheckoutEnabled"] = false`) |
+| `GetOffersForUser` USD pricing | Displays catalog `price_usd` (e.g. `$4.99`–`$49.99` PLEX packs; `$19.99` `30 Days Omega` / `MPTC`, `$7.99` `Skill Extractor`) | Guarantees the 4 canonical PLEX packs (`100`, `250`, `500`, `1100` PLEX, IDs `1`–`4`) and sets display `price = 0.0` (`unit_cents = 0`) |
+| Password verification in `BuyOffer` | Mandatory Argon2id account password check (`InvalidPassword` if omitted or wrong) | Omitted/`None`/`""` password accepted for 1-click checkout (non-empty passwords are still Argon2id-verified) |
+| QuickPay token & USD receipt | Requires an active unconsumed token (`is_quick_pay && !consumed` in `payment_tokens`, else `PaymentTokenRequired`) and appends `PaymentReceiptRecord` | Skipped because `amount_in_cents == 0` |
+| Fulfillment & response status | Credits `plex_amount * qty`, delivers `products` to station `Hangar`, sets `clone_grade = 2` when `category_id == 1`, returns `"status": "CONFIRMED"` | Same vault credit, item delivery, Omega `clone_grade = 2` upgrade, `OnAccountChange("plex")` + Quasar `BalanceChangedNotice`, returns `"status": "COMPLETED"` |
 
-* Even when `free_fast_checkout_plex = true` makes external PLEX pack top-ups free (`$0.00`), in-game New Eden Store catalog offers served by `storeManager.get_offers`, `storeManager.can_purchase_offer`, and `storeManager.buy_offer` retain their positive PLEX prices (`price_plex > 0`), deduct PLEX from the user's PLEX Vault, record a store debit transaction, and deliver items (such as permanent ship SKIN licenses) to the character's hangar.
+> [!NOTE]
+> Dual-priced catalog offers (such as `1001` `30 Days Omega`, `1002` `MPTC`, and `1003` `Skill Extractor` hydrated from `nes_store_catalog`) carry both a USD `price_cents` and a `price_plex` cost. Enabling `free_fast_checkout_plex = true` zeroes out the USD `amount_in_cents` charge on `FastCheckoutService.BuyOffer`, while pure PLEX-pack offers (`price_plex == 0`, IDs `1`–`4`) grant PLEX at `$0.00` and any offer with `price_plex > 0` still checks and debits `price_plex * quantity` from `account_plex_vault`.
+
+### New Eden Store (`storeManager`) & Quasar Payment / QuickPay Replay Protection
+
+* **PLEX-Denominated NES (`storeManager` & `eve_public.store.*`):** Completely separate from `free_fast_checkout_plex`. Offers served by `storeManager.get_offers`, `storeManager.can_purchase_offer`, and `storeManager.buy_offer` (`"PLX"` currency) always retain their positive `price_plex > 0` cost, debit `account_plex_vault` (queried via `eve_public.plex.vault.api.BalanceRequest`), record a `"New Eden Store"` / `"FastCheckout Purchase"` `PlexTransactionRecord`, and deliver items or permanent Ship SKIN licenses to the character's hangar.
+* **Quasar Real-Money Purchase & Single-Use QuickPay Tokens (`eve_public.payment.*`):**
+  * `eve_public.payment.purchase.api.CostRequest` and `eve_public.payment.purchase.api.TokenRequest` price store offers directly from `StoreOffer.price_cents` (`STATUS_NOT_IMPLEMENTED` if an offer is PLEX-only with `price_cents = None`).
+  * **Single-use token replay protection:** `TokenRequest` looks up the caller's `PaymentTokenRecord` in `service_state_blobs["payment_tokens"]`, enforces `tok.user_id == uid`, `tok.is_quick_pay == true`, and `!tok.consumed`, and atomically marks `tok.consumed = true` inside the purchase snapshot mutation before fulfilling Omega time (`clone_grade = 2`, `SubscriptionChangedNotice`) or hangar items. Any replay of a consumed token is rejected with `STATUS_BAD_REQUEST` (`"Payment token already consumed"`).
+  * Players or GMs can revoke all active QuickPay tokens at any time via `eve_public.payment.token.api.DisableAllRequest`, which clears `is_quick_pay = false` and emits `QuickPayRemovedNotice`.
 
 ---
 

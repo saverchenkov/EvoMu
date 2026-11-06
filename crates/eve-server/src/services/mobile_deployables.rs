@@ -901,42 +901,46 @@ pub fn handle_ball_damage_in_actor(
             // During 60-second anchoring countdown or when unanchored: takes direct damage and can be destroyed without reinforcement
             let anchoring_until_unix = rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs);
             let is_anchoring = !rec.anchor_completed && rec.anchor_start_unix > 0 && anchoring_until_unix > now_unix;
-            if rec.is_unanchored || is_anchoring {
-                let (applied, destroyed) = cs.apply_damage(damage);
-                if destroyed {
-                    ballpark.balls.remove(&ball_id);
-                }
-                return Some((applied, destroyed, ball_snap));
-            }
-
-            // Reinforcement threshold at 25% shield HP once anchored
-            let shield_threshold = (cs.max_shield_hp * DEPOT_REINFORCE_SHIELD_THRESHOLD).max(0.0);
-            if cs.shield_hp > shield_threshold + 1e-6 {
-                let damage_to_threshold = (cs.shield_hp - shield_threshold).max(0.0);
-                let incoming_total = damage.total();
-                if incoming_total + 1e-6 >= damage_to_threshold {
-                    cs.shield_hp = shield_threshold;
-                    let reinf_until = now_unix.saturating_add(DEPOT_REINFORCE_DURATION_SECS);
-                    db.with_mut_snapshot(|snap| {
-                        write_deployable_state_snap(snap, |st| {
-                            if let Some(r) = st.deployables.get_mut(&ball_id) {
-                                r.reinforced_until_unix = Some(reinf_until);
-                            }
+            if !(rec.is_unanchored || is_anchoring) {
+                // Reinforcement threshold at 25% shield HP once anchored (applying shield resistances)
+                let shield_threshold = (cs.max_shield_hp * DEPOT_REINFORCE_SHIELD_THRESHOLD).max(0.0);
+                if cs.shield_hp > shield_threshold + 1e-6 {
+                    let damage_to_threshold = (cs.shield_hp - shield_threshold).max(0.0);
+                    let resisted_shield_dmg = damage.em.max(0.0) * cs.shield_resonance[0]
+                        + damage.thermal.max(0.0) * cs.shield_resonance[1]
+                        + damage.kinetic.max(0.0) * cs.shield_resonance[2]
+                        + damage.explosive.max(0.0) * cs.shield_resonance[3];
+                    if resisted_shield_dmg <= 0.0 {
+                        return Some((0.0, false, ball_snap));
+                    }
+                    if resisted_shield_dmg + 1e-6 >= damage_to_threshold {
+                        cs.shield_hp = shield_threshold;
+                        let reinf_until = now_unix.saturating_add(DEPOT_REINFORCE_DURATION_SECS);
+                        db.with_mut_snapshot(|snap| {
+                            write_deployable_state_snap(snap, |st| {
+                                if let Some(r) = st.deployables.get_mut(&ball_id) {
+                                    r.reinforced_until_unix = Some(reinf_until);
+                                }
+                            });
                         });
-                    });
-                    return Some((damage_to_threshold, false, ball_snap));
-                } else {
-                    cs.shield_hp -= incoming_total;
-                    return Some((incoming_total, false, ball_snap));
+                        return Some((damage_to_threshold, false, ball_snap));
+                    } else {
+                        cs.shield_hp -= resisted_shield_dmg;
+                        return Some((resisted_shield_dmg, false, ball_snap));
+                    }
                 }
             }
         }
 
-        // Already reinforced or shields <= 25%: take damage directly without reinforcement
+        // Unanchored, anchoring, post-reinforcement, or shields <= 25%: take damage directly and run full cleanup on destruction
         let (applied, destroyed) = cs.apply_damage(damage);
         if destroyed {
-            ballpark.balls.remove(&ball_id);
-            let pos_arr = db.with_snapshot(|s| s.item_positions.get(&ball_id).copied()).unwrap_or([0.0; 3]);
+            let _ = ballpark.remove_ball(ball_id);
+            let pos_arr = db
+                .with_snapshot(|s| s.item_positions.get(&ball_id).copied())
+                .or_else(|| ball_snap.as_ref().map(|b| b.position.to_array()))
+                .unwrap_or([0.0; 3]);
+            let mut spawned_can_id = None;
             db.with_mut_snapshot(|snap| {
                 let hold_items: Vec<(i64, i32)> = snap
                     .items
@@ -963,6 +967,7 @@ pub fn handle_ball_damage_in_actor(
                     );
                     snap.item_positions.insert(can_id, pos_arr);
                     crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, can_id, now_unix, false);
+                    spawned_can_id = Some(can_id);
 
                     for (iid, _) in hold_items {
                         let roll = ((now_unix ^ (iid as u64)).wrapping_mul(6364136223846793005) >> 32) as f64 / 4294967296.0;
@@ -980,10 +985,33 @@ pub fn handle_ball_damage_in_actor(
                 snap.items.remove(&ball_id);
                 snap.item_positions.remove(&ball_id);
                 snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
+                snap.sp6_lifecycle.ship_combat_hp.remove(&ball_id);
                 write_deployable_state_snap(snap, |st| {
                     st.deployables.remove(&ball_id);
                 });
             });
+            if let Some(can_id) = spawned_can_id {
+                let _ = ballpark.add_static_ball_with_meta(
+                    eve_destiny::Ball {
+                        id: can_id,
+                        type_id: 23,
+                        position: DVec3::from_array(pos_arr),
+                        velocity: DVec3::ZERO,
+                        max_velocity: 0.0,
+                        inertia: 1.0,
+                        mass: 1_000.0,
+                        radius: 20.0,
+                        speed_fraction: 0.0,
+                        mode: eve_destiny::MovementMode::Stop,
+                    },
+                    eve_destiny::SlimItemMeta {
+                        group_id: 12,
+                        category_id: 2,
+                        owner_id,
+                        ..Default::default()
+                    },
+                );
+            }
         }
         return Some((applied, destroyed, ball_snap));
     }
@@ -991,6 +1019,7 @@ pub fn handle_ball_damage_in_actor(
     if it_grp == GROUP_MOBILE_TRACTOR {
         let (applied, destroyed, ball_opt) = ballpark.apply_damage_to_ball(ball_id, damage)?;
         if destroyed {
+            let _ = ballpark.remove_ball(ball_id);
             // Drop 50% loot into cargo container
             let pos_arr = db.with_snapshot(|s| s.item_positions.get(&ball_id).copied()).unwrap_or([0.0; 3]);
             db.with_mut_snapshot(|snap| {
@@ -1034,6 +1063,7 @@ pub fn handle_ball_damage_in_actor(
                 snap.items.remove(&ball_id);
                 snap.item_positions.remove(&ball_id);
                 snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
+                snap.sp6_lifecycle.ship_combat_hp.remove(&ball_id);
                 write_deployable_state_snap(snap, |st| {
                     st.deployables.remove(&ball_id);
                 });
@@ -1048,10 +1078,12 @@ pub fn handle_ball_damage_in_actor(
     ) {
         let (applied, destroyed, ball_opt) = ballpark.apply_damage_to_ball(ball_id, damage)?;
         if destroyed {
+            let _ = ballpark.remove_ball(ball_id);
             db.with_mut_snapshot(|snap| {
                 snap.items.remove(&ball_id);
                 snap.item_positions.remove(&ball_id);
                 snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
+                snap.sp6_lifecycle.ship_combat_hp.remove(&ball_id);
                 write_deployable_state_snap(snap, |st| {
                     st.deployables.remove(&ball_id);
                 });
@@ -1061,6 +1093,20 @@ pub fn handle_ball_damage_in_actor(
     }
 
     None
+}
+
+pub(crate) fn mmju_jump_dir(b: &eve_destiny::Ball) -> DVec3 {
+    if b.velocity.length_squared() > 1e-4 {
+        b.velocity.normalize()
+    } else if let eve_destiny::MovementMode::GotoDirection { direction } = b.mode {
+        if direction.length_squared() > 1e-4 {
+            direction.normalize()
+        } else {
+            DVec3::X
+        }
+    } else {
+        DVec3::X
+    }
 }
 
 /// Activates a Mobile Micro Jump Unit (`feat:structures.mobile-micro-jump-unit`) for the caller's ship.
@@ -1181,6 +1227,18 @@ pub async fn handle_activate_micro_jump_unit(
     if sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) || ship_cs.as_ref().is_some_and(|cs| cs.is_mwd_mjd_disabled) {
         return Err(BridgeRpcError { code: "WarpScrambled".into(), message: "Cannot activate Mobile Micro Jump Unit while warp scrambled".into() });
     }
+    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
+    crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "jump")?;
+    let jump_dir = mmju_jump_dir(&ship_ball);
+    let dest_pos = ship_ball.position + jump_dir * MMJU_JUMP_DISTANCE_M;
+    crate::services::inventory_fitting::fitting_ship_forcefield::check_pos_forcefield_coverage(
+        ctx,
+        sys_id,
+        char_id,
+        ship_id,
+        &[ship_ball.position, dest_pos],
+    )
+    .await?;
     let already_spooling = read_deployable_state(ctx)
         .mmju_spools
         .values()
@@ -1203,7 +1261,7 @@ pub async fn handle_activate_micro_jump_unit(
                 solar_system_id: sys_id,
                 started_unix: now_unix,
                 complete_at_unix: spool_complete_unix,
-                direction: [0.0, 0.0, 1.0],
+                direction: jump_dir.to_array(),
             },
         );
     });
