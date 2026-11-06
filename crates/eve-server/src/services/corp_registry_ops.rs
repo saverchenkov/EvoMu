@@ -521,11 +521,10 @@ pub fn handle(
                     return key == 1000;
                 }
                 let (is_ceo, role_mask) = crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-                    snap, corp_id, char_id, session.corp_role, now_unix,
+                    snap, corp_id, char_id, 0, now_unix,
                 );
                 let take_bit = 1u64 << (27 + div_idx);
-                let query_bit = 1u64 << (20 + div_idx);
-                is_ceo || role_mask == u64::MAX || (role_mask & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_ACCOUNTANT | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT | eve_db::corp_roles::ROLE_TRADER | take_bit | query_bit)) != 0
+                is_ceo || role_mask == u64::MAX || (role_mask & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_ACCOUNTANT | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT | take_bit)) != 0
             });
             if !can_use {
                 return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: format!("Character {char_id} lacks wallet division access for account key {key}") }));

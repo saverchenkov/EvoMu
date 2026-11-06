@@ -128,13 +128,8 @@ pub(crate) fn sweep_expired_orders_filtered(
                             .with_context(eve_db::ledger::JournalContext::MarketOrder, oid),
                     });
                 } else if let Some(corp) = snap.corporations.get_mut(&order.owner_id) {
-                    corp.master_wallet = corp.master_wallet.checked_add(order.escrow).unwrap_or(corp.master_wallet);
                     let div_id = meta.account_key.map(|ak| (ak.saturating_sub(999)).clamp(1, 7) as u8).unwrap_or(1);
-                    corp.ensure_wallet_divisions();
-                    if let Some(div) = corp.wallet_divisions.iter_mut().find(|d| d.division_id == div_id) {
-                        div.balance = div.balance.checked_add(order.escrow).unwrap_or(div.balance);
-                    }
-                    let bal = corp.master_wallet;
+                    let bal = corp.credit_division(div_id, order.escrow);
                     snap.append_journal(
                         order.owner_id,
                         "MarketOrderExpireRefund",
@@ -490,24 +485,27 @@ pub fn handle(
                     }
                     let mut meta = load_market_order_meta(snap, &order, 0);
                     if is_corp_order {
-                        let Some(corp) = snap.corporations.get(&caller_corp_id) else {
+                        if !snap.corporations.contains_key(&caller_corp_id) {
                             return Err(rpc_err("CorporationNotFound", "Corporation not found"));
-                        };
-                        let role_mask = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+                        }
                         let is_original_placer = snap
                             .market_order_meta
                             .get(&order_id)
                             .and_then(|m| m.issued_by)
                             == Some(char_id);
-                        if !is_original_placer
-                            && corp.ceo_id != char_id
-                            && !eve_db::corp_roles::has_role(
-                                role_mask,
-                                eve_db::corp_roles::ROLE_TRADER
-                                    | eve_db::corp_roles::ROLE_ACCOUNTANT
-                                    | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT,
-                            )
-                        {
+                        let (is_ceo, eff_roles) =
+                            crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+                                snap,
+                                caller_corp_id,
+                                char_id,
+                                0,
+                                now_unix,
+                            );
+                        let allowed_roles = eve_db::corp_roles::ROLE_DIRECTOR
+                            | eve_db::corp_roles::ROLE_TRADER
+                            | eve_db::corp_roles::ROLE_ACCOUNTANT
+                            | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT;
+                        if !is_original_placer && !is_ceo && (eff_roles & allowed_roles) == 0 {
                             return Err(rpc_err("CorpRoleRequired", "Character lacks corporation accountant/trader role to modify corporate order"));
                         }
                     }
@@ -640,24 +638,20 @@ pub fn handle(
                         let Some(corp_mut) = snap.corporations.get_mut(&caller_corp_id) else {
                             return Err(rpc_err("CorporationNotFound", "Corporation not found"));
                         };
-                        corp_mut.ensure_wallet_divisions();
-                        if net_wallet_debit_cents > 0 {
+                        let div_bal = corp_mut.division_balance(div_id);
+                        let bal_after = if net_wallet_debit_cents > 0 {
                             let req = IskCents(net_wallet_debit_cents);
-                            let div_bal = corp_mut.wallet_divisions.iter().find(|d| d.division_id == div_id)
-                                .map(|d| d.balance).unwrap_or(corp_mut.master_wallet);
-                            if div_bal.0 < req.0 || corp_mut.master_wallet.0 < req.0 {
+                            let Some(next_bal) = div_bal.checked_sub(req) else {
                                 return Err(rpc_err("InsufficientFunds", "Not enough corporation ISK for order modification relist fee and escrow"));
-                            }
-                            if let Some(div) = corp_mut.wallet_divisions.iter_mut().find(|d| d.division_id == div_id)
-                            { div.balance = div.balance.checked_sub(req).unwrap_or(IskCents(0)); }
-                            corp_mut.master_wallet = corp_mut.master_wallet.checked_sub(req).unwrap_or(IskCents(0));
-                        } else if net_wallet_debit_cents < 0 { let refund = IskCents(-net_wallet_debit_cents);
-                            if let Some(div) = corp_mut.wallet_divisions.iter_mut().find(|d| d.division_id == div_id)
-                            { div.balance = div.balance.checked_add(refund).unwrap_or(div.balance); }
-                            corp_mut.master_wallet = corp_mut.master_wallet.checked_add(refund)
-                                .unwrap_or(corp_mut.master_wallet);
-                        }
-                        let bal_after = corp_mut.master_wallet;
+                            };
+                            corp_mut.set_division_balance(div_id, next_bal);
+                            next_bal
+                        } else if net_wallet_debit_cents < 0 {
+                            corp_mut.credit_division(div_id, IskCents(-net_wallet_debit_cents))
+                        } else {
+                            corp_mut.ensure_wallet_divisions();
+                            div_bal
+                        };
                         snap.append_journal(
                             caller_corp_id,
                             "MarketBrokerFee",
@@ -968,26 +962,9 @@ pub fn handle(
                                     false
                                 }
                             } else if let Some(buyer_corp) = snap.corporations.get_mut(&resting.owner_id) {
-                                buyer_corp.ensure_wallet_divisions();
-                                let div_bal = buyer_corp
-                                    .wallet_divisions
-                                    .iter()
-                                    .find(|d| d.division_id == resting_div_id)
-                                    .map(|d| d.balance)
-                                    .unwrap_or(buyer_corp.master_wallet);
-                                if div_bal.0 >= uncovered.0 && buyer_corp.master_wallet.0 >= uncovered.0 {
-                                    buyer_corp.master_wallet = buyer_corp
-                                        .master_wallet
-                                        .checked_sub(uncovered)
-                                        .unwrap_or(IskCents(0));
-                                    if let Some(div) = buyer_corp
-                                        .wallet_divisions
-                                        .iter_mut()
-                                        .find(|d| d.division_id == resting_div_id)
-                                    {
-                                        div.balance = div.balance.checked_sub(uncovered).unwrap_or(IskCents(0));
-                                    }
-                                    let new_bal = buyer_corp.master_wallet;
+                                let div_bal = buyer_corp.division_balance(resting_div_id);
+                                if let Some(new_bal) = div_bal.checked_sub(uncovered) {
+                                    buyer_corp.set_division_balance(resting_div_id, new_bal);
                                     snap.append_journal(
                                         resting.owner_id,
                                         "MarketEscrowCover",
@@ -1011,18 +988,7 @@ pub fn handle(
                                             .checked_add(resting.escrow)
                                             .unwrap_or(buyer_ch.balance);
                                     } else if let Some(buyer_corp) = snap.corporations.get_mut(&resting.owner_id) {
-                                        buyer_corp.ensure_wallet_divisions();
-                                        buyer_corp.master_wallet = buyer_corp
-                                            .master_wallet
-                                            .checked_add(resting.escrow)
-                                            .unwrap_or(buyer_corp.master_wallet);
-                                        if let Some(div) = buyer_corp
-                                            .wallet_divisions
-                                            .iter_mut()
-                                            .find(|d| d.division_id == resting_div_id)
-                                        {
-                                            div.balance = div.balance.checked_add(resting.escrow).unwrap_or(div.balance);
-                                        }
+                                        buyer_corp.credit_division(resting_div_id, resting.escrow);
                                     }
                                 }
                                 if let Some(o_mut) = snap.market_orders.get_mut(&bid_oid) {
@@ -1250,7 +1216,7 @@ pub fn handle(
                 if has_winner && winner != c.issuer_id {
                     snap.credit_contract_issuer(&c, c.current_bid);
                     if c.for_corp {
-                        let bal = snap.corporations.get(&c.issuer_corp_id).map(|corp| corp.master_wallet).unwrap_or(IskCents(0));
+                        let bal = snap.corporations.get(&c.issuer_corp_id).map(|corp| corp.division_balance(1)).unwrap_or(IskCents(0));
                         snap.append_journal(c.issuer_corp_id, "ContractAuctionSold", c.current_bid, bal, format!("Auction {cid} finished"));
                     } else if let Some(iss) = snap.characters.get(&c.issuer_id) {
                         let bal = iss.balance;

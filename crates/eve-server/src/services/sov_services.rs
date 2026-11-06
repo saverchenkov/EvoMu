@@ -124,27 +124,33 @@ pub(crate) fn can_access_sov_hub_fuel(
     if group_id > 0 {
         let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
         if let Some(grp) = ext.owner_groups.get(&group_id) {
+            use crate::services::structure_acl_defense_rules::is_acl_role_allowed;
             if let Some(&r) = grp.members.get(&char_id) {
-                return r >= 0;
+                return is_acl_role_allowed(r);
             }
             if grp.creator_id == char_id {
                 return true;
             }
             if let Some(&r) = grp.members.get(&corp_id) {
-                return r >= 0;
+                return is_acl_role_allowed(r);
             }
             if let Some(aid) = alliance_id.filter(|&a| a > 0) {
                 if let Some(&r) = grp.members.get(&aid) {
-                    return r >= 0;
+                    return is_acl_role_allowed(r);
                 }
             }
             return false;
         }
     }
-    let has_mgr = eve_db::corp_roles::has_role(
-        extra_roles,
-        eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER,
-    );
+    let (is_ceo, eff_roles) =
+        crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+            snap, corp_id, char_id, 0, 0,
+        );
+    let combined = eff_roles | extra_roles;
+    let has_mgr = is_ceo
+        || (combined
+            & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER))
+            != 0;
     if !has_mgr {
         return false;
     }
@@ -423,15 +429,22 @@ pub async fn handle(
             };
             let access_group_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
 
+            let now_unix = ctx.now_unix();
+            if let Some(cid) = session.corporation_id.filter(|&id| id > 0) {
+                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, cid);
+            }
             let is_corp_director = ctx.db.with_snapshot(|snap| {
                 let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                if let Some(corp) = snap.corporations.get(&corp_id) {
-                    let role = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
-                    let has_role = char_id == corp.ceo_id
-                        || eve_db::corp_roles::has_role(
-                            role,
-                            eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER,
+                if snap.corporations.contains_key(&corp_id) {
+                    let (is_ceo, eff_roles) =
+                        crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+                            snap, corp_id, char_id, 0, now_unix,
                         );
+                    let has_role = is_ceo
+                        || (eff_roles
+                            & (eve_db::corp_roles::ROLE_DIRECTOR
+                                | eve_db::corp_roles::ROLE_STATION_MANAGER))
+                            != 0;
                     if !has_role {
                         return false;
                     }
@@ -832,7 +845,7 @@ pub async fn handle(
                 let structure_jammed = tenebrex_active || other_structure_jammed;
                 let item_inhibitor = snap.items.values().any(|i| {
                     i.location_id == sys_id as i64
-                        && (i.type_id == 33700
+                        && (i.type_id == 33_476
                             || ctx.sde.types.get(&i.type_id).is_some_and(|t| {
                                 t.default_attributes.get(&3038).copied().unwrap_or(0.0) > 0.0
                             }))

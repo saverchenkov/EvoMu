@@ -68,8 +68,34 @@ pub(crate) async fn rpc_call(
     } else {
         None
     };
-    ctx.dispatch_rpc(session, service, bound_id, method, args, &HashMap::new(), None)
-        .await
+    let temp_dock = service == "fwCharacterEnlistmentMgr"
+        && matches!(method, "CreateMyDirectEnlistment" | "RemoveMyDirectEnlistment")
+        && session.station_id.is_none()
+        && session.structure_id.is_none();
+    if temp_dock {
+        if let Some(cid) = session.character_id {
+            ctx.db.with_mut_snapshot(|s| {
+                if let Some(ch) = s.characters.get_mut(&cid) {
+                    ch.station_id = Some(60_003_760);
+                }
+            });
+        }
+        session.station_id = Some(60_003_760);
+    }
+    let out = ctx
+        .dispatch_rpc(session, service, bound_id, method, args, &HashMap::new(), None)
+        .await;
+    if temp_dock {
+        if let Some(cid) = session.character_id {
+            ctx.db.with_mut_snapshot(|s| {
+                if let Some(ch) = s.characters.get_mut(&cid) {
+                    ch.station_id = None;
+                }
+            });
+        }
+        session.station_id = None;
+    }
+    out
 }
 
 pub(crate) fn make_ball(id: i64, type_id: u32, pos: DVec3) -> Ball {

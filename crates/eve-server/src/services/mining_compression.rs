@@ -503,6 +503,9 @@ pub fn handle_structure_compression_mgr(
                 }));
             }
 
+            if let Some(cid) = session.corporation_id.filter(|&id| id > 0) {
+                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, cid);
+            }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(st) = snap.structures.get(&structure_id) else {
                     return Err(BridgeRpcError {
@@ -564,7 +567,7 @@ pub fn handle_structure_compression_mgr(
                 }
                 if caller_corp > 0
                     && item_owner == caller_corp
-                    && !caller_can_take_corp_hangar_item(snap, char_id, caller_corp, item_flag, session.corp_role)
+                    && !caller_can_take_corp_hangar_item(snap, char_id, caller_corp, item_flag, 0)
                 {
                     return Err(BridgeRpcError {
                         code: "CrpAccessDenied".into(),
@@ -695,6 +698,9 @@ pub fn handle_structure_compression_mgr(
             let efficiency =
                 compute_gas_decompression_efficiency(ctx, char_id, Some(structure_id));
 
+            if let Some(cid) = session.corporation_id.filter(|&id| id > 0) {
+                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, cid);
+            }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(st) = snap.structures.get(&structure_id) else {
                     return Err(BridgeRpcError {
@@ -746,7 +752,7 @@ pub fn handle_structure_compression_mgr(
                 }
                 if caller_corp > 0
                     && item_owner == caller_corp
-                    && !caller_can_take_corp_hangar_item(snap, char_id, caller_corp, item_flag, session.corp_role)
+                    && !caller_can_take_corp_hangar_item(snap, char_id, caller_corp, item_flag, 0)
                 {
                     return Err(BridgeRpcError {
                         code: "CrpAccessDenied".into(),
@@ -1159,7 +1165,7 @@ pub(crate) struct MetenoxDrillInspection {
 }
 
 pub fn caller_can_take_corp_hangar_item(snap: &eve_db::WorldStateSnapshot, char_id: i64, corp_id: i64, flag: InventoryFlag, session_corp_role: u64) -> bool {
-    let div_idx: u32 = match flag {
+    let div_idx: usize = match flag {
         InventoryFlag::CorpSAG1 | InventoryFlag::Hangar => 0,
         InventoryFlag::CorpSAG2 => 1,
         InventoryFlag::CorpSAG3 => 2,
@@ -1171,10 +1177,19 @@ pub fn caller_can_take_corp_hangar_item(snap: &eve_db::WorldStateSnapshot, char_
     };
     let Some(corp) = snap.corporations.get(&corp_id) else { return true };
     if corp.ceo_id == 0 || corp.ceo_id == char_id { return true; }
-    let take_mask = eve_db::corp_roles::ROLE_DIRECTOR | (1u64 << (13 + div_idx)) | (1u64 << (43 + div_idx));
-    let mut role = session_corp_role | corp.member_roles.get(&char_id).copied().unwrap_or(0);
+    let take_mask = eve_db::corp_roles::ROLE_DIRECTOR
+        | eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[div_idx]
+        | eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[div_idx];
+    let (_, mut role) = crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+        snap,
+        corp_id,
+        char_id,
+        session_corp_role,
+        0,
+    );
+    role |= session_corp_role;
     if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
-        role |= ra.roles | ra.roles_at_hq | ra.roles_at_base | ra.roles_at_other;
+        role |= ra.roles_at_hq | ra.roles_at_base | ra.roles_at_other;
     }
     (role & take_mask) != 0
 }

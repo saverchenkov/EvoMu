@@ -220,10 +220,7 @@ fn rpc_corp_and_alliance_enlistment_and_withdrawal() {
         .unwrap_err();
     assert_eq!(corp_cooldown.code, "MilitiaCooldownActive");
 
-    let now = ctx.now_unix();
-    ctx.db.with_mut_snapshot(|s| {
-        s.fw_corp_enlisted_on.insert(corp_id, now.saturating_sub(90_000));
-    });
+    ctx.advance_secs(90_000);
     assert_eq!(
         rt.block_on(handle(
             &ctx,
@@ -238,6 +235,7 @@ fn rpc_corp_and_alliance_enlistment_and_withdrawal() {
         PyRep::Bool(true)
     );
 
+    ctx.advance_secs(90_000);
     let joined_ally = rt
         .block_on(handle(
             &ctx,
@@ -256,9 +254,7 @@ fn rpc_corp_and_alliance_enlistment_and_withdrawal() {
         assert_eq!(s.fw_runtime.corp_war_factions.get(&extra_corp), Some(&500_004));
     });
 
-    ctx.db.with_mut_snapshot(|s| {
-        s.fw_corp_enlisted_on.insert(corp_id, now.saturating_sub(90_000));
-    });
+    ctx.advance_secs(90_000);
     let left_ally = rt
         .block_on(handle(
             &ctx,

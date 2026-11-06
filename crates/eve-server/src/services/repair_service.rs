@@ -225,8 +225,9 @@ fn check_item_repair_ownership_and_role(
     };
     let f = eff_flag as i64;
     if (116..=122).contains(&f) {
-        let div_idx = (f - 116) as u32;
-        let req_mask = (1u64 << (13 + div_idx)) | (1u64 << (43 + div_idx));
+        let div_idx = ((f - 116) as usize).min(6);
+        let req_mask = eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[div_idx]
+            | eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[div_idx];
         if (roles & req_mask) != 0 {
             return Ok(());
         }

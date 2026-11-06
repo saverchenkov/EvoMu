@@ -240,7 +240,8 @@ fn place_multi_sell_corporate_roles_insolvent_margin_bid_and_corp_bid_cover() {
         assert_eq!(s.market_orders[&920_101].vol_remaining, 0);
         assert_eq!(s.characters[&insolv_buyer_id].balance, IskCents::from_isk(100));
         assert_eq!(s.market_orders[&920_102].vol_remaining, 0);
-        assert_eq!(s.corporations[&buyer_corp_id].master_wallet, IskCents::from_isk(99_700));
+        assert_eq!(s.corporations[&buyer_corp_id].master_wallet, IskCents::from_isk(100_000));
+        assert_eq!(s.corporations[&buyer_corp_id].division_balance(2), IskCents::from_isk(99_700));
         assert_eq!(s.market_orders[&resting_oid].vol_remaining, 20);
         assert_eq!(s.market_orders[&resting_oid].owner_id, seller_corp_id);
     });
@@ -293,7 +294,8 @@ fn cancel_char_order_corporate_roles_and_deliveries_stack_merge() {
     ctx.db.with_snapshot(|s| {
         assert_eq!(s.items[&930_001].quantity, 75);
         assert_eq!(s.items[&930_001].version, 2);
-        assert_eq!(s.corporations[&corp_id].master_wallet, IskCents::from_isk(10_500));
+        assert_eq!(s.corporations[&corp_id].master_wallet, IskCents::from_isk(10_000));
+        assert_eq!(s.corporations[&corp_id].division_balance(2), IskCents::from_isk(500));
         let m = load_market_order_meta(s, &s.market_orders[&930_101], 0);
         assert_eq!(m.order_state, Some(3));
         assert_eq!(m.final_vol_remaining, Some(50));

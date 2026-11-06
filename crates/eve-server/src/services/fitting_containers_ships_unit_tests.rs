@@ -429,6 +429,24 @@ async fn invbroker_misc_and_encoded_items_decode_item() {
         oid_str: "N=1:1".into(),
         ref_id: 1,
     };
+    let char_id = sess.character_id.unwrap_or(90_000_001);
+    let wrap_loc = sess.station_id.unwrap_or(60_003_760);
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(
+            880_102,
+            InventoryItemRecord {
+                item_id: 880_102,
+                type_id: 3468,
+                owner_id: char_id,
+                location_id: wrap_loc,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
 
     for (svc, method, args) in [
         ("invbroker", "GetDamageForCrystals", vec![]),

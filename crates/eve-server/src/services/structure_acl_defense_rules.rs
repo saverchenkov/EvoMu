@@ -35,10 +35,34 @@ fn arg_i64(args: &[PyRep], idx: usize) -> Option<i64> {
 // 1. Structure Access Lists (`feat:structures.access-lists`)
 // ============================================================================
 
-pub const ACL_ROLE_BLOCKED: i64 = -1;
+pub const ACL_ROLE_NONE: i64 = -1;
 pub const ACL_ROLE_MEMBER: i64 = 0;
-pub const ACL_ROLE_ADMIN: i64 = 1;
-pub const ACL_ROLE_MANAGER: i64 = 2;
+pub const ACL_ROLE_MANAGER: i64 = 1;
+pub const ACL_ROLE_ADMIN: i64 = 2;
+pub const ACL_ROLE_EXCLUDED: i64 = 3;
+pub const ACL_ROLE_BLOCKED: i64 = ACL_ROLE_EXCLUDED;
+
+#[inline]
+pub fn is_acl_role_excluded(role: i64) -> bool {
+    role == ACL_ROLE_EXCLUDED || role < 0
+}
+
+#[inline]
+pub fn is_acl_role_allowed(role: i64) -> bool {
+    matches!(role, ACL_ROLE_MEMBER | ACL_ROLE_MANAGER | ACL_ROLE_ADMIN)
+}
+
+#[inline]
+pub fn normalize_acl_role_value(raw: i64) -> Result<i64, BridgeRpcError> {
+    match raw {
+        -1 | ACL_ROLE_EXCLUDED => Ok(ACL_ROLE_EXCLUDED),
+        ACL_ROLE_MEMBER | ACL_ROLE_MANAGER | ACL_ROLE_ADMIN => Ok(raw),
+        other => Err(err(
+            "InvalidAclRole",
+            format!("Role {other} is not a valid V24 ACL membershipType (0=Member, 1=Manager, 2=Admin, 3=Excluded)"),
+        )),
+    }
+}
 
 pub fn is_acl_admin(char_id: i64, grp: &ops::AccessGroupRecord) -> bool {
     grp.creator_id == char_id || grp.members.get(&char_id).copied() == Some(ACL_ROLE_ADMIN)
@@ -47,6 +71,73 @@ pub fn is_acl_admin(char_id: i64, grp: &ops::AccessGroupRecord) -> bool {
 pub fn is_acl_manager_or_admin(char_id: i64, grp: &ops::AccessGroupRecord) -> bool {
     is_acl_admin(char_id, grp)
         || grp.members.get(&char_id).copied() == Some(ACL_ROLE_MANAGER)
+}
+
+/// Synchronizes docking `allowed_*` / `blocked_*` sets on `pid` after modifying `entity_id`
+/// inside `group_id`, preserving cross-group exclusions/grants and ignoring defense-only groups.
+pub(crate) fn sync_profile_docking_entity_after_group_edit(
+    ext: &mut ops::StructureExtendedState,
+    pid: i64,
+    group_id: i64,
+    entity_id: i64,
+    is_ally: bool,
+    is_corp: bool,
+    new_role: Option<i64>,
+) {
+    if entity_id == 0 {
+        return;
+    }
+    let Some(attached_gids) = ext
+        .profiles_by_id
+        .get(&pid)
+        .filter(|p| p.access_group_ids.contains(&group_id))
+        .map(|p| p.access_group_ids.iter().copied().collect::<Vec<_>>())
+    else {
+        return;
+    };
+    let still_excluded_in_other = attached_gids.iter().any(|&gid| {
+        gid != group_id
+            && ext
+                .owner_groups
+                .get(&gid)
+                .and_then(|g| g.members.get(&entity_id))
+                .copied()
+                .is_some_and(is_acl_role_excluded)
+    });
+    let still_allowed_in_other = attached_gids.iter().any(|&gid| {
+        gid != group_id
+            && ext
+                .owner_groups
+                .get(&gid)
+                .and_then(|g| g.members.get(&entity_id))
+                .copied()
+                .is_some_and(is_acl_role_allowed)
+    });
+    let Some(prof) = ext.profiles_by_id.get_mut(&pid) else {
+        return;
+    };
+    match new_role {
+        Some(role) if is_acl_role_excluded(role) => {
+            ops::apply_entity_to_profile(prof, entity_id, is_ally, is_corp, true, true);
+            if !still_allowed_in_other {
+                ops::apply_entity_to_profile(prof, entity_id, is_ally, is_corp, false, false);
+            }
+        }
+        Some(_) => {
+            ops::apply_entity_to_profile(prof, entity_id, is_ally, is_corp, false, true);
+            if !still_excluded_in_other {
+                ops::apply_entity_to_profile(prof, entity_id, is_ally, is_corp, true, false);
+            }
+        }
+        None => {
+            if !still_allowed_in_other {
+                ops::apply_entity_to_profile(prof, entity_id, is_ally, is_corp, false, false);
+            }
+            if !still_excluded_in_other {
+                ops::apply_entity_to_profile(prof, entity_id, is_ally, is_corp, true, false);
+            }
+        }
+    }
 }
 
 /// Handles `ownerGroupManager.UpdateMembershipTypes(groupID, memberIDs, membershipType)`
@@ -59,7 +150,7 @@ pub fn handle_set_member_role(
     let (_, char_id) = ServerContext::require_character(session)?;
     let group_id = arg_i64(args, 0).ok_or_else(|| err("MissingGroupId", "UpdateMembershipTypes requires groupID"))?;
     let default_role = arg_i64(args, 2).unwrap_or(ACL_ROLE_MEMBER);
-    let updates: Vec<(i64, i64)> = match args.get(1) {
+    let raw_updates: Vec<(i64, i64)> = match args.get(1) {
         Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
             let ids: Vec<i64> = items.iter().filter_map(|v| v.as_i64()).collect();
             if ids.is_empty() {
@@ -82,10 +173,9 @@ pub fn handle_set_member_role(
             vec![(eid, default_role)]
         }
     };
-    for &(_, role) in &updates {
-        if !matches!(role, ACL_ROLE_BLOCKED | ACL_ROLE_MEMBER | ACL_ROLE_ADMIN | ACL_ROLE_MANAGER) {
-            return Err(err("InvalidAclRole", format!("Role {role} is not a valid ACL role (-1, 0, 1, 2)")));
-        }
+    let mut updates = Vec::with_capacity(raw_updates.len());
+    for (eid, raw_role) in raw_updates {
+        updates.push((eid, normalize_acl_role_value(raw_role)?));
     }
 
     let (notify_corp, released) = ctx.db.try_with_mut_snapshot(|snap| {
@@ -127,21 +217,17 @@ pub fn handle_set_member_role(
         let linked_pids: Vec<i64> = ext
             .profiles_by_id
             .values()
-            .filter(|p| p.access_group_ids.contains(&group_id) || p.defense_group_ids.contains(&group_id))
+            .filter(|p| {
+                p.access_group_ids.contains(&group_id)
+                    || p.defense_group_ids.contains(&group_id)
+                    || p.service_acl_rules.values().any(|rows| rows.iter().any(|&(gid, _)| gid == group_id))
+            })
             .map(|p| p.profile_id)
             .collect();
 
         for pid in linked_pids {
-            if let Some(prof) = ext.profiles_by_id.get_mut(&pid) {
-                for &(entity_id, role, is_ally, is_corp) in &classified {
-                    let is_blocked = role == ACL_ROLE_BLOCKED;
-                    ops::apply_entity_to_profile(prof, entity_id, is_ally, is_corp, is_blocked, true);
-                    if !is_blocked {
-                        ops::apply_entity_to_profile(prof, entity_id, is_ally, is_corp, true, false);
-                    } else {
-                        ops::apply_entity_to_profile(prof, entity_id, is_ally, is_corp, false, false);
-                    }
-                }
+            for &(entity_id, role, is_ally, is_corp) in &classified {
+                sync_profile_docking_entity_after_group_edit(&mut ext, pid, group_id, entity_id, is_ally, is_corp, Some(role));
             }
             ops::sync_assigned_structures_for_profile(&mut ext, pid);
         }
@@ -209,7 +295,7 @@ pub fn handle_get_group(
         let grp = ext.owner_groups.get(&group_id).ok_or_else(|| err("AccessGroupNotFound", format!("Group {group_id} not found")))?;
         let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
         let can_view = grp.creator_id == char_id
-            || grp.members.get(&char_id).is_some_and(|&r| r >= 0)
+            || grp.members.get(&char_id).copied().is_some_and(is_acl_role_allowed)
             || (grp.owner_corp_id != 0 && grp.owner_corp_id == caller_corp)
             || session.has_gm_role();
         if !can_view {
@@ -238,7 +324,7 @@ pub fn handle_get_members(
         let grp = ext.owner_groups.get(&group_id).ok_or_else(|| err("AccessGroupNotFound", format!("Group {group_id} not found")))?;
         let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
         let can_view = grp.creator_id == char_id
-            || grp.members.get(&char_id).is_some_and(|&r| r >= 0)
+            || grp.members.get(&char_id).copied().is_some_and(is_acl_role_allowed)
             || (grp.owner_corp_id != 0 && grp.owner_corp_id == caller_corp)
             || session.has_gm_role();
         if !can_view {
@@ -408,10 +494,7 @@ pub fn evaluate_auto_defense_target(
     let Some(st) = snap.structures.get(&structure_id) else {
         return false;
     };
-    if matches!(
-        st.state.as_str(),
-        "Destroyed" | "Unanchored" | "AnchorVulnerable" | "Anchoring" | "NoCore"
-    ) {
+    if !crate::services::structure_control_ops::is_structure_combat_operational(Some(ctx), st) {
         return false;
     }
     let ext = load_ext_state(snap);
@@ -502,9 +585,9 @@ pub fn evaluate_auto_defense_target(
         if let Some(p) = ext.access_profiles.get(&structure_id) {
             let grp_blk = p.access_group_ids.iter().chain(&p.defense_group_ids).any(|gid| {
                 ext.owner_groups.get(gid).is_some_and(|g| {
-                    g.members.get(&pilot_id) == Some(&-1)
-                        || (pilot_corp > 0 && g.members.get(&pilot_corp) == Some(&-1))
-                        || (pilot_ally > 0 && g.members.get(&pilot_ally) == Some(&-1))
+                    g.members.get(&pilot_id).copied().is_some_and(is_acl_role_excluded)
+                        || (pilot_corp > 0 && g.members.get(&pilot_corp).copied().is_some_and(is_acl_role_excluded))
+                        || (pilot_ally > 0 && g.members.get(&pilot_ally).copied().is_some_and(is_acl_role_excluded))
                 })
             });
             if grp_blk

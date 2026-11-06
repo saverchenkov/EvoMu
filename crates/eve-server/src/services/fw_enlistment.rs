@@ -33,7 +33,16 @@ pub(crate) struct FwEnlistmentStore {
     /// corporationID -> allowed militia factionIDs set by a director (player corps only).
     #[serde(default)]
     pub corp_allowed: HashMap<i64, Vec<i64>>,
+    /// corporationID -> unix time until which corporation/alliance FW re-enlistment is blocked after leaving.
+    #[serde(default)]
+    pub corp_cooldown_until: HashMap<i64, u64>,
+    /// characterID -> forced `war_faction_id` update to apply to live `SessionState` on next RPC.
+    #[serde(default)]
+    pub forced_war_faction_sync: HashMap<i64, Option<i64>>,
 }
+
+/// Tuple `(char_id, old_wf, new_eff, new_direct, active_ship_id, ship_type_id)` returned on corp FW mutations.
+pub(crate) type FwMemberMutation = (i64, Option<i64>, Option<i64>, Option<i64>, i64, u32);
 
 fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError { code: code.into(), message: message.into() }
@@ -55,6 +64,213 @@ fn save_store(snap: &mut eve_db::WorldStateSnapshot, store: &FwEnlistmentStore) 
     if let Ok(json) = serde_json::to_string(store) {
         snap.item_custom_names.insert(FW_ENLISTMENT_STORE_KEY, json);
     }
+}
+
+pub(crate) fn take_forced_war_faction_sync(ctx: &ServerContext, char_id: i64) -> Option<Option<i64>> {
+    if !ctx.db.with_snapshot(|s| load_store(s).forced_war_faction_sync.contains_key(&char_id)) {
+        return None;
+    }
+    ctx.db.with_mut_snapshot(|s| {
+        let mut st = load_store(s);
+        let res = st.forced_war_faction_sync.remove(&char_id);
+        if res.is_some() {
+            save_store(s, &st);
+        }
+        res
+    })
+}
+
+pub(crate) fn is_corp_leave_cooldown_active_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    corp_id: i64,
+    now_unix: u64,
+) -> bool {
+    load_store(snap)
+        .corp_cooldown_until
+        .get(&corp_id)
+        .copied()
+        .is_some_and(|until| now_unix < until)
+}
+
+pub(crate) fn record_corp_leave_cooldown_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    corp_id: i64,
+    until_unix: u64,
+) {
+    let mut st = load_store(snap);
+    st.corp_cooldown_until.insert(corp_id, until_unix);
+    save_store(snap, &st);
+}
+
+pub(crate) fn apply_corp_militia_faction_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    cid: i64,
+    fac: Option<i64>,
+    now_unix: u64,
+) -> Vec<FwMemberMutation> {
+    if let Some(f) = fac {
+        snap.fw_runtime.corp_war_factions.insert(cid, f);
+    } else {
+        snap.fw_runtime.corp_war_factions.remove(&cid);
+    }
+    let member_ids: Vec<i64> = snap
+        .characters
+        .values()
+        .filter(|ch| ch.corporation_id == cid)
+        .map(|ch| ch.character_id)
+        .collect();
+    let mut store = load_store(snap);
+    if let Some(f) = fac {
+        if let Some(allowed) = store.corp_allowed.get_mut(&cid) {
+            allowed.retain(|&af| af == f);
+        }
+    }
+    let mut mutations = Vec::with_capacity(member_ids.len());
+    for mid in member_ids {
+        let mut direct_opt = snap.fw_runtime.direct_enlisted_chars.get(&mid).copied();
+        let eff = if let Some(f) = fac {
+            if direct_opt.is_some_and(|df| df != f) {
+                snap.fw_runtime.direct_enlisted_chars.remove(&mid);
+                direct_opt = None;
+            }
+            Some(f)
+        } else {
+            direct_opt
+        };
+        let (old_wf, ship_id) = if let Some(ch) = snap.characters.get_mut(&mid) {
+            let old = ch.war_faction_id;
+            ch.war_faction_id = eff;
+            ch.version += 1;
+            (old, ch.active_ship_id)
+        } else {
+            continue;
+        };
+        let ship_tid = snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(0);
+        if let Some(f) = eff {
+            let rec = snap.fw_character_stats.entry(mid).or_insert_with(|| {
+                eve_db::snapshot_ext::FwCharacterStatsRecord {
+                    character_id: mid,
+                    faction_id: Some(f),
+                    enlisted_on_unix: Some(now_unix),
+                    current_rank: 1,
+                    highest_rank: 1,
+                    kills: Default::default(),
+                    victory_points: Default::default(),
+                }
+            });
+            rec.faction_id = Some(f);
+            if rec.enlisted_on_unix.is_none() {
+                rec.enlisted_on_unix = Some(now_unix);
+            }
+            rec.current_rank = rec.current_rank.max(1);
+            rec.highest_rank = rec.highest_rank.max(rec.current_rank);
+        } else if let Some(rec) = snap.fw_character_stats.get_mut(&mid) {
+            rec.faction_id = None;
+            rec.enlisted_on_unix = None;
+            rec.current_rank = 0;
+        }
+        store.forced_war_faction_sync.insert(mid, eff);
+        mutations.push((mid, old_wf, eff, direct_opt, ship_id, ship_tid));
+    }
+    save_store(snap, &store);
+    mutations
+}
+
+pub(crate) fn notify_member_war_faction_change(
+    ctx: &ServerContext,
+    char_id: i64,
+    old_fac: Option<i64>,
+    effective: Option<i64>,
+    direct: Option<i64>,
+    corp: Option<i64>,
+) {
+    notify_state(ctx, char_id, effective, direct, corp);
+    if old_fac != effective {
+        let old_py = old_fac.map(PyRep::Integer).unwrap_or(PyRep::None);
+        let new_py = effective.map(PyRep::Integer).unwrap_or(PyRep::None);
+        let sess_rep = PyRep::keyval([
+            ("charid", PyRep::Integer(char_id)),
+            ("warfactionid", new_py.clone()),
+        ]);
+        let change_args = vec![
+            PyRep::Bool(false),
+            sess_rep,
+            PyRep::Dict(vec![(
+                PyRep::String("warfactionid".into()),
+                PyRep::Tuple(vec![old_py, new_py]),
+            )]),
+        ];
+        ctx.notify(
+            NotificationTarget::Character(char_id),
+            "OnSessionChanged",
+            "charid",
+            change_args,
+        );
+    }
+}
+
+pub(crate) async fn sync_corp_militia_members_after_change(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    corp_fac: Option<i64>,
+    changes: &[FwMemberMutation],
+) {
+    for &(mid, old_wf, eff, direct_opt, ship_id, ship_tid) in changes {
+        if session.character_id == Some(mid) {
+            session.war_faction_id = eff;
+            let _ = take_forced_war_faction_sync(ctx, mid);
+        }
+        notify_member_war_faction_change(ctx, mid, old_wf, eff, direct_opt, corp_fac);
+        if old_wf != eff && ship_id > 0 && ship_tid > 0 {
+            if let Some(sys_id) = ctx.systems.find_ball_system_sync(ship_id) {
+                let meta = ctx.build_ship_slim_meta(mid, ship_tid);
+                let _ = ctx
+                    .systems
+                    .get_or_spawn(sys_id)
+                    .change_slim_item(ship_id, meta)
+                    .await;
+            }
+        }
+    }
+}
+
+fn require_docked_for_direct_enlistment(
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    ch: &eve_db::CharacterRecord,
+) -> Result<(), BridgeRpcError> {
+    let station_id = session
+        .station_id
+        .or_else(|| if session.ship_id.is_none() { ch.station_id } else { None });
+    let structure_id = session
+        .structure_id
+        .or_else(|| if session.ship_id.is_none() { ch.structure_id } else { None });
+    if station_id.is_some() {
+        return Ok(());
+    }
+    if let Some(sid) = structure_id {
+        let st = snap.structures.get(&sid).ok_or_else(|| {
+            err(
+                "MustBeDocked",
+                "Docked structure not found for direct militia enlistment",
+            )
+        })?;
+        if matches!(
+            st.state.as_str(),
+            "Destroyed" | "Unanchored" | "Anchoring" | "AnchorVulnerable"
+        ) || !st.quantum_core_installed
+        {
+            return Err(err(
+                "MustBeDocked",
+                "Structure must be online and cored to change direct militia enlistment",
+            ));
+        }
+        return Ok(());
+    }
+    Err(err(
+        "MustBeDocked",
+        "Must be docked in a station or operational structure to change direct militia enlistment",
+    ))
 }
 
 /// Militia factions derived from the SDE: every faction that has a militia corporation.
@@ -179,6 +395,7 @@ fn create_direct(
             .characters
             .get(&char_id)
             .ok_or_else(|| err("CharacterNotFound", format!("Character {char_id} not found")))?;
+        require_docked_for_direct_enlistment(snap, session, ch)?;
         if let Some(current) = ch.war_faction_id {
             return Err(err("FwAlreadyEnlisted", format!("Character is already enlisted with faction {current}")));
         }
@@ -196,8 +413,16 @@ fn create_direct(
         }
         let old_corp_id = ch.corporation_id;
         let in_player_corp = snap.corporations.contains_key(&old_corp_id);
-        // Player corporations may restrict which militias their members can join.
+        // Player corporations may restrict which militias their members can join, and cannot mix opposing militias.
         if in_player_corp {
+            if let Some(&corp_fac) = snap.fw_runtime.corp_war_factions.get(&old_corp_id) {
+                if corp_fac != faction_id {
+                    return Err(err(
+                        "FwFactionNotAllowedByCorp",
+                        format!("Corporation {old_corp_id} is enlisted with faction {corp_fac} and cannot allow opposing direct enlistment"),
+                    ));
+                }
+            }
             if let Some(allowed) = store.corp_allowed.get(&old_corp_id) {
                 if !allowed.contains(&faction_id) {
                     return Err(err(
@@ -257,7 +482,7 @@ fn create_direct(
             .get(&char_id)
             .and_then(|c| s.fw_runtime.corp_war_factions.get(&c.corporation_id).copied())
     });
-    notify_state(ctx, char_id, Some(faction_id), Some(faction_id), corp_fac);
+    notify_member_war_faction_change(ctx, char_id, None, Some(faction_id), Some(faction_id), corp_fac);
     Ok(PyRep::None)
 }
 
@@ -265,12 +490,16 @@ fn remove_direct(ctx: &ServerContext, session: &mut SessionState) -> Result<PyRe
     let (_, char_id) = ServerContext::require_character(session)?;
     let now = ctx.now_unix();
     let until = now + DIRECT_ENLISTMENT_COOLDOWN_SECS;
-    let (moved_corp_opt, inherited_corp_fac, released) = ctx.db.try_with_mut_snapshot(|snap| {
-        let old_corp_id = snap
+    let (moved_corp_opt, old_wf, inherited_corp_fac, released) = ctx.db.try_with_mut_snapshot(|snap| {
+        let ch_ref = snap
             .characters
             .get(&char_id)
-            .ok_or_else(|| err("CharacterNotFound", format!("Character {char_id} not found")))?
-            .corporation_id;
+            .ok_or_else(|| err("CharacterNotFound", format!("Character {char_id} not found")))?;
+        require_docked_for_direct_enlistment(snap, session, ch_ref)?;
+        if !snap.fw_runtime.direct_enlisted_chars.contains_key(&char_id) {
+            return Err(err("FwNotEnlisted", "Character is not directly enlisted"));
+        }
+        let old_corp_id = ch_ref.corporation_id;
         let in_player_corp = snap.corporations.contains_key(&old_corp_id);
         let default_npc_corp = if !in_player_corp {
             Some(crate::services::fleet_social::fleet_social_corp_tail::bloodline_default_npc_corp(
@@ -281,9 +510,7 @@ fn remove_direct(ctx: &ServerContext, session: &mut SessionState) -> Result<PyRe
         };
         let corp_fac = snap.fw_runtime.corp_war_factions.get(&old_corp_id).copied();
         let ch = snap.characters.get_mut(&char_id).expect("checked above");
-        if ch.war_faction_id.is_none() {
-            return Err(err("FwNotEnlisted", "Character is not directly enlisted"));
-        }
+        let old_wf = ch.war_faction_id;
         ch.war_faction_id = corp_fac;
         let mut new_corp_opt = None;
         if let Some(def_corp) = default_npc_corp {
@@ -315,14 +542,14 @@ fn remove_direct(ctx: &ServerContext, session: &mut SessionState) -> Result<PyRe
         let mut store = load_store(snap);
         store.cooldown_until.insert(char_id, until);
         save_store(snap, &store);
-        Ok((new_corp_opt, corp_fac, released))
+        Ok((new_corp_opt, old_wf, corp_fac, released))
     })?;
     crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
     if let Some((_, new_cid)) = moved_corp_opt {
         session.corporation_id = Some(new_cid);
     }
     session.war_faction_id = inherited_corp_fac;
-    notify_state(ctx, char_id, inherited_corp_fac, None, inherited_corp_fac);
+    notify_member_war_faction_change(ctx, char_id, old_wf, inherited_corp_fac, None, inherited_corp_fac);
     Ok(PyRep::None)
 }
 
@@ -370,28 +597,100 @@ fn get_corp_allowed(ctx: &ServerContext, session: &SessionState, args: &[PyRep])
     })
 }
 
-fn set_corp_allowed(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+fn set_corp_allowed(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let factions = faction_list_arg(ctx, args.first())?;
-    let corp_id = ctx.db.try_with_mut_snapshot(|snap| {
+    let now = ctx.now_unix();
+    let pre_cid = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
+        .unwrap_or(0);
+    if pre_cid > 0 {
+        crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, pre_cid);
+    }
+    let (corp_id, corp_fac, purged_members) = ctx.db.try_with_mut_snapshot(|snap| {
         let corp_id = snap
             .characters
             .get(&char_id)
             .map(|c| c.corporation_id)
             .ok_or_else(|| err("CharacterNotFound", format!("Character {char_id} not found")))?;
-        let corp = snap
-            .corporations
-            .get(&corp_id)
-            .ok_or_else(|| err("CorpRoleDenied", "NPC corporations cannot configure militia enlistment"))?;
-        let role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-        if char_id != corp.ceo_id && !corp_roles::has_role(role, corp_roles::ROLE_DIRECTOR) {
+        if !snap.corporations.contains_key(&corp_id) {
+            return Err(err("CorpRoleDenied", "NPC corporations cannot configure militia enlistment"));
+        }
+        let (is_ceo, role) =
+            crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+                snap, corp_id, char_id, 0, now,
+            );
+        if !is_ceo && !corp_roles::has_role(role, corp_roles::ROLE_DIRECTOR) {
             return Err(err("CorpRoleDenied", "Only the CEO or a director may set allowed enlistment factions"));
+        }
+        let corp_fac = snap.fw_runtime.corp_war_factions.get(&corp_id).copied();
+        if let Some(cf) = corp_fac {
+            if factions.iter().any(|&f| f != cf) {
+                return Err(err(
+                    "FwFactionNotAllowedByCorp",
+                    format!("Corporation {corp_id} is enlisted with faction {cf} and cannot allow opposing militias"),
+                ));
+            }
         }
         let mut store = load_store(snap);
         store.corp_allowed.insert(corp_id, factions.clone());
+        let disallowed_members: Vec<i64> = snap
+            .characters
+            .values()
+            .filter(|ch| ch.corporation_id == corp_id)
+            .filter_map(|ch| {
+                snap.fw_runtime
+                    .direct_enlisted_chars
+                    .get(&ch.character_id)
+                    .copied()
+                    .filter(|df| !factions.contains(df))
+                    .map(|_| ch.character_id)
+            })
+            .collect();
+        let mut purged = Vec::with_capacity(disallowed_members.len());
+        for mid in disallowed_members {
+            snap.fw_runtime.direct_enlisted_chars.remove(&mid);
+            let (old_wf, ship_id) = if let Some(ch) = snap.characters.get_mut(&mid) {
+                let old = ch.war_faction_id;
+                ch.war_faction_id = corp_fac;
+                ch.version += 1;
+                (old, ch.active_ship_id)
+            } else {
+                continue;
+            };
+            let ship_tid = snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(0);
+            if let Some(st) = snap.fw_character_stats.get_mut(&mid) {
+                st.faction_id = corp_fac;
+                if corp_fac.is_none() {
+                    st.enlisted_on_unix = None;
+                    st.current_rank = 0;
+                }
+            }
+            store.forced_war_faction_sync.insert(mid, corp_fac);
+            purged.push((mid, old_wf, corp_fac, None::<i64>, ship_id, ship_tid));
+        }
         save_store(snap, &store);
-        Ok(corp_id)
+        Ok((corp_id, corp_fac, purged))
     })?;
+    for &(mid, old_wf, eff, direct_opt, ship_id, ship_tid) in &purged_members {
+        if session.character_id == Some(mid) {
+            session.war_faction_id = eff;
+            let _ = take_forced_war_faction_sync(ctx, mid);
+        }
+        notify_member_war_faction_change(ctx, mid, old_wf, eff, direct_opt, corp_fac);
+        if old_wf != eff && ship_id > 0 && ship_tid > 0 {
+            if let Some(sys_id) = ctx.systems.find_ball_system_sync(ship_id) {
+                if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                    let sys_h = ctx.systems.get_or_spawn(sys_id);
+                    let meta = ctx.build_ship_slim_meta(mid, ship_tid);
+                    rt.spawn(async move {
+                        let _ = sys_h.change_slim_item(ship_id, meta).await;
+                    });
+                }
+            }
+        }
+    }
     ctx.notify(
         NotificationTarget::Corporation(corp_id),
         "OnCorpAllowedEnlistmentFactionsSet",

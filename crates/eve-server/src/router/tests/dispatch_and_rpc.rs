@@ -128,23 +128,11 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
     .await
     .unwrap();
 
-    // Create player corporation "Apex Syndicate" before anchoring structure so high-sec war declaration can target it
-    let corp1_res = ctx
-        .dispatch_rpc(
-            &mut session,
-            "corpmgr",
-            None,
-            "CreateCorporation", // rpc-lint: allow legacy/negative-test RPC (corpmgr.CreateCorporation)
-            &[
-                PyRep::String("Apex Syndicate".into()),
-                PyRep::String("APEX".into()),
-                PyRep::Real(0.05),
-            ],
-            &empty,
-            None,
-        )
-        .await
-        .unwrap();
+    // Create player corporation "Apex Syndicate" while docked before anchoring structure so high-sec war declaration can target it
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&90_000_001).unwrap().station_id = Some(60_003_760); });
+    let corp1_res = ctx.dispatch_rpc(&mut session, "corpmgr", None, "CreateCorporation", &[PyRep::String("Apex Syndicate".into()), PyRep::String("APEX".into()), PyRep::Real(0.05)], &empty, None).await.unwrap(); // rpc-lint: allow legacy/negative-test RPC (corpmgr.CreateCorporation)
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&90_000_001).unwrap().station_id = None; });
+    session.station_id = None;
     let PyRep::KeyVal(corp1_kv) = corp1_res else {
         panic!("Expected corp1 KeyVal");
     };
@@ -218,21 +206,10 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
         st.armor_hp = hp(265);
         st.hull_hp = hp(9);
     });
-    ctx.dispatch_rpc(
-        &mut sess2,
-        "corpRegistry",
-        None,
-        "AddCorporation",
-        &[
-            PyRep::String("Rival Raiders".into()),
-            PyRep::String("RVL".into()),
-            PyRep::Real(0.05),
-        ],
-        &empty,
-        None,
-    )
-    .await
-    .unwrap();
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&90_000_002).unwrap().station_id = Some(60_003_760); });
+    ctx.dispatch_rpc(&mut sess2, "corpRegistry", None, "AddCorporation", &[PyRep::String("Rival Raiders".into()), PyRep::String("RVL".into()), PyRep::Real(0.05)], &empty, None).await.unwrap();
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&90_000_002).unwrap().station_id = None; });
+    sess2.station_id = None;
     // Verify attacking a high-sec structure without an active war fails even if attacker owns a personal kill right
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(

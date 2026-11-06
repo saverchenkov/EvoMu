@@ -94,6 +94,10 @@ async fn test_live_member_audit_history_and_corp_quit_cleanup() {
     });
 
     ctx.advance_secs(15);
+    assert_eq!(rpc(&ctx, &mut s2, "corpRegistry", "KickOutMember", &[PyRep::Integer(PILOT_2)]).await.unwrap_err().code, "MemberHasRoles");
+    rpc(&ctx, &mut s1, "corpRegistry", "UpdateTitle", &[PyRep::Integer(1), PyRep::String("Hangar Crew".into()), PyRep::Integer(0), PyRep::Integer(0)]).await.expect("clear title roles");
+    rpc(&ctx, &mut s1, "corpRegistry", "UpdateMember", &[PyRep::Integer(PILOT_2), PyRep::Integer(0), PyRep::Integer(1)]).await.expect("drop roles keep title");
+    ctx.advance_secs(86_410);
     let quit = rpc(&ctx, &mut s2, "corpRegistry", "KickOutMember", &[PyRep::Integer(PILOT_2)]).await.expect("self-quit");
     assert_eq!(quit.dict_get("removed").and_then(|v| v.as_bool()), Some(true));
     let (bloodline, new_corp) = ctx.db.with_snapshot(|s| (s.characters[&PILOT_2].bloodline_id, s.characters[&PILOT_2].corporation_id));

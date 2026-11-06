@@ -542,8 +542,9 @@ pub(crate) fn validate_container_and_bay_move(
             } else {
                 0
             };
-            let req_container_take_role = 1u64 << (43 + div_idx);
-            if !is_ceo && !eve_db::corp_roles::has_role(roles, req_container_take_role) {
+            let req_container_take_role =
+                eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[(div_idx as usize).min(6)];
+            if !is_ceo && (roles & (eve_db::corp_roles::ROLE_DIRECTOR | req_container_take_role)) == 0 {
                 return Err(BridgeRpcError {
                     code: "CorpRoleDenied".into(),
                     message: format!(
@@ -1181,23 +1182,91 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                 .and_then(|a| a.as_i64())
                 .or_else(|| bound_entry.map(|b| b.object_id))
                 .unwrap_or(0);
-            ctx.db.with_mut_snapshot(|snap| {
-                if let Some(wrap) = snap.items.get(&wrap_id).cloned() {
-                    if wrap.owner_id == char_id && wrap.type_id == 3468 {
-                        let parent_loc = wrap.location_id;
-                        let parent_flag = wrap.flag;
-                        for child in snap.items.values_mut() {
-                            if child.location_id == wrap_id {
-                                child.location_id = parent_loc;
-                                child.flag = parent_flag;
-                                child.version += 1;
-                            }
-                        }
-                        snap.items.remove(&wrap_id);
+            let sess_dock = session.station_id.or(session.structure_id);
+            let sess_ship = session.ship_id.filter(|&id| id > 0);
+            let now_unix = ctx.now_unix();
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(wrap) = snap.items.get(&wrap_id).cloned() else {
+                    return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Plastic Wrap {wrap_id} not found") });
+                };
+                if wrap.type_id != 3468 {
+                    return Err(BridgeRpcError { code: "InvalidPlasticWrap".into(), message: format!("Item {wrap_id} is not a Plastic Wrap") });
+                }
+                let ch_opt = snap.characters.get(&char_id);
+                let eff_dock = sess_dock.or_else(|| if sess_ship.is_none() { ch_opt.and_then(|c| c.station_id.or(c.structure_id)) } else { None });
+                let eff_ship = sess_ship.or_else(|| ch_opt.map(|c| c.active_ship_id).filter(|&id| id > 0));
+                let colocated = if let Some(dock_id) = eff_dock {
+                    wrap.location_id == dock_id
+                        || (eff_ship == Some(wrap.location_id)
+                            && snap.items.get(&wrap.location_id).is_some_and(|sh| sh.location_id == dock_id))
+                } else {
+                    eff_ship == Some(wrap.location_id)
+                };
+                if !colocated {
+                    return Err(BridgeRpcError {
+                        code: "ItemNotAtStation".into(),
+                        message: format!("Plastic Wrap {wrap_id} is at {} which is not co-located with character {char_id}", wrap.location_id),
+                    });
+                }
+                let has_courier = snap.contracts.values().any(|c| {
+                    c.contract_type == "Courier"
+                        && c.status == "InProgress"
+                        && c.item_ids.iter().any(|iid| snap.items.get(iid).is_some_and(|it| it.location_id == wrap_id))
+                });
+                if has_courier {
+                    let (cid, issuer_id, extracted) =
+                        crate::services::contracts_service::break_courier_plastic_wrap(snap, char_id, wrap_id, now_unix)?;
+                    let changed: Vec<_> = extracted.iter().filter_map(|iid| snap.items.get(iid).cloned()).collect();
+                    return Ok((Some((cid, issuer_id)), wrap.location_id, wrap.flag, changed));
+                }
+                if wrap.owner_id != char_id {
+                    return Err(BridgeRpcError { code: "NotItemOwner".into(), message: format!("Character {char_id} does not own Plastic Wrap {wrap_id}") });
+                }
+                let parent_loc = wrap.location_id;
+                let parent_flag = wrap.flag;
+                let mut changed = Vec::new();
+                for child in snap.items.values_mut() {
+                    if child.location_id == wrap_id {
+                        child.location_id = parent_loc;
+                        child.flag = parent_flag;
+                        child.version += 1;
+                        changed.push(child.clone());
                     }
                 }
+                snap.items.remove(&wrap_id);
+                Ok((None, parent_loc, parent_flag, changed))
             });
-            Some(Ok(PyRep::None))
+            match res {
+                Ok((failed_courier, prev_loc, prev_flag, changed)) => {
+                    if let Some((cid, issuer_id)) = failed_courier {
+                        crate::services::contracts_service::notify_contract(ctx, issuer_id, "OnContractFailed", cid);
+                    }
+                    for item in &changed {
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(char_id),
+                            "OnItemChange",
+                            "charid",
+                            vec![
+                                PyRep::keyval([
+                                    ("itemID", PyRep::Integer(item.item_id)),
+                                    ("typeID", PyRep::Integer(item.type_id as i64)),
+                                    ("ownerID", PyRep::Integer(item.owner_id)),
+                                    ("locationID", PyRep::Integer(item.location_id)),
+                                    ("flagID", PyRep::Integer(item.flag as i64)),
+                                    ("quantity", PyRep::Integer(item.quantity as i64)),
+                                ]),
+                                PyRep::Dict(vec![
+                                    (PyRep::Integer(3), PyRep::Integer(wrap_id)),
+                                    (PyRep::Integer(4), PyRep::Integer(prev_flag as i64)),
+                                ]),
+                            ],
+                        );
+                    }
+                    let _ = prev_loc;
+                    Some(Ok(PyRep::None))
+                }
+                Err(e) => Some(Err(e)),
+            }
         }
 
         ("invbroker", "ClearCharges") => {
@@ -1284,48 +1353,29 @@ pub(crate) async fn validate_ship_module_unfit_auth(
             false
         };
         if ch_dock > 0 {
-            crate::services::structure_acl_defense_rules::validate_docked_ship_fitting_facility_in_snap(
-                ctx, snap, ch_dock,
-            )?;
+            crate::services::structure_acl_defense_rules::validate_docked_ship_fitting_facility_in_snap(ctx, snap, ch_dock)?;
             if !resolves_to_loc(ship_item.location_id, ch_dock) {
-                return Err(BridgeRpcError {
-                    code: "InvalidFittingTarget".into(),
-                    message: format!("Ship {} is not docked at current location {ch_dock}", ship_item.item_id),
-                });
+                return Err(BridgeRpcError { code: "InvalidFittingTarget".into(), message: format!("Ship {} is not docked at current location {ch_dock}", ship_item.item_id) });
             }
             if new_loc != ship_item.item_id && !resolves_to_loc(new_loc, ch_dock) {
-                return Err(BridgeRpcError {
-                    code: "InvalidItemLocation".into(),
-                    message: format!("Destination {new_loc} is not at current dock {ch_dock}"),
-                });
+                return Err(BridgeRpcError { code: "InvalidItemLocation".into(), message: format!("Destination {new_loc} is not at current dock {ch_dock}") });
             }
             Ok(None)
         } else {
             let caller_ship = session.ship_id.filter(|&id| id > 0).unwrap_or(active_ship_id);
             if ship_item.item_id != caller_ship || (ch_sys > 0 && ship_item.location_id != ch_sys) {
-                return Err(BridgeRpcError {
-                    code: "InvalidFittingTarget".into(),
-                    message: format!("Pilot {char_id} must be aboard ship {} in system {ch_sys} to unfit in space", ship_item.item_id),
-                });
+                return Err(BridgeRpcError { code: "InvalidFittingTarget".into(), message: format!("Pilot {char_id} must be aboard ship {} in system {ch_sys} to unfit in space", ship_item.item_id) });
             }
-            let sys_u32 = session.solar_system_id.unwrap_or(ch_sys.max(0) as u32);
-            Ok(Some((sys_u32, caller_ship)))
+            Ok(Some((session.solar_system_id.unwrap_or(ch_sys.max(0) as u32), caller_ship)))
         }
     })?;
     if let Some((sys_id, ship_id)) = in_space_ship {
         let now_unix = ctx.now_unix_secs();
-        let has_weapons_timer = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner()).states.get(&char_id).is_some_and(|cw| cw.is_weapon_timer_active(now_unix));
-        if has_weapons_timer {
-            return Err(BridgeRpcError {
-                code: "CannotRefitWithWeaponsTimer".into(),
-                message: "Cannot refit or unfit modules in space while weapons timer is active".into(),
-            });
+        if ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner()).states.get(&char_id).is_some_and(|cw| cw.is_weapon_timer_active(now_unix)) {
+            return Err(BridgeRpcError { code: "CannotRefitWithWeaponsTimer".into(), message: "Cannot refit or unfit modules in space while weapons timer is active".into() });
         }
         if sys_id == 0 || !super::is_near_in_space_fitting_service(ctx, sys_id, ship_id).await {
-            return Err(BridgeRpcError {
-                code: "CannotUnfitInSpace".into(),
-                message: "Unfitting modules requires being docked at a station/structure or within range of a Mobile Depot or capital SMA".into(),
-            });
+            return Err(BridgeRpcError { code: "CannotUnfitInSpace".into(), message: "Unfitting modules requires being docked at a station/structure or within range of a Mobile Depot or capital SMA".into() });
         }
     }
     Ok(())

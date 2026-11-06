@@ -358,7 +358,10 @@ async fn r6_t2_11_and_12_fw_alliance_guards_direct_enlist_and_ihub_lp_cap() {
 
     ctx.db.with_mut_snapshot(|s| { s.fw_corp_enlisted_on.clear(); });
     ctx.dispatch_rpc(&mut exec_sess, "facWarMgr", None, "JoinFactionAsAlliance", &[PyRep::Integer(500_001)], &empty, None).await.expect("ally join ok");
-    ctx.db.with_snapshot(|s| assert_eq!(s.characters[&direct_pilot].war_faction_id, Some(500_004)));
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.characters[&direct_pilot].war_faction_id, Some(500_001));
+        assert!(!s.fw_runtime.direct_enlisted_chars.contains_key(&direct_pilot));
+    });
 
     assert_eq!(ctx.dispatch_rpc(&mut exec_sess, "facWarMgr", None, "LeaveFactionAsCorporation", &[], &empty, None).await.unwrap_err().code, "AllianceEnlisted");
     assert_eq!(ctx.dispatch_rpc(&mut member_sess, "facWarMgr", None, "LeaveFactionAsCorporation", &[], &empty, None).await.unwrap_err().code, "AllianceEnlisted");

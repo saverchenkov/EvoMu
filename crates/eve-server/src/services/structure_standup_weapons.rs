@@ -398,26 +398,44 @@ async fn check_and_prepare_structure_cap(
     mod_type: &eve_sde::InvType,
 ) -> Result<(f64, f64), BridgeRpcError> {
     let cap_need = mod_type.default_attributes.get(&6).copied().unwrap_or(0.0);
-    let sde_max_cap = ctx
-        .sde
-        .types
-        .get(&st_type_id)
-        .and_then(|t| t.default_attributes.get(&482).copied())
-        .filter(|&c| c > 0.0)
-        .unwrap_or(600_000.0);
+    let now_unix = ctx.now_unix();
+    let (cur_cap, sde_max_cap) = crate::services::structure_weapons_ops::read_unified_structure_capacitor(
+        ctx,
+        sys_handle,
+        structure_id,
+        st_type_id,
+        now_unix,
+    )
+    .await;
     let mut cs = sys_handle.get_combat_state(structure_id).await.ok().flatten().unwrap_or_default();
     if cs.max_capacitor <= 0.0 {
         cs.max_capacitor = sde_max_cap;
-        cs.capacitor = sde_max_cap;
-        let _ = sys_handle.set_combat_state(structure_id, cs.clone()).await;
+        cs.capacitor = cur_cap;
+        let _ = sys_handle.set_combat_state(structure_id, cs).await;
     }
-    if cs.capacitor + 1e-6 < cap_need {
+    if cur_cap + 1e-6 < cap_need {
         return Err(err(
             "NotEnoughCapacitor",
-            format!("Structure {structure_id} has {:.1} GJ capacitor; module requires {:.1} GJ", cs.capacitor, cap_need),
+            format!("Structure {structure_id} has {:.1} GJ capacitor; module requires {:.1} GJ", cur_cap, cap_need),
         ));
     }
-    Ok((cs.capacitor, cap_need))
+    Ok((cur_cap, cap_need))
+}
+
+async fn commit_unified_structure_cap(
+    ctx: &ServerContext,
+    sys_handle: &SystemHandle,
+    structure_id: i64,
+    new_cap: f64,
+    now_unix: u64,
+) {
+    let clamped = new_cap.max(0.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        ext.structure_cap_state.insert(structure_id, (clamped, now_unix));
+        save_ext_state(snap, &ext);
+    });
+    let _ = sys_handle.set_capacitor(structure_id, clamped).await;
 }
 
 /// Steps in-flight Standup Guided Bombs (`group 1548`) in `sys_id` and detonates them on impact.
@@ -579,7 +597,14 @@ pub async fn try_activate_standup_weapon(
         let active_gunner = ext.active_pilot_by_structure.get(&structure_id).copied();
         let immob_until = ext.gunner_immobilized_until_unix.get(&structure_id).copied().unwrap_or(0);
         let mod_until = ext.standup_module_cycle_until_unix.get(&module_id).copied().unwrap_or(0);
-        let st_info = snap.structures.get(&structure_id).map(|s| (s.type_id, s.owner_corp_id, s.state.clone()));
+        let st_info = snap.structures.get(&structure_id).map(|s| {
+            (
+                s.type_id,
+                s.owner_corp_id,
+                s.state.clone(),
+                crate::services::structure_control_ops::is_structure_combat_operational(Some(ctx), s),
+            )
+        });
         Some((
             item_rec.location_id,
             item_rec.flag,
@@ -596,11 +621,17 @@ pub async fn try_activate_standup_weapon(
     let (mod_loc_id, mod_flag, mod_type, is_online, slot_charge_tid, active_gunner, immob_until, mod_until, st_info) =
         lookup;
 
-    let Some((st_type_id, st_corp_id, st_state)) = st_info else {
+    let Some((st_type_id, st_corp_id, st_state, st_operational)) = st_info else {
         return Some(Err(err("StructureNotFound", format!("Structure {structure_id} not found"))));
     };
     if st_state == "Destroyed" {
         return Some(Err(err("StructureDestroyed", format!("Structure {structure_id} is destroyed"))));
+    }
+    if !st_operational {
+        return Some(Err(err(
+            "StructureNotOperational",
+            format!("Structure {structure_id} is in state '{st_state}' and cannot activate Standup weapons"),
+        )));
     }
     if active_gunner != Some(char_id) {
         return Some(Err(err("NotControllingStructure", "Character is not the active gunner of this structure")));
@@ -657,7 +688,7 @@ pub async fn try_activate_standup_weapon(
             if !consume_structure_charge(ctx, structure_id, st_corp_id, module_id, mod_flag, flak_tid, charge_rate) {
                 return Some(Err(err("NoAmmoLoaded", "Insufficient Standup Flak Rounds remaining")));
             }
-            let _ = sys_handle.set_capacitor(structure_id, (cur_cap - cap_need).max(0.0)).await;
+            commit_unified_structure_cap(ctx, sys_handle, structure_id, cur_cap - cap_need, now_unix).await;
 
             let (optimal_range, falloff_range) = standup_weapon_optimal_and_falloff(&mod_type);
             let aoe_radius = optimal_range + 2.0 * falloff_range;
@@ -783,7 +814,7 @@ pub async fn try_activate_standup_weapon(
             if !consume_structure_charge(ctx, structure_id, st_corp_id, module_id, mod_flag, bomb_tid, 1) {
                 return Some(Err(err("NoAmmoLoaded", "No guided bombs remaining in structure")));
             }
-            let _ = sys_handle.set_capacitor(structure_id, (cur_cap - cap_need).max(0.0)).await;
+            commit_unified_structure_cap(ctx, sys_handle, structure_id, cur_cap - cap_need, now_unix).await;
 
             let aoe_radius = bomb_type.default_attributes.get(&99).copied().filter(|&r| r > 0.0).unwrap_or(20_000.0);
             let cycle_secs = mod_type
@@ -907,7 +938,7 @@ pub async fn try_activate_standup_weapon(
             ) {
                 return Some(Err(e));
             }
-            let _ = sys_handle.set_capacitor(structure_id, (cur_cap - cap_need).max(0.0)).await;
+            commit_unified_structure_cap(ctx, sys_handle, structure_id, cur_cap - cap_need, now_unix).await;
 
             let jump_radius = mod_type
                 .default_attributes

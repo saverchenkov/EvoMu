@@ -389,6 +389,12 @@ async fn test_lookup_warable_corporations_and_alliances_live() {
     assert_eq!(exact_rows[0].dict_get("groupID"), Some(&PyRep::Integer(2)));
 
     // 6. Active war against Corp A excludes Corp A from warable results for caller
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(hq) = snap.structures.get_mut(&caller_hq) {
+            hq.quantum_core_installed = true;
+            hq.state = "ShieldVulnerable".into();
+        }
+    });
     let _ = undock_to_system(&ctx, &mut caller_sess, 93_400_001, caller_ship, PERIMETER).await;
     rpc(
         &ctx,

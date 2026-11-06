@@ -343,17 +343,12 @@ pub async fn check_proximity(
     Ok(())
 }
 
-/// Executes jump handoff across system actors, moving the ball and emitting complete session changes.
-pub async fn execute_shipcaster_jump(
+pub async fn prevalidate_shipcaster_jump(
     ctx: &ServerContext,
-    session: &mut SessionState,
     char_id: i64,
     ship_id: i64,
     origin_sys: u32,
-    dest_sys: u32,
-    arrival_pos: DVec3,
-    launch_vector: DVec3,
-) -> Result<(), BridgeRpcError> {
+) -> Result<(u64, eve_destiny::Ball, Option<eve_destiny::CombatState>), BridgeRpcError> {
     let now_unix = ctx.now_unix();
     let old_handle = ctx.systems.get_or_spawn(origin_sys);
     let Some((cur_tick, ship_ball)) = old_handle
@@ -415,18 +410,61 @@ pub async fn execute_shipcaster_jump(
         ));
     }
 
-    if let Ok(Some(cs)) = old_handle.get_combat_state(ship_id).await {
+    let pre_cs = old_handle.get_combat_state(ship_id).await.ok().flatten();
+    if let Some(ref cs) = pre_cs {
         if cs.warp_scramble_strength > 0 {
             return Err(rpc_err("WarpScrambled", "Cannot jump shipcaster while warp scrambled"));
         }
     }
+
+    Ok((cur_tick, ship_ball, pre_cs))
+}
+
+/// Executes jump handoff across system actors, moving the ball and emitting complete session changes.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_shipcaster_jump(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    char_id: i64,
+    ship_id: i64,
+    origin_sys: u32,
+    dest_sys: u32,
+    arrival_pos: DVec3,
+    launch_vector: DVec3,
+) -> Result<(), BridgeRpcError> {
+    let now_unix = ctx.now_unix();
+    let (_, ship_ball, pre_cs) =
+        prevalidate_shipcaster_jump(ctx, char_id, ship_id, origin_sys).await?;
+    let old_handle = ctx.systems.get_or_spawn(origin_sys);
 
     let updated_ch = ctx
         .db
         .set_character_solar_system(char_id, dest_sys, &ctx.sde)
         .map_err(|e| rpc_err("SystemTransitionFailed", &e.to_string()))?;
 
+    let saved_heat = ctx
+        .ship_fittings
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&ship_id)
+        .map(|f| {
+            let dmg: Vec<(i64, f64)> = f
+                .modules
+                .iter()
+                .filter(|(_, m)| m.damage_hp.is_finite() && m.damage_hp > 0.0)
+                .map(|(&mid, m)| (mid, m.damage_hp))
+                .collect();
+            (f.rack_heat, dmg)
+        });
+
     let cleared_zarzakh_gate = ctx.db.with_mut_snapshot(|snap| {
+        if let Some((_, ref dmg_list)) = saved_heat {
+            for &(mid, dhp) in dmg_list {
+                if let Some(it) = snap.items.get_mut(&mid) {
+                    it.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, dhp);
+                }
+            }
+        }
         if let Some(ship) = snap.items.get_mut(&ship_id) {
             ship.location_id = dest_sys as i64;
         }
@@ -446,10 +484,30 @@ pub async fn execute_shipcaster_jump(
         );
     }
 
+    let live_cs = old_handle
+        .get_combat_state(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .or(pre_cs);
+    if let Some(ref prev_cs) = live_cs {
+        if prev_cs.structure_hp.is_finite() && prev_cs.structure_hp > 0.0 {
+            crate::sp6_lifecycle::persist_ship_combat_hp_in_db(&ctx.db, ship_id, prev_cs);
+        }
+    }
+
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, origin_sys);
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(
         ctx, char_id, ship_id,
     );
+    if let Some((rack_heat, _)) = saved_heat {
+        if rack_heat.iter().any(|&h| h.is_finite() && h > 0.0) {
+            if let Ok(mut fit) = ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
+                fit.rack_heat = rack_heat;
+                ctx.store_ship_fitting(ship_id, fit);
+            }
+        }
+    }
     let existing_ball = old_handle.remove_ball(ship_id).await;
     ctx.sync_character_local_chat(char_id, Some(origin_sys), dest_sys);
 
@@ -461,6 +519,22 @@ pub async fn execute_shipcaster_jump(
     new_ball.mode = MovementMode::Stop;
 
     let mut combat_state = ctx.build_ship_combat_state(char_id, ship_id, new_ball.type_id);
+    if let Some(prev_cs) = live_cs {
+        if prev_cs.shield_hp.is_finite() {
+            combat_state.shield_hp = prev_cs.shield_hp.clamp(0.0, combat_state.max_shield_hp.max(0.0));
+        }
+        if prev_cs.armor_hp.is_finite() {
+            combat_state.armor_hp = prev_cs.armor_hp.clamp(0.0, combat_state.max_armor_hp.max(0.0));
+        }
+        if prev_cs.structure_hp.is_finite() && prev_cs.structure_hp > 0.0 {
+            combat_state.structure_hp = prev_cs
+                .structure_hp
+                .clamp(1e-6, combat_state.max_structure_hp.max(1e-6));
+        }
+        if prev_cs.capacitor.is_finite() {
+            combat_state.capacitor = prev_cs.capacitor.clamp(0.0, combat_state.max_capacitor.max(0.0));
+        }
+    }
     combat_state.is_cloaked = true;
     combat_state.gate_cloak_remaining_ticks = 60;
     combat_state.undock_invulnerable_remaining_ticks = 60;

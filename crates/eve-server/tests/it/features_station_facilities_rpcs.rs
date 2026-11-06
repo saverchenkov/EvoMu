@@ -324,7 +324,8 @@ async fn test_b29_corp_invite_join_kick_quit_lifecycle() {
     rpc(&ctx, &mut sess1, "corpRegistry", "UpdateTitle", &[PyRep::Integer(1), PyRep::String("Officer".into()), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0)]).await;
     rpc(&ctx, &mut sess1, "corpRegistry", "UpdateMember", &[PyRep::Integer(PILOT_2), PyRep::Integer((1u64 << 13) as i64), PyRep::Integer(1), PyRep::Integer(1001)]).await;
 
-    ctx.advance_secs(25);
+    rpc(&ctx, &mut sess1, "corpRegistry", "UpdateMember", &[PyRep::Integer(PILOT_2), PyRep::Integer(0), PyRep::Integer(1), PyRep::Integer(0)]).await;
+    ctx.advance_secs(86_410);
     eve_server::services::space_destiny::clear_session_change_timer(&ctx, PILOT_2);
     rpc(&ctx, &mut sess2, "corpRegistry", "KickOutMember", &[PyRep::Integer(PILOT_2)]).await;
     let bloodline_id = ctx.db.with_snapshot(|s| s.characters[&PILOT_2].bloodline_id);

@@ -96,17 +96,19 @@ fn can_access_sov_hub_fuel_acl_precedence_and_corp_roles() {
     let char_outsider = 90_000_003_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations
+        let corp = snap.corporations
             .entry(owner_corp)
             .or_insert_with(|| eve_db::CorporationRecord {
                 corporation_id: owner_corp,
-                ceo_id: char_allowed,
+                ceo_id: 90_000_099,
                 alliance_id: Some(ally_id),
                 name: "OwnerCorp".into(),
                 ticker: "OWNC".into(),
                 ..Default::default()
-            })
-            .alliance_id = Some(ally_id);
+            });
+        corp.ceo_id = 90_000_099;
+        corp.alliance_id = Some(ally_id);
+        corp.member_roles.insert(char_allowed, 0);
         snap.structures.insert(
             hub_id,
             UpwellStructureRecord {
@@ -159,11 +161,11 @@ fn can_access_sov_hub_fuel_acl_precedence_and_corp_roles() {
             false
         ));
 
-        // Configure ACL group 77: alliance allowed (+1), char_blocked explicitly blocked (-1)
+        // Configure ACL group 77: alliance allowed (+1), char_blocked explicitly blocked (EXCLUDED = 3)
         let mut ext = load_ext_state(snap);
         let mut members = HashMap::new();
         members.insert(ally_id, 1);
-        members.insert(char_blocked, -1);
+        members.insert(char_blocked, 3);
         ext.owner_groups.insert(
             77,
             AccessGroupRecord {

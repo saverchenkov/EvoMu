@@ -849,6 +849,14 @@ pub async fn handle(
             let arrival_pos =
                 calculate_shipcaster_arrival_position(starter_station_pos, launch_vector, 2_500.0);
 
+            if let Err(e) = shipcaster_ops_starter::prevalidate_shipcaster_jump(
+                ctx, char_id, ship_id, sys_id,
+            )
+            .await
+            {
+                return Some(Err(e));
+            }
+
             let _ = apply_shipcaster_beacon_alignment_and_spool(
                 &sys,
                 ship_id,
@@ -1149,6 +1157,14 @@ pub async fn handle(
             );
             let arrival_pos =
                 calculate_shipcaster_arrival_position(pad.position, launch_vector, 2_500.0);
+
+            if let Err(e) = shipcaster_ops_starter::prevalidate_shipcaster_jump(
+                ctx, char_id, ship_id, sys_id,
+            )
+            .await
+            {
+                return Some(Err(e));
+            }
 
             let _ = apply_shipcaster_beacon_alignment_and_spool(
                 &sys,

@@ -100,7 +100,7 @@ async fn test_space_cyno_and_inventory_vault_containers() {
             inhibitor_item_id,
             InventoryItemRecord {
                 item_id: inhibitor_item_id,
-                type_id: 33_700, // Mobile Cynosural Inhibitor
+                type_id: 33_476, // Mobile Cynosural Inhibitor
                 owner_id: char_id,
                 location_id: SYS_JITA as i64,
                 flag: InventoryFlag::None,

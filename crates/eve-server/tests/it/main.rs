@@ -514,3 +514,5 @@ mod parity_shard_5_drones_fleet_corp_tests;
 mod parity_shard_5_social_services_tests;
 mod parity_shard_5_quasar_esi_plans_tests;
 mod parity_tail_fixes_tests;
+mod corp_market_divisions_contracts_and_wars;
+mod structures_acl_sov_shipcaster_and_fw;

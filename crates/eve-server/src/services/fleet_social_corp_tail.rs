@@ -748,10 +748,6 @@ fn remove_member_to_bloodline_npc_in_snap(
         }
     }
     if let Some(g) = snap.corp_governance.get_mut(&corp_id) {
-        if let Some(member_shares) = g.shares.remove(&tid) {
-            g.company_shares = g.company_shares.saturating_add(member_shares);
-            g.shares.insert(corp_id, g.company_shares);
-        }
         g.pending_role_grants.remove(&tid);
         g.pending_title_role_grants.remove(&tid);
         g.pending_scoped_role_grants.remove(&tid);
@@ -932,18 +928,23 @@ pub(crate) fn handle_kick_out_members(
                 message: format!("Corporation {corp_id} not found"),
             });
         };
-        let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+        let (is_ceo, eff_caller_role) =
+            crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+                snap, corp_id, char_id, 0, now_unix,
+            );
         let any_other = target_ids.iter().any(|&tid| tid != char_id);
         if any_other
-            && char_id != corp.ceo_id
-            && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR)
-            && !corp_roles::has_role(caller_role, corp_roles::ROLE_PERSONNEL_MANAGER)
+            && !is_ceo
+            && (eff_caller_role & (corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_PERSONNEL_MANAGER)) == 0
         {
             return Err(BridgeRpcError {
                 code: "CorpRoleDenied".into(),
                 message: "Kicking a member requires Personnel Manager or Director role".into(),
             });
         }
+        let caller_sess_in_space = session.station_id.is_none()
+            && session.structure_id.is_none()
+            && session.ship_id.is_some();
         for &tid in &target_ids {
             if !corp.members.contains(&tid) {
                 return Err(BridgeRpcError {
@@ -957,12 +958,25 @@ pub(crate) fn handle_kick_out_members(
                     message: "CEO cannot leave while other members remain in the corporation".into(),
                 });
             }
-            if tid != char_id {
+            if tid == char_id {
+                let ch_undocked = snap.characters.get(&tid).is_some_and(|ch| {
+                    ch.station_id.is_none() && ch.structure_id.is_none()
+                        && session.station_id.is_none() && session.structure_id.is_none()
+                });
+                if caller_sess_in_space || ch_undocked {
+                    return Err(BridgeRpcError {
+                        code: "MustBeDocked".into(),
+                        message: "You must be docked in a station or structure to leave a corporation".into(),
+                    });
+                }
+            }
+            let solo_ceo_closing = tid == corp.ceo_id && corp.members.len() == 1;
+            if !solo_ceo_closing {
                 if let Some(blocker) = member_kick_blocker(snap, corp_id, tid, now_unix) {
                     return Err(BridgeRpcError {
                         code: blocker.into(),
                         message: format!(
-                            "Cannot expel member {tid}: roles/titles must be dropped and 24h must pass ({blocker})"
+                            "Cannot leave or expel member {tid}: roles/titles must be dropped and 24h must pass ({blocker})"
                         ),
                     });
                 }

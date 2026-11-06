@@ -260,7 +260,9 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         // parity: feat:structures.deliveries
         ("structureDeliveries", "Deliver") => Some(super::structure_lifecycle_rpc::handle_structure_deliver(ctx, session, args)),
         // parity: feat:structures.cargo-dropoff
-        ("structureCargoDelivery", "DropOffItems") => Some(super::structure_lifecycle_rpc::handle_cargo_dropoff(ctx, session, args).await),
+        ("structureCargoDelivery", "DropOffItems") | ("structureCargo", "CargoDropoff") => {
+            Some(super::structure_lifecycle_rpc::handle_cargo_dropoff(ctx, session, args).await)
+        }
         // parity: feat:structures.guests
         ("structureGuests", "GetGuests") => Some(handle_structure_get_guests(ctx, session, args)),
         // parity: feat:structures.hangar-view
@@ -872,15 +874,16 @@ pub fn evaluate_character_structure_access_in_snap_at(snap: &WorldStateSnapshot,
         .and_then(|now| ext.pending_profile_applications.get(&structure_id).filter(|&&(_, t)| now >= t).and_then(|&(pid, _)| ext.profiles_by_id.get(&pid)))
         .or_else(|| ext.access_profiles.get(&structure_id));
     if let Some(prof) = effective_prof {
+        use crate::services::structure_acl_defense_rules::{is_acl_role_allowed, is_acl_role_excluded};
         if prof.blocked_characters.contains(&char_id) || prof.blocked_corporations.contains(&char_corp) || (char_ally > 0 && prof.blocked_alliances.contains(&char_ally)) { return false; }
         for &gid in &prof.access_group_ids {
             if let Some(grp) = ext.owner_groups.get(&gid) {
-                if grp.members.get(&char_id) == Some(&-1) || grp.members.get(&char_corp) == Some(&-1) || (char_ally > 0 && grp.members.get(&char_ally) == Some(&-1)) { return false; }
+                if grp.members.get(&char_id).copied().is_some_and(is_acl_role_excluded) || grp.members.get(&char_corp).copied().is_some_and(is_acl_role_excluded) || (char_ally > 0 && grp.members.get(&char_ally).copied().is_some_and(is_acl_role_excluded)) { return false; }
             }
         }
         if prof.corp_only && owner_corp != 0 && char_corp != owner_corp { return false; }
-        let has_group_allows = prof.access_group_ids.iter().any(|gid| ext.owner_groups.get(gid).is_some_and(|g| g.members.values().any(|&r| r >= 0)));
-        let in_group = prof.access_group_ids.iter().any(|gid| ext.owner_groups.get(gid).is_some_and(|g| g.members.get(&char_id).is_some_and(|&r| r >= 0) || g.members.get(&char_corp).is_some_and(|&r| r >= 0) || (char_ally > 0 && g.members.get(&char_ally).is_some_and(|&r| r >= 0))));
+        let has_group_allows = prof.access_group_ids.iter().any(|gid| ext.owner_groups.get(gid).is_some_and(|g| g.members.values().copied().any(is_acl_role_allowed)));
+        let in_group = prof.access_group_ids.iter().any(|gid| ext.owner_groups.get(gid).is_some_and(|g| g.members.get(&char_id).copied().is_some_and(is_acl_role_allowed) || g.members.get(&char_corp).copied().is_some_and(is_acl_role_allowed) || (char_ally > 0 && g.members.get(&char_ally).copied().is_some_and(is_acl_role_allowed))));
         let has_allow = !prof.allowed_characters.is_empty() || !prof.allowed_corporations.is_empty() || !prof.allowed_alliances.is_empty() || has_group_allows;
         if has_allow && char_corp != owner_corp && !prof.allowed_characters.contains(&char_id) && !prof.allowed_corporations.contains(&char_corp) && (char_ally <= 0 || !prof.allowed_alliances.contains(&char_ally)) && !in_group { return false; }
         return true;

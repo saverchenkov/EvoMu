@@ -392,6 +392,7 @@ async fn test_shard5_fleet_handover_formations_tags_corp_lookup_and_standings() 
         });
         saved_p2_initial_corp = p2_bloodline_npc_corp;
         crate::industry_live_support::dock_station(&ctx, &mut p2, 60_003_760).await;
+        crate::industry_live_support::dock_station(&ctx, &mut fc, 60_003_760).await;
         ctx.advance_secs(12);
         let add_corp = rpc(&ctx, &mut fc, "corpRegistry", "AddCorporation", &[PyRep::String("Shard5 Quit Corp".into()), PyRep::String("S5QC".into()), PyRep::Real(0.05)]).await.unwrap();
         let custom_corp_id = add_corp.dict_get("corporationID").and_then(|v| v.as_i64()).unwrap();
@@ -400,8 +401,9 @@ async fn test_shard5_fleet_handover_formations_tags_corp_lookup_and_standings() 
         ctx.advance_secs(31);
         rpc(&ctx, &mut p2, "corpRegistry", "UpdateApplicationOffer", &[PyRep::Integer(inv_id), PyRep::String("Accepted".into())]).await.unwrap();
         p2.corporation_id = Some(custom_corp_id);
-        rpc(&ctx, &mut fc, "corpRegistry", "UpdateMember", &[PyRep::Integer(PILOT_2), PyRep::String("Pilot 2 Title".into()), PyRep::Integer(1), PyRep::Integer(0x0001), PyRep::Integer(0x0001), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0), PyRep::Bool(false)]).await.ok();
-        ctx.advance_secs(31);
+        rpc(&ctx, &mut fc, "corpRegistry", "UpdateMember", &[PyRep::Integer(PILOT_2), PyRep::Integer(1), PyRep::Integer(0)]).await.ok();
+        rpc(&ctx, &mut fc, "corpRegistry", "UpdateMember", &[PyRep::Integer(PILOT_2), PyRep::Integer(0), PyRep::Integer(0)]).await.ok();
+        ctx.advance_secs(86_410);
         saved_custom_corp_id = custom_corp_id;
         let _ = saved_fleet_id;
         rpc(&ctx, &mut p2, "corpRegistry", "ResignFromCorp", &[]).await.unwrap();
@@ -413,7 +415,7 @@ async fn test_shard5_fleet_handover_formations_tags_corp_lookup_and_standings() 
     }
 
     // Verify corp creation, resignation, role/title cleanup & fleet formation state survived SQLite restart
-    let ctx2 = open_ctx(&db_path, base_time + 90);
+    let ctx2 = open_ctx(&db_path, base_time + 90_000);
     assert!(ctx2.db.with_snapshot(|s| s.corporations.contains_key(&saved_custom_corp_id)));
     assert_eq!(ctx2.db.with_snapshot(|s| s.characters[&saved_p2_cid].corporation_id), saved_p2_initial_corp);
     assert!(ctx2.db.with_snapshot(|s| !s.corp_role_assignments.contains_key(&(saved_custom_corp_id, saved_p2_cid))));

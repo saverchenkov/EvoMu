@@ -43,10 +43,41 @@ pub(crate) fn resolve_linked_structure_id(
     None
 }
 
+fn require_jump_bridge_recon_access(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    structure_id: i64,
+    char_id: i64,
+) -> Result<(), BridgeRpcError> {
+    if !snap.structures.contains_key(&structure_id) {
+        return Ok(());
+    }
+    let now = ctx.now_unix();
+    let allowed = crate::services::structure_profile_services::can_character_use_jump_bridge(
+        snap,
+        structure_id,
+        char_id,
+        now,
+    ) || super::structure_upwell_ops::evaluate_character_structure_access_in_snap_at(
+        snap,
+        structure_id,
+        char_id,
+        Some(now),
+    );
+    if !allowed {
+        return Err(err(
+            "AccessDenied",
+            format!("Character {char_id} is denied jump bridge access to structure {structure_id}"),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn handle_get_linked_structure(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
-    let _ = ServerContext::require_character(session)?;
+    let (_, char_id) = ServerContext::require_character(session)?;
     let structure_id = args.first().and_then(|a| a.as_i64()).ok_or_else(|| err("MissingStructureId", "GetLinkedStructure requires structureID"))?;
     ctx.db.with_snapshot(|snap| {
+        require_jump_bridge_recon_access(ctx, snap, structure_id, char_id)?;
         let Some(linked) = resolve_linked_structure_id(snap, &load_ext_state(snap), structure_id) else {
             return Ok(PyRep::None);
         };
@@ -57,10 +88,11 @@ pub(crate) fn handle_get_linked_structure(ctx: &ServerContext, session: &mut Ses
     })
 }
 
-pub(crate) fn handle_get_jb_structure_destination(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
-    let _ = ServerContext::require_character(session)?;
+pub fn handle_get_jb_structure_destination(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
     let structure_id = args.first().and_then(|a| a.as_i64()).ok_or_else(|| err("MissingStructureId", "GetJbStructureDestination requires structureID"))?;
     ctx.db.with_snapshot(|snap| {
+        require_jump_bridge_recon_access(ctx, snap, structure_id, char_id)?;
         let linked_id = resolve_linked_structure_id(snap, &load_ext_state(snap), structure_id)
             .ok_or_else(|| err("NoLinkedStructure", format!("Structure {structure_id} is not linked to any destination gate")))?;
         let dest_sys = snap

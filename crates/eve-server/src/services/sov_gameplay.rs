@@ -1099,17 +1099,23 @@ pub async fn handle_confirm_skyhook_sov_management(
         .unwrap_or(0)
         .clamp(0, 100) as u8;
 
+    let now_unix = ctx.now_unix();
+    if let Some(cid) = session.corporation_id.filter(|&id| id > 0) {
+        crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, cid);
+    }
     let is_authorized = ctx.db.with_snapshot(|snap| {
         let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
         let Some(corp) = snap.corporations.get(&corp_id) else {
             return false;
         };
-        let role = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
-        let has_role = char_id == corp.ceo_id
-            || eve_db::corp_roles::has_role(
-                role,
-                eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER,
+        let (is_ceo, eff_roles) =
+            crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+                snap, corp_id, char_id, 0, now_unix,
             );
+        let has_role = is_ceo
+            || (eff_roles
+                & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER))
+                != 0;
         if !has_role {
             return false;
         }
@@ -1319,8 +1325,12 @@ pub async fn handle_anchor_sov_hub_rpc(
             shield_hp: 15_000_000.0, armor_hp: 25_000_000.0, hull_hp: 40_000_000.0,
             reinforced_until_unix: now + 900, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
         });
-        snap.structure_vulnerability_windows.insert(id, ((now / 3_600) % 24, ((now / 86_400) + 4) % 7));
         snap.system_states.entry(sys_id).or_default().solar_system_id = sys_id;
+        let _ = sov_gameplay_entosis::apply_adm_scaled_vulnerability_window_in_snap(
+            snap,
+            id,
+            ((now / 3_600) % 24) as u32,
+        );
         Ok(id)
     })?;
     let _ = ctx.systems.get_or_spawn(sys_id).spawn_ball(Ball {

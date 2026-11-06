@@ -96,6 +96,45 @@ pub fn structure_online_defense_volley_omni(
     total
 }
 
+pub(crate) fn structure_cap_params(ctx: &ServerContext, st_type_id: u32) -> (f64, f64) {
+    let st_sde = ctx.sde.types.get(&st_type_id);
+    let max_cap = st_sde
+        .and_then(|t| t.default_attributes.get(&482).copied())
+        .filter(|&c| c > 0.0)
+        .unwrap_or(600_000.0);
+    let rech_s = (st_sde
+        .and_then(|t| t.default_attributes.get(&55).copied())
+        .unwrap_or(5_760_000.0)
+        / 1_000.0)
+        .max(1.0);
+    (max_cap, rech_s)
+}
+
+pub(crate) async fn read_unified_structure_capacitor(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    structure_id: i64,
+    st_type_id: u32,
+    now_unix: u64,
+) -> (f64, f64) {
+    let (max_cap, rech_s) = structure_cap_params(ctx, st_type_id);
+    let ext_entry = ctx
+        .db
+        .with_snapshot(|snap| load_ext_state(snap).structure_cap_state.get(&structure_id).copied());
+    let cs_opt = sys_handle.get_combat_state(structure_id).await.ok().flatten();
+    let cur_cap = match ext_entry {
+        Some((prev_cap, prev_ts)) => {
+            let dt = now_unix.saturating_sub(prev_ts) as f64;
+            (prev_cap + (max_cap / rech_s) * dt).min(max_cap)
+        }
+        None => cs_opt
+            .filter(|cs| cs.max_capacitor > 0.0)
+            .map(|cs| cs.capacitor.min(max_cap))
+            .unwrap_or(max_cap),
+    };
+    (cur_cap, max_cap)
+}
+
 pub async fn trigger_structure_auto_defense_on_grid(
     ctx: &ServerContext,
     sys_handle: &crate::system_actor::SystemHandle,
@@ -105,14 +144,16 @@ pub async fn trigger_structure_auto_defense_on_grid(
     now_unix: u64,
 ) {
     ops::sync_pending_profiles_in_ctx(ctx);
-    let Some((st_pos, _st_owner_id, pilot_opt)) = ctx.db.with_mut_snapshot(|snap| {
+    let Some((st_pos, st_type_id, _st_owner_id, pilot_opt)) = ctx.db.with_mut_snapshot(|snap| {
         if let Some(att_id) = attacker_char_id.filter(|&id| id > 0) {
             let mut def = load_defense_settings(snap, structure_id);
             def.record_attacker(att_id, now_unix);
             save_defense_settings(snap, &def);
         }
         let st = snap.structures.get(&structure_id)?;
-        if st.solar_system_id != sys_id || st.state == "Destroyed" {
+        if st.solar_system_id != sys_id
+            || !crate::services::structure_control_ops::is_structure_combat_operational(Some(ctx), st)
+        {
             return None;
         }
         let ext = load_ext_state(snap);
@@ -122,12 +163,13 @@ pub async fn trigger_structure_auto_defense_on_grid(
             .get(&st.owner_corp_id)
             .map(|c| c.ceo_id)
             .unwrap_or(0);
-        Some((DVec3::from_array(st.position), ceo_id, pilot_opt))
+        Some((DVec3::from_array(st.position), st.type_id, ceo_id, pilot_opt))
     }) else {
         return;
     };
 
     ensure_structure_ball_in_space(ctx, sys_id, structure_id).await;
+    let (seed_cap, _) = read_unified_structure_capacitor(ctx, sys_handle, structure_id, st_type_id, now_unix).await;
 
     let candidates: Vec<(i64, i64)> = if let Ok(bp) = sys_handle.ballpark.read() {
         bp.balls
@@ -150,9 +192,10 @@ pub async fn trigger_structure_auto_defense_on_grid(
         Vec::new()
     };
 
-    let (targets, per_target_dmg): (
+    let (targets, per_target_dmg, updated_cap): (
         Vec<(i64, i64)>,
         std::collections::HashMap<i64, DamageVector>,
+        Option<f64>,
     ) = ctx.db.with_mut_snapshot(|snap| {
         let mut matched: Vec<(i64, i64)> = candidates
             .into_iter()
@@ -165,27 +208,20 @@ pub async fn trigger_structure_auto_defense_on_grid(
 
         let mut per_target: std::collections::HashMap<i64, DamageVector> =
             std::collections::HashMap::new();
+        let mut cap_out = None;
         let (st_type_id, st_owner_corp) = snap
             .structures
             .get(&structure_id)
             .map(|st| (st.type_id, st.owner_corp_id))
             .unwrap_or((35832, 0));
         if !matched.is_empty() {
-            let st_sde = ctx.sde.types.get(&st_type_id);
-            let max_cap = st_sde
-                .and_then(|t| t.default_attributes.get(&482).copied())
-                .unwrap_or(400_000.0);
-            let rech_s = (st_sde
-                .and_then(|t| t.default_attributes.get(&55).copied())
-                .unwrap_or(5_760_000.0)
-                / 1_000.0)
-                .max(1.0);
+            let (max_cap, rech_s) = structure_cap_params(ctx, st_type_id);
             let mut cur_cap = match ext.structure_cap_state.get(&structure_id).copied() {
                 Some((prev_cap, prev_ts)) => {
                     let dt = now_unix.saturating_sub(prev_ts) as f64;
                     (prev_cap + (max_cap / rech_s) * dt).min(max_cap)
                 }
-                None => max_cap,
+                None => seed_cap.min(max_cap),
             };
 
             let mut mod_items: Vec<eve_db::InventoryItemRecord> = snap
@@ -228,6 +264,7 @@ pub async fn trigger_structure_auto_defense_on_grid(
                 }
                 cur_cap = (cur_cap - cap_need).max(0.0);
                 ext.structure_cap_state.insert(structure_id, (cur_cap, now_unix));
+                cap_out = Some(cur_cap);
                 let cycle_secs = mod_sde
                     .default_attributes
                     .get(&51)
@@ -248,8 +285,11 @@ pub async fn trigger_structure_auto_defense_on_grid(
             }
         }
         save_ext_state(snap, &ext);
-        (matched, per_target)
+        (matched, per_target, cap_out)
     });
+    if let Some(c) = updated_cap {
+        let _ = sys_handle.set_capacitor(structure_id, c).await;
+    }
 
     for (ship_id, target_char_id) in targets {
         let _ = sys_handle
@@ -343,7 +383,7 @@ pub async fn trigger_system_structures_auto_defense(ctx: &ServerContext, sys_id:
             .values()
             .filter(|st| {
                 st.solar_system_id == sys_id
-                    && st.state != "Destroyed"
+                    && crate::services::structure_control_ops::is_structure_combat_operational(Some(ctx), st)
                     && (ext.access_profiles.get(&st.structure_id).is_some_and(|p| p.has_defense_config)
                         || !load_defense_settings(snap, st.structure_id).known_attackers.is_empty()
                         || structure_online_defense_volley_omni(ctx, snap, st.structure_id) > 0.0)
@@ -373,10 +413,7 @@ pub async fn handle_structure_add_target(
             .structures
             .get(&structure_id)
             .ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")))?;
-        if matches!(
-            st.state.as_str(),
-            "Destroyed" | "Unanchored" | "AnchorVulnerable" | "Anchoring" | "NoCore"
-        ) {
+        if !crate::services::structure_control_ops::is_structure_combat_operational(Some(ctx), st) {
             return Err(err("StructureNotOperational", "Structure cannot lock targets in its current state"));
         }
         let ext = load_ext_state(snap);
@@ -589,10 +626,7 @@ pub async fn handle_structure_module_activate(
                 .get(&structure_id)
                 .cloned()
                 .ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")))?;
-            if matches!(
-                st.state.as_str(),
-                "Destroyed" | "Unanchored" | "AnchorVulnerable" | "Anchoring" | "NoCore"
-            ) {
+            if !crate::services::structure_control_ops::is_structure_combat_operational(Some(ctx), &st) {
                 return Err(err(
                     "StructureNotOperational",
                     format!("Structure {structure_id} is in state '{}' and cannot activate modules", st.state),
@@ -708,8 +742,10 @@ pub async fn handle_structure_module_activate(
         None
     };
 
+    let (seed_cap, _) = read_unified_structure_capacitor(ctx, &sys_handle, structure_id, st.type_id, now_unix).await;
+
     // Atomically check capacitor, per-module cycle cooldown, and consume 1 charge if required.
-    let charge_tid_opt = ctx.db.try_with_mut_snapshot(|snap| {
+    let (charge_tid_opt, new_cap_val) = ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_ext_state(snap);
         if ext
             .standup_module_cycle_until_unix
@@ -721,21 +757,13 @@ pub async fn handle_structure_module_activate(
                 format!("Module {module_id} is already cycling"),
             ));
         }
-        let st_sde = ctx.sde.types.get(&st.type_id);
-        let max_cap = st_sde
-            .and_then(|t| t.default_attributes.get(&482).copied())
-            .unwrap_or(400_000.0);
-        let rech_s = (st_sde
-            .and_then(|t| t.default_attributes.get(&55).copied())
-            .unwrap_or(5_760_000.0)
-            / 1_000.0)
-            .max(1.0);
+        let (max_cap, rech_s) = structure_cap_params(ctx, st.type_id);
         let cur_cap = match ext.structure_cap_state.get(&structure_id).copied() {
             Some((prev_cap, prev_ts)) => {
                 let dt = now_unix.saturating_sub(prev_ts) as f64;
                 (prev_cap + (max_cap / rech_s) * dt).min(max_cap)
             }
-            None => max_cap,
+            None => seed_cap.min(max_cap),
         };
         if cur_cap + 1e-6 < cap_need {
             return Err(err(
@@ -756,8 +784,9 @@ pub async fn handle_structure_module_activate(
         } else {
             None
         };
+        let next_cap = (cur_cap - cap_need).max(0.0);
         ext.structure_cap_state
-            .insert(structure_id, ((cur_cap - cap_need).max(0.0), now_unix));
+            .insert(structure_id, (next_cap, now_unix));
         let cycle_secs = mod_sde
             .default_attributes
             .get(&51)
@@ -768,8 +797,9 @@ pub async fn handle_structure_module_activate(
         ext.standup_module_cycle_until_unix
             .insert(module_id, now_unix.saturating_add(cycle_secs));
         save_ext_state(snap, &ext);
-        Ok(ctid)
+        Ok((ctid, next_cap))
     })?;
+    let _ = sys_handle.set_capacitor(structure_id, new_cap_val).await;
 
     ctx.notify_godma_ship_effect(
         crate::router::NotificationTarget::Character(char_id),

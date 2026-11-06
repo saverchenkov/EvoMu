@@ -242,7 +242,7 @@ async fn corp_hangar_divisions_account_keys_and_delayed_role_grants_kill_mutatio
     .unwrap_err();
     assert_eq!(loc_err.code, "InvalidLocation");
 
-    // SetAccountKey boundary (999 invalid, 1007 invalid, 1000..=1006 valid with role 1 << (div_idx + 8))
+    // SetAccountKey boundary (999 invalid, 1007 invalid, 1000..=1006 valid with ROLE_ACCOUNT_CAN_TAKE 1 << (div_idx + 27))
     assert_eq!(
         reg_call(&ctx, &mut ceo_sess, "SetAccountKey", &[PyRep::Integer(999)]).unwrap_err().code,
         "InvalidAccountKey"
@@ -252,9 +252,9 @@ async fn corp_hangar_divisions_account_keys_and_delayed_role_grants_kill_mutatio
         "InvalidAccountKey"
     );
     ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.get_mut(&corp_id).unwrap().member_roles.insert(member_id, 1u64 << 23);
+        snap.corporations.get_mut(&corp_id).unwrap().member_roles.insert(member_id, 1u64 << 30);
     });
-    let mut mem_sess = make_member_sess(member_id, corp_id, Some(station_id), 1u64 << 23);
+    let mut mem_sess = make_member_sess(member_id, corp_id, Some(station_id), 1u64 << 30);
     assert_eq!(
         reg_call(&ctx, &mut mem_sess, "SetAccountKey", &[PyRep::Integer(1002)]).unwrap_err().code,
         "CorpRoleDenied"

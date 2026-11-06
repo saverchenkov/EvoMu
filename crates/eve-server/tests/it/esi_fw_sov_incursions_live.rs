@@ -327,8 +327,14 @@ async fn test_esi_fw_live_enlistment_kills_and_complex_captures() {
     assert_eq!(lb_corp["kills"]["yesterday"][0]["corporation_id"], corp_1);
     assert_eq!(lb_corp["victory_points"]["active_total"][0]["corporation_id"], corp_1);
 
-    // 6. Advance > 24h (`86,410s`) and retire Pilot 2: `yesterday` rolls to 0 while `last_week` & `total` persist!
+    // 6. Advance > 24h (`86,410s`), dock Pilot 2, and retire Pilot 2: `yesterday` rolls to 0 while `last_week` & `total` persist!
     ctx.advance_secs(86_410);
+    s2.station_id = Some(60_003_760);
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(c) = s.characters.get_mut(&PILOT_2) {
+            c.station_id = Some(60_003_760);
+        }
+    });
     rpc(&ctx, &mut s2, "fwCharacterEnlistmentMgr", "RemoveMyDirectEnlistment", &[])
         .await
         .expect("RemoveMyDirectEnlistment");

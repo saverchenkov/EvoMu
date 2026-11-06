@@ -925,7 +925,6 @@ pub fn handle(
                 let mut wraps_to_remove = Vec::new();
                 for iid in &c.item_ids {
                     let present = snap.items.get(iid).is_some_and(|item| {
-                        if item.location_id == ship_id || item.location_id == c.end_station_id { return true; }
                         if let Some(wrap_item) = snap.items.get(&item.location_id).filter(|w| {
                             w.type_id == 3468
                                 && (w.owner_id == char_id || (is_corp_acceptor && w.owner_id == effective_corp))

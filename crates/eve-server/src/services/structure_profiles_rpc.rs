@@ -1045,7 +1045,7 @@ pub(crate) fn handle_save_profile_settings(
                         group_members_to_sync.push((
                             eid,
                             validate_and_classify_entity(snap, eid)?,
-                            mtype < 0,
+                            crate::services::structure_acl_defense_rules::is_acl_role_excluded(mtype),
                         ));
                     }
                 }

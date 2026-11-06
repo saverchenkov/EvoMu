@@ -295,7 +295,8 @@ fn sweep_expired_orders_refunds_buy_escrow_and_returns_sell_items() {
 
     ctx.db.with_snapshot(|s| {
         assert_eq!(s.characters[&char_id].balance, IskCents(initial_char_bal.0 + 2000_00));
-        assert_eq!(s.corporations[&corp_id].master_wallet, IskCents(initial_corp_bal.0 + 2500_00));
+        assert_eq!(s.corporations[&corp_id].master_wallet, initial_corp_bal);
+        assert_eq!(s.corporations[&corp_id].division_balance(2), IskCents(2500_00));
         assert_eq!(s.plex_vault_balance(char_id), initial_plex + 6);
         assert_eq!(s.market_orders[&700_001].vol_remaining, 0);
         assert_eq!(s.market_orders[&700_001].escrow, IskCents(0));

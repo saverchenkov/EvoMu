@@ -899,6 +899,9 @@ pub async fn handle(
             }
 
             let now_unix = ctx.now_unix();
+            if let Some(cid) = session.corporation_id.filter(|&id| id > 0) {
+                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, cid);
+            }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if station_id >= 1_000_000_000_000 {
                     let Some(st) = snap.structures.get(&station_id) else {
@@ -977,7 +980,7 @@ pub async fn handle(
                                 | InventoryFlag::CorpSAG6
                                 | InventoryFlag::CorpSAG7
                         )
-                        && caller_can_take_corp_hangar_item(snap, char_id, caller_corp, item.flag, session.corp_role);
+                        && caller_can_take_corp_hangar_item(snap, char_id, caller_corp, item.flag, 0);
                     if (!personal_ok && !corp_ok) || item.location_id != station_id || item.quantity <= 0 {
                         return Err(BridgeRpcError {
                             code: "OwnershipOrLocationViolation".into(),

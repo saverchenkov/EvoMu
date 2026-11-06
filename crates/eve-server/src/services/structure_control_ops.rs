@@ -4,7 +4,7 @@
 //! `feat:structures.defense-settings`).
 #![forbid(unsafe_code)]
 
-use super::station_structure::structure_lifecycle::{is_operational, structure_profile, HullClass};
+use super::station_structure::structure_lifecycle::{structure_profile, HullClass};
 use super::station_structure::structure_upwell_ops::{
     self as ops, apply_pending_profile_applications_with_snap, emit_ship_session_change,
     load_ext_state, require_structure_control_role, save_ext_state,
@@ -31,6 +31,26 @@ fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
 
 fn arg_i64(args: &[PyRep], idx: usize) -> Option<i64> {
     args.get(idx).and_then(|a| a.as_i64())
+}
+
+pub(crate) fn is_structure_combat_operational(
+    ctx_opt: Option<&ServerContext>,
+    st: &eve_db::UpwellStructureRecord,
+) -> bool {
+    if !matches!(
+        st.state.as_str(),
+        "ShieldVulnerable" | "ArmorReinforced" | "ArmorVulnerable" | "HullReinforced" | "HullVulnerable"
+    ) {
+        return false;
+    }
+    if st.quantum_core_installed {
+        return true;
+    }
+    if let Some(ctx) = ctx_opt {
+        structure_profile(ctx, st.type_id).is_some_and(|p| p.hull_class == HullClass::Flex && p.core_type_id.is_none())
+    } else {
+        matches!(st.type_id, 35_840 | 35_841 | 37_534 | 81_826)
+    }
 }
 
 pub(crate) fn can_character_control_structure_with_profile(
@@ -81,11 +101,12 @@ fn verify_control_acl_or_role_with_profile(
                 format!("Character {char_id} (corp {caller_corp}, alliance {caller_ally}) is blocked by structure profile"),
             ));
         }
+        use crate::services::structure_acl_defense_rules::{is_acl_role_allowed, is_acl_role_excluded};
         for &gid in &p.defense_group_ids {
             if let Some(grp) = ext.owner_groups.get(&gid) {
-                if grp.members.get(&char_id) == Some(&-1)
-                    || (caller_corp > 0 && grp.members.get(&caller_corp) == Some(&-1))
-                    || (caller_ally > 0 && grp.members.get(&caller_ally) == Some(&-1))
+                if grp.members.get(&char_id).copied().is_some_and(is_acl_role_excluded)
+                    || (caller_corp > 0 && grp.members.get(&caller_corp).copied().is_some_and(is_acl_role_excluded))
+                    || (caller_ally > 0 && grp.members.get(&caller_ally).copied().is_some_and(is_acl_role_excluded))
                 {
                     return Err(err(
                         "DefenseAccessDenied",
@@ -97,10 +118,10 @@ fn verify_control_acl_or_role_with_profile(
         p.defense_allowed_characters.contains(&char_id)
             || p.defense_group_ids.iter().any(|gid| {
                 ext.owner_groups.get(gid).is_some_and(|g| {
-                    g.members.get(&0).is_some_and(|&r| r >= 0)
-                        || g.members.get(&char_id).is_some_and(|&r| r >= 0)
-                        || (caller_corp > 0 && g.members.get(&caller_corp).is_some_and(|&r| r >= 0))
-                        || (caller_ally > 0 && g.members.get(&caller_ally).is_some_and(|&r| r >= 0))
+                    g.members.get(&0).copied().is_some_and(is_acl_role_allowed)
+                        || g.members.get(&char_id).copied().is_some_and(is_acl_role_allowed)
+                        || (caller_corp > 0 && g.members.get(&caller_corp).copied().is_some_and(is_acl_role_allowed))
+                        || (caller_ally > 0 && g.members.get(&caller_ally).copied().is_some_and(is_acl_role_allowed))
                 })
             })
     } else {
@@ -138,6 +159,12 @@ async fn engage_structure_control(
             return Err(err(
                 "StructureDestroyed",
                 format!("Structure {structure_id} has been destroyed"),
+            ));
+        }
+        if !is_structure_combat_operational(Some(ctx), &st) {
+            return Err(err(
+                "StructureNotOperational",
+                format!("Structure {structure_id} is in state '{}' (cored={}) and cannot be controlled", st.state, st.quantum_core_installed),
             ));
         }
         let prof = structure_profile(ctx, st.type_id);
@@ -206,6 +233,12 @@ async fn engage_structure_control(
             return Err(err(
                 "StructureDestroyed",
                 format!("Structure {structure_id} has been destroyed"),
+            ));
+        }
+        if !is_structure_combat_operational(Some(ctx), &st) {
+            return Err(err(
+                "StructureNotOperational",
+                format!("Structure {structure_id} is in state '{}' (cored={}) and cannot be controlled", st.state, st.quantum_core_installed),
             ));
         }
         let mut ext = load_ext_state(snap);
@@ -556,7 +589,9 @@ pub fn release_unauthorized_structure_controllers_in_snap(snap: &mut WorldStateS
     let mut released = Vec::new();
     for (structure_id, pilot_id) in pairs {
         let authorized = match snap.structures.get(&structure_id) {
-            Some(st) if st.state != "Destroyed" => verify_control_acl_or_role(snap, &load_ext_state(snap), st, pilot_id).is_ok(),
+            Some(st) if is_structure_combat_operational(None, st) => {
+                verify_control_acl_or_role(snap, &load_ext_state(snap), st, pilot_id).is_ok()
+            }
             _ => false,
         };
         if !authorized {
@@ -577,6 +612,9 @@ pub(crate) fn sync_character_session(ctx: &ServerContext, session: &mut SessionS
             session.corporation_id = Some(new_corp);
             session.alliance_id = new_ally;
             session.corp_role = new_role;
+        }
+        if let Some(new_wf) = crate::services::fw_enlistment::take_forced_war_faction_sync(ctx, cid) {
+            session.war_faction_id = new_wf;
         }
         apply_forced_session_ship_sync(ctx, session);
         if let Some((act_ship, st_id, str_id, sys_id, const_id, reg_id, stale_struct)) = ctx.db.with_snapshot(|snap| {
@@ -1055,7 +1093,7 @@ pub async fn step_structure_auto_defense(ctx: &ServerContext, sys_id: u32, dt: f
                 .values()
                 .filter(|st| {
                     st.solar_system_id == sys_id
-                        && is_operational(&st.state)
+                        && is_structure_combat_operational(Some(ctx), st)
                         && !ext.active_pilot_by_structure.contains_key(&st.structure_id)
                         && {
                             let eff_prof = crate::services::structure_profile_services::effective_profile_for_structure(

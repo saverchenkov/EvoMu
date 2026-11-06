@@ -132,7 +132,10 @@ async fn test_live_lifecycle_corp_quit_cleanup() {
         .unwrap_err();
     assert_eq!(blocked.code, "MemberHasRoles");
 
-    // Member self-quits via ResignFromCorp -> moved to SDE bloodline NPC corp, roles/pending/titles/account key/channels cleaned
+    // Member self-quit is also blocked while roles/24h stasis are active, then succeeds after dropping roles + 24h
+    assert_eq!(rpc(&ctx, &mut member.sess, "corpRegistry", "ResignFromCorp", &[]).await.unwrap_err().code, "MemberHasRoles");
+    rpc(&ctx, &mut ceo.sess, "corpRegistry", "UpdateMember", &[PyRep::Integer(member.char_id), PyRep::Integer(0), PyRep::Integer(1)]).await.expect("drop roles");
+    ctx.advance_secs(86_410);
     let quit = rpc(&ctx, &mut member.sess, "corpRegistry", "ResignFromCorp", &[])
         .await
         .expect("ResignFromCorp");

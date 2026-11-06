@@ -171,12 +171,13 @@ fn evaluate_rule_slice(
     if rules.is_empty() {
         return None;
     }
+    use crate::services::structure_acl_defense_rules::{is_acl_role_allowed, is_acl_role_excluded};
     for &(gid, _) in rules {
         if gid > 0 {
             if let Some(grp) = ext.owner_groups.get(&gid) {
-                if grp.members.get(&char_id) == Some(&-1)
-                    || (char_corp > 0 && grp.members.get(&char_corp) == Some(&-1))
-                    || (char_ally > 0 && grp.members.get(&char_ally) == Some(&-1))
+                if grp.members.get(&char_id).copied().is_some_and(is_acl_role_excluded)
+                    || (char_corp > 0 && grp.members.get(&char_corp).copied().is_some_and(is_acl_role_excluded))
+                    || (char_ally > 0 && grp.members.get(&char_ally).copied().is_some_and(is_acl_role_excluded))
                 {
                     return None;
                 }
@@ -188,10 +189,10 @@ fn evaluate_rule_slice(
         let matched = if gid == 0 {
             true
         } else if let Some(grp) = ext.owner_groups.get(&gid) {
-            grp.members.get(&0).is_some_and(|&r| r >= 0)
-                || grp.members.get(&char_id).is_some_and(|&r| r >= 0)
-                || (char_corp > 0 && grp.members.get(&char_corp).is_some_and(|&r| r >= 0))
-                || (char_ally > 0 && grp.members.get(&char_ally).is_some_and(|&r| r >= 0))
+            grp.members.get(&0).copied().is_some_and(is_acl_role_allowed)
+                || grp.members.get(&char_id).copied().is_some_and(is_acl_role_allowed)
+                || (char_corp > 0 && grp.members.get(&char_corp).copied().is_some_and(is_acl_role_allowed))
+                || (char_ally > 0 && grp.members.get(&char_ally).copied().is_some_and(is_acl_role_allowed))
         } else {
             false
         };
@@ -758,79 +759,112 @@ pub fn apply_group_member_batch(
     args: &[PyRep],
     is_add: bool,
 ) -> Result<PyRep, BridgeRpcError> {
+    use crate::services::structure_acl_defense_rules::{
+        is_acl_admin, is_acl_manager_or_admin, is_acl_role_excluded, normalize_acl_role_value,
+        sync_profile_docking_entity_after_group_edit, ACL_ROLE_ADMIN, ACL_ROLE_EXCLUDED,
+        ACL_ROLE_MANAGER, ACL_ROLE_MEMBER,
+    };
     let (_, char_id) = ServerContext::require_character(session)?;
     let group_or_struct_id = ops::arg_i64(args, 0)
         .or(session.structure_id)
         .ok_or_else(|| err("MissingGroupId", "ownerGroupManager requires groupID"))?;
-    let explicit_blocked = args.get(2).and_then(|a| match a {
-        PyRep::Bool(b) => Some(*b),
-        PyRep::Integer(i) => Some(*i != 0),
+    let explicit_role = match args.get(2) {
+        Some(PyRep::Bool(b)) => Some(if *b { ACL_ROLE_EXCLUDED } else { ACL_ROLE_MEMBER }),
+        Some(PyRep::Integer(i)) => Some(normalize_acl_role_value(*i)?),
         _ => None,
-    });
-    let default_blocked = explicit_blocked.unwrap_or(false);
-    let members: Vec<(i64, bool)> = match args.get(1) {
-        Some(PyRep::Dict(d)) => d
-            .iter()
-            .filter_map(|(k, v)| {
-                k.as_i64().map(|eid| {
-                    (
-                        eid,
-                        explicit_blocked.unwrap_or_else(|| {
-                            v.as_i64().is_some_and(|t| t < 0) || matches!(v, PyRep::Bool(false))
-                        }),
-                    )
-                })
-            })
-            .collect(),
-        Some(PyRep::List(xs) | PyRep::Tuple(xs)) => xs
-            .iter()
-            .filter_map(|x| x.as_i64().map(|eid| (eid, default_blocked)))
-            .collect(),
-        Some(PyRep::Integer(eid)) => vec![(*eid, default_blocked)],
+    };
+    let default_role = explicit_role.unwrap_or(ACL_ROLE_MEMBER);
+    let members: Vec<(i64, i64)> = match args.get(1) {
+        Some(PyRep::Dict(d)) => {
+            let mut out = Vec::with_capacity(d.len());
+            for (k, v) in d {
+                let Some(eid) = k.as_i64() else { continue };
+                let role = if let Some(er) = explicit_role {
+                    er
+                } else {
+                    match v {
+                        PyRep::Bool(b) => if *b { ACL_ROLE_MEMBER } else { ACL_ROLE_EXCLUDED },
+                        PyRep::Integer(i) => normalize_acl_role_value(*i)?,
+                        _ => default_role,
+                    }
+                };
+                out.push((eid, role));
+            }
+            out
+        }
+        Some(PyRep::List(xs) | PyRep::Tuple(xs)) => {
+            let mut out = Vec::with_capacity(xs.len());
+            for x in xs {
+                match x {
+                    PyRep::Integer(eid) => out.push((*eid, default_role)),
+                    PyRep::Tuple(pair) | PyRep::List(pair) if !pair.is_empty() => {
+                        let Some(eid) = pair[0].as_i64() else { continue };
+                        let role = if let Some(er) = explicit_role {
+                            er
+                        } else if let Some(v) = pair.get(1) {
+                            match v {
+                                PyRep::Bool(b) => if *b { ACL_ROLE_MEMBER } else { ACL_ROLE_EXCLUDED },
+                                PyRep::Integer(i) => normalize_acl_role_value(*i)?,
+                                _ => default_role,
+                            }
+                        } else {
+                            default_role
+                        };
+                        out.push((eid, role));
+                    }
+                    _ => {}
+                }
+            }
+            out
+        }
+        Some(PyRep::Integer(eid)) => vec![(*eid, default_role)],
         _ => return Err(err("MissingEntityId", "ownerGroupManager requires memberIDs")),
     };
     let (notify_corp, released) = ctx.db.try_with_mut_snapshot(|snap| {
-        let classified: Vec<(i64, bool, (bool, bool, bool))> = members
+        let classified: Vec<(i64, i64, (bool, bool, bool))> = members
             .iter()
-            .map(|&(eid, blk)| Ok((eid, blk, validate_group_member_entity(snap, eid, blk)?)))
+            .map(|&(eid, role)| {
+                let blk = is_acl_role_excluded(role);
+                Ok((eid, role, validate_group_member_entity(snap, eid, blk)?))
+            })
             .collect::<Result<_, BridgeRpcError>>()?;
         let mut ext = load_ext_state(snap);
         if let Some(grp) = ext.owner_groups.get(&group_or_struct_id) {
-            let is_admin_or_dir = grp.creator_id == char_id
-                || grp.members.get(&char_id) == Some(&1)
+            let is_admin_or_dir = is_acl_admin(char_id, grp)
                 || (grp.owner_corp_id != 0
                     && ops::require_corp_profile_manager(snap, session, char_id, grp.owner_corp_id)
                         .is_ok())
                 || session.has_gm_role();
-            let is_mgr = is_admin_or_dir || grp.members.get(&char_id) == Some(&2);
+            let is_mgr = is_admin_or_dir || is_acl_manager_or_admin(char_id, grp);
             if !is_mgr {
                 return Err(err(
                     "InsufficientCorpRoles",
                     "Caller is not a manager or admin of this access group",
                 ));
             }
-            for &(eid, blk, _) in &classified {
-                if eid == grp.creator_id && (!is_add || blk) && !session.has_gm_role() {
+            for &(eid, role, _) in &classified {
+                if eid == grp.creator_id && (!is_add || role != ACL_ROLE_ADMIN) && !session.has_gm_role() {
                     return Err(err(
                         "InsufficientCorpRoles",
-                        "Cannot remove or block access group creator",
+                        "Cannot remove, demote, or block access group creator",
                     ));
                 }
                 if !is_admin_or_dir
                     && (eid == grp.creator_id
-                        || matches!(grp.members.get(&eid).copied(), Some(1 | 2)))
+                        || (is_add && matches!(role, ACL_ROLE_MANAGER | ACL_ROLE_ADMIN))
+                        || matches!(grp.members.get(&eid).copied(), Some(ACL_ROLE_MANAGER | ACL_ROLE_ADMIN)))
                 {
                     return Err(err(
                         "InsufficientCorpRoles",
-                        "ACL Managers cannot overwrite or remove Admins or Managers",
+                        "ACL Managers cannot grant, overwrite, or remove Admins or Managers",
                     ));
                 }
             }
             let owner_corp = grp.owner_corp_id;
             if let Some(grp_mut) = ext.owner_groups.get_mut(&group_or_struct_id) {
-                for &(eid, blk, _) in &classified {
+                for &(eid, role, _) in &classified {
                     if is_add {
-                        grp_mut.members.insert(eid, if blk { -1 } else { 0 });
+                        grp_mut.members.insert(eid, role);
                     } else {
                         grp_mut.members.remove(&eid);
                     }
@@ -849,41 +883,16 @@ pub fn apply_group_member_batch(
                 .map(|p| p.profile_id)
                 .collect();
             for pid in linked_pids {
-                let is_docking_linked = ext
-                    .profiles_by_id
-                    .get(&pid)
-                    .is_some_and(|p| p.access_group_ids.contains(&group_or_struct_id));
-                if is_docking_linked {
-                    let attached_gids: Vec<i64> = ext
-                        .profiles_by_id
-                        .get(&pid)
-                        .map(|p| p.access_group_ids.iter().copied().collect())
-                        .unwrap_or_default();
-                    for &(eid, blk, (is_ally, is_corp, _)) in &classified {
-                        if eid == 0 {
-                            continue;
-                        }
-                        let still_in_other = |want_blk: bool| {
-                            attached_gids.iter().any(|&gid| {
-                                gid != group_or_struct_id
-                                    && ext
-                                        .owner_groups
-                                        .get(&gid)
-                                        .and_then(|g| g.members.get(&eid))
-                                        .is_some_and(|&mt| (mt < 0) == want_blk)
-                            })
-                        };
-                        if is_add || !still_in_other(blk) {
-                            if let Some(prof) = ext.profiles_by_id.get_mut(&pid) {
-                                ops::apply_entity_to_profile(prof, eid, is_ally, is_corp, blk, is_add);
-                            }
-                        }
-                        if !is_add && explicit_blocked.is_none() && !still_in_other(!blk) {
-                            if let Some(prof) = ext.profiles_by_id.get_mut(&pid) {
-                                ops::apply_entity_to_profile(prof, eid, is_ally, is_corp, !blk, false);
-                            }
-                        }
-                    }
+                for &(eid, role, (is_ally, is_corp, _)) in &classified {
+                    sync_profile_docking_entity_after_group_edit(
+                        &mut ext,
+                        pid,
+                        group_or_struct_id,
+                        eid,
+                        is_ally,
+                        is_corp,
+                        is_add.then_some(role),
+                    );
                 }
                 ops::sync_assigned_structures_for_profile(&mut ext, pid);
             }
@@ -896,12 +905,13 @@ pub fn apply_group_member_batch(
         } else {
             let st = ops::require_structure_corp_manager(snap, session, char_id, group_or_struct_id)?;
             let prof = ext.access_profiles.entry(group_or_struct_id).or_default();
-            for (eid, blk, (is_ally, is_corp, _)) in classified {
+            for (eid, role, (is_ally, is_corp, _)) in classified {
                 if eid == 0 {
                     continue;
                 }
+                let blk = is_acl_role_excluded(role);
                 ops::apply_entity_to_profile(prof, eid, is_ally, is_corp, blk, is_add);
-                if !is_add && explicit_blocked.is_none() {
+                if !is_add && explicit_role.is_none() {
                     ops::apply_entity_to_profile(prof, eid, is_ally, is_corp, !blk, false);
                 }
             }

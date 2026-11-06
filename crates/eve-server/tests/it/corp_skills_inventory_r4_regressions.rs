@@ -387,7 +387,7 @@ async fn r4_176_180_181_183_ship_bay_passwords_alsc_locks_and_container_roles() 
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(c) = snap.corporations.get_mut(&corp_id) {
-            *c.member_roles.entry(fleetmate_id).or_default() |= 1u64 << 43;
+            *c.member_roles.entry(fleetmate_id).or_default() |= eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[0];
         }
     });
     ctx.dispatch_rpc(

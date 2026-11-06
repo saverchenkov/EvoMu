@@ -454,7 +454,7 @@ async fn sov_rpcs_dev_indices_map_beyonce_and_hub_hacks_kill_mutations() {
             880_501,
             InventoryItemRecord {
                 item_id: 880_501,
-                type_id: 33_700,
+                type_id: 33_476,
                 owner_id: char_id,
                 location_id: i64::from(sys_id),
                 flag: InventoryFlag::Hangar,

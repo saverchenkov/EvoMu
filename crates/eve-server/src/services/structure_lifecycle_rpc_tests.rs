@@ -539,13 +539,21 @@ async fn fitting_online_fuel_jettison_delivery_and_cargo_dropoff_work() {
         snap.structures.get_mut(&sid).unwrap().armor_hp = 500_000.0;
     });
 
-    // Jettison fuel blocks from structure bay
+    // Jettison fuel blocks requires being docked in or actively controlling structure
     sess.structure_id = None;
     let jettison_args = vec![
         PyRep::Integer(sid),
         PyRep::Integer(i64::from(fuel_tid)),
         PyRep::Integer(25),
     ];
+    assert_eq!(
+        handle_jettison_structure_fuel(&ctx, &mut sess, &jettison_args)
+            .await
+            .unwrap_err()
+            .code,
+        "NotDockedInStructure"
+    );
+    sess.structure_id = Some(sid);
     let jet = handle_jettison_structure_fuel(&ctx, &mut sess, &jettison_args)
         .await
         .expect("jettison");

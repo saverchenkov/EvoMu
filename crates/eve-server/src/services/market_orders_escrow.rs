@@ -177,16 +177,29 @@ pub fn handle_orders_escrow(
                 let caller_corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 let div_id = (account_key.saturating_sub(999)).clamp(1, 7) as u8;
                 if use_corp {
-                    let Some(corp) = snap.corporations.get_mut(&caller_corp_id) else {
+                    if !snap.corporations.contains_key(&caller_corp_id) {
                         return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {caller_corp_id} not found for corporate sell order") });
-                    };
-                    let role_mask = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-                    if corp.ceo_id != char_id
-                        && !eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_ACCOUNTANT | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT | (1u64 << 20))
-                    {
+                    }
+                    let (is_ceo, eff_roles) =
+                        crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+                            snap,
+                            caller_corp_id,
+                            char_id,
+                            0,
+                            now_unix,
+                        );
+                    let take_bit = 1u64 << (27 + (div_id - 1));
+                    let allowed_roles = eve_db::corp_roles::ROLE_DIRECTOR
+                        | eve_db::corp_roles::ROLE_TRADER
+                        | eve_db::corp_roles::ROLE_ACCOUNTANT
+                        | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
+                        | take_bit;
+                    if !is_ceo && (eff_roles & allowed_roles) == 0 {
                         return Err(BridgeRpcError { code: "CorpRoleRequired".into(), message: "Character lacks corporation trader/accountant role to place corporate sell order".into() });
                     }
-                    corp.ensure_wallet_divisions();
+                    if let Some(corp) = snap.corporations.get_mut(&caller_corp_id) {
+                        corp.ensure_wallet_divisions();
+                    }
                 }
                 let order_owner_id = if use_corp { caller_corp_id } else { char_id };
 
@@ -437,26 +450,9 @@ pub fn handle_orders_escrow(
                             } else if let Some(buyer_corp) =
                                 snap.corporations.get_mut(&resting.owner_id)
                             {
-                                buyer_corp.ensure_wallet_divisions();
-                                let div_bal = buyer_corp
-                                    .wallet_divisions
-                                    .iter()
-                                    .find(|d| d.division_id == r_div_id)
-                                    .map(|d| d.balance)
-                                    .unwrap_or(buyer_corp.master_wallet);
-                                if div_bal.0 >= uncovered.0 && buyer_corp.master_wallet.0 >= uncovered.0 {
-                                    let new_bal = buyer_corp
-                                        .master_wallet
-                                        .checked_sub(uncovered)
-                                        .unwrap_or(IskCents(0));
-                                    buyer_corp.master_wallet = new_bal;
-                                    if let Some(d) = buyer_corp
-                                        .wallet_divisions
-                                        .iter_mut()
-                                        .find(|d| d.division_id == r_div_id)
-                                    {
-                                        d.balance = d.balance.checked_sub(uncovered).unwrap_or(IskCents(0));
-                                    }
+                                let div_bal = buyer_corp.division_balance(r_div_id);
+                                if let Some(new_bal) = div_bal.checked_sub(uncovered) {
+                                    buyer_corp.set_division_balance(r_div_id, new_bal);
                                     snap.append_journal(
                                         resting.owner_id,
                                         "MarketEscrowCover",
@@ -483,21 +479,7 @@ pub fn handle_orders_escrow(
                                     } else if let Some(buyer_corp) =
                                         snap.corporations.get_mut(&resting.owner_id)
                                     {
-                                        buyer_corp.ensure_wallet_divisions();
-                                        buyer_corp.master_wallet = buyer_corp
-                                            .master_wallet
-                                            .checked_add(resting.escrow)
-                                            .unwrap_or(buyer_corp.master_wallet);
-                                        if let Some(d) = buyer_corp
-                                            .wallet_divisions
-                                            .iter_mut()
-                                            .find(|d| d.division_id == r_div_id)
-                                        {
-                                            d.balance = d
-                                                .balance
-                                                .checked_add(resting.escrow)
-                                                .unwrap_or(d.balance);
-                                        }
+                                        buyer_corp.credit_division(r_div_id, resting.escrow);
                                     }
                                 }
                                 if let Some(o_mut) = snap.market_orders.get_mut(&oid) {
@@ -516,12 +498,7 @@ pub fn handle_orders_escrow(
                             fill_gross.checked_sub(fill_tax).unwrap_or(IskCents(0));
                         let (seller_id, seller_bal) = if use_corp {
                             let bal = snap.corporations.get_mut(&caller_corp_id).map(|corp_mut| {
-                                corp_mut.master_wallet =
-                                    corp_mut.master_wallet.checked_add(seller_net).unwrap_or(corp_mut.master_wallet);
-                                if let Some(d) = corp_mut.wallet_divisions.iter_mut().find(|d| d.division_id == div_id) {
-                                    d.balance = d.balance.checked_add(seller_net).unwrap_or(d.balance);
-                                }
-                                corp_mut.master_wallet
+                                corp_mut.credit_division(div_id, seller_net)
                             });
                             (caller_corp_id, bal)
                         } else {
@@ -624,23 +601,16 @@ pub fn handle_orders_escrow(
                         let corp_bal = snap
                             .corporations
                             .get(&caller_corp_id)
-                            .and_then(|c| c.wallet_divisions.iter().find(|d| d.division_id == div_id).map(|d| d.balance.min(c.master_wallet)))
+                            .map(|c| c.division_balance(div_id))
                             .unwrap_or(IskCents(0));
-                        if corp_bal.checked_sub(broker_fee).is_none() {
+                        let Some(bal_after) = corp_bal.checked_sub(broker_fee) else {
                             return Err(BridgeRpcError {
                                 code: "InsufficientFunds".into(),
                                 message: "Not enough corporation ISK for market broker fee".into(),
                             });
-                        }
+                        };
                         if let Some(corp_mut) = snap.corporations.get_mut(&caller_corp_id) {
-                            corp_mut.master_wallet = corp_mut
-                                .master_wallet
-                                .checked_sub(broker_fee)
-                                .unwrap_or(IskCents(0));
-                            if let Some(d) = corp_mut.wallet_divisions.iter_mut().find(|d| d.division_id == div_id) {
-                                d.balance = d.balance.checked_sub(broker_fee).unwrap_or(IskCents(0));
-                            }
-                            let bal_after = corp_mut.master_wallet;
+                            corp_mut.set_division_balance(div_id, bal_after);
                             snap.append_journal(
                                 caller_corp_id,
                                 "MarketBrokerFee",
@@ -910,13 +880,8 @@ pub fn handle_orders_escrow(
                                 .with_context(eve_db::ledger::JournalContext::MarketOrder, order_id),
                             });
                         } else if let Some(corp) = snap.corporations.get_mut(&order.owner_id) {
-                            corp.master_wallet = corp.master_wallet.checked_add(order.escrow).unwrap_or(corp.master_wallet);
                             let div_id = (meta.account_key.unwrap_or(1000).saturating_sub(999)).clamp(1, 7) as u8;
-                            corp.ensure_wallet_divisions();
-                            if let Some(d) = corp.wallet_divisions.iter_mut().find(|d| d.division_id == div_id) {
-                                d.balance = d.balance.checked_add(order.escrow).unwrap_or(d.balance);
-                            }
-                            let bal_after = corp.master_wallet;
+                            let bal_after = corp.credit_division(div_id, order.escrow);
                             snap.append_journal(
                                 order.owner_id,
                                 "MarketOrderCancelRefund",
@@ -1244,13 +1209,8 @@ pub fn handle_orders_escrow(
                             seller.balance = seller.balance.checked_add(seller_net).unwrap_or(seller.balance);
                             seller_bal = Some(seller.balance);
                         } else if let Some(seller_corp) = snap.corporations.get_mut(&seller_id) {
-                            seller_corp.master_wallet = seller_corp.master_wallet.checked_add(seller_net).unwrap_or(seller_corp.master_wallet);
                             let s_div = seller_meta.and_then(|m| m.account_key).map(|k| (k.saturating_sub(999)).clamp(1, 7) as u8).unwrap_or(1);
-                            seller_corp.ensure_wallet_divisions();
-                            if let Some(d) = seller_corp.wallet_divisions.iter_mut().find(|d| d.division_id == s_div) {
-                                d.balance = d.balance.checked_add(seller_net).unwrap_or(d.balance);
-                            }
-                            seller_bal = Some(seller_corp.master_wallet);
+                            seller_bal = Some(seller_corp.credit_division(s_div, seller_net));
                         }
                     }
 

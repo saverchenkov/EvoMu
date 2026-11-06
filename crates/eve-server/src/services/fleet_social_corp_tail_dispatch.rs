@@ -20,18 +20,19 @@ pub fn handle_corp_gov_tail(
     char_id: i64,
     now_unix: u64,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let has_director = ctx.db.with_snapshot(|snap| {
-        snap.corporations.get(&corp_id).map_or(false, |c| {
-            let r = c.member_roles.get(&char_id).copied().unwrap_or(0);
-            c.ceo_id == char_id || corp_roles::has_role(r, corp_roles::ROLE_DIRECTOR)
-        })
-    });
-    let has_comms = ctx.db.with_snapshot(|snap| {
-        snap.corporations.get(&corp_id).map_or(false, |c| {
-            let r = c.member_roles.get(&char_id).copied().unwrap_or(0);
-            c.ceo_id == char_id
-                || corp_roles::has_role(r, corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_PERSONNEL_MANAGER | (1u64 << 55))
-        })
+    let (has_director, has_comms) = ctx.db.with_snapshot(|snap| {
+        if !snap.corporations.contains_key(&corp_id) {
+            return (false, false);
+        }
+        let (is_ceo, eff_roles) =
+            crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+                snap, corp_id, char_id, 0, now_unix,
+            );
+        let dir = is_ceo || (eff_roles & corp_roles::ROLE_DIRECTOR) != 0;
+        let comms = dir
+            || (eff_roles & (corp_roles::ROLE_PERSONNEL_MANAGER | corp_roles::ROLE_CHAT_MANAGER))
+                != 0;
+        (dir, comms)
     });
     let deny_role = |msg: &'static str| -> Option<Result<PyRep, BridgeRpcError>> {
         Some(Err(BridgeRpcError {
@@ -757,12 +758,17 @@ pub(crate) fn handle_get_corp_applications_rpc(
         Err(e) => return Some(Err(e)),
     };
     let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(0);
+    super::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
+    let now_unix = ctx.now_unix();
     let res = ctx.db.with_snapshot(|snap| {
         let Some(corp) = snap.corporations.get(&corp_id) else {
             return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
         };
-        let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-        if char_id != corp.ceo_id && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_PERSONNEL_MANAGER) {
+        let (is_ceo, eff_roles) =
+            crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+                snap, corp_id, char_id, 0, now_unix,
+            );
+        if !is_ceo && (eff_roles & (corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_PERSONNEL_MANAGER)) == 0 {
             return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Viewing applications requires Personnel Manager or Director role".into() });
         }
         let rows: Vec<Vec<PyRep>> = corp

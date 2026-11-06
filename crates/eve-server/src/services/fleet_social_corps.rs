@@ -841,6 +841,11 @@ pub(super) fn handle_corps(
                 .and_then(|a| a.as_str())
                 .unwrap_or("Accepted");
             let now_unix = ctx.now_unix();
+            if let Some(app_cid) = ctx.db.with_snapshot(|s| {
+                s.corporations.values().find(|c| c.applications.contains_key(&app_id)).map(|c| c.corporation_id).or(session.corporation_id)
+            }).filter(|&id| id > 0) {
+                promote_due_pending_corp_grants(ctx, app_cid);
+            }
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 // Find the corporation owning app_id
@@ -861,7 +866,6 @@ pub(super) fn handle_corps(
                     });
                 };
                 let ceo_id = corp.ceo_id;
-                let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
                 let (applicant_id, app_msg, app_ts, app_status) = corp
                     .applications
                     .get(&app_id)
@@ -872,8 +876,12 @@ pub(super) fn handle_corps(
                 }
                 let old_corp_id = snap.characters.get(&applicant_id).map(|c| c.corporation_id).unwrap_or(0);
                 let is_invitation = app_status.eq_ignore_ascii_case("invited");
-                let has_personnel_role = char_id == ceo_id
-                    || corp_roles::has_role(caller_role, corp_roles::ROLE_PERSONNEL_MANAGER | corp_roles::ROLE_DIRECTOR);
+                let (is_ceo, eff_roles) =
+                    crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+                        snap, corp_id, char_id, 0, now_unix,
+                    );
+                let has_personnel_role = is_ceo
+                    || (eff_roles & (corp_roles::ROLE_PERSONNEL_MANAGER | corp_roles::ROLE_DIRECTOR)) != 0;
 
                 if action.eq_ignore_ascii_case("withdrawn") {
                     if char_id != applicant_id && !(is_invitation && has_personnel_role) {
@@ -1100,13 +1108,14 @@ pub(super) fn handle_corps(
             let corp_id = session.corporation_id.unwrap_or(0);
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let accept_now = matches!(args.get(1), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
-            let now_unix = ctx.now_unix();
             if accept_now {
                 return Some(Err(BridgeRpcError {
                     code: "AccessDenied".into(),
                     message: "InsertInvitation cannot auto-join a character; the target must accept via UpdateApplicationOffer".into(),
                 }));
             }
+            promote_due_pending_corp_grants(ctx, corp_id);
+            let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(corp) = snap.corporations.get(&corp_id) else {
                     return Err(BridgeRpcError {
@@ -1115,12 +1124,12 @@ pub(super) fn handle_corps(
                     });
                 };
                 let ceo_id = corp.ceo_id;
-                let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-                if char_id != ceo_id
-                    && !corp_roles::has_role(
-                        caller_role,
-                        corp_roles::ROLE_PERSONNEL_MANAGER | corp_roles::ROLE_DIRECTOR,
-                    )
+                let (is_ceo, eff_roles) =
+                    crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+                        snap, corp_id, char_id, 0, now_unix,
+                    );
+                if !is_ceo
+                    && (eff_roles & (corp_roles::ROLE_PERSONNEL_MANAGER | corp_roles::ROLE_DIRECTOR)) == 0
                 {
                     return Err(BridgeRpcError {
                         code: "CorpRoleDenied".into(),
@@ -1276,34 +1285,27 @@ pub(super) fn handle_corps(
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Transfer amount must be positive and finite".into() }));
             }
             let transfer_amount = IskCents::from_f64_isk(amount_isk);
+            promote_due_pending_corp_grants(ctx, corp_id);
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(corp) = snap.corporations.get_mut(&corp_id) else {
+                if !snap.corporations.contains_key(&corp_id) {
                     return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
-                };
-                let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-                let take_bit = 1u64 << (20 + (from_div - 1));
-                let has_any_div_bits = (caller_role & (0x7Fu64 << 20)) != 0;
-                let can_take_div = char_id == corp.ceo_id
-                    || corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR)
-                    || corp_roles::has_role(caller_role, take_bit)
-                    || (!has_any_div_bits && corp_roles::has_role(caller_role, corp_roles::ROLE_ACCOUNTANT));
-                if !can_take_div {
-                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Transferring between corp wallet divisions requires Director, Accountant, or source division take role".into() });
                 }
+                let (is_ceo, eff_roles) =
+                    crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+                        snap, corp_id, char_id, 0, now_unix,
+                    );
+                let take_bit = 1u64 << (27 + u32::from(from_div - 1));
+                if !is_ceo && (eff_roles & (corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_ACCOUNTANT | take_bit)) == 0 {
+                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Transferring between corp wallet divisions requires Director, Accountant, or source wallet division take role".into() });
+                }
+                let corp = snap.corporations.get_mut(&corp_id).unwrap();
                 corp.ensure_wallet_divisions();
-                let from_pos = corp.wallet_divisions.iter().position(|d| d.division_id == from_div)
-                    .ok_or_else(|| BridgeRpcError { code: "DivisionNotFound".into(), message: format!("Source wallet division {from_div} not found") })?;
-                let to_pos = corp.wallet_divisions.iter().position(|d| d.division_id == to_div)
-                    .ok_or_else(|| BridgeRpcError { code: "DivisionNotFound".into(), message: format!("Target wallet division {to_div} not found") })?;
-                let source_bal = corp.wallet_divisions[from_pos].balance;
+                let source_bal = corp.division_balance(from_div);
                 let new_source = source_bal.checked_sub(transfer_amount)
                     .ok_or_else(|| BridgeRpcError { code: "InsufficientDivisionFunds".into(), message: "Insufficient funds in source wallet division".into() })?;
-                corp.wallet_divisions[from_pos].balance = new_source;
-                let new_target = corp.wallet_divisions[to_pos].balance.checked_add(transfer_amount).unwrap_or(corp.wallet_divisions[to_pos].balance);
-                corp.wallet_divisions[to_pos].balance = new_target;
-                if from_div == 1 { corp.master_wallet = new_source; }
-                if to_div == 1 { corp.master_wallet = new_target; }
+                corp.set_division_balance(from_div, new_source);
+                let new_target = corp.credit_division(to_div, transfer_amount);
                 snap.next_entity_id += 2;
                 let eid = snap.next_entity_id;
                 let reason = format!("Corp wallet division transfer div {from_div} -> div {to_div}");

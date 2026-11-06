@@ -13,11 +13,12 @@ fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     }
 }
 
-pub fn can_enter_forcefield_in_snap(
+pub fn can_enter_forcefield_in_snap_at(
     snap: &eve_db::WorldStateSnapshot,
     char_id: i64,
     ship_id: i64,
     tower_id: i64,
+    now_unix: u64,
 ) -> bool {
     let owner_id = snap
         .items
@@ -37,8 +38,23 @@ pub fn can_enter_forcefield_in_snap(
     if owner_id == char_id {
         return true;
     }
+    if tower_corp_id != 0 && tower_corp_id == char_corp {
+        let (is_ceo, eff_roles) =
+            crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+                snap,
+                tower_corp_id,
+                char_id,
+                0,
+                now_unix,
+            );
+        let pos_admin_roles =
+            eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STARBASE_CONFIG;
+        if is_ceo || (eff_roles & pos_admin_roles) != 0 {
+            return true;
+        }
+    }
     let Some(settings) = snap.starbase_settings.get(&tower_id) else {
-        return char_corp != 0 && (owner_id == char_corp || tower_corp_id == char_corp);
+        return false;
     };
     let tower_alliance_id = snap
         .characters
@@ -66,9 +82,23 @@ pub fn can_enter_forcefield_in_snap(
     false
 }
 
+pub fn can_enter_forcefield_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    ship_id: i64,
+    tower_id: i64,
+) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    can_enter_forcefield_in_snap_at(snap, char_id, ship_id, tower_id, now)
+}
+
 pub fn can_enter_forcefield(ctx: &ServerContext, char_id: i64, ship_id: i64, tower_id: i64) -> bool {
+    let now = ctx.now_unix();
     ctx.db
-        .with_snapshot(|snap| can_enter_forcefield_in_snap(snap, char_id, ship_id, tower_id))
+        .with_snapshot(|snap| can_enter_forcefield_in_snap_at(snap, char_id, ship_id, tower_id, now))
 }
 
 pub fn is_pos_forcefield_blocked_in_snap(
@@ -82,9 +112,18 @@ pub fn is_pos_forcefield_blocked_in_snap(
 ) -> bool {
     for item in snap.items.values() {
         if item.location_id == sys_id as i64
+            && item.singleton
             && sde.types.get(&item.type_id).is_some_and(|t| t.group_id == 365)
             && snap.starbase_settings.contains_key(&item.item_id)
+            && snap.module_online_states.get(&item.item_id) != Some(&false)
+            && !item.dynamic_attributes.get(&2).is_some_and(|&v| v <= 0.0)
         {
+            let has_any_bay_entry = snap.items.values().any(|f| f.location_id == item.item_id);
+            let has_fuel = !has_any_bay_entry
+                || snap.items.values().any(|f| f.location_id == item.item_id && f.quantity > 0);
+            if !has_fuel {
+                continue;
+            }
             let rad = sde
                 .types
                 .get(&item.type_id)
@@ -107,6 +146,12 @@ pub fn is_pos_forcefield_blocked_in_snap(
     }
     for st in snap.structures.values() {
         if st.solar_system_id == sys_id
+            && st.fuel_blocks > 0
+            && !matches!(
+                st.state.as_str(),
+                "Destroyed" | "Unanchored" | "Offline" | "Anchoring" | "AnchorVulnerable" | "NoCore"
+            )
+            && snap.module_online_states.get(&st.structure_id) != Some(&false)
             && sde.types.get(&st.type_id).is_some_and(|t| t.group_id == 365)
             && snap.starbase_settings.contains_key(&st.structure_id)
         {
@@ -137,9 +182,18 @@ pub async fn check_pos_forcefield_coverage(
         let mut list = Vec::new();
         for item in snap.items.values() {
             if item.location_id == sys_id as i64
+                && item.singleton
                 && ctx.sde.types.get(&item.type_id).is_some_and(|t| t.group_id == 365)
                 && snap.starbase_settings.contains_key(&item.item_id)
+                && snap.module_online_states.get(&item.item_id) != Some(&false)
+                && !item.dynamic_attributes.get(&2).is_some_and(|&v| v <= 0.0)
             {
+                let has_any_bay_entry = snap.items.values().any(|f| f.location_id == item.item_id);
+                let has_fuel = !has_any_bay_entry
+                    || snap.items.values().any(|f| f.location_id == item.item_id && f.quantity > 0);
+                if !has_fuel {
+                    continue;
+                }
                 let rad = ctx
                     .sde
                     .types
@@ -157,6 +211,12 @@ pub async fn check_pos_forcefield_coverage(
         }
         for st in snap.structures.values() {
             if st.solar_system_id == sys_id
+                && st.fuel_blocks > 0
+                && !matches!(
+                    st.state.as_str(),
+                    "Destroyed" | "Unanchored" | "Offline" | "Anchoring" | "AnchorVulnerable" | "NoCore"
+                )
+                && snap.module_online_states.get(&st.structure_id) != Some(&false)
                 && ctx.sde.types.get(&st.type_id).is_some_and(|t| t.group_id == 365)
                 && snap.starbase_settings.contains_key(&st.structure_id)
             {
@@ -274,9 +334,7 @@ pub fn ship_configuration(
     let cfg = st.ship_configs.entry(ship_id).or_default();
     if method == "SetShipPassword" {
         let pw_opt = password_arg.and_then(|a| a.as_str()).filter(|p| !p.is_empty()).map(str::to_string);
-        if args.len() >= 2 {
-            cfg.password = pw_opt.clone();
-        }
+        cfg.password = pw_opt.clone();
         if let Some(ref pw) = pw_opt {
             st.ship_passwords.insert(ship_id, pw.clone());
         } else {

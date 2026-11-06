@@ -461,7 +461,9 @@ async fn test_navigation_starter_and_interstellar_shipcasters_live() {
         .await;
     eve_server::services::space_destiny::clear_session_change_timer(&ctx, rookie_char_id);
 
-    // Negative check: Empire militia enlisted pilot is refused by Deathless Shipcaster
+    // Negative check: Empire militia enlisted pilot is refused by Deathless Shipcaster (enlist while docked, then undock)
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&rookie_char_id).unwrap().station_id = Some(60_003_760); });
+    rookie_sess.station_id = Some(60_003_760);
     rpc(
         &ctx,
         &mut rookie_sess,
@@ -471,6 +473,8 @@ async fn test_navigation_starter_and_interstellar_shipcasters_live() {
     )
     .await
     .expect("Enlist in Caldari State militia");
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&rookie_char_id).unwrap().station_id = None; });
+    rookie_sess.station_id = None;
     let empire_refused = rpc(
         &ctx,
         &mut rookie_sess,
@@ -486,7 +490,9 @@ async fn test_navigation_starter_and_interstellar_shipcasters_live() {
     .expect_err("Empire militia must be refused by Deathless Shipcaster");
     assert_eq!(empire_refused.code, "EmpireMilitiaRefused");
 
-    // Remove direct enlistment to become neutral
+    // Remove direct enlistment while docked, then return to grid as neutral
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&rookie_char_id).unwrap().station_id = Some(60_003_760); });
+    rookie_sess.station_id = Some(60_003_760);
     rpc(
         &ctx,
         &mut rookie_sess,
@@ -496,6 +502,8 @@ async fn test_navigation_starter_and_interstellar_shipcasters_live() {
     )
     .await
     .expect("RemoveMyDirectEnlistment");
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&rookie_char_id).unwrap().station_id = None; });
+    rookie_sess.station_id = None;
 
     // Positive check: Neutral pilot jumps through Turnur beacon into Zarzakh
     eve_server::services::space_destiny::clear_session_change_timer(&ctx, rookie_char_id);

@@ -418,46 +418,8 @@ fn set_corp_militia_faction(
     cid: i64,
     fac: Option<i64>,
     now_unix: u64,
-) {
-    if let Some(f) = fac {
-        snap.fw_runtime.corp_war_factions.insert(cid, f);
-    } else {
-        snap.fw_runtime.corp_war_factions.remove(&cid);
-    }
-    let direct_map = snap.fw_runtime.direct_enlisted_chars.clone();
-    let mut member_factions = Vec::new();
-    for ch in snap.characters.values_mut() {
-        if ch.corporation_id == cid {
-            let eff = direct_map.get(&ch.character_id).copied().or(fac);
-            ch.war_faction_id = eff;
-            member_factions.push((ch.character_id, eff));
-        }
-    }
-    for (mid, eff) in member_factions {
-        if let Some(f) = eff {
-            let rec = snap.fw_character_stats.entry(mid).or_insert_with(|| {
-                eve_db::snapshot_ext::FwCharacterStatsRecord {
-                    character_id: mid,
-                    faction_id: Some(f),
-                    enlisted_on_unix: Some(now_unix),
-                    current_rank: 1,
-                    highest_rank: 1,
-                    kills: Default::default(),
-                    victory_points: Default::default(),
-                }
-            });
-            rec.faction_id = Some(f);
-            if rec.enlisted_on_unix.is_none() {
-                rec.enlisted_on_unix = Some(now_unix);
-            }
-            rec.current_rank = rec.current_rank.max(1);
-            rec.highest_rank = rec.highest_rank.max(rec.current_rank);
-        } else if let Some(rec) = snap.fw_character_stats.get_mut(&mid) {
-            rec.faction_id = None;
-            rec.enlisted_on_unix = None;
-            rec.current_rank = 0;
-        }
-    }
+) -> Vec<crate::services::fw_enlistment::FwMemberMutation> {
+    crate::services::fw_enlistment::apply_corp_militia_faction_in_snap(snap, cid, fac, now_unix)
 }
 
 fn corp_standing_with_faction(snap: &eve_db::WorldStateSnapshot, cid: i64, fac: i64) -> f64 {
@@ -794,6 +756,7 @@ pub async fn handle(
                     .get(&cid)
                     .copied()
                     .is_some_and(|enl| now < enl.saturating_add(86_400))
+                    || crate::services::fw_enlistment::is_corp_leave_cooldown_active_in_snap(snap, cid, now)
                 {
                     return Err(BridgeRpcError {
                         code: "MilitiaCooldownActive".into(),
@@ -801,12 +764,19 @@ pub async fn handle(
                     });
                 }
                 snap.fw_corp_enlisted_on.insert(cid, now);
-                set_corp_militia_faction(snap, cid, Some(fac), now);
-                Ok(snap.characters.get(&char_id).and_then(|c| c.war_faction_id))
+                let changes = set_corp_militia_faction(snap, cid, Some(fac), now);
+                Ok((snap.characters.get(&char_id).and_then(|c| c.war_faction_id), changes))
             });
             match res {
-                Ok(new_fac) => {
+                Ok((new_fac, changes)) => {
                     session.war_faction_id = new_fac;
+                    crate::services::fw_enlistment::sync_corp_militia_members_after_change(
+                        ctx,
+                        session,
+                        Some(fac),
+                        &changes,
+                    )
+                    .await;
                     crate::services::notify_emitters_character_services::emit_campaign_enrollment_changed(ctx, char_id);
                     Some(Ok(PyRep::Bool(true)))
                 }
@@ -879,12 +849,21 @@ pub async fn handle(
                     message: "Must wait 24 hours after enlisting to resign from militia".into(),
                 }));
             }
-            let new_char_fac = ctx.db.with_mut_snapshot(|snap| {
+            let (new_char_fac, changes) = ctx.db.with_mut_snapshot(|snap| {
+                crate::services::fw_enlistment::record_corp_leave_cooldown_in_snap(
+                    snap,
+                    cid,
+                    now.saturating_add(86_400),
+                );
                 snap.fw_corp_enlisted_on.remove(&cid);
-                set_corp_militia_faction(snap, cid, None, now);
-                snap.characters.get(&char_id).and_then(|c| c.war_faction_id)
+                let changes = set_corp_militia_faction(snap, cid, None, now);
+                (snap.characters.get(&char_id).and_then(|c| c.war_faction_id), changes)
             });
             session.war_faction_id = new_char_fac;
+            crate::services::fw_enlistment::sync_corp_militia_members_after_change(
+                ctx, session, None, &changes,
+            )
+            .await;
             crate::services::notify_emitters_character_services::emit_campaign_enrollment_changed(ctx, char_id);
             Some(Ok(PyRep::Bool(true)))
         }
@@ -958,6 +937,7 @@ pub async fn handle(
                         .get(&mc)
                         .copied()
                         .is_some_and(|enl| now < enl.saturating_add(86_400))
+                        || crate::services::fw_enlistment::is_corp_leave_cooldown_active_in_snap(snap, mc, now)
                     {
                         return Err(BridgeRpcError {
                             code: "MilitiaCooldownActive".into(),
@@ -972,15 +952,23 @@ pub async fn handle(
                         });
                     }
                 }
+                let mut changes = Vec::new();
                 for mc in member_corps {
                     snap.fw_corp_enlisted_on.insert(mc, now);
-                    set_corp_militia_faction(snap, mc, Some(fac), now);
+                    changes.extend(set_corp_militia_faction(snap, mc, Some(fac), now));
                 }
-                Ok(snap.characters.get(&char_id).and_then(|c| c.war_faction_id))
+                Ok((snap.characters.get(&char_id).and_then(|c| c.war_faction_id), changes))
             });
             match res {
-                Ok(new_fac) => {
+                Ok((new_fac, changes)) => {
                     session.war_faction_id = new_fac;
+                    crate::services::fw_enlistment::sync_corp_militia_members_after_change(
+                        ctx,
+                        session,
+                        Some(fac),
+                        &changes,
+                    )
+                    .await;
                     crate::services::notify_emitters_character_services::emit_campaign_enrollment_changed(ctx, char_id);
                     Some(Ok(PyRep::Bool(true)))
                 }
@@ -1037,15 +1025,25 @@ pub async fn handle(
                         message: "Must wait 24 hours after enlisting to withdraw alliance from militia".into(),
                     });
                 }
+                let mut changes = Vec::new();
                 for mc in member_corps {
+                    crate::services::fw_enlistment::record_corp_leave_cooldown_in_snap(
+                        snap,
+                        mc,
+                        now.saturating_add(86_400),
+                    );
                     snap.fw_corp_enlisted_on.remove(&mc);
-                    set_corp_militia_faction(snap, mc, None, now);
+                    changes.extend(set_corp_militia_faction(snap, mc, None, now));
                 }
-                Ok(snap.characters.get(&char_id).and_then(|c| c.war_faction_id))
+                Ok((snap.characters.get(&char_id).and_then(|c| c.war_faction_id), changes))
             });
             match res {
-                Ok(new_fac) => {
+                Ok((new_fac, changes)) => {
                     session.war_faction_id = new_fac;
+                    crate::services::fw_enlistment::sync_corp_militia_members_after_change(
+                        ctx, session, None, &changes,
+                    )
+                    .await;
                     crate::services::notify_emitters_character_services::emit_campaign_enrollment_changed(ctx, char_id);
                     Some(Ok(PyRep::Bool(true)))
                 }
@@ -1107,7 +1105,7 @@ pub async fn handle(
                 let exec_corp = s.alliances.get(&aid).map(|a| a.executor_corp_id)?;
                 s.fw_runtime.corp_war_factions.get(&exec_corp).copied()
             });
-            Some(Ok(fac.or(session.war_faction_id).map(PyRep::Integer).unwrap_or(PyRep::None)))
+            Some(Ok(fac.map(PyRep::Integer).unwrap_or(PyRep::None)))
         }
         ("facWarMgr", "GetCharacterRankInfo") | ("facWarMgr", "GetMyCharacterRankInfo") => {
             let cid = args
@@ -1170,14 +1168,31 @@ pub async fn handle(
         }
         ("facWarMgr", "GetControlBunkerIDInSystem") => {
             let sys_id = session.solar_system_id.unwrap_or(30000142);
-            let bunker_id = ctx.db.with_snapshot(|s| {
+            let bunker_opt = ctx.db.with_snapshot(|s| {
                 s.structures
                     .values()
-                    .find(|st| st.solar_system_id == sys_id)
+                    .find(|st| {
+                        st.solar_system_id == sys_id
+                            && st.type_id == crate::services::fw_gameplay::TYPE_FW_IHUB
+                            && st.state != "Destroyed"
+                    })
                     .map(|st| st.structure_id)
-                    .unwrap_or(1_000_000_000 + sys_id as i64)
+                    .or_else(|| {
+                        s.items
+                            .values()
+                            .find(|it| {
+                                it.type_id == crate::services::fw_gameplay::TYPE_FW_IHUB
+                                    && it.location_id == i64::from(sys_id)
+                            })
+                            .map(|it| it.item_id)
+                    })
+                    .or_else(|| {
+                        s.fw_system_occupations
+                            .contains_key(&sys_id)
+                            .then_some(1_000_000_000 + sys_id as i64)
+                    })
             });
-            Some(Ok(PyRep::Integer(bunker_id)))
+            Some(Ok(bunker_opt.map(PyRep::Integer).unwrap_or(PyRep::None)))
         }
         ("facWarMgr", "GetCorpFactionalWarStatus") => {
             let corp_id = args
@@ -1186,14 +1201,21 @@ pub async fn handle(
                 .or(session.corporation_id)
                 .unwrap_or(0);
             let now_ft = ctx.now_blueos_filetime_ticks();
-            let (fac, start_ft) = ctx.db.with_snapshot(|s| {
+            let (fac_opt, start_ft) = ctx.db.with_snapshot(|s| {
                 let fac = s
                     .fw_runtime
                     .corp_war_factions
                     .get(&corp_id)
                     .copied()
-                    .or(session.war_faction_id)
-                    .unwrap_or(500_001);
+                    .or_else(|| {
+                        u32::try_from(corp_id).ok().and_then(|npc_cid| {
+                            ctx.sde
+                                .factions
+                                .values()
+                                .find(|f| f.militia_corporation_id == Some(npc_cid as i64))
+                                .map(|f| i64::from(f.faction_id))
+                        })
+                    });
                 let enl = s
                     .fw_corp_enlisted_on
                     .get(&corp_id)
@@ -1202,27 +1224,42 @@ pub async fn handle(
                     .unwrap_or(now_ft);
                 (fac, enl)
             });
-            Some(Ok(PyRep::keyval([
-                ("factionID", PyRep::Integer(fac)),
-                ("startDate", PyRep::Tuple(vec![PyRep::Integer(start_ft)])),
-                ("status", PyRep::Integer(2)),
-            ])))
+            if let Some(fac) = fac_opt {
+                Some(Ok(PyRep::keyval([
+                    ("factionID", PyRep::Integer(fac)),
+                    ("startDate", PyRep::Tuple(vec![PyRep::Integer(start_ft)])),
+                    ("status", PyRep::Integer(2)),
+                ])))
+            } else {
+                Some(Ok(PyRep::keyval([
+                    ("factionID", PyRep::None),
+                    ("startDate", PyRep::None),
+                    ("status", PyRep::Integer(0)),
+                ])))
+            }
         }
         ("facWarMgr", "GetFactionCorporations") => {
             let fac_filter = args.first().and_then(|a| a.as_i64());
             let dict = ctx.db.with_snapshot(|s| {
-                let mut entries: Vec<(PyRep, PyRep)> = s
+                let mut map: HashMap<i64, i64> = s
                     .fw_runtime
                     .corp_war_factions
                     .iter()
                     .filter(|(_, &f)| fac_filter.is_none_or(|ff| ff == f))
-                    .map(|(&cid, &f)| (PyRep::Integer(cid), PyRep::Integer(f)))
+                    .map(|(&cid, &f)| (cid, f))
                     .collect();
-                if entries.is_empty() {
-                    let cid = session.corporation_id.unwrap_or(1_000_009);
-                    let f = fac_filter.or(session.war_faction_id).unwrap_or(500_001);
-                    entries.push((PyRep::Integer(cid), PyRep::Integer(f)));
+                for f in ctx.sde.factions.values() {
+                    let fid = i64::from(f.faction_id);
+                    if fac_filter.is_none_or(|ff| ff == fid) {
+                        if let Some(mc) = f.militia_corporation_id {
+                            map.entry(i64::from(mc)).or_insert(fid);
+                        }
+                    }
                 }
+                let entries: Vec<(PyRep, PyRep)> = map
+                    .into_iter()
+                    .map(|(cid, f)| (PyRep::Integer(cid), PyRep::Integer(f)))
+                    .collect();
                 PyRep::Dict(entries)
             });
             Some(Ok(dict))

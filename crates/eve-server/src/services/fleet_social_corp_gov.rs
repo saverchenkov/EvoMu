@@ -151,34 +151,32 @@ pub(super) fn handle_add_corporation(
         };
     let reg_fee = IskCents::from_isk(1_599_800);
     let now_unix = ctx.now_unix();
+    if let Some(cur_cid) = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id)).filter(|&id| id > 0) {
+        super::fleet_social_corps::promote_due_pending_corp_grants(ctx, cur_cid);
+    }
+    let sess_in_space = session.station_id.is_none() && session.structure_id.is_none() && session.ship_id.is_some();
 
     let res = ctx.db.try_with_mut_snapshot(|snap| {
-        let char_corp_id = snap
-            .characters
-            .get(&char_id)
-            .map(|c| c.corporation_id)
-            .unwrap_or(0);
-        if snap
-            .corporations
-            .get(&char_corp_id)
-            .is_some_and(|c| c.ceo_id == char_id)
-        {
-            return Err(BridgeRpcError {
-                code: "AlreadyCEO".into(),
-                message: "You are already the CEO of a corporation".into(),
-            });
+        let ch_ro = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found") })?;
+        let invalid_st = session.structure_id.or(ch_ro.structure_id).is_some_and(|sid| {
+            snap.structures.get(&sid).is_some_and(|st| matches!(st.state.as_str(), "Destroyed" | "Unanchored"))
+        });
+        let undocked = ch_ro.station_id.is_none() && ch_ro.structure_id.is_none() && session.station_id.is_none() && session.structure_id.is_none();
+        if sess_in_space || undocked || invalid_st {
+            return Err(BridgeRpcError { code: "MustBeDocked".into(), message: "You must be docked in a station or operational structure to create a corporation".into() });
         }
-        let corp_mgmt_lvl = snap
-            .skills
-            .get(&char_id)
-            .and_then(|m| m.get(&3363))
-            .map(|s| s.level)
-            .unwrap_or(0);
+        let char_corp_id = ch_ro.corporation_id;
+        if snap.corporations.get(&char_corp_id).is_some_and(|c| c.ceo_id == char_id) {
+            return Err(BridgeRpcError { code: "AlreadyCEO".into(), message: "You are already the CEO of a corporation".into() });
+        }
+        if snap.corporations.contains_key(&char_corp_id) {
+            if let Some(blocker) = super::fleet_social_corp_tail::member_kick_blocker(snap, char_corp_id, char_id, now_unix) {
+                return Err(BridgeRpcError { code: blocker.into(), message: format!("Cannot leave current corporation to found a new one ({blocker})") });
+            }
+        }
+        let corp_mgmt_lvl = snap.skills.get(&char_id).and_then(|m| m.get(&3363)).map(|s| s.level).unwrap_or(0);
         if corp_mgmt_lvl < 1 {
-            return Err(BridgeRpcError {
-                code: "MissingCorporationManagementSkill".into(),
-                message: "Creating a corporation requires Corporation Management (3363) level 1".into(),
-            });
+            return Err(BridgeRpcError { code: "MissingCorporationManagementSkill".into(), message: "Creating a corporation requires Corporation Management (3363) level 1".into() });
         }
         if snap
             .corporations
@@ -399,13 +397,16 @@ pub(super) fn handle_corp_gov(
     super::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
     let now_unix = ctx.now_unix();
     let (has_director, has_comms, has_diplomat) = ctx.db.with_snapshot(|snap| {
-        snap.corporations.get(&corp_id).map_or((false, false, false), |c| {
-            let r = c.member_roles.get(&char_id).copied().unwrap_or(0);
-            let dir = c.ceo_id == char_id || corp_roles::has_role(r, corp_roles::ROLE_DIRECTOR);
-            let comms = dir || corp_roles::has_role(r, corp_roles::ROLE_PERSONNEL_MANAGER | (1u64 << 55));
-            let dip = dir || corp_roles::has_role(r, 1u64 << 42);
-            (dir, comms, dip)
-        })
+        if !snap.corporations.contains_key(&corp_id) {
+            return (false, false, false);
+        }
+        let (is_ceo, r) = crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+            snap, corp_id, char_id, 0, now_unix,
+        );
+        let dir = is_ceo || (r & corp_roles::ROLE_DIRECTOR) != 0;
+        let comms = dir || (r & (corp_roles::ROLE_PERSONNEL_MANAGER | corp_roles::ROLE_CHAT_MANAGER)) != 0;
+        let dip = dir || (r & corp_roles::ROLE_DIPLOMAT) != 0;
+        (dir, comms, dip)
     });
     let deny_role = |msg: &str| Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: msg.into() }));
 
