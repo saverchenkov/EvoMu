@@ -239,10 +239,6 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                                     }
                                     Ok(true)
                                 }
-                                Some((fid, avail)) if is_phenomena && avail > 0 => {
-                                    snap.items.remove(&fid);
-                                    Ok(true)
-                                }
                                 Some((_, avail)) => Err(format!("Insufficient fuel (type {fuel_type_id}): need {fuel_qty_needed}, have {avail}")),
                                 None if require_strict => Err(format!("Missing required fuel (type {fuel_type_id}, quantity {fuel_qty_needed})")),
                                 None => Ok(false),
@@ -288,42 +284,45 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                             })
                             .map(|b| b.id)
                             .collect();
-                        let mut dbuff_mods: Vec<(u16, f64)> = Vec::new();
+                        let mut phen_dbuffs: Vec<(u32, f64)> = Vec::new();
                         for &(id_attr, val_attr) in &[(2468u16, 2469u16), (2470, 2471), (2472, 2473), (2536, 2537)] {
-                            let dbuff_id = mod_state.get_attribute(id_attr, &ctx.sde) as u32;
+                            let dbuff_id = mod_state.get_attribute(id_attr, &ctx.sde).round() as u32;
                             let pct = mod_state.get_attribute(val_attr, &ctx.sde);
-                            if dbuff_id > 0 && pct.abs() > 1e-9 {
-                                if let Some(dbuff) = ctx.sde.dbuff_collections.get(&dbuff_id) {
-                                    for &target_aid in &dbuff.item_modifiers {
-                                        dbuff_mods.push((target_aid, pct));
+                            if dbuff_id > 0
+                                && pct.abs() > 1e-9
+                                && ctx.sde.dbuff_collections.contains_key(&dbuff_id)
+                            {
+                                phen_dbuffs.push((dbuff_id, pct));
+                            }
+                        }
+                        if !phen_dbuffs.is_empty() {
+                            let now_unix = ctx.now_unix_secs();
+                            let duration_secs =
+                                ((mod_state.get_attribute(73, &ctx.sde) / 1000.0).ceil() as u64).max(30);
+                            let expires_at_unix = now_unix.saturating_add(duration_secs);
+                            if let Ok(mut st) =
+                                super::fitting_scanners_superweapons::scanners_superweapons_state().write()
+                            {
+                                for &sid in &dyn_ship_ids {
+                                    let entries = st.ship_dbuffs.entry((ctx.instance_id, sid)).or_default();
+                                    entries.retain(|e| {
+                                        e.expires_at_unix > now_unix && e.source_module_id != module_id
+                                    });
+                                    for &(dbuff_id, pct) in &phen_dbuffs {
+                                        entries.push(
+                                            super::fitting_scanners_superweapons::ActiveDbuffEntry {
+                                                dbuff_id,
+                                                value: pct,
+                                                expires_at_unix,
+                                                source_module_id: module_id,
+                                            },
+                                        );
                                     }
                                 }
                             }
-                        }
-                        if !dbuff_mods.is_empty() {
-                            ctx.db.with_mut_snapshot(|snap| {
-                                for &sid in &dyn_ship_ids {
-                                    if let Some(s_item) = snap.items.get_mut(&sid) {
-                                        let s_tid = s_item.type_id;
-                                        for &(aid, pct) in &dbuff_mods {
-                                            let base_v = s_item
-                                                .dynamic_attributes
-                                                .get(&aid)
-                                                .copied()
-                                                .or_else(|| {
-                                                    ctx.sde
-                                                        .types
-                                                        .get(&s_tid)
-                                                        .and_then(|t| t.default_attributes.get(&aid).copied())
-                                                })
-                                                .unwrap_or(1.0);
-                                            s_item
-                                                .dynamic_attributes
-                                                .insert(aid, base_v * (1.0 + pct / 100.0));
-                                        }
-                                    }
-                                }
-                            });
+                            for &sid in &dyn_ship_ids {
+                                ctx.invalidate_ship_fitting(sid);
+                            }
                         }
                     }
                 }

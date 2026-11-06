@@ -188,23 +188,13 @@ pub async fn handle(
                         snap.characters.get(&char_id).map(|c| c.corporation_id)
                     })
                 }).unwrap_or(0);
-                if src_item.owner_id == corp_id {
-                    let flag_val = src_item.flag as i64;
-                    if (116..=122).contains(&flag_val) {
-                        let (is_ceo, roles) = get_effective_corp_roles_at_location(
-                            ctx,
-                            corp_id,
-                            char_id,
-                            Some(src_item.location_id),
-                        );
-                        let div_idx = (flag_val - 116) as u32;
-                        let req_take_role = 1u64 << (13 + div_idx);
-                        if !is_ceo && !eve_db::corp_roles::has_role(roles, req_take_role) {
-                            return Some(Err(BridgeRpcError {
-                                code: "CorpRoleDenied".into(),
-                                message: format!("Corporation role denied for division {} take", div_idx + 1),
-                            }));
-                        }
+                if src_item.owner_id == corp_id && corp_id > 0 {
+                    if let Err(err) = ctx.db.with_snapshot(|snap| {
+                        super::inventory_bound::validate_corp_source_item_take_access_in_snap(
+                            ctx, snap, char_id, corp_id, src_item,
+                        )
+                    }) {
+                        return Some(Err(err));
                     }
                 }
             }

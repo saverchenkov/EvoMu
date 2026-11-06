@@ -11,6 +11,7 @@ pub mod air_npe_nodegraph_pocket;
 pub mod air_npe_nodegraph_runner;
 pub mod abyssal_void_gates;
 pub mod abyssal_void_mgr;
+pub(crate) mod agents_mission_delivery;
 pub mod agents_mission_rewards;
 pub mod agents_missions;
 pub mod auth_cache;
@@ -522,3 +523,4 @@ mod mining_compression_cyno_portal_deep_extra_unit_tests;
 mod tactical_scanners_bays_deep_extra_unit_tests;
 #[cfg(test)]
 mod warp_jump_gm_tools_deep_extra_unit_tests;
+mod r6_t3_p0_security_tests;

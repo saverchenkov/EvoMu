@@ -466,21 +466,14 @@ pub(crate) async fn handle_multi_add(
                 ctx, snap, session, char_id, item, new_loc, dest_is_struct_fuel, ch_dock, ch_sys, caller_ship_id, &pre_balls,
             )?;
             let is_corp_item = ch.corporation_id > 0 && item.owner_id == ch.corporation_id;
-            if is_corp_item && (116..=122).contains(&(item.flag as i64)) {
-                let (is_ceo, roles) = get_effective_corp_roles_at_location(
+            if is_corp_item && !src_is_struct_fuel {
+                crate::services::inventory_bound::validate_corp_source_item_take_access_in_snap(
                     ctx,
-                    ch.corporation_id,
+                    snap,
                     char_id,
-                    Some(item.location_id),
-                );
-                let div_idx = ((item.flag as i64) - 116) as u32;
-                let req_take_role = 1u64 << (13 + div_idx);
-                if !is_ceo && !eve_db::corp_roles::has_role(roles, req_take_role) {
-                    return Err(BridgeRpcError {
-                        code: "CorpRoleDenied".into(),
-                        message: format!("Corporation role denied for division {} take", div_idx + 1),
-                    });
-                }
+                    ch.corporation_id,
+                    item,
+                )?;
             }
             if !src_is_struct_fuel && item.owner_id != char_id && !is_corp_item && !looted_from_space_ids.contains(&item_id) {
                 return Err(BridgeRpcError {

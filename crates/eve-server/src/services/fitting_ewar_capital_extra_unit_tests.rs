@@ -359,7 +359,15 @@ async fn siege_triage_bastion_indy_core_phenomena_mwd_and_mjd_branches() {
         &ctx, &sys, sys_id, char_id, ship_id, 30, mod_id, &ph_fm, &ph_type, &ph_st, &fit, None, false, false, false,
     ).await.unwrap();
     assert!(ph_ok.immobilize_self);
-    assert!(ctx.db.with_snapshot(|s| s.items[&victim_id].dynamic_attributes.contains_key(&37)));
+    assert!(ctx.db.with_snapshot(|s| !s.items[&victim_id].dynamic_attributes.contains_key(&37)));
+    assert!(
+        super::fitting_scanners_superweapons::get_aggregated_ship_dbuffs(
+            &ctx,
+            victim_id,
+            ctx.now_unix_secs()
+        )
+        .contains_key(&9901)
+    );
 
     // Propulsion (group 46) and MJD / MJFG
     let (prop_fm, prop_st) = synth_module_and_state(

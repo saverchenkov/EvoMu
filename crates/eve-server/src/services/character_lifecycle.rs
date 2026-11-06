@@ -536,26 +536,82 @@ fn delete(ctx: &ServerContext, session: &mut SessionState, user_id: u64, args: &
         }
         snap.corp_role_assignments.remove(&(old_corp_id, char_id));
         snap.corp_member_titles.remove(&(old_corp_id, char_id));
+        snap.jump_clones.remove(&char_id);
+        snap.active_implants.remove(&char_id);
+
+        let ephemeral_char_items: Vec<i64> = snap
+            .items
+            .values()
+            .filter(|i| {
+                i.owner_id == char_id
+                    && (matches!(
+                        i.flag,
+                        eve_db::InventoryFlag::Implant
+                            | eve_db::InventoryFlag::Booster
+                            | eve_db::InventoryFlag::Skill
+                    ) || (i.location_id == char_id
+                        && i.type_id != 670
+                        && i.flag != eve_db::InventoryFlag::Capsule)
+                        || i.type_id == 3468)
+            })
+            .map(|i| i.item_id)
+            .collect();
+        for iid in ephemeral_char_items {
+            snap.items.remove(&iid);
+        }
+
+        let mut locked_contract_items: std::collections::HashSet<i64> = snap
+            .items
+            .values()
+            .filter(|i| {
+                i.flag == eve_db::InventoryFlag::Locked
+                    || snap.is_item_locked_in_contract_or_job(i.item_id)
+            })
+            .map(|i| i.item_id)
+            .collect();
+        let child_locked: Vec<i64> = snap
+            .items
+            .values()
+            .filter(|i| {
+                let mut cur = i.location_id;
+                let mut steps = 0;
+                while steps < 16 {
+                    if locked_contract_items.contains(&cur) {
+                        return true;
+                    }
+                    let Some(parent) = snap.items.get(&cur) else {
+                        break;
+                    };
+                    cur = parent.location_id;
+                    steps += 1;
+                }
+                false
+            })
+            .map(|i| i.item_id)
+            .collect();
+        locked_contract_items.extend(child_locked);
 
         if is_player_corp {
-            let office_stations: Vec<i64> = snap
+            let mut office_stations: Vec<i64> = snap
                 .items
                 .values()
                 .filter(|i| i.owner_id == old_corp_id && i.type_id == 27)
                 .map(|i| i.location_id)
                 .collect();
+            office_stations.sort_unstable();
             if office_stations.is_empty() {
                 // No corporate office: all character assets are destroyed.
-                snap.items.retain(|_, i| i.owner_id != char_id);
+                snap.items
+                    .retain(|id, i| i.owner_id != char_id || locked_contract_items.contains(id));
             } else {
                 let owned_ids: std::collections::HashSet<i64> = snap
                     .items
                     .values()
-                    .filter(|i| i.owner_id == char_id)
+                    .filter(|i| i.owner_id == char_id && !locked_contract_items.contains(&i.item_id))
                     .map(|i| i.item_id)
                     .collect();
                 for item in snap.items.values_mut() {
-                    if item.owner_id == char_id {
+                    if item.owner_id == char_id && !locked_contract_items.contains(&item.item_id) {
                         item.owner_id = old_corp_id;
                         if !owned_ids.contains(&item.location_id) {
                             let target_st = if office_stations.contains(&item.location_id) {
@@ -631,7 +687,8 @@ fn delete(ctx: &ServerContext, session: &mut SessionState, user_id: u64, args: &
             }
         } else {
             // NPC corporation member: all assets and wallet ISK are destroyed.
-            snap.items.retain(|_, i| i.owner_id != char_id);
+            snap.items
+                .retain(|id, i| i.owner_id != char_id || locked_contract_items.contains(id));
         }
 
         if let Some(ch) = snap.characters.get_mut(&char_id) {

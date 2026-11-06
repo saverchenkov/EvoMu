@@ -1,0 +1,172 @@
+//! Mission item delivery verification and consumption helpers (`#389` / `R6-T3-06`).
+
+use eve_proto::BridgeRpcError;
+use eve_db::{InventoryFlag, InventoryItemRecord, WorldStateSnapshot};
+
+/// Verifies and consumes mission completion delivery items.
+///
+/// For courier missions, only items created for the specific courier mission
+/// (`courier_cargo:{char_id}:{mission_id}`) at the destination station are valid.
+/// For non-courier item-delivery / trade / mining missions, contract-locked items,
+/// industry-job-locked items, and borrowed courier mission items (`courier_cargo:*`)
+/// are strictly excluded from eligibility and consumption.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn verify_and_consume_mission_delivery_items(
+    snap: &mut WorldStateSnapshot,
+    char_id: i64,
+    mission_id: u32,
+    req_tid: u32,
+    req_units: i32,
+    is_courier: bool,
+    is_mining_mission: bool,
+    current_station: Option<i64>,
+    agent_station_id: Option<i64>,
+    active_ship_id: Option<i64>,
+    destination_station_id: Option<i64>,
+    granted_courier_item_id: Option<i64>,
+) -> Result<(), BridgeRpcError> {
+    if is_courier {
+        let dest_station = destination_station_id.ok_or_else(|| BridgeRpcError {
+            code: "MissingDestinationStation".into(),
+            message: format!("Courier mission {mission_id} has no valid destination station"),
+        })?;
+        if current_station != Some(dest_station) {
+            return Err(BridgeRpcError {
+                code: "CourierNotAtDestinationStation".into(),
+                message: format!(
+                    "Courier mission {mission_id} requires delivery to destination station {dest_station}, character is currently docked at {current_station:?}"
+                ),
+            });
+        }
+        let courier_tag = format!("courier_cargo:{char_id}:{mission_id}");
+        let is_valid_courier_item = |item: &InventoryItemRecord| -> bool {
+            item.owner_id == char_id
+                && item.type_id == req_tid
+                && item.quantity > 0
+                && ((active_ship_id == Some(item.location_id)
+                    && item.flag == InventoryFlag::Cargo)
+                    || (item.location_id == dest_station && item.flag == InventoryFlag::Hangar))
+                && snap
+                    .item_custom_names
+                    .get(&item.item_id)
+                    .is_some_and(|s| s == &courier_tag)
+                && granted_courier_item_id.is_some_and(|gid| item.item_id >= gid)
+        };
+        let found_qty: i32 = snap
+            .items
+            .values()
+            .filter(|it| is_valid_courier_item(it))
+            .map(|it| it.quantity)
+            .sum();
+        if found_qty < req_units {
+            return Err(BridgeRpcError {
+                code: "MissionIncomplete".into(),
+                message: format!(
+                    "Courier mission {mission_id} requires delivering {req_units} units of type {req_tid} from ship cargo at destination station, character only has {found_qty}"
+                ),
+            });
+        }
+        let mut rem = req_units;
+        let mut to_remove = Vec::new();
+        let mut matching_ids: Vec<i64> = snap
+            .items
+            .values()
+            .filter(|it| is_valid_courier_item(it))
+            .map(|it| it.item_id)
+            .collect();
+        matching_ids.sort_unstable();
+        for iid in matching_ids {
+            if rem <= 0 {
+                break;
+            }
+            if let Some(item) = snap.items.get_mut(&iid) {
+                if item.quantity <= rem {
+                    rem -= item.quantity;
+                    to_remove.push(iid);
+                } else {
+                    item.quantity -= rem;
+                    rem = 0;
+                }
+            }
+        }
+        for iid in to_remove {
+            snap.items.remove(&iid);
+            snap.item_custom_names.remove(&iid);
+        }
+        return Ok(());
+    }
+
+    if let Some(ast_id) = agent_station_id {
+        if current_station != Some(ast_id) {
+            return Err(BridgeRpcError {
+                code: "MissionIncomplete".into(),
+                message: format!(
+                    "Mission {mission_id} delivery requires character to be docked at agent station {ast_id}, currently at {current_station:?}"
+                ),
+            });
+        }
+    }
+
+    let is_valid_delivery_item = |item: &InventoryItemRecord| -> bool {
+        item.owner_id == char_id
+            && item.type_id == req_tid
+            && item.quantity > 0
+            && !snap.is_item_locked_in_contract_or_job(item.item_id)
+            && !snap
+                .item_custom_names
+                .get(&item.item_id)
+                .is_some_and(|n| n.starts_with("courier_cargo:"))
+            && ((item.flag == InventoryFlag::Hangar
+                && agent_station_id.is_none_or(|st_id| item.location_id == st_id))
+                || ((is_mining_mission || req_tid == 34)
+                    && active_ship_id == Some(item.location_id)
+                    && matches!(
+                        item.flag,
+                        InventoryFlag::SpecializedOreHold | InventoryFlag::Cargo
+                    )))
+    };
+
+    let found_qty: i32 = snap
+        .items
+        .values()
+        .filter(|it| is_valid_delivery_item(it))
+        .map(|it| it.quantity)
+        .sum();
+    if found_qty < req_units {
+        return Err(BridgeRpcError {
+            code: "MissionIncomplete".into(),
+            message: format!(
+                "Mission {mission_id} requires delivering {req_units} units of type {req_tid} at agent station, character only has {found_qty}"
+            ),
+        });
+    }
+
+    let mut rem = req_units;
+    let mut to_remove = Vec::new();
+    let mut matching_ids: Vec<i64> = snap
+        .items
+        .values()
+        .filter(|it| is_valid_delivery_item(it))
+        .map(|it| it.item_id)
+        .collect();
+    matching_ids.sort_unstable();
+    for iid in matching_ids {
+        if rem <= 0 {
+            break;
+        }
+        if let Some(item) = snap.items.get_mut(&iid) {
+            if item.quantity <= rem {
+                rem -= item.quantity;
+                to_remove.push(iid);
+            } else {
+                item.quantity -= rem;
+                rem = 0;
+            }
+        }
+    }
+    for iid in to_remove {
+        snap.items.remove(&iid);
+        snap.item_custom_names.remove(&iid);
+    }
+    Ok(())
+}

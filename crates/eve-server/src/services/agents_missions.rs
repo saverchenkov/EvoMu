@@ -1061,114 +1061,33 @@ pub async fn handle(
                                     None
                                 }
                             });
+                        let m_agent_id = m.agent_id;
                         if let Some((req_tid, req_units)) = req_delivery {
                             let current_station = snap.characters.get(&char_id).and_then(|c| c.station_id).or(session.station_id);
-                            let agent_station_id = ctx.sde.agents.get(&m.agent_id).and_then(|a| a.station_id)
+                            let agent_station_id = ctx.sde.agents.get(&m_agent_id).and_then(|a| a.station_id)
                                 .or(session.station_id);
                             let active_ship_id = snap.characters.get(&char_id).map(|c| c.active_ship_id).or(session.ship_id);
-
-                            if is_courier {
-                                let dest_station = meta_opt
-                                    .as_ref()
-                                    .and_then(|mt| mt.destination_station_id)
-                                    .ok_or_else(|| BridgeRpcError {
-                                        code: "MissingDestinationStation".into(),
-                                        message: format!("Courier mission {mission_id} has no valid destination station"),
-                                    })?;
-                                if current_station != Some(dest_station) {
-                                    return Err(BridgeRpcError {
-                                        code: "CourierNotAtDestinationStation".into(),
-                                        message: format!("Courier mission {mission_id} requires delivery to destination station {dest_station}, character is currently docked at {current_station:?}"),
-                                    });
-                                }
-                                let courier_tag = format!("courier_cargo:{char_id}:{mission_id}");
-                                let custom_names = &snap.item_custom_names;
-                                let granted_cid = meta_opt.as_ref().and_then(|mt| mt.granted_courier_item_id);
-                                let is_valid_delivery_item = |item: &eve_db::InventoryItemRecord| -> bool {
-                                    item.owner_id == char_id
-                                        && item.type_id == req_tid
-                                        && ((active_ship_id == Some(item.location_id) && item.flag == InventoryFlag::Cargo)
-                                            || (item.location_id == dest_station && item.flag == InventoryFlag::Hangar))
-                                        && custom_names.get(&item.item_id).map_or(false, |s| s == &courier_tag)
-                                        && granted_cid.is_some_and(|gid| item.item_id >= gid)
-                                };
-                                let found_qty: i32 = snap
-                                    .items
-                                    .values()
-                                    .filter(|it| is_valid_delivery_item(it))
-                                    .map(|it| it.quantity)
-                                    .sum();
-                                if found_qty < req_units {
-                                    return Err(BridgeRpcError { code: "MissionIncomplete".into(), message: format!("Courier mission {mission_id} requires delivering {req_units} units of type {req_tid} from ship cargo at destination station, character only has {found_qty}") });
-                                }
-                                let mut rem = req_units;
-                                let mut to_remove = Vec::new();
-                                let matching_ids: Vec<i64> = snap.items.values().filter(|it| is_valid_delivery_item(it)).map(|it| it.item_id).collect();
-                                for iid in matching_ids {
-                                    if rem <= 0 { break; }
-                                    if let Some(item) = snap.items.get_mut(&iid) {
-                                        if item.quantity <= rem { rem -= item.quantity; to_remove.push(iid); }
-                                        else { item.quantity -= rem; rem = 0; }
-                                    }
-                                }
-                                for iid in to_remove { snap.items.remove(&iid); snap.item_custom_names.remove(&iid); }
-                            } else {
-                                if let Some(ast_id) = agent_station_id {
-                                    if current_station != Some(ast_id) {
-                                        return Err(BridgeRpcError {
-                                            code: "MissionIncomplete".into(),
-                                            message: format!("Mission {mission_id} delivery requires character to be docked at agent station {ast_id}, currently at {current_station:?}"),
-                                        });
-                                    }
-                                }
-                                let is_valid_delivery_item = |item: &eve_db::InventoryItemRecord| -> bool {
-                                    item.owner_id == char_id
-                                        && item.type_id == req_tid
-                                        && ((item.flag == InventoryFlag::Hangar
-                                            && agent_station_id.is_none_or(|st_id| item.location_id == st_id))
-                                            || ((is_mining_mission || req_tid == 34)
-                                                && active_ship_id == Some(item.location_id)
-                                                && matches!(item.flag, InventoryFlag::SpecializedOreHold | InventoryFlag::Cargo)))
-                                };
-                                let found_qty: i32 = snap
-                                    .items
-                                    .values()
-                                    .filter(|it| is_valid_delivery_item(it))
-                                    .map(|it| it.quantity)
-                                    .sum();
-                                if found_qty < req_units {
-                                    return Err(BridgeRpcError { code: "MissionIncomplete".into(), message: format!("Mission {mission_id} requires delivering {req_units} units of type {req_tid} in agent station hangar, character only has {found_qty}") });
-                                }
-                                let mut rem = req_units;
-                                let mut to_remove = Vec::new();
-                                let matching_ids: Vec<i64> = snap
-                                    .items
-                                    .values()
-                                    .filter(|it| is_valid_delivery_item(it))
-                                    .map(|it| it.item_id)
-                                    .collect();
-                                for iid in matching_ids {
-                                    if rem <= 0 {
-                                        break;
-                                    }
-                                    if let Some(item) = snap.items.get_mut(&iid) {
-                                        if item.quantity <= rem {
-                                            rem -= item.quantity;
-                                            to_remove.push(iid);
-                                        } else {
-                                            item.quantity -= rem;
-                                            rem = 0;
-                                        }
-                                    }
-                                }
-                                for iid in to_remove {
-                                    snap.items.remove(&iid);
-                                }
-                            }
+                            let dest_station_id = meta_opt.as_ref().and_then(|mt| mt.destination_station_id);
+                            let granted_cid = meta_opt.as_ref().and_then(|mt| mt.granted_courier_item_id);
+                            super::agents_mission_delivery::verify_and_consume_mission_delivery_items(
+                                snap,
+                                char_id,
+                                mission_id,
+                                req_tid,
+                                req_units,
+                                is_courier,
+                                is_mining_mission,
+                                current_station,
+                                agent_station_id,
+                                active_ship_id,
+                                dest_station_id,
+                                granted_cid,
+                            )?;
                         }
 
-                        let m_agent_id = m.agent_id;
-                        m.state = "Completed".into();
+                        if let Some(m_mut) = snap.active_missions.get_mut(&(char_id, mission_id)) {
+                            m_mut.state = "Completed".into();
+                        }
                         reclaim_courier_cargo(snap, char_id, mission_id);
 
                         let bonus_granted = meta_opt

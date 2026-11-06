@@ -523,6 +523,79 @@ pub(crate) fn get_effective_corp_roles_at_location(
     })
 }
 
+/// Validates that `char_id` is authorized to take a corporation-owned item `src_item` out of `corp_id`
+/// ownership into a non-corporation inventory (`#385` / `R6-T3-02`).
+pub(crate) fn validate_corp_source_item_take_access_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    corp_id: i64,
+    src_item: &eve_db::InventoryItemRecord,
+) -> Result<(), BridgeRpcError> {
+    let (mut root_loc, mut root_flag) = (src_item.location_id, src_item.flag);
+    for _ in 0..8 {
+        if (60_000_000..=69_999_999).contains(&root_loc) || root_loc >= 1_000_000_000_000 {
+            break;
+        }
+        let Some(parent) = snap.items.get(&root_loc) else {
+            break;
+        };
+        if parent.owner_id != corp_id {
+            break;
+        }
+        root_loc = parent.location_id;
+        root_flag = parent.flag;
+    }
+
+    let (is_ceo, role_mask) =
+        get_effective_corp_roles_at_location(ctx, corp_id, char_id, Some(root_loc));
+
+    if is_ceo || eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_DIRECTOR) {
+        return Ok(());
+    }
+
+    let flag_num = root_flag as i64;
+    if (116..=122).contains(&flag_num) {
+        let div_take_role = 1u64 << (13 + (flag_num - 116) as u32);
+        if !eve_db::corp_roles::has_role(role_mask, div_take_role) {
+            return Err(BridgeRpcError {
+                code: "CorpRoleDenied".into(),
+                message: format!(
+                    "Character {char_id} lacks corporation hangar division {} take role",
+                    flag_num - 115
+                ),
+            });
+        }
+        return Ok(());
+    }
+
+    if matches!(
+        root_flag,
+        eve_db::InventoryFlag::Deliveries | eve_db::InventoryFlag::CorpDeliveries
+    ) {
+        let deliveries_roles = eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_TAKE
+            | eve_db::corp_roles::ROLE_FACTORY_MANAGER
+            | eve_db::corp_roles::ROLE_TRADER;
+        if (role_mask & deliveries_roles) == 0 {
+            return Err(BridgeRpcError {
+                code: "CorpRoleDenied".into(),
+                message: format!(
+                    "Character {char_id} lacks role to take from corporation deliveries"
+                ),
+            });
+        }
+        return Ok(());
+    }
+
+    Err(BridgeRpcError {
+        code: "CorpRoleDenied".into(),
+        message: format!(
+            "Director or CEO role required to take non-division corporation item from flag {:?}",
+            root_flag
+        ),
+    })
+}
+
 /// Helper checking if an item or location is reachable and colocated with the character.
 pub(crate) fn is_inventory_location_colocated(
     snap: &eve_db::WorldStateSnapshot,

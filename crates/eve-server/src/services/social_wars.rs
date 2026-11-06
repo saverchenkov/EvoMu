@@ -662,13 +662,16 @@ pub(super) fn handle_wars(
             if !isk.is_finite() || isk < 0.0 {
                 return err("InvalidIskValue", "ISK value must be a non-negative number");
             }
-            let (Some(w), open_for_allies, is_player_corp) = ctx.db.with_snapshot(|snap| {
-                (
-                    snap.wars.get(&war_id).cloned(),
-                    snap.war_state.wars.get(&war_id).is_some_and(|m| m.open_for_allies),
-                    snap.corporations.contains_key(&my_corp),
-                )
-            }) else {
+            let (Some(w), open_for_allies, war_already_ending, is_player_corp) =
+                ctx.db.with_snapshot(|snap| {
+                    (
+                        snap.wars.get(&war_id).cloned(),
+                        snap.war_state.wars.get(&war_id).is_some_and(|m| m.open_for_allies),
+                        snap.war_state.wars.get(&war_id).is_some_and(|m| m.finish_at_unix.is_some()),
+                        snap.corporations.contains_key(&my_corp),
+                    )
+                })
+            else {
                 return err("WarNotFound", format!("War {war_id} not found"));
             };
             if !w.active {
@@ -678,6 +681,9 @@ pub(super) fn handle_wars(
             let kind = if method == "CreateSurrenderNegotiation" { NegKind::Surrender } else { NegKind::Ally };
             match kind {
                 NegKind::Surrender if !party => return err("NotWarParticipant", "Only war participants can negotiate surrender"),
+                NegKind::Surrender if war_already_ending => {
+                    return err("WarAlreadyEnding", format!("War {war_id} surrender has already been accepted"));
+                }
                 NegKind::Ally if party => return err("CannotAllyOwnWar", "War participants cannot offer themselves as allies"),
                 NegKind::Ally if !open_for_allies => {
                     return err("WarNotOpenForAllies", "The defender has not opened this war for allies")
@@ -689,6 +695,16 @@ pub(super) fn handle_wars(
             }
             let id = ctx.db.with_mut_snapshot(|snap| {
                 let st = &mut snap.war_state;
+                if kind == NegKind::Surrender {
+                    for neg in &mut st.negotiations {
+                        if neg.war_id == war_id
+                            && neg.kind == NegKind::Surrender
+                            && neg.status == "Offered"
+                        {
+                            neg.status = "Cancelled".into();
+                        }
+                    }
+                }
                 st.next_negotiation_id += 1;
                 let id = st.next_negotiation_id;
                 st.negotiations.push(Negotiation {
@@ -790,10 +806,44 @@ pub(super) fn handle_wars(
             if accepting && !w.active {
                 return err("WarNotActive", format!("War {} has ended", n.war_id));
             }
+            if accepting
+                && ctx.db.with_snapshot(|snap| {
+                    snap.war_state
+                        .wars
+                        .get(&n.war_id)
+                        .is_some_and(|wm| wm.finish_at_unix.is_some())
+                })
+            {
+                return err("WarAlreadyEnding", format!("War {} surrender has already been accepted", n.war_id));
+            }
             let effective = now + WAR_TIMER_SECS;
             let status = if accepting { "Accepted" } else { "Declined" };
             let tx_res = ctx.db.try_with_mut_snapshot(|snap| {
+                let current_status = snap
+                    .war_state
+                    .negotiations
+                    .get(idx)
+                    .map(|neg| neg.status.as_str())
+                    .unwrap_or("");
+                if current_status != "Offered" {
+                    return Err(BridgeRpcError {
+                        code: "NegotiationAlreadyResolved".into(),
+                        message: format!("Negotiation {neg_id} is already {current_status}"),
+                    });
+                }
                 if accepting {
+                    let already_ending = snap
+                        .war_state
+                        .wars
+                        .get(&n.war_id)
+                        .and_then(|wm| wm.finish_at_unix)
+                        .is_some();
+                    if already_ending {
+                        return Err(BridgeRpcError {
+                            code: "WarAlreadyEnding".into(),
+                            message: format!("War {} surrender has already been accepted", n.war_id),
+                        });
+                    }
                     debit_corp(snap, n.from_corp, n.isk)?;
                     credit_corp(snap, my_corp, n.isk);
                 }
@@ -802,6 +852,15 @@ pub(super) fn handle_wars(
                 if accepting {
                     st.negotiations[idx].effective_unix = Some(effective);
                     st.wars.entry(n.war_id).or_default().finish_at_unix = Some(effective);
+                    for (i, other) in st.negotiations.iter_mut().enumerate() {
+                        if i != idx
+                            && other.war_id == n.war_id
+                            && other.kind == NegKind::Surrender
+                            && other.status == "Offered"
+                        {
+                            other.status = "Cancelled".into();
+                        }
+                    }
                     let expiry = effective + PEACE_TREATY_SECS;
                     st.peace_treaties.push(PeaceTreaty {
                         war_id: n.war_id,
