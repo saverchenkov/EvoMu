@@ -5,7 +5,9 @@
 
 pub mod binding;
 mod binding_auth;
+mod binding_effects;
 pub mod cache_notifications;
+pub mod client_compat;
 pub mod context;
 mod context_charges;
 pub mod dispatch;

@@ -71,7 +71,28 @@ pub async fn provision_starter_characters(ctx: &ServerContext, cfg: &ServerConfi
                 continue;
             }
         };
-        if !ctx.db.get_characters_for_user(account.user_id).is_empty() {
+        let existing_chars = ctx.db.get_characters_for_user(account.user_id);
+        if !existing_chars.is_empty() {
+            if let Some(target_plex) = starter.initial_balance_plex {
+                if target_plex > 0 {
+                    let now_unix = ctx.now_unix();
+                    let char_id = existing_chars[0].character_id;
+                    let uid = account.user_id;
+                    ctx.db.with_mut_snapshot(|snap| {
+                        snap.fold_legacy_plex_balances();
+                        let cur = snap.unified_plex_balance_for_user(uid);
+                        if cur < target_plex {
+                            grant_starter_plex_in_snapshot(
+                                snap,
+                                uid,
+                                char_id,
+                                target_plex - cur,
+                                now_unix,
+                            );
+                        }
+                    });
+                }
+            }
             continue;
         }
         let mut session = SessionState::new(0);

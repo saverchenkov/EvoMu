@@ -217,7 +217,7 @@ pub fn handle(
     match (service, method) {
         // --- New Eden Store (`storeManager`, `feat:wallet.nes-store` & `feat:removed.aurum-currency`) ---
         // parity: rpc:storeManager.get_categories
-        ("storeManager", "get_categories") => {
+        ("storeManager", "get_categories") | ("storeManager", "GetCategories") => {
             let catalog = read_or_seed_store_catalog(ctx, session);
             let mut items: Vec<PyRep> = Vec::new();
             for c in catalog.categories {
@@ -246,7 +246,7 @@ pub fn handle(
             Some(Ok(PyRep::List(items)))
         }
         // parity: rpc:storeManager.get_products
-        ("storeManager", "get_products") => {
+        ("storeManager", "get_products") | ("storeManager", "GetProducts") => {
             let catalog = read_or_seed_store_catalog(ctx, session);
             let prods: Vec<PyRep> = catalog
                 .products
@@ -763,7 +763,7 @@ fn handle_trade_action(
                     || item.flag != InventoryFlag::Hangar
                     || Some(item_id) == active_ship_id
                     || snap.is_character_boarded_or_saved_ship(char_id, session.ship_id, item_id)
-                    || snap.is_item_locked_in_contract_or_job(item_id)
+                    || snap.is_item_locked_excluding_trade(item_id, Some(tr.trade_id))
                     || has_contents
                 {
                     return Err(rpc_err(
@@ -871,7 +871,7 @@ fn handle_trade_action(
                             || it.quantity < q
                             || Some(iid) == active_ship_a
                             || snap.is_character_boarded_or_saved_ship(tr.char_a, None, iid)
-                            || snap.is_item_locked_in_contract_or_job(iid)
+                            || snap.is_item_locked_excluding_trade(iid, Some(tr.trade_id))
                             || has_contents
                         {
                             return Err(rpc_err("InvalidTradeItem", "Offered item no longer available"));
@@ -894,7 +894,7 @@ fn handle_trade_action(
                             || it.quantity < q
                             || Some(iid) == active_ship_b
                             || snap.is_character_boarded_or_saved_ship(tr.char_b, None, iid)
-                            || snap.is_item_locked_in_contract_or_job(iid)
+                            || snap.is_item_locked_excluding_trade(iid, Some(tr.trade_id))
                             || has_contents
                         {
                             return Err(rpc_err("InvalidTradeItem", "Offered item no longer available"));
@@ -1019,6 +1019,29 @@ fn handle_trade_action(
     match res {
         Ok(tr) => {
             if tr.completed {
+                let mut item_notifs: Vec<(i64, PyRep)> = Vec::new();
+                ctx.db.with_snapshot(|snap| {
+                    for (old_owner, list) in [(tr.char_a, &tr.items_a), (tr.char_b, &tr.items_b)] {
+                        for &(iid, _) in list {
+                            if let Some(it) = snap.items.get(&iid) {
+                                let row = PyRep::keyval([
+                                    ("itemID", PyRep::Integer(it.item_id)),
+                                    ("typeID", PyRep::Integer(it.type_id as i64)),
+                                    ("ownerID", PyRep::Integer(it.owner_id)),
+                                    ("locationID", PyRep::Integer(it.location_id)),
+                                    ("flagID", PyRep::Integer(it.flag as i64)),
+                                    ("quantity", PyRep::Integer(if it.singleton { -1 } else { it.quantity as i64 })),
+                                ]);
+                                item_notifs.push((old_owner, row));
+                            }
+                        }
+                    }
+                });
+                for (old_owner, row) in item_notifs {
+                    for party in [tr.char_a, tr.char_b] {
+                        ctx.notify_item_change(party, row.clone(), vec![(2, PyRep::Integer(old_owner))]);
+                    }
+                }
                 for &(iid, _) in tr.items_a.iter().chain(tr.items_b.iter()) {
                     let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::void_ship_insurance_contract(ctx, iid);
                 }

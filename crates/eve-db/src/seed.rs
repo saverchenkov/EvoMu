@@ -578,6 +578,12 @@ impl WorldRepository {
         for (k, v) in demo.npe_progress {
             snap.npe_progress.entry(k).or_insert(v);
         }
+        for (k, v) in demo.account_plex_vault {
+            snap.account_plex_vault.entry(k).or_insert(v);
+        }
+        for (k, v) in demo.fw_system_occupations {
+            snap.fw_system_occupations.entry(k).or_insert(v);
+        }
         if snap.next_entity_id < demo.next_entity_id {
             snap.next_entity_id = demo.next_entity_id;
         }
@@ -596,7 +602,7 @@ impl WorldRepository {
 
         let mut repo = Self {
             instance_id: Self::next_instance_id(),
-            inner: RwLock::new(initial_snap),
+            inner: RwLock::new(std::sync::Arc::new(initial_snap)),
             sqlite_conn: std::sync::Mutex::new(conn),
             sqlite_fp: std::sync::Mutex::new(fp),
             sqlite_path: None,

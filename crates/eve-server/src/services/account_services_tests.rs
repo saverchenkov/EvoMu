@@ -461,12 +461,15 @@ fn slash_commands_redeem_tokens_mct_resculpt_and_user_svc_misc() {
             .unwrap()
             > 0
     );
-    assert_eq!(
+    let PyRep::String(tok_str) =
         handle_inner(&ctx, &mut sess, "userSvc", "GetUserToken", &[], &kw)
             .unwrap()
-            .unwrap(),
-        PyRep::String("sso-tok-1".into())
-    );
+            .unwrap()
+    else {
+        panic!("expected String JWT from userSvc.GetUserToken");
+    };
+    let verified = ctx.db.verify_quasar_bearer_jwt(&tok_str, ctx.now_unix()).unwrap();
+    assert_eq!(verified.user_id, 1);
     assert_eq!(
         handle_inner(&ctx, &mut sess, "userSvc", "CastUpvote", &[PyRep::String("ui".into())], &kw)
             .unwrap()
@@ -528,35 +531,18 @@ async fn async_logout_logoff_and_multilogin_blocker_paths() {
     let kw = HashMap::new();
 
     // multiLoginBlocker.Login validation and success
-    assert_eq!(
-        handle(
-            &ctx,
-            &mut sess,
-            "multiLoginBlocker",
-            "Login",
-            &[PyRep::String("  ".into())],
-            &kw,
-        )
+    let blank_hash = [PyRep::String("  ".into())];
+    let err = handle(&ctx, &mut sess, "multiLoginBlocker", "Login", &blank_hash, &kw)
         .await
         .unwrap()
-        .unwrap_err()
-        .code,
-        "InvalidComputerHash"
-    );
-    assert_eq!(
-        handle(
-            &ctx,
-            &mut sess,
-            "multiLoginBlocker",
-            "Login",
-            &[PyRep::Bytes(b"hw-hash-001".to_vec())],
-            &kw,
-        )
+        .unwrap_err();
+    assert_eq!(err.code, "InvalidComputerHash");
+    let valid_hash = [PyRep::Bytes(b"hw-hash-001".to_vec())];
+    let ok = handle(&ctx, &mut sess, "multiLoginBlocker", "Login", &valid_hash, &kw)
         .await
         .unwrap()
-        .unwrap(),
-        PyRep::Bool(true)
-    );
+        .unwrap();
+    assert_eq!(ok, PyRep::Bool(true));
 
     // UserLogOffCharacter clears character fields while preserving user_id
     let logoff = handle(&ctx, &mut sess, "userSvc", "UserLogOffCharacter", &[], &kw)
@@ -595,19 +581,16 @@ async fn async_logout_logoff_and_multilogin_blocker_paths() {
     });
     let mut banned_sess = auth_session(500, 0, 0, 30_000_142);
     banned_sess.character_id = None;
-    assert_eq!(
-        handle(
-            &ctx,
-            &mut banned_sess,
-            "multiLoginBlocker",
-            "Login",
-            &[PyRep::String("hw-hash-002".into())],
-            &kw,
-        )
-        .await
-        .unwrap()
-        .unwrap_err()
-        .code,
-        "UserBanned"
-    );
+    let err = handle(
+        &ctx,
+        &mut banned_sess,
+        "multiLoginBlocker",
+        "Login",
+        &[PyRep::String("hw-hash-002".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err.code, "UserBanned");
 }

@@ -425,3 +425,89 @@ fn station_direct_trade_lifecycle_and_validation() {
         "TradeClosed"
     );
 }
+
+#[test]
+fn station_direct_trade_completes_when_current_trade_item_is_escrowed_and_emits_item_change() {
+    let ctx = make_test_context();
+    let station_id: i64 = 60_003_760;
+    let char_a: i64 = 90_000_001;
+    let char_b: i64 = 90_000_002;
+    let item_id: i64 = 80_611;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(mut acc_a) = snap.accounts.values().next().cloned() {
+            acc_a.user_id = 501;
+            acc_a.username = "user_a".into();
+            snap.accounts.insert("user_a".into(), acc_a.clone());
+            acc_a.user_id = 502;
+            acc_a.username = "user_b".into();
+            snap.accounts.insert("user_b".into(), acc_a);
+        }
+        if let Some(ca) = snap.characters.get_mut(&char_a) {
+            ca.user_id = 501;
+            ca.station_id = Some(station_id);
+            ca.balance = IskCents::from_f64_isk(5_000.0);
+        }
+        let mut cb = snap.characters[&char_a].clone();
+        cb.character_id = char_b;
+        cb.user_id = 502;
+        cb.name = "BuyerB".into();
+        cb.corporation_id = 98_000_001;
+        cb.station_id = Some(station_id);
+        cb.balance = IskCents::from_f64_isk(10_000.0);
+        snap.characters.insert(char_b, cb);
+        snap.items.insert(
+            item_id,
+            InventoryItemRecord {
+                item_id,
+                type_id: 587,
+                owner_id: char_a,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    let mut sess_a = char_session(char_a, 98_000_001);
+    sess_a.user_id = Some(501);
+    sess_a.station_id = Some(station_id);
+    let mut sess_b = char_session(char_b, 98_000_001);
+    sess_b.user_id = Some(502);
+    sess_b.station_id = Some(station_id);
+    ctx.db
+        .acquire_online_lock(501, 101, Some(char_a), false, ctx.now_unix())
+        .unwrap();
+    ctx.db
+        .acquire_online_lock(502, 102, Some(char_b), false, ctx.now_unix())
+        .unwrap();
+
+    let init = handle(&ctx, &mut sess_a, "trademgr", "InitiateTrade", &[PyRep::Integer(char_b)], &HashMap::new())
+        .unwrap()
+        .unwrap();
+    let trade_id = init.dict_get("tradeContainerID").unwrap().as_i64().unwrap();
+    let _ = ctx.drain_notifications_for_char(char_a);
+    let _ = ctx.drain_notifications_for_char(char_b);
+
+    handle(&ctx, &mut sess_a, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(item_id), PyRep::Integer(1)], &HashMap::new())
+        .unwrap()
+        .unwrap();
+    handle(&ctx, &mut sess_b, "trademgr", "OfferMoney", &[PyRep::Integer(trade_id), PyRep::Real(2_500.0)], &HashMap::new())
+        .unwrap()
+        .unwrap();
+
+    handle(&ctx, &mut sess_a, "trademgr", "MakeOffer", &[PyRep::Integer(trade_id), PyRep::Bool(true)], &HashMap::new())
+        .unwrap()
+        .unwrap();
+    let res = handle(&ctx, &mut sess_b, "trademgr", "MakeOffer", &[PyRep::Integer(trade_id), PyRep::Bool(true)], &HashMap::new())
+        .unwrap()
+        .unwrap();
+    assert_eq!(res.dict_get("completed").and_then(PyRep::as_bool), Some(true));
+
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.items[&item_id].owner_id, char_b);
+        assert!(!s.is_item_locked_excluding_trade(item_id, None));
+    });
+    assert!(ctx.drain_notifications_for_char(char_a).iter().any(|n| n.event == "OnItemChange"));
+    assert!(ctx.drain_notifications_for_char(char_b).iter().any(|n| n.event == "OnItemChange"));
+}

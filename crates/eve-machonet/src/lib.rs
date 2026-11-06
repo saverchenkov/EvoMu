@@ -91,16 +91,20 @@ pub fn wrapped_runtime_error_body(original_command: i64, message: &str) -> PyRep
 }
 
 /// Body of a V24 `machoNetPacket.ErrorResponse` carrying a wrapped `eveexceptions.UserError`
-/// (`UserError('CustomInfo', {'info': message})`) so client call sites (`autopilot.pyj`,
-/// `movementFunctions.pyj`, `slash.py`) catch `UserError` cleanly instead of logging an
-/// unhandled `RuntimeError` stack trace.
-pub fn wrapped_user_error_body(original_command: i64, message: &str) -> PyRep {
+/// (`UserError(user_error_name, {'info': message})`) so V24 client handlers (e.g., `moniker.py`
+/// retrying on `'UnMachoDestination'` or `autopilot.pyj` handling `'CustomInfo'`) process the
+/// protocol exception cleanly without logging an unhandled traceback.
+pub fn wrapped_named_user_error_body(
+    original_command: i64,
+    user_error_name: &str,
+    message: &str,
+) -> PyRep {
     let exc = PyRep::ObjectEx {
         is_type_2: false,
         header: Box::new(PyRep::Tuple(vec![
             PyRep::Token("eveexceptions.UserError".into()),
             PyRep::Tuple(vec![
-                PyRep::ascii_bytes("CustomInfo"),
+                PyRep::ascii_bytes(user_error_name),
                 PyRep::Dict(vec![(
                     PyRep::ascii_bytes("info"),
                     PyRep::ascii_bytes(message),
@@ -115,6 +119,14 @@ pub fn wrapped_user_error_body(original_command: i64, message: &str) -> PyRep {
         PyRep::Integer(MACHONETERR_WRAPPEDEXCEPTION),
         PyRep::Tuple(vec![PyRep::Bytes(eve_proto::marshal::encode(&exc))]),
     ])
+}
+
+/// Body of a V24 `machoNetPacket.ErrorResponse` carrying a wrapped `eveexceptions.UserError`
+/// (`UserError('CustomInfo', {'info': message})`) so client call sites (`autopilot.pyj`,
+/// `movementFunctions.pyj`, `slash.py`) catch `UserError` cleanly instead of logging an
+/// unhandled `RuntimeError` stack trace.
+pub fn wrapped_user_error_body(original_command: i64, message: &str) -> PyRep {
+    wrapped_named_user_error_body(original_command, "CustomInfo", message)
 }
 
 /// `macho.MachoAddress` endpoint representation.
@@ -789,10 +801,6 @@ impl SessionState {
         if self.station_id != next.station_id {
             changes.insert(
                 "stationid".into(),
-                (opt_i64(self.station_id), opt_i64(next.station_id)),
-            );
-            changes.insert(
-                "stationid2".into(),
                 (opt_i64(self.station_id), opt_i64(next.station_id)),
             );
         }

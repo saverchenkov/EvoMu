@@ -315,6 +315,7 @@ pub(crate) async fn handle_abyssal_gate_activation(
         ("pocketID", PyRep::Integer(pid)),
         ("gateID", PyRep::Integer(gate_id)),
         ("gateActivated", PyRep::Bool(true)),
+        ("npcBallIDs", PyRep::List(next_room_npcs.iter().map(|&id| PyRep::Integer(id)).collect())),
     ]))
 }
 
@@ -546,6 +547,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         origin_pos[1] + 1_000.0,
         origin_pos[2] + 1_000.0,
     ];
+    let updated_ch = ctx.db.set_character_solar_system(char_id, origin_sys, &ctx.sde);
     let _ = ctx.db.try_with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = origin_sys;
@@ -565,6 +567,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         .db
         .with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(621));
     let cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type);
+    let slim_meta = ctx.build_ship_slim_meta(char_id, ship_type);
     let ball = crate::services::pve_abyssal_pylons::build_fitted_ship_space_ball(
         ctx,
         char_id,
@@ -572,8 +575,23 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         ship_type,
         DVec3::from_array(exit_pos),
     );
-    let _ = origin_sys_handle.spawn_ball_with_combat(ball, cs).await;
+    let _ = origin_sys_handle.spawn_ball_with_meta(ball, cs, slim_meta).await;
+    let _ = origin_sys_handle.push_set_state(ship_id).await;
+    let (const_id, reg_id) = match updated_ch {
+        Ok(ch) => (ch.constellation_id, ch.region_id),
+        Err(_) => ctx
+            .sde
+            .solar_systems
+            .get(&origin_sys)
+            .map(|s| (s.constellation_id, s.region_id))
+            .unwrap_or((20_000_020, 10_000_002)),
+    };
     session.solar_system_id = Some(origin_sys);
+    session.constellation_id = Some(const_id);
+    session.region_id = Some(reg_id);
+    session.station_id = None;
+    session.structure_id = None;
+    ctx.quasar_gateway.on_session_changed(session, ctx.now_unix());
     ctx.sync_character_local_chat(char_id, Some(pocket_sys), origin_sys);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, origin_sys);
     let origin_sec = ctx

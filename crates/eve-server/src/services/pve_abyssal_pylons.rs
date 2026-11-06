@@ -563,7 +563,7 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
     let mut active_clouds: HashMap<i64, TypeId> = HashMap::new();
     let mut boundary_ticks: HashMap<i64, u32> = HashMap::new();
     if let Some(db) = db_opt {
-        let _ = db.try_with_mut_snapshot(|snap| -> Result<(), ()> {
+        db.with_snapshot(|snap| {
             if let Some(blob) = snap.service_state_blobs.get("incursions_state") {
                 if let Ok(reg) = serde_json::from_str::<crate::services::pve_special_sites::PveSpecialSitesRegistry>(blob) {
                     for vs in reg.void_space_sessions.values() {
@@ -637,9 +637,10 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
             if let Some(bblob) = snap.service_state_blobs.get("abyssal_boundary_ticks") {
                 boundary_ticks = serde_json::from_str(bblob).unwrap_or_default();
             }
-            Ok(())
         });
     }
+    let prev_boundary_ticks = boundary_ticks.clone();
+    let prev_active_clouds = active_clouds.clone();
 
     let mut suppressors: Vec<(Option<i64>, DVec3, f64, eve_destiny::DamageVector)> = Vec::new();
     let mut tracking_pylons: Vec<(Option<i64>, DVec3, f64, f64)> = Vec::new();
@@ -1098,12 +1099,14 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
     }
 
     boundary_ticks.retain(|bid, _| ballpark.balls.contains_key(bid));
-    if let Some(db) = db_opt {
-        if let Ok(json) = serde_json::to_string(&boundary_ticks) {
-            let _ = db.try_with_mut_snapshot(|snap| -> Result<(), ()> {
-                snap.service_state_blobs.insert("abyssal_boundary_ticks".into(), json);
-                Ok(())
-            });
+    if boundary_ticks != prev_boundary_ticks {
+        if let Some(db) = db_opt {
+            if let Ok(json) = serde_json::to_string(&boundary_ticks) {
+                let _ = db.try_with_mut_snapshot(|snap| -> Result<(), ()> {
+                    snap.service_state_blobs.insert("abyssal_boundary_ticks".into(), json);
+                    Ok(())
+                });
+            }
         }
     }
 
@@ -1169,12 +1172,14 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
         }
     }
 
-    if let Some(db) = db_opt {
-        if let Ok(json) = serde_json::to_string(&active_clouds) {
-            let _ = db.try_with_mut_snapshot(|snap| -> Result<(), ()> {
-                snap.service_state_blobs.insert("abyssal_active_clouds".into(), json);
-                Ok(())
-            });
+    if active_clouds != prev_active_clouds {
+        if let Some(db) = db_opt {
+            if let Ok(json) = serde_json::to_string(&active_clouds) {
+                let _ = db.try_with_mut_snapshot(|snap| -> Result<(), ()> {
+                    snap.service_state_blobs.insert("abyssal_active_clouds".into(), json);
+                    Ok(())
+                });
+            }
         }
     }
     suppressor_destroyed

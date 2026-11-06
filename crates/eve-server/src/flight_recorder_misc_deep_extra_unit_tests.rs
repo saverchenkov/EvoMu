@@ -164,7 +164,7 @@ async fn sso_http_routes_tcp_framing_pkce_json_basic_auth_and_error_branches() {
     let consent = handle_http_request(
         &ctx,
         "GET",
-        "/v2/oauth/authorize?client_id=c%3C1%3E&redirect_uri=https%3A%2F%2Fapp.local%2Fcb&code_challenge=abc123&scope=s1&state=st%261",
+        "/v2/oauth/authorize?client_id=c%3C1%3E&redirect_uri=http%3A%2F%2Flocalhost%2Fcb&code_challenge=code_challenge_0123456789abcdef_0123456789abc&scope=s1&state=st%261",
         &HashMap::new(),
         b"",
     );
@@ -188,7 +188,7 @@ async fn sso_http_routes_tcp_framing_pkce_json_basic_auth_and_error_branches() {
     let no_user = handle_http_request(
         &ctx,
         "POST",
-        "/v2/oauth/authorize?client_id=c&redirect_uri=https://a/b&code_challenge=x",
+        "/v2/oauth/authorize?client_id=c&redirect_uri=http://localhost/cb&code_challenge=code_challenge_0123456789abcdef_0123456789abc",
         &HashMap::new(),
         b"",
     );
@@ -196,7 +196,7 @@ async fn sso_http_routes_tcp_framing_pkce_json_basic_auth_and_error_branches() {
     let no_pass = handle_http_request(
         &ctx,
         "POST",
-        "/v2/oauth/authorize?client_id=c&redirect_uri=https://a/b&code_challenge=x&username=alice",
+        "/v2/oauth/authorize?client_id=c&redirect_uri=http://localhost/cb&code_challenge=code_challenge_0123456789abcdef_0123456789abc&username=alice",
         &HashMap::new(),
         b"",
     );
@@ -207,7 +207,7 @@ async fn sso_http_routes_tcp_framing_pkce_json_basic_auth_and_error_branches() {
     let bad_cred = handle_http_request(
         &ctx,
         "POST",
-        "/v2/oauth/authorize?client_id=c&redirect_uri=https://a/b&code_challenge=x",
+        "/v2/oauth/authorize?client_id=c&redirect_uri=http://localhost/cb&code_challenge=code_challenge_0123456789abcdef_0123456789abc",
         &bad_basic,
         b"",
     );
@@ -259,7 +259,8 @@ async fn sso_http_routes_tcp_framing_pkce_json_basic_auth_and_error_branches() {
         "client_id": "eve-deep-client",
         "grant_type": "authorization_code",
         "code": code,
-        "code_verifier": verifier
+        "code_verifier": verifier,
+        "redirect_uri": "http://localhost:9000/cb?existing=1"
     })
     .to_string();
     let tok_rsp = handle_http_request(&ctx, "POST", "/v2/oauth/token", &json_hdrs, tok_req.as_bytes());

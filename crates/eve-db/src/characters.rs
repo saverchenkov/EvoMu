@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 impl WorldRepository {
     pub fn get_characters_for_user(&self, user_id: u64) -> Vec<CharacterRecord> {
-        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self.read_state();
         let mut chars: Vec<CharacterRecord> = guard
             .characters
             .values()
@@ -19,7 +19,7 @@ impl WorldRepository {
     }
 
     pub fn get_character(&self, character_id: i64) -> Result<CharacterRecord, DbError> {
-        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self.read_state();
         guard
             .characters
             .get(&character_id)
@@ -32,7 +32,7 @@ impl WorldRepository {
         user_id: u64,
         character_id: i64,
     ) -> Result<CharacterRecord, DbError> {
-        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self.read_state();
         let ch = guard
             .characters
             .get(&character_id)
@@ -812,7 +812,7 @@ impl WorldRepository {
 
     /// Returns all mining ledger entries for a character (`MN-03`).
     pub fn get_mining_ledger(&self, character_id: i64) -> Vec<MiningLedgerRecord> {
-        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self.read_state();
         guard
             .mining_ledger
             .iter()
@@ -823,7 +823,7 @@ impl WorldRepository {
 
     /// Returns all mining ledger entries with their wasted/residue quantities for a character (`MN-16`).
     pub fn get_mining_ledger_with_waste(&self, character_id: i64) -> Vec<(MiningLedgerRecord, i64)> {
-        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self.read_state();
         let waste_map: std::collections::BTreeMap<usize, i64> = guard
             .service_state_blobs
             .get("mining_ledger_waste")
@@ -840,7 +840,7 @@ impl WorldRepository {
 
     /// Returns all observer mining records for a given observer structure (`MN-15`).
     pub fn get_observer_mining_ledger(&self, observer_id: i64) -> Vec<crate::types::ObserverMiningRecord> {
-        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self.read_state();
         guard
             .observer_mining_ledger
             .get(&observer_id)
@@ -850,7 +850,7 @@ impl WorldRepository {
 
     /// Returns all observer IDs that have recorded mining events (`MN-15`).
     pub fn get_observers_with_mining_events(&self) -> Vec<i64> {
-        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self.read_state();
         let mut ids: Vec<i64> = guard.observer_mining_ledger.keys().copied().collect();
         ids.sort_unstable();
         ids

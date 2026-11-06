@@ -1151,7 +1151,7 @@ pub fn handle(
                 }
                 Ok(contract_to_pyrep(c, snap))
             });
-            if res.is_ok() { notify_contract(ctx, char_id, "OnShowContract", cid); }
+            if res.is_ok() && method == "GetContractInfo" { notify_contract(ctx, char_id, "OnShowContract", cid); }
             Some(res)
         }
 

@@ -269,10 +269,12 @@ async fn r6_t3_04_phenomena_generator_transient_dbuff_no_permanent_mutation_or_1
         });
     });
     for _ in 0..2 {
-        let prep_res = super::inventory_fitting::fitting_ewar_capital::prepare_ewar_and_capital_module(
+        let prep = super::inventory_fitting::fitting_ewar_capital::prepare_ewar_and_capital_module(
             &ctx, &sys, sys_id, t_pilot, titan, 30, mod_id, &fm, &mod_ty, &mod_st, &fit, None, false, false, false, &kw,
-        ).await;
-        assert!(prep_res.is_some_and(|r| r.is_ok()));
+        ).await.expect("phenomena prep").expect("phenomena ok");
+        super::inventory_fitting::fitting_ewar_capital::commit_post_cycle_activation_effects(
+            &ctx, &sys, t_pilot, titan, mod_id, &fm, &mod_ty, &mod_st, None, prep.deferred_post_cycle,
+        ).await.expect("phenomena commit");
     }
     ctx.db.with_snapshot(|snap| { assert!(snap.items[&victim].dynamic_attributes.is_empty()); });
     assert!(super::inventory_fitting::fitting_scanners_superweapons::get_aggregated_ship_dbuffs(&ctx, victim, ctx.now_unix_secs()).contains_key(&9901));

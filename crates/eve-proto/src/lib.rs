@@ -213,8 +213,12 @@ impl PyRep {
             if let Self::Tuple(items) = header.as_ref() {
                 if let Some(Self::Tuple(args)) = items.first() {
                     return matches!(
-                        args.first().and_then(Self::as_str),
-                        Some("dbutil.CRowset" | "carbon.common.script.sys.crowset.CRowset")
+                        args.first(),
+                        Some(Self::String(s) | Self::Token(s))
+                            if matches!(
+                                s.as_str(),
+                                "dbutil.CRowset" | "carbon.common.script.sys.crowset.CRowset"
+                            )
                     );
                 }
             }
@@ -232,8 +236,13 @@ impl PyRep {
             if let Self::Tuple(items) = header.as_ref() {
                 if let Some(Self::Tuple(args)) = items.first() {
                     return matches!(
-                        args.first().and_then(Self::as_str),
-                        Some("dbutil.CIndexedRowset" | "carbon.common.script.sys.crowset.CIndexedRowset")
+                        args.first(),
+                        Some(Self::String(s) | Self::Token(s))
+                            if matches!(
+                                s.as_str(),
+                                "dbutil.CIndexedRowset"
+                                    | "carbon.common.script.sys.crowset.CIndexedRowset"
+                            )
                     );
                 }
             }

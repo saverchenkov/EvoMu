@@ -17,6 +17,53 @@ pub fn wormhole_exit_item_id_for_signature(dest_sys: SolarSystemId, sig_id: &str
     wormhole_item_id_for_signature(dest_sys, &format!("K162-{sig_id}"))
 }
 
+pub fn resolve_cross_system_wormhole_polarization(
+    ctx: &ServerContext,
+    session: &eve_machonet::SessionState,
+    args: &[eve_proto::PyRep],
+) -> Option<Result<eve_proto::PyRep, BridgeRpcError>> {
+    use eve_proto::PyRep;
+    let (_, char_id) = ServerContext::require_character(session).ok()?;
+    let bid = args.first().and_then(|a| a.as_i64()).filter(|&b| b >= 40_000_000)?;
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let exp_unix_opt = ctx.db.with_snapshot(|snap| {
+        for (&psys, list) in &snap.cosmic_signatures {
+            if let Some(s) = list.iter().find(|s| {
+                s.sig_group == "Wormhole"
+                    && (wormhole_item_id_for_signature(psys, &s.signature_id) == bid
+                        || wormhole_exit_item_id_for_signature(psys, &s.signature_id) == bid)
+            }) {
+                let ent_id = wormhole_item_id_for_signature(psys, &s.signature_id);
+                let dest = s.destination_system_id.unwrap_or(31_000_005) as i64;
+                let exp = snap
+                    .wh_polarizations
+                    .get(&(char_id, ent_id))
+                    .or_else(|| snap.wh_polarizations.get(&(char_id, bid)))
+                    .or_else(|| snap.wh_polarizations.get(&(char_id, dest)))
+                    .copied()
+                    .unwrap_or(0);
+                return Some(exp);
+            }
+        }
+        if bid >= 700_000_000 {
+            return Some(snap.wh_polarizations.get(&(char_id, bid)).copied().unwrap_or(0));
+        }
+        None
+    })?;
+    if exp_unix_opt > now_unix {
+        let end_ft = crate::sp6_lifecycle::unix_to_filetime(exp_unix_opt);
+        let duration_ticks = 300_i64 * 10_000_000;
+        return Some(Ok(PyRep::Tuple(vec![
+            PyRep::Integer(end_ft),
+            PyRep::Integer(duration_ticks),
+        ])));
+    }
+    Some(Ok(PyRep::None))
+}
+
 pub fn pick_system_celestial_position(
     ctx: &ServerContext,
     sys_id: SolarSystemId,

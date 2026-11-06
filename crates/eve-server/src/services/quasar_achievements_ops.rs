@@ -508,7 +508,16 @@ pub fn register_achievement_handlers(
     router.register_handler(
         "eve_public.achievement.definition.api.cdn.GetLatestRequest",
         Arc::new(move |_ctx, any, dyn_msg| {
-            if dyn_msg.get(1).is_none()
+            let no_local = dyn_msg.get(2).and_then(|v| match v {
+                DynamicValue::Bool(b) => Some(*b),
+                DynamicValue::Uint64(u) => Some(*u != 0),
+                DynamicValue::Uint32(u) => Some(*u != 0),
+                DynamicValue::Int64(i) => Some(*i != 0),
+                DynamicValue::Int32(i) => Some(*i != 0),
+                _ => None,
+            }).unwrap_or(false);
+
+            if !no_local
                 && any.type_url.starts_with("type.evetech.net/")
                 && std::env::var("EVOMU_CDN_BASE_URL")
                     .ok()
@@ -522,15 +531,6 @@ pub fn register_achievement_handlers(
                     value: Vec::new(),
                 });
             }
-
-            let no_local = dyn_msg.get(2).and_then(|v| match v {
-                DynamicValue::Bool(b) => Some(*b),
-                DynamicValue::Uint64(u) => Some(*u != 0),
-                DynamicValue::Uint32(u) => Some(*u != 0),
-                DynamicValue::Int64(i) => Some(*i != 0),
-                DynamicValue::Int32(i) => Some(*i != 0),
-                _ => None,
-            }).unwrap_or(false);
 
             if dyn_msg.get(1).is_some() && !no_local {
                 return Err((
@@ -758,6 +758,7 @@ pub fn register_achievement_handlers(
     );
 }
 
-#[cfg(test)] #[path = "quasar_achievements_ops_tests.rs"]
+#[cfg(test)]
+#[path = "quasar_achievements_ops_tests.rs"]
 mod quasar_achievements_ops_tests;
 

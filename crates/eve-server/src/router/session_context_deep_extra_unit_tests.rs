@@ -18,10 +18,8 @@ use eve_machonet::service_roles::{ROLE_GMH, ROLE_PLAYER_DEFAULT};
 use eve_machonet::SessionState;
 use eve_sde::SdeRegistry;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use uuid::Uuid;
-
-static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 struct ScopedEnv {
     prev: Vec<(&'static str, Option<String>)>,
@@ -116,9 +114,9 @@ async fn context_constructors_production_accounts_and_demo_world_fixtures() {
     let tmp_dir = std::env::temp_dir().join(format!("evomu_ctx_ctor_{}", Uuid::new_v4()));
     std::fs::create_dir_all(&tmp_dir).unwrap();
 
-    // 1. new_production + new with EVOMU_DISABLE_DEMO_SEED under ENV_LOCK
+    // 1. new_production + new with EVOMU_DISABLE_DEMO_SEED under TEST_ENV_LOCK
     {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::lock_test_env_write();
         let _env = ScopedEnv::capture(&["EVOMU_ACCOUNTS", "EVOMU_GM_ACCOUNT", "EVOMU_DISABLE_DEMO_SEED"]);
         std::env::set_var("EVOMU_ACCOUNTS", "alice:pass_a , malformed_entry , bob:pass_b");
         std::env::set_var("EVOMU_GM_ACCOUNT", "op_gm:gm_pass");

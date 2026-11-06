@@ -153,7 +153,7 @@ async fn r6_t1_01_fighter_tube_merge_and_launch_hp_inflation_blocked() {
         .sde
         .types
         .values()
-        .find(|t| t.category_id == 87 && t.published)
+        .find(|t| t.category_id == 87 && t.published && t.default_attributes.get(&2215).copied() == Some(9.0))
         .map(|t| t.type_id)
         .unwrap_or(23_057);
     let mut sess = make_session(char_id, 98_000_001, sys_id, Some(carrier_id));

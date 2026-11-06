@@ -225,7 +225,7 @@ async fn tactical_projected_assistance_tsb_auto_target_and_wormhole_guards() {
 
     assert_eq!(apply_projected_remote_assistance(&ctx, c1, s1, 1_200_010, &rsb_type, &rsb_state, None, 10_000.0).unwrap_err().code, "TargetRequired");
     assert_eq!(apply_projected_remote_assistance(&ctx, c1, s1, 1_200_010, &rsb_type, &rsb_state, Some(s2), 90_000.0).unwrap_err().code, "OutOfRange");
-    ctx.crimewatch.write().unwrap().get_or_create(c2).criminal_flag_until_unix = 1_800_000_600;
+    ctx.crimewatch.write().unwrap().get_or_create(c2).suspect_flag_until_unix = 1_800_000_600;
     apply_projected_remote_assistance(&ctx, c1, s1, 1_200_010, &rsb_type, &rsb_state, Some(s2), 60_000.0).unwrap();
     apply_projected_remote_assistance(&ctx, c1, s1, 1_200_011, &rtc_type, &rtc_state, Some(s2), 40_000.0).unwrap();
     assert!(ctx.crimewatch.read().unwrap().states.get(&c1).is_some_and(|st| st.criminal_flag_until_unix >= 1_800_000_900));

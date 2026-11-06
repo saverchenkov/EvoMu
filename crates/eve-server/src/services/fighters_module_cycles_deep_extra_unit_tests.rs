@@ -134,6 +134,7 @@ async fn combat_fighters_all_commands_error_guards_and_squadron_damage() {
             t.category_id == 6
                 && t.default_attributes.get(&2216).copied().unwrap_or(0.0) >= 3.0
                 && t.default_attributes.get(&2217).copied().unwrap_or(0.0) >= 2.0
+                && t.default_attributes.get(&2055).copied().unwrap_or(0.0) >= 5_000.0
         })
         .map(|(&tid, _)| tid)
         .unwrap_or(23911);

@@ -386,7 +386,7 @@ fn wire_slim_item_and_event_encoding_covers_special_entity_types() {
         ..SlimItemMeta::default()
     };
     let wh_dict = slim_item_dict_with_park(Some(&park), &wh_ball, &wh_meta);
-    assert_eq!(dict_lookup(&wh_dict, "nebulaType"), Some(&PyRep::Integer(1)));
+    assert_eq!(dict_lookup(&wh_dict, "nebulaType"), Some(&PyRep::Integer(11806)));
     assert_eq!(dict_lookup(&wh_dict, "wormholeAge"), Some(&PyRep::Integer(1)));
     assert_eq!(dict_lookup(&wh_dict, "wormholeSize"), Some(&PyRep::Real(1.5)));
 
@@ -553,50 +553,28 @@ fn grid_axes_cloak_errors_warp_locks_and_mjd_filters() {
     assert!(!park.combat_states[&11].is_cloaked);
 
     // Emergency warp & clearing locks on warp initiation + clearing gate cloak on set_mode.
-    assert!(park.add_target_lock(
-        11,
-        TargetLock {
-            target_id: 9,
-            lock_time_ms: 1000.0,
-            remaining_lock_ms: 0.0,
-            locked: true,
-            max_range_m: None,
-        }
-    ));
+    assert!(park.add_target_lock(11, TargetLock { target_id: 9, lock_time_ms: 1000.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }));
     park.combat_states.get_mut(&11).unwrap().gate_cloak_remaining_ticks = 15;
     park.combat_states.get_mut(&11).unwrap().is_cloaked = true;
     park.combat_states.get_mut(&11).unwrap().is_emergency_warping = true;
     assert!(park.set_warp_scramble_strength(11, 2));
-    assert!(park
-        .set_mode(
-            11,
-            MovementMode::new_warp(DVec3::new(310_000.0, 0.0, 0.0), DVec3::new(50_000_000.0, 0.0, 0.0), 3.0),
-        )
-        .is_err());
+    let warp_mode = MovementMode::new_warp(DVec3::new(310_000.0, 0.0, 0.0), DVec3::new(50_000_000.0, 0.0, 0.0), 3.0);
+    assert!(park.set_mode(11, warp_mode.clone()).is_err());
     assert!(park.set_warp_core_strength(11, 3));
-    assert!(park
-        .set_mode(
-            11,
-            MovementMode::new_warp(DVec3::new(310_000.0, 0.0, 0.0), DVec3::new(50_000_000.0, 0.0, 0.0), 3.0),
-        )
-        .is_ok());
+    assert!(park.set_mode(11, warp_mode).is_ok());
     assert!(park.get_target_locks(11).is_empty());
     assert!(!park.combat_states[&11].is_cloaked);
 
     // MJD / MJFG unknown, in-warp, heading_for_ball Stop/zero GotoDirection, and MJFG candidate exclusions.
     assert!(park.micro_jump(999_999, 100_000.0).is_err());
     assert!(park.micro_jump_field(999_999, 100_000.0, 6_000.0, 25).is_err());
-    if let MovementMode::Warp { ref mut phase, .. } = park.balls.get_mut(&11).unwrap().mode {
-        *phase = WarpPhase::Cruising;
-    }
+    if let MovementMode::Warp { ref mut phase, .. } = park.balls.get_mut(&11).unwrap().mode { *phase = WarpPhase::Cruising; }
     assert!(park.micro_jump(11, 100_000.0).is_err());
     assert!(park.micro_jump_field(11, 100_000.0, 6_000.0, 25).is_err());
 
     // Zero GotoDirection heading fallback + SDE capital lookup with group_id = 0.
     assert!(park.add_ball(make_ship(12, 19724, DVec3::new(500_000.0, 0.0, 0.0))));
-    park.balls.get_mut(&12).unwrap().mode = MovementMode::GotoDirection {
-        direction: DVec3::ZERO,
-    };
+    park.balls.get_mut(&12).unwrap().mode = MovementMode::GotoDirection { direction: DVec3::ZERO };
     let cap_pos = park.micro_jump(12, 100_000.0).expect("capital 250km jump");
     assert!((cap_pos.x - 750_000.0).abs() < 1e-6);
 
@@ -607,9 +585,7 @@ fn grid_axes_cloak_errors_warp_locks_and_mjd_filters() {
     park.combat_states.get_mut(&14).unwrap().is_cloaked = true;
     assert!(park.add_ball(make_ship(15, 587, DVec3::new(750_300.0, 0.0, 0.0))));
     assert!(park.add_ball(make_ship(16, 587, DVec3::new(750_400.0, 0.0, 0.0))));
-    let limited = park
-        .micro_jump_field(12, 10_000.0, 5_000.0, 2)
-        .expect("mjfg limit 2");
+    let limited = park.micro_jump_field(12, 10_000.0, 5_000.0, 2).expect("mjfg limit 2");
     assert_eq!(limited, vec![12, 15]);
 }
 

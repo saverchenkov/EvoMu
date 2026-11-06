@@ -512,14 +512,16 @@ pub fn rebalance_overloaded_worker_nodes(ctx: &ServerContext) -> usize {
 }
 
 fn emit_cluster_shutdown_initiated(ctx: &ServerContext, shutdown_when_unix: u64, duration_minutes: i64) {
-    // V24 client `OnClusterShutdownInitiated(explanationLabel, when, duration)` takes 3 arguments.
+    // V24 client `OnClusterShutdownInitiated(explanationLabel, when, duration)` takes 3 arguments
+    // and requires `when > blue.os.GetWallclockTime()` for `FormatTimeIntervalWritten`.
+    let effective_when_unix = shutdown_when_unix.max(ctx.now_unix().saturating_add(60));
     ctx.notify(
         NotificationTarget::All,
         "OnClusterShutdownInitiated",
         "clientID",
         vec![
-            PyRep::String("UI/Shared/ClusterShutdownInitiated".into()),
-            PyRep::Integer(unix_to_filetime(shutdown_when_unix)),
+            PyRep::String("UI/Shared/ShutdownNotificationTitle".into()),
+            PyRep::Integer(unix_to_filetime(effective_when_unix)),
             PyRep::Integer(duration_minutes),
         ],
     );
@@ -601,7 +603,8 @@ pub fn has_downtime_countdown_armed_for_day(ctx: &ServerContext, now_unix: u64) 
 /// disconnects active non-GM transport sessions, and releases non-GM online session locks (`feat:serverops.downtime`).
 pub fn initiate_cluster_downtime_shutdown(ctx: &ServerContext) -> usize {
     let now = ctx.now_unix();
-    emit_cluster_shutdown_initiated(ctx, now, DOWNTIME_DURATION_MINUTES);
+    let shutdown_when = now.saturating_add((DOWNTIME_DURATION_MINUTES.max(1) as u64) * 60);
+    emit_cluster_shutdown_initiated(ctx, shutdown_when, DOWNTIME_DURATION_MINUTES);
 
     if let Ok(mut cluster) = ctx.cluster_state.write() {
         cluster.shutdown_in_progress = true;

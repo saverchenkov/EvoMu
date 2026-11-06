@@ -254,30 +254,28 @@ async fn serve_harness_bridge_client(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_t6_client_harness_run_journeys_two_clients_and_log_hygiene() {
     // Task T-6: Real-client & dual-client bridge journey harness (`tools/client-harness/run_journeys`).
-    let ctx = Arc::new(ServerContext::new());
+    let mut ctx = ServerContext::new();
+    ctx.feature_flags.free_fast_checkout_plex = true;
+    ctx.feature_flags.starter_plex_balance = 50_000;
+    let ctx = Arc::new(ctx);
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
+    crate::common::seed_test_nes_store_catalog(&ctx);
     ctx.db.provision_gm_account("other", "other-secret", 90_000_004, "ISD Other");
+    let other_uid = ctx.db.authenticate("other", "other-secret").unwrap().user_id;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            100_000_019,
-            eve_db::InventoryItemRecord {
-                item_id: 100_000_019,
-                type_id: 53977,
-                owner_id: 90_000_001,
-                location_id: 100_000_001,
-                flag: eve_db::InventoryFlag::Cargo,
-                quantity: 5,
-                singleton: false,
-                version: 1,
-                dynamic_attributes: std::collections::HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
+        snap.adjust_plex_vault(90_000_004, 50_000);
+        snap.account_plex_vault.insert(other_uid, 50_000);
     });
+    ctx.db
+        .add_or_stack_item(
+            90_000_001,
+            100_000_001,
+            eve_db::InventoryFlag::Cargo,
+            53977,
+            5,
+        )
+        .unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -463,4 +461,92 @@ async fn test_t6_client_harness_run_journeys_two_clients_and_log_hygiene() {
 
     accept_task.abort();
     let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_z1_to_z8_real_client_session_diff_and_journey_contract() {
+    let mut prev = SessionState::new(70_001);
+    prev.user_id = Some(1);
+    let mut next = prev.clone();
+    next.character_id = Some(90_000_001);
+    next.corporation_id = Some(1_000_035);
+    next.solar_system_id = Some(30_000_142);
+    next.constellation_id = Some(20_000_020);
+    next.region_id = Some(10_000_002);
+    next.station_id = Some(60_003_760);
+    next.ship_id = Some(100_000_001);
+    let diff = next.compute_diff(&prev);
+    let keys: Vec<String> = diff.iter().map(|(k, _)| k.to_string()).collect();
+    assert!(keys.contains(&"charid".to_string()));
+    assert!(keys.contains(&"corpid".to_string()));
+    assert!(keys.contains(&"solarsystemid2".to_string()));
+    assert!(keys.contains(&"stationid".to_string()));
+    assert!(keys.contains(&"shipid".to_string()));
+    assert!(
+        !keys.contains(&"stationid2".to_string()),
+        "V24.01 Session.__persistvars__ must never emit obsolete stationid2: {keys:?}"
+    );
+
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let journeys_path = repo_root
+        .join(".agents")
+        .join("skills")
+        .join("evomu-adversarial-review")
+        .join("references")
+        .join("parity")
+        .join("client_journeys.json");
+    let raw = std::fs::read_to_string(&journeys_path).expect("read client_journeys.json");
+    let parsed: serde_json::Value = serde_json::from_str(&raw).expect("parse client_journeys.json");
+    let journeys = parsed["journeys"].as_array().expect("journeys array");
+    assert_eq!(journeys.len(), 29, "client_journeys.json must list 29 real client journeys");
+
+    let driver_path = repo_root
+        .join("tools")
+        .join("client-harness")
+        .join("evomu_inclient_driver.py");
+    let site_path = repo_root
+        .join("tools")
+        .join("client-harness")
+        .join("evomu_site.py");
+    let driver_src = std::fs::read_to_string(&driver_path).expect("read evomu_inclient_driver.py");
+    let site_src = std::fs::read_to_string(&site_path).expect("read evomu_site.py");
+    assert!(site_src.contains("schedule_startup") && site_src.contains("_install_logmodule_hook"));
+    for j in journeys {
+        let jid = j["id"].as_str().expect("journey id string");
+        assert!(
+            driver_src.contains(&format!("\"{jid}\"")),
+            "evomu_inclient_driver.py missing live journey handler for '{jid}'"
+        );
+    }
+
+    let ctx = Arc::new(ServerContext::new());
+    ctx.seed_demo_world_fixtures();
+    let mut sess = SessionState::new(70_002);
+    crate::common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    let char_sel = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "GetCharactersToSelect",
+            &[],
+            &std::collections::HashMap::new(),
+            None,
+        )
+        .await
+        .expect("GetCharactersToSelect");
+    let first_name = char_sel
+        .crowset_rows()
+        .and_then(|rows| rows.into_iter().next())
+        .and_then(|row| row.dict_get("characterName").cloned());
+    assert_eq!(
+        first_name,
+        Some(PyRep::String("Aura Capsuleer".into())),
+        "charUnboundMgr must return seeded Aura Capsuleer row"
+    );
 }

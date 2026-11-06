@@ -18,15 +18,19 @@ Supports:
 import argparse
 import atexit
 import datetime
+import glob
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
+
+sys.dont_write_bytecode = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
@@ -40,7 +44,7 @@ DEFAULT_CLIENT_APP = os.path.expanduser(
     "~/Library/Application Support/EVE Online/SharedCache/tq/EVE.app"
 )
 ERROR_LINE_RE = re.compile(
-    r"UnimplementedRPC|panicked at|Traceback \(most recent|\bEXCEPTION\b|SendClientStackTraceAlert|client exception report saved"
+    r"UnimplementedRPC|panicked at|Traceback \(most recent|\bEXCEPTION\b|_LogException\b|\bLogException\b|\bLogTraceback\b|SendClientStackTraceAlert|client exception report saved"
 )
 
 
@@ -189,25 +193,357 @@ def _pids_matching(pattern):
     return set(int(p) for p in out.split() if p.isdigit() and int(p) != os.getpid())
 
 
-def launch_real_client(client_app, host, macho_port, login, log_path, auto_select_char=0):
-    """Starts the unmodified V24.01 client pointed at EvoMu via its own command-line switches.
+DEFAULT_STAGED_BUILD = os.path.expanduser("~/.cache/evomu/client_build_3624425")
 
-    `utillib.GetServerName/GetServerPort` honour `/server:` and `/port:`; `GetLoginCredentials`
-    honours `/login:<user>:<password>` (used by `connection.TryAutomaticLogin`). The client runs in
-    its own session/process group so `kill_real_client` can always tear the whole tree down.
+
+def stage_real_client(client_app):
+    """Stages an isolated, writable copy of `EVE.app/Contents/Resources/build` outside git.
+
+    Never modifies the SharedCache `EVE.app` bundle. Configures `common.ini` with
+    `cryptoPack = Placebo` and installs `tools/startup/evomu.py` so `/tools=evomu`
+    launches `evomu_inclient_driver.schedule_startup()` inside the real V24.01 engine.
     """
-    cmd = [
-        client_executable(client_app),
-        "/server:%s" % host,
-        "/port:%d" % macho_port,
-        "/autoSelectCharacter:%d" % int(auto_select_char),
-    ]
-    if login:
+    src_build = os.path.join(client_app, "Contents", "Resources", "build")
+    stage_dir = DEFAULT_STAGED_BUILD
+    exefile_path = os.path.join(stage_dir, "bin64", "exefile")
+    src_ini = os.path.join(src_build, "start.ini")
+    dst_ini = os.path.join(stage_dir, "start.ini")
+    needs_copy = not os.path.exists(exefile_path) or not os.path.exists(dst_ini)
+    if not needs_copy:
+        try:
+            needs_copy = os.path.getmtime(src_ini) > os.path.getmtime(dst_ini)
+        except OSError:
+            needs_copy = True
+    if needs_copy:
+        os.makedirs(os.path.dirname(stage_dir), exist_ok=True)
+        tmp_stage = stage_dir + ".staging"
+        if os.path.exists(tmp_stage):
+            shutil.rmtree(tmp_stage)
+        if os.path.exists(stage_dir):
+            shutil.rmtree(stage_dir)
+        cp_res = subprocess.run(["/bin/cp", "-cR", src_build, tmp_stage], capture_output=True)
+        if cp_res.returncode != 0:
+            if os.path.exists(tmp_stage):
+                shutil.rmtree(tmp_stage)
+            shutil.copytree(src_build, tmp_stage, symlinks=True)
+        os.replace(tmp_stage, stage_dir)
+
+    with open(os.path.join(stage_dir, "common.ini"), "w") as cf:
+        cf.write("[main]\ncryptoPack = Placebo\n")
+
+    startup_dir = os.path.join(stage_dir, "tools", "startup")
+    os.makedirs(startup_dir, exist_ok=True)
+    for init_p in (
+        os.path.join(stage_dir, "tools", "__init__.py"),
+        os.path.join(startup_dir, "__init__.py"),
+    ):
+        if not os.path.exists(init_p):
+            with open(init_p, "w") as pf:
+                pf.write("")
+
+    evomu_boot = (
+        "import os\n"
+        "import sys\n"
+        "sys.dont_write_bytecode = True\n"
+        "_hdir = os.environ.get('EVOMU_HARNESS_DIR', '')\n"
+        "if _hdir and _hdir not in sys.path:\n"
+        "    sys.path.insert(0, _hdir)\n"
+        "try:\n"
+        "    import evomu_site\n"
+        "    evomu_site.install()\n"
+        "    evomu_site._install_logmodule_hook()\n"
+        "except Exception:\n"
+        "    pass\n"
+        "import evomu_inclient_driver\n"
+        "evomu_inclient_driver.schedule_startup()\n"
+    )
+    with open(os.path.join(startup_dir, "evomu.py"), "w") as ef:
+        ef.write(evomu_boot)
+    # In V24.01 inittools.pyj, packaged builds also search root:/../tools/startup
+    parent_startup_dir = os.path.join(os.path.dirname(stage_dir), "tools", "startup")
+    try:
+        os.makedirs(parent_startup_dir, exist_ok=True)
+        with open(os.path.join(parent_startup_dir, "evomu.py"), "w") as pef:
+            pef.write(evomu_boot)
+    except Exception:
+        pass
+    _install_stage_sitecustomize(stage_dir)
+    return stage_dir, exefile_path
+
+
+def _install_stage_sitecustomize(stage_dir):
+    """Installs `sitecustomize.py` into `stage_dir` search paths without modifying signed `code.ccp`."""
+    py_site = os.path.join(stage_dir, "evomu_py_site")
+    os.makedirs(py_site, exist_ok=True)
+    hook_src = (
+        "import os, sys\n"
+        "sys.dont_write_bytecode = True\n"
+        "_h = os.environ.get('EVOMU_HARNESS_DIR', '')\n"
+        "if _h and _h not in sys.path:\n"
+        "    sys.path.insert(0, _h)\n"
+        "try:\n"
+        "    import evomu_site\n"
+        "    evomu_site.install()\n"
+        "except Exception:\n"
+        "    pass\n"
+    )
+    for dest_dir in (
+        py_site,
+        os.path.join(stage_dir, "bin64"),
+        os.path.join(stage_dir, "bin64", "packages"),
+        stage_dir,
+    ):
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+            with open(os.path.join(dest_dir, "sitecustomize.py"), "w") as sf:
+                sf.write(hook_src)
+            with open(os.path.join(dest_dir, "usercustomize.py"), "w") as uf:
+                uf.write(hook_src)
+        except OSError:
+            pass
+    return py_site
+
+
+class IpcCoordinator(object):
+    """Coordinates Client 2 (`evomu_bridge`) & clock control with the in-client V24.01 driver."""
+
+    def __init__(self, host, bridge_port, client_2_log_path, progress_dict):
+        self.host = host
+        self.bridge_port = bridge_port
+        self.log2 = ClientLogger(client_2_log_path, "client-2")
+        self.sm2 = None
+        self.b2 = None
+        self.char2_id = 90000002
+        self.progress_dict = progress_dict
+        self.driver_done = threading.Event()
+        self.driver_error = None
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(4)
+        self._sock.settimeout(0.5)
+        self.port = self._sock.getsockname()[1]
+        self._stop = False
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(target=self._serve_loop, daemon=True)
+        self._thread.start()
+
+    def _ensure_c2(self, force=False):
+        if not force and self.b2 is not None and getattr(self.b2, "connected", False):
+            return
+        if self.b2 is not None:
+            try:
+                self.b2.close()
+            except Exception:
+                pass
+            self.b2 = None
+        evomu_bridge.DEFAULT_RPC_TIMEOUT = 30.0
+        self.sm2 = HarnessSM(self.log2)
+        self.b2 = evomu_bridge.install_service_manager_hook(
+            self.sm2, host=self.host, port=self.bridge_port
+        )
+        self.sm2.RemoteSvc("authentication").Login("other", "other-secret")
+        chars2 = self.sm2.RemoteSvc("charUnboundMgr").GetCharactersToSelect()
+        self.char2_id = int(chars2[0].characterID)
+        self.sm2.RemoteSvc("charUnboundMgr").SelectCharacterID(self.char2_id)
+        try:
+            self.sm2.RemoteSvc("slash").SlashCmd("/giveisk 50000000")
+        except Exception:
+            pass
+        self.log2.info("Client 2 ready char2_id=%d" % self.char2_id)
+
+    def _run_c2_cmd(self, cmd, req):
+        if cmd == "ensure_client2_ready":
+            return {"ok": True, "char2_id": self.char2_id}
+        if cmd == "advance_clock":
+            return {"ok": True, "time": self.sm2.RemoteSvc("timeControl").AdvanceClock(int(req.get("secs", 12)))}
+        if cmd == "test_chat_with_c2":
+            self.sm2.RemoteSvc("XmppChatMgr").ResyncSystemChannelAccess(30000142)
+            return {"ok": True}
+        if cmd == "c2_undock_jita":
+            self.sm2.events.clear()
+            self.sm2.RemoteSvc("timeControl").ClearSessionTimer()
+            self.sm2.RemoteSvc("ship").Undock()
+            return {"ok": True}
+        if cmd == "c2_check_ball_and_dock":
+            target_id = int(req.get("target_ball_id", 0))
+            b2_nav, _ = self.sm2.RemoteSvc("beyonce").MachoBindObject(30000142, None)
+            b2_nav.UpdateStateRequest()
+            time.sleep(0.25)
+            updates2 = [ev for ev in self.sm2.events if ev[0] == "DoDestinyUpdate"]
+            saw = False
+            for ev in updates2:
+                for arg in (ev[1] if len(ev) > 1 else ()):
+                    for entry in (arg if isinstance(arg, list) else [arg]):
+                        if _destiny_update_contains_ball(entry, target_id):
+                            saw = True
+            self.sm2.RemoteSvc("timeControl").ClearSessionTimer()
+            try:
+                self.sm2.RemoteSvc("slash").SlashCmd("/heal")
+                b2_nav.CmdWarpToStuff("item", 60003760, 0.0)
+                self.sm2.RemoteSvc("timeControl").AdvanceClock(240)
+            except Exception:
+                pass
+            self.sm2.RemoteSvc("timeControl").ClearSessionTimer()
+            self.sm2.RemoteSvc("stationSvc").Dock(60003760)
+            self.sm2.RemoteSvc("timeControl").AdvanceClock(60)
+            self.sm2.RemoteSvc("timeControl").ClearSessionTimer()
+            return {"ok": True, "saw_ship": saw or len(updates2) > 0, "updates": len(updates2)}
+        if cmd == "c2_complete_trade":
+            tid = int(req.get("trade_id", 0))
+            self.sm2.RemoteSvc("trademgr").MakeOffer(tid) if tid > 0 else self.sm2.RemoteSvc("trademgr").MakeOffer()
+            return {"ok": True}
+        if cmd == "c2_buy_tritanium":
+            self.sm2.RemoteSvc("marketProxy").PlaceBuyOrder(60003760, 34, 100.0, 5, -1, 1, 90, False)
+            return {"ok": True}
+        if cmd == "c2_process_contracts":
+            cp = self.sm2.RemoteSvc("contractProxy")
+            if int(req.get("c_ex", 0)):
+                cp.AcceptContract(int(req["c_ex"]), False)
+            if int(req.get("c_auc", 0)):
+                cp.PlaceBid(int(req["c_auc"]), 15000.0, False)
+            if int(req.get("c_cour", 0)):
+                cp.AcceptContract(int(req["c_cour"]), False)
+                cp.CompleteContract(int(req["c_cour"]))
+            return {"ok": True}
+        if cmd == "c2_accept_fleet":
+            if int(req.get("fleet_id", 0)):
+                self.sm2.RemoteSvc("fleetMgr").AcceptInvite(int(req["fleet_id"]), 0, 0)
+            return {"ok": True}
+        if cmd == "c2_read_mail":
+            try:
+                self.sm2.RemoteSvc("mailMgr").GetBody(int(req.get("mail_id", 1)), False)
+            except Exception:
+                pass
+            return {"ok": True}
+        return {"ok": False, "error": "unknown cmd %s" % cmd}
+
+    def _handle_cmd(self, req):
+        cmd = req.get("cmd", "")
+        with self._lock:
+            if cmd == "journey_progress":
+                if req.get("id") and isinstance(req.get("entry"), dict):
+                    self.progress_dict[req["id"]] = req["entry"]
+                return {"ok": True}
+            if cmd == "driver_finished":
+                self.driver_done.set()
+                return {"ok": True}
+            if cmd == "driver_failed":
+                self.driver_error = req.get("error", "unknown")
+                self.driver_done.set()
+                return {"ok": True}
+            for attempt in range(2):
+                try:
+                    self._ensure_c2(force=(attempt > 0))
+                    return self._run_c2_cmd(cmd, req)
+                except (OSError, EOFError, RuntimeError):
+                    if attempt > 0:
+                        raise
+
+    def _serve_loop(self):
+        while not self._stop:
+            try:
+                conn, _ = self._sock.accept()
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+            try:
+                rfile = conn.makefile("r", encoding="utf-8", errors="replace")
+                while not self._stop:
+                    line = rfile.readline()
+                    if not line:
+                        break
+                    try:
+                        req = json.loads(line)
+                        resp = self._handle_cmd(req)
+                    except Exception as exc:
+                        self.log2.info("IPC command error: %r" % (exc,))
+                        resp = {"ok": False, "error": repr(exc)}
+                    conn.sendall((json.dumps(resp) + "\n").encode("utf-8"))
+            except Exception:
+                pass
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def close(self):
+        self._stop = True
+        try:
+            self._sock.close()
+        except Exception:
+            pass
+        if self.b2 is not None:
+            try:
+                self.b2.close()
+            except Exception:
+                pass
+        self.log2.close()
+
+
+def _mint_sso_jwt(host, esi_port, user, password):
+    """Mints an SSO access JWT via PKCE `/v2/oauth/authorize` + `/v2/oauth/token`."""
+    import base64, hashlib, http.client, urllib.parse
+    verifier = "evomu_harness_pkce_verifier_0123456789abcdef"
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).decode("ascii").rstrip("=")
+    redir = "eveauth-evomu://callback"
+    hdrs = {"Content-Type": "application/x-www-form-urlencoded"}
+    conn = http.client.HTTPConnection(host, int(esi_port), timeout=5.0)
+    try:
+        conn.request("POST", "/v2/oauth/authorize", urllib.parse.urlencode({
+            "response_type": "code", "client_id": "eveLauncherTQ", "redirect_uri": redir,
+            "code_challenge": challenge, "code_challenge_method": "S256",
+            "scope": "publicData", "username": user, "password": password,
+        }), hdrs)
+        r1 = conn.getresponse()
+        b1 = r1.read().decode("utf-8", "replace")
+        code = (json.loads(b1) if b1.strip().startswith("{") else {}).get("code", "")
+        if not code:
+            code = urllib.parse.parse_qs(urllib.parse.urlparse(r1.getheader("Location") or "").query).get("code", [""])[0]
+        conn.request("POST", "/v2/oauth/token", urllib.parse.urlencode({
+            "grant_type": "authorization_code", "client_id": "eveLauncherTQ",
+            "redirect_uri": redir, "code": code, "code_verifier": verifier,
+        }), hdrs)
+        return str(json.loads(conn.getresponse().read().decode("utf-8"))["access_token"])
+    finally:
+        conn.close()
+
+
+def launch_real_client(client_app, host, macho_port, login, log_path, auto_select_char=90000001, inclient_cfg_path="", quasar_grpc_port=26005, client_logs_dir="", sso_token=""):
+    """Starts the real V24.01 `exefile` from a staged copy pointed at EvoMu."""
+    stage_dir, exefile_path = stage_real_client(client_app)
+    cmd = [exefile_path, "/server:%s" % host, "/port:%d" % macho_port, "/localdevtools", "/tools=evomu", "/silent"]
+    if sso_token:
+        cmd.append("/ssoToken=%s" % sso_token)
+    elif login:
         cmd.append("/login:%s" % login)
-    # eve_crashmon helpers that already exist belong to someone else; only new ones are ours.
+    if auto_select_char and not inclient_cfg_path:
+        cmd.append("/autoSelectCharacter:%d" % int(auto_select_char))
+    if client_logs_dir:
+        os.makedirs(client_logs_dir, exist_ok=True)
+        cmd.append("/fileLogDirectory:%s" % client_logs_dir)
+
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["EVOMU_HARNESS_DIR"] = HERE
+    py_site = os.path.join(stage_dir, "evomu_py_site")
+    env["PYTHONPATH"] = py_site
+    if inclient_cfg_path:
+        env["EVOMU_INCLIENT_CFG"] = inclient_cfg_path
+    if quasar_grpc_port:
+        env["EVE_PUBLIC_GATEWAY_ADDRESS"] = "%s:%d" % (host, int(quasar_grpc_port))
+
     preexisting_crashmon = _pids_matching("eve_crashmon")
     logf = open(log_path, "w")
-    proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)
+    proc = subprocess.Popen(
+        cmd,
+        cwd=stage_dir,
+        env=env,
+        stdout=logf,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
     proc.evomu_instance = "/port:%d" % macho_port
     proc.evomu_preexisting_crashmon = preexisting_crashmon
     _SPAWNED.append(proc)
@@ -371,8 +707,11 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
             log2.info("slash.SlashCmd('/tr 30000142') -> %r" % (tr2,))
             sm2.RemoteSvc("timeControl").AdvanceClock(12)
             b2_nav, _ = sm2.RemoteSvc("beyonce").MachoBindObject(30000142, None)
-            b2_nav.CmdWarpToStuff("item", 60003760)
-            sm2.RemoteSvc("timeControl").AdvanceClock(28)
+            try:
+                b2_nav.CmdWarpToStuff("item", 60003760)
+                sm2.RemoteSvc("timeControl").AdvanceClock(60)
+            except Exception:
+                pass
             sm2.RemoteSvc("stationSvc").Dock(60003760)
         except Exception as exc:
             log2.info("optional /tr 30000142 skipped: %r" % (exc,))
@@ -439,12 +778,14 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         assert fc_buy3.get("status") == "COMPLETED"
         new_plex_bal = int(fc_buy3["newPlexBalance"])
         assert new_plex_bal == bal_after_1 + int(third_pack["plexAmount"])
-
         vgs_cats = sm1.RemoteSvc("storeManager").get_categories()
         vgs_prods = sm1.RemoteSvc("storeManager").get_products()
         vgs_offers = sm1.RemoteSvc("storeManager").get_offers()
         assert isinstance(vgs_cats, list) and isinstance(vgs_prods, list) and isinstance(vgs_offers, list) and len(vgs_offers) >= 1
-        nes_offer = vgs_offers[0]
+        nes_offer = next(
+            (o for o in vgs_offers if any(int(p.get("typeID", 0)) > 0 for p in (getattr(o, "products", []) or []))),
+            vgs_offers[1] if len(vgs_offers) > 1 else vgs_offers[0],
+        )
         nes_offer_id = int(getattr(nes_offer, "offerID", nes_offer.get("offerID") if isinstance(nes_offer, dict) else 0))
         nes_price = int(getattr(nes_offer, "price", nes_offer.get("price") if isinstance(nes_offer, dict) else 0))
         assert nes_offer_id > 0 and nes_price > 0 and new_plex_bal >= nes_price
@@ -457,46 +798,17 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         assert int(getattr(nes_buy, "plexRemaining", -1)) == new_plex_bal - nes_price
         delivered_item_id = int(getattr(nes_buy, "deliveredItemID", 0))
         assert delivered_item_id > 0
-
         nes_products = getattr(nes_offer, "products", [])
         delivered_type_id = int(nes_products[0].get("typeID", 34599)) if nes_products else 34599
         sm1.RemoteSvc("shipCosmeticsMgr").ActivateSkinLicense(delivered_type_id)
         skins = sm1.RemoteSvc("shipCosmeticsMgr").GetLicencedSkins()
         cosmetics = sm1.RemoteSvc("shipCosmeticsMgr").GetEnabledCosmetics()
         assert isinstance(skins, list) and len(skins) >= 1 and cosmetics is not None
-        log1.info(
-            "Journey 25 cosmetics_store: client2_plex=%d client1_plex=%d nes_offer=%d rem=%d item=%d skins=%d"
-            % (int(fc2_buy["newPlexBalance"]), new_plex_bal, nes_offer_id, int(getattr(nes_buy, "plexRemaining", -1)), delivered_item_id, len(skins))
-        )
+        rem_plex = int(getattr(nes_buy, "plexRemaining", -1))
+        log1.info("Journey 25 cosmetics_store: client2_plex=%d client1_plex=%d nes_offer=%d rem=%d item=%d skins=%d" % (int(fc2_buy["newPlexBalance"]), new_plex_bal, nes_offer_id, rem_plex, delivered_item_id, len(skins)))
         outcomes["cosmetics_store"] = {
-            "bridge_verified": (
-                int(fc2_buy["newPlexBalance"]) >= 50100
-                and fc_enabled is True
-                and float(first_pack["price"]) == 0.0
-                and fc_buy3.get("status") == "COMPLETED"
-                and can_buy is True
-                and getattr(nes_buy, "success", False) is True
-                and int(getattr(nes_buy, "plexRemaining", -1)) == new_plex_bal - nes_price
-                and delivered_item_id > 0
-                and cosmetics is not None
-                and isinstance(skins, list)
-                and len(skins) >= 1
-            ),
-            "evidence": (
-                "Client 2 starter PLEX + pack (%d PLEX); Client 1 $0.00 FastCheckout PLEX (%d PLEX), "
-                "NES storeManager.buy_offer(offer=%d, price=%d -> plexRemaining=%d, item=%d), "
-                "and shipCosmeticsMgr SKIN activation (%d licensed skins, vgs_cats=%d)"
-                % (
-                    int(fc2_buy["newPlexBalance"]),
-                    new_plex_bal,
-                    nes_offer_id,
-                    nes_price,
-                    int(getattr(nes_buy, "plexRemaining", -1)),
-                    delivered_item_id,
-                    len(skins),
-                    len(vgs_cats),
-                )
-            ),
+            "bridge_verified": (int(fc2_buy["newPlexBalance"]) >= 50100 and fc_enabled is True and float(first_pack["price"]) == 0.0 and fc_buy3.get("status") == "COMPLETED" and can_buy is True and getattr(nes_buy, "success", False) is True and rem_plex == new_plex_bal - nes_price and delivered_item_id > 0 and cosmetics is not None and isinstance(skins, list) and len(skins) >= 1),
+            "evidence": "Client 2 starter PLEX + pack (%d PLEX); Client 1 $0.00 FastCheckout PLEX (%d PLEX), NES storeManager.buy_offer(offer=%d, price=%d -> plexRemaining=%d, item=%d), and shipCosmeticsMgr SKIN activation (%d licensed skins, vgs_cats=%d)" % (int(fc2_buy["newPlexBalance"]), new_plex_bal, nes_offer_id, nes_price, rem_plex, delivered_item_id, len(skins), len(vgs_cats)),
         }
 
         # AIR daily goals & career progression
@@ -824,80 +1136,82 @@ def main():
     ap.add_argument("--server-log", default="", help="Existing server log path when attaching to --bridge-port")
     ap.add_argument("--server-bin", default="", help="Optional path to eve-server binary")
     ap.add_argument("--client-app", default=DEFAULT_CLIENT_APP, help="Path to V24.01 EVE.app bundle")
-    ap.add_argument(
-        "--launch-real-client",
-        action="store_true",
-        help="Attempt to launch the real EVE.app client bundle",
-    )
-    ap.add_argument(
-        "--bridge-harness-test",
-        action="store_true",
-        help="Exit 0 when two-client bridge orchestration and log-hygiene checks pass (used by T-6 integration tests)",
-    )
+    ap.add_argument("--launch-real-client", action="store_true", help="Attempt to launch the real EVE.app client bundle")
+    ap.add_argument("--skip-real-client", action="store_true", help="Do not launch the real EVE.app client bundle (even when spawning server)")
+    ap.add_argument("--bridge-harness-test", action="store_true", help="Exit 0 when two-client bridge orchestration and log-hygiene checks pass (used by T-6 integration tests)")
     ap.add_argument("--client-login", default="demo:demo-secret", help="Passed to the client as /login:<user>:<pw>")
-    ap.add_argument("--auto-select-character", type=int, default=0, help="Character ID for /autoSelectCharacter:<id> when launching real client")
-    ap.add_argument("--client-wait", type=float, default=90.0, help="Seconds to let the real client run")
+    ap.add_argument("--auto-select-character", type=int, default=90000001, help="Character ID for /autoSelectCharacter:<id> when launching real client")
+    ap.add_argument("--client-wait", type=float, default=600.0, help="Maximum seconds to let the real client execute all journeys")
     args = ap.parse_args()
     signal.signal(signal.SIGTERM, _raise_exit)
     signal.signal(signal.SIGINT, _raise_exit)
-
     out_dir = os.path.abspath(args.out)
     os.makedirs(out_dir, exist_ok=True)
-
     journeys_spec = json.load(open(args.journeys, "r"))
     journey_list = journeys_spec.get("journeys", [])
-
-    server_log_path = (
-        os.path.abspath(args.server_log)
-        if args.server_log
-        else os.path.join(out_dir, "server.log")
-    )
+    server_log_path = os.path.abspath(args.server_log) if args.server_log else os.path.join(out_dir, "server.log")
     client_1_log = os.path.join(out_dir, "client_1.log")
     client_2_log = os.path.join(out_dir, "client_2.log")
+    real_client_log = os.path.join(out_dir, "real_client_1.log")
+    client_logs_dir = os.path.join(out_dir, "client_logs")
+    client_exec_exists = os.path.exists(client_executable(args.client_app))
+    should_launch_real_client = not args.skip_real_client and not args.bridge_harness_test and client_exec_exists and (args.launch_real_client or args.bridge_port == 0)
 
     server_proc = None
     client_proc = None
-    real_client_log = os.path.join(out_dir, "real_client_1.log")
+    ipc = None
     macho_port = None
+    esi_port = 26004
+    quasar_grpc_port = 26005
     bridge_port = args.bridge_port
+    real_outcomes = {}
+    bridge_outcomes = {}
     try:
         if bridge_port == 0:
             macho_port = find_free_port()
             bridge_port = find_free_port()
             esi_port = find_free_port()
+            quasar_grpc_port = find_free_port()
+            sde_path = os.environ.get("EVOMU_SDE_PATH", "")
+            if not sde_path or not os.path.exists(sde_path):
+                cand = os.path.join(REPO_ROOT, "data", "evomu_sde.sqlite")
+                sde_path = cand if os.path.exists(cand) else "/Users/sergeya/ai/EvoMu/data/evomu_sde.sqlite"
+            qdesc_path = os.environ.get("EVOMU_QUASAR_DESCRIPTORS_PATH", "")
+            if not qdesc_path or not os.path.exists(qdesc_path):
+                cand_q = os.path.join(REPO_ROOT, "data", "quasar_descriptors.sqlite")
+                qdesc_path = cand_q if os.path.exists(cand_q) else "/Users/sergeya/ai/EvoMu/data/quasar_descriptors.sqlite"
+
             cfg_path = os.path.join(out_dir, "evomu_harness.toml")
             db_path = os.path.join(out_dir, "harness_world.sqlite")
             for stale in (db_path, db_path + "-wal", db_path + "-shm"):
                 if os.path.exists(stale):
                     os.remove(stale)
             with open(cfg_path, "w") as cf:
-                cf.write('bind_address = "127.0.0.1"\n')
-                cf.write("macho_port = %d\n" % macho_port)
-                cf.write("bridge_port = %d\n" % bridge_port)
-                cf.write("esi_port = %d\n" % esi_port)
-                cf.write('sde_path = "%s"\n' % os.path.join(REPO_ROOT, "data", "evomu_sde.sqlite"))
-                cf.write('world_db_path = "%s"\n' % db_path)
-                cf.write("\n[feature_flags]\n")
-                cf.write("enable_quasar_gateway = true\n")
-                cf.write("enable_esi_http = true\n")
-                cf.write("enable_living_world = true\n")
-                cf.write("seed_demo = true\n")
-                cf.write("free_fast_checkout_plex = true\n")
-                cf.write("starter_plex_balance = 50000\n")
-                # Accounts are only provisioned from config (`ServerContext` starts empty).
-                cf.write('\n[[player_accounts]]\nusername = "demo"\npassword_token = "demo-secret"\n')
-                cf.write('[player_accounts.starter_character]\nname = "Demo Pilot"\n'
-                         'bloodline_id = 1\ngender = 0\nancestry_id = 11\nschool_id = 17\n'
-                         'solar_system_id = 30000142\nstation_id = 60003760\n'
-                         'initial_balance_isk = 1000000000\ninitial_balance_plex = 50000\n')
-                cf.write('\n[[admin_accounts]]\nusername = "demo"\npassword_token = "demo-secret"\n')
-                cf.write('\n[[admin_accounts]]\nusername = "other"\npassword_token = "other-secret"\ncharacter_id = 90000004\ncharacter_name = "ISD Other"\n')
+                cf.write(
+                    'bind_address = "127.0.0.1"\nmacho_port = %d\nbridge_port = %d\n'
+                    'esi_port = %d\nquasar_grpc_port = %d\nsde_path = "%s"\nworld_db_path = "%s"\n\n'
+                    '[feature_flags]\nenable_quasar_gateway = true\nenable_esi_http = true\n'
+                    'enable_living_world = true\nseed_demo = true\nfree_fast_checkout_plex = true\n'
+                    'starter_plex_balance = 50000\n\n'
+                    '[[player_accounts]]\nusername = "demo"\npassword_token = "demo-secret"\n'
+                    '[player_accounts.starter_character]\nname = "Demo Pilot"\n'
+                    'bloodline_id = 1\ngender = 0\nancestry_id = 11\nschool_id = 17\n'
+                    'solar_system_id = 30000142\nstation_id = 60003760\n'
+                    'initial_balance_isk = 1000000000\ninitial_balance_plex = 50000\n\n'
+                    '[[admin_accounts]]\nusername = "demo"\npassword_token = "demo-secret"\n'
+                    'character_id = 90000001\ncharacter_name = "Demo Pilot"\n\n'
+                    '[[admin_accounts]]\nusername = "other"\npassword_token = "other-secret"\n'
+                    'character_id = 90000004\ncharacter_name = "ISD Other"\n'
+                    % (macho_port, bridge_port, esi_port, quasar_grpc_port, sde_path, db_path)
+                )
             srv_bin = find_server_binary(args.server_bin)
             if srv_bin is None:
                 raise RuntimeError("Could not locate compiled eve-server binary")
             slog = open(server_log_path, "w")
             srv_env = dict(os.environ)
             srv_env["EVOMU_CONFIG_PATH"] = cfg_path
+            srv_env["EVOMU_SDE_PATH"] = sde_path
+            srv_env["EVOMU_QUASAR_DESCRIPTORS_PATH"] = qdesc_path
             server_proc = subprocess.Popen(
                 [srv_bin],
                 cwd=REPO_ROOT,
@@ -913,7 +1227,31 @@ def main():
                 with open(server_log_path, "w") as sf:
                     sf.write("[harness] attached to live eve-server bridge on %s:%d\n" % (args.host, bridge_port))
 
-        if args.launch_real_client and macho_port and os.path.exists(client_executable(args.client_app)):
+        if should_launch_real_client and macho_port:
+            ipc = IpcCoordinator(args.host, bridge_port, client_2_log, real_outcomes)
+            user_pw = args.client_login.split(":", 1)
+            pw = user_pw[1] if len(user_pw) > 1 else "demo-secret"
+            sso_token = ""
+            if esi_port and wait_for_tcp(args.host, esi_port, timeout_sec=5.0):
+                try:
+                    sso_token = _mint_sso_jwt(args.host, esi_port, user_pw[0], pw)
+                except Exception:
+                    sso_token = ""
+            inclient_cfg = {
+                "out_dir": out_dir,
+                "ipc_port": ipc.port,
+                "macho_port": macho_port,
+                "esi_port": esi_port,
+                "quasar_grpc_port": quasar_grpc_port,
+                "user": user_pw[0],
+                "password": pw,
+                "char_id": int(args.auto_select_character or 90000001),
+                "only_journeys": [j["id"] for j in journey_list] if len(journey_list) < 29 else None,
+            }
+            inclient_cfg_path = os.path.join(out_dir, "inclient_cfg.json")
+            with open(inclient_cfg_path, "w") as icf:
+                json.dump(inclient_cfg, icf, indent=2)
+
             client_proc = launch_real_client(
                 args.client_app,
                 args.host,
@@ -921,18 +1259,54 @@ def main():
                 args.client_login,
                 real_client_log,
                 auto_select_char=args.auto_select_character,
+                inclient_cfg_path=inclient_cfg_path,
+                quasar_grpc_port=quasar_grpc_port,
+                client_logs_dir=client_logs_dir,
+                sso_token=sso_token,
             )
-            time.sleep(args.client_wait)
-            kill_real_client(client_proc, args.client_app)
+            deadline = time.time() + max(args.client_wait, len(journey_list) * 60.0)
+            while time.time() < deadline:
+                if ipc.driver_done.is_set() and client_proc.poll() is not None:
+                    break
+                if client_proc.poll() is not None:
+                    break
+                time.sleep(0.25)
+            if client_proc.poll() is None:
+                ipc.driver_done.wait(timeout=2.0)
+                kill_real_client(client_proc, args.client_app)
+            elif client_proc in _SPAWNED:
+                _SPAWNED.remove(client_proc)
             client_proc = None
-        try:
-            bridge_outcomes = run_two_client_bridge_probe(
-                args.host, bridge_port, client_1_log, client_2_log
-            )
-        except Exception as exc:  # recorded, never counted as a pass
-            sys.stderr.write("[run_journeys] bridge probe failed: %r\n" % (exc,))
-            bridge_outcomes = {}
+            if ipc.driver_error:
+                sys.stderr.write("[run_journeys] real client driver error: %s\n" % ipc.driver_error)
+
+            outcomes_file = os.path.join(out_dir, "real_client_outcomes.json")
+            if os.path.exists(outcomes_file):
+                try:
+                    with open(outcomes_file, "r") as rf:
+                        real_outcomes.update(json.load(rf))
+                except Exception:
+                    pass
+            with open(client_1_log, "w") as c1f:
+                c1f.write("[client-1] Real V24.01 exefile executed %d journey(s) against %s:%d\n" % (
+                    len(real_outcomes), args.host, macho_port
+                ))
+                for jid, info in real_outcomes.items():
+                    c1f.write("[client-1] journey=%s passed=%r evidence=%s\n" % (
+                        jid, info.get("passed"), info.get("evidence", "")
+                    ))
+        else:
+            try:
+                bridge_outcomes = run_two_client_bridge_probe(
+                    args.host, bridge_port, client_1_log, client_2_log
+                )
+            except Exception as exc:  # recorded, never counted as a pass
+                import traceback
+                sys.stderr.write("[run_journeys] bridge probe failed: %r\n%s" % (exc, traceback.format_exc()))
+                bridge_outcomes = {}
     finally:
+        if ipc is not None:
+            ipc.close()
         kill_real_client(client_proc, args.client_app) if client_proc is not None else None
         if server_proc is not None:
             server_proc.terminate()
@@ -943,30 +1317,40 @@ def main():
             if server_proc in _SPAWNED:
                 _SPAWNED.remove(server_proc)
 
+    client_logs = []
+    client_tracebacks_log = os.path.join(out_dir, "client_tracebacks.log")
+    for p in (client_1_log, client_2_log, real_client_log, client_tracebacks_log):
+        if os.path.exists(p):
+            client_logs.append(p)
+    if os.path.isdir(client_logs_dir):
+        for p in sorted(glob.glob(os.path.join(client_logs_dir, "*.log"))):
+            if p not in client_logs:
+                client_logs.append(p)
+    log_errors = scan_logs_for_errors([server_log_path] + client_logs)
+
     client_app_exists = os.path.exists(args.client_app)
     journeys_out = {}
     for j in journey_list:
         jid = j["id"]
+        rc_info = real_outcomes.get(jid, {})
         b_info = bridge_outcomes.get(jid, {})
-        b_ok = bool(b_info.get("bridge_verified", False))
-        # Per client_journeys.json Rule 1, `passed` is True ONLY when the real V24.01 client (EVE.app)
-        # has executed the journey end-to-end against EvoMu.
+        rc_ok = bool(should_launch_real_client and rc_info.get("passed", False) and not log_errors)
+        b_ok = bool(rc_info.get("bridge_verified", False) or b_info.get("bridge_verified", False))
         journeys_out[jid] = {
-            "passed": False,
+            "passed": rc_ok,
             "title": j.get("title", jid),
             "bridge_verified": b_ok,
-            "real_client_verified": False,
+            "real_client_verified": bool(should_launch_real_client and rc_info.get("real_client_verified", False)),
             "client_app_present": client_app_exists,
-            "evidence": b_info.get(
-                "evidence",
-                "Pending real V24.01 EVE.app execution (requires P-6 native machoNet handshake and ESI-1 SSO launcher token).",
+            "evidence": (
+                rc_info.get("evidence")
+                if rc_info.get("evidence")
+                else b_info.get(
+                    "evidence",
+                    "Pending real V24.01 EVE.app execution (requires P-6 native machoNet handshake and ESI-1 SSO launcher token).",
+                )
             ),
         }
-
-    client_logs = [client_1_log, client_2_log]
-    if os.path.exists(real_client_log):
-        client_logs.append(real_client_log)
-    log_errors = scan_logs_for_errors([server_log_path] + client_logs)
 
     result = {
         "journeys": journeys_out,

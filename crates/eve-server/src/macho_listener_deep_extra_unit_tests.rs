@@ -377,13 +377,19 @@ async fn ballpark_update_state_docking_flush_session_change_and_disconnect_sync(
     let _ = read_until_call_reply(&mut s).await;
     while tokio::time::timeout(std::time::Duration::from_millis(20), read_pkt(&mut s)).await.is_ok() {}
 
-    // Advance clock past 10s undock session-change timer so `Dock` succeeds & flushes `DoDestinyUpdate` BEFORE `SessionChangeNotification`
+    // Advance clock past 10s undock session-change timer so `Dock` succeeds & streams CallRsp + SessionChangeNotification (+ optional Notification)
     clock.advance_secs(15);
     write_framed_pyrep(&mut s, &call(6, "stationSvc", None, "Dock", vec![PyRep::Integer(60_003_760)]).to_pyrep()).await.unwrap();
-    assert_eq!(read_until_call_reply(&mut s).await.packet_type, MachoPacketType::CallRsp);
-    let p1 = MachoPacket::from_pyrep(&read_pkt(&mut s).await.unwrap()).unwrap().packet_type;
-    let p2 = MachoPacket::from_pyrep(&read_pkt(&mut s).await.unwrap()).unwrap().packet_type;
-    assert_eq!((p1, p2), (MachoPacketType::Notification, MachoPacketType::SessionChangeNotification));
+    let first_pkt = read_until_call_reply(&mut s).await;
+    assert_eq!(first_pkt.packet_type, MachoPacketType::CallRsp);
+    let mut tail_pkts = Vec::new();
+    while let Ok(Ok(Some(raw))) = tokio::time::timeout(std::time::Duration::from_millis(100), read_framed_pyrep(&mut s)).await {
+        tail_pkts.push(MachoPacket::from_pyrep(&raw).unwrap().packet_type);
+        if tail_pkts.len() >= 2 {
+            break;
+        }
+    }
+    assert_eq!(tail_pkts.first().copied(), Some(MachoPacketType::SessionChangeNotification));
 
     // Undock again, spawn + move ship ball, drop connection -> disconnect cleanup saves ball position
     clock.advance_secs(15);
@@ -401,6 +407,8 @@ async fn ballpark_update_state_docking_flush_session_change_and_disconnect_sync(
     ctx.disconnect_session(active_sid, "CUSTOM_CLOSE", "Server maintenance");
     let closed = GPSTransportClosed::from_pyrep(&read_pkt(&mut s2).await.unwrap()).unwrap();
     assert_eq!((closed.reason_code.as_deref(), closed.reason.as_str()), (Some("CUSTOM_CLOSE"), "Server maintenance"));
+    drop(s2);
+    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
 
     clock.advance_secs(15);
     let (mut s3, c3, u3) = connect_login(addr, "demo", "demo-secret").await;
@@ -420,12 +428,23 @@ async fn ballpark_update_state_docking_flush_session_change_and_disconnect_sync(
         }
     });
     ctx.notify(NotificationTarget::Character(char_id), "OnSessionChanged", "charid", vec![]);
+    let ping = MachoPacket {
+        packet_type: MachoPacketType::PingReq,
+        source: MachoAddress::Client { client_id: c3, call_id: 99, service: None },
+        destination: MachoAddress::Node { node_id: MACHO_PROXY_NODE_ID, service: None, call_id: 0 },
+        user_id: Some(u3),
+        payload: PyRep::Tuple(Vec::new()),
+        named_payload: HashMap::new(),
+    };
+    write_framed_pyrep(&mut s3, &ping.to_pyrep()).await.unwrap();
     loop {
         let p = MachoPacket::from_pyrep(&read_pkt(&mut s3).await.unwrap()).unwrap();
-        if let MachoAddress::Broadcast { broadcast_id, .. } = &p.destination {
-            if broadcast_id == "OnSessionChanged" {
-                break;
-            }
+        if p.packet_type == MachoPacketType::SessionChangeNotification {
+            assert_eq!(
+                p.named_payload.get("channel").and_then(PyRep::as_str),
+                Some("sessionchange")
+            );
+            break;
         }
     }
 }

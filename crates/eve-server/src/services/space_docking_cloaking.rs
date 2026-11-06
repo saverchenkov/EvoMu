@@ -376,6 +376,10 @@ pub async fn ensure_system_signatures_and_anomalies(
         if sig.sig_group == "Wormhole" && !sig.collapsed {
             let wh_item_id = wormhole_item_id_for_signature(sys_id, &sig.signature_id);
             let ball_pos = pochven_wormhole_ball_position(&ctx.sde, sig);
+            let (_, wh_size, _, wh_age, _) = compute_wormhole_stages_with_sde(sig, now_unix, Some(&ctx.sde));
+            let _ = sys_handle
+                .set_ball_wormhole_stages(wh_item_id, wh_age, wh_size)
+                .await;
             if sys_handle
                 .get_ball_snapshot(wh_item_id)
                 .await
@@ -398,10 +402,6 @@ pub async fn ensure_system_signatures_and_anomalies(
                     })
                     .await;
             }
-            let (_, wh_size, _, wh_age, _) = compute_wormhole_stages_with_sde(sig, now_unix, Some(&ctx.sde));
-            let _ = sys_handle
-                .set_ball_wormhole_stages(wh_item_id, wh_age, wh_size)
-                .await;
             if is_pochven_wormhole(&ctx.sde, sig) {
                 if is_pochven_sys && sig.signal_strength >= 1.0 {
                     let _ = super::space_pochven_wormholes::open_pochven_wormhole_and_spawn_guards(

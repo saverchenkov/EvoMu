@@ -602,6 +602,7 @@ pub fn emit_module_activation_godma_notifications(
             ("attributes", attrs_dict),
             ("activeEffects", active_effects),
             ("time", PyRep::Integer(now_ft)),
+            ("wallclockTime", PyRep::Integer(now_ft)),
         ]);
         ctx.notify(
             NotificationTarget::Character(char_id),

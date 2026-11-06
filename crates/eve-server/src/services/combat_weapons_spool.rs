@@ -910,16 +910,15 @@ pub async fn step_system_entropic_spools(
     dt: f64,
 ) {
     crate::services::combat_crimewatch::combat_npc_encounters::finalize_cycle_destroyed_npcs(ctx, solar_system_id).await;
-    let active_spool_keys: Vec<(i64, i64)> = {
-        let mut guard = ctx.combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
-        ctx.db.with_snapshot(|s| guard.sync_from_persisted(&s.combat_crimewatch_state));
-        guard
-            .entropic_spools
-            .iter()
-            .filter(|(_, state)| state.solar_system_id == solar_system_id)
-            .map(|(&key, _)| key)
-            .collect()
-    };
+    let active_spool_keys: Vec<(i64, i64)> =
+        crate::services::combat_crimewatch::with_combat_runtime(ctx, |guard| {
+            guard
+                .entropic_spools
+                .iter()
+                .filter(|(_, state)| state.solar_system_id == solar_system_id)
+                .map(|(&key, _)| key)
+                .collect()
+        });
 
     if active_spool_keys.is_empty() {
         return;

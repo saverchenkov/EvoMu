@@ -271,12 +271,17 @@ fn deep_weather_combat_nav_and_ship_dogma_modifiers_and_restore_all_weathers() {
     }
 
     ctx.db.with_snapshot(|snap| {
-        let sh = &snap.items[&ship_id];
-        assert!((sh.dynamic_attributes[&37] - 240.0).abs() < 1e-6);
-        assert!((sh.dynamic_attributes[&54] - 20_000.0).abs() < 1e-6);
+        let eff_attr = |id: i64, aid: u16| {
+            let it = &snap.items[&id];
+            it.dynamic_attributes.get(&aid).copied().unwrap_or_else(|| {
+                ctx.sde.types.get(&it.type_id).and_then(|t| t.default_attributes.get(&aid).copied()).unwrap_or(0.0)
+            })
+        };
+        assert!((eff_attr(ship_id, 37) - 240.0).abs() < 1e-6);
+        assert!((eff_attr(ship_id, 54) - 20_000.0).abs() < 1e-6);
+        assert!((eff_attr(turret_id, 54) - 12_000.0).abs() < 1e-6);
+        assert!((eff_attr(turret_id, 158) - 8_000.0).abs() < 1e-6);
         let tur = &snap.items[&turret_id];
-        assert!((tur.dynamic_attributes[&54] - 12_000.0).abs() < 1e-6);
-        assert!((tur.dynamic_attributes[&158] - 8_000.0).abs() < 1e-6);
         assert!(!tur.dynamic_attributes.contains_key(&9954));
         assert!(!tur.dynamic_attributes.contains_key(&9958));
     });

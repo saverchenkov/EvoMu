@@ -1045,7 +1045,11 @@ impl ServerContext {
                 PyRep::Integer(flag),
                 PyRep::Tuple(vec![
                     PyRep::Integer(item_id),
+                    PyRep::None,
                     PyRep::Integer(item_id),
+                    PyRep::None,
+                    PyRep::None,
+                    PyRep::List(Vec::new()),
                     PyRep::Integer(effect_id as i64),
                 ]),
                 PyRep::Integer(now_ticks),
@@ -1297,6 +1301,7 @@ impl ServerContext {
             PyRep::Integer(now),
             PyRep::Real(new_v),
             PyRep::Real(old_v),
+            PyRep::None,
         ]);
         self.notify(
             NotificationTarget::Character(char_id),

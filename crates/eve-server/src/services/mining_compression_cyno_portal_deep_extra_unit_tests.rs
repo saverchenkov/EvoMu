@@ -137,7 +137,7 @@ async fn deep_moon_extraction_auto_fracture_decay_and_metenox_drill_tick() {
         );
 
         let metenox_pos = [moon_pos[0] + 50_000.0, moon_pos[1], moon_pos[2]];
-        snap.structures.insert(metenox_sid, mk_upwell(metenox_sid, 81826, corp_id, lowsec_sys, "MetenoxDrill", metenox_pos, 50));
+        snap.structures.insert(metenox_sid, mk_upwell(metenox_sid, 81826, corp_id, lowsec_sys, "MetenoxDrill", metenox_pos, 0));
         snap.items.insert(941_000_001, mk_item(941_000_001, 4247, corp_id, metenox_sid, InventoryFlag::StructureFuel, 25, false));
         snap.items.insert(941_000_002, mk_item(941_000_002, 81143, corp_id, metenox_sid, InventoryFlag::StructureFuel, 450, false));
     });
@@ -156,11 +156,12 @@ async fn deep_moon_extraction_auto_fracture_decay_and_metenox_drill_tick() {
     });
 
     tick_all_metenox_moon_drills(&ctx, now_unix.saturating_sub(7_200), now_unix);
-    let (mid_fuel, mid_hold_items) = ctx.db.with_snapshot(|snap| {
+    let (mid_item_fuel, mid_hold_items) = ctx.db.with_snapshot(|snap| {
         let hold_cnt = snap.items.values().filter(|i| i.location_id == metenox_sid && i.flag == InventoryFlag::SpecializedMineralHold).count();
-        (snap.structures[&metenox_sid].fuel_blocks, hold_cnt)
+        let item_fuel = snap.items.get(&941_000_001).map(|i| i.quantity).unwrap_or(0);
+        (item_fuel, hold_cnt)
     });
-    assert!(mid_fuel < 25);
+    assert!(mid_item_fuel < 25);
     assert!(mid_hold_items > 0);
 
     // Tick 2: Drain remaining fuel so Metenox transitions to OutOfFuel status

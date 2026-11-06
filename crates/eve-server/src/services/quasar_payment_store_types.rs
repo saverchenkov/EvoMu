@@ -562,6 +562,40 @@ pub fn save_store_catalog(snap: &mut eve_db::WorldStateSnapshot, catalog: &Store
     }
 }
 
+pub(crate) fn seed_default_store_catalog_if_empty(
+    snap: &mut eve_db::WorldStateSnapshot,
+    sde: &eve_sde::SdeRegistry,
+) {
+    if snap.service_state_blobs.contains_key("nes_store_catalog") {
+        return;
+    }
+    let type_name = |tid: u32| sde.types.get(&tid).map(|t| t.name.clone()).unwrap_or_default();
+    let cat_name = |cid: u32, fallback: &str| {
+        sde.categories.get(&cid).map(|c| c.name.clone()).unwrap_or_else(|| fallback.to_string())
+    };
+    let catalog = StoreCatalog {
+        categories: vec![
+            StoreCategory { id: 1, name: "Clone State & Omega".into(), description: "Omega Clone State subscriptions".into() },
+            StoreCategory { id: 2, name: cat_name(91, "Ship SKINs"), description: "Permanent Ship Cosmetic Licenses".into() },
+            StoreCategory { id: 3, name: cat_name(5, "Accessories"), description: "Pilot services and skill extraction".into() },
+            StoreCategory { id: 4, name: cat_name(30, "Apparel"), description: "Pilot customizations and vanity items".into() },
+        ],
+        products: vec![
+            StoreProduct { id: 101, name: "30 Days Omega Clone State".into(), description: "30 Days Omega clone subscription".into(), type_id: 0, quantity: 1 },
+            StoreProduct { id: 102, name: type_name(34599), description: type_name(34599), type_id: 34599, quantity: 1 },
+            StoreProduct { id: 103, name: type_name(40519), description: type_name(40519), type_id: 40519, quantity: 1 },
+            StoreProduct { id: 104, name: type_name(3966), description: type_name(3966), type_id: 3966, quantity: 1 },
+        ],
+        offers: vec![
+            StoreOffer { id: 1001, name: "30 Days Omega Clone State".into(), description: "30 Days Omega clone subscription".into(), category_id: 1, price_plex: 500, product_ids: vec![101], targeted: false, price_cents: Some(1_999), currency: Some("USD".into()) },
+            StoreOffer { id: 1002, name: type_name(34599), description: type_name(34599), category_id: 2, price_plex: 110, product_ids: vec![102], targeted: false, price_cents: Some(499), currency: Some("USD".into()) },
+            StoreOffer { id: 1003, name: type_name(40519), description: type_name(40519), category_id: 3, price_plex: 140, product_ids: vec![103], targeted: false, price_cents: Some(699), currency: Some("USD".into()) },
+            StoreOffer { id: 1004, name: type_name(3966), description: type_name(3966), category_id: 4, price_plex: 75, product_ids: vec![104], targeted: true, price_cents: Some(399), currency: Some("USD".into()) },
+        ],
+    };
+    save_store_catalog(snap, &catalog);
+}
+
 /// DATA GAP: NES store catalog (categories, products, offers) is live Quasar backend data not present in V24 client FSD.
 /// Read persisted New Eden Store catalog from `WorldStateSnapshot.service_state_blobs["nes_store_catalog"]`.
 pub fn read_store_catalog(snap: &eve_db::WorldStateSnapshot) -> StoreCatalog {

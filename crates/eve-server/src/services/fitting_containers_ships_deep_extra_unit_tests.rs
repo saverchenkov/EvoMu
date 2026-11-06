@@ -557,7 +557,7 @@ async fn clear_charges_destroy_fitting_and_in_space_mobile_depot_unfit_rules() {
         }
         snap.items.insert(ship_id, make_item(ship_id, 587, char_id, sys_id as i64, InventoryFlag::None, 1, true));
         snap.items.insert(gun_id, make_item(gun_id, 492, char_id, ship_id, InventoryFlag::HiSlot0, 1, true));
-        snap.items.insert(charge_id, make_item(charge_id, SYNTH_CHARGE_TID, char_id, ship_id, InventoryFlag::HiSlot0, 1, false));
+        snap.items.insert(charge_id, make_item(charge_id, 215, char_id, ship_id, InventoryFlag::HiSlot0, 1, false));
         snap.items.insert(rig_id, make_item(rig_id, 2605, char_id, ship_id, InventoryFlag::RigSlot0, 1, true));
     });
 
@@ -574,7 +574,7 @@ async fn clear_charges_destroy_fitting_and_in_space_mobile_depot_unfit_rules() {
     let _ = sys_h.spawn_ball(Ball { id: ship_id, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 100.0, inertia: 1.0, mass: 1_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop }).await;
     let _ = sys_h.spawn_ball(Ball { id: depot_id, type_id: SYNTH_DEPOT_TID, position: DVec3::new(1_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1_000.0, radius: 100.0, speed_fraction: 0.0, mode: MovementMode::Stop }).await;
 
-    handle_containers_ships_and_fitting(&ctx, &mut space_sess, None, "invbroker", "ClearCharges", &[], &kw).await.unwrap().unwrap();
+    handle_containers_ships_and_fitting(&ctx, &mut space_sess, None, "invbroker", "ClearCharges", &[PyRep::Integer(ship_id)], &kw).await.unwrap().unwrap();
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&charge_id].flag), InventoryFlag::Cargo);
 
     handle_containers_ships_and_fitting(&ctx, &mut space_sess, None, "invbroker", "DestroyFitting", &[PyRep::Integer(gun_id)], &kw).await.unwrap().unwrap();

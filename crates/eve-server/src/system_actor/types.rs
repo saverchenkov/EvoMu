@@ -369,6 +369,11 @@ pub enum SystemCommand {
         dt: f64,
         reply: oneshot::Sender<(TickBroadcast, Vec<(BallId, Option<CharacterId>)>)>,
     },
+    FastForwardClock {
+        ship_id: BallId,
+        secs: u64,
+        reply: oneshot::Sender<()>,
+    },
     GetTargetLocks {
         ball_id: BallId,
         reply: oneshot::Sender<Vec<TargetLock>>,

@@ -323,7 +323,7 @@ static NEXT_REPO_INSTANCE_ID: std::sync::atomic::AtomicU64 =
 /// Encapsulated transactional world repository backed by SQLite (`D-3`, `D-4`).
 pub struct WorldRepository {
     pub(crate) instance_id: u64,
-    pub(crate) inner: RwLock<WorldStateSnapshot>,
+    pub(crate) inner: RwLock<std::sync::Arc<WorldStateSnapshot>>,
     pub(crate) sqlite_conn: std::sync::Mutex<rusqlite::Connection>,
     pub(crate) sqlite_fp: std::sync::Mutex<sqlite_store::TableFingerprints>,
     pub(crate) sqlite_path: Option<std::path::PathBuf>,
@@ -418,7 +418,7 @@ impl WorldRepository {
             sqlite_store::load_or_init_jwt_secret(&conn, Self::generate_random_secret_32)?;
         Ok(Self {
             instance_id: Self::next_instance_id(),
-            inner: RwLock::new(snap),
+            inner: RwLock::new(std::sync::Arc::new(snap)),
             sqlite_conn: std::sync::Mutex::new(conn),
             sqlite_fp: std::sync::Mutex::new(fp),
             sqlite_path: Some(target.to_path_buf()),
@@ -442,7 +442,7 @@ impl WorldRepository {
     /// Saves the current snapshot state directly into a SQLite database at `path`.
     pub fn save_to_sqlite(&self, path: impl AsRef<Path>) -> Result<(), String> {
         let repo = Self::open_sqlite(path)?;
-        let snap = self.inner.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let snap = self.read_state();
         let mut conn = repo.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
         sqlite_store::replace_sqlite_from_snapshot(&mut conn, &snap)?;
         Ok(())
@@ -560,7 +560,7 @@ impl WorldRepository {
 
         let mut repo = Self {
             instance_id: Self::next_instance_id(),
-            inner: RwLock::new(initial_snap),
+            inner: RwLock::new(std::sync::Arc::new(initial_snap)),
             sqlite_conn: std::sync::Mutex::new(conn),
             sqlite_fp: std::sync::Mutex::new(fp),
             sqlite_path: None,
@@ -781,17 +781,25 @@ impl WorldRepository {
             st.solar_system_id = sid;
         }
         *fp = sqlite_store::replace_sqlite_from_snapshot(&mut conn, &snap)?;
-        *guard = snap;
+        *guard = std::sync::Arc::new(snap);
         Ok(())
     }
 
+    pub(crate) fn read_state(&self) -> std::sync::Arc<WorldStateSnapshot> {
+        std::sync::Arc::clone(&self.inner.read().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    pub(crate) fn try_read_state(&self) -> Option<std::sync::Arc<WorldStateSnapshot>> {
+        self.inner.try_read().ok().map(|g| std::sync::Arc::clone(&g))
+    }
+
     fn run_read_snapshot(&self, f: &mut dyn FnMut(&WorldStateSnapshot)) {
-        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self.read_state();
         f(&guard);
     }
 
     fn run_try_read_snapshot(&self, f: &mut dyn FnMut(&WorldStateSnapshot)) -> bool {
-        if let Ok(guard) = self.inner.try_read() {
+        if let Some(guard) = self.try_read_state() {
             f(&guard);
             true
         } else {
@@ -803,13 +811,14 @@ impl WorldRepository {
         &self,
         f: &mut dyn FnMut(&mut WorldStateSnapshot) -> bool,
     ) -> Result<(), String> {
-        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        let mut arc_guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
         let _write_depth_guard = DbWriteLockDepthGuard::enter();
+        let guard = std::sync::Arc::make_mut(&mut *arc_guard);
         let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut fp = self.sqlite_fp.lock().unwrap_or_else(|e| e.into_inner());
-        if f(&mut guard) {
+        if f(guard) {
             if let Some(poison_err) = check_wal_poison() {
-                sqlite_store::rollback_dirty_from_sqlite(&conn, &mut guard, &fp).expect(
+                sqlite_store::rollback_dirty_from_sqlite(&conn, guard, &fp).expect(
                     "Fatal: failed to roll back dirty state from SQLite after poisoned dispatch",
                 );
                 return Err(poison_err);
@@ -826,13 +835,13 @@ impl WorldRepository {
                     .map_err(|e| e.to_string())?;
                 let delta = sqlite_store::sync_dirty_to_sqlite(
                     &tx,
-                    &guard,
+                    guard,
                     &mut staged_fp,
                     need_wal_delta,
                 )?;
                 if let Some(ref p) = self.snapshot_path {
                     let _wal_guard = self.wal_lock.lock().unwrap_or_else(|e| e.into_inner());
-                    self.append_wal_delta_locked(p, &guard, &delta)?;
+                    self.append_wal_delta_locked(p, guard, &delta)?;
                 }
                 tx.commit().map_err(|e| e.to_string())?;
                 Ok(())
@@ -843,13 +852,13 @@ impl WorldRepository {
                     Ok(())
                 }
                 Err(persist_err) => {
-                    sqlite_store::rollback_dirty_from_sqlite(&conn, &mut guard, &fp)
+                    sqlite_store::rollback_dirty_from_sqlite(&conn, guard, &fp)
                         .expect("Fatal: failed to roll back dirty state from SQLite after persist error");
                     Err(persist_err)
                 }
             }
         } else {
-            sqlite_store::rollback_dirty_from_sqlite(&conn, &mut guard, &fp).expect(
+            sqlite_store::rollback_dirty_from_sqlite(&conn, guard, &fp).expect(
                 "Fatal: failed to roll back dirty state from SQLite after transaction error",
             );
             Ok(())

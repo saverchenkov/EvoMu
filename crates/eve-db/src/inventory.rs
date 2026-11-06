@@ -8,12 +8,12 @@ const MAX_IDEMPOTENCY_KEYS: usize = 4_096;
 
 impl WorldRepository {
     pub fn get_item(&self, item_id: i64) -> Option<InventoryItemRecord> {
-        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self.read_state();
         guard.items.get(&item_id).cloned()
     }
 
     pub fn get_items_for_character(&self, character_id: i64) -> Vec<InventoryItemRecord> {
-        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self.read_state();
         let mut items: Vec<InventoryItemRecord> = guard
             .items
             .values()

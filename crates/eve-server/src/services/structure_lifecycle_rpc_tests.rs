@@ -248,13 +248,7 @@ async fn anchor_validates_docked_ship_cargo_highsec_palatine_and_succeeds_v24() 
     seed_astrahus_type(&mut ctx, tid, false);
     seed_astrahus_type(&mut ctx, hs_blocked_tid, true);
 
-    let sys_id = ctx
-        .sde
-        .solar_systems
-        .values()
-        .find(|s| s.security_status >= 0.5)
-        .map(|s| s.solar_system_id)
-        .unwrap_or(30000142);
+    let sys_id = 30_000_144_u32;
     seed_char_corp_ship(&ctx, 9201, 98_000_201, sys_id, 20001, true);
     let far_pos = DVec3::new(9_000_000_000.0, 5_000_000_000.0, -3_000_000_000.0);
     spawn_ship_ball(&ctx, sys_id, 20001, far_pos).await;

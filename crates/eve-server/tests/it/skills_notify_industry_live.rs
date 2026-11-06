@@ -479,7 +479,7 @@ async fn test_live_notify_chat_bans_and_cluster_shutdown() {
     assert!(gm_evs.iter().any(|(e, args)| {
         e == "OnClusterShutdownInitiated"
             && args.len() == 3
-            && args[0] == PyRep::String("UI/Shared/ClusterShutdownInitiated".into())
+            && args[0] == PyRep::String("UI/Shared/ShutdownNotificationTitle".into())
             && args[1] == PyRep::Integer(shut_ft)
             && args[2] == PyRep::Integer(180)
     }));

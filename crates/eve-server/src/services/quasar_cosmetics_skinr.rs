@@ -1070,12 +1070,14 @@ fn handle_title_def_get_latest(
     any_type_url: &str,
     dyn_msg: &DynamicQuasarMessage,
 ) -> HandlerResult {
+    let lang = sub(dyn_msg, 3).and_then(|l| str_of(l, 1)).filter(|s| !s.is_empty()).unwrap_or_else(|| "en-us".to_string());
     if dyn_msg.get(1).is_none() && any_type_url.starts_with("type.evetech.net/") && std::env::var("EVOMU_CDN_BASE_URL").ok().filter(|s| !s.trim().is_empty()).is_none() {
         let fb = crate::services::quasar_achievements::empty_root_table_flatbuffer();
         crate::services::quasar_achievements::ensure_client_flatbuffer_storage_seeded("character_titles", "24.1.1", &fb);
+        crate::services::quasar_achievements::ensure_client_flatbuffer_storage_seeded(&format!("character_titles_{lang}"), "24.1.1", &fb);
+        crate::services::quasar_achievements::ensure_client_flatbuffer_storage_seeded("character_titles_en-us", "24.1.1", &fb);
         return Ok(GoogleAny { type_url: String::new(), value: Vec::new() });
     }
-    let lang = sub(dyn_msg, 3).and_then(|l| str_of(l, 1)).filter(|s| !s.is_empty()).unwrap_or_else(|| "en-us".to_string());
     let data = state.data.read().unwrap_or_else(|e| e.into_inner());
     let ver = data.title_def_version;
     let crc = compute_title_def_crc(&data.title_definitions, ver, &lang);
@@ -1358,36 +1360,31 @@ pub(super) fn encode_skin_license_attrs(lic: &ThirdPartySkinLicense) -> Vec<u8> 
 }
 
 pub(super) fn encode_layout_slot(slot: &SkinLayoutSlot) -> Vec<u8> {
-    let mut id_msg = Vec::new();
-    encode_varint_field(1, slot.slot_id as u64, &mut id_msg);
+    fn encode_nested_u64(field: u32, value: u64, out: &mut Vec<u8>) {
+        let mut inner = Vec::new();
+        encode_varint_field(1, value, &mut inner);
+        encode_bytes_field(field, &inner, out);
+    }
 
     let mut cfg_msg = Vec::new();
     if slot.is_pattern {
         let mut pat_cfg = Vec::new();
-        let mut pat_id = Vec::new();
-        encode_varint_field(1, slot.component_id as u64, &mut pat_id);
-        encode_bytes_field(1, &pat_id, &mut pat_cfg);
+        encode_nested_u64(1, slot.component_id as u64, &mut pat_cfg);
         if let Some(p_coat) = slot.primary_coating_id {
-            let mut pc = Vec::new();
-            encode_varint_field(1, p_coat as u64, &mut pc);
-            encode_bytes_field(2, &pc, &mut pat_cfg);
+            encode_nested_u64(2, p_coat as u64, &mut pat_cfg);
         }
         if let Some(s_coat) = slot.secondary_coating_id {
-            let mut sc = Vec::new();
-            encode_varint_field(1, s_coat as u64, &mut sc);
-            encode_bytes_field(3, &sc, &mut pat_cfg);
+            encode_nested_u64(3, s_coat as u64, &mut pat_cfg);
         }
         encode_bytes_field(2, &pat_cfg, &mut cfg_msg);
     } else {
         let mut coat_cfg = Vec::new();
-        let mut coat_id = Vec::new();
-        encode_varint_field(1, slot.component_id as u64, &mut coat_id);
-        encode_bytes_field(1, &coat_id, &mut coat_cfg);
+        encode_nested_u64(1, slot.component_id as u64, &mut coat_cfg);
         encode_bytes_field(1, &coat_cfg, &mut cfg_msg);
     }
 
     let mut out = Vec::new();
-    encode_bytes_field(1, &id_msg, &mut out);
+    encode_nested_u64(1, slot.slot_id as u64, &mut out);
     encode_bytes_field(2, &cfg_msg, &mut out);
     out
 }

@@ -951,7 +951,7 @@ pub fn handle_batch3_gm_slash_cmd(
             ])))
         }
         "/shutdown" if parts.get(1).is_some_and(|s| s.parse::<u64>().is_ok()) => {
-            let secs: u64 = parts[1].parse::<u64>().unwrap_or(60).min(86400 * 30);
+            let secs: u64 = parts[1].parse::<u64>().unwrap_or(60).max(60).min(86400 * 30);
             let reason = parts.get(2).copied().unwrap_or("ServerRestart");
             let now_ft = ctx.now_blueos_filetime_ticks();
             let target_ft = now_ft.saturating_add((secs as i64).saturating_mul(10_000_000));
@@ -962,7 +962,7 @@ pub fn handle_batch3_gm_slash_cmd(
             let explanation = if reason.contains("Delay") {
                 "UI/Shared/ClusterShutdownDelayed"
             } else {
-                "UI/Shared/ClusterShutdownInitiated"
+                "UI/Shared/ShutdownNotificationTitle"
             };
             ctx.notify(
                 NotificationTarget::All,

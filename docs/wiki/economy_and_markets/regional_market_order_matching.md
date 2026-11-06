@@ -498,6 +498,7 @@ The regional market engine and contracts system are rigorously validated by exte
 
 ## Related Systems & Cross-References
 
+- [**PLEX Vault, Fast Checkout & New Eden Store**](./plex_vault_and_new_eden_store.md): Account-wide PLEX Vault mechanics, `$0.00` 1-click Fast Checkout PLEX packs (`free_fast_checkout_plex`), starter PLEX grants, and New Eden Store (`storeManager`) purchases.
 - [**Corporation Roles & Governance**](../corporations_and_governance/corporation_roles_and_governance.md): Corporate wallet divisions, accountant roles, and corporate order placement.
 - [**Blueprints, Manufacturing & Reactions**](../industry_and_manufacturing/blueprints_manufacturing_and_reactions.md): Material purchasing, finished good listing, and dynamic System Cost Indexes.
 - [**Agent Dialogue & Missions**](../missions_and_agents/agent_dialogue_and_missions.md): Loyalty Point (LP) store exchanges, buy orders, and market liquidity for faction gear.

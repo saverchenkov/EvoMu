@@ -650,19 +650,25 @@ pub fn step_mobile_deployables_in_actor(
     }
 
     // 2. Clear expired reinforcement timers and mark completed anchoring transitions
-    let has_transition = db.with_snapshot(|snap| {
+    let has_timer_transition = db.with_snapshot(|snap| {
         let st = read_deployable_state_snap(snap);
         let dep_due = st.deployables.values().any(|rec| {
             rec.solar_system_id == solar_system_id
                 && (rec.reinforced_until_unix.is_some_and(|u| now_unix >= u)
-                    || (!rec.is_unanchored && !rec.anchor_completed && rec.anchor_start_unix > 0
+                    || (!rec.is_unanchored
+                        && !rec.anchor_completed
+                        && rec.anchor_start_unix > 0
                         && now_unix >= rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs)))
         });
-        dep_due || snap.sp6_lifecycle.space_object_meta.values().any(|meta| {
-            !meta.anchor_completed && meta.anchor_start_unix.is_some_and(|s| now_unix >= s.saturating_add(meta.anchoring_delay_secs as u64))
-        })
+        dep_due
+            || snap.sp6_lifecycle.space_object_meta.values().any(|meta| {
+                !meta.anchor_completed
+                    && meta
+                        .anchor_start_unix
+                        .is_some_and(|start| now_unix >= start.saturating_add(meta.anchoring_delay_secs as u64))
+            })
     });
-    if has_transition {
+    if has_timer_transition {
         db.with_mut_snapshot(|snap| {
             write_deployable_state_snap(snap, |st| {
                 for rec in st.deployables.values_mut() {
@@ -670,7 +676,9 @@ pub fn step_mobile_deployables_in_actor(
                         if rec.reinforced_until_unix.is_some_and(|u| now_unix >= u) {
                             rec.reinforced_until_unix = None;
                         }
-                        if !rec.is_unanchored && !rec.anchor_completed && rec.anchor_start_unix > 0
+                        if !rec.is_unanchored
+                            && !rec.anchor_completed
+                            && rec.anchor_start_unix > 0
                             && now_unix >= rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs)
                         {
                             rec.anchor_completed = true;

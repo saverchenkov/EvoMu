@@ -23,11 +23,9 @@ use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
-
-static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 struct ScopedEnv {
     prev: Vec<(&'static str, Option<String>)>,
@@ -68,7 +66,7 @@ fn fast_test_context(base_unix: u64) -> (Arc<ServerContext>, Arc<VirtualServerCl
 
 #[test]
 fn config_load_default_or_env_and_cwd_toml_paths() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::lock_test_env_write();
     let keys = [
         "EVOMU_CONFIG_PATH",
         "EVOMU_SDE_PATH",

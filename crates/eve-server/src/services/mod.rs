@@ -139,6 +139,7 @@ pub mod quasar_cosmetics_drafts;
 pub mod quasar_cosmetics_skinr;
 pub mod quasar_cosmetics_skinr_seq;
 pub mod quasar_daily_goals;
+mod quasar_daily_goals_admin;
 pub mod quasar_economy_planetary_industry;
 pub mod quasar_entitlement_membership;
 pub mod quasar_inventory_asset;

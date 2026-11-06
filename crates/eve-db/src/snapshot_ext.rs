@@ -973,16 +973,19 @@ impl WorldStateSnapshot {
 
     /// Returns `true` if `item_id` is escrowed in an active contract, industry job, direct trade, or HyperNet raffle.
     pub fn is_item_locked_in_contract_or_job(&self, item_id: i64) -> bool {
+        self.is_item_locked_excluding_trade(item_id, None)
+    }
+
+    /// Returns `true` if `item_id` is escrowed in an active contract, industry job, direct trade (optionally excluding `exempt_trade_id`), or HyperNet raffle.
+    pub fn is_item_locked_excluding_trade(&self, item_id: i64, exempt_trade_id: Option<i64>) -> bool {
         #[derive(serde::Deserialize)]
-        struct TradeRef { #[serde(default)] items_a: Vec<(i64, i32)>, #[serde(default)] items_b: Vec<(i64, i32)>, #[serde(default)] completed: bool, #[serde(default)] cancelled: bool }
+        struct TradeRef { #[serde(default)] trade_id: i64, #[serde(default)] items_a: Vec<(i64, i32)>, #[serde(default)] items_b: Vec<(i64, i32)>, #[serde(default)] completed: bool, #[serde(default)] cancelled: bool }
         #[derive(serde::Deserialize)]
         struct RaffleRef { item_id: i64, #[serde(default)] winner_id: Option<i64>, #[serde(default)] expired: bool }
         self.contracts.values().any(|c| matches!(c.status.as_str(), "Outstanding" | "InProgress") && c.item_ids.contains(&item_id))
             || self.industry_jobs.values().any(|j| matches!(j.status.as_str(), "Active" | "Paused") && j.blueprint_item_id == item_id)
             || self.owner_notes.values().any(|n| match n.character_id {
-                -73 => serde_json::from_str::<TradeRef>(&n.note).is_ok_and(|t| {
-                    !t.completed && !t.cancelled && (t.items_a.iter().any(|(id, _)| *id == item_id) || t.items_b.iter().any(|(id, _)| *id == item_id))
-                }),
+                -73 => serde_json::from_str::<TradeRef>(&n.note).is_ok_and(|t| exempt_trade_id != Some(t.trade_id) && !t.completed && !t.cancelled && (t.items_a.iter().any(|(id, _)| *id == item_id) || t.items_b.iter().any(|(id, _)| *id == item_id))),
                 -74 => serde_json::from_str::<RaffleRef>(&n.note).is_ok_and(|r| !r.expired && r.winner_id.is_none() && r.item_id == item_id),
                 _ => false,
             })

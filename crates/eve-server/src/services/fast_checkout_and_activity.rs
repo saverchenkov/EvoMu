@@ -171,15 +171,21 @@ fn default_free_plex_pack_offers() -> Vec<FastCheckoutOfferRecord> {
 }
 
 fn load_fast_checkout_offers_for_ctx(
-    _ctx: &ServerContext,
+    ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
 ) -> Vec<FastCheckoutOfferRecord> {
-    let mut offers = load_catalog_plex_offers(snap);
-    if !offers.iter().any(|o| o.plex_amount > 0) {
-        let mut packs = default_free_plex_pack_offers();
-        packs.retain(|p| !offers.iter().any(|o| o.offer_id == p.offer_id));
-        packs.extend(offers);
-        offers = packs;
+    let catalog_offers = load_catalog_plex_offers(snap);
+    let need_default_packs = catalog_offers.is_empty()
+        || (ctx.feature_flags.free_fast_checkout_plex
+            && !catalog_offers.iter().any(|o| o.plex_amount > 0));
+    let mut offers = Vec::new();
+    if need_default_packs {
+        offers.extend(default_free_plex_pack_offers());
+    }
+    for o in catalog_offers {
+        if !offers.iter().any(|existing| existing.offer_id == o.offer_id) {
+            offers.push(o);
+        }
     }
     offers
 }

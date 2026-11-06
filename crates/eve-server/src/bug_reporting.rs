@@ -262,6 +262,10 @@ pub fn build_client_global_config(
         "ejabberd_client_address".to_string(),
         PyRep::ascii_bytes(host.as_bytes()),
     );
+    cfg.insert(
+        "chatserver_disable_tls".to_string(),
+        PyRep::ascii_bytes(b"1"),
+    );
 
     if let Ok(extra) = ctx.global_config_values.read() {
         for (k, v) in extra.iter() {

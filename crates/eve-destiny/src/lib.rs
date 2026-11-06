@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 mod ballpark;
 mod physics;
 pub mod wire;
+mod wire_batch;
 pub use physics::combat;
 
 #[cfg(test)]

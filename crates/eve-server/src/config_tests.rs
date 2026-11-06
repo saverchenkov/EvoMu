@@ -3,9 +3,6 @@
 #![forbid(unsafe_code)]
 
 use super::*;
-use std::sync::Mutex;
-
-static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 struct EnvVarGuard {
     saved: Vec<(&'static str, Option<String>)>,
@@ -112,7 +109,7 @@ initial_balance_isk = 5000000
 
 #[test]
 fn server_config_load_from_toml_and_env_overrides() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = crate::lock_test_env_write();
     let _guard = EnvVarGuard::capture(&[
         "EVOMU_CONFIG_PATH",
         "EVOMU_DB_PATH",

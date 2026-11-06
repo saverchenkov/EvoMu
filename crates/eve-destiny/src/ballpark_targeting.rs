@@ -282,11 +282,24 @@ impl Ballpark {
             for j in (i + 1)..ball_keys.len() {
                 let id_b = ball_keys[j];
                 let group_b = self.ball_group_ids.get(&id_b).copied().unwrap_or(0);
-                // Asteroid Belt (`group 9`) and Abyssal Spatial Hazard Clouds (`group 1971`)
-                // are volumetric/non-solid markers that must not eject ships;
+                let type_a = self.balls[&id_a].type_id;
+                let type_b = self.balls[&id_b].type_id;
+                // Asteroid Belt (`group 9`), Abyssal Spatial Hazard Clouds (`group 1971`), and
+                // Abyssal Automated Pylons (`group 1973`/`1981`, whose `radius` encodes their
+                // 15-40 km aura range) are volumetric/non-solid markers that must not eject ships;
                 // solid celestial hulls (Star `group 6`, Planet `group 7`, Moon `group 8`),
                 // stations, structures, stargates, and asteroids collide normally.
-                if matches!(group_a, 9 | 1971) || matches!(group_b, 9 | 1971) {
+                if matches!(group_a, 9 | 1971 | 1973 | 1981)
+                    || matches!(group_b, 9 | 1971 | 1973 | 1981)
+                    || matches!(
+                        type_a,
+                        47_437 | 47_438 | 47_439 | 47_440 | 47_441 | 47_469 | 47_470 | 47_472 | 47_473 | 47_620 | 48_254 | 64_896 | 80_876
+                    )
+                    || matches!(
+                        type_b,
+                        47_437 | 47_438 | 47_439 | 47_440 | 47_441 | 47_469 | 47_470 | 47_472 | 47_473 | 47_620 | 48_254 | 64_896 | 80_876
+                    )
+                {
                     continue;
                 }
                 let is_station_or_struct_b =

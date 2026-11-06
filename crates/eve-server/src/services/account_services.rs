@@ -931,7 +931,21 @@ fn handle_inner(
         }
         ("userSvc", "GetUserToken") => {
             let uid = ServerContext::require_auth(session)?;
-            Ok(Some(PyRep::String(format!("sso-tok-{uid}"))))
+            let now_unix = ctx.now_unix();
+            let tok = ctx
+                .db
+                .issue_gateway_dev_token(
+                    uid,
+                    session.character_id,
+                    "tranquility",
+                    now_unix + 86_400,
+                    now_unix,
+                )
+                .map_err(|_| BridgeRpcError {
+                    code: "TokenIssueFailed".into(),
+                    message: "Failed to sign user gateway JWT token".into(),
+                })?;
+            Ok(Some(PyRep::String(tok)))
         }
         ("userSvc", "CastUpvote") | ("userSvc", "CastDownvote") => {
             let uid = ServerContext::require_auth(session)?;

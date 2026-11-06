@@ -43,5 +43,9 @@ eve-testkit = { path = "../eve-testkit" }
 name = "it"
 path = "tests/it/main.rs"
 
+[[test]]
+name = "abyssal_real_client_sync"
+path = "tests/it/abyssal_real_client_sync.rs"
+
 [lints]
 workspace = true

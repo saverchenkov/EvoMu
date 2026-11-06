@@ -939,18 +939,20 @@ pub fn encode_goal_attributes(tpl: &DailyGoalTemplate, out: &mut Vec<u8>) {
     encode_contribution_configuration(tpl.category, out);
     // 7: career (.eve_public.career.Path: 1..=4)
     encode_varint_field(7, tpl.career.clamp(1, 4) as u64, out);
-    // 8: repeated payment (.eve_public.dailygoal.Payment { 2: period = 1, 3: unit })
-    if tpl.isk_reward > 0 {
-        let mut p = Vec::new();
-        encode_varint_field(2, 1, &mut p); // PAYMENT_PERIOD_COMPLETION
-        encode_bytes_field(3, &encode_isk_unit(tpl.isk_reward), &mut p);
-        encode_bytes_field(8, &p, out);
-    }
-    if tpl.sp_reward > 0.0 {
-        let mut p = Vec::new();
-        encode_varint_field(2, 1, &mut p); // PAYMENT_PERIOD_COMPLETION
-        encode_bytes_field(3, &encode_sp_unit(tpl.sp_reward as u32), &mut p);
-        encode_bytes_field(8, &p, out);
+    // 8: repeated payment (.eve_public.dailygoal.Payment { 1: asset, 2: period = 1, 3: unit })
+    for (tag, unit_opt) in [
+        (1u8, (tpl.isk_reward > 0).then(|| encode_isk_unit(tpl.isk_reward))),
+        (2u8, (tpl.sp_reward > 0.0).then(|| encode_sp_unit(tpl.sp_reward as u32))),
+    ] {
+        if let Some(unit) = unit_opt {
+            let (mut asset_uuid, mut asset_id, mut p) = (tpl.uuid, Vec::new(), Vec::new());
+            asset_uuid[14] = tag;
+            encode_bytes_field(1, &asset_uuid, &mut asset_id);
+            encode_bytes_field(1, &asset_id, &mut p);
+            encode_varint_field(2, 1, &mut p); // PAYMENT_PERIOD_COMPLETION
+            encode_bytes_field(3, &unit, &mut p);
+            encode_bytes_field(8, &p, out);
+        }
     }
     // 9: target (uint64)
     encode_varint_field(9, tpl.target, out);
@@ -1369,26 +1371,7 @@ pub fn register_daily_goal_handlers(
         }),
     );
 
-    // 12. eve.dailygoal.api.admin.AutoRedeemRequest -> AutoRedeemResponse
-    let mgr = Arc::clone(&manager);
-    let db_auto = Arc::clone(&db);
-    router.register_handler(
-        "eve.dailygoal.api.admin.AutoRedeemRequest",
-        Arc::new(move |ctx, _any, _dyn| {
-            crate::quasar_gateway::require_admin_role(ctx)?;
-            if let Some(cid) = ctx.effective_character_id() {
-                let goals = mgr.get_or_init_goals_at(cid, ctx.now_unix());
-                for g in goals.iter().filter(|g| g.completed && !g.claimed) {
-                    let _ = mgr.redeem_goal(cid, &g.uuid, ctx.now_unix(), &db_auto);
-                }
-                mgr.save_to_db();
-            }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.admin.AutoRedeemResponse"),
-                value: Vec::new(),
-            })
-        }),
-    );
+    super::quasar_daily_goals_admin::register(router, &manager, &db);
 }
 
 #[cfg(test)] #[path = "quasar_daily_goals_tests.rs"] mod quasar_daily_goals_tests;

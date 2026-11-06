@@ -1285,21 +1285,15 @@ pub async fn handle(
                     };
                     let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
                     if old_sys_id != dest_sys_id || existing_ball.is_none() {
+                        let tr_pos = if !session.address.is_empty() {
+                            ctx.sde.stations.get(&60_003_760).filter(|s| s.solar_system_id == dest_sys_id).or_else(|| ctx.sde.stations.values().find(|s| s.solar_system_id == dest_sys_id)).map_or(DVec3::new(2_500_000_000.0, 0.0, 0.0), |s| s.position + DVec3::new(1_500.0, 0.0, 0.0))
+                        } else { DVec3::new(10_000.0, 0.0, 0.0) };
                         let ship_tid = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(587);
                         let mut new_ball = existing_ball.unwrap_or(Ball {
-                            id: ship_id,
-                            type_id: ship_tid,
-                            position: DVec3::ZERO,
-                            velocity: DVec3::ZERO,
-                            max_velocity: 300.0,
-                            inertia: 0.5,
-                            mass: 1_000_000.0,
-                            radius: 50.0,
-                            speed_fraction: 0.0,
-                            mode: MovementMode::Stop,
+                            id: ship_id, type_id: ship_tid, position: DVec3::ZERO, velocity: DVec3::ZERO,
+                            max_velocity: 300.0, inertia: 0.5, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop,
                         });
-                        new_ball.position = DVec3::new(10_000.0, 0.0, 0.0);
-                        new_ball.velocity = DVec3::ZERO;
+                        (new_ball.position, new_ball.velocity, new_ball.mode) = (tr_pos, DVec3::ZERO, MovementMode::Stop);
                         let combat_state = ctx.build_ship_combat_state(cid, ship_id, new_ball.type_id);
                         let slim_meta = ctx.build_ship_slim_meta(cid, new_ball.type_id);
                         let _ = new_handle.spawn_ball_with_meta(new_ball, combat_state, slim_meta).await;

@@ -396,6 +396,9 @@ pub fn step_proving_grounds_arena_hazards_in_ballpark(
     let Some(db) = db_opt else {
         return destroyed_balls;
     };
+    if !db.with_snapshot(|snap| !load_pvp_store(snap).active_matches.is_empty()) {
+        return destroyed_balls;
+    }
     let now_unix = db.clock().now_unix_secs();
     let mut respawned_pilots: Vec<(i64, i64, i64, u32, i64)> = Vec::new();
     let mut ejected_pods: Vec<(i64, i64, i64)> = Vec::new();
@@ -682,7 +685,6 @@ pub fn step_proving_grounds_arena_hazards_in_ballpark(
             ("corpid", PyRep::Integer(corp_id)),
             ("allianceid", alliance_id.map_or(PyRep::None, PyRep::Integer)),
             ("stationid", PyRep::Integer(home_station_id)),
-            ("stationid2", PyRep::Integer(home_station_id)),
             ("structureid", PyRep::None),
             ("solarsystemid2", PyRep::Integer(i64::from(home_sys_id))),
             ("solarsystemid", PyRep::None),
@@ -699,10 +701,6 @@ pub fn step_proving_grounds_arena_hazards_in_ballpark(
             ),
             (
                 PyRep::String("stationid".into()),
-                PyRep::Tuple(vec![PyRep::None, PyRep::Integer(home_station_id)]),
-            ),
-            (
-                PyRep::String("stationid2".into()),
                 PyRep::Tuple(vec![PyRep::None, PyRep::Integer(home_station_id)]),
             ),
             (

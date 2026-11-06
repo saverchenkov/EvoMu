@@ -239,6 +239,8 @@ impl ServerConfig {
     /// Loads `EVOMU_CONFIG_PATH` (or `evomu.toml` if present) and applies any environment variable
     /// overrides (`EVOMU_SDE_PATH`, `EVOMU_DB_PATH`, `EVOMU_SNAPSHOT_PATH`, `EVOMU_ACCOUNTS`, `EVOMU_GM_ACCOUNT`).
     pub fn load_default_or_env() -> Result<Self, String> {
+        #[cfg(test)]
+        let _env_read_guard = crate::lock_test_env_read();
         let mut cfg = if let Ok(custom_path) = std::env::var("EVOMU_CONFIG_PATH") {
             let trimmed = custom_path.trim();
             if !trimmed.is_empty() {

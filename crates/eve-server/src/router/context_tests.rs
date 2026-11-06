@@ -176,7 +176,7 @@ fn module_reactivation_delay_lifecycle_and_clock_controls() {
     assert!(!ctx.is_module_in_reactivation_delay(ship_id, mod_id));
 
     // Clock injection and multiplier/pause controls
-    let custom_clock = Arc::new(VirtualServerClock::new());
+    let custom_clock = Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000));
     let base_now = custom_clock.now_unix_secs();
     ctx.set_clock(custom_clock);
     assert_eq!(ctx.now_unix_secs(), base_now);

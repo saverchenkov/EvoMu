@@ -23,6 +23,9 @@ pub(super) fn authorize_service_binding(
                 || session.station_id == Some(object_id)
                 || session.structure_id == Some(object_id)
                 || session.solar_system_id.map(i64::from) == Some(object_id)
+                || crate::router::client_compat::is_dogma_station_or_structure_accessible(
+                    ctx, session, char_id, object_id,
+                )
         }
         "invbroker" => authorize_invbroker_binding(ctx, session, object_id),
         "station" | "stationSvc" | "corpStationMgr" | "repairSvc" | "reprocessingSvc"
@@ -43,7 +46,12 @@ pub(super) fn authorize_service_binding(
                 || object_id == 0
         }
         "i2" => session.has_gm_role() && object_id > 0,
-        "corpRegistry" | "corpmgr" => object_id > 0 && session.corporation_id == Some(object_id),
+        "corpRegistry" | "corpmgr" | "officeManager" => {
+            object_id > 0
+                && (session.corporation_id == Some(object_id)
+                    || session.station_id == Some(object_id)
+                    || session.structure_id == Some(object_id))
+        }
         "allianceRegistry" => object_id > 0 && session.alliance_id == Some(object_id),
         "fleetObjectHandler" => object_id > 0 && session.fleet_id == Some(object_id),
         "planetMgr" => authorize_planet_binding(ctx, session, char_id, object_id),
@@ -113,7 +121,12 @@ pub(super) fn verify_service_binding_context(
                 || session.structure_id == Some(entry.object_id)
         }
         "invbroker" => authorize_invbroker_binding(ctx, session, entry.object_id),
-        "corpRegistry" | "corpmgr" => entry.object_id > 0 && session.corporation_id == Some(entry.object_id),
+        "corpRegistry" | "corpmgr" | "officeManager" => {
+            entry.object_id > 0
+                && (session.corporation_id == Some(entry.object_id)
+                    || session.station_id == Some(entry.object_id)
+                    || session.structure_id == Some(entry.object_id))
+        }
         "allianceRegistry" => entry.object_id > 0 && session.alliance_id == Some(entry.object_id),
         "fleetObjectHandler" => entry.object_id > 0 && session.fleet_id == Some(entry.object_id),
         "planetMgr" => authorize_planet_binding(ctx, session, entry.character_id, entry.object_id),

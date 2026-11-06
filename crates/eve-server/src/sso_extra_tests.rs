@@ -161,7 +161,10 @@ fn test_sso_authorize_token_revoke_and_verify_missing_params_and_aliases() {
         "POST",
         "/oauth/token",
         &basic_hdrs,
-        format!("grant_type=authorization_code&code={code}&code_verifier={verifier}").as_bytes(),
+        format!(
+            "grant_type=authorization_code&code={code}&code_verifier={verifier}&redirect_uri=http%3A%2F%2Flocalhost%3A8080%2Fcb"
+        )
+        .as_bytes(),
     );
     assert_eq!(tok_resp.status_code, 200);
     let tok_json: serde_json::Value = serde_json::from_slice(&tok_resp.body).unwrap();
@@ -245,7 +248,7 @@ fn test_sso_account_ban_and_suspension_branches_on_verify_and_token_exchange() {
         "POST",
         "/v2/oauth/token",
         &empty_hdrs,
-        format!("client_id=c1&grant_type=authorization_code&code={code_for_tok1}&code_verifier={verifier}").as_bytes(),
+        format!("client_id=c1&grant_type=authorization_code&code={code_for_tok1}&code_verifier={verifier}&redirect_uri=http%3A%2F%2F127.0.0.1%2Fcb").as_bytes(),
     );
     assert_eq!(tok_resp1.status_code, 200);
     let tok_json1: serde_json::Value = serde_json::from_slice(&tok_resp1.body).unwrap();
@@ -257,7 +260,7 @@ fn test_sso_account_ban_and_suspension_branches_on_verify_and_token_exchange() {
         "POST",
         "/v2/oauth/token",
         &empty_hdrs,
-        format!("client_id=c1&grant_type=authorization_code&code={code_for_tok2}&code_verifier={verifier}").as_bytes(),
+        format!("client_id=c1&grant_type=authorization_code&code={code_for_tok2}&code_verifier={verifier}&redirect_uri=http%3A%2F%2F127.0.0.1%2Fcb").as_bytes(),
     );
     assert_eq!(tok_resp2.status_code, 200);
     let tok_json2: serde_json::Value = serde_json::from_slice(&tok_resp2.body).unwrap();
@@ -285,7 +288,7 @@ fn test_sso_account_ban_and_suspension_branches_on_verify_and_token_exchange() {
         "POST",
         "/v2/oauth/token",
         &empty_hdrs,
-        format!("client_id=c1&grant_type=authorization_code&code={code_while_suspended}&code_verifier={verifier}").as_bytes(),
+        format!("client_id=c1&grant_type=authorization_code&code={code_while_suspended}&code_verifier={verifier}&redirect_uri=http%3A%2F%2F127.0.0.1%2Fcb").as_bytes(),
     );
     assert_eq!(exch_susp.status_code, 403);
 
@@ -317,7 +320,7 @@ fn test_sso_account_ban_and_suspension_branches_on_verify_and_token_exchange() {
         "POST",
         "/v2/oauth/token",
         &empty_hdrs,
-        format!("client_id=c1&grant_type=authorization_code&code={code_while_banned}&code_verifier={verifier}").as_bytes(),
+        format!("client_id=c1&grant_type=authorization_code&code={code_while_banned}&code_verifier={verifier}&redirect_uri=http%3A%2F%2F127.0.0.1%2Fcb").as_bytes(),
     );
     assert_eq!(exch_ban.status_code, 403);
 

@@ -192,6 +192,7 @@ pub async fn handle(
             }
             crate::services::pve_special_sites::ensure_abyssal_room_balls_for_ctx(ctx, char_id).await;
             if let Some(ship_id) = session.ship_id {
+                let _ = ctx.systems.get_or_spawn(cur_sys).push_set_state(ship_id).await;
                 let _ = crate::services::pve_special_sites_abyssal::evaluate_abyssal_spatial_clouds_for_ship(
                     ctx, cur_sys, ship_id,
                 )
@@ -470,7 +471,9 @@ async fn activate_trace(
         ship_type,
         base + DVec3::new(0.0, 0.0, -50_000.0),
     );
-    let _ = abyss_handle.spawn_ball_with_combat(ball, cs).await;
+    let slim_meta = ctx.build_ship_slim_meta(char_id, ship_type);
+    let _ = abyss_handle.spawn_ball_with_meta(ball, cs, slim_meta).await;
+    let _ = abyss_handle.push_set_state(ship_id).await;
     if with_pve_special_reg(ctx, |reg| {
         reg.abyssal_pockets
             .get(&char_id)
@@ -487,7 +490,24 @@ async fn activate_trace(
             )
             .await;
     }
+    let (const_id, reg_id) = match ctx
+        .db
+        .set_character_solar_system(char_id, ABYSSAL_SPACE_SYSTEM_ID, &ctx.sde)
+    {
+        Ok(ch) => (ch.constellation_id, ch.region_id),
+        Err(_) => ctx
+            .sde
+            .solar_systems
+            .get(&ABYSSAL_SPACE_SYSTEM_ID)
+            .map(|s| (s.constellation_id, s.region_id))
+            .unwrap_or((20_000_020, 10_000_002)),
+    };
     session.solar_system_id = Some(ABYSSAL_SPACE_SYSTEM_ID);
+    session.constellation_id = Some(const_id);
+    session.region_id = Some(reg_id);
+    session.station_id = None;
+    session.structure_id = None;
+    ctx.quasar_gateway.on_session_changed(session, entry_now);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, ABYSSAL_SPACE_SYSTEM_ID);
     emit_abyssal_entry_notifications(ctx, char_id, pocket_id, tier, remaining_sec);
 
@@ -589,7 +609,9 @@ async fn activate_inventory_filament(
         ship_type,
         base + DVec3::new(0.0, 0.0, -50_000.0),
     );
-    let _ = abyss_handle.spawn_ball_with_combat(ball, cs).await;
+    let slim_meta = ctx.build_ship_slim_meta(char_id, ship_type);
+    let _ = abyss_handle.spawn_ball_with_meta(ball, cs, slim_meta).await;
+    let _ = abyss_handle.push_set_state(ship_id).await;
     if with_pve_special_reg(ctx, |reg| {
         reg.abyssal_pockets
             .get(&char_id)
@@ -606,7 +628,24 @@ async fn activate_inventory_filament(
             )
             .await;
     }
+    let (const_id, reg_id) = match ctx
+        .db
+        .set_character_solar_system(char_id, ABYSSAL_SPACE_SYSTEM_ID, &ctx.sde)
+    {
+        Ok(ch) => (ch.constellation_id, ch.region_id),
+        Err(_) => ctx
+            .sde
+            .solar_systems
+            .get(&ABYSSAL_SPACE_SYSTEM_ID)
+            .map(|s| (s.constellation_id, s.region_id))
+            .unwrap_or((20_000_020, 10_000_002)),
+    };
     session.solar_system_id = Some(ABYSSAL_SPACE_SYSTEM_ID);
+    session.constellation_id = Some(const_id);
+    session.region_id = Some(reg_id);
+    session.station_id = None;
+    session.structure_id = None;
+    ctx.quasar_gateway.on_session_changed(session, now_unix);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, ABYSSAL_SPACE_SYSTEM_ID);
     emit_abyssal_entry_notifications(ctx, char_id, pocket_id, tier, 1_200);
     let gives_suspect =
@@ -642,9 +681,9 @@ fn emit_abyssal_entry_notifications(
     // DATA GAP: V24 live room IDs and nebula graphic IDs are Tranquility server-only dynamic instancing data
     let client_data = PyRep::Dict(vec![
         (PyRep::String("content_id".into()), PyRep::Integer(pocket_id)),
-        (PyRep::String("nebula_graphic_id".into()), PyRep::Integer(21_000 + tier as i64)),
+        (PyRep::String("nebula_graphic_id".into()), PyRep::Integer(22_041 + tier as i64)),
         (PyRep::String("difficulty_tier".into()), PyRep::Integer(tier as i64)),
-        (PyRep::String("location_id".into()), PyRep::Integer(ABYSSAL_SPACE_SYSTEM_ID as i64)),
+        (PyRep::String("location_id".into()), PyRep::Integer(1)),
         (PyRep::String("rooms_completed".into()), PyRep::Integer(0)),
     ]);
     ctx.notify(

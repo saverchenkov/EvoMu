@@ -429,7 +429,7 @@ impl WorldRepository {
                     return Err(DbError::InvalidCredentials);
                 }
                 let target_username = {
-                    let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+                    let guard = self.read_state();
                     let acc = if username.is_empty()
                         || username == "__sso__"
                         || username == "EVE-SSO-CONNECTION"
@@ -448,7 +448,7 @@ impl WorldRepository {
                     acc.username.clone()
                 };
                 self.clear_expired_ban(&target_username, now_unix);
-                let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+                let guard = self.read_state();
                 let acc = guard.accounts.get(&target_username).ok_or(DbError::InvalidCredentials)?;
                 acc.check_active_restriction(now_unix)?;
                 return Ok(acc.clone());
@@ -456,7 +456,7 @@ impl WorldRepository {
         }
 
         self.clear_expired_ban(username, now_unix);
-        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self.read_state();
         let acc = guard
             .accounts
             .get(username)
@@ -622,7 +622,7 @@ impl WorldRepository {
         reason: &str,
     ) -> Result<u64, DbError> {
         let username = {
-            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+            let guard = self.read_state();
             if let Ok(uid) = target.trim().parse::<u64>() {
                 guard
                     .accounts
@@ -671,7 +671,7 @@ impl WorldRepository {
     /// persisting the unbanned state to SQLite (`feat:account.account-bans`).
     pub fn clear_expired_ban(&self, username: &str, now_unix: u64) -> bool {
         let has_expired = {
-            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+            let guard = self.read_state();
             guard
                 .accounts
                 .get(username)
@@ -688,7 +688,7 @@ impl WorldRepository {
     /// persisting the unbanned state to SQLite (`feat:account.account-bans`).
     pub fn clear_expired_ban_by_id(&self, user_id: u64, now_unix: u64) -> bool {
         let uname = {
-            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+            let guard = self.read_state();
             guard
                 .accounts
                 .values()
@@ -707,7 +707,7 @@ impl WorldRepository {
         reason: &str,
     ) -> Result<u64, DbError> {
         let username = {
-            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+            let guard = self.read_state();
             if let Ok(uid) = target.trim().parse::<u64>() {
                 guard
                     .accounts
@@ -765,7 +765,7 @@ impl WorldRepository {
         now_unix: u64,
     ) -> Result<Option<OnlineSessionRecord>, DbError> {
         let username = {
-            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+            let guard = self.read_state();
             let acc = guard
                 .accounts
                 .values()
@@ -864,7 +864,7 @@ impl WorldRepository {
         computer_hash: &str,
     ) -> bool {
         let computer_hash = computer_hash.trim();
-        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self.read_state();
         let is_user_alpha = |uid: u64| -> bool {
             let mut chars: Vec<&CharacterRecord> = guard
                 .characters
@@ -955,7 +955,7 @@ impl WorldRepository {
 
     /// Looks up `user_id` for `username` (`D-4`).
     pub fn find_user_id_by_username(&self, username: &str) -> Option<u64> {
-        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self.read_state();
         guard.accounts.get(username).map(|a| a.user_id)
     }
 
@@ -969,7 +969,7 @@ impl WorldRepository {
     ) -> Option<(String, String)> {
         self.clear_expired_ban_by_id(user_id, now_unix);
         {
-            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+            let guard = self.read_state();
             if let Some(acc) = guard.accounts.values().find(|a| a.user_id == user_id) {
                 match acc.check_active_restriction(now_unix) {
                     Err(DbError::AccountBanned { until_unix, reason }) => {
@@ -1022,7 +1022,7 @@ impl WorldRepository {
         now_unix: u64,
     ) -> Option<OnlineSessionRecord> {
         {
-            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+            let guard = self.read_state();
             if let Some(acc) = guard.accounts.values().find(|a| a.user_id == user_id) {
                 if (acc.role & service_roles::ROLE_ADMIN) != 0 {
                     return None;
@@ -1225,7 +1225,7 @@ impl WorldRepository {
             return Err(DbError::InvalidCredentials);
         }
         {
-            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+            let guard = self.read_state();
             let acc = guard
                 .accounts
                 .values()
@@ -1266,7 +1266,7 @@ impl WorldRepository {
             r.clone()
         };
         {
-            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+            let guard = self.read_state();
             let acc = guard
                 .accounts
                 .values()
@@ -1346,7 +1346,7 @@ impl WorldRepository {
             }
             parsed
         };
-        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self.read_state();
         let acc = guard
             .accounts
             .values()

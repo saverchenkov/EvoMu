@@ -1009,6 +1009,42 @@ pub(crate) fn skill_queue_rowset(ctx: &ServerContext, char_id: i64) -> PyRep {
     )
 }
 
+pub(crate) async fn handle_public_qa_tools(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    method: &str,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    match method {
+        "MoveMeTo" => {
+            let (_, cid) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let has_gm_or_qa = session.has_gm_role()
+                || (session.role & eve_machonet::service_roles::ROLE_QA) != 0;
+            if !has_gm_or_qa {
+                return Some(Err(BridgeRpcError {
+                    code: "InsufficientRole".into(),
+                    message: "publicQaToolsServer.MoveMeTo requires GM/QA role".into(),
+                }));
+            }
+            Some(handle_qa_move_me_to(ctx, session, cid, args).await)
+        }
+        "CanGiveItemForMultifit" => {
+            let (_, cid) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let char_exists = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&cid));
+            let has_gm_or_qa = session.has_gm_role()
+                || (session.role & eve_machonet::service_roles::ROLE_QA) != 0;
+            Some(Ok(PyRep::Bool(char_exists && has_gm_or_qa)))
+        }
+        _ => None,
+    }
+}
+
 pub(crate) async fn handle_qa_move_me_to(
     ctx: &ServerContext,
     session: &mut SessionState,

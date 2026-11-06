@@ -140,7 +140,7 @@ async fn test_live_serverops_daily_downtime_and_jobs() {
     assert_eq!(shutdown_ev.args.len(), 3);
     assert_eq!(
         shutdown_ev.args[0],
-        PyRep::String("UI/Shared/ClusterShutdownInitiated".into())
+        PyRep::String("UI/Shared/ShutdownNotificationTitle".into())
     );
     assert_eq!(shutdown_ev.args[2], PyRep::Integer(15));
 

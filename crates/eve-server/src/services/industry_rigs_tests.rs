@@ -466,11 +466,11 @@ fn capital_construction_restrictions_and_ptv_multiplier_cover_all_branches() {
 fn ship_insurance_reference_value_with_prices_scales_by_live_material_basket() {
     let mut ctx = make_test_context();
     let mut sde = (*ctx.sde).clone();
-    sde.blueprints.retain(|_, b| b.product_type_id != 587);
+    sde.blueprints.retain(|_, bp| bp.product_type_id != 587);
     sde.blueprints.insert(
-        688,
+        999_001,
         BlueprintInfo {
-            blueprint_type_id: 688,
+            blueprint_type_id: 999_001,
             product_type_id: 587,
             product_quantity: 1,
             max_production_limit: 30,

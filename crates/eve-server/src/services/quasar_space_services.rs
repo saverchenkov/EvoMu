@@ -1165,7 +1165,8 @@ pub fn register_handlers(
                             .to_string(),
                     ));
                 }
-                if cur_ver.is_none()
+                let latest = cur_ver.unwrap_or((24u32, 1u32, sde_cdn.solar_systems.len() as u32));
+                if (cur_ver.is_none() || cur_ver == Some(latest))
                     && any.type_url.starts_with("type.evetech.net/")
                     && std::env::var("EVOMU_CDN_BASE_URL")
                         .ok()
@@ -1183,9 +1184,8 @@ pub fn register_handlers(
                         value: Vec::new(),
                     });
                 }
-                let latest = cur_ver.unwrap_or((24u32, 1u32, sde_cdn.solar_systems.len() as u32));
                 let mut out = Vec::new();
-                if no_local || cur_ver.is_some() || cur_ver != Some(latest) {
+                if no_local || cur_ver != Some(latest) {
                     let crc_val = ((sde_cdn.solar_systems.len() as u32).wrapping_mul(2654435761))
                         ^ ((sde_cdn.constellations.len() as u32).wrapping_mul(2246822519))
                         ^ ((sde_cdn.regions.len() as u32).wrapping_mul(3266489917));
@@ -1224,6 +1224,58 @@ pub fn register_handlers(
 }
 
 #[cfg(test)]
+#[cfg(test)]
 #[path = "quasar_space_services_tests.rs"]
 mod quasar_space_services_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::router::ServerContext;
+    use eve_machonet::SessionState;
+    use eve_proto::quasar::{EvePublicRequest, GoogleTimestamp, TYPE_EVETECH_PREFIX};
+
+    #[test]
+    fn space_cdn_get_update_evetech_refresh_with_current_version_returns_no_checkpoint() {
+        let ctx = ServerContext::new();
+        let mut sess = SessionState::new(77_101);
+        sess.user_id = Some(1);
+        sess.character_id = Some(90_000_001);
+
+        let mut ver_bytes = Vec::new();
+        encode_varint_field(1, 24, &mut ver_bytes);
+        encode_varint_field(2, 1, &mut ver_bytes);
+        encode_varint_field(3, 5432, &mut ver_bytes);
+        let mut req_bytes = Vec::new();
+        encode_bytes_field(1, &ver_bytes, &mut req_bytes);
+
+        let pub_req = EvePublicRequest {
+            issued: Some(GoogleTimestamp {
+                seconds: ctx.now_unix() as i64,
+                nanos: 0,
+            }),
+            correlation_uuid: vec![1u8; 16],
+            payload: Some(GoogleAny {
+                type_url: format!("{TYPE_EVETECH_PREFIX}eve_public.space.api.cdn.GetUpdateRequest"),
+                value: req_bytes,
+            }),
+            external_origin: "eve-desktop-client/3619879 tq".into(),
+            application_instance_uuid: vec![2u8; 16],
+            authoritative_context: None,
+            trace_context: None,
+        };
+        let rsp = ctx.quasar_gateway.handle_public_request(
+            &sess,
+            &pub_req,
+            None,
+            false,
+            ctx.now_unix(),
+        );
+        assert_eq!(rsp.status_code, 200);
+        assert!(
+            rsp.payload.as_ref().is_none_or(|p| p.value.is_empty()),
+            "up-to-date evetech client must not receive checkpoint URL"
+        );
+    }
+}
 

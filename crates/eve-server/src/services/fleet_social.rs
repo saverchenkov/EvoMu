@@ -198,11 +198,12 @@ fn handle_office_manager(
         .unwrap_or(0);
     let default_station_id = session
         .station_id
+        .or(session.structure_id)
         .or_else(|| ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).and_then(|c| c.station_id)))
         .unwrap_or(0);
 
     match method {
-        "Bind" | "SetSessionCheck" => Some(Ok(PyRep::None)),
+        "Bind" | "SetSessionCheck" | "PrimeOfficeItem" => Some(Ok(PyRep::None)),
 
         "GetPriceQuote" => {
             let station_id = args.first().and_then(|a| a.as_i64()).unwrap_or(default_station_id);
@@ -342,6 +343,7 @@ fn handle_office_manager(
                         vec![PyRep::Integer(corp_id), PyRep::Integer(office_id)],
                     );
                     Some(Ok(PyRep::keyval([
+                        ("officeID", PyRep::Integer(office_id)),
                         ("officeFolderID", PyRep::Integer(office_id)),
                         ("stationID", PyRep::Integer(st_id)),
                         ("corporationID", PyRep::Integer(corp_id)),
@@ -370,6 +372,7 @@ fn handle_office_manager(
 
             match found {
                 Some(oid) => Some(Ok(PyRep::keyval([
+                    ("officeID", PyRep::Integer(oid)),
                     ("officeFolderID", PyRep::Integer(oid)),
                     ("stationID", PyRep::Integer(station_id)),
                     ("corporationID", PyRep::Integer(corp_id)),
@@ -389,6 +392,7 @@ fn handle_office_manager(
                     .map(|i| {
                         vec![
                             PyRep::Integer(i.item_id),
+                            PyRep::Integer(i.item_id),
                             PyRep::Integer(i.location_id),
                             PyRep::Integer(corp_id),
                         ]
@@ -396,7 +400,7 @@ fn handle_office_manager(
                     .collect::<Vec<_>>()
             });
             Some(Ok(PyRep::rowset(
-                vec!["officeFolderID", "stationID", "corporationID"],
+                vec!["officeID", "officeFolderID", "stationID", "corporationID"],
                 rows,
             )))
         }
@@ -415,13 +419,14 @@ fn handle_office_manager(
                         vec![
                             PyRep::Integer(i.owner_id),
                             PyRep::Integer(i.item_id),
+                            PyRep::Integer(i.item_id),
                             PyRep::Integer(station_id),
                         ]
                     })
                     .collect::<Vec<_>>()
             });
             Some(Ok(PyRep::rowset(
-                vec!["corporationID", "officeFolderID", "stationID"],
+                vec!["corporationID", "officeID", "officeFolderID", "stationID"],
                 rows,
             )))
         }
@@ -961,7 +966,8 @@ pub(super) fn handle_get_init_state(
 
 pub(super) use fleet_social_finder_tactical::handle_fleet_watchlist_ops;
 
-#[cfg(test)] #[path = "fleet_social_tests.rs"]
+#[cfg(test)]
+#[path = "fleet_social_tests.rs"]
 mod fleet_social_tests;
 
 

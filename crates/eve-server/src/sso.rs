@@ -10,12 +10,13 @@
 
 #![forbid(unsafe_code)]
 
+use crate::esi::{EsiHttpRequest, EsiRouter};
 use crate::router::ServerContext;
 use anyhow::Result;
 use eve_db::{DbError, SsoTokenClaims};
 use serde_json::json;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -177,7 +178,7 @@ pub(crate) async fn handle_http_connection_with_timeout(
     let body_end = (header_end + content_length).min(buf.len());
     let body = &buf[header_end..body_end];
 
-    let resp = handle_http_request(&ctx, &method, &target, &headers, body);
+    let resp = handle_http_request_with_ctx(&ctx, &method, &target, &headers, body);
     stream.write_all(&resp.to_wire_bytes()).await?;
     stream.flush().await?;
     Ok(())
@@ -276,8 +277,30 @@ pub fn verify_esi_bearer_token(
     Ok(claims)
 }
 
+/// Dispatches an HTTP request with an `Arc<ServerContext>`, enabling full ESI OpenAPI delegation.
+pub fn handle_http_request_with_ctx(
+    ctx: &Arc<ServerContext>,
+    method: &str,
+    target: &str,
+    headers: &HashMap<String, String>,
+    body: &[u8],
+) -> HttpResponse {
+    handle_http_request_inner(Some(Arc::clone(ctx)), ctx.as_ref(), method, target, headers, body)
+}
+
 /// Dispatches an HTTP request to the SSO / OAuth2 + PKCE (`S256`) or ESI verification handlers (`ESI-1`).
 pub fn handle_http_request(
+    ctx: &ServerContext,
+    method: &str,
+    target: &str,
+    headers: &HashMap<String, String>,
+    body: &[u8],
+) -> HttpResponse {
+    handle_http_request_inner(None, ctx, method, target, headers, body)
+}
+
+fn handle_http_request_inner(
+    arc_ctx: Option<Arc<ServerContext>>,
     ctx: &ServerContext,
     method: &str,
     target: &str,
@@ -370,14 +393,72 @@ pub fn handle_http_request(
             }
         }
 
-        _ => HttpResponse::json(
+        _ => delegate_to_esi_router(arc_ctx, method, target, headers, body),
+    }
+}
+
+fn delegate_to_esi_router(
+    arc_ctx: Option<Arc<ServerContext>>,
+    method: &str,
+    target: &str,
+    headers: &HashMap<String, String>,
+    body: &[u8],
+) -> HttpResponse {
+    static ESI_ROUTER_CACHE: OnceLock<Mutex<(usize, Arc<EsiRouter>)>> = OnceLock::new();
+    let Some(shared_ctx) = arc_ctx else {
+        return HttpResponse::json(
             404,
             "Not Found",
             json!({
                 "error": "not_found",
-                "error_description": format!("Unknown SSO/ESI endpoint: {method} {path}")
+                "error_description": format!("Unknown SSO/ESI endpoint: {method} {target}")
             }),
-        ),
+        );
+    };
+    let db_key = Arc::as_ptr(&shared_ctx.db) as usize;
+    let router = {
+        let lock = ESI_ROUTER_CACHE.get_or_init(|| {
+            Mutex::new((db_key, Arc::new(EsiRouter::new(Arc::clone(&shared_ctx)))))
+        });
+        let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.0 != db_key {
+            *guard = (db_key, Arc::new(EsiRouter::new(Arc::clone(&shared_ctx))));
+        }
+        Arc::clone(&guard.1)
+    };
+
+    let mut esi_req = EsiHttpRequest::new(method, target).with_body(body.to_vec());
+    for (k, v) in headers {
+        esi_req = esi_req.with_header(k.clone(), v.clone());
+    }
+    let esi_resp = router.handle_request(&esi_req);
+    let status_text = match esi_resp.status_code {
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        420 => "Error Limited",
+        422 => "Unprocessable Entity",
+        500 => "Internal Server Error",
+        _ => "OK",
+    };
+    let mut out_headers = Vec::new();
+    for (k, v) in &esi_resp.headers {
+        if !k.eq_ignore_ascii_case("content-type") && !k.eq_ignore_ascii_case("content-length") {
+            out_headers.push((k.clone(), v.clone()));
+        }
+    }
+    HttpResponse {
+        status_code: esi_resp.status_code,
+        status_text,
+        content_type: "application/json; charset=utf-8",
+        headers: out_headers,
+        body: esi_resp.body,
     }
 }
 

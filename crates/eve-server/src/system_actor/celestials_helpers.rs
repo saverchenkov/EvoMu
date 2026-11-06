@@ -54,6 +54,23 @@ pub(crate) fn register_db_system_ballpark(
     );
 }
 
+pub(crate) fn sync_ball_positions(
+    ballpark: &Ballpark,
+    cache: &RwLock<HashMap<BallId, DVec3>>,
+    scrambled: &RwLock<std::collections::HashSet<BallId>>,
+) {
+    let mut guard = cache.write().unwrap_or_else(|e| e.into_inner());
+    let mut scram_guard = scrambled.write().unwrap_or_else(|e| e.into_inner());
+    guard.clear();
+    scram_guard.clear();
+    for (&id, ball) in &ballpark.balls {
+        guard.insert(id, ball.position);
+        if ballpark.is_ball_scrambled(id) {
+            scram_guard.insert(id);
+        }
+    }
+}
+
 /// Synchronously removes `ball_id` from `solar_system_id`'s `Ballpark` if spawned for `db`.
 pub fn try_remove_ball_for_db(
     db: &Arc<eve_db::WorldRepository>,
@@ -71,7 +88,7 @@ pub fn try_remove_ball_for_db(
         {
             let mut bp = bp_arc.write().unwrap_or_else(|e| e.into_inner());
             let _ = bp.remove_ball(ball_id);
-            crate::system_actor::sync_ball_positions(&bp, &pos_arc, &scram_arc);
+            sync_ball_positions(&bp, &pos_arc, &scram_arc);
         }
     }
 }
@@ -104,7 +121,96 @@ pub(crate) fn persist_landed_warps_in_db(
     });
 }
 
+/// Fast-forwards physics ticks inside the system actor for `timeControl.AdvanceClock`
+/// without per-tick DB snapshot cloning or flooding intermediate `DoDestinyUpdate` broadcasts.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fast_forward_clock_in_actor(
+    solar_system_id: SolarSystemId,
+    ballpark: &mut Ballpark,
+    ship_id: BallId,
+    secs: u64,
+    sim_elapsed_secs: &mut f64,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    ball_positions_actor: &Arc<RwLock<HashMap<BallId, DVec3>>>,
+    scrambled_balls_actor: &Arc<RwLock<std::collections::HashSet<BallId>>>,
+    event_tx_actor: &tokio::sync::broadcast::Sender<crate::system_actor::TickBroadcast>,
+) {
+    let Some(ball0) = ballpark.balls.get(&ship_id) else {
+        return;
+    };
+    let mut saw_warp = matches!(ball0.mode, eve_destiny::MovementMode::Warp { .. });
+    let is_moving = !matches!(ball0.mode, eve_destiny::MovementMode::Stop);
+    let was_invuln = ballpark
+        .combat_states
+        .get(&ship_id)
+        .is_some_and(|cs| cs.is_invulnerable());
+    if !is_moving && !was_invuln {
+        return;
+    }
+    let max_sim = if is_moving {
+        secs.min(300)
+    } else {
+        secs.min(65)
+    };
+    let initial_tick = ballpark.current_tick;
+    let mut all_events = Vec::new();
+    for _ in 0..max_sim {
+        *sim_elapsed_secs += 1.0;
+        let evs = ballpark.step(1.0);
+        persist_landed_warps_in_db(ballpark, &evs, db_opt);
+        let warp_exited = evs.iter().any(|e| {
+            matches!(
+                e,
+                eve_destiny::DestinyEvent::OnDeactivatingWarp { ball_id } if *ball_id == ship_id
+            )
+        });
+        all_events.extend(evs);
+        let mode_now = ballpark.balls.get(&ship_id).map(|b| &b.mode);
+        if matches!(mode_now, Some(eve_destiny::MovementMode::Warp { .. })) {
+            saw_warp = true;
+        }
+        if warp_exited
+            || (saw_warp && !matches!(mode_now, Some(eve_destiny::MovementMode::Warp { .. })))
+            || (is_moving && matches!(mode_now, Some(eve_destiny::MovementMode::Stop) | None))
+        {
+            break;
+        }
+        if !is_moving
+            && ballpark
+                .combat_states
+                .get(&ship_id)
+                .is_none_or(|cs| !cs.is_invulnerable())
+        {
+            break;
+        }
+    }
+    ballpark.current_tick = (initial_tick + 1).min(ballpark.current_tick);
+    if is_moving {
+        if let Some((pos, vel)) = ballpark
+            .balls
+            .get(&ship_id)
+            .map(|b| (b.position.to_array(), b.velocity.to_array()))
+        {
+            let pos_ev = eve_destiny::DestinyEvent::SetBallPosition {
+                ball_id: ship_id,
+                position: pos,
+            };
+            let vel_ev = eve_destiny::DestinyEvent::SetBallVelocity {
+                ball_id: ship_id,
+                velocity: vel,
+            };
+            let obs = ballpark.observer_events.entry(ship_id).or_default();
+            obs.insert(0, pos_ev.clone());
+            obs.insert(1, vel_ev.clone());
+            all_events.insert(0, pos_ev);
+            all_events.insert(1, vel_ev);
+        }
+    }
+    crate::system_actor::sync_ball_positions(ballpark, ball_positions_actor, scrambled_balls_actor);
+    let broadcast = crate::system_actor::build_tick_broadcast(solar_system_id, ballpark, all_events);
+    let _ = event_tx_actor.send(broadcast);
+}
+
 #[cfg(test)]
 #[path = "celestials_helpers_cov_unit_tests.rs"]
 mod celestials_helpers_cov_unit_tests;
-

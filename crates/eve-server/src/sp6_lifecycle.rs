@@ -18,6 +18,7 @@
 
 mod cluster_tick;
 mod cluster_tick_downtime;
+mod drone_reconnect_finish;
 pub mod drone_return;
 
 pub use cluster_tick::{
@@ -400,7 +401,7 @@ pub fn require_ship_ready_for_filament_jump(
                     message: "Cannot activate filament while warp scrambled".into(),
                 });
             }
-            if cs.is_warp_exit_invulnerable() || cs.gate_cloak_remaining_ticks > 0 {
+            if cs.is_warp_exit_invulnerable() || (cs.gate_cloak_remaining_ticks > 0 && cs.is_invulnerable()) {
                 return Err(BridgeRpcError {
                     code: "ShipInvulnerable".into(),
                     message: "Cannot activate filament while session-change or warp-exit invulnerability is active".into(),
@@ -1350,26 +1351,8 @@ pub async fn handle_cmd_reconnect_to_drones(
         });
     }
 
-    if !reconnected.is_empty() {
-        let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
-            for &(_, did, _) in &reconnected {
-                if let Some(it) = snap.items.get_mut(&did) {
-                    it.owner_id = char_id;
-                    it.version += 1;
-                }
-            }
-            Ok(())
-        });
-    }
-
-    for &(bid, _, tid) in &reconnected {
-        let _ = sys_handle
-            .emit_destiny_event(bid, eve_destiny::DestinyEvent::OnDroneStateChange {
-                drone_id: bid, owner_id: char_id, controller_id: ship_id,
-                activity_state: 0, type_id: tid, controller_owner_id: char_id, target_id: None,
-            })
-            .await;
-    }
+    drone_reconnect_finish::finish_reconnect_drones(ctx, &sys_handle, char_id, ship_id, &reconnected)
+        .await;
 
     let errors_py: Vec<(PyRep, PyRep)> = errors
         .into_iter()

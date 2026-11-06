@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod celestials;
+use celestials::fast_forward_clock_in_actor;
 pub use celestials::*;
 mod belts;
 pub use belts::*;
@@ -178,23 +179,6 @@ impl SystemRegistry {
     }
 }
 
-pub(crate) fn sync_ball_positions(
-    ballpark: &Ballpark,
-    cache: &RwLock<HashMap<BallId, DVec3>>,
-    scrambled: &RwLock<std::collections::HashSet<BallId>>,
-) {
-    let mut guard = cache.write().unwrap_or_else(|e| e.into_inner());
-    let mut scram_guard = scrambled.write().unwrap_or_else(|e| e.into_inner());
-    guard.clear();
-    scram_guard.clear();
-    for (&id, ball) in &ballpark.balls {
-        guard.insert(id, ball.position);
-        if ballpark.is_ball_scrambled(id) {
-            scram_guard.insert(id);
-        }
-    }
-}
-
 impl SystemRegistry {
     pub fn get_ball_position_sync(
         &self,
@@ -318,7 +302,7 @@ impl SystemRegistry {
         }
 
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<SystemCommand>(SYSTEM_MAILBOX_CAPACITY);
-        let (event_tx, _) = broadcast::channel::<TickBroadcast>(64);
+        let (event_tx, _) = broadcast::channel::<TickBroadcast>(4096);
         let event_tx_actor = event_tx.clone();
         let sde_opt = self.sde.clone();
         let db_opt = self.db.clone();
@@ -1294,6 +1278,10 @@ impl SystemRegistry {
                             }
                             SystemCommand::SetInterdictionNullified { ball_id, nullified, reply } => {
                                 let _ = reply.send(ballpark.set_interdiction_nullified(ball_id, nullified));
+                            }
+                            SystemCommand::FastForwardClock { ship_id, secs, reply } => {
+                                fast_forward_clock_in_actor(solar_system_id, &mut ballpark, ship_id, secs, sim_elapsed_secs, &db_opt, &ball_positions_actor, &scrambled_balls_actor, &event_tx_actor);
+                                let _ = reply.send(());
                             }
                             SystemCommand::MicroJump { ball_id, distance_meters, reply } => {
                                 let res = ballpark.micro_jump(ball_id, distance_meters);

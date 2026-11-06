@@ -702,7 +702,7 @@ pub(crate) async fn handle_cmd_goto_direction(
     let dir = DVec3::new(x, y, z).normalize_or_zero();
     let direction = if dir.length_squared() > 1e-6 { dir } else { DVec3::X };
     let handle = ctx.systems.get_or_spawn(sys_id);
-    let Some(_) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
+    let Some((_, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
         code: "DestinyCommandFailed".into(),
         message: e,
     })? else {
@@ -715,6 +715,9 @@ pub(crate) async fn handle_cmd_goto_direction(
     ensure_not_mjd_spooling(&handle, ship_id).await?;
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
+    if current_ball.speed_fraction <= 0.0 {
+        let _ = handle.set_speed_fraction(ship_id, 1.0).await;
+    }
     handle
         .set_movement_mode(ship_id, MovementMode::GotoDirection { direction })
         .await
@@ -881,7 +884,7 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
         });
     }
     let handle = ctx.systems.get_or_spawn(sys_id);
-    let Some(_) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
+    let Some((_, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
         code: "DestinyCommandFailed".into(),
         message: e,
     })? else {
@@ -917,6 +920,9 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
     ensure_not_mjd_spooling(&handle, ship_id).await?;
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
+    if current_ball.speed_fraction <= 0.0 {
+        let _ = handle.set_speed_fraction(ship_id, 1.0).await;
+    }
     let res = handle
         .set_movement_mode(ship_id, mode)
         .await

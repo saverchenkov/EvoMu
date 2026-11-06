@@ -227,6 +227,14 @@ class EvoMuBridgeConnection(object):
         self._reader_thread = None
         self._closed = False
 
+    @property
+    def connected(self):
+        return (
+            self.sock is not None
+            and not self._closed
+            and (self._reader_thread is None or self._reader_thread.is_alive())
+        )
+
     def connect(self):
         self.sock = socket.create_connection((self.host, self.port), timeout=DEFAULT_RPC_TIMEOUT)
         self.sock.settimeout(None)

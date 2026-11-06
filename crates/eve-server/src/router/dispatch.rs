@@ -245,7 +245,7 @@ impl ServerContext {
                     }
                 }
             }
-            res = crate::quasar_grpc::normalize_macho_rpc_reply(service, method, res);
+            res = crate::router::client_compat::normalize_macho_rpc_reply(service, method, res);
         }
 
         res
@@ -362,7 +362,17 @@ impl ServerContext {
         let _ = self.quasar_gateway.on_session_changed(session, now_unix);
 
         let bound_entry = if let Some(bid) = bound_id {
-            Some(self.verify_bound_object(session, bid)?)
+            match self.verify_bound_object(session, bid) {
+                Ok(entry) => Some(entry),
+                Err(e) => {
+                    let cw = self.bound_objects.read().ok().and_then(|m| m.get(&bid).cloned())
+                        .filter(|en| en.service == "crimewatch")
+                        .and_then(|en| u32::try_from(en.object_id).ok())
+                        .filter(|&sid| self.sde.solar_systems.contains_key(&sid))
+                        .and_then(|sid| { let mut s = session.clone(); s.solar_system_id = Some(sid); self.verify_bound_object(&s, bid).ok() });
+                    if let Some(entry) = cw { Some(entry) } else { return Err(e); }
+                }
+            }
         } else {
             None
         };
@@ -389,6 +399,12 @@ impl ServerContext {
             });
         }
 
+        if effective_service == "wormholeMgr" && method == "GetWormholePolarization" {
+            if let Some(res) = services::wormhole_lifecycle_ops::resolve_cross_system_wormhole_polarization(self, session, args) {
+                return res;
+            }
+        }
+
         if effective_service == "timeControl" && method == "AdvanceClock" {
             let _ = Self::require_auth(session)?;
             if !session.has_gm_role() {
@@ -410,14 +426,10 @@ impl ServerContext {
                 _ => 12,
             };
             self.advance_secs(secs);
-            if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
-                let sys_h = self.systems.get_or_spawn(sys_id);
-                if let Ok(Some((_, ball))) = sys_h.get_ball_snapshot(ship_id).await {
-                    if matches!(ball.mode, eve_destiny::MovementMode::Warp { .. }) {
-                        for _ in 0..secs.min(60) {
-                            let _ = sys_h.tick().await;
-                        }
-                    }
+            if secs > 0 {
+                if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
+                    let sys_h = self.systems.get_or_spawn(sys_id);
+                    let _ = sys_h.fast_forward_clock(ship_id, secs).await;
                 }
             }
             return Ok(PyRep::Bool(true));
@@ -596,7 +608,11 @@ impl ServerContext {
                     })
                 }
             };
-            let bid = self.bind_object(session, effective_service, obj_id)?;
+            let cw_sess = (effective_service == "crimewatch")
+                .then(|| u32::try_from(obj_id).ok().filter(|id| self.sde.solar_systems.contains_key(id)))
+                .flatten()
+                .map(|sys_id| { let mut s = session.clone(); s.solar_system_id = Some(sys_id); s });
+            let bid = self.bind_object(cw_sess.as_ref().unwrap_or(session), effective_service, obj_id)?;
             if effective_service == "beyonce" {
                 let requested_sys = u32::try_from(obj_id)
                     .ok()
@@ -1329,63 +1345,8 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
 }
 
 #[cfg(test)]
-mod wal_poison_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_b11r2_p1_01_second_with_mut_snapshot_refused_after_wal_error() {
-        ensure_wal_error_hook_installed();
-        let tmp_path = std::env::temp_dir().join(format!(
-            "evomu_b11r2_p1_01_poison_{}.json",
-            std::process::id()
-        ));
-        let wal_dir = tmp_path.with_extension("json.wal");
-        let _ = std::fs::remove_file(&tmp_path);
-        let _ = std::fs::remove_dir_all(&wal_dir);
-
-        let repo = eve_db::WorldRepository::new_empty_with_snapshot_path(Some(tmp_path.clone()))
-            .expect("new_empty_with_snapshot_path");
-        std::fs::write(&tmp_path, b"{}").expect("seed tmp_path");
-        // Block WAL append by placing a directory at `<tmp_path>.wal`.
-        std::fs::create_dir_all(&wal_dir).expect("create_dir_all wal_dir");
-
-        let recorded_err = DISPATCH_WAL_ERROR
-            .scope(std::cell::RefCell::new(None), async {
-                repo.with_mut_snapshot(|snap| {
-                    snap.service_state_blobs
-                        .insert("first_tx".into(), "should_rollback".into());
-                });
-                assert!(
-                    current_dispatch_wal_error().is_some(),
-                    "first WAL failure must poison DISPATCH_WAL_ERROR scope"
-                );
-                // Even if the WAL path becomes writable again, the poisoned scope must refuse commits.
-                let _ = std::fs::remove_dir_all(&wal_dir);
-                repo.with_mut_snapshot(|snap| {
-                    snap.service_state_blobs
-                        .insert("second_tx".into(), "must_not_persist".into());
-                });
-                take_dispatch_wal_error()
-            })
-            .await;
-
-        assert!(recorded_err.is_some(), "dispatch scope must report WAL error");
-        repo.with_snapshot(|snap| {
-            assert!(
-                !snap.service_state_blobs.contains_key("first_tx"),
-                "first failed mutation must not be persisted"
-            );
-            assert!(
-                !snap.service_state_blobs.contains_key("second_tx"),
-                "second mutation in poisoned dispatch scope must not be persisted"
-            );
-        });
-
-        drop(repo);
-        let _ = std::fs::remove_file(&tmp_path);
-        let _ = std::fs::remove_dir_all(&wal_dir);
-    }
-}
+#[path = "dispatch_wal_tests.rs"]
+mod wal_poison_tests;
 
 #[cfg(test)]
 #[path = "dispatch_unit_tests.rs"]

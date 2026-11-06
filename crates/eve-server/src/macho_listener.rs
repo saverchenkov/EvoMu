@@ -38,6 +38,29 @@ pub const FRAME_BODY_TIMEOUT_SECS: u64 = 30;
 
 static NEXT_MACHO_SESSION_ID: AtomicU64 = AtomicU64::new(10_000);
 
+fn reply_source_address(dest: &MachoAddress) -> MachoAddress {
+    match dest {
+        MachoAddress::Node { .. } => dest.clone(),
+        MachoAddress::Any { service, call_id } => MachoAddress::Node {
+            node_id: MACHO_PROXY_NODE_ID,
+            service: service.clone(),
+            call_id: *call_id,
+        },
+        MachoAddress::Client {
+            service, call_id, ..
+        } => MachoAddress::Node {
+            node_id: MACHO_PROXY_NODE_ID,
+            service: service.clone(),
+            call_id: *call_id,
+        },
+        MachoAddress::Broadcast { .. } => MachoAddress::Node {
+            node_id: MACHO_PROXY_NODE_ID,
+            service: None,
+            call_id: 0,
+        },
+    }
+}
+
 /// Writes a length-prefixed (`u32` little-endian) marshaled `PyRep` frame to an async writer.
 pub async fn write_framed_pyrep<W: AsyncWriteExt + Unpin>(
     stream: &mut W,
@@ -201,28 +224,39 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                 let _ = write_framed_pyrep(&mut writer, &closed.to_pyrep()).await;
                 break;
             }
-            Ok(tick_msg) = sys_rx.recv(), if ballpark_ready => {
-                if session.character_id.is_some()
-                    && session.station_id.is_none()
-                    && session.structure_id.is_none()
-                    && session.solar_system_id == Some(tick_msg.solar_system_id)
-                    && tick_msg.tick >= last_destiny_tick
-                {
-                    if let Some(ship_id) = session.ship_id {
-                        if let Some(updates_pyrep) = tick_msg.observer_updates_pyrep.get(&ship_id) {
-                            last_destiny_tick = tick_msg.tick;
-                            let notif_pkt = MachoPacket::new_broadcast_notification(
-                                MACHO_PROXY_NODE_ID,
-                                client_id,
-                                session.user_id,
-                                "DoDestinyUpdate",
-                                crate::quasar_grpc::normalize_macho_notification(
-                                    "DoDestinyUpdate",
-                                    vec![updates_pyrep.clone(), PyRep::Bool(false)],
-                                ),
-                            );
-                            if write_framed_pyrep(&mut writer, &notif_pkt.to_pyrep()).await.is_err() {
-                                break;
+            tick_res = sys_rx.recv(), if ballpark_ready => {
+                match tick_res {
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!("machoNet session {session_id} sys_rx lagged by {skipped} ticks");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {}
+                    Ok(tick_msg) => {
+                        if session.character_id.is_some()
+                            && session.station_id.is_none()
+                            && session.structure_id.is_none()
+                            && session.solar_system_id == Some(tick_msg.solar_system_id)
+                            && tick_msg.tick >= last_destiny_tick
+                        {
+                            if let Some(ship_id) = session.ship_id {
+                                if let Some(updates_pyrep) = tick_msg.observer_updates_pyrep.get(&ship_id) {
+                                    last_destiny_tick = tick_msg.tick;
+                                    let norm_args = crate::router::client_compat::normalize_macho_notification(
+                                        "DoDestinyUpdate",
+                                        vec![updates_pyrep.clone(), PyRep::Bool(false)],
+                                    );
+                                    if !matches!(norm_args.first(), Some(PyRep::List(items)) if items.is_empty()) {
+                                        let notif_pkt = MachoPacket::new_broadcast_notification(
+                                            MACHO_PROXY_NODE_ID,
+                                            client_id,
+                                            session.user_id,
+                                            "DoDestinyUpdate",
+                                            norm_args,
+                                        );
+                                        if write_framed_pyrep(&mut writer, &notif_pkt.to_pyrep()).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -236,9 +270,9 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
                     };
                     if should_drain {
-                        let prev_sys = session.solar_system_id;
+                        let prev_session = session.clone();
                         ctx.sync_session(&mut session);
-                        if session.solar_system_id != prev_sys
+                        if session.solar_system_id != prev_session.solar_system_id
                             || session.solar_system_id != subscribed_sys_id
                         {
                             ballpark_ready = false;
@@ -267,13 +301,20 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     ballpark_ready = false;
                                     last_destiny_tick = 0;
                                 }
+                                continue;
+                            }
+                            if crate::router::client_compat::should_suppress_macho_notification(
+                                &notif.event,
+                                &notif.args,
+                            ) {
+                                continue;
                             }
                             let notif_pkt = MachoPacket::new_broadcast_notification(
                                 MACHO_PROXY_NODE_ID,
                                 client_id,
                                 session.user_id,
                                 &notif.event,
-                                crate::quasar_grpc::normalize_macho_notification(
+                                crate::router::client_compat::normalize_macho_notification(
                                     &notif.event,
                                     notif.args,
                                 ),
@@ -285,6 +326,46 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         }
                         if write_failed {
                             break;
+                        }
+                        if session.solar_system_id != prev_session.solar_system_id
+                            || session.solar_system_id != subscribed_sys_id
+                        {
+                            ballpark_ready = false;
+                            last_destiny_tick = 0;
+                            if let Some(new_sys) = session.solar_system_id {
+                                sys_rx = ctx.systems.get_or_spawn(new_sys).subscribe();
+                            }
+                            subscribed_sys_id = session.solar_system_id;
+                        }
+                        if session.station_id.is_some() || session.structure_id.is_some() {
+                            ballpark_ready = false;
+                            last_destiny_tick = 0;
+                        }
+                        if let Some(sess_change_payload) = prev_session
+                            .to_session_change_pyrep(&session, vec![MACHO_PROXY_NODE_ID as i64])
+                        {
+                            let mut named_payload = HashMap::new();
+                            named_payload
+                                .insert("channel".into(), PyRep::ascii_bytes("sessionchange"));
+                            let sess_pkt = MachoPacket {
+                                packet_type: MachoPacketType::SessionChangeNotification,
+                                source: MachoAddress::Node {
+                                    node_id: MACHO_PROXY_NODE_ID,
+                                    service: None,
+                                    call_id: 0,
+                                },
+                                destination: MachoAddress::Client {
+                                    client_id,
+                                    call_id: 0,
+                                    service: None,
+                                },
+                                user_id: session.user_id,
+                                payload: sess_change_payload,
+                                named_payload,
+                            };
+                            if write_framed_pyrep(&mut writer, &sess_pkt.to_pyrep()).await.is_err() {
+                                break;
+                            }
                         }
                     }
                 }
@@ -482,13 +563,13 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                                 crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(
                                                     &ctx, disp_cid,
                                                 );
+                                                ctx.disconnect_session(
+                                                    d.session_id,
+                                                    "ACL_DISPLACED",
+                                                    "Displaced by concurrent login on same account",
+                                                );
+                                                ctx.release_session_bindings(d.session_id);
                                             }
-                                            ctx.disconnect_session(
-                                                d.session_id,
-                                                "ACL_DISPLACED",
-                                                "Displaced by concurrent login on same account",
-                                            );
-                                            ctx.release_session_bindings(d.session_id);
                                         }
                                     }
                                 }
@@ -546,39 +627,46 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                     MachoPacketType::PingReq => {
                         let mut payload = pkt.payload.clone();
                         let now_ft = ctx.now_blueos_filetime_ticks();
-                        if let PyRep::Tuple(items) = &mut payload {
-                            if let Some(PyRep::List(times)) = items.first_mut() {
-                                let (t1, t2) = times
-                                    .last()
-                                    .and_then(|entry| match entry {
-                                        PyRep::Tuple(t) if t.len() >= 2 => {
-                                            Some((t[0].as_i64()?, t[1].as_i64()?))
-                                        }
-                                        _ => None,
-                                    })
-                                    .unwrap_or((now_ft, now_ft));
-                                for label in [
-                                    "proxy::handle_message",
-                                    "proxy::after_tasklet",
-                                    "proxy::writing",
-                                    "server::handle_message",
-                                    "server::after_tasklet",
-                                    "server::turnaround",
-                                    "proxy::handle_message",
-                                    "proxy::after_tasklet",
-                                    "proxy::writing",
-                                ] {
-                                    times.push(PyRep::Tuple(vec![
-                                        PyRep::Integer(t1),
-                                        PyRep::Integer(t2),
-                                        PyRep::ascii_bytes(label),
-                                    ]));
+                        let append_ping_times = |times: &mut Vec<PyRep>| {
+                            let (t1, t2) = times
+                                .last()
+                                .and_then(|entry| match entry {
+                                    PyRep::Tuple(t) if t.len() >= 2 => {
+                                        Some((t[0].as_i64()?, t[1].as_i64()?))
+                                    }
+                                    _ => None,
+                                })
+                                .unwrap_or((now_ft, now_ft));
+                            for label in [
+                                "proxy::handle_message",
+                                "proxy::after_tasklet",
+                                "proxy::writing",
+                                "server::handle_message",
+                                "server::after_tasklet",
+                                "server::turnaround",
+                                "proxy::handle_message",
+                                "proxy::after_tasklet",
+                                "proxy::writing",
+                            ] {
+                                times.push(PyRep::Tuple(vec![
+                                    PyRep::Integer(t1),
+                                    PyRep::Integer(t2),
+                                    PyRep::ascii_bytes(label),
+                                ]));
+                            }
+                        };
+                        match &mut payload {
+                            PyRep::Tuple(items) => {
+                                if let Some(PyRep::List(times)) = items.first_mut() {
+                                    append_ping_times(times);
                                 }
                             }
+                            PyRep::List(times) => append_ping_times(times),
+                            _ => {}
                         }
                         let rsp = MachoPacket {
                             packet_type: MachoPacketType::PingRsp,
-                            source: pkt.destination.clone(),
+                            source: reply_source_address(&pkt.destination),
                             destination: pkt.source.clone(),
                             user_id: session.user_id,
                             payload,
@@ -616,6 +704,26 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 Some("machoNet:26000"),
                             )
                             .await;
+                        if let Some(cid) = session.character_id {
+                            for notif in ctx.drain_notifications_for_char(cid) {
+                                if !session
+                                    .notifications
+                                    .iter()
+                                    .any(|(ev, a)| ev == &notif.event && a == &notif.args)
+                                {
+                                    pre_rpc_notifs.push(notif);
+                                }
+                            }
+                        }
+                        if service == "timeControl"
+                            || pre_rpc_notifs.iter().any(|n| n.event == "OnSessionChanged")
+                            || session
+                                .notifications
+                                .iter()
+                                .any(|(ev, _)| ev == "OnSessionChanged")
+                        {
+                            ctx.sync_session(&mut session);
+                        }
 
                         if session.solar_system_id != prev_session.solar_system_id
                             || session.solar_system_id != subscribed_sys_id
@@ -669,7 +777,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 }
                                 MachoPacket {
                                     packet_type: MachoPacketType::CallRsp,
-                                    source: pkt.destination.clone(),
+                                    source: reply_source_address(&pkt.destination),
                                     destination: pkt.source.clone(),
                                     user_id: session.user_id,
                                     payload: PyRep::Tuple(vec![PyRep::SubStream(Box::new(val))]),
@@ -688,6 +796,25 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                         MachoPacketType::CallReq as i64,
                                         &err_msg,
                                     )
+                                } else if matches!(
+                                    err.code.as_str(),
+                                    "FakeItemNotFound" | "CharacterNotAtStation"
+                                ) {
+                                    eve_machonet::wrapped_runtime_error_body(
+                                        MachoPacketType::CallReq as i64,
+                                        &err.code,
+                                    )
+                                } else if matches!(
+                                    err.code.as_str(),
+                                    "InvalidBoundObject"
+                                        | "BoundObjectNotOwned"
+                                        | "UnMachoDestination"
+                                ) {
+                                    eve_machonet::wrapped_named_user_error_body(
+                                        MachoPacketType::CallReq as i64,
+                                        "UnMachoDestination",
+                                        &err_msg,
+                                    )
                                 } else {
                                     eve_machonet::wrapped_user_error_body(
                                         MachoPacketType::CallReq as i64,
@@ -696,7 +823,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 };
                                 MachoPacket {
                                     packet_type: MachoPacketType::ErrorResponse,
-                                    source: pkt.destination.clone(),
+                                    source: reply_source_address(&pkt.destination),
                                     destination: pkt.source.clone(),
                                     user_id: session.user_id,
                                     payload,
@@ -726,21 +853,24 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     sys_handle.drain_observer_updates(ship_id).await
                                 {
                                     if !obs_evs.is_empty() {
-                                        let notif_pkt = MachoPacket::new_broadcast_notification(
-                                            MACHO_PROXY_NODE_ID,
-                                            client_id,
-                                            session.user_id,
+                                        let norm_args = crate::router::client_compat::normalize_macho_notification(
                                             "DoDestinyUpdate",
-                                            crate::quasar_grpc::normalize_macho_notification(
-                                                "DoDestinyUpdate",
-                                                vec![updates_pyrep, PyRep::Bool(false)],
-                                            ),
+                                            vec![updates_pyrep, PyRep::Bool(false)],
                                         );
-                                        if write_framed_pyrep(&mut writer, &notif_pkt.to_pyrep())
-                                            .await
-                                            .is_err()
-                                        {
-                                            break;
+                                        if !matches!(norm_args.first(), Some(PyRep::List(items)) if items.is_empty()) {
+                                            let notif_pkt = MachoPacket::new_broadcast_notification(
+                                                MACHO_PROXY_NODE_ID,
+                                                client_id,
+                                                session.user_id,
+                                                "DoDestinyUpdate",
+                                                norm_args,
+                                            );
+                                            if write_framed_pyrep(&mut writer, &notif_pkt.to_pyrep())
+                                                .await
+                                                .is_err()
+                                            {
+                                                break;
+                                            }
                                         }
                                     }
                                 }
@@ -788,21 +918,24 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 {
                                     if !obs_evs.is_empty() {
                                         last_destiny_tick = last_destiny_tick.max(tick);
-                                        let notif_pkt = MachoPacket::new_broadcast_notification(
-                                            MACHO_PROXY_NODE_ID,
-                                            client_id,
-                                            session.user_id,
+                                        let norm_args = crate::router::client_compat::normalize_macho_notification(
                                             "DoDestinyUpdate",
-                                            crate::quasar_grpc::normalize_macho_notification(
-                                                "DoDestinyUpdate",
-                                                vec![updates_pyrep, PyRep::Bool(false)],
-                                            ),
+                                            vec![updates_pyrep, PyRep::Bool(false)],
                                         );
-                                        if write_framed_pyrep(&mut writer, &notif_pkt.to_pyrep())
-                                            .await
-                                            .is_err()
-                                        {
-                                            break;
+                                        if !matches!(norm_args.first(), Some(PyRep::List(items)) if items.is_empty()) {
+                                            let notif_pkt = MachoPacket::new_broadcast_notification(
+                                                MACHO_PROXY_NODE_ID,
+                                                client_id,
+                                                session.user_id,
+                                                "DoDestinyUpdate",
+                                                norm_args,
+                                            );
+                                            if write_framed_pyrep(&mut writer, &notif_pkt.to_pyrep())
+                                                .await
+                                                .is_err()
+                                            {
+                                                break;
+                                            }
                                         }
                                     }
                                 }
@@ -826,7 +959,12 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         }
                         let mut notif_write_failed = false;
                         for notif in pre_rpc_notifs {
-                            if sess_change_sent && notif.event == "OnSessionChanged" {
+                            if (sess_change_sent && notif.event == "OnSessionChanged")
+                                || crate::router::client_compat::should_suppress_macho_notification(
+                                    &notif.event,
+                                    &notif.args,
+                                )
+                            {
                                 continue;
                             }
                             let notif_pkt = MachoPacket::new_broadcast_notification(
@@ -834,7 +972,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 client_id,
                                 session.user_id,
                                 &notif.event,
-                                crate::quasar_grpc::normalize_macho_notification(
+                                crate::router::client_compat::normalize_macho_notification(
                                     &notif.event,
                                     notif.args,
                                 ),
@@ -849,7 +987,12 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         }
                         if !notif_write_failed {
                             for (event, args) in session.drain_notifications() {
-                                if sess_change_sent && event == "OnSessionChanged" {
+                                if (sess_change_sent && event == "OnSessionChanged")
+                                    || crate::router::client_compat::should_suppress_macho_notification(
+                                        &event,
+                                        &args,
+                                    )
+                                {
                                     continue;
                                 }
                                 let notif_pkt = MachoPacket::new_broadcast_notification(
@@ -857,7 +1000,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     client_id,
                                     session.user_id,
                                     &event,
-                                    crate::quasar_grpc::normalize_macho_notification(&event, args),
+                                    crate::router::client_compat::normalize_macho_notification(&event, args),
                                 );
                                 if write_framed_pyrep(&mut writer, &notif_pkt.to_pyrep())
                                     .await
@@ -872,10 +1015,27 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             break;
                         }
                     }
+                    MachoPacketType::ResolveReq => {
+                        let rsp = MachoPacket {
+                            packet_type: MachoPacketType::ResolveRsp,
+                            source: MachoAddress::Node {
+                                node_id: MACHO_PROXY_NODE_ID,
+                                service: None,
+                                call_id: 0,
+                            },
+                            destination: pkt.source.clone(),
+                            user_id: session.user_id,
+                            payload: PyRep::Integer(MACHO_PROXY_NODE_ID as i64),
+                            named_payload: HashMap::new(),
+                        };
+                        if write_framed_pyrep(&mut writer, &rsp.to_pyrep()).await.is_err() {
+                            break;
+                        }
+                    }
                     MachoPacketType::AuthenticationReq => {
                         let err_pkt = MachoPacket {
                             packet_type: MachoPacketType::ErrorResponse,
-                            source: pkt.destination.clone(),
+                            source: reply_source_address(&pkt.destination),
                             destination: pkt.source.clone(),
                             user_id: session.user_id,
                             payload: PyRep::Tuple(vec![

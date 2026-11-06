@@ -156,6 +156,7 @@ pub fn normalize_macho_notification(event: &str, args: Vec<PyRep>) -> Vec<PyRep>
                 let item_id = args[0].clone();
                 let effect_id = args.get(1).cloned().unwrap_or(PyRep::None);
                 let active = args.get(2).cloned().unwrap_or(PyRep::Bool(false));
+                let default_ft = 132_000_000_000_000_000_i64;
                 let env = PyRep::Tuple(vec![
                     item_id.clone(),
                     PyRep::None,
@@ -168,11 +169,11 @@ pub fn normalize_macho_notification(event: &str, args: Vec<PyRep>) -> Vec<PyRep>
                 vec![
                     item_id,
                     effect_id,
-                    PyRep::Integer(0),
+                    PyRep::Integer(default_ft),
                     active.clone(),
                     active,
                     env,
-                    PyRep::Integer(0),
+                    PyRep::Integer(default_ft),
                     PyRep::Real(0.0),
                     PyRep::Integer(0),
                     PyRep::None,

@@ -552,6 +552,13 @@ pub fn resolve_slim_item_meta(park: Option<&Ballpark>, ball: &Ball) -> SlimItemM
                 ..SlimItemMeta::default()
             };
         }
+        if matches!(ball.type_id, 32882 | 55914 | 56002) {
+            return SlimItemMeta {
+                group_id: 4079,
+                category_id: 2,
+                ..SlimItemMeta::default()
+            };
+        }
         return SlimItemMeta {
             group_id: 6,
             category_id: 2,
@@ -586,9 +593,14 @@ pub fn slim_item_dict(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
     } else {
         PyRep::None
     };
+    let wire_type_id = match ball.type_id {
+        0 => 6,
+        32882 | 56002 => 55914,
+        other => other,
+    };
     let mut entries = vec![
         ("itemID", PyRep::Integer(ball.id)),
-        ("typeID", PyRep::Integer(ball.type_id as i64)),
+        ("typeID", PyRep::Integer(wire_type_id as i64)),
         ("groupID", PyRep::Integer(meta.group_id as i64)),
         ("categoryID", PyRep::Integer(meta.category_id as i64)),
         ("ownerID", PyRep::Integer(meta.owner_id)),
@@ -601,20 +613,11 @@ pub fn slim_item_dict(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
         ("skinMaterialSetID", meta.skin_material_set_id.map(|m| PyRep::Integer(i64::from(m))).unwrap_or(PyRep::None)),
     ];
     if meta.group_id == 10 {
-        // DERIVED: V24.01 `evegraphics/controllers/clientControllerRegistry.py:75` (`StargateSetup`)
-        // indexes `slimItem.destinationCorruptionStageAndMaximum[0..1]` and the local/suppression
-        // 2-tuples directly (`SlimItem.__getattr__` returns `None` for missing keys, so `hasattr`
-        // is always `True`). Default stargates to stage `0` of `5`.
+        // DERIVED: V24.01 `StargateSetup` indexes corruption/suppression 2-tuples directly.
         let zero_of_five = PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(5)]);
-        entries.push((
-            "destinationCorruptionStageAndMaximum",
-            zero_of_five.clone(),
-        ));
+        entries.push(("destinationCorruptionStageAndMaximum", zero_of_five.clone()));
         entries.push(("localCorruptionStageAndMaximum", zero_of_five.clone()));
-        entries.push((
-            "destinationSuppressionStageAndMaximum",
-            zero_of_five.clone(),
-        ));
+        entries.push(("destinationSuppressionStageAndMaximum", zero_of_five.clone()));
         entries.push(("localSuppressionStageAndMaximum", zero_of_five));
         let jump_list = meta
             .jump_target
@@ -628,17 +631,12 @@ pub fn slim_item_dict(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
         entries.push(("jumps", PyRep::List(jump_list)));
     }
     if meta.group_id == 988 {
-        // DERIVED: V24.01 `wormhole.py:21` (`Assemble`) passes `self.slimItem.nebulaType`
-        // to `spaceMgr.GetNebulaTextureForType`; missing `nebulaType` yields `None` and
-        // raises `TypeError: Could not match argument 0 to expected type: wstring` in `trinity.Load`.
-        entries.push(("nebulaType", PyRep::Integer(1)));
+        entries.push(("nebulaType", PyRep::Integer(11806)));
+        entries.push(("maxShipJumpMass", PyRep::Real(300_000_000.0)));
+        entries.push(("isDestTriglavian", PyRep::Integer(0)));
     }
     if meta.category_id == 11 {
-        // DERIVED: V24.01 `spacecomponents/client/components/entitystandings.pyj:63`
-        // (`_get_icon_color_and_hint_from_entity_standing_response`) checks
-        // `if slim_item.hostile_response_threshold is None or slim_item.friendly_response_threshold is None:`
-        // and logs `logger.error('failed getting standing thresholds from slim_item, defaulting to hostile=%s and friendly=%s for type=%s')`
-        // (triggering `monolithsentry`) when missing on NPC entity balls (`category_id == 11`).
+        // DERIVED: V24.01 `entitystandings.pyj:63` requires non-None standing thresholds on NPC balls.
         entries.push(("hostile_response_threshold", PyRep::Real(11.0)));
         entries.push(("friendly_response_threshold", PyRep::Real(11.0)));
     }
@@ -654,12 +652,12 @@ pub fn slim_item_dict(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
 /// (`wormholeAge`, `wormholeSize`) when present.
 pub fn slim_item_dict_with_park(park: Option<&Ballpark>, ball: &Ball, meta: &SlimItemMeta) -> PyRep {
     let mut rep = slim_item_dict(ball, meta);
-    if let (Some((age, size)), PyRep::Dict(entries)) = (
-        park.and_then(|p| p.ball_wormhole_stages.get(&ball.id)),
-        &mut rep,
-    ) {
-        entries.push((PyRep::String("wormholeAge".into()), PyRep::Integer(*age)));
-        entries.push((PyRep::String("wormholeSize".into()), PyRep::Real(*size)));
+    let stages = park
+        .and_then(|p| p.ball_wormhole_stages.get(&ball.id).copied())
+        .or_else(|| (meta.group_id == 988).then_some((0, 1.0)));
+    if let (Some((age, size)), PyRep::Dict(entries)) = (stages, &mut rep) {
+        entries.push((PyRep::String("wormholeAge".into()), PyRep::Integer(age)));
+        entries.push((PyRep::String("wormholeSize".into()), PyRep::Real(size)));
     }
     rep
 }
@@ -1379,27 +1377,5 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
     PyRep::Tuple(vec![PyRep::Integer(stamp as i64), action_tuple])
 }
 
-/// Encodes a slice of [`DestinyEvent`]s into a `DoDestinyUpdate` `PyRep::List` of `(stamp, (action, args))` tuples.
-///
-/// DERIVED: V24.01 `eve/client/script/remote/michelle.pyj` (`Park.FlushState` & `Park.RealFlushState`)
-/// requires `SetState` to appear at index `0` (`state[0][1][0] == 'SetState'`); any `SetState` at index `> 0`
-/// is ignored by `RealFlushState`, leaving `Park.validState == False` and hanging `GetBallWaitForModel`.
-pub fn encode_destiny_updates(
-    stamp: u32,
-    events: &[DestinyEvent],
-    park: Option<&Ballpark>,
-) -> PyRep {
-    let mut encoded = Vec::with_capacity(events.len());
-    for ev in events {
-        if matches!(ev, DestinyEvent::SetState { .. }) {
-            encoded.push(encode_destiny_event(stamp, ev, park));
-        }
-    }
-    for ev in events {
-        if !matches!(ev, DestinyEvent::SetState { .. }) {
-            encoded.push(encode_destiny_event(stamp, ev, park));
-        }
-    }
-    PyRep::List(encoded)
-}
+pub use crate::wire_batch::encode_destiny_updates;
 #[cfg(test)] #[path = "wire_unit_tests.rs"] mod wire_unit_tests;

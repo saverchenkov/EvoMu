@@ -337,8 +337,7 @@ pub fn handle_char_unbound(
                             for s in sorted {
                                 hist.push(SkillHistoryEntry {
                                     log_date_ft: now_ft,
-                                    // 33 = SkillEventCharCreation (evemu_Crucible EVE_Skills.h:24)
-                                    event_type_id: 33,
+                                    event_type_id: 33, // 33 = SkillEventCharCreation
                                     skill_type_id: s.type_id,
                                     skill_level: s.level,
                                     absolute_points: s.skill_points,
@@ -357,10 +356,7 @@ pub fn handle_char_unbound(
                     });
                     Some(Ok(PyRep::Integer(ch.character_id)))
                 }
-                Err(e) => Some(Err(BridgeRpcError {
-                    code: "CharacterCreationFailed".into(),
-                    message: e.to_string(),
-                })),
+                Err(e) => Some(Err(BridgeRpcError { code: "CharacterCreationFailed".into(), message: e.to_string() })),
             }
         }
 
@@ -433,6 +429,7 @@ pub fn handle_char_unbound(
                 ("corporationID", PyRep::Integer(c.corporation_id)),
                 ("shipID", PyRep::Integer(c.active_ship_id)),
                 ("solarSystemID", PyRep::Integer(eff_sys as i64)),
+                ("sessionChangeReason", PyRep::String("charsel".into())),
             ])))
         }
 
@@ -451,31 +448,16 @@ pub async fn handle_gm_slash_ext(
     cmd: &str,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     if cmd == "/heal" || cmd.starts_with("/heal ") {
-        let arg_id = cmd
-            .strip_prefix("/heal")
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .and_then(|s| s.parse::<i64>().ok());
+        let arg_id = cmd.strip_prefix("/heal").map(str::trim).filter(|s| !s.is_empty()).and_then(|s| s.parse::<i64>().ok());
 
         let (target_char_id, sys_id, target_ship_id) = ctx.db.with_snapshot(|snap| {
-            let caller_sys = session
-                .solar_system_id
-                .or_else(|| snap.characters.get(&cid).map(|c| c.solar_system_id))
-                .unwrap_or(0);
-            let caller_ship = snap
-                .characters
-                .get(&cid)
-                .map(|c| c.active_ship_id)
-                .unwrap_or(0);
+            let caller_sys = session.solar_system_id.or_else(|| snap.characters.get(&cid).map(|c| c.solar_system_id)).unwrap_or(0);
+            let caller_ship = snap.characters.get(&cid).map(|c| c.active_ship_id).unwrap_or(0);
             if let Some(tid) = arg_id {
                 if let Some(ch) = snap.characters.get(&tid) {
                     (tid, ch.solar_system_id, ch.active_ship_id)
                 } else if let Some(item) = snap.items.get(&tid) {
-                    let owner_sys = snap
-                        .characters
-                        .get(&item.owner_id)
-                        .map(|c| c.solar_system_id)
-                        .unwrap_or(caller_sys);
+                    let owner_sys = snap.characters.get(&item.owner_id).map(|c| c.solar_system_id).unwrap_or(caller_sys);
                     (item.owner_id, owner_sys, tid)
                 } else {
                     (cid, caller_sys, tid)
@@ -498,8 +480,7 @@ pub async fn handle_gm_slash_ext(
             for item in snap.items.values_mut() {
                 if item.item_id == target_ship_id || item.location_id == target_ship_id {
                     item.dynamic_attributes.remove(&eve_sde::attr_ids::DAMAGE);
-                    item.dynamic_attributes
-                        .remove(&eve_sde::attr_ids::ARMOR_DAMAGE);
+                    item.dynamic_attributes.remove(&eve_sde::attr_ids::ARMOR_DAMAGE);
                     item.dynamic_attributes.remove(&1211u16); // heatDamage
                 }
             }
@@ -510,7 +491,7 @@ pub async fn handle_gm_slash_ext(
             ctx.store_ship_fitting(target_ship_id, fit);
         }
         let _ = ctx.notify_damage_state_change(crate::router::NotificationTarget::Character(target_char_id), target_ship_id, 1.0, 1.0, 1.0);
-        let _ = ctx.notify_remote_message(crate::router::NotificationTarget::Character(target_char_id), "CustomInfo", vec![("info", PyRep::String("Ship healed".into()))]);
+        let _ = ctx.notify_remote_message(crate::router::NotificationTarget::Character(target_char_id), "CustomNotify", vec![("notify", PyRep::String("Ship healed".into()))]);
 
         return Some(Ok(PyRep::keyval([
             ("command", PyRep::String(cmd.to_string())),
@@ -529,46 +510,24 @@ pub async fn handle_gm_slash_ext(
     if let Some(rest) = cmd.strip_prefix("/spawn ") {
         let mut parts = rest.split_whitespace();
         let Some(type_id) = parts.next().and_then(|s| s.parse::<u32>().ok()) else {
-            return Some(Err(BridgeRpcError {
-                code: "InvalidSlashArgument".into(),
-                message: "Usage: /spawn <type_id> [quantity]".into(),
-            }));
+            return Some(Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /spawn <type_id> [quantity]".into() }));
         };
-        let qty = parts
-            .next()
-            .and_then(|s| s.parse::<i32>().ok())
-            .unwrap_or(1);
+        let qty = parts.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(1);
         if !(1..=100).contains(&qty) {
-            return Some(Err(BridgeRpcError {
-                code: "InvalidSlashArgument".into(),
-                message: "Quantity for /spawn must be between 1 and 100".into(),
-            }));
+            return Some(Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Quantity for /spawn must be between 1 and 100".into() }));
         }
         let Some(inv_type) = ctx.sde.types.get(&type_id).cloned() else {
-            return Some(Err(BridgeRpcError {
-                code: "TypeNotFound".into(),
-                message: format!("Type ID {type_id} not found in SDE"),
-            }));
+            return Some(Err(BridgeRpcError { code: "TypeNotFound".into(), message: format!("Type ID {type_id} not found in SDE") }));
         };
         let (sys_id, ship_id) = ctx
             .db
-            .with_snapshot(|snap| {
-                snap.characters
-                    .get(&cid)
-                    .map(|c| (c.solar_system_id, c.active_ship_id))
-            })
+            .with_snapshot(|snap| snap.characters.get(&cid).map(|c| (c.solar_system_id, c.active_ship_id)))
             .or_else(|| session.solar_system_id.map(|s| (s, 0)))
             .unwrap_or((0, 0));
 
         let handle = ctx.systems.get_or_spawn(sys_id);
         let origin = if ship_id > 0 {
-            handle
-                .get_ball_snapshot(ship_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|(_, b)| b.position)
-                .unwrap_or(DVec3::ZERO)
+            handle.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(DVec3::ZERO)
         } else {
             DVec3::ZERO
         };
@@ -650,21 +609,12 @@ pub async fn handle_gm_slash_ext(
         ])));
     }
 
-    if let Some(rest) = cmd
-        .strip_prefix("/unspawn ")
-        .or_else(|| cmd.strip_prefix("/despawn "))
-    {
+    if let Some(rest) = cmd.strip_prefix("/unspawn ").or_else(|| cmd.strip_prefix("/despawn ")) {
         let Some(target_id) = rest.trim().parse::<i64>().ok().filter(|&id| id > 0) else {
-            return Some(Err(BridgeRpcError {
-                code: "InvalidSlashArgument".into(),
-                message: "Usage: /unspawn <entity_id>".into(),
-            }));
+            return Some(Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /unspawn <entity_id>".into() }));
         };
         let (sys_id, removed_db) = ctx.db.with_mut_snapshot(|snap| {
-            let caller_sys = session
-                .solar_system_id
-                .or_else(|| snap.characters.get(&cid).map(|c| c.solar_system_id))
-                .unwrap_or(0);
+            let caller_sys = session.solar_system_id.or_else(|| snap.characters.get(&cid).map(|c| c.solar_system_id)).unwrap_or(0);
             let removed = snap.items.remove(&target_id).is_some();
             let children: Vec<i64> = snap.items.values().filter(|i| i.location_id == target_id).map(|i| i.item_id).collect();
             for child_id in children { snap.items.remove(&child_id); }
@@ -674,12 +624,10 @@ pub async fn handle_gm_slash_ext(
         let removed_ball = handle.remove_ball(target_id).await.is_some();
         if removed_ball {
             crate::services::pve_incursion_sites::mark_incursion_boss_destroyed(ctx, sys_id, target_id);
+            crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_core(&ctx.systems, &ctx.db, sys_id, target_id).await;
         }
         if !removed_db && !removed_ball {
-            return Some(Err(BridgeRpcError {
-                code: "EntityNotFound".into(),
-                message: format!("Entity {target_id} not found in space or inventory"),
-            }));
+            return Some(Err(BridgeRpcError { code: "EntityNotFound".into(), message: format!("Entity {target_id} not found in space or inventory") }));
         }
         return Some(Ok(PyRep::keyval([
             ("command", PyRep::String(cmd.to_string())),
@@ -1438,30 +1386,9 @@ pub async fn handle_gm_qa_rpcs(
                 message: format!("Unknown or unsupported QA slash command '{cmd}'"),
             }))
         }
-        ("publicQaToolsServer", "MoveMeTo") => {
-            let (_, cid) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let has_gm_or_qa = session.has_gm_role()
-                || (session.role & eve_machonet::service_roles::ROLE_QA) != 0;
-            if !has_gm_or_qa {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "publicQaToolsServer.MoveMeTo requires GM/QA role".into(),
-                }));
-            }
-            Some(crate::services::jump_clone_names::handle_qa_move_me_to(ctx, session, cid, args).await)
-        }
-        ("publicQaToolsServer", "CanGiveItemForMultifit") => {
-            let (_, cid) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let char_exists = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&cid));
-            let has_gm_or_qa = session.has_gm_role()
-                || (session.role & eve_machonet::service_roles::ROLE_QA) != 0;
-            Some(Ok(PyRep::Bool(char_exists && has_gm_or_qa)))
+        ("publicQaToolsServer", method) => {
+            crate::services::jump_clone_names::handle_public_qa_tools(ctx, session, method, args)
+                .await
         }
         _ => None,
     }

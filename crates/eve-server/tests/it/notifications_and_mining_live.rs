@@ -163,13 +163,13 @@ async fn test_live_chat_bans_cluster_shutdown_and_bound_container_passwords() {
     tick_background_cluster(&ctx).await;
     let dt_notifs: Vec<_> = drain_events(&ctx, &mut p2, PILOT_2).into_iter().filter(|(e, _)| e == "OnClusterShutdownInitiated").map(|(_, a)| a).collect();
     let expected_dt_ft = (next_dt as i64 + 11_644_473_600) * 10_000_000;
-    assert_eq!(dt_notifs, vec![vec![PyRep::String("UI/Shared/ClusterShutdownInitiated".into()), PyRep::Integer(expected_dt_ft), PyRep::Integer(15)]]);
+    assert_eq!(dt_notifs, vec![vec![PyRep::String("UI/Shared/ShutdownNotificationTitle".into()), PyRep::Integer(expected_dt_ft), PyRep::Integer(15)]]);
 
     let expected_slash_ft = ctx.now_blueos_filetime_ticks() + 180 * 10_000_000;
     slash(&ctx, &mut gm, "/shutdown 180").await;
     let slash_shut: Vec<_> = drain_events(&ctx, &mut p2, PILOT_2).into_iter().filter(|(e, _)| e == "OnClusterShutdownInitiated").map(|(_, a)| a).collect();
     assert_eq!(slash_shut.len(), 1);
-    assert_eq!(slash_shut[0][..2], [PyRep::String("UI/Shared/ClusterShutdownInitiated".into()), PyRep::Integer(expected_slash_ft)]);
+    assert_eq!(slash_shut[0][..2], [PyRep::String("UI/Shared/ShutdownNotificationTitle".into()), PyRep::Integer(expected_slash_ft)]);
 
     // 4. Bound invbroker GetInventoryFromId -> SetPassword(which=1|2, newPassword, oldPassword) + corp container logs
     slash(&ctx, &mut gm, "/giveisk 20000000").await;

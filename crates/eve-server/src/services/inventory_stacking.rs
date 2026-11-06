@@ -864,6 +864,10 @@ fn handle_list_impl(
         char_id,
         session.has_gm_role(),
     )?;
+    let fleet_shipping_authorized =
+        crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+            rt.authorized_shipping_storage.contains(&(bound_loc_id, char_id))
+        });
     let unit_check: Result<bool, BridgeRpcError> = ctx.db.with_snapshot(|snap| {
         if let Some(it) = snap.items.get(&bound_loc_id) {
             let cat = ctx.sde.types.get(&it.type_id).map(|t| t.category_id).unwrap_or(0);
@@ -872,9 +876,7 @@ fn handle_list_impl(
             let is_unit = cat == 22 || matches!(grp, 12 | 186 | 340 | 448 | 649 | 4137) || it.type_id == 23;
             let is_fleet_auth = !is_personal
                 && snap.fleets.values().any(|f| f.members.contains(&char_id) && f.members.contains(&it.owner_id))
-                && crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                    rt.authorized_shipping_storage.contains(&(bound_loc_id, char_id))
-                });
+                && fleet_shipping_authorized;
             let is_auth = session.has_gm_role() || it.owner_id == char_id || it.owner_id == 0 || is_fleet_auth;
             if !is_unit || !is_auth {
                 return Ok(false);

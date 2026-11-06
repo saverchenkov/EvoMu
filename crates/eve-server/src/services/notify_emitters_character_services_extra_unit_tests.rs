@@ -443,7 +443,7 @@ fn batch3_gm_slash_commands_all_validation_and_schedule_branches_kill_mutations(
         .unwrap();
     assert_eq!(stop_ok.dict_get("active"), Some(&PyRep::Bool(false)));
 
-    // 4. /shutdown non-Delay reason uses ClusterShutdownInitiated; /shutdown cancel custom label
+    // 4. /shutdown non-Delay reason uses ShutdownNotificationTitle; /shutdown cancel custom label
     let _ = ctx.drain_notifications_for_char(char_id);
     let sd_ok = handle_batch3_gm_slash_cmd(&ctx, char_id, sys_id, "/shutdown 60 Reboot")
         .unwrap()
@@ -456,7 +456,7 @@ fn batch3_gm_slash_commands_all_validation_and_schedule_branches_kill_mutations(
     let sd_notifs = ctx.drain_notifications_for_char(char_id);
     assert_eq!(
         sd_notifs[0].args[0],
-        PyRep::String("UI/Shared/ClusterShutdownInitiated".into())
+        PyRep::String("UI/Shared/ShutdownNotificationTitle".into())
     );
 
     let cancel_ok =

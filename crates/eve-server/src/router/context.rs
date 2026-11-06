@@ -402,6 +402,9 @@ impl ServerContext {
         ctx.esi_port = cfg.esi_port;
         if cfg.feature_flags.seed_demo {
             ctx.seed_demo_world_fixtures();
+            ctx.db.with_mut_snapshot(|snap| {
+                crate::services::quasar_payment_store::seed_default_store_catalog_if_empty(snap, &ctx.sde);
+            });
         }
         Ok(ctx)
     }
@@ -482,6 +485,8 @@ impl ServerContext {
     }
 
     pub fn new() -> Self {
+        #[cfg(test)]
+        let _env_read_guard = crate::lock_test_env_read();
         #[cfg(any(test, feature = "demo-seed"))]
         let db = {
             let disable_demo = std::env::var("EVOMU_DISABLE_DEMO_SEED").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);

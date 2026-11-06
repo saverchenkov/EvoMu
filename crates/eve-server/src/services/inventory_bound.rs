@@ -164,6 +164,12 @@ pub fn handle(
             } else {
                 false
             };
+            let item_exists = item_id == char_id
+                || is_storage_auth
+                || ctx.db.with_snapshot(|snap| snap.items.contains_key(&item_id));
+            if !item_exists {
+                return Some(Err(BridgeRpcError::user_error("FakeItemNotFound")));
+            }
             let crab_allowed = match crate::services::pve_crab_beacons::check_crab_loot_access(
                 ctx,
                 item_id,
@@ -179,7 +185,11 @@ pub fn handle(
                 || ctx.db.with_snapshot(|snap| {
                     snap.items.get(&item_id).is_some_and(|it| {
                         let has_inventory = crab_allowed
-                            || ctx.sde.types.get(&it.type_id).is_some_and(|t| t.capacity > 0.0);
+                            || ctx
+                                .sde
+                                .types
+                                .get(&it.type_id)
+                                .is_some_and(|t| t.capacity > 0.0 || matches!(t.category_id, 6 | 23));
                         if !has_inventory {
                             return false;
                         }
@@ -253,6 +263,58 @@ fn self_inv_item(
                 .is_some_and(|cid| cid > 0 && i.owner_id == cid)
     }) {
         return Ok(header.build_dbrow(item_to_packed_cells(ctx, &item)));
+    }
+    if object_id == char_id {
+        if let Some(row) = ctx.db.with_snapshot(|snap| {
+            snap.characters.get(&object_id).map(|ch| {
+                let loc = ch
+                    .station_id
+                    .or(ch.structure_id)
+                    .unwrap_or(i64::from(ch.solar_system_id));
+                header.build_dbrow(vec![
+                    PyRep::Integer(ch.character_id),
+                    PyRep::Integer(1373),
+                    PyRep::Integer(ch.corporation_id),
+                    PyRep::Integer(loc),
+                    PyRep::Integer(0),
+                    PyRep::Integer(-1),
+                    PyRep::Integer(1),
+                    PyRep::Integer(1),
+                    PyRep::String(ch.name.clone()),
+                ])
+            })
+        }) {
+            return Ok(row);
+        }
+    }
+    if let Some(row) = ctx.db.with_snapshot(|snap| {
+        snap.structures.get(&object_id).and_then(|st| {
+            let same_corp = session
+                .corporation_id
+                .is_some_and(|cid| cid > 0 && st.owner_corp_id == cid);
+            if !same_corp && session.structure_id != Some(object_id) {
+                return None;
+            }
+            let (gid, cid) = ctx
+                .sde
+                .types
+                .get(&st.type_id)
+                .map(|t| (i64::from(t.group_id), i64::from(t.category_id)))
+                .unwrap_or((1657, 65));
+            Some(header.build_dbrow(vec![
+                PyRep::Integer(st.structure_id),
+                PyRep::Integer(i64::from(st.type_id)),
+                PyRep::Integer(st.owner_corp_id),
+                PyRep::Integer(i64::from(st.solar_system_id)),
+                PyRep::Integer(0),
+                PyRep::Integer(-1),
+                PyRep::Integer(gid),
+                PyRep::Integer(cid),
+                PyRep::String(st.name.clone()),
+            ]))
+        })
+    }) {
+        return Ok(row);
     }
     if session.station_id == Some(object_id) {
         if let Some(st) = ctx.sde.stations.get(&object_id) {

@@ -975,6 +975,15 @@ impl SystemHandle {
         Ok(broadcast)
     }
 
+    pub async fn fast_forward_clock(&self, ship_id: BallId, secs: u64) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::FastForwardClock { ship_id, secs, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
     pub async fn get_target_locks(&self, ball_id: BallId) -> Result<Vec<TargetLock>, String> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx.send(SystemCommand::GetTargetLocks { ball_id, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
@@ -1348,7 +1357,8 @@ impl SystemHandle {
 mod celestials_helpers;
 pub use celestials_helpers::try_remove_ball_for_db;
 pub(crate) use celestials_helpers::{
-    persist_landed_warps_in_db, register_db_system_ballpark,
+    fast_forward_clock_in_actor, persist_landed_warps_in_db, register_db_system_ballpark,
+    sync_ball_positions,
 };
 
 #[cfg(test)] #[path = "celestials_unit_tests.rs"] mod celestials_unit_tests;

@@ -148,9 +148,11 @@ pub async fn handle(
             // One line only: the client trace is diagnostic text, not a server fault.
             let first_line: String = trace.lines().find(|l| !l.trim().is_empty()).unwrap_or("")
                 .chars().take(200).collect();
+            let err_line: String = trace.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("")
+                .chars().take(200).collect();
             info!(
                 user_id = ?session.user_id, error_id = entry.0, stack_hash = hash,
-                stack_key = stack_key,
+                err = err_line, stack_key = stack_key,
                 "client stack trace reported: {first_line}"
             );
             tracing::debug!(error_id = entry.0, stack_hash = hash, "client stack trace body:\n{trace}");

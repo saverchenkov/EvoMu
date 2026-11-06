@@ -163,15 +163,16 @@ async fn test_315_cmd_warp_to_stuff_emits_v24_five_arg_warp_to() {
     };
     assert_eq!(
         warp_args.len(),
-        5,
-        "V24.01 Destiny.Ballpark.WarpTo expects 5 args (ball_id, x, y, z, warp_speed_x10), got {:?}",
+        6,
+        "V24.01 Destiny.Ballpark.WarpTo expects 6 args (ball_id, x, y, z, distance, warp_speed_x10), got {:?}",
         warp_args
     );
     assert_eq!(warp_args[0], PyRep::Integer(ship_id));
     assert!(matches!(warp_args[1], PyRep::Real(_)));
     assert!(matches!(warp_args[2], PyRep::Real(_)));
     assert!(matches!(warp_args[3], PyRep::Real(_)));
-    assert!(matches!(warp_args[4], PyRep::Integer(ws) if ws > 0));
+    assert_eq!(warp_args[4], PyRep::Integer(0));
+    assert!(matches!(warp_args[5], PyRep::Integer(ws) if ws > 0));
 }
 
 #[tokio::test]

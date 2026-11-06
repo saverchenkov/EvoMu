@@ -156,6 +156,12 @@ pub async fn handle_fleet_watchlist_ops(
         Err(e) => return Some(Err(e)),
     };
     let Some(fleet_id) = session.fleet_id else {
+        if method == "RegisterForDamageUpdates" {
+            return Some(Ok(PyRep::keyval([
+                ("characterID", PyRep::Integer(char_id)),
+                ("watched", PyRep::Bool(false)),
+            ])));
+        }
         return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
     };
     notify::ensure_fleet_watchlist_loaded(ctx);
@@ -1118,6 +1124,7 @@ pub fn clear_destroyed_target_tag(ctx: &ServerContext, target_id: i64) {
     }
 }
 
-#[cfg(test)] #[path = "fleet_social_finder_tactical_tests.rs"]
+#[cfg(test)]
+#[path = "fleet_social_finder_tactical_tests.rs"]
 mod fleet_social_finder_tactical_tests;
 
