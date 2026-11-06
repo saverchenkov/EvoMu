@@ -140,6 +140,7 @@ fn unbound_mgr_slots_locks_starter_systems_and_resculpt_branches_kill_mutations(
             ch.race_id = binfo_a.race_id;
             ch.bloodline_id = bl_a;
         }
+        snap.skills.remove(&cid);
         snap.service_state_blobs.remove(&format!("resculpt_pending:{cid}"));
         snap.service_state_blobs.remove(&format!("account_resculpt_tokens:{uid}"));
     });

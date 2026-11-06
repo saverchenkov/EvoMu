@@ -138,33 +138,14 @@ fn check_corp_lp_role(
     session: &SessionState,
     char_id: i64,
     corp_id: i64,
-) -> Result<(), BridgeRpcError> {
-    let allowed = eve_db::corp_roles::ROLE_DIRECTOR
-        | eve_db::corp_roles::ROLE_ACCOUNTANT
-        | eve_db::corp_roles::ROLE_BRAND_MANAGER;
-    let mut roles = if let Some(corp) = snap.corporations.get(&corp_id) {
-        if corp.ceo_id == char_id {
-            return Ok(());
-        }
-        corp.member_roles
-            .get(&char_id)
-            .copied()
-            .unwrap_or(session.corp_role)
-    } else {
-        session.corp_role
-    };
-    if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
-        roles |= ra.roles;
-    }
-    if (roles & allowed) == 0 {
-        return Err(BridgeRpcError {
-            code: "InsufficientCorporationRole".into(),
-            message: format!(
-                "Character {char_id} lacks Director, Accountant, or Brand Manager role in corporation {corp_id}"
-            ),
-        });
-    }
-    Ok(())
+    now_unix: u64,
+) -> Result<(bool, u64), BridgeRpcError> {
+    super::lp_store_catalog::check_corp_lp_role(snap, session, char_id, corp_id, now_unix)
+}
+
+#[inline]
+fn corp_lp_flag_take_authorized(is_ceo: bool, roles: u64, flag: InventoryFlag) -> bool {
+    super::lp_store_catalog::corp_lp_flag_take_authorized(is_ceo, roles, flag)
 }
 
 /// Returns the NPC corporations whose LP stores are hosted at `delivery_loc_id`.
@@ -404,6 +385,17 @@ fn take_offer(
         }
 
         // Verify required trade-in items (`req_items`) in hangar/cargo at `delivery_loc_id`
+        let corp_access = if is_corp_take {
+            Some(check_corp_lp_role(
+                snap,
+                session,
+                char_id,
+                ch.corporation_id,
+                now_unix,
+            )?)
+        } else {
+            None
+        };
         let active_ship_id = session
             .ship_id
             .or_else(|| Some(ch.active_ship_id).filter(|&id| id > 0));
@@ -444,20 +436,9 @@ fn take_offer(
                 } else {
                     it.owner_id == char_id
                 };
-                let loc_and_flag_matches = if is_corp_take {
+                let loc_and_flag_matches = if let Some((is_ceo, roles)) = corp_access {
                     it.location_id == delivery_loc_id
-                        && matches!(
-                            it.flag,
-                            InventoryFlag::Hangar
-                                | InventoryFlag::CorpDeliveries
-                                | InventoryFlag::CorpSAG1
-                                | InventoryFlag::CorpSAG2
-                                | InventoryFlag::CorpSAG3
-                                | InventoryFlag::CorpSAG4
-                                | InventoryFlag::CorpSAG5
-                                | InventoryFlag::CorpSAG6
-                                | InventoryFlag::CorpSAG7
-                        )
+                        && corp_lp_flag_take_authorized(is_ceo, roles, it.flag)
                 } else {
                     let ship_at_loc = active_ship_id.is_some_and(|aid| {
                         snap.items.get(&aid).map(|s| s.location_id == delivery_loc_id).unwrap_or(false)
@@ -508,7 +489,34 @@ fn take_offer(
 
         let (rem_lp, lp_before) = if is_corp_take {
             let player_corp_id = ch.corporation_id;
-            check_corp_lp_role(snap, session, char_id, player_corp_id)?;
+            let (is_ceo, roles) = corp_access.unwrap_or((false, 0));
+            if total_isk_cost.0 > 0
+                && !is_ceo
+                && (roles
+                    & (eve_db::corp_roles::ROLE_DIRECTOR
+                        | eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]))
+                    == 0
+            {
+                return Err(BridgeRpcError {
+                    code: "InsufficientCorporationRole".into(),
+                    message: format!(
+                        "Character {char_id} lacks Master Wallet take permission in corporation {player_corp_id}"
+                    ),
+                });
+            }
+            if !is_ceo
+                && (roles
+                    & (eve_db::corp_roles::ROLE_DIRECTOR
+                        | eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_TAKE))
+                    == 0
+            {
+                return Err(BridgeRpcError {
+                    code: "InsufficientCorporationRole".into(),
+                    message: format!(
+                        "Character {char_id} lacks Deliveries hangar permission in corporation {player_corp_id}"
+                    ),
+                });
+            }
             let mut corp_balances = load_corp_lp_balances(snap, player_corp_id);
             let current_lp = corp_balances.get(&offer.corp_id).copied().unwrap_or(0);
             if current_lp < total_lp_cost {
@@ -520,14 +528,12 @@ fn take_offer(
                     ),
                 });
             }
-            
             let corp_balance = if let Some(corp) = snap.corporations.get_mut(&player_corp_id) {
                 corp.ensure_wallet_divisions();
                 corp.wallet_divisions[0].balance
             } else {
                 IskCents(0)
             };
-                
             if corp_balance < total_isk_cost {
                 return Err(BridgeRpcError {
                     code: "InsufficientFunds".into(),
@@ -874,7 +880,7 @@ fn transfer_lp(
         }
         let (sender_remaining, lp_before) = if is_from_corp {
             let sender_corp_id = ch.corporation_id;
-            check_corp_lp_role(snap, session, char_id, sender_corp_id)?;
+            check_corp_lp_role(snap, session, char_id, sender_corp_id, ctx.now_unix())?;
             let mut sender_bals = load_corp_lp_balances(snap, sender_corp_id);
             let cur = sender_bals.get(&npc_corp_id).copied().unwrap_or(0);
             if cur < amount {

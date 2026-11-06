@@ -243,59 +243,20 @@ pub(crate) async fn handle_bookmark_static_location(
                 });
             }
         } else {
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            let is_cloaked = sys_handle
-                .get_combat_state(ent_id)
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|cs| cs.is_cloaked);
-            if !is_cloaked {
-                if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ent_id).await {
-                    let Some(caller_ship_id) = session.ship_id else {
-                        return Err(BridgeRpcError {
-                            code: "UserError".into(),
-                            message: "Must be in space on grid to bookmark dynamic in-space entities".into(),
-                        });
-                    };
-                    let caller_ball = sys_handle
-                        .get_ball_snapshot(caller_ship_id)
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|(_, b)| b);
-                    let Some(caller_ball) = caller_ball else {
-                        return Err(BridgeRpcError {
-                            code: "UserError".into(),
-                            message: "Caller ship not found in ballpark".into(),
-                        });
-                    };
-                    let dist = ball.position.distance(caller_ball.position);
-                    if dist > 8_000_000.0 {
-                        return Err(BridgeRpcError {
-                            code: "UserError".into(),
-                            message: format!("Entity {ent_id} is off-grid (distance > 8,000 km)"),
-                        });
-                    }
-                    let ent_type = ctx.db.with_snapshot(|s| {
-                        s.items
-                            .get(&ent_id)
-                            .filter(|it| it.location_id == sys_id as i64)
-                            .map(|it| it.type_id as i64)
-                    }).unwrap_or(5);
-                    (ent_type, (ball.position.x, ball.position.y, ball.position.z))
-                } else {
-                    return Err(BridgeRpcError {
-                        code: "UserError".into(),
-                        message: format!("Entity {ent_id} not found or not visible in current solar system"),
-                    });
-                }
-            } else {
-                return Err(BridgeRpcError {
-                    code: "UserError".into(),
-                    message: format!("Entity {ent_id} is cloaked or not visible"),
-                });
-            }
+            let coords = validate_dynamic_entity_bookmark_coords(
+                ctx,
+                session,
+                sys_id,
+                ent_id,
+            )
+            .await?;
+            let ent_type = ctx.db.with_snapshot(|s| {
+                s.items
+                    .get(&ent_id)
+                    .filter(|it| it.location_id == sys_id as i64)
+                    .map(|it| it.type_id as i64)
+            }).unwrap_or(5);
+            (ent_type, coords)
         }
     } else if let Some(st_id) = session.station_id {
         let (typ, pos) = ctx
@@ -994,6 +955,64 @@ pub(crate) async fn handle_copy_move_bookmarks(
             .collect();
         Ok(PyRep::Tuple(vec![PyRep::Dict(copied_dict), PyRep::None]))
     }
+}
+
+pub(crate) async fn validate_dynamic_entity_bookmark_coords(
+    ctx: &ServerContext,
+    session: &SessionState,
+    sys_id: u32,
+    ent_id: i64,
+) -> Result<(f64, f64, f64), BridgeRpcError> {
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let caller_ship_id = if session.station_id.is_some() || session.structure_id.is_some() {
+        None
+    } else {
+        session.ship_id
+    };
+    let Some(caller_ship_id) = caller_ship_id else {
+        return Err(BridgeRpcError {
+            code: "UserError".into(),
+            message: "Must be in space on grid to bookmark dynamic in-space entities".into(),
+        });
+    };
+    let caller_ball = sys_handle
+        .get_ball_snapshot(caller_ship_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|(_, b)| b);
+    let Some(caller_ball) = caller_ball else {
+        return Err(BridgeRpcError {
+            code: "UserError".into(),
+            message: "Caller ship not found in ballpark".into(),
+        });
+    };
+    let is_cloaked_combat = sys_handle
+        .get_combat_state(ent_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|cs| cs.is_cloaked);
+    let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ent_id).await else {
+        return Err(BridgeRpcError {
+            code: "UserError".into(),
+            message: format!("Entity {ent_id} not found or not visible in current solar system"),
+        });
+    };
+    if is_cloaked_combat {
+        return Err(BridgeRpcError {
+            code: "UserError".into(),
+            message: format!("Entity {ent_id} is cloaked or not visible"),
+        });
+    }
+    if ball.position.distance(caller_ball.position) > 8_000_000.0 {
+        return Err(BridgeRpcError {
+            code: "UserError".into(),
+            message: format!("Entity {ent_id} is off-grid (distance > 8,000 km)"),
+        });
+    }
+    let _ = ctx;
+    Ok((ball.position.x, ball.position.y, ball.position.z))
 }
 
 #[cfg(test)] #[path = "fleet_social_access_group_bookmarks_ops_tests.rs"]

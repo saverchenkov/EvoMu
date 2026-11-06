@@ -73,7 +73,8 @@ fn char_unbound_mgr_prepare_cancel_delete_bloodline_and_gender() {
         snap.service_state_blobs
             .insert(format!("resculpt_pending:{cid}"), "true".into());
     });
-    let valid_bl = *ctx.sde.bloodlines.keys().next().unwrap();
+    let ch_race = ctx.db.with_snapshot(|s| s.characters[&cid].race_id);
+    let valid_bl = *ctx.sde.bloodlines.iter().find(|(_, b)| b.race_id == ch_race).unwrap().0;
     assert_eq!(
         handle(
             &ctx,

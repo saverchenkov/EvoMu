@@ -309,6 +309,103 @@ pub(crate) fn offer_to_pyrep(o: &LPOffer) -> PyRep {
     PyRep::keyval(fields)
 }
 
+pub(crate) fn check_corp_lp_role(
+    snap: &eve_db::WorldStateSnapshot,
+    session: &eve_machonet::SessionState,
+    char_id: i64,
+    corp_id: i64,
+    now_unix: u64,
+) -> Result<(bool, u64), eve_proto::BridgeRpcError> {
+    let Some(corp) = snap.corporations.get(&corp_id) else {
+        let roles = session.corp_role;
+        if (roles & eve_db::corp_roles::ROLE_DIRECTOR) == 0 {
+            return Err(eve_proto::BridgeRpcError {
+                code: "InsufficientCorporationRole".into(),
+                message: format!(
+                    "Character {char_id} lacks active Director role in corporation {corp_id}"
+                ),
+            });
+        }
+        return Ok((false, roles));
+    };
+    if corp.ceo_id == char_id {
+        return Ok((true, u64::MAX));
+    }
+    let mut roles = corp
+        .member_roles
+        .get(&char_id)
+        .copied()
+        .unwrap_or(session.corp_role);
+    if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
+        roles |= ra.roles;
+    }
+    if let Some(gov) = snap.corp_governance.get(&corp_id) {
+        if let Some(&(p_mask, matured_at)) = gov.pending_role_grants.get(&char_id) {
+            if now_unix >= matured_at {
+                roles |= p_mask;
+            } else {
+                roles &= !p_mask;
+            }
+        }
+        let unmatured_title_bits = gov
+            .pending_title_role_grants
+            .get(&char_id)
+            .filter(|&&(_, matured_at)| now_unix < matured_at)
+            .map_or(0, |&(bits, _)| bits);
+        if let Some(&tmask) = gov.member_titles.get(&char_id) {
+            for (&tid, &(_, troles)) in &gov.titles {
+                if (1..=64).contains(&tid) && (tmask & (1u64 << (tid - 1))) != 0 {
+                    roles |= troles & !unmatured_title_bits;
+                }
+            }
+        }
+    }
+    if (roles & eve_db::corp_roles::ROLE_DIRECTOR) == 0 {
+        return Err(eve_proto::BridgeRpcError {
+            code: "InsufficientCorporationRole".into(),
+            message: format!(
+                "Character {char_id} lacks active Director role in corporation {corp_id}"
+            ),
+        });
+    }
+    Ok((false, roles))
+}
+
+pub(crate) fn corp_lp_flag_take_authorized(
+    is_ceo: bool,
+    roles: u64,
+    flag: eve_db::types::InventoryFlag,
+) -> bool {
+    use eve_db::types::InventoryFlag;
+    if is_ceo || (roles & eve_db::corp_roles::ROLE_DIRECTOR) != 0 {
+        return matches!(
+            flag,
+            InventoryFlag::Hangar
+                | InventoryFlag::CorpDeliveries
+                | InventoryFlag::CorpSAG1
+                | InventoryFlag::CorpSAG2
+                | InventoryFlag::CorpSAG3
+                | InventoryFlag::CorpSAG4
+                | InventoryFlag::CorpSAG5
+                | InventoryFlag::CorpSAG6
+                | InventoryFlag::CorpSAG7
+        );
+    }
+    match flag {
+        InventoryFlag::CorpSAG1 => (roles & eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[0]) != 0,
+        InventoryFlag::CorpSAG2 => (roles & eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[1]) != 0,
+        InventoryFlag::CorpSAG3 => (roles & eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[2]) != 0,
+        InventoryFlag::CorpSAG4 => (roles & eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[3]) != 0,
+        InventoryFlag::CorpSAG5 => (roles & eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[4]) != 0,
+        InventoryFlag::CorpSAG6 => (roles & eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[5]) != 0,
+        InventoryFlag::CorpSAG7 => (roles & eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[6]) != 0,
+        InventoryFlag::CorpDeliveries => {
+            (roles & eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_TAKE) != 0
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 #[path = "lp_store_catalog_tests.rs"]
 mod lp_store_catalog_tests;

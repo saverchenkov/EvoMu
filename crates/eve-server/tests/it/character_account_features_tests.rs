@@ -198,20 +198,33 @@ async fn test_feat_account_queue_pop_cap_and_character_locks() {
         .expect_err("cross-race bloodline requires resculpt");
     assert_eq!(bl_req_err.code, "ResculptRequired");
 
-    // Add resculpt token and change bloodline to cross_race_bl.
+    // Add resculpt token: cross-race bloodline switch is blocked once skills exist (#398),
+    // whereas same-race bloodline resculpt succeeds and consumes the token.
+    let same_race_bl = ctx
+        .sde
+        .bloodlines
+        .iter()
+        .find(|(&id, b)| b.race_id == ch_race && id != ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().bloodline_id))
+        .map(|(&id, _)| id)
+        .unwrap_or_else(|| ctx.sde.bloodlines.iter().find(|(_, b)| b.race_id == ch_race).map(|(&id, _)| id).unwrap());
     ctx.db.with_mut_snapshot(|snap| {
         snap.service_state_blobs.insert(format!("account_resculpt_tokens:{}", sess.user_id.unwrap()), "1".into());
     });
-    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "UpdateCharacterBloodline", &[PyRep::Integer(char_id), PyRep::Integer(cross_race_bl as i64)], &kw, None)
+    let cross_race_err = ctx
+        .dispatch_rpc(&mut sess, "charUnboundMgr", None, "UpdateCharacterBloodline", &[PyRep::Integer(char_id), PyRep::Integer(cross_race_bl as i64)], &kw, None)
         .await
-        .expect("UpdateCharacterBloodline with resculpt token");
+        .expect_err("cross-race bloodline change blocked after initial character creation");
+    assert_eq!(cross_race_err.code, "RaceChangeNotAllowed");
+    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "UpdateCharacterBloodline", &[PyRep::Integer(char_id), PyRep::Integer(same_race_bl as i64)], &kw, None)
+        .await
+        .expect("UpdateCharacterBloodline same-race with resculpt token");
 
     let (bl_id, race_id) = ctx.db.with_snapshot(|s| {
         let ch = s.characters.get(&char_id).unwrap();
         (ch.bloodline_id, ch.race_id)
     });
-    assert_eq!(bl_id, cross_race_bl);
-    assert_eq!(race_id, ctx.sde.bloodlines.get(&cross_race_bl).unwrap().race_id);
+    assert_eq!(bl_id, same_race_bl);
+    assert_eq!(race_id, ch_race);
 
     // ------------------------------------------------------------------------
     // 4. feat:character.portrait-upload

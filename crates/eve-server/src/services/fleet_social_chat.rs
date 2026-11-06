@@ -176,6 +176,11 @@ fn handle_chat_rpc(
         | ("XmppChatMgr", "ResyncSystemChannelAccess") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let explicit_arg = args.first().and_then(|a| a.as_str());
+            if let Err(e) = crate::services::fleet_social_chat_acl_helpers::validate_system_channel_resync(
+                ctx, session, char_id, method, explicit_arg,
+            ) {
+                return Some(Err(e));
+            }
             let (local_chan, synced_channels, is_delayed) = ctx.db.with_mut_snapshot(|snap| {
                 let ch = snap.characters.get(&char_id);
                 let sys_id = explicit_arg
@@ -824,36 +829,12 @@ fn handle_chat_rpc(
                 }
             }
             let explicit_chan = args.get(1).and_then(|a| a.as_str());
-            let chan_id = if let Some(cid) = explicit_chan
-                .filter(|s| s.starts_with("channel:") || s.starts_with("private:"))
-            {
-                cid.to_string()
-            } else {
-                let c1 = char_id.min(recipient_id);
-                let c2 = char_id.max(recipient_id);
-                format!("private:{c1}:{c2}")
+            let chan_id = match crate::services::fleet_social_chat_acl_helpers::validate_and_apply_channel_invite(
+                ctx, char_id, recipient_id, explicit_chan,
+            ) {
+                Ok(cid) => cid,
+                Err(e) => return Some(Err(e)),
             };
-
-            ctx.db.with_mut_snapshot(|snap| {
-                let chan = snap
-                    .chat_channels
-                    .entry(chan_id.clone())
-                    .or_insert_with(|| ChatChannelRecord {
-                        channel_id: chan_id.clone(),
-                        name: format!("Private Chat ({char_id}, {recipient_id})"),
-                        motd: String::new(),
-                        owner_id: Some(char_id),
-                        members: HashSet::new(),
-                        is_system_local: false,
-                        solar_system_id: None,
-                        is_private: true,
-                        operators: HashSet::from([char_id]),
-                        password: None,
-                        is_delayed_local: false,
-                    });
-                chan.members.insert(char_id);
-                chan.members.insert(recipient_id);
-            });
 
             ctx.notify(
                 NotificationTarget::Character(char_id),
@@ -876,27 +857,18 @@ fn handle_chat_rpc(
         }
 
         (_, "GetMembers") => {
-            let (_, _) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(chan_id) = args.first().and_then(|a| a.as_str()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "GetMembers requires channelID".into(),
                 }));
             };
-            let (chan_opt, acl) = ctx.db.with_snapshot(|snap| {
-                (
-                    snap.chat_channels.get(chan_id).cloned(),
-                    snap.chat_channel_acl
-                        .get(chan_id)
-                        .cloned()
-                        .unwrap_or_default(),
-                )
-            });
-            let Some(chan) = chan_opt else {
-                return Some(Err(BridgeRpcError {
-                    code: "ChannelNotFound".into(),
-                    message: format!("Channel {chan_id} does not exist"),
-                }));
+            let (chan, acl) = match crate::services::fleet_social_chat_acl_helpers::authorize_and_fetch_channel_members(
+                ctx, session, char_id, chan_id,
+            ) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
             };
             let visible_members: Vec<i64> = if chan.is_delayed_local {
                 ctx.social_extras

@@ -146,6 +146,17 @@ pub(super) async fn handle_bookmarks(
             }
             // Game mechanics: derive actual type_id and location_id from server-side state
             // rather than trusting raw client arguments, preventing type spoofing.
+            let is_static_entity = explicit_entity_id.is_some_and(|ent_id| {
+                ent_id < 60_000_000
+                    || ctx.sde.stations.contains_key(&ent_id)
+                    || ctx.db.with_snapshot(|s| {
+                        s.structures.contains_key(&ent_id)
+                            || s.items.get(&ent_id).is_some_and(|it| {
+                                ctx.sde.stations.contains_key(&it.location_id)
+                                    || s.structures.contains_key(&it.location_id)
+                            })
+                    })
+            });
             let (derived_type_id, derived_loc_id) = if let Some(ent_id) = explicit_entity_id {
                 ctx.db.with_snapshot(|s| {
                     s.items.get(&ent_id).map(|it| (it.type_id as i64, it.location_id))
@@ -156,18 +167,27 @@ pub(super) async fn handle_bookmarks(
             };
 
             let (x, y, z) = if let Some(ent_id) = explicit_entity_id {
-                let sys_handle = ctx.systems.get_or_spawn(sys_id);
-                if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ent_id).await {
-                    (ball.position.x, ball.position.y, ball.position.z)
-                } else if let Some(st) = ctx
-                    .sde
-                    .solar_systems
-                    .get(&sys_id)
-                    .and_then(|s| s.stations.iter().find(|st| st.station_id == ent_id))
-                {
-                    (st.position.x, st.position.y, st.position.z)
+                if ent_id != char_id && Some(ent_id) != session.ship_id && !is_static_entity {
+                    match super::fleet_social_access_group_bookmarks_ops::validate_dynamic_entity_bookmark_coords(
+                        ctx, session, sys_id, ent_id,
+                    ).await {
+                        Ok(coords) => coords,
+                        Err(e) => return Some(Err(e)),
+                    }
                 } else {
-                    (0.0, 0.0, 0.0)
+                    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+                    if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ent_id).await {
+                        (ball.position.x, ball.position.y, ball.position.z)
+                    } else if let Some(st) = ctx
+                        .sde
+                        .solar_systems
+                        .get(&sys_id)
+                        .and_then(|s| s.stations.iter().find(|st| st.station_id == ent_id))
+                    {
+                        (st.position.x, st.position.y, st.position.z)
+                    } else {
+                        (0.0, 0.0, 0.0)
+                    }
                 }
             } else if let Some(st_id) = session.station_id {
                 ctx.sde

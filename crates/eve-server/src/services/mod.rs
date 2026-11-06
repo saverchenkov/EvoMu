@@ -531,3 +531,6 @@ mod r6_t3_p0_security_tests;
 mod r6_t2_p0_security_tests;
 #[cfg(test)]
 mod r6_t1_p0_security_tests;
+pub(crate) mod fleet_social_chat_acl_helpers;
+#[cfg(test)]
+mod r6_t3_p1_security_tests;
