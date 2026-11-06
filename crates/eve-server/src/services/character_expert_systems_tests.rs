@@ -280,7 +280,7 @@ fn node_graph_blackboard_requests_messages_and_helpers() {
             NpeProgressRecord {
                 character_id: cid,
                 node_graph_id: graph_id as u32,
-                current_node_id: 10,
+                current_node_id: 25,
                 completed: false,
                 career_goal_progress: HashMap::new(),
                 claimed_goals: HashSet::new(),

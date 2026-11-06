@@ -322,8 +322,16 @@ async fn full_23_checkpoint_progression_act2_transition_and_client_events() {
         assert_eq!(r.checkpoint_id, 92);
     });
 
-    // Restart and test on_client_npe_event("complete_air_npe") and on_skip_air_npe
+    // Restart and test on_client_npe_event("complete_air_npe") requires GM and on_skip_air_npe
     on_start_tutorial(&ctx, &mut session, char_id, AIR_NPE_STATE_ACTIVE, Some(2));
+    assert_eq!(
+        on_client_npe_event(&ctx, &mut session, char_id, "complete_air_npe", None),
+        None
+    );
+    assert!(!ctx
+        .db
+        .with_snapshot(|s| load_runner_state(s, char_id).unwrap().completed));
+    session.role |= eve_machonet::service_roles::ROLE_GML;
     assert_eq!(
         on_client_npe_event(&ctx, &mut session, char_id, "complete_air_npe", None),
         Some(PyRep::Bool(true))

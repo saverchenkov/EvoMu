@@ -356,10 +356,16 @@ pub fn handle(
         // parity: rpc:node_graph.process_client_graph_message
         // DATA GAP: `OnClientNodeGraphMessage` (`SendMessageToClientGraph`) requires server-authored node-graph execution scripts not shipped in V24 client/SDE.
         ("node_graph", "process_client_graph_message") => {
+            const MAX_NODE_GRAPH_BB_KEYS: usize = 64;
+            const MAX_NODE_GRAPH_BB_KEY_BYTES: usize = 128;
+            const MAX_NODE_GRAPH_BB_VAL_BYTES: usize = 1024;
+            const MAX_NODE_GRAPH_BB_BLOB_BYTES: usize = 8192;
+
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let is_gm = session.has_gm_role();
             let graph_id = match args.first().and_then(|a| a.as_i64()) {
                 Some(id) if id > 0 => id,
                 _ => {
@@ -381,16 +387,57 @@ pub fn handle(
                     message: format!("Node graph {graph_id} not found"),
                 }));
             }
-            let node_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-            let Some(msg_name) = args.get(2).and_then(|a| a.as_str()).filter(|s| !s.is_empty()) else {
+            let Some(node_id) = args
+                .get(1)
+                .and_then(|a| a.as_i64())
+                .filter(|&n| n >= 0 && n <= u32::MAX as i64)
+            else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
-                    message: "process_client_graph_message requires a non-empty message key".into(),
+                    message: "process_client_graph_message requires a valid non-negative node_id"
+                        .into(),
                 }));
             };
+            let node_u32 = node_id as u32;
+            let graph_node_count = ctx
+                .sde
+                .node_graphs
+                .get(&(graph_id as u32))
+                .map(|g| g.node_count)
+                .unwrap_or(0);
+            if !is_gm && graph_node_count > 0 && node_u32 > graph_node_count {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: format!("Node {node_id} not in node graph {graph_id}"),
+                }));
+            }
+            let Some(msg_name) = args
+                .get(2)
+                .and_then(|a| a.as_str())
+                .filter(|s| !s.is_empty() && s.len() <= MAX_NODE_GRAPH_BB_KEY_BYTES)
+            else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "process_client_graph_message requires a valid message key".into(),
+                }));
+            };
+            if !is_gm
+                && matches!(
+                    msg_name.trim().to_ascii_lowercase().as_str(),
+                    "complete_air_npe"
+                        | "checkpoint_reached"
+                        | "advance_checkpoint"
+                        | "objective_completed"
+                )
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "InsufficientRole".into(),
+                    message: "GM role required for AIR NPE control graph message".into(),
+                }));
+            }
             let msg_data = args.get(3).cloned().unwrap_or(PyRep::None);
 
-            let data_str = match &msg_data {
+            let mut data_str = match &msg_data {
                 PyRep::String(s) => s.clone(),
                 PyRep::Integer(i) => i.to_string(),
                 PyRep::Bool(b) => b.to_string(),
@@ -398,31 +445,82 @@ pub fn handle(
                 PyRep::None => "None".to_string(),
                 other => format!("{other:?}"),
             };
-
-            ctx.db.with_mut_snapshot(|snap| {
-                let blob_key = node_graph_bb_blob_key(char_id, graph_id);
-                let mut bb: HashMap<String, String> = snap
-                    .service_state_blobs
-                    .get(&blob_key)
-                    .and_then(|json| serde_json::from_str(json).ok())
-                    .unwrap_or_default();
-
-                bb.insert(msg_name.to_string(), data_str);
-                bb.insert("last_message".to_string(), msg_name.to_string());
-                bb.insert(format!("node.{node_id}.last_message"), msg_name.to_string());
-
-                if let Ok(json) = serde_json::to_string(&bb) {
-                    snap.service_state_blobs.insert(blob_key, json);
+            if data_str.len() > MAX_NODE_GRAPH_BB_VAL_BYTES {
+                let mut end = MAX_NODE_GRAPH_BB_VAL_BYTES;
+                while end > 0 && !data_str.is_char_boundary(end) {
+                    end -= 1;
                 }
+                data_str.truncate(end);
+            }
 
-                if msg_name.starts_with("client_") {
-                    if let Some(npe) = snap.npe_progress.get_mut(&char_id) {
-                        if npe.node_graph_id == graph_id as u32 && !npe.completed {
-                            npe.current_node_id = (node_id as u32).saturating_add(1);
+            let update_res = ctx
+                .db
+                .with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                    let blob_key = node_graph_bb_blob_key(char_id, graph_id);
+                    let mut bb: HashMap<String, String> = snap
+                        .service_state_blobs
+                        .get(&blob_key)
+                        .and_then(|json| serde_json::from_str(json).ok())
+                        .unwrap_or_default();
+
+                    if !bb.contains_key(msg_name) && bb.len() >= MAX_NODE_GRAPH_BB_KEYS {
+                        return Err(BridgeRpcError {
+                            code: "InvalidArgument".into(),
+                            message: "Node graph blackboard key limit reached".into(),
+                        });
+                    }
+                    bb.insert(msg_name.to_string(), data_str);
+                    if bb.contains_key("last_message") || bb.len() < MAX_NODE_GRAPH_BB_KEYS {
+                        bb.insert("last_message".to_string(), msg_name.to_string());
+                    }
+                    let node_msg_key = format!("node.{node_id}.last_message");
+                    if bb.contains_key(&node_msg_key) || bb.len() < MAX_NODE_GRAPH_BB_KEYS {
+                        bb.insert(node_msg_key, msg_name.to_string());
+                    }
+
+                    let json = serde_json::to_string(&bb).map_err(|_| BridgeRpcError {
+                        code: "InternalError".into(),
+                        message: "Failed to serialize node graph blackboard".into(),
+                    })?;
+                    if json.len() > MAX_NODE_GRAPH_BB_BLOB_BYTES {
+                        return Err(BridgeRpcError {
+                            code: "InvalidArgument".into(),
+                            message: "Node graph blackboard size limit exceeded".into(),
+                        });
+                    }
+
+                    if msg_name.starts_with("client_") {
+                        if let Some(npe) = snap.npe_progress.get_mut(&char_id) {
+                            if npe.node_graph_id == graph_id as u32 && !npe.completed {
+                                if is_gm {
+                                    npe.current_node_id = node_u32.saturating_add(1);
+                                } else {
+                                    if node_u32 != npe.current_node_id
+                                        && node_u32.saturating_add(1) != npe.current_node_id
+                                    {
+                                        return Err(BridgeRpcError {
+                                            code: "InvalidArgument".into(),
+                                            message: format!(
+                                                "Out-of-order client node_id {node_id} (expected {})",
+                                                npe.current_node_id
+                                            ),
+                                        });
+                                    }
+                                    if node_u32 == npe.current_node_id {
+                                        npe.current_node_id =
+                                            npe.current_node_id.saturating_add(1);
+                                    }
+                                }
+                            }
                         }
                     }
-                }
-            });
+
+                    snap.service_state_blobs.insert(blob_key, json);
+                    Ok(())
+                });
+            if let Err(err) = update_res {
+                return Some(Err(err));
+            }
 
             if !crate::services::air_npe_nodegraph_runner::on_client_graph_message(
                 ctx,

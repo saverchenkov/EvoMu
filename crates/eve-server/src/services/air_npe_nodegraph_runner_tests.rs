@@ -63,7 +63,15 @@ async fn test_air_npe_nodegraph_runner_lifecycle_checkpoints_and_skip() {
     });
     assert_eq!(cp_after, Some(24));
 
-    // Test complete_air_npe via client event
+    // Unprivileged client cannot complete AIR NPE directly; GM role is required
+    let unpriv_comp = on_client_npe_event(&ctx, &mut session, char_id, "complete_air_npe", None);
+    assert_eq!(unpriv_comp, None);
+    assert_eq!(
+        ctx.db.with_snapshot(|snap| load_runner_state(snap, char_id).map(|r| r.completed)),
+        Some(false)
+    );
+
+    session.role |= eve_machonet::service_roles::ROLE_GML;
     let comp_res = on_client_npe_event(&ctx, &mut session, char_id, "complete_air_npe", None);
     assert_eq!(comp_res, Some(PyRep::Bool(true)));
     let is_comp = ctx.db.with_snapshot(|snap| {

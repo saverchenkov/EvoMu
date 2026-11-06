@@ -321,3 +321,232 @@ async fn r7_465_login_reward_packaging_expiry_item_change_and_campaign_scoped_cl
         );
     });
 }
+
+/// `#458`: Unprivileged clients cannot self-complete AIR NPE via `complete_air_npe`,
+/// generic checkpoint override aliases, or server-only gameplay event spoofing.
+#[tokio::test]
+async fn r7_458_unprivileged_client_cannot_self_complete_air_npe_checkpoints() {
+    use crate::services::air_npe_nodegraph_runner::{
+        AIR_NPE_NODE_GRAPH_ID, AIR_NPE_STATE_ACTIVE, AIR_NPE_STATE_COMPLETED, load_runner_state,
+        on_client_graph_message, on_client_npe_event, on_server_gameplay_event, on_start_tutorial,
+    };
+    use crate::services::operations_manager;
+    use eve_machonet::{SessionState, service_roles};
+    use eve_proto::BridgeRpcError;
+
+    fn call_process_client_event(
+        ctx: &crate::router::ServerContext,
+        sess: &mut SessionState,
+        args: &[PyRep],
+    ) -> Result<PyRep, BridgeRpcError> {
+        let kw = HashMap::new();
+        operations_manager::handle(
+            ctx,
+            sess,
+            "operationsManager",
+            "process_client_event",
+            args,
+            &kw,
+        )
+        .unwrap()
+    }
+
+    let ctx = test_ctx();
+    let cid = 90_000_001_i64;
+    let mut sess = auth_session(1, cid, 98_000_001, 30_000_142);
+
+    // Unprivileged client cannot start tutorial in COMPLETED state
+    let start_err = call_process_client_event(
+        &ctx,
+        &mut sess,
+        &[
+            PyRep::String("start_tutorial".into()),
+            PyRep::Integer(AIR_NPE_STATE_COMPLETED),
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(start_err.code, "InvalidTutorialState");
+
+    on_start_tutorial(&ctx, &mut sess, cid, AIR_NPE_STATE_ACTIVE, Some(2));
+    assert_eq!(
+        on_client_npe_event(&ctx, &mut sess, cid, "new_eden_cinematic_ended", None),
+        Some(PyRep::Bool(true))
+    );
+    assert!(on_client_graph_message(
+        &ctx,
+        &mut sess,
+        cid,
+        AIR_NPE_NODE_GRAPH_ID,
+        13,
+        "approach_station",
+        &PyRep::None,
+    ));
+
+    // Runner is now at checkpoint 18 ("lock_target"), a server-only gameplay checkpoint.
+    let cp_before = ctx
+        .db
+        .with_snapshot(|s| load_runner_state(s, cid).unwrap().checkpoint_id);
+    assert_eq!(cp_before, 18);
+
+    // Unprivileged client cannot spoof server-only events or generic/complete overrides
+    for ev in [
+        "lock_target",
+        "target_locked",
+        "activate_weapons",
+        "destroy_enemies",
+        "npcdestroyed",
+        "warp_to_site",
+        "dock_at_career_station",
+        "checkpoint_reached",
+        "advance_checkpoint",
+        "objective_completed",
+        "complete_air_npe",
+    ] {
+        assert_eq!(on_client_npe_event(&ctx, &mut sess, cid, ev, None), None);
+        on_client_graph_message(
+            &ctx,
+            &mut sess,
+            cid,
+            AIR_NPE_NODE_GRAPH_ID,
+            18,
+            ev,
+            &PyRep::None,
+        );
+    }
+    for rpc_override in [
+        "complete_air_npe",
+        "checkpoint_reached",
+        "advance_checkpoint",
+        "objective_completed",
+    ] {
+        let rpc_err =
+            call_process_client_event(&ctx, &mut sess, &[PyRep::String(rpc_override.into())])
+                .unwrap_err();
+        assert_eq!(rpc_err.code, "InsufficientRole");
+    }
+
+    ctx.db.with_snapshot(|s| {
+        let r = load_runner_state(s, cid).unwrap();
+        assert_eq!(r.checkpoint_id, 18);
+        assert!(!r.completed);
+    });
+
+    // Authoritative server hook DOES advance checkpoint 18 -> 20, and GM can complete AIR NPE.
+    on_server_gameplay_event(&ctx, cid, "lock_target", &[]);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| load_runner_state(s, cid).unwrap().checkpoint_id),
+        20
+    );
+
+    sess.role |= service_roles::ROLE_GML;
+    assert_eq!(
+        on_client_npe_event(&ctx, &mut sess, cid, "complete_air_npe", None),
+        Some(PyRep::Bool(true))
+    );
+    assert!(ctx.db.with_snapshot(|s| load_runner_state(s, cid).unwrap().completed));
+}
+
+/// `#458`: Rejects out-of-order `node_id` jumps and enforces strict key count,
+/// value byte length, and serialized JSON blob size bounds in `node_graph.process_client_graph_message`.
+#[test]
+fn r7_458_node_graph_client_message_bounds_blackboard_and_rejects_arbitrary_node_jump() {
+    use crate::services::character_expert_systems;
+    use eve_db::NpeProgressRecord;
+    use std::collections::HashSet;
+
+    let ctx = test_ctx();
+    let cid = 90_000_001_i64;
+    let mut sess = auth_session(1, cid, 98_000_001, 30_000_142);
+    let kw = HashMap::new();
+    let graph_id = 777_002_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.npe_progress.insert(
+            cid,
+            NpeProgressRecord {
+                character_id: cid,
+                node_graph_id: graph_id as u32,
+                current_node_id: 10,
+                completed: false,
+                career_goal_progress: HashMap::new(),
+                claimed_goals: HashSet::new(),
+            },
+        );
+    });
+
+    // Out-of-order node_id jump (10 -> 25) must fail and keep current_node_id == 10
+    let jump_err = character_expert_systems::handle(
+        &ctx,
+        &mut sess,
+        "node_graph",
+        "process_client_graph_message",
+        &[
+            PyRep::Integer(graph_id),
+            PyRep::Integer(25),
+            PyRep::String("client_step".into()),
+            PyRep::Integer(1),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(jump_err.code, "InvalidArgument");
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.npe_progress[&cid].current_node_id),
+        10
+    );
+
+    // Sequential step (node_id == 10) advances 10 -> 11 and truncates oversized values to <= 1024 bytes
+    let huge_val = "A".repeat(4096);
+    character_expert_systems::handle(
+        &ctx,
+        &mut sess,
+        "node_graph",
+        "process_client_graph_message",
+        &[
+            PyRep::Integer(graph_id),
+            PyRep::Integer(10),
+            PyRep::String("client_step".into()),
+            PyRep::String(huge_val),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.npe_progress[&cid].current_node_id),
+        11
+    );
+
+    // Flooding > 64 keys is bounded (returns InvalidArgument once key/blob cap is hit)
+    let mut rejected = false;
+    for i in 0..80 {
+        let res = character_expert_systems::handle(
+            &ctx,
+            &mut sess,
+            "node_graph",
+            "process_client_graph_message",
+            &[
+                PyRep::Integer(graph_id),
+                PyRep::Integer(10),
+                PyRep::String(format!("flood_key_{i}")),
+                PyRep::String("payload".into()),
+            ],
+            &kw,
+        )
+        .unwrap();
+        if res.is_err() {
+            rejected = true;
+            break;
+        }
+    }
+    assert!(rejected, "flooding beyond 64 keys must return an error");
+
+    ctx.db.with_snapshot(|snap| {
+        let raw = &snap.service_state_blobs[&format!("node_graph_bb:{cid}:{graph_id}")];
+        assert!(raw.len() <= 8192, "blackboard JSON size must stay <= 8192 bytes");
+        let parsed: HashMap<String, String> = serde_json::from_str(raw).unwrap();
+        assert!(parsed.len() <= 64, "blackboard key count must stay <= 64");
+        assert!(parsed["client_step"].len() <= 1024, "blackboard value length must stay <= 1024");
+    });
+}

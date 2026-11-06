@@ -832,43 +832,65 @@ fn find_checkpoint_idx(checkpoint_id: u32) -> usize {
         .unwrap_or(0)
 }
 
-fn event_matches_checkpoint(spec: &AirNpeCheckpointSpec, event_name: &str) -> bool {
+fn event_matches_checkpoint(
+    spec: &AirNpeCheckpointSpec,
+    event_name: &str,
+    trusted_server: bool,
+) -> bool {
     let ev = event_name.trim().to_ascii_lowercase();
-    if ev == spec.objective_key {
-        return true;
-    }
     match spec.objective_key {
         "new_eden_intro" => matches!(
             ev.as_str(),
-            "new_eden_cinematic_ended"
+            "new_eden_intro"
+                | "new_eden_cinematic_ended"
                 | "intro_cinematic_finished"
                 | "cinematic_finished"
                 | "enter_tutorial_pocket"
                 | "move_to_dungeon"
         ),
         "approach_station" => matches!(ev.as_str(), "approach_station" | "approach_complete"),
-        "lock_target" => matches!(ev.as_str(), "lock_target" | "target_locked"),
-        "activate_weapons" => matches!(ev.as_str(), "activate_weapons" | "activatemodule"),
-        "destroy_enemies" | "destroy_enemies_2" | "destroy_enemies_boss" => {
-            matches!(ev.as_str(), "destroy_enemies" | "npcdestroyed" | "destroynpc")
+        _ if !trusted_server => false,
+        _ => {
+            if ev == spec.objective_key {
+                return true;
+            }
+            match spec.objective_key {
+                "lock_target" => matches!(ev.as_str(), "lock_target" | "target_locked"),
+                "activate_weapons" => {
+                    matches!(ev.as_str(), "activate_weapons" | "activatemodule")
+                }
+                "destroy_enemies" | "destroy_enemies_2" | "destroy_enemies_boss" => {
+                    matches!(ev.as_str(), "destroy_enemies" | "npcdestroyed" | "destroynpc")
+                }
+                "activate_afterburner" => {
+                    matches!(ev.as_str(), "activate_afterburner" | "activatemodule")
+                }
+                "activate_webifier" => {
+                    matches!(ev.as_str(), "activate_webifier" | "activatemodule")
+                }
+                "warp_to_site" | "warp_to_gate" | "warp_to_stargate" | "warp_to_station" => {
+                    ev == spec.objective_key || ev == "warpto"
+                }
+                "destroy_ships" => matches!(ev.as_str(), "destroy_ships" | "ship_destroyed"),
+                "dock_at_station" | "dock_at_career_station" => {
+                    ev == spec.objective_key || ev == "dockatstation"
+                }
+                "station_intro" => {
+                    matches!(ev.as_str(), "station_intro" | "clone_rebirth_complete")
+                }
+                "board_ship" => {
+                    matches!(ev.as_str(), "board_ship" | "boardship" | "assembleship")
+                }
+                "undock" => matches!(ev.as_str(), "undock" | "undockfromstation"),
+                "start_skill" => matches!(ev.as_str(), "start_skill" | "trainskill"),
+                "activate_gate" => matches!(ev.as_str(), "activate_gate" | "gateactivated"),
+                "orbit_target" => matches!(ev.as_str(), "orbit_target" | "orbit_started"),
+                "jump_through_stargate" => {
+                    matches!(ev.as_str(), "jump_through_stargate" | "stargatejump")
+                }
+                _ => false,
+            }
         }
-        "activate_afterburner" => matches!(ev.as_str(), "activate_afterburner" | "activatemodule"),
-        "activate_webifier" => matches!(ev.as_str(), "activate_webifier" | "activatemodule"),
-        "warp_to_site" | "warp_to_gate" | "warp_to_stargate" | "warp_to_station" => {
-            ev == spec.objective_key || ev == "warpto"
-        }
-        "destroy_ships" => matches!(ev.as_str(), "destroy_ships" | "ship_destroyed"),
-        "dock_at_station" | "dock_at_career_station" => {
-            ev == spec.objective_key || ev == "dockatstation"
-        }
-        "station_intro" => matches!(ev.as_str(), "station_intro" | "clone_rebirth_complete"),
-        "board_ship" => matches!(ev.as_str(), "board_ship" | "boardship" | "assembleship"),
-        "undock" => matches!(ev.as_str(), "undock" | "undockfromstation"),
-        "start_skill" => matches!(ev.as_str(), "start_skill" | "trainskill"),
-        "activate_gate" => matches!(ev.as_str(), "activate_gate" | "gateactivated"),
-        "orbit_target" => matches!(ev.as_str(), "orbit_target" | "orbit_started"),
-        "jump_through_stargate" => matches!(ev.as_str(), "jump_through_stargate" | "stargatejump"),
-        _ => false,
     }
 }
 
@@ -877,6 +899,7 @@ fn advance_runner_checkpoint(
     session: Option<&mut SessionState>,
     char_id: i64,
     trigger_event: &str,
+    allow_generic_advance: bool,
 ) -> bool {
     let now = ctx.now_unix();
 
@@ -904,11 +927,14 @@ fn advance_runner_checkpoint(
         }
         let cur_idx = find_checkpoint_idx(runner.checkpoint_id);
         let cur_spec = AIR_NPE_CHECKPOINTS[cur_idx];
-        let force_advance = matches!(
-            trigger_event,
-            "checkpoint_reached" | "advance_checkpoint" | "objective_completed"
-        );
-        if !force_advance && !event_matches_checkpoint(&cur_spec, trigger_event) {
+        let force_advance = allow_generic_advance
+            && matches!(
+                trigger_event,
+                "checkpoint_reached" | "advance_checkpoint" | "objective_completed"
+            );
+        if !force_advance
+            && !event_matches_checkpoint(&cur_spec, trigger_event, allow_generic_advance)
+        {
             return TransitionPlan::None;
         }
 
@@ -1089,7 +1115,11 @@ pub fn on_client_npe_event(
         }
     }
 
+    let is_gm = session.has_gm_role();
     if ev == "complete_air_npe" {
+        if !is_gm {
+            return None;
+        }
         let is_active = ctx.db.with_snapshot(|snap| {
             load_runner_state(snap, char_id).is_some_and(|r| r.state_id == AIR_NPE_STATE_ACTIVE)
         });
@@ -1102,7 +1132,7 @@ pub fn on_client_npe_event(
     let is_active = ctx.db.with_snapshot(|snap| {
         load_runner_state(snap, char_id).is_some_and(|r| r.state_id == AIR_NPE_STATE_ACTIVE)
     });
-    if is_active && advance_runner_checkpoint(ctx, Some(session), char_id, &ev) {
+    if is_active && advance_runner_checkpoint(ctx, Some(session), char_id, &ev, is_gm) {
         return Some(PyRep::Bool(true));
     }
 
@@ -1130,6 +1160,7 @@ pub fn on_client_graph_message(
         return false;
     }
 
+    let is_gm = session.has_gm_role();
     let msg_lower = msg_name.trim().to_ascii_lowercase();
     if matches!(
         msg_lower.as_str(),
@@ -1144,11 +1175,14 @@ pub fn on_client_graph_message(
     }
 
     if msg_lower == "complete_air_npe" {
+        if !is_gm {
+            return true;
+        }
         complete_air_npe(ctx, Some(session), char_id, ctx.now_unix());
         return true;
     }
 
-    if advance_runner_checkpoint(ctx, Some(session), char_id, &msg_lower) {
+    if advance_runner_checkpoint(ctx, Some(session), char_id, &msg_lower, is_gm) {
         return true;
     }
 
@@ -1187,7 +1221,7 @@ pub fn on_server_gameplay_event(
     if !is_active {
         return;
     }
-    let _ = advance_runner_checkpoint(ctx, None, char_id, event_name);
+    let _ = advance_runner_checkpoint(ctx, None, char_id, event_name, true);
 }
 
 /// Skips AIR NPE cleanly (`air_npe.skip_air_npe` or `operationsManager.process_client_event("skip_tutorial")`):

@@ -1046,7 +1046,11 @@ pub fn handle(
                         args.get(2).and_then(|a| a.as_i64()),
                     ),
                 };
-                if state_id <= 0 {
+                if state_id <= 0
+                    || (!session.has_gm_role()
+                        && state_id
+                            != crate::services::air_npe_nodegraph_runner::AIR_NPE_STATE_ACTIVE)
+                {
                     return Some(Err(BridgeRpcError::user_error("InvalidTutorialState")));
                 }
                 crate::services::air_npe_nodegraph_runner::on_start_tutorial(
@@ -1190,6 +1194,21 @@ pub fn handle(
                     save_store(snap, &store, now);
                 });
                 return Some(Ok(PyRep::Bool(true)));
+            }
+
+            if !session.has_gm_role()
+                && matches!(
+                    event_name.trim().to_ascii_lowercase().as_str(),
+                    "complete_air_npe"
+                        | "checkpoint_reached"
+                        | "advance_checkpoint"
+                        | "objective_completed"
+                )
+            {
+                return Some(Err(rpc_err(
+                    "InsufficientRole",
+                    "GM role required to advance or complete AIR NPE",
+                )));
             }
 
             if let Some(npe_rep) = crate::services::air_npe_nodegraph_runner::on_client_npe_event(
