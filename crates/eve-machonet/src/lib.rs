@@ -1185,4 +1185,6 @@ mod tests {
 mod lib_unit_tests;
 #[cfg(test)]
 mod machonet_deep_extra_unit_tests;
+#[cfg(test)]
+mod machonet_cov_unit_tests;
 

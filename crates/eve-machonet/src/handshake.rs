@@ -1068,6 +1068,11 @@ impl MachoHandshakeStateMachine {
         self.expected_version.to_server_hello_pyrep()
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_pending_identity_for_test(&mut self, id: Option<HandshakeIdentity>) {
+        self.pending_identity = id;
+    }
+
     /// Processes an incoming client `PyRep` frame according to the current handshake phase.
     /// Explicitly rejects unauthenticated `AuthenticationReq("ok")` stubs or premature `MachoPacket`s.
     pub fn step(&mut self, frame: &PyRep) -> Result<HandshakeStepOutput, GPSTransportClosed> {
