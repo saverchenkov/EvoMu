@@ -302,14 +302,26 @@ pub(crate) fn reconcile_velocity_for_ship(
     let cloak_orig = ballpark
         .combat_states
         .get(&ship_id)
-        .and_then(|cs| cs.cloak_original_max_velocity);
+        .and_then(|cs| cs.cloak_original_max_velocity)
+        .filter(|&v| v > 0.0);
     let cycle_orig = active_module_cycles
         .iter()
         .filter(|c| c.ship_id == ship_id)
-        .find_map(|c| c.original_max_velocity);
+        .filter_map(|c| c.original_max_velocity)
+        .find(|&v| v > 0.0);
     let base_v = *ballpark
         .base_webbed_max_velocity
         .entry(ship_id)
+        .and_modify(|v| {
+            if *v <= 0.0 {
+                if let Some(valid) = cloak_orig
+                    .or(cycle_orig)
+                    .or((current_v > 0.0).then_some(current_v))
+                {
+                    *v = valid;
+                }
+            }
+        })
         .or_insert_with(|| cloak_orig.or(cycle_orig).unwrap_or(current_v));
 
     let (target_v, has_any_modifier) =
@@ -468,29 +480,38 @@ pub(crate) fn handle_add_module_cycle(
         let cloak_orig = ballpark
             .combat_states
             .get(&cycle.ship_id)
-            .and_then(|cs| cs.cloak_original_max_velocity);
+            .and_then(|cs| cs.cloak_original_max_velocity)
+            .filter(|&v| v > 0.0);
         let existing_cycle_orig = active_module_cycles
             .iter()
             .filter(|c| c.ship_id == cycle.ship_id)
-            .find_map(|c| c.original_max_velocity);
-        let current_v = ballpark
+            .filter_map(|c| c.original_max_velocity)
+            .find(|&v| v > 0.0);
+        let ball_v_opt = ballpark
             .balls
             .get(&cycle.ship_id)
             .map(|b| b.max_velocity)
-            .unwrap_or(0.0);
-        let base_v = *ballpark
-            .base_webbed_max_velocity
-            .entry(cycle.ship_id)
-            .or_insert_with(|| cloak_orig.or(existing_cycle_orig).unwrap_or(current_v));
-        if cycle.original_max_velocity.is_none() {
-            cycle.original_max_velocity = Some(base_v);
-        }
-        if cycle.effect_name.starts_with("cloaking") {
-            ballpark
-                .combat_states
+            .filter(|&v| v > 0.0);
+        if let Some(resolved_v) = cloak_orig.or(existing_cycle_orig).or(ball_v_opt) {
+            let base_v = *ballpark
+                .base_webbed_max_velocity
                 .entry(cycle.ship_id)
-                .or_default()
-                .cloak_original_max_velocity = Some(base_v);
+                .and_modify(|v| {
+                    if *v <= 0.0 {
+                        *v = resolved_v;
+                    }
+                })
+                .or_insert(resolved_v);
+            if cycle.original_max_velocity.is_none_or(|v| v <= 0.0) {
+                cycle.original_max_velocity = Some(base_v);
+            }
+            if cycle.effect_name.starts_with("cloaking") {
+                ballpark
+                    .combat_states
+                    .entry(cycle.ship_id)
+                    .or_default()
+                    .cloak_original_max_velocity = Some(base_v);
+            }
         }
         if cycle.immobilize_self {
             if let Some(ball) = ballpark.balls.get_mut(&cycle.ship_id) {

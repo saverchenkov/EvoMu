@@ -58,32 +58,18 @@ pub(crate) async fn handle(
     }
 }
 
+#[path = "space_warp_jump_helpers.rs"]
+mod space_warp_jump_helpers;
+use space_warp_jump_helpers::{
+    bookmark_expired_err, emit_structure_dock_notifications, handle_undock,
+    resolve_bound_or_session_sys as resolve_bound_or_session_sys_inner,
+};
+
 fn resolve_bound_or_session_sys(
     bound_entry: Option<&BoundObjectEntry>,
     session: &SessionState,
 ) -> Result<u32, BridgeRpcError> {
-    match bound_entry {
-        Some(b) => {
-            if b.service != BEYONCE_SVC {
-                return Err(BridgeRpcError {
-                    code: "InvalidBoundService".into(),
-                    message: format!("Expected bound service {BEYONCE_SVC}, got {}", b.service),
-                });
-            }
-            Ok(b.object_id as u32)
-        }
-        None => session.solar_system_id.ok_or_else(|| BridgeRpcError {
-            code: "BoundObjectRequired".into(),
-            message: format!("Calls to {BEYONCE_SVC} require a bound object handle or active solar system"),
-        }),
-    }
-}
-
-fn bookmark_expired_err(bm_id: i64) -> BridgeRpcError {
-    BridgeRpcError {
-        code: "BookmarkExpired".into(),
-        message: format!("Bookmark {bm_id} has expired"),
-    }
+    resolve_bound_or_session_sys_inner(bound_entry, session, BEYONCE_SVC)
 }
 
 async fn handle_cmd_warp_to_stuff(
@@ -1346,28 +1332,8 @@ async fn handle_dock(
                     let st_tid = snap.structures.get(&dock_id).map(|s| s.type_id).unwrap_or(35832);
                     (corp, ally, fac, st_tid)
                 });
-                ctx.notify(
-                    crate::router::NotificationTarget::Station(dock_id),
-                    "OnCharacterEnteredStructure",
-                    "stationid",
-                    vec![
-                        PyRep::Integer(char_id),
-                        PyRep::Integer(corp_id),
-                        ally_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                        fac_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                    ],
-                );
-                let hv_state = PyRep::keyval([
-                    ("characterID", PyRep::Integer(char_id)),
-                    ("structureID", PyRep::Integer(dock_id)),
-                    ("structureTypeID", PyRep::Integer(i64::from(st_type_id))),
-                    ("shipID", PyRep::Integer(ship_id)),
-                ]);
-                ctx.notify(
-                    crate::router::NotificationTarget::Character(char_id),
-                    "OnHangarViewStateUpdated",
-                    "charid",
-                    vec![PyRep::Integer(dock_id), hv_state],
+                emit_structure_dock_notifications(
+                    ctx, dock_id, char_id, corp_id, ally_id, fac_id, st_type_id, ship_id,
                 );
             }
             ctx.quasar_gateway.on_session_changed(session, now_unix);
@@ -1384,49 +1350,6 @@ async fn handle_dock(
         }),
     }
 }
-
-async fn handle_undock(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    args: &[PyRep],
-    kwargs: &HashMap<String, PyRep>,
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, char_id) = match ServerContext::require_character(session) {
-        Ok(v) => v,
-        Err(e) => return Some(Err(e)),
-    };
-    let now_unix = ctx.now_unix();
-    if let Some(active_timer) = check_session_change_timer_active(ctx, char_id, now_unix, None) {
-        return Some(Err(BridgeRpcError {
-            code: "SessionChangeInProgress".into(),
-            message: format!(
-                "Cannot undock while 10s session-change timer ({}) is active",
-                active_timer.reason
-            ),
-        }));
-    }
-    let res = crate::services::station_structure::handle(
-        ctx,
-        session,
-        "stationSvc",
-        "Undock",
-        args,
-        kwargs,
-    )
-    .await?;
-    if let Ok(ref rep) = res {
-        let sys_id = session.solar_system_id.or_else(|| {
-            ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
-        }).unwrap_or(0);
-        let spawn_tick = rep
-            .dict_get("spawnTick")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0) as u64;
-        record_session_change_timer(ctx, char_id, now_unix, sys_id, spawn_tick, "undock");
-    }
-    Some(res)
-}
-
 
 pub use crate::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space;
 

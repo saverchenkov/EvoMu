@@ -14,3 +14,5 @@ pub mod dispatch_routing_tests;
 pub mod fixtures;
 #[cfg(test)]
 pub mod journeys_and_catalog;
+#[cfg(test)]
+pub mod journeys_and_catalog_part2;

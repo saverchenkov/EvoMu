@@ -1044,7 +1044,7 @@ pub(crate) fn step_cycles_and_capacitor(
 }
 
 pub(crate) fn cleanup_removed_module_cycle(ballpark: &mut Ballpark, removed: &ActiveModuleCycle, db_opt: &Option<Arc<eve_db::WorldRepository>>) {
-    if let Some(orig_v) = removed.original_max_velocity {
+    if let Some(orig_v) = removed.original_max_velocity.filter(|&v| v > 0.0) {
         if removed.effect_name.starts_with("cloaking") {
             if let Some(cs) = ballpark.combat_states.get_mut(&removed.ship_id) {
                 cs.cloak_original_max_velocity = None;
