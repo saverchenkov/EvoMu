@@ -386,3 +386,21 @@ mod pve_hacking_sites_extra_unit_tests;
 
 #[cfg(test)]
 mod wormhole_pve_escalations_extra_unit_tests;
+
+#[cfg(test)]
+mod fitting_saved_apply_extra_unit_tests;
+
+#[cfg(test)]
+mod doomsday_aoe_ops_extra_unit_tests;
+
+#[cfg(test)]
+mod pve_special_sites_abyssal_extra_unit_tests;
+
+#[cfg(test)]
+mod pve_expeditions_extra_unit_tests;
+
+#[cfg(test)]
+mod combat_npc_encounters_extra_unit_tests;
+
+#[cfg(test)]
+mod fw_services_extra_unit_tests;
