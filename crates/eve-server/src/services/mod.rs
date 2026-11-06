@@ -435,3 +435,21 @@ mod fleet_social_persistence_extra_unit_tests;
 
 #[cfg(test)]
 mod quasar_vendors_and_war_services_extra_unit_tests;
+
+#[cfg(test)]
+mod structure_profile_services_extra_unit_tests;
+
+#[cfg(test)]
+mod pve_abyssal_hazards_extra_unit_tests;
+
+#[cfg(test)]
+mod fw_insurgency_extra_unit_tests;
+
+#[cfg(test)]
+mod wormhole_pve_seeding_extra_unit_tests;
+
+#[cfg(test)]
+mod structure_weapons_ops_extra_unit_tests;
+
+#[cfg(test)]
+mod hypernet_raffle_ops_extra_unit_tests;
