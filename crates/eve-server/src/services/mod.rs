@@ -519,3 +519,6 @@ mod fighters_module_cycles_deep_extra_unit_tests;
 mod structure_lifecycle_control_deep_extra_unit_tests;
 #[cfg(test)]
 mod mining_compression_cyno_portal_deep_extra_unit_tests;
+mod tactical_scanners_bays_deep_extra_unit_tests;
+#[cfg(test)]
+mod warp_jump_gm_tools_deep_extra_unit_tests;
