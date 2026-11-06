@@ -20,4 +20,10 @@ pub use sync::*;
 
 #[cfg(test)]
 mod sqlite_store_extra_unit_tests;
+#[cfg(test)]
+mod social_store_extra_unit_tests;
+#[cfg(test)]
+mod industry_market_pve_store_extra_unit_tests;
+#[cfg(test)]
+mod notes_lp_ledger_sync_extra_unit_tests;
 

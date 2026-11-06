@@ -1390,4 +1390,5 @@ pub async fn handle_cmd_reconnect_to_drones(
 }
 
 #[cfg(test)] #[path = "sp6_lifecycle_unit_tests.rs"] mod sp6_lifecycle_unit_tests;
-
+#[cfg(test)] mod drone_return_extra_unit_tests;
+#[cfg(test)] mod cluster_tick_downtime_extra_unit_tests;
