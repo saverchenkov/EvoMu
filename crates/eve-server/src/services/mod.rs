@@ -481,3 +481,13 @@ mod fitting_containers_ships_deep_extra_unit_tests;
 mod space_probe_scanning_deep_extra_unit_tests;
 #[cfg(test)]
 mod character_skill_clone_deep_extra_unit_tests;
+#[cfg(test)]
+mod mining_sites_deep_extra_unit_tests;
+#[cfg(test)]
+mod mining_cycle_deep_extra_unit_tests;
+#[cfg(test)]
+mod moon_mining_deep_extra_unit_tests;
+#[cfg(test)]
+mod pve_missions_deep_extra_unit_tests;
+#[cfg(test)]
+mod pve_burners_lp_escalations_deep_extra_unit_tests;
