@@ -506,3 +506,6 @@ mod quasar_cosmetics_skills_deep_extra_unit_tests;
 mod air_npe_season_corp_projects_deep_extra_unit_tests;
 #[cfg(test)]
 mod crab_beacons_filament_arena_deep_extra_unit_tests;
+mod pve_dungeon_ess_insurgency_deep_extra_unit_tests;
+#[cfg(test)]
+mod fighters_module_cycles_deep_extra_unit_tests;
