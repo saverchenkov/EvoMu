@@ -182,26 +182,20 @@ pub fn apply_projected_remote_assistance(
         0.5_f64.powf(((dist_m - optimal) / falloff).powi(2))
     };
 
-    // Propagate logistics aggression flags from target owner to logi pilot
-    let target_owner_opt = ctx.db.with_snapshot(|snap| snap.items.get(&target_id).map(|i| i.owner_id));
-    if let Some(target_owner_id) = target_owner_opt.filter(|&oid| oid > 0 && oid != char_id) {
-        let now_unix = ctx.now_unix_secs();
-        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-        let (t_weap, t_pvp, t_susp, t_crim) = {
-            let ts = cw.get_or_create(target_owner_id);
-            (ts.weapon_timer_until_unix, ts.pvp_timer_until_unix, ts.suspect_flag_until_unix, ts.criminal_flag_until_unix)
-        };
-        let cs = cw.get_or_create(char_id);
-        if t_weap > now_unix {
-            cs.weapon_timer_until_unix = cs.weapon_timer_until_unix.max(t_weap);
-        }
-        if t_pvp > now_unix {
-            cs.pvp_timer_until_unix = cs.pvp_timer_until_unix.max(t_pvp);
-        }
-        if t_susp > now_unix || t_crim > now_unix {
-            cs.suspect_flag_until_unix = cs.suspect_flag_until_unix.max(t_susp).max(t_crim);
-        }
-    }
+    // Enforce full safety level, Criminal/Suspect inheritance, and CONCORD interference for remote assistance
+    let sys_id = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .get(&char_id)
+            .map(|c| c.solar_system_id)
+            .unwrap_or(30_000_142)
+    });
+    crate::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_remote_assistance(
+        ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        target_id,
+    )?;
 
     let entry = if mod_type.group_id == 290 {
         ProjectedRemoteAssistance {

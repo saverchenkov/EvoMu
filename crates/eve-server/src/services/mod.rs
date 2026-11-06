@@ -544,3 +544,8 @@ mod r6_t2_p1_security_tests;
 mod r6_t3_p1b_fitting_tests;
 #[cfg(test)]
 mod r6_t3_p1b_cycles_tests;
+pub(crate) mod r6_t1_p1_helpers;
+#[cfg(test)]
+mod r6_t1_p1_security_tests;
+#[cfg(test)]
+mod r6_t1_p1_security_tests_part2;

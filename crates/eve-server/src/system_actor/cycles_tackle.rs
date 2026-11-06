@@ -8,6 +8,30 @@ use glam::DVec3;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Returns true when `target_id` is a Sleeper or Drifter NPC immune to capacitor warfare (`#369`).
+#[inline]
+pub(crate) fn is_sleeper_or_drifter_capacitor_immune(
+    ballpark: &Ballpark,
+    target_id: BallId,
+    sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
+) -> bool {
+    let Some(b) = ballpark.balls.get(&target_id) else {
+        return false;
+    };
+    if matches!(b.type_id, 30185..=30500 | 37472) {
+        return true;
+    }
+    sde_opt
+        .as_deref()
+        .and_then(|sde| sde.types.get(&b.type_id))
+        .is_some_and(|t| {
+            matches!(
+                t.group_id,
+                959 | 960 | 961 | 982..=987 | 1306 | 1307 | 1529 | 4036
+            )
+        })
+}
+
 pub(crate) fn reconcile_tackle_and_bubbles(
     ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
@@ -325,10 +349,8 @@ pub(crate) fn handle_add_module_cycle(
         }
     }
     if let Some(target_id) = cycle.target_id {
-        let is_sleeper_target = ballpark
-            .balls
-            .get(&target_id)
-            .is_some_and(|b| matches!(b.type_id, 30185..=30500));
+        let is_sleeper_target =
+            is_sleeper_or_drifter_capacitor_immune(ballpark, target_id, sde_opt);
         if let Some(t_cs) = ballpark.combat_states.get_mut(&target_id) {
             let mut att = 1.0;
             if cycle.remote_falloff > 0.0 || cycle.remote_optimal > 0.0 {

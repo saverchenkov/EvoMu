@@ -345,74 +345,7 @@ pub async fn step_missiles_and_breachers(
     }
 
     // Step active Breacher Pod DoTs (non-stacking per target) ONLY for targets in `solar_system_id` (#208)
-    let dot_targets: Vec<i64> = with_combat_runtime(ctx, |rt| {
-        rt.active_breacher_dots.keys().copied().collect()
-    });
-    for tid in dot_targets {
-        let dot_opt = with_combat_runtime(ctx, |rt| rt.active_breacher_dots.get(&tid).cloned());
-        if let Some(mut dot) = dot_opt {
-            if let Ok(Some(mut cs)) = sys_handle.get_combat_state(tid).await {
-                let mut destroyed_by_dot = false;
-                let total_max_hp = (cs.max_shield_hp + cs.max_armor_hp + cs.max_structure_hp).max(1.0);
-                let dps = breacher_pod_tick_damage(total_max_hp, dot.pct_cap_fraction, dot.flat_cap_dps);
-                let step_s = dt.min(dot.remaining_s).max(0.0);
-                let raw_dmg = dps * step_s;
-                dot.tick_damage = dps;
-                let mut rem = raw_dmg;
-                if cs.shield_hp > 0.0 {
-                    let take = cs.shield_hp.min(rem);
-                    cs.shield_hp -= take;
-                    rem -= take;
-                }
-                if rem > 0.0 && cs.armor_hp > 0.0 {
-                    let take = cs.armor_hp.min(rem);
-                    cs.armor_hp -= take;
-                    rem -= take;
-                }
-                if rem > 0.0 && cs.structure_hp > 0.0 {
-                    let take = cs.structure_hp.min(rem);
-                    cs.structure_hp -= take;
-                }
-                if cs.structure_hp <= 1e-6 {
-                    cs.structure_hp = 0.0;
-                    destroyed_by_dot = true;
-                }
-                let _ = sys_handle.set_combat_state(tid, cs).await;
-                dot.remaining_s -= dt;
-                with_mut_combat_runtime(ctx, |rt| {
-                    if destroyed_by_dot || dot.remaining_s <= 1e-6 {
-                        rt.active_breacher_dots.remove(&tid);
-                    } else {
-                        rt.active_breacher_dots.insert(tid, dot.clone());
-                    }
-                });
-                if destroyed_by_dot {
-                    let (ball_type_id, ball_pos) = sys_handle
-                        .get_ball_snapshot(tid)
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|(_, b)| (b.type_id, b.position))
-                        .unwrap_or_else(|| {
-                            let stid = ctx.db.with_snapshot(|snap| {
-                                snap.items.get(&tid).map(|i| i.type_id).unwrap_or(0)
-                            });
-                            (stid, DVec3::ZERO)
-                        });
-                    handle_destroyed_ball_from_missile_or_aoe(
-                        ctx,
-                        solar_system_id,
-                        dot.source_char_id,
-                        tid,
-                        ball_type_id,
-                        ball_pos,
-                        ctx.now_unix(),
-                    )
-                    .await;
-                }
-            }
-        }
-    }
+    crate::services::r6_t1_p1_helpers::step_active_breacher_dots(ctx, &sys_handle, solar_system_id, dt).await;
 
     // Complete any self-destruct countdowns in `solar_system_id` whose timer has elapsed (`feat:ships.self-destruct-countdown`)
     let now_unix = ctx.now_unix();

@@ -1030,31 +1030,15 @@ pub async fn handle_fighters(
                 .unwrap_or("GOTO_POINT")
                 .to_ascii_uppercase();
             if cmd == "MWD" {
-                for fid in fighter_ids {
-                    let (ftype_id, was_mwd) = {
-                        let mut fighters = ctx.active_fighters.write().unwrap();
-                        if let Some(f) = fighters.get_mut(&fid) {
-                            let prev = f.mwd_active;
-                            f.mwd_active = true;
-                            (f.type_id, prev)
-                        } else {
-                            continue;
-                        }
-                    };
-                    if !was_mwd {
-                        let speed_bonus_pct = ctx
-                            .sde
-                            .types
-                            .get(&ftype_id)
-                            .and_then(|t| t.default_attributes.get(&2151).copied())
-                            .unwrap_or(400.0);
-                        if let Ok(Some((_, mut b))) = sys_handle.get_ball_snapshot(fid).await {
-                            b.max_velocity *= 1.0 + speed_bonus_pct / 100.0;
-                            b.speed_fraction = 1.0;
-                            let _ = sys_handle.spawn_ball(b).await;
-                        }
-                    }
-                    let _ = sys_handle.set_speed_fraction(fid, 1.0).await;
+                if let Err(err) = crate::services::r6_t1_p1_helpers::validate_and_activate_fighter_mwd(
+                    ctx,
+                    char_id,
+                    &sys_handle,
+                    &fighter_ids,
+                )
+                .await
+                {
+                    return Some(Err(err));
                 }
                 return Some(Ok(PyRep::Bool(true)));
             }
@@ -1310,8 +1294,18 @@ async fn handle_scoop_abandoned_fighter(
         }));
     }
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let f_pos = sys_handle.get_ball_position_sync(squad.ball_id);
-    let s_pos = sys_handle.get_ball_position_sync(ship_id);
+    let f_pos = sys_handle
+        .get_ball_snapshot(squad.ball_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|(_, b)| b.position);
+    let s_pos = sys_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|(_, b)| b.position);
     let Some(f_pos) = f_pos else {
         return Some(Err(BridgeRpcError {
             code: "FighterNotInSystem".into(),

@@ -1272,30 +1272,29 @@ pub async fn handle_npcs_drones(
                     .get(&ship_id)
                     .and_then(|sh| ctx.sde.types.get(&sh.type_id))
                     .and_then(|st| st.default_attributes.get(&283).copied())
-                    .unwrap_or(0.0);
-                if ship_drone_cap > 0.0 {
-                    let used_vol: f64 = snap
-                        .items
-                        .values()
-                        .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::DroneBay)
-                        .map(|i| {
-                            ctx.sde
-                                .types
-                                .get(&i.type_id)
-                                .map(|dt| dt.volume * (i.quantity.max(1) as f64))
-                                .unwrap_or(0.0)
-                        })
-                        .sum();
-                    let incoming_vol = t.volume * (it.quantity.max(1) as f64);
-                    if used_vol + incoming_vol > ship_drone_cap + 1e-4 {
-                        return Err(BridgeRpcError {
-                            code: "InsufficientDroneBayCapacity".into(),
-                            message: format!(
-                                "Drone bay capacity exceeded ({:.1} + {:.1} > {:.1} m3)",
-                                used_vol, incoming_vol, ship_drone_cap
-                            ),
-                        });
-                    }
+                    .unwrap_or(0.0)
+                    .max(0.0);
+                let used_vol: f64 = snap
+                    .items
+                    .values()
+                    .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::DroneBay)
+                    .map(|i| {
+                        ctx.sde
+                            .types
+                            .get(&i.type_id)
+                            .map(|dt| dt.volume * (i.quantity.max(1) as f64))
+                            .unwrap_or(0.0)
+                    })
+                    .sum();
+                let incoming_vol = t.volume * (it.quantity.max(1) as f64);
+                if ship_drone_cap <= 0.0 || used_vol + incoming_vol > ship_drone_cap + 1e-4 {
+                    return Err(BridgeRpcError {
+                        code: "InsufficientDroneBayCapacity".into(),
+                        message: format!(
+                            "Drone bay capacity exceeded ({:.1} + {:.1} > {:.1} m3)",
+                            used_vol, incoming_vol, ship_drone_cap
+                        ),
+                    });
                 }
                 Ok(())
             }) {

@@ -467,9 +467,10 @@ pub(crate) fn step_cycles_and_capacitor(
                     1.0
                 };
 
-                let is_sleeper_target = ballpark.balls.get(&target_id)
-                    .and_then(|b| sde_opt.as_ref().and_then(|sde| sde.types.get(&b.type_id)))
-                    .is_some_and(|t| matches!(t.group_id, 959 | 960 | 961 | 982..=987 | 1306 | 1307 | 1529 | 4036));
+                let is_sleeper_target =
+                    super::cycles_tackle::is_sleeper_or_drifter_capacitor_immune(
+                        ballpark, target_id, sde_opt,
+                    );
                 let mut nos_transferred = 0.0;
                 if let Some(cs) = ballpark.combat_states.get_mut(&target_id) {
                     // Nosferatu transfer rule (`feat:combat.nosferatu-drain-cap`, `feat:modules.nosferatu-transfer-rule`, `feat:npc.sleeper-capacitor-immunity-and-leash`):
@@ -937,10 +938,10 @@ pub(crate) fn step_cycles_and_capacitor(
                         }
                     }
                     if let Some(target_id) = cycle.target_id {
-                        let is_sleeper_target = ballpark
-                            .balls
-                            .get(&target_id)
-                            .is_some_and(|b| matches!(b.type_id, 30185..=30500));
+                        let is_sleeper_target =
+                            super::cycles_tackle::is_sleeper_or_drifter_capacitor_immune(
+                                ballpark, target_id, sde_opt,
+                            );
                         let impedance = if is_capital_remote_repair_module(cycle.module_type_id, sde_opt) {
                             let cap_rank = cap_remote_rep_ranks
                                 .get(&(target_id, cycle.module_id))

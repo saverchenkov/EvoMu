@@ -241,7 +241,7 @@ fn test_projected_remote_assistance_falloff_crimewatch_and_removal() {
         let cs = cw.get_or_create(logi_char);
         assert_eq!(cs.weapon_timer_until_unix, now + 60);
         assert_eq!(cs.pvp_timer_until_unix, now + 900);
-        assert_eq!(cs.suspect_flag_until_unix, now + 900);
+        assert_eq!(cs.criminal_flag_until_unix, now + 900);
     }
 
     let mut mod_attrs = HashMap::from([(54u16, 10_000.0), (158u16, 5_000.0), (160u16, 1.0)]);

@@ -882,40 +882,26 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
             message: "Session has no active solar system".into(),
         }));
     };
-    let fighter_ball_id = match args.first() {
-        Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => items.first().and_then(|i| i.as_i64()).unwrap_or(0),
-        Some(other) => other.as_i64().unwrap_or(0),
-        None => 0,
-    };
-    let slot_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0) as u32;
+    let (fighter_ids, slot_id, target_point) =
+        match crate::services::r6_t1_p1_helpers::parse_fighter_point_target_args(args) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
 
-    let target_point = match args.get(2) {
-        Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) if items.len() >= 3 => {
-            let x = items[0].as_f64().unwrap_or(0.0);
-            let y = items[1].as_f64().unwrap_or(0.0);
-            let z = items[2].as_f64().unwrap_or(0.0);
-            DVec3::new(x, y, z)
-        }
-        Some(PyRep::Real(x)) => {
-            let y = args.get(3).and_then(|a| a.as_f64()).unwrap_or(0.0);
-            let z = args.get(4).and_then(|a| a.as_f64()).unwrap_or(0.0);
-            DVec3::new(*x, y, z)
-        }
-        _ => DVec3::ZERO,
-    };
-
-    let fighter_opt = ctx
-        .active_fighters
-        .read()
-        .unwrap()
-        .get(&fighter_ball_id)
-        .cloned();
-    let Some(fighter) = fighter_opt else {
-        return Some(Err(BridgeRpcError {
-            code: "FighterNotFound".into(),
-            message: format!("Fighter squadron {fighter_ball_id} not found or not launched"),
-        }));
-    };
+    let mut point_results: Vec<PyRep> = Vec::with_capacity(fighter_ids.len());
+    for &fighter_ball_id in &fighter_ids {
+        let fighter_opt = ctx
+            .active_fighters
+            .read()
+            .unwrap()
+            .get(&fighter_ball_id)
+            .cloned();
+        let Some(fighter) = fighter_opt else {
+            return Some(Err(BridgeRpcError {
+                code: "FighterNotFound".into(),
+                message: format!("Fighter squadron {fighter_ball_id} not found or not launched"),
+            }));
+        };
     if fighter.owner_char_id != char_id || fighter.is_abandoned {
         return Some(Err(BridgeRpcError {
             code: "FighterNotOwned".into(),
@@ -1187,7 +1173,7 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
         ],
     );
 
-    Some(Ok(PyRep::keyval([
+    point_results.push(PyRep::keyval([
         ("fighterID", PyRep::Integer(fighter_ball_id)),
         ("slotID", PyRep::Integer(slot_id as i64)),
         ("abilityID", PyRep::Integer(slot_def.ability_id as i64)),
@@ -1204,7 +1190,13 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
         ])),
         ("remainingCharges", PyRep::Integer(remaining_charges)),
         ("success", PyRep::Bool(true)),
-    ])))
+    ]));
+    }
+    if point_results.len() == 1 {
+        Some(Ok(point_results.into_iter().next().unwrap()))
+    } else {
+        Some(Ok(PyRep::List(point_results)))
+    }
 }
 
 /// Handles `fighterMgr.CmdDeactivateAbilitySlots` (`feat:drones.fighter-abilities`).

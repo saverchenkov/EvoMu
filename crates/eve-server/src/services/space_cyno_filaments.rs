@@ -284,6 +284,7 @@ async fn handle_wormhole_jump(
         }
     };
 
+    let prev_combat_state = old_handle.get_combat_state(ship_id).await.ok().flatten();
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, old_sys);
     let existing_ball = old_handle.remove_ball(ship_id).await;
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
@@ -305,6 +306,7 @@ async fn handle_wormhole_jump(
     new_ball.speed_fraction = 0.0;
     new_ball.mode = MovementMode::Stop;
     let mut combat_state = ctx.build_ship_combat_state(char_id, ship_id, new_ball.type_id);
+    crate::services::r6_t1_p1_helpers::apply_preserved_combat_state(&mut combat_state, prev_combat_state);
     combat_state.is_cloaked = true;
     combat_state.gate_cloak_remaining_ticks = 60;
     combat_state.undock_invulnerable_remaining_ticks = 60;
@@ -329,20 +331,16 @@ async fn handle_wormhole_jump(
         .materialize_system_lod2(dest_sys_id, &ctx.systems, &ctx.sde)
         .await;
 
-    let _ = new_handle
-        .spawn_ball(Ball {
-            id: wh_ball_id,
-            type_id: 26272,
-            position: dest_sig_pos,
-            velocity: DVec3::ZERO,
-            max_velocity: 0.0,
-            inertia: 1.0,
-            mass: 1_000_000_000.0,
-            radius: 1500.0,
-            speed_fraction: 0.0,
-            mode: MovementMode::Rigid,
-        })
-        .await;
+    let exit_wh_ball_id = crate::services::r6_t1_p1_helpers::spawn_distinct_exit_wormhole(
+        ctx,
+        &new_handle,
+        old_sys,
+        dest_sys_id,
+        wh_ball_id,
+        wh_ball.position,
+        dest_sig_pos,
+    )
+    .await;
 
     session.solar_system_id = Some(updated_ch.solar_system_id);
     session.constellation_id = Some(updated_ch.constellation_id);
@@ -355,6 +353,7 @@ async fn handle_wormhole_jump(
     Ok(PyRep::keyval([
         ("solarSystemID", PyRep::Integer(dest_sys_id as i64)),
         ("beyonceBoundID", PyRep::Integer(new_beyonce_id as i64)),
+        ("exitWormholeBallID", PyRep::Integer(exit_wh_ball_id)),
     ]))
 }
 
