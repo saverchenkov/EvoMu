@@ -1046,6 +1046,46 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         }),
     );
 
+    // DeleteRequest -> DeleteResponse (+ DeletedNotice)
+    let state_del_cmd = Arc::clone(&state);
+    router.register_handler(
+        "eve_public.freelance.project.api.DeleteRequest",
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let Some(cid) = ctx.effective_character_id() else {
+                return Err((STATUS_UNAUTHENTICATED, "Unauthenticated".into()));
+            };
+            let caller_corp = ctx.effective_corporation_id();
+            let uuid = extract_uuid(dyn_msg.get(1)).ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
+            let now_u = ctx_now_unix(ctx);
+            let corpid = state_del_cmd.owner_corp_of(&uuid, now_u)?;
+            if caller_corp != Some(corpid) {
+                return Err((STATUS_PERMISSION_DENIED, "Permission denied".into()));
+            }
+            check_corp_admin_role(ctx, state_del_cmd.db.as_ref(), cid, corpid)?;
+            if let (Some(pid), Some(ref db)) = (corp_projects::freelance_uuid_to_project_id(&uuid), &state_del_cmd.db) {
+                let _ = corp_projects::close_or_delete_canonical_project(db, pid, true, now_u);
+            }
+            state_del_cmd.refresh_from_db(now_u);
+
+            let mut notice_bytes = Vec::new();
+            encode_uuid_field(1, &uuid, &mut notice_bytes);
+            ctx_queue_notice(
+                NoticeScope::Corporation(corpid),
+                GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.DeletedNotice"),
+                    value: notice_bytes,
+                },
+                now_u,
+            );
+            let mut out = Vec::new();
+            encode_bytes_field(1, &[], &mut out);
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.DeleteResponse"),
+                value: out,
+            })
+        }),
+    );
+
     // Admin/Manager SetNameRequest & SetDescriptionRequest
     let state_set_name = Arc::clone(&state);
     router.register_handler(

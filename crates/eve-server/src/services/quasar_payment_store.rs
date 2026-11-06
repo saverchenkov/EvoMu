@@ -84,7 +84,50 @@ fn extract_u64_id(raw_bytes: &[u8], dyn_msg: &DynamicQuasarMessage) -> Option<u6
     parse_raw_varints(raw_bytes).get(&1).copied().filter(|id| *id > 0)
 }
 
+fn hydrate_store_catalog_from_sde(db: &WorldRepository, sde: &eve_sde::SdeRegistry) {
+    if sde.skin_licenses.len() <= 20 {
+        return;
+    }
+    db.with_mut_snapshot(|snap| {
+        if snap.service_state_blobs.contains_key("nes_store_catalog") {
+            return;
+        }
+        let type_name = |tid: u32, fallback: &str| {
+            sde.types.get(&tid).map(|t| t.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| fallback.to_string())
+        };
+        let categories = vec![
+            StoreCategory { id: 1, name: "Omega Time".into(), description: "Omega Clone State upgrades".into() },
+            StoreCategory { id: 2, name: "Pilot Services".into(), description: "Account & skill services".into() },
+            StoreCategory { id: 3, name: "Ship SKINs".into(), description: "Published ship SKIN licenses".into() },
+        ];
+        let mut products = vec![
+            StoreProduct { id: 101, name: "30 Days Omega".into(), description: "30-day Omega subscription".into(), type_id: 0, quantity: 1 },
+            StoreProduct { id: 102, name: type_name(34_599, "Multiple Pilot Training Certificate"), description: type_name(34_599, "MPTC"), type_id: 34_599, quantity: 1 },
+            StoreProduct { id: 103, name: type_name(40_519, "Skill Extractor"), description: type_name(40_519, "Skill Extractor"), type_id: 40_519, quantity: 1 },
+            StoreProduct { id: 104, name: type_name(40_520, "Large Skill Injector"), description: type_name(40_520, "Large Skill Injector"), type_id: 40_520, quantity: 1 },
+        ];
+        let mut offers = vec![
+            StoreOffer { id: 1001, name: "30 Days Omega".into(), description: "30-day Omega time".into(), category_id: 1, price_plex: 500, product_ids: vec![101], targeted: false, price_cents: Some(1_999), currency: Some("USD".into()) },
+            StoreOffer { id: 1002, name: type_name(34_599, "MPTC"), description: "Multi-character training".into(), category_id: 2, price_plex: 485, product_ids: vec![102], targeted: false, price_cents: Some(1_999), currency: Some("USD".into()) },
+            StoreOffer { id: 1003, name: type_name(40_519, "Skill Extractor"), description: "Extract skill points".into(), category_id: 2, price_plex: 195, product_ids: vec![103], targeted: true, price_cents: Some(799), currency: Some("USD".into()) },
+            StoreOffer { id: 1004, name: type_name(40_520, "Large Skill Injector"), description: "Inject unallocated SP".into(), category_id: 2, price_plex: 350, product_ids: vec![104], targeted: false, price_cents: None, currency: None },
+        ];
+        let mut skin_tids: Vec<u32> = sde.skin_licenses.keys().copied().filter(|tid| sde.types.contains_key(tid)).collect();
+        skin_tids.sort_unstable();
+        for (idx, tid) in skin_tids.into_iter().take(24).enumerate() {
+            let pid = 200 + idx as u32;
+            let oid = 2001 + idx as u32;
+            let name = type_name(tid, &format!("Ship SKIN {tid}"));
+            let plex = 55i64 + i64::from(tid % 4) * 55;
+            products.push(StoreProduct { id: pid, name: name.clone(), description: name.clone(), type_id: tid, quantity: 1 });
+            offers.push(StoreOffer { id: oid, name, description: "Published V24 Ship SKIN".into(), category_id: 3, price_plex: plex, product_ids: vec![pid], targeted: idx % 4 == 0, price_cents: None, currency: None });
+        }
+        save_store_catalog(snap, &StoreCatalog { categories, products, offers });
+    });
+}
+
 pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
+    hydrate_store_catalog_from_sde(&db, &router.sde);
     // 1. eve_public.plex.vault.api.BalanceRequest -> eve_public.plex.vault.api.BalanceResponse
     let db_plex_bal = Arc::clone(&db);
     router.register_handler(

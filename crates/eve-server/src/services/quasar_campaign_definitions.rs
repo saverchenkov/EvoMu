@@ -294,35 +294,25 @@ pub fn register_campaign_definition_handlers(
         "eve_public.campaign.contributionmethod.definition.api.GetAllRequest",
         Arc::new(move |_ctx, _any, _dyn| {
             let mut out = Vec::new();
-            let mut encoded_any = false;
-
             if let Some(ref sde) = mgr_cm.sde {
-                if let Ok(methods) = sde.contribution_methods() {
-                    for (name, val) in &methods {
-                        let title_id = val.get("titleID").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                        let progress_desc_id = val.get("progressDescriptionID").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                        let icon = val.get("icon").and_then(|v| v.as_str()).unwrap_or("");
-                        let mut param_list = Vec::new();
-                        if let Some(params_arr) = val.get("parameters").and_then(|v| v.as_array()) {
-                            for p in params_arr {
-                                let key = p.get("parameterKey").and_then(|v| v.as_str()).unwrap_or("");
-                                let ptype = p.get("parameterType").and_then(|v| v.as_str()).unwrap_or("");
-                                let picon = p.get("icon").and_then(|v| v.as_str()).unwrap_or("");
-                                param_list.push((key, ptype, picon));
-                            }
+                let methods = sde.contribution_methods().map_err(|e| {
+                    (STATUS_INTERNAL_ERROR, format!("Failed to load SDE contribution methods: {e}"))
+                })?;
+                for (name, val) in &methods {
+                    let title_id = val.get("titleID").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    let progress_desc_id = val.get("progressDescriptionID").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    let icon = val.get("icon").and_then(|v| v.as_str()).unwrap_or("");
+                    let mut param_list = Vec::new();
+                    if let Some(params_arr) = val.get("parameters").and_then(|v| v.as_array()) {
+                        for p in params_arr {
+                            let key = p.get("parameterKey").and_then(|v| v.as_str()).unwrap_or("");
+                            let ptype = p.get("parameterType").and_then(|v| v.as_str()).unwrap_or("");
+                            let picon = p.get("icon").and_then(|v| v.as_str()).unwrap_or("");
+                            param_list.push((key, ptype, picon));
                         }
-                        let mut def_bytes = Vec::new();
-                        encode_contribution_method_definition(name, title_id, progress_desc_id, icon, &param_list, &mut def_bytes);
-                        encode_bytes_field(1, &def_bytes, &mut out);
                     }
-                    encoded_any = !methods.is_empty();
-                }
-            }
-
-            if !encoded_any {
-                for (name, title_id, prog_desc, icon, params) in AUTHENTIC_CONTRIBUTION_METHODS {
                     let mut def_bytes = Vec::new();
-                    encode_contribution_method_definition(name, *title_id, *prog_desc, icon, params, &mut def_bytes);
+                    encode_contribution_method_definition(name, title_id, progress_desc_id, icon, &param_list, &mut def_bytes);
                     encode_bytes_field(1, &def_bytes, &mut out);
                 }
             }

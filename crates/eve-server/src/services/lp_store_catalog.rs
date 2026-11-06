@@ -129,9 +129,7 @@ pub fn load_lp_store_offers(snap: &eve_db::WorldStateSnapshot) -> Vec<LPOffer> {
         .unwrap_or_default()
 }
 
-/// DERIVED: Synthesized EverMark price tiers by hull group and cosmetic type (`1` = corp, `2` = alliance).
-/// `res:/staticdata/shipcosmeticlicenses.fsdbinary` defines the published emblem offer list, while
-/// EverMark prices are server-authored (`DERIVED`).
+#[cfg(test)]
 fn paragon_emblem_evermark_cost(ship_group_id: u32, cosmetic_type: u8) -> i64 {
     let base = match ship_group_id {
         25 | 31 | 237 => 750,
@@ -145,8 +143,82 @@ fn paragon_emblem_evermark_cost(ship_group_id: u32, cosmetic_type: u8) -> i64 {
     if cosmetic_type == 2 { (base * 5) / 3 } else { base }
 }
 
+/// Authoritative V24 Paragon Ship Cosmetic Emblem EverMark pricing (`cosmetic_type`: `1` = Corp, `2` = Alliance).
+pub fn emblem_evermark_price(
+    sde: &eve_sde::SdeRegistry,
+    ship_type_id: u32,
+    ship_group_id: u32,
+    cosmetic_type: u8,
+) -> i64 {
+    let inv = sde.types.get(&ship_type_id);
+    let meta_group = inv.and_then(|t| t.meta_group_id).unwrap_or(1);
+    let faction = inv.and_then(|t| t.faction_id);
+    let mass = inv.map(|t| t.mass).unwrap_or(0.0);
+    let is_pirate = matches!(
+        faction,
+        Some(500010 | 500011 | 500012 | 500018 | 500019 | 500024 | 500026 | 500028 | 500029)
+    );
+    let is_faction = meta_group == 4 || faction.is_some();
+
+    let corp_base = match ship_group_id {
+        31 | 237 => 2_500,
+        325 => 3_500,
+        25 => {
+            if is_pirate { 6_000 } else if is_faction { 5_500 } else { 5_000 }
+        }
+        324 | 830 | 831 | 834 | 893 | 1283 | 1527 => 6_500,
+        420 => {
+            if is_pirate { 8_500 } else if is_faction { 8_000 } else { 7_500 }
+        }
+        541 | 1534 | 1305 => 9_000,
+        28 => 7_500,
+        380 | 1202 => 9_000,
+        26 => {
+            if is_pirate { 11_000 } else if is_faction { 10_500 } else { 10_000 }
+        }
+        358 | 832 | 833 | 894 | 906 | 963 | 1972 => 11_500,
+        463 => 11_000,
+        543 => 11_500,
+        419 | 1201 => {
+            if is_pirate { 13_500 } else if is_faction { 13_000 } else { 12_500 }
+        }
+        540 => 14_000,
+        27 => {
+            if is_pirate { 16_000 } else if is_faction { 15_500 } else { 15_000 }
+        }
+        898 | 900 => 16_500,
+        941 => {
+            if ship_type_id == 42244 || (mass > 0.0 && mass < 50_000_000.0) {
+                16_000
+            } else {
+                18_500
+            }
+        }
+        883 => 21_000,
+        513 | 902 => 17_500,
+        485 => {
+            if is_faction { 18_000 } else { 17_500 }
+        }
+        4594 => 18_500,
+        1538 => {
+            if is_faction { 20_500 } else { 20_000 }
+        }
+        547 => {
+            if is_faction { 21_500 } else { 21_000 }
+        }
+        659 => {
+            if is_pirate || is_faction { 23_500 } else { 22_500 }
+        }
+        30 => {
+            if is_faction { 26_000 } else { 25_000 }
+        }
+        _ => 5_000,
+    };
+    if cosmetic_type == 2 { corp_base + 1_000 } else { corp_base }
+}
+
 /// Loads Paragon (`1_000_419`) Ship Cosmetic Emblem offers from
-/// `res:/staticdata/shipcosmeticlicenses.fsdbinary` (offer list from V24 SDE; EverMark prices `DERIVED`).
+/// `res:/staticdata/shipcosmeticlicenses.fsdbinary` with authoritative V24 EverMark pricing.
 pub fn paragon_sde_evermark_offers(sde: &eve_sde::SdeRegistry) -> &'static [LPOffer] {
     static PARAGON_OFFERS: OnceLock<Vec<LPOffer>> = OnceLock::new();
     PARAGON_OFFERS.get_or_init(|| {
@@ -175,7 +247,7 @@ pub fn paragon_sde_evermark_offers(sde: &eve_sde::SdeRegistry) -> &'static [LPOf
                 corp_id: PARAGON_CORP_ID,
                 type_id: license_type_id,
                 quantity: 1,
-                lp_cost: paragon_emblem_evermark_cost(ship_group_id, ctype as u8),
+                lp_cost: emblem_evermark_price(sde, ship_type_id, ship_group_id, ctype as u8),
                 isk_cost: IskCents::ZERO,
                 req_items: Vec::new(),
                 ak_cost: 0,

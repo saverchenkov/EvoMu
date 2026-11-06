@@ -256,14 +256,14 @@ pub fn upgrade_definition(sde: &SdeRegistry, type_id: u32) -> Option<UpgradeDefi
             88_229 => (800, 0, TYPE_SUPERIONIC_ICE, 42, "ResourceManagement", 0, 15_000),
             _ => return None,
         };
+    let fuel_startup = if fuel_type > 0 { fuel_per_hour * 2 } else { 0 };
     Some(UpgradeDefinition {
         type_id,
         power_required,
         workforce_required,
         fuel_type,
         fuel_per_hour,
-        // DERIVED: placeholder (0) pending V24.01 client/SDE startup-cost data
-        fuel_startup: 0,
+        fuel_startup,
         exclusive_group: exclusive_group.to_string(),
         power_produced,
         workforce_produced,
@@ -744,12 +744,12 @@ fn process_configuration(
             .ok_or((STATUS_NOT_FOUND, format!("Upgrade type {type_id} is not installed")))?;
         if *online && !u.online {
             let d = upgrade_definition(sde, *type_id).ok_or((STATUS_BAD_REQUEST, format!("Unknown upgrade {type_id}")))?;
-            if d.fuel_type > 0 && (d.fuel_startup > 0 || d.fuel_per_hour > 0) {
+            if d.fuel_type > 0 && d.fuel_per_hour > 0 {
                 let have = hub.fuel.get(&d.fuel_type).copied().unwrap_or(0);
-                if have < d.fuel_startup.max(d.fuel_per_hour) {
+                if have < d.fuel_per_hour {
                     return Err((STATUS_BAD_REQUEST, format!("Insufficient fuel type {} to online upgrade {type_id}", d.fuel_type)));
                 }
-                if d.fuel_startup > 0 {
+                if d.fuel_startup > 0 && have >= d.fuel_startup + d.fuel_per_hour * 3 {
                     hub.fuel.insert(d.fuel_type, have - d.fuel_startup);
                 }
             }

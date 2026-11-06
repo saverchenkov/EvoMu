@@ -145,6 +145,53 @@ pub fn seed_component_listings_if_empty(data: &mut CosmeticsMarketData, sde: &Sd
         .map(|t| t.type_id)
         .collect();
     design_types.sort_unstable();
+    let comp_meta = sde
+        .load_cfsd_table("res:/staticdata/shipskindesigncomponents.fsdbinary")
+        .ok();
+    let component_tier = |tid: u32, idx: usize| -> u64 {
+        comp_meta
+            .as_ref()
+            .and_then(|rows| rows.get(&i64::from(tid)))
+            .and_then(|rec| match rec.fields.get("rarity").or_else(|| rec.fields.get("tier")) {
+                Some(eve_sde::CfsdValue::Int(v)) => u64::try_from(*v).ok(),
+                _ => None,
+            })
+            .unwrap_or(((idx % 5) + 1) as u64)
+            .clamp(1, 5)
+    };
+    if design_types.len() > 4 {
+        let mut seq = 0u64;
+        for (idx, type_id) in design_types.into_iter().enumerate() {
+            let tier = component_tier(type_id, idx);
+            let unit_isk = tier * 250_000;
+            let unit_plex = tier * 500;
+            let variants = [
+                (Some(unit_isk), None, 1u64, 0u32),
+                (Some(unit_isk * 4), None, 5u64, 20u32),
+                (None, Some(unit_plex), 1u64, 0u32),
+            ];
+            for (price_isk, price_plex_cents, bundle_size, discount_percent) in variants {
+                seq += 1;
+                let mut uuid = [0u8; 16];
+                uuid[0..8].copy_from_slice(b"COMPLIST");
+                uuid[8..16].copy_from_slice(&seq.to_be_bytes());
+                data.component_listings.insert(
+                    hex(&uuid),
+                    ComponentListingRecord {
+                        uuid,
+                        sale_end_unix: 4_102_444_800,
+                        price_isk,
+                        price_plex_cents,
+                        component_item_type_id: type_id,
+                        bundle_size,
+                        discount_percent,
+                    },
+                );
+            }
+        }
+        data.next_seq = data.next_seq.max(seq + 10);
+        return true;
+    }
     if design_types.len() < 4 {
         let mut fallback: Vec<u32> = sde.skin_licenses.keys().copied().collect();
         fallback.sort_unstable();
@@ -159,23 +206,23 @@ pub fn seed_component_listings_if_empty(data: &mut CosmeticsMarketData, sde: &Sd
         (design_types[2], None, Some(1_000u64), 1u64, 0u32),
         (design_types[3], None, Some(4_000u64), 5u64, 20u32),
     ];
-    for (idx, (type_id, price_isk, price_plex_cents, bundle_size, discount_percent)) in
-        templates.into_iter().enumerate()
-    {
+    for (idx, (type_id, price_isk, price_plex_cents, bundle_size, discount_percent)) in templates.into_iter().enumerate() {
         let seq = (idx as u64) + 1;
         let mut uuid = [0u8; 16];
         uuid[0..8].copy_from_slice(b"COMPLIST");
         uuid[8..16].copy_from_slice(&seq.to_be_bytes());
-        let rec = ComponentListingRecord {
-            uuid,
-            sale_end_unix: 4_102_444_800,
-            price_isk,
-            price_plex_cents,
-            component_item_type_id: type_id,
-            bundle_size,
-            discount_percent,
-        };
-        data.component_listings.insert(hex(&uuid), rec);
+        data.component_listings.insert(
+            hex(&uuid),
+            ComponentListingRecord {
+                uuid,
+                sale_end_unix: 4_102_444_800,
+                price_isk,
+                price_plex_cents,
+                component_item_type_id: type_id,
+                bundle_size,
+                discount_percent,
+            },
+        );
     }
     if data.next_seq < 10 {
         data.next_seq = 10;
@@ -183,51 +230,14 @@ pub fn seed_component_listings_if_empty(data: &mut CosmeticsMarketData, sde: &Sd
     true
 }
 
-fn hex(u: &[u8]) -> String {
-    u.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn any(type_name: &str, value: Vec<u8>) -> GoogleAny {
-    GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
-        value,
-    }
-}
-
-fn put_seq(field: u32, id: u64, out: &mut Vec<u8>) {
-    let mut b = Vec::new();
-    encode_varint_field(1, id, &mut b);
-    encode_bytes_field(field, &b, out);
-}
-
-fn put_seconds(field: u32, secs: u64, out: &mut Vec<u8>) {
-    let mut b = Vec::new();
-    encode_varint_field(1, secs, &mut b);
-    encode_bytes_field(field, &b, out);
-}
-
-fn put_uuid(field: u32, uuid: &[u8; 16], out: &mut Vec<u8>) {
-    let mut b = Vec::new();
-    encode_bytes_field(1, uuid, &mut b);
-    encode_bytes_field(field, &b, out);
-}
-
-fn put_isk(field: u32, units: u64, out: &mut Vec<u8>) {
-    let mut b = Vec::new();
-    encode_sint_field(1, i64::try_from(units).unwrap_or(i64::MAX), &mut b);
-    encode_sint_field(2, 0, &mut b);
-    encode_bytes_field(field, &b, out);
-}
-
-fn put_plex_cents(field: u32, cents: u64, out: &mut Vec<u8>) {
-    let mut b = Vec::new();
-    encode_varint_field(1, cents, &mut b);
-    encode_bytes_field(field, &b, out);
-}
-
-fn encode_sint_field(field: u32, v: i64, out: &mut Vec<u8>) {
-    encode_varint_field(field, ((v << 1) ^ (v >> 63)) as u64, out);
-}
+fn hex(u: &[u8]) -> String { u.iter().map(|b| format!("{b:02x}")).collect() }
+fn any(type_name: &str, value: Vec<u8>) -> GoogleAny { GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"), value } }
+fn put_seq(field: u32, id: u64, out: &mut Vec<u8>) { let mut b = Vec::new(); encode_varint_field(1, id, &mut b); encode_bytes_field(field, &b, out); }
+fn put_seconds(field: u32, secs: u64, out: &mut Vec<u8>) { let mut b = Vec::new(); encode_varint_field(1, secs, &mut b); encode_bytes_field(field, &b, out); }
+fn put_uuid(field: u32, uuid: &[u8; 16], out: &mut Vec<u8>) { let mut b = Vec::new(); encode_bytes_field(1, uuid, &mut b); encode_bytes_field(field, &b, out); }
+fn put_isk(field: u32, units: u64, out: &mut Vec<u8>) { let mut b = Vec::new(); encode_sint_field(1, i64::try_from(units).unwrap_or(i64::MAX), &mut b); encode_sint_field(2, 0, &mut b); encode_bytes_field(field, &b, out); }
+fn put_plex_cents(field: u32, cents: u64, out: &mut Vec<u8>) { let mut b = Vec::new(); encode_varint_field(1, cents, &mut b); encode_bytes_field(field, &b, out); }
+fn encode_sint_field(field: u32, v: i64, out: &mut Vec<u8>) { encode_varint_field(field, ((v << 1) ^ (v >> 63)) as u64, out); }
 
 fn put_buyer_fee(field: u32, lp_amount: u64, out: &mut Vec<u8>) {
     let mut lp = Vec::new();
@@ -417,11 +427,21 @@ fn broker_fee_for(duration_secs: u64, target: &ListingTargetRecord) -> u64 {
         .find(|(d, _)| *d == duration_secs)
         .map(|(_, fee)| *fee)
         .unwrap_or_else(|| ((duration_secs.max(86_400) / 86_400) * 50_000).max(100_000));
-    if target.is_branded() {
-        base / 2
-    } else {
-        base
-    }
+    if target.is_branded() { base / 2 } else { base }
+}
+
+fn broker_fee_for_valuation(listing_value_isk: u64, duration_secs: u64, target: &ListingTargetRecord) -> u64 {
+    let floor = broker_fee_for(duration_secs, target);
+    let bps = match duration_secs {
+        d if d <= 86_400 => 200,
+        d if d <= 259_200 => 250,
+        d if d <= 604_800 => 300,
+        d if d <= 2_592_000 => 400,
+        _ => 500,
+    };
+    let scaled = listing_value_isk.saturating_mul(bps) / 10_000;
+    let val_fee = if target.is_branded() { scaled / 2 } else { scaled };
+    floor.max(val_fee)
 }
 
 fn market_get_broker_fees(
@@ -431,32 +451,31 @@ fn market_get_broker_fees(
 ) -> HandlerResult {
     let _cid = require_char(ctx)?;
     let target = parse_listing_target(sub(msg, 1));
+    let est_value_isk = sub(msg, 2)
+        .and_then(|m| m.get(1))
+        .and_then(as_u64)
+        .or_else(|| sub(msg, 3).and_then(|m| m.get(1)).and_then(as_u64).map(|p| p.saturating_mul(50_000)))
+        .unwrap_or(0);
     let mut out = Vec::new();
     for (secs, _) in LISTING_DURATIONS_SECS {
-        let fee_isk = broker_fee_for(secs, &target);
+        let fee_isk = broker_fee_for_valuation(est_value_isk, secs, &target);
         let mut bf = Vec::new();
         put_seconds(1, secs, &mut bf);
         put_isk(2, fee_isk, &mut bf);
         encode_bytes_field(1, &bf, &mut out);
-
         let mut fpd = Vec::new();
         put_seconds(1, secs, &mut fpd);
         encode_bytes_field(2, &bf, &mut fpd);
         encode_bytes_field(2, &fpd, &mut out);
     }
-    Ok(any(
-        "eve_public.cosmetic.market.api.GetBrokerFeesResponse",
-        out,
-    ))
+    Ok(any("eve_public.cosmetic.market.api.GetBrokerFeesResponse", out))
 }
 
 fn paragon_hub_skill_reductions(st: &CosmeticsMarketState, cid: u32) -> (u64, usize) {
     st.db.with_snapshot(|s| {
-        let Some(sk_map) = s.skills.get(&(cid as i64)) else {
-            return (0, 5);
-        };
+        let Some(sk_map) = s.skills.get(&(cid as i64)) else { return (0, 5); };
         let lvl = |sid: u32| sk_map.get(&sid).map(|sk| sk.level as u64).unwrap_or(0);
-        // 84217 Paragon Relations, 84218 Paragon Partnership, 84220 Executive Paragon Partnership: -1% vendor fee per level each
+        // 84217 Paragon Relations, 84218 Paragon Partnership, 84220 Executive Paragon Partnership: -1% vendor fee/lvl
         let fee_reduction_pct = (lvl(84217) + lvl(84218) + lvl(84220)).min(15);
         // 81368 Hub Promotion (+1/lvl), 81369 Hub Algorithm Optimization (+5/lvl)
         let max_listings = 5 + (lvl(81368) + lvl(81369) * 5) as usize;
@@ -488,10 +507,7 @@ fn market_get_tax_rate(
     encode_sint_field(2, 0, &mut tr);
     let mut out = Vec::new();
     encode_bytes_field(1, &tr, &mut out);
-    Ok(any(
-        "eve_public.cosmetic.market.api.GetTaxRateResponse",
-        out,
-    ))
+    Ok(any("eve_public.cosmetic.market.api.GetTaxRateResponse", out))
 }
 
 fn market_get_buyer_fee(
@@ -501,31 +517,18 @@ fn market_get_buyer_fee(
 ) -> HandlerResult {
     let _cid = require_char(ctx)?;
     let target = parse_listing_target(sub(msg, 1));
-    let skin_hex = sub(msg, 2)
-        .and_then(|m| m.get(1))
-        .and_then(as_str)
-        .unwrap_or("");
+    let skin_hex = sub(msg, 2).and_then(|m| m.get(1)).and_then(as_str).unwrap_or("");
     if skin_hex.is_empty() {
         return Err((STATUS_BAD_REQUEST, "Empty skin identifier".to_string()));
     }
     let Some(tier_u32) = st.skin_tier_for_hex(skin_hex) else {
-        return Err((
-            STATUS_NOT_FOUND,
-            format!("SKIN design '{skin_hex}' not found"),
-        ));
+        return Err((STATUS_NOT_FOUND, format!("SKIN design '{skin_hex}' not found")));
     };
     let tier = u64::from(tier_u32);
-    let lp_amount = if target.is_branded() {
-        tier * 2_500
-    } else {
-        tier * 1_000
-    };
+    let lp_amount = if target.is_branded() { tier * 2_500 } else { tier * 1_000 };
     let mut out = Vec::new();
     put_buyer_fee(1, lp_amount, &mut out);
-    Ok(any(
-        "eve_public.cosmetic.market.api.GetBuyerFeeResponse",
-        out,
-    ))
+    Ok(any("eve_public.cosmetic.market.api.GetBuyerFeeResponse", out))
 }
 
 fn market_get_buyer_fees_definition(
@@ -535,7 +538,7 @@ fn market_get_buyer_fees_definition(
 ) -> HandlerResult {
     let _cid = require_char(ctx)?;
     let mut out = Vec::new();
-    for level in 1u64..=5 {
+    for level in 1u64..=10 {
         let mut fpt = Vec::new();
         put_seq(1, level, &mut fpt);
         put_buyer_fee(2, level * 1_000, &mut fpt);
@@ -543,10 +546,7 @@ fn market_get_buyer_fees_definition(
         encode_bytes_field(1, &fpt, &mut out);
     }
     encode_string_field(2, BUYER_FEES_VERSION, &mut out);
-    Ok(any(
-        "eve_public.cosmetic.market.api.GetBuyerFeesDefinitionResponse",
-        out,
-    ))
+    Ok(any("eve_public.cosmetic.market.api.GetBuyerFeesDefinitionResponse", out))
 }
 
 fn component_get_all(
@@ -914,7 +914,10 @@ fn skin_initiate_create(
         }
     }
     let target = parse_listing_target(sub(msg, 6));
-    let broker_fee = checked_isk_cents(broker_fee_for(duration_secs, &target))
+    let est_val = price_isk
+        .unwrap_or_else(|| price_plex_cents.unwrap_or(0).saturating_mul(50_000))
+        .saturating_mul(quantity_u64);
+    let broker_fee = checked_isk_cents(broker_fee_for_valuation(est_val, duration_secs, &target))
         .ok_or_else(|| (STATUS_BAD_REQUEST, "Broker fee overflows".to_string()))?;
     let now = ctx.now_unix();
 

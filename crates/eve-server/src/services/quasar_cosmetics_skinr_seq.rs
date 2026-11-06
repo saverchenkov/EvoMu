@@ -693,19 +693,26 @@ fn handle_get_tier_durations(
     Ok(any_msg(rsp_type, out))
 }
 
+pub fn early_completion_plex_cents(remaining_secs: u64) -> u64 {
+    if remaining_secs == 0 {
+        0
+    } else {
+        remaining_secs.saturating_add(899).saturating_div(900).saturating_mul(100).max(200)
+    }
+}
+
 fn handle_get_early_completion_pricing(req_type: &str) -> HandlerResult {
-    let brackets = [
-        (0u64, 3_600u64, 500u64),
-        (3_600, 86_400, 2_500),
-        (86_400, 604_800, 10_000),
+    let bounds = [
+        (0u64, 900u64), (900, 1_800), (1_800, 3_600), (3_600, 10_800), (10_800, 25_200),
+        (25_200, 43_200), (43_200, 86_400), (86_400, 259_200), (259_200, 604_800), (604_800, 1_915_200),
     ];
     let mut out = Vec::new();
-    for (gt_secs, lte_secs, plex_cents) in brackets {
+    for (gt_secs, lte_secs) in bounds {
         let mut entry = Vec::new();
         put_duration(1, gt_secs, &mut entry);
         put_duration(2, lte_secs, &mut entry);
         let mut plex_msg = Vec::new();
-        encode_varint_field(1, plex_cents, &mut plex_msg);
+        encode_varint_field(1, early_completion_plex_cents(lte_secs), &mut plex_msg);
         encode_bytes_field(3, &plex_msg, &mut entry);
         encode_bytes_field(1, &entry, &mut out);
     }
@@ -1220,9 +1227,9 @@ fn handle_job_complete_early(
             return Err((STATUS_BAD_REQUEST, "Sequencing job is already finished".into()));
         }
         let rem_secs = job.initiated_unix.saturating_add(job.planned_duration_secs).saturating_sub(now);
-        let cost = if rem_secs <= 3_600 { 5 } else if rem_secs <= 86_400 { 25 } else { 100 };
+        let cost = early_completion_plex_cents(rem_secs).saturating_add(99) / 100;
         job.completed_unix = Some(now);
-        (cost, job.skin_hex.clone(), job.quantity)
+        (i64::try_from(cost).unwrap_or(i64::MAX), job.skin_hex.clone(), job.quantity)
     };
     let mut plex_notice: Option<(u64, u64, i64)> = None;
     state.db.with_mut_snapshot(|s| {

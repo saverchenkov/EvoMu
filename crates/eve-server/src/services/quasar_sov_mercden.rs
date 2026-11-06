@@ -66,9 +66,6 @@ pub fn stage_for_level(level: u32) -> u32 {
     }
 }
 
-/// DERIVED (synthetic deterministic lower bound of each stage's `Mercenary_Tactical_Operation.md:28-34`
-/// range: `65-100`, `68-105`, `71-110`, `74-115`, `78-120` IDK/hr across stages `1..=5`; exact server
-/// per-planet formula is not in `.fsdbinary`).
 pub fn infomorphs_per_hour(dev_stage: u32) -> u32 {
     match dev_stage {
         1 => 65,
@@ -77,6 +74,39 @@ pub fn infomorphs_per_hour(dev_stage: u32) -> u32 {
         4 => 74,
         _ => 78,
     }
+}
+
+/// V24 stage band `(min_idk_per_hr, max_idk_per_hr)` from `Mercenary_Tactical_Operation.md:28-34`.
+pub fn stage_infomorph_band(dev_stage: u32) -> (u32, u32) {
+    match dev_stage {
+        1 => (65, 100),
+        2 => (68, 105),
+        3 => (71, 110),
+        4 => (74, 115),
+        _ => (78, 120),
+    }
+}
+
+/// Planet-scaled V24 hourly Infomorph Decryption Key yield (`65..=120` IDK/hr across stages `1..=5`),
+/// scaling within each stage's V24 band by the temperate planet's SDE radius (`sde.celestials_in_system`).
+pub fn planet_scaled_infomorphs_per_hour(
+    sde: Option<&eve_sde::SdeRegistry>,
+    solar_system_id: u32,
+    planet_id: i64,
+    dev_stage: u32,
+) -> u32 {
+    let (min_r, max_r) = stage_infomorph_band(dev_stage);
+    let Some(planet) = sde.and_then(|reg| {
+        reg.celestials_in_system(solar_system_id)
+            .into_iter()
+            .find(|c| c.celestial_id == planet_id)
+    }) else {
+        return min_r;
+    };
+    let r_km = (planet.radius / 1_000.0).clamp(2_000.0, 12_000.0);
+    let norm = ((r_km - 2_000.0) / 10_000.0).clamp(0.0, 1.0);
+    let span = f64::from(max_r.saturating_sub(min_r));
+    min_r.saturating_add((norm * span).round() as u32).min(max_r)
 }
 
 /// Wiki (`Mercenary_Tactical_Operation.md:41-47`): host Skyhook workforce disruption percentage by Anarchy stage (`1..=5`: `0%`, `0%`, `-10%`, `-20%`, `-40%`).
@@ -124,6 +154,17 @@ fn owned_den(snap: &WorldStateSnapshot, cid: i64, den_id: i64) -> Result<Persist
 /// Advances hourly infomorph generation and 24-hour development / anarchy evolution (`+5`/day),
 /// tracking sub-24h remainder in `evo_rem_secs`. Returns `true` when the development or anarchy stage changed.
 pub fn simulate_den_with_rem(den: &mut PersistedMercenaryDen, evo_rem_secs: &mut u64, now: u64) -> bool {
+    simulate_den_for_planet(den, evo_rem_secs, None, now)
+}
+
+/// Advances hourly infomorph generation and 24-hour development / anarchy evolution (`+5`/day),
+/// scaling hourly infomorph output across each V24 stage band using host planet SDE radius.
+pub fn simulate_den_for_planet(
+    den: &mut PersistedMercenaryDen,
+    evo_rem_secs: &mut u64,
+    sde: Option<&eve_sde::SdeRegistry>,
+    now: u64,
+) -> bool {
     if den.simulated_at_unix == 0 || !den.enabled || now <= den.simulated_at_unix {
         if den.simulated_at_unix == 0 || !den.enabled {
             den.simulated_at_unix = now;
@@ -137,7 +178,12 @@ pub fn simulate_den_with_rem(den: &mut PersistedMercenaryDen, evo_rem_secs: &mut
     let before = (stage_for_level(den.development_level), stage_for_level(den.anarchy_level));
     let stepped = hours.min(720);
     for _ in 0..stepped {
-        let rate = infomorphs_per_hour(stage_for_level(den.development_level));
+        let rate = planet_scaled_infomorphs_per_hour(
+            sde,
+            den.solar_system_id,
+            den.planet_id,
+            stage_for_level(den.development_level),
+        );
         den.infomorphs = den.infomorphs.saturating_add(rate).min(INFOMORPH_CARGO_CAPACITY);
         *evo_rem_secs += INFOMORPH_UNIT_SECS;
         if *evo_rem_secs >= EVOLUTION_UNIT_SECS {
@@ -148,7 +194,12 @@ pub fn simulate_den_with_rem(den: &mut PersistedMercenaryDen, evo_rem_secs: &mut
     }
     let extra_hours = hours.saturating_sub(stepped);
     if extra_hours > 0 {
-        let rate = infomorphs_per_hour(stage_for_level(den.development_level));
+        let rate = planet_scaled_infomorphs_per_hour(
+            sde,
+            den.solar_system_id,
+            den.planet_id,
+            stage_for_level(den.development_level),
+        );
         let added = u64::from(rate).saturating_mul(extra_hours).min(u64::from(INFOMORPH_CARGO_CAPACITY)) as u32;
         den.infomorphs = den.infomorphs.saturating_add(added).min(INFOMORPH_CARGO_CAPACITY);
         let total_rem = *evo_rem_secs + extra_hours * INFOMORPH_UNIT_SECS;
@@ -173,11 +224,21 @@ pub fn simulate_den(den: &mut PersistedMercenaryDen, now: u64) -> bool {
 
 /// Simulates a den in `sov_runtime` while preserving sub-24h evolution remainder.
 pub fn simulate_den_in_snap(sov_rt: &mut eve_db::PersistedSovState, den_id: i64, now: u64) -> bool {
+    simulate_den_in_snap_with_sde(sov_rt, None, den_id, now)
+}
+
+/// Simulates a den in `sov_runtime` using host planet SDE data.
+pub fn simulate_den_in_snap_with_sde(
+    sov_rt: &mut eve_db::PersistedSovState,
+    sde: Option<&eve_sde::SdeRegistry>,
+    den_id: i64,
+    now: u64,
+) -> bool {
     let Some(den) = sov_rt.mercenary_dens.get_mut(&den_id) else {
         return false;
     };
     let rem = sov_rt.mercenary_den_evo_rem.entry(den_id).or_insert(0);
-    simulate_den_with_rem(den, rem, now)
+    simulate_den_for_planet(den, rem, sde, now)
 }
 
 fn encode_level_sim(level: u32, simulated_at: u64) -> Vec<u8> {
@@ -217,16 +278,27 @@ fn encode_evolution_definition() -> Vec<u8> {
     b
 }
 
-fn encode_infomorphs_gen_definition(cap: u32) -> Vec<u8> {
+fn encode_infomorphs_gen_definition_for_planet(
+    cap: u32,
+    sde: Option<&eve_sde::SdeRegistry>,
+    solar_system_id: u32,
+    planet_id: i64,
+) -> Vec<u8> {
     let mut info_def = Vec::new();
     id_field(1, u64::from(TYPE_INFOMORPH_DECRYPTION_KEY), &mut info_def);
     encode_varint_field(2, INFOMORPH_UNIT_SECS, &mut info_def);
     for stage in 1..=5u32 {
-        let rate = infomorphs_per_hour(stage);
+        let rate = planet_scaled_infomorphs_per_hour(sde, solar_system_id, planet_id, stage);
+        let has_planet = sde.is_some_and(|r| {
+            r.celestials_in_system(solar_system_id)
+                .into_iter()
+                .any(|c| c.celestial_id == planet_id)
+        });
+        let (band_min, band_max) = if has_planet { stage_infomorph_band(stage) } else { (rate, rate) };
         let mut band = Vec::new();
         encode_varint_field(1, u64::from(stage), &mut band);
-        encode_varint_field(2, u64::from(rate), &mut band);
-        encode_varint_field(3, u64::from(rate), &mut band);
+        encode_varint_field(2, u64::from(band_min), &mut band);
+        encode_varint_field(3, u64::from(band_max), &mut band);
         encode_bytes_field(3, &band, &mut info_def);
     }
     encode_varint_field(4, u64::from(cap), &mut info_def);
@@ -244,7 +316,7 @@ pub fn push_definitions_updated_notice(pending: &PendingNotices, den: &Persisted
     let mut n = Vec::new();
     id_field(1, den.den_id as u64, &mut n);
     encode_bytes_field(2, &encode_evolution_definition(), &mut n);
-    encode_bytes_field(3, &encode_infomorphs_gen_definition(INFOMORPH_CARGO_CAPACITY), &mut n);
+    encode_bytes_field(3, &encode_infomorphs_gen_definition_for_planet(INFOMORPH_CARGO_CAPACITY, None, den.solar_system_id, den.planet_id), &mut n);
     push_notice(pending, den.solar_system_id, "eve_public.sovereignty.mercenaryden.api.DefinitionsUpdatedNotice", n);
 }
 
@@ -279,13 +351,23 @@ pub fn push_activity_expiry_changed_notice(
     push_notice(pending, solar_system_id, "eve_public.sovereignty.mercenaryden.activity.api.ExpiryChangedNotice", n);
 }
 
-/// Simulates a den in place and emits `EvolutionStateChangedNotice` on a stage change.
-fn tick_den(snap: &mut WorldStateSnapshot, pending: &PendingNotices, den_id: i64, now: u64) {
-    if simulate_den_in_snap(&mut snap.sov_runtime, den_id, now) {
+/// Simulates a den in place using planet SDE data and emits `EvolutionStateChangedNotice` on a stage change.
+fn tick_den_with_sde(
+    snap: &mut WorldStateSnapshot,
+    sde: Option<&eve_sde::SdeRegistry>,
+    pending: &PendingNotices,
+    den_id: i64,
+    now: u64,
+) {
+    if simulate_den_in_snap_with_sde(&mut snap.sov_runtime, sde, den_id, now) {
         if let Some(den) = snap.sov_runtime.mercenary_dens.get(&den_id) {
             push_evolution_notice(pending, den);
         }
     }
+}
+
+fn tick_den(snap: &mut WorldStateSnapshot, pending: &PendingNotices, den_id: i64, now: u64) {
+    tick_den_with_sde(snap, None, pending, den_id, now);
 }
 
 pub(crate) fn hex(bytes: &[u8]) -> String {
@@ -554,7 +636,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
         );
     }
     {
-        let (db, pending) = (Arc::clone(&db), Arc::clone(&router.pending_notices));
+        let (db, sde, pending) = (Arc::clone(&db), Arc::clone(&router.sde), Arc::clone(&router.pending_notices));
         router.register_handler(
             "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
@@ -562,7 +644,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 let den_id = required_id(dyn_msg, 1, "Mercenary den")?;
                 let (den, skyhook_owner) = transact(&db, |snap| {
                     owned_den(snap, cid, den_id)?;
-                    tick_den(snap, &pending, den_id, ctx.now_unix());
+                    tick_den_with_sde(snap, Some(&sde), &pending, den_id, ctx.now_unix());
                     let den = owned_den(snap, cid, den_id)?;
                     let owner = snap.structures.get(&den.skyhook_id).map(|s| s.owner_corp_id);
                     Ok::<_, RpcError>((den, owner))
@@ -578,7 +660,12 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 encode_bytes_field(2, &encode_evolution_simulation(&den), &mut evo);
                 let (mut contents, mut infomorphs) = (Vec::new(), Vec::new());
                 let cap = infomorph_cargo_capacity(stage_for_level(den.development_level));
-                let info_def = encode_infomorphs_gen_definition(cap);
+                let info_def = encode_infomorphs_gen_definition_for_planet(
+                    cap,
+                    Some(&sde),
+                    den.solar_system_id,
+                    den.planet_id,
+                );
                 encode_varint_field(1, u64::from(den.infomorphs), &mut contents);
                 ts_field(2, den.simulated_at_unix, &mut contents);
                 encode_bytes_field(1, &info_def, &mut infomorphs);

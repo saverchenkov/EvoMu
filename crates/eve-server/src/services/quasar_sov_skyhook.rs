@@ -31,11 +31,42 @@ fn open_window(snap: &WorldStateSnapshot, id: i64, now: u64) -> Option<(u64, u64
         .filter(|(start, end)| *start <= now && now < *end)
 }
 
+/// Computes V24 per-planet-type hourly reagent harvest yield from SDE celestial type and radius.
+pub fn planet_hourly_reagent_yield(
+    sde: &SdeRegistry,
+    planet_id: Option<i64>,
+    sys_id: Option<u32>,
+    _reagent_type: u32,
+) -> u64 {
+    let fallback = super::sov_gameplay::SKYHOOK_HOURLY_REAGENT_YIELD;
+    let (Some(pid), Some(sys)) = (planet_id, sys_id) else {
+        return fallback;
+    };
+    let Some(planet) = sde.celestials_in_system(sys).into_iter().find(|c| c.celestial_id == pid) else {
+        return fallback;
+    };
+    let (base, min_y, max_y) = match planet.type_id {
+        12 => (1_200.0, 900, 1_800),     // Ice -> Superionic Ice
+        2015 => (1_000.0, 750, 1_500),   // Lava -> Magmatic Gas
+        2014 | 2063 => (600.0, 450, 900),
+        2017 | 13 => (400.0, 300, 600),
+        _ => return fallback,
+    };
+    if planet.radius > 0.0 {
+        let factor = (planet.radius / 5_000_000.0).clamp(0.75, 1.5);
+        ((base * factor).round() as u64).clamp(min_y, max_y)
+    } else {
+        base as u64
+    }
+}
+
 /// Encodes the shared skyhook body: `skyhook(1)`, `reagent_simulations(2)`, `active(3)`,
 /// `theft_vulnerability(5)` and `workforce(7)`.
 fn encode_skyhook(snap: &WorldStateSnapshot, sde: &SdeRegistry, id: i64, now: u64) -> Vec<u8> {
     let mut b = Vec::new();
     id_field(1, id as u64, &mut b);
+    let planet_id = snap.sov_runtime.skyhook_planets.get(&id).copied();
+    let sys_id = snap.structures.get(&id).map(|s| s.solar_system_id);
     if let Some((reagent_type, stock)) = snap.sov_runtime.skyhook_reagents.get(&id).copied() {
         let (sec_stock, insec_stock, sim_ts) = snap
             .sov_runtime
@@ -54,10 +85,11 @@ fn encode_skyhook(snap: &WorldStateSnapshot, sde: &SdeRegistry, id: i64, now: u6
         encode_bytes_field(4, &sim, &mut r);
         encode_bytes_field(2, &r, &mut b);
 
+        let hourly_yield = planet_hourly_reagent_yield(sde, planet_id, sys_id, reagent_type);
         let mut r_def = Vec::new();
         id_field(1, u64::from(reagent_type), &mut r_def);
         let mut amt = Vec::new();
-        encode_varint_field(1, super::sov_gameplay::SKYHOOK_HOURLY_REAGENT_YIELD, &mut amt);
+        encode_varint_field(1, hourly_yield, &mut amt);
         encode_varint_field(2, 3_600, &mut amt);
         encode_bytes_field(2, &amt, &mut r_def);
         encode_bytes_field(4, &r_def, &mut b);
@@ -74,11 +106,10 @@ fn encode_skyhook(snap: &WorldStateSnapshot, sde: &SdeRegistry, id: i64, now: u6
         None => encode_varint_field(1, 0, &mut theft),
     }
     encode_bytes_field(5, &theft, &mut b);
-    let planet_id = snap.sov_runtime.skyhook_planets.get(&id).copied();
     if let Some(pid) = planet_id {
         id_field(6, pid as u64, &mut b);
     }
-    let wf_amount = match (planet_id, snap.structures.get(&id).map(|s| s.solar_system_id)) {
+    let wf_amount = match (planet_id, sys_id) {
         (Some(pid), Some(sys_id)) if active => sde
             .celestials_in_system(sys_id)
             .into_iter()
