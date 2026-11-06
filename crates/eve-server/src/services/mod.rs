@@ -114,6 +114,7 @@ pub mod pve_crab_beacons;
 pub mod pve_special_sites;
 pub mod pve_special_sites_abyssal;
 pub mod pve_special_sites_combat;
+pub(crate) mod r6_t1_p0_helpers;
 pub mod pvp_filament_arena;
 pub mod pvp_filament_mgr;
 pub mod quasar_achievements;
@@ -520,8 +521,13 @@ mod fighters_module_cycles_deep_extra_unit_tests;
 mod structure_lifecycle_control_deep_extra_unit_tests;
 #[cfg(test)]
 mod mining_compression_cyno_portal_deep_extra_unit_tests;
+#[cfg(test)]
 mod tactical_scanners_bays_deep_extra_unit_tests;
 #[cfg(test)]
 mod warp_jump_gm_tools_deep_extra_unit_tests;
+#[cfg(test)]
 mod r6_t3_p0_security_tests;
+#[cfg(test)]
 mod r6_t2_p0_security_tests;
+#[cfg(test)]
+mod r6_t1_p0_security_tests;

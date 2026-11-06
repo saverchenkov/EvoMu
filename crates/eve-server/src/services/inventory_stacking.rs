@@ -173,6 +173,16 @@ pub(super) fn handle_stack_ops(
                     if src.flag == InventoryFlag::Locked || dst.flag == InventoryFlag::Locked {
                         return Err("Cannot merge locked items".to_string());
                     }
+                    if src.flag == InventoryFlag::FighterBay
+                        && ctx
+                            .fighter_tube_loads
+                            .read()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .values()
+                            .any(|&fid| fid == src_id || fid == dst_id)
+                    {
+                        return Err("Cannot merge fighters loaded in a fighter tube".to_string());
+                    }
                     Ok(src.quantity)
                 });
                 let src_qty = match pre_check {
@@ -262,6 +272,13 @@ pub(super) fn handle_stack_ops(
                 .unwrap_or(default_flag);
 
             let alsc_locked_set = fitting_containers_ships::read_container_ship_state(ctx).alsc_locked_items;
+            let loaded_tube_items: std::collections::HashSet<i64> = ctx
+                .fighter_tube_loads
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .values()
+                .copied()
+                .collect();
             let groups: HashMap<TypeId, Vec<i64>> = ctx.db.with_snapshot(|snap| {
                 let mut by_type: HashMap<TypeId, Vec<i64>> = HashMap::new();
                 for item in snap.items.values() {
@@ -274,6 +291,7 @@ pub(super) fn handle_stack_ops(
                         && item.source_mutaplasmid_id.is_none()
                         && item.quantity > 0
                         && !alsc_locked_set.contains(&item.item_id)
+                        && !loaded_tube_items.contains(&item.item_id)
                         && !snap.is_item_locked_in_contract_or_job(item.item_id)
                         && !snap.item_custom_names.get(&item.item_id).map_or(false, |s| s.starts_with("courier_cargo:"))
                     {

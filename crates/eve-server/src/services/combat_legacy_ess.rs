@@ -552,7 +552,7 @@ pub async fn handle_legacy_and_ess(
                 .map(|s| s.security_status)
                 .unwrap_or(1.0);
             let now_unix = ctx.now_unix();
-            let attacker_ship_val = ctx
+            let _attacker_ship_val = ctx
                 .sde
                 .types
                 .get(&attacker_ball.type_id)
@@ -565,77 +565,33 @@ pub async fn handle_legacy_and_ess(
                 .map(|t| t.base_price)
                 .unwrap_or(230_000.0);
 
-            // If target is another player capsuleer, evaluate CrimeWatch 2.0 legality in current system
+            // If target is another player capsuleer, enforce CrimeWatch 2.0 safety, Limited Engagements, Kill Rights, & CONCORD
             let mut has_legal_engagement = false;
             if let Some((victim_char_id, _)) = player_target_info {
-                has_legal_engagement = ctx.db.with_snapshot(|snap| {
-                    is_legal_war_or_suspect_target(snap, char_id, victim_char_id, now_unix)
-                });
-                if sys_sec >= 0.45 && !has_legal_engagement {
-                    // Illegal High-Sec Attack -> Criminal Flag -> CONCORD Response -> Kill Right (`E2E-12`)
-                    let concord_delay = concord_response_delay_sec(sys_sec);
-                    let _ = sys_handle.remove_ball(ship_id).await;
-                    ctx.invalidate_ship_fitting(ship_id);
-                    let (kill_id, kr_id) = ctx
-                        .db
-                        .try_with_mut_snapshot(|snap| {
-                            snap.next_entity_id += 1;
-                            let kid = snap.next_entity_id;
-                            snap.record_killmail(
-                                KillmailRecord {
-                                    kill_id: kid,
-                                    victim_character_id: char_id,
-                                    attacker_character_id: 1_000_125, // CONCORD
-                                    solar_system_id: sys_id,
-                                    ship_type_id: attacker_ball.type_id,
-                                    total_value_isk: attacker_ship_val,
-                                    ..Default::default()
-                                },
-                                ctx.now_unix(),
-                            );
-                            snap.next_entity_id += 1;
-                            let krid = snap.next_entity_id;
-                            Ok::<_, std::convert::Infallible>((kid, krid))
-                        })
-                        .unwrap();
-                    crate::services::combat_crimewatch::crimewatch_timers::apply_illegal_pvp_sec_status_loss(
-                        ctx,
-                        char_id,
-                        victim_char_id,
-                        sys_id,
-                        sys_sec,
-                        target_ball.type_id == 670,
-                        now_unix,
-                    );
-                    crate::services::combat_crimewatch::create_kill_right(
-                        ctx,
-                        kr_id,
-                        victim_char_id,
-                        char_id,
-                        0.0,
-                    );
-                    // CONCORD kill voids any active ship insurance contract (`feat:combat.insurance-payout`)
-                    let _ = process_ship_insurance_payout(ctx, char_id, ship_id, attacker_ball.type_id, true);
-                    // Destroy the criminal's ship + cargo/modules and respawn in a Capsule at home_station_id
-                    crate::services::station_structure::structure_lifecycle::prepare_home_station_respawn(ctx, char_id);
-                    if let Ok((respawned_ch, capsule)) =
-                        ctx.db.respawn_character_at_home_station(char_id, ship_id, &ctx.sde)
-                    {
-                        session.ship_id = Some(capsule.item_id);
-                        session.station_id = respawned_ch.station_id;
-                        session.structure_id = respawned_ch.structure_id;
-                        session.solar_system_id = Some(respawned_ch.solar_system_id);
-                        session.constellation_id = Some(respawned_ch.constellation_id);
-                        session.region_id = Some(respawned_ch.region_id);
+                match crate::services::r6_t1_p0_helpers::enforce_legacy_pvp_safety_and_concord(
+                    ctx,
+                    session,
+                    &sys_handle,
+                    char_id,
+                    ship_id,
+                    &attacker_ball,
+                    sys_id,
+                    sys_sec,
+                    target_id,
+                    &target_ball,
+                    victim_char_id,
+                    now_unix,
+                )
+                .await
+                {
+                    Ok((legal, Some(early_rep))) => {
+                        let _ = legal;
+                        return Some(Ok(early_rep));
                     }
-                    return Some(Ok(PyRep::keyval([
-                        ("criminalCharacterID", PyRep::Integer(char_id)),
-                        ("victimCharacterID", PyRep::Integer(victim_char_id)),
-                        ("concordResponseSeconds", PyRep::Real(concord_delay)),
-                        ("concordKillmailID", PyRep::Integer(kill_id)),
-                        ("killRightID", PyRep::Integer(kr_id)),
-                        ("criminalTimerSeconds", PyRep::Integer(900)),
-                    ])));
+                    Ok((legal, None)) => {
+                        has_legal_engagement = legal;
+                    }
+                    Err(e) => return Some(Err(e)),
                 }
             }
 

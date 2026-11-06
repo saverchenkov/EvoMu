@@ -770,31 +770,27 @@ pub async fn activate_superweapon_with_args(
         let beam_radius = mod_type.default_attributes.get(&2263).copied().unwrap_or(2_500.0);
         let neut_radius = mod_type.default_attributes.get(&2259).copied().unwrap_or(10_000.0).max(beam_radius);
         let caster_lock_secs = (mod_type.default_attributes.get(&73).copied().unwrap_or(300_000.0) / 1_000.0).round() as u64;
-        let mut hit_targets = Vec::new();
-        for b in all_balls {
-            if b.id != ship_id && (is_combatant_ship_or_entity_ball(Some(&ctx.sde), Some(&ctx.db), b.id, b.type_id) || (b.id >= 1_895_000_000 && b.id < 1_900_000_000)) {
-                let to_ball = b.position - ship_pos;
-                let along_beam = to_ball.dot(beam_dir);
-                let perp_dist = (to_ball - beam_dir * along_beam).length();
-                if along_beam >= 100.0 && along_beam <= effective_range && perp_dist <= neut_radius {
-                    if perp_dist <= beam_radius {
-                        let (applied, destroyed) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys, sys_id, char_id, b.id, total_dmg_vec, 10.0, now_unix).await.ok().flatten().map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
-                        crate::services::combat_crimewatch::record_killmail_assist_action(ctx, b.id, char_id, ship_type_id, mod_type_id, applied, false, now_unix);
-                        if destroyed {
-                            crate::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(ctx, sys_id, char_id, b.id, b.type_id, b.position, now_unix).await;
-                        }
-                    }
-                    if let Ok(Some(mut v_cs)) = sys.get_combat_state(b.id).await {
-                        v_cs.capacitor = (v_cs.capacitor - neut_amount_gj).max(0.0);
-                        v_cs.warp_scramble_strength = v_cs.warp_scramble_strength.max(100);
-                        v_cs.is_mwd_mjd_disabled = true;
-                        v_cs.is_tethered = false;
-                        let _ = sys.set_combat_state(b.id, v_cs).await;
-                    }
-                    hit_targets.push(b.id);
-                }
-            }
-        }
+        let mut hit_targets = crate::services::r6_t1_p0_helpers::execute_lancer_beam_attack(
+            ctx,
+            &sys,
+            sys_id,
+            char_id,
+            ship_id,
+            ship_type_id,
+            mod_type_id,
+            &all_balls,
+            ship_pos,
+            beam_dir,
+            effective_range,
+            beam_radius,
+            neut_radius,
+            total_dmg_vec,
+            neut_amount_gj,
+            victim_debuff_secs,
+            now_unix,
+        )
+        .await?;
+        let _ = &mut hit_targets;
         let db_key = db_key_of(ctx);
         {
             let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
@@ -987,6 +983,15 @@ pub(crate) fn fire_lance_warmup_in_ballpark(
         let along = to_b.dot(beam_dir);
         let perp = (to_b - beam_dir * along).length();
         if along > 0.0 && along <= beam_len && perp <= beam_radius {
+            let skip_target = ballpark.combat_states.get(&bid).is_some_and(|v_cs| {
+                v_cs.is_tethered
+                    || v_cs.is_invulnerable()
+                    || v_cs.undock_invulnerable_remaining_ticks > 0
+                    || v_cs.gate_cloak_remaining_ticks > 0
+            });
+            if skip_target {
+                continue;
+            }
             let target_sig = ballpark.combat_states.get(&bid).map(|cs| cs.signature_radius.max(1.0)).unwrap_or(dmg_sig);
             let sig_scale = (target_sig / dmg_sig).min(1.0);
             let scaled_dmg = cycle.damage_vector.scaled(sig_scale);
@@ -994,9 +999,6 @@ pub(crate) fn fire_lance_warmup_in_ballpark(
             if let Some((app, destroyed, _)) = ballpark.apply_damage_to_ball(bid, scaled_dmg) {
                 applied_dmg = app;
                 if destroyed { destroyed_balls.push((bid, cycle.owner_char_id)); }
-            }
-            if let Some(v_cs) = ballpark.combat_states.get_mut(&bid) {
-                v_cs.is_tethered = false;
             }
             hits.push((bid, applied_dmg));
         }

@@ -1243,7 +1243,12 @@ pub async fn handle_pve_exploration(
                 }
             }
             let mut site_id = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
-            if let Some(item_id) = args.first().and_then(|a| a.as_i64()) {
+            let special_id_arg = args.first().and_then(|a| a.as_i64()).or_else(|| {
+                crate::services::r6_t1_p0_helpers::resolve_special_site_string_instance_id(
+                    ctx, &site_id,
+                )
+            });
+            if let Some(item_id) = special_id_arg {
                 // Integer argument: a DED acceleration gate ball in the pilot's system resolves to its site;
                 // any other gate item belongs to the in-space gate / mission handlers.
                 let gate_site = match resolve_session_system_id(ctx, session) {
@@ -1259,7 +1264,11 @@ pub async fn handle_pve_exploration(
                 };
                 match gate_site {
                     Some(sid) => site_id = sid,
-                    None if method == "EnterNextDungeonRoom" => {
+                    None if method == "EnterNextDungeonRoom"
+                        || crate::services::r6_t1_p0_helpers::is_known_special_site_instance_id(
+                            ctx, item_id,
+                        ) =>
+                    {
                         let fleet_count = args.get(1).and_then(|a| a.as_i64()).unwrap_or(5).clamp(1, 10) as usize;
                         let res = crate::services::pve_special_sites::complete_special_dungeon_instance(ctx, session, item_id, fleet_count).await;
                         if let Ok(ref rep) = res {

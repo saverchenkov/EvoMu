@@ -72,29 +72,15 @@ pub async fn apply_damage_to_fighter_squadron(
     let Some(mut squad) = squad_opt else {
         return (0, 0, false);
     };
-    let unit_hp = ctx
-        .sde
-        .types
-        .get(&squad.type_id)
-        .and_then(|t| {
-            t.default_attributes
-                .get(&263)
-                .copied()
-                .or_else(|| t.default_attributes.get(&9).copied())
-        })
-        .unwrap_or(1_000.0)
-        .max(250.0);
-
+    let unit_hp = ctx.sde.types.get(&squad.type_id)
+        .and_then(|t| t.default_attributes.get(&263).copied().or_else(|| t.default_attributes.get(&9).copied()))
+        .unwrap_or(1_000.0).max(250.0);
     let raw_dmg = damage.total().max(0.0);
     let total_accum = with_mut_combat_runtime(ctx, |rt| {
-        let entry = rt
-            .fighter_unit_damage_accum
-            .entry(fighter_ball_id)
-            .or_insert(0.0);
+        let entry = rt.fighter_unit_damage_accum.entry(fighter_ball_id).or_insert(0.0);
         *entry += raw_dmg;
         *entry
     });
-
     let units_killed = (total_accum / unit_hp).floor() as u32;
     if units_killed > 0 {
         with_mut_combat_runtime(ctx, |rt| {
@@ -103,23 +89,24 @@ pub async fn apply_damage_to_fighter_squadron(
             }
         });
     }
-
     let before_size = squad.squadron_size;
     let lost = units_killed.min(before_size);
     squad.squadron_size = before_size.saturating_sub(lost);
     let wiped_out = squad.squadron_size == 0;
-
     let owner_char_id = squad.owner_char_id;
     let tube_flag = (159 + squad.tube_index) as i64;
     if wiped_out {
         ctx.active_fighters.write().unwrap().remove(&fighter_ball_id);
-        with_mut_combat_runtime(ctx, |rt| {
-            rt.fighter_unit_damage_accum.remove(&fighter_ball_id);
-        });
+        with_mut_combat_runtime(ctx, |rt| { rt.fighter_unit_damage_accum.remove(&fighter_ball_id); });
         let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
         let _ = sys_handle.remove_ball(fighter_ball_id).await;
         ctx.db.with_mut_snapshot(|snap| {
-            snap.items.remove(&squad.item_id);
+            let reserve = snap.items.get(&squad.item_id).map(|it| it.quantity - (before_size as i32)).unwrap_or(0);
+            if reserve > 0 {
+                if let Some(it) = snap.items.get_mut(&squad.item_id) { it.quantity = reserve; it.singleton = false; it.version += 1; }
+            } else {
+                snap.items.remove(&squad.item_id);
+            }
         });
         crate::services::fleet_social::fleet_social_finder_tactical::clear_destroyed_target_tag(ctx, fighter_ball_id);
         ctx.notify(crate::router::NotificationTarget::Character(owner_char_id), "OnFighterRemovedFromController", "charid", vec![PyRep::Integer(fighter_ball_id), PyRep::Integer(tube_flag)]);
@@ -127,7 +114,9 @@ pub async fn apply_damage_to_fighter_squadron(
         ctx.active_fighters.write().unwrap().insert(fighter_ball_id, squad.clone());
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(it) = snap.items.get_mut(&squad.item_id) {
-                it.quantity = squad.squadron_size as i32;
+                let reserve = (it.quantity - (before_size as i32)).max(0);
+                it.quantity = (squad.squadron_size as i32) + reserve;
+                it.singleton = false;
                 it.version += 1;
             }
         });
@@ -714,9 +703,10 @@ pub async fn handle_fighters(
                         message: format!("Fighter item {fighter_item_id} in tube {tube_idx} no longer exists"),
                     }));
                 };
+                let tube_flag = InventoryFlag::from_u16(159 + tube_idx as u16);
                 if item.owner_id != char_id
                     || item.location_id != ship_id
-                    || item.flag != InventoryFlag::FighterBay
+                    || (item.flag != InventoryFlag::FighterBay && item.flag != tube_flag)
                     || item.quantity <= 0
                 {
                     return Some(Err(BridgeRpcError {
@@ -745,9 +735,33 @@ pub async fn handle_fighters(
                         range: 1_000.0,
                     },
                 };
+                let max_squadron_size = ctx
+                    .sde
+                    .types
+                    .get(&item.type_id)
+                    .map(|t| {
+                        t.default_attributes
+                            .get(&2215)
+                            .copied()
+                            .map(|v| v as u32)
+                            .unwrap_or(match t.group_id {
+                                1537 | 4778 => 3,
+                                1653 | 4779 => 6,
+                                _ => 9,
+                            })
+                    })
+                    .unwrap_or(9);
+                let item = crate::services::r6_t1_p0_helpers::prepare_tube_fighter_stack_for_launch(
+                    ctx,
+                    fighter_item_id,
+                    ship_id,
+                    max_squadron_size,
+                )
+                .unwrap_or(item);
+                let launched_units = (item.quantity.max(1) as u32).min(max_squadron_size);
                 let ball_pos = [ball.position.x, ball.position.y, ball.position.z];
                 let mut cs = ctx.build_type_combat_state(item.type_id);
-                let squad_size = (item.quantity as f64).max(1.0);
+                let squad_size = launched_units as f64;
                 cs.shield_hp *= squad_size;
                 cs.max_shield_hp *= squad_size;
                 cs.armor_hp *= squad_size;
@@ -756,14 +770,6 @@ pub async fn handle_fighters(
                 cs.max_structure_hp *= squad_size;
                 let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
 
-                let max_squadron_size = ctx
-                    .sde
-                    .types
-                    .get(&item.type_id)
-                    .and_then(|t| t.default_attributes.get(&2215).copied())
-                    .map(|v| v as u32)
-                    .unwrap_or(9);
-
                 let squad = crate::router::context::ActiveFighterSquadron {
                     ball_id,
                     item_id: fighter_item_id,
@@ -771,7 +777,7 @@ pub async fn handle_fighters(
                     owner_char_id: char_id,
                     parent_ship_id: ship_id,
                     tube_index: tube_idx,
-                    squadron_size: (item.quantity as u32).min(max_squadron_size),
+                    squadron_size: launched_units,
                     target_id: None,
                     is_abandoned: false,
                     mwd_active: false,

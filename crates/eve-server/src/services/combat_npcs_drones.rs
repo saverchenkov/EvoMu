@@ -61,13 +61,12 @@ impl DroneSpaceState {
         target_sig_radius: f64,
     ) -> f64 {
         let raw_dist = drone_ball.position.distance(target_ball.position);
-        let combat_dist = if !self.is_sentry && raw_dist > 15_000.0 {
-            1_500.0
-        } else {
-            raw_dist
-        };
         let optimal = self.optimal_range.max(500.0);
-        let falloff = self.effective_falloff_range(ctx);
+        let falloff = self.effective_falloff_range(ctx).max(1.0);
+        if raw_dist > optimal + 3.0 * falloff {
+            return 0.0;
+        }
+        let combat_dist = raw_dist;
         let range_term = ((combat_dist - optimal).max(0.0) / falloff).powi(2);
 
         let rel_pos = target_ball.position - drone_ball.position;
@@ -924,15 +923,26 @@ pub async fn handle_npcs_drones(
                     .collect()
             });
 
-            let has_offensive = drones.iter().any(|d| d.group_id != 640 && (d.damage_vector.total() > 0.0 || matches!(d.group_id, 639 | 641 | 544 | 545)));
-            let has_logi = drones.iter().any(|d| d.group_id == 640);
+            let mut engaging_drones = Vec::new();
+            for d in drones {
+                let Some((_, drone_ball)) = sys_handle.get_ball_snapshot(d.ball_id).await.ok().flatten() else {
+                    continue;
+                };
+                if ship_pos.distance(drone_ball.position) > max_ctrl_range {
+                    continue;
+                }
+                engaging_drones.push((d, drone_ball));
+            }
+            let has_offensive = engaging_drones.iter().any(|(d, _)| d.group_id != 640 && (d.damage_vector.total() > 0.0 || matches!(d.group_id, 639 | 641 | 544 | 545)));
+            let has_logi = engaging_drones.iter().any(|(d, _)| d.group_id == 640);
             if has_offensive {
                 if let Err(e) = super::crimewatch_timers::evaluate_and_record_pvp_aggression(
                     ctx, char_id, ship_id, sys_id, target_id, target_ball.type_id == 670,
                 ) {
                     return Some(Err(e));
                 }
-            } else if has_logi {
+            }
+            if has_logi {
                 if let Err(e) = super::crimewatch_timers::evaluate_and_record_remote_assistance(
                     ctx, char_id, ship_id, sys_id, target_id,
                 ) {
@@ -945,13 +955,7 @@ pub async fn handle_npcs_drones(
             let mut ewar_applied = false;
             let now_unix = ctx.now_unix();
 
-            for mut d in drones {
-                let Some((_, drone_ball)) = sys_handle.get_ball_snapshot(d.ball_id).await.ok().flatten() else {
-                    continue;
-                };
-                if ship_pos.distance(drone_ball.position) > max_ctrl_range {
-                    continue;
-                }
+            for (mut d, drone_ball) in engaging_drones {
                 d.target_id = Some(target_id);
                 d.activity_state = 1;
                 if !d.is_sentry {
@@ -1008,8 +1012,11 @@ pub async fn handle_npcs_drones(
                         }
                         if d.tp_sig_bonus_pct > 0.0 {
                             if let Ok(Some(mut tcs)) = sys_handle.get_combat_state(target_id).await {
-                                let base_sig = if tcs.signature_radius > 0.0 { tcs.signature_radius } else { target_ball.radius.max(35.0) };
-                                tcs.signature_radius = base_sig * (1.0 + d.tp_sig_bonus_pct / 100.0);
+                                let base_sig = *tcs.base_signature_radius.get_or_insert_with(|| {
+                                    if tcs.signature_radius > 0.0 { tcs.signature_radius } else { target_ball.radius.max(35.0) }
+                                });
+                                let tp_mult = 1.0 + (d.tp_sig_bonus_pct.min(100.0) / 100.0);
+                                tcs.signature_radius = (base_sig * tp_mult).max(base_sig);
                                 let _ = sys_handle.set_combat_state(target_id, tcs).await;
                             }
                         }

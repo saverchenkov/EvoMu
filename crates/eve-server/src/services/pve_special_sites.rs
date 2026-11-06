@@ -890,6 +890,9 @@ pub async fn complete_special_dungeon_instance(
         if sys_handle.get_ball_snapshot(hive.warden_npc_ball_id).await.ok().flatten().is_some() {
             return Err(rpc_err("WaveNpcsRemaining", format!("Drifter Hive warden {} has not been destroyed", hive.warden_npc_ball_id)));
         }
+        crate::services::r6_t1_p0_helpers::verify_special_site_caller_on_grid(
+            ctx, session, &sys_handle, char_id, DVec3::new(10_000.0, 0.0, 0.0), &hive.dungeon_name,
+        ).await?;
         let (kv, iid, blue_iid, elem_tid) = with_pve_special_reg(ctx, |reg| {
             let next_iid = 1_899_000_000 + next_spec_seq(reg);
             let next_blue = 1_899_100_000 + next_spec_seq(reg);
@@ -931,9 +934,9 @@ pub async fn complete_special_dungeon_instance(
 
     // 2. Check Homefront Sites (710_001..710_002)
     let hf_lookup = with_pve_special_reg(ctx, |reg| {
-        reg.homefront_sites.values().flatten().find(|s| s.instance_id == instance_id).cloned()
+        reg.homefront_sites.values().flatten().enumerate().find(|(_, s)| s.instance_id == instance_id).map(|(idx, s)| (idx, s.clone()))
     });
-    if let Some(hf) = hf_lookup {
+    if let Some((hf_idx, hf)) = hf_lookup {
         if caller_sys != hf.solar_system_id {
             return Err(rpc_err("NotInSiteSystem", format!("Must be in system {} to complete {}", hf.solar_system_id, hf.dungeon_name)));
         }
@@ -943,6 +946,14 @@ pub async fn complete_special_dungeon_instance(
         if sys_handle.get_ball_snapshot(hf.boss_npc_ball_id).await.ok().flatten().is_some() {
             return Err(rpc_err("WaveNpcsRemaining", format!("Homefront site wave NPC {} is still alive", hf.boss_npc_ball_id)));
         }
+        let hf_pos = DVec3::new(
+            10_000.0 + ((hf.instance_id % 100) as f64) * 5_000.0 + (hf_idx as f64) * 2_500.0,
+            ((hf.instance_id % 10) as f64) * 1_000.0,
+            0.0,
+        );
+        crate::services::r6_t1_p0_helpers::verify_special_site_caller_on_grid(
+            ctx, session, &sys_handle, char_id, hf_pos, &hf.dungeon_name,
+        ).await?;
         let actual_fleet_count = ctx.db.with_snapshot(|snap| {
             let fleet_id = snap.characters.get(&char_id).and_then(|c| c.fleet_id);
             if let Some(fid) = fleet_id {
@@ -1014,9 +1025,11 @@ pub async fn complete_special_dungeon_instance(
 
     // 3. Check Triglavian Sites (720_001..720_002)
     let trig_lookup = with_pve_special_reg(ctx, |reg| {
-        reg.triglavian_sites.values().flatten().find(|s| s.instance_id == instance_id).cloned()
+        reg.triglavian_sites.get(&caller_sys)
+            .and_then(|list| list.iter().enumerate().find(|(_, s)| s.instance_id == instance_id).map(|(idx, s)| (idx, s.clone())))
+            .or_else(|| reg.triglavian_sites.values().flatten().find(|s| s.instance_id == instance_id).map(|s| (0, s.clone())))
     });
-    if let Some(trig) = trig_lookup {
+    if let Some((trig_idx, trig)) = trig_lookup {
         if caller_sys != trig.solar_system_id {
             return Err(rpc_err("NotInSiteSystem", format!("Must be in system {} to complete {}", trig.solar_system_id, trig.dungeon_name)));
         }
@@ -1031,6 +1044,10 @@ pub async fn complete_special_dungeon_instance(
                 return Err(rpc_err("WaveNpcsRemaining", format!("Triglavian site escort NPC {ebid} is still alive")));
             }
         }
+        let trig_pos = DVec3::new(10_000.0 + (trig_idx as f64) * 20_000.0, 0.0, 0.0);
+        crate::services::r6_t1_p0_helpers::verify_special_site_caller_on_grid(
+            ctx, session, &sys_handle, char_id, trig_pos, &trig.dungeon_name,
+        ).await?;
         let loot_iid = with_pve_special_reg(ctx, |reg| {
             let seq_id = 1_899_500_000 + next_spec_seq(reg);
             if let Some(list) = reg.triglavian_sites.get_mut(&trig.solar_system_id) {

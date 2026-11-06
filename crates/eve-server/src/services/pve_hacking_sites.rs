@@ -402,14 +402,26 @@ pub async fn handle_pve_hacking(
                 .get(&sys_id)
                 .map(|s| s.security_status)
                 .unwrap_or(0.0);
-            let min_difficulty: u8 = if is_ghost {
+            let is_structure = site_id.starts_with("STRUCTURE_");
+            let site_tier_from_reg = if !is_structure {
+                with_pve_exploration_reg(ctx, |reg| {
+                    reg.sites_by_system.get(&sys_id).and_then(|sites| {
+                        sites.iter().find(|s| s.site_id == site_id).and_then(|s| {
+                            s.ded_rating.or(s.wormhole_class)
+                        })
+                    })
+                })
+            } else {
+                None
+            };
+            let min_difficulty: u8 = if is_structure || is_ghost || is_sleeper_cache {
                 4
             } else if (31_000_000..32_000_000).contains(&sys_id) || sys_sec <= 0.0 {
                 3
             } else if sys_sec < 0.45 || is_relic {
                 2
             } else {
-                2
+                1
             };
             let container_type_id = ctx
                 .db
@@ -419,11 +431,10 @@ pub async fn handle_pve_hacking(
                 .and_then(|t| t.default_attributes.get(&1919).copied())
                 .filter(|&v| v >= 1.0)
                 .map(|v| (v as u8).clamp(1, 5));
-            let difficulty = args
-                .get(4)
-                .and_then(|a| a.as_i64())
-                .map(|d| (d as u8).clamp(min_difficulty, 5))
-                .unwrap_or_else(|| sde_tier.map(|t| t.max(min_difficulty)).unwrap_or(min_difficulty));
+            let difficulty = sde_tier
+                .or(site_tier_from_reg)
+                .map(|t| t.clamp(min_difficulty, 5))
+                .unwrap_or(min_difficulty);
             let rng_seed = ctx.mechanic_rng.try_next_u64().unwrap_or(0);
             let game = with_pve_exploration_reg(ctx, |reg| {
                 let game_id = 500_000 + next_pve_seq(reg);
@@ -801,15 +812,20 @@ pub async fn handle_pve_hacking(
                     let mut ghost_info = None;
                     if game.status == "InProgress" {
                         let sid = game.solar_system_id;
-                        let fc = reg.failure_counts.entry((sid, container_id)).or_insert(0);
-                        *fc += 1;
-                        if *fc >= 2 || game.is_ghost_site {
-                            reg.hacked_containers.insert((sid, container_id));
-                        }
-                        if game.is_ghost_site {
-                            ghost_info = Some((sid, game.site_id.clone()));
-                        } else if *fc >= 2 {
-                            explode_info = Some((sid, game.site_id.clone(), game.is_relic));
+                        if game.site_id.starts_with("STRUCTURE_") {
+                            let fc = reg.structure_char_failures.entry((char_id, container_id)).or_insert(0);
+                            *fc += 1;
+                        } else {
+                            let fc = reg.failure_counts.entry((sid, container_id)).or_insert(0);
+                            *fc += 1;
+                            if *fc >= 2 || game.is_ghost_site {
+                                reg.hacked_containers.insert((sid, container_id));
+                            }
+                            if game.is_ghost_site {
+                                ghost_info = Some((sid, game.site_id.clone()));
+                            } else if *fc >= 2 {
+                                explode_info = Some((sid, game.site_id.clone(), game.is_relic));
+                            }
                         }
                     }
                     (true, explode_info, ghost_info)

@@ -113,127 +113,10 @@ pub fn signature_difficulty_level_and_min_strength(
     (level, min_strength)
 }
 
-/// Checks for any active probes belonging to `char_id` that have exceeded `max_flight_time_s`
-/// (16m40s = 1000s for RSS Core Scanner Probe `32246`, 1h6m40s = 4000s for others).
-/// Probes past their max flight time return to `InventoryFlag::Cargo` if there is free cargo room,
-/// otherwise they are lost.
 // parity: feat:scanning.probe-range-deviation
-pub async fn expire_overdue_probes_for_char(
-    ctx: &ServerContext,
-    char_id: i64,
-    now_unix: u64,
-) -> (Vec<i64>, Vec<i64>) {
-    let newly_expired: Vec<crate::router::ActiveScannerProbe> =
-        if let Ok(mut map) = ctx.active_scanner_probes.write() {
-            map.values_mut()
-                .filter(|p| {
-                    p.owner_char_id == char_id
-                        && p.state >= 0
-                        && now_unix >= p.launched_at_unix.saturating_add(p.max_flight_time_s.max(0.0) as u64)
-                })
-                .map(|p| p.clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-    if newly_expired.is_empty() {
-        return (Vec::new(), Vec::new());
-    }
-
-    for p in &newly_expired {
-        let sys_handle = ctx.systems.get_or_spawn(p.solar_system_id);
-        let _ = sys_handle.remove_ball(p.probe_id).await;
-    }
-
-    let (returned_ids, lost_ids) = ctx.db.with_mut_snapshot(|snap| {
-        let mut ret = Vec::new();
-        let mut lost = Vec::new();
-        for p in &newly_expired {
-            let probe_vol = ctx.sde.types.get(&p.probe_type_id).map(|t| t.volume.max(0.01)).unwrap_or(0.1);
-            let ship_cap = snap
-                .items
-                .get(&p.ship_id)
-                .and_then(|si| {
-                    si.dynamic_attributes.get(&38).copied().or_else(|| ctx.sde.types.get(&si.type_id).map(|t| t.capacity))
-                })
-                .unwrap_or(400.0);
-            let used_vol: f64 = snap
-                .items
-                .values()
-                .filter(|i| i.location_id == p.ship_id && i.flag == InventoryFlag::Cargo && i.quantity > 0)
-                .map(|i| (i.quantity as f64) * ctx.sde.types.get(&i.type_id).map(|t| t.volume).unwrap_or(0.1))
-                .sum();
-            if used_vol + probe_vol <= ship_cap + 1e-6 && snap.items.contains_key(&p.ship_id) {
-                if let Some(st) = snap.items.values_mut().find(|i| {
-                    i.owner_id == char_id && i.location_id == p.ship_id && i.flag == InventoryFlag::Cargo && i.type_id == p.probe_type_id
-                }) {
-                    st.quantity += 1;
-                    st.version += 1;
-                } else {
-                    snap.next_entity_id += 1;
-                    let new_id = snap.next_entity_id;
-                    snap.items.insert(
-                        new_id,
-                        eve_db::InventoryItemRecord {
-                            item_id: new_id,
-                            type_id: p.probe_type_id,
-                            owner_id: char_id,
-                            location_id: p.ship_id,
-                            flag: InventoryFlag::Cargo,
-                            quantity: 1,
-                            singleton: false,
-                            version: 1,
-                            ..Default::default()
-                        },
-                    );
-                }
-                ret.push(p.probe_id);
-            } else {
-                lost.push(p.probe_id);
-            }
-        }
-        (ret, lost)
-    });
-
-    if let Ok(mut map) = ctx.active_scanner_probes.write() {
-        for pid in &returned_ids {
-            if let Some(p) = map.get_mut(pid) {
-                p.state = -1; // expired & auto-returned to cargo
-            }
-        }
-        for pid in &lost_ids {
-            if let Some(p) = map.get_mut(pid) {
-                p.state = -2; // expired & lost (cargo full)
-            }
-        }
-    }
-
-    (returned_ids, lost_ids)
-}
-
-/// Background cluster sweep that expires overdue scanner probes across all characters.
-// parity: feat:scanning.probe-range-deviation
-pub async fn expire_all_overdue_probes(ctx: &ServerContext, now_unix: u64) {
-    let overdue_owners: Vec<i64> = if let Ok(map) = ctx.active_scanner_probes.read() {
-        let mut owners: Vec<i64> = map
-            .values()
-            .filter(|p| {
-                p.state >= 0
-                    && now_unix >= p.launched_at_unix.saturating_add(p.max_flight_time_s.max(0.0) as u64)
-            })
-            .map(|p| p.owner_char_id)
-            .collect();
-        owners.sort_unstable();
-        owners.dedup();
-        owners
-    } else {
-        Vec::new()
-    };
-    for cid in overdue_owners {
-        let _ = expire_overdue_probes_for_char(ctx, cid, now_unix).await;
-    }
-}
+pub use crate::services::r6_t1_p0_helpers::{
+    expire_all_overdue_probes, expire_overdue_probes_for_char,
+};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn activate_scan_probe_launcher(
@@ -443,14 +326,29 @@ pub(crate) async fn handle_scan_and_wormhole_extras(
         ("scanMgr", "ReconnectToLostProbes") => handle_reconnect_probes(ctx, session, bound_entry).await,
         ("scanMgr", "DestroyProbe") => handle_destroy_probe(ctx, session, bound_entry, args).await,
         ("scanMgr", "GetFullState") => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let sys_id = bound_entry
-                .map(|b| b.object_id as u32)
-                .or(session.solar_system_id)
-                .unwrap_or(30_000_142);
+            let caller_sys = resolve_caller_solar_system(ctx, session, char_id);
+            let is_gm = session.has_gm_role();
+            if let Some(b) = bound_entry {
+                let req_sys = b.object_id as u32;
+                if req_sys > 0 && req_sys != caller_sys && !is_gm {
+                    return Some(Err(BridgeRpcError {
+                        code: "CrossSystemScanDenied".into(),
+                        message: format!("Cannot query GetFullState for remote solar system {req_sys}"),
+                    }));
+                }
+            }
+            let sys_id = if is_gm {
+                bound_entry
+                    .map(|b| b.object_id as u32)
+                    .filter(|&id| id > 0)
+                    .unwrap_or(caller_sys)
+            } else {
+                caller_sys
+            };
             let (sigs, anomalies) = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
             let anom_entries: Vec<(PyRep, PyRep)> = anomalies
                 .into_iter()
@@ -476,17 +374,23 @@ pub(crate) async fn handle_scan_and_wormhole_extras(
                 .into_iter()
                 .enumerate()
                 .map(|(idx, s)| {
+                    let eff_strength = if is_gm {
+                        1.0
+                    } else {
+                        ctx.effective_signature_signal_strength(char_id, sys_id, &s)
+                    };
+                    let coords = if eff_strength >= 1.0 { s.position } else { [0.0, 0.0, 0.0] };
                     let pos = PyRep::Tuple(vec![
-                        PyRep::Real(s.position[0]),
-                        PyRep::Real(s.position[1]),
-                        PyRep::Real(s.position[2]),
+                        PyRep::Real(coords[0]),
+                        PyRep::Real(coords[1]),
+                        PyRep::Real(coords[2]),
                     ]);
                     let val = PyRep::Tuple(vec![
                         PyRep::Integer((idx as i64) + 1),
                         PyRep::String(s.signature_id.clone()),
                         pos,
-                        PyRep::Integer(1),
-                        PyRep::Integer(502),
+                        PyRep::Integer(if eff_strength >= 1.0 { 1 } else { 0 }),
+                        PyRep::Integer(if eff_strength >= 0.25 { 502 } else { 0 }),
                     ]);
                     (PyRep::String(s.signature_id), val)
                 })

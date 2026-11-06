@@ -82,14 +82,16 @@ pub(crate) fn reconcile_tackle_and_bubbles(
             .is_some_and(|m| m.group_id == 31);
 
         if let Some(cs) = ballpark.combat_states.get_mut(&ball_id) {
-            let lance_scram = if cs.lance_disrupted_remaining_s > 0.0 { 100 } else { 0 };
+            let is_protected = cs.is_invulnerable()
+                || cs.undock_invulnerable_remaining_ticks > 0
+                || cs.gate_cloak_remaining_ticks > 0
+                || cs.is_cloaked
+                || cs.is_tethered;
+            let lance_scram = if cs.lance_disrupted_remaining_s > 0.0 && !is_protected { 100 } else { 0 };
             cs.warp_scramble_strength = base_scram + mod_scram + lance_scram;
             cs.warp_core_strength = base_core + mod_core;
             cs.is_mwd_mjd_disabled = mwd_disabled;
             cs.disallow_assistance = disallow_assist;
-            if lance_scram > 0 {
-                cs.is_tethered = false;
-            }
             if ewar_immune {
                 cs.ecm_jammed_remaining_s = 0.0;
             }

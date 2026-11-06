@@ -45,7 +45,7 @@
 
 use crate::formulas::{
     breacher_pod_tick_damage, compute_dbs_and_ess_bounty_split, compute_insurance_levels,
-    compute_insurance_quote, compute_ship_insurance_reference_value, concord_response_delay_sec,
+    compute_insurance_quote, compute_ship_insurance_reference_value,
     entropic_spool_multiplier, missile_damage_factor, turret_chance_to_hit,
     turret_chance_to_hit_with_res, turret_shot_damage, vorton_arc_targets_with_cap,
 };
