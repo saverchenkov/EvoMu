@@ -311,6 +311,19 @@ mod mailing_lists_ops_extra_unit_tests;
 mod implant_plugging_extra_unit_tests;
 #[cfg(test)]
 mod tactical_module_mechanics_extra_unit_tests;
+#[cfg(test)]
+mod mining_cycle_extra_unit_tests;
+#[cfg(test)]
+mod quasar_achievements_extra_unit_tests;
+#[cfg(test)]
+mod abyssal_void_gates_extra_unit_tests;
+#[cfg(test)]
+mod space_mining_harvest_extra_unit_tests;
+#[cfg(test)]
+mod fitting_dogma_ops_extra_unit_tests;
+#[cfg(test)]
+mod sov_gameplay_skyhook_extra_unit_tests;
+
 
 
 
