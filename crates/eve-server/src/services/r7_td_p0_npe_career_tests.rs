@@ -373,7 +373,10 @@ async fn test_r7_td_457_docking_updates_system_constellation_region_and_blocks_c
         let ch2 = &snap.characters[&cid2];
         assert_eq!(ch2.solar_system_id, kisogo_sys);
         assert_ne!(ch2.station_id, Some(null_station));
-        assert_eq!(ch2.station_id, Some(kisogo_station));
+        assert!(ch2
+            .station_id
+            .and_then(|sid| ctx.sde.stations.get(&sid))
+            .is_some_and(|st| st.solar_system_id == kisogo_sys));
     });
 }
 

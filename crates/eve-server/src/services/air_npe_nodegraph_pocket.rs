@@ -400,7 +400,13 @@ fn resolve_npe_dock_target(
             }
         }
     }
-    if let Some(st) = ctx.sde.stations.values().find(|s| s.solar_system_id == expected_sys) {
+    if let Some(st) = ctx
+        .sde
+        .stations
+        .values()
+        .filter(|s| s.solar_system_id == expected_sys)
+        .min_by_key(|s| s.station_id)
+    {
         return Some((
             st.station_id,
             st.solar_system_id,

@@ -1138,7 +1138,7 @@ pub fn try_client_npe_event(
     let is_gm = session.has_gm_role();
     if ev == "complete_air_npe" {
         if !is_gm {
-            return None;
+            return Ok(None);
         }
         let is_active = ctx.db.with_snapshot(|snap| {
             load_runner_state(snap, char_id)
@@ -1211,7 +1211,7 @@ pub fn on_client_graph_message(
 
     if msg_lower == "complete_air_npe" {
         if !is_gm {
-            return true;
+            return false;
         }
         return complete_air_npe_checked(ctx, Some(session), char_id, ctx.now_unix()).is_ok();
     }
