@@ -35,6 +35,7 @@ mod flight_recorder_misc_deep_extra_unit_tests;
 mod formulas_extra_unit_tests;
 #[cfg(test)]
 mod living_world_seeder_deep_extra_unit_tests;
+#[cfg(test)]
 mod lifecycle_bug_reporting_deep_extra_unit_tests;
 #[cfg(test)]
 mod macho_listener_deep_extra_unit_tests;

@@ -502,3 +502,7 @@ mod station_inventory_stacking_deep_extra_unit_tests;
 mod quasar_goals_achievements_deep_extra_unit_tests;
 #[cfg(test)]
 mod quasar_cosmetics_skills_deep_extra_unit_tests;
+#[cfg(test)]
+mod air_npe_season_corp_projects_deep_extra_unit_tests;
+#[cfg(test)]
+mod crab_beacons_filament_arena_deep_extra_unit_tests;
