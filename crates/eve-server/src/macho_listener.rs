@@ -19,7 +19,7 @@ use eve_machonet::{
 };
 use eve_proto::{marshal, PyRep};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -27,6 +27,10 @@ use tracing::{debug, warn};
 
 /// Maximum frame length accepted on TCP listeners (4 MiB, matching `eve_proto::marshal::MAX_FRAME_SIZE`) to prevent memory exhaustion.
 pub const MAX_MACHO_FRAME_LEN: usize = eve_proto::marshal::MAX_FRAME_SIZE;
+/// Maximum frame length and `zlib` inflation budget accepted prior to completing the `GPSTransport` authentication handshake (64 KiB).
+pub const MAX_PREAUTH_MACHO_FRAME_LEN: usize = 64 * 1024;
+/// Maximum decoded AST / byte-weight nodes accepted prior to completing the `GPSTransport` authentication handshake.
+pub const MAX_PREAUTH_DECODED_NODES: usize = 4_096;
 /// Idle timeout waiting for the next machoNet frame header on an open connection.
 pub const IDLE_READ_TIMEOUT_SECS: u64 = 300;
 /// Maximum timeout to finish reading a frame body after its 4-byte length prefix arrives.
@@ -116,6 +120,8 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
     let mut last_destiny_tick: u64 = 0;
 
     let (mut reader, mut writer) = stream.into_split();
+    let is_authenticated_flag = Arc::new(AtomicBool::new(false));
+    let is_authenticated_reader = Arc::clone(&is_authenticated_flag);
     let (frame_tx, mut frame_rx) =
         tokio::sync::mpsc::channel::<std::result::Result<Vec<u8>, std::io::Error>>(32);
     let reader_task = tokio::spawn(async move {
@@ -144,7 +150,12 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                     break;
                 }
             };
-            if frame_len == 0 || frame_len > MAX_MACHO_FRAME_LEN {
+            let max_allowed_frame_len = if is_authenticated_reader.load(Ordering::Acquire) {
+                MAX_MACHO_FRAME_LEN
+            } else {
+                MAX_PREAUTH_MACHO_FRAME_LEN
+            };
+            if frame_len == 0 || frame_len > max_allowed_frame_len {
                 let _ = frame_tx
                     .send(Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
@@ -287,7 +298,13 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                     }
                     None => break,
                 };
-                let pyrep = match marshal::decode(&payload) {
+                let (max_frame_bytes, max_nodes) = if handshake.is_authenticated() {
+                    (MAX_MACHO_FRAME_LEN, eve_proto::MAX_DECODED_NODES)
+                } else {
+                    (MAX_PREAUTH_MACHO_FRAME_LEN, MAX_PREAUTH_DECODED_NODES)
+                };
+                let pyrep = match marshal::decode_with_limits(&payload, max_frame_bytes, max_nodes)
+                {
                     Ok(r) => r,
                     Err(e) => {
                         warn!("Failed to decode marshal payload on machoNet session {session_id}: {e}");
@@ -490,6 +507,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             session.language_id = identity.language_id.clone();
                             session.address = identity.address.clone();
                             session.user_type = identity.user_type;
+                            is_authenticated_flag.store(true, Ordering::Release);
 
                             let mut failed = false;
                             for f in &frames {
@@ -932,4 +950,7 @@ pub use eve_machonet::extract_macho_call_req;
 #[path = "macho_listener_tests.rs"]
 mod macho_listener_tests;
 #[cfg(test)] #[path = "macho_listener_extra_tests.rs"] mod macho_listener_extra_tests;
+#[cfg(test)]
+#[path = "macho_listener_preauth_bounds_tests.rs"]
+mod macho_listener_preauth_bounds_tests;
 

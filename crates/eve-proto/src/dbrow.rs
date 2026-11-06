@@ -798,6 +798,26 @@ pub fn unpack_packed_row_columns(header: &PyRep, raw_rle: &[u8]) -> Vec<(String,
     try_unpack_packed_row_columns(header, raw_rle).unwrap_or_default()
 }
 
+/// Computes the unpacked byte buffer length required by a `PyPackedRow` descriptor's
+/// fixed-width columns, boolean bits, and null-indicator bitmap.
+pub fn packed_row_expected_bytes(defs: &[(String, i64)]) -> usize {
+    if defs.is_empty() {
+        return 0;
+    }
+    let mut byte_data_bit_len = 0usize;
+    let mut bool_bit_len = 0usize;
+    for (_, dbtype) in defs {
+        let size = dbtype_bit_width(*dbtype);
+        if *dbtype == 11 {
+            bool_bit_len += 1;
+        }
+        if size >= 8 {
+            byte_data_bit_len = byte_data_bit_len.saturating_add(size);
+        }
+    }
+    (byte_data_bit_len >> 3) + ((bool_bit_len + defs.len()) >> 3) + 1
+}
+
 /// Fallible version of [`unpack_packed_row_columns`] that returns [`crate::ProtoError::InvalidPackedRowRle`]
 /// when the RLE stream is corrupt or overflows the expected column byte length.
 pub fn try_unpack_packed_row_columns(
@@ -823,7 +843,7 @@ pub fn try_unpack_packed_row_columns(
             bool_bit_len += 1;
         }
         if size >= 8 {
-            byte_data_bit_len += size;
+            byte_data_bit_len = byte_data_bit_len.saturating_add(size);
         }
     }
 

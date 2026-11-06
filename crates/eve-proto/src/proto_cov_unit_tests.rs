@@ -274,7 +274,7 @@ fn pyrep_node_count_and_wire_boundaries_cover_all_arithmetic_branches() {
         ("a".to_string(), PyRep::Integer(1)),
         ("b".to_string(), PyRep::Integer(2)),
     ]);
-    assert_eq!(PyRep::KeyVal(kv).node_count(), 3);
+    assert_eq!(PyRep::KeyVal(kv).node_count(), 5);
     assert_eq!(
         PyRep::Rowset {
             columns: vec!["c1".into(), "c2".into(), "c3".into()],
@@ -293,7 +293,7 @@ fn pyrep_node_count_and_wire_boundaries_cover_all_arithmetic_branches() {
             )],
         }
         .node_count(),
-        6
+        7
     );
     assert_eq!(
         PyRep::DBRow {
@@ -305,7 +305,7 @@ fn pyrep_node_count_and_wire_boundaries_cover_all_arithmetic_branches() {
             raw_rle: vec![0u8; 128],
         }
         .node_count(),
-        6
+        8
     );
     assert_eq!(
         PyRep::ObjectEx {

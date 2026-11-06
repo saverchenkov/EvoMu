@@ -378,22 +378,31 @@ impl PyRep {
                     .map(|(k, v)| k.node_count() + v.node_count())
                     .sum::<usize>()
             }
-            Self::KeyVal(map) => 1 + map.values().map(Self::node_count).sum::<usize>(),
+            Self::KeyVal(map) => {
+                1 + map
+                    .iter()
+                    .map(|(k, v)| (1 + (k.len() / 64)) + v.node_count())
+                    .sum::<usize>()
+            }
             Self::Rowset { columns, rows } | Self::TupleSet { columns, rows } => {
-                1 + columns.len()
+                1 + columns.iter().map(|c| 1 + (c.len() / 64)).sum::<usize>()
                     + rows
                         .iter()
-                        .flat_map(|r| r.iter())
-                        .map(Self::node_count)
+                        .map(|r| r.iter().map(Self::node_count).sum::<usize>().max(1))
                         .sum::<usize>()
             }
             Self::IndexRowset {
-                columns, items, ..
+                key_column,
+                columns,
+                items,
             } => {
-                1 + columns.len()
+                1 + (1 + (key_column.len() / 64))
+                    + columns.iter().map(|c| 1 + (c.len() / 64)).sum::<usize>()
                     + items
                         .iter()
-                        .map(|(k, r)| k.node_count() + r.iter().map(Self::node_count).sum::<usize>())
+                        .map(|(k, r)| {
+                            k.node_count() + r.iter().map(Self::node_count).sum::<usize>().max(1)
+                        })
                         .sum::<usize>()
             }
             Self::DBRow {
@@ -405,11 +414,11 @@ impl PyRep {
                     + header.node_count()
                     + columns
                         .iter()
-                        .map(|(_, v)| v.node_count())
+                        .map(|(c, v)| (1 + (c.len() / 64)) + v.node_count())
                         .sum::<usize>()
             }
-            Self::Object { args, .. }
-            | Self::SubStruct(args)
+            Self::Object { type_name, args } => 1 + (type_name.len() / 64) + args.node_count(),
+            Self::SubStruct(args)
             | Self::SubStream(args)
             | Self::ChecksumedStream { body: args, .. } => 1 + args.node_count(),
             Self::ObjectEx {

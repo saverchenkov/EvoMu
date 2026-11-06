@@ -333,41 +333,70 @@ fn is_zlib_stream_header(input: &[u8]) -> bool {
 /// Decodes a raw or `zlib`-compressed `eveMarshal` payload with strict size, collection,
 /// recursion, node-budget, and trailing `save_count` map handling.
 pub fn decode(input: &[u8]) -> Result<PyRep, ProtoError> {
+    decode_with_limits(input, MAX_FRAME_SIZE, MAX_DECODED_NODES)
+}
+
+/// Decodes a raw or `zlib`-compressed `eveMarshal` payload using caller-supplied outer/inflated
+/// byte limits (`max_inflate_bytes`) and AST/byte-weight node budget (`max_nodes`).
+///
+/// `max_inflate_bytes` bounds both the raw outer slice length and the cumulative decompressed
+/// bytes across the outer stream and all nested `PySubStream` (`0x2B`) `zlib` streams combined.
+pub fn decode_with_limits(
+    input: &[u8],
+    max_inflate_bytes: usize,
+    max_nodes: usize,
+) -> Result<PyRep, ProtoError> {
     if input.is_empty() {
         return Err(ProtoError::UnexpectedEof);
     }
-    if input.len() > MAX_FRAME_SIZE {
+    if input.len() > max_inflate_bytes {
         return Err(ProtoError::FrameTooLarge(input.len()));
     }
 
-    let decompressed_buf: Vec<u8>;
-    let cursor: &[u8] = if is_zlib_stream_header(input) {
-        let mut decoder = ZlibDecoder::new(input).take((MAX_FRAME_SIZE + 1) as u64);
-        let mut out = Vec::new();
-        decoder
-            .read_to_end(&mut out)
-            .map_err(|e| ProtoError::ZlibError(e.to_string()))?;
-        if out.len() > MAX_FRAME_SIZE {
-            return Err(ProtoError::FrameTooLarge(out.len()));
-        }
-        decompressed_buf = out;
-        &decompressed_buf
-    } else {
-        input
-    };
-
-    let mut remaining_budget = MAX_DECODED_NODES;
-    decode_stream_slice(cursor, 0, &mut remaining_budget)
+    let mut remaining_budget = max_nodes;
+    let mut remaining_inflate_budget = max_inflate_bytes;
+    decode_stream_slice(
+        input,
+        0,
+        &mut remaining_budget,
+        &mut remaining_inflate_budget,
+    )
 }
 
 fn decode_stream_slice(
     stream: &[u8],
     depth: usize,
     remaining_budget: &mut usize,
+    remaining_inflate_budget: &mut usize,
 ) -> Result<PyRep, ProtoError> {
     if depth > MAX_RECURSION_DEPTH {
         return Err(ProtoError::RecursionLimitExceeded);
     }
+    if stream.is_empty() {
+        return Err(ProtoError::UnexpectedEof);
+    }
+
+    // Both outer frames and nested `PySubStream` (`0x2B`) payloads produced by V24.01
+    // `blue.marshal.Save` may be independently `zlib`-compressed (`0x78 ...` or `0x58 0x09 ...`).
+    // All inflations share `remaining_inflate_budget` so nested zip-bombs cannot amplify memory.
+    let inflated_buf: Vec<u8>;
+    let stream: &[u8] = if is_zlib_stream_header(stream) {
+        let max_take = (*remaining_inflate_budget as u64).saturating_add(1);
+        let mut decoder = ZlibDecoder::new(stream).take(max_take);
+        let mut out = Vec::new();
+        decoder
+            .read_to_end(&mut out)
+            .map_err(|e| ProtoError::ZlibError(e.to_string()))?;
+        if out.len() > *remaining_inflate_budget {
+            return Err(ProtoError::FrameTooLarge(out.len()));
+        }
+        *remaining_inflate_budget -= out.len();
+        inflated_buf = out;
+        &inflated_buf
+    } else {
+        stream
+    };
+
     if stream.is_empty() {
         return Err(ProtoError::UnexpectedEof);
     }
@@ -399,6 +428,7 @@ fn decode_stream_slice(
         depth,
         &mut saved_slots,
         remaining_budget,
+        remaining_inflate_budget,
     )?;
 
     if !body_cursor.is_empty() {
@@ -414,6 +444,7 @@ fn decode_inner(
     depth: usize,
     saved_slots: &mut [Option<PyRep>],
     remaining_budget: &mut usize,
+    remaining_inflate_budget: &mut usize,
 ) -> Result<PyRep, ProtoError> {
     if depth > MAX_RECURSION_DEPTH {
         return Err(ProtoError::RecursionLimitExceeded);
@@ -456,6 +487,9 @@ fn decode_inner(
             if input.len() < len {
                 return Err(ProtoError::UnexpectedEof);
             }
+            *remaining_budget = remaining_budget
+                .checked_sub(len / 64)
+                .ok_or(ProtoError::NodeBudgetExceeded)?;
             let s = String::from_utf8(input[..len].to_vec())?;
             *input = &input[len..];
             PyRep::Token(s)
@@ -534,6 +568,9 @@ fn decode_inner(
             if input.len() < len {
                 return Err(ProtoError::UnexpectedEof);
             }
+            *remaining_budget = remaining_budget
+                .checked_sub(len / 64)
+                .ok_or(ProtoError::NodeBudgetExceeded)?;
             let b = input[..len].to_vec();
             *input = &input[len..];
             PyRep::Buffer(b)
@@ -556,6 +593,9 @@ fn decode_inner(
             if input.len() < len {
                 return Err(ProtoError::UnexpectedEof);
             }
+            *remaining_budget = remaining_budget
+                .checked_sub(len / 64)
+                .ok_or(ProtoError::NodeBudgetExceeded)?;
             let b = input[..len].to_vec();
             *input = &input[len..];
             PyRep::Bytes(b)
@@ -570,6 +610,9 @@ fn decode_inner(
                 .checked_sub(1)
                 .and_then(|i| MARSHAL_STRING_TABLE.get(i))
                 .ok_or(ProtoError::UnsupportedOpcode(opcode))?;
+            *remaining_budget = remaining_budget
+                .checked_sub(s.len() / 64)
+                .ok_or(ProtoError::NodeBudgetExceeded)?;
             PyRep::String((*s).to_string())
         }
         x if x == MarshalOpcode::PyWStringUCS2Char as u8 => {
@@ -587,18 +630,29 @@ fn decode_inner(
             if input.len() < byte_len {
                 return Err(ProtoError::UnexpectedEof);
             }
+            *remaining_budget = remaining_budget
+                .checked_sub(byte_len / 64)
+                .ok_or(ProtoError::NodeBudgetExceeded)?;
             let mut units = Vec::with_capacity(char_len.min(1024));
             for chunk in input[..byte_len].chunks_exact(2) {
                 units.push(u16::from_le_bytes([chunk[0], chunk[1]]));
             }
             *input = &input[byte_len..];
-            PyRep::String(String::from_utf16_lossy(&units))
+            let s = String::from_utf16_lossy(&units);
+            let extra_utf8 = (s.len() / 64).saturating_sub(byte_len / 64);
+            *remaining_budget = remaining_budget
+                .checked_sub(extra_utf8)
+                .ok_or(ProtoError::NodeBudgetExceeded)?;
+            PyRep::String(s)
         }
         x if x == MarshalOpcode::PyLongString as u8 => {
             let len = read_size_ex(input)?;
             if input.len() < len {
                 return Err(ProtoError::UnexpectedEof);
             }
+            *remaining_budget = remaining_budget
+                .checked_sub(len / 64)
+                .ok_or(ProtoError::NodeBudgetExceeded)?;
             let b = input[..len].to_vec();
             *input = &input[len..];
             PyRep::Bytes(b)
@@ -608,21 +662,58 @@ fn decode_inner(
             if input.len() < len {
                 return Err(ProtoError::UnexpectedEof);
             }
+            *remaining_budget = remaining_budget
+                .checked_sub(len / 64)
+                .ok_or(ProtoError::NodeBudgetExceeded)?;
             let b = input[..len].to_vec();
             *input = &input[len..];
             PyRep::Picked(b)
         }
         x if x == MarshalOpcode::PyPackedRow as u8 => {
-            let header = decode_inner(input, save_map, depth + 1, saved_slots, remaining_budget)?;
+            let header = decode_inner(
+                input,
+                save_map,
+                depth + 1,
+                saved_slots,
+                remaining_budget,
+                remaining_inflate_budget,
+            )?;
             let rle_len = read_size_ex(input)?;
             if input.len() < rle_len {
                 return Err(ProtoError::UnexpectedEof);
             }
+            *remaining_budget = remaining_budget
+                .checked_sub(rle_len / 64)
+                .ok_or(ProtoError::NodeBudgetExceeded)?;
             let raw_rle = input[..rle_len].to_vec();
             *input = &input[rle_len..];
+
+            // Charge column count, column-name byte weights, unpacked fixed-width cells, and
+            // unpacked RLE byte-buffer weight BEFORE allocating inside `try_unpack_packed_row_columns`.
+            let defs = extract_dbrow_header_col_defs(&header);
+            if let Some(ref col_defs) = defs {
+                if !col_defs.is_empty() {
+                    let expected_bytes = crate::dbrow::packed_row_expected_bytes(col_defs);
+                    if expected_bytes > MAX_COLLECTION_LEN {
+                        return Err(ProtoError::CollectionTooLarge(expected_bytes));
+                    }
+                    let col_weight: usize = col_defs
+                        .iter()
+                        .map(|(col_name, dbtype)| {
+                            let fixed_cell = usize::from(dbtype_bit_width(*dbtype) > 0);
+                            (1 + (col_name.len() / 64)) + fixed_cell
+                        })
+                        .sum();
+                    let unpack_cost = col_weight.saturating_add(expected_bytes / 64);
+                    *remaining_budget = remaining_budget
+                        .checked_sub(unpack_cost)
+                        .ok_or(ProtoError::NodeBudgetExceeded)?;
+                }
+            }
+
             let mut columns = crate::dbrow::try_unpack_packed_row_columns(&header, &raw_rle)?;
-            if let Some(defs) = extract_dbrow_header_col_defs(&header) {
-                for (idx, (col_name, dbtype)) in defs.iter().enumerate() {
+            if let Some(col_defs) = defs {
+                for (idx, (col_name, dbtype)) in col_defs.iter().enumerate() {
                     if dbtype_bit_width(*dbtype) == 0 {
                         let val = decode_inner(
                             input,
@@ -630,6 +721,7 @@ fn decode_inner(
                             depth + 1,
                             saved_slots,
                             remaining_budget,
+                            remaining_inflate_budget,
                         )?;
                         if let Some(slot) = columns.get_mut(idx) {
                             *slot = (col_name.clone(), val);
@@ -649,6 +741,9 @@ fn decode_inner(
             if input.len() < len {
                 return Err(ProtoError::UnexpectedEof);
             }
+            *remaining_budget = remaining_budget
+                .checked_sub(len / 64)
+                .ok_or(ProtoError::NodeBudgetExceeded)?;
             let s = String::from_utf8(input[..len].to_vec())?;
             *input = &input[len..];
             PyRep::String(s)
@@ -660,10 +755,25 @@ fn decode_inner(
             depth + 1,
             saved_slots,
             remaining_budget,
+            remaining_inflate_budget,
         )?]),
         x if x == MarshalOpcode::PyTwoTuple as u8 => {
-            let a = decode_inner(input, save_map, depth + 1, saved_slots, remaining_budget)?;
-            let b = decode_inner(input, save_map, depth + 1, saved_slots, remaining_budget)?;
+            let a = decode_inner(
+                input,
+                save_map,
+                depth + 1,
+                saved_slots,
+                remaining_budget,
+                remaining_inflate_budget,
+            )?;
+            let b = decode_inner(
+                input,
+                save_map,
+                depth + 1,
+                saved_slots,
+                remaining_budget,
+                remaining_inflate_budget,
+            )?;
             PyRep::Tuple(vec![a, b])
         }
         x if x == MarshalOpcode::PyTuple as u8 => {
@@ -676,6 +786,7 @@ fn decode_inner(
                     depth + 1,
                     saved_slots,
                     remaining_budget,
+                    remaining_inflate_budget,
                 )?);
             }
             PyRep::Tuple(items)
@@ -687,6 +798,7 @@ fn decode_inner(
             depth + 1,
             saved_slots,
             remaining_budget,
+            remaining_inflate_budget,
         )?]),
         x if x == MarshalOpcode::PyList as u8 => {
             let len = read_collection_len(input)?;
@@ -698,6 +810,7 @@ fn decode_inner(
                     depth + 1,
                     saved_slots,
                     remaining_budget,
+                    remaining_inflate_budget,
                 )?);
             }
             PyRep::List(items)
@@ -706,20 +819,47 @@ fn decode_inner(
             let len = read_collection_len(input)?;
             let mut entries = Vec::with_capacity(len.min(input.len() / 2).min(1024));
             for _ in 0..len {
-                let v = decode_inner(input, save_map, depth + 1, saved_slots, remaining_budget)?;
-                let k = decode_inner(input, save_map, depth + 1, saved_slots, remaining_budget)?;
+                let v = decode_inner(
+                    input,
+                    save_map,
+                    depth + 1,
+                    saved_slots,
+                    remaining_budget,
+                    remaining_inflate_budget,
+                )?;
+                let k = decode_inner(
+                    input,
+                    save_map,
+                    depth + 1,
+                    saved_slots,
+                    remaining_budget,
+                    remaining_inflate_budget,
+                )?;
                 entries.push((k, v));
             }
             PyRep::Dict(entries)
         }
         x if x == MarshalOpcode::PyObject as u8 => {
-            let type_rep =
-                decode_inner(input, save_map, depth + 1, saved_slots, remaining_budget)?;
+            let type_rep = decode_inner(
+                input,
+                save_map,
+                depth + 1,
+                saved_slots,
+                remaining_budget,
+                remaining_inflate_budget,
+            )?;
             let type_name = type_rep
                 .as_str()
                 .ok_or(ProtoError::UnsupportedOpcode(opcode))?
                 .to_string();
-            let args = decode_inner(input, save_map, depth + 1, saved_slots, remaining_budget)?;
+            let args = decode_inner(
+                input,
+                save_map,
+                depth + 1,
+                saved_slots,
+                remaining_budget,
+                remaining_inflate_budget,
+            )?;
 
             if type_name == "util.KeyVal" || type_name == V24_KEYVAL_CLASS {
                 if let PyRep::Dict(entries) = &args {
@@ -782,7 +922,14 @@ fn decode_inner(
         }
         x if x == MarshalOpcode::PyObjectEx1 as u8 || x == MarshalOpcode::PyObjectEx2 as u8 => {
             let is_type_2 = opcode == MarshalOpcode::PyObjectEx2 as u8;
-            let header = decode_inner(input, save_map, depth + 1, saved_slots, remaining_budget)?;
+            let header = decode_inner(
+                input,
+                save_map,
+                depth + 1,
+                saved_slots,
+                remaining_budget,
+                remaining_inflate_budget,
+            )?;
             let mut list = Vec::new();
             while !input.is_empty() && input[0] != MarshalOpcode::PackedTerminator as u8 {
                 if list.len() >= MAX_COLLECTION_LEN {
@@ -794,6 +941,7 @@ fn decode_inner(
                     depth + 1,
                     saved_slots,
                     remaining_budget,
+                    remaining_inflate_budget,
                 )?);
             }
             if input.is_empty() {
@@ -806,8 +954,22 @@ fn decode_inner(
                 if dict.len() >= MAX_COLLECTION_LEN {
                     return Err(ProtoError::CollectionTooLarge(dict.len() + 1));
                 }
-                let k = decode_inner(input, save_map, depth + 1, saved_slots, remaining_budget)?;
-                let v = decode_inner(input, save_map, depth + 1, saved_slots, remaining_budget)?;
+                let k = decode_inner(
+                    input,
+                    save_map,
+                    depth + 1,
+                    saved_slots,
+                    remaining_budget,
+                    remaining_inflate_budget,
+                )?;
+                let v = decode_inner(
+                    input,
+                    save_map,
+                    depth + 1,
+                    saved_slots,
+                    remaining_budget,
+                    remaining_inflate_budget,
+                )?;
                 dict.push((k, v));
             }
             if input.is_empty() {
@@ -846,7 +1008,14 @@ fn decode_inner(
             }
         }
         x if x == MarshalOpcode::PySubStruct as u8 => {
-            let inner = decode_inner(input, save_map, depth + 1, saved_slots, remaining_budget)?;
+            let inner = decode_inner(
+                input,
+                save_map,
+                depth + 1,
+                saved_slots,
+                remaining_budget,
+                remaining_inflate_budget,
+            )?;
             PyRep::SubStruct(Box::new(inner))
         }
         x if x == MarshalOpcode::PyChecksumedStream as u8 => {
@@ -855,7 +1024,14 @@ fn decode_inner(
             }
             let checksum = u32::from_le_bytes(input[..4].try_into().unwrap());
             *input = &input[4..];
-            let body = decode_inner(input, save_map, depth + 1, saved_slots, remaining_budget)?;
+            let body = decode_inner(
+                input,
+                save_map,
+                depth + 1,
+                saved_slots,
+                remaining_budget,
+                remaining_inflate_budget,
+            )?;
             PyRep::ChecksumedStream {
                 checksum,
                 body: Box::new(body),
@@ -868,7 +1044,12 @@ fn decode_inner(
             }
             let sub_slice = &input[..len];
             *input = &input[len..];
-            let inner = decode_stream_slice(sub_slice, depth + 1, remaining_budget)?;
+            let inner = decode_stream_slice(
+                sub_slice,
+                depth + 1,
+                remaining_budget,
+                remaining_inflate_budget,
+            )?;
             PyRep::SubStream(Box::new(inner))
         }
         x if x == MarshalOpcode::PySavedStreamElement as u8 => {
@@ -1054,5 +1235,8 @@ fn _keep_extract_col_defs_ref() {
 #[cfg(test)]
 #[path = "marshal_unit_tests.rs"]
 mod marshal_unit_tests;
+#[cfg(test)]
+#[path = "marshal_substream_budget_tests.rs"]
+mod marshal_substream_budget_tests;
 
 

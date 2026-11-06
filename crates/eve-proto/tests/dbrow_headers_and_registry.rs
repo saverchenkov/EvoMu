@@ -357,7 +357,7 @@ fn test_pyrep_accessors_rowsets_null_dbrow_and_objectex() {
     assert_eq!(
         PyRep::index_rowset("a", vec!["a", "b"], vec![(PyRep::Integer(1), vec![PyRep::Integer(1), PyRep::None])])
             .node_count(),
-        6
+        7
     );
     assert!(PyRep::ChecksumedStream { checksum: 7, body: Box::new(rs) }.node_count() >= 6);
     assert!(PyRep::SubStream(Box::new(PyRep::Buffer(vec![0u8; 128]))).node_count() >= 4);
