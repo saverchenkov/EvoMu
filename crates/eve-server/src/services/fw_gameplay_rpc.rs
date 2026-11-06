@@ -354,27 +354,47 @@ pub fn donate_lp_to_fw_ihub(
                 ),
             });
         }
-        let (lp_key, have) = if let Some(&bal) = ch.loyalty_points.get(&lp_corp) {
-            (lp_corp, bal)
-        } else {
-            (occ_fac, ch.loyalty_points.get(&occ_fac).copied().unwrap_or(0))
-        };
-        if have < lp_amount {
-            return Err(BridgeRpcError {
-                code: "InsufficientLoyaltyPoints".into(),
-                message: format!(
-                    "Have {have} LP with militia corporation {lp_corp}, tried to donate {lp_amount}"
-                ),
-            });
-        }
-        ch.loyalty_points.insert(lp_key, have - lp_amount);
+        const MAX_IHUB_LP: i64 = 200_000;
         let old = snap
             .fw_runtime
             .ihub_lp_donations
             .get(&sys_id)
             .copied()
             .unwrap_or(0);
-        let total = old + lp_amount;
+        let remaining_cap = MAX_IHUB_LP.saturating_sub(old);
+        if remaining_cap <= 0 {
+            return Err(BridgeRpcError {
+                code: "IhubMaxTierReached".into(),
+                message: format!(
+                    "Solar system {sys_id} iHub has reached maximum Tier 5 LP capacity ({MAX_IHUB_LP})"
+                ),
+            });
+        }
+        let effective_lp = lp_amount.min(remaining_cap);
+        let corp_bal = ch.loyalty_points.get(&lp_corp).copied().unwrap_or(0).max(0);
+        let fac_bal = if lp_corp != occ_fac {
+            ch.loyalty_points.get(&occ_fac).copied().unwrap_or(0).max(0)
+        } else {
+            0
+        };
+        let have = corp_bal.saturating_add(fac_bal);
+        if have < effective_lp {
+            return Err(BridgeRpcError {
+                code: "InsufficientLoyaltyPoints".into(),
+                message: format!(
+                    "Have {have} LP with militia corporation {lp_corp}, tried to donate {effective_lp}"
+                ),
+            });
+        }
+        let from_corp = effective_lp.min(corp_bal);
+        let from_fac = effective_lp - from_corp;
+        if from_corp > 0 {
+            ch.loyalty_points.insert(lp_corp, corp_bal - from_corp);
+        }
+        if from_fac > 0 {
+            ch.loyalty_points.insert(occ_fac, fac_bal - from_fac);
+        }
+        let total = old + effective_lp;
         snap.fw_runtime.ihub_lp_donations.insert(sys_id, total);
         let tier: u8 = match total {
             0..=39_999 => 0,
@@ -408,7 +428,7 @@ fn set_corp_militia_faction(
     let mut member_factions = Vec::new();
     for ch in snap.characters.values_mut() {
         if ch.corporation_id == cid {
-            let eff = fac.or_else(|| direct_map.get(&ch.character_id).copied());
+            let eff = direct_map.get(&ch.character_id).copied().or(fac);
             ch.war_faction_id = eff;
             member_factions.push((ch.character_id, eff));
         }
@@ -752,20 +772,53 @@ pub async fn handle(
                 }));
             }
             let now = ctx.now_unix();
-            ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let ally_opt = session
+                    .alliance_id
+                    .or_else(|| snap.characters.get(&char_id).and_then(|c| c.alliance_id))
+                    .and_then(|aid| snap.alliances.get(&aid));
+                if let Some(ally) = ally_opt {
+                    if snap.fw_runtime.corp_war_factions.contains_key(&ally.executor_corp_id)
+                        || ally.member_corp_ids.iter().any(|&mc| {
+                            mc != cid && snap.fw_runtime.corp_war_factions.contains_key(&mc)
+                        })
+                    {
+                        return Err(BridgeRpcError {
+                            code: "AllianceAlreadyEnlisted".into(),
+                            message: "Alliance is already enlisted in Factional Warfare".into(),
+                        });
+                    }
+                }
+                if snap
+                    .fw_corp_enlisted_on
+                    .get(&cid)
+                    .copied()
+                    .is_some_and(|enl| now < enl.saturating_add(86_400))
+                {
+                    return Err(BridgeRpcError {
+                        code: "MilitiaCooldownActive".into(),
+                        message: "Corporation is on active 24-hour militia cooldown".into(),
+                    });
+                }
                 snap.fw_corp_enlisted_on.insert(cid, now);
                 set_corp_militia_faction(snap, cid, Some(fac), now);
+                Ok(snap.characters.get(&char_id).and_then(|c| c.war_faction_id))
             });
-            session.war_faction_id = Some(fac);
-            crate::services::notify_emitters_character_services::emit_campaign_enrollment_changed(ctx, char_id);
-            Some(Ok(PyRep::Bool(true)))
+            match res {
+                Ok(new_fac) => {
+                    session.war_faction_id = new_fac;
+                    crate::services::notify_emitters_character_services::emit_campaign_enrollment_changed(ctx, char_id);
+                    Some(Ok(PyRep::Bool(true)))
+                }
+                Err(e) => Some(Err(e)),
+            }
         }
         ("facWarMgr", "LeaveFactionAsCorporation") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let (cid, is_ceo, cur_fac, enlisted_on) = ctx.db.with_snapshot(|snap| {
+            let (cid, is_ceo, cur_fac, enlisted_on, alliance_block) = ctx.db.with_snapshot(|snap| {
                 let cid = session
                     .corporation_id
                     .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id))
@@ -778,12 +831,39 @@ pub async fn handle(
                 }) || (session.corp_role & eve_db::corp_roles::ROLE_DIRECTOR != 0);
                 let cur = snap.fw_runtime.corp_war_factions.get(&cid).copied();
                 let enl = snap.fw_corp_enlisted_on.get(&cid).copied().unwrap_or(0);
-                (cid, is_ceo, cur, enl)
+                let aid = session
+                    .alliance_id
+                    .or_else(|| snap.characters.get(&char_id).and_then(|c| c.alliance_id))
+                    .or_else(|| snap.corporations.get(&cid).and_then(|c| c.alliance_id));
+                let ally_block = aid
+                    .and_then(|a| snap.alliances.get(&a))
+                    .is_some_and(|ally| {
+                        let any_other_enlisted = ally
+                            .member_corp_ids
+                            .iter()
+                            .any(|&mc| mc != cid && snap.fw_runtime.corp_war_factions.contains_key(&mc));
+                        let exec_enlisted = snap
+                            .fw_runtime
+                            .corp_war_factions
+                            .contains_key(&ally.executor_corp_id);
+                        if ally.executor_corp_id == cid {
+                            any_other_enlisted
+                        } else {
+                            exec_enlisted || any_other_enlisted
+                        }
+                    });
+                (cid, is_ceo, cur, enl, ally_block)
             });
             if !is_ceo {
                 return Some(Err(BridgeRpcError {
                     code: "AccessDenied".into(),
                     message: "Only corporation CEO or Director can resign from militia".into(),
+                }));
+            }
+            if alliance_block {
+                return Some(Err(BridgeRpcError {
+                    code: "AllianceEnlisted".into(),
+                    message: "Cannot resign corporation individually while alliance is enlisted; use LeaveFactionAsAlliance or leave alliance".into(),
                 }));
             }
             if cur_fac.is_none() {
@@ -857,17 +937,33 @@ pub async fn handle(
                         message: "Only the alliance executor corporation CEO can enlist the alliance".into(),
                     });
                 }
-                if snap.fw_runtime.corp_war_factions.contains_key(&cid) {
-                    return Err(BridgeRpcError {
-                        code: "AllianceAlreadyEnlisted".into(),
-                        message: "Alliance is already enlisted in Factional Warfare".into(),
-                    });
-                }
                 let mut member_corps: Vec<i64> = alliance.member_corp_ids.iter().copied().collect();
                 if !member_corps.contains(&cid) {
                     member_corps.push(cid);
                 }
                 for &mc in &member_corps {
+                    if let Some(&existing) = snap.fw_runtime.corp_war_factions.get(&mc) {
+                        return Err(BridgeRpcError {
+                            code: if mc == cid {
+                                "AllianceAlreadyEnlisted"
+                            } else {
+                                "CorporationAlreadyEnlisted"
+                            }
+                            .into(),
+                            message: format!("Corporation {mc} is already enlisted in militia {existing}"),
+                        });
+                    }
+                    if snap
+                        .fw_corp_enlisted_on
+                        .get(&mc)
+                        .copied()
+                        .is_some_and(|enl| now < enl.saturating_add(86_400))
+                    {
+                        return Err(BridgeRpcError {
+                            code: "MilitiaCooldownActive".into(),
+                            message: format!("Member corporation {mc} is on active 24-hour militia cooldown"),
+                        });
+                    }
                     let st = corp_standing_with_faction(snap, mc, fac);
                     if st < 0.0 {
                         return Err(BridgeRpcError {
@@ -880,14 +976,16 @@ pub async fn handle(
                     snap.fw_corp_enlisted_on.insert(mc, now);
                     set_corp_militia_faction(snap, mc, Some(fac), now);
                 }
-                Ok(())
+                Ok(snap.characters.get(&char_id).and_then(|c| c.war_faction_id))
             });
-            if let Err(e) = res {
-                return Some(Err(e));
+            match res {
+                Ok(new_fac) => {
+                    session.war_faction_id = new_fac;
+                    crate::services::notify_emitters_character_services::emit_campaign_enrollment_changed(ctx, char_id);
+                    Some(Ok(PyRep::Bool(true)))
+                }
+                Err(e) => Some(Err(e)),
             }
-            session.war_faction_id = Some(fac);
-            crate::services::notify_emitters_character_services::emit_campaign_enrollment_changed(ctx, char_id);
-            Some(Ok(PyRep::Bool(true)))
         }
         ("facWarMgr", "LeaveFactionAsAlliance") => {
             let (_, char_id) = match ServerContext::require_character(session) {
@@ -919,7 +1017,14 @@ pub async fn handle(
                         message: "Only the alliance executor corporation CEO can withdraw the alliance".into(),
                     });
                 }
-                if !snap.fw_runtime.corp_war_factions.contains_key(&cid) {
+                let mut member_corps: Vec<i64> = alliance.member_corp_ids.iter().copied().collect();
+                if !member_corps.contains(&cid) {
+                    member_corps.push(cid);
+                }
+                if !member_corps
+                    .iter()
+                    .any(|mc| snap.fw_runtime.corp_war_factions.contains_key(mc))
+                {
                     return Err(BridgeRpcError {
                         code: "AllianceNotEnlisted".into(),
                         message: "Alliance is not enlisted in Factional Warfare".into(),
@@ -931,10 +1036,6 @@ pub async fn handle(
                         code: "MilitiaCooldownActive".into(),
                         message: "Must wait 24 hours after enlisting to withdraw alliance from militia".into(),
                     });
-                }
-                let mut member_corps: Vec<i64> = alliance.member_corp_ids.iter().copied().collect();
-                if !member_corps.contains(&cid) {
-                    member_corps.push(cid);
                 }
                 for mc in member_corps {
                     snap.fw_corp_enlisted_on.remove(&mc);

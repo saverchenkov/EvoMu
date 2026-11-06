@@ -30,6 +30,7 @@ fn loaded_charge_sde_damage(
     ctx: &ServerContext,
     snap: &WorldStateSnapshot,
     structure_id: i64,
+    st_owner_corp: i64,
     mod_item: &eve_db::InventoryItemRecord,
 ) -> Option<(i64, DamageVector)> {
     let mod_sde = ctx.sde.types.get(&mod_item.type_id)?;
@@ -43,8 +44,10 @@ fn loaded_charge_sde_damage(
         .filter(|it| {
             it.location_id == structure_id
                 && it.flag == mod_item.flag
+                && it.owner_id == st_owner_corp
                 && it.item_id != mod_item.item_id
                 && it.quantity > 0
+                && !snap.is_item_locked_in_contract_or_job(it.item_id)
                 && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 8)
         })
         .map(|it| (it.item_id, it.type_id))
@@ -73,6 +76,11 @@ pub fn structure_online_defense_volley_omni(
     snap: &WorldStateSnapshot,
     structure_id: i64,
 ) -> f64 {
+    let owner_corp = snap
+        .structures
+        .get(&structure_id)
+        .map(|s| s.owner_corp_id)
+        .unwrap_or(0);
     let mut total = 0.0;
     for item in snap.items.values() {
         if item.location_id != structure_id || !(27..=34).contains(&(item.flag as u16)) {
@@ -81,7 +89,7 @@ pub fn structure_online_defense_volley_omni(
         if !snap.module_online_states.get(&item.item_id).copied().unwrap_or(true) {
             continue;
         }
-        if let Some((_, dmg)) = loaded_charge_sde_damage(ctx, snap, structure_id, item) {
+        if let Some((_, dmg)) = loaded_charge_sde_damage(ctx, snap, structure_id, owner_corp, item) {
             total += dmg.total();
         }
     }
@@ -157,11 +165,13 @@ pub async fn trigger_structure_auto_defense_on_grid(
 
         let mut per_target: std::collections::HashMap<i64, DamageVector> =
             std::collections::HashMap::new();
+        let (st_type_id, st_owner_corp) = snap
+            .structures
+            .get(&structure_id)
+            .map(|st| (st.type_id, st.owner_corp_id))
+            .unwrap_or((35832, 0));
         if !matched.is_empty() {
-            let st_sde = snap
-                .structures
-                .get(&structure_id)
-                .and_then(|st| ctx.sde.types.get(&st.type_id));
+            let st_sde = ctx.sde.types.get(&st_type_id);
             let max_cap = st_sde
                 .and_then(|t| t.default_attributes.get(&482).copied())
                 .unwrap_or(400_000.0);
@@ -205,7 +215,7 @@ pub async fn trigger_structure_auto_defense_on_grid(
                 if cur_cap + 1e-6 < cap_need {
                     continue;
                 }
-                let Some((charge_iid, dmg)) = loaded_charge_sde_damage(ctx, snap, structure_id, &mod_item) else {
+                let Some((charge_iid, dmg)) = loaded_charge_sde_damage(ctx, snap, structure_id, st_owner_corp, &mod_item) else {
                     continue;
                 };
                 if let Some(ch_it) = snap.items.get_mut(&charge_iid) {
@@ -284,7 +294,13 @@ pub async fn trigger_structure_auto_defense_on_grid(
                     continue;
                 }
             }
-            if let Ok(Some((dealt, _, _))) = sys_handle
+            let pre_ball = sys_handle
+                .get_ball_snapshot(ship_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, b)| (b.type_id, b.position));
+            if let Ok(Some((dealt, destroyed, _))) = sys_handle
                 .apply_damage_with_attacker(ship_id, target_dmg, pilot_opt.or(Some(structure_id)))
                 .await
             {
@@ -301,6 +317,19 @@ pub async fn trigger_structure_auto_defense_on_grid(
                             ]),
                         ],
                     );
+                }
+                if destroyed && !ctx.db.with_snapshot(|s| s.structures.contains_key(&ship_id)) {
+                    let (b_tid, b_pos) = pre_ball.unwrap_or((0, DVec3::ZERO));
+                    crate::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(
+                        ctx,
+                        sys_id,
+                        pilot_opt.unwrap_or(structure_id),
+                        ship_id,
+                        b_tid,
+                        b_pos,
+                        now_unix,
+                    )
+                    .await;
                 }
             }
         }
@@ -447,20 +476,28 @@ fn consume_structure_charge_in_snap(
     ctx: &ServerContext,
     snap: &mut WorldStateSnapshot,
     structure_id: i64,
+    st_owner_corp: i64,
+    module_id: i64,
     slot_flag: InventoryFlag,
     req_charge_group: u32,
 ) -> Result<u32, BridgeRpcError> {
     let mut wrong_group_seen = false;
     let mut candidates: Vec<(i64, u32, bool)> = Vec::new();
     for it in snap.items.values() {
-        if it.location_id != structure_id || it.quantity <= 0 {
+        if it.owner_id != st_owner_corp
+            || it.quantity <= 0
+            || it.item_id == module_id
+            || snap.is_item_locked_in_contract_or_job(it.item_id)
+        {
             continue;
         }
-        let in_slot = it.flag == slot_flag;
-        let in_ammo = matches!(
-            it.flag,
-            InventoryFlag::SpecializedAmmoHold | InventoryFlag::Cargo | InventoryFlag::FighterBay
-        );
+        let in_slot =
+            it.location_id == module_id || (it.location_id == structure_id && it.flag == slot_flag);
+        let in_ammo = it.location_id == structure_id
+            && matches!(
+                it.flag,
+                InventoryFlag::SpecializedAmmoHold | InventoryFlag::Cargo
+            );
         if !in_slot && !in_ammo {
             continue;
         }
@@ -492,7 +529,7 @@ fn consume_structure_charge_in_snap(
     if let Some(it) = snap.items.get_mut(&charge_iid) {
         if it.quantity > 1 {
             it.quantity -= 1;
-            it.version += 1;
+            it.version = it.version.saturating_add(1);
         } else {
             snap.items.remove(&charge_iid);
         }
@@ -711,6 +748,8 @@ pub async fn handle_structure_module_activate(
                 ctx,
                 snap,
                 structure_id,
+                st.owner_corp_id,
+                module_id,
                 slot_flag,
                 req_charge_grp,
             )?)
@@ -872,10 +911,10 @@ pub async fn handle_structure_module_activate(
                 .unwrap_or(100.0);
             let factor = (sig / exp_rad).clamp(0.04, 1.0);
             let em = csde.and_then(|t| t.default_attributes.get(&114).copied()).unwrap_or(300.0) * dmg_mult * factor;
-            let th = csde.and_then(|t| t.default_attributes.get(&116).copied()).unwrap_or(300.0) * dmg_mult * factor;
+            let th = csde.and_then(|t| t.default_attributes.get(&118).copied()).unwrap_or(300.0) * dmg_mult * factor;
             let ki = csde.and_then(|t| t.default_attributes.get(&117).copied()).unwrap_or(300.0) * dmg_mult * factor;
-            let ex = csde.and_then(|t| t.default_attributes.get(&118).copied()).unwrap_or(300.0) * dmg_mult * factor;
-            let dealt = apply_damage_structure_or_ball(
+            let ex = csde.and_then(|t| t.default_attributes.get(&116).copied()).unwrap_or(300.0) * dmg_mult * factor;
+            let outcome = apply_damage_structure_or_ball(
                 ctx,
                 &sys_handle,
                 sys_id,
@@ -890,9 +929,20 @@ pub async fn handle_structure_module_activate(
                 10.0,
                 now_unix,
             )
-            .await?
-            .map(|(d, _, _)| d)
-            .unwrap_or(0.0);
+            .await?;
+            let (dealt, destroyed) = outcome.map(|(d, dest, _)| (d, dest)).unwrap_or((0.0, false));
+            if destroyed && !ctx.db.with_snapshot(|s| s.structures.contains_key(&primary_id)) {
+                crate::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(
+                    ctx,
+                    sys_id,
+                    char_id,
+                    primary_id,
+                    primary_ball.type_id,
+                    primary_ball.position,
+                    now_unix,
+                )
+                .await;
+            }
             Ok(PyRep::keyval([
                 ("moduleID", PyRep::Integer(module_id)),
                 ("targetID", PyRep::Integer(primary_id)),

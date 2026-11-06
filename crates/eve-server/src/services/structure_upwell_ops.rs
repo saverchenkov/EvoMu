@@ -257,7 +257,6 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         ("structureDirectory", "GetStructures") => Some(super::structure_lifecycle_rpc::handle_get_structures(ctx, session, false)),
         ("structureDirectory", "GetCorporationStructures") => Some(super::structure_lifecycle_rpc::handle_get_structures(ctx, session, true)),
         ("structureDirectory", "GetStructureInfo") => Some(super::structure_lifecycle_rpc::handle_get_structure_info(ctx, session, args)),
-        ("structureDirectory", "GetStructureMapData") => Some(handle_get_structure_map_data(ctx, session, args)),
         // parity: feat:structures.deliveries
         ("structureDeliveries", "Deliver") => Some(super::structure_lifecycle_rpc::handle_structure_deliver(ctx, session, args)),
         // parity: feat:structures.cargo-dropoff
@@ -1072,47 +1071,168 @@ pub fn credit_structure_owner_corp_div1(
     }
 }
 
-fn handle_get_structure_map_data(
-    ctx: &ServerContext,
-    session: &SessionState,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let arg_sys = args
-        .first()
-        .and_then(|v| v.as_i64())
-        .and_then(|v| u32::try_from(v).ok())
-        .or(session.solar_system_id);
-    let rows = ctx.db.with_snapshot(|snap| {
-        let sys_id = arg_sys
-            .or_else(|| {
-                session
-                    .structure_id
-                    .and_then(|sid| snap.structures.get(&sid).map(|st| st.solar_system_id))
-            })
-            .or_else(|| {
-                session
-                    .character_id
-                    .and_then(|cid| snap.characters.get(&cid).map(|c| c.solar_system_id))
-            })
-            .unwrap_or(0);
-        snap.structures
-            .values()
-            .filter(|st| st.solar_system_id == sys_id && st.state != "Destroyed")
-            .map(|st| {
-                PyRep::keyval([
-                    ("itemID", PyRep::Integer(st.structure_id)),
-                    ("typeID", PyRep::Integer(i64::from(st.type_id))),
-                    ("name", PyRep::String(st.name.clone())),
-                    ("x", PyRep::Real(st.position[0])),
-                    ("y", PyRep::Real(st.position[1])),
-                    ("z", PyRep::Real(st.position[2])),
-                    ("ownerID", PyRep::Integer(st.owner_corp_id)),
-                    ("solarSystemID", PyRep::Integer(i64::from(st.solar_system_id))),
-                ])
-            })
-            .collect::<Vec<_>>()
-    });
-    Ok(PyRep::List(rows))
+pub(crate) fn transfer_structure_corp_ownership_in_snap(
+    snap: &mut WorldStateSnapshot,
+    structure_id: i64,
+    caller_corp: i64,
+    target_corp_id: i64,
+    sys_id: u32,
+) -> Result<Vec<(i64, i64, u32, i64)>, BridgeRpcError> {
+    let st = snap.structures.get(&structure_id).cloned().ok_or_else(|| {
+        err("ItemNotFound", format!("Structure {structure_id} not found"))
+    })?;
+    if st.owner_corp_id != caller_corp {
+        return Err(err(
+            "CrpAccessDenied",
+            "Structure is not owned by caller's corporation",
+        ));
+    }
+    if st.solar_system_id != sys_id {
+        return Err(err(
+            "ItemNotInSpace",
+            "Structure must be in caller's solar system",
+        ));
+    }
+    let mut ext = load_ext_state(snap);
+    if matches!(
+        st.state.as_str(),
+        "ArmorReinforced"
+            | "ArmorReinforce"
+            | "HullReinforced"
+            | "HullReinforce"
+            | "Anchoring"
+            | "AnchorVulnerable"
+            | "Unanchoring"
+            | "Unanchored"
+            | "Destroyed"
+            | "Reinforced"
+    ) || ext.unanchoring_until_unix.contains_key(&structure_id)
+    {
+        return Err(err(
+            "StructureTransferForbidden",
+            format!(
+                "Cannot transfer structure {structure_id} while in state '{}'",
+                st.state
+            ),
+        ));
+    }
+    if st.type_id == 32_458 {
+        let caller_ally = snap.corporations.get(&caller_corp).and_then(|c| c.alliance_id);
+        let target_ally = snap
+            .corporations
+            .get(&target_corp_id)
+            .and_then(|c| c.alliance_id);
+        if caller_ally.is_none() || caller_ally != target_ally {
+            return Err(err(
+                "SovHubAllianceMismatch",
+                "Sovereignty Hub can only be transferred within the same alliance",
+            ));
+        }
+    }
+    if let Some(st_mut) = snap.structures.get_mut(&structure_id) {
+        st_mut.owner_corp_id = target_corp_id;
+    }
+    let mod_ids: std::collections::HashSet<i64> = snap
+        .items
+        .values()
+        .filter(|it| it.location_id == structure_id && (11..=34).contains(&(it.flag as u16)))
+        .map(|it| it.item_id)
+        .collect();
+    for it in snap.items.values_mut() {
+        let in_structure_bay_or_slot = it.location_id == structure_id
+            && (matches!(
+                it.flag,
+                eve_db::InventoryFlag::LoSlot0
+                    | eve_db::InventoryFlag::LoSlot1
+                    | eve_db::InventoryFlag::LoSlot2
+                    | eve_db::InventoryFlag::LoSlot3
+                    | eve_db::InventoryFlag::LoSlot4
+                    | eve_db::InventoryFlag::LoSlot5
+                    | eve_db::InventoryFlag::LoSlot6
+                    | eve_db::InventoryFlag::LoSlot7
+                    | eve_db::InventoryFlag::MedSlot0
+                    | eve_db::InventoryFlag::MedSlot1
+                    | eve_db::InventoryFlag::MedSlot2
+                    | eve_db::InventoryFlag::MedSlot3
+                    | eve_db::InventoryFlag::MedSlot4
+                    | eve_db::InventoryFlag::MedSlot5
+                    | eve_db::InventoryFlag::MedSlot6
+                    | eve_db::InventoryFlag::MedSlot7
+                    | eve_db::InventoryFlag::HiSlot0
+                    | eve_db::InventoryFlag::HiSlot1
+                    | eve_db::InventoryFlag::HiSlot2
+                    | eve_db::InventoryFlag::HiSlot3
+                    | eve_db::InventoryFlag::HiSlot4
+                    | eve_db::InventoryFlag::HiSlot5
+                    | eve_db::InventoryFlag::HiSlot6
+                    | eve_db::InventoryFlag::HiSlot7
+                    | eve_db::InventoryFlag::RigSlot0
+                    | eve_db::InventoryFlag::RigSlot1
+                    | eve_db::InventoryFlag::RigSlot2
+                    | eve_db::InventoryFlag::ServiceSlot0
+                    | eve_db::InventoryFlag::ServiceSlot1
+                    | eve_db::InventoryFlag::ServiceSlot2
+                    | eve_db::InventoryFlag::ServiceSlot3
+                    | eve_db::InventoryFlag::ServiceSlot4
+                    | eve_db::InventoryFlag::ServiceSlot5
+                    | eve_db::InventoryFlag::ServiceSlot6
+                    | eve_db::InventoryFlag::ServiceSlot7
+                    | eve_db::InventoryFlag::FighterBay
+                    | eve_db::InventoryFlag::StructureFuel
+                    | eve_db::InventoryFlag::SpecializedFuelBay
+                    | eve_db::InventoryFlag::SpecializedAmmoHold
+                    | eve_db::InventoryFlag::StructureDeedBay
+            ) || (159..=163).contains(&(it.flag as u16))
+                || it.flag == eve_db::InventoryFlag::QuantumCoreRoom);
+        if it.owner_id == caller_corp
+            && (in_structure_bay_or_slot || mod_ids.contains(&it.location_id))
+        {
+            it.owner_id = target_corp_id;
+            it.version = it.version.saturating_add(1);
+        }
+    }
+    ext.pending_profile_applications.remove(&structure_id);
+    snap.structure_docking_acl_denied.remove(&structure_id);
+    snap.sov_runtime.fuel_access_groups.remove(&structure_id);
+    let target_pid = ext
+        .default_profile_by_corp
+        .get(&target_corp_id)
+        .copied()
+        .or_else(|| {
+            ext.profiles_by_id
+                .values()
+                .find(|p| p.owner_corp_id == target_corp_id && p.is_default)
+                .map(|p| p.profile_id)
+        })
+        .or_else(|| {
+            ext.profiles_by_id
+                .values()
+                .find(|p| p.owner_corp_id == target_corp_id)
+                .map(|p| p.profile_id)
+        });
+    if let Some((pid, prof)) =
+        target_pid.and_then(|pid| ext.profiles_by_id.get(&pid).cloned().map(|p| (pid, p)))
+    {
+        ext.structure_profile_id.insert(structure_id, pid);
+        ext.access_profiles.insert(structure_id, prof);
+    } else {
+        ext.structure_profile_id.remove(&structure_id);
+        ext.access_profiles.insert(
+            structure_id,
+            StructureAccessProfile {
+                profile_id: 0,
+                owner_corp_id: target_corp_id,
+                corp_only: true,
+                ..Default::default()
+            },
+        );
+    }
+    save_ext_state(snap, &ext);
+    Ok(
+        crate::services::structure_control_ops::release_unauthorized_structure_controllers_in_snap(
+            snap,
+        ),
+    )
 }
 #[cfg(test)]
 #[path = "structure_upwell_ops_tests.rs"]

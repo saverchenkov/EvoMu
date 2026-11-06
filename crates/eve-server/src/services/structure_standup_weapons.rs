@@ -100,20 +100,11 @@ fn standup_falloff_multiplier(dist: f64, optimal: f64, falloff: f64) -> Option<f
 }
 
 fn is_structure_ammo_bay(item: &InventoryItemRecord, st_corp_id: i64, mod_flag: InventoryFlag) -> bool {
-    item.flag == mod_flag
-        || (item.owner_id == st_corp_id
-            && matches!(
+    item.owner_id == st_corp_id
+        && (item.flag == mod_flag
+            || matches!(
                 item.flag,
-                InventoryFlag::StructureFuel
-                    | InventoryFlag::Cargo
-                    | InventoryFlag::SpecializedAmmoHold
-                    | InventoryFlag::CorpSAG1
-                    | InventoryFlag::CorpSAG2
-                    | InventoryFlag::CorpSAG3
-                    | InventoryFlag::CorpSAG4
-                    | InventoryFlag::CorpSAG5
-                    | InventoryFlag::CorpSAG6
-                    | InventoryFlag::CorpSAG7
+                InventoryFlag::Cargo | InventoryFlag::SpecializedAmmoHold
             ))
 }
 
@@ -129,16 +120,18 @@ fn find_structure_charge_type(
 ) -> Option<u32> {
     ctx.db.with_snapshot(|snap| {
         let matches_item = |i: &&InventoryItemRecord| {
-            i.location_id == structure_id
+            (i.location_id == structure_id || i.location_id == module_id)
+                && i.owner_id == st_corp_id
                 && i.item_id != module_id
                 && i.quantity >= min_qty
-                && is_structure_ammo_bay(i, st_corp_id, mod_flag)
+                && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                && (i.location_id == module_id || is_structure_ammo_bay(i, st_corp_id, mod_flag))
                 && preferred_type.is_none_or(|pt| i.type_id == pt)
                 && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == charge_group)
         };
         snap.items
             .values()
-            .find(|i| i.flag == mod_flag && matches_item(i))
+            .find(|i| (i.location_id == module_id || i.flag == mod_flag) && matches_item(i))
             .or_else(|| snap.items.values().find(matches_item))
             .map(|i| i.type_id)
     })
@@ -158,17 +151,21 @@ fn consume_structure_charge(
             .items
             .values()
             .find(|i| {
-                i.location_id == structure_id
+                (i.location_id == structure_id || i.location_id == module_id)
+                    && i.owner_id == st_corp_id
                     && i.item_id != module_id
-                    && i.flag == mod_flag
+                    && (i.location_id == module_id || i.flag == mod_flag)
+                    && !snap.is_item_locked_in_contract_or_job(i.item_id)
                     && i.type_id == charge_tid
                     && i.quantity >= qty_needed
             })
             .or_else(|| {
                 snap.items.values().find(|i| {
                     i.location_id == structure_id
+                        && i.owner_id == st_corp_id
                         && i.item_id != module_id
                         && is_structure_ammo_bay(i, st_corp_id, mod_flag)
+                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
                         && i.type_id == charge_tid
                         && i.quantity >= qty_needed
                 })
@@ -179,6 +176,7 @@ fn consume_structure_charge(
         };
         let remove = if let Some(it) = snap.items.get_mut(&cid) {
             it.quantity -= qty_needed;
+            it.version = it.version.saturating_add(1);
             it.quantity <= 0
         } else {
             false

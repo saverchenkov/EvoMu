@@ -133,22 +133,13 @@ fn handle_get_structure_map_data(
         .or(session.solar_system_id)
         .unwrap_or(0);
     ctx.db.with_snapshot(|snap| {
-        let caller_corp = snap
-            .characters
-            .get(&char_id)
-            .map(|c| c.corporation_id)
-            .or(session.corporation_id)
-            .unwrap_or(0);
-        let in_same_sys = session.solar_system_id == Some(sys_id);
         let mut list: Vec<&eve_db::UpwellStructureRecord> = snap
             .structures
             .values()
             .filter(|s| {
                 s.solar_system_id == sys_id
                     && s.state != life::STATE_DESTROYED
-                    && (in_same_sys
-                        || s.owner_corp_id == caller_corp
-                        || evaluate_character_structure_access_in_snap(snap, s.structure_id, char_id))
+                    && evaluate_character_structure_access_in_snap(snap, s.structure_id, char_id)
             })
             .collect();
         list.sort_by_key(|s| s.structure_id);

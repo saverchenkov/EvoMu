@@ -917,10 +917,67 @@ pub async fn handle_hub_and_scan(
             if sys_id == 30_100_000 || (32_000_000..=32_999_999).contains(&sys_id) {
                 return Some(Err(BridgeRpcError::user_error("CannotDscanInThisSystem")));
             }
+            if args.first().and_then(|a| a.as_f64()).is_some_and(|v| !v.is_finite() || v < 0.0) {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgs".into(),
+                    message: "ConeScan scan angle must be a finite non-negative number".into(),
+                }));
+            }
+            if args.get(1).and_then(|a| a.as_f64()).is_some_and(|v| !v.is_finite()) {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgs".into(),
+                    message: "ConeScan scan range must be a finite number".into(),
+                }));
+            }
+            let scan_angle_rad = args
+                .first()
+                .and_then(|a| a.as_f64())
+                .unwrap_or(std::f64::consts::TAU);
             let max_range = args
                 .get(1)
                 .and_then(|a| a.as_f64())
-                .unwrap_or(14.4 * AU_METERS);
+                .unwrap_or(14.4 * AU_METERS)
+                .max(0.0);
+            let dir_vec_opt: Option<DVec3> = match args.get(2) {
+                Some(PyRep::Tuple(coords) | PyRep::List(coords)) if coords.len() >= 3 => {
+                    let (Some(dx), Some(dy), Some(dz)) = (
+                        coords[0].as_f64(),
+                        coords[1].as_f64(),
+                        coords[2].as_f64(),
+                    ) else {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidArgs".into(),
+                            message: "ConeScan direction vector must contain numeric coordinates".into(),
+                        }));
+                    };
+                    if !dx.is_finite() || !dy.is_finite() || !dz.is_finite() {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidArgs".into(),
+                            message: "ConeScan direction vector coordinates must be finite".into(),
+                        }));
+                    }
+                    DVec3::new(dx, dy, dz).try_normalize()
+                }
+                Some(_) => {
+                    if let (Some(dx), Some(dy), Some(dz)) = (
+                        args.get(2).and_then(|a| a.as_f64()),
+                        args.get(3).and_then(|a| a.as_f64()),
+                        args.get(4).and_then(|a| a.as_f64()),
+                    ) {
+                        if !dx.is_finite() || !dy.is_finite() || !dz.is_finite() {
+                            return Some(Err(BridgeRpcError {
+                                code: "InvalidArgs".into(),
+                                message: "ConeScan direction coordinates must be finite".into(),
+                            }));
+                        }
+                        DVec3::new(dx, dy, dz).try_normalize()
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            };
+
             let handle = ctx.systems.get_or_spawn(sys_id);
             let ship_pos = if let Some(ship_id) = session.ship_id {
                 handle
@@ -934,27 +991,52 @@ pub async fn handle_hub_and_scan(
                 DVec3::ZERO
             };
 
+            let mut cloaked_balls: std::collections::HashSet<i64> = std::collections::HashSet::new();
+            if let Ok(bp) = handle.ballpark.read() {
+                for (&bid, cs) in &bp.combat_states {
+                    if cs.is_cloaked {
+                        cloaked_balls.insert(bid);
+                    }
+                }
+                for (&bid, sm) in &bp.ball_slim_meta {
+                    if sm.is_cloaked {
+                        cloaked_balls.insert(bid);
+                    }
+                }
+            }
+
+            let cos_half = (scan_angle_rad * 0.5).cos();
+            let check_cone = scan_angle_rad < std::f64::consts::TAU && dir_vec_opt.is_some();
             let all_balls = handle.list_balls().await.unwrap_or_default();
             let mut results = Vec::new();
             for b in all_balls {
-                if Some(b.id) == session.ship_id {
+                if Some(b.id) == session.ship_id || cloaked_balls.contains(&b.id) {
                     continue;
                 }
-                let dist = ship_pos.distance(b.position);
-                if dist <= max_range {
-                    let group_id = ctx
-                        .sde
-                        .types
-                        .get(&b.type_id)
-                        .map(|t| t.group_id as i64)
-                        .unwrap_or(0);
-                    results.push(PyRep::keyval([
-                        ("itemID", PyRep::Integer(b.id)),
-                        ("typeID", PyRep::Integer(b.type_id as i64)),
-                        ("groupID", PyRep::Integer(group_id)),
-                        ("distance", PyRep::Real(dist)),
-                    ]));
+                let offset = b.position - ship_pos;
+                let dist = offset.length();
+                if dist > max_range {
+                    continue;
                 }
+                if check_cone {
+                    if let (Some(dir), Some(to_target)) = (dir_vec_opt, offset.try_normalize()) {
+                        if to_target.dot(dir) < cos_half {
+                            continue;
+                        }
+                    }
+                }
+                let group_id = ctx
+                    .sde
+                    .types
+                    .get(&b.type_id)
+                    .map(|t| t.group_id as i64)
+                    .unwrap_or(0);
+                results.push(PyRep::keyval([
+                    ("itemID", PyRep::Integer(b.id)),
+                    ("typeID", PyRep::Integer(b.type_id as i64)),
+                    ("groupID", PyRep::Integer(group_id)),
+                    ("distance", PyRep::Real(dist)),
+                ]));
             }
             Some(Ok(PyRep::List(results)))
         }

@@ -538,3 +538,5 @@ mod r6_t3_p1_security_tests;
 mod r6_t4_p0_security_tests;
 #[cfg(test)]
 mod quasar_r6_plex_skin_regression_tests;
+#[cfg(test)]
+mod r6_t2_p1_security_tests;

@@ -535,10 +535,16 @@ async fn map_data_memoized_clones_and_profile_tax_entity_validations() {
     sess.solar_system_id = Some(30_000_142);
 
     assert_eq!(call_upwell(&ctx, &mut sess, "structureSettings", "clear_memoized", &[]).await.unwrap().unwrap(), PyRep::None);
-    let map_data = call_upwell(&ctx, &mut sess, "structureDirectory", "GetStructureMapData", &[PyRep::Integer(30_000_142)])
-        .await
-        .unwrap()
-        .unwrap();
+    let map_data = crate::services::station_structure::structure_profiles_directory::handle(
+        &ctx,
+        &mut sess,
+        "structureDirectory",
+        "GetStructureMapData",
+        &[PyRep::Integer(30_000_142)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap();
     assert!(matches!(map_data, PyRep::List(ref l) if !l.is_empty()));
 
     assert_eq!(

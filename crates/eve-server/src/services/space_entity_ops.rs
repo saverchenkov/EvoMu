@@ -567,7 +567,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError { code: "NotInSpace".into(), message: "Caller must be in space (not docked)".into() }));
             }
             let sys_id = session.solar_system_id.unwrap();
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
+            let released = ctx.db.try_with_mut_snapshot(|snap| {
                 // Invariant: Target corporation must be an existing player corporation (preventing transfer to NPC corps).
                 if target_corp_id <= 0 || !snap.corporations.contains_key(&target_corp_id) || ctx.sde.npc_corporations.contains_key(&target_corp_id) {
                     return Err(BridgeRpcError { code: "InvalidTargetCorporation".into(), message: format!("Target {target_corp_id} must be an existing player corporation") });
@@ -584,6 +584,17 @@ pub async fn handle(
                     });
                 }
                 let mut transferred = false;
+                let mut released = Vec::new();
+                if snap.structures.contains_key(&item_id) {
+                    released = super::station_structure::structure_upwell_ops::transfer_structure_corp_ownership_in_snap(
+                        snap,
+                        item_id,
+                        caller_corp,
+                        target_corp_id,
+                        sys_id,
+                    )?;
+                    transferred = true;
+                }
                 if let Some(it) = snap.items.get_mut(&item_id) {
                     if it.owner_id != caller_corp {
                         return Err(BridgeRpcError { code: "CrpAccessDenied".into(), message: "Item is not owned by caller's corporation".into() });
@@ -595,24 +606,16 @@ pub async fn handle(
                     it.version += 1;
                     transferred = true;
                 }
-                if let Some(st) = snap.structures.get_mut(&item_id) {
-                    if st.owner_corp_id != caller_corp {
-                        return Err(BridgeRpcError { code: "CrpAccessDenied".into(), message: "Structure is not owned by caller's corporation".into() });
-                    }
-                    if st.solar_system_id != sys_id {
-                        return Err(BridgeRpcError { code: "ItemNotInSpace".into(), message: "Structure must be in caller's solar system".into() });
-                    }
-                    st.owner_corp_id = target_corp_id;
-                    transferred = true;
-                }
                 if !transferred {
                     return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("In-space corporation asset {item_id} not found") });
                 }
-                Ok(())
+                Ok(released)
             });
-            if let Err(e) = res {
-                return Some(Err(e));
-            }
+            let released = match released {
+                Ok(r) => r,
+                Err(e) => return Some(Err(e)),
+            };
+            crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
             Some(Ok(PyRep::keyval([
                 ("itemID", PyRep::Integer(item_id)),
                 ("ownerID", PyRep::Integer(target_corp_id)),
