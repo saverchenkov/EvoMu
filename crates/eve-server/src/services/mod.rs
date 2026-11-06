@@ -332,3 +332,21 @@ mod pve_abyssal_pylons_extra_unit_tests;
 
 #[cfg(test)]
 mod pvp_filament_arena_extra_unit_tests;
+
+#[cfg(test)]
+mod character_gm_tools_extra_unit_tests;
+
+#[cfg(test)]
+mod character_skills_extra_unit_tests;
+
+#[cfg(test)]
+mod mobile_deployables_extra_unit_tests;
+
+#[cfg(test)]
+mod space_nav_travel_extra_unit_tests;
+
+#[cfg(test)]
+mod wallet_services_ext_extra_unit_tests;
+
+#[cfg(test)]
+mod structure_upwell_ops_extra_unit_tests;
