@@ -453,3 +453,21 @@ mod structure_weapons_ops_extra_unit_tests;
 
 #[cfg(test)]
 mod hypernet_raffle_ops_extra_unit_tests;
+
+#[cfg(test)]
+mod fitting_ewar_capital_extra_unit_tests;
+
+#[cfg(test)]
+mod structure_standup_weapons_extra_unit_tests;
+
+#[cfg(test)]
+mod fleet_social_access_group_bookmarks_ops_extra_unit_tests;
+
+#[cfg(test)]
+mod fitting_conduit_jump_extra_unit_tests;
+
+#[cfg(test)]
+mod character_clone_jump_rules_extra_unit_tests;
+
+#[cfg(test)]
+mod notify_emitters_seasons_tactical_extra_unit_tests;
