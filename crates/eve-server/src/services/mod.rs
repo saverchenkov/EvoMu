@@ -448,15 +448,18 @@ mod fleet_social_corp_tail_dispatch_extra_unit_tests;
 mod quasar_sov_mercden_extra_unit_tests;
 
 #[cfg(test)]
-mod market_orders_deep_extra_unit_tests;
+mod structures_pos_deep_extra_unit_tests;
 
 #[cfg(test)]
-mod market_quote_deep_extra_unit_tests;
+mod planetary_interaction_deep_extra_unit_tests;
 
+#[cfg(test)]
+mod abyssal_void_mgr_deep_extra_unit_tests;
 #[cfg(test)]
 mod pve_special_sites_abyssal_deep_extra_unit_tests;
-
 #[cfg(test)]
 mod pve_incursion_lifecycle_deep_extra_unit_tests;
-
-
+#[cfg(test)]
+mod market_orders_deep_extra_unit_tests;
+#[cfg(test)]
+mod market_quote_deep_extra_unit_tests;
