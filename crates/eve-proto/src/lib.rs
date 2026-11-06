@@ -1009,4 +1009,5 @@ fn read_pb_bytes(input: &mut &[u8]) -> Result<Vec<u8>, ProtoError> {
 mod tests;
 #[cfg(test)] mod proto_lib_extra_tests;
 #[cfg(test)] mod quasar_extra_unit_tests;
+#[cfg(test)] mod proto_deep_extra_unit_tests;
 

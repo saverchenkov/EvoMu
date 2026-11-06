@@ -891,6 +891,8 @@ mod evaluation;
 mod fitting;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod dogma_deep_extra_unit_tests;
 
 pub use combat_eval::*;
 pub use context::*;
