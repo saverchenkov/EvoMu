@@ -4,6 +4,18 @@
 
 use super::*;
 
+#[derive(Default)]
+pub(crate) struct DeferredPostCycleEffects {
+    pub projected_assist_dist_m: Option<f64>,
+    pub fuel_to_deduct: Option<(u32, i32, bool)>,
+    pub phenomena_debuffs: Option<(Vec<i64>, Vec<(u32, f64)>, u64)>,
+    pub burst_projector: Option<(DVec3, f64, Vec<i64>)>,
+    pub bastion_weapon_timer: bool,
+    pub passive_targeter_lock: Option<eve_destiny::TargetLock>,
+    pub cap_booster_charge_id: Option<i64>,
+    pub turret_charge_consumptions: Vec<(i64, i64)>,
+}
+
 pub(crate) struct EwarCapitalPrep {
     pub warp_scramble_points: i32,
     pub disables_target_mwd_mjd: bool,
@@ -33,6 +45,7 @@ pub(crate) struct EwarCapitalPrep {
     pub grappler_optimal_m: f64,
     pub grappler_falloff_m: f64,
     pub grappler_speed_factor_pct: f64,
+    pub deferred_post_cycle: DeferredPostCycleEffects,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -126,6 +139,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                 let mut grappler_optimal_m = 0.0;
                 let mut grappler_falloff_m = 0.0;
                 let mut grappler_speed_factor_pct = 0.0;
+                let mut deferred_post_cycle = DeferredPostCycleEffects::default();
                 let mut immobilize_self = false;
                 let mut self_disallow_assistance = false;
                 let mut self_ewar_immune = false;
@@ -159,17 +173,25 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                     }));
                 }
                 if matches!(mod_type.group_id, 290 | 209) {
+                    let Some(tid) = target_id_opt else {
+                        return Some(Err(BridgeRpcError {
+                            code: "TargetRequired".into(),
+                            message: format!("{} requires a locked target", mod_type.name),
+                        }));
+                    };
                     let mut dist_m = 0.0;
-                    if let Some(tid) = target_id_opt {
-                        if let (Ok(Some((_, sb))), Ok(Some((_, tb)))) = (sys.get_ball_snapshot(ship_id).await, sys.get_ball_snapshot(tid).await) {
-                            dist_m = (sb.position - tb.position).length();
-                        }
+                    if let (Ok(Some((_, sb))), Ok(Some((_, tb)))) = (sys.get_ball_snapshot(ship_id).await, sys.get_ball_snapshot(tid).await) {
+                        dist_m = (sb.position - tb.position).length();
                     }
-                    if let Err(e) = crate::services::tactical_modules::apply_projected_remote_assistance(
-                        ctx, char_id, ship_id, module_id, mod_type, mod_state, target_id_opt, dist_m,
-                    ) {
-                        return Some(Err(e));
+                    let optimal = mod_state.get_attribute(54, &ctx.sde);
+                    let falloff = mod_state.get_attribute(2044, &ctx.sde);
+                    if optimal > 0.0 && dist_m > optimal + 2.0 * falloff + 1.0 {
+                        return Some(Err(BridgeRpcError {
+                            code: "OutOfRange".into(),
+                            message: format!("{} target at {dist_m:.1}m exceeds optimal ({optimal:.1}m) + 2*falloff ({falloff:.1}m)", mod_type.name),
+                        }));
                     }
+                    deferred_post_cycle.projected_assist_dist_m = Some(dist_m);
                 }
 
                 // Zero-Point Mass Entangler (`49099`, `group_id == 2008`, `feat:modules.zero-point-mass-entangler`)
@@ -223,29 +245,25 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                     };
                     if fuel_type_id > 0 && fuel_qty_needed > 0 {
                         let require_strict = is_siege || is_triage || is_phenomena;
-                        let fuel_check = ctx.db.with_mut_snapshot(|snap| {
-                            let cand_id = snap.items.values().find(|i| {
+                        let fuel_check = ctx.db.with_snapshot(|snap| {
+                            let avail = snap.items.values().find(|i| {
                                 i.location_id == ship_id && (i.type_id == fuel_type_id || (is_phenomena && i.type_id == 16275)) && i.quantity > 0
-                            }).map(|i| (i.item_id, i.quantity));
-                            match cand_id {
-                                Some((fid, avail)) if avail >= fuel_qty_needed => {
-                                    let mut rem = 0;
-                                    if let Some(f_it) = snap.items.get_mut(&fid) {
-                                        f_it.quantity -= fuel_qty_needed;
-                                        rem = f_it.quantity;
-                                    }
-                                    if rem == 0 {
-                                        snap.items.remove(&fid);
-                                    }
-                                    Ok(true)
-                                }
-                                Some((_, avail)) => Err(format!("Insufficient fuel (type {fuel_type_id}): need {fuel_qty_needed}, have {avail}")),
+                            }).map(|i| i.quantity);
+                            match avail {
+                                Some(avail) if avail >= fuel_qty_needed => Ok(true),
+                                Some(avail) => Err(format!("Insufficient fuel (type {fuel_type_id}): need {fuel_qty_needed}, have {avail}")),
                                 None if require_strict => Err(format!("Missing required fuel (type {fuel_type_id}, quantity {fuel_qty_needed})")),
                                 None => Ok(false),
                             }
                         });
-                        if let Err(msg) = fuel_check {
-                            return Some(Err(BridgeRpcError { code: "InsufficientFuel".into(), message: msg }));
+                        match fuel_check {
+                            Ok(true) => {
+                                deferred_post_cycle.fuel_to_deduct = Some((fuel_type_id, fuel_qty_needed, is_phenomena));
+                            }
+                            Ok(false) => {}
+                            Err(msg) => {
+                                return Some(Err(BridgeRpcError { code: "InsufficientFuel".into(), message: msg }));
+                            }
                         }
                     }
 
@@ -262,10 +280,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         self_mass_multiplier = Some(10.0);
                     }
                     if is_bastion {
-                        let now_unix = ctx.now_unix_secs();
-                        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-                        let st = cw.get_or_create(char_id);
-                        st.weapon_timer_until_unix = st.weapon_timer_until_unix.max(now_unix + 60);
+                        deferred_post_cycle.bastion_weapon_timer = true;
                     }
 
                     if is_phenomena {
@@ -296,33 +311,10 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                             }
                         }
                         if !phen_dbuffs.is_empty() {
-                            let now_unix = ctx.now_unix_secs();
                             let duration_secs =
                                 ((mod_state.get_attribute(73, &ctx.sde) / 1000.0).ceil() as u64).max(30);
-                            let expires_at_unix = now_unix.saturating_add(duration_secs);
-                            if let Ok(mut st) =
-                                super::fitting_scanners_superweapons::scanners_superweapons_state().write()
-                            {
-                                for &sid in &dyn_ship_ids {
-                                    let entries = st.ship_dbuffs.entry((ctx.instance_id, sid)).or_default();
-                                    entries.retain(|e| {
-                                        e.expires_at_unix > now_unix && e.source_module_id != module_id
-                                    });
-                                    for &(dbuff_id, pct) in &phen_dbuffs {
-                                        entries.push(
-                                            super::fitting_scanners_superweapons::ActiveDbuffEntry {
-                                                dbuff_id,
-                                                value: pct,
-                                                expires_at_unix,
-                                                source_module_id: module_id,
-                                            },
-                                        );
-                                    }
-                                }
-                            }
-                            for &sid in &dyn_ship_ids {
-                                ctx.invalidate_ship_fitting(sid);
-                            }
+                            deferred_post_cycle.phenomena_debuffs =
+                                Some((dyn_ship_ids, phen_dbuffs, duration_secs));
                         }
                     }
                 }
@@ -799,56 +791,12 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         })
                         .map(|b| b.id)
                         .collect();
-                    match m.type_id {
-                        27678 => {
-                            for &vid in &victims {
-                                let _ = sys.apply_ecm_jam(vid, 20.0).await;
-                            }
-                        }
-                        40636 => {
-                            let _ = sys.add_warp_bubble(module_id, burst_center, burst_radius).await;
-                        }
-                        40635 => {
-                            let neut_amt = mod_state.get_attribute(97, &ctx.sde).max(1200.0);
-                            for &vid in &victims {
-                                if let Ok(Some(cs)) = sys.get_combat_state(vid).await {
-                                    let _ = sys
-                                        .set_capacitor(vid, (cs.capacitor - neut_amt).max(0.0))
-                                        .await;
-                                }
-                            }
-                        }
-                        40699 | 40697 | 40698 | 40696 => {
-                            let synth_tid = match m.type_id {
-                                40696 => 12709,
-                                40698 => 526,
-                                40699 => 1968,
-                                _ => 2108,
-                            };
-                            if m.type_id == 40698 {
-                                let sf = mod_state.get_attribute(20, &ctx.sde).min(-30.0);
-                                target_velocity_multiplier =
-                                    Some((1.0 + sf / 100.0).clamp(0.05, 1.0));
-                            }
-                            let mut synth_mod = mod_state.clone();
-                            synth_mod.base_attributes.insert(54, 1_000_000_000.0);
-                            for &vid in &victims {
-                                ctx.upsert_projected_ewar_on_ship(
-                                    ship_id,
-                                    vid,
-                                    eve_dogma::ProjectedEwarEffect {
-                                        source_module_id: module_id,
-                                        source_module_type_id: synth_tid,
-                                        charge_type_id: None,
-                                        distance: 0.0,
-                                        overloaded: false,
-                                        effective_module: synth_mod.clone(),
-                                    },
-                                );
-                            }
-                        }
-                        _ => {}
+                    if m.type_id == 40698 {
+                        let sf = mod_state.get_attribute(20, &ctx.sde).min(-30.0);
+                        target_velocity_multiplier =
+                            Some((1.0 + sf / 100.0).clamp(0.05, 1.0));
                     }
+                    deferred_post_cycle.burst_projector = Some((burst_center, burst_radius, victims));
                 }
 
 
@@ -881,7 +829,296 @@ pub(crate) async fn prepare_ewar_and_capital_module(
         grappler_optimal_m,
         grappler_falloff_m,
         grappler_speed_factor_pct,
+        deferred_post_cycle,
     }))
+}
+
+pub(crate) async fn validate_passive_targeter_activation(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    target_id: i64,
+    fit: &eve_dogma::ShipFittingEngine,
+) -> Result<eve_destiny::TargetLock, BridgeRpcError> {
+    if target_id == ship_id {
+        return Err(BridgeRpcError {
+            code: "CannotActivateOnSelf".into(),
+            message: "Cannot activate Passive Targeter on self".into(),
+        });
+    }
+    if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
+        if cs.ecm_jammed_remaining_s > 0.0 {
+            return Err(BridgeRpcError {
+                code: "ShipJammed".into(),
+                message: "Targeting systems are jammed by ECM".into(),
+            });
+        }
+        if (cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0)
+            || cs.decloak_targeting_delay_remaining_s > 0.0
+        {
+            return Err(BridgeRpcError {
+                code: "TargetingFailed".into(),
+                message: "Cannot acquire target lock while cloaked or during decloak delay".into(),
+            });
+        }
+    }
+    let Some((_, s_ball)) = sys.get_ball_snapshot(ship_id).await.ok().flatten() else {
+        return Err(BridgeRpcError {
+            code: "TargetingFailed".into(),
+            message: "Ship is not present in space ballpark".into(),
+        });
+    };
+    let Some((_, t_ball)) = sys.get_ball_snapshot(target_id).await.ok().flatten() else {
+        return Err(BridgeRpcError {
+            code: "TargetingFailed".into(),
+            message: format!("Target {target_id} not found in space"),
+        });
+    };
+    let t_cs = sys.get_combat_state(target_id).await.ok().flatten();
+    if t_cs.as_ref().is_some_and(|cs| cs.is_cloaked) {
+        return Err(BridgeRpcError {
+            code: "TargetingFailed".into(),
+            message: format!("Target {target_id} is cloaked"),
+        });
+    }
+    if t_cs
+        .as_ref()
+        .is_some_and(|cs| cs.is_tethered || cs.is_invulnerable())
+    {
+        return Err(BridgeRpcError {
+            code: "TargetInvulnerable".into(),
+            message: format!("Target {target_id} is tethered or invulnerable"),
+        });
+    }
+    let max_range = fit
+        .ship
+        .get_attribute(attr_ids::MAX_TARGET_RANGE, &ctx.sde)
+        .max(0.0);
+    let dist = (s_ball.position - t_ball.position).length();
+    if dist > max_range {
+        return Err(BridgeRpcError {
+            code: "TargetOutOfRange".into(),
+            message: format!(
+                "Target {target_id} at {dist:.0}m exceeds max targeting range {max_range:.0}m"
+            ),
+        });
+    }
+    let ship_max = fit
+        .ship
+        .get_attribute(attr_ids::MAX_LOCKED_TARGETS, &ctx.sde)
+        .max(1.0) as usize;
+    let skills = ctx.character_skill_levels(char_id);
+    let tm_lvl = skills.get(&3429).copied().unwrap_or(0);
+    let atm_lvl = skills.get(&3430).copied().unwrap_or(0);
+    let max_locked = eve_dogma::compute_effective_max_locked_targets(ship_max, tm_lvl, atm_lvl);
+    let current_locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
+    if !current_locks.iter().any(|l| l.target_id == target_id) && current_locks.len() >= max_locked {
+        return Err(BridgeRpcError {
+            code: "TooManyLockedTargets".into(),
+            message: format!("Max locked targets exceeded ({max_locked})"),
+        });
+    }
+    let scan_res = fit
+        .ship
+        .get_attribute(attr_ids::SCAN_RESOLUTION, &ctx.sde)
+        .max(1.0);
+    let raw_sig = t_cs
+        .map(|cs| cs.base_signature_radius.unwrap_or(cs.signature_radius))
+        .filter(|&s| s > 0.0)
+        .unwrap_or(0.0)
+        .max(t_ball.radius)
+        .max(35.0);
+    let target_sig = ctx.effective_target_signature_radius(target_id, raw_sig);
+    let lock_sec = eve_destiny::combat::compute_lock_time_seconds(scan_res, target_sig).max(0.5);
+    let lock_time_ms = lock_sec * 1000.0;
+    Ok(eve_destiny::TargetLock {
+        target_id,
+        lock_time_ms,
+        remaining_lock_ms: lock_time_ms,
+        locked: false,
+        max_range_m: Some(max_range),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn commit_post_cycle_activation_effects(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+    m: &eve_dogma::FittedModule,
+    mod_type: &eve_sde::InvType,
+    mod_state: &eve_dogma::DogmaItemState,
+    target_id_opt: Option<i64>,
+    deferred: DeferredPostCycleEffects,
+) -> Result<(), BridgeRpcError> {
+    if deferred.fuel_to_deduct.is_some()
+        || deferred.cap_booster_charge_id.is_some()
+        || !deferred.turret_charge_consumptions.is_empty()
+    {
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some((fuel_type_id, fuel_qty_needed, is_phenomena)) = deferred.fuel_to_deduct {
+                if let Some((fid, avail)) = snap
+                    .items
+                    .values()
+                    .find(|i| {
+                        i.location_id == ship_id
+                            && (i.type_id == fuel_type_id
+                                || (is_phenomena && i.type_id == 16275))
+                            && i.quantity > 0
+                    })
+                    .map(|i| (i.item_id, i.quantity))
+                {
+                    if avail >= fuel_qty_needed {
+                        let rem = snap
+                            .items
+                            .get_mut(&fid)
+                            .map(|f_it| {
+                                f_it.quantity -= fuel_qty_needed;
+                                f_it.quantity
+                            })
+                            .unwrap_or(0);
+                        if rem == 0 {
+                            snap.items.remove(&fid);
+                        }
+                    }
+                }
+            }
+            if let Some(cid) = deferred.cap_booster_charge_id {
+                let rem = snap
+                    .items
+                    .get_mut(&cid)
+                    .map(|ci| {
+                        ci.quantity = ci.quantity.saturating_sub(1);
+                        ci.quantity
+                    })
+                    .unwrap_or(0);
+                if rem == 0 {
+                    snap.items.remove(&cid);
+                }
+            }
+            for (turret_id, charge_id) in deferred.turret_charge_consumptions {
+                let mut remove_cid: Option<i64> = None;
+                if let Some(ci) = snap.items.get_mut(&charge_id) {
+                    ci.quantity = ci.quantity.saturating_sub(1);
+                    if ci.quantity == 0 {
+                        remove_cid = Some(ci.item_id);
+                    }
+                }
+                if let Some(rcid) = remove_cid {
+                    snap.items.remove(&rcid);
+                    snap.module_active_charges.remove(&turret_id);
+                }
+            }
+        });
+    }
+
+    if deferred.bastion_weapon_timer {
+        let now_unix = ctx.now_unix_secs();
+        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+        let st = cw.get_or_create(char_id);
+        st.weapon_timer_until_unix = st.weapon_timer_until_unix.max(now_unix + 60);
+    }
+
+    if let Some(dist_m) = deferred.projected_assist_dist_m {
+        crate::services::tactical_modules::apply_projected_remote_assistance(
+            ctx,
+            char_id,
+            ship_id,
+            module_id,
+            mod_type,
+            mod_state,
+            target_id_opt,
+            dist_m,
+        )?;
+    }
+
+    if let Some((dyn_ship_ids, phen_dbuffs, duration_secs)) = deferred.phenomena_debuffs {
+        let now_unix = ctx.now_unix_secs();
+        let expires_at_unix = now_unix.saturating_add(duration_secs);
+        if let Ok(mut st) =
+            super::fitting_scanners_superweapons::scanners_superweapons_state().write()
+        {
+            for &sid in &dyn_ship_ids {
+                let entries = st.ship_dbuffs.entry((ctx.instance_id, sid)).or_default();
+                entries.retain(|e| e.expires_at_unix > now_unix && e.source_module_id != module_id);
+                for &(dbuff_id, pct) in &phen_dbuffs {
+                    entries.push(super::fitting_scanners_superweapons::ActiveDbuffEntry {
+                        dbuff_id,
+                        value: pct,
+                        expires_at_unix,
+                        source_module_id: module_id,
+                    });
+                }
+            }
+        }
+        for &sid in &dyn_ship_ids {
+            ctx.invalidate_ship_fitting(sid);
+        }
+    }
+
+    if let Some((burst_center, burst_radius, victims)) = deferred.burst_projector {
+        match m.type_id {
+            27678 => {
+                for &vid in &victims {
+                    let _ = sys.apply_ecm_jam(vid, 20.0).await;
+                }
+            }
+            40636 => {
+                let _ = sys.add_warp_bubble(module_id, burst_center, burst_radius).await;
+            }
+            40635 => {
+                let neut_amt = mod_state.get_attribute(97, &ctx.sde).max(1200.0);
+                for &vid in &victims {
+                    if let Ok(Some(cs)) = sys.get_combat_state(vid).await {
+                        let _ = sys
+                            .set_capacitor(vid, (cs.capacitor - neut_amt).max(0.0))
+                            .await;
+                    }
+                }
+            }
+            40699 | 40697 | 40698 | 40696 => {
+                let synth_tid = match m.type_id {
+                    40696 => 12709,
+                    40698 => 526,
+                    40699 => 1968,
+                    _ => 2108,
+                };
+                let mut synth_mod = mod_state.clone();
+                synth_mod.base_attributes.insert(54, 1_000_000_000.0);
+                for &vid in &victims {
+                    ctx.upsert_projected_ewar_on_ship(
+                        ship_id,
+                        vid,
+                        eve_dogma::ProjectedEwarEffect {
+                            source_module_id: module_id,
+                            source_module_type_id: synth_tid,
+                            charge_type_id: None,
+                            distance: 0.0,
+                            overloaded: false,
+                            effective_module: synth_mod.clone(),
+                        },
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(lock) = deferred.passive_targeter_lock {
+        let tid = lock.target_id;
+        let _ = sys.add_target_lock(ship_id, lock).await;
+        ctx.notify(
+            crate::router::NotificationTarget::Character(char_id),
+            "OnTarget",
+            "charid",
+            vec![PyRep::Integer(tid), PyRep::String("locking".into())],
+        );
+    }
+
+    Ok(())
 }
 
 pub(crate) fn ewar_jamming_type(

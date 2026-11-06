@@ -471,7 +471,17 @@ async fn interdiction_sphere_target_locks_passive_targeter_cap_booster_and_safet
     .unwrap()
     .expect("passive targeter silent lock");
     assert_eq!(pass_rep.dict_get("active").and_then(|v| v.as_bool()), Some(true));
-    let locks = ctx.systems.get_or_spawn(hs_sys).get_target_locks(ship_id).await.unwrap();
+    let sys_handle = ctx.systems.get_or_spawn(hs_sys);
+    let pending_locks = sys_handle.get_target_locks(ship_id).await.unwrap();
+    assert!(
+        pending_locks
+            .iter()
+            .any(|l| l.target_id == target_ship_id && l.lock_time_ms > 0.0 && l.remaining_lock_ms > 0.0 && !l.locked)
+    );
+    for _ in 0..10 {
+        sys_handle.tick().await.unwrap();
+    }
+    let locks = sys_handle.get_target_locks(ship_id).await.unwrap();
     assert!(locks.iter().any(|l| l.target_id == target_ship_id && l.locked));
 
     // 4. Cap Booster without charges -> NoChargesLoaded; with charge -> injects +200 GJ capacitor!

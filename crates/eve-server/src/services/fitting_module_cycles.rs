@@ -662,12 +662,13 @@ pub(crate) async fn handle_module_cycles(
                         message: format!("Module {module_id} is already active in a cycle"),
                     }));
                 }
-                if matches!(mod_type.group_id, 1122 | 650) && target_id_opt.is_none() {
+                if matches!(mod_type.group_id, 1122 | 650 | 82) && target_id_opt.is_none() {
                     return Some(Err(BridgeRpcError {
                         code: "TargetRequired".into(),
-                        message: "Salvager / Tractor Beam requires a locked target".into(),
+                        message: "Target required for module activation".into(),
                     }));
                 }
+                let mut passive_targeter_lock_opt: Option<eve_destiny::TargetLock> = None;
                 if let Some(target_id) = target_id_opt {
                     if crate::services::tactical_module_mechanics::is_untargetable_interdiction_probe(
                         ctx, &sys, target_id,
@@ -686,23 +687,14 @@ pub(crate) async fn handle_module_cycles(
                         }));
                     }
                     if mod_type.group_id == 82 {
-                        // Passive Targeter (`group_id == 82`, `feat:modules.passive-targeter`):
-                        // locks target silently without sending `"OnTarget"` `"targetedBy"` to target pilot!
-                        let max_range = fit.ship.get_attribute(attr_ids::MAX_TARGET_RANGE, &ctx.sde);
-                        let lock = eve_destiny::TargetLock {
-                            target_id,
-                            lock_time_ms: 0.0,
-                            remaining_lock_ms: 0.0,
-                            locked: true,
-                            max_range_m: Some(max_range),
-                        };
-                        let _ = sys.add_target_lock(ship_id, lock).await;
-                        ctx.notify(
-                            crate::router::NotificationTarget::Character(char_id),
-                            "OnTarget",
-                            "charid",
-                            vec![PyRep::Integer(target_id), PyRep::String("locked".into())],
-                        );
+                        match validate_passive_targeter_activation(
+                            ctx, &sys, char_id, ship_id, target_id, &fit,
+                        )
+                        .await
+                        {
+                            Ok(lock) => passive_targeter_lock_opt = Some(lock),
+                            Err(e) => return Some(Err(e)),
+                        }
                     } else if mod_type.group_id != 842 {
                         let locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
                         if !locks.iter().any(|l| l.target_id == target_id && l.locked) {
@@ -765,6 +757,19 @@ pub(crate) async fn handle_module_cycles(
                         }
                     }
                 }
+                // Burst Jammer / ECM Burst (`group_id == 80 || 353`), Smartbomb (`group_id == 72`),
+                // & Supercarrier Burst Projector (`group_id == 842`) Crimewatch safety check:
+                // require Safety Red in empire space (`sys_sec > 0.0`) before any resource/AoE execution.
+                if matches!(mod_type.group_id, 72 | 80 | 353 | 842) {
+                    let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| rt.modified_system_securities.get(&sys_id).copied())
+                        .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0));
+                    let safety = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                        rt.safety_levels.get(&char_id).copied().unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Red)
+                    });
+                    if sys_sec > 0.0 && safety != crate::services::combat_crimewatch::SafetyLevel::Red {
+                        return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
+                    }
+                }
                 let EwarCapitalPrep {
                     warp_scramble_points, disables_target_mwd_mjd, warp_core_stab_bonus,
                     hic_bubble_radius_m, hic_velocity_multiplier, hic_sig_multiplier, hic_mass_addition,
@@ -774,6 +779,7 @@ pub(crate) async fn handle_module_cycles(
                     remote_hull_amount, remote_cap_amount, remote_optimal, remote_falloff,
                     mutadaptive_spool_step, mutadaptive_spool_max,
                     grappler_optimal_m, grappler_falloff_m, grappler_speed_factor_pct,
+                    mut deferred_post_cycle,
                 } = match prepare_ewar_and_capital_module(
                     ctx, &sys, sys_id, char_id, ship_id, ship_group_id, module_id, &m, mod_type,
                     &mod_state, &fit, target_id_opt, is_overloaded, is_mwd, is_mjd, kwargs,
@@ -782,6 +788,7 @@ pub(crate) async fn handle_module_cycles(
                     Some(Err(e)) => return Some(Err(e)),
                     None => unreachable!(),
                 };
+                deferred_post_cycle.passive_targeter_lock = passive_targeter_lock_opt;
             let duration_ms = {
                 let d = mod_state.get_attribute(attr_ids::DURATION, &ctx.sde);
                 if d > 0.0 { d } else {
@@ -877,10 +884,8 @@ pub(crate) async fn handle_module_cycles(
             // Capacitor Booster (`group_id == 76`, `feat:modules.cap-booster`)
             let mut cap_booster_inject_amount = 0.0;
             if mod_type.group_id == 76 {
-                let mut charge_tid_opt: Option<u32> = None;
-                ctx.db.with_mut_snapshot(|snap| {
-                    if let Some((cid, ctid)) = snap
-                        .items
+                let charge_opt = ctx.db.with_snapshot(|snap| {
+                    snap.items
                         .values()
                         .find(|i| {
                             i.location_id == ship_id
@@ -889,21 +894,11 @@ pub(crate) async fn handle_module_cycles(
                                 && i.quantity > 0
                         })
                         .map(|i| (i.item_id, i.type_id))
-                    {
-                        charge_tid_opt = Some(ctid);
-                        let mut rem = 0;
-                        if let Some(ci) = snap.items.get_mut(&cid) {
-                            ci.quantity = ci.quantity.saturating_sub(1);
-                            rem = ci.quantity;
-                        }
-                        if rem == 0 {
-                            snap.items.remove(&cid);
-                        }
-                    }
                 });
-                let Some(charge_tid) = charge_tid_opt else {
+                let Some((cid, charge_tid)) = charge_opt else {
                     return Some(Err(BridgeRpcError { code: "NoChargesLoaded".into(), message: "Capacitor Booster has no Cap Booster charges loaded".into() }));
                 };
+                deferred_post_cycle.cap_booster_charge_id = Some(cid);
                 cap_booster_inject_amount = ctx
                     .sde
                     .types
@@ -1000,11 +995,10 @@ pub(crate) async fn handle_module_cycles(
                 if !is_non_volatile_crystal
                     && (first_charge_tid.is_some() || active_burst_charge_tid.is_some())
                 {
-                    ctx.db.with_mut_snapshot(|snap| {
+                    ctx.db.with_snapshot(|snap| {
                         for &tid in &linked_turrets {
                             if let Some(tf) = snap.items.get(&tid).map(|i| i.flag) {
-                                let mut remove_cid: Option<i64> = None;
-                                if let Some(charge_item) = snap.items.values_mut().find(|i| {
+                                if let Some(charge_item) = snap.items.values().find(|i| {
                                     i.location_id == ship_id
                                         && i.flag == tf
                                         && i.item_id != tid
@@ -1022,17 +1016,12 @@ pub(crate) async fn handle_module_cycles(
                                         crystal_volatility_damage = -1.0;
                                     } else {
                                         crystal_volatility_damage = 0.0;
-                                        charge_item.quantity = charge_item.quantity.saturating_sub(1);
-                                        if charge_item.quantity == 0 {
-                                            remove_cid = Some(charge_item.item_id);
-                                        }
+                                        deferred_post_cycle
+                                            .turret_charge_consumptions
+                                            .push((tid, charge_item.item_id));
                                     }
                                 } else if active_burst_charge_tid.is_some() && crystal_volatility_damage < 0.0 {
                                     crystal_volatility_damage = 0.0;
-                                }
-                                if let Some(rcid) = remove_cid {
-                                    snap.items.remove(&rcid);
-                                    snap.module_active_charges.remove(&tid);
                                 }
                             }
                         }
@@ -1100,18 +1089,6 @@ pub(crate) async fn handle_module_cycles(
                 None
             };
 
-            // Burst Jammer / ECM Burst (`group_id == 80 || group_id == 353`, e.g. `580` Burst Jammer I, `2117` Burst Jammer II)
-            // & Smartbomb (`group_id == 72`) Crimewatch safety check: require Safety Red in all empire space (`sys_sec > 0.0`)
-            if matches!(mod_type.group_id, 72 | 80 | 353) {
-                let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| rt.modified_system_securities.get(&sys_id).copied())
-                    .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0));
-                let safety = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                    rt.safety_levels.get(&char_id).copied().unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Red)
-                });
-                if sys_sec > 0.0 && safety != crate::services::combat_crimewatch::SafetyLevel::Red {
-                    return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
-                }
-            }
             if mod_type.group_id == 1122 {
                 if let Err(e) = crate::combat::drones_salvage_tractor::validate_wreck_salvage_target(
                     ctx,
@@ -1262,6 +1239,20 @@ pub(crate) async fn handle_module_cycles(
 
             if let Err(e) = evaluate_module_cycle_aggression_or_assistance(
                 ctx, &sys, sys_id, char_id, ship_id, mod_type.group_id, target_id_opt,
+            ).await {
+                ctx.remove_projected_ewar_by_module(ship_id, module_id);
+                let _ = sys.remove_module_cycle(ship_id, module_id).await;
+                if cap_need > 0.0 {
+                    if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
+                        let _ = sys.set_capacitor(ship_id, (cs.capacitor + cap_need).min(cs.max_capacitor)).await;
+                    }
+                }
+                return Some(Err(e));
+            }
+
+            if let Err(e) = commit_post_cycle_activation_effects(
+                ctx, &sys, char_id, ship_id, module_id, &m, mod_type, &mod_state,
+                target_id_opt, deferred_post_cycle,
             ).await {
                 ctx.remove_projected_ewar_by_module(ship_id, module_id);
                 let _ = sys.remove_module_cycle(ship_id, module_id).await;

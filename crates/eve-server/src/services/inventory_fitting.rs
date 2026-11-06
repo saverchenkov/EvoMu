@@ -43,6 +43,9 @@ pub(crate) use fitting_dogma_ops::*;
 pub mod fitting_containers_ships;
 pub(crate) use fitting_containers_ships::*;
 
+#[path = "fitting_containers_ships_ops.rs"]
+pub mod fitting_containers_ships_ops;
+
 #[path = "fitting_ships_mastery.rs"]
 pub mod fitting_ships_mastery;
 pub(crate) use fitting_ships_mastery::*;

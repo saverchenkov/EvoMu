@@ -311,10 +311,20 @@ async fn test_dg5_web_grappler_neut_nos_burst_projector_and_targeters() {
             && format!("{payload:?}").contains("targetedBy")),
         "Passive Targeter I must not emit an OnTarget targetedBy yellow-box notification"
     );
+    let locks_pending = sys.get_target_locks(ship_id).await.unwrap();
+    assert!(
+        locks_pending
+            .iter()
+            .any(|l| l.target_id == victim_id && l.lock_time_ms > 0.0 && l.remaining_lock_ms > 0.0 && !l.locked),
+        "Passive Targeter I must start a timed silent lock with lock_time_ms > 0"
+    );
+    for _ in 0..45 {
+        let _ = sys.tick().await;
+    }
     let locks_after_passive = sys.get_target_locks(ship_id).await.unwrap();
     assert!(
         locks_after_passive.iter().any(|l| l.target_id == victim_id && l.locked),
-        "Passive Targeter I must acquire a target lock on victim_id"
+        "Passive Targeter I must complete target lock on victim_id after lock timer elapses"
     );
     ctx.dispatch_rpc(
         &mut sess,

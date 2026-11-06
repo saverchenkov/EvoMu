@@ -60,11 +60,29 @@ pub async fn handle_fit_ships(
     let mut desired_items: Vec<(TypeId, InventoryFlag, i32)> = Vec::new();
     let mut expected_ship_type_id: Option<u32> = None;
     if let Some(fid) = fitting_id_opt {
-        if let Some(saved) = ctx.db.with_snapshot(|s| s.saved_fittings.get(&fid).cloned()) {
-            desired_items = saved.items;
-            if saved.ship_type_id > 0 {
-                expected_ship_type_id = Some(saved.ship_type_id);
-            }
+        let Some(saved) = ctx.db.with_snapshot(|s| s.saved_fittings.get(&fid).cloned()) else {
+            return Some(Err(BridgeRpcError {
+                code: "FittingNotFound".into(),
+                message: format!("Fitting {fid} not found"),
+            }));
+        };
+        let authorized = saved.owner_id == char_id
+            || session
+                .corporation_id
+                .is_some_and(|cid| cid > 0 && saved.owner_id == cid)
+            || session
+                .alliance_id
+                .is_some_and(|aid| aid > 0 && saved.owner_id == aid)
+            || crate::services::inventory_fitting::fitting_mgr_service::is_community_fitting_owner(saved.owner_id);
+        if !authorized {
+            return Some(Err(BridgeRpcError {
+                code: "AccessDenied".into(),
+                message: format!("Not authorized to access fitting {fid}"),
+            }));
+        }
+        desired_items = saved.items;
+        if saved.ship_type_id > 0 {
+            expected_ship_type_id = Some(saved.ship_type_id);
         }
     }
     if desired_items.is_empty() {
@@ -268,6 +286,90 @@ pub async fn handle_fit_ships(
                         });
                     }
                     let req_eff = if m_type.category_id == 8 {
+                        if !matches!(flag_u16, 11..=34) {
+                            return Err(BridgeRpcError {
+                                code: "UserError".into(),
+                                message: format!(
+                                    "CannotLoadChargeInSlot: Slot {flag_u16} cannot hold charge {tid}"
+                                ),
+                            });
+                        }
+                        let fitted_mod_type = desired_items
+                            .iter()
+                            .find(|&&(mtid, mflag, _)| {
+                                mflag == flag
+                                    && ctx
+                                        .sde
+                                        .types
+                                        .get(&mtid)
+                                        .is_some_and(|t| t.category_id != 8)
+                            })
+                            .and_then(|&(mtid, _, _)| ctx.sde.types.get(&mtid))
+                            .or_else(|| {
+                                snap.items
+                                    .values()
+                                    .find(|i| {
+                                        i.location_id == ship_id
+                                            && i.flag == flag
+                                            && ctx
+                                                .sde
+                                                .types
+                                                .get(&i.type_id)
+                                                .is_some_and(|t| t.category_id != 8)
+                                    })
+                                    .and_then(|i| ctx.sde.types.get(&i.type_id))
+                            });
+                        let Some(mod_type) = fitted_mod_type else {
+                            return Err(BridgeRpcError {
+                                code: "UserError".into(),
+                                message: format!(
+                                    "NoModuleInSlot: No fitted module in slot {flag_u16} for charge {tid}"
+                                ),
+                            });
+                        };
+                        let allowed_groups: Vec<u32> = (604..=608)
+                            .filter_map(|attr| {
+                                mod_type.default_attributes.get(&attr).map(|&v| v as u32)
+                            })
+                            .filter(|&g| g > 0)
+                            .collect();
+                        if !allowed_groups.is_empty() && !allowed_groups.contains(&m_type.group_id)
+                        {
+                            return Err(BridgeRpcError {
+                                code: "UserError".into(),
+                                message: format!(
+                                    "ChargeGroupMismatch: Charge group {} not compatible with module {}",
+                                    m_type.group_id, mod_type.type_id
+                                ),
+                            });
+                        }
+                        if let Some(&req_size) = mod_type.default_attributes.get(&128) {
+                            if req_size > 0.0 {
+                                let charge_size =
+                                    m_type.default_attributes.get(&128).copied().unwrap_or(0.0);
+                                if (charge_size - req_size).abs() > 0.01 {
+                                    return Err(BridgeRpcError {
+                                        code: "UserError".into(),
+                                        message: format!(
+                                            "ChargeSizeMismatch: Charge size {charge_size} != module chargeSize {req_size}"
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                        let charge_vol = m_type.volume;
+                        if mod_type.capacity <= 0.0
+                            || (charge_vol > 0.0
+                                && (req_qty as f64) * charge_vol > mod_type.capacity + 1e-6)
+                        {
+                            return Err(BridgeRpcError {
+                                code: "UserError".into(),
+                                message: format!(
+                                    "CapacityExceeded: Charge qty {req_qty} exceeds module {} capacity {}",
+                                    mod_type.type_id, mod_type.capacity
+                                ),
+                            });
+                        }
                         0
                     } else {
                         match flag_u16 {

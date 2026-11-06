@@ -428,7 +428,7 @@ pub(crate) async fn handle_dogma_im(
                     if snap.module_active_states.contains(&item_id) {
                         return Err(BridgeRpcError { code: "ModuleIsActive".into(), message: format!("Module {item_id} cannot be destroyed while active") });
                     }
-                    if (125..=129).contains(&flag_u16) {
+                    if (125..=132).contains(&flag_u16) {
                         let has_fitted_modules = snap.items.values().any(|other| {
                             other.location_id == loc && other.item_id != item_id && (11..=34).contains(&(other.flag as u16)) && ctx.sde.types.get(&other.type_id).is_none_or(|t| t.category_id != 8)
                         });

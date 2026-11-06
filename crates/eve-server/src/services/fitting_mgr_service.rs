@@ -8,7 +8,7 @@ use super::*;
 /// plus legacy curated community owner ID `1`.
 const COMMUNITY_FITTING_CORP_ID: i64 = 1_000_282;
 
-fn is_community_fitting_owner(owner_id: i64) -> bool {
+pub(crate) fn is_community_fitting_owner(owner_id: i64) -> bool {
     owner_id == 1 || owner_id == COMMUNITY_FITTING_CORP_ID
 }
 
