@@ -466,6 +466,12 @@ impl QuasarDescriptorRegistry {
             .and_then(|&idx| self.files.get(idx))
     }
 
+    #[cfg(test)]
+    pub(crate) fn insert_message_for_test(&mut self, desc: DescriptorProto) {
+        self.messages_by_full_name
+            .insert(desc.full_name.clone(), desc);
+    }
+
     /// Deterministically constructs a populated sample `DynamicQuasarMessage` for any message in the registry.
     pub fn instantiate_populated_sample(
         &self,

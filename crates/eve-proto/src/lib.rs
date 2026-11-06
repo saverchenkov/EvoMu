@@ -1010,4 +1010,5 @@ mod tests;
 #[cfg(test)] mod proto_lib_extra_tests;
 #[cfg(test)] mod quasar_extra_unit_tests;
 #[cfg(test)] mod proto_deep_extra_unit_tests;
+#[cfg(test)] mod proto_cov_unit_tests;
 
