@@ -716,7 +716,7 @@ impl NpcSpawnManager {
 
         let mut to_remove = Vec::new();
         let mut mode_updates: Vec<(i64, MovementMode)> = Vec::new();
-        let mut dmg_updates: Vec<(i64, DamageVector)> = Vec::new();
+        let mut dmg_updates: Vec<(i64, i64, DamageVector)> = Vec::new();
 
         for (&ball_id, entity) in self.entities.iter_mut() {
             let Some(&npc_pos) = ball_positions.get(&ball_id) else {
@@ -773,7 +773,7 @@ impl NpcSpawnManager {
                             if current_tick >= entity.last_attack_tick.saturating_add(2) {
                                 entity.last_attack_tick = current_tick;
                                 let dmg = entity.damage_vector.scaled(0.5);
-                                dmg_updates.push((target_id, dmg));
+                                dmg_updates.push((ball_id, target_id, dmg));
                             }
                         }
                     }
@@ -789,7 +789,8 @@ impl NpcSpawnManager {
             }
         }
 
-        let damaged_target_ids: Vec<i64> = dmg_updates.iter().map(|&(tid, _)| tid).collect();
+        let damaged_target_ids: Vec<i64> = dmg_updates.iter().map(|&(_, tid, _)| tid).collect();
+        let mut destroyed_balls: Vec<(i64, i64, Ball)> = Vec::new();
         if !mode_updates.is_empty() || !dmg_updates.is_empty() {
             let mut bp = sys_handle
                 .ballpark
@@ -803,8 +804,10 @@ impl NpcSpawnManager {
             for (bid, mode) in mode_updates {
                 let _ = bp.set_mode(bid, mode);
             }
-            for (tid, dmg) in dmg_updates {
-                bp.apply_damage_to_ball(tid, dmg);
+            for (attacker_id, tid, dmg) in dmg_updates {
+                if let Some((_, true, Some(dead_ball))) = bp.apply_damage_to_ball(tid, dmg) {
+                    destroyed_balls.push((attacker_id, tid, dead_ball));
+                }
             }
             let deact_guard = sys_handle
                 .module_deactivation_hook
@@ -865,6 +868,24 @@ impl NpcSpawnManager {
                         .insert((sys_id, dead_ent.spawn_group_id), until);
                 }
             }
+        }
+
+        if !destroyed_balls.is_empty() {
+            let mut remaining = Vec::with_capacity(destroyed_balls.len());
+            for (attacker_npc_id, target_id, dead_ball) in destroyed_balls {
+                if self.entities.contains_key(&target_id) {
+                    let _ = self.handle_npc_destroyed(
+                        ctx,
+                        sys_id,
+                        target_id,
+                        attacker_npc_id,
+                        now_unix,
+                    );
+                } else {
+                    remaining.push((attacker_npc_id, target_id, dead_ball));
+                }
+            }
+            handle_npc_ai_ball_destructions(ctx, sys_id, remaining);
         }
     }
 
@@ -1058,6 +1079,117 @@ impl NpcSpawnManager {
         }
         res
     }
+}
+
+/// Processes ball destructions returned by `bp.apply_damage_to_ball` during NPC AI ticks:
+/// invokes `execute_death_pipeline_sync` for player ships/capsules, cleans up destroyed player drones,
+/// and removes destroyed extended NPC entities.
+pub(crate) fn handle_npc_ai_ball_destructions(
+    ctx: &ServerContext,
+    sys_id: u32,
+    destructions: Vec<(i64, i64, Ball)>,
+) {
+    if destructions.is_empty() {
+        return;
+    }
+    let now_unix = ctx.now_unix();
+    for (attacker_npc_id, target_id, dead_ball) in destructions {
+        let removed_drone = crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+            let d = rt.active_drones_in_space.remove(&target_id);
+            if d.is_some() {
+                rt.active_drone_miners.remove(&target_id);
+                rt.drone_next_ready_unix.remove(&target_id);
+            }
+            d
+        });
+        if let Some(d) = removed_drone {
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.items.remove(&d.drone_item_id);
+                snap.item_positions.remove(&d.ball_id);
+                snap.sp6_lifecycle.space_object_meta.remove(&d.ball_id);
+            });
+            continue;
+        }
+
+        let victim_char_opt = ctx.db.with_snapshot(|snap| {
+            snap.characters
+                .values()
+                .find(|c| c.active_ship_id == target_id)
+                .map(|c| c.character_id)
+                .or_else(|| {
+                    snap.sp6_lifecycle
+                        .disconnected_ships
+                        .values()
+                        .find(|d| d.ship_id == target_id)
+                        .map(|d| d.char_id)
+                })
+                .or_else(|| {
+                    snap.items
+                        .get(&target_id)
+                        .filter(|it| {
+                            it.owner_id >= 90_000_000
+                                && ctx
+                                    .sde
+                                    .types
+                                    .get(&it.type_id)
+                                    .is_some_and(|t| t.category_id == 6)
+                        })
+                        .map(|it| it.owner_id)
+                })
+        });
+        if let Some(victim_char_id) = victim_char_opt {
+            let final_blow_id =
+                crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                    let mut latest: Option<(u64, i64)> = None;
+                    for key in [target_id, victim_char_id] {
+                        if let Some(list) = rt.aggression_assist_log.get(&key) {
+                            for e in list {
+                                if now_unix.saturating_sub(e.last_action_unix)
+                                    <= crate::services::combat_crimewatch::KILLMAIL_ASSIST_WINDOW_SECS
+                                    && e.attacker_char_id != victim_char_id
+                                    && latest.is_none_or(|(ts, _)| e.last_action_unix > ts)
+                                {
+                                    latest = Some((e.last_action_unix, e.attacker_char_id));
+                                }
+                            }
+                        }
+                    }
+                    latest.map(|(_, cid)| cid)
+                })
+                .unwrap_or(attacker_npc_id);
+            let _ = crate::combat::death_pipeline::execute_death_pipeline_sync(
+                ctx,
+                sys_id,
+                victim_char_id,
+                target_id,
+                final_blow_id,
+                dead_ball.position,
+                now_unix,
+            );
+            continue;
+        }
+
+        let removed_ext_npc =
+            crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                rt.npc_entities.remove(&target_id).is_some()
+            });
+        if removed_ext_npc {
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.items.remove(&target_id);
+                snap.item_positions.remove(&target_id);
+                snap.sp6_lifecycle.space_object_meta.remove(&target_id);
+            });
+        }
+    }
+}
+
+pub(crate) fn compute_sleeper_sentry_interval_s(ctx: &ServerContext, npc_type_id: u32) -> f64 {
+    ctx.sde
+        .types
+        .get(&npc_type_id)
+        .and_then(|t| t.default_attributes.get(&51).copied())
+        .unwrap_or(15_000.0)
+        / 1000.0
 }
 
 #[cfg(test)] #[path = "npc_ai_unit_tests.rs"]

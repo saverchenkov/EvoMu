@@ -180,13 +180,17 @@ pub fn execute_death_pipeline_sync_inner(
         230_000.0
     };
 
-    let drop_threshold = crate::services::security_mgr::insurgency_pvp_loot_drop_threshold(
-        ctx,
-        sys_id,
-        attacker_char_id,
-        victim_char_id,
-        is_self_destruct,
-    );
+    let drop_threshold = if is_self_destruct {
+        0.0
+    } else {
+        crate::services::security_mgr::insurgency_pvp_loot_drop_threshold(
+            ctx,
+            sys_id,
+            attacker_char_id,
+            victim_char_id,
+            is_self_destruct,
+        )
+    };
 
     let (
         wreck_item_id,
@@ -357,9 +361,11 @@ pub fn execute_death_pipeline_sync_inner(
                 .unwrap_or(100.0);
             items_isk += item_unit_isk * (item_snap.quantity.max(1) as f64);
             let is_rig_or_sub = matches!(item_snap.flag as i64, 89 | 92..=94 | 125..=132);
-            let roll = ((rng_seed ^ (iid as u64)).wrapping_mul(6364136223846793005) >> 32)
-                as f64
-                / 4294967296.0;
+            let mut rng_buf = [0u8; 8];
+            let _ = getrandom::getrandom(&mut rng_buf);
+            let entropy = rng_seed.wrapping_add(u64::from_le_bytes(rng_buf));
+            let mixed = (entropy ^ (iid as u64)).wrapping_mul(6364136223846793005);
+            let roll = ((mixed ^ (mixed >> 32)) >> 32) as f64 / 4294967296.0;
             if !is_pod && !is_rig_or_sub && roll < drop_threshold {
                 if let Some(item) = snap.items.get_mut(&iid) {
                     item.location_id = wreck_id;
@@ -416,6 +422,15 @@ pub fn execute_death_pipeline_sync_inner(
             }
         }
         if is_pod {
+            let char_booster_items: Vec<i64> = snap
+                .items
+                .values()
+                .filter(|i| i.location_id == victim_char_id && i.flag == InventoryFlag::Booster)
+                .map(|i| i.item_id)
+                .collect();
+            for bid in char_booster_items {
+                snap.items.remove(&bid);
+            }
             let mut imp_tids: Vec<u32> = snap
                 .active_implants
                 .remove(&victim_char_id)

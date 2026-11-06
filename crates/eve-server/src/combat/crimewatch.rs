@@ -492,6 +492,10 @@ impl CrimeWatchDirector {
     ) -> Vec<ConcordExecutionReport> {
         let mut ready = Vec::new();
         for (&char_id, st) in self.states.iter_mut() {
+            if st.criminal_flag_until_unix > 0 && now_unix >= st.criminal_flag_until_unix {
+                st.criminal_flag_until_unix = 0;
+                st.pending_concord_arrival = None;
+            }
             if let Some((sys_id, arrival_unix, ship_id, victim_char_id)) = st.pending_concord_arrival {
                 if now_unix >= arrival_unix {
                     ready.push((char_id, sys_id, ship_id, victim_char_id));
@@ -503,15 +507,45 @@ impl CrimeWatchDirector {
         let mut reports = Vec::new();
 
         for (criminal_char_id, sys_id, criminal_ship_id, victim_char_id) in ready {
+            let is_valid_criminal_ship = ctx.db.with_snapshot(|snap| {
+                let Some(ch) = snap.characters.get(&criminal_char_id) else {
+                    return false;
+                };
+                if ch.station_id.is_some()
+                    || ch.structure_id.is_some()
+                    || ch.solar_system_id != sys_id
+                {
+                    return false;
+                }
+                if criminal_ship_id <= 0 || ch.active_ship_id != criminal_ship_id {
+                    return false;
+                }
+                let Some(ship_item) = snap.items.get(&criminal_ship_id) else {
+                    return false;
+                };
+                let is_capsule = ship_item.type_id == 670
+                    || ctx
+                        .sde
+                        .types
+                        .get(&ship_item.type_id)
+                        .is_some_and(|t| t.group_id == 29);
+                !is_capsule
+            });
+            if !is_valid_criminal_ship {
+                continue;
+            }
+
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
 
-            let crim_pos = sys_handle
+            let Some((_, ship_ball)) = sys_handle
                 .get_ball_snapshot(criminal_ship_id)
                 .await
                 .ok()
                 .flatten()
-                .map(|(_, b)| b.position)
-                .unwrap_or(DVec3::ZERO);
+            else {
+                continue;
+            };
+            let crim_pos = ship_ball.position;
 
             // 1. Spawn real CONCORD Police Battleship in the ballpark (completely invulnerable to damage)
             let concord_ball_id = ctx.db.with_mut_snapshot(|snap| {
@@ -615,6 +649,9 @@ impl CrimeWatchDirector {
                 rng_seed,
             )
             .await;
+
+            // Despawn transient invulnerable CONCORD Commander ball once execution completes.
+            let _ = sys_handle.remove_ball(concord_ball_id).await;
 
             // 3. Record sec-status loss/transaction (if not already recorded) and grant 30-day private Kill Right (0 fee until made public)
             let now_unix = ctx.now_unix();

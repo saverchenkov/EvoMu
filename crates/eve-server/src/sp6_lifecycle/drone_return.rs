@@ -109,177 +109,183 @@ pub async fn handle_cmd_return_bay(
             continue;
         }
 
-        // Immediate scoop: check drone bay capacity
-        let drone_vol = ctx.sde.types.get(&d.type_id).map(|t| t.volume).unwrap_or(0.0);
-        let cap_ok = ctx.db.with_snapshot(|snap| {
-            let Some(sh) = snap.items.get(&ship_id) else { return false; };
-            let ship_cap = ctx.sde.types.get(&sh.type_id)
-                .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::DRONE_CAPACITY))
-                .copied()
-                .unwrap_or(0.0);
-            let used_vol: f64 = snap.items.values()
-                .filter(|it| it.location_id == ship_id && it.flag == eve_db::InventoryFlag::DroneBay)
-                .map(|it| ctx.sde.types.get(&it.type_id).map(|t| t.volume).unwrap_or(0.0) * (it.quantity as f64))
-                .sum();
-            ship_cap <= 0.0 || (used_vol + drone_vol <= ship_cap + 1e-4)
-        });
-        if !cap_ok {
+        if !try_atomic_scoop_drone(ctx, &sys_handle, &d, ship_id).await {
             continue;
         }
-
-        with_mut_combat_runtime(ctx, |rt| {
-            rt.active_drones_in_space.remove(&d.ball_id);
-            rt.active_drone_miners.remove(&d.ball_id);
-        });
-        let _ = sys_handle.remove_ball(d.ball_id).await;
-        ctx.db.with_mut_snapshot(|snap| {
-            if let Some(it) = snap.items.get_mut(&d.drone_item_id) {
-                it.location_id = ship_id;
-                it.flag = eve_db::InventoryFlag::DroneBay;
-                it.version += 1;
-            }
-        });
-
-        // Emit OnDroneStateChange (returned/in-bay = 0)
-        let _ = sys_handle.emit_destiny_event(
-            d.ball_id,
-            eve_destiny::DestinyEvent::OnDroneStateChange {
-                drone_id: d.ball_id,
-                owner_id: char_id,
-                controller_id: ship_id,
-                activity_state: 0,
-                type_id: d.type_id,
-                controller_owner_id: char_id,
-                target_id: None,
-            },
-        ).await;
-        let notif_args = vec![
-            PyRep::Integer(d.ball_id),
-            PyRep::Integer(char_id),
-            PyRep::Integer(ship_id),
-            PyRep::Integer(0),
-            PyRep::Integer(d.type_id as i64),
-            PyRep::Integer(char_id),
-            PyRep::None,
-        ];
-        ctx.notify(NotificationTarget::Character(char_id), "OnDroneStateChange", "charid", notif_args);
-        crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(ctx, char_id, d.ball_id, 0, None);
-
-        // Emit OnItemChange
-        ctx.notify(
-            NotificationTarget::Character(char_id),
-            "OnItemChange",
-            "charid",
-            vec![
-                PyRep::keyval([
-                    ("itemID", PyRep::Integer(d.drone_item_id)),
-                    ("typeID", PyRep::Integer(d.type_id as i64)),
-                    ("locationID", PyRep::Integer(ship_id)),
-                    ("flagID", PyRep::Integer(eve_db::InventoryFlag::DroneBay as i64)),
-                    ("quantity", PyRep::Integer(1)),
-                ]),
-                PyRep::Dict(vec![
-                    (PyRep::Integer(3), PyRep::Integer(d.solar_system_id as i64)),
-                    (PyRep::Integer(4), PyRep::Integer(0)),
-                ]),
-            ],
-        );
-
         recalled_items.push(d.drone_item_id);
     }
 
     Ok(PyRep::Dict(Vec::new()))
 }
 
+/// Atomically claims a drone from `rt.active_drones_in_space`, verifies remaining drone bay
+/// capacity and item existence under the `snap` write lock, moves the item into `DroneBay`,
+/// cleans up `snap.item_positions` and `snap.space_object_meta`, removes its space ball,
+/// and emits state/inventory notifications (`#437`).
+async fn try_atomic_scoop_drone(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    d: &DroneSpaceState,
+    target_ship_id: i64,
+) -> bool {
+    let claimed = with_mut_combat_runtime(ctx, |rt| {
+        let removed = rt.active_drones_in_space.remove(&d.ball_id)?;
+        rt.active_drone_miners.remove(&d.ball_id);
+        Some(removed)
+    });
+    let Some(claimed_drone) = claimed else {
+        return false;
+    };
+
+    let drone_vol = ctx
+        .sde
+        .types
+        .get(&claimed_drone.type_id)
+        .map(|t| t.volume)
+        .unwrap_or(0.0);
+    #[derive(Copy, Clone, PartialEq, Eq)]
+    enum ScoopOutcome {
+        Moved,
+        BayFull,
+        ItemMissing,
+    }
+    let outcome = ctx.db.with_mut_snapshot(|snap| {
+        let Some(sh) = snap.items.get(&target_ship_id) else {
+            return ScoopOutcome::ItemMissing;
+        };
+        let ship_cap = ctx
+            .sde
+            .types
+            .get(&sh.type_id)
+            .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::DRONE_CAPACITY))
+            .copied()
+            .unwrap_or(0.0);
+        let used_vol: f64 = snap
+            .items
+            .values()
+            .filter(|it| {
+                it.item_id != claimed_drone.drone_item_id
+                    && it.location_id == target_ship_id
+                    && it.flag == eve_db::InventoryFlag::DroneBay
+            })
+            .map(|it| {
+                ctx.sde.types.get(&it.type_id).map(|t| t.volume).unwrap_or(0.0)
+                    * (it.quantity as f64)
+            })
+            .sum();
+        if ship_cap > 0.0 && used_vol + drone_vol > ship_cap + 1e-4 {
+            return ScoopOutcome::BayFull;
+        }
+        let Some(it) = snap.items.get_mut(&claimed_drone.drone_item_id) else {
+            return ScoopOutcome::ItemMissing;
+        };
+        it.location_id = target_ship_id;
+        it.flag = eve_db::InventoryFlag::DroneBay;
+        it.version += 1;
+        snap.item_positions.remove(&claimed_drone.ball_id);
+        snap.sp6_lifecycle
+            .space_object_meta
+            .remove(&claimed_drone.ball_id);
+        ScoopOutcome::Moved
+    });
+    match outcome {
+        ScoopOutcome::Moved => {}
+        ScoopOutcome::BayFull => {
+            with_mut_combat_runtime(ctx, |rt| {
+                rt.active_drones_in_space
+                    .insert(claimed_drone.ball_id, claimed_drone);
+            });
+            return false;
+        }
+        ScoopOutcome::ItemMissing => {
+            let _ = sys_handle.remove_ball(claimed_drone.ball_id).await;
+            return false;
+        }
+    }
+
+    let _ = sys_handle.remove_ball(claimed_drone.ball_id).await;
+
+    let _ = sys_handle
+        .emit_destiny_event(
+            claimed_drone.ball_id,
+            eve_destiny::DestinyEvent::OnDroneStateChange {
+                drone_id: claimed_drone.ball_id,
+                owner_id: claimed_drone.owner_char_id,
+                controller_id: target_ship_id,
+                activity_state: 0,
+                type_id: claimed_drone.type_id,
+                controller_owner_id: claimed_drone.owner_char_id,
+                target_id: None,
+            },
+        )
+        .await;
+    let notif_args = vec![
+        PyRep::Integer(claimed_drone.ball_id),
+        PyRep::Integer(claimed_drone.owner_char_id),
+        PyRep::Integer(target_ship_id),
+        PyRep::Integer(0),
+        PyRep::Integer(claimed_drone.type_id as i64),
+        PyRep::Integer(claimed_drone.owner_char_id),
+        PyRep::None,
+    ];
+    ctx.notify(
+        NotificationTarget::Character(claimed_drone.owner_char_id),
+        "OnDroneStateChange",
+        "charid",
+        notif_args,
+    );
+    crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(
+        ctx,
+        claimed_drone.owner_char_id,
+        claimed_drone.ball_id,
+        0,
+        None,
+    );
+    ctx.notify(
+        NotificationTarget::Character(claimed_drone.owner_char_id),
+        "OnItemChange",
+        "charid",
+        vec![
+            PyRep::keyval([
+                ("itemID", PyRep::Integer(claimed_drone.drone_item_id)),
+                ("typeID", PyRep::Integer(claimed_drone.type_id as i64)),
+                ("locationID", PyRep::Integer(target_ship_id)),
+                ("flagID", PyRep::Integer(eve_db::InventoryFlag::DroneBay as i64)),
+                ("quantity", PyRep::Integer(1)),
+            ]),
+            PyRep::Dict(vec![
+                (
+                    PyRep::Integer(3),
+                    PyRep::Integer(claimed_drone.solar_system_id as i64),
+                ),
+                (PyRep::Integer(4), PyRep::Integer(0)),
+            ]),
+        ],
+    );
+    true
+}
+
 /// Periodic tick scoop for returning mobile drones (`activity_state == 4`).
 pub async fn step_returning_drones(ctx: &ServerContext) {
     let returning_drones: Vec<DroneSpaceState> = with_combat_runtime(ctx, |rt| {
-        rt.active_drones_in_space.values().filter(|d| d.activity_state == 4).cloned().collect()
+        rt.active_drones_in_space
+            .values()
+            .filter(|d| d.activity_state == 4)
+            .cloned()
+            .collect()
     });
 
     for d in returning_drones {
         let sys_handle = ctx.systems.get_or_spawn(d.solar_system_id);
         let ship_pos = sys_handle.get_ball_position_sync(d.parent_ship_id);
         let drone_pos = sys_handle.get_ball_position_sync(d.ball_id);
-        let Some((sp, dp)) = ship_pos.zip(drone_pos) else { continue; };
-        let dist = sp.distance(dp);
-        if dist > 2_500.0 {
+        let Some((sp, dp)) = ship_pos.zip(drone_pos) else {
+            continue;
+        };
+        if sp.distance(dp) > 2_500.0 {
             continue;
         }
-
-        let drone_vol = ctx.sde.types.get(&d.type_id).map(|t| t.volume).unwrap_or(0.0);
-        let cap_ok = ctx.db.with_snapshot(|snap| {
-            let Some(sh) = snap.items.get(&d.parent_ship_id) else { return false; };
-            let ship_cap = ctx.sde.types.get(&sh.type_id)
-                .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::DRONE_CAPACITY))
-                .copied()
-                .unwrap_or(0.0);
-            let used_vol: f64 = snap.items.values()
-                .filter(|it| it.location_id == d.parent_ship_id && it.flag == eve_db::InventoryFlag::DroneBay)
-                .map(|it| ctx.sde.types.get(&it.type_id).map(|t| t.volume).unwrap_or(0.0) * (it.quantity as f64))
-                .sum();
-            ship_cap <= 0.0 || (used_vol + drone_vol <= ship_cap + 1e-4)
-        });
-        if !cap_ok {
-            continue;
-        }
-
-        with_mut_combat_runtime(ctx, |rt| {
-            rt.active_drones_in_space.remove(&d.ball_id);
-            rt.active_drone_miners.remove(&d.ball_id);
-        });
-        let _ = sys_handle.remove_ball(d.ball_id).await;
-        ctx.db.with_mut_snapshot(|snap| {
-            if let Some(it) = snap.items.get_mut(&d.drone_item_id) {
-                it.location_id = d.parent_ship_id;
-                it.flag = eve_db::InventoryFlag::DroneBay;
-                it.version += 1;
-            }
-        });
-
-        // Emit OnDroneStateChange (returned/in-bay = 0)
-        let _ = sys_handle.emit_destiny_event(
-            d.ball_id,
-            eve_destiny::DestinyEvent::OnDroneStateChange {
-                drone_id: d.ball_id,
-                owner_id: d.owner_char_id,
-                controller_id: d.parent_ship_id,
-                activity_state: 0,
-                type_id: d.type_id,
-                controller_owner_id: d.owner_char_id,
-                target_id: None,
-            },
-        ).await;
-        let notif_args = vec![
-            PyRep::Integer(d.ball_id),
-            PyRep::Integer(d.owner_char_id),
-            PyRep::Integer(d.parent_ship_id),
-            PyRep::Integer(0),
-            PyRep::Integer(d.type_id as i64),
-            PyRep::Integer(d.owner_char_id),
-            PyRep::None,
-        ];
-        ctx.notify(NotificationTarget::Character(d.owner_char_id), "OnDroneStateChange", "charid", notif_args);
-
-        // Emit OnItemChange
-        ctx.notify(
-            NotificationTarget::Character(d.owner_char_id),
-            "OnItemChange",
-            "charid",
-            vec![
-                PyRep::keyval([
-                    ("itemID", PyRep::Integer(d.drone_item_id)),
-                    ("typeID", PyRep::Integer(d.type_id as i64)),
-                    ("locationID", PyRep::Integer(d.parent_ship_id)),
-                    ("flagID", PyRep::Integer(eve_db::InventoryFlag::DroneBay as i64)),
-                    ("quantity", PyRep::Integer(1)),
-                ]),
-                PyRep::Dict(vec![
-                    (PyRep::Integer(3), PyRep::Integer(d.solar_system_id as i64)),
-                    (PyRep::Integer(4), PyRep::Integer(0)),
-                ]),
-            ],
-        );
+        let _ = try_atomic_scoop_drone(ctx, &sys_handle, &d, d.parent_ship_id).await;
     }
 }
 

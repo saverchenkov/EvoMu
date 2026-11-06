@@ -1060,10 +1060,12 @@ pub fn reconnect_character_in_space_sync(
             if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
                 cs.is_emergency_warping = false;
             }
-            if let Some(orig_arr) = pre_warp_pos_opt {
-                let orig_pos = DVec3::from_array(orig_arr);
-                if existing_pos.distance(orig_pos) > 10_000.0 {
-                    let _ = bp.set_mode(ship_id, MovementMode::new_warp(existing_pos, orig_pos, warp_speed));
+            if !bp.is_ball_scrambled(ship_id) {
+                if let Some(orig_arr) = pre_warp_pos_opt {
+                    let orig_pos = DVec3::from_array(orig_arr);
+                    if existing_pos.distance(orig_pos) > 10_000.0 {
+                        let _ = bp.set_mode(ship_id, MovementMode::new_warp(existing_pos, orig_pos, warp_speed));
+                    }
                 }
             }
         }
@@ -1107,10 +1109,12 @@ pub fn reconnect_character_in_space_sync(
     if let Ok(mut bp) = sys_handle.ballpark.write() {
         bp.observer_events.remove(&ship_id);
         bp.queue_set_state(ship_id);
-        if let Some(orig_arr) = pre_warp_pos_opt {
-            let orig_pos = DVec3::from_array(orig_arr);
-            if final_pos.distance(orig_pos) > 10_000.0 {
-                let _ = bp.set_mode(ship_id, MovementMode::new_warp(final_pos, orig_pos, warp_speed));
+        if !bp.is_ball_scrambled(ship_id) {
+            if let Some(orig_arr) = pre_warp_pos_opt {
+                let orig_pos = DVec3::from_array(orig_arr);
+                if final_pos.distance(orig_pos) > 10_000.0 {
+                    let _ = bp.set_mode(ship_id, MovementMode::new_warp(final_pos, orig_pos, warp_speed));
+                }
             }
         }
     }

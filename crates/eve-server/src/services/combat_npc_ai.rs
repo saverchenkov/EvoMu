@@ -759,6 +759,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                     }
                 }
             }
+            let mut destroyed_in_tick: Vec<(i64, i64, eve_destiny::Ball)> = Vec::new();
             if npc.archetype == "Triglavian" {
                 let mult = 1.0 + (npc.entropic_cycles as f64 * 0.10).min(1.50);
                 cycle_dmg = cycle_dmg.scaled(mult);
@@ -774,18 +775,11 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 let candidates: Vec<(i64, DVec3)> = ball_map
                     .iter()
                     .filter(|(&other_id, other_ball)| {
-                        let is_targetable_cat = ctx
-                            .sde
-                            .types
-                            .get(&other_ball.type_id)
-                            .is_none_or(|t| matches!(t.category_id, 6 | 11 | 18 | 65));
-                        if other_id == nid || other_id == target_id || !is_targetable_cat {
-                            return false;
-                        }
-                        if npc.threat_table.contains_key(&other_id) {
-                            return true;
-                        }
-                        is_candidate_hostile_to_edencom(ctx, &npc, other_id, target_id)
+                        other_id != nid
+                            && other_id != target_id
+                            && ctx.sde.types.get(&other_ball.type_id).is_none_or(|t| matches!(t.category_id, 6 | 11 | 18 | 65))
+                            && (npc.threat_table.contains_key(&other_id)
+                                || is_candidate_hostile_to_edencom(ctx, &npc, other_id, target_id))
                     })
                     .map(|(&other_id, other_ball)| (other_id, other_ball.position))
                     .collect();
@@ -797,7 +791,9 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                     5,
                 );
                 for arc_id in hits.into_iter().skip(1) {
-                    bp.apply_damage_to_ball(arc_id, npc.damage_vector.scaled(0.5));
+                    if let Some((_, true, Some(dead_ball))) = bp.apply_damage_to_ball(arc_id, npc.damage_vector.scaled(0.5)) {
+                        destroyed_in_tick.push((nid, arc_id, dead_ball));
+                    }
                 }
             } else if npc.archetype == "Sleeper" {
                 let is_cap = ctx.db.with_snapshot(|snap| {
@@ -815,31 +811,23 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 crate::services::security_mgr::apply_counter_insurgency_sentry_ewar(&ctx.sde, &mut bp, target_id, target_ball.radius, dist);
             }
             let can_fire = if npc.archetype == "SleeperSentry" {
-                let interval_s = ctx
-                    .sde
-                    .types
-                    .get(&npc.type_id)
-                    .and_then(|t| t.default_attributes.get(&51).copied())
-                    .unwrap_or(15_000.0)
-                    / 1000.0;
+                let interval_s = crate::combat::npc_ai::compute_sleeper_sentry_interval_s(ctx, npc.type_id);
                 dist <= npc.optimal_range
                     && crate::services::wormhole_pve_escalations::can_sentry_fire_and_record(
-                        ctx,
-                        nid,
-                        interval_s,
-                        st.sim_elapsed_secs,
+                        ctx, nid, interval_s, st.sim_elapsed_secs,
                     )
             } else {
                 true
             };
             if can_fire {
-                bp.apply_damage_to_ball(target_id, cycle_dmg);
+                if let Some((_, true, Some(dead_ball))) = bp.apply_damage_to_ball(target_id, cycle_dmg) {
+                    destroyed_in_tick.push((nid, target_id, dead_ball));
+                }
             }
-            crate::system_actor::sync_ball_positions(
-                &bp,
-                &sys_handle.ball_positions,
-                &sys_handle.scrambled_balls,
-            );
+            crate::system_actor::sync_ball_positions(&bp, &sys_handle.ball_positions, &sys_handle.scrambled_balls);
+            drop(st_guard);
+            drop(bp);
+            crate::combat::npc_ai::handle_npc_ai_ball_destructions(ctx, solar_system_id, destroyed_in_tick);
         }
         if let Some(target_char_id) = ctx.db.with_snapshot(|snap| {
             snap.characters

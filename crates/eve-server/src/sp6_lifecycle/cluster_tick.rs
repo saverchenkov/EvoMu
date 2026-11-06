@@ -1291,7 +1291,9 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
         }
     }
     if !temp_cw.states.is_empty() {
-        let _ = temp_cw.step_concord(ctx, now_unix, now_unix).await;
+        let mut seed_buf = [0u8; 8];
+        let _ = getrandom::getrandom(&mut seed_buf);
+        let _ = temp_cw.step_concord(ctx, now_unix, u64::from_le_bytes(seed_buf)).await;
     }
 
     let _ = crate::services::mining_cycle::process_mining_cycles(ctx).await;
