@@ -29,6 +29,10 @@ mod ballpark_lifecycle_tests;
 mod physics_combat_collision_tests;
 #[cfg(test)]
 mod mutation_math_and_grid_tests;
+#[cfg(test)]
+mod ballpark_deep_extra_unit_tests;
+#[cfg(test)]
+mod physics_wire_deep_extra_unit_tests;
 
 pub type BallId = i64;
 
