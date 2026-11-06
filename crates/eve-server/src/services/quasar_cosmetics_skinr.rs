@@ -366,6 +366,7 @@ pub struct SkinrCosmeticsState {
     pub sde: Arc<SdeRegistry>,
     pub catalog: SkinrStaticCatalog,
     pub data: RwLock<SkinrCosmeticsData>,
+    pub last_redeemed_gen: std::sync::atomic::AtomicU64,
 }
 
 impl SkinrCosmeticsState {
@@ -382,7 +383,30 @@ impl SkinrCosmeticsState {
             sde,
             catalog,
             data: RwLock::new(data),
+            last_redeemed_gen: std::sync::atomic::AtomicU64::new(
+                super::quasar_entitlement_ledger::redeemed_skin_generation(),
+            ),
         })
+    }
+
+    pub fn sync_redeemed_skins_if_needed(&self) {
+        let cur_gen = super::quasar_entitlement_ledger::redeemed_skin_generation();
+        let prev = self
+            .last_redeemed_gen
+            .swap(cur_gen, std::sync::atomic::Ordering::AcqRel);
+        if prev != cur_gen {
+            if let Some(blob_lics) = self.db.with_snapshot(|s| {
+                s.quasar_state_blobs
+                    .get(SKINR_BLOB_KEY)
+                    .and_then(|j| serde_json::from_str::<SkinrCosmeticsData>(j).ok())
+                    .map(|d| d.skin_licenses)
+            }) {
+                let mut data = self.data.write().unwrap_or_else(|e| e.into_inner());
+                for (k, v) in blob_lics {
+                    data.skin_licenses.insert(k, v);
+                }
+            }
+        }
     }
 
     pub fn save(&self) {

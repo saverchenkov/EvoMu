@@ -383,6 +383,64 @@ impl WorldStateSnapshot {
         self.characters.get(&char_id).map(|c| c.user_id)
     }
 
+    /// Account-wide PLEX Vault balance visible to `user_id` across all characters on the account
+    /// (canonical `account_plex_vault` plus any un-folded legacy per-character `plex_balance`).
+    pub fn unified_plex_balance_for_user(&self, uid: u64) -> i64 {
+        let vault = self.account_plex_vault.get(&uid).copied().unwrap_or(0);
+        let legacy: i64 = self
+            .characters
+            .values()
+            .filter(|c| c.user_id == uid)
+            .map(|c| c.plex_balance)
+            .sum();
+        vault.saturating_add(legacy)
+    }
+
+    /// Unified PLEX Vault balance visible to `char_id` across the owning account.
+    pub fn unified_plex_balance(&self, char_id: i64) -> i64 {
+        self.account_of_character(char_id)
+            .map(|uid| self.unified_plex_balance_for_user(uid))
+            .unwrap_or(0)
+    }
+
+    /// Adds `delta` PLEX to the unified account vault of `user_id` (folding any legacy per-character
+    /// `plex_balance` into `account_plex_vault`). Returns the new balance, or `None` if overflow or negative.
+    pub fn adjust_unified_plex_for_user(&mut self, uid: u64, delta: i64) -> Option<i64> {
+        let legacy_cids: Vec<(i64, i64)> = self
+            .characters
+            .values()
+            .filter(|c| c.user_id == uid && c.plex_balance != 0)
+            .map(|c| (c.character_id, c.plex_balance))
+            .collect();
+        let legacy_sum: i64 = legacy_cids
+            .iter()
+            .try_fold(0i64, |acc, &(_, p)| acc.checked_add(p))?;
+        let cur = self
+            .account_plex_vault
+            .get(&uid)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(legacy_sum)?;
+        let next = cur.checked_add(delta)?;
+        if next < 0 {
+            return None;
+        }
+        for (cid, _) in legacy_cids {
+            if let Some(c) = self.characters.get_mut(&cid) {
+                c.plex_balance = 0;
+            }
+        }
+        self.account_plex_vault.insert(uid, next);
+        Some(next)
+    }
+
+    /// Adds `delta` PLEX to the unified account vault of `char_id`. Returns the new balance, or `None` if
+    /// the character is unknown or the vault would go negative (no change is made then).
+    pub fn adjust_unified_plex(&mut self, char_id: i64, delta: i64) -> Option<i64> {
+        let uid = self.account_of_character(char_id)?;
+        self.adjust_unified_plex_for_user(uid, delta)
+    }
+
     /// Account-wide PLEX Vault balance visible to `char_id` (shared by all characters on the account).
     pub fn plex_vault_balance(&self, char_id: i64) -> i64 {
         self.account_of_character(char_id)

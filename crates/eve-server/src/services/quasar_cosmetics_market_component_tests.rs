@@ -123,7 +123,7 @@ fn component_listings_get_all_purchase_isk_plex_failures_and_overflow_bounds() {
     let wm_bp = WireMessage::decode(&r_buy_plex.payload.unwrap().value).unwrap();
     assert_eq!(wm_varint(&wm_bp, 2), 1);
     db.with_snapshot(|s| {
-        assert_eq!(s.characters.get(&cid).unwrap().plex_balance, 40);
+        assert_eq!(s.unified_plex_balance(cid), 40);
     });
 
     let mut fail_plex = Vec::new();

@@ -107,9 +107,9 @@ pub fn rollback_dirty_from_sqlite(
     }
 
     // 5. In-memory direct restores for exact-value tracked sets/maps and append-only logs
-    if snap.wallet_journal.len() > fp.wallet_journal_len {
-        snap.wallet_journal.truncate(fp.wallet_journal_len);
-    } else if snap.wallet_journal.len() < fp.wallet_journal_len {
+    if snap.wallet_journal.len() != fp.wallet_journal_len
+        || fp_wallet_journal_slice(&snap.wallet_journal) != fp.wallet_journal_hash
+    {
         snap.wallet_journal.clear();
         let mut stmt = conn
             .prepare("SELECT entry_id, character_id, entry_type, amount_cents, balance_after_cents, reason FROM wallet_journal ORDER BY seq_idx ASC")
@@ -131,9 +131,7 @@ pub fn rollback_dirty_from_sqlite(
         }
     }
 
-    if snap.mails.len() > fp.mails_len {
-        snap.mails.truncate(fp.mails_len);
-    } else if snap.mails.len() < fp.mails_len {
+    if snap.mails.len() != fp.mails_len || fp_mails_slice(&snap.mails) != fp.mails_hash {
         snap.mails.clear();
         let mut stmt = conn
             .prepare("SELECT message_id, sender_id, recipient_id, subject, body FROM mail ORDER BY seq_idx ASC")
@@ -410,7 +408,7 @@ pub fn rollback_dirty_from_sqlite(
         if snap.bookmarks.get(&id).map(fp_json) != Some(eh) {
             let bm = conn
                 .query_row(
-                    "SELECT bookmark_id, owner_id, label, solar_system_id, x, y, z FROM bookmarks WHERE bookmark_id = ?1",
+                    "SELECT bookmark_id, owner_id, label, solar_system_id, x, y, z, item_id, memo, folder_id, is_shared FROM bookmarks WHERE bookmark_id = ?1",
                     params![id],
                     |r| {
                         Ok(BookmarkRecord {
@@ -421,10 +419,10 @@ pub fn rollback_dirty_from_sqlite(
                             x: r.get(4)?,
                             y: r.get(5)?,
                             z: r.get(6)?,
-                            item_id: None,
-                            memo: String::new(),
-                            folder_id: None,
-                            is_shared: false,
+                            item_id: r.get(7)?,
+                            memo: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                            folder_id: r.get(9)?,
+                            is_shared: r.get::<_, i64>(10)? != 0,
                         })
                     },
                 )

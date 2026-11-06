@@ -641,41 +641,34 @@ fn component_initiate_purchase(
     st.save();
 
     let mut debited_bal: Option<IskCents> = None;
+    let mut plex_notice: Option<(u64, u64, i64, i64)> = None;
     let succeeded = st.db.with_mut_snapshot(|s| {
-        let Some(ch) = s.characters.get_mut(&(cid as i64)) else {
-            return false;
-        };
+        let Some((ch_station, ch_struct, ch_home)) = s
+            .characters
+            .get(&(cid as i64))
+            .map(|ch| (ch.station_id, ch.structure_id, ch.home_station_id))
+        else { return false; };
         if let Some(total_cost) = checked_isk_total {
-            let Some(rem) = ch.balance.checked_sub(total_cost) else {
-                return false;
-            };
-            ch.balance = rem;
+            let Some(rem) = s.characters.get_mut(&(cid as i64)).and_then(|ch| {
+                let r = ch.balance.checked_sub(total_cost)?;
+                ch.balance = r;
+                Some(r)
+            }) else { return false; };
             debited_bal = Some(rem);
         } else if let Some(total_plex) = checked_plex_total {
-            if ch.plex_balance < total_plex {
-                return false;
+            let Some(rem_plex) = s.adjust_unified_plex(cid as i64, -total_plex) else { return false; };
+            if let Some(uid) = s.account_of_character(cid as i64) {
+                s.next_entity_id += 1;
+                plex_notice = Some((uid, s.next_entity_id as u64, -total_plex, rem_plex));
             }
-            let Some(rem_plex) = ch.plex_balance.checked_sub(total_plex) else {
-                return false;
-            };
-            ch.plex_balance = rem_plex;
         }
-        let location_id = ch
-            .station_id
-            .or(ch.structure_id)
-            .unwrap_or_else(|| {
-                if st.skinr.sde.stations.contains_key(&ch.home_station_id) {
-                    ch.home_station_id
-                } else {
-                    st.skinr
-                        .sde
-                        .stations
-                        .keys()
-                        .copied()
-                        .min()
-                        .unwrap_or(ch.home_station_id)
-                }
-            });
+        let location_id = ch_station.or(ch_struct).unwrap_or_else(|| {
+            if st.skinr.sde.stations.contains_key(&ch_home) {
+                ch_home
+            } else {
+                st.skinr.sde.stations.keys().copied().min().unwrap_or(ch_home)
+            }
+        });
         if let (Some(total_cost), Some(rem)) = (checked_isk_total, debited_bal) {
             s.append_journal(cid as i64, "ParagonHubComponentPurchase", IskCents(-total_cost.0), rem, format!("Paragon Hub component purchase ({quantity_u64}x)"));
         }
@@ -704,6 +697,9 @@ fn component_initiate_purchase(
         true
     });
     if let Some(rem) = debited_bal { st.emit_account_change(cid as i64, rem); }
+    if let Some((uid, tx_id, delta, rem)) = plex_notice {
+        super::quasar_payment_store_types::queue_plex_balance_changed_notice(uid, tx_id, delta, rem, "Paragon Hub component purchase", now);
+    }
     record_tx(st, tx_uuid, now, succeeded, Some(cid), None, CosmeticTransactionDetails::PurchasingComponent);
     queue_transaction_notice(cid, &tx_uuid, succeeded, now);
     let mut out = Vec::new();
@@ -936,6 +932,7 @@ fn skin_initiate_create(
                 format!("Maximum active Paragon Hub listings ({max_listings}) reached"),
             ));
         }
+        st.skinr.sync_redeemed_skins_if_needed();
         let mut skinr_data = st.skinr.data.write().unwrap_or_else(|e| e.into_inner());
         let lic_key = SkinrCosmeticsState::skin_lic_key(cid, &skin_hex);
         let avail = skinr_data
@@ -983,7 +980,8 @@ fn skin_initiate_create(
     let Some(new_bal) = fee_paid_bal else {
         st.data.write().unwrap_or_else(|e| e.into_inner()).skin_listings.remove(&listing_key);
         {
-            let mut skinr_data = st.skinr.data.write().unwrap_or_else(|e| e.into_inner());
+            st.skinr.sync_redeemed_skins_if_needed();
+        let mut skinr_data = st.skinr.data.write().unwrap_or_else(|e| e.into_inner());
             let lic_key = SkinrCosmeticsState::skin_lic_key(cid, &skin_hex);
             if let Some(lic) = skinr_data.skin_licenses.get_mut(&lic_key) {
                 lic.unactivated = lic.unactivated.saturating_add(u64::from(quantity));
@@ -1035,7 +1033,8 @@ fn skin_cancel_listing(
     };
     if let Some(removed) = removed {
         {
-            let mut skinr_data = st.skinr.data.write().unwrap_or_else(|e| e.into_inner());
+            st.skinr.sync_redeemed_skins_if_needed();
+        let mut skinr_data = st.skinr.data.write().unwrap_or_else(|e| e.into_inner());
             let lic_key = SkinrCosmeticsState::skin_lic_key(cid, &removed.skin_hex);
             if let Some(lic) = skinr_data.skin_licenses.get_mut(&lic_key) {
                 lic.unactivated = lic.unactivated.saturating_add(u64::from(removed.quantity));
@@ -1217,6 +1216,7 @@ fn skin_initiate_purchase(
     };
 
     let mut isk_balances: Option<(IskCents, i64, Option<IskCents>)> = None;
+    let mut plex_notices: Vec<(u64, u64, i64, i64, &'static str)> = Vec::new();
     let settled = st.db.with_mut_snapshot(|s| {
         let Some(buyer) = s.characters.get(&(cid as i64)) else {
             return false;
@@ -1245,22 +1245,23 @@ fn skin_initiate_purchase(
             } else { None };
             isk_balances = Some((new_buyer_bal, listing.seller_id as i64, new_seller_bal));
         } else if let Some((total_plex, net_plex)) = checked_plex_settlement {
-            if buyer.plex_balance < total_plex {
-                return false;
-            }
-            if let Some(seller) = s.characters.get(&(listing.seller_id as i64)) {
-                if seller.plex_balance.checked_add(net_plex).is_none() {
-                    return false;
-                }
-            }
+            let Some(buyer_rem) = s.adjust_unified_plex(cid as i64, -total_plex) else { return false; };
             if let Some(b) = s.characters.get_mut(&(cid as i64)) {
-                b.plex_balance -= total_plex;
-                if let Some(lp) = b.loyalty_points.get_mut(&(PARAGON_CORP_ID as i64)) {
-                    *lp -= buyer_lp_fee;
+                if let Some(lp) = b.loyalty_points.get_mut(&(PARAGON_CORP_ID as i64)) { *lp -= buyer_lp_fee; }
+            }
+            if s.characters.contains_key(&(listing.seller_id as i64)) {
+                let Some(seller_rem) = s.adjust_unified_plex(listing.seller_id as i64, net_plex) else {
+                    let _ = s.adjust_unified_plex(cid as i64, total_plex);
+                    return false;
+                };
+                if let Some(suid) = s.account_of_character(listing.seller_id as i64) {
+                    s.next_entity_id += 1;
+                    plex_notices.push((suid, s.next_entity_id as u64, net_plex, seller_rem, "Paragon Hub SKIN sale"));
                 }
             }
-            if let Some(seller) = s.characters.get_mut(&(listing.seller_id as i64)) {
-                seller.plex_balance += net_plex;
+            if let Some(buid) = s.account_of_character(cid as i64) {
+                s.next_entity_id += 1;
+                plex_notices.push((buid, s.next_entity_id as u64, -total_plex, buyer_rem, "Paragon Hub SKIN purchase"));
             }
         } else {
             return false;
@@ -1271,9 +1272,13 @@ fn skin_initiate_purchase(
         st.emit_account_change(cid as i64, b_bal);
         if let Some(s_bal) = s_bal_opt { if s_id != cid as i64 { st.emit_account_change(s_id, s_bal); } }
     }
+    for (uid, tx_id, delta, bal, desc) in plex_notices {
+        super::quasar_payment_store_types::queue_plex_balance_changed_notice(uid, tx_id, delta, bal, desc, now);
+    }
     if settled {
         {
-            let mut skinr_data = st.skinr.data.write().unwrap_or_else(|e| e.into_inner());
+            st.skinr.sync_redeemed_skins_if_needed();
+        let mut skinr_data = st.skinr.data.write().unwrap_or_else(|e| e.into_inner());
             let s_key = SkinrCosmeticsState::skin_lic_key(listing.seller_id, &listing.skin_hex);
             if let Some(lic) = skinr_data.skin_licenses.get_mut(&s_key) {
                 lic.escrowed = lic.escrowed.saturating_sub(u64::from(quantity));

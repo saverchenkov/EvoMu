@@ -265,6 +265,50 @@ fn populate_all_27_batch4_blobs_and_mining_ledger() -> WorldStateSnapshot {
     );
     snap.quasar_state_blobs.insert("q_key".into(), "q_val".into());
     snap.service_state_blobs.insert("svc_key".into(), "svc_val".into());
+    snap.killmail_details.insert(
+        7001,
+        crate::KillmailDetailRecord {
+            kill_id: 7001,
+            killmail_time_unix: 1_700_000_000,
+            damage_taken: 1200,
+            victim_position: Some([1.0, 2.0, 3.0]),
+            attackers: Vec::new(),
+        },
+    );
+    snap.station_office_rental_costs.insert(60_003_760, 50_000.0);
+    snap.structure_esi_timer_meta
+        .insert(1_020_000_000_001, crate::StructureEsiTimerMeta::default());
+    snap.corp_project_contributors.insert(
+        10,
+        vec![crate::CorpProjectContributorEntry {
+            character_id: 90_000_001,
+            contributed_quantity: 5,
+        }],
+    );
+    snap.loyalty_store_offers.insert(
+        1_000_035,
+        vec![crate::LoyaltyStoreOfferRecord {
+            offer_id: 1,
+            type_id: 17_703,
+            quantity: 1,
+            lp_cost: 100,
+            isk_cost: 1_000,
+            ak_cost: None,
+            required_items: Vec::new(),
+        }],
+    );
+    snap.system_jump_events.push(crate::SystemJumpEvent {
+        solar_system_id: 30_000_142,
+        character_id: 90_000_001,
+        timestamp_unix: 1_700_000_100,
+    });
+    snap.system_kill_events.push(crate::SystemKillEvent {
+        solar_system_id: 30_000_142,
+        ship_kills: 1,
+        npc_kills: 2,
+        pod_kills: 0,
+        timestamp_unix: 1_700_000_200,
+    });
     snap.mining_ledger.push(MiningLedgerRecord {
         character_id: 90_000_001,
         solar_system_id: 30_000_142,
@@ -285,11 +329,11 @@ fn all_27_batch4_blobs_and_mining_ledger_roundtrip_and_rollback() {
 
     let empty = WorldStateSnapshot::default();
     let empty_fp = compute_d6_batch4_fingerprints(&empty);
-    assert_eq!(empty_fp.blobs.len(), 27);
+    assert_eq!(empty_fp.blobs.len(), 34);
 
     let full = populate_all_27_batch4_blobs_and_mining_ledger();
     let full_fp = compute_d6_batch4_fingerprints(&full);
-    assert_eq!(full_fp.blobs.len(), 27);
+    assert_eq!(full_fp.blobs.len(), 34);
     assert_ne!(full_fp.mining_ledger, empty_fp.mining_ledger);
     for (key, empty_hash) in &empty_fp.blobs {
         assert_ne!(

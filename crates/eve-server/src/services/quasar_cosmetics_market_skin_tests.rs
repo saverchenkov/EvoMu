@@ -379,8 +379,8 @@ fn skin_listing_lifecycle_create_cancel_visibility_purchase_and_admin_expiration
         STATUS_OK
     );
     db.with_snapshot(|s| {
-        assert_eq!(s.characters.get(&buyer_ok).unwrap().plex_balance, 475);
-        assert_eq!(s.characters.get(&seller).unwrap().plex_balance, 43);
+        assert_eq!(s.unified_plex_balance(buyer_ok), 475);
+        assert_eq!(s.unified_plex_balance(seller), 43);
         assert_eq!(
             s.characters
                 .get(&buyer_ok)

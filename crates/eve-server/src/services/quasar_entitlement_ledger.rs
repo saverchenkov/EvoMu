@@ -781,20 +781,43 @@ fn redeem_record(
         );
     }
     if let Some(ref skin_hex) = asset.ship_skin_license_hex {
-        let (mut ch_id, mut sk_id, mut lic_id, mut lic_at, mut lic_n) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (lic, prev) = super::quasar_cosmetics_skinr_seq::materialize_redeemed_skin_license(
+            db,
+            updated.holder,
+            skin_hex,
+            units,
+            now_unix,
+        );
+        let (mut ch_id, mut sk_id, mut lic_id, mut lic_n) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         encode_varint_field(1, updated.holder as u64, &mut ch_id);
         encode_string_field(1, skin_hex, &mut sk_id);
         encode_bytes_field(1, &ch_id, &mut lic_id);
         encode_bytes_field(2, &sk_id, &mut lic_id);
-        encode_varint_field(1, 0, &mut lic_at);
-        encode_varint_field(2, units, &mut lic_at);
         encode_bytes_field(1, &lic_id, &mut lic_n);
+        let mut lic_at = Vec::new();
+        encode_varint_field(1, u64::from(lic.activated), &mut lic_at);
+        encode_varint_field(2, lic.unactivated, &mut lic_at);
+        encode_varint_field(3, lic.escrowed, &mut lic_at);
         encode_bytes_field(2, &lic_at, &mut lic_n);
-        ctx_queue_notice(
-            NoticeScope::Character(updated.holder),
-            any("eve_public.cosmetic.ship.skin.thirdparty.license.api.AddedNotice", lic_n),
-            now_unix,
-        );
+        if let Some(prev_lic) = prev {
+            let mut prev_at = Vec::new();
+            encode_varint_field(1, u64::from(prev_lic.activated), &mut prev_at);
+            encode_varint_field(2, prev_lic.unactivated, &mut prev_at);
+            encode_varint_field(3, prev_lic.escrowed, &mut prev_at);
+            encode_bytes_field(3, &prev_at, &mut lic_n);
+            ctx_queue_notice(
+                NoticeScope::Character(updated.holder),
+                any("eve_public.cosmetic.ship.skin.thirdparty.license.api.UpdatedNotice", lic_n),
+                now_unix,
+            );
+        } else {
+            ctx_queue_notice(
+                NoticeScope::Character(updated.holder),
+                any("eve_public.cosmetic.ship.skin.thirdparty.license.api.AddedNotice", lic_n),
+                now_unix,
+            );
+        }
     }
     ctx_queue_notice(
         NoticeScope::Character(updated.holder),
@@ -802,6 +825,16 @@ fn redeem_record(
         now_unix,
     );
     Ok(())
+}
+
+static REDEEMED_SKIN_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn redeemed_skin_generation() -> u64 {
+    REDEEMED_SKIN_GEN.load(std::sync::atomic::Ordering::Acquire)
+}
+
+pub(crate) fn sync_live_skinr_states(_db: &WorldRepository) {
+    REDEEMED_SKIN_GEN.fetch_add(1, std::sync::atomic::Ordering::Release);
 }
 
 fn delete_or_expire(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage, rsp_type: &str, require_admin: bool) -> Result<GoogleAny, (u32, String)> {

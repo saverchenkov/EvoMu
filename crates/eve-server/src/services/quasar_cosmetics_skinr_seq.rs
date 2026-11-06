@@ -237,19 +237,15 @@ fn handle_skin_license_get_owned(
     req_type: &str,
 ) -> HandlerResult {
     let cid = require_char(ctx)?;
+    state.sync_redeemed_skins_if_needed();
     settle_completed_jobs(state, ctx.now_unix());
     let data = state.data.read().unwrap_or_else(|e| e.into_inner());
-    let mut owned_hexes: Vec<String> = data
+    let owned_hexes: Vec<String> = data
         .skin_licenses
         .values()
         .filter(|lic| lic.character_id == cid)
         .map(|lic| lic.skin_hex.clone())
         .collect();
-    for (sh, _) in super::quasar_entitlement_ledger::redeemed_skin_licenses_for_char(&state.db, cid) {
-        if !owned_hexes.contains(&sh) {
-            owned_hexes.push(sh);
-        }
-    }
     let mut out = Vec::new();
     for sh in &owned_hexes {
         encode_bytes_field(1, &encode_skin_license_id(cid, sh), &mut out);
@@ -285,27 +281,11 @@ fn handle_skin_license_get(
         return Err((STATUS_FORBIDDEN, "Cannot read another character's SKIN license".into()));
     }
     let key = SkinrCosmeticsState::skin_lic_key(target_cid, &skin_hex);
+    state.sync_redeemed_skins_if_needed();
     settle_completed_jobs(state, ctx.now_unix());
     let data = state.data.read().unwrap_or_else(|e| e.into_inner());
-    let redeemed_qty = super::quasar_entitlement_ledger::redeemed_skin_licenses_for_char(&state.db, target_cid)
-        .into_iter()
-        .find(|(sh, _)| sh == &skin_hex)
-        .map(|(_, q)| q)
-        .unwrap_or(0);
-    let lic_cow = match data.skin_licenses.get(&key).cloned() {
-        Some(mut l) => {
-            l.unactivated = l.unactivated.saturating_add(redeemed_qty);
-            l
-        }
-        None if redeemed_qty > 0 => ThirdPartySkinLicense {
-            character_id: target_cid,
-            skin_hex: skin_hex.clone(),
-            activated: false,
-            unactivated: redeemed_qty,
-            escrowed: 0,
-            first_acquired_unix: ctx.now_unix(),
-        },
-        None => return Err((STATUS_NOT_FOUND, "3rd-party SKIN license not found".into())),
+    let Some(lic_cow) = data.skin_licenses.get(&key).cloned() else {
+        return Err((STATUS_NOT_FOUND, "3rd-party SKIN license not found".into()));
     };
     let mut out = Vec::new();
     encode_bytes_field(1, &encode_skin_license_attrs(&lic_cow), &mut out);
@@ -332,6 +312,7 @@ fn handle_skin_license_activate(
         return Err((STATUS_FORBIDDEN, "Cannot activate another character's SKIN license".into()));
     }
     let key = SkinrCosmeticsState::skin_lic_key(caller, &skin_hex);
+    state.sync_redeemed_skins_if_needed();
     settle_completed_jobs(state, ctx.now_unix());
     let (updated, prev) = {
         let mut data = state.data.write().unwrap_or_else(|e| e.into_inner());
@@ -446,6 +427,61 @@ fn handle_skin_license_unapply(
         "eve_public.cosmetic.ship.skin.thirdparty.license.api.UnapplyResponse",
         Vec::new(),
     ))
+}
+
+pub(super) fn materialize_redeemed_skin_license(
+    db: &eve_db::WorldRepository,
+    character_id: u32,
+    skin_hex: &str,
+    units: u64,
+    now_unix: u64,
+) -> (ThirdPartySkinLicense, Option<ThirdPartySkinLicense>) {
+    let mut data = db.with_snapshot(|s| {
+        s.quasar_state_blobs
+            .get(super::quasar_cosmetics_skinr::SKINR_BLOB_KEY)
+            .and_then(|j| serde_json::from_str::<super::quasar_cosmetics_skinr::SkinrCosmeticsData>(j).ok())
+            .unwrap_or_default()
+    });
+    data.skins.entry(skin_hex.to_string()).or_insert_with(|| SkinDesignRecord {
+        skin_hex: skin_hex.to_string(),
+        name: format!("Custom SKIN {skin_hex}"),
+        line_name: "Paragon Custom Line".into(),
+        creator_id: character_id,
+        ship_type_id: DEFAULT_SHIP_TYPE_ID,
+        pattern_blend_mode: 1,
+        slots: Vec::new(),
+        tier_level: 1,
+        first_sequenced_unix: Some(now_unix),
+    });
+    let key = SkinrCosmeticsState::skin_lic_key(character_id, skin_hex);
+    let (lic, prev) = if let Some(existing) = data.skin_licenses.get_mut(&key) {
+        let prev = existing.clone();
+        existing.unactivated = existing.unactivated.saturating_add(units);
+        if existing.first_acquired_unix == 0 {
+            existing.first_acquired_unix = now_unix;
+        }
+        (existing.clone(), Some(prev))
+    } else {
+        let lic = ThirdPartySkinLicense {
+            character_id,
+            skin_hex: skin_hex.to_string(),
+            activated: false,
+            unactivated: units,
+            escrowed: 0,
+            first_acquired_unix: now_unix,
+        };
+        data.skin_licenses.insert(key, lic.clone());
+        (lic, None)
+    };
+    if let Ok(json) = serde_json::to_string(&data) {
+        let _ = db.try_with_mut_snapshot(|s| {
+            s.quasar_state_blobs
+                .insert(super::quasar_cosmetics_skinr::SKINR_BLOB_KEY.into(), json);
+            Ok::<(), String>(())
+        });
+    }
+    super::quasar_entitlement_ledger::sync_live_skinr_states(db);
+    (lic, prev)
 }
 
 fn grant_or_increment_skin_license(
@@ -1003,20 +1039,27 @@ fn handle_job_initiate(
         (uuid, shex, job)
     };
 
-    // Check and debit PLEX sequencing cost + award Paragon EverMarks atomically in DB
-    let mut insufficient_funds = false;
+    // Check and debit PLEX sequencing cost from unified account PLEX Vault
+    let mut plex_notice: Option<(u64, u64, i64)> = None;
     state.db.with_mut_snapshot(|s| {
-        if let Some(ch) = s.characters.get_mut(&(cid as i64)) {
-            if let Some(rem_plex) = ch.plex_balance.checked_sub(total_plex_cost) {
-                ch.plex_balance = rem_plex;
-            } else {
-                insufficient_funds = true;
-            }
-        } else {
-            insufficient_funds = true;
+        if let (Some(uid), Some(rem_plex)) = (
+            s.account_of_character(cid as i64),
+            s.adjust_unified_plex(cid as i64, -total_plex_cost),
+        ) {
+            s.next_entity_id += 1;
+            plex_notice = Some((uid, s.next_entity_id as u64, rem_plex));
         }
     });
-    if insufficient_funds {
+    if let Some((uid, tx_id, rem_plex)) = plex_notice {
+        super::quasar_payment_store_types::queue_plex_balance_changed_notice(
+            uid,
+            tx_id,
+            -total_plex_cost,
+            rem_plex,
+            "SKINR Sequencing",
+            now,
+        );
+    } else {
         {
             let mut data = state.data.write().unwrap_or_else(|e| e.into_inner());
             data.sequencing_jobs.remove(&hex_bytes(&job_uuid));
@@ -1076,6 +1119,7 @@ fn handle_job_get_all_active(
     ctx: &AuthoritativeContext,
 ) -> HandlerResult {
     let cid = require_char(ctx)?;
+    state.sync_redeemed_skins_if_needed();
     settle_completed_jobs(state, ctx.now_unix());
     let data = state.data.read().unwrap_or_else(|e| e.into_inner());
     let mut out = Vec::new();
@@ -1120,6 +1164,7 @@ fn handle_job_get(
         return Err((STATUS_BAD_REQUEST, "Missing sequencing job UUID".into()));
     };
     let key = hex_bytes(&uuid);
+    state.sync_redeemed_skins_if_needed();
     settle_completed_jobs(state, ctx.now_unix());
     let data = state.data.read().unwrap_or_else(|e| e.into_inner());
     let Some(job) = data.sequencing_jobs.get(&key) else {
@@ -1179,25 +1224,31 @@ fn handle_job_complete_early(
         job.completed_unix = Some(now);
         (cost, job.skin_hex.clone(), job.quantity)
     };
-    let mut insufficient_plex = false;
+    let mut plex_notice: Option<(u64, u64, i64)> = None;
     state.db.with_mut_snapshot(|s| {
-        if let Some(ch) = s.characters.get_mut(&(caller as i64)) {
-            if ch.plex_balance < plex_cost {
-                insufficient_plex = true;
-            } else {
-                ch.plex_balance -= plex_cost;
-            }
-        } else {
-            insufficient_plex = true;
+        if let (Some(uid), Some(rem_plex)) = (
+            s.account_of_character(caller as i64),
+            s.adjust_unified_plex(caller as i64, -plex_cost),
+        ) {
+            s.next_entity_id += 1;
+            plex_notice = Some((uid, s.next_entity_id as u64, rem_plex));
         }
     });
-    if insufficient_plex {
+    let Some((uid, tx_id, rem_plex)) = plex_notice else {
         let mut data = state.data.write().unwrap_or_else(|e| e.into_inner());
         if let Some(job) = data.sequencing_jobs.get_mut(&key) {
             job.completed_unix = None;
         }
         return Err((STATUS_BAD_REQUEST, format!("Insufficient PLEX balance for early sequencing completion (requires {plex_cost} PLEX)")));
-    }
+    };
+    super::quasar_payment_store_types::queue_plex_balance_changed_notice(
+        uid,
+        tx_id,
+        -plex_cost,
+        rem_plex,
+        "SKINR Early Completion",
+        now,
+    );
     {
         let mut data = state.data.write().unwrap_or_else(|e| e.into_inner());
         if let Some(skin_rec) = data.skins.get_mut(&skin_hex) {

@@ -12,15 +12,14 @@ use eve_proto::quasar::{
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 
-pub fn emit_balance_changed_notice(
-    router_notices: &RwLock<Vec<(NoticeScope, GoogleAny)>>,
+pub(crate) fn encode_plex_balance_changed_notice(
     user_id: u64,
     tx_id: u64,
     amount: i64,
     balance_after: i64,
     description: &str,
     now_unix: u64,
-) {
+) -> GoogleAny {
     let mut notice_bytes = Vec::new();
     let mut ident = Vec::new();
     encode_varint_field(1, tx_id, &mut ident);
@@ -46,16 +45,38 @@ pub fn emit_balance_changed_notice(
     encode_string_field(6, description, &mut attr);
     encode_bytes_field(2, &attr, &mut notice_bytes);
 
+    GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.plex.vault.api.BalanceChangedNotice"),
+        value: notice_bytes,
+    }
+}
+
+pub(crate) fn queue_plex_balance_changed_notice(
+    user_id: u64,
+    tx_id: u64,
+    amount: i64,
+    balance_after: i64,
+    description: &str,
+    now_unix: u64,
+) {
+    let any = encode_plex_balance_changed_notice(user_id, tx_id, amount, balance_after, description, now_unix);
+    super::quasar_social_chat::ctx_queue_notice(NoticeScope::User(user_id as i32), any, now_unix);
+}
+
+pub fn emit_balance_changed_notice(
+    router_notices: &RwLock<Vec<(NoticeScope, GoogleAny)>>,
+    user_id: u64,
+    tx_id: u64,
+    amount: i64,
+    balance_after: i64,
+    description: &str,
+    now_unix: u64,
+) {
+    let notice = encode_plex_balance_changed_notice(user_id, tx_id, amount, balance_after, description, now_unix);
     router_notices
         .write()
         .unwrap_or_else(|e| e.into_inner())
-        .push((
-            NoticeScope::User(user_id as i32),
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.plex.vault.api.BalanceChangedNotice"),
-                value: notice_bytes,
-            },
-        ));
+        .push((NoticeScope::User(user_id as i32), notice));
 }
 
 pub fn cancel_user_payment_schedule(
@@ -718,12 +739,9 @@ pub fn register_plex_vault_extra_handlers(router: &PublicGatewayRouter, db: Arc<
                         None
                     };
 
-                    let cur = snap.account_plex_vault.entry(uid).or_insert(0);
-                    if *cur < total_cost {
+                    let Some(bal) = snap.adjust_unified_plex_for_user(uid, -total_cost) else {
                         return Err(format!("{STATUS_BAD_REQUEST}:Insufficient PLEX balance"));
-                    }
-                    *cur -= total_cost;
-                    let bal = *cur;
+                    };
                     snap.next_entity_id += 1;
                     let tx_id = snap.next_entity_id as u64;
                     let desc = format!("NES Purchase: {}", offer.name);

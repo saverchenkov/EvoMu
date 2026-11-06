@@ -26,4 +26,6 @@ mod social_store_extra_unit_tests;
 mod industry_market_pve_store_extra_unit_tests;
 #[cfg(test)]
 mod notes_lp_ledger_sync_extra_unit_tests;
+#[cfg(test)]
+mod r6_persist_regression_tests;
 

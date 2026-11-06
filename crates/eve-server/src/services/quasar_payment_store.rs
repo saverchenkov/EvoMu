@@ -95,9 +95,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 .filter(|&u| u > 0)
                 .ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))?
                 as u64;
-            let bal = db_plex_bal.with_snapshot(|snap| {
-                snap.account_plex_vault.get(&uid).copied().unwrap_or(0)
-            });
+            let bal = db_plex_bal.with_snapshot(|snap| snap.unified_plex_balance_for_user(uid));
 
             let mut curr = Vec::new();
             encode_varint_field(1, encode_zigzag64(bal * 100), &mut curr); // field 1: total_in_cents (sint64)
@@ -149,15 +147,15 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             }
 
             let now_unix = ctx.now_unix();
-            let (new_bal, tx_id) = db_plex_dep.with_mut_snapshot(|snap| {
-                let cur = snap.account_plex_vault.entry(uid).or_insert(0);
-                *cur = cur.saturating_add(deposit_amount);
-                let bal = *cur;
-                snap.next_entity_id += 1;
-                let tx_id = snap.next_entity_id as u64;
-                record_plex_transaction(snap, tx_id, uid, deposit_amount, bal, "GM Deposit", now_unix);
-                (bal, tx_id)
-            });
+            let (new_bal, tx_id) = db_plex_dep
+                .try_with_mut_snapshot(|snap| -> Result<(i64, u64), ()> {
+                    let bal = snap.adjust_unified_plex_for_user(uid, deposit_amount).ok_or(())?;
+                    snap.next_entity_id += 1;
+                    let tx_id = snap.next_entity_id as u64;
+                    record_plex_transaction(snap, tx_id, uid, deposit_amount, bal, "GM Deposit", now_unix);
+                    Ok((bal, tx_id))
+                })
+                .map_err(|_| (STATUS_BAD_REQUEST, "PLEX balance overflow".to_string()))?;
 
             emit_balance_changed_notice(
                 &router_pending_dep,
@@ -216,12 +214,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             let now_unix = ctx.now_unix();
             let (new_bal, tx_id) = db_plex_with
                 .try_with_mut_snapshot(|snap| -> Result<(i64, u64), ()> {
-                    let cur = snap.account_plex_vault.entry(uid).or_insert(0);
-                    if *cur < withdraw_amount {
-                        return Err(());
-                    }
-                    *cur -= withdraw_amount;
-                    let bal = *cur;
+                    let bal = snap.adjust_unified_plex_for_user(uid, -withdraw_amount).ok_or(())?;
                     snap.next_entity_id += 1;
                     let tx_id = snap.next_entity_id as u64;
                     record_plex_transaction(

@@ -79,10 +79,12 @@ pub(super) fn make_char(
         }
         let mut ch = s.characters.values().next().expect("demo char").clone();
         ch.character_id = cid;
+        ch.user_id = cid as u64;
         ch.corporation_id = corp_id;
         ch.alliance_id = alliance_id;
         ch.balance = IskCents(isk_cents);
-        ch.plex_balance = plex;
+        ch.plex_balance = 0;
+        s.account_plex_vault.insert(cid as u64, plex);
         ch.home_station_id = 60_003_760;
         ch.station_id = Some(60_003_760);
         ch.structure_id = None;

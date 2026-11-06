@@ -135,6 +135,13 @@ fn compute_blob_hashes(snap: &WorldStateSnapshot) -> HashMap<&'static str, u64> 
     m.insert("paused_skill_queues", fp_set(&snap.paused_skill_queues));
     m.insert("starbase_settings", fp_map(&snap.starbase_settings));
     m.insert("corp_container_logs", fp_map(&snap.corp_container_logs));
+    m.insert("killmail_details", fp_map(&snap.killmail_details));
+    m.insert("station_office_rental_costs", fp_map(&snap.station_office_rental_costs));
+    m.insert("structure_esi_timer_meta", fp_map(&snap.structure_esi_timer_meta));
+    m.insert("corp_project_contributors", fp_map(&snap.corp_project_contributors));
+    m.insert("loyalty_store_offers", fp_map(&snap.loyalty_store_offers));
+    m.insert("system_jump_events", fp_json(&snap.system_jump_events));
+    m.insert("system_kill_events", fp_json(&snap.system_kill_events));
     m.insert("quasar_state_blobs", fp_map(&snap.quasar_state_blobs));
     m.insert("service_state_blobs", fp_map(&snap.service_state_blobs));
     m
@@ -171,6 +178,17 @@ fn serialize_blob(snap: &WorldStateSnapshot, key: &str) -> Result<String, String
         }
         "starbase_settings" => map_to_json(&snap.starbase_settings),
         "corp_container_logs" => map_to_json(&snap.corp_container_logs),
+        "killmail_details" => map_to_json(&snap.killmail_details),
+        "station_office_rental_costs" => map_to_json(&snap.station_office_rental_costs),
+        "structure_esi_timer_meta" => map_to_json(&snap.structure_esi_timer_meta),
+        "corp_project_contributors" => map_to_json(&snap.corp_project_contributors),
+        "loyalty_store_offers" => map_to_json(&snap.loyalty_store_offers),
+        "system_jump_events" => {
+            serde_json::to_string(&snap.system_jump_events).map_err(|e| e.to_string())
+        }
+        "system_kill_events" => {
+            serde_json::to_string(&snap.system_kill_events).map_err(|e| e.to_string())
+        }
         "quasar_state_blobs" => map_to_json(&snap.quasar_state_blobs),
         "service_state_blobs" => map_to_json(&snap.service_state_blobs),
         _ => Ok("[]".into()),
@@ -304,6 +322,41 @@ fn apply_blob_json(snap: &mut WorldStateSnapshot, key: &str, js: &str) {
                 snap.corp_container_logs = m;
             }
         }
+        "killmail_details" => {
+            if let Some(m) = map_from_json(js) {
+                snap.killmail_details = m;
+            }
+        }
+        "station_office_rental_costs" => {
+            if let Some(m) = map_from_json(js) {
+                snap.station_office_rental_costs = m;
+            }
+        }
+        "structure_esi_timer_meta" => {
+            if let Some(m) = map_from_json(js) {
+                snap.structure_esi_timer_meta = m;
+            }
+        }
+        "corp_project_contributors" => {
+            if let Some(m) = map_from_json(js) {
+                snap.corp_project_contributors = m;
+            }
+        }
+        "loyalty_store_offers" => {
+            if let Some(m) = map_from_json(js) {
+                snap.loyalty_store_offers = m;
+            }
+        }
+        "system_jump_events" => {
+            if let Ok(v) = serde_json::from_str(js) {
+                snap.system_jump_events = v;
+            }
+        }
+        "system_kill_events" => {
+            if let Ok(v) = serde_json::from_str(js) {
+                snap.system_kill_events = v;
+            }
+        }
         "quasar_state_blobs" => {
             if let Some(m) = map_from_json(js) {
                 snap.quasar_state_blobs = m;
@@ -431,6 +484,13 @@ pub fn rollback_d6_batch4(conn: &Connection, snap: &mut WorldStateSnapshot, fp: 
     snap.paused_skill_queues = fresh.paused_skill_queues;
     snap.starbase_settings = fresh.starbase_settings;
     snap.corp_container_logs = fresh.corp_container_logs;
+    snap.killmail_details = fresh.killmail_details;
+    snap.station_office_rental_costs = fresh.station_office_rental_costs;
+    snap.structure_esi_timer_meta = fresh.structure_esi_timer_meta;
+    snap.corp_project_contributors = fresh.corp_project_contributors;
+    snap.loyalty_store_offers = fresh.loyalty_store_offers;
+    snap.system_jump_events = fresh.system_jump_events;
+    snap.system_kill_events = fresh.system_kill_events;
     snap.quasar_state_blobs = fresh.quasar_state_blobs;
     snap.service_state_blobs = fresh.service_state_blobs;
 }
