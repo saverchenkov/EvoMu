@@ -274,4 +274,6 @@ mod tests {
 
 #[cfg(test)]
 mod lib_tests;
+#[cfg(test)]
+mod testkit_deep_extra_unit_tests;
 
