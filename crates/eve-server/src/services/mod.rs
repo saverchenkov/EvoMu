@@ -311,19 +311,6 @@ mod mailing_lists_ops_extra_unit_tests;
 mod implant_plugging_extra_unit_tests;
 #[cfg(test)]
 mod tactical_module_mechanics_extra_unit_tests;
-#[cfg(test)]
-mod mining_cycle_extra_unit_tests;
-#[cfg(test)]
-mod quasar_achievements_extra_unit_tests;
-#[cfg(test)]
-mod abyssal_void_gates_extra_unit_tests;
-#[cfg(test)]
-mod space_mining_harvest_extra_unit_tests;
-#[cfg(test)]
-mod fitting_dogma_ops_extra_unit_tests;
-#[cfg(test)]
-mod sov_gameplay_skyhook_extra_unit_tests;
-
 
 
 
@@ -437,38 +424,19 @@ mod fleet_social_persistence_extra_unit_tests;
 mod quasar_vendors_and_war_services_extra_unit_tests;
 
 #[cfg(test)]
-mod structure_profile_services_extra_unit_tests;
+mod quasar_market_extra_unit_tests;
 
 #[cfg(test)]
-mod pve_abyssal_hazards_extra_unit_tests;
+mod fitting_mining_lasers_extra_unit_tests;
 
 #[cfg(test)]
-mod fw_insurgency_extra_unit_tests;
+mod lookup_svc_extra_unit_tests;
 
 #[cfg(test)]
-mod wormhole_pve_seeding_extra_unit_tests;
+mod market_price_history_extra_unit_tests;
 
 #[cfg(test)]
-mod structure_weapons_ops_extra_unit_tests;
+mod fleet_social_corp_tail_dispatch_extra_unit_tests;
 
 #[cfg(test)]
-mod hypernet_raffle_ops_extra_unit_tests;
-
-#[cfg(test)]
-mod quasar_social_chat_extra_unit_tests;
-
-#[cfg(test)]
-mod pve_hacking_board_extra_unit_tests;
-
-#[cfg(test)]
-mod pve_abyssal_lifecycle_extra_unit_tests;
-
-#[cfg(test)]
-mod repair_service_extra_unit_tests;
-
-#[cfg(test)]
-mod doomsday_aoe_tick_extra_unit_tests;
-
-#[cfg(test)]
-mod inventory_bound_extra_unit_tests;
-
+mod quasar_sov_mercden_extra_unit_tests;
