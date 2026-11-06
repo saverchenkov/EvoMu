@@ -208,7 +208,11 @@ pub use inventory_fitting::fitting_containers_ships;
 pub use space_destiny::space_probe_scanning;
 
 #[cfg(test)]
+mod combat_crimewatch_extra_unit_tests;
+#[cfg(test)]
 mod combat_fighters_extra_unit_tests;
+#[cfg(test)]
+mod combat_weapons_extra_unit_tests;
 #[cfg(test)]
 mod combat_weapons_spool_extra_unit_tests;
 #[cfg(test)]
@@ -219,6 +223,12 @@ mod fitting_containers_ships_extra_unit_tests;
 mod fitting_containers_ships_unit_tests;
 #[cfg(test)]
 mod fitting_module_cycles_helpers_extra_unit_tests;
+#[cfg(test)]
+mod fleet_social_corp_gov_extra_unit_tests;
+#[cfg(test)]
+mod fw_gameplay_insurgency_extra_unit_tests;
+#[cfg(test)]
+mod inventory_stacking_extra_unit_tests;
 #[cfg(test)]
 mod pve_dungeon_runtime_extra_unit_tests;
 #[cfg(test)]
@@ -231,6 +241,8 @@ mod insurgency_complex_ops_extra_unit_tests;
 mod pve_exploration_extra_unit_tests;
 #[cfg(test)]
 mod space_destiny_extra_unit_tests;
+#[cfg(test)]
+mod social_corp_fleet_extra_unit_tests;
 #[cfg(test)]
 mod space_probe_scanning_extra_unit_tests;
 #[cfg(test)]
@@ -264,29 +276,29 @@ mod station_structure_extra_unit_tests;
 #[cfg(test)]
 mod structure_lifecycle_extra_unit_tests;
 #[cfg(test)]
-mod market_orders_escrow_extra_unit_tests;
+mod pve_incursion_lifecycle_extra_unit_tests;
 #[cfg(test)]
-mod quasar_payment_store_extra_unit_tests;
+mod pi_helpers_extra_unit_tests;
 #[cfg(test)]
-mod combat_npcs_drones_extra_unit_tests;
+mod combat_fighters_abilities_extra_unit_tests;
 #[cfg(test)]
-mod space_entity_ops_extra_unit_tests;
+mod wormhole_lifecycle_ops_extra_unit_tests;
 #[cfg(test)]
-mod fleet_social_bookmarks_extra_unit_tests;
+mod fleet_social_corp_tail_extra_unit_tests;
 #[cfg(test)]
-mod space_cyno_filaments_extra_unit_tests;
+mod season_manager_extra_unit_tests;
 #[cfg(test)]
-mod agents_missions_extra_unit_tests;
+mod quasar_progression_extra_extra_unit_tests;
 #[cfg(test)]
-mod space_warp_jump_extra_unit_tests;
+mod mining_sites_extra_unit_tests;
 #[cfg(test)]
-mod character_contacts_extra_unit_tests;
+mod tourney_service_extra_unit_tests;
 #[cfg(test)]
-mod industry_facilities_bps_extra_unit_tests;
+mod quasar_space_services_extra_unit_tests;
 #[cfg(test)]
-mod campaigns_and_milestones_extra_unit_tests;
+mod project_discovery_extra_unit_tests;
 #[cfg(test)]
-mod structure_acl_defense_rules_extra_unit_tests;
+mod combat_legacy_ess_extra_unit_tests;
 
 
 
