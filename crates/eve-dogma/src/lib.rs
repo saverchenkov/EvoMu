@@ -1108,5 +1108,7 @@ pub fn apply_wormhole_phenomenon_to_attributes(
     !modified_attrs.is_empty()
 }
 #[cfg(test)] #[path = "dogma_lib_unit_tests.rs"] mod dogma_lib_unit_tests;
+#[cfg(test)] mod dogma_cov_unit_tests;
+#[cfg(test)] mod dogma_cov_unit_tests_part2;
 
 

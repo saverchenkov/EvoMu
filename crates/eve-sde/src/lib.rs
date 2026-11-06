@@ -1362,5 +1362,6 @@ mod tests {
 
 #[cfg(test)] mod sde_lib_extra_tests;
 #[cfg(test)] mod sde_deep_extra_unit_tests;
+#[cfg(test)] mod sde_cov_unit_tests;
 
 
