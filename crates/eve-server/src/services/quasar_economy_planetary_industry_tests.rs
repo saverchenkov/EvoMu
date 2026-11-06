@@ -104,7 +104,7 @@ fn encode_id_req(type_name: &str, id: u64) -> GoogleAny {
 
 #[test]
 fn extract_u64_and_accounting_journal_entries_and_auth() {
-    // parity: feat:economy.accounting
+    // parity: feat:quasar.accounting
     let mut m = DynamicQuasarMessage::new("test.Msg");
     m.set(1, DynamicValue::Uint64(42));
     assert_eq!(extract_u64_from_field(&m, 1), 42);
@@ -262,7 +262,7 @@ fn extract_u64_and_accounting_journal_entries_and_auth() {
 
 #[test]
 fn contract_item_exchange_and_lp_assetholding_handlers() {
-    // parity: feat:economy.contracts
+    // parity: feat:quasar.contract
     let (router, db, _sde) = make_router_and_db();
     let issuer = 211200110i64;
     let assignee = 211200111i64;
@@ -362,7 +362,7 @@ fn contract_item_exchange_and_lp_assetholding_handlers() {
 
 #[test]
 fn industry_planets_pi_moons_belts_bloodlines_wallet_and_id_handlers() {
-    // parity: feat:industry.planetary-interaction
+    // parity: feat:quasar.planetinteraction
     let (router, db, _sde) = make_router_and_db();
     let cid = 211200120i64;
     seed_char(&db, cid, 1000009, 50_000);

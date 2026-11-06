@@ -1,4 +1,4 @@
-//! Unit and mutation-killing tests for `quasar_market_contract_services` (`feat:cosmetics.skinr`, `feat:quasar.cdn`, `feat:quasar.client`, `feat:quasar.contact`, `feat:quasar.content`).
+//! Unit and mutation-killing tests for `quasar_market_contract_services` (`feat:quasar.cosmetic`, `feat:quasar.cdn`, `feat:quasar.client`, `feat:quasar.contact`, `feat:quasar.content`).
 
 use super::*;
 use crate::quasar_gateway::{
@@ -78,7 +78,7 @@ fn make_ctx(char_id: Option<u32>, role: u64) -> AuthoritativeContext {
 
 #[test]
 fn draft_get_shared_and_cosmetic_market_transactions() {
-    // parity: feat:cosmetics.skinr
+    // parity: feat:quasar.cosmetic
     assert_eq!(hex_uuid(&[0x01, 0xab, 0xff]), "01abff");
 
     for det in [

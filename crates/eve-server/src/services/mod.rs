@@ -440,3 +440,10 @@ mod fleet_social_corp_tail_dispatch_extra_unit_tests;
 
 #[cfg(test)]
 mod quasar_sov_mercden_extra_unit_tests;
+
+#[cfg(test)]
+mod market_orders_deep_extra_unit_tests;
+
+#[cfg(test)]
+mod market_quote_deep_extra_unit_tests;
+

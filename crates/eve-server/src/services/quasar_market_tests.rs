@@ -86,7 +86,7 @@ fn encode_id_req(type_name: &str, id: u64) -> GoogleAny {
 
 #[test]
 fn regional_station_structure_price_history_and_new_entry_notice() {
-    // parity: feat:economy.market-orders
+    // parity: feat:quasar.market
     let mut dm = DynamicQuasarMessage::new("test.Msg");
     dm.set(1, DynamicValue::Uint64(50));
     assert_eq!(extract_u64_from_field(&dm, 1), 50);
@@ -185,7 +185,7 @@ fn regional_station_structure_price_history_and_new_entry_notice() {
 
 #[test]
 fn character_and_corporation_market_order_authorization_and_queries() {
-    // parity: feat:economy.market-orders
+    // parity: feat:quasar.market
     let (router, db) = make_router_and_db();
     let cid = 211200410i64;
     let other_cid = 211200411i64;
