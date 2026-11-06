@@ -350,3 +350,21 @@ mod wallet_services_ext_extra_unit_tests;
 
 #[cfg(test)]
 mod structure_upwell_ops_extra_unit_tests;
+
+#[cfg(test)]
+mod crimewatch_bounty_extra_unit_tests;
+
+#[cfg(test)]
+mod sov_services_extra_unit_tests;
+
+#[cfg(test)]
+mod notify_emitters_tournaments_anomalies_extra_unit_tests;
+
+#[cfg(test)]
+mod petitioner_ops_extra_unit_tests;
+
+#[cfg(test)]
+mod notify_emitters_character_services_extra_unit_tests;
+
+#[cfg(test)]
+mod quasar_corp_structure_services_extra_unit_tests;
