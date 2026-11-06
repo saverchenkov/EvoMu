@@ -1,0 +1,431 @@
+//! Deep branch-coverage and mutation-killing unit tests for `macho_listener`:
+//! frame codec I/O error & timeout guards, reader task bounds/EOF/truncated paths,
+//! handshake VIP/QueueCheck/empty-SSO/mid-handshake shutdown-suspension-kick gates,
+//! `PingReq` keepalive payload variants, `MachoAddress` service extraction, `OID+`
+//! direct `SubStruct` extraction, `UserError` vs `RuntimeError` error wrapping,
+//! `MultiLoginBlocked` transport preservation, `UpdateStateRequest` & docking destiny
+//! flush order, async `OnSessionChanged` ballpark reset, and disconnect position sync.
+
+#![forbid(unsafe_code)]
+
+use crate::macho_listener::*;
+use crate::router::{NotificationTarget, ServerContext};
+use eve_db::{ServerClock, VirtualServerClock};
+use eve_machonet::{
+    placebo_crypto_hash, CryptoChallengePacket, CryptoHandshakeAck, CryptoHandshakeResult,
+    CryptoRequestPacket, CryptoServerHandshake, GPSTransportClosed, HandshakeCommand,
+    MachoAddress, MachoPacket, MachoPacketType, VersionExchange, MACHO_PROXY_NODE_ID,
+};
+use eve_proto::{marshal, PyRep};
+use std::collections::HashMap;
+use std::io::Cursor;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncWriteExt, ReadBuf};
+use tokio::net::{TcpListener, TcpStream};
+
+struct FailingAsyncReader {
+    kind: std::io::ErrorKind,
+}
+
+impl AsyncRead for FailingAsyncReader {
+    fn poll_read(self: Pin<&mut Self>, _cx: &mut Context<'_>, _buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Err(std::io::Error::new(self.kind, "injected read error")))
+    }
+}
+
+fn as_tuple(rep: &PyRep) -> &[PyRep] {
+    let PyRep::Tuple(items) = rep else { panic!("expected Tuple, got {rep:?}") };
+    items
+}
+
+fn as_list(rep: &PyRep) -> &[PyRep] {
+    let PyRep::List(items) = rep else { panic!("expected List, got {rep:?}") };
+    items
+}
+
+fn as_dict(rep: &PyRep) -> &[(PyRep, PyRep)] {
+    let PyRep::Dict(items) = rep else { panic!("expected Dict, got {rep:?}") };
+    items
+}
+
+async fn spawn_listener(ctx: Arc<ServerContext>) -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind macho test listener");
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let c = Arc::clone(&ctx);
+            tokio::spawn(async move {
+                let _ = handle_macho_client(stream, c).await;
+            });
+        }
+    });
+    addr
+}
+
+async fn read_pkt(stream: &mut TcpStream) -> Option<PyRep> {
+    tokio::time::timeout(std::time::Duration::from_secs(20), read_framed_pyrep(stream))
+        .await
+        .expect("read timeout")
+        .expect("read error")
+}
+
+async fn complete_placebo_challenge(s: &mut TcpStream, user: &str, pass: &str, sso: Option<&str>, lang: &str) {
+    let mut chal = CryptoChallengePacket::new_password_login(user, pass);
+    if let Some(tok) = sso {
+        chal.user_sso_token = Some(tok.to_string());
+    }
+    chal.user_language_id = lang.to_string();
+    write_framed_pyrep(s, &chal.to_pyrep()).await.unwrap();
+    assert_eq!(read_pkt(s).await.unwrap().as_i64(), Some(2));
+    let srv_hs = CryptoServerHandshake::from_pyrep(&read_pkt(s).await.unwrap()).unwrap();
+    write_framed_pyrep(
+        s,
+        &(CryptoHandshakeResult {
+            challenge_response_hash: placebo_crypto_hash(&srv_hs.server_challenge),
+            func_output: Vec::new(),
+            func_result: PyRep::Integer(0),
+        })
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+}
+
+async fn connect_login(addr: std::net::SocketAddr, username: &str, password: &str) -> (TcpStream, u64, u64) {
+    let mut s = TcpStream::connect(addr).await.unwrap();
+    let _hello = read_pkt(&mut s).await.unwrap();
+    write_framed_pyrep(&mut s, &VersionExchange::default().to_pyrep()).await.unwrap();
+    write_framed_pyrep(&mut s, &CryptoRequestPacket::placebo().to_pyrep()).await.unwrap();
+    assert_eq!(read_pkt(&mut s).await.unwrap().as_str(), Some("OK CC"));
+    complete_placebo_challenge(&mut s, username, password, None, "EN").await;
+    let ack = CryptoHandshakeAck::from_pyrep(&read_pkt(&mut s).await.unwrap()).unwrap();
+    let init_pkt = MachoPacket::from_pyrep(&read_pkt(&mut s).await.unwrap()).unwrap();
+    let MachoAddress::Client { client_id, .. } = init_pkt.destination else { panic!() };
+    let _sess_chg = MachoPacket::from_pyrep(&read_pkt(&mut s).await.unwrap()).unwrap();
+    (s, client_id, ack.user_id)
+}
+
+fn build_call_pkt(
+    client_id: u64,
+    user_id: u64,
+    call_id: u64,
+    destination: MachoAddress,
+    bound_id: Option<u64>,
+    method: &str,
+    args: Vec<PyRep>,
+) -> MachoPacket {
+    MachoPacket {
+        packet_type: MachoPacketType::CallReq,
+        source: MachoAddress::Client { client_id, call_id, service: None },
+        destination,
+        user_id: Some(user_id),
+        payload: PyRep::Tuple(vec![PyRep::Tuple(vec![
+            PyRep::Integer(bound_id.unwrap_or(0) as i64),
+            PyRep::SubStream(Box::new(PyRep::Tuple(vec![
+                PyRep::ascii_bytes(method),
+                PyRep::Tuple(args),
+                PyRep::Dict(Vec::new()),
+            ]))),
+        ])]),
+        named_payload: HashMap::new(),
+    }
+}
+
+async fn read_until_call_reply(stream: &mut TcpStream) -> MachoPacket {
+    loop {
+        let pkt = MachoPacket::from_pyrep(&read_pkt(stream).await.unwrap()).unwrap();
+        if matches!(pkt.packet_type, MachoPacketType::CallRsp | MachoPacketType::ErrorResponse) {
+            return pkt;
+        }
+    }
+}
+
+#[tokio::test]
+async fn frame_codec_io_errors_truncated_body_and_tcp_reader_task_guards() {
+    let mut bad_reader = FailingAsyncReader { kind: std::io::ErrorKind::BrokenPipe };
+    assert!(read_framed_pyrep(&mut bad_reader).await.unwrap_err().to_string().contains("injected read error"));
+
+    let mut trunc_bytes = Vec::new();
+    trunc_bytes.extend_from_slice(&12u32.to_le_bytes());
+    trunc_bytes.extend_from_slice(&[1, 2, 3]);
+    assert!(read_framed_pyrep(&mut Cursor::new(trunc_bytes)).await.is_err());
+
+    let (mut client_io, server_io) = tokio::io::duplex(8);
+    drop(server_io);
+    assert!(write_framed_pyrep(&mut client_io, &PyRep::Integer(1)).await.is_err());
+
+    let ctx = Arc::new(ServerContext::new());
+    let addr = spawn_listener(Arc::clone(&ctx)).await;
+
+    for bad_len in [0u32, (MAX_MACHO_FRAME_LEN + 1) as u32] {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let _hello = read_pkt(&mut s).await.unwrap();
+        s.write_u32_le(bad_len).await.unwrap();
+        s.flush().await.unwrap();
+        assert_eq!(read_pkt(&mut s).await, None);
+    }
+    {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let _hello = read_pkt(&mut s).await.unwrap();
+        s.write_u32_le(24).await.unwrap();
+        s.write_all(&[1, 2, 3, 4]).await.unwrap();
+        s.shutdown().await.unwrap();
+        assert_eq!(read_pkt(&mut s).await, None);
+    }
+}
+
+#[tokio::test]
+async fn handshake_queue_check_vip_empty_sso_and_mid_handshake_gates() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let _susp_uid = ctx.db.provision_player_account("midsusp_user", "secret_ms");
+    let _gone_uid = ctx.db.provision_player_account("midgone_user", "secret_mg");
+    let _ban_uid = ctx.db.provision_player_account("ban_args_user", "secret_ba");
+    ctx.db.ban_account("ban_args_user", 1_800_050_000, "Botting").unwrap();
+    let addr = spawn_listener(Arc::clone(&ctx)).await;
+
+    // 1. QueueCheck `(None, "QC")` -> queue position 1 + fresh hello -> VipKey + empty SSO + blank lang
+    {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let _hello1 = read_pkt(&mut s).await.unwrap();
+        write_framed_pyrep(&mut s, &VersionExchange::default().to_pyrep()).await.unwrap();
+        write_framed_pyrep(&mut s, &HandshakeCommand::QueueCheck.to_pyrep()).await.unwrap();
+        assert_eq!(read_pkt(&mut s).await.unwrap().as_i64(), Some(1));
+        assert!(VersionExchange::from_pyrep(&read_pkt(&mut s).await.unwrap()).is_some());
+
+        write_framed_pyrep(&mut s, &VersionExchange::default().to_pyrep()).await.unwrap();
+        write_framed_pyrep(&mut s, &HandshakeCommand::VipKey("vip-gold".into()).to_pyrep()).await.unwrap();
+        write_framed_pyrep(&mut s, &CryptoRequestPacket::placebo().to_pyrep()).await.unwrap();
+        assert_eq!(read_pkt(&mut s).await.unwrap().as_str(), Some("OK CC"));
+        complete_placebo_challenge(&mut s, "demo", "demo-secret", Some(""), "").await;
+        assert_eq!(CryptoHandshakeAck::from_pyrep(&read_pkt(&mut s).await.unwrap()).unwrap().user_id, 1);
+    }
+
+    // 2. Banned login includes `expiry` and `until` arguments on `GPSTransportClosed`
+    {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let _ = read_pkt(&mut s).await.unwrap();
+        write_framed_pyrep(&mut s, &VersionExchange::default().to_pyrep()).await.unwrap();
+        write_framed_pyrep(&mut s, &CryptoRequestPacket::placebo().to_pyrep()).await.unwrap();
+        let _ = read_pkt(&mut s).await.unwrap();
+        write_framed_pyrep(&mut s, &CryptoChallengePacket::new_password_login("ban_args_user", "secret_ba").to_pyrep()).await.unwrap();
+        let closed = GPSTransportClosed::from_pyrep(&read_pkt(&mut s).await.unwrap()).unwrap();
+        assert_eq!(closed.reason_code.as_deref(), Some("UserBanned"));
+        assert_eq!(closed.reason_args.get("expiry"), Some(&PyRep::Integer(1_800_050_000)));
+        assert_eq!(closed.reason_args.get("until"), Some(&PyRep::Integer(1_800_050_000)));
+    }
+
+    // 3. Mid-handshake suspension, deleted account (`acquire_online_lock` Err), and cluster shutdown gates
+    for (user, pass, action, expected_code) in [
+        ("midsusp_user", "secret_ms", 0u8, "AccountSuspended"),
+        ("midgone_user", "secret_mg", 1u8, "LoginAuthFailed"),
+        ("demo", "demo-secret", 2u8, "ClusterShuttingDown"),
+    ] {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let _ = read_pkt(&mut s).await.unwrap();
+        write_framed_pyrep(&mut s, &VersionExchange::default().to_pyrep()).await.unwrap();
+        write_framed_pyrep(&mut s, &CryptoRequestPacket::placebo().to_pyrep()).await.unwrap();
+        let _ = read_pkt(&mut s).await.unwrap();
+        write_framed_pyrep(&mut s, &CryptoChallengePacket::new_password_login(user, pass).to_pyrep()).await.unwrap();
+        let _ = read_pkt(&mut s).await.unwrap();
+        let srv_hs = CryptoServerHandshake::from_pyrep(&read_pkt(&mut s).await.unwrap()).unwrap();
+
+        match action {
+            0 => {
+                ctx.db.suspend_account("midsusp_user", 1_800_010_000, "Temp hold").unwrap();
+            }
+            1 => {
+                ctx.db.with_mut_snapshot(|snap| {
+                    snap.accounts.remove("midgone_user");
+                });
+            }
+            _ => {
+                ctx.cluster_state.write().unwrap().shutdown_in_progress = true;
+            }
+        }
+
+        write_framed_pyrep(
+            &mut s,
+            &(CryptoHandshakeResult {
+                challenge_response_hash: placebo_crypto_hash(&srv_hs.server_challenge),
+                func_output: Vec::new(),
+                func_result: PyRep::Integer(0),
+            })
+            .to_pyrep(),
+        )
+        .await
+        .unwrap();
+        let closed = GPSTransportClosed::from_pyrep(&read_pkt(&mut s).await.unwrap()).unwrap();
+        assert_eq!(closed.reason_code.as_deref(), Some(expected_code));
+    }
+}
+
+#[tokio::test]
+async fn post_auth_ping_variants_address_types_error_wrapping_and_multilogin() {
+    let ctx = Arc::new(ServerContext::new());
+    let addr = spawn_listener(Arc::clone(&ctx)).await;
+    let (mut s, client_id, user_id) = connect_login(addr, "demo", "demo-secret").await;
+
+    let raw_ping = MachoPacket {
+        packet_type: MachoPacketType::PingReq,
+        source: MachoAddress::Client { client_id, call_id: 10, service: None },
+        destination: MachoAddress::Node { node_id: MACHO_PROXY_NODE_ID, service: None, call_id: 0 },
+        user_id: Some(user_id),
+        payload: PyRep::None,
+        named_payload: HashMap::new(),
+    };
+    write_framed_pyrep(&mut s, &raw_ping.to_pyrep()).await.unwrap();
+    let rsp_raw = MachoPacket::from_pyrep(&read_pkt(&mut s).await.unwrap()).unwrap();
+    assert_eq!((rsp_raw.packet_type, rsp_raw.payload, rsp_raw.destination), (MachoPacketType::PingRsp, PyRep::None, raw_ping.source.clone()));
+
+    let fb_ping = MachoPacket { payload: PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(55)])]), ..raw_ping.clone() };
+    write_framed_pyrep(&mut s, &fb_ping.to_pyrep()).await.unwrap();
+    let rsp_fb = MachoPacket::from_pyrep(&read_pkt(&mut s).await.unwrap()).unwrap();
+    let fb_list = as_list(&as_tuple(&rsp_fb.payload)[0]);
+    assert_eq!(fb_list.len(), 10);
+    assert_eq!(as_tuple(&fb_list[1])[2], PyRep::ascii_bytes("proxy::handle_message"));
+    assert_eq!(as_tuple(&fb_list[6])[2], PyRep::ascii_bytes("server::turnaround"));
+
+    let seeded_ping = MachoPacket {
+        payload: PyRep::Tuple(vec![PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(111), PyRep::Integer(222)])])]),
+        ..raw_ping.clone()
+    };
+    write_framed_pyrep(&mut s, &seeded_ping.to_pyrep()).await.unwrap();
+    let rsp_seeded = MachoPacket::from_pyrep(&read_pkt(&mut s).await.unwrap()).unwrap();
+    let seeded_list = as_list(&as_tuple(&rsp_seeded.payload)[0]);
+    assert_eq!(seeded_list.len(), 10);
+    assert_eq!(as_tuple(&seeded_list[1])[0], PyRep::Integer(111));
+    assert_eq!(as_tuple(&seeded_list[1])[1], PyRep::Integer(222));
+
+    let node_none = build_call_pkt(client_id, user_id, 11, MachoAddress::Node { node_id: MACHO_PROXY_NODE_ID, service: None, call_id: 0 }, None, "", Vec::new());
+    write_framed_pyrep(&mut s, &node_none.to_pyrep()).await.unwrap();
+    let rt_err = read_until_call_reply(&mut s).await;
+    assert_eq!(rt_err.packet_type, MachoPacketType::ErrorResponse);
+    let PyRep::Bytes(rt_bytes) = &as_tuple(&as_tuple(&rt_err.payload)[2])[0] else { panic!() };
+    let PyRep::ObjectEx { header: rt_hdr, .. } = marshal::decode(rt_bytes).unwrap() else { panic!() };
+    assert_eq!(as_tuple(&rt_hdr)[0], PyRep::Token("exceptions.RuntimeError".into()));
+
+    for (cid_num, dest) in [
+        (12, MachoAddress::Client { client_id, call_id: 12, service: Some("config".into()) }),
+        (13, MachoAddress::Broadcast { broadcast_id: "config".into(), id_type: "clientid".into(), narrowcast: vec![client_id] }),
+    ] {
+        let call = build_call_pkt(client_id, user_id, cid_num, dest, None, "GetMap", vec![PyRep::Integer(30_000_142)]);
+        write_framed_pyrep(&mut s, &call.to_pyrep()).await.unwrap();
+        assert_eq!(read_until_call_reply(&mut s).await.packet_type, MachoPacketType::CallRsp);
+    }
+
+    let sel = build_call_pkt(client_id, user_id, 14, MachoAddress::Node { node_id: MACHO_PROXY_NODE_ID, service: Some("charUnboundMgr".into()), call_id: 0 }, None, "SelectCharacterID", vec![PyRep::Integer(90_000_001)]);
+    write_framed_pyrep(&mut s, &sel.to_pyrep()).await.unwrap();
+    assert_eq!(read_until_call_reply(&mut s).await.packet_type, MachoPacketType::CallRsp);
+
+    let scan_call = build_call_pkt(client_id, user_id, 15, MachoAddress::Node { node_id: MACHO_PROXY_NODE_ID, service: Some("scanMgr".into()), call_id: 0 }, None, "GetSystemScanMgr", Vec::new());
+    write_framed_pyrep(&mut s, &scan_call.to_pyrep()).await.unwrap();
+    let scan_rsp = read_until_call_reply(&mut s).await;
+    assert_eq!(scan_rsp.packet_type, MachoPacketType::CallRsp);
+    assert!(scan_rsp.named_payload.contains_key("OID+"));
+
+    let bad_char = build_call_pkt(client_id, user_id, 16, MachoAddress::Node { node_id: MACHO_PROXY_NODE_ID, service: Some("charMgr".into()), call_id: 0 }, None, "GetPublicInfo3", vec![PyRep::Integer(999_999_999)]);
+    write_framed_pyrep(&mut s, &bad_char.to_pyrep()).await.unwrap();
+    let usr_err = read_until_call_reply(&mut s).await;
+    assert_eq!(usr_err.packet_type, MachoPacketType::ErrorResponse);
+    let PyRep::Bytes(usr_bytes) = &as_tuple(&as_tuple(&usr_err.payload)[2])[0] else { panic!() };
+    let PyRep::ObjectEx { header: usr_hdr, .. } = marshal::decode(usr_bytes).unwrap() else { panic!() };
+    assert_eq!(as_tuple(&usr_hdr)[0], PyRep::Token("eveexceptions.UserError".into()));
+
+    let _ = ctx.db.acquire_online_lock(user_id, 999_999, Some(90_000_001), false, ctx.now_unix());
+    write_framed_pyrep(&mut s, &raw_ping.to_pyrep()).await.unwrap();
+    assert_eq!(MachoPacket::from_pyrep(&read_pkt(&mut s).await.unwrap()).unwrap().packet_type, MachoPacketType::PingRsp);
+}
+
+#[tokio::test]
+async fn ballpark_update_state_docking_flush_session_change_and_disconnect_sync() {
+    let ctx = Arc::new(ServerContext::new());
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000));
+    ctx.set_clock(Arc::clone(&clock) as Arc<dyn ServerClock>);
+    let addr = spawn_listener(Arc::clone(&ctx)).await;
+    let (mut s, client_id, user_id) = connect_login(addr, "demo", "demo-secret").await;
+    let (char_id, ship_id) = (90_000_001_i64, 100_000_001_i64);
+
+    let call = |cid: u64, svc: &str, bid: Option<u64>, m: &str, args: Vec<PyRep>| {
+        build_call_pkt(client_id, user_id, cid, MachoAddress::Node { node_id: MACHO_PROXY_NODE_ID, service: Some(svc.into()), call_id: 0 }, bid, m, args)
+    };
+
+    write_framed_pyrep(&mut s, &call(1, "charUnboundMgr", None, "SelectCharacterID", vec![PyRep::Integer(char_id)]).to_pyrep()).await.unwrap();
+    let _ = read_until_call_reply(&mut s).await;
+    write_framed_pyrep(&mut s, &call(2, "stationSvc", None, "Undock", vec![]).to_pyrep()).await.unwrap();
+    let _ = read_until_call_reply(&mut s).await;
+
+    let jita = ctx.systems.get_or_spawn(30_000_142);
+    let _ = jita.step_manual(1.0).await.unwrap();
+
+    write_framed_pyrep(&mut s, &call(3, "beyonce", None, "MachoBindObject", vec![PyRep::Integer(30_000_142), PyRep::None]).to_pyrep()).await.unwrap();
+    let bind_rsp = read_until_call_reply(&mut s).await;
+    let oid_val = bind_rsp.named_payload.get("OID+").map(as_dict).and_then(|e| e.first()).and_then(|(k, _)| k.as_str()).and_then(|s_oid| s_oid.split(':').nth(1)).and_then(|n| n.parse::<u64>().ok()).unwrap();
+
+    write_framed_pyrep(&mut s, &call(4, "beyonce", Some(oid_val), "UpdateStateRequest", vec![]).to_pyrep()).await.unwrap();
+    assert_eq!(read_until_call_reply(&mut s).await.packet_type, MachoPacketType::CallRsp);
+
+    // Tick system while `ballpark_ready == true` so `sys_rx` streams `DoDestinyUpdate`, and queue pre-RPC notifications before next CallReq
+    let _ = jita.step_manual(1.0).await.unwrap();
+    assert_eq!(MachoPacket::from_pyrep(&read_pkt(&mut s).await.unwrap()).unwrap().packet_type, MachoPacketType::Notification);
+    ctx.notify_account_change(char_id, "cash", 1000, 456.0);
+    ctx.notify(NotificationTarget::Character(char_id), "OnSessionChanged", "charid", vec![]);
+
+    write_framed_pyrep(&mut s, &call(5, "beyonce", Some(oid_val), "CmdSetSpeedFraction", vec![PyRep::Real(0.5)]).to_pyrep()).await.unwrap();
+    let _ = read_until_call_reply(&mut s).await;
+    while tokio::time::timeout(std::time::Duration::from_millis(20), read_pkt(&mut s)).await.is_ok() {}
+
+    // Advance clock past 10s undock session-change timer so `Dock` succeeds & flushes `DoDestinyUpdate` BEFORE `SessionChangeNotification`
+    clock.advance_secs(15);
+    write_framed_pyrep(&mut s, &call(6, "stationSvc", None, "Dock", vec![PyRep::Integer(60_003_760)]).to_pyrep()).await.unwrap();
+    assert_eq!(read_until_call_reply(&mut s).await.packet_type, MachoPacketType::CallRsp);
+    let p1 = MachoPacket::from_pyrep(&read_pkt(&mut s).await.unwrap()).unwrap().packet_type;
+    let p2 = MachoPacket::from_pyrep(&read_pkt(&mut s).await.unwrap()).unwrap().packet_type;
+    assert_eq!((p1, p2), (MachoPacketType::Notification, MachoPacketType::SessionChangeNotification));
+
+    // Undock again, spawn + move ship ball, drop connection -> disconnect cleanup saves ball position
+    clock.advance_secs(15);
+    write_framed_pyrep(&mut s, &call(7, "stationSvc", None, "Undock", vec![]).to_pyrep()).await.unwrap();
+    let _ = read_until_call_reply(&mut s).await;
+    let _ = jita.step_manual(1.0).await.unwrap();
+    let _ = jita.set_ball_position(ship_id, glam::DVec3::new(12_345.0, -6_789.0, 42.0)).await;
+    drop(s);
+    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    assert!(ctx.db.get_online_session(user_id).is_none());
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.item_positions.get(&ship_id).copied()), Some([12_345.0, -6_789.0, 42.0]));
+
+    let (mut s2, _c2, u2) = connect_login(addr, "demo", "demo-secret").await;
+    let active_sid = ctx.db.get_online_session(u2).unwrap().session_id;
+    ctx.disconnect_session(active_sid, "CUSTOM_CLOSE", "Server maintenance");
+    let closed = GPSTransportClosed::from_pyrep(&read_pkt(&mut s2).await.unwrap()).unwrap();
+    assert_eq!((closed.reason_code.as_deref(), closed.reason.as_str()), (Some("CUSTOM_CLOSE"), "Server maintenance"));
+
+    clock.advance_secs(15);
+    let (mut s3, c3, u3) = connect_login(addr, "demo", "demo-secret").await;
+    let call3 = |cid: u64, svc: &str, m: &str, args: Vec<PyRep>| {
+        build_call_pkt(c3, u3, cid, MachoAddress::Node { node_id: MACHO_PROXY_NODE_ID, service: Some(svc.into()), call_id: 0 }, None, m, args)
+    };
+    write_framed_pyrep(&mut s3, &call3(1, "charUnboundMgr", "SelectCharacterID", vec![PyRep::Integer(char_id)]).to_pyrep()).await.unwrap();
+    let _ = read_until_call_reply(&mut s3).await;
+    write_framed_pyrep(&mut s3, &call3(2, "stationSvc", "Undock", vec![]).to_pyrep()).await.unwrap();
+    let _ = read_until_call_reply(&mut s3).await;
+    write_framed_pyrep(&mut s3, &call3(3, "beyonce", "MachoBindObject", vec![PyRep::Integer(30_000_142), PyRep::None]).to_pyrep()).await.unwrap();
+    let _ = read_until_call_reply(&mut s3).await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = 30_000_144;
+        }
+    });
+    ctx.notify(NotificationTarget::Character(char_id), "OnSessionChanged", "charid", vec![]);
+    loop {
+        let p = MachoPacket::from_pyrep(&read_pkt(&mut s3).await.unwrap()).unwrap();
+        if let MachoAddress::Broadcast { broadcast_id, .. } = &p.destination {
+            if broadcast_id == "OnSessionChanged" {
+                break;
+            }
+        }
+    }
+}

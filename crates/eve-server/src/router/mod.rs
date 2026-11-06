@@ -13,6 +13,8 @@ pub mod session;
 #[cfg(test)]
 mod binding_deep_extra_unit_tests;
 #[cfg(test)]
+mod cache_notifications_deep_extra_unit_tests;
+#[cfg(test)]
 mod dispatch_deep_extra_unit_tests;
 #[cfg(test)]
 mod router_advanced_branches_tests;
