@@ -30,8 +30,11 @@ mod config_starter_state_deep_extra_unit_tests;
 #[cfg(test)]
 mod fast_checkout_plex_tests;
 #[cfg(test)]
+mod flight_recorder_misc_deep_extra_unit_tests;
+#[cfg(test)]
 mod formulas_extra_unit_tests;
 #[cfg(test)]
+mod living_world_seeder_deep_extra_unit_tests;
 mod lifecycle_bug_reporting_deep_extra_unit_tests;
 #[cfg(test)]
 mod macho_listener_deep_extra_unit_tests;
