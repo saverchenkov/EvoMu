@@ -519,3 +519,5 @@ mod structures_acl_sov_shipcaster_and_fw;
 mod r8_shard_b_commerce_chat;
 mod r8_shard_b_biomass_esi_market;
 mod r8_shard_b_combat_tactical_warp;
+mod cosmetics_skinr_redemption_and_logo_persistence;
+mod navigation_warp_tunnel_immobility;

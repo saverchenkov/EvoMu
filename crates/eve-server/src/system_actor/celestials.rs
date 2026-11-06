@@ -63,11 +63,7 @@ impl SystemHandle {
 
     pub fn try_stop_ball(&self, ball_id: BallId) {
         if let Ok(mut bp) = self.ballpark.write() {
-            let _ = bp.set_mode(ball_id, MovementMode::Stop);
-            if let Some(b) = bp.balls.get_mut(&ball_id) {
-                b.speed_fraction = 0.0;
-                b.velocity = DVec3::ZERO;
-            }
+            let _ = bp.force_stop_warp(ball_id);
         }
     }
 

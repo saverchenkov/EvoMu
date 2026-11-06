@@ -4339,7 +4339,7 @@ async fn test_warp_vector_rejects_mid_warp_and_abyssal_and_cmd_dock_checks_upwel
     assert_eq!(err_mid.code, "ShipAlreadyInWarp");
 
     // 2. Abyssal Deadspace (32_000_001) must reject warpVectorMgr.UseVector
-    sys.set_movement_mode(ship_id, MovementMode::Stop).await.unwrap();
+    sys.force_stop_warp(ship_id).unwrap();
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(c) = snap.characters.get_mut(&char_id) {
             c.solar_system_id = 32_000_001;

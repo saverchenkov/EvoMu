@@ -1402,7 +1402,7 @@ async fn test_r2_track1_nullifier_skill_scaling_cyno_guards_and_ewarp_reconnect(
         in_warp_err.code, "CannotActivateInWarp",
         "Interdiction Nullifier must reject activation after entering warp tunnel"
     );
-    sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await.unwrap();
+    sys_handle.force_stop_warp(ship_id).unwrap();
 
     // 2. Issue #74: Mobile Cyno Inhibitor uses live ballpark position
     let inhib_id = 60_000_402;

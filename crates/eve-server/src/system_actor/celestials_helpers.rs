@@ -211,6 +211,17 @@ pub(crate) fn fast_forward_clock_in_actor(
     let _ = event_tx_actor.send(broadcast);
 }
 
+impl SystemHandle {
+    /// Server-authoritative warp termination (reconnect recovery / admin reset) that stops even
+    /// mid-tunnel warps, zeroes velocity, and restores `SetBallMassive { is_massive: true }`.
+    pub fn force_stop_warp(&self, ball_id: BallId) -> Result<u64, String> {
+        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        bp.force_stop_warp(ball_id)?;
+        crate::system_actor::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        Ok(bp.current_tick)
+    }
+}
+
 #[cfg(test)]
 #[path = "celestials_helpers_cov_unit_tests.rs"]
 mod celestials_helpers_cov_unit_tests;

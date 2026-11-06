@@ -305,6 +305,39 @@ pub(crate) async fn emit_cloak_transition(ctx: &ServerContext, sys_id: u32, ship
     }
 }
 
+fn map_destiny_nav_err(e: String) -> BridgeRpcError {
+    if e.starts_with("ShipAlreadyInWarp") {
+        BridgeRpcError {
+            code: "ShipAlreadyInWarp".into(),
+            message: e,
+        }
+    } else {
+        BridgeRpcError {
+            code: "DestinyCommandFailed".into(),
+            message: e,
+        }
+    }
+}
+
+fn cancel_pending_warp_align_if_needed(
+    ctx: &ServerContext,
+    ship_id: i64,
+    prev_mode: &MovementMode,
+) {
+    if matches!(
+        prev_mode,
+        MovementMode::Warp {
+            phase: eve_destiny::WarpPhase::Aligning,
+            ..
+        }
+    ) {
+        ctx.active_warps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&ship_id);
+    }
+}
+
 /// `beyonce.CmdGotoPoint(x, y, z)`: steer toward an absolute point and emit `GotoPoint`.
 pub(crate) async fn handle_cmd_goto_point(
     ctx: &ServerContext,
@@ -313,6 +346,9 @@ pub(crate) async fn handle_cmd_goto_point(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(err("NotInSpace", "Cannot steer ship while docked".into()));
+    }
     let sys_id = ServerContext::require_bound_system(bound_entry, super::BEYONCE_SVC)?;
     let ship_id = session
         .ship_id
@@ -322,8 +358,16 @@ pub(crate) async fn handle_cmd_goto_point(
     let (Some(x), Some(y), Some(z)) = (coord(0), coord(1), coord(2)) else {
         return Err(err("InvalidArguments", "CmdGotoPoint expects finite (x, y, z)".into()));
     };
-    super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let handle = ctx.systems.get_or_spawn(sys_id);
+    let Some((_, current_ball)) = handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .map_err(|e| err("DestinyCommandFailed", e))?
+    else {
+        return Err(err("ShipNotInSpace", "Active ship is not spawned in Ballpark".into()));
+    };
+    crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
+    super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
     ensure_not_mjd_spooling(&handle, ship_id).await?;
     let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
@@ -331,7 +375,8 @@ pub(crate) async fn handle_cmd_goto_point(
         .goto_point(ship_id, DVec3::new(x, y, z))
         .await
         .map(|tick| PyRep::Integer(tick as i64))
-        .map_err(|e| err("DestinyCommandFailed", e))?;
+        .map_err(map_destiny_nav_err)?;
+    cancel_pending_warp_align_if_needed(ctx, ship_id, &current_ball.mode);
     let _ = crate::services::pve_dungeon_runtime::on_dungeon_approach(
         ctx, char_id, sys_id, ship_id, None,
     )
@@ -711,6 +756,7 @@ pub(crate) async fn handle_cmd_goto_direction(
             message: "Active ship is not spawned in Ballpark".into(),
         });
     };
+    crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
     ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
     ensure_not_mjd_spooling(&handle, ship_id).await?;
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
@@ -718,14 +764,12 @@ pub(crate) async fn handle_cmd_goto_direction(
     if current_ball.speed_fraction <= 0.0 {
         let _ = handle.set_speed_fraction(ship_id, 1.0).await;
     }
-    handle
+    let tick = handle
         .set_movement_mode(ship_id, MovementMode::GotoDirection { direction })
         .await
-        .map(|tick| PyRep::Integer(tick as i64))
-        .map_err(|e| BridgeRpcError {
-            code: "DestinyCommandFailed".into(),
-            message: e,
-        })
+        .map_err(map_destiny_nav_err)?;
+    cancel_pending_warp_align_if_needed(ctx, ship_id, &current_ball.mode);
+    Ok(PyRep::Integer(tick as i64))
 }
 
 pub(crate) async fn handle_cmd_stop(
@@ -752,7 +796,7 @@ pub(crate) async fn handle_cmd_stop(
     };
     let handle = ctx.systems.get_or_spawn(sys_id);
     ensure_not_mjd_spooling(&handle, ship_id).await?;
-    let Some(_) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
+    let Some((_, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
         code: "DestinyCommandFailed".into(),
         message: e,
     })? else {
@@ -761,14 +805,13 @@ pub(crate) async fn handle_cmd_stop(
             message: "Active ship is not spawned in Ballpark".into(),
         });
     };
+    crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let tick = handle
         .set_movement_mode(ship_id, MovementMode::Stop)
         .await
-        .map_err(|e| BridgeRpcError {
-            code: "DestinyCommandFailed".into(),
-            message: e,
-        })?;
+        .map_err(map_destiny_nav_err)?;
+    cancel_pending_warp_align_if_needed(ctx, ship_id, &current_ball.mode);
     crate::services::notify_emitters_space_dungeons::emit_destiny_updates(
         ctx,
         char_id,
@@ -820,7 +863,7 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
     }
     let handle = ctx.systems.get_or_spawn(sys_id);
     ensure_not_mjd_spooling(&handle, ship_id).await?;
-    let Some(_) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
+    let Some((_, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
         code: "DestinyCommandFailed".into(),
         message: e,
     })? else {
@@ -829,6 +872,7 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
             message: "Active ship is not spawned in Ballpark".into(),
         });
     };
+    crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
     if fraction > 0.0 {
         ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
     }
@@ -836,14 +880,35 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
     if fraction > 0.0 {
         let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
     }
+    let clamped = fraction.clamp(0.0, 1.0);
+    if let MovementMode::Warp {
+        destination,
+        phase: eve_destiny::WarpPhase::Aligning,
+        ..
+    } = current_ball.mode
+    {
+        if clamped <= 0.0 {
+            let tick = handle
+                .set_movement_mode(ship_id, MovementMode::Stop)
+                .await
+                .map_err(map_destiny_nav_err)?;
+            cancel_pending_warp_align_if_needed(ctx, ship_id, &current_ball.mode);
+            return Ok(PyRep::Integer(tick as i64));
+        } else if clamped < 0.75 {
+            let dir = (destination - current_ball.position).normalize_or_zero();
+            let direction = if dir.length_squared() > 1e-6 { dir } else { DVec3::X };
+            handle
+                .set_movement_mode(ship_id, MovementMode::GotoDirection { direction })
+                .await
+                .map_err(map_destiny_nav_err)?;
+            cancel_pending_warp_align_if_needed(ctx, ship_id, &current_ball.mode);
+        }
+    }
     handle
-        .set_speed_fraction(ship_id, fraction.clamp(0.0, 1.0))
+        .set_speed_fraction(ship_id, clamped)
         .await
         .map(|tick| PyRep::Integer(tick as i64))
-        .map_err(|e| BridgeRpcError {
-            code: "DestinyCommandFailed".into(),
-            message: e,
-        })
+        .map_err(map_destiny_nav_err)
 }
 
 pub(crate) async fn handle_cmd_orbit_or_follow(
@@ -893,6 +958,7 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
             message: "Active ship is not spawned in Ballpark".into(),
         });
     };
+    crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
     let Some(_) = resolve_system_target_position(ctx, sys_id, char_id, target_id).await else {
         return Err(BridgeRpcError {
             code: "TargetNotFound".into(),
@@ -927,10 +993,8 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
         .set_movement_mode(ship_id, mode)
         .await
         .map(|tick| PyRep::Integer(tick as i64))
-        .map_err(|e| BridgeRpcError {
-            code: "DestinyCommandFailed".into(),
-            message: e,
-        })?;
+        .map_err(map_destiny_nav_err)?;
+    cancel_pending_warp_align_if_needed(ctx, ship_id, &current_ball.mode);
     let _ = crate::services::pve_dungeon_runtime::on_dungeon_approach(
         ctx,
         char_id,
@@ -994,6 +1058,7 @@ pub(crate) async fn handle_cmd_align_to(
             message: "Active ship is not spawned in Ballpark".into(),
         });
     };
+    crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
     let target_pos_opt = if let Some(bm_id) = bookmark_id {
         if (32_000_000..=32_999_999).contains(&sys_id) {
             return Err(BridgeRpcError {
@@ -1026,15 +1091,13 @@ pub(crate) async fn handle_cmd_align_to(
     ensure_not_mjd_spooling(&handle, ship_id).await?;
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
-    let _ = handle.set_speed_fraction(ship_id, 1.0).await;
     let res = handle
         .set_movement_mode(ship_id, MovementMode::GotoDirection { direction })
         .await
         .map(|tick| PyRep::Integer(tick as i64))
-        .map_err(|e| BridgeRpcError {
-            code: "DestinyCommandFailed".into(),
-            message: e,
-        })?;
+        .map_err(map_destiny_nav_err)?;
+    let _ = handle.set_speed_fraction(ship_id, 1.0).await;
+    cancel_pending_warp_align_if_needed(ctx, ship_id, &current_ball.mode);
     let _ = crate::services::pve_dungeon_runtime::on_dungeon_approach(
         ctx,
         char_id,

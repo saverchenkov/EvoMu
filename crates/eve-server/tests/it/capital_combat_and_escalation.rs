@@ -1508,7 +1508,7 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
     }).await;
     let warp_err = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSlashModule", slash_vec(dd_mod_id, 1.0, 0.0, 0.0)).await.unwrap_err();
     assert_eq!(warp_err.code, "CantActivateInWarp");
-    let _ = sys.set_movement_mode(titan_id, MovementMode::Stop).await;
+    let _ = sys.force_stop_warp(titan_id);
 
     let err_fuel = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSlashModule", slash_vec(dd_mod_id, 1.0, 0.0, 0.0)).await.unwrap_err();
     assert_eq!(err_fuel.code, "InsufficientFuel");

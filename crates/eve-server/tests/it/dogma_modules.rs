@@ -1204,9 +1204,7 @@ async fn test_phase_4_dg5_targeting_lock_and_break() {
         )),
         "Expected OnTarget lost event when target warps away"
     );
-    sys.set_movement_mode(near_target_id, MovementMode::Stop)
-        .await
-        .expect("stop target");
+    sys.force_stop_warp(near_target_id).expect("stop target");
 
     // Re-lock and verify entering warp clears all locks on the warping attacker ship
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(near_target_id)], &kw, None).await

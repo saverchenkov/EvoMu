@@ -7,11 +7,13 @@
 #![forbid(unsafe_code)]
 
 use super::quasar_cosmetics_skinr::{
-    any_msg, as_u64, encode_layout_slot, encode_skin_id, encode_skin_license_attrs,
-    encode_skin_license_id, parse_component_id, put_duration, put_seq, put_timestamp, require_char,
-    seq_of, str_of, sub, tier_base_duration_secs, tier_base_plex_cents, HandlerResult,
-    SequencingJobRecord, SkinDesignRecord, SkinLayoutSlot, SkinrCosmeticsState,
-    ThirdPartySkinLicense, CATEGORY_SHIP,
+    any_msg, as_u64, encode_skin_attributes, encode_skin_id,
+    encode_skin_license_attrs, encode_skin_license_id, parse_component_id, parse_skin_hex,
+    parse_skin_license_id, put_duration, put_seq, put_timestamp, queue_ship_skin_set_notice,
+    queue_skin_license_added_notice, queue_skin_license_deleted_notice,
+    queue_skin_license_updated_notice, register_live_skinr_state, require_char, seq_of, str_of,
+    sub, tier_base_duration_secs, tier_base_plex_cents, HandlerResult, SequencingJobRecord,
+    SkinDesignRecord, SkinLayoutSlot, SkinrCosmeticsState, ThirdPartySkinLicense, CATEGORY_SHIP,
 };
 use super::quasar_social_chat::ctx_queue_notice;
 use crate::quasar_gateway::{
@@ -19,9 +21,13 @@ use crate::quasar_gateway::{
     STATUS_NOT_FOUND,
 };
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    DynamicQuasarMessage, DynamicValue, GoogleAny, WireMessage,
+    encode_bytes_field, encode_varint_field, AuthoritativeContext, DynamicQuasarMessage,
+    DynamicValue, GoogleAny, WireMessage,
 };
+#[cfg(test)]
+use eve_proto::quasar::encode_string_field;
+#[cfg(test)]
+use super::quasar_cosmetics_skinr::encode_layout_slot;
 use std::sync::Arc;
 
 const DEFAULT_SHIP_TYPE_ID: u32 = 587; // Rifter
@@ -38,173 +44,6 @@ fn job_seq_to_uuid(seq: u64) -> [u8; 16] {
 }
 
 // ============================================================================
-// Wire Encoding Helpers for Custom 3rd-Party SKINs & Licenses
-// ============================================================================
-
-fn encode_skin_attributes(rec: &SkinDesignRecord) -> Vec<u8> {
-    let mut out = Vec::new();
-    encode_string_field(1, &rec.name, &mut out);
-    encode_string_field(2, &rec.line_name, &mut out);
-    put_seq(3, rec.creator_id as u64, &mut out);
-
-    let mut layout = Vec::new();
-    for slot in &rec.slots {
-        encode_bytes_field(1, &encode_layout_slot(slot), &mut layout);
-    }
-    put_seq(2, rec.ship_type_id.max(1) as u64, &mut layout);
-    encode_varint_field(3, rec.pattern_blend_mode.max(1) as u64, &mut layout);
-    encode_bytes_field(4, &layout, &mut out);
-
-    let mut tier_msg = Vec::new();
-    encode_varint_field(1, rec.tier_level.max(1) as u64, &mut tier_msg);
-    encode_bytes_field(5, &tier_msg, &mut out);
-
-    match rec.first_sequenced_unix {
-        Some(ts) => put_timestamp(7, ts, &mut out),
-        None => encode_varint_field(6, 1, &mut out),
-    }
-    out
-}
-
-fn queue_skin_license_added_notice(lic: &ThirdPartySkinLicense, now_unix: u64) {
-    let mut payload = Vec::new();
-    encode_bytes_field(1, &encode_skin_license_id(lic.character_id, &lic.skin_hex), &mut payload);
-    encode_bytes_field(2, &encode_skin_license_attrs(lic), &mut payload);
-    ctx_queue_notice(
-        NoticeScope::Character(lic.character_id),
-        any_msg("eve_public.cosmetic.ship.skin.thirdparty.license.api.AddedNotice", payload),
-        now_unix,
-    );
-}
-
-fn queue_skin_license_updated_notice(
-    lic: &ThirdPartySkinLicense,
-    prev: &ThirdPartySkinLicense,
-    now_unix: u64,
-) {
-    let mut payload = Vec::new();
-    encode_bytes_field(1, &encode_skin_license_id(lic.character_id, &lic.skin_hex), &mut payload);
-    encode_bytes_field(2, &encode_skin_license_attrs(lic), &mut payload);
-    encode_bytes_field(3, &encode_skin_license_attrs(prev), &mut payload);
-    ctx_queue_notice(
-        NoticeScope::Character(lic.character_id),
-        any_msg("eve_public.cosmetic.ship.skin.thirdparty.license.api.UpdatedNotice", payload),
-        now_unix,
-    );
-}
-
-fn queue_skin_license_deleted_notice(character_id: u32, skin_hex: &str, now_unix: u64) {
-    let mut payload = Vec::new();
-    encode_bytes_field(1, &encode_skin_license_id(character_id, skin_hex), &mut payload);
-    ctx_queue_notice(
-        NoticeScope::Character(character_id),
-        any_msg("eve_public.cosmetic.ship.skin.thirdparty.license.api.DeletedNotice", payload),
-        now_unix,
-    );
-}
-
-fn queue_ship_skin_set_notice(
-    character_id: u32,
-    ship_id: u64,
-    thirdparty_skin_hex: Option<&str>,
-    now_unix: u64,
-) {
-    let mut skin_state = Vec::new();
-    match thirdparty_skin_hex {
-        Some(hex) => {
-            let mut tp = Vec::new();
-            encode_bytes_field(1, &encode_skin_id(hex), &mut tp);
-            encode_bytes_field(2, &tp, &mut skin_state);
-        }
-        None => encode_varint_field(3, 1, &mut skin_state),
-    }
-    let mut state_msg = Vec::new();
-    put_seq(1, character_id as u64, &mut state_msg);
-    put_seq(2, ship_id, &mut state_msg);
-    encode_bytes_field(3, &skin_state, &mut state_msg);
-
-    let mut payload = Vec::new();
-    encode_bytes_field(1, &state_msg, &mut payload);
-    ctx_queue_notice(
-        NoticeScope::Character(character_id),
-        any_msg("eve_public.cosmetic.ship.api.SetNotice", payload),
-        now_unix,
-    );
-}
-
-fn parse_skin_hex(dyn_msg: &DynamicQuasarMessage, raw: &[u8]) -> Option<String> {
-    if let Some(s) = sub(dyn_msg, 1).and_then(|m| str_of(m, 1)).filter(|s| !s.is_empty()) {
-        return Some(s);
-    }
-    if let Some(s) = str_of(dyn_msg, 1).filter(|s| !s.is_empty()) {
-        return Some(s);
-    }
-    if let Some(id) = sub(dyn_msg, 1).and_then(|m| m.get(1)).and_then(as_u64) {
-        return Some(format!("skin_{id:08x}"));
-    }
-    let wm = WireMessage::decode(raw).ok()?;
-    let f1 = wm.fields.iter().find(|f| f.field_number == 1)?;
-    if let Some(b) = f1.value.as_bytes() {
-        if let Ok(inner) = WireMessage::decode(b) {
-            if let Some(inf1) = inner.fields.iter().find(|x| x.field_number == 1) {
-                if let Some(s) = inf1
-                    .value
-                    .as_bytes()
-                    .and_then(|sb| String::from_utf8(sb.to_vec()).ok())
-                    .filter(|s| !s.is_empty())
-                {
-                    return Some(s);
-                }
-                if let Some(v) = inf1.value.as_varint() {
-                    return Some(format!("skin_{v:08x}"));
-                }
-            }
-        }
-        if let Some(s) = String::from_utf8(b.to_vec()).ok().filter(|s| !s.is_empty()) {
-            return Some(s);
-        }
-    }
-    None
-}
-
-fn parse_skin_license_id(
-    dyn_msg: &DynamicQuasarMessage,
-    raw: &[u8],
-) -> Option<(Option<u32>, String)> {
-    if let Some(lic_m) = sub(dyn_msg, 1) {
-        let char_id = seq_of(lic_m, 1).map(|u| u as u32);
-        if let Some(h) = sub(lic_m, 2)
-            .and_then(|sm| str_of(sm, 1))
-            .or_else(|| str_of(lic_m, 2))
-            .filter(|s| !s.is_empty())
-        {
-            return Some((char_id, h));
-        }
-    }
-    let wm = WireMessage::decode(raw).ok()?;
-    let b1 = wm.fields.iter().find(|f| f.field_number == 1)?.value.as_bytes()?;
-    let lwm = WireMessage::decode(b1).ok()?;
-    let char_id = lwm
-        .fields
-        .iter()
-        .find(|f| f.field_number == 1)
-        .and_then(|f| f.value.as_bytes())
-        .and_then(|cb| WireMessage::decode(cb).ok())
-        .and_then(|cwm| {
-            cwm.fields
-                .iter()
-                .find(|f| f.field_number == 1)
-                .and_then(|f| f.value.as_varint())
-                .map(|u| u as u32)
-        });
-    let sb = lwm.fields.iter().find(|f| f.field_number == 2)?.value.as_bytes()?;
-    let swm = WireMessage::decode(sb).ok()?;
-    let hb = swm.fields.iter().find(|f| f.field_number == 1)?.value.as_bytes()?;
-    let s = String::from_utf8(hb.to_vec()).ok().filter(|s| !s.is_empty())?;
-    Some((char_id, s))
-}
-
-// ============================================================================
 // 3rd-Party SKIN Design & License Handlers
 // ============================================================================
 
@@ -217,6 +56,7 @@ fn handle_skin_get(
     let Some(skin_hex) = parse_skin_hex(dyn_msg, raw) else {
         return Err((STATUS_BAD_REQUEST, "Missing 3rd-party SKIN identifier hex".into()));
     };
+    state.sync_redeemed_skins_if_needed();
     let data = state.data.read().unwrap_or_else(|e| e.into_inner());
     let Some(design) = data.skins.get(&skin_hex) else {
         return Err((STATUS_NOT_FOUND, format!("3rd-party SKIN design '{skin_hex}' not found")));
@@ -369,6 +209,8 @@ fn handle_skin_license_apply(
     }
 
     let key = SkinrCosmeticsState::skin_lic_key(caller, &skin_hex);
+    state.sync_redeemed_skins_if_needed();
+    settle_completed_jobs(state, ctx.now_unix());
     {
         let mut data = state.data.write().unwrap_or_else(|e| e.into_inner());
         let Some(lic) = data.skin_licenses.get(&key) else {
@@ -415,6 +257,7 @@ fn handle_skin_license_unapply(
     if owner != caller as i64 {
         return Err((STATUS_FORBIDDEN, "Character does not own target ship".into()));
     }
+    state.sync_redeemed_skins_if_needed();
     state
         .data
         .write()
@@ -436,6 +279,7 @@ fn grant_or_increment_skin_license(
     unactivated_delta: u64,
     now_unix: u64,
 ) {
+    state.sync_redeemed_skins_if_needed();
     let key = SkinrCosmeticsState::skin_lic_key(character_id, skin_hex);
     let mut added = None;
     let mut updated = None;
@@ -526,6 +370,7 @@ fn handle_skin_license_admin_revoke(
         return Err((STATUS_BAD_REQUEST, "Missing 3rd-party SKIN license identifier".into()));
     };
     let target_cid = req_char.unwrap_or(caller);
+    state.sync_redeemed_skins_if_needed();
     let key = SkinrCosmeticsState::skin_lic_key(target_cid, &skin_hex);
     let removed = state
         .data
@@ -1046,6 +891,7 @@ fn handle_job_initiate(
 }
 
 fn settle_completed_jobs(state: &SkinrCosmeticsState, now: u64) {
+    state.sync_redeemed_skins_if_needed();
     let mut completed = Vec::new();
     {
         let mut data = state.data.write().unwrap_or_else(|e| e.into_inner());
@@ -1223,6 +1069,7 @@ fn handle_job_complete_early(
 }
 
 pub fn register(router: &PublicGatewayRouter, state: Arc<SkinrCosmeticsState>) {
+    register_live_skinr_state(&state);
     macro_rules! reg {
         ($name:expr, $closure:expr) => {{
             let s = Arc::clone(&state);
