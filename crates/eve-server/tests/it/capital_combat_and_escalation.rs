@@ -1253,6 +1253,16 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
 
     // 2. Insurance contract via real InsureShip RPC: 12-week expiry -> 40% fallback + EVE-mail, and CONCORD criminal voiding
     let cost_isk = 1.0_f64; // Platinum fraction (1.0)
+    let _ = ctx.systems.get_or_spawn(highsec_sys).remove_ball(ship_id).await;
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(c) = s.characters.get_mut(&char_id) {
+            c.station_id = Some(jita_station);
+        }
+        if let Some(it) = s.items.get_mut(&ship_id) {
+            it.location_id = jita_station;
+        }
+    });
+    sess.station_id = Some(jita_station);
     let _ = ctx
         .dispatch_rpc(
             &mut sess,
@@ -1282,13 +1292,25 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
 
     // CONCORD criminal death, self-destruct, and repackaging all void active insurance contracts (0.0 payout)
     let ship_id_2 = 104_000_304i64;
-    seed_ship_in_space(&ctx, char_id, ship_id_2, 587, highsec_sys, DVec3::ZERO).await;
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(c) = s.characters.get_mut(&char_id) { c.station_id = Some(jita_station); }
+        s.items.insert(ship_id_2, InventoryItemRecord { item_id: ship_id_2, type_id: 587, owner_id: char_id, location_id: jita_station, flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default() });
+    });
+    sess.station_id = Some(jita_station);
     let _ = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_id_2), PyRep::Real(cost_isk), PyRep::Bool(false), PyRep::Bool(true)], &HashMap::new(), None).await.expect("InsureShip ship 2");
+    seed_ship_in_space(&ctx, char_id, ship_id_2, 587, highsec_sys, DVec3::ZERO).await;
+    sess.station_id = None;
     assert_eq!(eve_server::services::combat_crimewatch::process_ship_insurance_payout(&ctx, char_id, ship_id_2, 587, true), 0.0);
 
     let ship_sd = 104_000_305i64;
-    seed_ship_in_space(&ctx, char_id, ship_sd, 587, highsec_sys, DVec3::new(500.0, 0.0, 0.0)).await;
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(c) = s.characters.get_mut(&char_id) { c.station_id = Some(jita_station); }
+        s.items.insert(ship_sd, InventoryItemRecord { item_id: ship_sd, type_id: 587, owner_id: char_id, location_id: jita_station, flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default() });
+    });
+    sess.station_id = Some(jita_station);
     let _ = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_sd), PyRep::Real(cost_isk), PyRep::Bool(false), PyRep::Bool(true)], &HashMap::new(), None).await.expect("InsureShip self-destruct");
+    seed_ship_in_space(&ctx, char_id, ship_sd, 587, highsec_sys, DVec3::new(500.0, 0.0, 0.0)).await;
+    sess.station_id = None;
     let sd_res = eve_server::combat::death_pipeline::execute_death_pipeline_sync_inner(&ctx, highsec_sys, char_id, ship_sd, char_id, DVec3::ZERO, 7, true).expect("Self-destruct death");
     assert_eq!(sd_res.insurance_payout_isk, 0.0, "Self-destruct must void ship insurance payout");
 

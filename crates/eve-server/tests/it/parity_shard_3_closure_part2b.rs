@@ -9,8 +9,7 @@ use crate::parity_shard_3_closure_part2::{
 use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_proto::PyRep;
 use eve_server::services::sov_gameplay::{
-    advance_skyhook_reagents_in_snap, record_sov_system_activity, SKYHOOK_HOURLY_REAGENT_YIELD,
-    SKYHOOK_MATURITY_CYCLE_SECS,
+    advance_skyhook_reagents_in_snap, record_sov_system_activity, SKYHOOK_MATURITY_CYCLE_SECS,
 };
 use eve_server::services::sov_services::{
     calculate_adm, TYPE_MAGMATIC_GAS, TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB,
@@ -500,22 +499,28 @@ async fn test_e2e_skyhook_reagent_maturity_and_warp_vector() {
     tick_background_cluster(&ctx).await;
     let (_, sec_0h, insec_0h) = ctx
         .db
-        .with_mut_snapshot(|s| advance_skyhook_reagents_in_snap(s, skyhook_id, ctx.now_unix()))
+        .with_mut_snapshot(|s| advance_skyhook_reagents_in_snap(s, &ctx.sde, skyhook_id, ctx.now_unix()))
         .expect("reagent bay initialized at anchor completion");
 
     let after_2h = ctx.now_unix() + 2 * 3_600;
-    let (_, sec_2h, insec_2h) = ctx
+    let (reagent_tid_2h, sec_2h, insec_2h) = ctx
         .db
-        .with_mut_snapshot(|s| advance_skyhook_reagents_in_snap(s, skyhook_id, after_2h))
+        .with_mut_snapshot(|s| advance_skyhook_reagents_in_snap(s, &ctx.sde, skyhook_id, after_2h))
         .expect("reagent bay after 2h");
     let harvested_2h = (sec_2h + insec_2h) - (sec_0h + insec_0h);
-    assert_eq!(harvested_2h, 2 * SKYHOOK_HOURLY_REAGENT_YIELD);
+    let expected_hourly = eve_server::services::quasar_sov_skyhook::planet_hourly_reagent_yield(
+        &ctx.sde,
+        ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_planets.get(&skyhook_id).copied()),
+        Some(sys_id),
+        reagent_tid_2h,
+    );
+    assert_eq!(harvested_2h, 2 * expected_hourly);
     assert!(insec_2h > 0, "Surplus bay holds unmatured 50% split ({insec_2h})");
 
     let after_maturity = after_2h + SKYHOOK_MATURITY_CYCLE_SECS + 3_600;
     let (rt_tid, sec_full, insec_full) = ctx
         .db
-        .with_mut_snapshot(|s| advance_skyhook_reagents_in_snap(s, skyhook_id, after_maturity))
+        .with_mut_snapshot(|s| advance_skyhook_reagents_in_snap(s, &ctx.sde, skyhook_id, after_maturity))
         .expect("reagent maturity elapsed");
     assert!(rt_tid == TYPE_SUPERIONIC_ICE || rt_tid == TYPE_MAGMATIC_GAS);
     let expected_sec_full = sec_2h + insec_2h + (((sec_full + insec_full) - (sec_2h + insec_2h)) / 2);

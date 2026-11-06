@@ -64,6 +64,17 @@ fn freelance_project_lifecycle_and_rpc_handlers() {
                 ch.corporation_id = corp_id as i64;
             }
         }
+        let c = snap
+            .corporations
+            .entry(corp_id as i64)
+            .or_insert_with(|| eve_db::CorporationRecord {
+                corporation_id: corp_id as i64,
+                ceo_id: dir_cid as i64,
+                ..Default::default()
+            });
+        c.ceo_id = dir_cid as i64;
+        c.members.insert(dir_cid as i64);
+        c.members.insert(worker_cid as i64);
     });
 
     let dir_ctx = AuthoritativeContext::for_session(
@@ -187,7 +198,22 @@ fn freelance_project_lifecycle_and_rpc_handlers() {
             "eve_public.freelance.project.api.GetStatsResponse",
         ),
     ] {
-        let r = handlers[req](&worker_ctx, &dummy_any, &uuid_msg(1, &proj_uuid)).expect(req);
+        let caller_ctx = if matches!(
+            req,
+            "eve_public.freelance.project.api.GetForManagerRequest"
+                | "eve_public.freelance.project.api.GetParticipationDetailsRequest"
+        ) {
+            assert_eq!(
+                handlers[req](&worker_ctx, &dummy_any, &uuid_msg(1, &proj_uuid))
+                    .unwrap_err()
+                    .0,
+                STATUS_FORBIDDEN
+            );
+            &dir_ctx
+        } else {
+            &worker_ctx
+        };
+        let r = handlers[req](caller_ctx, &dummy_any, &uuid_msg(1, &proj_uuid)).expect(req);
         assert!(r.type_url.ends_with(suffix));
     }
 

@@ -1,6 +1,8 @@
 //! Legacy bookmarks (`SO-4`: `bookmark`, `beyonce`).
 
-use super::fleet_social_access_group_bookmarks::{folder_access_level, AccessLevel};
+use super::fleet_social_access_group_bookmarks::{
+    effective_char_corp_and_alliance, folder_access_level, AccessLevel,
+};
 use super::fleet_social_access_group_bookmarks_ops::acl_active_bookmarks;
 use super::fleet_social_chat::extract_id_list;
 use super::{is_bookmark_expired_in_snap, sweep_expired_bookmarks_and_notify};
@@ -9,6 +11,12 @@ use eve_db::{corp_roles, BookmarkFolderRecord, BookmarkRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
+
+#[path = "fleet_social_bookmarks_transfer.rs"]
+mod fleet_social_bookmarks_transfer;
+use fleet_social_bookmarks_transfer::{
+    copy_bookmarks_to_folder_and_subfolder, move_bookmarks_to_folder_and_subfolder,
+};
 
 
 pub(crate) fn shared_bookmark_corp_id(
@@ -133,7 +141,7 @@ pub(super) async fn handle_bookmarks(
                 if fid != 0 && fid != char_id {
                     let ok = ctx.db.with_snapshot(|s| {
                         s.bookmark_folders.get(&fid).is_some_and(|f| {
-                            f.owner_id == char_id || (f.is_shared && session.corporation_id == Some(f.owner_id))
+                            folder_access_level(s, session, char_id, f) >= AccessLevel::Use
                         })
                     });
                     if !ok {
@@ -311,9 +319,7 @@ pub(super) async fn handle_bookmarks(
             let now_unix = ctx.now_unix();
             sweep_expired_bookmarks_and_notify(ctx, now_unix);
             let rows = ctx.db.try_with_mut_snapshot(|snap| {
-                let corp_id_opt = session
-                    .corporation_id
-                    .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id));
+                let (corp_id_opt, _) = effective_char_corp_and_alliance(snap, session, char_id);
                 let list: Vec<Vec<PyRep>> = snap
                     .bookmarks
                     .values()
@@ -321,10 +327,17 @@ pub(super) async fn handle_bookmarks(
                         if is_bookmark_expired_in_snap(snap, b.bookmark_id, now_unix) {
                             return false;
                         }
-                        b.owner_id == char_id
-                            || (b.is_shared
-                                && corp_id_opt.is_some()
-                                && shared_bookmark_corp_id(snap, b) == corp_id_opt)
+                        if !b.is_shared {
+                            return b.owner_id == char_id;
+                        }
+                        if let Some(f) = b.folder_id.and_then(|fid| snap.bookmark_folders.get(&fid))
+                        {
+                            folder_access_level(snap, session, char_id, f) >= AccessLevel::View
+                        } else {
+                            b.owner_id == char_id
+                                || (corp_id_opt.is_some()
+                                    && shared_bookmark_corp_id(snap, b) == corp_id_opt)
+                        }
                     })
                     .map(|b| {
                         let sf_opt = snap
@@ -372,22 +385,27 @@ pub(super) async fn handle_bookmarks(
             let expiry_hours_opt = args.get(4).and_then(|a| a.as_i64());
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let corp_id = session
-                    .corporation_id
-                    .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id));
+                let (corp_id, _) = effective_char_corp_and_alliance(snap, session, char_id);
+                let src_folder_lvl = snap
+                    .bookmarks
+                    .get(&bm_id)
+                    .and_then(|b| b.folder_id)
+                    .and_then(|fid| snap.bookmark_folders.get(&fid))
+                    .map(|f| folder_access_level(snap, session, char_id, f));
                 let bm_corp = snap
                     .bookmarks
                     .get(&bm_id)
                     .and_then(|b| shared_bookmark_corp_id(snap, b));
-                let has_manage_access = corp_id.is_some_and(|cid| {
-                    bm_corp == Some(cid)
-                        && has_corp_bookmark_admin_role(snap, session, char_id, cid)
-                });
+                let has_manage_access = match src_folder_lvl {
+                    Some(lvl) => lvl >= AccessLevel::Manage,
+                    None => corp_id.is_some_and(|cid| {
+                        bm_corp == Some(cid)
+                            && has_corp_bookmark_admin_role(snap, session, char_id, cid)
+                    }),
+                };
                 let target_folder_shared = if let Some(fid) = folder_id_opt {
                     if let Some(tf) = snap.bookmark_folders.get(&fid) {
-                        if tf.owner_id != char_id
-                            && folder_access_level(snap, session, char_id, tf) < AccessLevel::Use
-                        {
+                        if folder_access_level(snap, session, char_id, tf) < AccessLevel::Use {
                             return Err(BridgeRpcError {
                                 code: "AccessDenied".into(),
                                 message: "Cannot move bookmark into a folder without use/add access".into(),
@@ -415,6 +433,15 @@ pub(super) async fn handle_bookmarks(
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: "Cannot edit another character's bookmark without manage/admin rights".into(),
+                    });
+                }
+                if bm.owner_id == char_id
+                    && bm.is_shared
+                    && src_folder_lvl.is_some_and(|lvl| lvl < AccessLevel::Use)
+                {
+                    return Err(BridgeRpcError {
+                        code: "AccessDenied".into(),
+                        message: "Cannot edit bookmark in a shared folder without use access".into(),
                     });
                 }
                 if let Some(l) = label_opt {
@@ -486,9 +513,7 @@ pub(super) async fn handle_bookmarks(
                 }));
             }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let corp_id = session
-                    .corporation_id
-                    .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id));
+                let (corp_id, _) = effective_char_corp_and_alliance(snap, session, char_id);
                 let mut any_shared_folder = None;
                 for &bm_id in &bm_ids {
                     let Some(bm) = snap.bookmarks.get(&bm_id) else {
@@ -497,15 +522,31 @@ pub(super) async fn handle_bookmarks(
                             message: format!("Bookmark {bm_id} not found"),
                         });
                     };
+                    let src_folder_lvl = bm
+                        .folder_id
+                        .and_then(|fid| snap.bookmark_folders.get(&fid))
+                        .map(|f| folder_access_level(snap, session, char_id, f));
                     let bm_corp = shared_bookmark_corp_id(snap, bm);
-                    let has_manage_access = corp_id.is_some_and(|cid| {
-                        bm_corp == Some(cid)
-                            && has_corp_bookmark_admin_role(snap, session, char_id, cid)
-                    });
+                    let has_manage_access = match src_folder_lvl {
+                        Some(lvl) => lvl >= AccessLevel::Manage,
+                        None => corp_id.is_some_and(|cid| {
+                            bm_corp == Some(cid)
+                                && has_corp_bookmark_admin_role(snap, session, char_id, cid)
+                        }),
+                    };
                     if bm.owner_id != char_id && !(bm.is_shared && has_manage_access) {
                         return Err(BridgeRpcError {
                             code: "AccessDenied".into(),
                             message: "Cannot delete another character's bookmark without manage/admin rights".into(),
+                        });
+                    }
+                    if bm.owner_id == char_id
+                        && bm.is_shared
+                        && src_folder_lvl.is_some_and(|lvl| lvl < AccessLevel::Use)
+                    {
+                        return Err(BridgeRpcError {
+                            code: "AccessDenied".into(),
+                            message: "Cannot delete bookmark in a shared folder without use access".into(),
                         });
                     }
                     if bm.is_shared {
@@ -746,7 +787,6 @@ pub(super) async fn handle_bookmarks(
 
         ("bookmark", "GetFolders") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let corp_id_opt = session.corporation_id;
             let target_fid = if method == "GetFolderInfo" {
                 args.first().and_then(|a| a.as_i64())
             } else {
@@ -755,37 +795,27 @@ pub(super) async fn handle_bookmarks(
             let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
                 snap.bookmark_folders
                     .values()
-                    .filter(|f| {
-                        let visible = f.owner_id == char_id
-                            || (f.is_shared && f.corporation_id == corp_id_opt)
-                            || snap
-                                .bookmark_folder_acls
-                                .get(&f.folder_id)
-                                .is_some_and(|acl| acl.contains(&char_id));
-                        if !visible {
-                            return false;
+                    .filter_map(|f| {
+                        let lvl = folder_access_level(snap, session, char_id, f);
+                        if lvl < AccessLevel::View {
+                            return None;
                         }
-                        if let Some(tfid) = target_fid {
+                        let match_target = if let Some(tfid) = target_fid {
                             f.folder_id == tfid
                                 || snap.bookmark_subfolder_parents.get(&f.folder_id) == Some(&tfid)
                         } else {
                             !snap.bookmark_subfolder_parents.contains_key(&f.folder_id)
+                        };
+                        if !match_target {
+                            return None;
                         }
-                    })
-                    .map(|f| {
                         let acl = snap
                             .bookmark_folder_acls
                             .get(&f.folder_id)
                             .cloned()
                             .unwrap_or_default();
-                        let access_level = if f.owner_id == char_id || acl.contains(&char_id) {
-                            4
-                        } else if f.is_shared {
-                            3
-                        } else {
-                            1
-                        };
-                        vec![
+                        let access_level = lvl as i64;
+                        Some(vec![
                             PyRep::Integer(f.folder_id),
                             PyRep::String(f.folder_name.clone()),
                             PyRep::Integer(f.owner_id),
@@ -793,7 +823,7 @@ pub(super) async fn handle_bookmarks(
                             f.corporation_id.map(PyRep::Integer).unwrap_or(PyRep::None),
                             PyRep::List(acl.into_iter().map(PyRep::Integer).collect()),
                             PyRep::Integer(access_level),
-                        ]
+                        ])
                     })
                     .collect()
             });
@@ -1021,13 +1051,19 @@ pub(super) async fn handle_bookmarks(
                 session.corporation_id = Some(cid);
             }
             let check = ctx.db.with_snapshot(|snap| {
+                if snap.bookmark_subfolder_parents.contains_key(&folder_id) {
+                    return Err(BridgeRpcError {
+                        code: "FolderNotFound".into(),
+                        message: format!("Subfolder {folder_id} cannot be subscribed as a root folder"),
+                    });
+                }
                 let Some(f) = snap.bookmark_folders.get(&folder_id) else {
                     return Err(BridgeRpcError {
                         code: "FolderNotFound".into(),
                         message: format!("Shared folder {folder_id} not found"),
                     });
                 };
-                if !f.is_shared || f.corporation_id != session.corporation_id {
+                if !f.is_shared || folder_access_level(snap, session, char_id, f) < AccessLevel::View {
                     return Err(BridgeRpcError {
                         code: "BookmarkAccessDenied".into(),
                         message: "Character lacks access-group rights to subscribe to this shared bookmark folder".into(),
@@ -1157,7 +1193,7 @@ pub(super) async fn handle_bookmarks(
                 if fid != 0 && fid != char_id {
                     let ok = ctx.db.with_snapshot(|s| {
                         s.bookmark_folders.get(&fid).is_some_and(|f| {
-                            f.owner_id == char_id || (f.is_shared && session.corporation_id == Some(f.owner_id))
+                            folder_access_level(s, session, char_id, f) >= AccessLevel::Use
                         })
                     });
                     if !ok {
@@ -1197,172 +1233,6 @@ pub(super) async fn handle_bookmarks(
         }
 
         _ => None,
-    }
-}
-
-fn copy_bookmarks_to_folder_and_subfolder(
-    ctx: &ServerContext,
-    session: &SessionState,
-    args: &[PyRep],
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    transfer_bookmarks_to_folder_and_subfolder(ctx, session, args, false)
-}
-
-fn move_bookmarks_to_folder_and_subfolder(
-    ctx: &ServerContext,
-    session: &SessionState,
-    args: &[PyRep],
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    transfer_bookmarks_to_folder_and_subfolder(ctx, session, args, true)
-}
-
-fn transfer_bookmarks_to_folder_and_subfolder(
-    ctx: &ServerContext,
-    session: &SessionState,
-    args: &[PyRep],
-    is_move: bool,
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, char_id) = match ServerContext::require_character(session) {
-        Ok(v) => v,
-        Err(e) => return Some(Err(e)),
-    };
-    let bm_ids = extract_id_list(args.first());
-    if bm_ids.len() > 20 {
-        return Some(Err(BridgeRpcError {
-            code: "BookmarkCopyBatchLimitExceeded".into(),
-            message: "Cannot copy or move more than 20 bookmarks in a single operation".into(),
-        }));
-    }
-    let target_folder_id = args.get(1).and_then(|a| a.as_i64());
-    let target_subfolder_id = args.get(2).and_then(|a| a.as_i64());
-
-    let res = ctx.db.try_with_mut_snapshot(|snap| {
-        let caller_corp_id = session
-            .corporation_id
-            .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id));
-        let is_shared_target = if let Some(fid) = target_folder_id {
-            let Some(tf) = snap.bookmark_folders.get(&fid) else {
-                return Err(BridgeRpcError {
-                    code: "FolderNotFound".into(),
-                    message: format!("Bookmark folder {fid} not found"),
-                });
-            };
-            if tf.owner_id != char_id
-                && !(tf.is_shared
-                    && caller_corp_id.is_some()
-                    && tf.corporation_id == caller_corp_id)
-            {
-                return Err(BridgeRpcError {
-                    code: "BookmarkFolderAccessDenied".into(),
-                    message: "No write access to target bookmark folder".into(),
-                });
-            }
-            tf.is_shared
-        } else {
-            false
-        };
-        let current_in_folder = snap
-            .bookmarks
-            .values()
-            .filter(|b| {
-                b.folder_id == target_folder_id && (is_shared_target || b.owner_id == char_id)
-            })
-            .count();
-        let added_count = if is_move {
-            bm_ids
-                .iter()
-                .filter(|&&id| {
-                    snap.bookmarks
-                        .get(&id)
-                        .is_some_and(|b| b.folder_id != target_folder_id)
-                })
-                .count()
-        } else {
-            bm_ids.len()
-        };
-        if current_in_folder + added_count > 500 {
-            let code = if is_shared_target {
-                "MaxSharedFolderBookmarksReached"
-            } else {
-                "MaxBookmarksReached"
-            };
-            return Err(BridgeRpcError {
-                code: code.into(),
-                message: "Bookmark folder capacity (500) exceeded".into(),
-            });
-        }
-        let mut out_ids = Vec::new();
-        for &bm_id in &bm_ids {
-            let Some(orig) = snap.bookmarks.get(&bm_id).cloned() else {
-                return Err(BridgeRpcError {
-                    code: "BookmarkNotFound".into(),
-                    message: format!("Bookmark {bm_id} not found"),
-                });
-            };
-            let orig_corp_id = shared_bookmark_corp_id(snap, &orig);
-            let same_corp_shared =
-                orig.is_shared && caller_corp_id.is_some() && orig_corp_id == caller_corp_id;
-            let can_access = if is_move {
-                orig.owner_id == char_id
-                    || (same_corp_shared
-                        && has_corp_bookmark_admin_role(
-                            snap,
-                            session,
-                            char_id,
-                            caller_corp_id.unwrap(),
-                        ))
-            } else {
-                orig.owner_id == char_id || same_corp_shared
-            };
-            if !can_access {
-                return Err(BridgeRpcError {
-                    code: "BookmarkAccessDenied".into(),
-                    message: format!("No access to bookmark {bm_id}"),
-                });
-            }
-            if is_move {
-                if let Some(bm) = snap.bookmarks.get_mut(&bm_id) {
-                    bm.folder_id = target_folder_id;
-                    bm.is_shared = is_shared_target;
-                }
-                if let Some(sfid) = target_subfolder_id {
-                    snap.bookmark_subfolders.insert(bm_id, sfid);
-                }
-                out_ids.push(bm_id);
-            } else {
-                snap.next_entity_id += 1;
-                let new_id = snap.next_entity_id;
-                snap.bookmarks.insert(
-                    new_id,
-                    BookmarkRecord {
-                        bookmark_id: new_id,
-                        owner_id: char_id,
-                        folder_id: target_folder_id,
-                        is_shared: is_shared_target,
-                        ..orig
-                    },
-                );
-                if let Some(sfid) = target_subfolder_id {
-                    snap.bookmark_subfolders.insert(new_id, sfid);
-                }
-                out_ids.push(new_id);
-            }
-        }
-        Ok(out_ids)
-    });
-
-    match res {
-        Ok(out_ids) => Some(Ok(PyRep::keyval([
-            (
-                "bookmarkIDs",
-                PyRep::List(out_ids.into_iter().map(PyRep::Integer).collect()),
-            ),
-            (
-                "folderID",
-                target_folder_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-            ),
-        ]))),
-        Err(e) => Some(Err(e)),
     }
 }
 

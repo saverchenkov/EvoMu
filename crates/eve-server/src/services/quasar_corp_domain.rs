@@ -9,7 +9,7 @@ use crate::quasar_gateway::{
 };
 use eve_db::{CorporationRecord, WorldRepository};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
+    encode_bytes_field, encode_string_field, encode_varint_field,
     DynamicQuasarMessage, DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::collections::BTreeMap;
@@ -80,64 +80,11 @@ fn extract_id(msg: &DynamicQuasarMessage, field: u32) -> Option<u32> {
     .filter(|&v| v > 0)
 }
 
-fn resolve_authorized_corp(
-    ctx: &AuthoritativeContext,
-    msg: &DynamicQuasarMessage,
-    corp_field: u32,
-    db: &WorldRepository,
-) -> Result<i64, (u32, String)> {
-    let is_admin = require_admin_role(ctx).is_ok();
-    let caller_cid = ctx.effective_character_id();
-    if caller_cid.is_none() && !is_admin {
-        return Err((STATUS_FORBIDDEN, "Character authentication required".into()));
-    }
-    let caller_corp = ctx.effective_corporation_id().or_else(|| {
-        let cid = caller_cid? as i64;
-        db.with_snapshot(|s| s.characters.get(&cid).map(|c| c.corporation_id as u32))
-    });
-    let req_corp = extract_id(msg, corp_field)
-        .or_else(|| if corp_field != 1 { extract_id(msg, 1) } else { None });
-    let target = match (req_corp, caller_corp) {
-        (Some(req), Some(own)) => {
-            if req != own && !is_admin {
-                return Err((STATUS_FORBIDDEN, "Cross-corporation access denied".into()));
-            }
-            req
-        }
-        (Some(req), None) if is_admin => req,
-        (None, Some(own)) => own,
-        _ => return Err((STATUS_FORBIDDEN, "Corporation context required".into())),
-    };
-    Ok(target as i64)
-}
-
-fn check_corp_admin_role(
-    ctx: &AuthoritativeContext,
-    db: &WorldRepository,
-) -> Result<(u32, i64), (u32, String)> {
-    let Some(cid) = ctx.effective_character_id() else {
-        return Err((STATUS_FORBIDDEN, "Authentication required".into()));
-    };
-    let corpid = ctx
-        .effective_corporation_id()
-        .or_else(|| db.with_snapshot(|s| s.characters.get(&(cid as i64)).map(|c| c.corporation_id as u32)))
-        .ok_or_else(|| (STATUS_FORBIDDEN, "Missing corporation context".into()))? as i64;
-    let corp_role = if ctx.corp_role_mask != 0 {
-        ctx.corp_role_mask
-    } else {
-        ctx.identity
-            .as_ref()
-            .and_then(|id| id.roles.as_ref().map(|r| r.bitmask))
-            .unwrap_or(0)
-    };
-    let is_admin = (corp_role & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_PERSONNEL_MANAGER)) != 0
-        || require_admin_role(ctx).is_ok()
-        || db.with_snapshot(|s| s.corporations.get(&corpid).is_some_and(|c| c.ceo_id == cid as i64));
-    if !is_admin {
-        return Err((STATUS_FORBIDDEN, "Insufficient corporation role".into()));
-    }
-    Ok((cid, corpid))
-}
+#[path = "quasar_corp_domain_auth.rs"]
+mod quasar_corp_domain_auth;
+pub(crate) use quasar_corp_domain_auth::{
+    check_corp_admin_role, live_caller_corp, require_corp_roles, resolve_authorized_corp,
+};
 
 fn parse_location_flag(s: &str) -> u64 {
     match s {
@@ -343,6 +290,14 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             "eve.corporation.accounting.wallet.GetAllDivisionBalanceRequest",
             Arc::new(move |ctx, _any, msg| {
                 let corpid = resolve_authorized_corp(ctx, msg, 2, &d)?;
+                require_corp_roles(
+                    ctx,
+                    &d,
+                    corpid,
+                    eve_db::corp_roles::ROLE_ACCOUNTANT
+                        | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
+                        | (0x7Fu64 << 27),
+                )?;
                 let divs = d.with_snapshot(|s| {
                     let c = s.corporations.get(&corpid).ok_or_else(|| {
                         (STATUS_NOT_FOUND, format!("Corporation {corpid} not found"))
@@ -511,6 +466,12 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             "eve.corporation.alsclogs.GetRequest",
             Arc::new(move |ctx, _any, msg| {
                 let corpid = resolve_authorized_corp(ctx, msg, 1, &d)?;
+                require_corp_roles(
+                    ctx,
+                    &d,
+                    corpid,
+                    eve_db::corp_roles::ROLE_CONFIG_EQUIPMENT | eve_db::corp_roles::ROLE_AUDITOR,
+                )?;
                 let logs = d.with_snapshot(|s| {
                     s.corp_container_logs
                         .get(&corpid)
@@ -598,6 +559,14 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             "eve.corporation.industry.job.GetActiveRequest",
             Arc::new(move |ctx, _any, msg| {
                 let corpid = resolve_authorized_corp(ctx, msg, 1, &d)?;
+                require_corp_roles(
+                    ctx,
+                    &d,
+                    corpid,
+                    eve_db::corp_roles::ROLE_FACTORY_MANAGER
+                        | eve_db::corp_roles::ROLE_RENT_FACTORY_FACILITY
+                        | eve_db::corp_roles::ROLE_RENT_RESEARCH_FACILITY,
+                )?;
                 let jobs = d.with_snapshot(|s| {
                     let mut v: Vec<_> = s
                         .industry_jobs
@@ -671,6 +640,14 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             "eve.corporation.industry.blueprints.GetRequest",
             Arc::new(move |ctx, _any, msg| {
                 let corpid = resolve_authorized_corp(ctx, msg, 1, &d)?;
+                require_corp_roles(
+                    ctx,
+                    &d,
+                    corpid,
+                    eve_db::corp_roles::ROLE_FACTORY_MANAGER
+                        | eve_db::corp_roles::ROLE_RENT_FACTORY_FACILITY
+                        | eve_db::corp_roles::ROLE_RENT_RESEARCH_FACILITY,
+                )?;
                 let items = d.with_snapshot(|s| {
                     let mut v: Vec<_> = s
                         .items
@@ -928,6 +905,12 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         let d = Arc::clone(&db);
         router.register_handler("eve.corporation.members.roles.auditlog.GetRequest", Arc::new(move |ctx, _any, msg| {
             let corpid = resolve_authorized_corp(ctx, msg, 1, &d)?;
+            require_corp_roles(
+                ctx,
+                &d,
+                corpid,
+                eve_db::corp_roles::ROLE_PERSONNEL_MANAGER | eve_db::corp_roles::ROLE_AUDITOR,
+            )?;
             let history = d.with_snapshot(|s| s.corp_role_history.get(&corpid).cloned().unwrap_or_default());
             let mut out = Vec::new();
             for entry in history {
@@ -1079,10 +1062,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let vote_id = extract_id(msg, 1).ok_or_else(|| (STATUS_BAD_REQUEST, "Missing vote identifier".into()))? as i64;
             let vc = d.with_snapshot(|s| s.corp_vote_cases.get(&vote_id).cloned()).ok_or_else(|| (STATUS_NOT_FOUND, format!("Vote {vote_id} not found")))?;
             let is_admin = require_admin_role(ctx).is_ok();
-            let caller_corp = ctx.effective_corporation_id().map(i64::from).or_else(|| {
-                let cid = ctx.effective_character_id()? as i64;
-                d.with_snapshot(|s| s.characters.get(&cid).map(|c| c.corporation_id))
-            });
+            let caller_corp = live_caller_corp(ctx, &d);
             if !is_admin && caller_corp != Some(vc.corporation_id) {
                 return Err((STATUS_FORBIDDEN, "Cross-corporation vote access denied".into()));
             }
@@ -1126,15 +1106,22 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         let d = Arc::clone(&db);
         router.register_handler("eve.corporation.starbase.GetSettingsAndFuelsRequest", Arc::new(move |ctx, _any, msg| {
             let corpid = resolve_authorized_corp(ctx, msg, 1, &d)?;
+            require_corp_roles(
+                ctx,
+                &d,
+                corpid,
+                eve_db::corp_roles::ROLE_CONFIG_EQUIPMENT
+                    | eve_db::corp_roles::ROLE_STATION_MANAGER,
+            )?;
             let sb_id = extract_id(msg, 3).ok_or_else(|| (STATUS_BAD_REQUEST, "Missing starbase identifier".into()))? as i64;
             let (cfg, fuel_blocks) = d.with_snapshot(|s| {
                 let st_opt = s.structures.get(&sb_id);
-                if let Some(st) = st_opt {
-                    if st.owner_corp_id != corpid && require_admin_role(ctx).is_err() {
-                        return Err((STATUS_FORBIDDEN, "Cross-corporation starbase access denied".into()));
-                    }
-                } else if !s.starbase_settings.contains_key(&sb_id) {
-                    return Err((STATUS_NOT_FOUND, format!("Starbase {sb_id} not found")));
+                let owner_corp = st_opt
+                    .map(|st| st.owner_corp_id)
+                    .or_else(|| s.items.get(&sb_id).map(|it| it.owner_id))
+                    .ok_or_else(|| (STATUS_NOT_FOUND, format!("Starbase {sb_id} not found")))?;
+                if owner_corp != corpid && require_admin_role(ctx).is_err() {
+                    return Err((STATUS_FORBIDDEN, "Cross-corporation starbase access denied".into()));
                 }
                 Ok::<_, (u32, String)>((s.starbase_settings.get(&sb_id).cloned().unwrap_or_default(), st_opt.map(|st| st.fuel_blocks).unwrap_or(0)))
             })?;
@@ -1202,6 +1189,15 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         let d = Arc::clone(&db);
         router.register_handler("eve.corporation.market.entry.GetEntriesRequest", Arc::new(move |ctx, _any, msg| {
             let corpid = resolve_authorized_corp(ctx, msg, 1, &d)?;
+            require_corp_roles(
+                ctx,
+                &d,
+                corpid,
+                eve_db::corp_roles::ROLE_ACCOUNTANT
+                    | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
+                    | eve_db::corp_roles::ROLE_TRADER
+                    | (0x7Fu64 << 27),
+            )?;
             let div_key = match msg.get(1) {
                 Some(DynamicValue::Message(m)) => match m.get(2) {
                     Some(DynamicValue::Enum(e)) if *e >= 1000 => (*e - 999) as i64,

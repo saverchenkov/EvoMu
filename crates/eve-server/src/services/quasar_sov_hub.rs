@@ -114,14 +114,34 @@ pub(crate) fn caller(ctx: &AuthoritativeContext, snap: &WorldStateSnapshot) -> R
         .effective_character_id()
         .ok_or((STATUS_UNAUTHORIZED, "Authenticated character required".to_string()))? as i64;
     let ch = snap.characters.get(&cid);
-    let corp = ctx
-        .effective_corporation_id()
-        .map(i64::from)
-        .or_else(|| ch.map(|c| c.corporation_id))
-        .filter(|c| *c > 0)
-        .ok_or((STATUS_FORBIDDEN, format!("Character {cid} has no corporation")))?;
+    let ctx_corp = ctx.effective_corporation_id().map(i64::from).filter(|c| *c > 0);
+    let corp = match ch.map(|c| c.corporation_id) {
+        Some(dc) if (1_000_000..2_000_000).contains(&dc) => ctx_corp
+            .filter(|&cc| {
+                cc != dc
+                    && snap
+                        .corporations
+                        .get(&cc)
+                        .is_some_and(|c| c.ceo_id == cid || c.members.contains(&cid))
+            })
+            .unwrap_or(dc),
+        Some(dc) if dc > 0 => dc,
+        _ => ctx_corp.ok_or((STATUS_FORBIDDEN, format!("Character {cid} has no corporation")))?,
+    };
     let alliance = ch.and_then(|c| c.alliance_id).or_else(|| corp_alliance(snap, corp));
-    let roles = effective_roles(ctx);
+    let roles = if crate::quasar_gateway::require_admin_role(ctx).is_ok() {
+        u64::MAX
+    } else {
+        let (is_ceo, eff) =
+            super::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+                snap,
+                corp,
+                cid,
+                0,
+                ctx.now_unix(),
+            );
+        if is_ceo { u64::MAX } else { eff }
+    };
     Ok(Caller { cid, corp, alliance, roles })
 }
 
@@ -171,7 +191,16 @@ pub(crate) fn corp_owned_structure<'a>(
     Ok(st)
 }
 
+/// Requires at least one of the corporation `roles` bits in the caller's live DB corporation state.
+pub(crate) fn require_caller_roles(c: &Caller, roles: u64, action: &str) -> Result<(), RpcError> {
+    if c.roles & roles == 0 {
+        return Err((STATUS_FORBIDDEN, format!("Missing corporation role required to {action}")));
+    }
+    Ok(())
+}
+
 /// Requires at least one of the corporation `roles` bits in the caller's active identity.
+#[allow(dead_code)]
 pub(crate) fn require_roles(ctx: &AuthoritativeContext, roles: u64, action: &str) -> Result<(), RpcError> {
     if effective_roles(ctx) & roles == 0 {
         return Err((STATUS_FORBIDDEN, format!("Missing corporation role required to {action}")));
@@ -744,12 +773,19 @@ fn process_configuration(
             .ok_or((STATUS_NOT_FOUND, format!("Upgrade type {type_id} is not installed")))?;
         if *online && !u.online {
             let d = upgrade_definition(sde, *type_id).ok_or((STATUS_BAD_REQUEST, format!("Unknown upgrade {type_id}")))?;
-            if d.fuel_type > 0 && d.fuel_per_hour > 0 {
+            if d.fuel_type > 0 && (d.fuel_per_hour > 0 || d.fuel_startup > 0) {
                 let have = hub.fuel.get(&d.fuel_type).copied().unwrap_or(0);
-                if have < d.fuel_per_hour {
-                    return Err((STATUS_BAD_REQUEST, format!("Insufficient fuel type {} to online upgrade {type_id}", d.fuel_type)));
+                let required = d.fuel_startup.saturating_add(d.fuel_per_hour);
+                if have < required {
+                    return Err((
+                        STATUS_BAD_REQUEST,
+                        format!(
+                            "Insufficient fuel type {} to online upgrade {type_id}: have {have}, require {required}",
+                            d.fuel_type
+                        ),
+                    ));
                 }
-                if d.fuel_startup > 0 && have >= d.fuel_startup + d.fuel_per_hour * 3 {
+                if d.fuel_startup > 0 {
                     hub.fuel.insert(d.fuel_type, have - d.fuel_startup);
                 }
             }
@@ -960,7 +996,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                         c.cid,
                         c.corp,
                         c.alliance,
-                        effective_roles(ctx),
+                        c.roles,
                         true,
                     ) {
                         return Err((
@@ -1110,7 +1146,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                 }
                 let hub_upgrades = transact(&db, |snap| {
                     let c = caller(ctx, snap)?;
-                    require_roles(ctx, HUB_MANAGER_ROLES, "configure sovereignty hub upgrades")?;
+                    require_caller_roles(&c, HUB_MANAGER_ROLES, "configure sovereignty hub upgrades")?;
                     corp_owned_structure(snap, &c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?;
                     run_simulation(snap, &sde, &pending, hub_id, ctx.now_unix());
                     let before = hub_views(snap, &sde, &[hub_id]);
@@ -1138,7 +1174,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                 let (hub_id, type_id) = upgrade_identifier(dyn_msg, 1)?;
                 transact(&db, |snap| {
                     let c = caller(ctx, snap)?;
-                    require_roles(ctx, HUB_MANAGER_ROLES, "uninstall sovereignty hub upgrades")?;
+                    require_caller_roles(&c, HUB_MANAGER_ROLES, "uninstall sovereignty hub upgrades")?;
                     let st = corp_owned_structure(snap, &c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?;
                     let sys = st.solar_system_id;
                     run_simulation(snap, &sde, &pending, hub_id, ctx.now_unix());

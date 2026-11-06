@@ -65,8 +65,9 @@ fn sub_unit_remainder_conservation_inactive_skyhook_and_extract_extra_var_edges(
     assert_eq!(extract_extra_var(Some(&dict_wrong), "planetID"), None);
 
     // Missing skyhook_id returns None
+    let ctx = test_ctx();
     let mut snap = WorldStateSnapshot::default();
-    assert!(advance_skyhook_reagents_in_snap(&mut snap, 999, 1000).is_none());
+    assert!(advance_skyhook_reagents_in_snap(&mut snap, &ctx.sde, 999, 1000).is_none());
 
     // Inactive skyhook does NOT harvest hourly yield, but still matures existing insecure_qty
     // and 864 steps of 100s mature the exact same 240 units as a single 86,400s step!
@@ -77,14 +78,14 @@ fn sub_unit_remainder_conservation_inactive_skyhook_and_extract_extra_var_edges(
         .skyhook_reagent_bays
         .insert(sh_id, (TYPE_SUPERIONIC_ICE, 10, 240, 0)); // last_ts = 0 -> initialized to t0 on first call
 
-    let (_, sec0, insec0) = advance_skyhook_reagents_in_snap(&mut snap, sh_id, t0).unwrap();
+    let (_, sec0, insec0) = advance_skyhook_reagents_in_snap(&mut snap, &ctx.sde, sh_id, t0).unwrap();
     assert_eq!((sec0, insec0), (10, 240));
 
     for step in 1..=864 {
-        let _ = advance_skyhook_reagents_in_snap(&mut snap, sh_id, t0 + step * 100).unwrap();
+        let _ = advance_skyhook_reagents_in_snap(&mut snap, &ctx.sde, sh_id, t0 + step * 100).unwrap();
     }
     let (_, final_sec, final_insec) =
-        advance_skyhook_reagents_in_snap(&mut snap, sh_id, t0 + 86_400).unwrap();
+        advance_skyhook_reagents_in_snap(&mut snap, &ctx.sde, sh_id, t0 + 86_400).unwrap();
     assert_eq!(final_sec, 250);
     assert_eq!(final_insec, 0);
     assert_eq!(snap.sov_runtime.skyhook_maturity_rem.get(&sh_id), Some(&(0, 0)));

@@ -195,13 +195,61 @@ pub fn try_match_legacy_operation(method: &str, raw_path: &str) -> Option<Matche
     None
 }
 
-#[allow(clippy::too_many_lines)]
 pub fn dispatch_char_social_route(
     ctx: &ServerContext,
     method: &str,
     path: &str,
     path_params: &HashMap<String, String>,
     query_params: &HashMap<String, String>,
+    req_body: &[u8],
+) -> Option<RouteExecutionResult> {
+    dispatch_char_social_route_with_claims(
+        ctx,
+        method,
+        path,
+        path_params,
+        query_params,
+        None,
+        req_body,
+    )
+}
+
+fn esi_corp_bookmark_session(
+    snap: &eve_db::WorldStateSnapshot,
+    corp_id: i64,
+    caller_cid: i64,
+) -> eve_machonet::SessionState {
+    let alliance_id = snap
+        .corporations
+        .get(&corp_id)
+        .and_then(|c| c.alliance_id)
+        .or_else(|| snap.characters.get(&caller_cid).and_then(|ch| ch.alliance_id));
+    eve_machonet::SessionState {
+        user_id: u64::try_from(caller_cid).ok(),
+        character_id: Some(caller_cid),
+        corporation_id: Some(corp_id),
+        alliance_id,
+        ..Default::default()
+    }
+}
+
+fn esi_caller_in_corp(snap: &eve_db::WorldStateSnapshot, corp_id: i64, caller_cid: i64) -> bool {
+    snap.characters
+        .get(&caller_cid)
+        .is_some_and(|ch| ch.corporation_id == corp_id)
+        || snap.corporations.get(&corp_id).is_some_and(|corp| {
+            corp.ceo_id == caller_cid || corp.member_roles.contains_key(&caller_cid)
+        })
+}
+
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+pub fn dispatch_char_social_route_with_claims(
+    ctx: &ServerContext,
+    method: &str,
+    path: &str,
+    path_params: &HashMap<String, String>,
+    query_params: &HashMap<String, String>,
+    claims: Option<&eve_db::SsoTokenClaims>,
     req_body: &[u8],
 ) -> Option<RouteExecutionResult> {
     let now = ctx.now_unix();
@@ -755,29 +803,56 @@ pub fn dispatch_char_social_route(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
+            let caller_cid_opt = claims.map(|c| c.character_id).filter(|&cid| cid > 0);
             Some(ctx.db.with_snapshot(|snap| {
                 if !snap.corporations.contains_key(&corp_id) {
                     return RouteExecutionResult::error(404, format!("Corporation {corp_id} not found"));
                 }
+                let esi_sess_opt = match caller_cid_opt {
+                    Some(cid) => {
+                        if !esi_caller_in_corp(snap, corp_id, cid) {
+                            return RouteExecutionResult::error(
+                                403,
+                                format!("Character {cid} is not a member of corporation {corp_id}"),
+                            );
+                        }
+                        Some((cid, esi_corp_bookmark_session(snap, corp_id, cid)))
+                    }
+                    None => None,
+                };
                 let mut bms: Vec<_> = snap
                     .bookmarks
                     .values()
                     .filter(|b| {
-                        let is_corp_folder = b
-                            .folder_id
-                            .and_then(|fid| snap.bookmark_folders.get(&fid))
-                            .is_some_and(|f| f.is_shared || f.corporation_id == Some(corp_id));
+                        let folder_opt = b.folder_id.and_then(|fid| snap.bookmark_folders.get(&fid));
+                        let is_corp_folder = folder_opt.is_some_and(|f| {
+                            f.owner_id == corp_id || f.corporation_id == Some(corp_id)
+                        });
                         let belongs_to_corp = b.owner_id == corp_id
                             || ((b.is_shared || is_corp_folder)
                                 && snap
                                     .characters
                                     .get(&b.owner_id)
                                     .is_some_and(|c| c.corporation_id == corp_id));
-                        belongs_to_corp
-                            && !snap
-                                .bookmark_expiries
-                                .get(&b.bookmark_id)
-                                .is_some_and(|&exp| exp > 0 && now >= exp)
+                        if !belongs_to_corp {
+                            return false;
+                        }
+                        if snap
+                            .bookmark_expiries
+                            .get(&b.bookmark_id)
+                            .is_some_and(|&exp| exp > 0 && now >= exp)
+                        {
+                            return false;
+                        }
+                        if let (Some((cid, ref esi_sess)), Some(f)) = (&esi_sess_opt, folder_opt) {
+                            use crate::services::fleet_social::fleet_social_access_group_bookmarks::{
+                                folder_access_level, AccessLevel,
+                            };
+                            if folder_access_level(snap, esi_sess, *cid, f) < AccessLevel::View {
+                                return false;
+                            }
+                        }
+                        true
                     })
                     .collect();
                 bms.sort_by_key(|b| b.bookmark_id);
@@ -811,38 +886,62 @@ pub fn dispatch_char_social_route(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
+            let caller_cid_opt = claims.map(|c| c.character_id).filter(|&cid| cid > 0);
             Some(ctx.db.with_snapshot(|snap| {
                 if !snap.corporations.contains_key(&corp_id) {
                     return RouteExecutionResult::error(404, format!("Corporation {corp_id} not found"));
                 }
+                let esi_sess_opt = match caller_cid_opt {
+                    Some(cid) => {
+                        if !esi_caller_in_corp(snap, corp_id, cid) {
+                            return RouteExecutionResult::error(
+                                403,
+                                format!("Character {cid} is not a member of corporation {corp_id}"),
+                            );
+                        }
+                        Some((cid, esi_corp_bookmark_session(snap, corp_id, cid)))
+                    }
+                    None => None,
+                };
+                let folder_visible = |f: &eve_db::BookmarkFolderRecord| -> bool {
+                    if !(f.owner_id == corp_id || f.corporation_id == Some(corp_id))
+                        || snap.bookmark_subfolder_parents.contains_key(&f.folder_id)
+                    {
+                        return false;
+                    }
+                    if let Some((cid, ref esi_sess)) = esi_sess_opt {
+                        use crate::services::fleet_social::fleet_social_access_group_bookmarks::{
+                            folder_access_level, AccessLevel,
+                        };
+                        if folder_access_level(snap, esi_sess, cid, f) < AccessLevel::View {
+                            return false;
+                        }
+                    }
+                    true
+                };
                 let mut folders: Vec<_> = snap
                     .bookmark_folders
                     .values()
-                    .filter(|f| {
-                        (f.owner_id == corp_id || f.corporation_id == Some(corp_id))
-                            && !snap.bookmark_subfolder_parents.contains_key(&f.folder_id)
-                    })
+                    .filter(|f| folder_visible(f))
                     .collect();
                 folders.sort_by_key(|f| f.folder_id);
+                let mut known_fids: Vec<i64> = folders.iter().map(|f| f.folder_id).collect();
                 let mut out: Vec<Value> = folders
                     .into_iter()
                     .map(|f| json!({ "folder_id": f.folder_id, "name": f.folder_name, "creator_id": f.owner_id }))
-                    .collect();
-                let mut known_fids: Vec<i64> = snap
-                    .bookmark_folders
-                    .values()
-                    .filter(|f| {
-                        (f.owner_id == corp_id || f.corporation_id == Some(corp_id))
-                            && !snap.bookmark_subfolder_parents.contains_key(&f.folder_id)
-                    })
-                    .map(|f| f.folder_id)
                     .collect();
                 let mut bm_fids: Vec<i64> = snap
                     .bookmarks
                     .values()
                     .filter(|b| b.owner_id == corp_id)
                     .filter_map(|b| b.folder_id)
-                    .filter(|fid| !snap.bookmark_subfolder_parents.contains_key(fid))
+                    .filter(|fid| {
+                        !snap.bookmark_subfolder_parents.contains_key(fid)
+                            && snap
+                                .bookmark_folders
+                                .get(fid)
+                                .is_none_or(&folder_visible)
+                    })
                     .collect();
                 bm_fids.sort_unstable();
                 bm_fids.dedup();

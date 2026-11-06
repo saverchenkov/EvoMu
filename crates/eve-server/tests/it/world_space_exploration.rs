@@ -1290,6 +1290,14 @@ async fn test_equinox_sov_hub_power_reagents_fuel_upgrades_and_workforce() {
         .collect();
 
     ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.insert(
+            CORP,
+            eve_db::CorporationRecord {
+                corporation_id: CORP,
+                ceo_id: PILOT,
+                ..Default::default()
+            },
+        );
         snap.structures.insert(hub_a, structure(hub_a, CORP, jita, TYPE_SOVEREIGNTY_HUB));
         snap.structures.insert(hub_b, structure(hub_b, CORP, perimeter, TYPE_SOVEREIGNTY_HUB));
         for (iid, tid, qty, loc) in [
@@ -1370,7 +1378,7 @@ async fn test_equinox_sov_hub_power_reagents_fuel_upgrades_and_workforce() {
 
     ctx.advance_secs(3_600);
     let fuel = qrpc(&ctx, &mut s, "eve_public.sovereignty.hub.fuel.api.GetRequest", id_req(1, hub_a as u64)).await.payload.unwrap().value;
-    assert_eq!(field(&fuel, 1).and_then(|f| varint(&f, 2)), Some(493));
+    assert_eq!(field(&fuel, 1).and_then(|f| varint(&f, 2)), Some(479));
 
     // 5. Workforce transit configuration (export 300 from Jita to Perimeter)
     let mut exp = Vec::new();

@@ -71,6 +71,7 @@ pub(crate) fn extract_extra_var(extra: Option<&PyRep>, key: &str) -> Option<i64>
 /// ticks never integer-truncate maturity progress.
 pub fn advance_skyhook_reagents_in_snap(
     snap: &mut WorldStateSnapshot,
+    sde: &eve_sde::SdeRegistry,
     skyhook_id: i64,
     now_unix: u64,
 ) -> Option<(u32, u64, u64)> {
@@ -86,22 +87,28 @@ pub fn advance_skyhook_reagents_in_snap(
             .is_none_or(|st| !st.state.eq_ignore_ascii_case("destroyed"));
 
     let mut harvested_now = 0u64;
-    if is_active && snap.sov_runtime.skyhook_reagent_bays.contains_key(&skyhook_id) {
-        let bay_ts = snap
-            .sov_runtime
-            .skyhook_reagent_bays
-            .get(&skyhook_id)
-            .map(|b| b.3)
-            .unwrap_or(now_unix);
-        let last_h = snap
-            .sov_runtime
-            .skyhook_last_harvest_unix
-            .entry(skyhook_id)
-            .or_insert(if bay_ts > 0 { bay_ts } else { now_unix });
-        if now_unix >= last_h.saturating_add(3_600) {
-            let hours = (now_unix - *last_h) / 3_600;
-            *last_h = last_h.saturating_add(hours * 3_600);
-            harvested_now = hours.saturating_mul(SKYHOOK_HOURLY_REAGENT_YIELD);
+    if is_active {
+        if let Some(&(bay_reagent_type, _, _, bay_ts)) =
+            snap.sov_runtime.skyhook_reagent_bays.get(&skyhook_id)
+        {
+            let planet_id = snap.sov_runtime.skyhook_planets.get(&skyhook_id).copied();
+            let sys_id = snap.structures.get(&skyhook_id).map(|s| s.solar_system_id);
+            let hourly_yield = crate::services::quasar_sov_skyhook::planet_hourly_reagent_yield(
+                sde,
+                planet_id,
+                sys_id,
+                bay_reagent_type,
+            );
+            let last_h = snap
+                .sov_runtime
+                .skyhook_last_harvest_unix
+                .entry(skyhook_id)
+                .or_insert(if bay_ts > 0 { bay_ts } else { now_unix });
+            if now_unix >= last_h.saturating_add(3_600) {
+                let hours = (now_unix - *last_h) / 3_600;
+                *last_h = last_h.saturating_add(hours * 3_600);
+                harvested_now = hours.saturating_mul(hourly_yield);
+            }
         }
     }
 
@@ -623,7 +630,7 @@ pub async fn handle_skyhook_component_call(
             let completes_at = now + SKYHOOK_SILO_LINK_DURATION_SECS;
             let orig_max_vel = ship_ball.max_velocity;
             ctx.db.try_with_mut_snapshot(|snap| {
-                let _ = advance_skyhook_reagents_in_snap(snap, skyhook_id, now);
+                let _ = advance_skyhook_reagents_in_snap(snap, &ctx.sde, skyhook_id, now);
                 let window_open = snap
                     .sov_runtime
                     .skyhook_theft_windows
@@ -721,7 +728,7 @@ pub async fn handle_skyhook_component_call(
             let req_qty_opt = args.get(4).and_then(|a| a.as_i64()).filter(|&q| q > 0).map(|q| q as u64);
             let (reagent_tid, extracted, rem_sec) = ctx.db.try_with_mut_snapshot(|snap| {
                 let free_m3 = super::ship_free_cargo_m3(ctx, snap, ship_id)?;
-                let _ = advance_skyhook_reagents_in_snap(snap, skyhook_id, now);
+                let _ = advance_skyhook_reagents_in_snap(snap, &ctx.sde, skyhook_id, now);
                 let entry = snap
                     .sov_runtime
                     .skyhook_reagent_bays
@@ -813,7 +820,7 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
     let newly_hackable: Vec<(u32, i64)> = ctx.db.with_mut_snapshot(|snap| {
         let mut opened = Vec::new();
         for id in skyhook_ids {
-            let _ = advance_skyhook_reagents_in_snap(snap, id, now_unix);
+            let _ = advance_skyhook_reagents_in_snap(snap, &ctx.sde, id, now_unix);
             let window = snap
                 .sov_runtime
                 .skyhook_theft_windows
@@ -909,7 +916,7 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
         // leaving secure bay untouched, and restore ship max velocity.
         let drop_res = ctx.db.with_mut_snapshot(|snap| {
             snap.sov_runtime.skyhook_silo_links.remove(&skyhook_id);
-            let _ = advance_skyhook_reagents_in_snap(snap, skyhook_id, now_unix);
+            let _ = advance_skyhook_reagents_in_snap(snap, &ctx.sde, skyhook_id, now_unix);
             let entry = snap.sov_runtime.skyhook_reagent_bays.get_mut(&skyhook_id)?;
             if entry.2 == 0 {
                 return None;

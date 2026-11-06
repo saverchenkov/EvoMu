@@ -76,6 +76,26 @@ fn helper_parsers_role_masks_and_corp_authorization() {
         c.corporation_id = corp_id;
         c.ceo_id = cid;
         snap.corporations.insert(corp_id, c);
+        snap.structures.insert(
+            88_000_001,
+            eve_db::UpwellStructureRecord {
+                structure_id: 88_000_001,
+                type_id: 16_213,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            88_000_001,
+            eve_db::UpwellStructureRecord {
+                structure_id: 88_000_001,
+                type_id: 16_213,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                ..Default::default()
+            },
+        );
         snap.starbase_settings.insert(88_000_001, Default::default());
     });
 
@@ -163,6 +183,16 @@ fn registered_quasar_alliance_and_corporation_handlers() {
                 short_name: "QSTA".into(),
                 executor_corp_id: corp_id,
                 member_corp_ids: members,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            88_000_001,
+            eve_db::UpwellStructureRecord {
+                structure_id: 88_000_001,
+                type_id: 16_213,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
                 ..Default::default()
             },
         );

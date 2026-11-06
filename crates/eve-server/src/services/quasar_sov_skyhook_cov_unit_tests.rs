@@ -369,6 +369,14 @@ fn query_handlers_sorting_filtering_and_error_paths() {
             ch.solar_system_id = sys_a;
             ch.corporation_id = corp_a;
         }
+        snap.corporations.insert(
+            corp_a,
+            eve_db::CorporationRecord {
+                corporation_id: corp_a,
+                ceo_id: cid,
+                ..Default::default()
+            },
+        );
         // Insert out-of-order IDs + a non-skyhook structure to verify filtering and sorting
         snap.structures
             .insert(90_020, mk_struct(90_020, TYPE_ORBITAL_SKYHOOK, corp_a, sys_a));
@@ -429,20 +437,23 @@ fn query_handlers_sorting_filtering_and_error_paths() {
         .collect();
     assert_eq!(local_ids, vec![90_005, 90_020]);
 
-    // GetAllByCorporationRequest: missing ID -> 400, empty corp -> empty, corp_a -> [90_005, 90_020]
+    // GetAllByCorporationRequest: missing ID -> 400, foreign corp -> 403, corp_a -> [90_005, 90_020]
     assert_eq!(
         handlers["eve_public.sovereignty.skyhook.api.GetAllByCorporationRequest"](&ctx, &any_empty, &empty_req)
             .unwrap_err()
             .0,
         STATUS_BAD_REQUEST
     );
-    let empty_corp = handlers["eve_public.sovereignty.skyhook.api.GetAllByCorporationRequest"](
-        &ctx,
-        &any_empty,
-        &id_msg(1, 555_555),
-    )
-    .expect("empty corp");
-    assert!(empty_corp.value.is_empty());
+    assert_eq!(
+        handlers["eve_public.sovereignty.skyhook.api.GetAllByCorporationRequest"](
+            &ctx,
+            &any_empty,
+            &id_msg(1, 555_555),
+        )
+        .unwrap_err()
+        .0,
+        crate::quasar_gateway::STATUS_FORBIDDEN
+    );
 
     let corp_res = handlers["eve_public.sovereignty.skyhook.api.GetAllByCorporationRequest"](
         &ctx,

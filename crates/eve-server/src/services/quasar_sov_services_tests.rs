@@ -39,9 +39,18 @@ fn skyhook_activation_and_stargate_lock_notices() {
     let sys_id = 30_000_142_u32;
 
     db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&cid) {
-            ch.corporation_id = corp_id;
+        for id in [cid, 90_000_002_i64] {
+            if let Some(ch) = snap.characters.get_mut(&id) {
+                ch.corporation_id = corp_id;
+            }
         }
+        let mut c = eve_db::CorporationRecord {
+            corporation_id: corp_id,
+            ceo_id: cid,
+            ..Default::default()
+        };
+        c.members.extend([cid, 90_000_002]);
+        snap.corporations.insert(corp_id, c);
         snap.structures.insert(
             skyhook_id,
             UpwellStructureRecord {
@@ -70,7 +79,7 @@ fn skyhook_activation_and_stargate_lock_notices() {
     );
     let grunt_ctx = AuthoritativeContext::for_session(
         Some(2),
-        Some(cid as u32),
+        Some(90_000_002),
         Some(corp_id as u32),
         0,
         "tranquility",

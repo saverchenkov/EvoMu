@@ -86,6 +86,14 @@ fn workforce_network_and_rpc_handlers() {
             ch.corporation_id = corp_id;
             ch.solar_system_id = sys_a;
         }
+        snap.corporations.insert(
+            corp_id,
+            eve_db::CorporationRecord {
+                corporation_id: corp_id,
+                ceo_id: cid,
+                ..Default::default()
+            },
+        );
         snap.structures.insert(
             hub_a,
             UpwellStructureRecord {

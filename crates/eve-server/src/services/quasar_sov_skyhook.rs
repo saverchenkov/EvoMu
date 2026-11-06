@@ -9,10 +9,15 @@
 
 #![forbid(unsafe_code)]
 
-use super::quasar_sov_hub::{any, id_field, required_id, ts_field, RpcError};
+use super::quasar_sov_hub::{
+    any, caller, id_field, require_caller_roles, required_id, ts_field, RpcError,
+};
 use super::sov_services::TYPE_ORBITAL_SKYHOOK;
-use crate::quasar_gateway::{PublicGatewayRouter, STATUS_NOT_FOUND, STATUS_UNAUTHORIZED};
-use eve_db::{WorldRepository, WorldStateSnapshot};
+use crate::quasar_gateway::{
+    require_admin_role, PublicGatewayRouter, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
+    STATUS_UNAUTHORIZED,
+};
+use eve_db::{corp_roles, WorldRepository, WorldStateSnapshot};
 use eve_proto::quasar::{encode_bytes_field, encode_varint_field};
 use eve_sde::SdeRegistry;
 use std::collections::BTreeSet;
@@ -153,7 +158,7 @@ pub fn register_query_handlers(router: &PublicGatewayRouter, db: Arc<WorldReposi
                     if !is_skyhook(snap, id) {
                         return Err::<Vec<u8>, RpcError>((STATUS_NOT_FOUND, format!("Skyhook {id} not found")));
                     }
-                    let _ = super::sov_gameplay::advance_skyhook_reagents_in_snap(snap, id, now);
+                    let _ = super::sov_gameplay::advance_skyhook_reagents_in_snap(snap, &sde, id, now);
                     Ok(encode_skyhook(snap, &sde, id, now))
                 })?;
                 Ok(any("eve_public.sovereignty.skyhook.api.GetResponse", body))
@@ -169,7 +174,8 @@ pub fn register_query_handlers(router: &PublicGatewayRouter, db: Arc<WorldReposi
                 let cid = ctx
                     .effective_character_id()
                     .ok_or((STATUS_UNAUTHORIZED, "Authenticated character required".to_string()))? as i64;
-                let out = db.with_snapshot(|snap| {
+                let now = ctx.now_unix();
+                let out = db.try_with_mut_snapshot(|snap| {
                     let sys = snap
                         .characters
                         .get(&cid)
@@ -178,7 +184,8 @@ pub fn register_query_handlers(router: &PublicGatewayRouter, db: Arc<WorldReposi
                     let mut out = Vec::new();
                     id_field(1, u64::from(sys), &mut out);
                     for id in sorted_skyhooks(snap, |s| s.solar_system_id == sys) {
-                        encode_bytes_field(2, &encode_skyhook(snap, &sde, id, ctx.now_unix()), &mut out);
+                        let _ = super::sov_gameplay::advance_skyhook_reagents_in_snap(snap, &sde, id, now);
+                        encode_bytes_field(2, &encode_skyhook(snap, &sde, id, now), &mut out);
                     }
                     Ok::<_, RpcError>(out)
                 })?;
@@ -193,13 +200,31 @@ pub fn register_query_handlers(router: &PublicGatewayRouter, db: Arc<WorldReposi
             "eve_public.sovereignty.skyhook.api.GetAllByCorporationRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
                 let corp = required_id(dyn_msg, 1, "Corporation")?;
-                let out = db.with_snapshot(|snap| {
+                let now = ctx.now_unix();
+                let out = db.try_with_mut_snapshot(|snap| {
+                    if require_admin_role(ctx).is_err() {
+                        let c = caller(ctx, snap)?;
+                        if c.corp != corp {
+                            return Err::<Vec<u8>, RpcError>((
+                                STATUS_FORBIDDEN,
+                                format!("Skyhooks of corporation {corp} are not owned by your corporation"),
+                            ));
+                        }
+                        require_caller_roles(
+                            &c,
+                            corp_roles::ROLE_DIRECTOR
+                                | corp_roles::ROLE_STATION_MANAGER
+                                | corp_roles::ROLE_CONFIG_EQUIPMENT,
+                            "query corporation skyhooks",
+                        )?;
+                    }
                     let mut out = Vec::new();
                     for id in sorted_skyhooks(snap, |s| s.owner_corp_id == corp) {
-                        encode_bytes_field(1, &encode_skyhook(snap, &sde, id, ctx.now_unix()), &mut out);
+                        let _ = super::sov_gameplay::advance_skyhook_reagents_in_snap(snap, &sde, id, now);
+                        encode_bytes_field(1, &encode_skyhook(snap, &sde, id, now), &mut out);
                     }
-                    out
-                });
+                    Ok(out)
+                })?;
                 Ok(any("eve_public.sovereignty.skyhook.api.GetAllByCorporationResponse", out))
             }),
         );
@@ -258,5 +283,9 @@ mod quasar_sov_skyhook_tests;
 #[path = "quasar_sov_skyhook_cov_unit_tests.rs"]
 #[cfg(test)]
 mod quasar_sov_skyhook_cov_unit_tests;
+
+#[cfg(test)]
+#[path = "r8_shard_c_security_regression_tests.rs"]
+mod r8_shard_c_security_regression_tests;
 
 

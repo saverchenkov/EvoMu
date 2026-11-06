@@ -45,30 +45,37 @@ pub fn cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx: &ServerContext) ->
             removed_wreck_balls.push((sys_id, wid));
         }
 
-        // Despawn surviving mission NPCs and reset uncompleted ("Accepted") missions (`feat:lifecycle.mission-downtime-respawn`)
-        for mission in snap.active_missions.values_mut() {
+        // Despawn surviving mission NPCs and reset uncompleted ("Accepted") combat missions (`feat:lifecycle.mission-downtime-respawn`)
+        for (&map_key, mission) in snap.active_missions.iter_mut() {
             if mission.state == "Accepted" {
                 let mkey = format!("{}:{}", mission.character_id, mission.mission_id);
-                let target_count = st
+                let initial_count = st
                     .mission_initial_npc_counts
                     .get(&mkey)
                     .copied()
-                    .unwrap_or_else(|| {
-                        (mission.spawned_npc_ball_ids.len() as u32)
-                            .max(mission.npcs_remaining)
-                            .max(4)
-                    });
+                    .unwrap_or(0);
+                let old_spawned_len = mission.spawned_npc_ball_ids.len() as u32;
+                let has_combat_wave =
+                    initial_count > 0 || old_spawned_len > 0 || mission.npcs_remaining > 0;
                 for &old_bid in &mission.spawned_npc_ball_ids {
                     removed_mission_npcs.push((mission.solar_system_id, old_bid));
                 }
                 mission.spawned_npc_ball_ids.clear();
-                mission.npcs_remaining = target_count;
                 mission.current_room_id = 1;
-                let key = (mission.character_id, mission.agent_id as u32);
-                if !st.missions_awaiting_downtime_respawn.contains(&key) {
-                    st.missions_awaiting_downtime_respawn.push(key);
+                if has_combat_wave {
+                    let target_count = if initial_count > 0 {
+                        initial_count
+                    } else {
+                        old_spawned_len.max(mission.npcs_remaining).max(4)
+                    };
+                    mission.npcs_remaining = target_count;
+                    if !st.missions_awaiting_downtime_respawn.contains(&map_key) {
+                        st.missions_awaiting_downtime_respawn.push(map_key);
+                    }
+                    missions_reset_count += 1;
+                } else {
+                    mission.npcs_remaining = 0;
                 }
-                missions_reset_count += 1;
             }
         }
         let active_accepted_keys: std::collections::HashSet<String> = snap
@@ -81,6 +88,11 @@ pub fn cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx: &ServerContext) ->
             .retain(|k, _| active_accepted_keys.contains(k));
         st.mission_initial_npc_types
             .retain(|k, _| active_accepted_keys.contains(k));
+        st.missions_awaiting_downtime_respawn.retain(|k| {
+            snap.active_missions
+                .get(k)
+                .is_some_and(|m| m.state == "Accepted")
+        });
     });
 
     let wrecks_removed_count = removed_wreck_balls.len();
@@ -139,11 +151,19 @@ pub fn spawn_mission_wave_on_pocket_entry_if_needed(
             st.missions_awaiting_downtime_respawn
                 .retain(|&k| k != (cid, aid));
             let mkey = format!("{cid}:{mission_id}");
-            let wave_count = st
+            let initial_count = st
                 .mission_initial_npc_counts
                 .get(&mkey)
                 .copied()
-                .unwrap_or_else(|| cur_npcs.max(4));
+                .unwrap_or(0);
+            if initial_count == 0 && cur_npcs == 0 {
+                continue;
+            }
+            let wave_count = if initial_count > 0 {
+                initial_count
+            } else {
+                cur_npcs.max(4)
+            };
             let wave_types = st.mission_initial_npc_types.get(&mkey).cloned();
             let new_bids: Vec<i64> = (0..wave_count).map(|_| snap.alloc_entity_id()).collect();
             if let Some(mission) = snap.active_missions.get_mut(&(cid, aid)) {

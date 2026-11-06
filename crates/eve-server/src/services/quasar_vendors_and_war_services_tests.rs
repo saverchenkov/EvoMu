@@ -143,7 +143,8 @@ fn notice_publishers_publish_to_gateway() {
 #[test]
 fn registered_handlers_for_tournament_universe_vanguard_vendors_and_war() {
     let (router, db, _sde) = setup_router();
-    let ctx = AuthoritativeContext::for_session(Some(1), Some(90_000_001), Some(1_000_009), 0, "tranquility", vec![1]);
+    let ctx = AuthoritativeContext::for_session(Some(1), Some(90_000_001), Some(1_000_009), 0, "tranquility", vec![1])
+        .with_service_roles(eve_machonet::service_roles::ROLE_ADMIN);
 
     // 1. ThirdPartyApi
     let mut tpa_req = DynamicQuasarMessage::new("eve.thirdpartyapi.RequestReceived");

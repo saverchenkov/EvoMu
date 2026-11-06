@@ -412,7 +412,8 @@ pub fn compute_ship_insurance_reference_value_with_prices(
     if let Some(bp) = sde
         .blueprints
         .values()
-        .find(|b| b.product_type_id == ship_type_id)
+        .filter(|b| b.product_type_id == ship_type_id)
+        .min_by_key(|b| b.blueprint_type_id)
     {
         let mats: Vec<(eve_sde::TypeId, u64)> = if !bp.materials.is_empty() {
             bp.materials.iter().map(|m| (m.type_id, m.quantity)).collect()
@@ -463,16 +464,57 @@ pub fn compute_ship_insurance_reference_value_for_ctx(
     })
 }
 
+pub fn is_station_container_type(type_id: eve_sde::TypeId) -> bool {
+    matches!(
+        type_id,
+        23 | 3293
+            | 3296
+            | 3297
+            | 3465..=3467
+            | 11488
+            | 11489
+            | 17363..=17368
+            | 24445
+            | 33003..=33011
+            | 41567
+    )
+}
+
+pub fn is_valid_industry_output_flag(
+    flag: eve_db::InventoryFlag,
+    is_item_container: bool,
+    use_corp: bool,
+) -> bool {
+    if is_item_container {
+        return matches!(
+            flag,
+            eve_db::InventoryFlag::Unlocked | eve_db::InventoryFlag::Hangar
+        );
+    }
+    match flag {
+        eve_db::InventoryFlag::Hangar | eve_db::InventoryFlag::Deliveries => true,
+        eve_db::InventoryFlag::CorpDeliveries
+        | eve_db::InventoryFlag::CorpSAG1
+        | eve_db::InventoryFlag::CorpSAG2
+        | eve_db::InventoryFlag::CorpSAG3
+        | eve_db::InventoryFlag::CorpSAG4
+        | eve_db::InventoryFlag::CorpSAG5
+        | eve_db::InventoryFlag::CorpSAG6
+        | eve_db::InventoryFlag::CorpSAG7 => use_corp,
+        _ => false,
+    }
+}
+
 pub fn is_industry_loc_at_facility(
     snap: &eve_db::WorldStateSnapshot,
     loc_id: i64,
     station_id: i64,
-    docked_id: i64,
+    _docked_id: i64,
     char_id: i64,
     use_corp: bool,
     job_owner_id: i64,
 ) -> bool {
-    if loc_id == station_id || loc_id == docked_id {
+    if loc_id == station_id {
         return true;
     }
     let Some(parent) = snap.items.get(&loc_id) else {
@@ -481,12 +523,25 @@ pub fn is_industry_loc_at_facility(
     if parent.owner_id != char_id && !(use_corp && parent.owner_id == job_owner_id) {
         return false;
     }
-    if parent.location_id == station_id || parent.location_id == docked_id {
+    if parent.type_id == 60
+        || matches!(
+            parent.flag,
+            eve_db::InventoryFlag::Impounded | eve_db::InventoryFlag::Locked
+        )
+    {
+        return false;
+    }
+    if parent.location_id == station_id {
         return true;
     }
     snap.items.get(&parent.location_id).is_some_and(|gp| {
         (gp.owner_id == char_id || (use_corp && gp.owner_id == job_owner_id))
-            && (gp.location_id == station_id || gp.location_id == docked_id)
+            && gp.type_id != 60
+            && !matches!(
+                gp.flag,
+                eve_db::InventoryFlag::Impounded | eve_db::InventoryFlag::Locked
+            )
+            && gp.location_id == station_id
     })
 }
 
@@ -521,28 +576,100 @@ pub fn resolve_industry_delivery_target(
     out_owner_id: i64,
     fallback_loc: i64,
 ) -> (i64, eve_db::InventoryFlag) {
+    let safe_fallback = if fallback_loc == job.facility_id {
+        job.facility_id
+    } else {
+        match snap.items.get(&fallback_loc) {
+            Some(it)
+                if (it.owner_id == char_id
+                    || (meta.use_corp && it.owner_id == out_owner_id))
+                    && it.type_id != 60
+                    && !matches!(
+                        it.flag,
+                        eve_db::InventoryFlag::Impounded | eve_db::InventoryFlag::Locked
+                    )
+                    && is_industry_loc_at_facility(
+                        snap,
+                        it.location_id,
+                        job.facility_id,
+                        job.facility_id,
+                        char_id,
+                        meta.use_corp,
+                        out_owner_id,
+                    ) =>
+            {
+                if it.type_id == 27 {
+                    job.facility_id
+                } else if is_station_container_type(it.type_id) && it.singleton {
+                    fallback_loc
+                } else {
+                    job.facility_id
+                }
+            }
+            _ => job.facility_id,
+        }
+    };
     let raw_target = if job.output_location_id > 0 {
         job.output_location_id
     } else if meta.output_location_id > 0 {
         meta.output_location_id
     } else {
-        fallback_loc
+        safe_fallback
     };
-    let target_loc = match snap.items.get(&raw_target) {
-        Some(it) if it.type_id == 27 => it.location_id,
-        Some(_) => raw_target,
-        None => fallback_loc,
-    };
-    let is_item_container = snap.items.get(&target_loc).is_some_and(|it| it.type_id != 27);
-    let target_flag = meta.output_flag.unwrap_or_else(|| {
-        if is_item_container {
-            eve_db::InventoryFlag::Unlocked
-        } else if meta.use_corp && out_owner_id != char_id {
-            crate::services::industry_pi::restore_blueprint_flag(out_owner_id, meta)
-        } else {
-            eve_db::InventoryFlag::Hangar
+    let target_loc = if raw_target == job.facility_id {
+        job.facility_id
+    } else {
+        match snap.items.get(&raw_target) {
+            Some(it)
+                if (it.owner_id == char_id
+                    || (meta.use_corp && it.owner_id == out_owner_id))
+                    && it.type_id != 60
+                    && !matches!(
+                        it.flag,
+                        eve_db::InventoryFlag::Impounded | eve_db::InventoryFlag::Locked
+                    )
+                    && is_industry_loc_at_facility(
+                        snap,
+                        it.location_id,
+                        job.facility_id,
+                        job.facility_id,
+                        char_id,
+                        meta.use_corp,
+                        out_owner_id,
+                    ) =>
+            {
+                if it.type_id == 27 {
+                    job.facility_id
+                } else if is_station_container_type(it.type_id) && it.singleton {
+                    raw_target
+                } else {
+                    safe_fallback
+                }
+            }
+            _ => safe_fallback,
         }
-    });
+    };
+    let is_item_container = snap
+        .items
+        .get(&target_loc)
+        .is_some_and(|it| is_station_container_type(it.type_id) && it.singleton);
+    let default_flag = if is_item_container {
+        eve_db::InventoryFlag::Unlocked
+    } else if meta.use_corp && out_owner_id != char_id {
+        crate::services::industry_pi::restore_blueprint_flag(out_owner_id, meta)
+    } else {
+        eve_db::InventoryFlag::Hangar
+    };
+    let target_flag = match meta.output_flag {
+        Some(f) if is_valid_industry_output_flag(f, is_item_container, meta.use_corp && out_owner_id != char_id) => {
+            if is_item_container {
+                eve_db::InventoryFlag::Unlocked
+            } else {
+                f
+            }
+        }
+        _ => default_flag,
+    };
     (target_loc, target_flag)
 }
 

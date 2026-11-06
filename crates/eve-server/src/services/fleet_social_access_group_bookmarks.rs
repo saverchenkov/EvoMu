@@ -20,6 +20,44 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
 
+/// Resolve a character's effective corporation and alliance IDs from live snapshot state,
+/// falling back to `session` only when the character or synthetic test corp is absent from `snap`.
+pub(crate) fn effective_char_corp_and_alliance(
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+) -> (Option<i64>, Option<i64>) {
+    let corp_id = if let Some(ch) = snap.characters.get(&char_id) {
+        if !(1_000_000..2_000_000).contains(&ch.corporation_id) {
+            Some(ch.corporation_id)
+        } else if let Some(scid) = session.corporation_id {
+            if scid != ch.corporation_id
+                && snap
+                    .corporations
+                    .get(&scid)
+                    .map_or(true, |c| c.ceo_id == char_id || c.members.contains(&char_id))
+            {
+                Some(scid)
+            } else {
+                Some(ch.corporation_id)
+            }
+        } else {
+            Some(ch.corporation_id)
+        }
+    } else {
+        session.corporation_id
+    };
+    let alliance_id = corp_id
+        .and_then(|cid| snap.corporations.get(&cid).map(|c| c.alliance_id))
+        .unwrap_or_else(|| {
+            snap.characters
+                .get(&char_id)
+                .and_then(|c| c.alliance_id)
+                .or(session.alliance_id)
+        });
+    (corp_id, alliance_id)
+}
+
 /// Check if a character (or their corp/alliance) has membership in an access group.
 pub(crate) fn is_in_access_group(
     snap: &eve_db::WorldStateSnapshot,
@@ -31,12 +69,14 @@ pub(crate) fn is_in_access_group(
         if members.contains(&char_id) {
             return true;
         }
-        if let Some(cid) = session.corporation_id {
+        let (corp_id_opt, alliance_id_opt) =
+            effective_char_corp_and_alliance(snap, session, char_id);
+        if let Some(cid) = corp_id_opt {
             if members.contains(&cid) {
                 return true;
             }
         }
-        if let Some(aid) = session.alliance_id {
+        if let Some(aid) = alliance_id_opt {
             if members.contains(&aid) {
                 return true;
             }
@@ -207,7 +247,8 @@ pub(crate) fn folder_access_level(
     }
 
     // Legacy folder fallback (when no access groups are configured)
-    if let (Some(fcid), Some(scid)) = (f.corporation_id, session.corporation_id) {
+    let (eff_corp_id, _) = effective_char_corp_and_alliance(snap, session, char_id);
+    if let (Some(fcid), Some(scid)) = (f.corporation_id, eff_corp_id) {
         if fcid == scid {
             if has_corp_bookmark_admin_role(snap, session, char_id, scid) {
                 level = level.max(AccessLevel::Admin);

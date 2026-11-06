@@ -162,6 +162,12 @@ fn serde_defaults_snapshot_mapping_admin_role_divisions_and_extractors() {
     let ctx_member = sess(Some(2), Some(pm_cid), Some(corp_id), 0);
     assert_eq!(check_corp_admin_role(&ctx_member, Some(&db), pm_cid, corp_id).unwrap_err().0, STATUS_FORBIDDEN);
 
+    db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.corporations.get_mut(&(corp_id as i64)) {
+            c.members.insert(pm_cid as i64);
+            c.member_roles.insert(pm_cid as i64, corp_roles::ROLE_PROJECT_MANAGER);
+        }
+    });
     for (acct, expected_div) in [(999, 1u8), (1000, 1), (1003, 4), (1006, 7), (1007, 1)] {
         db.with_mut_snapshot(|snap| {
             snap.corp_governance.entry(corp_id as i64).or_default().member_account_keys.insert(pm_cid as i64, acct);
@@ -182,9 +188,11 @@ fn create_request_config_variants_negative_budget_and_escrow_role_checks() {
     let (dir_cid, pm_cid, corp_id) = (90_000_001_u32, 90_000_002_u32, 1_000_009_u32);
     db.with_mut_snapshot(|snap| {
         let c = snap.corporations.entry(corp_id as i64).or_insert_with(|| CorporationRecord { corporation_id: corp_id as i64, ceo_id: dir_cid as i64, ..Default::default() });
+        c.members.extend([dir_cid as i64, pm_cid as i64]);
         c.master_wallet = IskCents::from_isk(200_000_000);
         c.set_division_balance(1, IskCents::from_isk(200_000_000));
         c.set_division_balance(4, IskCents::from_isk(200_000_000));
+        c.member_roles.insert(pm_cid as i64, corp_roles::ROLE_PROJECT_MANAGER);
         let mut gov = CorpGovState::default();
         gov.member_account_keys.insert(pm_cid as i64, 1003);
         snap.corp_governance.insert(corp_id as i64, gov);
@@ -349,7 +357,12 @@ fn full_lifecycle_queries_close_escrow_guard_delete_and_redeem_reward() {
     ] {
         assert_eq!(handlers[ep](&worker_ctx, &any, &DynamicQuasarMessage::new("E")).unwrap_err().0, STATUS_BAD_REQUEST);
         assert_eq!(handlers[ep](&worker_ctx, &any, &uuid_req(1, &[0xFF; 16])).unwrap_err().0, STATUS_NOT_FOUND);
-        assert!(handlers[ep](&worker_ctx, &any, &uuid_req(1, &proj_uuid)).is_ok());
+        if ep == "eve_public.freelance.project.api.GetRequest" {
+            assert!(handlers[ep](&worker_ctx, &any, &uuid_req(1, &proj_uuid)).is_ok());
+        } else {
+            assert_eq!(handlers[ep](&worker_ctx, &any, &uuid_req(1, &proj_uuid)).unwrap_err().0, STATUS_FORBIDDEN);
+            assert!(handlers[ep](&dir_ctx, &any, &uuid_req(1, &proj_uuid)).is_ok());
+        }
     }
     assert_eq!(handlers["eve_public.freelance.project.api.GetAllActiveForCorporationRequest"](&unauth, &any, &DynamicQuasarMessage::new("E")).unwrap_err().0, STATUS_FORBIDDEN);
     let mut corp_req = DynamicQuasarMessage::new("Req");

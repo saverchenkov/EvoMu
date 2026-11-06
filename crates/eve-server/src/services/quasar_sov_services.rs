@@ -14,7 +14,9 @@
 
 #![forbid(unsafe_code)]
 
-use super::quasar_sov_hub::{caller, corp_owned_structure, require_roles, required_id, transact};
+use super::quasar_sov_hub::{
+    caller, corp_owned_structure, require_caller_roles, required_id, transact,
+};
 use super::quasar_space_services::{
     encode_domain_message, get_identifier_or_int, get_int_field, get_string_field,
     set_domain_attributes,
@@ -42,7 +44,7 @@ pub(crate) fn authorize_skyhook(
 ) -> Result<u32, (u32, String)> {
     let c = caller(ctx, snap)?;
     let sys = corp_owned_structure(snap, &c, skyhook_id, &[TYPE_ORBITAL_SKYHOOK], "Skyhook")?.solar_system_id;
-    require_roles(ctx, corp_roles::ROLE_DIRECTOR, action)?;
+    require_caller_roles(&c, corp_roles::ROLE_DIRECTOR, action)?;
     Ok(sys)
 }
 

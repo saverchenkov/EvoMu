@@ -198,7 +198,8 @@ async fn test_quasar_batch2_freelance_projects_and_item_delivery_e2e() {
     let dir_notices = poll_notice_names(&ctx, &dir_sess);
     assert!(dir_notices.iter().any(|n| n == "eve_public.freelance.project.api.ParticipantAddedNotice"));
     assert_eq!(quasar_call(&ctx, &wrk_sess, "eve_public.freelance.project.api.GetAllCommittedRequest", Vec::new()).status_code, STATUS_OK);
-    assert_eq!(quasar_call(&ctx, &wrk_sess, "eve_public.freelance.project.api.GetParticipationDetailsRequest", proj_req.clone()).status_code, STATUS_OK);
+    assert_eq!(quasar_call(&ctx, &wrk_sess, "eve_public.freelance.project.api.GetParticipationDetailsRequest", proj_req.clone()).status_code, 403);
+    assert_eq!(quasar_call(&ctx, &dir_sess, "eve_public.freelance.project.api.GetParticipationDetailsRequest", proj_req.clone()).status_code, STATUS_OK);
 
     // 4. DeliverRequest -> deposits into CorpDeliveries hangar, emits ContributionSucceededNotice, ProgressedNotice, CompletedNotice
     let mut deliver_req = proj_req.clone();

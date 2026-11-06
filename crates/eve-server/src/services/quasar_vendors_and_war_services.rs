@@ -702,7 +702,8 @@ pub fn register_handlers(
 
     router.register_handler(
         "eve.tournament.arena.api.CreateRequest",
-        Arc::new(move |_ctx, _any, _msg| {
+        Arc::new(move |ctx, _any, _msg| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let mut out = Vec::new();
             encode_uuid_msg(1, b"arena-alpha-1234", &mut out);
             Ok(any("eve.tournament.arena.api.CreateResponse", out))
@@ -711,7 +712,8 @@ pub fn register_handlers(
 
     router.register_handler(
         "eve.tournament.arena.api.DeleteRequest",
-        Arc::new(move |_ctx, _any, msg| {
+        Arc::new(move |ctx, _any, msg| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let _uuid = extract_uuid_bytes(msg, 1).unwrap_or_else(|| b"arena-alpha-1234".to_vec());
             Ok(any("eve.tournament.arena.api.DeleteResponse", Vec::new()))
         }),
@@ -769,7 +771,8 @@ pub fn register_handlers(
     // ------------------------------------------------------------------------
     router.register_handler(
         "eve.vanguard.commission.assignment.admin.api.TriggerCompletedEventRequest",
-        Arc::new(move |_ctx, _any, msg| {
+        Arc::new(move |ctx, _any, msg| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let _user = extract_required_u64(msg, 1, "user")?;
             Ok(any("eve.vanguard.commission.assignment.admin.api.TriggerCompletedEventResponse", Vec::new()))
         }),
@@ -780,7 +783,8 @@ pub fn register_handlers(
     // ------------------------------------------------------------------------
     router.register_handler(
         "eve.vendors.epic.api.GetUserByEveUserIDRequest",
-        Arc::new(move |_ctx, _any, msg| {
+        Arc::new(move |ctx, _any, msg| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let user_id = extract_required_u64(msg, 1, "user")?;
             let mut out = Vec::new();
             encode_id_msg(1, user_id, &mut out);
@@ -796,7 +800,8 @@ pub fn register_handlers(
 
     router.register_handler(
         "eve.vendors.epic.api.GetEntitlementsRequest",
-        Arc::new(move |_ctx, _any, msg| {
+        Arc::new(move |ctx, _any, msg| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let _user = extract_required_u64(msg, 1, "user")?;
             let mut out = Vec::new();
             let ent = encode_epic_entitlement("epic_ent_omega_30d", "Omega 30 Days Game Time", "active", 1_700_000_000);
@@ -807,7 +812,8 @@ pub fn register_handlers(
 
     router.register_handler(
         "eve.vendors.steam.user.api.GetRequest",
-        Arc::new(move |_ctx, _any, msg| {
+        Arc::new(move |ctx, _any, msg| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let steam_id = extract_string_field(msg, 1).unwrap_or("76561198000000000");
             let mut out = Vec::new();
             encode_id_msg(1, 1001, &mut out);
@@ -819,7 +825,8 @@ pub fn register_handlers(
 
     router.register_handler(
         "eve.vendors.steam.user.api.GetByEveUserRequest",
-        Arc::new(move |_ctx, _any, msg| {
+        Arc::new(move |ctx, _any, msg| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let _user_id = extract_required_u64(msg, 1, "user")?;
             let mut out = Vec::new();
             let mut steam_id_msg = Vec::new();
@@ -835,7 +842,8 @@ pub fn register_handlers(
 
     router.register_handler(
         "eve.vendors.steam.user.api.CreateRequest",
-        Arc::new(move |_ctx, _any, _msg| {
+        Arc::new(move |ctx, _any, _msg| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let mut out = Vec::new();
             encode_id_msg(1, 1002, &mut out);
             encode_varint_field(2, 0, &mut out); // already_existed: false
@@ -845,7 +853,8 @@ pub fn register_handlers(
 
     router.register_handler(
         "eve.vendors.fusionauth.api.LinkUserRequest",
-        Arc::new(move |_ctx, _any, _msg| {
+        Arc::new(move |ctx, _any, _msg| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let mut out = Vec::new();
             encode_id_msg(1, 1001, &mut out);
             Ok(any("eve.vendors.fusionauth.api.LinkUserResponse", out))
@@ -854,7 +863,8 @@ pub fn register_handlers(
 
     router.register_handler(
         "eve.vendors.payletter.GetUserIdentityVerificationReceiptRequest",
-        Arc::new(move |_ctx, _any, msg| {
+        Arc::new(move |ctx, _any, msg| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let _user_id = extract_required_u64(msg, 1, "user")?;
             let mut out = Vec::new();
             let receipt = encode_payletter_receipt("payletter_tx_889900", "AUTH_VERIFIED_KR");

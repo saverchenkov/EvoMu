@@ -466,6 +466,7 @@ fn capital_construction_restrictions_and_ptv_multiplier_cover_all_branches() {
 fn ship_insurance_reference_value_with_prices_scales_by_live_material_basket() {
     let mut ctx = make_test_context();
     let mut sde = (*ctx.sde).clone();
+    sde.blueprints.retain(|_, b| b.product_type_id != 587);
     sde.blueprints.insert(
         688,
         BlueprintInfo {

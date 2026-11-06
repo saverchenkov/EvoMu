@@ -233,14 +233,31 @@ fn check_corp_admin_role(
 ) -> Result<(bool, u64, u8), (u32, String)> {
     let sess_role = ctx.identity.as_ref().and_then(|id| id.roles.as_ref().map(|r| r.bitmask)).unwrap_or(ctx.corp_role_mask);
     let now_u = ctx_now_unix(ctx);
-    let (is_ceo, eff_roles, wallet_div) = db.map_or((false, sess_role, 1u8), |db| {
+    let (member_ok, is_ceo, eff_roles, wallet_div) = db.map_or((true, false, sess_role, 1u8), |db| {
         db.with_snapshot(|snap| {
-            let (ceo, eff) = corp_projects::effective_corp_member_roles(snap, corpid as i64, cid as i64, sess_role, now_u);
-            let acct = snap.corp_governance.get(&(corpid as i64)).and_then(|g| g.member_account_keys.get(&(cid as i64)).copied()).unwrap_or(1000);
+            let cid_i64 = cid as i64;
+            let corp_i64 = corpid as i64;
+            let in_corp = match snap.characters.get(&cid_i64) {
+                Some(ch) if ch.corporation_id == corp_i64 => true,
+                Some(ch) if (1_000_000..2_000_000).contains(&ch.corporation_id) => snap
+                    .corporations
+                    .get(&corp_i64)
+                    .is_some_and(|c| c.ceo_id == cid_i64 || c.members.contains(&cid_i64)),
+                Some(_) => false,
+                None => true,
+            };
+            if !in_corp {
+                return (false, false, 0u64, 1u8);
+            }
+            let (ceo, eff) = corp_projects::effective_corp_member_roles(snap, corp_i64, cid_i64, 0, now_u);
+            let acct = snap.corp_governance.get(&corp_i64).and_then(|g| g.member_account_keys.get(&cid_i64).copied()).unwrap_or(1000);
             let div = if (1000..=1006).contains(&acct) { (acct - 999) as u8 } else { 1 };
-            (ceo, eff | (sess_role & !corp_projects::HANGAR_DIV_MASK), div)
+            (true, ceo, eff, div)
         })
     });
+    if !member_ok {
+        return Err((STATUS_FORBIDDEN, "Not a member of the target corporation".into()));
+    }
     if !is_ceo && (eff_roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_PROJECT_MANAGER)) == 0 {
         return Err((STATUS_FORBIDDEN, "Insufficient corporation role".into()));
     }
@@ -485,6 +502,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let Some(proj) = projects.get(&uuid).cloned() else {
                 return Err((STATUS_NOT_FOUND, "Freelance project not found".to_string()));
             };
+            drop(projects);
 
             let cid = ctx.effective_character_id().unwrap_or(0);
             let (char_prog, unredeemed) = proj.contributors.get(&cid).copied().unwrap_or((0, 0));
@@ -517,8 +535,14 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let Some(proj) = projects.get(&uuid).cloned() else {
                 return Err((STATUS_NOT_FOUND, "Freelance project not found".to_string()));
             };
+            drop(projects);
 
-            let cid = ctx.effective_character_id().unwrap_or(0);
+            let Some(cid) = ctx.effective_character_id() else {
+                return Err((STATUS_UNAUTHENTICATED, "Unauthenticated".to_string()));
+            };
+            if crate::quasar_gateway::require_admin_role(ctx).is_err() {
+                check_corp_admin_role(ctx, state_mgr.db.as_ref(), cid, proj.owner_corp_id)?;
+            }
             let (char_prog, unredeemed) = proj.contributors.get(&cid).copied().unwrap_or((0, 0));
             let attr = encode_project_attributes(&proj);
             let mut admin = Vec::new();
@@ -719,7 +743,16 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let projects = state_part.projects.read().unwrap_or_else(|e| e.into_inner());
             let p = projects
                 .get(&uuid)
+                .cloned()
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Freelance project not found".to_string()))?;
+            drop(projects);
+
+            let Some(caller_cid) = ctx.effective_character_id() else {
+                return Err((STATUS_UNAUTHENTICATED, "Unauthenticated".to_string()));
+            };
+            if crate::quasar_gateway::require_admin_role(ctx).is_err() {
+                check_corp_admin_role(ctx, state_part.db.as_ref(), caller_cid, p.owner_corp_id)?;
+            }
 
             let (slice, next_tok) = paginate_slice(dyn_msg.get(2), &p.committed_participants);
             let mut out = Vec::new();

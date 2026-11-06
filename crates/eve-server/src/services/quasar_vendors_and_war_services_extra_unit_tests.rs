@@ -204,7 +204,8 @@ fn dynamic_message_nested_extractors_and_handler_fallbacks_kill_mutations() {
         0,
         "tranquility",
         vec![1],
-    );
+    )
+    .with_service_roles(eve_machonet::service_roles::ROLE_ADMIN);
     let anon_ctx = AuthoritativeContext::default();
 
     // 1. Nested message extractors: sub.get(1) as Message(inner), Int64, Sint32, None -> sub.get(2)

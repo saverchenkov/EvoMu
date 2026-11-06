@@ -9,7 +9,7 @@ use crate::quasar_gateway::{
     STATUS_UNAUTHORIZED,
 };
 use eve_db::durable_domain_types::PersistedMercenaryDen;
-use eve_db::{InventoryFlag, InventoryItemRecord, PersistedHubUpgrade, PersistedSovHubData, UpwellStructureRecord};
+use eve_db::{CorporationRecord, InventoryFlag, InventoryItemRecord, PersistedHubUpgrade, PersistedSovHubData, UpwellStructureRecord};
 use eve_proto::quasar::{AuthoritativeContext, DynamicQuasarMessage, DynamicValue, QuasarDescriptorRegistry};
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -265,19 +265,33 @@ fn caller_ownership_item_access_mercden_siphon_and_process_configuration_boundar
         assert!(!item_at_hub(snap, &c, &bad_owner_it, hub_id, sys_id));
         snap.items.insert(88_201, corp_it);
 
-        // Startup fuel boundary on 87_710 (fuel_per_hour = 8, fuel_startup = 16 -> threshold = 16 + 24 = 40):
-        // At 39 units (< 40), no startup fuel is deducted; at 40 units, 16 startup fuel IS deducted -> 24 left!
+        // Startup fuel boundary on 87_710 (fuel_per_hour = 8, fuel_startup = 16 -> required = 24):
+        // At 23 units (< 24), onlining is rejected with STATUS_BAD_REQUEST; at 24 units, 16 startup fuel IS deducted -> 8 left!
         snap.sov_runtime.sov_hubs.insert(
             hub_id,
             PersistedSovHubData {
                 hub_id,
-                fuel: [(TYPE_SUPERIONIC_ICE, 39)].into_iter().collect(),
+                fuel: [(TYPE_SUPERIONIC_ICE, 23)].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            process_configuration(snap, &sde, &c, hub_id, &[88_201], &[(87_710, true)], 1_000)
+                .unwrap_err()
+                .0,
+            STATUS_BAD_REQUEST
+        );
+        snap.sov_runtime.sov_hubs.insert(
+            hub_id,
+            PersistedSovHubData {
+                hub_id,
+                fuel: [(TYPE_SUPERIONIC_ICE, 24)].into_iter().collect(),
                 ..Default::default()
             },
         );
         process_configuration(snap, &sde, &c, hub_id, &[88_201], &[(87_710, true)], 1_000).unwrap();
         assert_eq!(snap.items[&88_201].quantity, 1); // partial consume_items left 1 unit
-        assert_eq!(snap.sov_runtime.sov_hubs[&hub_id].fuel[&TYPE_SUPERIONIC_ICE], 39);
+        assert_eq!(snap.sov_runtime.sov_hubs[&hub_id].fuel[&TYPE_SUPERIONIC_ICE], 8);
 
         // Offline, top up to 40, and re-online -> deducts 16 startup fuel, leaving 24!
         process_configuration(snap, &sde, &c, hub_id, &[], &[(87_710, false)], 1_001).unwrap();
@@ -320,6 +334,17 @@ fn fuel_add_validation_starvation_simulation_and_uninstall_overload_recovery_not
         let ch = snap.characters.get_mut(&cid).unwrap();
         ch.corporation_id = corp_id;
         ch.solar_system_id = sys_id;
+        if let Some(ch2) = snap.characters.get_mut(&90_000_002) {
+            ch2.corporation_id = corp_id;
+            ch2.solar_system_id = sys_id;
+        }
+        let mut corp_rec = CorporationRecord {
+            corporation_id: corp_id,
+            ceo_id: cid,
+            ..Default::default()
+        };
+        corp_rec.members.extend([cid, 90_000_002]);
+        snap.corporations.insert(corp_id, corp_rec);
         snap.structures.insert(
             hub_id,
             UpwellStructureRecord {
@@ -432,8 +457,8 @@ fn fuel_add_validation_starvation_simulation_and_uninstall_overload_recovery_not
         STATUS_BAD_REQUEST
     );
     let line_member = AuthoritativeContext::for_session_at(
-        Some(1),
-        Some(cid as u32),
+        Some(2),
+        Some(90_000_002),
         Some(corp_id as u32),
         0,
         "tranquility",

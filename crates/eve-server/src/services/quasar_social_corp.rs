@@ -221,9 +221,31 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
     // ========================================================================
 
     fn resolve_corp_id(ctx: &AuthoritativeContext, db: Option<&Arc<WorldRepository>>) -> Result<u32, (u32, String)> {
-        ctx.effective_corporation_id()
-            .or_else(|| ctx.effective_character_id().zip(db).and_then(|(cid, d)| d.with_snapshot(|s| s.characters.get(&(cid as i64)).map(|c| c.corporation_id as u32))))
-            .ok_or_else(|| (STATUS_FORBIDDEN, "Missing corporation context".into()))
+        let ctx_corp = ctx.effective_corporation_id();
+        if let (Some(cid), Some(d)) = (ctx.effective_character_id(), db) {
+            let resolved = d.with_snapshot(|s| {
+                let db_corp = s.characters.get(&(cid as i64)).map(|c| c.corporation_id as u32);
+                match (db_corp, ctx_corp) {
+                    (Some(dc), Some(cc)) if cc != dc => {
+                        if (1_000_000..2_000_000).contains(&dc)
+                            && s.corporations
+                                .get(&(cc as i64))
+                                .is_some_and(|c| c.ceo_id == cid as i64 || c.members.contains(&(cid as i64)))
+                        {
+                            Some(cc)
+                        } else {
+                            Some(dc)
+                        }
+                    }
+                    (Some(dc), _) => Some(dc),
+                    (None, cc) => cc,
+                }
+            });
+            if let Some(c) = resolved.filter(|&c| c > 0) {
+                return Ok(c);
+            }
+        }
+        ctx_corp.ok_or_else(|| (STATUS_FORBIDDEN, "Missing corporation context".into()))
     }
 
     fn check_corp_admin_role(
@@ -234,14 +256,26 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             return Err((STATUS_FORBIDDEN, "Authentication required".into()));
         };
         let corpid = resolve_corp_id(ctx, db)?;
-        let corp_role = if ctx.corp_role_mask != 0 {
-            ctx.corp_role_mask
-        } else {
-            ctx.identity.as_ref().and_then(|id| id.roles.as_ref().map(|r| r.bitmask)).unwrap_or(0)
+        if crate::quasar_gateway::require_admin_role(ctx).is_ok() {
+            return Ok((cid, corpid));
+        }
+        let allowed = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_PERSONNEL_MANAGER;
+        let has_role = match db {
+            Some(d) => d.with_snapshot(|s| {
+                let (is_ceo, eff_roles) =
+                    corp_projects::effective_corp_member_roles(s, corpid as i64, cid as i64, 0, ctx_now_unix(ctx));
+                is_ceo || (eff_roles & allowed) != 0
+            }),
+            None => {
+                let corp_role = if ctx.corp_role_mask != 0 {
+                    ctx.corp_role_mask
+                } else {
+                    ctx.identity.as_ref().and_then(|id| id.roles.as_ref().map(|r| r.bitmask)).unwrap_or(0)
+                };
+                (corp_role & allowed) != 0
+            }
         };
-        let is_admin = (corp_role & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_PERSONNEL_MANAGER)) != 0
-            || crate::quasar_gateway::require_admin_role(ctx).is_ok();
-        if is_admin || db.map_or(false, |d| d.with_snapshot(|s| s.corporations.get(&(corpid as i64)).map_or(false, |c| c.ceo_id == cid as i64))) {
+        if has_role {
             return Ok((cid, corpid));
         }
         Err((STATUS_FORBIDDEN, "Insufficient corporation role".into()))

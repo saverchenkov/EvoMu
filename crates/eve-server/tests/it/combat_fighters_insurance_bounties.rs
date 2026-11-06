@@ -48,12 +48,12 @@ async fn ship_insurance_quotes_purchase_contracts_void_link_and_payout_vs_concor
             k.balance = IskCents::from_isk(100_000_000);
         }
         if let Some(v) = snap.characters.get_mut(&victim_id) {
-            v.station_id = None;
-            v.solar_system_id = lowsec_sys_id;
+            v.station_id = Some(60_003_760);
+            v.solar_system_id = highsec_sys_id;
             v.active_ship_id = victim_ship_id;
             v.balance = IskCents::from_isk(10_000_000);
         }
-        for (sid, oid, loc) in [(killer_ship_id, killer_id, lowsec_sys_id as i64), (victim_ship_id, victim_id, lowsec_sys_id as i64), (traded_ship_id, victim_id, 60_003_760)] {
+        for (sid, oid, loc) in [(killer_ship_id, killer_id, lowsec_sys_id as i64), (victim_ship_id, victim_id, 60_003_760), (traded_ship_id, victim_id, 60_003_760)] {
             snap.items.insert(
                 sid,
                 InventoryItemRecord {
@@ -112,10 +112,10 @@ async fn ship_insurance_quotes_purchase_contracts_void_link_and_payout_vs_concor
     });
 
     let mut s_killer = make_session(10, 1, killer_id, lowsec_sys_id, killer_ship_id, None);
-    let mut s_victim = make_session(11, 2, victim_id, lowsec_sys_id, victim_ship_id, None);
+    let mut s_victim = make_session(11, 2, victim_id, highsec_sys_id, victim_ship_id, Some(60_003_760));
     let kw = HashMap::new();
 
-    // 2. Quote & buy Platinum insurance on both victim ships (`feat:combat.insurance-quote`, `feat:combat.insurance-buy`)
+    // 2. Quote & buy Platinum insurance on both victim ships while docked at NPC station (`feat:combat.insurance-quote`, `feat:combat.insurance-buy`)
     let quote_rep = ctx.dispatch_rpc(&mut s_victim, "insuranceSvc", None, "GetInsurancePrice", &[PyRep::Integer(victim_ship_id)], &kw, None).await.expect("GetInsurancePrice");
     let plat_payout = quote_rep.as_f64().unwrap();
     assert!(plat_payout > 0.0);
@@ -129,6 +129,17 @@ async fn ship_insurance_quotes_purchase_contracts_void_link_and_payout_vs_concor
     assert!((insured_payout - plat_payout).abs() < 1e-2);
 
     ctx.dispatch_rpc(&mut s_victim, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(traded_ship_id), PyRep::Real(1.0)], &kw, None).await.expect("InsureShip traded_ship_id");
+    s_victim.station_id = None;
+    s_victim.solar_system_id = Some(lowsec_sys_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(v) = snap.characters.get_mut(&victim_id) {
+            v.station_id = None;
+            v.solar_system_id = lowsec_sys_id;
+        }
+        if let Some(it) = snap.items.get_mut(&victim_ship_id) {
+            it.location_id = lowsec_sys_id as i64;
+        }
+    });
 
     // 3. Verify `GetContracts` lists both contracts, and repackaging/transferring `traded_ship_id` voids its contract (`feat:combat.insurance-contracts`, `feat:ships.ship-insurance-link`)
     let PyRep::List(contracts_before) = ctx.dispatch_rpc(&mut s_victim, "insuranceSvc", None, "GetContracts", &[], &kw, None).await.expect("GetContracts before repackage") else {
@@ -205,14 +216,25 @@ async fn ship_insurance_quotes_purchase_contracts_void_link_and_payout_vs_concor
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(k) = snap.characters.get_mut(&killer_id) {
             k.solar_system_id = highsec_sys_id;
+            k.station_id = Some(60_003_760);
             k.active_ship_id = killer_ship_id;
+        }
+        if let Some(it) = snap.items.get_mut(&killer_ship_id) {
+            it.location_id = 60_003_760;
+        }
+    });
+    s_killer.solar_system_id = Some(highsec_sys_id);
+    s_killer.station_id = Some(60_003_760);
+    ctx.dispatch_rpc(&mut s_killer, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(killer_ship_id), PyRep::Real(1.0)], &kw, None).await.expect("Insure criminal ship");
+    s_killer.station_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(k) = snap.characters.get_mut(&killer_id) {
+            k.station_id = None;
         }
         if let Some(it) = snap.items.get_mut(&killer_ship_id) {
             it.location_id = highsec_sys_id as i64;
         }
     });
-    s_killer.solar_system_id = Some(highsec_sys_id);
-    ctx.dispatch_rpc(&mut s_killer, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(killer_ship_id), PyRep::Real(1.0)], &kw, None).await.expect("Insure criminal ship");
 
     let jita_handle = ctx.systems.get_or_spawn(highsec_sys_id);
     let victim_jita_pod: i64 = 920_099;

@@ -131,10 +131,10 @@ async fn insurance_svc_personal_corp_void_old_and_error_branches() {
     .expect_err("structure without insurance service");
     assert_eq!(err.code, "StationServiceUnavailable");
 
-    // Insuring from another NPC station with insurance service (Amarr VIII 60_008_494) succeeds,
-    // and calling again without voidOld=true rejects duplicate active contract (InsureShipFailedSingleContract)
+    // Insuring a ship stored at Jita remotely from Amarr VIII (60_008_494) is rejected (ShipNotAtStation);
+    // insuring while docked at Jita (60_003_760) succeeds, and duplicate without voidOld=true is rejected.
     let mut amarr_station = make_session(char_id, corp_id, Some(60_008_494), Some(ship_id));
-    let remote_rep = handle_ships_and_services(
+    let remote_err = handle_ships_and_services(
         &ctx,
         &mut amarr_station,
         None,
@@ -145,12 +145,27 @@ async fn insurance_svc_personal_corp_void_old_and_error_branches() {
     )
     .await
     .expect("handled")
-    .expect("ship insured from remote station with insurance service");
-    assert!(matches!(remote_rep, PyRep::KeyVal(_)));
+    .expect_err("remote ship insurance rejected");
+    assert_eq!(remote_err.code, "ShipNotAtStation");
+
+    let mut jita_station = make_session(char_id, corp_id, Some(station_id), Some(ship_id));
+    let local_rep = handle_ships_and_services(
+        &ctx,
+        &mut jita_station,
+        None,
+        "insuranceSvc",
+        "InsureShip",
+        &[PyRep::Integer(ship_id), PyRep::Real(1.0)],
+        &empty_kw,
+    )
+    .await
+    .expect("handled")
+    .expect("ship insured at co-located NPC station");
+    assert!(matches!(local_rep, PyRep::KeyVal(_)));
 
     let err_dup = handle_ships_and_services(
         &ctx,
-        &mut amarr_station,
+        &mut jita_station,
         None,
         "insuranceSvc",
         "InsureShip",

@@ -2568,8 +2568,9 @@ async fn test_skyhook_reagent_harvest_secure_surplus_split() {
         snap.sov_runtime
             .skyhook_last_harvest_unix
             .insert(skyhook_id, t0);
-        let (_, sec_1h, sur_1h) = advance_skyhook_reagents_in_snap(snap, skyhook_id, t0 + 3_600)
-            .expect("1h skyhook harvest");
+        let (_, sec_1h, sur_1h) =
+            advance_skyhook_reagents_in_snap(snap, &ctx.sde, skyhook_id, t0 + 3_600)
+                .expect("1h skyhook harvest");
         assert!(sec_1h > 0, "Newly harvested reagents must split into Secure bay");
         assert!(sur_1h > 0, "Newly harvested reagents must split into Surplus bay");
         assert_eq!(sec_1h, sur_1h, "Harvested reagents split 50/50 between Secure and Surplus");

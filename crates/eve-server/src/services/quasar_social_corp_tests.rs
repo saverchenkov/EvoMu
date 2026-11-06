@@ -90,6 +90,17 @@ fn corp_skill_plan_and_milestone_rpc_handlers() {
                 ch.corporation_id = corp_id as i64;
             }
         }
+        let c = snap
+            .corporations
+            .entry(corp_id as i64)
+            .or_insert_with(|| eve_db::CorporationRecord {
+                corporation_id: corp_id as i64,
+                ceo_id: cid as i64,
+                ..Default::default()
+            });
+        c.ceo_id = cid as i64;
+        c.members.insert(90_000_001);
+        c.members.insert(90_000_002);
     });
     let dir_ctx = AuthoritativeContext::for_session(
         Some(1),
@@ -267,6 +278,17 @@ fn corporation_goal_and_reward_rpc_handlers() {
                 ch.corporation_id = corp_id as i64;
             }
         }
+        let c = snap
+            .corporations
+            .entry(corp_id as i64)
+            .or_insert_with(|| eve_db::CorporationRecord {
+                corporation_id: corp_id as i64,
+                ceo_id: cid as i64,
+                ..Default::default()
+            });
+        c.ceo_id = cid as i64;
+        c.members.insert(90_000_001);
+        c.members.insert(90_000_002);
     });
     let gid = router
         .progression

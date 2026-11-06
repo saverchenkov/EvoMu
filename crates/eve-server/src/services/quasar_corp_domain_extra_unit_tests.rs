@@ -72,12 +72,18 @@ fn quasar_alliance_corporation_handlers_deep_data_branches_and_edge_cases() {
         ch1.create_date_unix = 1_700_000_000;
         snap.characters.insert(cid, ch1);
 
-        let mut ch2 = base_ch;
+        let mut ch2 = base_ch.clone();
         ch2.character_id = cid2;
         ch2.corporation_id = corp_id;
         ch2.alliance_id = Some(ally_id);
         ch2.structure_id = Some(1_040_001_001);
         snap.characters.insert(cid2, ch2);
+
+        let mut ch3 = base_ch;
+        ch3.character_id = 980_103;
+        ch3.corporation_id = corp_no_ally;
+        ch3.alliance_id = None;
+        snap.characters.insert(980_103, ch3);
 
         snap.character_login_stats.insert(cid, CharacterLoginStats {
             last_login_unix: 1_750_000_000, last_logout_unix: 1_750_003_600, logins_count: 42,
@@ -98,7 +104,7 @@ fn quasar_alliance_corporation_handlers_deep_data_branches_and_edge_cases() {
         snap.corporations.insert(corp_id, c);
 
         snap.corporations.insert(corp_no_ally, CorporationRecord {
-            corporation_id: corp_no_ally, ceo_id: cid, name: "StandaloneCorp".into(), ticker: "STND".into(), ..Default::default()
+            corporation_id: corp_no_ally, ceo_id: 980_103, name: "StandaloneCorp".into(), ticker: "STND".into(), ..Default::default()
         });
         snap.corporations.insert(npc_corp_id, CorporationRecord {
             corporation_id: npc_corp_id, ceo_id: 3_000_001, name: "Caldari Provisions".into(), ticker: "CP".into(), ..Default::default()
@@ -344,7 +350,7 @@ fn quasar_alliance_corporation_handlers_deep_data_branches_and_edge_cases() {
     }
 
     let auth_no_ally = AuthoritativeContext::for_session(
-        Some(1), Some(cid as u32), Some(corp_no_ally as u32), corp_roles::ROLE_DIRECTOR, "tranquility", vec![1],
+        Some(1), Some(980_103), Some(corp_no_ally as u32), corp_roles::ROLE_DIRECTOR, "tranquility", vec![1],
     );
     assert_eq!(handlers["eve.corporation.alliance.api.GetCurrentMembershipRequest"](&auth_no_ally, &dummy_any, &seq_id_msg(1, corp_no_ally as u32)).unwrap().value, vec![0x10, 0x01]);
 

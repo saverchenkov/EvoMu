@@ -101,6 +101,8 @@ fn skill_plan_and_milestone_error_branches_and_role_resolution() {
         c.ceo_id = ceo_id as i64;
         c.members.insert(ceo_id as i64);
         c.members.insert(pm_id as i64);
+        c.member_roles
+            .insert(pm_id as i64, corp_roles::ROLE_PERSONNEL_MANAGER);
         snap.corporations.insert(corp_a as i64, c);
     });
 

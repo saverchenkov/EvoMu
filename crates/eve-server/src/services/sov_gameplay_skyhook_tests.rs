@@ -81,13 +81,13 @@ fn planet_reagent_mapping_and_linear_reagent_maturity_math() {
         // Advance 12 hours (half of 24h cycle): 120 insecure units mature -> 220 secure, 120 insecure
         // PLUS 12 hours * 50/hr = 600 harvested (300 to secure, 300 to insecure)
         let (_, sec1, insec1) =
-            advance_skyhook_reagents_in_snap(snap, skyhook_id, t0 + 12 * 3_600).unwrap();
+            advance_skyhook_reagents_in_snap(snap, &ctx.sde, skyhook_id, t0 + 12 * 3_600).unwrap();
         assert_eq!(sec1, 100 + 120 + 300);
         assert_eq!(insec1, 120 + 300);
 
         // Advance another 24 hours: all 420 insecure mature + 1200 harvested (600 sec, 600 insec)
         let (_, sec2, insec2) =
-            advance_skyhook_reagents_in_snap(snap, skyhook_id, t0 + 36 * 3_600).unwrap();
+            advance_skyhook_reagents_in_snap(snap, &ctx.sde, skyhook_id, t0 + 36 * 3_600).unwrap();
         assert_eq!(sec2, sec1 + 420 + 600);
         assert_eq!(insec2, 600);
     });

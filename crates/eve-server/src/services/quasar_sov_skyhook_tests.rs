@@ -41,6 +41,14 @@ fn skyhook_helpers_and_query_handlers() {
             ch.corporation_id = corp_id;
             ch.solar_system_id = sys_id;
         }
+        snap.corporations.insert(
+            corp_id,
+            eve_db::CorporationRecord {
+                corporation_id: corp_id,
+                ceo_id: cid,
+                ..Default::default()
+            },
+        );
         snap.structures.insert(
             skyhook_id,
             UpwellStructureRecord {

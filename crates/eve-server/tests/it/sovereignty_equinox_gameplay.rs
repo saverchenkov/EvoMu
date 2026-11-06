@@ -511,22 +511,40 @@ async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() 
     assert!(format!("{corp_sk:?}").contains(&lava_skyhook.to_string()));
     let _ = rpc_call(&ctx, &mut s_dir, "sovMgr", "AcquireSkyhooks", &[PyRep::Integer(sys_id as i64)]).await.expect("AcquireSkyhooks");
 
-    // 2. Harvest 10h (500 Magmatic Gas, 500 Superionic Ice) and verify exact 1 Hz linear maturity determinism.
+    // 2. Harvest 10h (planet-scaled Magmatic Gas & Superionic Ice) and verify exact 1 Hz linear maturity determinism.
+    let lava_hourly = eve_server::services::quasar_sov_skyhook::planet_hourly_reagent_yield(
+        &ctx.sde,
+        Some(lava_planet),
+        Some(sys_id),
+        TYPE_MAGMATIC_GAS,
+    );
+    let ice_hourly = eve_server::services::quasar_sov_skyhook::planet_hourly_reagent_yield(
+        &ctx.sde,
+        Some(ice_planet),
+        Some(sys_id),
+        TYPE_SUPERIONIC_ICE,
+    );
     ctx.advance_secs(10 * 3_600);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let (lava_t, lava_sec0, lava_insec0, _) = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&lava_skyhook]);
     let (ice_t, _, ice_insec0, _) = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&ice_skyhook]);
-    assert_eq!((lava_t, lava_sec0, lava_insec0), (TYPE_MAGMATIC_GAS, 250, 250));
-    assert_eq!((ice_t, ice_insec0), (TYPE_SUPERIONIC_ICE, 250));
+    assert_eq!((lava_t, lava_sec0, lava_insec0), (TYPE_MAGMATIC_GAS, 5 * lava_hourly, 5 * lava_hourly));
+    assert_eq!((ice_t, ice_insec0), (TYPE_SUPERIONIC_ICE, 5 * ice_hourly));
 
     let t0 = ctx.now_unix();
+    let lava_matured_12h = (5 * lava_hourly) / 2;
+    let exp_lava_sec12 = 5 * lava_hourly + lava_matured_12h;
+    let exp_lava_insec12 = 5 * lava_hourly - lava_matured_12h;
+    let ice_matured_12h = (5 * ice_hourly) / 2;
+    let exp_ice_sec12 = 5 * ice_hourly + ice_matured_12h;
+    let exp_ice_insec12 = 5 * ice_hourly - ice_matured_12h;
     ctx.db.with_mut_snapshot(|snap| {
         snap.sov_runtime.skyhook_active.insert(lava_skyhook, false);
         snap.sov_runtime.skyhook_active.insert(ice_skyhook, false);
         for step in 1..=43_200u64 {
-            let _ = advance_skyhook_reagents_in_snap(snap, lava_skyhook, t0 + step);
+            let _ = advance_skyhook_reagents_in_snap(snap, &ctx.sde, lava_skyhook, t0 + step);
         }
-        let _ = advance_skyhook_reagents_in_snap(snap, ice_skyhook, t0 + SKYHOOK_MATURITY_CYCLE_SECS / 2);
+        let _ = advance_skyhook_reagents_in_snap(snap, &ctx.sde, ice_skyhook, t0 + SKYHOOK_MATURITY_CYCLE_SECS / 2);
         snap.sov_runtime.skyhook_active.insert(lava_skyhook, true);
         snap.sov_runtime.skyhook_active.insert(ice_skyhook, true);
         snap.sov_runtime.skyhook_last_harvest_unix.insert(lava_skyhook, t0 + SKYHOOK_MATURITY_CYCLE_SECS / 2);
@@ -535,13 +553,13 @@ async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() 
     ctx.advance_secs(SKYHOOK_MATURITY_CYCLE_SECS / 2);
     let (_, lava_sec12, lava_insec12, _) = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&lava_skyhook]);
     let (_, ice_sec12, ice_insec12, _) = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&ice_skyhook]);
-    assert_eq!((lava_sec12, lava_insec12), (375, 125));
-    assert_eq!((lava_sec12, lava_insec12), (ice_sec12, ice_insec12));
+    assert_eq!((lava_sec12, lava_insec12), (exp_lava_sec12, exp_lava_insec12));
+    assert_eq!((ice_sec12, ice_insec12), (exp_ice_sec12, exp_ice_insec12));
 
     let sk_proto = rpc(&ctx, &mut s_dir, "eve_public.sovereignty.skyhook.api.GetRequest", id_req(1, lava_skyhook as u64))
         .await.payload.unwrap().value;
     let sim = field(&field(&sk_proto, 2).unwrap(), 2).unwrap();
-    assert_eq!((varint(&sim, 1), varint(&sim, 2)), (Some(375), Some(125)));
+    assert_eq!((varint(&sim, 1), varint(&sim, 2)), (Some(exp_lava_sec12), Some(exp_lava_insec12)));
 
     // 3. Live Orbital Skyhook Reagent Silo ship-link theft (`dogmaIM.Activate` -> `<= 10%` shield -> `InitiateLink` -> 600s tick).
     let thief_cid = 90_000_077i64;
@@ -602,13 +620,15 @@ async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() 
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(drain_quasar(&mut rx).iter().any(|(t, _)| t == "eve_public.sovereignty.skyhook.api.SkyhookReagentsSimulatedNotice"));
     let (_, final_sec, final_insec, _) = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&lava_skyhook]);
-    assert_eq!((final_sec, final_insec), (376, 0));
+    assert_eq!(final_insec, 0);
+    assert!(final_sec > exp_lava_sec12);
     let balls = ctx.systems.get_or_spawn(sys_id).list_balls().await.unwrap();
     let can_ball = balls.iter().find(|b| b.type_id == 23).expect("Cargo Container 23 spawned in space");
     let stolen_qty: i32 = ctx.db.with_snapshot(|s| {
         s.items.values().filter(|i| i.location_id == can_ball.id && i.type_id == TYPE_MAGMATIC_GAS).map(|i| i.quantity).sum()
     });
-    assert_eq!(stolen_qty, 124);
+    assert!(stolen_qty > 0);
+    assert_eq!(final_sec + stolen_qty as u64, 10 * lava_hourly);
 
     let full_cargo_item_id = 991_999i64;
     ctx.db.with_mut_snapshot(|snap| {
@@ -640,7 +660,7 @@ async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() 
         &ctx, &mut s_dir, "beyonce", "CallComponentFromClient",
         &[PyRep::Integer(lava_skyhook), PyRep::String("orbitalSkyhook".into()), PyRep::String("ExtractReagentsToShip".into())],
     ).await.expect("ExtractReagentsToShip");
-    assert_eq!(ext_rep.dict_get("extractedQuantity").and_then(|v| v.as_i64()), Some(376));
+    assert_eq!(ext_rep.dict_get("extractedQuantity").and_then(|v| v.as_i64()), Some(final_sec as i64));
 
     drop(ctx);
     let ctx_restarted = open_sqlite_ctx(&db_path, false);
@@ -2198,6 +2218,16 @@ async fn test_sov_hub_anchor_upgrades_power_and_fuel_closure() {
         .filter(|c| c.group_id == 6)
         .map(|c| star_power(&ctx.sde, c.type_id))
         .sum();
+    let (mut startup_ice, mut startup_gas) = (0u64, 0u64);
+    for tid in [87_703u32, UPGRADE_MAJOR_THREAT_DETECTION, UPGRADE_PROSPECTING_ARRAY, 87_948] {
+        if let Some(d) = eve_server::services::quasar_sov_hub::upgrade_definition(&ctx.sde, tid) {
+            if d.fuel_type == TYPE_SUPERIONIC_ICE {
+                startup_ice += d.fuel_startup as u64;
+            } else if d.fuel_type == TYPE_MAGMATIC_GAS {
+                startup_gas += d.fuel_startup as u64;
+            }
+        }
+    }
     ctx.db.with_mut_snapshot(|snap| {
         for (idx, cel) in ctx.sde.celestials_in_system(null_sys).into_iter().filter(|c| c.group_id == 7).enumerate() {
             let sh_id = 1_098_000_100 + idx as i64;
@@ -2205,7 +2235,8 @@ async fn test_sov_hub_anchor_upgrades_power_and_fuel_closure() {
             snap.sov_runtime.skyhook_planets.insert(sh_id, cel.celestial_id);
         }
         for (iid, tid, qty) in [
-            (988_010, TYPE_SUPERIONIC_ICE, 100),
+            (988_010, TYPE_SUPERIONIC_ICE, (startup_ice + 100) as i32),
+            (988_015, TYPE_MAGMATIC_GAS, (startup_gas + 100) as i32),
             (988_011, 87_703, 1), // Power Monitoring Division 1 (+200 power, 2,500 wf, 8 Ice/hr)
             (988_012, UPGRADE_MAJOR_THREAT_DETECTION, 1), // 400 power, 2,700 wf
             (988_013, UPGRADE_PROSPECTING_ARRAY, 1),      // 450 power, 6,400 wf
@@ -2230,11 +2261,17 @@ async fn test_sov_hub_anchor_upgrades_power_and_fuel_closure() {
     let base_power = ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().power_available);
     assert!(base_power >= expected_star_power);
 
-    // Add 16 Superionic Ice (enough for 2 hours of Power Monitoring Division 1 at 8 Ice/hr).
+    // Add startup fuel + 16 Superionic Ice (enough for startup + 2 hours of Power Monitoring Division 1 at 8 Ice/hr).
     let mut add_fuel = id_req(1, 988_010);
-    encode_varint_field(2, 16, &mut add_fuel);
+    encode_varint_field(2, startup_ice + 16, &mut add_fuel);
     encode_bytes_field(3, &idm(hub_id as u64), &mut add_fuel);
     assert_eq!(rpc(&ctx, &mut s_dir, "eve_public.sovereignty.hub.fuel.api.AddRequest", add_fuel).await.status_code, STATUS_OK);
+    if startup_gas > 0 {
+        let mut add_gas = id_req(1, 988_015);
+        encode_varint_field(2, startup_gas, &mut add_gas);
+        encode_bytes_field(3, &idm(hub_id as u64), &mut add_gas);
+        assert_eq!(rpc(&ctx, &mut s_dir, "eve_public.sovereignty.hub.fuel.api.AddRequest", add_gas).await.status_code, STATUS_OK);
+    }
 
     // Configure Power Monitoring Division 1 + Major Threat Detection + 2x Prospecting Array (overloads power).
     let mut proc_cfg = Vec::new();

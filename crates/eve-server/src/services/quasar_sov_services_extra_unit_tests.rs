@@ -57,6 +57,14 @@ fn skyhook_authorization_and_planetless_activation_branches() {
         if let Some(ch) = snap.characters.get_mut(&cid) {
             ch.corporation_id = corp_id;
         }
+        snap.corporations.insert(
+            corp_id,
+            eve_db::CorporationRecord {
+                corporation_id: corp_id,
+                ceo_id: cid,
+                ..Default::default()
+            },
+        );
         snap.structures.insert(
             skyhook_id,
             UpwellStructureRecord {

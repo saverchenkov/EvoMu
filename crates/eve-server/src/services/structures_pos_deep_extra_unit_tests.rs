@@ -573,7 +573,7 @@ async fn pos_mgr_orbital_anchoring_gantry_upgrade_and_skyhook_reagent_siphon_mat
         snap.sov_runtime.skyhook_theft_windows.insert(skyhook_id, (now, now + 7_200));
 
         for step in 1..=3_600 {
-            advance_skyhook_reagents_in_snap(snap, skyhook_id, now + step);
+            advance_skyhook_reagents_in_snap(snap, &ctx.sde, skyhook_id, now + step);
         }
         let (_, sec_qty, insec_qty, _) = snap.sov_runtime.skyhook_reagent_bays[&skyhook_id];
         assert!(sec_qty > 125);

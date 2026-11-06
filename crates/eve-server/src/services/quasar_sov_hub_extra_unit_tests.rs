@@ -228,23 +228,60 @@ fn process_configuration_reordering_fuel_restore_hacked_hub_and_uninstall_recove
     let ship_id = 79_000_010_i64;
 
     db.with_mut_snapshot(|snap| {
+        let base_ch = snap.characters[&cid].clone();
         if let Some(ch) = snap.characters.get_mut(&cid) {
             ch.corporation_id = corp_a;
             ch.alliance_id = Some(ally_id);
             ch.solar_system_id = sys_id;
             ch.active_ship_id = ship_id;
         }
-        for (c_id, a_id) in [(corp_a, Some(ally_id)), (sister_corp, Some(ally_id)), (enemy_corp, None)] {
-            snap.corporations.insert(
-                c_id,
-                CorporationRecord {
-                    corporation_id: c_id,
-                    alliance_id: a_id,
-                    ceo_id: cid,
-                    ..Default::default()
-                },
-            );
+        let mut grunt_ch = base_ch.clone();
+        grunt_ch.character_id = 90_000_003;
+        grunt_ch.corporation_id = corp_a;
+        grunt_ch.alliance_id = Some(ally_id);
+        grunt_ch.solar_system_id = sys_id;
+        snap.characters.insert(90_000_003, grunt_ch);
+
+        let mut sis_ch = base_ch.clone();
+        sis_ch.character_id = 90_000_004;
+        sis_ch.corporation_id = sister_corp;
+        sis_ch.alliance_id = Some(ally_id);
+        sis_ch.solar_system_id = sys_id;
+        snap.characters.insert(90_000_004, sis_ch);
+
+        if let Some(ech) = snap.characters.get_mut(&90_000_002) {
+            ech.corporation_id = enemy_corp;
+            ech.alliance_id = None;
         }
+
+        let mut ca = CorporationRecord {
+            corporation_id: corp_a,
+            alliance_id: Some(ally_id),
+            ceo_id: 99_999_001,
+            ..Default::default()
+        };
+        ca.members.extend([cid, 90_000_003]);
+        ca.member_roles.insert(cid, corp_roles::ROLE_DIRECTOR);
+        snap.corporations.insert(corp_a, ca);
+
+        snap.corporations.insert(
+            sister_corp,
+            CorporationRecord {
+                corporation_id: sister_corp,
+                alliance_id: Some(ally_id),
+                ceo_id: 90_000_004,
+                ..Default::default()
+            },
+        );
+        snap.corporations.insert(
+            enemy_corp,
+            CorporationRecord {
+                corporation_id: enemy_corp,
+                alliance_id: None,
+                ceo_id: 90_000_002,
+                ..Default::default()
+            },
+        );
         snap.structures.insert(
             hub_id,
             UpwellStructureRecord {
@@ -287,7 +324,7 @@ fn process_configuration_reordering_fuel_restore_hacked_hub_and_uninstall_recove
     let unauth_ctx = AuthoritativeContext::for_session(None, None, None, 0, "tranquility", vec![]);
     let no_role_ctx = AuthoritativeContext::for_session(
         Some(1),
-        Some(cid as u32),
+        Some(90_000_003),
         Some(corp_a as u32),
         0,
         "tranquility",
@@ -303,7 +340,7 @@ fn process_configuration_reordering_fuel_restore_hacked_hub_and_uninstall_recove
     );
     let sister_mgr_ctx = AuthoritativeContext::for_session(
         Some(2),
-        Some(cid as u32),
+        Some(90_000_004),
         Some(sister_corp as u32),
         corp_roles::ROLE_DIRECTOR,
         "tranquility",

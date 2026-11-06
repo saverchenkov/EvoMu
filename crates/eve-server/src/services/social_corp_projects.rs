@@ -41,7 +41,7 @@ pub const SERVER_TRACKED_MATCHERS: &[&str] = &[
 ];
 
 /// Delayed 24h division access/take role bits: hangar divisions (`13..=26`) + `ROLE_ACCOUNT_CAN_TAKE` (`27..=33`).
-pub(crate) const HANGAR_DIV_MASK: u64 = eve_db::corp_roles::CORP_DELAYED_DIVISION_ROLE_MASK;
+pub const HANGAR_DIV_MASK: u64 = eve_db::corp_roles::CORP_DELAYED_DIVISION_ROLE_MASK;
 
 pub fn corp_goal_uuid(project_id: i64) -> [u8; 16] {
     let mut uuid = [0u8; 16];

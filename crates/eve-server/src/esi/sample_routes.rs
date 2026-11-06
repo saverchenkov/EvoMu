@@ -568,12 +568,13 @@ pub fn dispatch_operation(
         return res;
     }
 
-    if let Some(res) = super::char_social_routes::dispatch_char_social_route(
+    if let Some(res) = super::char_social_routes::dispatch_char_social_route_with_claims(
         ctx,
         method,
         path_pattern,
         path_params,
         query_params,
+        claims,
         req_body,
     ) {
         return res;
