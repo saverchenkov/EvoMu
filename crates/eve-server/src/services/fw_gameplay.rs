@@ -18,6 +18,8 @@ pub use fw_gameplay_insurgency::*;
 #[path = "fw_gameplay_rpc.rs"]
 pub mod fw_gameplay_rpc;
 pub use fw_gameplay_rpc::*;
+#[path = "fw_gameplay_supply.rs"]
+pub(crate) mod fw_gameplay_supply;
 
 use crate::router::ServerContext;
 use crate::services::fw_services::{
@@ -30,7 +32,7 @@ use crate::services::fw_services::{
 use crate::services::insurgency_services::{
     PIRATE_STRONGHOLD_ANGEL_TYPE, PIRATE_STRONGHOLD_GURISTAS_TYPE,
 };
-use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord};
+use eve_db::UpwellStructureRecord;
 use eve_destiny::{Ball, MovementMode};
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
@@ -227,62 +229,15 @@ pub async fn ensure_warzone_sites_spawned(ctx: &ServerContext, sys_id: u32) {
         }
 
         // 3. Ensure SupplyCache, SupplyDepot, ListeningPost, and Propaganda tactical objectives exist for Advantage.
-        let supply_base = crate::services::space_destiny::space_docking_cloaking::pick_system_celestial_position(ctx, sys_id, 5).0;
-        for (idx, kind, pos_offset) in [
-            (0usize, "SupplyCache", [0.0, 20_000.0, 0.0]),
-            (1usize, "SupplyDepot", [5_000.0, -20_000.0, 0.0]),
-            (2usize, "ListeningPost", [10_000.0, 25_000.0, 0.0]),
-            (3usize, "Propaganda", [15_000.0, -25_000.0, 0.0]),
-        ] {
-            let pos = [
-                supply_base[0] + pos_offset[0],
-                supply_base[1] + pos_offset[1],
-                supply_base[2] + pos_offset[2],
-            ];
-            let existing = snap
-                .fw_runtime
-                .supply_sites
-                .iter()
-                .find(|(&sid, (ssys, skind, _))| {
-                    *ssys == sys_id
-                        && skind == kind
-                        && snap.structures.get(&sid).is_some_and(|st| st.state != "Destroyed")
-                })
-                .map(|(&sid, _)| sid);
-            let sid = if let Some(id) = existing {
-                id
-            } else {
-                snap.next_entity_id += 1;
-                let id = snap.next_entity_id;
-                let hp = if idx == 1 { 3_000.0 } else { 1_500.0 };
-                snap.fw_runtime
-                    .supply_sites
-                    .insert(id, (sys_id, kind.to_string(), occ_fac));
-                snap.structures.insert(
-                    id,
-                    UpwellStructureRecord {
-                        structure_id: id,
-                        type_id: TYPE_FW_SUPPLY_SITE,
-                        owner_corp_id: occ_corp,
-                        solar_system_id: sys_id,
-                        name: format!("Militia {kind}"),
-                        state: "ShieldVulnerable".into(),
-                        position: pos,
-                        quantum_core_installed: true,
-                        fuel_blocks: 100,
-                        shield_hp: hp,
-                        armor_hp: hp,
-                        hull_hp: hp,
-                        reinforced_until_unix: 0,
-                        last_damage_unix: 0,
-                        last_damage_tick: 0,
-                        self_destruct_at_unix: None,
-                    },
-                );
-                id
-            };
-            balls_to_spawn.push((sid, TYPE_FW_SUPPLY_SITE, pos, 150.0));
-        }
+        fw_gameplay_supply::spawn_warzone_supply_sites_in_snap(
+            ctx,
+            snap,
+            sys_id,
+            occ_fac,
+            occ_corp,
+            TYPE_FW_SUPPLY_SITE,
+            &mut balls_to_spawn,
+        );
 
         // 4. Ensure FW Infrastructure Hub (`32226`) exists in `snap.structures`.
         // DERIVED (synthetic): baseline warzone I-Hub orbital anchor coordinates.
@@ -554,16 +509,6 @@ pub fn is_fw_or_insurgency_structure_in_snap(
         || sde.types.get(&type_id).is_some_and(|t| t.group_id == 4644)
 }
 
-fn supply_loot_type(faction_id: i64) -> u32 {
-    match faction_id {
-        500_003 => 15_607, // Imperial Navy Midshipman Insignia I
-        500_002 => 15_625, // Republic Fleet Midshipman Insignia I
-        500_001 => 15_596, // Caldari Navy Midshipman Insignia I
-        500_004 => 15_587, // Federation Navy Midshipman Insignia I
-        _ => 15_596,
-    }
-}
-
 /// Applies live weapon damage (`dogmaIM.Activate`) to an FW Supply Cache/Depot,
 /// FW Infrastructure Hub (`32226`), or Pirate FOB (`79172` / `78260`).
 pub async fn apply_fw_or_insurgency_structure_damage(
@@ -591,142 +536,17 @@ pub async fn apply_fw_or_insurgency_structure_damage(
         .db
         .with_snapshot(|s| s.fw_runtime.supply_sites.get(&structure_id).cloned());
     if let Some((sys_id, site_kind, site_fac)) = supply_info {
-        let outcome = ctx.db.try_with_mut_snapshot(|snap| {
-            let att_fac = snap
-                .characters
-                .get(&attacker_char_id)
-                .and_then(|c| c.war_faction_id)
-                .ok_or_else(|| BridgeRpcError {
-                    code: "NotEnlistedInMilitia".into(),
-                    message: "Only militia-enlisted pilots can attack FW Supply Caches/Depots".into(),
-                })?;
-            if att_fac == site_fac {
-                return Err(BridgeRpcError {
-                    code: "CannotAttackFriendlyStructure".into(),
-                    message: "Cannot attack your own militia's Supply Cache/Depot".into(),
-                });
-            }
-            let st = snap.structures.get_mut(&structure_id).ok_or_else(|| BridgeRpcError {
-                code: "StructureNotFound".into(),
-                message: format!("Supply site {structure_id} not found"),
-            })?;
-            if st.state == "Destroyed" {
-                return Err(BridgeRpcError {
-                    code: "StructureDestroyed".into(),
-                    message: format!("Supply site {structure_id} is already destroyed"),
-                });
-            }
-            let pos = st.position;
-            let mut rem = damage.max(0.0);
-            for layer in [&mut st.shield_hp, &mut st.armor_hp, &mut st.hull_hp] {
-                if rem > 0.0 && *layer > 0.0 {
-                    let take = rem.min(*layer);
-                    *layer -= take;
-                    rem -= take;
-                }
-            }
-            if damage > 0.0 {
-                st.last_damage_unix = now;
-            }
-            if st.hull_hp > 0.0 {
-                return Ok((false, st.shield_hp, st.armor_hp, st.hull_hp, pos, att_fac, 0, Vec::new()));
-            }
-            st.state = "Destroyed".into();
-            snap.fw_runtime.supply_sites.remove(&structure_id);
-            snap.next_entity_id += 1;
-            let can_id = snap.next_entity_id;
-            snap.items.insert(
-                can_id,
-                InventoryItemRecord {
-                    item_id: can_id,
-                    type_id: 23,
-                    owner_id: attacker_char_id,
-                    location_id: i64::from(sys_id),
-                    quantity: 1,
-                    singleton: true,
-                    ..Default::default()
-                },
-            );
-            snap.item_positions.insert(can_id, pos);
-            snap.next_entity_id += 1;
-            let loot_id = snap.next_entity_id;
-            let is_depot = site_kind == "SupplyDepot";
-            snap.items.insert(
-                loot_id,
-                InventoryItemRecord {
-                    item_id: loot_id,
-                    type_id: supply_loot_type(site_fac),
-                    owner_id: attacker_char_id,
-                    location_id: can_id,
-                    flag: InventoryFlag::Cargo,
-                    quantity: if is_depot { 5 } else { 2 },
-                    ..Default::default()
-                },
-            );
-            snap.next_entity_id += 1;
-            let supply_item_id = snap.next_entity_id;
-            snap.items.insert(
-                supply_item_id,
-                InventoryItemRecord {
-                    item_id: supply_item_id,
-                    type_id: 88_103,
-                    owner_id: attacker_char_id,
-                    location_id: can_id,
-                    flag: InventoryFlag::Cargo,
-                    quantity: if is_depot { 10 } else { 5 },
-                    ..Default::default()
-                },
-            );
-            Ok((true, 0.0, 0.0, 0.0, pos, att_fac, can_id, vec![loot_id, supply_item_id]))
-        })?;
-        let (destroyed, s_hp, a_hp, h_hp, pos, att_fac, can_id, dropped_ids) = outcome;
-        if destroyed {
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            let _ = sys_handle.remove_ball(structure_id).await;
-            let _ = sys_handle
-                .spawn_ball(Ball {
-                    id: can_id,
-                    type_id: 23,
-                    position: DVec3::from_array(pos),
-                    velocity: DVec3::ZERO,
-                    max_velocity: 0.0,
-                    inertia: 0.0,
-                    mass: 2_500.0,
-                    radius: 25.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Rigid,
-                })
-                .await;
-            // DERIVED (synthetic): Advantage delta (+2% SupplyCache, +5% SupplyDepot/ListeningPost, +4% Propaganda).
-            let adv_delta = match site_kind.as_str() {
-                "SupplyDepot" | "ListeningPost" => 5.0,
-                "Propaganda" => 4.0,
-                _ => 2.0,
-            };
-            let occ_fac = ctx
-                .db
-                .with_snapshot(|s| s.fw_system_occupations.get(&sys_id).map(|o| o.occupier_faction_id))
-                .unwrap_or(site_fac);
-            let (occ_d, att_d) = if att_fac == occ_fac { (adv_delta, 0.0) } else { (0.0, adv_delta) };
-            let (occ_adv, att_adv) = update_system_advantage(ctx, sys_id, occ_d, att_d);
-            let (friendly_adv, enemy_adv) = if att_fac == occ_fac { (occ_adv, att_adv) } else { (att_adv, occ_adv) };
-            let dropped_reps: Vec<PyRep> = dropped_ids.into_iter().map(PyRep::Integer).collect();
-            return Ok(PyRep::keyval([
-                ("structureID", PyRep::Integer(structure_id)),
-                ("state", PyRep::String("Destroyed".into())),
-                ("lootContainerID", PyRep::Integer(can_id)),
-                ("droppedItemIDs", PyRep::List(dropped_reps)),
-                ("friendlyAdvantage", PyRep::Real(friendly_adv)),
-                ("enemyAdvantage", PyRep::Real(enemy_adv)),
-            ]));
-        }
-        return Ok(PyRep::keyval([
-            ("structureID", PyRep::Integer(structure_id)),
-            ("state", PyRep::String("ShieldVulnerable".into())),
-            ("shieldHP", PyRep::Real(s_hp)),
-            ("armorHP", PyRep::Real(a_hp)),
-            ("hullHP", PyRep::Real(h_hp)),
-        ]));
+        return fw_gameplay_supply::apply_supply_site_damage(
+            ctx,
+            attacker_char_id,
+            structure_id,
+            damage,
+            sys_id,
+            site_kind,
+            site_fac,
+            now,
+        )
+        .await;
     }
 
     // 2. FW Infrastructure Hub (`32226`) siege -> flips warzone system occupancy on destruction!

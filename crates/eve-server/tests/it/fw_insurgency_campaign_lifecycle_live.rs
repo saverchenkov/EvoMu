@@ -452,12 +452,12 @@ async fn test_live_fw_supply_caches_depots_and_advantage() {
     assert_eq!(att_adv2, 7.0);
 }
 
-// parity: feat:fw.insurgency-lifecycle
+// parity: feat:fw.insurgency-campaign-lifecycle
 // parity: feat:fw.insurgency-spread
 #[tokio::test]
 async fn test_live_insurgency_campaign_lifecycle_and_stargate_spread() {
     eve_testkit::attest(&[
-        "feat:fw.insurgency-lifecycle",
+        "feat:fw.insurgency-campaign-lifecycle",
         "feat:fw.insurgency-spread",
     ]);
 

@@ -168,6 +168,16 @@ pub fn miner_type_for_system(sde: &eve_sde::SdeRegistry, solar_system_id: SolarS
     }
 }
 
+/// Resolves the empire/faction frigate/destroyer escort hull `TypeId` protecting an NPC mining fleet (`feat:npc.mining-op-npc`).
+pub fn mining_escort_type_for_system(sde: &eve_sde::SdeRegistry, solar_system_id: SolarSystemId) -> TypeId {
+    match system_faction_id(sde, solar_system_id) {
+        500_002 => 16242, // Thrasher (Republic defense escort)
+        500_003 => 16236, // Coercer (Imperial defense escort)
+        500_004 => 16240, // Catalyst (Federal defense escort)
+        _ => 16238,       // Cormorant (Caldari defense escort)
+    }
+}
+
 impl LivingWorldDirector {
     /// Initializes an empty `LivingWorldDirector` with `0` pre-seeded convoys (`S-5`).
     pub fn new() -> Self {
@@ -339,6 +349,14 @@ impl LivingWorldDirector {
                     grid_origin + DVec3::new(2_100.0, 0.0, 250.0),
                 );
                 let _ = handle.spawn_ball_with_combat(h_ball, h_combat).await;
+                let escort_tid = mining_escort_type_for_system(sde, solar_system_id);
+                let (e_ball, e_combat) = sde_ball_and_combat(
+                    sde,
+                    c.convoy_id + 2_000_000,
+                    escort_tid,
+                    grid_origin + DVec3::new(1_850.0, 300.0, 0.0),
+                );
+                let _ = handle.spawn_ball_with_combat(e_ball, e_combat).await;
             }
             count += 1;
         }
@@ -512,7 +530,9 @@ impl LivingWorldDirector {
 
         let handle = systems.get_or_spawn(sys_id);
         let hauler_ball_id = convoy_id + 1_000_000;
+        let escort_ball_id = convoy_id + 2_000_000;
         if destroyed {
+            let _ = handle.remove_ball(escort_ball_id).await;
             let _ = handle.remove_ball(hauler_ball_id).await;
             let _ = handle.remove_ball(convoy_id).await;
             db.with_mut_snapshot(|snap| {
@@ -533,7 +553,7 @@ impl LivingWorldDirector {
             .or_else(|| asteroids.iter().find(|a| !a.depleted && a.remaining_units > 0));
 
         let Some(target) = target_ast else {
-            let hauler_ball_id = convoy_id + 1_000_000;
+            let _ = handle.remove_ball(escort_ball_id).await;
             let _ = handle.remove_ball(hauler_ball_id).await;
             let _ = handle.remove_ball(convoy_id).await;
             return Err(format!("No minable asteroids remaining in system {sys_id}"));
@@ -549,25 +569,6 @@ impl LivingWorldDirector {
             .map(|(_, b)| b.position)
             .unwrap_or(DVec3::new(50_000.0, 0.0, 0.0));
 
-        // Ensure miner and companion hauler balls are spawned at the asteroid belt (`feat:npc.mining-op-npc`)
-        if handle
-            .get_ball_snapshot(convoy_id)
-            .await
-            .ok()
-            .flatten()
-            .is_none()
-        {
-            let (m_ball, m_combat) = sde_ball_and_combat(
-                sde,
-                convoy_id,
-                ship_type_id,
-                ast_pos + DVec3::new(500.0, 0.0, 0.0),
-            );
-            let _ = handle.spawn_ball_with_combat(m_ball, m_combat).await;
-        } else {
-            let _ = handle.set_ball_position(convoy_id, ast_pos + DVec3::new(500.0, 0.0, 0.0)).await;
-        }
-        let hauler_ball_id = convoy_id + 1_000_000;
         let belt_hauler_pos = ast_pos + DVec3::new(1_200.0, 0.0, 200.0);
         let dest_station_pos = sde
             .solar_systems
@@ -575,9 +576,61 @@ impl LivingWorldDirector {
             .and_then(|sys| sys.stations.iter().find(|st| st.station_id == dest_station_id))
             .map(|st| st.position)
             .unwrap_or(belt_hauler_pos + DVec3::new(100_000_000.0, 0.0, 0.0));
+
+        // Ensure miner, companion hauler, and defense escort balls exist at the asteroid belt (`feat:npc.mining-op-npc`).
+        // If the miner or hauler has taken hostile fire, evade by warping toward destination station instead of snapping back.
+        let miner_snap = handle.get_ball_snapshot(convoy_id).await.ok().flatten();
+        let miner_under_fire = {
+            let bp = handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
+            [convoy_id, hauler_ball_id].into_iter().any(|bid| {
+                bp.combat_states.get(&bid).is_some_and(|mc| {
+                    mc.shield_hp + 1.0 < mc.max_shield_hp || mc.armor_hp + 1.0 < mc.max_armor_hp
+                })
+            })
+        };
+        match miner_snap {
+            None => {
+                let (m_ball, m_combat) = sde_ball_and_combat(
+                    sde,
+                    convoy_id,
+                    ship_type_id,
+                    ast_pos + DVec3::new(500.0, 0.0, 0.0),
+                );
+                let _ = handle.spawn_ball_with_combat(m_ball, m_combat).await;
+            }
+            Some((_, mb)) if miner_under_fire => {
+                if !matches!(mb.mode, MovementMode::Warp { .. }) && (mb.position - dest_station_pos).length() > 5_000.0 {
+                    let _ = handle
+                        .set_movement_mode(
+                            convoy_id,
+                            MovementMode::new_warp(mb.position, dest_station_pos, 3.0),
+                        )
+                        .await;
+                }
+            }
+            Some(_) => {
+                let _ = handle.set_ball_position(convoy_id, ast_pos + DVec3::new(500.0, 0.0, 0.0)).await;
+            }
+        }
+        if handle
+            .get_ball_snapshot(escort_ball_id)
+            .await
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            let escort_tid = mining_escort_type_for_system(sde, sys_id);
+            let (e_ball, e_combat) = sde_ball_and_combat(
+                sde,
+                escort_ball_id,
+                escort_tid,
+                ast_pos + DVec3::new(900.0, 250.0, 0.0),
+            );
+            let _ = handle.spawn_ball_with_combat(e_ball, e_combat).await;
+        }
         let in_transit_cargo = self.hauler_cargo_units(db, convoy_id);
         let hauler_snap = handle.get_ball_snapshot(hauler_ball_id).await.ok().flatten();
-        if in_transit_cargo > 0 {
+        if in_transit_cargo > 0 || miner_under_fire {
             if let Some((_, hb)) = hauler_snap.as_ref() {
                 if (hb.position - dest_station_pos).length() > 5_000.0 {
                     let _ = handle
