@@ -175,6 +175,7 @@ fn classification_isk_tiers_loot_crates_task_eviction_url_fallbacks_and_slash_er
     assert_eq!(sub1.dict_get("loot_crates"), Some(&PyRep::List(vec![])));
 
     // Task 2: accurate classification with accuracy < 0.5 -> tier 0 ISK multiplier (500 * rank 3 = 1500), then ranks up 3 -> 4 (< 25) granting LOOT_CRATE_TYPE_ID
+    ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
     handle_project_discovery_slash(&ctx, "/pd consensus 2 true").unwrap().unwrap();
     call_pd(&ctx, &mut sess, "get_new_task", &[]).unwrap();
     let sub2 = call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(2), PyRep::String("ok".into())]).unwrap();
@@ -185,6 +186,7 @@ fn classification_isk_tiers_loot_crates_task_eviction_url_fallbacks_and_slash_er
     );
 
     // Jump rank to 24 with high XP gain so next submission crosses NEEDED_LEVEL_FOR_SUPERIOR_CRATES (25)
+    ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
     handle_project_discovery_slash(&ctx, "/pd config 100 250 2500 10 15").unwrap().unwrap();
     handle_project_discovery_slash(&ctx, "/pd consensus 3 true").unwrap().unwrap();
     call_pd(&ctx, &mut sess, "get_new_task", &[]).unwrap();

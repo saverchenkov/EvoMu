@@ -242,6 +242,9 @@ pub fn register_item_delivery_and_definitions(
                     let Some(item) = snap.items.get(&iid) else {
                         return Some(8); // item_not_found_at_location
                     };
+                    if snap.is_item_locked_in_contract_or_job(iid) {
+                        return Some(8); // item locked in contract/market escrow
+                    }
                     if item.owner_id != cid as i64 {
                         return Some(6); // item_not_owned_by_deliverer
                     }
@@ -265,6 +268,7 @@ pub fn register_item_delivery_and_definitions(
                         .values()
                         .filter(|item| {
                             item.owner_id == cid as i64
+                                && !snap.is_item_locked_in_contract_or_job(item.item_id)
                                 && item.type_id == target_type_id
                                 && !item.singleton
                                 && !snap.items.values().any(|c| c.location_id == item.item_id)

@@ -57,6 +57,8 @@ pub struct FreelanceProjectRecord {
     pub committed_participants: Vec<u32>,
     pub contributors: HashMap<u32, (i64, i64)>, // char_id -> (progress, unredeemed_units)
     pub reward_isk: i64,
+    #[serde(default)]
+    pub initial_reward_isk: Option<i64>,
     #[serde(default = "legacy_serde_type_id")]
     pub required_type_id: u32,
     #[serde(default = "legacy_serde_batch_size")]
@@ -111,6 +113,12 @@ fn build_freelance_map_from_snap(
             .iter()
             .filter_map(|&c| u32::try_from(c).ok())
             .collect();
+        let remaining_reward = (p.escrow_remaining.raw_cents() / 100).max(0);
+        let init_reward = if det.initial_escrow.raw_cents() > 0 {
+            det.initial_escrow.raw_cents() / 100
+        } else {
+            remaining_reward
+        };
         projs.insert(
             uuid.clone(),
             FreelanceProjectRecord {
@@ -127,7 +135,8 @@ fn build_freelance_map_from_snap(
                 state,
                 committed_participants,
                 contributors,
-                reward_isk: (p.escrow_remaining.raw_cents() / 100).max(0),
+                reward_isk: remaining_reward,
+                initial_reward_isk: Some(init_reward),
                 required_type_id: det.filter_id.unwrap_or(0).max(0) as u32,
                 batch_size: batch as i64,
             },
@@ -1000,8 +1009,20 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             if caller_corp != Some(corpid) {
                 return Err((STATUS_PERMISSION_DENIED, "Permission denied".into()));
             }
-            check_corp_admin_role(ctx, state_close_cmd.db.as_ref(), cid, corpid)?;
+            let (is_ceo, eff_roles, wallet_div) =
+                check_corp_admin_role(ctx, state_close_cmd.db.as_ref(), cid, corpid)?;
             if let (Some(pid), Some(ref db)) = (corp_projects::freelance_uuid_to_project_id(&uuid), &state_close_cmd.db) {
+                let (has_escrow, proj_div) = db.with_snapshot(|snap| {
+                    let rem = snap.corp_projects.get(&pid).map_or(0, |p| p.escrow_remaining.raw_cents());
+                    let div = snap.alliance_war_state.project_details.get(&pid).map_or(wallet_div, |d| d.wallet_division.clamp(1, 7));
+                    (rem > 0, div)
+                });
+                if has_escrow && !is_ceo && (eff_roles & eve_db::corp_roles::ROLE_DIRECTOR) == 0 {
+                    let take_bit = eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[(proj_div.clamp(1, 7) - 1) as usize];
+                    if (eff_roles & take_bit) == 0 {
+                        return Err((STATUS_FORBIDDEN, "CorpRoleDenied: Project Manager lacks wallet division take role for escrow refund".into()));
+                    }
+                }
                 let _ = corp_projects::close_or_delete_canonical_project(db, pid, false, now_u);
             }
             state_close_cmd.refresh_from_db(now_u);

@@ -19,6 +19,7 @@ pub const ISK_MULTIPLIERS: [i64; 3] = [500, 800, 1_000];
 pub const LOOT_CRATE_TYPE_ID: u32 = 55358;
 pub const SUPERIOR_LOOT_CRATE_TYPE_ID: u32 = 55359;
 pub const NEEDED_LEVEL_FOR_SUPERIOR_CRATES: i64 = 25;
+pub const MIN_SUBMISSION_INTERVAL_SECS: u64 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectDiscoveryTaskData {
@@ -341,6 +342,8 @@ pub struct PlayerProjectState {
     pub last_submitted_task_index: i64,
     #[serde(default)]
     pub last_bonus_refill_unix: u64,
+    #[serde(default)]
+    pub last_submission_unix: u64,
 }
 
 fn default_max_bonus_samples() -> i64 {
@@ -370,8 +373,111 @@ impl Default for PlayerProjectState {
             project_id: ACTIVE_PROJECT_ID.into(),
             last_submitted_task_index: 0,
             last_bonus_refill_unix: 0,
+            last_submission_unix: 0,
         }
     }
+}
+
+fn json_has_non_empty_classification_content(val: &serde_json::Value) -> bool {
+    match val {
+        serde_json::Value::Null | serde_json::Value::Bool(false) => false,
+        serde_json::Value::Bool(true) | serde_json::Value::Number(_) => true,
+        serde_json::Value::String(s) => !s.trim().is_empty(),
+        serde_json::Value::Array(arr) => {
+            !arr.is_empty() && arr.iter().any(json_has_non_empty_classification_content)
+        }
+        serde_json::Value::Object(map) => {
+            if map.is_empty() {
+                return false;
+            }
+            for key in ["polygons", "gates"] {
+                if let Some(poly_val) = map.get(key) {
+                    return matches!(poly_val, serde_json::Value::Array(arr) if !arr.is_empty() && arr.iter().any(json_has_non_empty_classification_content));
+                }
+            }
+            map.values().any(json_has_non_empty_classification_content)
+        }
+    }
+}
+
+fn pyrep_has_non_empty_classification_content(rep: &PyRep, top_level: bool) -> bool {
+    match rep {
+        PyRep::None | PyRep::Bool(false) => false,
+        PyRep::Bool(true) | PyRep::Integer(_) | PyRep::Real(_) => !top_level,
+        PyRep::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty()
+                || trimmed == "[]"
+                || trimmed == "{}"
+                || trimmed.eq_ignore_ascii_case("null")
+                || trimmed.eq_ignore_ascii_case("none")
+            {
+                return false;
+            }
+            if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                    return json_has_non_empty_classification_content(&json_val);
+                }
+            }
+            true
+        }
+        PyRep::Bytes(b) | PyRep::Buffer(b) => !b.is_empty(),
+        PyRep::List(items) | PyRep::Tuple(items) => {
+            !items.is_empty()
+                && items
+                    .iter()
+                    .any(|item| pyrep_has_non_empty_classification_content(item, false))
+        }
+        PyRep::Dict(entries) => {
+            if entries.is_empty() {
+                return false;
+            }
+            for (k, v) in entries {
+                if matches!(k.as_str(), Some("polygons" | "gates")) {
+                    return match v {
+                        PyRep::List(items) | PyRep::Tuple(items) => {
+                            !items.is_empty()
+                                && items
+                                    .iter()
+                                    .any(|item| pyrep_has_non_empty_classification_content(item, false))
+                        }
+                        _ => false,
+                    };
+                }
+            }
+            entries
+                .iter()
+                .any(|(_, v)| pyrep_has_non_empty_classification_content(v, false))
+        }
+        PyRep::KeyVal(entries) => {
+            if entries.is_empty() {
+                return false;
+            }
+            for (k, v) in entries {
+                if k == "polygons" || k == "gates" {
+                    return match v {
+                        PyRep::List(items) | PyRep::Tuple(items) => {
+                            !items.is_empty()
+                                && items
+                                    .iter()
+                                    .any(|item| pyrep_has_non_empty_classification_content(item, false))
+                        }
+                        _ => false,
+                    };
+                }
+            }
+            entries
+                .iter()
+                .any(|(_, v)| pyrep_has_non_empty_classification_content(v, false))
+        }
+        PyRep::Object { args, .. } => pyrep_has_non_empty_classification_content(args, top_level),
+        PyRep::Rowset { rows, .. } => !rows.is_empty(),
+        _ => false,
+    }
+}
+
+fn has_valid_classification_payload(rep: &PyRep) -> bool {
+    pyrep_has_non_empty_classification_content(rep, true)
 }
 
 /// Global config key (`machoNet.SetGlobalConfigValue`) controlling Project Discovery enablement.
@@ -743,29 +849,15 @@ pub fn handle_project_discovery(
         }
 
         // DERIVED (synthetic): DATA GAP — MMOS classification consensus grading and XP/AK rewards are external backend data not in V24 client FSD.
-        "post_classification" | "submit" => {
+        "post_classification" | "submit" | "submit_classification" => {
             if args.len() < 2 {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidClassification".into(),
-                    message: "Both task ID and classification payload are required".into(),
-                }));
+                return Some(Err(BridgeRpcError::user_error("InvalidClassification")));
             }
             let task_arg = &args[0];
             let classification_arg = &args[1];
 
-            let is_empty_classification = match classification_arg {
-                PyRep::None => true,
-                PyRep::String(s) if s.trim().is_empty() => true,
-                PyRep::List(l) if l.is_empty() => true,
-                PyRep::Tuple(t) if t.is_empty() => true,
-                PyRep::Dict(d) if d.is_empty() => true,
-                _ => false,
-            };
-            if is_empty_classification {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidClassification".into(),
-                    message: "Classification payload cannot be empty".into(),
-                }));
+            if !has_valid_classification_payload(classification_arg) {
+                return Some(Err(BridgeRpcError::user_error("InvalidClassification")));
             }
 
             let task_index = match task_arg {
@@ -787,6 +879,12 @@ pub fn handle_project_discovery(
 
             let now_unix = ctx.now_unix();
             let res = try_with_player_state(ctx, char_id, |st, snap| {
+                if st.last_submission_unix > 0
+                    && (now_unix <= st.last_submission_unix
+                        || now_unix.saturating_sub(st.last_submission_unix) < MIN_SUBMISSION_INTERVAL_SECS)
+                {
+                    return Err(BridgeRpcError::user_error("ProjectDiscoverySubmissionTooFast"));
+                }
                 if req_task_index != st.current_task_index {
                     return Err(BridgeRpcError {
                         code: "InvalidTaskId".into(),
@@ -801,6 +899,7 @@ pub fn handle_project_discovery(
                 }
                 let prev_tasks = st.tasks_submitted;
                 st.last_submitted_task_index = st.current_task_index;
+                st.last_submission_unix = now_unix;
                 st.tasks_submitted += 1;
                 let mut store = load_discovery_store(snap);
                 if !store.mmos_configured {
@@ -815,11 +914,10 @@ pub fn handle_project_discovery(
                     }
                     store.task_consensus_by_index.entry(req_task_index).or_insert(true);
                 }
-                let is_accurate = store
-                    .task_consensus_by_index
-                    .get(&req_task_index)
-                    .copied()
-                    .unwrap_or(false);
+                let mut is_accurate = false;
+                if let Some(&consensus) = store.task_consensus_by_index.get(&req_task_index) {
+                    is_accurate = consensus;
+                }
                 let sample_acc = if is_accurate { 1.0 } else { 0.0 };
                 st.accuracy = if prev_tasks <= 0 {
                     sample_acc

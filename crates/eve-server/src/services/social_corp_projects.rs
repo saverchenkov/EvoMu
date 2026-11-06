@@ -402,6 +402,22 @@ pub struct CanonicalProjectSpec {
     pub min_project_id: i64,
 }
 
+fn read_synced_corp_wallet_balance(corp: &mut eve_db::CorporationRecord, div_id: u8) -> IskCents {
+    corp.ensure_wallet_divisions();
+    if div_id == 1 {
+        let div1 = corp.division_balance(1);
+        if corp.master_wallet != div1 {
+            let unified = if corp.master_wallet.raw_cents() != 0 {
+                corp.master_wallet
+            } else {
+                div1
+            };
+            corp.set_division_balance(1, unified);
+        }
+    }
+    corp.division_balance(div_id)
+}
+
 pub fn create_canonical_project(
     db: &WorldRepository,
     spec: CanonicalProjectSpec,
@@ -438,12 +454,7 @@ pub fn create_canonical_project(
             let Some(corp) = snap.corporations.get_mut(&spec.corp_id) else {
                 return Err((STATUS_BAD_REQUEST, "Corporation not found for project escrow".into()));
             };
-            let cur = if div == 1 && corp.master_wallet.raw_cents() > 0 {
-                corp.master_wallet
-            } else {
-                corp.ensure_wallet_divisions();
-                corp.division_balance(div)
-            };
+            let cur = read_synced_corp_wallet_balance(corp, div);
             let Some(rem) = cur.checked_sub(spec.escrow) else {
                 return Err((
                     STATUS_BAD_REQUEST,
@@ -555,12 +566,7 @@ pub fn close_or_delete_canonical_project(
         if refund.raw_cents() > 0 {
             let mut bal_after = IskCents::ZERO;
             if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-                let cur = if div_id == 1 && corp.master_wallet.raw_cents() > 0 {
-                    corp.master_wallet
-                } else {
-                    corp.ensure_wallet_divisions();
-                    corp.division_balance(div_id)
-                };
+                let cur = read_synced_corp_wallet_balance(corp, div_id);
                 let next = cur.checked_add(refund).unwrap_or(cur);
                 corp.set_division_balance(div_id, next);
                 bal_after = next;
@@ -732,13 +738,20 @@ pub fn redeem_freelance_reward_for_char(
         let total_batches = total_prog / batch;
         let redeemed_batches = det_ro.contributions_by_char.get(&char_id).copied().unwrap_or(0);
         let unredeemed = total_batches.saturating_sub(redeemed_batches);
+        let initial_escrow = if det_ro.initial_escrow.raw_cents() > 0 {
+            det_ro.initial_escrow
+        } else {
+            proj.escrow_remaining
+        };
+        let total_batches_target = (proj.target_quantity / batch).max(1);
         let batch_reward = if proj.isk_per_unit.raw_cents() > 0 {
             proj.isk_per_unit
                 .checked_mul_qty(batch as i64)
                 .unwrap_or(IskCents::ZERO)
-        } else if proj.escrow_remaining.raw_cents() > 0 && proj.target_quantity > 0 {
-            let unit_cents = (proj.escrow_remaining.raw_cents() / (proj.target_quantity as i64)).max(1);
-            IskCents(unit_cents.saturating_mul(batch as i64))
+        } else if initial_escrow.raw_cents() > 0 && proj.target_quantity > 0 {
+            let per_batch_cents = ((initial_escrow.raw_cents() as i128) / (total_batches_target as i128))
+                .clamp(1, i64::MAX as i128) as i64;
+            IskCents(per_batch_cents)
         } else {
             IskCents::ZERO
         };
@@ -751,10 +764,32 @@ pub fn redeem_freelance_reward_for_char(
         if units == 0 {
             return Err((STATUS_BAD_REQUEST, "No redeemable freelance rewards available".into()));
         }
-        let payout_cents = batch_reward
+        let new_char_redeemed = redeemed_batches.saturating_add(units);
+        let total_redeemed_after: u64 = det_ro
+            .contributions_by_char
+            .iter()
+            .filter(|(&cid_k, _)| cid_k != char_id)
+            .map(|(_, &v)| v)
+            .fold(new_char_redeemed, |acc, v| acc.saturating_add(v));
+        let mut payout_cents = batch_reward
             .checked_mul_qty(units as i64)
             .unwrap_or(IskCents::ZERO)
             .min(proj.escrow_remaining);
+        if proj.current_quantity >= proj.target_quantity
+            && total_redeemed_after >= total_batches_target
+            && proj.escrow_remaining.raw_cents() > payout_cents.raw_cents()
+        {
+            let expected_exact_from_rate = proj
+                .isk_per_unit
+                .checked_mul_qty(proj.target_quantity as i64)
+                .map(|c| c.raw_cents())
+                .unwrap_or(0);
+            if proj.isk_per_unit.raw_cents() == 0
+                || initial_escrow.raw_cents() > expected_exact_from_rate
+            {
+                payout_cents = proj.escrow_remaining;
+            }
+        }
         let Some(ch) = snap.characters.get_mut(&char_id) else {
             return Err((STATUS_BAD_REQUEST, "Unable to credit freelance reward".into()));
         };
@@ -830,12 +865,7 @@ pub fn sweep_expired_corp_projects_in_snap(
             if refund.raw_cents() > 0 {
                 let mut bal_after = IskCents::ZERO;
                 if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-                    let cur = if div_id == 1 && corp.master_wallet.raw_cents() > 0 {
-                        corp.master_wallet
-                    } else {
-                        corp.ensure_wallet_divisions();
-                        corp.division_balance(div_id)
-                    };
+                    let cur = read_synced_corp_wallet_balance(corp, div_id);
                     let next = cur.checked_add(refund).unwrap_or(cur);
                     corp.set_division_balance(div_id, next);
                     bal_after = next;
