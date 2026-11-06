@@ -850,7 +850,7 @@ pub fn handle_batch3_gm_slash_cmd(
                     snap.service_state_blobs.insert("login_campaign_enrollments".into(), json);
                 }
                 let mut ext = crate::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
-                ext.login_campaign_claimed_days.remove(&target_cid);
+                ext.login_campaign_claimed_days.remove(&(target_cid, campaign_id));
                 crate::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
             });
             emit_campaign_enrollment_changed(ctx, target_cid);

@@ -172,7 +172,7 @@ pub(crate) fn effective_corp_member_roles(
             .pending_title_role_grants
             .get(&char_id)
             .filter(|&&(_, matured_at)| now_unix < matured_at)
-            .map_or(0, |&(bits, _)| bits & HANGAR_DIV_MASK);
+            .map_or(0, |&(bits, _)| bits);
         if let Some(&tmask) = gov.member_titles.get(&char_id) {
             for (&tid, &(_, troles)) in &gov.titles {
                 if (1..=64).contains(&tid) && (tmask & (1u64 << (tid - 1))) != 0 {
@@ -592,9 +592,9 @@ fn calc_corp_goal_unit_rate_cents(proj: &CorpProjectRecord, det: &PersistedProje
         proj.escrow_remaining.raw_cents() / 100
     };
     let rate_isk = if proj.target_quantity > 0 && pool_isk > 0 {
-        (pool_isk / (proj.target_quantity as i64)).clamp(1, 10_000)
+        (pool_isk / (proj.target_quantity as i64)).max(1)
     } else {
-        10_000
+        1
     };
     IskCents::from_isk(rate_isk)
 }

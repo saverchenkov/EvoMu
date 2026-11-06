@@ -45,6 +45,42 @@ pub struct SeasonalCampaignSchedule {
     pub turnover_secs: u32,
 }
 
+mod claimed_days_by_char_campaign_serde {
+    use super::*;
+    use serde::ser::SerializeMap;
+
+    pub fn serialize<S: serde::Serializer>(
+        map: &HashMap<(i64, i64), Vec<u64>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut s = serializer.serialize_map(Some(map.len()))?;
+        for (&(char_id, campaign_id), days) in map {
+            s.serialize_entry(&format!("{char_id}:{campaign_id}"), days)?;
+        }
+        s.end()
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<HashMap<(i64, i64), Vec<u64>>, D::Error> {
+        let raw = HashMap::<String, Vec<u64>>::deserialize(deserializer)?;
+        let mut out = HashMap::with_capacity(raw.len());
+        for (k, days) in raw {
+            if let Some((c_str, camp_str)) = k.split_once(':') {
+                if let (Ok(char_id), Ok(campaign_id)) = (c_str.parse::<i64>(), camp_str.parse::<i64>()) {
+                    out.insert((char_id, campaign_id), days);
+                }
+            } else if let Ok(char_id) = k.parse::<i64>() {
+                out.insert(
+                    (char_id, crate::services::campaigns_and_milestones::DEFAULT_LOGIN_CAMPAIGN_ID),
+                    days,
+                );
+            }
+        }
+        Ok(out)
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CosmeticsUiExtendedState {
     pub skin_license_entries: HashMap<i64, Vec<SkinLicenseEntry>>,
@@ -60,8 +96,8 @@ pub struct CosmeticsUiExtendedState {
     pub claimed_milestones: HashMap<i64, Vec<i64>>,
     #[serde(default)]
     pub characters_warped: Vec<i64>,
-    #[serde(default)]
-    pub login_campaign_claimed_days: HashMap<i64, Vec<u64>>,
+    #[serde(default, with = "claimed_days_by_char_campaign_serde")]
+    pub login_campaign_claimed_days: HashMap<(i64, i64), Vec<u64>>,
     #[serde(default)]
     pub seasonal_claimed_days: HashMap<i64, Vec<u64>>,
     #[serde(default)]

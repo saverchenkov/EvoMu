@@ -99,21 +99,13 @@ fn get_crate_specs(ctx: &ServerContext) -> &'static HashMap<u32, CrateLootSpec> 
 }
 
 fn crate_loot_spec(ctx: &ServerContext, type_id: u32) -> Option<CrateLootSpec> {
-    if let Some(spec) = get_crate_specs(ctx).get(&type_id) {
-        if !spec.items.is_empty() || spec.skill_bundle.is_some() || spec.fitting_ship_type_id.is_some() || !spec.fittings.is_empty() {
-            return Some(spec.clone());
-        }
-    }
-    let t = ctx.sde.types.get(&type_id)?;
-    let is_crate = (t.category_id == 17 && t.group_id == 1818)
-        || (t.category_id == 63 && (t.group_id == 1194 || t.group_id == 4093 || t.group_id == 4139))
-        || (t.name.contains("Crate") || t.name.contains("Box") || t.name.contains("Cache") || t.name.contains("Bundle") || t.name.contains("Package"));
-    if !is_crate {
-        return None;
-    }
-    if let Some(mats) = ctx.sde.type_materials.get(&type_id).filter(|m| !m.is_empty()) {
-        let items = mats.iter().map(|m| (m.material_type_id, m.quantity.max(1) as i32)).collect();
-        return Some(CrateLootSpec { items, skill_bundle: None, fitting_ship_type_id: None, fittings: Vec::new() });
+    let spec = get_crate_specs(ctx).get(&type_id)?;
+    if !spec.items.is_empty()
+        || spec.skill_bundle.is_some()
+        || spec.fitting_ship_type_id.is_some()
+        || !spec.fittings.is_empty()
+    {
+        return Some(spec.clone());
     }
     None
 }
@@ -131,8 +123,13 @@ fn require_owned_crate(
     if item.owner_id != char_id {
         return Err(err("CrateNotFound", format!("Crate {crate_id} not owned by character")));
     }
-    let current_dock = snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id)).or_else(|| session.station_id.or(session.structure_id));
-    let current_ship = session.ship_id.or_else(|| snap.characters.get(&char_id).map(|c| c.active_ship_id).filter(|&sid| sid > 0));
+    let current_dock = session
+        .station_id
+        .or(session.structure_id)
+        .or_else(|| snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id)));
+    let current_ship = session
+        .ship_id
+        .or_else(|| snap.characters.get(&char_id).map(|c| c.active_ship_id).filter(|&sid| sid > 0));
     if !snap.is_item_consumable_by(&item, char_id, current_dock, current_ship) {
         return Err(err("InvalidCrateLocation", format!("Crate {crate_id} is not reachable in your current hangar/cargo or is locked in a contract")));
     }

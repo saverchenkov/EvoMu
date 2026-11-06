@@ -248,6 +248,10 @@ mod social_corp_fleet_extra_unit_tests;
 #[cfg(test)]
 mod r7_tb_p0_security_tests;
 #[cfg(test)]
+mod r7_td_p1_security_tests;
+#[cfg(test)]
+mod r7_td_p1_security_tests_part2;
+#[cfg(test)]
 mod space_probe_scanning_extra_unit_tests;
 #[cfg(test)]
 mod space_probe_scanning_unit_tests;

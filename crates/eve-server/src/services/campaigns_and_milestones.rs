@@ -293,7 +293,13 @@ fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     }
 }
 
-fn deliver_login_reward(
+pub(crate) struct DeliveredLoginReward {
+    pub(crate) primary_id: i64,
+    pub(crate) spawned_item: Option<eve_db::InventoryItemRecord>,
+    pub(crate) expire_date_time: Option<i64>,
+}
+
+pub(crate) fn deliver_login_reward(
     snap: &mut eve_db::WorldStateSnapshot,
     uid: u64,
     char_id: i64,
@@ -301,8 +307,8 @@ fn deliver_login_reward(
     campaign_id: i64,
     now_unix: u64,
     rw: &SdeLoginRewardEntry,
-) -> i64 {
-    let expire_date_time = rw.redeemed_expiry_days.map(|days| {
+) -> DeliveredLoginReward {
+    let expire_date_time = rw.redeemed_expiry_days.filter(|&d| d > 0).map(|days| {
         let exp_unix = now_unix.saturating_add(u64::from(days) * 86_400);
         ((exp_unix as i64) + 11_644_473_600) * 10_000_000
     });
@@ -321,27 +327,33 @@ fn deliver_login_reward(
     if let Some(station_id) = docked_station_id {
         snap.next_entity_id += 1;
         let item_id = snap.next_entity_id;
-        snap.items.insert(
+        let record = eve_db::InventoryItemRecord {
             item_id,
-            eve_db::InventoryItemRecord {
-                item_id,
-                type_id: rw.type_id,
-                owner_id: char_id,
-                location_id: station_id,
-                flag: eve_db::InventoryFlag::Hangar,
-                quantity: rw.quantity.max(1) as i32,
-                singleton: rw.quantity == 1,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: rw.blueprint_runs.is_some(),
-                blueprint_runs_remaining: rw.blueprint_runs.map(|r| r as i32),
-            },
-        );
-        item_id
+            type_id: rw.type_id,
+            owner_id: char_id,
+            location_id: station_id,
+            flag: eve_db::InventoryFlag::Hangar,
+            quantity: rw.quantity.max(1) as i32,
+            singleton: rw.blueprint_runs.is_some(),
+            version: 1,
+            dynamic_attributes: HashMap::new(),
+            source_mutaplasmid_id: None,
+            insured_payout_isk: 0.0,
+            is_blueprint_copy: rw.blueprint_runs.is_some(),
+            blueprint_runs_remaining: rw.blueprint_runs.map(|r| r as i32),
+        };
+        if let Some(exp_ft) = expire_date_time {
+            snap.service_state_blobs
+                .insert(format!("login_reward_expiry:{item_id}"), exp_ft.to_string());
+        }
+        snap.items.insert(item_id, record.clone());
+        DeliveredLoginReward {
+            primary_id: item_id,
+            spawned_item: Some(record),
+            expire_date_time,
+        }
     } else {
-        crate::services::account_services::enqueue_redeem_token_in_snapshot(
+        let token_id = crate::services::account_services::enqueue_redeem_token_in_snapshot(
             snap,
             uid,
             rw.type_id,
@@ -349,7 +361,12 @@ fn deliver_login_reward(
             format!("Campaign {campaign_id} login reward"),
             None,
             expire_date_time,
-        )
+        );
+        DeliveredLoginReward {
+            primary_id: token_id,
+            spawned_item: None,
+            expire_date_time,
+        }
     }
 }
 
@@ -447,7 +464,7 @@ fn handle_login_campaign_get_state(
 
         let claimed_days = ext
             .login_campaign_claimed_days
-            .get(&char_id)
+            .get(&(char_id, campaign_id))
             .cloned()
             .unwrap_or_default();
         let already_claimed_today = claimed_days.contains(&today);
@@ -531,7 +548,7 @@ fn handle_login_campaign_claim_reward(
     let campaigns = get_sde_login_campaigns(&ctx.sde);
     let sess_docked = session.station_id.or(session.structure_id);
 
-    let res = ctx.db.try_with_mut_snapshot(|snap| {
+    let (res, spawned_items) = ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
         let per_char_cid = snap
             .service_state_blobs
@@ -558,13 +575,16 @@ fn handle_login_campaign_claim_reward(
             })
             .ok_or_else(|| err("CharacterNotFound", format!("Character {char_id} not found")))?;
 
-        let claimed_days = ext.login_campaign_claimed_days.entry(char_id).or_default();
+        let claimed_days = ext
+            .login_campaign_claimed_days
+            .entry((char_id, campaign_id))
+            .or_default();
         if claimed_days.contains(&today) {
-            return Ok(PyRep::None);
+            return Ok((PyRep::None, Vec::new()));
         }
         let day_idx = claimed_days.len() as u32;
         if i64::from(day_idx) >= track_length {
-            return Ok(PyRep::None);
+            return Ok((PyRep::None, Vec::new()));
         }
 
         let alpha_rw = campaign.alpha_rewards.get(&day_idx);
@@ -581,8 +601,10 @@ fn handle_login_campaign_claim_reward(
         })?;
 
         let mut delivered_item_ids = Vec::new();
-        if let Some(rw) = alpha_rw {
-            delivered_item_ids.push(deliver_login_reward(
+        let mut spawned_items = Vec::new();
+        let mut primary_expire_date_time = None;
+        for rw in [alpha_rw, omega_rw].into_iter().flatten() {
+            let del = deliver_login_reward(
                 snap,
                 uid,
                 char_id,
@@ -590,18 +612,14 @@ fn handle_login_campaign_claim_reward(
                 campaign_id,
                 now,
                 rw,
-            ));
-        }
-        if let Some(rw) = omega_rw {
-            delivered_item_ids.push(deliver_login_reward(
-                snap,
-                uid,
-                char_id,
-                docked_station_id,
-                campaign_id,
-                now,
-                rw,
-            ));
+            );
+            delivered_item_ids.push(del.primary_id);
+            if primary_expire_date_time.is_none() {
+                primary_expire_date_time = del.expire_date_time;
+            }
+            if let Some(rec) = del.spawned_item {
+                spawned_items.push(rec);
+            }
         }
 
         claimed_days.push(today);
@@ -625,6 +643,10 @@ fn handle_login_campaign_claim_reward(
                 "delivered_item_ids",
                 PyRep::List(delivered_item_ids.iter().copied().map(PyRep::Integer).collect()),
             ),
+            (
+                "expireDateTime",
+                primary_expire_date_time.map(PyRep::Integer).unwrap_or(PyRep::None),
+            ),
         ]);
 
         let item_progress = PyRep::keyval([
@@ -647,24 +669,47 @@ fn handle_login_campaign_claim_reward(
             ("total", PyRep::Integer(track_length)),
         ]);
 
-        Ok(PyRep::Tuple(vec![
-            reward_item,
-            item_progress,
-            reward_event,
-            bucket_progress,
-        ]))
-    });
-    if let Ok(rep) = &res {
-        if *rep != PyRep::None {
+        Ok((
+            PyRep::Tuple(vec![
+                reward_item,
+                item_progress,
+                reward_event,
+                bucket_progress,
+            ]),
+            spawned_items,
+        ))
+    })?;
+    if res != PyRep::None {
+        for item in &spawned_items {
+            let item_change_args = vec![
+                PyRep::keyval([
+                    ("itemID", PyRep::Integer(item.item_id)),
+                    ("typeID", PyRep::Integer(i64::from(item.type_id))),
+                    ("ownerID", PyRep::Integer(char_id)),
+                    ("locationID", PyRep::Integer(item.location_id)),
+                    ("flagID", PyRep::Integer(eve_db::InventoryFlag::Hangar as i64)),
+                    ("quantity", PyRep::Integer(i64::from(item.quantity))),
+                    ("singleton", PyRep::Bool(item.singleton)),
+                    ("stacksize", PyRep::Integer(i64::from(item.quantity))),
+                ]),
+                PyRep::Dict(Vec::new()),
+            ];
+            session.push_notification("OnItemChange", item_change_args.clone());
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
-                "OnRedeemingTokensUpdated",
+                "OnItemChange",
                 "charid",
-                vec![],
+                item_change_args,
             );
         }
+        ctx.notify(
+            crate::router::NotificationTarget::Character(char_id),
+            "OnRedeemingTokensUpdated",
+            "charid",
+            vec![],
+        );
     }
-    res
+    Ok(res)
 }
 
 fn handle_seasonal_login_get_active_campaign(
@@ -831,9 +876,9 @@ fn handle_seasonal_login_claim_reward(
         let mut created_hangar_items: Vec<(i64, u32, i64, u32)> = Vec::new();
         for retro_idx in &retro_indices {
             if let Some(rw) = campaign.omega_rewards.get(retro_idx) {
-                let item_id = deliver_login_reward(snap, uid, char_id, docked_station_id, campaign_id, now, rw);
+                let del = deliver_login_reward(snap, uid, char_id, docked_station_id, campaign_id, now, rw);
                 if let Some(loc_id) = docked_station_id {
-                    created_hangar_items.push((item_id, rw.type_id, loc_id, rw.quantity.max(1)));
+                    created_hangar_items.push((del.primary_id, rw.type_id, loc_id, rw.quantity.max(1)));
                 }
                 delivered_any = true;
             }
@@ -850,16 +895,16 @@ fn handle_seasonal_login_claim_reward(
                 ));
             }
             if let Some(rw) = alpha_rw {
-                let item_id = deliver_login_reward(snap, uid, char_id, docked_station_id, campaign_id, now, rw);
+                let del = deliver_login_reward(snap, uid, char_id, docked_station_id, campaign_id, now, rw);
                 if let Some(loc_id) = docked_station_id {
-                    created_hangar_items.push((item_id, rw.type_id, loc_id, rw.quantity.max(1)));
+                    created_hangar_items.push((del.primary_id, rw.type_id, loc_id, rw.quantity.max(1)));
                 }
                 delivered_any = true;
             }
             if let Some(rw) = omega_rw {
-                let item_id = deliver_login_reward(snap, uid, char_id, docked_station_id, campaign_id, now, rw);
+                let del = deliver_login_reward(snap, uid, char_id, docked_station_id, campaign_id, now, rw);
                 if let Some(loc_id) = docked_station_id {
-                    created_hangar_items.push((item_id, rw.type_id, loc_id, rw.quantity.max(1)));
+                    created_hangar_items.push((del.primary_id, rw.type_id, loc_id, rw.quantity.max(1)));
                 }
                 delivered_any = true;
             }

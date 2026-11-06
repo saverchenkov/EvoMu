@@ -245,7 +245,10 @@ pub fn register_item_delivery_and_definitions(
                     if item.owner_id != cid as i64 {
                         return Some(6); // item_not_owned_by_deliverer
                     }
-                    if item.type_id != target_type_id {
+                    if item.type_id != target_type_id
+                        || item.singleton
+                        || snap.items.values().any(|c| c.location_id == iid)
+                    {
                         return Some(9); // invalid_item_type
                     }
                     if item_container.is_some_and(|c| c != item.location_id)
@@ -263,6 +266,8 @@ pub fn register_item_delivery_and_definitions(
                         .filter(|item| {
                             item.owner_id == cid as i64
                                 && item.type_id == target_type_id
+                                && !item.singleton
+                                && !snap.items.values().any(|c| c.location_id == item.item_id)
                                 && item.quantity >= (batch_size as i32)
                                 && item.flag == eve_db::InventoryFlag::Hangar
                                 && item.location_id == char_loc
