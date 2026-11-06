@@ -448,11 +448,18 @@ mod fleet_social_corp_tail_dispatch_extra_unit_tests;
 mod quasar_sov_mercden_extra_unit_tests;
 
 #[cfg(test)]
-mod combat_crimewatch_deep_extra_unit_tests;
+mod corp_registry_roles_deep_extra_unit_tests;
 
 #[cfg(test)]
-mod space_destiny_deep_extra_unit_tests;
+mod sov_fw_deep_extra_unit_tests;
 
+#[cfg(test)]
+mod fleet_social_deep_extra_unit_tests;
+
+#[cfg(test)]
+mod combat_crimewatch_deep_extra_unit_tests;
+#[cfg(test)]
+mod space_destiny_deep_extra_unit_tests;
 #[cfg(test)]
 mod wormhole_lifecycle_deep_extra_unit_tests;
 #[cfg(test)]
