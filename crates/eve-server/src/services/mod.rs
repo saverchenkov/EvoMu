@@ -499,6 +499,11 @@ mod mail_chat_notifications_deep_extra_unit_tests;
 mod auth_login_cluster_deep_extra_unit_tests;
 #[cfg(test)]
 mod station_inventory_stacking_deep_extra_unit_tests;
+#[cfg(test)]
+mod config_standings_bookmarks_deep_extra_unit_tests;
+#[cfg(test)]
+mod corp_gov_votes_sanctions_deep_extra_unit_tests;
+#[cfg(test)]
 mod quasar_goals_achievements_deep_extra_unit_tests;
 #[cfg(test)]
 mod quasar_cosmetics_skills_deep_extra_unit_tests;
