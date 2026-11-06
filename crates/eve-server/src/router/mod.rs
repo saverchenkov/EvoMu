@@ -19,6 +19,8 @@ mod dispatch_deep_extra_unit_tests;
 #[cfg(test)]
 mod router_advanced_branches_tests;
 #[cfg(test)]
+mod session_context_deep_extra_unit_tests;
+#[cfg(test)]
 mod tests;
 
 pub use cache_notifications::*;
