@@ -368,3 +368,21 @@ mod notify_emitters_character_services_extra_unit_tests;
 
 #[cfg(test)]
 mod quasar_corp_structure_services_extra_unit_tests;
+
+#[cfg(test)]
+mod cluster_macho_misc_services_extra_unit_tests;
+
+#[cfg(test)]
+mod fleet_social_calendar_ops_extra_unit_tests;
+
+#[cfg(test)]
+mod operations_manager_helpers_extra_unit_tests;
+
+#[cfg(test)]
+mod pve_fob_observatory_extra_unit_tests;
+
+#[cfg(test)]
+mod pve_hacking_sites_extra_unit_tests;
+
+#[cfg(test)]
+mod wormhole_pve_escalations_extra_unit_tests;
