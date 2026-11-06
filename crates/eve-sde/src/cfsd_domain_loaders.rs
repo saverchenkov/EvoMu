@@ -121,25 +121,50 @@ pub struct SoundIdInfo {
 }
 
 fn u32_le(buf: &[u8], pos: usize) -> u32 {
-    u32::from_le_bytes(buf[pos..pos + 4].try_into().expect("u32 slice"))
+    pos.checked_add(4)
+        .and_then(|end| buf.get(pos..end))
+        .and_then(|s| s.try_into().ok())
+        .map(u32::from_le_bytes)
+        .unwrap_or(0)
 }
 
 fn u64_le(buf: &[u8], pos: usize) -> u64 {
-    u64::from_le_bytes(buf[pos..pos + 8].try_into().expect("u64 slice"))
+    pos.checked_add(8)
+        .and_then(|end| buf.get(pos..end))
+        .and_then(|s| s.try_into().ok())
+        .map(u64::from_le_bytes)
+        .unwrap_or(0)
 }
 
 fn f32_le(buf: &[u8], pos: usize) -> f32 {
-    f32::from_le_bytes(buf[pos..pos + 4].try_into().expect("f32 slice"))
+    pos.checked_add(4)
+        .and_then(|end| buf.get(pos..end))
+        .and_then(|s| s.try_into().ok())
+        .map(f32::from_le_bytes)
+        .unwrap_or(0.0)
 }
 
 fn cfsd_str(buf: &[u8], rel: u64) -> String {
     if rel == 0 {
         return String::new();
     }
-    let abs = 32 + rel as usize;
-    let len = u64_le(buf, abs - 8) as usize;
-    std::str::from_utf8(&buf[abs..abs + len])
-        .expect("cfsd UTF-8 string")
+    let Some(rel_usize) = usize::try_from(rel).ok() else {
+        return String::new();
+    };
+    let Some(abs) = 32_usize.checked_add(rel_usize) else {
+        return String::new();
+    };
+    let Some(len_pos) = abs.checked_sub(8) else {
+        return String::new();
+    };
+    let Some(len) = usize::try_from(u64_le(buf, len_pos)).ok() else {
+        return String::new();
+    };
+    let Some(bytes) = abs.checked_add(len).and_then(|end| buf.get(abs..end)) else {
+        return String::new();
+    };
+    std::str::from_utf8(bytes)
+        .unwrap_or_default()
         .to_string()
 }
 
@@ -148,18 +173,39 @@ fn cfsd_opt_str(buf: &[u8], rel: u64) -> Option<String> {
 }
 
 fn cfsd_records(raw: &[u8], stride: usize) -> Vec<usize> {
-    let cnt = u64_le(raw, 40) as usize;
-    let buckets = u64_le(raw, 48) as usize;
-    let mut out = Vec::with_capacity(cnt);
+    if raw.len() < 56 || stride == 0 {
+        return Vec::new();
+    }
+    let buckets = usize::try_from(u64_le(raw, 48)).unwrap_or(0);
+    let max_buckets = (raw.len().saturating_sub(56)) / 8;
+    let buckets = buckets.min(max_buckets);
+    let mut out = Vec::new();
     for b in 0..buckets {
-        let boff = u64_le(raw, 56 + b * 8) as usize;
-        if boff == 0 {
+        let Some(boff) = u64_le(raw, 56 + b * 8)
+            .checked_add(0)
+            .and_then(|v| (v != 0).then_some(v))
+            .and_then(|v| usize::try_from(v).ok())
+        else {
+            continue;
+        };
+        let Some(abs) = 32_usize.checked_add(boff) else {
+            continue;
+        };
+        let Some(cnt_pos) = abs.checked_sub(8) else {
+            continue;
+        };
+        if cnt_pos.checked_add(8).is_none_or(|end| end > raw.len()) {
             continue;
         }
-        let abs = 32 + boff;
-        let n = u64_le(raw, abs - 8) as usize;
+        let n = usize::try_from(u64_le(raw, cnt_pos)).unwrap_or(0);
         for i in 0..n {
-            out.push(abs + i * stride);
+            let Some(off) = i.checked_mul(stride).and_then(|d| abs.checked_add(d)) else {
+                break;
+            };
+            if off.checked_add(stride).is_none_or(|end| end > raw.len()) {
+                break;
+            }
+            out.push(off);
         }
     }
     out

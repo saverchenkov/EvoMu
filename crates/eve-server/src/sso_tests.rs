@@ -177,7 +177,11 @@ fn test_sso_discovery_jwks_consent_html_and_helpers() {
     assert!(base64_decode_standard("!!!").is_none());
     assert_eq!(percent_decode("a+b%2Fc%ZZ"), "a b/c%ZZ");
     assert!(is_valid_redirect_uri("eveauth://callback"));
-    assert!(is_valid_redirect_uri("https://app.example.com/cb"));
+    assert!(is_valid_redirect_uri("eveauth-app://callback"));
+    assert!(is_valid_redirect_uri("http://localhost:8080/cb"));
+    assert!(is_valid_redirect_uri("http://127.0.0.1:8080/cb"));
+    assert!(!is_valid_redirect_uri("https://app.example.com/cb"));
+    assert!(!is_valid_redirect_uri("http://localhost.attacker.com/cb"));
     assert!(!is_valid_redirect_uri("http://untrusted.example.com/cb"));
     assert!(!is_valid_redirect_uri("https://app.example.com/\ncb"));
 
@@ -315,7 +319,7 @@ fn test_sso_pkce_full_lifecycle_validation_and_revocation() {
         "POST",
         "/v2/oauth/token",
         &form_hdrs,
-        format!("grant_type=authorization_code&client_id=eve-launcher&code={code}&code_verifier={verifier}").as_bytes(),
+        format!("grant_type=authorization_code&client_id=eve-launcher&code={code}&code_verifier={verifier}&redirect_uri=eveauth%3A%2F%2Fcallback%2F%3Fflow%3Dv24").as_bytes(),
     );
     assert_eq!(tok_resp.status_code, 200);
     let tok_json: serde_json::Value = serde_json::from_slice(&tok_resp.body).unwrap();
@@ -415,7 +419,8 @@ fn test_sso_pkce_full_lifecycle_validation_and_revocation() {
             "grant_type": "authorization_code",
             "code": pilot_code,
             "client_id": "eve-launcher",
-            "code_verifier": verifier
+            "code_verifier": verifier,
+            "redirect_uri": "eveauth://callback/?flow=v24"
         }))
         .unwrap()
         .as_slice(),
@@ -527,4 +532,86 @@ async fn test_sso_tcp_http_connection_framing_and_limits() {
     assert!(String::from_utf8_lossy(&r3).starts_with("HTTP/1.1 413 Payload Too Large"));
 
     server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_issue_427_slowloris_timeout_and_oauth_redirect_uri_binding() {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::{TcpListener, TcpStream};
+
+    let ctx = Arc::new(ServerContext::new());
+
+    // 1. Stalled Slowloris TCP header read terminates promptly at read_timeout instead of hanging
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (accept_res, cli_res) = tokio::join!(listener.accept(), TcpStream::connect(addr));
+    let (srv_stream, _) = accept_res.unwrap();
+    let mut cli_stream = cli_res.unwrap();
+    cli_stream
+        .write_all(b"GET /v2/oauth/authorize HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+        .await
+        .unwrap();
+    let timed = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        handle_http_connection_with_timeout(
+            srv_stream,
+            ctx.clone(),
+            std::time::Duration::from_millis(40),
+        ),
+    )
+    .await;
+    assert!(timed.is_ok(), "Slowloris connection must terminate within timeout");
+
+    // 2. OAuth2 token exchange rejects mismatched redirect_uri and accepts exact match
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = pkce_challenge_s256(verifier);
+    let bound_redir = "http://127.0.0.1:8080/callback";
+    let hdrs = HashMap::from([(
+        "content-type".to_string(),
+        "application/x-www-form-urlencoded".to_string(),
+    )]);
+    let code1 = ctx
+        .db
+        .authorize_pkce(
+            "demo",
+            "demo-secret",
+            90_000_001,
+            "eve-launcher",
+            bound_redir,
+            vec![],
+            &challenge,
+            "S256",
+            ctx.now_unix(),
+        )
+        .unwrap();
+    let bad_tok = handle_http_request(
+        &ctx,
+        "POST",
+        "/v2/oauth/token",
+        &hdrs,
+        format!("grant_type=authorization_code&client_id=eve-launcher&code={code1}&code_verifier={verifier}&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fsteal").as_bytes(),
+    );
+    assert_eq!(bad_tok.status_code, 400);
+    let code2 = ctx
+        .db
+        .authorize_pkce(
+            "demo",
+            "demo-secret",
+            90_000_001,
+            "eve-launcher",
+            bound_redir,
+            vec![],
+            &challenge,
+            "S256",
+            ctx.now_unix(),
+        )
+        .unwrap();
+    let good_tok = handle_http_request(
+        &ctx,
+        "POST",
+        "/v2/oauth/token",
+        &hdrs,
+        format!("grant_type=authorization_code&client_id=eve-launcher&code={code2}&code_verifier={verifier}&redirect_uri=http%3A%2F%2F127.0.0.1%3A8080%2Fcallback").as_bytes(),
+    );
+    assert_eq!(good_tok.status_code, 200);
 }

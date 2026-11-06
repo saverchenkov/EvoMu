@@ -261,34 +261,9 @@ impl ServerContext {
         active_dock_id: Option<i64>,
         reason: &str,
     ) {
-        if matches!(
-            reason,
-            "set_account_key"
-                | "corp_change"
-                | "fleet_change"
-                | "board_or_eject"
-                | "ship_loss"
-                | "clone_swap"
-                | "login"
-        ) {
+        if matches!(reason, "set_account_key" | "login") {
             return;
         }
-        let is_docked = active_dock_id.is_some()
-            || matches!(
-                reason,
-                "dock" | "podding" | "clone_jump" | "turbo_dock" | "self_destruct_clone"
-            );
-        let is_space_jump = matches!(
-            reason,
-            "stargate_jump"
-                | "wormhole_jump"
-                | "jump_drive"
-                | "cyno_jump"
-                | "filamentJump"
-                | "filament_jump"
-                | "jump_bridge"
-                | "shipcaster"
-        );
         let mut removed = Vec::new();
         self.bound_objects
             .write()
@@ -297,26 +272,13 @@ impl ServerContext {
                 if b.character_id != char_id {
                     return true;
                 }
-                let is_solar_system_scoped = matches!(b.service.as_str(), "beyonce" | "scanMgr")
-                    || (matches!(b.service.as_str(), "keeper" | "posMgr" | "devIndexManager")
-                        && (30_000_000..=39_999_999).contains(&b.object_id));
-                let is_station_scoped = matches!(
-                    b.service.as_str(),
-                    "station"
-                        | "stationSvc"
-                        | "corpStationMgr"
-                        | "repairSvc"
-                        | "reprocessingSvc"
-                        | "insuranceSvc"
-                );
-                let invalidate = if is_solar_system_scoped {
-                    is_docked || is_space_jump || b.object_id != i64::from(system_id)
-                } else if is_station_scoped {
-                    Some(b.object_id) != active_dock_id
-                } else {
-                    false
-                };
-                if invalidate {
+                if crate::router::binding_auth::should_invalidate_bound_object(
+                    self,
+                    b,
+                    system_id,
+                    active_dock_id,
+                    reason,
+                ) {
                     removed.push(b.clone());
                     false
                 } else {

@@ -342,3 +342,89 @@ fn thermodynamics_boosters_dbuffs_abyssal_and_stances() {
     assert!(eng.switch_ship_stance(34319, 5000, &sde).is_err()); // cooldown active (4000 < 10000)
     assert!(eng.switch_ship_stance(34319, 11_000, &sde).is_ok()); // cooldown elapsed
 }
+
+#[test]
+fn test_issue_424_heat_cycle_single_thermodynamics_and_per_slot_rolls() {
+    use eve_sde::EffectModifierSpec;
+
+    let mut sde = SdeRegistry::with_canonical_seed();
+    let ship_tid = 91_001;
+    let mod_tid = 91_002;
+    let thermo_tid: u32 = 28_164;
+    let heat_eff_id: u16 = 9_150;
+
+    let mut eff = sde.effects.values().next().unwrap().clone();
+    eff.effect_id = heat_eff_id;
+    eff.name = "testThermoHeatReduction".to_string();
+    eff.modifiers = vec![EffectModifierSpec {
+        domain: "shipID".to_string(),
+        func: "LocationRequiredSkillModifier".to_string(),
+        modified_attribute_id: 1211, // heatDamage
+        modifying_attribute_id: 1229, // thermodynamicsHeatDamage bonus (-5%/lvl)
+        operator: 2,                  // PostPercent
+        group_id: None,
+        skill_type_id: Some(thermo_tid),
+        effect_id: Some(heat_eff_id),
+    }];
+    sde.effects.insert(heat_eff_id, eff);
+    sde.types.insert(
+        thermo_tid,
+        make_type(thermo_tid, 268, 16, &[(1229, -5.0)], &[heat_eff_id]),
+    );
+    sde.types.insert(
+        ship_tid,
+        make_type(
+            ship_tid,
+            25,
+            6,
+            &[
+                (attr_ids::HI_SLOTS, 4.0),
+                (attr_ids::CPU_OUTPUT, 500.0),
+                (attr_ids::POWER_OUTPUT, 500.0),
+            ],
+            &[],
+        ),
+    );
+    sde.types.insert(
+        mod_tid,
+        make_type(
+            mod_tid,
+            53,
+            7,
+            &[
+                (attr_ids::CPU, 10.0),
+                (attr_ids::POWER, 10.0),
+                (attr_ids::HP_STRUCT, 10_000.0),
+                (1211, 10.0),
+            ],
+            &[12, 16],
+        ),
+    );
+
+    let mut eng = ShipFittingEngine::from_sde(1, ship_tid, &sde);
+    eng.set_character_skills(HashMap::from([(thermo_tid, 5)]));
+    eng.fit_module(101, mod_tid, 27, &sde).unwrap();
+    eng.fit_module(102, mod_tid, 28, &sde).unwrap();
+    eng.fit_module(103, mod_tid, 29, &sde).unwrap();
+
+    // Thermodynamics V must be applied once (7.5), never double-applied (5.625)
+    eng.rack_heat[0] = 0.80;
+    let rep = eng.apply_heat_cycle(102, 0.0, 0.0, 0.0, 0.99, &sde).unwrap();
+    assert!((rep.module_damage - 7.5).abs() < 1e-6);
+
+    // Symmetric neighbors at equal slot distance (slot 27 & slot 29 around 28) receive
+    // independent per-slot RNG rolls rather than lockstep all-or-nothing hits.
+    let mut split_observed = false;
+    for step in 0..80 {
+        for m in eng.modules.values_mut() {
+            m.damage_hp = 0.0;
+        }
+        let probe = (step as f64) * 0.01;
+        let r = eng.apply_heat_cycle(102, 0.0, 0.0, 0.0, probe, &sde).unwrap();
+        if r.adjacent_damaged_modules.len() == 1 {
+            split_observed = true;
+            break;
+        }
+    }
+    assert!(split_observed, "Symmetric neighbors must roll independently per slot");
+}

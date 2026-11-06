@@ -507,9 +507,10 @@ impl Ballpark {
         for mjfg_id in mjfg_completed_ids {
             let _ = self.micro_jump_field(mjfg_id, 100_000.0, 6_000.0, 25);
         }
-        let gate_decloaked_set: std::collections::HashSet<BallId> =
-            gate_decloaked.iter().copied().collect();
-        for decloaked_id in gate_decloaked.into_iter().chain(proximity_decloaked) {
+        for decloaked_id in gate_decloaked {
+            self.finish_gate_decloak(decloaked_id);
+        }
+        for decloaked_id in proximity_decloaked {
             self.emit_event(
                 Some(decloaked_id),
                 DestinyEvent::CloakBall {
@@ -517,17 +518,6 @@ impl Ballpark {
                     cloaked: 0,
                 },
             );
-            if gate_decloaked_set.contains(&decloaked_id) {
-                self.emit_event(
-                    Some(decloaked_id),
-                    DestinyEvent::OnSpecialFX {
-                        ball_id: decloaked_id,
-                        module_id: None,
-                        guid: "effects.Cloak".to_string(),
-                        is_active: false,
-                    },
-                );
-            }
             if let Some(orig_v) = self
                 .combat_states
                 .get_mut(&decloaked_id)
@@ -540,16 +530,7 @@ impl Ballpark {
             if let Some(meta) = self.ball_slim_meta.get_mut(&decloaked_id) {
                 meta.is_cloaked = false;
             }
-            if let (Some(&gid), Some(b)) = (
-                self.ball_grid_ids.get(&decloaked_id),
-                self.balls.get(&decloaked_id).cloned(),
-            ) {
-                self.queue_event_for_grid_observers(
-                    gid,
-                    Some(decloaked_id),
-                    &DestinyEvent::AddBalls2 { balls: vec![b] },
-                );
-            }
+            self.reveal_ball_to_grid_observers(decloaked_id);
         }
 
         // Reconcile shared dynamic GridBubble membership after movement (`SP-2`, `SP-3`, `Grid.md:13-15`).
@@ -1256,6 +1237,51 @@ pub(crate) fn step_warp_ball(
     false
 }
 impl Ballpark {
+    pub(crate) fn reveal_ball_to_grid_observers(&mut self, ball_id: BallId) {
+        if let (Some(&gid), Some(b)) = (
+            self.ball_grid_ids.get(&ball_id),
+            self.balls.get(&ball_id).cloned(),
+        ) {
+            self.queue_event_for_grid_observers(
+                gid,
+                Some(ball_id),
+                &DestinyEvent::AddBalls2 { balls: vec![b] },
+            );
+        }
+    }
+
+    pub(crate) fn finish_gate_decloak(&mut self, ball_id: BallId) {
+        self.emit_event(
+            Some(ball_id),
+            DestinyEvent::CloakBall {
+                ball_id,
+                cloaked: 0,
+            },
+        );
+        self.emit_event(
+            Some(ball_id),
+            DestinyEvent::OnSpecialFX {
+                ball_id,
+                module_id: None,
+                guid: "effects.Cloak".to_string(),
+                is_active: false,
+            },
+        );
+        if let Some(orig_v) = self
+            .combat_states
+            .get_mut(&ball_id)
+            .and_then(|c| c.cloak_original_max_velocity.take())
+        {
+            if let Some(b) = self.balls.get_mut(&ball_id) {
+                b.max_velocity = orig_v;
+            }
+        }
+        if let Some(meta) = self.ball_slim_meta.get_mut(&ball_id) {
+            meta.is_cloaked = false;
+        }
+        self.reveal_ball_to_grid_observers(ball_id);
+    }
+
     pub(crate) fn remove_ball_preserving_observer_events(
         &mut self,
         ball_id: BallId,

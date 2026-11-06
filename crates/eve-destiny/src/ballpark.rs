@@ -1361,12 +1361,7 @@ impl Ballpark {
                 }
             }
             if uncloaked {
-                if let Some(meta) = self.ball_slim_meta.get_mut(&ball_id) {
-                    meta.is_cloaked = false;
-                }
-                if let (Some(&gid), Some(b)) = (self.ball_grid_ids.get(&ball_id), self.balls.get(&ball_id).cloned()) {
-                    self.queue_event_for_grid_observers(gid, Some(ball_id), &DestinyEvent::AddBalls2 { balls: vec![b] });
-                }
+                self.finish_gate_decloak(ball_id);
             }
         }
         let ev = DestinyEvent::SetSpeedFraction { ball_id, fraction: clamped };

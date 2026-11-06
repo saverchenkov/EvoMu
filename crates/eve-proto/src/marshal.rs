@@ -497,14 +497,24 @@ fn decode_inner(
         }
         x if x == MarshalOpcode::PyVarInteger as u8 => {
             let len = read_size_ex(input)?;
-            if input.len() < len || len > 8 {
+            if input.len() < len || len > 9 {
                 return Err(ProtoError::UnexpectedEof);
             }
             let mut bytes = [0u8; 8];
-            bytes[..len].copy_from_slice(&input[..len]);
-            if len > 0 && (input[len - 1] & 0x80) != 0 {
+            if len == 9 {
+                if input[8] != 0x00 && input[8] != 0xFF {
+                    return Err(ProtoError::UnexpectedEof);
+                }
+                bytes.copy_from_slice(&input[..8]);
+            } else {
+                bytes[..len].copy_from_slice(&input[..len]);
+                let fill = if len > 0 && (input[len - 1] & 0x80) != 0 {
+                    0xFF
+                } else {
+                    0x00
+                };
                 for b in &mut bytes[len..] {
-                    *b = 0xFF;
+                    *b = fill;
                 }
             }
             *input = &input[len..];

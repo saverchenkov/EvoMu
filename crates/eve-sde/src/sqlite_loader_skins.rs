@@ -333,13 +333,17 @@ impl SdeRegistry {
         };
         let mut out = HashMap::new();
         for (sk_attr, lvl_attr) in PAIRS {
-            if let (Some(&sk), Some(&lvl)) = (
-                inv.default_attributes.get(&sk_attr),
-                inv.default_attributes.get(&lvl_attr),
-            ) {
+            if let Some(&sk) = inv.default_attributes.get(&sk_attr) {
                 let sk_id = sk as TypeId;
                 if sk_id > 0 {
-                    out.insert(sk_id, lvl as u8);
+                    let lvl = inv
+                        .default_attributes
+                        .get(&lvl_attr)
+                        .copied()
+                        .unwrap_or(1.0)
+                        .round()
+                        .max(0.0) as u8;
+                    out.insert(sk_id, lvl);
                 }
             }
         }

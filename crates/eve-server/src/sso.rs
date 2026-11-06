@@ -78,12 +78,25 @@ impl HttpResponse {
     }
 }
 
+const HTTP_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Handles a single HTTP/1.1 connection on the SSO/ESI listener (`ESI-1`).
-pub async fn handle_http_connection(mut stream: TcpStream, ctx: Arc<ServerContext>) -> Result<()> {
+pub async fn handle_http_connection(stream: TcpStream, ctx: Arc<ServerContext>) -> Result<()> {
+    handle_http_connection_with_timeout(stream, ctx, HTTP_READ_TIMEOUT).await
+}
+
+pub(crate) async fn handle_http_connection_with_timeout(
+    mut stream: TcpStream,
+    ctx: Arc<ServerContext>,
+    read_timeout: std::time::Duration,
+) -> Result<()> {
     let mut buf = Vec::with_capacity(4096);
     let mut chunk = [0u8; 4096];
     let header_end = loop {
-        let n = stream.read(&mut chunk).await?;
+        let Ok(read_res) = tokio::time::timeout(read_timeout, stream.read(&mut chunk)).await else {
+            return Ok(());
+        };
+        let n = read_res?;
         if n == 0 {
             return Ok(());
         }
@@ -151,7 +164,10 @@ pub async fn handle_http_connection(mut stream: TcpStream, ctx: Arc<ServerContex
     }
 
     while buf.len() < header_end + content_length {
-        let n = stream.read(&mut chunk).await?;
+        let Ok(read_res) = tokio::time::timeout(read_timeout, stream.read(&mut chunk)).await else {
+            return Ok(());
+        };
+        let n = read_res?;
         if n == 0 {
             break;
         }
@@ -701,10 +717,14 @@ fn handle_oauth_token(
                     }),
                 );
             };
-            match ctx
-                .db
-                .exchange_pkce_code(&code, &client_id, &code_verifier, now_unix)
-            {
+            let redirect_uri = get_param("redirect_uri");
+            match ctx.db.exchange_pkce_code_with_redirect(
+                &code,
+                &client_id,
+                &code_verifier,
+                redirect_uri.as_deref(),
+                now_unix,
+            ) {
                 Ok(tok) => HttpResponse::json(
                     200,
                     "OK",
@@ -1006,6 +1026,14 @@ fn escape_html_attr(s: &str) -> String {
     out
 }
 
+fn is_loopback_prefix(lower: &str, base: &str) -> bool {
+    match lower.strip_prefix(base) {
+        Some("") => true,
+        Some(rest) => rest.starts_with(':') || rest.starts_with('/'),
+        None => false,
+    }
+}
+
 fn is_valid_redirect_uri(uri: &str) -> bool {
     if uri.is_empty()
         || uri.contains('\r')
@@ -1015,9 +1043,11 @@ fn is_valid_redirect_uri(uri: &str) -> bool {
         return false;
     }
     let lower = uri.to_ascii_lowercase();
-    lower.starts_with("https://")
-        || lower.starts_with("http://localhost")
-        || lower.starts_with("http://127.0.0.1")
+    is_loopback_prefix(&lower, "http://localhost")
+        || is_loopback_prefix(&lower, "http://127.0.0.1")
+        || is_loopback_prefix(&lower, "https://localhost")
+        || is_loopback_prefix(&lower, "https://127.0.0.1")
+        || lower.starts_with("eveauth-")
         || lower.starts_with("eveauth://")
 }
 

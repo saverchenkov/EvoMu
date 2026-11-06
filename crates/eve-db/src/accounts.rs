@@ -1177,6 +1177,30 @@ impl WorldRepository {
         code_verifier: &str,
         now_unix: u64,
     ) -> Result<SsoTokenBundle, DbError> {
+        self.exchange_pkce_code_inner(code, client_id, code_verifier, None, false, now_unix)
+    }
+
+    /// Exchanges a single-use OAuth2 PKCE authorization code while enforcing `redirect_uri` binding.
+    pub fn exchange_pkce_code_with_redirect(
+        &self,
+        code: &str,
+        client_id: &str,
+        code_verifier: &str,
+        redirect_uri: Option<&str>,
+        now_unix: u64,
+    ) -> Result<SsoTokenBundle, DbError> {
+        self.exchange_pkce_code_inner(code, client_id, code_verifier, redirect_uri, true, now_unix)
+    }
+
+    fn exchange_pkce_code_inner(
+        &self,
+        code: &str,
+        client_id: &str,
+        code_verifier: &str,
+        redirect_uri: Option<&str>,
+        enforce_redirect: bool,
+        now_unix: u64,
+    ) -> Result<SsoTokenBundle, DbError> {
         let pkce = {
             let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
             rt.pkce_codes
@@ -1184,6 +1208,12 @@ impl WorldRepository {
                 .ok_or(DbError::InvalidCredentials)?
         };
         if now_unix > pkce.expires_at_unix || pkce.client_id != client_id {
+            return Err(DbError::InvalidCredentials);
+        }
+        if enforce_redirect
+            && !pkce.redirect_uri.is_empty()
+            && redirect_uri != Some(pkce.redirect_uri.as_str())
+        {
             return Err(DbError::InvalidCredentials);
         }
         let verifier_digest = sha256_bytes(code_verifier.as_bytes());

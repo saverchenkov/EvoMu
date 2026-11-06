@@ -312,3 +312,84 @@ fn test_issue_420_destruction_preserves_victim_damage_and_terminal_explosion() {
         .iter()
         .any(|e| matches!(e, DestinyEvent::TerminalExplosion { ball_id, .. } if *ball_id == dot_victim)));
 }
+
+#[test]
+fn test_issue_421_breaking_gate_cloak_restores_velocity_and_emits_ego_and_observer_events() {
+    let mut park = Ballpark::new(30_000_142);
+    let observer_id = 100_000_010;
+    let ship_a = 100_000_011;
+    let ship_b = 100_000_012;
+    let target_id = 100_000_013;
+
+    park.add_ball(make_ship(observer_id, DVec3::new(0.0, 0.0, 0.0)));
+    park.add_ball(make_ship(target_id, DVec3::new(5_000.0, 0.0, 0.0)));
+
+    for ship_id in [ship_a, ship_b] {
+        let mut ship = make_ship(ship_id, DVec3::new(1_000.0, 0.0, 0.0));
+        ship.max_velocity = 35.0; // slowed while cloaked
+        park.add_ball(ship);
+        park.ball_slim_meta.insert(
+            ship_id,
+            SlimItemMeta {
+                is_cloaked: true,
+                ..Default::default()
+            },
+        );
+        park.combat_states.insert(
+            ship_id,
+            crate::CombatState {
+                gate_cloak_remaining_ticks: 30,
+                is_cloaked: true,
+                cloak_original_max_velocity: Some(350.0),
+                ..Default::default()
+            },
+        );
+    }
+    let _ = park.drain_all_observer_events();
+
+    // 1. Breaking gate cloak via set_speed_fraction restores max_velocity, clears slim cloak,
+    // emits CloakBall(0) + OnSpecialFX("effects.Cloak", false) to ego, and reveals to observers.
+    assert!(park.set_speed_fraction(ship_a, 1.0));
+    assert_eq!(park.balls[&ship_a].max_velocity, 350.0);
+    assert!(!park.ball_slim_meta[&ship_a].is_cloaked);
+    let ego_a = park.drain_observer_events(ship_a);
+    assert!(ego_a.iter().any(|e| matches!(
+        e,
+        DestinyEvent::CloakBall { ball_id, cloaked: 0 } if *ball_id == ship_a
+    )));
+    assert!(ego_a.iter().any(|e| matches!(
+        e,
+        DestinyEvent::OnSpecialFX { ball_id, guid, is_active: false, .. }
+            if *ball_id == ship_a && guid == "effects.Cloak"
+    )));
+    let obs_events = park.drain_observer_events(observer_id);
+    assert!(obs_events.iter().any(|e| matches!(
+        e,
+        DestinyEvent::AddBalls2 { balls } if balls.iter().any(|b| b.id == ship_a)
+    )));
+
+    // 2. Breaking gate cloak via add_target_lock restores max_velocity, clears slim cloak,
+    // and emits ego CloakBall(0) + OnSpecialFX("effects.Cloak", false).
+    assert!(park.add_target_lock(
+        ship_b,
+        TargetLock {
+            target_id,
+            lock_time_ms: 1_000.0,
+            remaining_lock_ms: 1_000.0,
+            locked: false,
+            max_range_m: None,
+        }
+    ));
+    assert_eq!(park.balls[&ship_b].max_velocity, 350.0);
+    assert!(!park.ball_slim_meta[&ship_b].is_cloaked);
+    let ego_b = park.drain_observer_events(ship_b);
+    assert!(ego_b.iter().any(|e| matches!(
+        e,
+        DestinyEvent::CloakBall { ball_id, cloaked: 0 } if *ball_id == ship_b
+    )));
+    assert!(ego_b.iter().any(|e| matches!(
+        e,
+        DestinyEvent::OnSpecialFX { ball_id, guid, is_active: false, .. }
+            if *ball_id == ship_b && guid == "effects.Cloak"
+    )));
+}

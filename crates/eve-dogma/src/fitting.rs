@@ -895,20 +895,34 @@ impl ShipFittingEngine {
         roll_u: f64,
         sde: &SdeRegistry,
     ) -> Result<HeatDamageReport, String> {
-        let (flag_id, rack_idx, base_heat_dmg) = {
-            let m = self.modules.get(&module_id).ok_or_else(|| format!("Module {module_id} not found"))?;
+        let (flag_id, rack_idx, base_heat_dmg, has_thermo_mod) = {
+            let m = self
+                .modules
+                .get(&module_id)
+                .ok_or_else(|| format!("Module {module_id} not found"))?;
             let r_idx = match m.flag_id {
                 27..=34 => 0, // High
                 19..=26 => 1, // Med
                 11..=18 => 2, // Low
                 _ => return Err(format!("Module on flag {} is not in a heat rack", m.flag_id)),
             };
-            let base_heat_dmg = sde
-                .types
-                .get(&m.type_id)
-                .and_then(|t| t.default_attributes.get(&1211).copied())
-                .unwrap_or(5.0);
-            (m.flag_id, r_idx, base_heat_dmg)
+            let mod_state = self.module_state(module_id, sde).unwrap_or_else(|| {
+                let mut st = DogmaItemState::from_sde(module_id, m.type_id, sde);
+                for (&aid, &val) in &m.dynamic_attribute_overrides {
+                    st.base_attributes.insert(aid, val);
+                }
+                st
+            });
+            let has_thermo = mod_state
+                .modifiers
+                .iter()
+                .any(|md| md.source_item_id == 28164 && md.target_attribute_id == 1211);
+            let eval_heat_dmg = if mod_state.base_attributes.contains_key(&1211) || has_thermo {
+                mod_state.get_attribute(1211, sde)
+            } else {
+                5.0
+            };
+            (m.flag_id, r_idx, eval_heat_dmg, has_thermo)
         };
 
         // 1. Advance rack heat
@@ -920,9 +934,13 @@ impl ShipFittingEngine {
         );
         let current_rack_heat = self.rack_heat[rack_idx];
 
-        // 2. Compute effective heat damage to active module
+        // 2. Compute effective heat damage to active module (avoid double-applying Thermodynamics)
         let thermo_lvl = self.character_skills.get(&28164).copied().unwrap_or(0); // 28164 = Thermodynamics
-        let applied_mod_dmg = thermodynamics::effective_heat_damage(base_heat_dmg, thermo_lvl);
+        let applied_mod_dmg = if has_thermo_mod {
+            base_heat_dmg
+        } else {
+            thermodynamics::effective_heat_damage(base_heat_dmg, thermo_lvl)
+        };
 
         let mut module_burned = false;
         if let Some(m) = self.modules.get_mut(&module_id) {
@@ -934,7 +952,7 @@ impl ShipFittingEngine {
             }
         }
 
-        // 3. Roll damage to adjacent modules in the same rack
+        // 3. Roll damage to adjacent modules in the same rack with independent per-slot rolls
         let mut adjacent_reports = Vec::new();
         let other_modules: Vec<(i64, u16)> = self
             .modules
@@ -952,7 +970,8 @@ impl ShipFittingEngine {
         for (adj_id, adj_flag) in other_modules {
             let slot_dist = (adj_flag as isize - flag_id as isize).unsigned_abs();
             let prob = thermodynamics::heat_damage_probability(current_rack_heat, slot_dist, 0.5);
-            if roll_u < prob {
+            let slot_roll = thermodynamics::per_slot_heat_roll(roll_u, adj_id);
+            if slot_roll < prob {
                 let adj_dmg = thermodynamics::effective_heat_damage(base_heat_dmg * 0.5, thermo_lvl);
                 let mut adj_burned = false;
                 if let Some(am) = self.modules.get_mut(&adj_id) {
@@ -1015,6 +1034,16 @@ pub mod thermodynamics {
     /// Computes effective heat damage per cycle after Thermodynamics skill level (`5%` reduction/level, `#33`).
     pub fn effective_heat_damage(base_heat_damage: f64, thermodynamics_level: u8) -> f64 {
         base_heat_damage * (1.0 - 0.05 * (thermodynamics_level.min(5) as f64))
+    }
+
+    /// Derives an independent deterministic per-slot roll from a base uniform roll and slot item ID.
+    pub fn per_slot_heat_roll(roll_u: f64, slot_item_id: i64) -> f64 {
+        let mut h = (slot_item_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        h ^= h >> 30;
+        h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        h ^= h >> 27;
+        let jitter = (((h & 0xFFFF) as f64) / 65536.0 - 0.5) * 0.08;
+        (roll_u + jitter).clamp(0.0, 1.0 - f64::EPSILON)
     }
 
     /// Computes Nanite Repair Paste quantity required to repair `damaged_hp` on a module (`#34`).

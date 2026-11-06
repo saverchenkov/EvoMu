@@ -1220,34 +1220,21 @@ impl ServerContext {
         });
 
         let mut auto_offlined = Vec::new();
+        let mut fitted_items = Vec::with_capacity(fittable_items.len());
         for item in fittable_items {
-            let online = online_states.get(&item.item_id).copied().unwrap_or(true);
-            let fit_res = fit.fit_module_with_state(
-                item.item_id,
-                item.type_id,
-                item.flag as u16,
-                online,
-                &self.sde,
-            );
-            let is_online = if let Err(ref err_msg) = fit_res {
-                if online {
-                    let _ = fit.fit_module_with_state(
-                        item.item_id,
-                        item.type_id,
-                        item.flag as u16,
-                        false,
-                        &self.sde,
-                    );
-                    if err_msg.contains("Insufficient CPU")
-                        || err_msg.contains("Insufficient Powergrid")
-                    {
-                        auto_offlined.push(item.item_id);
-                    }
-                }
-                false
-            } else {
-                online
-            };
+            let want_online = online_states.get(&item.item_id).copied().unwrap_or(true);
+            if fit
+                .fit_module_with_state(
+                    item.item_id,
+                    item.type_id,
+                    item.flag as u16,
+                    false,
+                    &self.sde,
+                )
+                .is_err()
+            {
+                continue;
+            }
             if let Some(m) = fit.modules.get_mut(&item.item_id) {
                 if let Some(&dmg) = item.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE) {
                     m.damage_hp = dmg;
@@ -1261,14 +1248,30 @@ impl ServerContext {
                 if !overrides.is_empty() {
                     m.dynamic_attribute_overrides = overrides;
                 }
-            }
-            if is_online && active_states.contains(&item.item_id) {
-                let _ = fit.activate_module(item.item_id, false, &self.sde);
-            }
-            if let Some(&active_charge) = active_charges.get(&item.item_id) {
-                if let Some(m) = fit.modules.get_mut(&item.item_id) {
+                if let Some(&active_charge) = active_charges.get(&item.item_id) {
                     m.charge_type_id = Some(active_charge);
                     m.charge_quantity = m.charge_quantity.max(1);
+                }
+            }
+            fitted_items.push((item.item_id, want_online));
+        }
+        fit.recalculate_stats(&self.sde);
+        for (item_id, want_online) in fitted_items {
+            if !want_online {
+                continue;
+            }
+            match fit.set_module_online(item_id, &self.sde) {
+                Ok(()) => {
+                    if active_states.contains(&item_id) {
+                        let _ = fit.activate_module(item_id, false, &self.sde);
+                    }
+                }
+                Err(ref err_msg) => {
+                    if err_msg.contains("Insufficient CPU")
+                        || err_msg.contains("Insufficient Powergrid")
+                    {
+                        auto_offlined.push(item_id);
+                    }
                 }
             }
         }

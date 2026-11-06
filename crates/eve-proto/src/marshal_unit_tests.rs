@@ -169,7 +169,24 @@ fn decoder_legacy_opcodes_varint_string_table_ucs2_and_object_fallbacks() {
         PyRep::Integer(-2)
     );
     assert_eq!(
-        decode(&make_frame(&[MarshalOpcode::PyVarInteger as u8, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0])),
+        decode(&make_frame(&[
+            MarshalOpcode::PyVarInteger as u8,
+            9,
+            0x01,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0x80,
+            0x00
+        ]))
+        .unwrap(),
+        PyRep::Integer(0x8000_0000_0000_0001_u64 as i64)
+    );
+    assert_eq!(
+        decode(&make_frame(&[MarshalOpcode::PyVarInteger as u8, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])),
         Err(ProtoError::UnexpectedEof)
     );
 
@@ -377,4 +394,94 @@ fn test_issue_413_pack_dbrow_emits_null_bitmap_and_roundtrips() {
         Some(&PyRep::String("Jita IV - Moon 4".into()))
     );
     assert_eq!(decoded.dbrow_get("null_str"), Some(&PyRep::None));
+}
+
+#[test]
+fn test_issue_414_varinteger_9byte_u64_and_negative_sign_extension() {
+    let wrap = |payload: &[u8]| -> Vec<u8> {
+        let mut f = vec![0x7E_u8, 0, 0, 0, 0];
+        f.extend_from_slice(payload);
+        f
+    };
+
+    // 9-byte positive unsigned 64-bit integer with bit 63 set (e.g. 0x8000_0000_0000_0001)
+    let high_u64: u64 = 0x8000_0000_0000_0001;
+    let mut wire_9b = vec![MarshalOpcode::PyVarInteger as u8, 9];
+    wire_9b.extend_from_slice(&high_u64.to_le_bytes());
+    wire_9b.push(0x00);
+    let decoded_9b = decode(&wrap(&wire_9b)).expect("9-byte unsigned PyVarInteger must decode");
+    assert_eq!(decoded_9b, PyRep::Integer(high_u64 as i64));
+
+    // Reject 9-byte PyVarInteger with invalid sign byte
+    let mut bad_9b = vec![MarshalOpcode::PyVarInteger as u8, 9];
+    bad_9b.extend_from_slice(&high_u64.to_le_bytes());
+    bad_9b.push(0x01);
+    assert!(decode(&wrap(&bad_9b)).is_err());
+
+    // Negative 1-byte two's-complement integer (-1 = [0xFF])
+    assert_eq!(
+        decode(&wrap(&[MarshalOpcode::PyVarInteger as u8, 1, 0xFF])).unwrap(),
+        PyRep::Integer(-1)
+    );
+
+    // Negative 2-byte two's-complement integer (-256 = [0x00, 0xFF])
+    assert_eq!(
+        decode(&wrap(&[MarshalOpcode::PyVarInteger as u8, 2, 0x00, 0xFF])).unwrap(),
+        PyRep::Integer(-256)
+    );
+
+    // Negative 3-byte two's-complement integer (-100_000 = [0x60, 0x79, 0xFE])
+    let neg_100k = (-100_000_i64).to_le_bytes();
+    assert_eq!(
+        decode(&wrap(&[
+            MarshalOpcode::PyVarInteger as u8,
+            3,
+            neg_100k[0],
+            neg_100k[1],
+            neg_100k[2],
+        ]))
+        .unwrap(),
+        PyRep::Integer(-100_000)
+    );
+}
+
+#[test]
+fn test_issue_415_quasar_packed_repeated_appends_across_chunks() {
+    use crate::quasar::registry::DynamicValue;
+    use crate::quasar::{DescriptorProto, FieldDescriptorProto, FieldLabel, FieldType};
+
+    let mut reg = crate::quasar::registry::QuasarDescriptorRegistry::empty_with_builtins();
+    reg.messages_by_full_name.insert(
+        "test.PackedList".to_string(),
+        DescriptorProto {
+            name: "PackedList".to_string(),
+            full_name: "test.PackedList".to_string(),
+            fields: vec![FieldDescriptorProto {
+                name: "ids".to_string(),
+                number: 1,
+                label: FieldLabel::Repeated,
+                field_type: FieldType::Int32,
+                type_name: String::new(),
+                oneof_index: None,
+                json_name: "ids".to_string(),
+            }],
+            nested_types: Vec::new(),
+            enum_types: Vec::new(),
+            oneofs: Vec::new(),
+            is_map_entry: false,
+        },
+    );
+
+    // Two separate LengthDelimited records for field #1 (tag 0x0A): chunk1=[10, 20], chunk2=[30, 40]
+    let wire = vec![0x0A, 2, 10, 20, 0x0A, 2, 30, 40];
+    let msg = reg.decode_dynamic("test.PackedList", &wire).unwrap();
+    assert_eq!(
+        msg.fields.get(&1),
+        Some(&DynamicValue::Repeated(vec![
+            DynamicValue::Int32(10),
+            DynamicValue::Int32(20),
+            DynamicValue::Int32(30),
+            DynamicValue::Int32(40),
+        ]))
+    );
 }

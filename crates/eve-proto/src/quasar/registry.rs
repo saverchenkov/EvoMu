@@ -870,7 +870,13 @@ impl QuasarDescriptorRegistry {
                     };
                     unpacked.push(item);
                 }
-                msg.fields.insert(fdesc.number, DynamicValue::Repeated(unpacked));
+                match msg.fields.get_mut(&fdesc.number) {
+                    Some(DynamicValue::Repeated(list)) => list.extend(unpacked),
+                    _ => {
+                        msg.fields
+                            .insert(fdesc.number, DynamicValue::Repeated(unpacked));
+                    }
+                }
                 continue;
             }
 

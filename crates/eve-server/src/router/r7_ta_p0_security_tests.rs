@@ -190,3 +190,169 @@ fn test_issue_417_bind_object_enforces_strict_context_authorization() {
     sess.corporation_id = Some(corp2);
     assert!(ctx.verify_bound_object(&sess, corp_bid).is_err());
 }
+
+#[tokio::test]
+async fn test_issue_418_verify_and_invalidate_bound_objects_on_session_transitions() {
+    let char1: i64 = 90_000_201;
+    let corp1: i64 = 98_000_201;
+    let corp2: i64 = 98_000_202;
+    let fleet1: i64 = 77_000_201;
+    let fleet2: i64 = 77_000_202;
+    let ship1: i64 = 100_000_201;
+    let ship2: i64 = 100_000_202;
+    let jita: u32 = 30_000_142;
+    let perim: u32 = 30_000_144;
+    let struct1: i64 = 1_000_000_201_001;
+
+    let ctx = test_ctx();
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = make_char(char1, corp1, None, jita);
+        ch.active_ship_id = ship1;
+        ch.fleet_id = Some(fleet1);
+        snap.characters.insert(char1, ch);
+        snap.structures.insert(
+            struct1,
+            UpwellStructureRecord {
+                structure_id: struct1,
+                type_id: 35832,
+                name: "Citadel".into(),
+                solar_system_id: jita,
+                owner_corp_id: corp1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut sess = SessionState {
+        session_id: 418,
+        user_id: Some(1),
+        character_id: Some(char1),
+        corporation_id: Some(corp1),
+        fleet_id: Some(fleet1),
+        solar_system_id: Some(jita),
+        ship_id: Some(ship1),
+        role: ROLE_PLAYER,
+        ..Default::default()
+    };
+    ctx.db
+        .acquire_online_lock(1, 418, Some(char1), true, ctx.now_unix())
+        .unwrap();
+
+    let bid_ship = ctx.bind_object(&sess, "ship", ship1).unwrap();
+    let bid_dogma = ctx.bind_object(&sess, "dogmaIM", ship1).unwrap();
+    let bid_corp = ctx.bind_object(&sess, "corpRegistry", corp1).unwrap();
+    let bid_fleet = ctx.bind_object(&sess, "fleetObjectHandler", fleet1).unwrap();
+    let bid_struct = ctx.bind_object(&sess, "structure", struct1).unwrap();
+
+    // Ship board_or_eject invalidates old ship & dogmaIM and emits OnMachoObjectDisconnect
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&char1) {
+            c.active_ship_id = ship2;
+        }
+    });
+    sess.ship_id = Some(ship2);
+    assert!(ctx.verify_bound_object(&sess, bid_ship).is_err());
+    assert!(ctx.verify_bound_object(&sess, bid_dogma).is_err());
+    ctx.pending_notifications.write().unwrap().clear();
+    ctx.invalidate_bound_objects_for_session_transition(char1, jita, None, "board_or_eject");
+    let disconnects = ctx
+        .pending_notifications
+        .read()
+        .unwrap()
+        .get(&char1)
+        .map_or(0, |v| {
+            v.iter()
+                .filter(|n| n.event == "OnMachoObjectDisconnect")
+                .count()
+        });
+    assert!(disconnects >= 2);
+    assert!(ctx.verify_bound_object(&sess, bid_corp).is_ok());
+
+    // Fleet transition invalidates old fleetObjectHandler
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&char1) {
+            c.fleet_id = Some(fleet2);
+        }
+    });
+    sess.fleet_id = Some(fleet2);
+    assert!(ctx.verify_bound_object(&sess, bid_fleet).is_err());
+    ctx.invalidate_bound_objects_for_session_transition(char1, jita, None, "fleet_change");
+
+    // Corp change + jump away from jita invalidates corpRegistry & structure
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&char1) {
+            c.corporation_id = corp2;
+            c.solar_system_id = perim;
+        }
+    });
+    sess.corporation_id = Some(corp2);
+    sess.solar_system_id = Some(perim);
+    assert!(ctx.verify_bound_object(&sess, bid_struct).is_err());
+    ctx.invalidate_bound_objects_for_session_transition(char1, perim, None, "stargate_jump");
+}
+
+#[tokio::test]
+async fn test_issue_425_abyssal_dynamic_attributes_stay_online_on_rebuild() {
+    use eve_db::{InventoryFlag, InventoryItemRecord};
+    use std::collections::HashMap;
+
+    let char_id: i64 = 90_000_301;
+    let ship_id: i64 = 100_000_301;
+    let mod_id: i64 = 100_000_302;
+    let hull_tid: u32 = 587;
+    let ab_tid: u32 = 439;
+
+    let mut ctx = test_ctx();
+    let sde = Arc::make_mut(&mut ctx.sde);
+    if let Some(hull) = sde.types.get_mut(&hull_tid) {
+        hull.default_attributes.insert(eve_sde::attr_ids::CPU_OUTPUT, 50.0);
+        hull.default_attributes.insert(eve_sde::attr_ids::POWER_OUTPUT, 50.0);
+    }
+    if let Some(m) = sde.types.get_mut(&ab_tid) {
+        m.effect_ids = vec![13, 16]; // medPower + online
+        for req_attr in [182_u16, 183, 184, 1285, 1289, 1290] {
+            m.default_attributes.remove(&req_attr);
+        }
+        m.default_attributes.insert(eve_sde::attr_ids::CPU, 80.0);
+        m.default_attributes.insert(eve_sde::attr_ids::POWER, 30.0);
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters
+            .insert(char_id, make_char(char_id, 1_000_009, None, 30_000_142));
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: hull_tid,
+                owner_id: char_id,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: ab_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                dynamic_attributes: HashMap::from([(eve_sde::attr_ids::CPU, 35.0)]),
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(mod_id, true);
+    });
+
+    let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
+    let fitted = fit.modules.get(&mod_id).unwrap();
+    assert_eq!(fitted.state, eve_dogma::ModuleState::Online);
+    assert_eq!(fitted.dynamic_attribute_overrides.get(&eve_sde::attr_ids::CPU), Some(&35.0));
+    assert_eq!(ctx.db.with_snapshot(|s| s.module_online_states.get(&mod_id).copied()), Some(true));
+}

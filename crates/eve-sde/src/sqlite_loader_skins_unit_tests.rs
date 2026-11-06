@@ -363,3 +363,19 @@ fn dungeon_ores_blueprints_skills_index_and_fighter_abilities() {
     assert_eq!(fa_slots.len(), 1);
     assert_eq!(fa_slots[0].1.target_mode, "pointTargeted");
 }
+
+#[test]
+fn test_issue_426_default_required_skill_level_1_and_safe_fsd_helpers() {
+    let mut sde = SdeRegistry::with_canonical_seed();
+    // Skill 3336 specified on attribute 182 with requiredSkill1Level (277) omitted -> defaults to 1
+    sde.types.insert(
+        77_001,
+        sample_inv_type(77_001, 25, 6, true, None, None, &[(182, 3336.0)]),
+    );
+    let reqs = sde.required_skills_for_type(77_001);
+    assert_eq!(reqs.get(&3336), Some(&1));
+
+    // Truncated/underflow FSD dict buffers must never panic
+    let truncated_fsd = [4_u8, 0, 0, 0, 1, 2]; // body_end - 4 = 2, footer_size large/corrupt
+    assert!(crate::static_domain_loaders::fsd_dict_entries(&truncated_fsd, 0, 8).is_empty());
+}

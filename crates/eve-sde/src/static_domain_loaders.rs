@@ -184,29 +184,55 @@ pub struct SecondarySunInfo {
 static SECONDARY_SUNS_CACHE: OnceLock<HashMap<SolarSystemId, SecondarySunInfo>> = OnceLock::new();
 
 fn u32_le(buf: &[u8], pos: usize) -> u32 {
-    u32::from_le_bytes(buf[pos..pos + 4].try_into().expect("u32 slice"))
+    pos.checked_add(4)
+        .and_then(|end| buf.get(pos..end))
+        .and_then(|s| s.try_into().ok())
+        .map(u32::from_le_bytes)
+        .unwrap_or(0)
 }
 
 fn i32_le(buf: &[u8], pos: usize) -> i32 {
-    i32::from_le_bytes(buf[pos..pos + 4].try_into().expect("i32 slice"))
+    pos.checked_add(4)
+        .and_then(|end| buf.get(pos..end))
+        .and_then(|s| s.try_into().ok())
+        .map(i32::from_le_bytes)
+        .unwrap_or(0)
 }
 
 fn u64_le(buf: &[u8], pos: usize) -> u64 {
-    u64::from_le_bytes(buf[pos..pos + 8].try_into().expect("u64 slice"))
+    pos.checked_add(8)
+        .and_then(|end| buf.get(pos..end))
+        .and_then(|s| s.try_into().ok())
+        .map(u64::from_le_bytes)
+        .unwrap_or(0)
 }
 
 fn f32_le(buf: &[u8], pos: usize) -> f32 {
-    f32::from_le_bytes(buf[pos..pos + 4].try_into().expect("f32 slice"))
+    pos.checked_add(4)
+        .and_then(|end| buf.get(pos..end))
+        .and_then(|s| s.try_into().ok())
+        .map(f32::from_le_bytes)
+        .unwrap_or(0.0)
 }
 
 fn f64_le(buf: &[u8], pos: usize) -> f64 {
-    f64::from_le_bytes(buf[pos..pos + 8].try_into().expect("f64 slice"))
+    pos.checked_add(8)
+        .and_then(|end| buf.get(pos..end))
+        .and_then(|s| s.try_into().ok())
+        .map(f64::from_le_bytes)
+        .unwrap_or(0.0)
 }
 
 fn fsd_str(buf: &[u8], pos: usize) -> String {
     let len = u32_le(buf, pos) as usize;
-    std::str::from_utf8(&buf[pos + 4..pos + 4 + len])
-        .expect("FSD UTF-8 string")
+    let Some(bytes) = pos
+        .checked_add(4)
+        .and_then(|start| start.checked_add(len).and_then(|end| buf.get(start..end)))
+    else {
+        return String::new();
+    };
+    std::str::from_utf8(bytes)
+        .unwrap_or_default()
         .to_string()
 }
 
@@ -215,18 +241,52 @@ mod static_localization_loaders;
 pub use static_localization_loaders::*;
 
 
-fn fsd_dict_entries(buf: &[u8], pos: usize, item_size: usize) -> Vec<(u32, usize)> {
-    let body_start = pos + 4;
-    let body_end = body_start + u32_le(buf, pos) as usize;
-    let footer_size = u32_le(buf, body_end - 4) as usize;
-    let footer = body_end - 4 - footer_size;
+pub(crate) fn fsd_dict_entries(buf: &[u8], pos: usize, item_size: usize) -> Vec<(u32, usize)> {
+    if item_size < 8 {
+        return Vec::new();
+    }
+    let Some(body_start) = pos.checked_add(4) else {
+        return Vec::new();
+    };
+    if body_start > buf.len() {
+        return Vec::new();
+    }
+    let Some(body_end) = body_start.checked_add(u32_le(buf, pos) as usize) else {
+        return Vec::new();
+    };
+    if body_end > buf.len() {
+        return Vec::new();
+    }
+    let Some(footer_len_pos) = body_end.checked_sub(4) else {
+        return Vec::new();
+    };
+    let footer_size = u32_le(buf, footer_len_pos) as usize;
+    let Some(footer) = footer_len_pos.checked_sub(footer_size) else {
+        return Vec::new();
+    };
+    if footer.checked_add(4).is_none_or(|end| end > body_end) {
+        return Vec::new();
+    }
     let cnt = u32_le(buf, footer) as usize;
-    (0..cnt)
-        .map(|i| {
-            let at = footer + 4 + i * item_size;
-            (u32_le(buf, at), body_start + u32_le(buf, at + 4) as usize)
-        })
-        .collect()
+    let mut entries = Vec::new();
+    for i in 0..cnt {
+        let Some(at) = i
+            .checked_mul(item_size)
+            .and_then(|d| footer.checked_add(4).and_then(|s| s.checked_add(d)))
+        else {
+            break;
+        };
+        if at.checked_add(8).is_none_or(|end| end > body_end) {
+            break;
+        }
+        let key = u32_le(buf, at);
+        if let Some(val_off) = body_start.checked_add(u32_le(buf, at + 4) as usize) {
+            if val_off <= body_end {
+                entries.push((key, val_off));
+            }
+        }
+    }
+    entries
 }
 
 impl SdeRegistry {
