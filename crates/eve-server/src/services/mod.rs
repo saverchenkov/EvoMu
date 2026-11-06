@@ -314,41 +314,17 @@ mod fleet_social_fleet_ops_extra_unit_tests;
 #[cfg(test)]
 mod mining_advanced_extra_unit_tests;
 #[cfg(test)]
-mod space_docking_cloaking_extra_unit_tests;
+mod market_contracts_extra_unit_tests;
 #[cfg(test)]
-mod fitting_ships_mastery_extra_unit_tests;
+mod quasar_corp_domain_extra_unit_tests;
 #[cfg(test)]
-mod quasar_progression_extra_unit_tests;
+mod air_npe_nodegraph_runner_extra_unit_tests;
 #[cfg(test)]
-mod agents_standings_arcs_extra_unit_tests;
+mod mining_compression_extra_unit_tests;
 #[cfg(test)]
-mod sov_gameplay_extra_unit_tests;
+mod pvp_filament_mgr_extra_unit_tests;
 #[cfg(test)]
-mod fleet_social_corps_extra_unit_tests;
-#[cfg(test)]
-mod pi_orbitals_extra_unit_tests;
-#[cfg(test)]
-mod market_trading_extra_unit_tests;
-#[cfg(test)]
-mod lp_store_extra_unit_tests;
-#[cfg(test)]
-mod config_service_extra_unit_tests;
-#[cfg(test)]
-mod fitting_cyno_portal_extra_unit_tests;
-#[cfg(test)]
-mod pve_crab_beacons_extra_unit_tests;
-#[cfg(test)]
-mod fleet_social_notify_extra_unit_tests;
-#[cfg(test)]
-mod space_entity_mining_extra_unit_tests;
-#[cfg(test)]
-mod fleet_social_scanning_extra_unit_tests;
-#[cfg(test)]
-mod pi_colonies_extra_unit_tests;
-#[cfg(test)]
-mod fleet_social_fleets_extra_unit_tests;
-#[cfg(test)]
-mod notify_emitters_space_dungeons_extra_unit_tests;
+mod combat_missiles_aoe_extra_unit_tests;
 
 
 
