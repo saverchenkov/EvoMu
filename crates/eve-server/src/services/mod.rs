@@ -437,56 +437,20 @@ mod fleet_social_persistence_extra_unit_tests;
 mod quasar_vendors_and_war_services_extra_unit_tests;
 
 #[cfg(test)]
-mod structure_profile_services_extra_unit_tests;
+mod character_skill_ops_extra_unit_tests;
 
 #[cfg(test)]
-mod pve_abyssal_hazards_extra_unit_tests;
+mod quasar_entitlement_membership_extra_unit_tests;
 
 #[cfg(test)]
-mod fw_insurgency_extra_unit_tests;
+mod sov_warzone_dynamic_extra_unit_tests;
 
 #[cfg(test)]
-mod wormhole_pve_seeding_extra_unit_tests;
+mod quasar_sov_services_extra_unit_tests;
 
 #[cfg(test)]
-mod structure_weapons_ops_extra_unit_tests;
+mod quasar_achievements_ops_extra_unit_tests;
 
 #[cfg(test)]
-mod hypernet_raffle_ops_extra_unit_tests;
-
-#[cfg(test)]
-mod fitting_ewar_capital_extra_unit_tests;
-
-#[cfg(test)]
-mod structure_standup_weapons_extra_unit_tests;
-
-#[cfg(test)]
-mod fleet_social_access_group_bookmarks_ops_extra_unit_tests;
-
-#[cfg(test)]
-mod fitting_conduit_jump_extra_unit_tests;
-
-#[cfg(test)]
-mod character_clone_jump_rules_extra_unit_tests;
-
-#[cfg(test)]
-mod notify_emitters_seasons_tactical_extra_unit_tests;
-
-#[cfg(test)]
-mod quasar_social_community_extra_unit_tests;
-
-#[cfg(test)]
-mod map_service_extra_unit_tests;
-
-#[cfg(test)]
-mod quasar_space_domain_extra_unit_tests;
-
-#[cfg(test)]
-mod industry_rigs_extra_unit_tests;
-
-#[cfg(test)]
-mod combat_npc_police_extra_unit_tests;
-
-#[cfg(test)]
-mod encounter_surveillance_system_extra_unit_tests;
+mod quasar_campaign_state_extra_unit_tests;
 
