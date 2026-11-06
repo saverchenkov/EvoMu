@@ -767,24 +767,7 @@ pub fn handle_industry_jobs(
                                 .collect()
                         })
                         .unwrap_or_default();
-                    let has_sde_mats = !sde_inv_mats.is_empty()
-                        && sde_inv_mats.iter().all(|(tid, q)| {
-                            let avail: i64 = snap
-                                .items
-                                .values()
-                                .filter(|i| {
-                                    (i.owner_id == char_id || (use_corp && i.owner_id == job_owner_id))
-                                        && (i.location_id == station_id || i.location_id == docked_id)
-                                        && i.type_id == *tid
-                                        && !i.singleton
-                                        && is_usable_industry_flag(i.flag)
-                                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                                })
-                                .map(|i| i64::from(i.quantity))
-                                .sum();
-                            avail >= i64::from(*q)
-                        });
-                    if has_sde_mats {
+                    if !sde_inv_mats.is_empty() {
                         for (dc_type, q) in sde_inv_mats {
                             consume_material(snap, dc_type, q, "InsufficientInventionDatacores")?;
                         }

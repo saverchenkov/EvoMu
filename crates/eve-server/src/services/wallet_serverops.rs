@@ -179,7 +179,7 @@ pub fn process_due_automatic_bills(ctx: &ServerContext) -> usize {
                 format!("Automatic payment of bill {}", bill.bill_id),
             );
             if let Some(cred) = snap.corporations.get_mut(&bill.creditor_id) {
-                cred.master_wallet = cred.master_wallet.checked_add(amt).unwrap_or(cred.master_wallet);
+                cred.credit_division(1, amt);
             }
             bill.paid = true;
             bill.paid_by_division = Some(div_key);
@@ -779,6 +779,12 @@ pub fn handle(
                 if bill.paid {
                     return Err(rpc_err("BillAlreadyPaid", "Bill is already paid"));
                 }
+                if bill.debtor_id != char_id {
+                    return Err(rpc_err(
+                        "AccessDenied",
+                        format!("Bill {bill_id} does not belong to character {char_id}"),
+                    ));
+                }
                 let amt = IskCents(bill.amount_cents);
                 let ch = snap
                     .characters
@@ -797,7 +803,7 @@ pub fn handle(
                     format!("Paid bill {bill_id}"),
                 );
                 if let Some(cred) = snap.corporations.get_mut(&bill.creditor_id) {
-                    cred.master_wallet = cred.master_wallet.checked_add(amt).unwrap_or(cred.master_wallet);
+                    cred.credit_division(1, amt);
                 }
                 bill.paid = true;
                 save_json_note(snap, nid, -71, bill_id, format!("bill:{bill_id}"), &bill, now);
@@ -869,7 +875,7 @@ pub fn handle(
                 }
                 snap.append_journal(corp_id, "BillPayment", amt, bal_after, format!("Paid corporation bill {bill_id}"));
                 if let Some(cred) = snap.corporations.get_mut(&bill.creditor_id) {
-                    cred.master_wallet = cred.master_wallet.checked_add(amt).unwrap_or(cred.master_wallet);
+                    cred.credit_division(1, amt);
                 }
                 bill.paid = true;
                 bill.paid_by_division = Some(from_account_key);
@@ -1062,10 +1068,7 @@ fn give_cash(
             rec.balance
         } else {
             let corp = snap.corporations.get_mut(&to_id).expect("checked above");
-            let cur = corp.division_balance(1).max(corp.master_wallet);
-            let next_bal = cur.checked_add(amount).unwrap_or(cur);
-            corp.set_division_balance(1, next_bal);
-            corp.master_wallet
+            corp.credit_division(1, amount)
         };
         let rec_reason = if reason.is_empty() { format!("Player donation from {char_id}") } else { format!("Player donation from {char_id}: {reason}") };
         snap.append_journal_entry(eve_db::ledger::JournalEntryInput {

@@ -78,7 +78,7 @@ fn normalize_macho_rpc_reply_covers_structure_jump_chat_siphon_and_blueprints() 
     assert_eq!(siphon.dict_get("capacity"), Some(&PyRep::Real(1_000.0)));
     assert_eq!(siphon.dict_get("used"), Some(&PyRep::Real(350.0)));
 
-    // blueprintManager.GetBlueprintDataByOwner empty vs non-empty
+    // blueprintManager.GetBlueprintDataByOwner empty list stays empty
     let bp_empty = normalize_macho_rpc_reply(
         "blueprintManager",
         "GetBlueprintDataByOwner",
@@ -91,8 +91,7 @@ fn normalize_macho_rpc_reply_covers_structure_jump_chat_siphon_and_blueprints() 
     let PyRep::List(bp_list) = &bp_parts[0] else {
         panic!("expected list");
     };
-    assert_eq!(bp_list.len(), 1);
-    assert_eq!(bp_list[0].dict_get("typeID"), Some(&PyRep::Integer(688)));
+    assert!(bp_list.is_empty());
 }
 
 #[test]
@@ -127,7 +126,7 @@ fn normalize_macho_rpc_reply_covers_char_contracts_corp_and_dev_indices() {
     )
     .unwrap();
     if let PyRep::List(items) = notes_empty {
-        assert_eq!(items.len(), 1);
+        assert!(items.is_empty());
     } else {
         panic!("expected list");
     }
@@ -136,7 +135,10 @@ fn normalize_macho_rpc_reply_covers_char_contracts_corp_and_dev_indices() {
     let cinfo = normalize_macho_rpc_reply(
         "charUnboundMgr",
         "GetCharacterInfo",
-        Ok(PyRep::keyval([("name", PyRep::String("Pilot".into()))])),
+        Ok(PyRep::keyval([
+            ("characterID", PyRep::Integer(90_000_001)),
+            ("name", PyRep::String("Pilot".into())),
+        ])),
     )
     .unwrap();
     let PyRep::List(cinfo_list) = cinfo else {
@@ -176,7 +178,7 @@ fn normalize_macho_rpc_reply_covers_char_contracts_corp_and_dev_indices() {
         Ok(PyRep::List(Vec::new())),
     )
     .unwrap();
-    assert_eq!(search_empty.dict_get("numFound"), Some(&PyRep::Integer(1)));
+    assert_eq!(search_empty.dict_get("numFound"), Some(&PyRep::Integer(0)));
 
     let search_raw = normalize_macho_rpc_reply(
         "contractProxy",
@@ -221,7 +223,10 @@ fn normalize_macho_rpc_reply_covers_char_contracts_corp_and_dev_indices() {
     let emp = normalize_macho_rpc_reply(
         "corporationSvc",
         "GetEmployementRecordAndCharacterTransfers",
-        Ok(PyRep::None),
+        Ok(PyRep::rowset(
+            vec!["recordID", "corporationID", "startDate"],
+            vec![vec![PyRep::Integer(1), PyRep::Integer(98_000_009), PyRep::Integer(1_700_000_000)]],
+        )),
     )
     .unwrap();
     assert!(matches!(emp, PyRep::Tuple(_)));
@@ -233,8 +238,7 @@ fn normalize_macho_rpc_reply_covers_char_contracts_corp_and_dev_indices() {
     )
     .unwrap();
     if let PyRep::List(items) = dev {
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].dict_get("adm"), Some(&PyRep::Real(4.2)));
+        assert!(items.is_empty());
     } else {
         panic!("expected list");
     }
@@ -247,7 +251,15 @@ fn normalize_macho_rpc_reply_covers_dogma_map_planet_raffle_skill_war_and_store(
         PyRep::List(_)
     ));
     assert_eq!(
-        normalize_macho_rpc_reply("fwVictoryPointMgr", "GetLocalVictoryPointState", Ok(PyRep::None)).unwrap(),
+        normalize_macho_rpc_reply(
+            "fwVictoryPointMgr",
+            "GetLocalVictoryPointState",
+            Ok(PyRep::keyval([
+                ("solarSystemID", PyRep::Integer(30_000_142)),
+                ("state", PyRep::Integer(1))
+            ]))
+        )
+        .unwrap(),
         PyRep::Tuple(vec![PyRep::Integer(30_000_142), PyRep::Integer(1)])
     );
     let hs = normalize_macho_rpc_reply(
@@ -258,13 +270,13 @@ fn normalize_macho_rpc_reply_covers_dogma_map_planet_raffle_skill_war_and_store(
     .unwrap();
     assert!(matches!(hs, PyRep::List(_)));
 
-    assert!(matches!(
-        normalize_macho_rpc_reply("invbroker", "ALSCLogGet", Ok(PyRep::None)).unwrap(),
-        PyRep::List(_)
-    ));
     assert_eq!(
-        normalize_macho_rpc_reply("invbroker", "TrashItems", Ok(PyRep::None)).unwrap(),
-        PyRep::List(Vec::new())
+        normalize_macho_rpc_reply("invbroker", "ALSCLogGet", Ok(PyRep::None)).unwrap(),
+        PyRep::None
+    );
+    assert_eq!(
+        normalize_macho_rpc_reply("invbroker", "TrashItems", Ok(PyRep::List(vec![PyRep::Integer(42)]))).unwrap(),
+        PyRep::List(vec![PyRep::Integer(42)])
     );
     let add_tgt = normalize_macho_rpc_reply(
         "dogmaIM",
@@ -312,7 +324,7 @@ fn normalize_macho_rpc_reply_covers_dogma_map_planet_raffle_skill_war_and_store(
     assert!(normalize_macho_rpc_reply("reprocessingSvc", "GetQuotes", Ok(PyRep::Tuple(vec![PyRep::Real(0.03)]))).is_ok());
     assert_eq!(
         normalize_macho_rpc_reply("scanMgr", "RecoverProbes", Ok(PyRep::Dict(Vec::new()))).unwrap(),
-        PyRep::List(vec![PyRep::Integer(1)])
+        PyRep::List(Vec::new())
     );
     assert!(matches!(
         normalize_macho_rpc_reply("ship", "GetShipFittingInfo", Ok(PyRep::Dict(Vec::new()))).unwrap(),
@@ -393,42 +405,33 @@ fn normalize_macho_notification_covers_all_event_shapes() {
     );
     assert_eq!(du.len(), 1);
 
+    assert!(normalize_macho_notification("OnChannelJoined", Vec::new()).is_empty());
     assert_eq!(
-        normalize_macho_notification("OnChannelJoined", Vec::new()),
-        vec![PyRep::String("solarsystemid2:30000142".into())]
-    );
-    assert_eq!(
-        normalize_macho_notification("OnSharedBookmarksFolderUpdated", Vec::new()).len(),
-        1
+        normalize_macho_notification("OnSharedBookmarksFolderUpdated", vec![PyRep::Integer(42)]),
+        vec![PyRep::Integer(42)]
     );
     assert!(normalize_macho_notification("OnCorporationRecruitmentAdChanged", vec![PyRep::Integer(1)]).is_empty());
-    assert_eq!(
-        normalize_macho_notification("OnOrganizationContactsUpdated", Vec::new()).len(),
-        2
-    );
+    assert!(normalize_macho_notification("OnOrganizationContactsUpdated", Vec::new()).is_empty());
     assert_eq!(
         normalize_macho_notification("OnTargetClear", Vec::new()),
         vec![PyRep::List(Vec::new())]
     );
-    assert_eq!(
-        normalize_macho_notification("OnGodmaShipEffect", vec![PyRep::Integer(100)]).len(),
-        11
-    );
+    let effect = normalize_macho_notification("OnGodmaShipEffect", vec![PyRep::Integer(100)]);
+    assert_eq!(effect.len(), 11);
+    assert_eq!(effect[0], PyRep::Integer(100));
     assert_eq!(
         normalize_macho_notification("OnHeatAdded", vec![PyRep::Real(0.5)]),
         vec![PyRep::Integer(1211), PyRep::Real(0.5)]
     );
+    let mod_attr = normalize_macho_notification("OnModuleAttributeChanges", vec![PyRep::Integer(7)]);
+    assert!(matches!(
+        mod_attr.as_slice(),
+        [PyRep::List(items)] if matches!(items.as_slice(), [PyRep::Tuple(t)] if t.len() == 8 && t[2] == PyRep::Integer(7))
+    ));
+    assert!(normalize_macho_notification("OnModuleUnfitted", Vec::new()).is_empty());
     assert_eq!(
-        normalize_macho_notification("OnModuleAttributeChanges", Vec::new()).len(),
-        1
-    );
-    assert_eq!(
-        normalize_macho_notification("OnModuleUnfitted", Vec::new()),
-        vec![PyRep::Integer(100_000_005)]
-    );
-    assert_eq!(
-        normalize_macho_notification("OnRemoteMessage", vec![PyRep::String("A".into()), PyRep::Dict(Vec::new())]).len(),
-        3
+        normalize_macho_notification("OnRemoteMessage", vec![PyRep::String("A".into()), PyRep::Dict(Vec::new())]),
+        vec![PyRep::String("A".into()), PyRep::Dict(Vec::new()), PyRep::None]
     );
     let item_chg = normalize_macho_notification(
         "OnItemChange",
@@ -438,18 +441,16 @@ fn normalize_macho_notification_covers_all_event_shapes() {
         ],
     );
     assert_eq!(item_chg.len(), 3);
-    assert_eq!(
-        normalize_macho_notification(
-            "ProcessInventoryChange",
-            vec![PyRep::Integer(1), PyRep::Integer(2), PyRep::Integer(4)]
-        )
-        .len(),
-        4
+    let inv_chg = normalize_macho_notification(
+        "ProcessInventoryChange",
+        vec![PyRep::Integer(1), PyRep::Integer(2), PyRep::Integer(4)],
     );
-    assert_eq!(
-        normalize_macho_notification("OnNotificationReceived", Vec::new()).len(),
-        5
-    );
+    assert!(matches!(
+        inv_chg.as_slice(),
+        [PyRep::List(items), PyRep::Dict(_), PyRep::Bool(true), PyRep::None]
+            if items.first().and_then(|i| i.dict_get("itemID")) == Some(&PyRep::Integer(1))
+    ));
+    assert_eq!(normalize_macho_notification("OnNotificationReceived", Vec::new()).len(), 5);
     assert_eq!(
         normalize_macho_notification("OnTarget", vec![PyRep::Integer(99), PyRep::String("locking".into())]),
         vec![PyRep::String("add".into()), PyRep::Integer(99), PyRep::None]
@@ -605,44 +606,26 @@ async fn quasar_grpc_error_branches_compression_and_unauthenticated_paths() {
 
     // 1. Unknown gRPC method returns grpc-status = 12 (UNIMPLEMENTED)
     {
-        let req = Request::builder()
-            .method("POST")
-            .uri("http://127.0.0.1/eve_public.gateway.Unknown/Method")
-            .header("content-type", "application/grpc")
-            .body(())
-            .unwrap();
+        let req = Request::builder().method("POST").uri("http://127.0.0.1/eve_public.gateway.Unknown/Method")
+            .header("content-type", "application/grpc").body(()).unwrap();
         let (rsp_fut, _send) = h2_client.send_request(req, true).unwrap();
         let rsp = rsp_fut.await.unwrap();
         assert_eq!(rsp.status(), StatusCode::OK);
-        assert_eq!(
-            rsp.headers().get("grpc-status").and_then(|v| v.to_str().ok()),
-            Some("12")
-        );
+        assert_eq!(rsp.headers().get("grpc-status").and_then(|v| v.to_str().ok()), Some("12"));
     }
 
     // 2. Unauthenticated Requests/Send returns grpc-status = 16 (UNAUTHENTICATED)
     {
-        let req = Request::builder()
-            .method("POST")
-            .uri("http://127.0.0.1/eve_public.gateway.Requests/Send")
-            .header("content-type", "application/grpc")
-            .header("authorization", "Bearer invalid.jwt.token")
-            .body(())
-            .unwrap();
+        let req = Request::builder().method("POST").uri("http://127.0.0.1/eve_public.gateway.Requests/Send")
+            .header("content-type", "application/grpc").header("authorization", "Bearer invalid.jwt.token").body(()).unwrap();
         let (rsp_fut, _send) = h2_client.send_request(req, true).unwrap();
         let rsp = rsp_fut.await.unwrap();
-        assert_eq!(
-            rsp.headers().get("grpc-status").and_then(|v| v.to_str().ok()),
-            Some("16")
-        );
+        assert_eq!(rsp.headers().get("grpc-status").and_then(|v| v.to_str().ok()), Some("16"));
     }
 
     // 3. Gzip and Deflate compressed frames on Events/Publish
     let now_u = ctx.now_unix();
-    let dev_jwt = ctx
-        .db
-        .issue_gateway_dev_token(1, None, "tranquility", now_u + 3600, now_u)
-        .unwrap();
+    let dev_jwt = ctx.db.issue_gateway_dev_token(1, None, "tranquility", now_u + 3600, now_u).unwrap();
     for encoding in ["gzip", "deflate"] {
         let req = Request::builder()
             .method("POST")
@@ -658,10 +641,7 @@ async fn quasar_grpc_error_branches_compression_and_unauthenticated_paths() {
         assert_eq!(rsp.status(), StatusCode::OK);
 
         let ev = EvePublicEvent {
-            occurred: Some(GoogleTimestamp {
-                seconds: 1_700_000_000,
-                nanos: 0,
-            }),
+            occurred: Some(GoogleTimestamp { seconds: 1_700_000_000, nanos: 0 }),
             uuid: vec![1u8; 16],
             payload: Some(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.app.eveonline.ui.OpenedEvent"),
@@ -680,13 +660,11 @@ async fn quasar_grpc_error_branches_compression_and_unauthenticated_paths() {
             enc.finish().unwrap()
         };
         let mut framed = BytesMut::with_capacity(5 + compressed_bytes.len());
-        framed.extend_from_slice(&[1u8]); // compressed flag = 1
+        framed.extend_from_slice(&[1u8]);
         framed.extend_from_slice(&(compressed_bytes.len() as u32).to_be_bytes());
         framed.extend_from_slice(&compressed_bytes);
         send_body.send_data(framed.freeze(), true).unwrap();
-
         let mut body = rsp.into_body();
-        let chunk = body.data().await.unwrap().unwrap();
-        assert_eq!(chunk.chunk(), &[0, 0, 0, 0, 0]);
+        assert_eq!(body.data().await.unwrap().unwrap().chunk(), &[0, 0, 0, 0, 0]);
     }
 }

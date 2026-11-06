@@ -770,7 +770,7 @@ async fn test_plan_e3_contracts_item_exchange_and_courier() {
     let s1_bal_after = ctx.db.get_character(90_000_001).unwrap().balance;
     let s2_bal_after = ctx.db.get_character(90_000_002).unwrap().balance;
 
-    assert_eq!(s1_bal_after, s1_bal_before.checked_add(IskCents::from_isk(50_000)).unwrap(), "Issuer must receive contract price");
+    assert_eq!(s1_bal_after, s1_bal_before.checked_add(IskCents::from_isk(150_000)).unwrap(), "Issuer must receive contract price plus refunded contract deposit");
     assert_eq!(s2_bal_after, s2_bal_before.checked_sub(IskCents::from_isk(50_000)).unwrap(), "Acceptor must pay contract price");
 
     ctx.db.with_snapshot(|snap| {

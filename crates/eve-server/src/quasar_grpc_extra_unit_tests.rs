@@ -93,7 +93,7 @@ fn normalize_macho_rpc_reply_exhaustive_fallback_and_non_empty_branches() {
     );
     assert_eq!(note_list[1], PyRep::Integer(42));
 
-    // charUnboundMgr.GetCharacterInfo with empty KeyVal defaults to Aura Capsuleer & 90_000_001, plus non-KeyVal passthrough
+    // charUnboundMgr.GetCharacterInfo with empty KeyVal defaults to empty name & 0 ID, plus non-KeyVal passthrough
     let cinfo_default = normalize_macho_rpc_reply(
         "charUnboundMgr",
         "GetCharacterInfo",
@@ -105,7 +105,7 @@ fn normalize_macho_rpc_reply_exhaustive_fallback_and_non_empty_branches() {
     };
     assert_eq!(
         cinfo_items[0].dict_get("characterName"),
-        Some(&PyRep::String("Aura Capsuleer".into()))
+        Some(&PyRep::String(String::new()))
     );
     assert_eq!(
         normalize_macho_rpc_reply("charUnboundMgr", "GetCharacterInfo", Ok(PyRep::Integer(7)))
@@ -168,8 +168,7 @@ fn normalize_macho_rpc_reply_covers_dev_index_raffle_skill_station_and_store_var
     )
     .unwrap();
     if let PyRep::List(items) = hs_empty {
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].dict_get("station_id"), Some(&PyRep::Integer(60_003_760)));
+        assert!(items.is_empty());
     }
     let hs_other = normalize_macho_rpc_reply(
         "home_station",
@@ -179,7 +178,7 @@ fn normalize_macho_rpc_reply_covers_dev_index_raffle_skill_station_and_store_var
     .unwrap();
     assert_eq!(hs_other, PyRep::List(vec![PyRep::String("custom".into())]));
 
-    // dogmaIM.AddTarget default locked=true and default targetID=100_000_001
+    // dogmaIM.AddTarget default locked=true and default targetID=0
     let tgt_def = normalize_macho_rpc_reply(
         "dogmaIM",
         "AddTarget",
@@ -190,7 +189,7 @@ fn normalize_macho_rpc_reply_covers_dev_index_raffle_skill_station_and_store_var
         tgt_def,
         PyRep::Tuple(vec![
             PyRep::Integer(1),
-            PyRep::List(vec![PyRep::Integer(100_000_001)])
+            PyRep::List(vec![PyRep::Integer(0)])
         ])
     );
 
@@ -208,7 +207,7 @@ fn normalize_macho_rpc_reply_covers_dev_index_raffle_skill_station_and_store_var
         assert_eq!(parts[1], PyRep::Integer(2));
     }
 
-    // skillMgr2.GetSkillQueueAndFreePoints with empty queue populates default skill 3300
+    // skillMgr2.GetSkillQueueAndFreePoints with empty queue preserves empty queue
     let sq_empty = normalize_macho_rpc_reply(
         "skillMgr2",
         "GetSkillQueueAndFreePoints",
@@ -217,7 +216,7 @@ fn normalize_macho_rpc_reply_covers_dev_index_raffle_skill_station_and_store_var
     .unwrap();
     if let PyRep::Tuple(parts) = sq_empty {
         if let PyRep::List(q) = &parts[0] {
-            assert_eq!(q[0].dict_get("trainingTypeID"), Some(&PyRep::Integer(3300)));
+            assert!(q.is_empty());
         }
     }
 
@@ -229,7 +228,7 @@ fn normalize_macho_rpc_reply_covers_dev_index_raffle_skill_station_and_store_var
     )
     .unwrap();
     if let PyRep::List(items) = al_empty {
-        assert_eq!(items.len(), 1);
+        assert!(items.is_empty());
     }
     let al_other = normalize_macho_rpc_reply(
         "stationSvc",
@@ -336,10 +335,10 @@ fn normalize_macho_notification_exhaustive_edge_cases() {
         vec![PyRep::Integer(1), PyRep::Real(0.0)]
     );
 
-    // OnModuleUnfitted with non-empty args returns last
+    // OnModuleUnfitted preserves args
     assert_eq!(
         normalize_macho_notification("OnModuleUnfitted", vec![PyRep::Integer(1), PyRep::Integer(2)]),
-        vec![PyRep::Integer(2)]
+        vec![PyRep::Integer(1), PyRep::Integer(2)]
     );
 
     // OnRemoteMessage with 3 args passthrough

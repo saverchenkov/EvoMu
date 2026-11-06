@@ -803,7 +803,6 @@ pub fn handle(
                     (b_lvl, a_lvl, m_lvl, v_lvl, f_st, c_st, order_limit, tier)
                 });
             if type_id != PLEX_TYPE_ID
-                && duration_days > 0
                 && order_range > super::market_contracts::max_remote_jumps_for_skill_level(vis_lvl)
             {
                 return Some(Err(BridgeRpcError {
@@ -815,12 +814,12 @@ pub fn handle(
                 }));
             }
             let order_price = IskCents::from_f64_isk(price_isk);
-            let Some(max_order_cost) = order_price.checked_mul_qty(quantity) else {
+            if order_price.checked_mul_qty(quantity).is_none() {
                 return Some(Err(BridgeRpcError {
                     code: "MarketOrderOverflow".into(),
                     message: "Order total cost overflows 64-bit ISK cents".into(),
                 }));
-            };
+            }
             let now_unix = ctx.now_unix();
             let tax_collector = crate::services::wallet_serverops::tax_collector_id(ctx);
 
@@ -843,13 +842,6 @@ pub fn handle(
                 } else {
                     let tier_mult = 1.0 - (f64::from(m_tier) * 0.10).min(0.50);
                     compute_broker_fee_rate(broker_lvl, faction_standing, corp_standing) * tier_mult
-                };
-                let broker_fee = if duration_days > 0 {
-                    let broker_ppm = (broker_rate * 1_000_000.0).round() as i128;
-                    IskCents((((max_order_cost.0 as i128) * broker_ppm + 500_000) / 1_000_000) as i64)
-                        .max(IskCents(10_000))
-                } else {
-                    IskCents(0)
                 };
                 let caller_corp_id = snap
                     .characters
@@ -884,35 +876,6 @@ pub fn handle(
                 } else {
                     1.0
                 };
-                let min_escrow_upfront = IskCents(((max_order_cost.0 as f64) * escrow_fraction).round() as i64);
-                let required_upfront = if is_bid {
-                    min_escrow_upfront.checked_add(broker_fee).ok_or_else(|| {
-                        BridgeRpcError {
-                            code: "MarketOrderOverflow".into(),
-                            message: "Order cost + broker fee overflow".into(),
-                        }
-                    })?
-                } else {
-                    broker_fee
-                };
-
-                let caller_balance = if use_corp {
-                    snap.corporations
-                        .get(&caller_corp_id)
-                        .and_then(|c| c.wallet_divisions.iter().find(|d| d.division_id == div_id).map(|d| d.balance.min(c.master_wallet)))
-                        .unwrap_or(IskCents(0))
-                } else {
-                    snap.characters
-                        .get(&char_id)
-                        .map(|c| c.balance)
-                        .unwrap_or(IskCents(0))
-                };
-                if caller_balance.checked_sub(required_upfront).is_none() {
-                    return Err(BridgeRpcError {
-                        code: "InsufficientFunds".into(),
-                        message: "Not enough ISK for market order and broker fee".into(),
-                    });
-                }
 
                 // Collect matching opposite orders sorted by best price-time priority
                 let bid_sys_opt = resolve_station_solar_system(ctx, snap, station_id);
@@ -965,57 +928,6 @@ pub fn handle(
                     candidate_ids.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
                 } else {
                     candidate_ids.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-                }
-
-                // Debit broker fee upfront
-                if use_corp {
-                    if let Some(corp) = snap.corporations.get_mut(&caller_corp_id) {
-                        corp.master_wallet = corp.master_wallet.checked_sub(broker_fee).unwrap_or(IskCents(0));
-                        if let Some(d) = corp.wallet_divisions.iter_mut().find(|d| d.division_id == div_id) {
-                            d.balance = d.balance.checked_sub(broker_fee).unwrap_or(IskCents(0));
-                        }
-                        let bal_after = corp.master_wallet;
-                        snap.append_journal(
-                            caller_corp_id,
-                            "MarketBrokerFee",
-                            broker_fee,
-                            bal_after,
-                            format!("Broker fee for corporate order on type {type_id}"),
-                        );
-                    }
-                } else if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    ch.balance = ch.balance.checked_sub(broker_fee).unwrap_or(IskCents(0));
-                    let bal_after = ch.balance;
-                    snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
-                        owner_id: char_id,
-                        entry_type: "MarketBrokerFee",
-                        amount: IskCents(-broker_fee.0),
-                        balance_after: bal_after,
-                        reason: format!("Broker fee for order on type {type_id}"),
-                        meta: eve_db::ledger::JournalMeta::new(
-                            eve_db::ledger::ref_types::BROKER_FEE,
-                            char_id,
-                            owner_corp_id,
-                            now_unix,
-                        ),
-                    });
-                }
-                if let Some((st_corp_id, _, pilot_bps)) = structure_broker_opt {
-                    if broker_fee.0 > 0 {
-                        let owner_share = structure_owner_broker_share_with_pilot(snap, station_id, broker_fee, pilot_bps);
-                        if owner_share.0 > 0 {
-                            crate::services::station_structure::structure_upwell_ops::credit_structure_owner_corp_div1(
-                                snap,
-                                st_corp_id,
-                                owner_share,
-                                eve_db::ledger::ref_types::BROKER_FEE,
-                                "MarketBrokerFee",
-                                order_owner_id,
-                                format!("Structure market broker fee for order on type {type_id}"),
-                                now_unix,
-                            );
-                        }
-                    }
                 }
 
                 let mut remaining_qty = quantity_i32;
@@ -1194,7 +1106,7 @@ pub fn handle(
                     return Ok((
                         first_matched_oid.unwrap_or(0),
                         true,
-                        broker_fee,
+                        IskCents(0),
                         actual_sales_tax_charged,
                         IskCents(0),
                         matched_sellers,
@@ -1226,11 +1138,18 @@ pub fn handle(
                 let full_esc = order_price
                     .checked_mul_qty(remaining_qty as i64)
                     .unwrap_or(IskCents(0));
+                let broker_ppm = (broker_rate * 1_000_000.0).round() as i128;
+                let broker_fee = IskCents((((full_esc.0 as i128) * broker_ppm + 500_000) / 1_000_000) as i64)
+                    .max(IskCents(10_000));
                 let escrow = if mt_lvl > 0 {
                     IskCents(((full_esc.0 as f64) * escrow_fraction).round() as i64)
                 } else {
                     full_esc
                 };
+                let resting_need = broker_fee.checked_add(escrow).ok_or_else(|| BridgeRpcError {
+                    code: "MarketOrderOverflow".into(),
+                    message: "Order escrow + broker fee overflow".into(),
+                })?;
                 let cur_bal = if use_corp {
                     snap.corporations
                         .get(&caller_corp_id)
@@ -1242,11 +1161,41 @@ pub fn handle(
                         .map(|c| c.balance)
                         .unwrap_or(IskCents(0))
                 };
-                if cur_bal.checked_sub(escrow).is_none() {
+                if cur_bal.checked_sub(resting_need).is_none() {
                     return Err(BridgeRpcError {
                         code: "InsufficientFunds".into(),
-                        message: "Not enough ISK to cover buy order escrow".into(),
+                        message: "Not enough ISK to cover buy order escrow and broker fee".into(),
                     });
+                }
+                if use_corp {
+                    if let Some(corp) = snap.corporations.get_mut(&caller_corp_id) {
+                        corp.master_wallet = corp.master_wallet.checked_sub(broker_fee).unwrap_or(IskCents(0));
+                        if let Some(d) = corp.wallet_divisions.iter_mut().find(|d| d.division_id == div_id) {
+                            d.balance = d.balance.checked_sub(broker_fee).unwrap_or(IskCents(0));
+                        }
+                        let bal_after = corp.master_wallet;
+                        snap.append_journal(caller_corp_id, "MarketBrokerFee", broker_fee, bal_after, format!("Broker fee for corporate order on type {type_id}"));
+                    }
+                } else if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    ch.balance = ch.balance.checked_sub(broker_fee).unwrap_or(IskCents(0));
+                    let bal_after = ch.balance;
+                    snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
+                        owner_id: char_id,
+                        entry_type: "MarketBrokerFee",
+                        amount: IskCents(-broker_fee.0),
+                        balance_after: bal_after,
+                        reason: format!("Broker fee for order on type {type_id}"),
+                        meta: eve_db::ledger::JournalMeta::new(eve_db::ledger::ref_types::BROKER_FEE, char_id, owner_corp_id, now_unix),
+                    });
+                }
+                if let Some((st_corp_id, _, pilot_bps)) = structure_broker_opt {
+                    let owner_share = structure_owner_broker_share_with_pilot(snap, station_id, broker_fee, pilot_bps);
+                    if owner_share.0 > 0 {
+                        crate::services::station_structure::structure_upwell_ops::credit_structure_owner_corp_div1(
+                            snap, st_corp_id, owner_share, eve_db::ledger::ref_types::BROKER_FEE,
+                            "MarketBrokerFee", order_owner_id, format!("Structure market broker fee for order on type {type_id}"), now_unix,
+                        );
+                    }
                 }
                 let escrow_bal = if use_corp {
                     snap.corporations.get_mut(&caller_corp_id).map(|corp| {

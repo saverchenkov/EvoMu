@@ -555,3 +555,5 @@ mod r6_t1_p1_security_tests_part2;
 mod r7_tc_p0_arena_abyssal_tests;
 #[cfg(test)]
 mod r7_tc_p0_raid_ess_tests;
+#[cfg(test)]
+mod r6_t4_econ_security_tests;

@@ -137,6 +137,26 @@ fn check_contract_visibility(
     }
 }
 
+fn has_corp_contract_role(
+    snap: &eve_db::WorldStateSnapshot,
+    session: Option<&SessionState>,
+    char_id: i64,
+    corp_id: i64,
+) -> bool {
+    const CONTRACT_ROLES: u64 =
+        eve_db::corp_roles::ROLE_CONTRACT_MANAGER | eve_db::corp_roles::ROLE_DIRECTOR;
+    if corp_id == 0 {
+        return false;
+    }
+    if session.is_some_and(|s| s.corporation_id == Some(corp_id) && (s.corp_role & CONTRACT_ROLES) != 0) {
+        return true;
+    }
+    snap.corporations.get(&corp_id).is_some_and(|corp| {
+        corp.ceo_id == char_id
+            || corp.member_roles.get(&char_id).is_some_and(|&r| (r & CONTRACT_ROLES) != 0)
+    })
+}
+
 pub fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -520,18 +540,8 @@ pub fn handle(
                 if !check_contract_visibility(&c, char_id, effective_caller_corp, caller_alliance) {
                     return Err(rpc_err("ContractAccessDenied", format!("Character {char_id} is not authorized to accept private contract {cid}")));
                 }
-                if is_corp_accept {
-                    let has_corp_role = effective_caller_corp != 0
-                        && ((session.corp_role & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_CONTRACT_MANAGER)) != 0
-                            || snap.corporations.get(&effective_caller_corp).is_some_and(|corp| {
-                                corp.ceo_id == char_id
-                                    || corp.member_roles.get(&char_id).is_some_and(|&r| {
-                                        (r & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_CONTRACT_MANAGER)) != 0
-                                    })
-                            }));
-                    if !has_corp_role {
-                        return Err(rpc_err("CrpAccessDenied", "Accepting a contract on behalf of a corporation requires ROLE_CONTRACT_MANAGER or ROLE_DIRECTOR"));
-                    }
+                if is_corp_accept && !has_corp_contract_role(snap, Some(session), char_id, effective_caller_corp) {
+                    return Err(rpc_err("CrpAccessDenied", "Accepting a contract on behalf of a corporation requires ROLE_CONTRACT_MANAGER or ROLE_DIRECTOR"));
                 }
                 if caller_station != Some(c.start_station_id) {
                     return Err(rpc_err("MustBeDockedAtStartStation", format!("Accepting contract {cid} requires being docked at {}", c.start_station_id)));
@@ -621,7 +631,14 @@ pub fn handle(
                 snap.credit_contract_issuer(&c, c.price);
 
                 if c.contract_type == "ItemExchange" {
-                    snap.service_state_blobs.remove(&format!("contract_deposit:{cid}"));
+                    if let Some(dep_raw) = snap
+                        .service_state_blobs
+                        .remove(&format!("contract_deposit:{cid}"))
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .filter(|&d| d > 0)
+                    {
+                        snap.credit_contract_issuer(&c, IskCents(dep_raw));
+                    }
                     let issuer_entity_id = if c.for_corp && c.issuer_corp_id != 0 { c.issuer_corp_id } else { c.issuer_id };
                     let (acceptor_entity_id, acceptor_flag) = if is_corp_accept {
                         (effective_caller_corp, InventoryFlag::CorpDeliveries)
@@ -670,10 +687,11 @@ pub fn handle(
                         snap.credit_contract_issuer(&c, IskCents(dep_raw));
                     }
                 }
+                let courier_owner_id = if is_corp_accept { effective_caller_corp } else { char_id };
                 snap.next_entity_id += 1;
                 let wrap_id = snap.next_entity_id;
                 snap.items.insert(wrap_id, InventoryItemRecord {
-                    item_id: wrap_id, type_id: 3468, owner_id: char_id, location_id: c.start_station_id,
+                    item_id: wrap_id, type_id: 3468, owner_id: courier_owner_id, location_id: c.start_station_id,
                     flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default()
                 });
                 for iid in &c.item_ids {
@@ -869,6 +887,7 @@ pub fn handle(
             let cid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let caller_station = session.station_id.or(session.structure_id);
             let caller_ship = session.ship_id;
+            let caller_corp = session.corporation_id.unwrap_or(0);
             let now_unix = ctx.now_unix();
             let expired_in_progress = ctx.db.try_with_mut_snapshot(|snap| {
                     Ok::<_, std::convert::Infallible>(snap.resolve_expired_contract(cid, now_unix))
@@ -883,41 +902,40 @@ pub fn handle(
                 let Some(c) = snap.contracts.get(&cid).cloned() else {
                     return Err(rpc_err("ContractNotFound", format!("Contract {cid} does not exist")));
                 };
-                if c.status != "InProgress" || c.acceptor_id != Some(char_id) {
-                    return Err(rpc_err(
-                        "InvalidContractState",
-                        format!("Contract {cid} is not InProgress for character {char_id}"),
-                    ));
+                let effective_corp = if caller_corp != 0 { caller_corp } else { snap.characters.get(&char_id).map(|ch| ch.corporation_id).unwrap_or(0) };
+                let is_corp_acceptor = effective_corp != 0 && c.acceptor_id == Some(effective_corp) && has_corp_contract_role(snap, Some(session), char_id, effective_corp);
+                if c.status != "InProgress" || (c.acceptor_id != Some(char_id) && !is_corp_acceptor) {
+                    return Err(rpc_err("InvalidContractState", format!("Contract {cid} is not InProgress for character {char_id}")));
                 }
                 if c.contract_type != "Courier" {
                     return Err(rpc_err("InvalidContractType", format!("Contract {cid} is not a Courier contract")));
                 }
                 if caller_station != Some(c.end_station_id) {
-                    return Err(rpc_err(
-                        "CourierNotAtDestinationStation",
-                        format!("Completing Courier contract {cid} requires being docked at {}", c.end_station_id),
-                    ));
+                    return Err(rpc_err("CourierNotAtDestinationStation", format!("Completing Courier contract {cid} requires being docked at {}", c.end_station_id)));
                 }
                 let Some(ship_id) = caller_ship else {
-                    return Err(rpc_err(
-                        "NoActiveShip",
-                        "Completing a Courier contract requires the active delivery ship",
-                    ));
+                    return Err(rpc_err("NoActiveShip", "Completing a Courier contract requires the active delivery ship"));
                 };
-                let ship_at_dest = snap.items.get(&ship_id).map(|sh| sh.owner_id == char_id && sh.location_id == c.end_station_id).unwrap_or(false);
+                let ship_at_dest = snap.items.get(&ship_id).is_some_and(|sh| {
+                    (sh.owner_id == char_id || (is_corp_acceptor && sh.owner_id == effective_corp)) && sh.location_id == c.end_station_id
+                });
                 if !ship_at_dest {
                     return Err(rpc_err("DeliveryShipNotAtDestination", format!("Active ship {ship_id} is not docked at destination station {}", c.end_station_id)));
                 }
                 let mut wraps_to_remove = Vec::new();
                 for iid in &c.item_ids {
-                    let present = snap.items.get(iid).map(|item| {
+                    let present = snap.items.get(iid).is_some_and(|item| {
                         if item.location_id == ship_id || item.location_id == c.end_station_id { return true; }
-                        if let Some(wrap_item) = snap.items.get(&item.location_id).filter(|w| w.type_id == 3468 && w.owner_id == char_id && (w.location_id == ship_id || w.location_id == c.end_station_id)) {
+                        if let Some(wrap_item) = snap.items.get(&item.location_id).filter(|w| {
+                            w.type_id == 3468
+                                && (w.owner_id == char_id || (is_corp_acceptor && w.owner_id == effective_corp))
+                                && (w.location_id == ship_id || w.location_id == c.end_station_id)
+                        }) {
                             wraps_to_remove.push(wrap_item.item_id);
                             return true;
                         }
                         false
-                    }).unwrap_or(false);
+                    });
                     if !present {
                         return Err(rpc_err("CourierPackageMissing", format!("Courier Plastic Wrap package for item {iid} is not present at destination")));
                     }
@@ -937,13 +955,15 @@ pub fn handle(
                 }
                 for wid in wraps_to_remove { snap.items.remove(&wid); }
                 if let Some(c_mut) = snap.contracts.get_mut(&cid) { c_mut.status = "Completed".into(); }
-                if let Some(dep_str) = snap.service_state_blobs.remove(&format!("contract_deposit:{cid}")) {
-                    if let Ok(dep_raw) = dep_str.parse::<i64>() {
-                        snap.credit_contract_issuer(&c, IskCents(dep_raw));
-                    }
+                if let Some(dep_raw) = snap.service_state_blobs.remove(&format!("contract_deposit:{cid}")).and_then(|s| s.parse::<i64>().ok()) {
+                    snap.credit_contract_issuer(&c, IskCents(dep_raw));
                 }
                 let total_return = c.collateral.checked_add(c.reward).unwrap_or(c.collateral);
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
+                if is_corp_acceptor {
+                    if let Some(corp) = snap.corporations.get_mut(&effective_corp) {
+                        corp.credit_division(1, total_return);
+                    }
+                } else if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.balance = ch.balance.checked_add(total_return).unwrap_or(ch.balance);
                 }
                 Ok((total_return.to_wire_f64(), c.issuer_id))
@@ -1027,36 +1047,21 @@ pub fn handle(
                 } else {
                     c.issuer_id
                 };
-                let has_caller_corp_contract_role = caller_corp != 0
-                    && ((session.corp_role
-                        & (eve_db::corp_roles::ROLE_CONTRACT_MANAGER
-                            | eve_db::corp_roles::ROLE_DIRECTOR))
-                        != 0
-                        || snap.corporations.get(&caller_corp).is_some_and(|corp| {
-                            corp.ceo_id == char_id
-                                || corp.member_roles.get(&char_id).is_some_and(|&r| {
-                                    (r & (eve_db::corp_roles::ROLE_CONTRACT_MANAGER
-                                        | eve_db::corp_roles::ROLE_DIRECTOR))
-                                        != 0
-                                })
-                        }));
+                let effective_corp = if caller_corp != 0 {
+                    caller_corp
+                } else {
+                    snap.characters.get(&char_id).map(|ch| ch.corporation_id).unwrap_or(0)
+                };
+                let has_caller_corp_contract_role =
+                    has_corp_contract_role(snap, Some(session), char_id, effective_corp);
                 if method == "RejectContract" {
                     let is_assignee = c.assignee_id != 0
-                        && (c.assignee_id == char_id || c.assignee_id == caller_corp);
+                        && (c.assignee_id == char_id || c.assignee_id == effective_corp);
                     if !is_assignee || c.status != "Outstanding" {
-                        return Err(rpc_err(
-                            "ContractOwnershipViolation",
-                            format!("Character {char_id} cannot reject contract {cid} in state '{}'", c.status),
-                        ));
+                        return Err(rpc_err("ContractOwnershipViolation", format!("Character {char_id} cannot reject contract {cid} in state '{}'", c.status)));
                     }
-                    if c.assignee_id == caller_corp
-                        && c.assignee_id != char_id
-                        && !has_caller_corp_contract_role
-                    {
-                        return Err(rpc_err(
-                            "CrpAccessDenied",
-                            "Corporate Contract Manager or Director role required to reject a corporate contract",
-                        ));
+                    if c.assignee_id == effective_corp && c.assignee_id != char_id && !has_caller_corp_contract_role {
+                        return Err(rpc_err("CrpAccessDenied", "Corporate Contract Manager or Director role required to reject a corporate contract"));
                     }
                     snap.credit_contract_issuer(&c, c.reward);
                     if let Some(dep_str) = snap.service_state_blobs.remove(&format!("contract_deposit:{cid}")) {
@@ -1077,31 +1082,17 @@ pub fn handle(
                 }
 
                 let can_manage_as_issuer = c.issuer_id == char_id
-                    || (c.for_corp
-                        && c.issuer_corp_id != 0
-                        && c.issuer_corp_id == caller_corp
-                        && has_caller_corp_contract_role);
-                if !can_manage_as_issuer && c.acceptor_id != Some(char_id) {
-                    return Err(rpc_err(
-                        "ContractOwnershipViolation",
-                        format!("Character {char_id} is neither issuer nor acceptor of contract {cid}"),
-                    ));
+                    || (c.for_corp && c.issuer_corp_id != 0 && c.issuer_corp_id == effective_corp && has_caller_corp_contract_role);
+                let is_corp_acceptor = effective_corp != 0 && c.acceptor_id == Some(effective_corp) && has_caller_corp_contract_role;
+                if !can_manage_as_issuer && c.acceptor_id != Some(char_id) && !is_corp_acceptor {
+                    return Err(rpc_err("ContractOwnershipViolation", format!("Character {char_id} is neither issuer nor acceptor of contract {cid}")));
                 }
                 if let Some(new_state) = snap.resolve_expired_contract(cid, now_unix) {
                     return Ok((new_state, c.issuer_id));
                 }
-                if method == "DeleteContract"
-                    && (c.status == "Outstanding" || c.status == "Expired")
-                    && can_manage_as_issuer
-                {
-                    if c.status == "Outstanding"
-                        && c.contract_type == "Auction"
-                        && c.current_bidder_id.is_some()
-                    {
-                        return Err(rpc_err(
-                            "CannotDeleteAuctionWithBids",
-                            format!("Auction contract {cid} already has active bids and cannot be deleted"),
-                        ));
+                if method == "DeleteContract" && (c.status == "Outstanding" || c.status == "Expired") && can_manage_as_issuer {
+                    if c.status == "Outstanding" && c.contract_type == "Auction" && c.current_bidder_id.is_some() {
+                        return Err(rpc_err("CannotDeleteAuctionWithBids", format!("Auction contract {cid} already has active bids and cannot be deleted")));
                     }
                     if c.status == "Outstanding" {
                         snap.credit_contract_issuer(&c, c.reward);
@@ -1126,7 +1117,7 @@ pub fn handle(
                     if let Some(c_mut) = snap.contracts.get_mut(&cid) { c_mut.status = "Deleted".into(); }
                     return Ok(("Deleted", c.issuer_id));
                 }
-                if method == "FailContract" && c.status == "InProgress" && c.contract_type == "Courier" && c.acceptor_id == Some(char_id) {
+                if method == "FailContract" && c.status == "InProgress" && c.contract_type == "Courier" && (c.acceptor_id == Some(char_id) || is_corp_acceptor) {
                     snap.fail_courier_contract(cid, now_unix);
                     return Ok(("Failed", c.issuer_id));
                 }
@@ -1345,28 +1336,41 @@ pub fn break_courier_plastic_wrap(
     let Some(wrap_item) = snap.items.get(&wrap_id).cloned() else {
         return Err(rpc_err("ItemNotFound", format!("Plastic Wrap {wrap_id} not found")));
     };
-    if wrap_item.type_id != 3468 || wrap_item.owner_id != char_id {
-        return Err(rpc_err("InvalidPlasticWrap", format!("Item {wrap_id} is not a Courier Plastic Wrap owned by {char_id}")));
+    let can_break = wrap_item.type_id == 3468
+        && (wrap_item.owner_id == char_id
+            || has_corp_contract_role(snap, None, char_id, wrap_item.owner_id));
+    if !can_break {
+        return Err(rpc_err("InvalidPlasticWrap", format!("Item {wrap_id} is not a Courier Plastic Wrap accessible to {char_id}")));
     }
-    let char_loc = snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id));
-    if char_loc != Some(wrap_item.location_id) {
-        return Err(rpc_err("CustomInfo", format!("Must be docked at location {} where Plastic Wrap {wrap_id} is located", wrap_item.location_id)));
+    let ch_opt = snap.characters.get(&char_id);
+    let char_loc = ch_opt.and_then(|c| c.station_id.or(c.structure_id));
+    let char_ship = ch_opt.map(|c| c.active_ship_id).filter(|&id| id > 0);
+    if char_loc != Some(wrap_item.location_id) && char_ship != Some(wrap_item.location_id) {
+        return Err(rpc_err("CustomInfo", format!("Must be docked at location or in ship {} where Plastic Wrap {wrap_id} is located", wrap_item.location_id)));
     }
     let cid_opt = snap.contracts.values().find(|c| {
         c.contract_type == "Courier"
             && c.status == "InProgress"
-            && c.acceptor_id == Some(char_id)
+            && (c.acceptor_id == Some(char_id)
+                || c.acceptor_id.is_some_and(|aid| {
+                    aid == wrap_item.owner_id && has_corp_contract_role(snap, None, char_id, aid)
+                }))
             && c.item_ids.iter().any(|iid| snap.items.get(iid).is_some_and(|it| it.location_id == wrap_id))
-    }).map(|c| (c.contract_id, c.issuer_id, c.item_ids.clone()));
-    let Some((cid, issuer_id, item_ids)) = cid_opt else {
+    }).map(|c| (c.contract_id, c.issuer_id, c.acceptor_id.unwrap_or(char_id), c.item_ids.clone()));
+    let Some((cid, issuer_id, acceptor_owner_id, item_ids)) = cid_opt else {
         return Err(rpc_err("ContractNotFound", format!("No active InProgress courier contract found for Plastic Wrap {wrap_id}")));
     };
     snap.fail_courier_contract(cid, now_unix);
+    let target_flag = if snap.items.contains_key(&wrap_item.location_id) {
+        InventoryFlag::Cargo
+    } else {
+        InventoryFlag::Hangar
+    };
     for iid in &item_ids {
         if let Some(it) = snap.items.get_mut(iid) {
-            it.owner_id = char_id;
+            it.owner_id = acceptor_owner_id;
             it.location_id = wrap_item.location_id;
-            it.flag = InventoryFlag::Hangar;
+            it.flag = target_flag;
             it.version += 1;
         }
     }

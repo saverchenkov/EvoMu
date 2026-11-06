@@ -1101,15 +1101,35 @@ pub fn handle_orders_escrow(
                 let _ = crate::services::structure_profile_services::apply_due_profiles_and_check_upwell_market(
                     ctx, snap, station_id, char_id, now_unix, "MarketServiceOffline",
                 )?;
-                let vis_lvl = snap.skills.get(&char_id).and_then(|m| m.get(&3447)).map(|s| s.level).unwrap_or(0);
+                let sk = snap.skills.get(&char_id);
+                let vis_lvl = sk.and_then(|m| m.get(&3447)).map(|s| s.level).unwrap_or(0);
                 let max_vis_jumps = crate::services::market_contracts::max_remote_jumps_for_skill_level(vis_lvl);
-                for (_, _, _, ent_st, ord_rng) in &parsed_requests {
+                let proc_lvl = sk.and_then(|m| m.get(&16594)).map(|s| s.level).unwrap_or(0);
+                let max_proc_jumps = crate::services::market_contracts::max_remote_jumps_for_skill_level(proc_lvl);
+                let caller_sys = super::resolve_station_solar_system(ctx, snap, station_id);
+                for (req_tid, _, _, ent_st, ord_rng) in &parsed_requests {
+                    if !matches!(*ord_rng, -1 | 0 | 1..=40 | 32767) {
+                        return Err(BridgeRpcError { code: "InvalidBuyMultipleItems".into(), message: format!("Invalid orderRange {ord_rng} in BuyMultipleItems") });
+                    }
                     if *ent_st != station_id {
                         let _ = crate::services::structure_profile_services::apply_due_profiles_and_check_upwell_market(
                             ctx, snap, *ent_st, char_id, now_unix, "MarketServiceOffline",
                         )?;
+                        let ent_sys = super::resolve_station_solar_system(ctx, snap, *ent_st);
+                        let ent_reg = ent_sys.and_then(|s| ctx.sde.solar_systems.get(&s).map(|sys| sys.region_id));
+                        if ent_reg != Some(region_id) {
+                            return Err(BridgeRpcError { code: "InvalidMarketStation".into(), message: format!("Station {ent_st} is not in region {region_id}") });
+                        }
+                        let proc_ok = proc_lvl > 0 && (max_proc_jumps >= 32_767 || match (caller_sys, ent_sys) {
+                            (Some(a), Some(b)) if a == b => true,
+                            (Some(a), Some(b)) if max_proc_jumps > 0 => super::solar_system_jump_distance(ctx, a, b).is_some_and(|d| (d as i64) <= max_proc_jumps),
+                            _ => false,
+                        });
+                        if !proc_ok {
+                            return Err(BridgeRpcError { code: "InsufficientProcurementSkill".into(), message: format!("Procurement skill level {proc_lvl} is insufficient for remote station {ent_st}") });
+                        }
                     }
-                    if *ord_rng > max_vis_jumps.max(0) {
+                    if *req_tid != super::PLEX_TYPE_ID && *ord_rng > max_vis_jumps {
                         return Err(BridgeRpcError { code: "InsufficientVisibilitySkill".into(), message: format!("Order range {ord_rng} exceeds Visibility skill limit {max_vis_jumps}") });
                     }
                 }
@@ -1127,10 +1147,10 @@ pub fn handle_orders_escrow(
                         .market_orders
                         .values()
                         .filter(|o| {
-                            let in_range = if *ord_rng < 0 {
+                            let in_range = o.region_id == region_id && if *ord_rng < 0 {
                                 o.station_id == *ent_st
                             } else if *ord_rng >= 32767 {
-                                o.region_id == region_id
+                                true
                             } else {
                                 let s1 = super::resolve_station_solar_system(ctx, snap, *ent_st);
                                 let s2 = super::resolve_station_solar_system(ctx, snap, o.station_id);

@@ -1160,6 +1160,13 @@ impl CorporationRecord {
             self.master_wallet = balance;
         }
     }
+
+    pub fn credit_division(&mut self, division_id: u8, amount: IskCents) -> IskCents {
+        let cur = self.division_balance(division_id);
+        let next = cur.checked_add(amount).unwrap_or(cur);
+        self.set_division_balance(division_id, next);
+        next
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
