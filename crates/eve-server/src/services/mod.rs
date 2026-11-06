@@ -314,3 +314,21 @@ mod tactical_module_mechanics_extra_unit_tests;
 
 
 
+
+#[cfg(test)]
+mod fleet_social_finder_tactical_extra_unit_tests;
+
+#[cfg(test)]
+mod quasar_auth_user_extra_unit_tests;
+
+#[cfg(test)]
+mod jump_clone_names_extra_unit_tests;
+
+#[cfg(test)]
+mod fitting_dogma_im_extra_unit_tests;
+
+#[cfg(test)]
+mod pve_abyssal_pylons_extra_unit_tests;
+
+#[cfg(test)]
+mod pvp_filament_arena_extra_unit_tests;
