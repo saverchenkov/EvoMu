@@ -963,34 +963,58 @@ pub async fn handle_pvp_end_gate_activation(
 
     let match_precheck = ctx.db.with_snapshot(|snap| {
         let store = load_pvp_store(snap);
-        for m in store.active_matches.values() {
-            if m.arena_solar_system_id == 32_000_001
-                && match_contains_char(&store, m, char_id)
-                && !m.exited_pilots.contains(&char_id)
-            {
-                return Some((
+        store
+            .active_matches
+            .values()
+            .filter(|m| {
+                let is_eliminated = store
+                    .match_eliminated
+                    .get(&m.match_id)
+                    .is_some_and(|e| e.contains(&char_id));
+                m.arena_solar_system_id == 32_000_001
+                    && match_contains_char(&store, m, char_id)
+                    && !m.exited_pilots.contains(&char_id)
+                    && !is_eliminated
+                    && (m.active || m.winner_char_id.is_some())
+            })
+            .max_by_key(|m| m.match_id)
+            .map(|m| {
+                let on_winning_side = m.winner_char_id.is_some_and(|wcid| {
+                    let teams = effective_match_teams(&store, m);
+                    teams
+                        .iter()
+                        .find(|t| t.contains(&wcid))
+                        .map_or(wcid == char_id, |t| t.contains(&char_id))
+                });
+                (
                     m.match_id,
                     m.end_gate_id,
                     m.winner_char_id,
-                    m.active,
+                    on_winning_side,
                     m.started_unix,
-                ));
-            }
-        }
-        None
+                )
+            })
     });
 
-    let Some((mid, end_gate_id, winner_char_id, m_active, m_started_unix)) = match_precheck else {
+    let Some((mid, end_gate_id, winner_char_id, on_winning_side, m_started_unix)) = match_precheck else {
         return Err(BridgeRpcError::user_error("NoActiveMatch"));
     };
 
     let match_timed_out = now_unix >= m_started_unix.saturating_add(900);
-    if winner_char_id.is_none() && m_active && !match_timed_out {
-        return Err(BridgeRpcError::user_error("MatchNotConcluded"));
+    if winner_char_id.is_none() {
+        let err_code = if match_timed_out {
+            "ArenaCollapsed"
+        } else {
+            "MatchNotConcluded"
+        };
+        return Err(BridgeRpcError::user_error(err_code));
+    }
+    if !on_winning_side {
+        return Err(BridgeRpcError::user_error("AccessDenied"));
     }
 
     let target_gate_id = if end_gate_id > 0 { end_gate_id } else { 70_001 };
-    if gate_id > 0 && gate_id != target_gate_id && gate_id != 70_001 {
+    if gate_id != target_gate_id {
         return Err(BridgeRpcError::user_error("TooFarFromGate"));
     }
 

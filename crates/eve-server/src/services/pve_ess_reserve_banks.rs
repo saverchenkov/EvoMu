@@ -1053,6 +1053,7 @@ pub fn compute_ess_reserve_pulse_payout_cents(
 /// active `<= 2,500 m` ship proximity to the ESS beacon and emitting `OnReserveBankPlayerLinkDisconnected`
 /// strictly upon link termination (`feat:pve.ess-reserve-bank-key-tiers`).
 pub async fn tick_ess_reserve_bank_links(ctx: &ServerContext, now_unix: u64) -> usize {
+    let _ = super::encounter_surveillance_system::tick_ess_main_bank_links(ctx).await;
     let active_systems: Vec<(SolarSystemId, CharacterId)> = ctx.db.with_snapshot(|snap| {
         snap.service_state_blobs
             .iter()
@@ -1097,12 +1098,6 @@ pub async fn tick_ess_reserve_bank_links(ctx: &ServerContext, now_unix: u64) -> 
                 pulse_st.reserve_link_started_tick = None;
                 pulse_st.link_started_unix = None;
                 super::space_destiny::set_ess_reserve_pulses(snap, sys_id, &pulse_st);
-                if let Some(st) = snap.system_states.get_mut(&sys_id) {
-                    if st.ess_linked_character_id == Some(char_id) {
-                        st.ess_linked_character_id = None;
-                        st.ess_link_started_tick = None;
-                    }
-                }
                 true
             });
             if severed {
@@ -1178,12 +1173,6 @@ pub async fn tick_ess_reserve_bank_links(ctx: &ServerContext, now_unix: u64) -> 
                     pulse_st.reserve_linked_character_id = None;
                     pulse_st.reserve_link_started_tick = None;
                     pulse_st.link_started_unix = None;
-                    if let Some(st) = snap.system_states.get_mut(&sys_id) {
-                        if st.ess_linked_character_id == Some(char_id) {
-                            st.ess_linked_character_id = None;
-                            st.ess_link_started_tick = None;
-                        }
-                    }
                     if pulse_st.pulses_remaining == 0 || window_expired {
                         pulse_st.unlocked_until_unix = 0;
                         clear_rt = true;

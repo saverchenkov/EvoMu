@@ -7,6 +7,7 @@ use crate::services::combat_crimewatch::{
 use crate::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications;
 use crate::services::space_destiny::get_ess_reserve_pulses;
 use eve_db::{InventoryFlag, IskCents};
+use eve_destiny::MovementMode;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 
@@ -284,6 +285,36 @@ pub async fn handle_ess_link(
             message: "Active ship ball is not in space".into(),
         });
     };
+    if ship_ball.type_id == 670 {
+        return Err(BridgeRpcError {
+            code: "CantDoThatInPod".into(),
+            message: "Capsules cannot link to an Encounter Surveillance System".into(),
+        });
+    }
+    if matches!(ship_ball.mode, MovementMode::Warp { .. }) {
+        return Err(BridgeRpcError {
+            code: "ShipWarping".into(),
+            message: "Cannot link to ESS while warping".into(),
+        });
+    }
+    let ship_cs = sys_handle.get_combat_state(ship_id).await.ok().flatten();
+    if ship_cs.as_ref().is_some_and(|cs| cs.structure_hp <= 0.0) {
+        return Err(BridgeRpcError {
+            code: "ShipDestroyed".into(),
+            message: "Destroyed ships cannot link to an Encounter Surveillance System".into(),
+        });
+    }
+    let is_cloaked = ship_cs.as_ref().is_some_and(|cs| cs.is_cloaked)
+        || sys_handle
+            .ballpark
+            .read()
+            .is_ok_and(|bp| bp.ball_slim_meta.get(&ship_id).is_some_and(|sm| sm.is_cloaked));
+    if is_cloaked {
+        return Err(BridgeRpcError {
+            code: "CantLinkWhileCloaked".into(),
+            message: "Cannot link to ESS while cloaked".into(),
+        });
+    }
 
     let Some(ess_ball_id) = args.first().and_then(|a| a.as_i64()) else {
         return Err(BridgeRpcError {
@@ -346,7 +377,7 @@ pub async fn handle_ess_link(
             }
         } else if let Some(st) = snap.system_states.get(&sys_id) {
             if let Some(other) = st.ess_linked_character_id {
-                if other != char_id && pulse_st.reserve_linked_character_id != Some(other) {
+                if other != char_id {
                     return Err(BridgeRpcError {
                         code: "EssAlreadyLinked".into(),
                         message: format!("ESS Main Bank in system {sys_id} is already linked by character {other}"),
@@ -359,11 +390,7 @@ pub async fn handle_ess_link(
         } else {
             snap.system_states
                 .get(&sys_id)
-                .map(|st| {
-                    st.ess_linked_character_id == Some(char_id)
-                        && pulse_st.reserve_linked_character_id != Some(char_id)
-                })
-                .unwrap_or(false)
+                .is_some_and(|st| st.ess_linked_character_id == Some(char_id))
         };
         if is_reserve && !already_linked {
             if is_unlocked {
@@ -379,12 +406,6 @@ pub async fn handle_ess_link(
                     return Err(BridgeRpcError {
                         code: "EssReservePulsesExhausted".into(),
                         message: "All ESS Reserve Bank pulses for this key have been exhausted".into(),
-                    });
-                }
-                if already_linked && pulse_st.last_pulse_sec.is_some_and(|last| now_unix < last.saturating_add(60)) {
-                    return Err(BridgeRpcError {
-                        code: "EssReservePulseCooldown".into(),
-                        message: "ESS Reserve Bank pulse is on 60s cooldown".into(),
                     });
                 }
             } else {
@@ -440,21 +461,7 @@ pub async fn handle_ess_link(
                     sys_id,
                     &pulse_st,
                 );
-                if st.ess_linked_character_id.is_none() {
-                    st.ess_linked_character_id = Some(char_id);
-                    st.ess_link_started_tick = Some(current_tick);
-                }
             } else {
-                if pulse_st.reserve_linked_character_id == Some(char_id) {
-                    pulse_st.reserve_linked_character_id = None;
-                    pulse_st.reserve_link_started_tick = None;
-                    pulse_st.link_started_unix = None;
-                    crate::services::space_destiny::set_ess_reserve_pulses_in_blobs(
-                        &mut snap.service_state_blobs,
-                        sys_id,
-                        &pulse_st,
-                    );
-                }
                 st.ess_linked_character_id = Some(char_id);
                 st.ess_link_started_tick = Some(current_tick);
             }
@@ -501,10 +508,6 @@ pub async fn handle_ess_link(
                 pulse_st.reserve_linked_character_id = None;
                 pulse_st.reserve_link_started_tick = None;
                 pulse_st.link_started_unix = None;
-                if st.ess_linked_character_id == Some(char_id) {
-                    st.ess_linked_character_id = None;
-                    st.ess_link_started_tick = None;
-                }
                 if pulse_st.pulses_remaining == 0 {
                     pulse_st.unlocked_until_unix = 0;
                     clear_unlock = true;
@@ -667,6 +670,83 @@ pub async fn handle_ess_link(
         ("suspectFlagged", PyRep::Bool(true)),
         ("suspectTimerUntilUnix", PyRep::Integer(suspect_until as i64)),
     ]))
+}
+
+/// Validates active ESS Main Bank links at 1 Hz, severing any link whose pilot left the
+/// solar system, docked, cloaked, warped, entered a Capsule, was destroyed, or moved > 2,500 m
+/// from the ESS beacon.
+pub async fn tick_ess_main_bank_links(ctx: &ServerContext) -> usize {
+    let active_links: Vec<(u32, i64)> = ctx.db.with_snapshot(|snap| {
+        snap.system_states
+            .iter()
+            .filter_map(|(&sid, st)| st.ess_linked_character_id.map(|cid| (sid, cid)))
+            .collect()
+    });
+    let mut severed_count = 0usize;
+    for (sys_id, char_id) in active_links {
+        let ship_id_opt = ctx.db.with_snapshot(|snap| {
+            let ch = snap.characters.get(&char_id)?;
+            if ch.solar_system_id != sys_id
+                || ch.station_id.is_some()
+                || ch.structure_id.is_some()
+                || ch.active_ship_id <= 0
+            {
+                return None;
+            }
+            Some(ch.active_ship_id)
+        });
+        let mut ess_id_hint = 820_000_000 + sys_id as i64;
+        let mut link_ok = false;
+        if let Some(ship_id) = ship_id_opt {
+            let sys_h = ctx.systems.get_or_spawn(sys_id);
+            if let Some((_, ship_ball)) = sys_h.get_ball_snapshot(ship_id).await.ok().flatten() {
+                let not_pod_or_warp = ship_ball.type_id != 670
+                    && !matches!(ship_ball.mode, MovementMode::Warp { .. });
+                let cs_opt = sys_h.get_combat_state(ship_id).await.ok().flatten();
+                let alive = cs_opt.as_ref().is_none_or(|cs| cs.structure_hp > 0.0);
+                let cloaked = cs_opt.as_ref().is_some_and(|cs| cs.is_cloaked)
+                    || sys_h
+                        .ballpark
+                        .read()
+                        .is_ok_and(|bp| bp.ball_slim_meta.get(&ship_id).is_some_and(|sm| sm.is_cloaked));
+                if not_pod_or_warp && alive && !cloaked {
+                    let balls = sys_h.list_balls().await.unwrap_or_default();
+                    if let Some(ess) = balls.into_iter().find(|b| {
+                        b.type_id == 32_882
+                            || b.type_id == 56_002
+                            || b.id == 820_000_000 + sys_id as i64
+                    }) {
+                        ess_id_hint = ess.id;
+                        link_ok = ship_ball.position.distance(ess.position) <= 2_500.0;
+                    }
+                }
+            }
+        }
+        if !link_ok {
+            let was_severed = ctx.db.with_mut_snapshot(|snap| {
+                let Some(st) = snap.system_states.get_mut(&sys_id) else {
+                    return false;
+                };
+                if st.ess_linked_character_id != Some(char_id) {
+                    return false;
+                }
+                st.ess_linked_character_id = None;
+                st.ess_link_started_tick = None;
+                true
+            });
+            if was_severed {
+                severed_count += 1;
+                super::notify_emitters_combat_ess_progression::emit_main_bank_player_link_disconnected(
+                    ctx,
+                    char_id,
+                    sys_id,
+                    "OutOfRange",
+                    ess_id_hint,
+                );
+            }
+        }
+    }
+    severed_count
 }
 
 #[cfg(test)]

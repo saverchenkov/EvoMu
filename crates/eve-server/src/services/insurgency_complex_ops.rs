@@ -162,7 +162,7 @@ impl OutpostRaidSize {
     }
 
     pub fn pocket_position(self) -> DVec3 {
-        DVec3::new(self.gate_position().x, 0.0, 250_000.0)
+        DVec3::new(self.gate_position().x, 0.0, 2_500_000.0)
     }
 
     pub fn mordus_defender_type_id(self) -> u32 {
@@ -1104,7 +1104,7 @@ async fn collect_aligned_pilots_on_grid(
             continue;
         }
         if let Ok(Some((_, b))) = sys_handle.get_ball_snapshot(shid).await {
-            if b.position.distance(anchor) <= range_m {
+            if !matches!(b.mode, MovementMode::Warp { .. }) && b.position.distance(anchor) <= range_m {
                 out.push((cid, shid, wf, grp, has_wcs));
             }
         }
@@ -1342,8 +1342,16 @@ pub async fn tick_insurgency_complex_ops(ctx: &ServerContext, now_unix: u64) {
             continue;
         }
         let active_pilots = if capturing_pirates { &pir_pilots } else { &emp_pilots };
-        raid.weighted_elapsed_secs += dt as f64;
-        if raid.weighted_elapsed_secs >= raid.size.base_capture_duration_secs() as f64 {
+        let target_secs = raid.size.base_capture_duration_secs() as f64;
+        if capturing_pirates {
+            raid.weighted_elapsed_secs = (raid.weighted_elapsed_secs + dt as f64).min(target_secs);
+        } else {
+            raid.weighted_elapsed_secs = (raid.weighted_elapsed_secs - dt as f64).max(-target_secs);
+        }
+        let capture_complete = (capturing_pirates && raid.weighted_elapsed_secs >= target_secs)
+            || (!capturing_pirates && raid.weighted_elapsed_secs <= -target_secs);
+        if capture_complete {
+            raid.weighted_elapsed_secs = 0.0;
             let subpts = raid.size.contribution_subpoints();
             let _ = add_percentage_campaign_points(ctx, raid.campaign_id, sys_id, capturing_pirates, subpts);
             let shared_lp = share_site_lp_up_to_5(raid.size.base_lp_reward(), active_pilots.len());

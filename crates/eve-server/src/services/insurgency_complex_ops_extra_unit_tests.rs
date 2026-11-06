@@ -64,7 +64,7 @@ fn outpost_raid_size_defenders_ship_groups_roamers_and_loot_cover_all_branches()
         let g = s.gate_position();
         let p = s.pocket_position();
         assert!((g.x - p.x).abs() < 1e-6);
-        assert!((p.z - 250_000.0).abs() < 1e-6);
+        assert!((p.z - 2_500_000.0).abs() < 1e-6);
     }
 
     // T3 Destroyer (1305), T3 Cruiser (963), Battlecruiser (540), Battleship (898), Capital (485)

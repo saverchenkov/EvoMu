@@ -318,12 +318,41 @@ async fn hazard_tick_recovery_pod_destruction_ffa_spawn_and_end_gate_errors() {
             .is_err()
     );
 
-    // - Wrong gate ID when match has timed out (now_unix = 10_500 >= 9_500 + 900) -> TooFarFromGate
+    // - Draw timeout without winner (now_unix = 10_500 >= 9_500 + 900) MUST NOT unlock exit gate (#443)
+    assert!(handle_pvp_end_gate_activation(
+        &ctx,
+        &mut sess1,
+        c1,
+        &[PyRep::Integer(gate_id)],
+        10_500
+    )
+    .await
+    .is_err());
+
+    // Record winner_char_id = Some(c1) for the concluded match
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut store = load_pvp_store(snap);
+        let m = store.active_matches.get_mut(&mid).unwrap();
+        m.active = false;
+        m.winner_char_id = Some(c1);
+        save_pvp_store(snap, &store);
+    });
+
+    // - Wrong gate ID (including base 70_001 when end_gate_id is 70_044) -> TooFarFromGate
     assert!(handle_pvp_end_gate_activation(
         &ctx,
         &mut sess1,
         c1,
         &[PyRep::Integer(99_999)],
+        10_500
+    )
+    .await
+    .is_err());
+    assert!(handle_pvp_end_gate_activation(
+        &ctx,
+        &mut sess1,
+        c1,
+        &[PyRep::Integer(70_001)],
         10_500
     )
     .await
@@ -355,7 +384,7 @@ async fn hazard_tick_recovery_pod_destruction_ffa_spawn_and_end_gate_errors() {
     .await
     .is_err());
 
-    // - Move ship1 within 50 km and activate on timeout -> succeeds!
+    // - Move ship1 within 50 km and activate as winner -> succeeds!
     let _ = arena
         .spawn_ball(Ball {
             id: ship1,

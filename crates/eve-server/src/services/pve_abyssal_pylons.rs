@@ -605,19 +605,29 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
                 }
             }
             let pvp_store = crate::services::pvp_filament_mgr::load_pvp_store(snap);
+            let mut arena_chars: HashSet<i64> = HashSet::new();
             for m in pvp_store.active_matches.values() {
-                let elim = pvp_store.match_eliminated.get(&m.match_id);
-                for team in crate::services::pvp_filament_arena::effective_match_teams(&pvp_store, m) {
-                    for cid in team {
-                        if !m.exited_pilots.contains(&cid)
-                            && !elim.is_some_and(|e| e.contains(&cid))
-                        {
-                            if let Some(ch) = snap.characters.get(&cid) {
-                                if ch.solar_system_id == m.arena_solar_system_id {
-                                    arena_ships.insert(ch.active_ship_id);
+                if m.arena_solar_system_id == solar_system_id {
+                    for team in crate::services::pvp_filament_arena::effective_match_teams(&pvp_store, m) {
+                        for cid in team {
+                            if !m.exited_pilots.contains(&cid) {
+                                arena_chars.insert(cid);
+                                if let Some(ch) = snap.characters.get(&cid) {
+                                    if ch.solar_system_id == m.arena_solar_system_id
+                                        && ch.active_ship_id > 0
+                                    {
+                                        arena_ships.insert(ch.active_ship_id);
+                                    }
                                 }
                             }
                         }
+                    }
+                }
+            }
+            if !arena_chars.is_empty() {
+                for it in snap.items.values() {
+                    if it.location_id == solar_system_id as i64 && arena_chars.contains(&it.owner_id) {
+                        arena_ships.insert(it.item_id);
                     }
                 }
             }
@@ -759,16 +769,25 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
 
     let mut boundary_destroyed: Vec<(i64, TypeId, DVec3, bool, bool, u32)> = Vec::new();
     for (bid, b_type, b_pos, is_probe, is_pod) in boundary_candidates {
-        let center = room_center_by_ship
+        let center_opt = room_center_by_ship
             .get(&bid)
             .copied()
             .or_else(|| {
-                ballpark
-                    .ball_slim_meta
-                    .get(&bid)
-                    .and_then(|m| room_center_by_char.get(&m.owner_id).copied())
+                ballpark.ball_slim_meta.get(&bid).and_then(|m| {
+                    room_center_by_char
+                        .get(&m.owner_id)
+                        .or_else(|| m.char_id.and_then(|cid| room_center_by_char.get(&cid)))
+                        .copied()
+                })
             })
-            .unwrap_or(DVec3::ZERO);
+            .or_else(|| {
+                (b_pos.x < crate::services::pvp_filament_mgr::PROVING_ARENA_MIN_X_M - 1_000_000.0)
+                    .then_some(DVec3::ZERO)
+            });
+        let Some(center) = center_opt else {
+            boundary_ticks.remove(&bid);
+            continue;
+        };
         if b_pos.distance(center) <= ABYSSAL_ROOM_BOUNDARY_RADIUS_M {
             boundary_ticks.remove(&bid);
             continue;

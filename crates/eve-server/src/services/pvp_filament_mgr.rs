@@ -65,6 +65,9 @@ pub struct PvpArenaMatchInstance {
     pub end_gate_id: i64,
 }
 
+pub const PROVING_ARENA_MIN_X_M: f64 = 50_000_000.0;
+pub const PROVING_ARENA_SLOT_STRIDE_M: f64 = 5_000_000.0;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PvpFilamentStore {
     pub queue: HashMap<i64, PvpQueueCharacterEntry>,
@@ -1125,10 +1128,17 @@ pub async fn handle(
                     let used_slots: HashSet<i64> = store
                         .match_arena_offsets
                         .values()
-                        .map(|off| ((off[0] - 50_000_000.0) / 5_000_000.0).round() as i64)
+                        .map(|off| {
+                            ((off[0] - PROVING_ARENA_MIN_X_M) / PROVING_ARENA_SLOT_STRIDE_M).round()
+                                as i64
+                        })
                         .collect();
                     let slot = (0_i64..10_000).find(|s| !used_slots.contains(s)).unwrap_or(0);
-                    let arena_offset = [50_000_000.0 + (slot as f64) * 5_000_000.0, 0.0, 0.0];
+                    let arena_offset = [
+                        PROVING_ARENA_MIN_X_M + (slot as f64) * PROVING_ARENA_SLOT_STRIDE_M,
+                        0.0,
+                        0.0,
+                    ];
 
                     let mut origin_systems = HashMap::new();
                     let mut participants: Vec<(i64, i64, u32)> =

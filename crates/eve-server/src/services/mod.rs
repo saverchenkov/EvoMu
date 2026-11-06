@@ -549,3 +549,7 @@ pub(crate) mod r6_t1_p1_helpers;
 mod r6_t1_p1_security_tests;
 #[cfg(test)]
 mod r6_t1_p1_security_tests_part2;
+#[cfg(test)]
+mod r7_tc_p0_arena_abyssal_tests;
+#[cfg(test)]
+mod r7_tc_p0_raid_ess_tests;
