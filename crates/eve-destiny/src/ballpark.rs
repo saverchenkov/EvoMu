@@ -214,26 +214,22 @@ impl Ballpark {
         for existing in self.grids.values() {
             if existing.overlaps_bounds(min_b, max_b) {
                 if pos.x > existing.max_bounds.x {
-                    min_b.x = min_b.x.max(existing.max_bounds.x + 1.0);
-                    max_b.x = max_b.x.max(min_b.x + 2.0 * r);
+                    min_b.x = min_b.x.max(existing.max_bounds.x);
                 } else if pos.x < existing.min_bounds.x {
-                    max_b.x = max_b.x.min(existing.min_bounds.x - 1.0);
-                    min_b.x = min_b.x.min(max_b.x - 2.0 * r);
+                    max_b.x = max_b.x.min(existing.min_bounds.x);
                 } else if pos.y > existing.max_bounds.y {
-                    min_b.y = min_b.y.max(existing.max_bounds.y + 1.0);
-                    max_b.y = max_b.y.max(min_b.y + 2.0 * r);
+                    min_b.y = min_b.y.max(existing.max_bounds.y);
                 } else if pos.y < existing.min_bounds.y {
-                    max_b.y = max_b.y.min(existing.min_bounds.y - 1.0);
-                    min_b.y = min_b.y.min(max_b.y - 2.0 * r);
+                    max_b.y = max_b.y.min(existing.min_bounds.y);
                 } else if pos.z > existing.max_bounds.z {
-                    min_b.z = min_b.z.max(existing.max_bounds.z + 1.0);
-                    max_b.z = max_b.z.max(min_b.z + 2.0 * r);
+                    min_b.z = min_b.z.max(existing.max_bounds.z);
                 } else if pos.z < existing.min_bounds.z {
-                    max_b.z = max_b.z.min(existing.min_bounds.z - 1.0);
-                    min_b.z = min_b.z.min(max_b.z - 2.0 * r);
+                    max_b.z = max_b.z.min(existing.min_bounds.z);
                 }
             }
         }
+        min_b = min_b.min(pos);
+        max_b = max_b.max(pos);
 
         let id = self.next_grid_id.max(1);
         self.next_grid_id = id + 1;
@@ -501,7 +497,7 @@ impl Ballpark {
             } else {
                 self.observer_events.entry(ball_id).or_default().push(term_ev);
             }
-            let _ = self.remove_ball(ball_id);
+            let _ = self.remove_ball_preserving_observer_events(ball_id);
         }
     }
 

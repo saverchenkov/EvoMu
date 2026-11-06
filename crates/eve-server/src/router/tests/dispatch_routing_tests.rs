@@ -163,6 +163,7 @@ async fn dispatch_gates_timecontrol_macho_bind_and_quasar_domains() {
         .await
         .is_err());
 
+    session.corporation_id = Some(98_000_001);
     let bound = ctx
         .dispatch_rpc(
             &mut session,
@@ -176,6 +177,18 @@ async fn dispatch_gates_timecontrol_macho_bind_and_quasar_domains() {
         .await
         .unwrap();
     assert!(matches!(bound, PyRep::Tuple(_)));
+    assert!(ctx
+        .dispatch_rpc(
+            &mut session,
+            "corpRegistry",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(98_000_002)],
+            &HashMap::new(),
+            Some("machoNet:26000"),
+        )
+        .await
+        .is_err());
 
     // Unimplemented RPC on an internal non-client service returns UnimplementedRPC
     let err = ctx

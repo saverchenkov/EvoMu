@@ -367,3 +367,230 @@ fn dogma_effect_context_domains_apply_and_remove() {
     ctx.remove_effect(1, &eff);
     assert!(ctx.ship.modifiers.is_empty());
 }
+
+#[test]
+fn test_issue_422_premul_and_prediv_apply_stacking_penalties() {
+    let mut sde = SdeRegistry::default();
+    let target_attr = attr_ids::SHIELD_EM_DAMAGE_RESONANCE; // non-stackable attribute
+    sde.attributes.insert(
+        target_attr,
+        DogmaAttributeType {
+            attribute_id: target_attr,
+            name: "shieldEmDamageResonance".into(),
+            default_value: 1.0,
+            high_is_good: false,
+            stackable: false,
+            published: true,
+        },
+    );
+    let mut item = empty_item(100, 1);
+    item.base_attributes.insert(target_attr, 100.0);
+
+    // Two identical stacking-penalized PreMul(1.5) modifiers must apply CCP stacking penalty on 2nd
+    for src in [1_i64, 2] {
+        item.add_modifier(AttributeModifier {
+            source_item_id: src,
+            effect_id: Some(10),
+            target_attribute_id: target_attr,
+            operator: ModifierOperator::PreMul,
+            value: 1.5,
+            stacking_penalized: true,
+        });
+    }
+    let penalized_mul = item.get_attribute(target_attr, &sde);
+    let expected_penalized_mul = 100.0 * 1.5 * (1.0 + 0.5 * stacking_penalty_factor(1));
+    assert!((penalized_mul - expected_penalized_mul).abs() < 1e-6);
+
+    // Unpenalized PreMul modifiers apply full product without penalty
+    item.modifiers.clear();
+    for src in [1_i64, 2] {
+        item.add_modifier(AttributeModifier {
+            source_item_id: src,
+            effect_id: Some(10),
+            target_attribute_id: target_attr,
+            operator: ModifierOperator::PreMul,
+            value: 1.5,
+            stacking_penalized: false,
+        });
+    }
+    assert!((item.get_attribute(target_attr, &sde) - 225.0).abs() < 1e-6);
+
+    // Two stacking-penalized PreDiv(2.0) modifiers apply CCP stacking penalty on 2nd
+    item.modifiers.clear();
+    for src in [1_i64, 2] {
+        item.add_modifier(AttributeModifier {
+            source_item_id: src,
+            effect_id: Some(11),
+            target_attribute_id: target_attr,
+            operator: ModifierOperator::PreDiv,
+            value: 2.0,
+            stacking_penalized: true,
+        });
+    }
+    let penalized_div = item.get_attribute(target_attr, &sde);
+    let expected_penalized_div = 100.0 * 0.5 * (1.0 - 0.5 * stacking_penalty_factor(1));
+    assert!((penalized_div - expected_penalized_div).abs() < 1e-6);
+}
+
+#[test]
+fn test_issue_423_two_pass_cpu_pg_load_and_self_location_modifier_preservation() {
+    let mut sde = SdeRegistry::default();
+    let ship_tid = 99_001_u32;
+    let weapon_tid = 99_002_u32;
+    let self_mod_tid = 99_003_u32;
+    let rig_tid = 99_004_u32;
+
+    let make_inv_type =
+        |type_id: u32,
+         group_id: u32,
+         category_id: u32,
+         name: &str,
+         effect_ids: Vec<u16>,
+         default_attributes: HashMap<u16, f64>| InvType {
+            type_id,
+            group_id,
+            category_id,
+            name: name.into(),
+            mass: 0.0,
+            volume: 1.0,
+            capacity: 0.0,
+            radius: 1.0,
+            base_price: 0.0,
+            published: true,
+            portion_size: 1,
+            market_group_id: None,
+            race_id: None,
+            faction_id: None,
+            variation_parent_type_id: None,
+            description_id: None,
+            icon_id: None,
+            graphic_id: None,
+            sound_id: None,
+            meta_group_id: None,
+            meta_level: None,
+            tech_level: None,
+            default_effect_id: None,
+            description: String::new(),
+            effect_ids,
+            default_attributes,
+        };
+
+    sde.types.insert(
+        ship_tid,
+        make_inv_type(
+            ship_tid,
+            25,
+            6,
+            "Test Frigate",
+            Vec::new(),
+            HashMap::from([
+                (attr_ids::CPU_OUTPUT, 500.0),
+                (attr_ids::POWER_OUTPUT, 1_000.0),
+                (attr_ids::UPGRADE_CAPACITY, 400.0),
+                (attr_ids::HI_SLOTS, 4.0),
+                (attr_ids::MED_SLOTS, 4.0),
+                (attr_ids::RIG_SLOTS, 3.0),
+                (attr_ids::RIG_SIZE, 1.0),
+            ]),
+        ),
+    );
+    for (eid, name) in [(12_u16, "hiPower"), (13_u16, "medPower"), (2663_u16, "rigSlot")] {
+        sde.effects.insert(
+            eid,
+            DogmaEffectType {
+                effect_id: eid,
+                name: name.into(),
+                effect_category: 0,
+                ..Default::default()
+            },
+        );
+    }
+    sde.types.insert(
+        weapon_tid,
+        make_inv_type(
+            weapon_tid,
+            55,
+            7,
+            "Test Turret",
+            vec![12],
+            HashMap::from([(attr_ids::CPU, 100.0), (attr_ids::POWER, 200.0)]),
+        ),
+    );
+    let make_loc_mod = |modified_attribute_id: u16, modifying_attribute_id: u16, group_id: u32| {
+        EffectModifierSpec {
+            domain: "shipID".into(),
+            func: "LocationGroupModifier".into(),
+            modified_attribute_id,
+            modifying_attribute_id,
+            operator: 6,
+            group_id: Some(group_id),
+            skill_type_id: None,
+            effect_id: None,
+        }
+    };
+    let self_mod_eff = 65_001_u16;
+    sde.effects.insert(
+        self_mod_eff,
+        DogmaEffectType {
+            effect_id: self_mod_eff,
+            name: "testSelfLocMod".into(),
+            effect_category: 0,
+            modifiers: vec![make_loc_mod(attr_ids::CPU, 202, 76)],
+            ..Default::default()
+        },
+    );
+    sde.types.insert(
+        self_mod_tid,
+        make_inv_type(
+            self_mod_tid,
+            76,
+            7,
+            "Test Capacitor Booster",
+            vec![13, self_mod_eff],
+            HashMap::from([
+                (attr_ids::CPU, 40.0),
+                (attr_ids::POWER, 10.0),
+                (202, 25.0),
+            ]),
+        ),
+    );
+    let rig_eff = 65_002_u16;
+    sde.effects.insert(
+        rig_eff,
+        DogmaEffectType {
+            effect_id: rig_eff,
+            name: "testRigDrawback".into(),
+            effect_category: 0,
+            modifiers: vec![
+                make_loc_mod(attr_ids::CPU, 202, 55),
+                make_loc_mod(attr_ids::POWER, 1082, 55),
+            ],
+            ..Default::default()
+        },
+    );
+    sde.types.insert(
+        rig_tid,
+        make_inv_type(
+            rig_tid,
+            773,
+            7,
+            "Test Weapon Rig",
+            vec![2663, rig_eff],
+            HashMap::from([
+                (attr_ids::UPGRADE_COST, 100.0),
+                (attr_ids::RIG_SIZE, 1.0),
+                (202, 10.0),
+                (1082, 15.0),
+            ]),
+        ),
+    );
+    let mut engine = ShipFittingEngine::from_sde(1, ship_tid, &sde);
+    engine.fit_and_online_module(10, weapon_tid, 27, &sde).unwrap();
+    engine.fit_and_online_module(11, self_mod_tid, 19, &sde).unwrap();
+    engine.fit_and_online_module(12, rig_tid, 92, &sde).unwrap();
+    let ctx = engine.evaluated_context(&sde);
+    assert!((ctx.ship.get_attribute(attr_ids::CPU_LOAD, &sde) - 160.0).abs() < 1e-6);
+    assert!((ctx.ship.get_attribute(attr_ids::POWER_LOAD, &sde) - 240.0).abs() < 1e-6);
+    let self_mod_state = ctx.ship_located_items.iter().find(|i| i.item_id == 11).unwrap();
+    assert!((self_mod_state.get_attribute(attr_ids::CPU, &sde) - 50.0).abs() < 1e-6);
+}

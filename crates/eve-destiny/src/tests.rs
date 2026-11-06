@@ -262,7 +262,7 @@ fn test_spatial_bubbles_10000km_isolation_and_warp_transitions() {
     );
 
     let _ = park.drain_all_observer_events();
-    let far_dest = DVec3::new(20_000_000.0, 0.0, 0.0);
+    let far_dest = DVec3::new(17_500_000.0, 0.0, 0.0);
     park.set_ball_position(100_000_002, far_dest);
     park.set_mode(
         100_000_001,

@@ -654,20 +654,18 @@ impl DogmaItemState {
         }
 
         // 2. PreMul & PreDiv
-        for m in relevant
+        let pre_deltas: Vec<(f64, bool)> = relevant
             .iter()
-            .filter(|m| m.operator == ModifierOperator::PreMul)
-        {
-            val *= m.value;
-        }
-        for m in relevant
-            .iter()
-            .filter(|m| m.operator == ModifierOperator::PreDiv)
-        {
-            if m.value != 0.0 {
-                val /= m.value;
-            }
-        }
+            .filter_map(|m| {
+                let d = match m.operator {
+                    ModifierOperator::PreMul => Some(m.value - 1.0),
+                    ModifierOperator::PreDiv if m.value != 0.0 => Some((1.0 / m.value) - 1.0),
+                    _ => None,
+                }?;
+                Some((d, !attr_allows_free_stacking && m.stacking_penalized))
+            })
+            .collect();
+        val = apply_signed_stacking_penalties(val, pre_deltas);
 
         // 3. ModAdd & ModSub
         for m in relevant
@@ -684,51 +682,28 @@ impl DogmaItemState {
         }
 
         // 4. PostMul / PostDiv / PostPercent / PostPercentUnNerfed / SpecialSkillRelationship
-        let mut unpenalized_deltas = Vec::new();
-        let mut penalized_pos_deltas = Vec::new();
-        let mut penalized_neg_deltas = Vec::new();
-
-        for m in &relevant {
-            let (delta_opt, force_unpenalized) = match m.operator {
-                ModifierOperator::PostMul => (Some(m.value - 1.0), false),
-                ModifierOperator::PostDiv if m.value != 0.0 => (Some((1.0 / m.value) - 1.0), false),
-                ModifierOperator::PostPercent => (Some(m.value / 100.0), false),
-                ModifierOperator::PostPercentUnNerfed => (Some(m.value / 100.0), true),
-                // In the V24.01 SDE, operator 9 (SpecialSkillRelationship / dgmAssSpecialSkillRelationship)
-                // only appears on effect_id = 132 (skillEffect, modified_attribute_id: 280 skillLevel,
-                // modifying_attribute_id: 275 skillTimeConstant) and is not present in CCP's
-                // dogma/const.pyj dgmOperatorPrecedence ([-1, 0, 1, 2, 3, 4, 5, 6, 8, 7]).
-                // In CCP's SkillLevelAttribute, AddIncomingModifier is a no-op and Attribute.Update()
-                // does not apply an arithmetic percentage modifier for operator 9.
-                ModifierOperator::SpecialSkillRelationship => (None, false),
-                _ => (None, false),
-            };
-            if let Some(d) = delta_opt {
+        let post_deltas: Vec<(f64, bool)> = relevant
+            .iter()
+            .filter_map(|m| {
+                let (d, force_unpenalized) = match m.operator {
+                    ModifierOperator::PostMul => (m.value - 1.0, false),
+                    ModifierOperator::PostDiv if m.value != 0.0 => ((1.0 / m.value) - 1.0, false),
+                    ModifierOperator::PostPercent => (m.value / 100.0, false),
+                    ModifierOperator::PostPercentUnNerfed => (m.value / 100.0, true),
+                    // In the V24.01 SDE, operator 9 (SpecialSkillRelationship / dgmAssSpecialSkillRelationship)
+                    // only appears on effect_id = 132 (skillEffect, modified_attribute_id: 280 skillLevel,
+                    // modifying_attribute_id: 275 skillTimeConstant) and is not present in CCP's
+                    // dogma/const.pyj dgmOperatorPrecedence ([-1, 0, 1, 2, 3, 4, 5, 6, 8, 7]).
+                    // In CCP's SkillLevelAttribute, AddIncomingModifier is a no-op and Attribute.Update()
+                    // does not apply an arithmetic percentage modifier for operator 9.
+                    _ => return None,
+                };
                 let is_penalized =
                     !force_unpenalized && !attr_allows_free_stacking && m.stacking_penalized;
-                if !is_penalized {
-                    unpenalized_deltas.push(d);
-                } else if d >= 0.0 {
-                    penalized_pos_deltas.push(d);
-                } else {
-                    penalized_neg_deltas.push(d);
-                }
-            }
-        }
-
-        for d in unpenalized_deltas {
-            val *= 1.0 + d;
-        }
-
-        penalized_pos_deltas.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-        for (i, d) in penalized_pos_deltas.into_iter().enumerate() {
-            val *= 1.0 + d * stacking_penalty_factor(i);
-        }
-
-        penalized_neg_deltas.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        for (i, d) in penalized_neg_deltas.into_iter().enumerate() {
-            val *= 1.0 + d * stacking_penalty_factor(i);
-        }
+                Some((d, is_penalized))
+            })
+            .collect();
+        val = apply_signed_stacking_penalties(val, post_deltas);
 
         // 5. PostAssign (resolved deterministically by high_is_good)
         let post_assigns: Vec<f64> = relevant
@@ -762,6 +737,30 @@ pub struct ProjectedEwarEffect {
     pub distance: f64,
     pub overloaded: bool,
     pub effective_module: DogmaItemState,
+}
+
+fn apply_signed_stacking_penalties(val: f64, deltas: Vec<(f64, bool)>) -> f64 {
+    let mut out = val;
+    let mut penalized_pos = Vec::new();
+    let mut penalized_neg = Vec::new();
+    for (d, is_penalized) in deltas {
+        if !is_penalized {
+            out *= 1.0 + d;
+        } else if d >= 0.0 {
+            penalized_pos.push(d);
+        } else {
+            penalized_neg.push(d);
+        }
+    }
+    penalized_pos.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    for (i, d) in penalized_pos.into_iter().enumerate() {
+        out *= 1.0 + d * stacking_penalty_factor(i);
+    }
+    penalized_neg.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    for (i, d) in penalized_neg.into_iter().enumerate() {
+        out *= 1.0 + d * stacking_penalty_factor(i);
+    }
+    out
 }
 
 fn select_dominant_assignment(values: &[f64], high_is_good: bool) -> Option<f64> {

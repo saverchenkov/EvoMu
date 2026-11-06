@@ -727,17 +727,15 @@ impl ShipFittingEngine {
             }
         }
 
-        // 4. Evaluate fitted modules' online fitting load (`16` `online` / `2663` `rigSlot`),
-        //    passive/online SDE `modifierInfo` effects (`effect_category == 0 | 4`),
-        //    and (when `Active` or `Overloaded`) active SDE `modifierInfo` effects (`effect_category == 1..=3`)
-        //    plus active propulsion engine effects (`6730` `moduleBonusMicrowarpdrive`, `6731` `moduleBonusAfterburner`).
+        // 4. Evaluate fitted modules in two passes:
+        //    Pass 1: apply self-modifiers (`itemID`) and all passive/online/active/overloaded
+        //            effects onto `ctx.ship`, `ctx.character`, and `ctx.ship_located_items` without
+        //            overwriting self-targeted `Location*` modifiers on `ctx.ship_located_items[idx]`.
         for (idx, m) in sorted_modules.iter().enumerate() {
             let Some(mod_type) = sde.types.get(&m.type_id) else {
                 continue;
             };
             let is_active = matches!(m.state, ModuleState::Active | ModuleState::Overloaded);
-            // First apply self-modifiers (`domain == "itemID"`, e.g. `5261` `CovertCloakCPUAddition` on Covert Ops Cloaking Device II)
-            // so the module's effective CPU/PG/attributes reflect any subsystem or skill modifications before fitting load is added.
             for &eid in &mod_type.effect_ids {
                 if let Some(effect) = sde.effects.get(&eid) {
                     let should_apply = match effect.effect_category {
@@ -766,71 +764,6 @@ impl ShipFittingEngine {
 
             let mod_state = ctx.ship_located_items[idx].clone();
             ctx.item = mod_state.clone();
-
-            let cpu_need = mod_state.get_attribute(attr_ids::CPU, sde);
-            let pg_need = mod_state.get_attribute(attr_ids::POWER, sde);
-            let cal_need = mod_state.get_attribute(attr_ids::UPGRADE_COST, sde);
-
-            if cpu_need > 0.0 {
-                let expr = DogmaExpressionNode {
-                    opcode: DogmaVmOpcode::AddItmMod,
-                    value_f64: None,
-                    attribute_id: Some(attr_ids::CPU_LOAD),
-                    operator: Some(ModifierOperator::ModAdd),
-                    arg1: None,
-                    arg2: Some(Box::new(DogmaExpressionNode {
-                        opcode: DogmaVmOpcode::GetAttr,
-                        value_f64: None,
-                        attribute_id: Some(attr_ids::CPU),
-                        operator: None,
-                        arg1: None,
-                        arg2: None,
-                    })),
-                };
-                expr.execute_on_target_with_effect(m.item_id, Some(16), &mod_state, &mut ctx.ship, sde);
-            }
-            if pg_need > 0.0 {
-                let expr = DogmaExpressionNode {
-                    opcode: DogmaVmOpcode::AddItmMod,
-                    value_f64: None,
-                    attribute_id: Some(attr_ids::POWER_LOAD),
-                    operator: Some(ModifierOperator::ModAdd),
-                    arg1: None,
-                    arg2: Some(Box::new(DogmaExpressionNode {
-                        opcode: DogmaVmOpcode::GetAttr,
-                        value_f64: None,
-                        attribute_id: Some(attr_ids::POWER),
-                        operator: None,
-                        arg1: None,
-                        arg2: None,
-                    })),
-                };
-                expr.execute_on_target_with_effect(m.item_id, Some(16), &mod_state, &mut ctx.ship, sde);
-            }
-            if cal_need > 0.0 {
-                let expr = DogmaExpressionNode {
-                    opcode: DogmaVmOpcode::AddItmMod,
-                    value_f64: None,
-                    attribute_id: Some(attr_ids::UPGRADE_CAPACITY),
-                    operator: Some(ModifierOperator::ModSub),
-                    arg1: None,
-                    arg2: Some(Box::new(DogmaExpressionNode {
-                        opcode: DogmaVmOpcode::GetAttr,
-                        value_f64: None,
-                        attribute_id: Some(attr_ids::UPGRADE_COST),
-                        operator: None,
-                        arg1: None,
-                        arg2: None,
-                    })),
-                };
-                expr.execute_on_target_with_effect(
-                    m.item_id,
-                    Some(2663),
-                    &mod_state,
-                    &mut ctx.ship,
-                    sde,
-                );
-            }
 
             for &eid in &mod_type.effect_ids {
                 if let Some(effect) = sde.effects.get(&eid) {
@@ -947,7 +880,79 @@ impl ShipFittingEngine {
                     }
                 }
             }
-            ctx.ship_located_items[idx] = ctx.item.clone();
+        }
+
+        //    Pass 2: read final evaluated `CPU`, `POWER`, and `UPGRADE_COST` from `ctx.ship_located_items[idx]`
+        //            (including all rig drawbacks and cross-module bonuses) to accumulate fitting loads.
+        for (idx, m) in sorted_modules.iter().enumerate() {
+            if !sde.types.contains_key(&m.type_id) {
+                continue;
+            }
+            let mod_state = ctx.ship_located_items[idx].clone();
+            let cpu_need = mod_state.get_attribute(attr_ids::CPU, sde);
+            let pg_need = mod_state.get_attribute(attr_ids::POWER, sde);
+            let cal_need = mod_state.get_attribute(attr_ids::UPGRADE_COST, sde);
+
+            if cpu_need > 0.0 {
+                let expr = DogmaExpressionNode {
+                    opcode: DogmaVmOpcode::AddItmMod,
+                    value_f64: None,
+                    attribute_id: Some(attr_ids::CPU_LOAD),
+                    operator: Some(ModifierOperator::ModAdd),
+                    arg1: None,
+                    arg2: Some(Box::new(DogmaExpressionNode {
+                        opcode: DogmaVmOpcode::GetAttr,
+                        value_f64: None,
+                        attribute_id: Some(attr_ids::CPU),
+                        operator: None,
+                        arg1: None,
+                        arg2: None,
+                    })),
+                };
+                expr.execute_on_target_with_effect(m.item_id, Some(16), &mod_state, &mut ctx.ship, sde);
+            }
+            if pg_need > 0.0 {
+                let expr = DogmaExpressionNode {
+                    opcode: DogmaVmOpcode::AddItmMod,
+                    value_f64: None,
+                    attribute_id: Some(attr_ids::POWER_LOAD),
+                    operator: Some(ModifierOperator::ModAdd),
+                    arg1: None,
+                    arg2: Some(Box::new(DogmaExpressionNode {
+                        opcode: DogmaVmOpcode::GetAttr,
+                        value_f64: None,
+                        attribute_id: Some(attr_ids::POWER),
+                        operator: None,
+                        arg1: None,
+                        arg2: None,
+                    })),
+                };
+                expr.execute_on_target_with_effect(m.item_id, Some(16), &mod_state, &mut ctx.ship, sde);
+            }
+            if cal_need > 0.0 {
+                let expr = DogmaExpressionNode {
+                    opcode: DogmaVmOpcode::AddItmMod,
+                    value_f64: None,
+                    attribute_id: Some(attr_ids::UPGRADE_CAPACITY),
+                    operator: Some(ModifierOperator::ModSub),
+                    arg1: None,
+                    arg2: Some(Box::new(DogmaExpressionNode {
+                        opcode: DogmaVmOpcode::GetAttr,
+                        value_f64: None,
+                        attribute_id: Some(attr_ids::UPGRADE_COST),
+                        operator: None,
+                        arg1: None,
+                        arg2: None,
+                    })),
+                };
+                expr.execute_on_target_with_effect(
+                    m.item_id,
+                    Some(2663),
+                    &mod_state,
+                    &mut ctx.ship,
+                    sde,
+                );
+            }
         }
 
         // 5. Evaluate active hostile EWAR modules projected onto this ship (`feat:modules.tracking-disruptor`, `feat:dogma.ewar-resistance-attributes`, `DG-5`).

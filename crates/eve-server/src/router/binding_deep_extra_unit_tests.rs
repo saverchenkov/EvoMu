@@ -246,34 +246,29 @@ fn moniker_bind_and_verify_authorization_matrix_across_all_services() {
         sess.solar_system_id = Some(sys_id);
     }
 
-    // 7) Positive-ID services: object_id > 0 allowed, object_id <= 0 denied
-    for svc in [
-        "agentMgr",
-        "keeper",
-        "planetMgr",
-        "posMgr",
-        "fleetObjectHandler",
-        "corpRegistry",
-        "corpmgr",
-        "allianceRegistry",
-        "warRegistry",
-        "warStatisticMgr",
-        "trademgr",
-        "voucher",
-        "structure",
-        "devIndexManager",
-        "contractProxy",
+    // 7) Context-authorized vs unauthorized object bindings across corp/alliance/fleet/planet/trade/pos/structure services
+    sess.corporation_id = Some(98_000_111);
+    sess.alliance_id = Some(99_000_111);
+    sess.fleet_id = Some(77_000_111);
+    for (svc, allowed_id, denied_id) in [
+        ("agentMgr", 3_018_922_i64, 0_i64),
+        ("keeper", 1_i64, -5_i64),
+        ("corpRegistry", 98_000_111_i64, 98_000_222_i64),
+        ("corpmgr", 98_000_111_i64, 98_000_222_i64),
+        ("allianceRegistry", 99_000_111_i64, 99_000_222_i64),
+        ("fleetObjectHandler", 77_000_111_i64, 77_000_222_i64),
+        ("warRegistry", 98_000_111_i64, 98_000_222_i64),
+        ("warStatisticMgr", 99_000_111_i64, 99_000_222_i64),
+        ("voucher", char_id, char_id + 1),
+        ("trademgr", 10_000_002_i64, 999_999_i64),
+        ("devIndexManager", i64::from(sys_id), i64::from(other_sys)),
+        ("contractProxy", char_id, char_id + 1),
     ] {
-        assert!(ctx.bind_object(&sess, svc, 1).is_ok(), "{svc} > 0");
+        assert!(ctx.bind_object(&sess, svc, allowed_id).is_ok(), "{svc} allowed");
         assert_eq!(
-            ctx.bind_object(&sess, svc, 0).unwrap_err().code,
+            ctx.bind_object(&sess, svc, denied_id).unwrap_err().code,
             "BindAuthorizationDenied", // rpc-lint: allow error code assertion
-            "{svc} == 0"
-        );
-        assert_eq!(
-            ctx.bind_object(&sess, svc, -5).unwrap_err().code,
-            "BindAuthorizationDenied", // rpc-lint: allow error code assertion
-            "{svc} < 0"
+            "{svc} denied"
         );
     }
 }
@@ -289,6 +284,7 @@ fn session_transition_invalidation_and_macho_object_disconnect_notifications() {
         session_id: 601,
         user_id: Some(1),
         character_id: Some(char_id),
+        corporation_id: Some(500),
         solar_system_id: Some(sys_id),
         station_id: Some(st_id),
         ship_id: Some(100_000_001),

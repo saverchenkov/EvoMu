@@ -178,15 +178,15 @@ fn grid_six_face_clamping_warp_interception_and_ball_helpers() {
         panic!("expected warp mode");
     }
 
-    // 6-face grid overlap clamping against base grid at origin
+    // 6-face grid overlap clamping against base grid at origin (no 1m dead-zone gap or extra expansion)
     let r = 100_000.0;
     let face_targets = [
-        (DVec3::new(150_000.0, 0.0, 0.0), DVec3::new(100_001.0, -r, -r), DVec3::new(300_001.0, r, r)),
-        (DVec3::new(-150_000.0, 0.0, 0.0), DVec3::new(-300_001.0, -r, -r), DVec3::new(-100_001.0, r, r)),
-        (DVec3::new(0.0, 150_000.0, 0.0), DVec3::new(-r, 100_001.0, -r), DVec3::new(r, 300_001.0, r)),
-        (DVec3::new(0.0, -150_000.0, 0.0), DVec3::new(-r, -300_001.0, -r), DVec3::new(r, -100_001.0, r)),
-        (DVec3::new(0.0, 0.0, 150_000.0), DVec3::new(-r, -r, 100_001.0), DVec3::new(r, r, 300_001.0)),
-        (DVec3::new(0.0, 0.0, -150_000.0), DVec3::new(-r, -r, -300_001.0), DVec3::new(r, r, -100_001.0)),
+        (DVec3::new(150_000.0, 0.0, 0.0), DVec3::new(100_000.0, -r, -r), DVec3::new(250_000.0, r, r)),
+        (DVec3::new(-150_000.0, 0.0, 0.0), DVec3::new(-250_000.0, -r, -r), DVec3::new(-100_000.0, r, r)),
+        (DVec3::new(0.0, 150_000.0, 0.0), DVec3::new(-r, 100_000.0, -r), DVec3::new(r, 250_000.0, r)),
+        (DVec3::new(0.0, -150_000.0, 0.0), DVec3::new(-r, -250_000.0, -r), DVec3::new(r, -100_000.0, r)),
+        (DVec3::new(0.0, 0.0, 150_000.0), DVec3::new(-r, -r, 100_000.0), DVec3::new(r, r, 250_000.0)),
+        (DVec3::new(0.0, 0.0, -150_000.0), DVec3::new(-r, -r, -250_000.0), DVec3::new(r, r, -100_000.0)),
     ];
     for (pos, exp_min, exp_max) in face_targets {
         let mut bp = Ballpark::with_bubble_radius(30_000_142, r);

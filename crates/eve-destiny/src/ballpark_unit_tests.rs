@@ -200,3 +200,115 @@ fn cloak_activation_deactivation_navigation_and_cross_grid_teleport() {
     assert!(park.in_same_bubble(1, 3));
     assert!(!park.in_same_bubble(1, 2));
 }
+
+#[test]
+fn test_issue_419_grid_boundary_no_dead_zone_and_no_1hz_thrashing() {
+    let r = 100_000.0;
+    let mut park = Ballpark::with_bubble_radius(30_000_142, r);
+    park.add_ball(make_ship(10, DVec3::ZERO));
+    let gid1 = park.bubble_id_for_ball(10).unwrap();
+
+    // Crossing the +x grid wall by < 1.0m (0.3m) must create a contiguous grid containing pos
+    let just_outside = DVec3::new(r + 0.3, 0.0, 0.0);
+    park.add_ball(make_ship(11, just_outside));
+    let gid2 = park.bubble_id_for_ball(11).unwrap();
+    assert_ne!(gid1, gid2);
+    assert!(
+        park.grids[&gid2].contains(just_outside),
+        "New grid must strictly contain pos when crossing grid wall by < 1.0m"
+    );
+    assert!(!park.grids[&gid1].overlaps_bounds(
+        park.grids[&gid2].min_bounds,
+        park.grids[&gid2].max_bounds
+    ));
+    let _ = park.drain_all_observer_events();
+
+    // 10 consecutive 1Hz physics steps must not thrash grids or spam AddBalls2/RemoveBalls
+    for _ in 0..10 {
+        park.step(1.0);
+        assert_eq!(park.bubble_id_for_ball(11), Some(gid2));
+        let evs = park.drain_observer_events(11);
+        assert!(
+            !evs.iter().any(|e| matches!(
+                e,
+                DestinyEvent::AddBalls2 { .. } | DestinyEvent::RemoveBalls { .. }
+            )),
+            "Sub-meter grid boundary position must not trigger 1Hz AddBalls2/RemoveBalls thrashing: {evs:?}"
+        );
+    }
+}
+
+#[test]
+fn test_issue_420_destruction_preserves_victim_damage_and_terminal_explosion() {
+    use crate::CombatState;
+    let mut park = Ballpark::new(30_000_142);
+    let victim_id = 100_000_077;
+    park.add_ball(make_ship(victim_id, DVec3::new(1_000.0, 0.0, 0.0)));
+    park.combat_states.insert(
+        victim_id,
+        CombatState {
+            shield_hp: 100.0,
+            max_shield_hp: 100.0,
+            armor_hp: 100.0,
+            max_armor_hp: 100.0,
+            structure_hp: 100.0,
+            max_structure_hp: 100.0,
+            ..Default::default()
+        },
+    );
+    let _ = park.drain_all_observer_events();
+
+    let (_, destroyed, _) = park
+        .apply_damage_to_ball(
+            victim_id,
+            DamageVector {
+                em: 1_000.0,
+                thermal: 0.0,
+                kinetic: 0.0,
+                explosive: 0.0,
+            },
+        )
+        .unwrap();
+    assert!(destroyed);
+    assert!(!park.balls.contains_key(&victim_id));
+
+    let victim_events = park.drain_observer_events(victim_id);
+    assert!(
+        victim_events
+            .iter()
+            .any(|e| matches!(e, DestinyEvent::OnDamageStateChange { ball_id, .. } if *ball_id == victim_id)),
+        "Victim must still receive OnDamageStateChange after remove_ball: {victim_events:?}"
+    );
+    assert!(
+        victim_events
+            .iter()
+            .any(|e| matches!(e, DestinyEvent::TerminalExplosion { ball_id, .. } if *ball_id == victim_id)),
+        "Victim must still receive TerminalExplosion after remove_ball: {victim_events:?}"
+    );
+
+    // Also verify Breacher DoT lethal destruction preserves victim observer events
+    let dot_victim = 100_000_088;
+    park.add_ball(make_ship(dot_victim, DVec3::new(2_000.0, 0.0, 0.0)));
+    park.combat_states.insert(
+        dot_victim,
+        CombatState {
+            shield_hp: 0.0,
+            max_shield_hp: 100.0,
+            armor_hp: 0.0,
+            max_armor_hp: 100.0,
+            structure_hp: 10.0,
+            max_structure_hp: 100.0,
+            ..Default::default()
+        },
+    );
+    park.apply_breacher_dot(dot_victim, 50.0, 0.5, 2);
+    let _ = park.drain_all_observer_events();
+    park.step(1.0);
+    let dot_events = park.drain_observer_events(dot_victim);
+    assert!(dot_events
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::OnDamageStateChange { ball_id, .. } if *ball_id == dot_victim)));
+    assert!(dot_events
+        .iter()
+        .any(|e| matches!(e, DestinyEvent::TerminalExplosion { ball_id, .. } if *ball_id == dot_victim)));
+}

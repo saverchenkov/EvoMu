@@ -4,6 +4,7 @@
 //! session validation, and central RPC dispatch across the 12 modular domain services.
 
 pub mod binding;
+mod binding_auth;
 pub mod cache_notifications;
 pub mod context;
 mod context_charges;
@@ -16,6 +17,8 @@ mod binding_deep_extra_unit_tests;
 mod cache_notifications_deep_extra_unit_tests;
 #[cfg(test)]
 mod dispatch_deep_extra_unit_tests;
+#[cfg(test)]
+mod r7_ta_p0_security_tests;
 #[cfg(test)]
 mod router_advanced_branches_tests;
 #[cfg(test)]

@@ -333,3 +333,48 @@ fn decode_error_branches_and_pack_dbrow_helper() {
     assert_eq!(dec.dbrow_get("c_i8"), Some(&PyRep::Integer(10)));
     assert_eq!(dec.dbrow_get("c_str"), Some(&PyRep::String("packed".into())));
 }
+
+#[test]
+fn test_issue_413_pack_dbrow_emits_null_bitmap_and_roundtrips() {
+    let row = pack_dbrow(&[
+        ("id", 20, PyRep::Integer(42_001)),
+        ("null_i8", 20, PyRep::None),
+        ("score", 5, PyRep::Real(99.5)),
+        ("null_r8", 5, PyRep::None),
+        ("flag_true", 11, PyRep::Bool(true)),
+        ("null_bool", 11, PyRep::None),
+        ("name", 130, PyRep::String("Jita IV - Moon 4".into())),
+        ("null_str", 130, PyRep::None),
+    ]);
+    let PyRep::DBRow {
+        ref header,
+        ref columns,
+        ref raw_rle,
+    } = row
+    else {
+        panic!("expected PyRep::DBRow");
+    };
+    assert_eq!(columns.len(), 8);
+    let unpacked = crate::dbrow::try_unpack_packed_row_columns(header, raw_rle)
+        .expect("pack_dbrow RLE must include full null-indicator bitmap");
+    assert_eq!(unpacked[0], ("id".into(), PyRep::Integer(42_001)));
+    assert_eq!(unpacked[1], ("null_i8".into(), PyRep::None));
+    assert_eq!(unpacked[2], ("score".into(), PyRep::Real(99.5)));
+    assert_eq!(unpacked[3], ("null_r8".into(), PyRep::None));
+    assert_eq!(unpacked[4], ("flag_true".into(), PyRep::Bool(true)));
+    assert_eq!(unpacked[5], ("null_bool".into(), PyRep::None));
+
+    let wire = encode(&row);
+    let decoded = decode(&wire).unwrap();
+    assert_eq!(decoded.dbrow_get("id"), Some(&PyRep::Integer(42_001)));
+    assert_eq!(decoded.dbrow_get("null_i8"), Some(&PyRep::None));
+    assert_eq!(decoded.dbrow_get("score"), Some(&PyRep::Real(99.5)));
+    assert_eq!(decoded.dbrow_get("null_r8"), Some(&PyRep::None));
+    assert_eq!(decoded.dbrow_get("flag_true"), Some(&PyRep::Bool(true)));
+    assert_eq!(decoded.dbrow_get("null_bool"), Some(&PyRep::None));
+    assert_eq!(
+        decoded.dbrow_get("name"),
+        Some(&PyRep::String("Jita IV - Moon 4".into()))
+    );
+    assert_eq!(decoded.dbrow_get("null_str"), Some(&PyRep::None));
+}

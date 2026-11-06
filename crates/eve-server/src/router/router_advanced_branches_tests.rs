@@ -73,8 +73,10 @@ async fn test_binding_containers_and_notifications() {
     assert!(ctx.bind_object(&mut session, "populationCap", char1).is_ok());
     assert!(ctx.bind_object(&mut session, "populationCap", char2).is_err());
     assert!(ctx.bind_object(&mut session, "i2", 5).is_err());
-    assert!(ctx.bind_object(&mut session, "trademgr", 1).is_ok());
-    assert!(ctx.bind_object(&mut session, "contractProxy", 1).is_ok());
+    assert!(ctx.bind_object(&mut session, "trademgr", 10_000_002).is_ok());
+    assert!(ctx.bind_object(&mut session, "trademgr", 999_999).is_err());
+    assert!(ctx.bind_object(&mut session, "contractProxy", char1).is_ok());
+    assert!(ctx.bind_object(&mut session, "contractProxy", char2).is_err());
     assert!(ctx.bind_object(&mut session, "nonExistentSvc", 1).is_err());
 
     let mut gm_session = session.clone();

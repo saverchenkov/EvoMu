@@ -110,6 +110,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
     }
 
     let mut sys_rx = ctx.systems.get_or_spawn(30000142).subscribe();
+    let mut subscribed_sys_id: Option<u32> = None;
     let mut notify_rx = ctx.notify_tx.subscribe();
     let mut ballpark_ready = false;
     let mut last_destiny_tick: u64 = 0;
@@ -224,18 +225,32 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
                     };
                     if should_drain {
+                        let prev_sys = session.solar_system_id;
                         ctx.sync_session(&mut session);
+                        if session.solar_system_id != prev_sys
+                            || session.solar_system_id != subscribed_sys_id
+                        {
+                            ballpark_ready = false;
+                            last_destiny_tick = 0;
+                            if let Some(new_sys) = session.solar_system_id {
+                                sys_rx = ctx.systems.get_or_spawn(new_sys).subscribe();
+                            }
+                            subscribed_sys_id = session.solar_system_id;
+                        }
                         let mut write_failed = false;
                         for notif in ctx.drain_notifications_for_char(cid) {
                             if notif.event == "OnSessionChanged" {
-                                let prev_sys = session.solar_system_id;
+                                let inner_prev_sys = session.solar_system_id;
                                 ctx.sync_session(&mut session);
-                                if session.solar_system_id != prev_sys {
+                                if session.solar_system_id != inner_prev_sys
+                                    || session.solar_system_id != subscribed_sys_id
+                                {
                                     ballpark_ready = false;
                                     last_destiny_tick = 0;
                                     if let Some(new_sys) = session.solar_system_id {
                                         sys_rx = ctx.systems.get_or_spawn(new_sys).subscribe();
                                     }
+                                    subscribed_sys_id = session.solar_system_id;
                                 }
                                 if session.station_id.is_some() || session.structure_id.is_some() {
                                     ballpark_ready = false;
@@ -584,12 +599,15 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             )
                             .await;
 
-                        if session.solar_system_id != prev_session.solar_system_id {
+                        if session.solar_system_id != prev_session.solar_system_id
+                            || session.solar_system_id != subscribed_sys_id
+                        {
                             ballpark_ready = false;
                             last_destiny_tick = 0;
                             if let Some(new_sys) = session.solar_system_id {
                                 sys_rx = ctx.systems.get_or_spawn(new_sys).subscribe();
                             }
+                            subscribed_sys_id = session.solar_system_id;
                         }
                         if (method == "UpdateStateRequest"
                             || (service == "beyonce" && method == "MachoBindObject"))

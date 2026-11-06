@@ -501,7 +501,7 @@ impl Ballpark {
                         destruction_effect_id: None,
                     },
                 );
-                let _ = self.remove_ball(dot_id);
+                let _ = self.remove_ball_preserving_observer_events(dot_id);
             }
         }
         for mjfg_id in mjfg_completed_ids {
@@ -1255,5 +1255,22 @@ pub(crate) fn step_warp_ball(
     };
     false
 }
+impl Ballpark {
+    pub(crate) fn remove_ball_preserving_observer_events(
+        &mut self,
+        ball_id: BallId,
+    ) -> Option<Ball> {
+        let saved_obs = self.observer_events.remove(&ball_id).unwrap_or_default();
+        let removed = self.remove_ball(ball_id);
+        if !saved_obs.is_empty() {
+            self.observer_events
+                .entry(ball_id)
+                .or_default()
+                .extend(saved_obs);
+        }
+        removed
+    }
+}
+
 #[cfg(test)] #[path = "physics_unit_tests.rs"] mod physics_unit_tests;
 
