@@ -281,3 +281,8 @@ pub(crate) async fn apply_supply_site_damage(
         ("hullHP", PyRep::Real(h_hp)),
     ]))
 }
+
+#[path = "fw_gameplay_supply_cov_unit_tests.rs"]
+#[cfg(test)]
+mod fw_gameplay_supply_cov_unit_tests;
+

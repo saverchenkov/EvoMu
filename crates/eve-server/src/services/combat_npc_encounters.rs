@@ -987,4 +987,6 @@ pub fn record_npc_kill_progression(
 #[cfg(test)]
 #[path = "combat_npc_encounters_tests.rs"] mod combat_npc_encounters_tests;
 
-
+#[path = "combat_npc_encounters_cov_unit_tests.rs"]
+#[cfg(test)]
+mod combat_npc_encounters_cov_unit_tests;

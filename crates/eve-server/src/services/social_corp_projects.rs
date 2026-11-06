@@ -1378,3 +1378,6 @@ pub fn handle_edit_project(
 #[path = "social_corp_projects_tests.rs"]
 mod social_corp_projects_tests;
 
+#[path = "social_corp_projects_cov_unit_tests.rs"]
+#[cfg(test)]
+mod social_corp_projects_cov_unit_tests;

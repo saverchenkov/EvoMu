@@ -637,3 +637,8 @@ pub async fn tick_insurgency_campaigns(ctx: &ServerContext, now_unix: u64) {
         }
     }
 }
+
+#[path = "fw_gameplay_insurgency_lifecycle_cov_unit_tests.rs"]
+#[cfg(test)]
+mod fw_gameplay_insurgency_lifecycle_cov_unit_tests;
+
