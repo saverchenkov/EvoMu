@@ -495,3 +495,7 @@ mod pve_burners_lp_escalations_deep_extra_unit_tests;
 mod wallet_accounting_store_deep_extra_unit_tests;
 #[cfg(test)]
 mod mail_chat_notifications_deep_extra_unit_tests;
+#[cfg(test)]
+mod auth_login_cluster_deep_extra_unit_tests;
+#[cfg(test)]
+mod station_inventory_stacking_deep_extra_unit_tests;
