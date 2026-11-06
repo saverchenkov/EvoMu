@@ -404,3 +404,21 @@ mod combat_npc_encounters_extra_unit_tests;
 
 #[cfg(test)]
 mod fw_services_extra_unit_tests;
+
+#[cfg(test)]
+mod character_lifecycle_extra_unit_tests;
+
+#[cfg(test)]
+mod pve_dungeon_editor_extra_unit_tests;
+
+#[cfg(test)]
+mod fleet_social_extra_unit_tests;
+
+#[cfg(test)]
+mod nav_warp_interdiction_extra_unit_tests;
+
+#[cfg(test)]
+mod fleet_social_persistence_extra_unit_tests;
+
+#[cfg(test)]
+mod quasar_vendors_and_war_services_extra_unit_tests;
