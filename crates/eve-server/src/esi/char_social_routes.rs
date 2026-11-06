@@ -913,4 +913,7 @@ pub fn dispatch_char_social_route(
 #[cfg(test)]
 #[path = "char_social_routes_unit_tests.rs"]
 mod char_social_routes_unit_tests;
+#[path = "char_social_routes_cov_unit_tests.rs"]
+#[cfg(test)]
+mod char_social_routes_cov_unit_tests;
 

@@ -864,3 +864,6 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
 #[path = "quasar_sov_mercden_tests.rs"]
 mod quasar_sov_mercden_tests;
 
+#[path = "quasar_sov_mercden_cov_unit_tests.rs"]
+#[cfg(test)]
+mod quasar_sov_mercden_cov_unit_tests;

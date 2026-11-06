@@ -914,4 +914,7 @@ fn format_industry_job_json(
 #[cfg(test)]
 #[path = "economy_industry_routes_unit_tests.rs"]
 mod economy_industry_routes_unit_tests;
+#[path = "economy_industry_routes_cov_unit_tests.rs"]
+#[cfg(test)]
+mod economy_industry_routes_cov_unit_tests;
 

@@ -1346,4 +1346,7 @@ pub fn handle_industry_jobs(
 #[cfg(test)]
 #[path = "industry_jobs_tests.rs"]
 mod industry_jobs_tests;
+#[path = "industry_jobs_cov_unit_tests.rs"]
+#[cfg(test)]
+mod industry_jobs_cov_unit_tests;
 
