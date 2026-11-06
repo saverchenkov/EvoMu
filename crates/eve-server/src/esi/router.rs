@@ -705,49 +705,17 @@ impl EsiRouter {
                         return (c_corp, true);
                     }
                     let allowed_mask = required_role_mask | eve_db::corp_roles::ROLE_DIRECTOR;
-                    let has_title_grantable = is_corp_roles_route
-                        && snap
-                            .corp_member_titles
-                            .get(&(path_corp_id, claims.character_id))
-                            .zip(snap.corp_titles.get(&path_corp_id))
-                            .is_some_and(|(tids, titles)| {
-                                titles.iter().filter(|t| tids.contains(&t.title_id)).any(|t| {
-                                    !t.grantable_roles.is_empty()
-                                        || !t.grantable_roles_at_hq.is_empty()
-                                        || !t.grantable_roles_at_base.is_empty()
-                                        || !t.grantable_roles_at_other.is_empty()
-                                })
-                            });
-                    let has_role = snap
-                        .corporations
-                        .get(&path_corp_id)
-                        .map(|corp| {
-                            corp.ceo_id == claims.character_id
-                                || (corp
-                                    .member_roles
-                                    .get(&claims.character_id)
-                                    .copied()
-                                    .unwrap_or(0)
-                                    & allowed_mask)
-                                    != 0
-                        })
-                        .unwrap_or(false)
-                        || snap
-                            .corp_role_assignments
-                            .get(&(path_corp_id, claims.character_id))
-                            .map(|r| {
-                                (((r.roles | r.roles_at_hq | r.roles_at_base | r.roles_at_other)
-                                    & allowed_mask)
-                                    != 0)
-                                    || (is_corp_roles_route
-                                        && (r.grantable_roles
-                                            | r.grantable_roles_at_hq
-                                            | r.grantable_roles_at_base
-                                            | r.grantable_roles_at_other)
-                                            != 0)
-                            })
-                            .unwrap_or(false)
-                        || has_title_grantable;
+                    let eff = effective_esi_corp_role_breakdown(
+                        snap,
+                        path_corp_id,
+                        claims.character_id,
+                        now,
+                    );
+                    let has_role = eff.is_ceo
+                        || (eff.any_active_roles() & allowed_mask) != 0
+                        || (is_corp_roles_route
+                            && ((eff.any_grantable_roles() & !eff.unmatured_mask) & allowed_mask)
+                                != 0);
                     (c_corp, has_role)
                 });
                 if char_corp != Some(path_corp_id) || !has_corp_role {
@@ -773,8 +741,9 @@ impl EsiRouter {
                         };
                         let char_al = snap.characters.get(&claims.character_id).and_then(|c| c.alliance_id);
                         let char_corp = snap.characters.get(&claims.character_id).map(|c| c.corporation_id).unwrap_or(0);
-                        let in_alliance = char_al == Some(path_alliance_id) || al.member_corp_ids.contains(&char_corp);
-                        !in_alliance && (!al.member_corp_ids.is_empty() || char_al.is_some())
+                        let in_alliance = char_al == Some(path_alliance_id)
+                            || (char_corp > 0 && al.member_corp_ids.contains(&char_corp));
+                        !in_alliance
                     });
                     if forbidden {
                         return self.build_error_response(
@@ -1064,6 +1033,116 @@ fn hex_val(b: u8) -> Option<u8> {
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct EsiEffectiveCorpRoles {
+    pub is_ceo: bool,
+    pub roles: u64,
+    pub roles_at_hq: u64,
+    pub roles_at_base: u64,
+    pub roles_at_other: u64,
+    pub grantable_roles: u64,
+    pub grantable_roles_at_hq: u64,
+    pub grantable_roles_at_base: u64,
+    pub grantable_roles_at_other: u64,
+    pub unmatured_mask: u64,
+}
+
+impl EsiEffectiveCorpRoles {
+    pub(crate) fn any_active_roles(&self) -> u64 {
+        self.roles | self.roles_at_hq | self.roles_at_base | self.roles_at_other
+    }
+
+    pub(crate) fn any_grantable_roles(&self) -> u64 {
+        self.grantable_roles
+            | self.grantable_roles_at_hq
+            | self.grantable_roles_at_base
+            | self.grantable_roles_at_other
+    }
+}
+
+pub(crate) fn effective_esi_corp_role_breakdown(
+    snap: &eve_db::WorldStateSnapshot,
+    corp_id: i64,
+    char_id: i64,
+    now_unix: u64,
+) -> EsiEffectiveCorpRoles {
+    let Some(corp) = snap.corporations.get(&corp_id) else {
+        return EsiEffectiveCorpRoles::default();
+    };
+    let mut out = EsiEffectiveCorpRoles {
+        is_ceo: corp.ceo_id == char_id,
+        roles: corp.member_roles.get(&char_id).copied().unwrap_or(0),
+        ..Default::default()
+    };
+    if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
+        out.roles |= ra.roles;
+        out.roles_at_hq |= ra.roles_at_hq;
+        out.roles_at_base |= ra.roles_at_base;
+        out.roles_at_other |= ra.roles_at_other;
+        out.grantable_roles |= ra.grantable_roles;
+        out.grantable_roles_at_hq |= ra.grantable_roles_at_hq;
+        out.grantable_roles_at_base |= ra.grantable_roles_at_base;
+        out.grantable_roles_at_other |= ra.grantable_roles_at_other;
+    }
+    let mut unmatured_role_bits = 0u64;
+    let mut unmatured_title_bits = 0u64;
+    if let Some(gov) = snap.corp_governance.get(&corp_id) {
+        if let Some(&(p_mask, matured_at)) = gov.pending_role_grants.get(&char_id) {
+            if now_unix >= matured_at {
+                out.roles |= p_mask;
+            } else {
+                unmatured_role_bits |= p_mask;
+            }
+        }
+        if let Some(&(t_mask, matured_at)) = gov.pending_title_role_grants.get(&char_id) {
+            if now_unix >= matured_at {
+                out.roles |= t_mask;
+            } else {
+                unmatured_title_bits |= t_mask;
+            }
+        }
+        if let Some(&tmask) = gov.member_titles.get(&char_id) {
+            for (&tid, &(_, troles)) in &gov.titles {
+                if (1..=64).contains(&tid) && (tmask & (1u64 << (tid - 1))) != 0 {
+                    out.roles |= troles & !unmatured_title_bits;
+                }
+            }
+        }
+    }
+    if let (Some(tids), Some(titles)) = (
+        snap.corp_member_titles.get(&(corp_id, char_id)),
+        snap.corp_titles.get(&corp_id),
+    ) {
+        for t in titles.iter().filter(|t| tids.contains(&t.title_id)) {
+            out.roles |= super::corp_governance_routes::encode_esi_corp_roles(&t.roles)
+                & !unmatured_title_bits;
+            out.roles_at_hq |=
+                super::corp_governance_routes::encode_esi_corp_roles(&t.roles_at_hq)
+                    & !unmatured_title_bits;
+            out.roles_at_base |=
+                super::corp_governance_routes::encode_esi_corp_roles(&t.roles_at_base)
+                    & !unmatured_title_bits;
+            out.roles_at_other |=
+                super::corp_governance_routes::encode_esi_corp_roles(&t.roles_at_other)
+                    & !unmatured_title_bits;
+            out.grantable_roles |=
+                super::corp_governance_routes::encode_esi_corp_roles(&t.grantable_roles);
+            out.grantable_roles_at_hq |=
+                super::corp_governance_routes::encode_esi_corp_roles(&t.grantable_roles_at_hq);
+            out.grantable_roles_at_base |=
+                super::corp_governance_routes::encode_esi_corp_roles(&t.grantable_roles_at_base);
+            out.grantable_roles_at_other |=
+                super::corp_governance_routes::encode_esi_corp_roles(&t.grantable_roles_at_other);
+        }
+    }
+    out.unmatured_mask = unmatured_role_bits | unmatured_title_bits;
+    out.roles &= !out.unmatured_mask;
+    out.roles_at_hq &= !out.unmatured_mask;
+    out.roles_at_base &= !out.unmatured_mask;
+    out.roles_at_other &= !out.unmatured_mask;
+    out
 }
 
 fn required_corp_roles_for_route(method: &str, path_pattern: &str) -> u64 {

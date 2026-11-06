@@ -511,3 +511,5 @@ mod esi_routes_auth_deep_extra_unit_tests;
 mod esi_routes_economy_comms_deep_extra_unit_tests;
 #[cfg(test)]
 mod esi_routes_world_social_deep_extra_unit_tests;
+#[cfg(test)]
+mod r7_esi_security_tests;

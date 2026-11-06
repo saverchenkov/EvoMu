@@ -47,6 +47,7 @@ fn parse_path_i64_validates_missing_invalid_nonpositive_and_positive() {
 fn is_character_invited_covers_all_owner_and_attendee_branches() {
     let base_ev = UnifiedCalendarEvent {
         event_id: 100,
+        creator_id: 90_000_099,
         event_date_unix: 1_700_000_000,
         title: "Op".to_string(),
         text: "Desc".to_string(),

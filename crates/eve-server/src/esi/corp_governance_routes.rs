@@ -77,6 +77,20 @@ pub(crate) fn decode_corp_roles(mask: u64) -> Vec<&'static str> {
         .collect()
 }
 
+pub(crate) fn encode_esi_corp_roles(names: &[String]) -> u64 {
+    let mut mask = 0u64;
+    for name in names {
+        for &(bit, client_name, esi_name) in CORP_ROLE_DEFINITIONS {
+            if (!esi_name.is_empty() && name.eq_ignore_ascii_case(esi_name))
+                || name.eq_ignore_ascii_case(client_name)
+            {
+                mask |= bit;
+            }
+        }
+    }
+    mask
+}
+
 fn parse_path_i64(
     path_params: &HashMap<String, String>,
     name: &str,

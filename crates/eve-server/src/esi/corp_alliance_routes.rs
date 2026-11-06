@@ -422,6 +422,7 @@ pub fn dispatch_corp_alliance_route(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
+            let now = ctx.now_unix();
             Some(ctx.db.with_snapshot(|snap| {
                 let Some(corp) = snap.corporations.get(&corp_id) else {
                     return RouteExecutionResult::error(
@@ -436,31 +437,29 @@ pub fn dispatch_corp_alliance_route(
                 member_ids.sort_unstable();
                 let mut out = Vec::new();
                 for cid in member_ids {
-                    let assigned = snap.corp_role_assignments.get(&(corp_id, cid));
-                    let roles_mask = assigned.map_or(0, |a| a.roles)
-                        | corp.member_roles.get(&cid).copied().unwrap_or(0);
-                    let grantable_mask = assigned.map(|a| a.grantable_roles).unwrap_or(0);
-                    let hq_mask = assigned.map(|a| a.roles_at_hq).unwrap_or(0);
-                    let grantable_hq_mask = assigned.map(|a| a.grantable_roles_at_hq).unwrap_or(0);
-                    let base_mask = assigned.map(|a| a.roles_at_base).unwrap_or(0);
-                    let grantable_base_mask =
-                        assigned.map(|a| a.grantable_roles_at_base).unwrap_or(0);
-                    let other_mask = assigned.map(|a| a.roles_at_other).unwrap_or(0);
-                    let grantable_other_mask =
-                        assigned.map(|a| a.grantable_roles_at_other).unwrap_or(0);
-
-                    let roles = super::corp_governance_routes::decode_corp_roles(roles_mask);
-                    let grantable =
-                        super::corp_governance_routes::decode_corp_roles(grantable_mask);
-                    let at_hq = super::corp_governance_routes::decode_corp_roles(hq_mask);
-                    let grantable_hq =
-                        super::corp_governance_routes::decode_corp_roles(grantable_hq_mask);
-                    let at_base = super::corp_governance_routes::decode_corp_roles(base_mask);
-                    let grantable_base =
-                        super::corp_governance_routes::decode_corp_roles(grantable_base_mask);
-                    let at_other = super::corp_governance_routes::decode_corp_roles(other_mask);
-                    let grantable_other =
-                        super::corp_governance_routes::decode_corp_roles(grantable_other_mask);
+                    let eff = super::router::effective_esi_corp_role_breakdown(
+                        snap, corp_id, cid, now,
+                    );
+                    let roles =
+                        super::corp_governance_routes::decode_corp_roles(eff.roles);
+                    let grantable = super::corp_governance_routes::decode_corp_roles(
+                        eff.grantable_roles & !eff.unmatured_mask,
+                    );
+                    let at_hq =
+                        super::corp_governance_routes::decode_corp_roles(eff.roles_at_hq);
+                    let grantable_hq = super::corp_governance_routes::decode_corp_roles(
+                        eff.grantable_roles_at_hq & !eff.unmatured_mask,
+                    );
+                    let at_base =
+                        super::corp_governance_routes::decode_corp_roles(eff.roles_at_base);
+                    let grantable_base = super::corp_governance_routes::decode_corp_roles(
+                        eff.grantable_roles_at_base & !eff.unmatured_mask,
+                    );
+                    let at_other =
+                        super::corp_governance_routes::decode_corp_roles(eff.roles_at_other);
+                    let grantable_other = super::corp_governance_routes::decode_corp_roles(
+                        eff.grantable_roles_at_other & !eff.unmatured_mask,
+                    );
 
                     if !roles.is_empty()
                         || !grantable.is_empty()

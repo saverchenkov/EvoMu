@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 struct UnifiedCalendarEvent {
     event_id: i64,
+    creator_id: i64,
     event_date_unix: u64,
     title: String,
     text: String,
@@ -127,6 +128,7 @@ fn load_calendar_events_from_game_state(
             eid,
             UnifiedCalendarEvent {
                 event_id: eid,
+                creator_id: ev.creator_id,
                 event_date_unix,
                 title: ev.title.clone(),
                 text: ev.description.clone(),
@@ -162,6 +164,46 @@ fn is_character_invited(
         || (ev.owner_type == "corporation" && ev.owner_id == corp_id)
         || (ev.owner_type == "alliance" && corp_alliance_id == Some(ev.owner_id))
         || ev.owner_type == "eve_server"
+}
+
+fn can_view_event_attendees(
+    snap: &eve_db::WorldStateSnapshot,
+    ev: &UnifiedCalendarEvent,
+    char_id: i64,
+    corp_id: i64,
+    corp_alliance_id: Option<i64>,
+    now_unix: u64,
+) -> bool {
+    let officer_roles =
+        eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_CHAT_MANAGER;
+    match ev.owner_type.as_str() {
+        "eve_server" | "faction" => false,
+        "corporation" => {
+            ev.owner_id == corp_id
+                && (ev.creator_id == char_id || {
+                    let eff = super::router::effective_esi_corp_role_breakdown(
+                        snap,
+                        corp_id,
+                        char_id,
+                        now_unix,
+                    );
+                    eff.is_ceo || (eff.any_active_roles() & officer_roles) != 0
+                })
+        }
+        "alliance" => {
+            corp_alliance_id == Some(ev.owner_id)
+                && (ev.creator_id == char_id || {
+                    let eff = super::router::effective_esi_corp_role_breakdown(
+                        snap,
+                        corp_id,
+                        char_id,
+                        now_unix,
+                    );
+                    eff.is_ceo || (eff.any_active_roles() & officer_roles) != 0
+                })
+        }
+        _ => ev.owner_id == char_id || ev.creator_id == char_id,
+    }
 }
 
 pub fn dispatch_char_calendar_route(
@@ -402,6 +444,7 @@ pub fn dispatch_char_calendar_route(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
+            let now = ctx.now_unix();
             Some(ctx.db.with_snapshot(|snap| {
                 let Some(ch) = snap.characters.get(&char_id) else {
                     return RouteExecutionResult::error(
@@ -420,10 +463,12 @@ pub fn dispatch_char_calendar_route(
                     .corporations
                     .get(&ch.corporation_id)
                     .and_then(|c| c.alliance_id);
-                if !is_character_invited(ev, char_id, ch.corporation_id, corp_alliance_id) {
+                if !can_view_event_attendees(snap, ev, char_id, ch.corporation_id, corp_alliance_id, now) {
                     return RouteExecutionResult::error(
                         403,
-                        format!("Character {char_id} is not invited to calendar event {event_id}"),
+                        format!(
+                            "Character {char_id} is not authorized to view attendees for calendar event {event_id}"
+                        ),
                     );
                 }
                 let mut attendees = ev.attendees.clone();

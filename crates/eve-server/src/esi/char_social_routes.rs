@@ -529,6 +529,7 @@ pub fn dispatch_char_social_route(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
+            let now = ctx.now_unix();
             Some(ctx.db.with_snapshot(|snap| {
                 let Some(ch) = snap.characters.get(&char_id) else {
                     return RouteExecutionResult::error(
@@ -547,26 +548,19 @@ pub fn dispatch_char_social_route(
                         3600,
                     );
                 }
-                let role_mask = snap
-                    .corporations
-                    .get(&ch.corporation_id)
-                    .and_then(|c| c.member_roles.get(&char_id).copied())
-                    .unwrap_or(0);
-                let assigned = snap
-                    .corp_role_assignments
-                    .get(&(ch.corporation_id, char_id));
-                let roles = super::corp_governance_routes::decode_corp_roles(
-                    assigned.map_or(role_mask, |a| a.roles | role_mask),
+                let eff = super::router::effective_esi_corp_role_breakdown(
+                    snap,
+                    ch.corporation_id,
+                    char_id,
+                    now,
                 );
-                let roles_at_hq = super::corp_governance_routes::decode_corp_roles(
-                    assigned.map_or(0, |a| a.roles_at_hq),
-                );
-                let roles_at_base = super::corp_governance_routes::decode_corp_roles(
-                    assigned.map_or(0, |a| a.roles_at_base),
-                );
-                let roles_at_other = super::corp_governance_routes::decode_corp_roles(
-                    assigned.map_or(0, |a| a.roles_at_other),
-                );
+                let roles = super::corp_governance_routes::decode_corp_roles(eff.roles);
+                let roles_at_hq =
+                    super::corp_governance_routes::decode_corp_roles(eff.roles_at_hq);
+                let roles_at_base =
+                    super::corp_governance_routes::decode_corp_roles(eff.roles_at_base);
+                let roles_at_other =
+                    super::corp_governance_routes::decode_corp_roles(eff.roles_at_other);
                 RouteExecutionResult::ok_json(
                     json!({
                         "roles": roles,

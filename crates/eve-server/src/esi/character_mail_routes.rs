@@ -26,6 +26,7 @@ fn parse_optional_from_id(
     }
 }
 
+#[cfg(test)]
 fn check_corp_wallet_access(
     corp: &eve_db::CorporationRecord,
     claims: Option<&SsoTokenClaims>,
@@ -38,7 +39,37 @@ fn check_corp_wallet_access(
                     | eve_db::corp_roles::ROLE_ACCOUNTANT
                     | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT))
                 != 0;
-        if !corp.members.contains(&c.character_id) || !has_role {
+        if (!corp.members.contains(&c.character_id) && corp.ceo_id != c.character_id) || !has_role {
+            return Err(RouteExecutionResult::error(
+                403,
+                format!(
+                    "Character {} lacks Accountant/Director/CEO role for corporation {}",
+                    c.character_id, corp.corporation_id
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_corp_wallet_access_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    corp: &eve_db::CorporationRecord,
+    claims: Option<&SsoTokenClaims>,
+    now_unix: u64,
+) -> Result<(), RouteExecutionResult> {
+    if let Some(c) = claims {
+        let eff = super::router::effective_esi_corp_role_breakdown(
+            snap,
+            corp.corporation_id,
+            c.character_id,
+            now_unix,
+        );
+        let allowed_wallet_roles = eve_db::corp_roles::ROLE_DIRECTOR
+            | eve_db::corp_roles::ROLE_ACCOUNTANT
+            | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT;
+        let has_role = eff.is_ceo || (eff.any_active_roles() & allowed_wallet_roles) != 0;
+        if (!corp.members.contains(&c.character_id) && !eff.is_ceo) || !has_role {
             return Err(RouteExecutionResult::error(
                 403,
                 format!(
@@ -184,6 +215,7 @@ pub fn dispatch_character_mail_routes(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
+            let now = ctx.now_unix();
             Some(ctx.db.with_snapshot(|snap| {
                 let Some(corp) = snap.corporations.get(&corp_id) else {
                     return RouteExecutionResult::error(
@@ -191,7 +223,7 @@ pub fn dispatch_character_mail_routes(
                         format!("Corporation {corp_id} not found"),
                     );
                 };
-                if let Err(e) = check_corp_wallet_access(corp, claims) {
+                if let Err(e) = check_corp_wallet_access_in_snap(snap, corp, claims, now) {
                     return e;
                 }
                 let mut divisions = Vec::with_capacity(7);
@@ -220,6 +252,7 @@ pub fn dispatch_character_mail_routes(
                 }
                 Err(e) => return Some(e),
             };
+            let now = ctx.now_unix();
             Some(ctx.db.with_snapshot(|snap| {
                 let Some(corp) = snap.corporations.get(&corp_id) else {
                     return RouteExecutionResult::error(
@@ -227,7 +260,7 @@ pub fn dispatch_character_mail_routes(
                         format!("Corporation {corp_id} not found"),
                     );
                 };
-                if let Err(e) = check_corp_wallet_access(corp, claims) {
+                if let Err(e) = check_corp_wallet_access_in_snap(snap, corp, claims, now) {
                     return e;
                 }
                 let mut rows = snap
@@ -285,6 +318,7 @@ pub fn dispatch_character_mail_routes(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
+            let now = ctx.now_unix();
             Some(ctx.db.with_snapshot(|snap| {
                 let Some(corp) = snap.corporations.get(&corp_id) else {
                     return RouteExecutionResult::error(
@@ -292,7 +326,7 @@ pub fn dispatch_character_mail_routes(
                         format!("Corporation {corp_id} not found"),
                     );
                 };
-                if let Err(e) = check_corp_wallet_access(corp, claims) {
+                if let Err(e) = check_corp_wallet_access_in_snap(snap, corp, claims, now) {
                     return e;
                 }
                 let mut rows: Vec<_> = snap
@@ -602,6 +636,67 @@ pub fn dispatch_character_mail_routes(
                 }
             }
             let now = ctx.now_unix();
+            let (extra_contacts, extra_cspa) = {
+                let mut contacts = HashMap::new();
+                let mut cspa = HashMap::new();
+                if let Ok(s) = ctx.social_extras.lock() {
+                    for &(rid, ref rtype) in &recipient_specs {
+                        if rtype == "character" && rid != char_id {
+                            if let Some(&(st, _, _)) =
+                                s.contacts.get(&rid).and_then(|m| m.get(&char_id))
+                            {
+                                contacts.insert(rid, st);
+                            }
+                            if let Some(&ch) = s.cspa_charges.get(&rid) {
+                                cspa.insert(rid, ch);
+                            }
+                        }
+                    }
+                }
+                (contacts, cspa)
+            };
+            for &(rid, ref rtype) in &recipient_specs {
+                if rtype == "character" && rid != char_id {
+                    let explicitly_blocked = ctx.db.with_snapshot(|snap| {
+                        snap.char_contacts
+                            .get(&rid)
+                            .is_some_and(|list| {
+                                list.iter().any(|c| c.contact_id == char_id && c.is_blocked)
+                            })
+                    }) || ctx
+                        .esi_state
+                        .char_contacts
+                        .read()
+                        .ok()
+                        .and_then(|map| map.get(&rid).cloned())
+                        .is_some_and(|list| {
+                            list.into_iter()
+                                .any(|c| c.contact_id == char_id && c.is_blocked)
+                        });
+                    let friendly_contact =
+                        extra_contacts.get(&rid).is_some_and(|&st| st > 0.0)
+                            || ctx.db.with_snapshot(|snap| {
+                                snap.char_contacts.get(&rid).is_some_and(|list| {
+                                    list.iter().any(|c| {
+                                        c.contact_id == char_id
+                                            && !c.is_blocked
+                                            && c.standing > 0.0
+                                    })
+                                })
+                            });
+                    if explicitly_blocked
+                        || (!friendly_contact
+                            && crate::services::character_contacts::is_blocked_by(
+                                ctx, rid, char_id,
+                            ))
+                    {
+                        return Some(RouteExecutionResult::error(
+                            403,
+                            format!("Recipient {rid} has blocked sender {char_id}"),
+                        ));
+                    }
+                }
+            }
             let specs_for_notify = recipient_specs.clone();
             let res: Result<(i64, Vec<(i64, i64)>), RouteExecutionResult> = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(sender) = snap.characters.get(&char_id).cloned() else {
@@ -610,18 +705,99 @@ pub fn dispatch_character_mail_routes(
                         format!("Character {char_id} not found"),
                     ));
                 };
+                let allowed_mail_roles = eve_db::corp_roles::ROLE_DIRECTOR
+                    | eve_db::corp_roles::ROLE_PERSONNEL_MANAGER
+                    | eve_db::corp_roles::ROLE_CHAT_MANAGER
+                    | eve_db::corp_roles::ROLE_DIPLOMAT;
                 let mut total_cspa_cents = 0i64;
                 for &(rid, ref rtype) in &recipient_specs {
-                    if rtype == "character" && rid != char_id {
+                    if rtype == "corporation" {
+                        let Some(corp) = snap.corporations.get(&rid) else {
+                            return Err(RouteExecutionResult::error(
+                                404,
+                                format!("Corporation {rid} not found"),
+                            ));
+                        };
+                        if sender.corporation_id != rid
+                            && !corp.members.contains(&char_id)
+                            && corp.ceo_id != char_id
+                        {
+                            return Err(RouteExecutionResult::error(
+                                403,
+                                format!(
+                                    "Character {char_id} is not a member of corporation {rid}"
+                                ),
+                            ));
+                        }
+                        let restrict = snap
+                            .corp_governance
+                            .get(&rid)
+                            .is_some_and(|g| g.restrict_corp_mails);
+                        if restrict {
+                            let eff = super::router::effective_esi_corp_role_breakdown(
+                                snap, rid, char_id, now,
+                            );
+                            if !eff.is_ceo && (eff.any_active_roles() & allowed_mail_roles) == 0 {
+                                return Err(RouteExecutionResult::error(
+                                    403,
+                                    format!(
+                                        "Corporation {rid} restricts corporation mail to leadership"
+                                    ),
+                                ));
+                            }
+                        }
+                    } else if rtype == "alliance" {
+                        let Some(al) = snap.alliances.get(&rid) else {
+                            return Err(RouteExecutionResult::error(
+                                404,
+                                format!("Alliance {rid} not found"),
+                            ));
+                        };
+                        let in_alliance = sender.alliance_id == Some(rid)
+                            || (sender.corporation_id > 0
+                                && al.member_corp_ids.contains(&sender.corporation_id));
+                        if !in_alliance {
+                            return Err(RouteExecutionResult::error(
+                                403,
+                                format!("Character {char_id} is not a member of alliance {rid}"),
+                            ));
+                        }
+                        let restrict = (al.executor_corp_id > 0
+                            && snap
+                                .corp_governance
+                                .get(&al.executor_corp_id)
+                                .is_some_and(|g| g.restrict_corp_mails))
+                            || snap
+                                .corp_governance
+                                .get(&sender.corporation_id)
+                                .is_some_and(|g| g.restrict_corp_mails);
+                        if restrict {
+                            let eff = super::router::effective_esi_corp_role_breakdown(
+                                snap,
+                                sender.corporation_id,
+                                char_id,
+                                now,
+                            );
+                            if !eff.is_ceo && (eff.any_active_roles() & allowed_mail_roles) == 0 {
+                                return Err(RouteExecutionResult::error(
+                                    403,
+                                    format!(
+                                        "Alliance {rid} restricts alliance mail to authorized officers"
+                                    ),
+                                ));
+                            }
+                        }
+                    } else if rtype == "character" && rid != char_id {
                         let same_corp = snap
                             .characters
                             .get(&rid)
                             .is_some_and(|rc| rc.corporation_id == sender.corporation_id);
-                        let is_exempt_contact = snap
-                            .char_contacts
-                            .get(&rid)
-                            .and_then(|list| list.iter().find(|c| c.contact_id == char_id))
-                            .is_some_and(|c| !c.is_blocked && c.standing > -10.0)
+                        let is_exempt_contact = extra_contacts.contains_key(&rid)
+                            || snap
+                                .char_contacts
+                                .get(&rid)
+                                .and_then(|list| list.iter().find(|c| c.contact_id == char_id))
+                                .is_some_and(|c| !c.is_blocked && c.standing > -10.0)
                             || ctx
                                 .esi_state
                                 .char_contacts
@@ -635,6 +811,7 @@ pub fn dispatch_character_mail_routes(
                                 .character_cspa_charges
                                 .get(&rid)
                                 .copied()
+                                .or_else(|| extra_cspa.get(&rid).copied())
                                 .unwrap_or(IskCents(0));
                             total_cspa_cents = total_cspa_cents.saturating_add(cspa.0.max(0));
                         }

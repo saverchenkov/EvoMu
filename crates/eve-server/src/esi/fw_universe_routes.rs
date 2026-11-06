@@ -8,7 +8,7 @@ use crate::esi::sample_routes::{
     compute_killmail_hash, format_iso8601_utc, parse_path_i64, RouteExecutionResult,
 };
 use crate::router::ServerContext;
-use eve_db::{FwWindowedStat, InventoryFlag, WorldStateSnapshot};
+use eve_db::{FwWindowedStat, WorldStateSnapshot};
 use eve_sde::{SdeRegistry, StationInfo};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -699,6 +699,9 @@ pub fn dispatch_fw_universe_route(
             let Some(killmail_hash) = path_params.get("killmail_hash") else {
                 return Some(RouteExecutionResult::error(400, "Missing killmail_hash"));
             };
+            let dkm = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                rt.detailed_killmails.get(&killmail_id).cloned()
+            });
             Some(ctx.db.with_snapshot(|snap| {
                 let Some(km) = snap.killmails.get(&killmail_id) else {
                     return RouteExecutionResult::error(
@@ -738,111 +741,94 @@ pub fn dispatch_fw_universe_route(
                     .unwrap_or(0.5);
 
                 let detail = snap.killmail_details.get(&killmail_id);
-                let killmail_time_unix = detail.map(|d| d.killmail_time_unix).unwrap_or(1_700_000_000);
-                let victim_ship_item = victim_char
-                    .and_then(|c| snap.items.get(&c.active_ship_id))
-                    .filter(|it| it.type_id == km.ship_type_id)
-                    .or_else(|| {
-                        snap.items.values().find(|it| {
-                            it.owner_id == km.victim_character_id && it.type_id == km.ship_type_id
-                        })
-                    });
+                let dkm_ref = dkm
+                    .as_ref()
+                    .or_else(|| snap.combat_crimewatch_state.detailed_killmails.get(&killmail_id));
+                let killmail_time_unix = detail
+                    .map(|d| d.killmail_time_unix)
+                    .or_else(|| dkm_ref.map(|k| k.kill_time_unix))
+                    .unwrap_or(1_700_000_000);
                 let pos = detail
                     .and_then(|d| d.victim_position)
-                    .or_else(|| {
-                        victim_ship_item
-                            .and_then(|it| snap.item_positions.get(&it.item_id).copied())
-                    })
+                    .or_else(|| dkm_ref.map(|k| k.victim_position))
                     .unwrap_or([0.0, 0.0, 0.0]);
-                let items: Vec<Value> = if let Some(ship_it) = victim_ship_item {
-                    let mut contained: Vec<_> = snap
-                        .items
-                        .values()
-                        .filter(|it| it.location_id == ship_it.item_id)
-                        .collect();
-                    contained.sort_by_key(|it| it.item_id);
-                    contained
-                        .into_iter()
+                let items: Vec<Value> = if let Some(k) = dkm_ref {
+                    k.dropped_items
+                        .iter()
+                        .chain(k.destroyed_items.iter())
                         .map(|it| {
-                            json!({
+                            let mut obj = json!({
                                 "item_type_id": it.type_id as i64,
                                 "flag": it.flag as i64,
                                 "singleton": i64::from(it.singleton),
-                                "quantity_destroyed": it.quantity.max(1) as i64,
-                            })
+                            });
+                            if it.qty_dropped > 0 {
+                                obj["quantity_dropped"] = json!(it.qty_dropped as i64);
+                            }
+                            if it.qty_destroyed > 0 || it.qty_dropped == 0 {
+                                obj["quantity_destroyed"] = json!(it.qty_destroyed as i64);
+                            }
+                            obj
                         })
                         .collect()
                 } else {
                     Vec::new()
                 };
 
-                let damage_taken = detail.map(|d| d.damage_taken).unwrap_or(0);
-                let attackers: Vec<Value> = if let Some(d) = detail.filter(|d| !d.attackers.is_empty()) {
-                    d.attackers
-                        .iter()
-                        .map(|a| {
-                            let mut obj = json!({
-                                "character_id": a.character_id,
-                                "corporation_id": a.corporation_id,
-                                "ship_type_id": a.ship_type_id as i64,
-                                "weapon_type_id": a.weapon_type_id as i64,
-                                "damage_done": a.damage_done,
-                                "final_blow": a.final_blow,
-                                "security_status": a.security_status,
-                            });
-                            if let Some(aid) = a.alliance_id {
-                                obj["alliance_id"] = json!(aid);
-                            }
-                            obj
-                        })
-                        .collect()
-                } else {
-                    let attacker_ship_item = attacker_char
-                        .and_then(|c| snap.items.get(&c.active_ship_id))
-                        .or_else(|| {
-                            snap.items.values().find(|it| {
-                                it.owner_id == km.attacker_character_id
-                                    && ctx
-                                        .sde
-                                        .types
-                                        .get(&it.type_id)
-                                        .is_some_and(|t| t.category_id == 6)
+                let damage_taken = detail
+                    .map(|d| d.damage_taken)
+                    .or_else(|| dkm_ref.map(|k| k.victim_damage_taken.round() as i64))
+                    .unwrap_or(0);
+                let attackers: Vec<Value> =
+                    if let Some(d) = detail.filter(|d| !d.attackers.is_empty()) {
+                        d.attackers
+                            .iter()
+                            .map(|a| {
+                                let mut obj = json!({
+                                    "character_id": a.character_id,
+                                    "corporation_id": a.corporation_id,
+                                    "ship_type_id": a.ship_type_id as i64,
+                                    "weapon_type_id": a.weapon_type_id as i64,
+                                    "damage_done": a.damage_done,
+                                    "final_blow": a.final_blow,
+                                    "security_status": a.security_status,
+                                });
+                                if let Some(aid) = a.alliance_id {
+                                    obj["alliance_id"] = json!(aid);
+                                }
+                                obj
                             })
-                        });
-                    let attacker_ship_type_id = attacker_ship_item
-                        .map(|it| it.type_id)
-                        .unwrap_or(km.ship_type_id) as i64;
-                    let attacker_weapon_type_id = attacker_ship_item
-                        .and_then(|ship_it| {
-                            snap.items
-                                .values()
-                                .find(|it| {
-                                    it.location_id == ship_it.item_id
-                                        && matches!(
-                                            it.flag,
-                                            InventoryFlag::HiSlot0
-                                                | InventoryFlag::HiSlot1
-                                                | InventoryFlag::HiSlot2
-                                                | InventoryFlag::HiSlot3
-                                                | InventoryFlag::HiSlot4
-                                                | InventoryFlag::HiSlot5
-                                                | InventoryFlag::HiSlot6
-                                                | InventoryFlag::HiSlot7
-                                        )
-                                })
-                                .map(|it| it.type_id as i64)
-                        })
-                        .unwrap_or(attacker_ship_type_id);
-                    vec![json!({
-                        "character_id": km.attacker_character_id,
-                        "corporation_id": attacker_corp_id,
-                        "ship_type_id": attacker_ship_type_id,
-                        "weapon_type_id": attacker_weapon_type_id,
-                        "damage_done": damage_taken,
-                        "final_blow": true,
-                        "security_status": attacker_sec_status,
-                    })]
-                };
+                            .collect()
+                    } else if let Some(k) = dkm_ref.filter(|k| !k.attackers.is_empty()) {
+                        k.attackers
+                            .iter()
+                            .map(|a| {
+                                let mut obj = json!({
+                                    "character_id": a.character_id,
+                                    "corporation_id": a.corporation_id,
+                                    "ship_type_id": a.ship_type_id as i64,
+                                    "weapon_type_id": a.weapon_type_id as i64,
+                                    "damage_done": a.damage_done,
+                                    "final_blow": a.final_blow,
+                                    "security_status": a.security_status,
+                                });
+                                if let Some(aid) = a.alliance_id {
+                                    obj["alliance_id"] = json!(aid);
+                                }
+                                obj
+                            })
+                            .collect()
+                    } else {
+                        vec![json!({
+                            "character_id": km.attacker_character_id,
+                            "corporation_id": attacker_corp_id,
+                            "ship_type_id": km.ship_type_id as i64,
+                            "weapon_type_id": km.ship_type_id as i64,
+                            "damage_done": damage_taken,
+                            "final_blow": true,
+                            "security_status": attacker_sec_status,
+                        })]
+                    };
 
                 RouteExecutionResult::ok_json(
                     json!({
