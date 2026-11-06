@@ -437,20 +437,38 @@ mod fleet_social_persistence_extra_unit_tests;
 mod quasar_vendors_and_war_services_extra_unit_tests;
 
 #[cfg(test)]
-mod character_skill_ops_extra_unit_tests;
+mod structure_profile_services_extra_unit_tests;
 
 #[cfg(test)]
-mod quasar_entitlement_membership_extra_unit_tests;
+mod pve_abyssal_hazards_extra_unit_tests;
 
 #[cfg(test)]
-mod sov_warzone_dynamic_extra_unit_tests;
+mod fw_insurgency_extra_unit_tests;
 
 #[cfg(test)]
-mod quasar_sov_services_extra_unit_tests;
+mod wormhole_pve_seeding_extra_unit_tests;
 
 #[cfg(test)]
-mod quasar_achievements_ops_extra_unit_tests;
+mod structure_weapons_ops_extra_unit_tests;
 
 #[cfg(test)]
-mod quasar_campaign_state_extra_unit_tests;
+mod hypernet_raffle_ops_extra_unit_tests;
+
+#[cfg(test)]
+mod quasar_social_chat_extra_unit_tests;
+
+#[cfg(test)]
+mod pve_hacking_board_extra_unit_tests;
+
+#[cfg(test)]
+mod pve_abyssal_lifecycle_extra_unit_tests;
+
+#[cfg(test)]
+mod repair_service_extra_unit_tests;
+
+#[cfg(test)]
+mod doomsday_aoe_tick_extra_unit_tests;
+
+#[cfg(test)]
+mod inventory_bound_extra_unit_tests;
 
