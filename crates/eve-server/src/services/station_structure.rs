@@ -337,7 +337,10 @@ pub async fn handle(
                 .map(|_| sid)
             });
             let (station_id, ch, ship) = match ctx.db.undock_character(user_id, char_id) {
-                Ok(t) => t,
+                Ok(t) => {
+                    crate::sp6_lifecycle::clear_safe_logoff(&ctx.db, char_id);
+                    t
+                }
                 Err(e) => {
                     if let Some(sid) = controlled_sid {
                         crate::services::structure_control_ops::rollback_ship_after_failed_undock(

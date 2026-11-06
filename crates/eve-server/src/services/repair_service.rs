@@ -11,9 +11,57 @@ use crate::services::station_structure::structure_upwell_ops::{
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 
+fn ship_combat_damage(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    ship_id: i64,
+    max_hull: f64,
+    max_armor: f64,
+    max_shield: f64,
+) -> (f64, bool) {
+    let live_cs = ctx.systems.find_ball_system_sync(ship_id).and_then(|sys_id| {
+        let handle = ctx.systems.get_or_spawn(sys_id);
+        let bp = handle.ballpark.read().ok()?;
+        let cs = bp.combat_states.get(&ship_id)?;
+        Some((
+            cs.max_structure_hp,
+            cs.structure_hp,
+            cs.max_armor_hp,
+            cs.armor_hp,
+            cs.max_shield_hp,
+            cs.shield_hp,
+        ))
+    });
+    let eff_hull = live_cs.map(|c| c.0).unwrap_or(max_hull).max(max_hull);
+    let eff_armor = live_cs.map(|c| c.2).unwrap_or(max_armor).max(max_armor);
+    let eff_shield = live_cs.map(|c| c.4).unwrap_or(max_shield).max(max_shield);
+    let live_shield_dmg = live_cs
+        .map(|(_, _, _, _, ms, s)| if ms > 0.0 { (ms - s).max(0.0) } else { 0.0 })
+        .unwrap_or(0.0);
+    let live_dmg = live_cs
+        .map(|(mh, h, ma, a, _, _)| {
+            let hd = if mh > 0.0 { (mh - h).max(0.0) } else { 0.0 };
+            let ad = if ma > 0.0 { (ma - a).max(0.0) } else { 0.0 };
+            hd + ad + live_shield_dmg
+        })
+        .unwrap_or(0.0);
+    let (persisted_dmg, persisted_shield_dmg) = snap
+        .sp6_lifecycle
+        .ship_combat_hp
+        .get(&ship_id)
+        .map(|hp| {
+            let hd = if eff_hull > 0.0 { (eff_hull - hp.hull_hp).max(0.0) } else { 0.0 };
+            let ad = if eff_armor > 0.0 { (eff_armor - hp.armor_hp).max(0.0) } else { 0.0 };
+            let sd = if eff_shield > 0.0 { (eff_shield - hp.shield_hp).max(0.0) } else { 0.0 };
+            (hd + ad + sd, sd)
+        })
+        .unwrap_or((0.0, 0.0));
+    (live_dmg.max(persisted_dmg), live_shield_dmg > 0.0 || persisted_shield_dmg > 0.0)
+}
+
 fn item_repair_metrics(
     ctx: &ServerContext,
-    _snap: &eve_db::WorldStateSnapshot,
+    snap: &eve_db::WorldStateSnapshot,
     item: &eve_db::InventoryItemRecord,
 ) -> (f64, f64, f64) {
     let mut dmg = item
@@ -34,16 +82,31 @@ fn item_repair_metrics(
         }
     }
     let t_opt = ctx.sde.types.get(&item.type_id);
-    let max_hp = t_opt
-        .map(|t| {
-            let hp = t.default_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied().unwrap_or(0.0);
-            let armor = t.default_attributes.get(&eve_sde::attr_ids::ARMOR_HP).copied().unwrap_or(0.0);
-            (hp + armor).max(40.0)
-        })
-        .unwrap_or(100.0);
+    let is_ship = t_opt.is_some_and(|t| t.category_id == 6);
+    let max_hull = t_opt
+        .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied())
+        .unwrap_or(0.0);
+    let max_armor = t_opt
+        .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::ARMOR_HP).copied())
+        .unwrap_or(0.0);
+    let max_shield = t_opt
+        .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::SHIELD_CAPACITY).copied())
+        .unwrap_or(0.0);
+    let mut has_shield_dmg = false;
+    if is_ship {
+        let (combat_dmg, shield_damaged) =
+            ship_combat_damage(ctx, snap, item.item_id, max_hull, max_armor, max_shield);
+        dmg = dmg.max(combat_dmg);
+        has_shield_dmg = shield_damaged;
+    }
+    let max_hp = if t_opt.is_some() {
+        let base = max_hull + max_armor + if has_shield_dmg { max_shield } else { 0.0 };
+        base.max(40.0)
+    } else {
+        100.0
+    };
     // DERIVED: linear basePrice repair scaling factors (7.5e-6 per HP for ships, 1.25e-3 per HP
     // for modules/drones); live EVE Online computes repair quotes from material/market valuation.
-    let is_ship = t_opt.is_some_and(|t| t.category_id == 6);
     let base_price = t_opt
         .map(|t| t.base_price)
         .filter(|p| *p > 0.0)
@@ -303,6 +366,12 @@ pub fn handle_repair_get_quotes(
     }
     let repair_sid = resolve_structure_repair_location(ctx, session, char_id);
     let dock_loc = session.station_id.or(session.structure_id);
+    if dock_loc.is_none() && repair_sid.is_none() {
+        return Err(BridgeRpcError {
+            code: "NotInStation".into(),
+            message: "Must be docked at a station or structure, or tethered to an Upwell structure".into(),
+        });
+    }
     let active_ship = session.ship_id;
     let corp_id = session.corporation_id.or_else(|| {
         ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id))
@@ -434,7 +503,7 @@ pub fn handle_repair_items_in_location(
             message: "RepairItemsInStructure requires being docked in or tethered at an accessible operational Upwell structure".into(),
         })?
     } else {
-        let sid = session.station_id.or(session.structure_id).or(repair_sid).ok_or_else(|| BridgeRpcError {
+        let sid = session.station_id.or(session.structure_id).ok_or_else(|| BridgeRpcError {
             code: "NotInStation".into(),
             message: "RepairItemsInStation requires being docked in a station or structure".into(),
         })?;
@@ -511,7 +580,7 @@ pub fn handle_repair_items_in_location(
             if !is_docked_at_loc {
                 let on_active = Some(root.item_id) == active_ship
                     || (Some(root.location_id) == active_ship && is_repairable_ship_child_flag(root.flag));
-                if !on_active {
+                if !is_structure || !on_active {
                     return Err(BridgeRpcError {
                         code: "NotDockedInStructure".into(),
                         message: format!(
@@ -671,6 +740,7 @@ pub fn handle_repair_items_in_location(
                 it.dynamic_attributes.remove(&eve_sde::attr_ids::ARMOR_DAMAGE);
                 it.version += 1;
             }
+            snap.sp6_lifecycle.ship_combat_hp.remove(tid);
         }
         Ok((target_ids, total_cents.to_f64_isk(), bal))
     })?;
@@ -683,9 +753,9 @@ pub fn handle_repair_items_in_location(
             }
         }
     }
-    if let Some(sys_id) = session.solar_system_id {
-        if let Ok(mut bp) = ctx.systems.get_or_spawn(sys_id).ballpark.write() {
-            for &iid in &repaired_ids {
+    for &iid in &repaired_ids {
+        if let Some(sys_id) = session.solar_system_id.or_else(|| ctx.systems.find_ball_system_sync(iid)) {
+            if let Ok(mut bp) = ctx.systems.get_or_spawn(sys_id).ballpark.write() {
                 if let Some(cs) = bp.combat_states.get_mut(&iid) {
                     cs.shield_hp = cs.max_shield_hp;
                     cs.armor_hp = cs.max_armor_hp;

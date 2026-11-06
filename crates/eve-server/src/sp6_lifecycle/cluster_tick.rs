@@ -925,6 +925,7 @@ pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
             "charid",
             vec![],
         );
+        super::disconnect_safe_logoff_sessions(ctx, entry.char_id);
     }
 
     // 4. Finalize expired ungraceful logoff / disconnect ship removal timers (`plan:SP-6`)

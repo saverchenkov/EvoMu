@@ -704,6 +704,7 @@ impl ServerContext {
         if let Some(res) = services::character_skills::handle(self, session, effective_service, method, args, kwargs) {
             if effective_service == "charUnboundMgr" && method == "SelectCharacterID" && res.is_ok() {
                 if let Some(cid) = session.character_id {
+                    crate::sp6_lifecycle::clear_safe_logoff(&self.db, cid);
                     services::character_skill_ops::migrate_obsolete_skills_for_character(self, cid);
                     services::pve_special_sites::ensure_abyssal_room_balls_for_ctx(self, cid).await;
                     if let Some(sys) = session.solar_system_id {

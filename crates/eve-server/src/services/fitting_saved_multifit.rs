@@ -1223,6 +1223,7 @@ pub(crate) async fn handle_ships_and_services(
                         if item.owner_id == char_id {
                             item.dynamic_attributes.remove(&attr_ids::DAMAGE);
                             item.dynamic_attributes.remove(&attr_ids::ARMOR_DAMAGE);
+                            snap.sp6_lifecycle.ship_combat_hp.remove(&id);
                         }
                     }
                 }

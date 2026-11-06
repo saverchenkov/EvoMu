@@ -165,18 +165,7 @@ pub(crate) fn reconcile_tackle_and_bubbles(
             ) {
                 return false;
             }
-            let is_emergency_warp = ballpark
-                .combat_states
-                .get(&id)
-                .is_some_and(|cs| cs.is_emergency_warping);
-            if is_emergency_warp {
-                ballpark
-                    .combat_states
-                    .get(&id)
-                    .is_some_and(|cs| cs.is_warp_scrambled())
-            } else {
-                ballpark.is_ball_scrambled(id)
-            }
+            ballpark.is_ball_scrambled(id)
         })
         .map(|(&id, _)| id)
         .collect();

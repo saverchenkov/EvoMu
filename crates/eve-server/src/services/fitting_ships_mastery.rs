@@ -468,6 +468,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                             ],
                         );
                     }
+                    crate::sp6_lifecycle::clear_safe_logoff(&ctx.db, char_id);
                     Some(Ok(PyRep::keyval([
                         ("characterID", PyRep::Integer(char_id)),
                         ("shipID", PyRep::Integer(sid)),

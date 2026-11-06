@@ -8,7 +8,8 @@ use crate::router::{NotificationTarget, ServerContext};
 use super::wallet_services_ext::{save_json_note, sweep_expired_raffles};
 use super::wallet_serverops::process_due_automatic_bills;
 use eve_db::{MarketHistoryDayRecord, WorldStateSnapshot};
-use eve_proto::PyRep;
+use eve_machonet::SessionState;
+use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::SolarSystemId;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -1143,6 +1144,217 @@ pub fn run_daily_downtime_and_jobs(ctx: &ServerContext) -> HashMap<String, i64> 
     report.insert("fwSystemsCaptured".into(), fw_captured);
     report.insert("clusterRestartEpoch".into(), restart_epoch);
     report
+}
+
+/// Enforces GM or Admin privileges on administrative `machoNet` / `cluster` RPCs (`#432`).
+pub fn require_gm_or_admin(session: &SessionState) -> Result<(), BridgeRpcError> {
+    ServerContext::require_auth(session)?;
+    if !session.has_gm_role() && (session.role & eve_db::service_roles::ROLE_ADMIN) == 0 {
+        return Err(BridgeRpcError {
+            code: "InsufficientRole".into(),
+            message: "Cluster administration RPC requires GM or Admin role".into(),
+        });
+    }
+    Ok(())
+}
+
+/// Dispatches privileged `machoNet` and `cluster` administrative RPCs (`#432`).
+pub fn handle_admin_cluster_rpc(
+    ctx: &ServerContext,
+    session: &SessionState,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if !matches!(
+        method,
+        "AddClusterNode"
+            | "RemoveClusterNode"
+            | "AdminBroadcast"
+            | "SetServiceState"
+            | "ReinforceNode"
+            | "RebalanceNodes"
+    ) {
+        return None;
+    }
+    if let Err(e) = require_gm_or_admin(session) {
+        return Some(Err(e));
+    }
+    let res = match method {
+        "AddClusterNode" => {
+            let explicit_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or_else(|| kwargs.get("nodeID").or_else(|| kwargs.get("node_id")).and_then(|a| a.as_i64()));
+            if let Some(id) = explicit_id {
+                if id <= 0 {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidArgument".into(),
+                        message: "AddClusterNode requires a positive nodeID".into(),
+                    }));
+                }
+            }
+            let addr_arg = args
+                .get(1)
+                .and_then(|a| a.as_str())
+                .or_else(|| args.first().and_then(|a| a.as_str()))
+                .or_else(|| kwargs.get("address").or_else(|| kwargs.get("addr")).and_then(|a| a.as_str()))
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let mut state = ctx.cluster_state.write().unwrap_or_else(|e| e.into_inner());
+            let next_id = state.node_addresses.values().copied().max().unwrap_or(1).max(1) + 1;
+            let node_id = explicit_id.unwrap_or(next_id);
+            let addr = addr_arg
+                .map(ToString::to_string)
+                .unwrap_or_else(|| format!("127.0.0.1:{}", 26000 + node_id));
+            state.node_addresses.insert(addr.clone(), node_id);
+            drop(state);
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut table: std::collections::BTreeMap<String, String> = snap
+                    .service_state_blobs
+                    .get("cluster_node_table")
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                table.insert(node_id.to_string(), addr);
+                if let Ok(json) = serde_json::to_string(&table) {
+                    snap.service_state_blobs.insert("cluster_node_table".into(), json);
+                }
+            });
+            Ok(PyRep::Integer(node_id))
+        }
+        "RemoveClusterNode" => {
+            let node_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or_else(|| kwargs.get("nodeID").or_else(|| kwargs.get("node_id")).and_then(|a| a.as_i64()))
+                .unwrap_or(0);
+            if node_id <= 1 {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "RemoveClusterNode requires a removable secondary nodeID > 1".into(),
+                }));
+            }
+            if let Ok(mut state) = ctx.cluster_state.write() {
+                state.node_addresses.retain(|_, &mut nid| nid != node_id);
+                state.shutdown_complete_nodes.retain(|&nid| nid != node_id);
+            }
+            ctx.db.with_mut_snapshot(|snap| {
+                if let Some(blob) = snap.service_state_blobs.get("cluster_node_table").cloned() {
+                    if let Ok(mut table) = serde_json::from_str::<std::collections::BTreeMap<String, String>>(&blob) {
+                        table.remove(&node_id.to_string());
+                        if let Ok(json) = serde_json::to_string(&table) {
+                            snap.service_state_blobs.insert("cluster_node_table".into(), json);
+                        }
+                    }
+                }
+            });
+            let _ = recompute_cluster_node_tidi(ctx);
+            Ok(PyRep::Bool(true))
+        }
+        "AdminBroadcast" => {
+            let msg = args
+                .first()
+                .and_then(|a| a.as_str())
+                .or_else(|| kwargs.get("message").or_else(|| kwargs.get("msg")).and_then(|a| a.as_str()))
+                .map(str::trim)
+                .unwrap_or("");
+            if msg.is_empty() {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "AdminBroadcast requires a non-empty message".into(),
+                }));
+            }
+            crate::services::notify_emitters_skills_trade_godma::emit_server_message_broadcast(ctx, msg);
+            let now = ctx.now_unix();
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut log: Vec<serde_json::Value> = snap
+                    .service_state_blobs
+                    .get("cluster_admin_broadcasts")
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                if log.len() >= 100 {
+                    log.drain(0..log.len().saturating_sub(99));
+                }
+                log.push(serde_json::json!({ "message": msg, "timestamp_unix": now }));
+                if let Ok(json) = serde_json::to_string(&log) {
+                    snap.service_state_blobs.insert("cluster_admin_broadcasts".into(), json);
+                }
+            });
+            Ok(PyRep::Bool(true))
+        }
+        "SetServiceState" => {
+            let svc_name = args
+                .first()
+                .and_then(|a| a.as_str())
+                .or_else(|| kwargs.get("service").or_else(|| kwargs.get("serviceName")).and_then(|a| a.as_str()))
+                .map(str::trim)
+                .unwrap_or("");
+            if svc_name.is_empty() {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "SetServiceState requires a service name".into(),
+                }));
+            }
+            let enabled = match args
+                .get(1)
+                .or_else(|| kwargs.get("state"))
+                .or_else(|| kwargs.get("enabled"))
+            {
+                Some(PyRep::Bool(b)) => *b,
+                Some(PyRep::Integer(i)) => *i != 0,
+                Some(PyRep::String(s)) => !matches!(
+                    s.trim().to_ascii_lowercase().as_str(),
+                    "0" | "false" | "stopped" | "offline" | "disabled" | "down"
+                ),
+                _ => true,
+            };
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut states: std::collections::BTreeMap<String, bool> = snap
+                    .service_state_blobs
+                    .get("cluster_service_states")
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                states.insert(svc_name.to_string(), enabled);
+                if let Ok(json) = serde_json::to_string(&states) {
+                    snap.service_state_blobs.insert("cluster_service_states".into(), json);
+                }
+            });
+            Ok(PyRep::Bool(true))
+        }
+        "ReinforceNode" => {
+            let sys_arg = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or_else(|| kwargs.get("solarSystemID").or_else(|| kwargs.get("solar_system_id")).and_then(|a| a.as_i64()));
+            let node_arg = args
+                .get(1)
+                .and_then(|a| a.as_i64())
+                .or_else(|| kwargs.get("nodeID").or_else(|| kwargs.get("node_id")).and_then(|a| a.as_i64()));
+            let target_node = node_arg.and_then(|n| u32::try_from(n).ok()).filter(|&n| n > 0);
+            if let Some(sys_u32) = sys_arg.and_then(|s| u32::try_from(s).ok()).filter(|s| ctx.sde.solar_systems.contains_key(s)) {
+                let assigned = assign_or_reinforce_system_node(ctx, sys_u32, target_node);
+                Ok(PyRep::Integer(i64::from(assigned)))
+            } else if let Some(nid) = target_node.or_else(|| sys_arg.and_then(|n| u32::try_from(n).ok()).filter(|&n| n > 0)) {
+                if let Ok(mut state) = ctx.cluster_state.write() {
+                    let addr = format!("127.0.0.1:{}", 26000 + nid);
+                    state.node_addresses.entry(addr).or_insert(i64::from(nid));
+                }
+                Ok(PyRep::Integer(i64::from(nid)))
+            } else {
+                Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "ReinforceNode requires a valid solarSystemID or positive nodeID".into(),
+                })
+            }
+        }
+        "RebalanceNodes" => {
+            let migrated = rebalance_overloaded_worker_nodes(ctx);
+            let _ = recompute_cluster_node_tidi(ctx);
+            Ok(PyRep::Integer(migrated as i64))
+        }
+        _ => unreachable!(),
+    };
+    Some(res)
 }
 
 #[cfg(test)] #[path = "serverops_cluster_tests.rs"] mod serverops_cluster_tests;

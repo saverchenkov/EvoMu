@@ -144,16 +144,11 @@ impl Ballpark {
                         .combat_states
                         .get(&ball.id)
                         .is_some_and(|cs| cs.is_interdiction_nullified);
-                let is_emergency_warp = self
-                    .combat_states
-                    .get(&ball.id)
-                    .is_some_and(|cs| cs.is_emergency_warping);
                 // While still sub-warp aligning, entering or sitting in a bubble aborts alignment immediately,
-                // except for shuttles, active Interdiction Nullifiers, and disconnect emergency warps.
+                // except for shuttles and active Interdiction Nullifiers.
                 // Once in the warp tunnel (Accelerating/Cruising/Decelerating), newly anchored bubbles do not yank ships mid-flight.
                 if phase == WarpPhase::Aligning
                     && !is_nullified_or_shuttle
-                    && !is_emergency_warp
                     && self.warp_bubble_mgr.is_scrambled_at(ball.position)
                 {
                     ball.velocity = DVec3::ZERO;

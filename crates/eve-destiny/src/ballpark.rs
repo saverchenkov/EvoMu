@@ -1179,18 +1179,7 @@ impl Ballpark {
 
         // Reject warp if scrambled or cloaked with a non-covert cloaking device (`feat:modules.cloak-prototype`, `feat:modules.covert-ops-cloak`)
         if matches!(mode, MovementMode::Warp { .. }) {
-            let is_emergency_warp = self
-                .combat_states
-                .get(&ball_id)
-                .is_some_and(|cs| cs.is_emergency_warping);
-            let is_scrambled = if is_emergency_warp {
-                self.combat_states
-                    .get(&ball_id)
-                    .is_some_and(|cs| cs.is_warp_scrambled())
-            } else {
-                self.is_ball_scrambled(ball_id)
-            };
-            if is_scrambled {
+            if self.is_ball_scrambled(ball_id) {
                 return Err(
                     "WarpScrambled: Warp drive disabled by warp disruption/scrambler effect"
                         .to_string(),

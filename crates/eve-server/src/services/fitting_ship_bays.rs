@@ -255,6 +255,7 @@ pub(crate) async fn board_stored_ship(
             PyRep::Dict(changes),
         ],
     );
+    crate::sp6_lifecycle::clear_safe_logoff(&ctx.db, char_id);
     Ok(PyRep::keyval([
         ("shipID", PyRep::Integer(stored_id)),
         ("typeID", PyRep::Integer(stored.type_id as i64)),

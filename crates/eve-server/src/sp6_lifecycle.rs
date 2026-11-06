@@ -25,7 +25,8 @@ pub use cluster_tick::{
     tick_background_cluster,
 };
 pub use cluster_tick_downtime::{
-    cleanup_npc_wrecks_and_reset_missions_on_downtime, spawn_mission_wave_on_pocket_entry_if_needed,
+    cleanup_npc_wrecks_and_reset_missions_on_downtime, clear_safe_logoff,
+    disconnect_safe_logoff_sessions, spawn_mission_wave_on_pocket_entry_if_needed,
 };
 pub use drone_return::{
     abandon_drones_and_fighters_for_ship_sync, abandon_drones_on_warp_sync,
@@ -712,22 +713,10 @@ pub fn maybe_abort_safe_logoff_on_action(
     char_id: i64,
     reason_code: &str,
 ) -> bool {
-    let has_active_logoff = with_sp6_state(&ctx.db, |st| {
-        st.safe_logoffs
-            .get(&char_id)
-            .is_some_and(|entry| !entry.completed)
-    });
-    if !has_active_logoff {
-        return false;
-    }
     let aborted = with_mut_sp6_state(&ctx.db, |st, _snap| {
-        if let Some(entry) = st.safe_logoffs.get(&char_id) {
-            if !entry.completed {
-                st.safe_logoffs.remove(&char_id);
-                return true;
-            }
-        }
-        false
+        st.safe_logoffs
+            .remove(&char_id)
+            .is_some_and(|entry| !entry.completed)
     });
     if aborted {
         ctx.notify(
@@ -769,21 +758,9 @@ pub async fn handle_character_logoff_or_disconnect(
     char_id: i64,
 ) -> Option<DisconnectedShipEntry> {
     let now_unix = ctx.now_unix();
-
-    // If the pilot already completed a 30s safe logoff, their ship was already cleanly removed.
-    let already_safely_logged_off = with_mut_sp6_state(&ctx.db, |st, _snap| {
-        if let Some(entry) = st.safe_logoffs.get(&char_id) {
-            if entry.completed {
-                return true;
-            }
-            st.safe_logoffs.remove(&char_id);
-        }
-        false
-    });
-    if already_safely_logged_off {
-        return None;
-    }
-
+    let (weap_until, npc_until, pvp_until, crim_until) =
+        active_timers_for_char(ctx, char_id, now_unix);
+    let safe_entry = with_mut_sp6_state(&ctx.db, |st, _snap| st.safe_logoffs.remove(&char_id));
     let char_info = ctx.db.with_snapshot(|snap| {
         let ch = snap.characters.get(&char_id)?;
         if ch.station_id.is_some() || ch.structure_id.is_some() {
@@ -798,9 +775,18 @@ pub async fn handle_character_logoff_or_disconnect(
             .unwrap_or([0.0, 0.0, 0.0]);
         Some((ch.solar_system_id, ship_id, ship_type_id, saved_pos))
     })?;
-
     let (sys_id, ship_id, ship_type_id, saved_pos) = char_info;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let has_active_combat_timers = weap_until > now_unix
+        || npc_until > now_unix
+        || pvp_until > now_unix
+        || crim_until > now_unix;
+    if safe_entry.is_some_and(|e| e.completed)
+        && !has_active_combat_timers
+        && sys_handle.get_ball_position_sync(ship_id).is_none()
+    {
+        return None;
+    }
     let (group_id, category_id, mass, radius, max_vel, inertia, warp_speed_au_s) =
         sde_ship_physics(&ctx.sde, ship_type_id);
 
@@ -886,14 +872,13 @@ pub async fn handle_character_logoff_or_disconnect(
         .map(|s| s.security_status)
         .unwrap_or(0.5);
     let in_abyssal = (32_000_000..=32_999_999).contains(&sys_id);
-    let is_point_scrambled = sys_handle
-        .get_combat_state(ship_id)
-        .await
-        .ok()
-        .flatten()
-        .is_some_and(|cs| cs.is_warp_scrambled());
+    let is_ball_scrambled = sys_handle
+        .ballpark
+        .read()
+        .is_ok_and(|bp| bp.is_ball_scrambled(ship_id))
+        || ctx.systems.is_ball_scrambled_sync(sys_id, ship_id);
     let is_scrambled = in_abyssal
-        || is_point_scrambled
+        || is_ball_scrambled
         || (sys_sec >= 0.45 && crim_until > now_unix);
 
     ctx.active_warps.lock().unwrap_or_else(|e| e.into_inner()).remove(&ship_id);

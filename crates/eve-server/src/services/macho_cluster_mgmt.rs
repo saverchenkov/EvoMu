@@ -161,6 +161,7 @@ pub fn handle(
     let handled = matches!(
         service,
         "machoNet"
+            | "cluster"
             | "externalQueueMgr"
             | "tcpRawProxyService"
             | "loadService"
@@ -172,12 +173,18 @@ pub fn handle(
     if !handled {
         return None;
     }
-
     if let Ok(mut state) = ctx.cluster_state.write() {
         *state.calls_received.entry(service.to_string()).or_insert(0) += 1;
     }
-
-    if service == "machoNet" {
+    if matches!(service, "machoNet" | "cluster") {
+        if let Some(res) = crate::services::serverops_cluster::handle_admin_cluster_rpc(
+            ctx, session, method, args, kwargs,
+        ) {
+            return Some(res);
+        }
+        if service == "cluster" {
+            return None;
+        }
         return handle_macho_net(ctx, session, method, args, kwargs);
     }
 

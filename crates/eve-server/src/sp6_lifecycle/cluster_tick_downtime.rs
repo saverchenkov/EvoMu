@@ -280,6 +280,40 @@ pub fn spawn_mission_wave_on_pocket_entry_if_needed(
     count
 }
 
+/// Clears any stored safe-logoff state for `char_id` on login, undock, ship board, or action.
+pub fn clear_safe_logoff(db: &std::sync::Arc<eve_db::WorldRepository>, char_id: i64) {
+    super::with_mut_sp6_state(db, |st, _snap| {
+        st.safe_logoffs.remove(&char_id);
+    });
+}
+
+/// Disconnects active client sessions and releases online locks for `char_id` after safe logoff.
+pub fn disconnect_safe_logoff_sessions(ctx: &crate::router::ServerContext, char_id: i64) {
+    let mut session_ids = std::collections::BTreeSet::new();
+    let user_id = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.user_id));
+    if let Some(uid) = user_id {
+        if let Some(rec) = ctx.db.get_online_session(uid) {
+            if rec.character_id.is_none_or(|cid| cid == char_id) {
+                session_ids.insert(rec.session_id);
+                ctx.db.release_online_lock(uid, rec.session_id);
+            }
+        }
+    }
+    if let Ok(bound) = ctx.bound_objects.read() {
+        for entry in bound.values() {
+            if entry.character_id == char_id {
+                session_ids.insert(entry.session_id);
+            }
+        }
+    }
+    for sid in session_ids {
+        ctx.disconnect_session(sid, "SafeLogoff", "Safe logoff completed");
+        ctx.release_session_bindings(sid);
+    }
+    crate::services::fleet_social::fleet_social_notify::on_character_logout(ctx, char_id);
+    crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(ctx, char_id);
+}
+
 #[cfg(test)]
 #[path = "downtime_cleanup_tests.rs"]
 mod downtime_cleanup_tests;
