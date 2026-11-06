@@ -332,7 +332,8 @@ fn esi_markets_contracts_and_industry_mining_pi_pocos_populated() {
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(c) = snap.contracts.get_mut(&66_001) {
-            c.assignee_id = char_id;
+            c.bid_history
+                .push((char_id, IskCents::from_isk(125_000), now));
         }
         if let Some(st) = snap.structures.get_mut(&structure_id) {
             st.type_id = 35_833;

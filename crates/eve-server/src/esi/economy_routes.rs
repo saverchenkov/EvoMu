@@ -110,6 +110,11 @@ fn contract_retained_in_list(c: &eve_db::ContractRecord, now: u64) -> bool {
     true
 }
 
+fn is_public_available_contract(c: &eve_db::ContractRecord) -> bool {
+    (c.availability.is_empty() || c.availability.eq_ignore_ascii_case("Public"))
+        && c.assignee_id == 0
+}
+
 fn is_character_party_to_contract(
     snap: &eve_db::WorldStateSnapshot,
     char_id: i64,
@@ -1038,8 +1043,7 @@ pub fn dispatch_economy_route(
                     .filter(|c| {
                         c.status.eq_ignore_ascii_case("Outstanding")
                             && !is_contract_expired(c, now)
-                            && (c.availability.is_empty()
-                                || c.availability.eq_ignore_ascii_case("Public"))
+                            && is_public_available_contract(c)
                             && contract_in_region(ctx, snap, c, reg_u32)
                     })
                     .collect();
@@ -1090,9 +1094,11 @@ pub fn dispatch_economy_route(
                 Err(e) => return Some(e),
             };
             Some(ctx.db.with_snapshot(|snap| {
-                let Some(c) = snap.contracts.get(&contract_id).filter(|c| {
-                    c.availability.is_empty() || c.availability.eq_ignore_ascii_case("Public")
-                }) else {
+                let Some(c) = snap
+                    .contracts
+                    .get(&contract_id)
+                    .filter(|c| is_public_available_contract(c))
+                else {
                     return RouteExecutionResult::error(
                         404,
                         format!("Public contract {contract_id} not found"),
@@ -1117,9 +1123,11 @@ pub fn dispatch_economy_route(
                 Err(e) => return Some(e),
             };
             Some(ctx.db.with_snapshot(|snap| {
-                let Some(c) = snap.contracts.get(&contract_id).filter(|c| {
-                    c.availability.is_empty() || c.availability.eq_ignore_ascii_case("Public")
-                }) else {
+                let Some(c) = snap
+                    .contracts
+                    .get(&contract_id)
+                    .filter(|c| is_public_available_contract(c))
+                else {
                     return RouteExecutionResult::error(
                         404,
                         format!("Public contract {contract_id} not found"),

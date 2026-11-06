@@ -964,37 +964,60 @@ fn handle_inner(
         ("userSvc", "ActivateMultiTraining") | ("userSvc", "ActivateSoulboundMultiTraining") => {
             let uid = ServerContext::require_auth(session)?;
             let (_, char_id) = ServerContext::require_character(session)?;
-            let res: Result<(), BridgeRpcError> = ctx.db.try_with_mut_snapshot(|snap| {
-                let cert_found = snap.items.values_mut().find(|it| {
-                    (it.type_id == 33027 || it.type_id == 34189 || it.type_id == 48582)
-                        && it.owner_id == char_id
-                        && it.quantity >= 1
-                });
-                if let Some(cert) = cert_found {
-                    cert.quantity -= 1;
-                    cert.version += 1;
-                    let cert_id = cert.item_id;
-                    let qty = cert.quantity;
-                    if qty == 0 {
-                        snap.items.remove(&cert_id);
-                    }
-                    Ok(())
-                } else {
-                    Err(BridgeRpcError {
-                        code: "UserError".into(),
-                        message: "NoMultiTrainingCertificateFound".into(),
-                    })
-                }
-            });
-            res?;
             let now_unix = ctx.now_unix();
             let expiry = now_unix + 30 * 86_400;
-            with_store(ctx, |snap, store| {
-                let slots = store.mct_slots.entry(uid).or_default();
-                slots.push(expiry);
-                if let Ok(json) = serde_json::to_string(slots) {
-                    snap.service_state_blobs.insert(format!("mct_slots:{uid}"), json);
-                }
+            let updated_slots: Result<Vec<u64>, BridgeRpcError> =
+                ctx.db.try_with_mut_snapshot(|snap| {
+                    let ch_opt = snap.characters.get(&char_id);
+                    let effective_dock = session
+                        .station_id
+                        .or(session.structure_id)
+                        .or_else(|| ch_opt.and_then(|c| c.station_id.or(c.structure_id)));
+                    let effective_ship = session
+                        .ship_id
+                        .or_else(|| ch_opt.map(|c| c.active_ship_id).filter(|&id| id > 0));
+                    let cert_id = snap
+                        .items
+                        .values()
+                        .filter(|it| {
+                            (it.type_id == 33027 || it.type_id == 34189 || it.type_id == 48582)
+                                && snap.is_item_consumable_by(
+                                    it,
+                                    char_id,
+                                    effective_dock,
+                                    effective_ship,
+                                )
+                        })
+                        .map(|it| it.item_id)
+                        .min()
+                        .ok_or_else(|| BridgeRpcError {
+                            code: "UserError".into(),
+                            message: "NoMultiTrainingCertificateFound".into(),
+                        })?;
+                    let cert = snap.items.get_mut(&cert_id).ok_or_else(|| BridgeRpcError {
+                        code: "UserError".into(),
+                        message: "NoMultiTrainingCertificateFound".into(),
+                    })?;
+                    cert.quantity -= 1;
+                    cert.version += 1;
+                    if cert.quantity <= 0 {
+                        snap.items.remove(&cert_id);
+                    }
+                    let key = format!("mct_slots:{uid}");
+                    let mut slots: Vec<u64> = snap
+                        .service_state_blobs
+                        .get(&key)
+                        .and_then(|raw| serde_json::from_str(raw).ok())
+                        .unwrap_or_default();
+                    slots.push(expiry);
+                    if let Ok(json) = serde_json::to_string(&slots) {
+                        snap.service_state_blobs.insert(key, json);
+                    }
+                    Ok(slots)
+                });
+            let slots = updated_slots?;
+            with_store(ctx, |_, store| {
+                store.mct_slots.insert(uid, slots);
             });
             crate::services::notify_emitters_skills_trade_godma::emit_multiple_characters_training_updated(
                 ctx,
@@ -1032,35 +1055,52 @@ fn handle_inner(
             let uid = ServerContext::require_auth(session)?;
             let (_, char_id) = ServerContext::require_character(session)?;
             let res: Result<(), BridgeRpcError> = ctx.db.try_with_mut_snapshot(|snap| {
-                let cert_found = snap.items.values_mut().find(|it| {
-                    (it.type_id == 28662 || it.type_id == 33502) && it.owner_id == char_id && it.quantity >= 1
-                });
-                if let Some(cert) = cert_found {
-                    cert.quantity -= 1;
-                    cert.version += 1;
-                    let cert_id = cert.item_id;
-                    let qty = cert.quantity;
-                    if qty == 0 {
-                        snap.items.remove(&cert_id);
-                    }
-                    Ok(())
-                } else {
-                    Err(BridgeRpcError {
+                let ch_opt = snap.characters.get(&char_id);
+                let effective_dock = session
+                    .station_id
+                    .or(session.structure_id)
+                    .or_else(|| ch_opt.and_then(|c| c.station_id.or(c.structure_id)));
+                let effective_ship = session
+                    .ship_id
+                    .or_else(|| ch_opt.map(|c| c.active_ship_id).filter(|&id| id > 0));
+                let cert_id = snap
+                    .items
+                    .values()
+                    .filter(|it| {
+                        (it.type_id == 28662 || it.type_id == 33502)
+                            && snap.is_item_consumable_by(
+                                it,
+                                char_id,
+                                effective_dock,
+                                effective_ship,
+                            )
+                    })
+                    .map(|it| it.item_id)
+                    .min()
+                    .ok_or_else(|| BridgeRpcError {
                         code: "UserError".into(),
                         message: "NoResculptCertificateFound".into(),
-                    })
+                    })?;
+                let cert = snap.items.get_mut(&cert_id).ok_or_else(|| BridgeRpcError {
+                    code: "UserError".into(),
+                    message: "NoResculptCertificateFound".into(),
+                })?;
+                cert.quantity -= 1;
+                cert.version += 1;
+                if cert.quantity <= 0 {
+                    snap.items.remove(&cert_id);
                 }
-            });
-            res?;
-            with_store(ctx, |snap, store| {
-                store.resculpt_pending.insert(char_id);
                 let cur: u32 = snap
                     .service_state_blobs
                     .get(&format!("account_resculpt_tokens:{uid}"))
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0);
-                snap.service_state_blobs.insert(format!("account_resculpt_tokens:{uid}"), (cur + 1).to_string());
-                snap.service_state_blobs.insert(format!("resculpt_pending:{char_id}"), "true".to_string());
+                snap.service_state_blobs.insert(
+                    format!("account_resculpt_tokens:{uid}"),
+                    (cur + 1).to_string(),
+                );
+                snap.service_state_blobs
+                    .insert(format!("resculpt_pending:{char_id}"), "true".to_string());
                 let mut map: HashMap<String, u32> = snap
                     .service_state_blobs
                     .get("account_resculpt_tokens")
@@ -1069,8 +1109,14 @@ fn handle_inner(
                 *map.entry(uid.to_string()).or_default() += 1;
                 *map.entry(char_id.to_string()).or_default() += 1;
                 if let Ok(j) = serde_json::to_string(&map) {
-                    snap.service_state_blobs.insert("account_resculpt_tokens".to_string(), j);
+                    snap.service_state_blobs
+                        .insert("account_resculpt_tokens".to_string(), j);
                 }
+                Ok(())
+            });
+            res?;
+            with_store(ctx, |_, store| {
+                store.resculpt_pending.insert(char_id);
             });
             Ok(Some(PyRep::Bool(true)))
         }

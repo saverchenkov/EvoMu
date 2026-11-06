@@ -131,7 +131,7 @@ fn get_orders_and_public_open_filters_and_wire_encoding_branches() {
     assert_eq!(sell_fields.len(), 1);
     assert_eq!(buy_fields.len(), 1);
 
-    // Sell order attributes: no field 15 (escrow), price = 250 ISK
+    // Sell order attributes: no field 1 (issuer_character), no field 15 (escrow), price = 250 ISK
     let sell_entry = sell_fields[0].value.as_bytes().unwrap();
     assert_eq!(decode_sub_varint(sell_entry, 1, 1), Some(1001));
     let sell_attrs_bytes = WireMessage::decode(sell_entry)
@@ -145,14 +145,14 @@ fn get_orders_and_public_open_filters_and_wire_encoding_branches() {
         .unwrap()
         .to_vec();
     let sell_attrs = WireMessage::decode(&sell_attrs_bytes).unwrap();
-    assert_eq!(decode_sub_varint(&sell_attrs_bytes, 1, 1), Some(cid as u64));
+    assert!(sell_attrs.fields.iter().all(|f| f.field_number != 1));
     assert_eq!(decode_sub_varint(&sell_attrs_bytes, 3, 1), Some(34));
     assert_eq!(decode_sub_varint(&sell_attrs_bytes, 5, 1), Some(250));
     assert_eq!(decode_sub_varint(&sell_attrs_bytes, 12, 1), Some(60_003_760));
     assert_eq!(decode_sub_varint(&sell_attrs_bytes, 13, 1), Some(10_000_002));
     assert!(sell_attrs.fields.iter().all(|f| f.field_number != 15));
 
-    // Buy order attributes: field 15 (escrow = 500 ISK), negative price clamped to 0
+    // Buy order attributes: no field 1 or field 15 (escrow) leaked in public feed, negative price clamped to 0
     let buy_entry = buy_fields[0].value.as_bytes().unwrap();
     assert_eq!(decode_sub_varint(buy_entry, 1, 1), Some(1002));
     let buy_attrs_bytes = WireMessage::decode(buy_entry)
@@ -165,8 +165,10 @@ fn get_orders_and_public_open_filters_and_wire_encoding_branches() {
         .as_bytes()
         .unwrap()
         .to_vec();
+    let buy_attrs = WireMessage::decode(&buy_attrs_bytes).unwrap();
+    assert!(buy_attrs.fields.iter().all(|f| f.field_number != 1));
     assert_eq!(decode_sub_varint(&buy_attrs_bytes, 5, 1), Some(0));
-    assert_eq!(decode_sub_varint(&buy_attrs_bytes, 15, 1), Some(500));
+    assert!(buy_attrs.fields.iter().all(|f| f.field_number != 15));
 
     // Filter GetOrdersRequest by specific type 34 (using Int32 inside submessage) and wrong station
     req.set(3, sub_id(DynamicValue::Int32(34)));

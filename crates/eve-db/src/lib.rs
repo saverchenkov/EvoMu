@@ -14,6 +14,7 @@ pub mod clock;
 pub mod durable_domain_types;
 pub use durable_domain_types as d6_types;
 pub mod fw_seed;
+pub mod gateway_tokens;
 pub mod inventory;
 pub mod ledger;
 pub mod persistence;
@@ -45,6 +46,7 @@ pub use accounts::service_roles;
 pub use accounts::{base64url_decode_no_pad, base64url_encode_no_pad};
 pub use clock::{ServerClock, VirtualServerClock};
 pub use fw_seed::DEFAULT_FW_WARZONE_SYSTEMS;
+pub use gateway_tokens::QuasarVerifiedToken;
 pub use ledger::{JournalEntryInput, JournalMeta};
 pub use persistence::{
     record_last_wal_error, set_wal_error_hook, set_wal_poison_check_hook, WorldRepository,

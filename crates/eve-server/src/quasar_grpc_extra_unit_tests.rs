@@ -534,7 +534,11 @@ async fn quasar_grpc_jwt_variants_pings_and_invalid_proto_streams() {
     }
 
     // 3. `authorization_token` header + lowercase `bearer ` + 16-byte `application_instance_uuid`
-    let dev_jwt_main = fabricate_local_dev_user_token("tranquility", 1);
+    let now_u = ctx.now_unix();
+    let dev_jwt_main = ctx
+        .db
+        .issue_gateway_dev_token(1, None, "tranquility", now_u + 3600, now_u)
+        .unwrap();
     {
         let req = Request::builder()
             .method("POST")
@@ -563,7 +567,11 @@ async fn quasar_grpc_jwt_variants_pings_and_invalid_proto_streams() {
 
     // 4. Invalid protobuf on Events/Publish -> trailers must have grpc-status = 3 (INVALID_ARGUMENT)
     {
-        let dev_jwt = fabricate_local_dev_user_token("tranquility", 1);
+        let now_u = ctx.now_unix();
+        let dev_jwt = ctx
+            .db
+            .issue_gateway_dev_token(1, None, "tranquility", now_u + 3600, now_u)
+            .unwrap();
         let req = Request::builder()
             .method("POST")
             .uri("http://127.0.0.1/eve_public.gateway.Events/Publish")

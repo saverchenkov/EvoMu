@@ -50,20 +50,32 @@ fn encode_timestamp(field_num: u32, secs: i64, out: &mut Vec<u8>) {
     encode_bytes_field(field_num, &ts.encode_proto(), out);
 }
 
-fn encode_order_attributes(order: &MarketOrderRecord, is_buy: bool) -> Vec<u8> {
+fn encode_order_attributes(
+    snap: &eve_db::WorldStateSnapshot,
+    order: &MarketOrderRecord,
+    is_buy: bool,
+    include_private_details: bool,
+) -> Vec<u8> {
     let mut out = Vec::new();
-    // 1: issuer_character
-    encode_identifier(1, order.owner_id as u64, &mut out);
+    if include_private_details {
+        // 1: issuer_character
+        encode_identifier(1, order.owner_id as u64, &mut out);
+    }
     // 3: item_type
     encode_identifier(3, order.type_id as u64, &mut out);
     // 4: quantity
     encode_varint_field(4, order.vol_entered as u64, &mut out);
     // 5: price
     encode_currency(5, order.price.0, &mut out);
+    let (days, issued_unix) = snap
+        .market_order_meta
+        .get(&order.order_id)
+        .map(|m| (m.duration_days as u64, m.issued_unix as i64))
+        .unwrap_or((90, 1_760_000_000));
     // 6: days
-    encode_varint_field(6, 90, &mut out);
+    encode_varint_field(6, days, &mut out);
     // 8: issued_date
-    encode_timestamp(8, 1_760_000_000, &mut out);
+    encode_timestamp(8, issued_unix, &mut out);
     // 9: quantity_minimum
     encode_varint_field(9, order.min_volume as u64, &mut out);
     // 10: quantity_remain
@@ -74,39 +86,77 @@ fn encode_order_attributes(order: &MarketOrderRecord, is_buy: bool) -> Vec<u8> {
     encode_identifier(12, order.station_id as u64, &mut out);
     // 13: scope
     encode_identifier(13, order.region_id as u64, &mut out);
-    if is_buy {
+    if is_buy && include_private_details {
         // 15: escrow
         encode_currency(15, order.escrow.0, &mut out);
     }
     out
 }
 
-fn encode_sell_order_entry(order: &MarketOrderRecord) -> Vec<u8> {
+fn encode_sell_order_entry(
+    snap: &eve_db::WorldStateSnapshot,
+    order: &MarketOrderRecord,
+    include_private_details: bool,
+) -> Vec<u8> {
     let mut out = Vec::new();
     encode_identifier(1, order.order_id as u64, &mut out);
-    let attrs = encode_order_attributes(order, false);
+    let attrs = encode_order_attributes(snap, order, false, include_private_details);
     encode_bytes_field(2, &attrs, &mut out);
     out
 }
 
-fn encode_buy_order_entry(order: &MarketOrderRecord) -> Vec<u8> {
+fn encode_buy_order_entry(
+    snap: &eve_db::WorldStateSnapshot,
+    order: &MarketOrderRecord,
+    include_private_details: bool,
+) -> Vec<u8> {
     let mut out = Vec::new();
     encode_identifier(1, order.order_id as u64, &mut out);
-    let attrs = encode_order_attributes(order, true);
+    let attrs = encode_order_attributes(snap, order, true, include_private_details);
     encode_bytes_field(2, &attrs, &mut out);
     out
 }
 
-fn encode_composite_order_entry(order: &MarketOrderRecord) -> Vec<u8> {
+fn encode_composite_order_entry(
+    snap: &eve_db::WorldStateSnapshot,
+    order: &MarketOrderRecord,
+    include_private_details: bool,
+) -> Vec<u8> {
     let mut out = Vec::new();
     if order.is_bid {
-        let buy_entry = encode_buy_order_entry(order);
+        let buy_entry = encode_buy_order_entry(snap, order, include_private_details);
         encode_bytes_field(1, &buy_entry, &mut out);
     } else {
-        let sell_entry = encode_sell_order_entry(order);
+        let sell_entry = encode_sell_order_entry(snap, order, include_private_details);
         encode_bytes_field(2, &sell_entry, &mut out);
     }
     out
+}
+
+fn can_caller_view_market_location(
+    snap: &eve_db::WorldStateSnapshot,
+    caller_char_id: i64,
+    location_id: i64,
+) -> bool {
+    let Some(st) = snap.structures.get(&location_id) else {
+        return true;
+    };
+    if !crate::services::market_trading::is_structure_market_online(snap, location_id) {
+        return false;
+    }
+    if caller_char_id <= 0 {
+        return crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
+            snap,
+            location_id,
+            0,
+        );
+    }
+    crate::esi::universe_routes::character_has_structure_acl_access(snap, caller_char_id, st)
+        && crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
+            snap,
+            location_id,
+            caller_char_id,
+        )
 }
 
 fn extract_u64_from_field(dyn_msg: &DynamicQuasarMessage, field_num: u32) -> u64 {
@@ -136,34 +186,32 @@ pub fn register_market_handlers(
     let db_clone = Arc::clone(&db);
     router.register_handler(
         "eve.market.orders.GetOrdersRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let caller_cid = ctx.effective_character_id().unwrap_or(0) as i64;
             let region_id = extract_u64_from_field(dyn_msg, 1) as u32;
             let station_id = extract_u64_from_field(dyn_msg, 2) as i64;
             let item_type = extract_u64_from_field(dyn_msg, 3) as u32;
 
-            let orders = db_clone.with_snapshot(|snap| {
-                snap.market_orders
-                    .values()
-                    .filter(|o| {
-                        (region_id == 0 || o.region_id == region_id)
-                            && (station_id == 0 || o.station_id == station_id)
-                            && (item_type == 0 || o.type_id == item_type)
-                            && o.vol_remaining > 0
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>()
-            });
-
-            let mut out = Vec::new();
-            for o in &orders {
-                if o.is_bid {
-                    let entry = encode_buy_order_entry(o);
-                    encode_bytes_field(2, &entry, &mut out);
-                } else {
-                    let entry = encode_sell_order_entry(o);
-                    encode_bytes_field(1, &entry, &mut out);
+            let out = db_clone.with_snapshot(|snap| {
+                let mut buf = Vec::new();
+                for o in snap.market_orders.values() {
+                    if (region_id == 0 || o.region_id == region_id)
+                        && (station_id == 0 || o.station_id == station_id)
+                        && (item_type == 0 || o.type_id == item_type)
+                        && o.vol_remaining > 0
+                        && can_caller_view_market_location(snap, caller_cid, o.station_id)
+                    {
+                        if o.is_bid {
+                            let entry = encode_buy_order_entry(snap, o, false);
+                            encode_bytes_field(2, &entry, &mut buf);
+                        } else {
+                            let entry = encode_sell_order_entry(snap, o, false);
+                            encode_bytes_field(1, &entry, &mut buf);
+                        }
+                    }
                 }
-            }
+                buf
+            });
 
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.market.orders.GetOrdersResponse"),
@@ -176,7 +224,8 @@ pub fn register_market_handlers(
     let db_clone = Arc::clone(&db);
     router.register_handler(
         "eve.market.orders.GetPublicOpenInRegionRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let caller_cid = ctx.effective_character_id().unwrap_or(0) as i64;
             let region_id = extract_u64_from_field(dyn_msg, 1) as u32;
             let no_type_filter = matches!(dyn_msg.get(2), Some(DynamicValue::Bool(true)));
             let item_type = if no_type_filter {
@@ -185,23 +234,20 @@ pub fn register_market_handlers(
                 extract_u64_from_field(dyn_msg, 3) as u32
             };
 
-            let orders = db_clone.with_snapshot(|snap| {
-                snap.market_orders
-                    .values()
-                    .filter(|o| {
-                        (region_id == 0 || o.region_id == region_id)
-                            && (item_type == 0 || o.type_id == item_type)
-                            && o.vol_remaining > 0
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>()
+            let out = db_clone.with_snapshot(|snap| {
+                let mut buf = Vec::new();
+                for o in snap.market_orders.values() {
+                    if (region_id == 0 || o.region_id == region_id)
+                        && (item_type == 0 || o.type_id == item_type)
+                        && o.vol_remaining > 0
+                        && can_caller_view_market_location(snap, caller_cid, o.station_id)
+                    {
+                        let comp = encode_composite_order_entry(snap, o, false);
+                        encode_bytes_field(1, &comp, &mut buf);
+                    }
+                }
+                buf
             });
-
-            let mut out = Vec::new();
-            for o in orders {
-                let comp = encode_composite_order_entry(&o);
-                encode_bytes_field(1, &comp, &mut out);
-            }
 
             Ok(GoogleAny {
                 type_url: format!(
@@ -216,7 +262,8 @@ pub fn register_market_handlers(
     let db_clone = Arc::clone(&db);
     router.register_handler(
         "eve.market.orders.buyorder.GetAllPublicOpenInRegionRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let caller_cid = ctx.effective_character_id().unwrap_or(0) as i64;
             let region_id = extract_u64_from_field(dyn_msg, 1) as u32;
             let no_type_filter = matches!(dyn_msg.get(2), Some(DynamicValue::Bool(true)));
             let item_type = if no_type_filter {
@@ -225,24 +272,21 @@ pub fn register_market_handlers(
                 extract_u64_from_field(dyn_msg, 3) as u32
             };
 
-            let orders = db_clone.with_snapshot(|snap| {
-                snap.market_orders
-                    .values()
-                    .filter(|o| {
-                        o.is_bid
-                            && (region_id == 0 || o.region_id == region_id)
-                            && (item_type == 0 || o.type_id == item_type)
-                            && o.vol_remaining > 0
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>()
+            let out = db_clone.with_snapshot(|snap| {
+                let mut buf = Vec::new();
+                for o in snap.market_orders.values() {
+                    if o.is_bid
+                        && (region_id == 0 || o.region_id == region_id)
+                        && (item_type == 0 || o.type_id == item_type)
+                        && o.vol_remaining > 0
+                        && can_caller_view_market_location(snap, caller_cid, o.station_id)
+                    {
+                        let entry = encode_buy_order_entry(snap, o, false);
+                        encode_bytes_field(1, &entry, &mut buf);
+                    }
+                }
+                buf
             });
-
-            let mut out = Vec::new();
-            for o in orders {
-                let entry = encode_buy_order_entry(&o);
-                encode_bytes_field(1, &entry, &mut out);
-            }
 
             Ok(GoogleAny {
                 type_url: format!(
@@ -257,7 +301,8 @@ pub fn register_market_handlers(
     let db_clone = Arc::clone(&db);
     router.register_handler(
         "eve.market.orders.sellorder.GetAllPublicOpenInRegionRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let caller_cid = ctx.effective_character_id().unwrap_or(0) as i64;
             let region_id = extract_u64_from_field(dyn_msg, 1) as u32;
             let no_type_filter = matches!(dyn_msg.get(2), Some(DynamicValue::Bool(true)));
             let item_type = if no_type_filter {
@@ -266,24 +311,21 @@ pub fn register_market_handlers(
                 extract_u64_from_field(dyn_msg, 3) as u32
             };
 
-            let orders = db_clone.with_snapshot(|snap| {
-                snap.market_orders
-                    .values()
-                    .filter(|o| {
-                        !o.is_bid
-                            && (region_id == 0 || o.region_id == region_id)
-                            && (item_type == 0 || o.type_id == item_type)
-                            && o.vol_remaining > 0
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>()
+            let out = db_clone.with_snapshot(|snap| {
+                let mut buf = Vec::new();
+                for o in snap.market_orders.values() {
+                    if !o.is_bid
+                        && (region_id == 0 || o.region_id == region_id)
+                        && (item_type == 0 || o.type_id == item_type)
+                        && o.vol_remaining > 0
+                        && can_caller_view_market_location(snap, caller_cid, o.station_id)
+                    {
+                        let entry = encode_sell_order_entry(snap, o, false);
+                        encode_bytes_field(1, &entry, &mut buf);
+                    }
+                }
+                buf
             });
-
-            let mut out = Vec::new();
-            for o in orders {
-                let entry = encode_sell_order_entry(&o);
-                encode_bytes_field(1, &entry, &mut out);
-            }
 
             Ok(GoogleAny {
                 type_url: format!(
@@ -298,20 +340,22 @@ pub fn register_market_handlers(
     let db_clone = Arc::clone(&db);
     router.register_handler(
         "eve.market.orders.GetOpenInStationRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let caller_cid = ctx.effective_character_id().unwrap_or(0) as i64;
             let station_id = extract_u64_from_field(dyn_msg, 1) as i64;
-            let orders = db_clone.with_snapshot(|snap| {
-                snap.market_orders
-                    .values()
-                    .filter(|o| o.station_id == station_id && o.vol_remaining > 0)
-                    .cloned()
-                    .collect::<Vec<_>>()
+            let out = db_clone.with_snapshot(|snap| {
+                if !can_caller_view_market_location(snap, caller_cid, station_id) {
+                    return Vec::new();
+                }
+                let mut buf = Vec::new();
+                for o in snap.market_orders.values() {
+                    if o.station_id == station_id && o.vol_remaining > 0 {
+                        let comp = encode_composite_order_entry(snap, o, false);
+                        encode_bytes_field(1, &comp, &mut buf);
+                    }
+                }
+                buf
             });
-            let mut out = Vec::new();
-            for o in orders {
-                let comp = encode_composite_order_entry(&o);
-                encode_bytes_field(1, &comp, &mut out);
-            }
             Ok(GoogleAny {
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve.market.orders.GetOpenInStationResponse"
@@ -325,20 +369,39 @@ pub fn register_market_handlers(
     let db_clone = Arc::clone(&db);
     router.register_handler(
         "eve.market.orders.GetOpenInStructureRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
-            let structure_id = extract_u64_from_field(dyn_msg, 1) as i64;
-            let orders = db_clone.with_snapshot(|snap| {
-                snap.market_orders
-                    .values()
-                    .filter(|o| o.station_id == structure_id && o.vol_remaining > 0)
-                    .cloned()
-                    .collect::<Vec<_>>()
-            });
-            let mut out = Vec::new();
-            for o in orders {
-                let comp = encode_composite_order_entry(&o);
-                encode_bytes_field(1, &comp, &mut out);
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let caller_cid = ctx.effective_character_id().unwrap_or(0) as i64;
+            if caller_cid <= 0 {
+                return Err((
+                    STATUS_UNAUTHORIZED,
+                    "Active character identity required to query structure market orders".to_string(),
+                ));
             }
+            let structure_id = extract_u64_from_field(dyn_msg, 1) as i64;
+            let out = db_clone.with_snapshot(|snap| -> Result<Vec<u8>, (u32, String)> {
+                if snap.structures.contains_key(&structure_id) {
+                    if !crate::services::market_trading::is_structure_market_online(snap, structure_id) {
+                        return Err((
+                            STATUS_FORBIDDEN,
+                            format!("Structure {structure_id} does not have an online Standup Market Hub service"),
+                        ));
+                    }
+                    if !can_caller_view_market_location(snap, caller_cid, structure_id) {
+                        return Err((
+                            STATUS_FORBIDDEN,
+                            format!("Character {caller_cid} lacks ACL access to structure {structure_id}"),
+                        ));
+                    }
+                }
+                let mut buf = Vec::new();
+                for o in snap.market_orders.values() {
+                    if o.station_id == structure_id && o.vol_remaining > 0 {
+                        let comp = encode_composite_order_entry(snap, o, false);
+                        encode_bytes_field(1, &comp, &mut buf);
+                    }
+                }
+                Ok(buf)
+            })?;
             Ok(GoogleAny {
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve.market.orders.GetOpenInStructureResponse"
@@ -371,18 +434,16 @@ pub fn register_market_handlers(
             }
             let target_cid = effective_cid;
 
-            let orders = db_clone.with_snapshot(|snap| {
-                snap.market_orders
-                    .values()
-                    .filter(|o| o.owner_id == target_cid && o.vol_remaining > 0)
-                    .cloned()
-                    .collect::<Vec<_>>()
+            let out = db_clone.with_snapshot(|snap| {
+                let mut buf = Vec::new();
+                for o in snap.market_orders.values() {
+                    if o.owner_id == target_cid && o.vol_remaining > 0 {
+                        let comp = encode_composite_order_entry(snap, o, true);
+                        encode_bytes_field(1, &comp, &mut buf);
+                    }
+                }
+                buf
             });
-            let mut out = Vec::new();
-            for o in orders {
-                let comp = encode_composite_order_entry(&o);
-                encode_bytes_field(1, &comp, &mut out);
-            }
             Ok(GoogleAny {
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve.market.orders.GetOpenForCharacterResponse"
@@ -415,18 +476,16 @@ pub fn register_market_handlers(
             }
             let target_cid = effective_cid;
 
-            let orders = db_clone.with_snapshot(|snap| {
-                snap.market_orders
-                    .values()
-                    .filter(|o| o.owner_id == target_cid)
-                    .cloned()
-                    .collect::<Vec<_>>()
+            let out = db_clone.with_snapshot(|snap| {
+                let mut buf = Vec::new();
+                for o in snap.market_orders.values() {
+                    if o.owner_id == target_cid {
+                        let comp = encode_composite_order_entry(snap, o, true);
+                        encode_bytes_field(1, &comp, &mut buf);
+                    }
+                }
+                buf
             });
-            let mut out = Vec::new();
-            for o in orders {
-                let comp = encode_composite_order_entry(&o);
-                encode_bytes_field(1, &comp, &mut out);
-            }
             Ok(GoogleAny {
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve.market.orders.GetHistoryForCharacterResponse"
@@ -442,21 +501,17 @@ pub fn register_market_handlers(
         "eve.market.orders.GetOpenForCorporationRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let corp_id = extract_u64_from_field(dyn_msg, 1) as i64;
-            let orders = db_clone.with_snapshot(|snap| {
+            let out = db_clone.with_snapshot(|snap| -> Result<Vec<u8>, (u32, String)> {
                 let target_corp = authorize_corp_financial_access(ctx, snap, corp_id)?;
-                Ok::<_, (u32, String)>(
-                    snap.market_orders
-                        .values()
-                        .filter(|o| o.owner_id == target_corp && o.vol_remaining > 0)
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                )
+                let mut buf = Vec::new();
+                for o in snap.market_orders.values() {
+                    if o.owner_id == target_corp && o.vol_remaining > 0 {
+                        let comp = encode_composite_order_entry(snap, o, true);
+                        encode_bytes_field(1, &comp, &mut buf);
+                    }
+                }
+                Ok(buf)
             })?;
-            let mut out = Vec::new();
-            for o in orders {
-                let comp = encode_composite_order_entry(&o);
-                encode_bytes_field(1, &comp, &mut out);
-            }
             Ok(GoogleAny {
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve.market.orders.GetOpenForCorporationResponse"
@@ -472,21 +527,17 @@ pub fn register_market_handlers(
         "eve.market.orders.GetHistoryForCorporationRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let corp_id = extract_u64_from_field(dyn_msg, 1) as i64;
-            let orders = db_clone.with_snapshot(|snap| {
+            let out = db_clone.with_snapshot(|snap| -> Result<Vec<u8>, (u32, String)> {
                 let target_corp = authorize_corp_financial_access(ctx, snap, corp_id)?;
-                Ok::<_, (u32, String)>(
-                    snap.market_orders
-                        .values()
-                        .filter(|o| o.owner_id == target_corp)
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                )
+                let mut buf = Vec::new();
+                for o in snap.market_orders.values() {
+                    if o.owner_id == target_corp {
+                        let comp = encode_composite_order_entry(snap, o, true);
+                        encode_bytes_field(1, &comp, &mut buf);
+                    }
+                }
+                Ok(buf)
             })?;
-            let mut out = Vec::new();
-            for o in orders {
-                let comp = encode_composite_order_entry(&o);
-                encode_bytes_field(1, &comp, &mut out);
-            }
             Ok(GoogleAny {
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve.market.orders.GetHistoryForCorporationResponse"
@@ -500,12 +551,17 @@ pub fn register_market_handlers(
     let db_clone = Arc::clone(&db);
     router.register_handler(
         "eve.market.orders.GetTypesWithActiveOrdersInRegionRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let caller_cid = ctx.effective_character_id().unwrap_or(0) as i64;
             let region_id = extract_u64_from_field(dyn_msg, 1) as u32;
             let types = db_clone.with_snapshot(|snap| {
                 snap.market_orders
                     .values()
-                    .filter(|o| (region_id == 0 || o.region_id == region_id) && o.vol_remaining > 0)
+                    .filter(|o| {
+                        (region_id == 0 || o.region_id == region_id)
+                            && o.vol_remaining > 0
+                            && can_caller_view_market_location(snap, caller_cid, o.station_id)
+                    })
                     .map(|o| o.type_id)
                     .collect::<BTreeSet<_>>()
             });
@@ -526,7 +582,8 @@ pub fn register_market_handlers(
     let db_clone = Arc::clone(&db);
     router.register_handler(
         "eve.market.orders.GetPriceHistoryRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let caller_cid = ctx.effective_character_id().unwrap_or(0) as i64;
             let region_id = extract_u64_from_field(dyn_msg, 1) as u32;
             let item_type = extract_u64_from_field(dyn_msg, 3) as u32;
 
@@ -537,6 +594,7 @@ pub fn register_market_handlers(
                     .filter(|o| {
                         (region_id == 0 || o.region_id == region_id)
                             && (item_type == 0 || o.type_id == item_type)
+                            && can_caller_view_market_location(snap, caller_cid, o.station_id)
                     })
                     .collect::<Vec<_>>();
                 if matching.is_empty() {
@@ -568,7 +626,8 @@ pub fn register_market_handlers(
     let db_clone = Arc::clone(&db);
     router.register_handler(
         "eve.market.price.history.GetForRegionAndTypeRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let caller_cid = ctx.effective_character_id().unwrap_or(0) as i64;
             let region_id = extract_u64_from_field(dyn_msg, 1) as u32;
             let item_type = extract_u64_from_field(dyn_msg, 2) as u32;
 
@@ -579,6 +638,7 @@ pub fn register_market_handlers(
                     .filter(|o| {
                         (region_id == 0 || o.region_id == region_id)
                             && (item_type == 0 || o.type_id == item_type)
+                            && can_caller_view_market_location(snap, caller_cid, o.station_id)
                     })
                     .collect::<Vec<_>>();
                 if matching.is_empty() {
@@ -609,7 +669,8 @@ pub fn register_market_handlers(
     let db_clone = Arc::clone(&db);
     router.register_handler(
         "eve.market.region.GetPriceHistoryForTypeRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let caller_cid = ctx.effective_character_id().unwrap_or(0) as i64;
             let region_id = extract_u64_from_field(dyn_msg, 1) as u32;
             let item_type = extract_u64_from_field(dyn_msg, 2) as u32;
 
@@ -620,6 +681,7 @@ pub fn register_market_handlers(
                     .filter(|o| {
                         (region_id == 0 || o.region_id == region_id)
                             && (item_type == 0 || o.type_id == item_type)
+                            && can_caller_view_market_location(snap, caller_cid, o.station_id)
                     })
                     .collect::<Vec<_>>();
                 if matching.is_empty() {
@@ -650,10 +712,12 @@ pub fn register_market_handlers(
     let db_clone = Arc::clone(&db);
     router.register_handler(
         "eve.market.price.GetForAllTypesRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
+        Arc::new(move |ctx, _any, _dyn_msg| {
+            let caller_cid = ctx.effective_character_id().unwrap_or(0) as i64;
             let active_types = db_clone.with_snapshot(|snap| {
                 snap.market_orders
                     .values()
+                    .filter(|o| can_caller_view_market_location(snap, caller_cid, o.station_id))
                     .map(|o| (o.type_id, o.price.0))
                     .collect::<Vec<_>>()
             });
@@ -689,19 +753,21 @@ pub fn register_market_handlers(
                 ));
             }
             let order_id = extract_u64_from_field(dyn_msg, 1) as i64;
-            let order = db_clone
-                .with_snapshot(|snap| snap.market_orders.get(&order_id).cloned())
-                .ok_or((STATUS_NOT_FOUND, "Order not found".to_string()))?;
-            if order.owner_id != effective_cid {
-                return Err((
-                    STATUS_FORBIDDEN,
-                    format!(
-                        "Character {effective_cid} is not authorized to read character sell order {order_id}"
-                    ),
-                ));
-            }
-
-            let attrs = encode_order_attributes(&order, false);
+            let attrs = db_clone.with_snapshot(|snap| -> Result<Vec<u8>, (u32, String)> {
+                let order = snap
+                    .market_orders
+                    .get(&order_id)
+                    .ok_or((STATUS_NOT_FOUND, "Order not found".to_string()))?;
+                if order.owner_id != effective_cid {
+                    return Err((
+                        STATUS_FORBIDDEN,
+                        format!(
+                            "Character {effective_cid} is not authorized to read character sell order {order_id}"
+                        ),
+                    ));
+                }
+                Ok(encode_order_attributes(snap, order, false, true))
+            })?;
             let mut out = Vec::new();
             encode_bytes_field(1, &attrs, &mut out);
 
@@ -720,17 +786,14 @@ pub fn register_market_handlers(
         "eve.market.corporation.sellorder.GetRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let order_id = extract_u64_from_field(dyn_msg, 1) as i64;
-            let order = db_clone.with_snapshot(|snap| {
+            let attrs = db_clone.with_snapshot(|snap| -> Result<Vec<u8>, (u32, String)> {
                 let ord = snap
                     .market_orders
                     .get(&order_id)
-                    .cloned()
                     .ok_or((STATUS_NOT_FOUND, "Corp order not found".to_string()))?;
                 authorize_corp_financial_access(ctx, snap, ord.owner_id)?;
-                Ok::<_, (u32, String)>(ord)
+                Ok(encode_order_attributes(snap, ord, false, true))
             })?;
-
-            let attrs = encode_order_attributes(&order, false);
             let mut out = Vec::new();
             encode_bytes_field(1, &attrs, &mut out);
 

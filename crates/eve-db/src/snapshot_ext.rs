@@ -971,17 +971,21 @@ impl WorldStateSnapshot {
         });
     }
 
-    /// Returns `true` if `item_id` is currently escrowed in an active contract (`Outstanding` or `InProgress`)
-    /// or locked as the blueprint of an `Active` industry job.
+    /// Returns `true` if `item_id` is escrowed in an active contract, industry job, direct trade, or HyperNet raffle.
     pub fn is_item_locked_in_contract_or_job(&self, item_id: i64) -> bool {
-        let in_contract = self.contracts.values().any(|c| {
-            (c.status == "Outstanding" || c.status == "InProgress") && c.item_ids.contains(&item_id)
-        });
-        let in_job = self
-            .industry_jobs
-            .values()
-            .any(|j| matches!(j.status.as_str(), "Active" | "Paused") && j.blueprint_item_id == item_id);
-        in_contract || in_job
+        #[derive(serde::Deserialize)]
+        struct TradeRef { #[serde(default)] items_a: Vec<(i64, i32)>, #[serde(default)] items_b: Vec<(i64, i32)>, #[serde(default)] completed: bool, #[serde(default)] cancelled: bool }
+        #[derive(serde::Deserialize)]
+        struct RaffleRef { item_id: i64, #[serde(default)] winner_id: Option<i64>, #[serde(default)] expired: bool }
+        self.contracts.values().any(|c| matches!(c.status.as_str(), "Outstanding" | "InProgress") && c.item_ids.contains(&item_id))
+            || self.industry_jobs.values().any(|j| matches!(j.status.as_str(), "Active" | "Paused") && j.blueprint_item_id == item_id)
+            || self.owner_notes.values().any(|n| match n.character_id {
+                -73 => serde_json::from_str::<TradeRef>(&n.note).is_ok_and(|t| {
+                    !t.completed && !t.cancelled && (t.items_a.iter().any(|(id, _)| *id == item_id) || t.items_b.iter().any(|(id, _)| *id == item_id))
+                }),
+                -74 => serde_json::from_str::<RaffleRef>(&n.note).is_ok_and(|r| !r.expired && r.winner_id.is_none() && r.item_id == item_id),
+                _ => false,
+            })
     }
 
     /// Returns `true` if `item_id` is saved in `StructureExtendedState.previous_ship_by_structure`
@@ -1049,7 +1053,8 @@ impl WorldStateSnapshot {
             && item.flag == InventoryFlag::Hangar;
         let in_ship_cargo = active_ship_id
             .filter(|&sid| {
-                self.is_ship_colocated_with_character(char_id, sid, station_or_struct_id)
+                !self.is_item_locked_in_contract_or_job(sid)
+                    && self.is_ship_colocated_with_character(char_id, sid, station_or_struct_id)
             })
             .is_some()
             && Some(item.location_id) == active_ship_id

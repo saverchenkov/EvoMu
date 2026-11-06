@@ -190,6 +190,11 @@ pub fn handle(
             };
             let assignee_id = p_field("assigneeID").or_else(|| args.get(2)).and_then(|a| a.as_i64())
                 .or_else(|| kwargs.get("assigneeID").and_then(|v| v.as_i64())).unwrap_or(0);
+            let availability = if assignee_id > 0 && availability.eq_ignore_ascii_case("Public") {
+                "Personal".to_string()
+            } else {
+                availability
+            };
             let num_days = p_field("numDays").or_else(|| args.get(4)).and_then(|a| a.as_i64()).filter(|&d| d > 0).map(|d| d.clamp(1, 28) as u32)
                 .unwrap_or(1);
             let duration_secs = if let Some(exp_min) = p_field("expireTime").or_else(|| args.get(3)).and_then(|a| a.as_i64()).filter(|&m| m > 0)

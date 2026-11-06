@@ -68,7 +68,7 @@ pub fn sha256_bytes(data: &[u8]) -> [u8; 32] {
     out
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -1290,12 +1290,21 @@ impl WorldRepository {
             }
             let payload_bytes =
                 base64url_decode_no_pad(payload_b64).map_err(|_| DbError::InvalidCredentials)?;
+            let payload_val: serde_json::Value =
+                serde_json::from_slice(&payload_bytes).map_err(|_| DbError::InvalidCredentials)?;
+            let payload_obj = payload_val
+                .as_object()
+                .ok_or(DbError::InvalidCredentials)?;
+            if crate::gateway_tokens::payload_contains_forbidden_privilege_claim(payload_obj, true) {
+                return Err(DbError::InvalidCredentials);
+            }
             let parsed: SsoTokenClaims =
                 serde_json::from_slice(&payload_bytes).map_err(|_| DbError::InvalidCredentials)?;
             if parsed.iat > now_unix
                 || now_unix >= parsed.exp
                 || parsed.iss != "https://login.eveonline.com"
                 || !parsed.aud.iter().any(|a| a == "EVE Online")
+                || parsed.sub != format!("CHARACTER:EVE:{}", parsed.character_id)
                 || rt.revoked_jtis.contains(&parsed.jti)
             {
                 return Err(DbError::InvalidCredentials);

@@ -303,7 +303,8 @@ fn dispatch_char_corp_and_public_contracts_items_and_bids() {
     let (ctx, _token, char_id, corp_id, _planet_id) = seed_full_esi_context();
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(c) = snap.contracts.get_mut(&66_001) {
-            c.assignee_id = char_id;
+            c.bid_history
+                .push((char_id, eve_db::IskCents::from_isk(125_000), 1_700_003_000));
         }
     });
     let char_str = char_id.to_string();

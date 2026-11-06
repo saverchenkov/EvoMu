@@ -306,6 +306,11 @@ async fn http2_grpc_requests_notices_stream_jwt_variants_and_wire_coercion_mutan
     });
 
     // 1. Auth edge cases: empty bearer, wrong alg, expired local-dev JWT, invalid signature -> status 16
+    let forged_dev_jwt = sign_hs256_jwt(
+        r#"{"alg":"HS256","typ":"JWT"}"#,
+        r#"{"sub":"USER:EVE:1","tenant":"tranquility"}"#,
+        b"dev",
+    );
     let expired_jwt = sign_hs256_jwt(
         r#"{"alg":"HS256","typ":"JWT"}"#,
         r#"{"sub":"USER:EVE:1","exp":1}"#,
@@ -323,6 +328,7 @@ async fn http2_grpc_requests_notices_stream_jwt_variants_and_wire_coercion_mutan
     );
     for auth_val in [
         "Bearer ",
+        &format!("Bearer {forged_dev_jwt}"),
         &format!("Bearer {expired_jwt}"),
         &format!("Bearer {wrong_alg_jwt}"),
         &format!("Bearer {bad_sig_jwt}"),
@@ -370,11 +376,10 @@ async fn http2_grpc_requests_notices_stream_jwt_variants_and_wire_coercion_mutan
         .db
         .exchange_pkce_code(&code, "evomu-test", verifier, now_unix)
         .unwrap();
-    let char_dev_jwt = sign_hs256_jwt(
-        r#"{"alg":"HS256","typ":"JWT"}"#,
-        r#"{"sub":"CHARACTER:EVE:90000001","tenant":"tranquility"}"#,
-        b"dev",
-    );
+    let char_dev_jwt = ctx
+        .db
+        .issue_gateway_dev_token(uid_pkce, Some(90_000_001), "tranquility", now_unix + 3600, now_unix)
+        .unwrap();
     assert!(
         ctx.quasar_gateway.descriptors.get_message("google.protobuf.Empty").is_some()
             || NOTICE_CACHE_MAX_SIZE_BYTES == 2_000_000

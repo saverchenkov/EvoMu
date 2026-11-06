@@ -638,7 +638,11 @@ async fn quasar_grpc_error_branches_compression_and_unauthenticated_paths() {
     }
 
     // 3. Gzip and Deflate compressed frames on Events/Publish
-    let dev_jwt = fabricate_local_dev_user_token("tranquility", 1);
+    let now_u = ctx.now_unix();
+    let dev_jwt = ctx
+        .db
+        .issue_gateway_dev_token(1, None, "tranquility", now_u + 3600, now_u)
+        .unwrap();
     for encoding in ["gzip", "deflate"] {
         let req = Request::builder()
             .method("POST")
