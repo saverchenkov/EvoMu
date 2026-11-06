@@ -525,6 +525,18 @@ async fn handle_npcs_drones_launch_return_engage_scoop_and_salvage_branches() {
     let _ = sys_handle
         .spawn_ball(victim_ball)
         .await;
+    let _ = sys_handle
+        .add_target_lock(
+            session.ship_id.unwrap(),
+            eve_destiny::TargetLock {
+                target_id: pvp_victim,
+                lock_time_ms: 1_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await;
     handle_npcs_drones(
         &ctx,
         &mut session,

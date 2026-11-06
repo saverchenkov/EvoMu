@@ -228,7 +228,7 @@ async fn tactical_projected_assistance_tsb_auto_target_and_wormhole_guards() {
     ctx.crimewatch.write().unwrap().get_or_create(c2).criminal_flag_until_unix = 1_800_000_600;
     apply_projected_remote_assistance(&ctx, c1, s1, 1_200_010, &rsb_type, &rsb_state, Some(s2), 60_000.0).unwrap();
     apply_projected_remote_assistance(&ctx, c1, s1, 1_200_011, &rtc_type, &rtc_state, Some(s2), 40_000.0).unwrap();
-    assert!(ctx.crimewatch.read().unwrap().states.get(&c1).is_some_and(|st| st.suspect_flag_until_unix >= 1_800_000_300));
+    assert!(ctx.crimewatch.read().unwrap().states.get(&c1).is_some_and(|st| st.criminal_flag_until_unix >= 1_800_000_900));
 
     let mut tur_attrs = HashMap::from([(54u16, 10_000.0), (160u16, 0.05)]);
     apply_projected_rtc_to_module_attrs(&ctx, s2, &mut tur_attrs);
@@ -320,9 +320,9 @@ async fn tactical_superweapons_lance_entosis_and_command_bursts() {
 
     assert_eq!(activate_superweapon_with_args(&ctx, c1, titan_id, null_sys, 1_300_010, "ActivateSinglePointTargetedModule", None, &[]).await.unwrap_err().code, "TargetRequired");
     let sys = ctx.systems.get_or_spawn(null_sys);
-    let _ = sys.add_target_lock(titan_id, TargetLock { target_id: victim_id, lock_time_ms: 1_000.0, remaining_lock_ms: 0.0, locked: true, max_range_m: Some(200_000.0) }).await;
+    let _ = sys.add_target_lock(titan_id, TargetLock { target_id: lancer_id, lock_time_ms: 1_000.0, remaining_lock_ms: 0.0, locked: true, max_range_m: Some(200_000.0) }).await;
     put_item(&ctx, 1_300_020, 16274, c1, titan_id, InventoryFlag::SpecializedFuelBay, 1_000, false);
-    assert!(activate_superweapon_with_args(&ctx, c1, titan_id, null_sys, 1_300_010, "ActivateSinglePointTargetedModule", Some(victim_id), &[]).await.is_ok());
+    assert!(activate_superweapon_with_args(&ctx, c1, titan_id, null_sys, 1_300_010, "ActivateSinglePointTargetedModule", Some(lancer_id), &[]).await.is_ok());
 
     put_item(&ctx, 1_300_021, 16274, c2, lancer_id, InventoryFlag::SpecializedFuelBay, 1_000, false);
     let dir_arg = PyRep::Tuple(vec![PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)]);
@@ -332,6 +332,7 @@ async fn tactical_superweapons_lance_entosis_and_command_bursts() {
     bp.add_ball(Ball { id: lancer_id, type_id: 997_011, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 100.0, inertia: 1.0, mass: 1e8, radius: 1000.0, speed_fraction: 0.0, mode: MovementMode::Stop });
     bp.add_ball(Ball { id: victim_id, type_id: 997_021, position: DVec3::new(20_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 1.0, mass: 1e6, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop });
     bp.ball_slim_meta.insert(victim_id, SlimItemMeta { group_id: 25, category_id: 6, owner_id: 90_000_003, ..Default::default() });
+    bp.combat_states.insert(lancer_id, CombatState { is_tethered: true, ..Default::default() });
     bp.combat_states.insert(victim_id, CombatState { shield_hp: 0.0, max_shield_hp: 0.0, armor_hp: 10_000.0, max_armor_hp: 10_000.0, structure_hp: 10_000.0, max_structure_hp: 10_000.0, signature_radius: 250.0, is_tethered: true, ..Default::default() });
     let cycle = ActiveModuleCycle {
         ship_id: lancer_id, module_id: 1_300_011, module_type_id: 997_013, owner_char_id: Some(c2),
@@ -342,7 +343,9 @@ async fn tactical_superweapons_lance_entosis_and_command_bursts() {
     let mut actions: Vec<PendingCycleAction> = Vec::new();
     let mut destroyed = Vec::new();
     fire_lance_warmup_in_ballpark(&mut bp, &cycle, &Some(Arc::clone(&ctx.sde)), &Some(Arc::clone(&ctx.db)), &ctx.tactical_state, &mut actions, &mut destroyed);
-    assert!(!bp.combat_states[&victim_id].is_tethered);
+    assert!(!bp.combat_states[&lancer_id].is_tethered);
+    assert_eq!(bp.combat_states[&victim_id].armor_hp, 10_000.0);
+    bp.combat_states.get_mut(&victim_id).unwrap().is_tethered = false;
     fire_lance_warmup_in_ballpark(&mut bp, &cycle, &Some(Arc::clone(&ctx.sde)), &Some(Arc::clone(&ctx.db)), &ctx.tactical_state, &mut actions, &mut destroyed);
     assert!(bp.combat_states[&victim_id].armor_hp < 10_000.0);
 

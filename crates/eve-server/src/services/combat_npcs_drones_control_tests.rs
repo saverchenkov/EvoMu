@@ -51,7 +51,22 @@ async fn drone_engage_combat_logi_ewar_and_step_engaged_drones() {
     spawn_test_ball(&ctx, sys_id, enemy_id, 587, DVec3::new(4_000.0, 0.0, 0.0), 2_000.0).await;
     spawn_test_ball(&ctx, sys_id, far_id, 587, DVec3::new(90_000.0, 0.0, 0.0), 2_000.0).await;
 
-    // Give enemy a lock so ECM clears it
+    // Give ship_id locks on friend_id and enemy_id, and give enemy_id a lock on ship_id so ECM clears it
+    for tid in [friend_id, enemy_id] {
+        sys_handle
+            .add_target_lock(
+                ship_id,
+                eve_destiny::TargetLock {
+                    target_id: tid,
+                    lock_time_ms: 1_000.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
     sys_handle
         .add_target_lock(
             enemy_id,

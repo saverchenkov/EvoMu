@@ -156,6 +156,7 @@ async fn test_plan_c7_sentry_scoop_and_same_grid_recall_and_abandon() {
     assert_eq!(with_combat_runtime(&ctx, |rt| rt.active_drones_in_space[&mob_ball_id].activity_state), 0);
     let oor_home = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdReturnHome", &[PyRep::List(vec![PyRep::Integer(mob_ball_id)])], &kw).await.expect("CmdReturnHome returns count of recalled drones");
     assert_eq!(oor_home, PyRep::Integer(0));
+    let _ = sys_handle.add_target_lock(ship_id, eve_destiny::TargetLock { target_id: dummy_target_id, lock_time_ms: 1_000.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await;
     let engage_oor = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdEngage", &[PyRep::List(vec![PyRep::Integer(mob_ball_id)]), PyRep::Integer(dummy_target_id)], &kw)
         .await.expect("CmdEngage skips out-of-range drone");
     assert_eq!(dict_get(&engage_oor, "totalDamageDealt"), Some(&PyRep::Real(0.0)));
@@ -361,6 +362,7 @@ async fn test_plan_c7_gecko_augmented_mutated_subverted_drones() {
     ).await.expect("2 x 20 Mbit/s Subverted drones must launch");
     let sub_balls: Vec<i64> = match launch_two { PyRep::List(v) => v.iter().filter_map(PyRep::as_i64).collect(), _ => panic!() };
     assert_eq!(sub_balls.len(), 2);
+    let _ = sys_handle.add_target_lock(ship_id, eve_destiny::TargetLock { target_id, lock_time_ms: 1_000.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await;
     let sub_eng = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdEngage", &[PyRep::Integer(target_id)], &kw).await.unwrap();
     assert!(dict_get(&sub_eng, "totalDamageDealt").and_then(PyRep::as_f64).unwrap() > 0.0);
     for bid in sub_balls {
@@ -433,6 +435,7 @@ async fn test_plan_c7_gecko_augmented_mutated_subverted_drones() {
         },
         fast_cs,
     ).await;
+    let _ = sys_handle.add_target_lock(ship_id, eve_destiny::TargetLock { target_id, lock_time_ms: 1_000.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await;
     let launch_pair = dispatch_combat_rpc(&ctx, &mut sess, "ship", "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(base_hob_id), PyRep::Integer(track_hob_id)])], &kw).await.unwrap();
     let (b_ball, t_ball) = match launch_pair { PyRep::List(v) => (v[0].as_i64().unwrap(), v[1].as_i64().unwrap()), _ => panic!() };
     let b_eng = dispatch_combat_rpc(&ctx, &mut sess, "entity", "CmdEngage", &[PyRep::List(vec![PyRep::Integer(b_ball)]), PyRep::Integer(target_id)], &kw).await.unwrap();

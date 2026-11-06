@@ -2636,6 +2636,7 @@ async fn notify_batch8_ammo_drones_and_fleet_events() {
         PyRep::List(items) => items[0].as_i64().expect("drone ball id"),
         _ => panic!("expected list from LaunchDrones"),
     };
+    let _ = ctx.systems.get_or_spawn(sess_a.solar_system_id.unwrap()).add_target_lock(ship_a, eve_destiny::TargetLock { target_id: ship_b, lock_time_ms: 1_000.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await;
     let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
 
     rpc(

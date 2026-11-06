@@ -704,7 +704,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         let dist = npc_ball.position.distance(target_ball.position);
 
         // 3. Apply NPC EWAR & 4. Archetype Weapon Application synchronously on Ballpark
-        {
+        let did_aggress = {
             let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
             let mut st_guard = sys_handle.actor_state.write().unwrap_or_else(|e| e.into_inner());
             let st = &mut *st_guard;
@@ -828,14 +828,21 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             drop(st_guard);
             drop(bp);
             crate::combat::npc_ai::handle_npc_ai_ball_destructions(ctx, solar_system_id, destroyed_in_tick);
-        }
-        if let Some(target_char_id) = ctx.db.with_snapshot(|snap| {
-            snap.characters
-                .values()
-                .find(|c| c.active_ship_id == target_id)
-                .map(|c| c.character_id)
-        }) {
-            crate::sp6_lifecycle::record_npc_aggression_timer(ctx, target_char_id, ctx.now_unix());
+            can_fire || active_npc_scram_targets.contains(&target_id)
+        };
+        if did_aggress {
+            let now_u = ctx.now_unix();
+            let min_fresh = now_u.saturating_add(crate::sp6_lifecycle::NPC_TIMER_SECS.saturating_sub(5));
+            if let Some(target_char_id) = ctx.db.with_snapshot(|snap| {
+                let cid = snap.characters.values().find(|c| c.active_ship_id == target_id).map(|c| c.character_id)?;
+                if snap.sp6_lifecycle.disconnected_ships.get(&cid).is_some_and(|d| !d.removed_from_space) {
+                    return None;
+                }
+                let sp_u = snap.sp6_lifecycle.npc_timers_until.get(&cid).copied().unwrap_or(0);
+                (snap.sp6_lifecycle.safe_logoffs.contains_key(&cid) || sp_u < min_fresh).then_some(cid)
+            }) {
+                crate::sp6_lifecycle::record_npc_aggression_timer(ctx, target_char_id, now_u);
+            }
         }
 
         with_mut_combat_ephemeral(ctx, |rt| {

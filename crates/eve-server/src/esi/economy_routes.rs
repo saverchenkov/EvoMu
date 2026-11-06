@@ -458,16 +458,14 @@ pub fn dispatch_economy_route(
                     let Some(meta) = snap.market_order_meta.get(&o.order_id) else {
                         continue;
                     };
+                    // CCP ESI restricts Upwell structure market orders to authenticated
+                    // `GET /markets/structures/{structure_id}` (`#524`); public regional
+                    // `/markets/{region_id}/orders` only exposes NPC station orders.
                     let Some(system_id) = ctx
                         .sde
                         .stations
                         .get(&o.station_id)
                         .map(|st| st.solar_system_id as i64)
-                        .or_else(|| {
-                            snap.structures
-                                .get(&o.station_id)
-                                .map(|st| st.solar_system_id as i64)
-                        })
                     else {
                         continue;
                     };
@@ -575,7 +573,11 @@ pub fn dispatch_economy_route(
                 let mut tids: Vec<i64> = snap
                     .market_orders
                     .values()
-                    .filter(|o| o.region_id == reg_u32 && o.vol_remaining > 0)
+                    .filter(|o| {
+                        o.region_id == reg_u32
+                            && o.vol_remaining > 0
+                            && ctx.sde.stations.contains_key(&o.station_id)
+                    })
                     .map(|o| o.type_id as i64)
                     .collect();
                 tids.sort_unstable();

@@ -196,8 +196,11 @@ pub fn register_crab_beacon(
 
 /// Returns `true` while `ship_id` has an active 4-minute CRAB beacon link (disallowing warp, cloak, and tether).
 pub fn is_ship_crab_linked(ctx: &ServerContext, ship_id: i64, now_unix: u64) -> bool {
+    if !has_special_sites_state(ctx) {
+        return false;
+    }
     let effective_now = now_unix.max(ctx.now_unix());
-    with_pve_special_reg(ctx, |reg| {
+    read_pve_special_reg(ctx, |reg| {
         let now = effective_now.max(spec_now_sec(reg));
         reg.crab_beacons.values().any(|b| {
             b.phase == CrabBeaconPhase::Linking

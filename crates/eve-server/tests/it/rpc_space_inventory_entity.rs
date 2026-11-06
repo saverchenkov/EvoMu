@@ -570,6 +570,7 @@ async fn test_entity_drone_space_commands() {
         .await;
 
     // 1. rpc:entity.CmdEngage: command drones to engage hostile target
+    let _ = sys_handle.add_target_lock(ship_id, eve_destiny::TargetLock { target_id: target_ball_id, lock_time_ms: 1_000.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await;
     let engage_res = rpc_call(
         &ctx,
         &mut sess,

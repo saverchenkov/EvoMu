@@ -174,7 +174,7 @@ pub fn handle(
             }
             None
         }
-        ("charUnboundMgr", "PrepareCharacterForDelete") => Some(prepare(ctx, user_id, args)),
+        ("charUnboundMgr", "PrepareCharacterForDelete") => Some(prepare(ctx, session, user_id, args)),
         ("charUnboundMgr", "CancelCharacterDeletePrepare") => Some(cancel(ctx, user_id, args)),
         ("charUnboundMgr", "DeleteCharacter") => Some(delete(ctx, session, user_id, args)),
         ("charUnboundMgr", "GetQAStarterSystemIDs") => {
@@ -276,9 +276,95 @@ fn handle_toggle_validation(_session: &SessionState, _args: &[PyRep]) -> Option<
     Some(Ok(PyRep::Bool(true)))
 }
 
-fn prepare(ctx: &ServerContext, user_id: u64, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+fn has_active_combat_timer(ctx: &ServerContext, char_id: i64, now: u64) -> bool {
+    ctx.crimewatch
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .states
+        .get(&char_id)
+        .is_some_and(|cw| {
+            cw.is_weapon_timer_active(now)
+                || cw.is_pvp_active(now)
+                || cw.is_criminal(now)
+                || now < cw.suspect_flag_until_unix
+        })
+}
+
+fn validate_character_safe_for_biomass(
+    ctx: &ServerContext,
+    session: &SessionState,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    now: u64,
+    has_combat_timer: bool,
+) -> Result<(), BridgeRpcError> {
+    let ch = snap.characters.get(&char_id).ok_or_else(|| {
+        err(
+            "CharacterNotFound",
+            format!("Character {char_id} not found"),
+        )
+    })?;
+    if ch.station_id.is_none() && ch.structure_id.is_none() {
+        return Err(err(
+            "CharacterMustBeDocked",
+            "Character must be docked in a station or structure before biomassing",
+        ));
+    }
+    if session.character_id == Some(char_id)
+        && session.ship_id.is_some()
+        && session.station_id.is_none()
+        && session.structure_id.is_none()
+    {
+        return Err(err(
+            "CharacterMustBeDocked",
+            "Active character session is undocked in space",
+        ));
+    }
+    if ch.active_ship_id > 0 {
+        if let Some(ship_item) = snap.items.get(&ch.active_ship_id) {
+            if u32::try_from(ship_item.location_id)
+                .ok()
+                .is_some_and(|sid| ctx.sde.solar_systems.contains_key(&sid))
+            {
+                return Err(err(
+                    "CharacterMustBeDocked",
+                    "Character's active ship is currently undocked in space",
+                ));
+            }
+        }
+    }
+    if snap
+        .sp6_lifecycle
+        .disconnected_ships
+        .get(&char_id)
+        .is_some_and(|d| !d.removed_from_space && now < d.remove_at_unix)
+        || snap.sp6_lifecycle.safe_logoffs.contains_key(&char_id)
+        || snap.sp6_lifecycle.self_destructs.contains_key(&char_id)
+        || snap.sp6_lifecycle.abyssal_sessions.contains_key(&char_id)
+    {
+        return Err(err(
+            "CharacterInSpace",
+            "Character still has an active or disconnecting ship in space",
+        ));
+    }
+    if has_combat_timer {
+        return Err(err(
+            "CombatTimerActive",
+            "Cannot biomass a character while Crimewatch combat or aggression timers are active",
+        ));
+    }
+    Ok(())
+}
+
+fn prepare(
+    ctx: &ServerContext,
+    session: &SessionState,
+    user_id: u64,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
     let char_id = owned_char_arg(ctx, user_id, args, "PrepareCharacterForDelete")?;
     let now = ctx.now_unix();
+    let has_combat_timer = has_active_combat_timer(ctx, char_id, now);
     ctx.db.try_with_mut_snapshot(|snap| {
         if snap.corporations.values().any(|c| c.ceo_id == char_id) {
             return Err(err(
@@ -286,6 +372,7 @@ fn prepare(ctx: &ServerContext, user_id: u64, args: &[PyRep]) -> Result<PyRep, B
                 "A corporation CEO cannot be biomassed; transfer CEO role or dissolve the corporation first",
             ));
         }
+        validate_character_safe_for_biomass(ctx, session, snap, char_id, now, has_combat_timer)?;
         let mut store = load_store(snap);
         store.delete_prepared_unix.insert(char_id, now);
         save_store(snap, &store);
@@ -311,7 +398,12 @@ fn delete(ctx: &ServerContext, session: &mut SessionState, user_id: u64, args: &
         .ok_or_else(|| err("SdeMissing", "Doomheim corporation not found in SDE"))?;
     let now = ctx.now_unix();
     let is_forced = session.has_gm_role();
-    ctx.db.try_with_mut_snapshot(|snap| {
+    let has_combat_timer = if is_forced {
+        false
+    } else {
+        has_active_combat_timer(ctx, char_id, now)
+    };
+    let (ch_sys_id, ch_ship_id) = ctx.db.try_with_mut_snapshot(|snap| {
         if snap.corporations.values().any(|c| c.ceo_id == char_id) {
             return Err(err(
                 "CannotDeleteCorpCEO",
@@ -340,16 +432,40 @@ fn delete(ctx: &ServerContext, session: &mut SessionState, user_id: u64, args: &
                 ),
             ));
         }
-        store.delete_prepared_unix.remove(&char_id);
-        save_store(snap, &store);
-        if !snap.characters.contains_key(&char_id) {
+        if !is_forced {
+            validate_character_safe_for_biomass(ctx, session, snap, char_id, now, has_combat_timer)?;
+        }
+        let Some(ch_rec) = snap.characters.get(&char_id) else {
             return Err(err(
                 "CharacterNotFound",
                 format!("Character {char_id} not found"),
             ));
-        }
-        Ok(())
+        };
+        let sys_and_ship = (ch_rec.solar_system_id, ch_rec.active_ship_id);
+        store.delete_prepared_unix.remove(&char_id);
+        save_store(snap, &store);
+        snap.sp6_lifecycle.disconnected_ships.remove(&char_id);
+        snap.sp6_lifecycle.safe_logoffs.remove(&char_id);
+        snap.sp6_lifecycle.self_destructs.remove(&char_id);
+        snap.sp6_lifecycle.abyssal_sessions.remove(&char_id);
+        Ok(sys_and_ship)
     })?;
+    if ch_ship_id > 0
+        && ctx.systems.active_systems_count() > 0
+        && tokio::runtime::Handle::try_current().is_ok()
+    {
+        for (_, h) in ctx.systems.active_system_handles() {
+            let mut bp = h.ballpark.write().unwrap_or_else(|e| e.into_inner());
+            bp.balls.remove(&ch_ship_id);
+            bp.combat_states.remove(&ch_ship_id);
+        }
+        crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
+            ctx, char_id, ch_ship_id, ch_sys_id,
+        );
+        crate::services::inventory_fitting::fitting_cyno_portal::on_cyno_ship_destroyed(
+            ctx, ch_ship_id,
+        );
+    }
 
     // Remove character from all fleets and chat channels (`feat:lifecycle.character-biomass-cleanup`).
     crate::services::fleet_social::fleet_social_notify::on_character_logout(ctx, char_id);
@@ -364,7 +480,10 @@ fn delete(ctx: &ServerContext, session: &mut SessionState, user_id: u64, args: &
         };
         let old_corp_id = ch_snap.corporation_id;
         let char_name = ch_snap.name.clone();
-        let home_st = ch_snap.station_id.unwrap_or(ch_snap.home_station_id);
+        let home_st = ch_snap
+            .station_id
+            .or(ch_snap.structure_id)
+            .unwrap_or(ch_snap.home_station_id);
         let mut escrow_and_reward_refund = eve_db::IskCents(0);
 
         // 1. Cancel personal market orders; buy-order escrow and sell-order items follow the asset rule.
@@ -496,11 +615,19 @@ fn delete(ctx: &ServerContext, session: &mut SessionState, user_id: u64, args: &
             }
         }
 
-        // 3. Resolve industry jobs and planetary colonies.
+        // 3. Resolve personal industry jobs and planetary colonies (corporate jobs continue `#519`).
         let job_ids: Vec<i64> = snap
             .industry_jobs
             .values()
-            .filter(|j| j.installer_id == char_id)
+            .filter(|j| {
+                let is_corp_job = crate::services::industry_pi::load_job_cost_meta(snap, j.job_id)
+                    .is_some_and(|m| m.use_corp || (m.owner_id > 0 && m.owner_id != char_id))
+                    || snap
+                        .items
+                        .get(&j.blueprint_item_id)
+                        .is_some_and(|bp| bp.owner_id != char_id);
+                j.installer_id == char_id && !is_corp_job
+            })
             .map(|j| j.job_id)
             .collect();
         for jid in job_ids {
@@ -613,6 +740,25 @@ fn delete(ctx: &ServerContext, session: &mut SessionState, user_id: u64, args: &
             .collect();
         locked_contract_items.extend(child_locked);
 
+        let mut struct_ext =
+            crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        let char_wrap_ids: std::collections::HashSet<i64> = struct_ext
+            .asset_safety_wraps
+            .values()
+            .filter(|w| !w.is_corp && w.owner_id == char_id)
+            .map(|w| w.wrap_id)
+            .collect();
+        // Items inside active Asset Safety wraps (`flag == Locked`) belong to `char_id` and must
+        // NOT be misclassified as third-party contract items (`#519`).
+        for wid in &char_wrap_ids {
+            locked_contract_items.remove(wid);
+        }
+        locked_contract_items.retain(|iid| {
+            snap.items
+                .get(iid)
+                .is_none_or(|it| !char_wrap_ids.contains(&it.location_id))
+        });
+
         if is_player_corp {
             let mut office_stations: Vec<i64> = snap
                 .items
@@ -622,10 +768,19 @@ fn delete(ctx: &ServerContext, session: &mut SessionState, user_id: u64, args: &
                 .collect();
             office_stations.sort_unstable();
             if office_stations.is_empty() {
-                // No corporate office: all character assets are destroyed.
+                // No corporate office: all character assets and asset-safety wraps are destroyed.
+                for wid in &char_wrap_ids {
+                    struct_ext.asset_safety_wraps.remove(wid);
+                }
                 snap.items
                     .retain(|id, i| i.owner_id != char_id || locked_contract_items.contains(id));
             } else {
+                for wid in &char_wrap_ids {
+                    if let Some(w) = struct_ext.asset_safety_wraps.get_mut(wid) {
+                        w.owner_id = old_corp_id;
+                        w.is_corp = true;
+                    }
+                }
                 let owned_ids: std::collections::HashSet<i64> = snap
                     .items
                     .values()
@@ -635,18 +790,32 @@ fn delete(ctx: &ServerContext, session: &mut SessionState, user_id: u64, args: &
                 for item in snap.items.values_mut() {
                     if item.owner_id == char_id && !locked_contract_items.contains(&item.item_id) {
                         item.owner_id = old_corp_id;
-                        if !owned_ids.contains(&item.location_id) {
-                            let target_st = if office_stations.contains(&item.location_id) {
-                                item.location_id
-                            } else {
-                                office_stations[0]
-                            };
-                            item.location_id = target_st;
-                            item.flag = eve_db::InventoryFlag::CorpSAG1;
+                        if char_wrap_ids.contains(&item.item_id)
+                            || char_wrap_ids.contains(&item.location_id)
+                        {
+                            // Preserve Asset Safety wrap and wrapped contents at their exact
+                            // `location_id` and `flag` without bypassing retrieval fees (`#519`).
+                        } else if !owned_ids.contains(&item.location_id) {
+                            // Keep items at their existing `location_id` without cross-universe
+                            // teleportation (`#519`).
+                            if office_stations.contains(&item.location_id) {
+                                item.flag = eve_db::InventoryFlag::CorpSAG1;
+                            } else if !u32::try_from(item.location_id)
+                                .ok()
+                                .is_some_and(|sid| ctx.sde.solar_systems.contains_key(&sid))
+                            {
+                                item.flag = eve_db::InventoryFlag::Impounded;
+                            }
                         }
                         item.version += 1;
                     }
                 }
+            }
+            if !char_wrap_ids.is_empty() {
+                crate::services::station_structure::structure_upwell_ops::save_ext_state(
+                    snap,
+                    &struct_ext,
+                );
             }
 
             let mut remaining_members = Vec::new();
@@ -708,7 +877,16 @@ fn delete(ctx: &ServerContext, session: &mut SessionState, user_id: u64, args: &
                 snap.mail_timestamps.insert(mid, now);
             }
         } else {
-            // NPC corporation member: all assets and wallet ISK are destroyed.
+            // NPC corporation member: all assets, asset-safety wraps, and wallet ISK are destroyed.
+            if !char_wrap_ids.is_empty() {
+                for wid in &char_wrap_ids {
+                    struct_ext.asset_safety_wraps.remove(wid);
+                }
+                crate::services::station_structure::structure_upwell_ops::save_ext_state(
+                    snap,
+                    &struct_ext,
+                );
+            }
             snap.items
                 .retain(|id, i| i.owner_id != char_id || locked_contract_items.contains(id));
         }
@@ -1051,5 +1229,7 @@ fn handle_char_mgr(
     }
 }
 
-#[cfg(test)] #[path = "character_lifecycle_tests.rs"] mod character_lifecycle_tests;
+#[cfg(test)]
+#[path = "character_lifecycle_tests.rs"]
+mod character_lifecycle_tests;
 

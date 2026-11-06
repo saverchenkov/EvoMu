@@ -469,6 +469,220 @@ pub(crate) async fn on_warp_initiated_hooks(
     crate::sp6_lifecycle::abandon_drones_on_warp_sync(ctx, char_id, ship_id, sys_id);
 }
 
+/// Evaluates origin/destination warp-disruption bubbles in `sys_handle` (`#520`):
+/// - Rejects warp initiation if a non-bubble-immune ship is inside a warp bubble at `origin`.
+/// - Adjusts `dest_pos` to the earliest bubble drag/stop intercept point along `(origin, dest_pos)`.
+pub(crate) fn check_warp_interdiction_and_adjust_dest(
+    sys_handle: &crate::system_actor::SystemHandle,
+    ship_id: i64,
+    origin: DVec3,
+    dest_pos: DVec3,
+) -> Result<DVec3, BridgeRpcError> {
+    let bp = sys_handle
+        .ballpark
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    if bp.is_ball_bubble_immune(ship_id) {
+        return Ok(dest_pos);
+    }
+    if bp.warp_bubble_mgr.is_scrambled_at(origin) {
+        return Err(BridgeRpcError {
+            code: "WarpScrambled".into(),
+            message: "WarpScrambled: Warp drive disabled by warp disruption bubble".into(),
+        });
+    }
+    if let Some((_bid, intercept_pos)) = bp.warp_bubble_mgr.check_interception(origin, dest_pos) {
+        return Ok(intercept_pos);
+    }
+    Ok(dest_pos)
+}
+
+/// Executes full warp validation, bubble interdiction, capacitor deduction, and warp initiation
+/// for `custom_agency_provider.warp_to_content` (`#520`).
+pub(crate) async fn execute_agency_content_warp(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    current_ball: &eve_destiny::Ball,
+    raw_dest_pos: DVec3,
+) -> Result<(), BridgeRpcError> {
+    validate_pre_warp_common(ctx, char_id, ship_id, sys_id, sys_handle).await?;
+    ensure_not_in_active_warp(&current_ball.mode)?;
+    crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(
+        ctx, char_id, sys_id, ship_id,
+    )
+    .await;
+
+    let is_scrambled = sys_handle.is_ball_scrambled_sync(ship_id)
+        || sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false)
+        || sys_handle
+            .get_combat_state(ship_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|cs| cs.is_warp_scrambled());
+    if is_scrambled {
+        return Err(BridgeRpcError {
+            code: "WarpScrambled".into(),
+            message: "WarpScrambled: Warp drive disabled by warp disruption/scrambler effect"
+                .into(),
+        });
+    }
+
+    let mut is_covert_cloaked = false;
+    if let Ok(Some(cs_check)) = sys_handle.get_combat_state(ship_id).await {
+        if cs_check.is_cloaked
+            && cs_check.gate_cloak_remaining_ticks == 0
+            && !cs_check.is_covert_cloak
+        {
+            return Err(BridgeRpcError {
+                code: "CloakedCannotWarp".into(),
+                message: "Cannot initiate warp while cloaked without a Covert Ops Cloaking Device"
+                    .into(),
+            });
+        }
+        is_covert_cloaked = cs_check.is_cloaked
+            && cs_check.is_covert_cloak
+            && cs_check.gate_cloak_remaining_ticks == 0;
+    }
+
+    crate::services::pve_dungeon_runtime::check_deadspace_warp_allowed(
+        ctx,
+        sys_id,
+        current_ball.position.to_array(),
+        raw_dest_pos.to_array(),
+        raw_dest_pos.to_array(),
+    )?;
+    crate::services::pve_ess_reserve_banks::check_ess_warp_destination_allowed(
+        ctx,
+        sys_id,
+        raw_dest_pos,
+        raw_dest_pos,
+    )
+    .await?;
+    crate::services::pve_dungeon_runtime_rpc::check_warp_target_blocked_by_gated_dungeon_room(
+        ctx,
+        sys_id,
+        raw_dest_pos,
+        None,
+    )?;
+
+    let mut dest_pos = check_warp_interdiction_and_adjust_dest(
+        sys_handle,
+        ship_id,
+        current_ball.position,
+        raw_dest_pos,
+    )?;
+    let requested_dist_m = current_ball.position.distance(dest_pos);
+    let warp_dir = (dest_pos - current_ball.position).normalize_or_zero();
+
+    let (base_warp_cap_need, sde_max_cap) = ctx
+        .sde
+        .types
+        .get(&current_ball.type_id)
+        .map(|t| {
+            let wcn = t.default_attributes.get(&153).copied().unwrap_or(1.24e-6);
+            let cap = t.default_attributes.get(&482).copied().unwrap_or(250.0);
+            (wcn, cap)
+        })
+        .unwrap_or((1.24e-6, 250.0));
+    let wdo_lvl = ctx.db.with_snapshot(|snap| {
+        snap.skills
+            .get(&char_id)
+            .and_then(|m| m.get(&3455))
+            .map(|s| s.level.min(5))
+            .unwrap_or(0)
+    });
+    let eff_warp_cap_need = base_warp_cap_need * (1.0 - 0.10 * (wdo_lvl as f64));
+    let cap_per_m = (eff_warp_cap_need * current_ball.mass) / 149_597_870_700.0;
+    let req_cap = cap_per_m * requested_dist_m;
+
+    if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
+        if (cs.max_capacitor - 250.0).abs() < 1e-6
+            && (cs.capacitor - 250.0).abs() < 1e-6
+            && sde_max_cap > 250.0
+        {
+            cs.max_capacitor = sde_max_cap;
+            cs.capacitor = sde_max_cap;
+        }
+        if cs.capacitor < req_cap {
+            let affordable_dist_m = if cap_per_m > 0.0 {
+                cs.capacitor / cap_per_m
+            } else {
+                requested_dist_m
+            };
+            if affordable_dist_m < 150_000.0 {
+                return Err(BridgeRpcError {
+                    code: "NotEnoughCapacitor".into(),
+                    message: format!(
+                        "Insufficient capacitor ({:.3} GJ) to initiate minimum 150 km warp",
+                        cs.capacitor
+                    ),
+                });
+            }
+            dest_pos = current_ball.position + warp_dir * affordable_dist_m;
+            cs.capacitor = 0.0;
+        } else {
+            cs.capacitor = (cs.capacitor - req_cap).max(0.0);
+        }
+        let _ = sys_handle.set_capacitor(ship_id, cs.capacitor).await;
+        ctx.notify(
+            NotificationTarget::Character(char_id),
+            "OnCapacitorChange",
+            "charid",
+            vec![
+                PyRep::Integer(ship_id),
+                PyRep::Real(cs.capacitor),
+                PyRep::Real(cs.max_capacitor),
+            ],
+        );
+    }
+
+    let warp_speed = crate::services::space_destiny::compute_pilot_warp_speed_au_s(
+        ctx,
+        char_id,
+        sys_id,
+        current_ball.type_id,
+    );
+    if !is_covert_cloaked {
+        let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(
+            ctx, sys_handle, char_id, ship_id,
+        )
+        .await;
+    }
+    let mode = MovementMode::new_warp(current_ball.position, dest_pos, warp_speed);
+    if let Err(e) = sys_handle.set_movement_mode(ship_id, mode).await {
+        let code = if e.contains("WarpScrambled") {
+            "WarpScrambled"
+        } else if e.contains("CloakedCannotWarp") {
+            "CloakedCannotWarp"
+        } else {
+            "DestinyCommandFailed"
+        };
+        return Err(BridgeRpcError {
+            code: code.into(),
+            message: e,
+        });
+    }
+    on_warp_initiated_hooks(ctx, sys_handle, char_id, ship_id, sys_id).await;
+    ctx.active_warps
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(ship_id, char_id);
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnWarpStarted",
+        "charid",
+        vec![
+            PyRep::Integer(ship_id),
+            PyRep::Integer(i64::from(current_ball.type_id)),
+        ],
+    );
+    Ok(())
+}
+
 fn rollback_warp_vector_reservation(
     ctx: &ServerContext,
     char_id: i64,
@@ -955,5 +1169,7 @@ pub(crate) async fn handle_set_session_check(
     ]))
 }
 
-#[cfg(test)] #[path = "nav_warp_interdiction_tests.rs"] mod nav_warp_interdiction_tests;
+#[cfg(test)]
+#[path = "nav_warp_interdiction_tests.rs"]
+mod nav_warp_interdiction_tests;
 

@@ -398,7 +398,7 @@ async fn test_character_biomass_cleanup_and_economy() {
         );
         for cid in [P1, P2, victim_corp] {
             if let Some(ch) = snap.characters.get_mut(&cid) {
-                ch.corporation_id = corp_id;
+                ch.corporation_id = corp_id; ch.station_id = Some(station_id);
             }
         }
         snap.characters.get_mut(&victim_corp).unwrap().balance = IskCents::from_isk(2_000_000);

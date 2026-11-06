@@ -349,15 +349,7 @@ async fn test_drone_state_change_emitted_on_launch() {
     assert_eq!(st.len(), 1, "one OnDroneStateChange per launched drone");
     assert_eq!(
         st[0].as_slice(),
-        &[
-            PyRep::Integer(drone_ball),
-            PyRep::Integer(PILOT),
-            PyRep::Integer(ship_id),
-            PyRep::Integer(0),
-            PyRep::Integer(2_454),
-            PyRep::Integer(PILOT),
-            PyRep::None,
-        ],
+        &[PyRep::Integer(drone_ball), PyRep::Integer(PILOT), PyRep::Integer(ship_id), PyRep::Integer(0), PyRep::Integer(2_454), PyRep::Integer(PILOT), PyRep::None],
         "(droneID, ownerID, controllerID, activityState, droneTypeID, controllerOwnerID, targetID)"
     );
 
@@ -365,21 +357,15 @@ async fn test_drone_state_change_emitted_on_launch() {
     let target_ball = 990_000_088i64;
     let (_, ship_ball) = handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     handle.spawn_ball(Ball { id: target_ball, position: ship_ball.position + DVec3::new(1_000.0, 0.0, 0.0), ..ship_ball }).await.unwrap();
+    let _ = handle.add_target_lock(ship_id, eve_destiny::TargetLock { target_id: target_ball, lock_time_ms: 1_000.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await;
+    let _ = drain_actions(&handle, ship_id).await;
     ctx.dispatch_rpc(&mut sess, "entity", None, "CmdEngage", &[PyRep::Integer(target_ball)], &HashMap::new(), None).await.expect("CmdEngage");
     let engage_acts = drain_actions(&handle, ship_id).await;
     let engage_st = find(&engage_acts, "OnDroneStateChange");
     assert_eq!(engage_st.len(), 1, "drone engage emits OnDroneStateChange on activity change");
     assert_eq!(
         engage_st[0].as_slice(),
-        &[
-            PyRep::Integer(drone_ball),
-            PyRep::Integer(PILOT),
-            PyRep::Integer(ship_id),
-            PyRep::Integer(1),
-            PyRep::Integer(2_454),
-            PyRep::Integer(PILOT),
-            PyRep::Integer(target_ball),
-        ]
+        &[PyRep::Integer(drone_ball), PyRep::Integer(PILOT), PyRep::Integer(ship_id), PyRep::Integer(1), PyRep::Integer(2_454), PyRep::Integer(PILOT), PyRep::Integer(target_ball)]
     );
 }
 

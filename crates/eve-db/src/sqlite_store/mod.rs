@@ -40,4 +40,6 @@ mod notes_lp_sequence_store_cov_unit_tests;
 mod sync_ext_cov_unit_tests;
 #[cfg(test)]
 mod ledger_store_cov_unit_tests;
+#[cfg(test)]
+mod social_store_r8b_unit_tests;
 

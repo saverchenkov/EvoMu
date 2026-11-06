@@ -229,6 +229,19 @@ async fn test_titan_doomsday_single_target_and_lance_slash() {
         )
         .await;
 
+    let _ = sys
+        .add_target_lock(
+            titan_id,
+            eve_destiny::TargetLock {
+                target_id: dread_target_id,
+                lock_time_ms: 1_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(250_000.0),
+            },
+        )
+        .await;
+
     // Firing without Helium Isotopes (16274) must fail with InsufficientFuel
     let no_fuel_err = ctx
         .dispatch_rpc(

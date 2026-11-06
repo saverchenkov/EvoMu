@@ -629,6 +629,21 @@ async fn test_c7_drone_lifecycle_bandwidth_control_range_sentries_salvage_logi_e
     set_skill_level(&ctx, char_id, 3437, 4);
     set_skill_level(&ctx, char_id, 23618, 2);
     assert!((compute_drone_control_range(&ctx, char_id, ship_id) - 46_000.0).abs() < 1e-3);
+    let _ = sys_handle
+        .add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id: target_ball_id,
+                lock_time_ms: 1_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await;
+    for &bid in &launched_balls {
+        sys_handle.try_set_ball_position(bid, DVec3::new(33_500.0, 0.0, 0.0));
+    }
 
     let engage_res = dispatch_combat_rpc(
         &ctx,
@@ -789,20 +804,24 @@ async fn test_c7_drone_lifecycle_bandwidth_control_range_sentries_salvage_logi_e
             ctx.build_type_combat_state(26473),
         )
         .await;
-    let drone_salv_res = dispatch_combat_rpc(
-        &ctx,
-        &mut sess,
-        "entity",
-        "CmdSalvage",
-        &[PyRep::Integer(drone_wreck_id)],
-        &HashMap::new(),
-    )
-    .await
-    .expect("entity.CmdSalvage");
-    assert_eq!(
-        dict_get(&drone_salv_res, "salvaged").and_then(|v| v.as_bool()),
-        Some(true)
-    );
+    let mut salvaged_ok = false;
+    for _ in 0..80 {
+        let drone_salv_res = dispatch_combat_rpc(
+            &ctx,
+            &mut sess,
+            "entity",
+            "CmdSalvage",
+            &[PyRep::Integer(drone_wreck_id)],
+            &HashMap::new(),
+        )
+        .await
+        .expect("entity.CmdSalvage");
+        if dict_get(&drone_salv_res, "salvaged").and_then(|v| v.as_bool()) == Some(true) {
+            salvaged_ok = true;
+            break;
+        }
+    }
+    assert!(salvaged_ok, "Salvage Drone I must salvage wreck over repeated cycles");
 
     // 6. Immobile Sentry Drone (`Warden I`) 2,500m scoop distance restriction (`feat:drones.sentry-drone-scoop-distance`):
     // Move controlling ship to 5,000 m away from `warden_ball_id` -> `entity.CmdReturnBay` must fail with `SentryDroneOutOfScoopRange`!

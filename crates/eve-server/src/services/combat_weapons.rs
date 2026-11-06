@@ -88,34 +88,7 @@ pub async fn handle_weapons(
             }
             let mut m = if let Some(found) = fit.modules.get(&module_id).cloned() {
                 found
-            } else if let Some(item_rec) = ctx.db.with_snapshot(|snap| {
-                snap.items
-                    .get(&module_id)
-                    .filter(|i| i.location_id == ship_id)
-                    .cloned()
-            }) {
-                let charge_tid = ctx.db.with_snapshot(|snap| {
-                    snap.items
-                        .values()
-                        .find(|i| {
-                            i.location_id == ship_id
-                                && i.flag == item_rec.flag
-                                && i.item_id != module_id
-                                && i.quantity > 0
-                        })
-                        .map(|i| i.type_id)
-                });
-                let fm = eve_dogma::FittedModule {
-                    item_id: item_rec.item_id,
-                    type_id: item_rec.type_id,
-                    flag_id: item_rec.flag as u16,
-                    state: eve_dogma::ModuleState::Online,
-                    charge_type_id: charge_tid,
-                    charge_quantity: 1,
-                    damage_hp: 0.0,
-                    max_hp: 40.0,
-                    dynamic_attribute_overrides: item_rec.dynamic_attributes.clone(),
-                };
+            } else if let Some(fm) = crate::services::inventory_fitting::fitting_module_cycles::fallback_fitted_weapon_module(ctx, ship_id, module_id) {
                 fit.modules.insert(module_id, fm.clone());
                 fm
             } else {
@@ -145,6 +118,15 @@ pub async fn handle_weapons(
                 ctx, &sys_handle, char_id, ship_id, sys_id, module_id, target_id_opt, &attacker_ball,
             ).await {
                 return Some(res);
+            }
+            if !controlling_structure {
+                if let Err(e) = crate::services::inventory_fitting::fitting_module_cycles::enforce_space_module_cloak_and_warp_guard(
+                    ctx, &sys_handle, char_id, ship_id, mod_type,
+                )
+                .await
+                {
+                    return Some(Err(e));
+                }
             }
 
             let is_overloaded = method == "Overload";

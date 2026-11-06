@@ -182,7 +182,7 @@ fn biomass_delete_contracts_orders_jobs_colonies_and_corp_asset_rules_kill_mutat
         c1.user_id = uid;
         c1.name = "SacPilotOne".into();
         c1.corporation_id = player_corp;
-        c1.station_id = None;
+        c1.station_id = Some(office_st_1);
         c1.home_station_id = office_st_1;
         c1.balance = IskCents(20_000_00);
         snap.characters.insert(sac1, c1);
@@ -250,8 +250,8 @@ fn biomass_delete_contracts_orders_jobs_colonies_and_corp_asset_rules_kill_mutat
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items[&920_010].location_id, office_st_2);
         assert_eq!(snap.items[&920_011].location_id, 920_010);
-        assert_eq!(snap.items[&920_012].location_id, office_st_1);
-        assert_eq!(snap.items[&920_012].flag, InventoryFlag::CorpSAG1);
+        assert_eq!(snap.items[&920_012].location_id, remote_st);
+        assert_eq!(snap.items[&920_012].flag, InventoryFlag::Impounded);
         assert!(!snap.market_orders.contains_key(&920_020));
         assert!(snap.market_orders.contains_key(&920_021));
         assert!(!snap.contracts.contains_key(&920_031));

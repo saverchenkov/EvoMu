@@ -340,11 +340,23 @@ async fn test_tsb_capacitor_and_superweapon_doomsday_and_slash_branches() {
     ensure_char(&ctx, char_id, 1000125, null_sys, titan_id, 1);
     insert_item(&ctx, titan_id, 11_567, char_id, null_sys as i64, InventoryFlag::Hangar, 1, true);
     insert_item(&ctx, mod_id, 24_550, char_id, titan_id, InventoryFlag::HiSlot0, 1, true);
-    insert_item(&ctx, tgt_id, 587, 915_002, null_sys as i64, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, tgt_id, 19_720, 915_002, null_sys as i64, InventoryFlag::Hangar, 1, true);
 
     spawn_ship_ball_with_cs(&ctx, null_sys, titan_id, 11_567, char_id, 1000125, DVec3::ZERO, 100.0).await;
-    spawn_ship_ball_with_cs(&ctx, null_sys, tgt_id, 587, 915_002, 1000125, DVec3::new(10_000.0, 0.0, 0.0), 1000.0).await;
+    spawn_ship_ball_with_cs(&ctx, null_sys, tgt_id, 19_720, 915_002, 1000125, DVec3::new(10_000.0, 0.0, 0.0), 1000.0).await;
     let sys = ctx.systems.get_or_spawn(null_sys);
+    let _ = sys
+        .add_target_lock(
+            titan_id,
+            eve_destiny::TargetLock {
+                target_id: tgt_id,
+                lock_time_ms: 1_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(250_000.0),
+            },
+        )
+        .await;
 
     let tsb_type = ctx.sde.types.get(&4_409).unwrap().clone();
     let tsb_state = DogmaItemState::from_sde(915_299, 4_409, &ctx.sde);

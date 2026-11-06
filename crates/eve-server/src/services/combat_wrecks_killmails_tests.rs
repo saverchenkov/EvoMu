@@ -179,6 +179,48 @@ async fn container_decay_crystal_damage_deactivate_loot_all_and_self_destruct_ki
     assert_eq!(deact_res.dict_get("active"), Some(&PyRep::Bool(false)));
 
     // 3. LootAll on foreign wreck: blocked on SafetyLevel::Green, triggers suspect flag on SafetyLevel::Yellow/Red
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 23_915,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 500.0,
+                max_shield_hp: 500.0,
+                armor_hp: 500.0,
+                max_armor_hp: 500.0,
+                structure_hp: 500.0,
+                max_structure_hp: 500.0,
+                ..CombatState::default()
+            },
+        )
+        .await
+        .unwrap();
+    sys_handle
+        .spawn_ball(Ball {
+            id: foreign_wreck_id,
+            type_id: 26_557,
+            position: DVec3::new(1_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1_000.0,
+            radius: 20.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
     with_mut_combat_runtime(&ctx, |rt| {
         rt.safety_levels.insert(char_id, SafetyLevel::Green);
     });

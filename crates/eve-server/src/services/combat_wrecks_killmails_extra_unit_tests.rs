@@ -422,6 +422,21 @@ async fn bubble_decay_precursor_deactivate_loot_all_split_and_killmail_variants(
     });
 
     // Looting all items from jetcan (type 23) despawns the empty jetcan
+    sys_handle
+        .spawn_ball(Ball {
+            id: jetcan_id,
+            type_id: 23,
+            position: DVec3::new(500.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 100.0,
+            radius: 10.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
     handle_wrecks_killmails(&ctx, &mut session, "invbroker", "LootAll", &[PyRep::Integer(jetcan_id)], &kw)
         .await
         .unwrap()

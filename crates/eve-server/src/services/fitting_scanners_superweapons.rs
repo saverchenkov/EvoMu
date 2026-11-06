@@ -788,17 +788,14 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                 return Some(Err(BridgeRpcError::user_error("CantDoThatWhileDocked")));
             }
             let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "Activating a superweapon requires an active Titan".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "Activating a superweapon requires an active Titan".into() }));
             };
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NotInSpace".into(),
-                    message: "Superweapons can only be activated in space".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NotInSpace".into(), message: "Superweapons can only be activated in space".into() }));
             };
+            if let Err(e) = crate::services::tactical_modules::check_superweapon_tether_guard(ctx, sys_id, ship_id).await {
+                return Some(Err(e));
+            }
             let module_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let mod_type_info = ctx.db.with_snapshot(|snap| {
                 snap.items.get(&module_id).and_then(|i| ctx.sde.types.get(&i.type_id))

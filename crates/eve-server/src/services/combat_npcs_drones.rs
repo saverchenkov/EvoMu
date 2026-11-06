@@ -92,68 +92,9 @@ impl DroneSpaceState {
     }
 }
 
-/// Executes per-cycle drone combat volleys on the cluster tick (`feat:drones.engage-target`,
-/// `feat:drones.gecko-augmented-mutated-drones`, `feat:drones.gecko-subverted-bandwidth`).
-pub async fn step_engaged_drones(ctx: &ServerContext, now_unix: u64) {
-    let due_drones: Vec<DroneSpaceState> = with_combat_runtime(ctx, |rt| {
-        rt.active_drones_in_space
-            .values()
-            .filter(|d| {
-                !d.is_abandoned
-                    && d.activity_state == 1
-                    && d.target_id.is_some()
-                    && now_unix >= rt.drone_next_ready_unix.get(&d.ball_id).copied().unwrap_or(0)
-            })
-            .cloned()
-            .collect()
-    });
-    for d in due_drones {
-        let Some(target_id) = d.target_id else { continue; };
-        let sys_handle = ctx.systems.get_or_spawn(d.solar_system_id);
-        let Some((_, drone_ball)) = sys_handle.get_ball_snapshot(d.ball_id).await.ok().flatten() else {
-            continue;
-        };
-        let Some((_, target_ball)) = sys_handle.get_ball_snapshot(target_id).await.ok().flatten() else {
-            continue;
-        };
-        if d.damage_vector.total() > 0.0 {
-            let target_sig = sys_handle
-                .get_combat_state(target_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|cs| cs.signature_radius)
-                .unwrap_or(target_ball.radius.max(35.0));
-            let hit_mult = d.compute_combat_hit_multiplier(ctx, &drone_ball, &target_ball, target_sig);
-            let scaled_dmg = DamageVector {
-                em: d.damage_vector.em * hit_mult,
-                thermal: d.damage_vector.thermal * hit_mult,
-                kinetic: d.damage_vector.kinetic * hit_mult,
-                explosive: d.damage_vector.explosive * hit_mult,
-            };
-            let cyc_s = d.cycle_duration_secs(ctx).max(1) as f64;
-            if let Ok(Some((app, _, _))) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys_handle, d.solar_system_id, d.owner_char_id, target_id, scaled_dmg, cyc_s, now_unix).await
-            {
-                record_killmail_assist_action(
-                    ctx,
-                    target_id,
-                    d.owner_char_id,
-                    d.type_id,
-                    d.type_id,
-                    app,
-                    false,
-                    now_unix,
-                );
-            }
-        }
-        let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, d.solar_system_id).clamp(0.1, 1.0);
-        let scaled_cycle_secs = ((d.cycle_duration_secs(ctx) as f64) / tidi).round().max(1.0) as u64;
-        let next_ready = now_unix.saturating_add(scaled_cycle_secs);
-        with_mut_combat_runtime(ctx, |rt| {
-            rt.drone_next_ready_unix.insert(d.ball_id, next_ready);
-        });
-    }
-}
+#[path = "combat_npcs_drones_cycle_ops.rs"]
+mod cycle_ops;
+pub use cycle_ops::{step_drone_auto_aggression_and_assist, step_engaged_drones};
 
 /// Evaluates effective drone control range in meters for `char_id` flying `ship_id` (`feat:drones.drone-control-range`).
 /// Base control range is 20,000 m + 5,000 m/level of Drone Avionics (`3437`) + 3,000 m/level of Advanced Drone Avionics (`23618`).
@@ -318,84 +259,6 @@ pub async fn activate_salvager_or_tractor_module(
 
 pub use crate::combat::drones_salvage_tractor::execute_wreck_salvage_cycle;
 
-/// Steps automatic drone aggression (`feat:drones.aggressive-passive`) and fleet Assist / Guard (`feat:drones.assist-guard`).
-/// - If `attacker_of_owner_opt` is `Some(aggressor_ball_id)` and owner's drone setting is `aggressive == true`,
-///   idle combat drones belonging to `owner_char_id` automatically engage `aggressor_ball_id` (concentrating on one target if `focus_fire == true`).
-/// - If an assisted fleetmate attacks `assisted_target_opt`, assisting drones engage `assisted_target_opt`.
-/// - If a guarded fleetmate is attacked by `attacker_of_guarded_opt`, guarding drones engage that attacker.
-pub async fn step_drone_auto_aggression_and_assist(
-    ctx: &ServerContext,
-    solar_system_id: u32,
-    owner_char_id: i64,
-    attacker_of_owner_opt: Option<i64>,
-    assisted_target_opt: Option<(i64, i64)>,
-    attacker_of_guarded_opt: Option<(i64, i64)>,
-) -> Vec<i64> {
-    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-    let settings = with_combat_runtime(ctx, |rt| {
-        rt.drone_settings
-            .get(&owner_char_id)
-            .cloned()
-            .unwrap_or_default()
-    });
-    let drones: Vec<DroneSpaceState> = with_combat_runtime(ctx, |rt| {
-        rt.active_drones_in_space
-            .values()
-            .filter(|d| {
-                d.solar_system_id == solar_system_id
-                    && d.owner_char_id == owner_char_id
-                    && !d.is_abandoned
-            })
-            .cloned()
-            .collect()
-    });
-
-    let mut engaged_drone_balls = Vec::new();
-    for mut d in drones {
-        let mut chosen_target = None;
-        if let Some((assisted_char, target_ball)) = assisted_target_opt {
-            if d.assist_char_id == Some(assisted_char) {
-                chosen_target = Some(target_ball);
-            }
-        }
-        if chosen_target.is_none() {
-            if let Some((guarded_char, aggressor_ball)) = attacker_of_guarded_opt {
-                if d.guard_char_id == Some(guarded_char) {
-                    chosen_target = Some(aggressor_ball);
-                }
-            }
-        }
-        if chosen_target.is_none() && settings.aggressive {
-            if let Some(aggr) = attacker_of_owner_opt {
-                chosen_target = Some(aggr);
-            }
-        }
-        if let Some(tid) = chosen_target {
-            d.target_id = Some(tid);
-            if !d.is_sentry {
-                let _ = sys_handle
-                    .set_movement_mode(
-                        d.ball_id,
-                        MovementMode::Orbit {
-                            target_id: tid,
-                            range: 1_500.0,
-                        },
-                    )
-                    .await;
-            }
-            if d.damage_vector.total() > 0.0 {
-                let cyc_s = d.cycle_duration_secs(ctx).max(1) as f64;
-                let _ = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys_handle, d.solar_system_id, d.owner_char_id, tid, d.damage_vector, cyc_s, ctx.now_unix()).await;
-            }
-            engaged_drone_balls.push(d.ball_id);
-            with_mut_combat_runtime(ctx, |rt| {
-                rt.active_drones_in_space.insert(d.ball_id, d);
-            });
-        }
-    }
-    engaged_drone_balls
-}
-
 /// Applies incoming weapon/NPC damage to a launched drone in space (`feat:drones.drone-hp-loss`).
 /// If the drone's structure HP reaches 0, removes the drone ball from Ballpark and deletes its inventory record.
 pub async fn apply_damage_to_drone_in_space(
@@ -489,6 +352,18 @@ pub async fn handle_npcs_drones(
                 return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
             };
             if let Err(e) = crate::services::tourney_service::check_tourney_drone_restricted(ctx, sys_id, char_id) {
+                return Some(Err(e));
+            }
+            let sys_handle_guard = ctx.systems.get_or_spawn(sys_id);
+            if let Err(e) = crate::services::inventory_fitting::fitting_module_cycles::enforce_space_action_cloak_and_warp_guard(
+                ctx,
+                &sys_handle_guard,
+                char_id,
+                ship_id,
+                "launch drones",
+            )
+            .await
+            {
                 return Some(Err(e));
             }
             let mut drone_ids: Vec<i64> = match args.first() {
@@ -884,6 +759,35 @@ pub async fn handle_npcs_drones(
                 _ => (0, None),
             };
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipDocked".into(),
+                    message: "Cannot engage drones while docked".into(),
+                }));
+            }
+            if let Err(e) = crate::services::inventory_fitting::fitting_module_cycles::enforce_space_action_cloak_and_warp_guard(
+                ctx,
+                &sys_handle,
+                char_id,
+                ship_id,
+                "engage drones",
+            )
+            .await
+            {
+                return Some(Err(e));
+            }
+            if sys_handle
+                .get_combat_state(ship_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|cs| cs.is_tethered)
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "CantActivateWhileTethered".into(),
+                    message: "Cannot engage drones while tethered".into(),
+                }));
+            }
             let ship_pos = sys_handle
                 .get_ball_snapshot(ship_id)
                 .await
@@ -906,6 +810,21 @@ pub async fn handle_npcs_drones(
                     message: format!(
                         "Target is {target_dist:.1} m away (exceeds drone control range {max_ctrl_range:.1} m)"
                     ),
+                }));
+            }
+            if let Some(target_cs) = sys_handle.get_combat_state(target_id).await.ok().flatten() {
+                if target_cs.is_cloaked {
+                    return Some(Err(BridgeRpcError::user_error("CannotTargetCloaked")));
+                }
+                if target_cs.is_tethered {
+                    return Some(Err(BridgeRpcError::user_error("TargetInvulnerable")));
+                }
+            }
+            let locks = sys_handle.get_target_locks(ship_id).await.unwrap_or_default();
+            if !locks.iter().any(|l| l.target_id == target_id && l.locked) {
+                return Some(Err(BridgeRpcError {
+                    code: "TargetNotLocked".into(),
+                    message: format!("Target {target_id} is not locked"),
                 }));
             }
 
@@ -955,6 +874,8 @@ pub async fn handle_npcs_drones(
             let mut total_dmg_dealt = 0.0;
             let mut total_repaired = 0.0;
             let mut ewar_applied = false;
+            let mut target_destroyed = false;
+            let victim_char_opt = cycle_ops::resolve_victim_character_for_ball(ctx, target_id);
             let now_unix = ctx.now_unix();
 
             for (mut d, drone_ball) in engaging_drones {
@@ -982,7 +903,7 @@ pub async fn handle_npcs_drones(
                 let next_ready = with_combat_runtime(ctx, |rt| {
                     rt.drone_next_ready_unix.get(&d.ball_id).copied().unwrap_or(0)
                 });
-                let cycle_ready = now_unix >= next_ready;
+                let cycle_ready = now_unix >= next_ready && !target_destroyed;
                 if cycle_ready {
                     if d.group_id == 640 {
                         // Logistic drone (`feat:drones.logistic-drones`)
@@ -1001,34 +922,56 @@ pub async fn handle_npcs_drones(
                         }
                     } else if matches!(d.group_id, 639 | 641 | 544 | 545) {
                         // EWAR drone (`feat:drones.ewar-drones`)
-                        ewar_applied = true;
-                        if d.web_speed_factor < 0.0 {
-                            let mult = (1.0 + d.web_speed_factor / 100.0).clamp(0.1, 1.0);
-                            let _ = sys_handle.set_speed_fraction(target_id, (target_ball.speed_fraction.max(1.0)) * mult).await;
-                        }
-                        if d.neut_amount > 0.0 {
-                            if let Ok(Some(mut tcs)) = sys_handle.get_combat_state(target_id).await {
-                                tcs.capacitor = (tcs.capacitor - d.neut_amount).max(0.0);
-                                let _ = sys_handle.set_combat_state(target_id, tcs).await;
+                        let immune = cycle_ops::is_target_immune_to_drone_ewar(
+                            ctx,
+                            &sys_handle,
+                            target_id,
+                            target_ball.type_id,
+                        )
+                        .await;
+                        let mut this_drone_ewar = false;
+                        if !immune {
+                            if d.web_speed_factor < 0.0 {
+                                let mult = (1.0 + d.web_speed_factor / 100.0).clamp(0.1, 1.0);
+                                let _ = sys_handle.set_speed_fraction(target_id, (target_ball.speed_fraction.max(1.0)) * mult).await;
+                                this_drone_ewar = true;
+                            }
+                            if d.neut_amount > 0.0 {
+                                if let Ok(Some(mut tcs)) = sys_handle.get_combat_state(target_id).await {
+                                    tcs.capacitor = (tcs.capacitor - d.neut_amount).max(0.0);
+                                    let _ = sys_handle.set_combat_state(target_id, tcs).await;
+                                    this_drone_ewar = true;
+                                }
+                            }
+                            if d.tp_sig_bonus_pct > 0.0 {
+                                if let Ok(Some(mut tcs)) = sys_handle.get_combat_state(target_id).await {
+                                    let base_sig = *tcs.base_signature_radius.get_or_insert_with(|| {
+                                        if tcs.signature_radius > 0.0 { tcs.signature_radius } else { target_ball.radius.max(35.0) }
+                                    });
+                                    let tp_mult = 1.0 + (d.tp_sig_bonus_pct.min(100.0) / 100.0);
+                                    tcs.signature_radius = (base_sig * tp_mult).max(base_sig);
+                                    let _ = sys_handle.set_combat_state(target_id, tcs).await;
+                                    this_drone_ewar = true;
+                                }
+                            }
+                            if d.ecm_strength > 0.0
+                                && cycle_ops::try_apply_drone_ecm_jam(
+                                    ctx,
+                                    &sys_handle,
+                                    &d,
+                                    &drone_ball,
+                                    target_id,
+                                    &target_ball,
+                                )
+                                .await
+                            {
+                                this_drone_ewar = true;
                             }
                         }
-                        if d.tp_sig_bonus_pct > 0.0 {
-                            if let Ok(Some(mut tcs)) = sys_handle.get_combat_state(target_id).await {
-                                let base_sig = *tcs.base_signature_radius.get_or_insert_with(|| {
-                                    if tcs.signature_radius > 0.0 { tcs.signature_radius } else { target_ball.radius.max(35.0) }
-                                });
-                                let tp_mult = 1.0 + (d.tp_sig_bonus_pct.min(100.0) / 100.0);
-                                tcs.signature_radius = (base_sig * tp_mult).max(base_sig);
-                                let _ = sys_handle.set_combat_state(target_id, tcs).await;
-                            }
+                        if this_drone_ewar {
+                            ewar_applied = true;
+                            record_killmail_assist_action(ctx, target_id, char_id, d.type_id, d.type_id, 0.0, true, now_unix);
                         }
-                        if d.ecm_strength > 0.0 {
-                            let _ = sys_handle.clear_target_locks(target_id).await;
-                            with_mut_combat_runtime(ctx, |rt| {
-                                if let Some(npc) = rt.npc_entities.get_mut(&target_id) { npc.ecm_jammed = true; }
-                            });
-                        }
-                        record_killmail_assist_action(ctx, target_id, char_id, d.type_id, d.type_id, 0.0, true, now_unix);
                     } else if d.damage_vector.total() > 0.0 {
                         // Combat / Sentry / Gecko / Augmented / Mutated drone (`feat:drones.engage-target`, `feat:drones.gecko-augmented-mutated-drones`, `feat:drones.gecko-subverted-bandwidth`)
                         let target_sig = sys_handle
@@ -1046,14 +989,21 @@ pub async fn handle_npcs_drones(
                             explosive: d.damage_vector.explosive * hit_mult,
                         };
                         let cyc_s = d.cycle_duration_secs(ctx).max(1) as f64;
-                        if let Ok(Some((app, _, _))) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys_handle, d.solar_system_id, char_id, target_id, scaled_dmg, cyc_s, now_unix).await {
+                        if let Ok(Some((app, destroyed, _))) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys_handle, d.solar_system_id, char_id, target_id, scaled_dmg, cyc_s, now_unix).await {
                             total_dmg_dealt += app;
                             if app > 0.0 {
                                 super::combat_npc_ai::record_npc_threat_event(ctx, target_id, d.ball_id, app, false, false);
                             }
                             record_killmail_assist_action(ctx, target_id, char_id, d.type_id, d.type_id, app, false, now_unix);
+                            if destroyed {
+                                target_destroyed = true;
+                            }
                         }
                     }
+                }
+                if target_destroyed {
+                    d.target_id = None;
+                    d.activity_state = 0;
                 }
                 let next_cycle_unix = if cycle_ready {
                     now_unix.saturating_add(d.cycle_duration_secs(ctx))
@@ -1066,17 +1016,21 @@ pub async fn handle_npcs_drones(
                 });
             }
 
-            if total_dmg_dealt > 0.0 || ewar_applied {
-                let victim_char_opt = ctx.db.with_snapshot(|snap| {
-                    snap.characters.values().find(|c| c.active_ship_id == target_id).map(|c| c.character_id)
-                        .or_else(|| snap.items.get(&target_id).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)))
-                });
-                if let Some(vcid) = victim_char_opt.filter(|&v| v != char_id) {
-                    ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).trigger_weapon_timer(char_id, now_unix);
-                    crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, now_unix);
-                } else {
-                    crate::sp6_lifecycle::record_npc_aggression_timer(ctx, char_id, now_unix);
-                }
+            if total_dmg_dealt > 0.0 || ewar_applied || target_destroyed {
+                cycle_ops::renew_drone_aggression_timers(ctx, char_id, victim_char_opt, now_unix);
+            }
+            if target_destroyed {
+                cycle_ops::disengage_drones_targeting(ctx, sys_id, target_id);
+                super::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(
+                    ctx,
+                    sys_id,
+                    char_id,
+                    target_id,
+                    target_ball.type_id,
+                    target_ball.position,
+                    now_unix,
+                )
+                .await;
             }
 
             Some(Ok(PyRep::keyval([

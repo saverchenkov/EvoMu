@@ -149,6 +149,12 @@ struct PersistedChatChannel {
     record: ChatChannelRecord,
     #[serde(default)]
     acl: ChatChannelAclRecord,
+    #[serde(default)]
+    standalone_acl_only: bool,
+}
+
+fn is_chat_acl_non_empty(acl: &ChatChannelAclRecord) -> bool {
+    !acl.allow_list.is_empty() || !acl.deny_list.is_empty() || !acl.muted_until.is_empty()
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -260,9 +266,19 @@ pub(super) fn compute_d6_social_fp(snap: &WorldStateSnapshot) -> D6SocialFingerp
     for k in cc_keys {
         k.hash(&mut h);
         fp_json(&snap.chat_channels[k]).hash(&mut h);
-        if let Some(acl) = snap.chat_channel_acl.get(k) {
-            fp_json(acl).hash(&mut h);
-        }
+    }
+
+    let mut acl_keys: Vec<&String> = snap
+        .chat_channel_acl
+        .iter()
+        .filter_map(|(k, acl)| is_chat_acl_non_empty(acl).then_some(k))
+        .collect();
+    acl_keys.sort_unstable();
+    "chat_channel_acl_v2".hash(&mut h);
+    acl_keys.len().hash(&mut h);
+    for k in acl_keys {
+        k.hash(&mut h);
+        fp_json(&snap.chat_channel_acl[k]).hash(&mut h);
     }
 
     let mut chc_keys: Vec<i64> = snap.char_contacts.keys().copied().collect();
@@ -517,11 +533,10 @@ pub(super) fn load_d6_social_into_snapshot(
             let (cid, js) = row.map_err(|e| e.to_string())?;
             let persisted: PersistedChatChannel =
                 serde_json::from_str(&js).map_err(|e| e.to_string())?;
-            snap.chat_channels.insert(cid.clone(), persisted.record);
-            if !persisted.acl.allow_list.is_empty()
-                || !persisted.acl.deny_list.is_empty()
-                || !persisted.acl.muted_until.is_empty()
-            {
+            if !persisted.standalone_acl_only {
+                snap.chat_channels.insert(cid.clone(), persisted.record);
+            }
+            if is_chat_acl_non_empty(&persisted.acl) {
                 snap.chat_channel_acl.insert(cid, persisted.acl);
             }
         }
@@ -804,6 +819,35 @@ pub(super) fn sync_d6_social(
                 .get(cid)
                 .cloned()
                 .unwrap_or_default(),
+            standalone_acl_only: false,
+        };
+        let js = serde_json::to_string(&persisted).map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO chat_channels (channel_id, record_json) VALUES (?1, ?2)",
+            params![cid, js],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    for (cid, acl) in &snap.chat_channel_acl {
+        if snap.chat_channels.contains_key(cid) || !is_chat_acl_non_empty(acl) {
+            continue;
+        }
+        let persisted = PersistedChatChannel {
+            record: ChatChannelRecord {
+                channel_id: cid.clone(),
+                name: cid.clone(),
+                motd: String::new(),
+                owner_id: None,
+                members: Default::default(),
+                is_system_local: false,
+                solar_system_id: None,
+                is_private: false,
+                operators: Default::default(),
+                password: None,
+                is_delayed_local: false,
+            },
+            acl: acl.clone(),
+            standalone_acl_only: true,
         };
         let js = serde_json::to_string(&persisted).map_err(|e| e.to_string())?;
         tx.execute(

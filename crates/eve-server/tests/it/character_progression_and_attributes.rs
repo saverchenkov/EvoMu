@@ -228,6 +228,7 @@ async fn test_parity_misc_destiny_on_drone_activity_change() {
         panic!("expected launched drone ball IDs list, got {launched:?}");
     };
     let drone_ball_id = launched_ids[0].as_i64().expect("launched drone ball_id");
+    let _ = handle.add_target_lock(ship_id, eve_destiny::TargetLock { target_id, lock_time_ms: 1_000.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await;
     let _ = handle.drain_observer_updates(ship_id).await;
 
     let _ = ctx

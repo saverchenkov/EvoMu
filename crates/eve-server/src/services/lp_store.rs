@@ -384,6 +384,19 @@ fn take_offer(
             }
         }
 
+        let is_blueprint = ctx
+            .sde
+            .types
+            .get(&offer.type_id)
+            .is_some_and(|t| t.category_id == 9);
+        if is_blueprint && qty_i32 > 1_000 {
+            return Err(BridgeRpcError {
+                code: "InvalidQuantity".into(),
+                message: "Blueprint LP store purchases are capped at 1,000 copies per transaction"
+                    .into(),
+            });
+        }
+
         // Verify required trade-in items (`req_items`) in hangar/cargo at `delivery_loc_id`
         let corp_access = if is_corp_take {
             Some(check_corp_lp_role(
@@ -678,27 +691,57 @@ fn take_offer(
             ba
         };
 
-        // Deliver item to hangar
-        snap.next_entity_id += 1;
-        let new_item_id = snap.next_entity_id;
+        // Deliver item to hangar (blueprint offers always mint licensed BPCs, never infinite-run BPOs)
         let final_owner_id = if is_corp_take { ch.corporation_id } else { char_id };
         let final_flag = if is_corp_take { eve_db::types::InventoryFlag::CorpDeliveries } else { delivery_flag };
-        snap.items.insert(
-            new_item_id,
-            InventoryItemRecord {
-                item_id: new_item_id,
-                type_id: offer.type_id,
-                owner_id: final_owner_id,
-                location_id: delivery_loc_id,
-                flag: final_flag,
-                quantity: total_items_qty,
-                singleton: false,
-                version: 1,
-                ..Default::default()
-            },
-        );
+        let (first_item_id, delivered_qty) = if is_blueprint {
+            let bpc_runs = offer.quantity.max(1) as u32;
+            let mut first_id = 0_i64;
+            for _ in 0..qty_i32 {
+                snap.next_entity_id += 1;
+                let new_item_id = snap.next_entity_id;
+                if first_id == 0 {
+                    first_id = new_item_id;
+                }
+                snap.items.insert(
+                    new_item_id,
+                    InventoryItemRecord {
+                        item_id: new_item_id,
+                        type_id: offer.type_id,
+                        owner_id: final_owner_id,
+                        location_id: delivery_loc_id,
+                        flag: final_flag,
+                        quantity: 1,
+                        singleton: true,
+                        version: 1,
+                        is_blueprint_copy: true,
+                        blueprint_runs_remaining: Some(bpc_runs as i32),
+                        ..Default::default()
+                    },
+                );
+            }
+            (first_id, qty_i32)
+        } else {
+            snap.next_entity_id += 1;
+            let new_item_id = snap.next_entity_id;
+            snap.items.insert(
+                new_item_id,
+                InventoryItemRecord {
+                    item_id: new_item_id,
+                    type_id: offer.type_id,
+                    owner_id: final_owner_id,
+                    location_id: delivery_loc_id,
+                    flag: final_flag,
+                    quantity: total_items_qty,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            (new_item_id, total_items_qty)
+        };
 
-        Ok((new_item_id, offer.type_id, total_items_qty, rem_lp, bal_after, lp_before))
+        Ok((first_item_id, offer.type_id, delivered_qty, rem_lp, bal_after, lp_before))
     });
 
     match res {

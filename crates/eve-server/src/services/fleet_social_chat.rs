@@ -6,6 +6,15 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{HashMap, HashSet};
 
+#[path = "fleet_social_chat_auth_ops.rs"]
+mod fleet_social_chat_auth_ops;
+
+use fleet_social_chat_auth_ops::{
+    build_initial_channel_record, check_channel_or_global_mute,
+    handle_contacts_notifications_calendar, has_channel_operator_auth, has_channel_owner_auth,
+    is_system_or_org_channel, validate_channel_join_auth,
+};
+
 pub(crate) use super::fleet_social_persistence::{
     CalendarEventState, SocialExtrasState,
 };
@@ -116,29 +125,40 @@ fn handle_chat_rpc(
                 }
             }
             let is_delayed = is_delayed_local_channel(chan_id);
+            let sys_id_opt = parse_channel_system_id(chan_id);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                validate_channel_join_auth(ctx, snap, session, caller_id, target_char, chan_id)?;
                 let chan_exists = snap.chat_channels.contains_key(chan_id);
-                if !chan_exists && target_char != caller_id {
+                if !chan_exists && target_char != caller_id && !session.has_gm_role() {
                     return Err(BridgeRpcError { code: "ChannelAccessDenied".into(), message: "Cannot add another character to non-existent channel".into() });
                 }
-                let chan = snap.chat_channels.entry(chan_id.to_string()).or_insert_with(|| ChatChannelRecord {
-                    channel_id: chan_id.to_string(),
-                    name: chan_id.to_string(),
-                    motd: String::new(),
-                    owner_id: Some(caller_id),
-                    members: HashSet::new(),
-                    is_system_local: chan_id.starts_with("solarsystemid2:"),
-                    solar_system_id: parse_channel_system_id(chan_id),
-                    is_private: chan_id.starts_with("private:"),
-                    operators: HashSet::from([caller_id]),
-                    password: None,
-                    is_delayed_local: is_delayed,
+                if target_char != caller_id {
+                    let existing = snap.chat_channels.get(chan_id);
+                    if !has_channel_operator_auth(snap, session, caller_id, chan_id, existing) {
+                        return Err(BridgeRpcError { code: "ChannelAccessDenied".into(), message: "Only channel owner or operator may add other characters".into() });
+                    }
+                }
+                let caller_is_op = {
+                    let existing = snap.chat_channels.get(chan_id);
+                    has_channel_operator_auth(snap, session, caller_id, chan_id, existing)
+                };
+                let chan = snap.chat_channels.entry(chan_id.to_string()).or_insert_with(|| {
+                    build_initial_channel_record(
+                        chan_id,
+                        caller_id,
+                        "",
+                        None,
+                        is_delayed,
+                        sys_id_opt,
+                    )
                 });
-                if target_char != caller_id && chan.owner_id != Some(caller_id) && !chan.operators.contains(&caller_id) {
-                    return Err(BridgeRpcError { code: "ChannelAccessDenied".into(), message: "Only channel owner or operator may add other characters".into() });
+                if is_system_or_org_channel(chan_id) {
+                    chan.owner_id = None;
+                    chan.operators.clear();
+                    chan.password = None;
                 }
                 if let Some(ref pw) = chan.password {
-                    if !pw.is_empty() && chan.owner_id != Some(caller_id) && !chan.operators.contains(&caller_id) && password_arg != Some(pw.as_str()) {
+                    if !pw.is_empty() && !caller_is_op && chan.owner_id != Some(caller_id) && !chan.operators.contains(&caller_id) && password_arg != Some(pw.as_str()) {
                         return Err(BridgeRpcError { code: "InvalidChannelPassword".into(), message: "Incorrect password for channel".into() });
                     }
                 }
@@ -223,22 +243,18 @@ fn handle_chat_rpc(
                 }
                 for cid in &target_chans {
                     let delayed = is_delayed_local_channel(cid);
+                    let sys_opt = parse_channel_system_id(cid);
                     let chan = snap
                         .chat_channels
                         .entry(cid.clone())
-                        .or_insert_with(|| ChatChannelRecord {
-                            channel_id: cid.clone(),
-                            name: cid.clone(),
-                            motd: String::new(),
-                            owner_id: Some(char_id),
-                            members: HashSet::from([char_id]),
-                            is_system_local: cid.starts_with("solarsystemid2:"),
-                            solar_system_id: parse_channel_system_id(cid),
-                            is_private: false,
-                            operators: HashSet::from([char_id]),
-                            password: None,
-                            is_delayed_local: delayed,
+                        .or_insert_with(|| {
+                            build_initial_channel_record(cid, char_id, "", None, delayed, sys_opt)
                         });
+                    if is_system_or_org_channel(cid) {
+                        chan.owner_id = None;
+                        chan.operators.clear();
+                        chan.password = None;
+                    }
                     chan.members.insert(char_id);
                 }
                 let is_del = is_delayed_local_channel(&local_id);
@@ -307,13 +323,19 @@ fn handle_chat_rpc(
                 } else {
                     chan_id.to_lowercase()
                 };
+                if is_system_or_org_channel(&chan_key) {
+                    return Err(BridgeRpcError {
+                        code: "NotChannelOwner".into(),
+                        message: "System and organization channels do not allow ownership transfer".into(),
+                    });
+                }
                 let Some(chan) = snap.chat_channels.get_mut(&chan_key) else {
                     return Err(BridgeRpcError {
                         code: "ChannelNotFound".into(),
                         message: format!("Channel {chan_id} not found"),
                     });
                 };
-                if chan.owner_id != Some(char_id) {
+                if !has_channel_owner_auth(session, char_id, &chan_key, chan) {
                     return Err(BridgeRpcError {
                         code: "NotChannelOwner".into(),
                         message: "Only the channel owner can transfer ownership".into(),
@@ -338,13 +360,17 @@ fn handle_chat_rpc(
             let chan_id = args.first().and_then(|a| a.as_str()).unwrap_or("local");
             let motd = args.get(1).and_then(|a| a.as_str()).unwrap_or("");
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let can_op = {
+                    let chan_ref = snap.chat_channels.get(chan_id);
+                    has_channel_operator_auth(snap, session, char_id, chan_id, chan_ref)
+                };
                 let Some(chan) = snap.chat_channels.get_mut(chan_id) else {
                     return Err(BridgeRpcError {
                         code: "ChannelNotFound".into(),
                         message: format!("Channel {chan_id} not found"),
                     });
                 };
-                if chan.owner_id != Some(char_id) && !chan.operators.contains(&char_id) {
+                if !can_op {
                     return Err(BridgeRpcError {
                         code: "NotChannelOperator".into(),
                         message: "Requires channel operator privileges".into(),
@@ -366,12 +392,9 @@ fn handle_chat_rpc(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let chan_id = args.get(1).and_then(|a| a.as_str()).unwrap_or("global");
-            let is_authorized = session.has_gm_role()
-                || ctx.db.with_snapshot(|snap| {
-                    snap.chat_channels
-                        .get(chan_id)
-                        .is_some_and(|c| c.owner_id == Some(char_id) || c.operators.contains(&char_id))
-                });
+            let is_authorized = ctx.db.with_snapshot(|snap| {
+                has_channel_operator_auth(snap, session, char_id, chan_id, snap.chat_channels.get(chan_id))
+            });
             if !is_authorized {
                 return Some(Err(BridgeRpcError {
                     code: "ChatAccessDenied".into(),
@@ -403,8 +426,8 @@ fn handle_chat_rpc(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let chan_id = args.get(1).and_then(|a| a.as_str()).unwrap_or("global");
-            let is_authorized = session.has_gm_role() || ctx.db.with_snapshot(|snap| {
-                snap.chat_channels.get(chan_id).is_some_and(|c| c.owner_id == Some(char_id) || c.operators.contains(&char_id))
+            let is_authorized = ctx.db.with_snapshot(|snap| {
+                has_channel_operator_auth(snap, session, char_id, chan_id, snap.chat_channels.get(chan_id))
             });
             if !is_authorized {
                 return Some(Err(BridgeRpcError { code: "ChatAccessDenied".into(), message: "GMUnmute requires channel operator or GM role".into() }));
@@ -476,8 +499,11 @@ fn handle_chat_rpc(
                                 ("displayName", PyRep::String(c.name.clone())),
                                 ("motd", PyRep::String(c.motd.clone())),
                                 ("isDelayedLocal", PyRep::Bool(c.is_delayed_local)),
-                                ("isOperator", PyRep::Bool(c.operators.contains(&char_id))),
-                                ("isMuted", PyRep::Bool(snap.chat_channel_acl.get(&c.channel_id).is_some_and(|a| a.muted_until.contains_key(&char_id)))),
+                                ("isOperator", PyRep::Bool(has_channel_operator_auth(snap, session, char_id, &c.channel_id, Some(c)))),
+                                ("isMuted", PyRep::Bool(
+                                    snap.chat_channel_acl.get(&c.channel_id).is_some_and(|a| a.muted_until.contains_key(&char_id))
+                                    || snap.chat_channel_acl.get("global").is_some_and(|a| a.muted_until.contains_key(&char_id))
+                                )),
                             ]),
                         ));
                     }
@@ -546,29 +572,38 @@ fn handle_chat_rpc(
             }
 
             let is_delayed = is_delayed_local_channel(chan_id);
+            let sys_id_opt = parse_channel_system_id(chan_id);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                validate_channel_join_auth(ctx, snap, session, char_id, char_id, chan_id)?;
                 let is_allowed_explicitly = snap
                     .chat_channel_acl
                     .get(chan_id)
                     .is_some_and(|a| a.allow_list.contains(&char_id));
+                let caller_is_op = {
+                    let existing = snap.chat_channels.get(chan_id);
+                    has_channel_operator_auth(snap, session, char_id, chan_id, existing)
+                };
                 let chan = snap
                     .chat_channels
                     .entry(chan_id.to_string())
-                    .or_insert_with(|| ChatChannelRecord {
-                        channel_id: chan_id.to_string(),
-                        name: chan_id.to_string(),
-                        motd: motd_arg.to_string(),
-                        owner_id: Some(char_id),
-                        members: HashSet::new(),
-                        is_system_local: chan_id.starts_with("solarsystemid2:"),
-                        solar_system_id: parse_channel_system_id(chan_id),
-                        is_private: chan_id.starts_with("private:"),
-                        operators: HashSet::from([char_id]),
-                        password: password_arg.map(|s| s.to_string()),
-                        is_delayed_local: is_delayed,
+                    .or_insert_with(|| {
+                        build_initial_channel_record(
+                            chan_id,
+                            char_id,
+                            motd_arg,
+                            password_arg,
+                            is_delayed,
+                            sys_id_opt,
+                        )
                     });
+                if is_system_or_org_channel(chan_id) {
+                    chan.owner_id = None;
+                    chan.operators.clear();
+                    chan.password = None;
+                }
                 if let Some(ref pw) = chan.password {
                     if !pw.is_empty()
+                        && !caller_is_op
                         && chan.owner_id != Some(char_id)
                         && !chan.operators.contains(&char_id)
                         && !is_allowed_explicitly
@@ -672,19 +707,14 @@ fn handle_chat_rpc(
                     return Some(Err(BridgeRpcError { code: "CharacterChatBanned".into(), message: format!("Character is banned from chat: {reason}") }));
                 }
             }
-            let db_mute = ctx.db.with_snapshot(|snap| snap.chat_channel_acl.get(chan_id).and_then(|a| a.muted_until.get(&char_id).cloned()));
-            if let Some((until, reason)) = db_mute {
-                if now_unix < until {
-                    return Some(Err(BridgeRpcError { code: "MutedInChannel".into(), message: format!("You are muted in {chan_id}: {reason}") }));
-                }
+            if let Some(reason) = check_channel_or_global_mute(ctx, chan_id, char_id, now_unix) {
+                return Some(Err(BridgeRpcError {
+                    code: "MutedInChannel".into(),
+                    message: format!("You are muted in {chan_id}: {reason}"),
+                }));
             }
             {
                 let mut s = ctx.social_extras.lock().unwrap();
-                if let Some(&(until, ref reason)) = s.muted_in_channel.get(&(chan_id.to_string(), char_id)) {
-                    if now_unix < until {
-                        return Some(Err(BridgeRpcError { code: "MutedInChannel".into(), message: format!("You are muted in {chan_id}: {reason}") }));
-                    }
-                }
                 let entry = s.chat_rate_window.entry(char_id).or_insert((now_unix, 0));
                 if entry.0 == now_unix {
                     entry.1 += 1;
@@ -944,6 +974,12 @@ fn handle_chat_rpc(
                 }));
             };
             if method == "DestroyChannel" {
+                if is_system_or_org_channel(chan_id) {
+                    return Some(Err(BridgeRpcError {
+                        code: "NotChannelOwner".into(),
+                        message: "System and organization channels cannot be destroyed".into(),
+                    }));
+                }
                 let res = ctx.db.try_with_mut_snapshot(|snap| {
                     let Some(chan) = snap.chat_channels.get(chan_id) else {
                         return Err(BridgeRpcError {
@@ -951,7 +987,7 @@ fn handle_chat_rpc(
                             message: format!("Channel {chan_id} not found"),
                         });
                     };
-                    if chan.owner_id != Some(char_id) {
+                    if !has_channel_owner_auth(session, char_id, chan_id, chan) {
                         return Err(BridgeRpcError {
                             code: "NotChannelOwner".into(),
                             message: "Only channel owner can destroy the channel".into(),
@@ -981,13 +1017,25 @@ fn handle_chat_rpc(
                 } else {
                     chan_id.to_lowercase()
                 };
+                if is_system_or_org_channel(&chan_key)
+                    && matches!(method, "RenameChannel" | "SetChannelPassword")
+                {
+                    return Err(BridgeRpcError {
+                        code: "NotChannelOwner".into(),
+                        message: "System and organization channels cannot be renamed or password-locked".into(),
+                    });
+                }
+                let can_op = {
+                    let chan_ref = snap.chat_channels.get(&chan_key);
+                    has_channel_operator_auth(snap, session, char_id, &chan_key, chan_ref)
+                };
                 let Some(chan) = snap.chat_channels.get_mut(&chan_key) else {
                     return Err(BridgeRpcError {
                         code: "ChannelNotFound".into(),
                         message: format!("Channel {chan_id} not found"),
                     });
                 };
-                if chan.owner_id != Some(char_id) && !chan.operators.contains(&char_id) {
+                if !can_op {
                     return Err(BridgeRpcError {
                         code: "NotChannelOperator".into(),
                         message: "Requires channel owner or operator privileges".into(),
@@ -1016,7 +1064,7 @@ fn handle_chat_rpc(
                         let mode = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
                         match mode {
                             3 => {
-                                if chan.owner_id != Some(char_id) {
+                                if !has_channel_owner_auth(session, char_id, &chan_key, chan) {
                                     return Err(BridgeRpcError {
                                         code: "NotChannelOwner".into(),
                                         message: "Only the channel owner can transfer ownership"
@@ -1027,6 +1075,12 @@ fn handle_chat_rpc(
                                 chan.operators.insert(target_id);
                             }
                             2 => {
+                                if is_system_or_org_channel(&chan_key) {
+                                    return Err(BridgeRpcError {
+                                        code: "NotChannelOwner".into(),
+                                        message: "System and organization channels derive operator rights from roles".into(),
+                                    });
+                                }
                                 chan.operators.insert(target_id);
                                 let acl = snap.chat_channel_acl.entry(chan_key.clone()).or_default();
                                 acl.allow_list.insert(target_id);
@@ -1135,176 +1189,6 @@ fn parse_channel_system_id(chan_id: &str) -> Option<u32> {
     chan_id
         .strip_prefix("solarsystemid2:")
         .and_then(|s| s.parse().ok())
-}
-
-#[inline]
-fn dispatch_char_contacts(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    method: &str,
-    args: &[PyRep],
-    kwargs: &HashMap<String, PyRep>,
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    crate::services::character_skills::character_contacts::handle_contacts(
-        ctx, session, "charMgr", method, args, kwargs,
-    )
-}
-
-fn handle_contacts_notifications_calendar(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    service: &str,
-    method: &str,
-    args: &[PyRep],
-    kwargs: &HashMap<String, PyRep>,
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    match (service, method) {
-        // parity: rpc:charMgr.GetContactList
-        ("charMgr", "GetContactList") => dispatch_char_contacts(ctx, session, method, args, kwargs),
-        // parity: rpc:charMgr.AddContact
-        ("charMgr", "AddContact") => dispatch_char_contacts(ctx, session, method, args, kwargs),
-        // parity: rpc:charMgr.EditContact, rpc:charMgr.EditContactsRelationshipID
-        ("charMgr", "EditContact") | ("charMgr", "EditContactsRelationshipID") => {
-            dispatch_char_contacts(ctx, session, method, args, kwargs)
-        }
-        // parity: rpc:charMgr.DeleteContacts
-        ("charMgr", "DeleteContacts") => dispatch_char_contacts(ctx, session, method, args, kwargs),
-        // parity: rpc:charMgr.BlockOwners, rpc:charMgr.UnblockOwners
-        ("charMgr", "BlockOwners") | ("charMgr", "UnblockOwners") => {
-            dispatch_char_contacts(ctx, session, method, args, kwargs)
-        }
-
-        ("charMgr", "GetSettingsInfo") => Some(
-            ServerContext::require_character(session).map(|_| crate::services::client_login::settings_info_blob()),
-        ),
-
-        ("charMgr", "LogSettings") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let isk = args
-                .first()
-                .and_then(|a| a.as_f64().or_else(|| a.as_i64().map(|v| v as f64)))
-                .unwrap_or(2_950.0)
-                .clamp(0.0, 1_000_000.0);
-            let charge = IskCents::from_f64_isk(isk);
-            if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
-                snap.character_cspa_charges.insert(char_id, charge);
-                Ok(())
-            }) {
-                return Some(Err(e));
-            }
-            ctx.social_extras.lock().unwrap().cspa_charges.insert(char_id, charge);
-            Some(Ok(PyRep::Real(isk)))
-        }
-
-        ("charMgr", "CSPAChargedAction") | ("charMgr", "CSPAChargedActionForMany") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let target_ids: Vec<i64> = if method == "CSPAChargedActionForMany" {
-                let list_arg = args
-                    .iter()
-                    .find(|a| matches!(a, PyRep::List(_) | PyRep::Tuple(_)))
-                    .or_else(|| args.first());
-                extract_id_list(list_arg)
-            } else {
-                args.iter()
-                    .rev()
-                    .find_map(|a| a.as_i64())
-                    .into_iter()
-                    .collect()
-            };
-            let mut total_cspa = IskCents(0);
-            {
-                let s = ctx.social_extras.lock().unwrap();
-                for &rec_id in &target_ids {
-                    if rec_id == char_id || rec_id <= 0 {
-                        continue;
-                    }
-                    let friendly = s
-                        .contacts
-                        .get(&rec_id)
-                        .and_then(|m| m.get(&char_id))
-                        .is_some_and(|&(st, _, _)| st > 0.0)
-                        || ctx.db.with_snapshot(|snap| {
-                            if snap.char_contacts.get(&rec_id).is_some_and(|list| {
-                                list.iter()
-                                    .any(|c| c.contact_id == char_id && !c.is_blocked && c.standing > 0.0)
-                            }) {
-                                return true;
-                            }
-                            let c1 = snap.characters.get(&char_id);
-                            let c2 = snap.characters.get(&rec_id);
-                            match (c1, c2) {
-                                (Some(a), Some(b)) => {
-                                    a.corporation_id == b.corporation_id
-                                        || (a.alliance_id.is_some() && a.alliance_id == b.alliance_id)
-                                }
-                                _ => false,
-                            }
-                        });
-                    if !friendly {
-                        let charge = ctx
-                            .db
-                            .with_snapshot(|snap| snap.character_cspa_charges.get(&rec_id).copied())
-                            .or_else(|| s.cspa_charges.get(&rec_id).copied())
-                            .unwrap_or_else(|| IskCents::from_f64_isk(2_950.0));
-                        if charge.0 > 0 {
-                            total_cspa = total_cspa.checked_add(charge).unwrap_or(total_cspa);
-                        }
-                    }
-                }
-            }
-            if total_cspa.0 > 0 {
-                let res = ctx.db.try_with_mut_snapshot(|snap| {
-                    let Some(ch) = snap.characters.get_mut(&char_id) else {
-                        return Err(BridgeRpcError {
-                            code: "CharacterNotFound".into(),
-                            message: format!("Character {char_id} not found"),
-                        });
-                    };
-                    ch.balance = ch.balance.checked_sub(total_cspa).ok_or_else(|| BridgeRpcError {
-                        code: "InsufficientFundsForCSPA".into(),
-                        message: "Insufficient ISK to pay recipient CSPA charge".into(),
-                    })?;
-                    Ok(())
-                });
-                if let Err(e) = res {
-                    return Some(Err(e));
-                }
-            }
-            Some(Ok(PyRep::Real(total_cspa.to_wire_f64())))
-        }
-
-        ("charMgr", "SetNote") | ("charMgr", "GetNote") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
-            if method == "SetNote" {
-                let note = args.get(1).and_then(|a| a.as_str()).unwrap_or("");
-                if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
-                    snap.char_notes.insert((char_id, item_id), note.to_string());
-                    Ok(())
-                }) {
-                    return Some(Err(e));
-                }
-                ctx.social_extras.lock().unwrap().char_notes.insert((char_id, item_id), note.to_string());
-                Some(Ok(PyRep::Bool(true)))
-            } else {
-                let note = ctx
-                    .db
-                    .with_snapshot(|snap| snap.char_notes.get(&(char_id, item_id)).cloned())
-                    .or_else(|| {
-                        ctx.social_extras
-                            .lock()
-                            .unwrap()
-                            .char_notes
-                            .get(&(char_id, item_id))
-                            .cloned()
-                    })
-                    .unwrap_or_default();
-                Some(Ok(PyRep::String(note)))
-            }
-        }
-
-        _ => None,
-    }
 }
 
 pub(super) fn extract_id_list(arg: Option<&PyRep>) -> Vec<i64> {

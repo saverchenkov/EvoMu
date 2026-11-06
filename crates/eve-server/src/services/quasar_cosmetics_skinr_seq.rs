@@ -429,61 +429,6 @@ fn handle_skin_license_unapply(
     ))
 }
 
-pub(super) fn materialize_redeemed_skin_license(
-    db: &eve_db::WorldRepository,
-    character_id: u32,
-    skin_hex: &str,
-    units: u64,
-    now_unix: u64,
-) -> (ThirdPartySkinLicense, Option<ThirdPartySkinLicense>) {
-    let mut data = db.with_snapshot(|s| {
-        s.quasar_state_blobs
-            .get(super::quasar_cosmetics_skinr::SKINR_BLOB_KEY)
-            .and_then(|j| serde_json::from_str::<super::quasar_cosmetics_skinr::SkinrCosmeticsData>(j).ok())
-            .unwrap_or_default()
-    });
-    data.skins.entry(skin_hex.to_string()).or_insert_with(|| SkinDesignRecord {
-        skin_hex: skin_hex.to_string(),
-        name: format!("Custom SKIN {skin_hex}"),
-        line_name: "Paragon Custom Line".into(),
-        creator_id: character_id,
-        ship_type_id: DEFAULT_SHIP_TYPE_ID,
-        pattern_blend_mode: 1,
-        slots: Vec::new(),
-        tier_level: 1,
-        first_sequenced_unix: Some(now_unix),
-    });
-    let key = SkinrCosmeticsState::skin_lic_key(character_id, skin_hex);
-    let (lic, prev) = if let Some(existing) = data.skin_licenses.get_mut(&key) {
-        let prev = existing.clone();
-        existing.unactivated = existing.unactivated.saturating_add(units);
-        if existing.first_acquired_unix == 0 {
-            existing.first_acquired_unix = now_unix;
-        }
-        (existing.clone(), Some(prev))
-    } else {
-        let lic = ThirdPartySkinLicense {
-            character_id,
-            skin_hex: skin_hex.to_string(),
-            activated: false,
-            unactivated: units,
-            escrowed: 0,
-            first_acquired_unix: now_unix,
-        };
-        data.skin_licenses.insert(key, lic.clone());
-        (lic, None)
-    };
-    if let Ok(json) = serde_json::to_string(&data) {
-        let _ = db.try_with_mut_snapshot(|s| {
-            s.quasar_state_blobs
-                .insert(super::quasar_cosmetics_skinr::SKINR_BLOB_KEY.into(), json);
-            Ok::<(), String>(())
-        });
-    }
-    super::quasar_entitlement_ledger::sync_live_skinr_states(db);
-    (lic, prev)
-}
-
 fn grant_or_increment_skin_license(
     state: &SkinrCosmeticsState,
     character_id: u32,

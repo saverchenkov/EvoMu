@@ -435,7 +435,10 @@ async fn test_esi6_market_public_and_structure_routes() {
     let types = get_json(&router, &spec, "/v1/markets/10000002/types/", None);
     let types_arr = types.as_array().unwrap();
     assert!(types_arr.contains(&json!(39)));
-    assert!(types_arr.contains(&json!(587)));
+    assert!(
+        !types_arr.contains(&json!(587)),
+        "private Upwell structure orders must not leak into unauthenticated /markets/{{region_id}}/types/ (#524)"
+    );
     assert_status(&router, "/v1/markets/99999999/types/", None, 404);
 
     // 6. GET /v1/markets/structures/{structure_id}/ (scope + ACL enforcement)

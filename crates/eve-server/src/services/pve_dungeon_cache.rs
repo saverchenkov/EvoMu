@@ -227,6 +227,25 @@ fn anomaly_instances(ctx: &ServerContext, sys_id: SolarSystemId, kind: &str) -> 
     out
 }
 
+fn is_site_scanned_by_character(
+    ctx: &ServerContext,
+    char_id: i64,
+    sys_id: SolarSystemId,
+    site_id: &str,
+) -> bool {
+    ctx.db.with_snapshot(|snap| {
+        snap.cosmic_signatures
+            .get(&sys_id)
+            .into_iter()
+            .flatten()
+            .any(|sig| {
+                sig.signature_id == site_id
+                    && !sig.collapsed
+                    && ctx.effective_signature_signal_strength(char_id, sys_id, sig) >= 1.0
+            })
+    })
+}
+
 fn registry_instances(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
@@ -753,9 +772,10 @@ pub async fn handle(
     // parity: feat:pve.agency-content
     // parity: rpc:custom_agency_provider.get_content_data
     if service == "custom_agency_provider" && method == "get_content_data" {
-        if let Err(e) = ServerContext::require_character(session) {
-            return Some(Err(e));
-        }
+        let (_, char_id) = match ServerContext::require_character(session) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
         let Some(sys_id) = session.solar_system_id else {
             return Some(Err(BridgeRpcError {
                 code: "UnknownSolarSystem".into(),
@@ -780,19 +800,33 @@ pub async fn handle(
                 ]));
             }
         }
-        let sigs = registry_instances(ctx, sys_id, true);
-        for (did, instances) in sigs {
-            for iid in instances {
-                content_pieces.push(PyRep::keyval([
-                    ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
-                    ("contentType", PyRep::String("signature".into())),
-                    ("content_type", PyRep::Integer(2)),
-                    ("dungeonID", PyRep::Integer(i64::from(did))),
-                    ("instanceID", PyRep::Integer(iid)),
-                    ("security", PyRep::Real(sec)),
-                    ("jumps", PyRep::Integer(0)),
-                ]));
-            }
+        // Only expose `probe_required` cosmic signatures that `char_id` has already scanned to 100% (`#520`).
+        let scanned_sigs: Vec<(u32, i64)> = with_pve_exploration_reg(ctx, |reg| {
+            let now = crate::services::pve_exploration::now_sec(reg);
+            reg.sites_by_system
+                .get(&sys_id)
+                .into_iter()
+                .flatten()
+                .filter(|s| {
+                    s.probe_required
+                        && !s.cleared
+                        && (s.lifetime_seconds == 0
+                            || now < s.created_unix.saturating_add(s.lifetime_seconds))
+                        && is_site_scanned_by_character(ctx, char_id, sys_id, &s.site_id)
+                })
+                .map(|s| (s.dungeon_id, registry_instance_id(&s.site_id)))
+                .collect()
+        });
+        for (did, iid) in scanned_sigs {
+            content_pieces.push(PyRep::keyval([
+                ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+                ("contentType", PyRep::String("signature".into())),
+                ("content_type", PyRep::Integer(2)),
+                ("dungeonID", PyRep::Integer(i64::from(did))),
+                ("instanceID", PyRep::Integer(iid)),
+                ("security", PyRep::Real(sec)),
+                ("jumps", PyRep::Integer(0)),
+            ]));
         }
         return Some(Ok(PyRep::List(content_pieces)));
     }
@@ -825,7 +859,7 @@ pub async fn handle(
             return Some(Err(e));
         }
 
-        // Extract content identifier from argument (no client raw coordinates accepted)
+        // Extract content identifier from argument (no client raw coordinates or arbitrary celestials accepted)
         let (target_iid, target_did) = match args.first() {
             Some(PyRep::Integer(id)) => (Some(*id), None),
             Some(rep) if matches!(rep, PyRep::Dict(_) | PyRep::KeyVal { .. }) => {
@@ -844,19 +878,42 @@ pub async fn handle(
         ensure_system_pve_sites_seeded(ctx, sys_id).await;
         seed_system_mining_sites_from_sde(ctx, sys_id).await;
 
+        let mut unscanned_blocked = false;
         let mut resolved_pos: Option<glam::DVec3> = with_pve_exploration_reg(ctx, |reg| {
+            let now = crate::services::pve_exploration::now_sec(reg);
             for s in reg.sites_by_system.get(&sys_id).into_iter().flatten() {
+                if s.cleared
+                    || (s.lifetime_seconds > 0
+                        && now >= s.created_unix.saturating_add(s.lifetime_seconds))
+                {
+                    continue;
+                }
                 let iid = registry_instance_id(&s.site_id);
                 if Some(iid) == target_iid || (target_iid.is_none() && Some(s.dungeon_id) == target_did) {
+                    if s.probe_required
+                        && !is_site_scanned_by_character(ctx, char_id, sys_id, &s.site_id)
+                    {
+                        unscanned_blocked = true;
+                        return None;
+                    }
                     return Some(glam::DVec3::from_array(s.position));
                 }
             }
             None
         });
+        if unscanned_blocked {
+            return Some(Err(BridgeRpcError {
+                code: "SignatureNotScanned".into(),
+                message: "Cosmic signature must be probe-scanned to 100% before warping".into(),
+            }));
+        }
 
         if resolved_pos.is_none() {
             resolved_pos = ctx.db.with_snapshot(|snap| {
                 for a in snap.cosmic_anomalies.get(&sys_id).into_iter().flatten() {
+                    if a.cleared {
+                        continue;
+                    }
                     if let Some((did, iid)) = parse_dng_site_id(&a.anomaly_id) {
                         if Some(iid) == target_iid || (target_iid.is_none() && Some(did) == target_did) {
                             return Some(glam::DVec3::from_array(a.position));
@@ -864,21 +921,26 @@ pub async fn handle(
                     }
                 }
                 for s in snap.cosmic_signatures.get(&sys_id).into_iter().flatten() {
+                    if s.collapsed {
+                        continue;
+                    }
                     if let Some((did, iid)) = parse_dng_site_id(&s.signature_id) {
                         if Some(iid) == target_iid || (target_iid.is_none() && Some(did) == target_did) {
+                            if ctx.effective_signature_signal_strength(char_id, sys_id, s) < 1.0 {
+                                unscanned_blocked = true;
+                                return None;
+                            }
                             return Some(glam::DVec3::from_array(s.position));
                         }
                     }
                 }
                 None
             });
-        }
-
-        if resolved_pos.is_none() {
-            if let Some(target_id) = target_iid {
-                if let Some(cel) = ctx.sde.celestials_in_system(sys_id).iter().find(|c| c.celestial_id == target_id) {
-                    resolved_pos = Some(cel.position);
-                }
+            if unscanned_blocked {
+                return Some(Err(BridgeRpcError {
+                    code: "SignatureNotScanned".into(),
+                    message: "Cosmic signature must be probe-scanned to 100% before warping".into(),
+                }));
             }
         }
 
@@ -917,47 +979,19 @@ pub async fn handle(
             }));
         }
 
-        if handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
-            return Some(Err(BridgeRpcError {
-                code: "WarpScrambled".into(),
-                message: "WarpScrambled: Warp drive disabled by warp disruption/scrambler effect".into(),
-            }));
+        if let Err(e) = crate::services::nav_warp_interdiction::execute_agency_content_warp(
+            ctx,
+            &handle,
+            char_id,
+            ship_id,
+            sys_id,
+            &current_ball,
+            dest_pos,
+        )
+        .await
+        {
+            return Some(Err(e));
         }
-
-        let mut is_covert_cloaked = false;
-        if let Ok(Some(cs_check)) = handle.get_combat_state(ship_id).await {
-            if cs_check.is_cloaked && cs_check.gate_cloak_remaining_ticks == 0 && !cs_check.is_covert_cloak {
-                return Some(Err(BridgeRpcError {
-                    code: "CloakedCannotWarp".into(),
-                    message: "Cannot initiate warp while cloaked without a Covert Ops Cloaking Device".into(),
-                }));
-            }
-            is_covert_cloaked = cs_check.is_cloaked && cs_check.is_covert_cloak && cs_check.gate_cloak_remaining_ticks == 0;
-        }
-
-        let warp_speed = crate::services::space_destiny::compute_ship_warp_speed_au_s(ctx, current_ball.type_id);
-        if !is_covert_cloaked {
-            let _ = handle.break_gate_cloak(ship_id).await;
-        }
-
-        let mode = eve_destiny::MovementMode::new_warp(current_ball.position, dest_pos, warp_speed);
-        if let Err(e) = handle.set_movement_mode(ship_id, mode).await {
-            return Some(Err(BridgeRpcError {
-                code: "DestinyCommandFailed".into(),
-                message: e,
-            }));
-        }
-        let _ = handle.stop_non_warp_module_cycles(ship_id).await;
-
-        ctx.notify(
-            crate::router::NotificationTarget::Character(char_id),
-            "OnWarpStarted",
-            "charid",
-            vec![
-                PyRep::Integer(ship_id),
-                PyRep::Integer(i64::from(current_ball.type_id)),
-            ],
-        );
 
         return Some(Ok(PyRep::None));
     }

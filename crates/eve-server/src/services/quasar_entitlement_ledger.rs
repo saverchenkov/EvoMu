@@ -14,12 +14,16 @@
 
 #![forbid(unsafe_code)]
 
+use super::quasar_cosmetics_skinr::{
+    SkinDesignRecord, SkinrCosmeticsData, SkinrCosmeticsState, ThirdPartySkinLicense,
+    SKINR_BLOB_KEY,
+};
 use super::quasar_social_chat::ctx_queue_notice;
 use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
     STATUS_NOT_FOUND,
 };
-use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
+use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository, WorldStateSnapshot};
 use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
     DynamicQuasarMessage, DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
@@ -72,8 +76,22 @@ fn any(type_name: &str, value: Vec<u8>) -> GoogleAny {
     GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"), value }
 }
 
+fn load_from_snap(s: &WorldStateSnapshot) -> EntitlementLedger {
+    s.quasar_state_blobs
+        .get(BLOB_KEY)
+        .and_then(|j| serde_json::from_str(j).ok())
+        .unwrap_or_default()
+}
+
+fn save_to_snap(s: &mut WorldStateSnapshot, ledger: &EntitlementLedger) -> Result<(), (u32, String)> {
+    let json = serde_json::to_string(ledger)
+        .map_err(|e| (STATUS_BAD_REQUEST, format!("Failed to serialize entitlement ledger: {e}")))?;
+    s.quasar_state_blobs.insert(BLOB_KEY.into(), json);
+    Ok(())
+}
+
 pub(super) fn load(db: &WorldRepository) -> EntitlementLedger {
-    db.with_snapshot(|s| s.quasar_state_blobs.get(BLOB_KEY).and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default())
+    db.with_snapshot(load_from_snap)
 }
 
 pub fn redeemed_titles_for_char(db: &WorldRepository, char_id: u32) -> Vec<u64> {
@@ -311,8 +329,8 @@ fn asset_unit_volume_m3(sde: &SdeRegistry, asset: &AssetRecord) -> f64 {
         .sum()
 }
 
-fn check_holder_hangar_volume(
-    db: &WorldRepository,
+fn check_holder_hangar_volume_in_snap(
+    s: &WorldStateSnapshot,
     sde: &SdeRegistry,
     ledger: &EntitlementLedger,
     holder: u32,
@@ -340,10 +358,7 @@ fn check_holder_hangar_volume(
         0.0
     };
     let holder_i64 = holder as i64;
-    let (existing_vol_m3, cap_m3) = db.with_snapshot(|s| {
-        let Some(ch) = s.characters.get(&holder_i64) else {
-            return (0.0, MAX_STATION_HANGAR_CAPACITY_M3);
-        };
+    let (existing_vol_m3, cap_m3) = if let Some(ch) = s.characters.get(&holder_i64) {
         let location = ch.station_id.or(ch.structure_id).unwrap_or(ch.home_station_id);
         let cap = s
             .items
@@ -368,7 +383,9 @@ fn check_holder_hangar_volume(
             })
             .sum();
         (used, cap)
-    });
+    } else {
+        (0.0, MAX_STATION_HANGAR_CAPACITY_M3)
+    };
     if existing_vol_m3 + reserved_vol_m3 + incoming_vol_m3 > cap_m3 + 1e-6 {
         return Err((
             STATUS_BAD_REQUEST,
@@ -416,26 +433,30 @@ fn spawn(db: &WorldRepository, sde: &SdeRegistry, ctx: &AuthoritativeContext, ms
         Some(DynamicValue::String(s)) => s.clone(),
         _ => String::new(),
     };
-    let mut ledger = load(db);
-    if ledger.assets.len() >= MAX_LEDGER_ENTRIES {
-        return Err((STATUS_BAD_REQUEST, "Asset ledger capacity reached".to_string()));
-    }
-    ledger.next_asset_seq += 1;
-    let mut uuid = [0u8; 16];
-    uuid[0..8].copy_from_slice(b"ASSETHLD");
-    uuid[8..16].copy_from_slice(&ledger.next_asset_seq.to_be_bytes());
-    let record = AssetRecord {
-        uuid,
-        name,
-        stacks,
-        character_title_id,
-        ship_skin_license_hex: None,
-        capacity,
-        benefactor_char_id: ctx.effective_character_id(),
-    };
-    let attrs = encode_asset_attributes(&record, false);
-    ledger.assets.insert(hex(&uuid), record);
-    save(db, &ledger);
+    let benefactor_char_id = ctx.effective_character_id();
+    let (uuid, attrs) = db.try_with_mut_snapshot(|s| {
+        let mut ledger = load_from_snap(s);
+        if ledger.assets.len() >= MAX_LEDGER_ENTRIES {
+            return Err((STATUS_BAD_REQUEST, "Asset ledger capacity reached".to_string()));
+        }
+        ledger.next_asset_seq += 1;
+        let mut uuid = [0u8; 16];
+        uuid[0..8].copy_from_slice(b"ASSETHLD");
+        uuid[8..16].copy_from_slice(&ledger.next_asset_seq.to_be_bytes());
+        let record = AssetRecord {
+            uuid,
+            name,
+            stacks,
+            character_title_id,
+            ship_skin_license_hex: None,
+            capacity,
+            benefactor_char_id,
+        };
+        let attrs = encode_asset_attributes(&record, false);
+        ledger.assets.insert(hex(&uuid), record);
+        save_to_snap(s, &ledger)?;
+        Ok((uuid, attrs))
+    })?;
     let (mut id, mut out) = (Vec::new(), Vec::new());
     encode_bytes_field(1, &uuid, &mut id);
     encode_bytes_field(1, &id, &mut out);
@@ -482,26 +503,29 @@ fn hold(db: &WorldRepository, sde: &SdeRegistry, ctx: &AuthoritativeContext, msg
     } else {
         return Err((STATUS_BAD_REQUEST, "Unsupported HoldRequest unit".to_string()));
     }
-    let mut ledger = load(db);
-    if ledger.assets.len() >= MAX_LEDGER_ENTRIES {
-        return Err((STATUS_BAD_REQUEST, "Asset ledger capacity reached".to_string()));
-    }
-    ledger.next_asset_seq += 1;
-    let mut uuid = [0u8; 16];
-    uuid[0..8].copy_from_slice(b"ASSETHLD");
-    uuid[8..16].copy_from_slice(&ledger.next_asset_seq.to_be_bytes());
-    let record = AssetRecord {
-        uuid,
-        name,
-        stacks,
-        character_title_id: None,
-        ship_skin_license_hex,
-        capacity,
-        benefactor_char_id: creator_cid,
-    };
-    let attrs = encode_asset_attributes(&record, false);
-    ledger.assets.insert(hex(&uuid), record);
-    save(db, &ledger);
+    let (uuid, attrs) = db.try_with_mut_snapshot(|s| {
+        let mut ledger = load_from_snap(s);
+        if ledger.assets.len() >= MAX_LEDGER_ENTRIES {
+            return Err((STATUS_BAD_REQUEST, "Asset ledger capacity reached".to_string()));
+        }
+        ledger.next_asset_seq += 1;
+        let mut uuid = [0u8; 16];
+        uuid[0..8].copy_from_slice(b"ASSETHLD");
+        uuid[8..16].copy_from_slice(&ledger.next_asset_seq.to_be_bytes());
+        let record = AssetRecord {
+            uuid,
+            name,
+            stacks,
+            character_title_id: None,
+            ship_skin_license_hex,
+            capacity,
+            benefactor_char_id: creator_cid,
+        };
+        let attrs = encode_asset_attributes(&record, false);
+        ledger.assets.insert(hex(&uuid), record);
+        save_to_snap(s, &ledger)?;
+        Ok((uuid, attrs))
+    })?;
     let (mut id, mut out) = (Vec::new(), Vec::new());
     encode_bytes_field(1, &uuid, &mut id);
     encode_bytes_field(1, &id, &mut out);
@@ -541,36 +565,32 @@ fn create_asset(db: &WorldRepository, sde: &SdeRegistry, ctx: &AuthoritativeCont
         return Err((STATUS_BAD_REQUEST, "Unsupported CreateRequest unit".to_string()));
     }
     let capacity = msg.get(6).and_then(as_u64).filter(|&c| c > 0).map(|c| (c, c));
-    let mut ledger = load(db);
-    if ledger.assets.len() >= MAX_LEDGER_ENTRIES {
-        return Err((STATUS_BAD_REQUEST, "Asset ledger capacity reached".to_string()));
-    }
-    ledger.next_asset_seq += 1;
-    let mut uuid = [0u8; 16];
-    uuid[0..8].copy_from_slice(b"ASSETHLD");
-    uuid[8..16].copy_from_slice(&ledger.next_asset_seq.to_be_bytes());
-    ledger.assets.insert(hex(&uuid), AssetRecord {
-        uuid,
-        name: format!("created:{}", ledger.next_asset_seq),
-        stacks,
-        character_title_id,
-        ship_skin_license_hex,
-        capacity,
-        benefactor_char_id: ctx.effective_character_id(),
-    });
-    save(db, &ledger);
+    let benefactor_char_id = ctx.effective_character_id();
+    let uuid = db.try_with_mut_snapshot(|s| {
+        let mut ledger = load_from_snap(s);
+        if ledger.assets.len() >= MAX_LEDGER_ENTRIES {
+            return Err((STATUS_BAD_REQUEST, "Asset ledger capacity reached".to_string()));
+        }
+        ledger.next_asset_seq += 1;
+        let mut uuid = [0u8; 16];
+        uuid[0..8].copy_from_slice(b"ASSETHLD");
+        uuid[8..16].copy_from_slice(&ledger.next_asset_seq.to_be_bytes());
+        ledger.assets.insert(hex(&uuid), AssetRecord {
+            uuid,
+            name: format!("created:{}", ledger.next_asset_seq),
+            stacks,
+            character_title_id,
+            ship_skin_license_hex,
+            capacity,
+            benefactor_char_id,
+        });
+        save_to_snap(s, &ledger)?;
+        Ok(uuid)
+    })?;
     let (mut id, mut out) = (Vec::new(), Vec::new());
     encode_bytes_field(1, &uuid, &mut id);
     encode_bytes_field(1, &id, &mut out);
     Ok(any("eve.assetholding.asset.api.CreateResponse", out))
-}
-
-fn save(db: &WorldRepository, ledger: &EntitlementLedger) {
-    if let Ok(json) = serde_json::to_string(ledger) {
-        db.with_mut_snapshot(|s| {
-            s.quasar_state_blobs.insert(BLOB_KEY.into(), json);
-        });
-    }
 }
 
 /// GM: `DirectDeliveryRequest { entitlements = 2 [{ entitlement = 2, quantity = 10 }] }` grants
@@ -586,51 +606,54 @@ fn direct_delivery(
     if entries.is_empty() {
         return Err((STATUS_BAD_REQUEST, "No entitlements to deliver".to_string()));
     }
-    let mut ledger = load(db);
-    let mut granted = Vec::new();
-    for e in entries {
-        let key = EntitlementKey::parse(sub(e, 2))?;
-        let quantity = e.get(10).and_then(as_u64).unwrap_or(0);
-        if quantity == 0 {
-            return Err((STATUS_BAD_REQUEST, "Delivered quantity must be positive".to_string()));
-        }
-        if !db.with_snapshot(|s| s.characters.contains_key(&(key.holder as i64))) {
-            return Err((STATUS_NOT_FOUND, format!("Character {} not found", key.holder)));
-        }
-        let k = key.key();
-        if !ledger.entitlements.contains_key(&k) && ledger.entitlements.len() >= MAX_LEDGER_ENTRIES {
-            return Err((STATUS_BAD_REQUEST, "Entitlement ledger capacity reached".to_string()));
-        }
-        let unredeemed_reserved: u64 = ledger
-            .entitlements
-            .values()
-            .filter(|ent| ent.asset == key.asset)
-            .map(|ent| ent.total.saturating_sub(ent.redeemed))
-            .sum();
-        let asset = ledger
-            .assets
-            .get(&hex(&key.asset))
-            .cloned()
-            .ok_or_else(|| (STATUS_NOT_FOUND, "Asset not found".to_string()))?;
-        if let Some((_orig, rem)) = asset.capacity {
-            if unredeemed_reserved.saturating_add(quantity) > rem {
-                return Err((STATUS_BAD_REQUEST, "Asset finite capacity exhausted".to_string()));
+    let granted = db.try_with_mut_snapshot(|s| {
+        let mut ledger = load_from_snap(s);
+        let mut granted = Vec::new();
+        for e in &entries {
+            let key = EntitlementKey::parse(sub(e, 2))?;
+            let quantity = e.get(10).and_then(as_u64).unwrap_or(0);
+            if quantity == 0 {
+                return Err((STATUS_BAD_REQUEST, "Delivered quantity must be positive".to_string()));
             }
+            if !s.characters.contains_key(&(key.holder as i64)) {
+                return Err((STATUS_NOT_FOUND, format!("Character {} not found", key.holder)));
+            }
+            let k = key.key();
+            if !ledger.entitlements.contains_key(&k) && ledger.entitlements.len() >= MAX_LEDGER_ENTRIES {
+                return Err((STATUS_BAD_REQUEST, "Entitlement ledger capacity reached".to_string()));
+            }
+            let unredeemed_reserved: u64 = ledger
+                .entitlements
+                .values()
+                .filter(|ent| ent.asset == key.asset)
+                .map(|ent| ent.total.saturating_sub(ent.redeemed))
+                .sum();
+            let asset = ledger
+                .assets
+                .get(&hex(&key.asset))
+                .cloned()
+                .ok_or_else(|| (STATUS_NOT_FOUND, "Asset not found".to_string()))?;
+            if let Some((_orig, rem)) = asset.capacity {
+                if unredeemed_reserved.saturating_add(quantity) > rem {
+                    return Err((STATUS_BAD_REQUEST, "Asset finite capacity exhausted".to_string()));
+                }
+            }
+            let incoming_vol_m3 = asset_unit_volume_m3(sde, &asset) * (quantity as f64);
+            check_holder_hangar_volume_in_snap(s, sde, &ledger, key.holder, incoming_vol_m3, true)?;
+            let rec = ledger.entitlements.entry(k).or_insert_with(|| EntitlementRecord {
+                holder: key.holder,
+                asset: key.asset,
+                group_name: key.group_name.clone(),
+                group_uuid: key.group_uuid,
+                total: 0,
+                redeemed: 0,
+            });
+            rec.total = rec.total.saturating_add(quantity);
+            granted.push((rec.clone(), quantity));
         }
-        let incoming_vol_m3 = asset_unit_volume_m3(sde, &asset) * (quantity as f64);
-        check_holder_hangar_volume(db, sde, &ledger, key.holder, incoming_vol_m3, true)?;
-        let rec = ledger.entitlements.entry(k).or_insert_with(|| EntitlementRecord {
-            holder: key.holder,
-            asset: key.asset,
-            group_name: key.group_name.clone(),
-            group_uuid: key.group_uuid,
-            total: 0,
-            redeemed: 0,
-        });
-        rec.total = rec.total.saturating_add(quantity);
-        granted.push((rec.clone(), quantity));
-    }
-    save(db, &ledger);
+        save_to_snap(s, &ledger)?;
+        Ok(granted)
+    })?;
     for (rec, quantity) in granted {
         ctx_queue_notice(
             NoticeScope::Character(rec.holder),
@@ -686,10 +709,22 @@ fn redeem(
     if require_admin {
         require_admin_role(ctx)?;
     }
-    let mut ledger = load(db);
-    let (key, rec) = owned_entitlement(&ledger, ctx, msg, require_admin || !is_public)?;
-    redeem_record(db, sde, &mut ledger, ctx.now_unix(), &key, rec)?;
-    save(db, &ledger);
+    let now_unix = ctx.now_unix();
+    let (notices, redeemed_any_skin) = db.try_with_mut_snapshot(|s| {
+        let mut ledger = load_from_snap(s);
+        let (key, rec) = owned_entitlement(&ledger, ctx, msg, require_admin || !is_public)?;
+        let mut notices = Vec::new();
+        let redeemed_skin =
+            redeem_record_in_snap(s, sde, &mut ledger, now_unix, &key, rec, &mut notices)?;
+        save_to_snap(s, &ledger)?;
+        Ok((notices, redeemed_skin))
+    })?;
+    if redeemed_any_skin {
+        sync_live_skinr_states(db);
+    }
+    for (holder, notice) in notices {
+        ctx_queue_notice(NoticeScope::Character(holder), notice, now_unix);
+    }
     let rsp_type = if require_admin {
         "eve.assetholding.entitlement.api.admin.RedeemResponse"
     } else if is_public {
@@ -700,26 +735,82 @@ fn redeem(
     Ok(any(rsp_type, Vec::new()))
 }
 
-fn redeem_record(
-    db: &WorldRepository,
+fn materialize_redeemed_skin_license_in_snap(
+    s: &mut WorldStateSnapshot,
+    character_id: u32,
+    skin_hex: &str,
+    units: u64,
+    now_unix: u64,
+) -> Result<(ThirdPartySkinLicense, Option<ThirdPartySkinLicense>), (u32, String)> {
+    let mut data = s
+        .quasar_state_blobs
+        .get(SKINR_BLOB_KEY)
+        .and_then(|j| serde_json::from_str::<SkinrCosmeticsData>(j).ok())
+        .unwrap_or_default();
+    data.skins
+        .entry(skin_hex.to_string())
+        .or_insert_with(|| SkinDesignRecord {
+            skin_hex: skin_hex.to_string(),
+            name: format!("Custom SKIN {skin_hex}"),
+            line_name: "Paragon Custom Line".into(),
+            creator_id: character_id,
+            ship_type_id: 587,
+            pattern_blend_mode: 1,
+            slots: Vec::new(),
+            tier_level: 1,
+            first_sequenced_unix: Some(now_unix),
+        });
+    let key = SkinrCosmeticsState::skin_lic_key(character_id, skin_hex);
+    let (lic, prev) = if let Some(existing) = data.skin_licenses.get_mut(&key) {
+        let prev = existing.clone();
+        existing.unactivated = existing.unactivated.saturating_add(units);
+        if existing.first_acquired_unix == 0 {
+            existing.first_acquired_unix = now_unix;
+        }
+        (existing.clone(), Some(prev))
+    } else {
+        let lic = ThirdPartySkinLicense {
+            character_id,
+            skin_hex: skin_hex.to_string(),
+            activated: false,
+            unactivated: units,
+            escrowed: 0,
+            first_acquired_unix: now_unix,
+        };
+        data.skin_licenses.insert(key, lic.clone());
+        (lic, None)
+    };
+    let json = serde_json::to_string(&data)
+        .map_err(|e| (STATUS_BAD_REQUEST, format!("Failed to serialize SKINR state: {e}")))?;
+    s.quasar_state_blobs.insert(SKINR_BLOB_KEY.into(), json);
+    Ok((lic, prev))
+}
+
+fn redeem_record_in_snap(
+    s: &mut WorldStateSnapshot,
     sde: &SdeRegistry,
     ledger: &mut EntitlementLedger,
     now_unix: u64,
     key: &str,
     rec: EntitlementRecord,
-) -> Result<(), (u32, String)> {
+    notices: &mut Vec<(u32, GoogleAny)>,
+) -> Result<bool, (u32, String)> {
     let units = rec.total.saturating_sub(rec.redeemed);
     if units == 0 {
         return Err((STATUS_BAD_REQUEST, "Entitlement has nothing left to redeem".to_string()));
     }
     let asset_key = hex(&rec.asset);
-    let mut asset = ledger.assets.get(&asset_key).cloned().ok_or_else(|| (STATUS_NOT_FOUND, "Asset not found".to_string()))?;
+    let mut asset = ledger
+        .assets
+        .get(&asset_key)
+        .cloned()
+        .ok_or_else(|| (STATUS_NOT_FOUND, "Asset not found".to_string()))?;
     for (_type_id, qty) in &asset.stacks {
         let _ = i32::try_from((*qty as u64).saturating_mul(units))
             .map_err(|_| (STATUS_BAD_REQUEST, "Quantity overflow".to_string()))?;
     }
     let incoming_vol_m3 = asset_unit_volume_m3(sde, &asset) * (units as f64);
-    check_holder_hangar_volume(db, sde, ledger, rec.holder, incoming_vol_m3, false)?;
+    check_holder_hangar_volume_in_snap(s, sde, ledger, rec.holder, incoming_vol_m3, false)?;
     let mut cap_claimed: Option<(u64, u64)> = None;
     if let Some((orig, rem)) = asset.capacity {
         if rem < units {
@@ -730,30 +821,31 @@ fn redeem_record(
         cap_claimed = Some((rem, new_rem));
     }
     let holder = rec.holder as i64;
-    db.try_with_mut_snapshot(|s| {
-        let ch = s.characters.get(&holder).ok_or_else(|| (STATUS_NOT_FOUND, "Character not found".to_string()))?;
-        let location = ch.station_id.or(ch.structure_id).unwrap_or(ch.home_station_id);
-        for (type_id, qty) in &asset.stacks {
-            let quantity = i32::try_from((*qty as u64).saturating_mul(units)).map_err(|_| (STATUS_BAD_REQUEST, "Quantity overflow".to_string()))?;
-            s.next_entity_id += 1;
-            let item_id = s.next_entity_id;
-            s.items.insert(
+    let ch = s
+        .characters
+        .get(&holder)
+        .ok_or_else(|| (STATUS_NOT_FOUND, "Character not found".to_string()))?;
+    let location = ch.station_id.or(ch.structure_id).unwrap_or(ch.home_station_id);
+    for (type_id, qty) in &asset.stacks {
+        let quantity = i32::try_from((*qty as u64).saturating_mul(units))
+            .map_err(|_| (STATUS_BAD_REQUEST, "Quantity overflow".to_string()))?;
+        s.next_entity_id += 1;
+        let item_id = s.next_entity_id;
+        s.items.insert(
+            item_id,
+            InventoryItemRecord {
                 item_id,
-                InventoryItemRecord {
-                    item_id,
-                    type_id: *type_id,
-                    owner_id: holder,
-                    location_id: location,
-                    flag: InventoryFlag::Hangar,
-                    quantity,
-                    singleton: false,
-                    version: 1,
-                    ..Default::default()
-                },
-            );
-        }
-        Ok::<(), (u32, String)>(())
-    })?;
+                type_id: *type_id,
+                owner_id: holder,
+                location_id: location,
+                flag: InventoryFlag::Hangar,
+                quantity,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    }
     let mut updated = rec;
     updated.redeemed = updated.total;
     ledger.assets.insert(asset_key, asset.clone());
@@ -764,30 +856,30 @@ fn redeem_record(
         encode_bytes_field(1, &a_id, &mut cap_n);
         encode_varint_field(2, prev_rem, &mut cap_n);
         encode_varint_field(3, cur_rem, &mut cap_n);
-        ctx_queue_notice(
-            NoticeScope::Character(updated.holder),
+        notices.push((
+            updated.holder,
             any("eve_public.assetholding.asset.api.FiniteCapacityClaimedNotice", cap_n),
-            now_unix,
-        );
+        ));
     }
     if let Some(tid) = asset.character_title_id {
         let (mut t_id, mut t_n) = (Vec::new(), Vec::new());
         encode_bytes_field(1, &super::quasar_cosmetics_drafts::id_to_uuid_bytes(tid), &mut t_id);
         encode_bytes_field(1, &t_id, &mut t_n);
-        ctx_queue_notice(
-            NoticeScope::Character(updated.holder),
+        notices.push((
+            updated.holder,
             any("eve_public.cosmetic.character.title.api.GrantedNotice", t_n),
-            now_unix,
-        );
+        ));
     }
+    let mut redeemed_skin = false;
     if let Some(ref skin_hex) = asset.ship_skin_license_hex {
-        let (lic, prev) = super::quasar_cosmetics_skinr_seq::materialize_redeemed_skin_license(
-            db,
+        let (lic, prev) = materialize_redeemed_skin_license_in_snap(
+            s,
             updated.holder,
             skin_hex,
             units,
             now_unix,
-        );
+        )?;
+        redeemed_skin = true;
         let (mut ch_id, mut sk_id, mut lic_id, mut lic_n) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         encode_varint_field(1, updated.holder as u64, &mut ch_id);
@@ -806,25 +898,22 @@ fn redeem_record(
             encode_varint_field(2, prev_lic.unactivated, &mut prev_at);
             encode_varint_field(3, prev_lic.escrowed, &mut prev_at);
             encode_bytes_field(3, &prev_at, &mut lic_n);
-            ctx_queue_notice(
-                NoticeScope::Character(updated.holder),
+            notices.push((
+                updated.holder,
                 any("eve_public.cosmetic.ship.skin.thirdparty.license.api.UpdatedNotice", lic_n),
-                now_unix,
-            );
+            ));
         } else {
-            ctx_queue_notice(
-                NoticeScope::Character(updated.holder),
+            notices.push((
+                updated.holder,
                 any("eve_public.cosmetic.ship.skin.thirdparty.license.api.AddedNotice", lic_n),
-                now_unix,
-            );
+            ));
         }
     }
-    ctx_queue_notice(
-        NoticeScope::Character(updated.holder),
+    notices.push((
+        updated.holder,
         entitlement_notice("eve_public.assetholding.entitlement.api.RedeemedNotice", &updated, units),
-        now_unix,
-    );
-    Ok(())
+    ));
+    Ok(redeemed_skin)
 }
 
 static REDEEMED_SKIN_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -841,16 +930,19 @@ fn delete_or_expire(db: &WorldRepository, ctx: &AuthoritativeContext, msg: &Dyna
     if require_admin {
         require_admin_role(ctx)?;
     }
-    let mut ledger = load(db);
-    let (key, rec) = owned_entitlement(&ledger, ctx, msg, true)?;
-    if !require_admin && require_admin_role(ctx).is_err() && rec.redeemed > 0 {
-        return Err((
-            STATUS_FORBIDDEN,
-            "Cannot delete an already-redeemed entitlement without admin role".to_string(),
-        ));
-    }
-    ledger.entitlements.remove(&key);
-    save(db, &ledger);
+    let rec = db.try_with_mut_snapshot(|s| {
+        let mut ledger = load_from_snap(s);
+        let (key, rec) = owned_entitlement(&ledger, ctx, msg, true)?;
+        if !require_admin && require_admin_role(ctx).is_err() && rec.redeemed > 0 {
+            return Err((
+                STATUS_FORBIDDEN,
+                "Cannot delete an already-redeemed entitlement without admin role".to_string(),
+            ));
+        }
+        ledger.entitlements.remove(&key);
+        save_to_snap(s, &ledger)?;
+        Ok(rec)
+    })?;
     let (mut a_id, mut del_n) = (Vec::new(), Vec::new());
     encode_bytes_field(1, &rec.asset, &mut a_id);
     encode_bytes_field(1, &a_id, &mut del_n);
@@ -881,22 +973,39 @@ fn auto_redeem(
         Some(DynamicValue::Bytes(b)) if b.len() == 16 => Some(hex(b)),
         _ => None,
     });
-    let mut ledger = load(db);
-    let pending: Vec<(String, EntitlementRecord)> = ledger
-        .entitlements
-        .iter()
-        .filter(|(k, r)| {
-            r.total > r.redeemed
-                && target_key.as_ref().is_none_or(|tk| *k == tk)
-                && (target_key.is_some() || target_holder.is_none_or(|th| r.holder == th))
-                && (target_key.is_some() || target_asset.as_ref().is_none_or(|ta| &hex(&r.asset) == ta))
-        })
-        .map(|(k, r)| (k.clone(), r.clone()))
-        .collect();
-    for (k, rec) in pending {
-        let _ = redeem_record(db, sde, &mut ledger, ctx.now_unix(), &k, rec);
+    let now_unix = ctx.now_unix();
+    let (notices, redeemed_any_skin) = db.try_with_mut_snapshot(|s| {
+        let mut ledger = load_from_snap(s);
+        let pending: Vec<(String, EntitlementRecord)> = ledger
+            .entitlements
+            .iter()
+            .filter(|(k, r)| {
+                r.total > r.redeemed
+                    && target_key.as_ref().is_none_or(|tk| *k == tk)
+                    && (target_key.is_some() || target_holder.is_none_or(|th| r.holder == th))
+                    && (target_key.is_some()
+                        || target_asset.as_ref().is_none_or(|ta| &hex(&r.asset) == ta))
+            })
+            .map(|(k, r)| (k.clone(), r.clone()))
+            .collect();
+        let mut notices = Vec::new();
+        let mut redeemed_any_skin = false;
+        for (k, rec) in pending {
+            if let Ok(skin) =
+                redeem_record_in_snap(s, sde, &mut ledger, now_unix, &k, rec, &mut notices)
+            {
+                redeemed_any_skin |= skin;
+            }
+        }
+        save_to_snap(s, &ledger)?;
+        Ok((notices, redeemed_any_skin))
+    })?;
+    if redeemed_any_skin {
+        sync_live_skinr_states(db);
     }
-    save(db, &ledger);
+    for (holder, notice) in notices {
+        ctx_queue_notice(NoticeScope::Character(holder), notice, now_unix);
+    }
     Ok(any(rsp_type, Vec::new()))
 }
 

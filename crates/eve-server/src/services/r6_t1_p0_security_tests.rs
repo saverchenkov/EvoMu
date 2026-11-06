@@ -331,6 +331,20 @@ async fn r6_t1_03_drone_engage_mixed_squadron_range_and_tp_no_compound() {
     for did in [901_001, 901_010, 901_002, 901_003] {
         let _ = sys.spawn_ball(make_ship_ball(did, DVec3::new(1_000.0, 0.0, 0.0))).await;
     }
+    for tid in [target_ship, suspect_ship] {
+        let _ = sys
+            .add_target_lock(
+                att_ship,
+                eve_destiny::TargetLock {
+                    target_id: tid,
+                    lock_time_ms: 1_000.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: None,
+                },
+            )
+            .await;
+    }
 
     ctx.crimewatch
         .write()

@@ -4,6 +4,9 @@
 
 use super::*;
 
+#[path = "fitting_module_cycles_guards.rs"]
+pub(crate) mod guards;
+pub(crate) use guards::*;
 #[path = "fitting_module_cycles_helpers.rs"]
 pub(crate) mod helpers;
 pub(crate) use helpers::*;
@@ -142,6 +145,15 @@ pub(crate) async fn handle_module_cycles(
             let Some(mod_type) = ctx.sde.types.get(&m.type_id) else {
                 return Some(Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module type {} not found in SDE", m.type_id) }));
             };
+            if effect_name != "online" && session.station_id.is_none() && session.structure_id.is_none() {
+                if let Err(e) = enforce_space_module_cloak_and_warp_guard(
+                    ctx, &sys, char_id, ship_id, mod_type,
+                )
+                .await
+                {
+                    return Some(Err(e));
+                }
+            }
             let is_weapon = matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807);
             if method == "Activate" && is_weapon && ctx.is_module_in_reactivation_delay(ship_id, module_id) {
                 return Some(Err(BridgeRpcError {
@@ -182,7 +194,7 @@ pub(crate) async fn handle_module_cycles(
 
             if (matches!(
                 mod_type.group_id,
-                52 | 65 | 68 | 71 | 72 | 201 | 208 | 291 | 379 | 862 | 74 | 55 | 53 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807
+                52 | 65 | 68 | 71 | 72 | 201 | 208 | 291 | 379 | 588 | 862 | 74 | 55 | 53 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807
             ) || matches!(
                 effect_name.as_str(),
                 "empWave" | "useMissiles" | "targetAttack" | "projectileFired"
@@ -224,7 +236,18 @@ pub(crate) async fn handle_module_cycles(
                 }
             }
             if mod_type.group_id == 588 {
-                return Some(crate::services::tactical_modules::activate_superweapon_or_lance(ctx, char_id, ship_id, sys_id, module_id, "ActivateSlashModule", target_id_opt).await);
+                let is_lance_or_slash = matches!(mod_type.type_id, 77398..=77401)
+                    || mod_type.default_attributes.contains_key(&2263)
+                    || mod_type.name.contains("Lance")
+                    || mod_type.name.contains("Slash")
+                    || mod_type.name.contains("Bosonic")
+                    || mod_type.name.contains("Reaper");
+                let sw_method = if is_lance_or_slash {
+                    "ActivateSlashModule"
+                } else {
+                    "ActivateSinglePointTargetedModule"
+                };
+                return Some(crate::services::tactical_modules::activate_superweapon_or_lance(ctx, char_id, ship_id, sys_id, module_id, sw_method, target_id_opt).await);
             }
             if mod_type.group_id == 1154 {
                 let mod_state = fit.build_effective_module_state(module_id, m.type_id, false, &ctx.sde);
@@ -338,22 +361,6 @@ pub(crate) async fn handle_module_cycles(
                         message: "Cannot activate Interdiction Sphere Launcher while docked".into(),
                     }));
                 }
-                let ship_cloaked = sys
-                    .get_combat_state(ship_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some_and(|cs| cs.is_cloaked || cs.cloak_original_max_velocity.is_some())
-                    || ctx.db.with_snapshot(|s| {
-                        s.items.values().any(|it| {
-                            it.location_id == ship_id
-                                && s.module_active_states.contains(&it.item_id)
-                                && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 330)
-                        })
-                    });
-                if ship_cloaked {
-                    return Some(Err(BridgeRpcError::user_error("CannotActivateCloaked")));
-                }
                 if sys
                     .get_combat_state(ship_id)
                     .await
@@ -365,18 +372,6 @@ pub(crate) async fn handle_module_cycles(
                         code: "CantActivateWhileTethered".into(),
                         message: "Cannot activate Interdiction Sphere Launcher while tethered".into(),
                     }));
-                }
-                if let Some((_, ship_ball)) = sys.get_ball_snapshot(ship_id).await.ok().flatten() {
-                    if matches!(
-                        ship_ball.mode,
-                        eve_destiny::MovementMode::Warp { phase, .. }
-                            if phase != eve_destiny::WarpPhase::Aligning
-                    ) {
-                        return Some(Err(BridgeRpcError {
-                            code: "CantActivateInWarp".into(),
-                            message: "Cannot activate Interdiction Sphere Launcher while in warp".into(),
-                        }));
-                    }
                 }
                 return Some(
                     crate::services::tactical_module_mechanics::activate_interdiction_sphere_launcher(
@@ -734,17 +729,6 @@ pub(crate) async fn handle_module_cycles(
                     || mod_type.name.contains("Micro Jump Field Generator");
                 let is_mwd_or_mjd = is_mwd || is_mjd;
 
-                if mod_type.group_id == 46 || is_mjd {
-                    let ship_cloaked = sys.get_combat_state(ship_id).await.ok().flatten()
-                        .is_some_and(|cs| cs.is_cloaked || cs.cloak_original_max_velocity.is_some())
-                        || ctx.db.with_snapshot(|s| s.items.values().any(|it| {
-                            it.location_id == ship_id && s.module_active_states.contains(&it.item_id)
-                                && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 330)
-                        }));
-                    if ship_cloaked {
-                        return Some(Err(BridgeRpcError::user_error("CannotActivateCloaked")));
-                    }
-                }
                 if is_mwd && effect_name != "online" {
                     if let Err(e) = crate::services::pve_dungeon_runtime_rpc::check_deadspace_mwd_disallowed(ctx, &sys, sys_id, ship_id).await {
                         return Some(Err(e));

@@ -84,16 +84,29 @@ async fn test_xmpp_chat_mgr_and_macho_net() {
     assert_eq!(host_rep, PyRep::String("chat.evomu.local".into()));
 
     // 2. XmppChatMgr.EnsureResourceWarsChannelExists: creates authentic RW channel in snapshot
-    let chan_name = "resourcewars:rw_site_999";
-    let rw_rep = rpc(&ctx, &mut sess1, "XmppChatMgr", "EnsureResourceWarsChannelExists", &[PyRep::String(chan_name.into())])
+    let rw_sys = sess1.solar_system_id.unwrap_or(30_000_142);
+    let rw_chan_name = format!("resourcewars:{rw_sys}");
+    let rw_rep = rpc(&ctx, &mut sess1, "XmppChatMgr", "EnsureResourceWarsChannelExists", &[PyRep::String(rw_chan_name.clone())])
         .await
         .expect("EnsureResourceWarsChannelExists");
-    assert_eq!(field(&rw_rep, "channelID"), &PyRep::String(chan_name.into()));
+    assert_eq!(field(&rw_rep, "channelID"), &PyRep::String(rw_chan_name.clone()));
     assert_eq!(field(&rw_rep, "exists"), &PyRep::Bool(true));
     ctx.db.with_snapshot(|snap| {
-        let ch = snap.chat_channels.get(chan_name).expect("resource wars channel in snapshot");
+        let ch = snap.chat_channels.get(&rw_chan_name).expect("resource wars channel in snapshot");
         assert!(ch.members.contains(&PILOT_1));
+        assert_eq!(ch.owner_id, None);
     });
+
+    let chan_name = "channel:rw_squad_ops";
+    rpc(
+        &ctx,
+        &mut sess1,
+        "XmppChatMgr",
+        "CreatePlayerOwnedChannel",
+        &[PyRep::String("rw squad ops".into())],
+    )
+    .await
+    .expect("CreatePlayerOwnedChannel");
 
     // 3. XmppChatMgr.GetDeprecatedPrefsFallback: returns persisted character chat settings and joined channel prefs
     rpc(

@@ -516,3 +516,6 @@ mod parity_shard_5_quasar_esi_plans_tests;
 mod parity_tail_fixes_tests;
 mod corp_market_divisions_contracts_and_wars;
 mod structures_acl_sov_shipcaster_and_fw;
+mod r8_shard_b_commerce_chat;
+mod r8_shard_b_biomass_esi_market;
+mod r8_shard_b_combat_tactical_warp;

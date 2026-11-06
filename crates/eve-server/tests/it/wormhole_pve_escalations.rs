@@ -590,6 +590,13 @@ async fn test_wormhole_capital_escalations_sentries_drifter_relay_and_downtime_d
         let s = reg.sites_by_system.get(&c5_relic_sys).unwrap().iter().find(|s| s.site_id == relic_sig_id).unwrap();
         (s.dungeon_id, s.hackable_can_ids.clone())
     });
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sigs) = snap.cosmic_signatures.get_mut(&c5_relic_sys) {
+            if let Some(sig) = sigs.iter_mut().find(|s| s.signature_id == relic_sig_id) {
+                sig.signal_strength = 1.0;
+            }
+        }
+    });
     let c5_rel_handle = ctx.systems.get_or_spawn(c5_relic_sys);
     ctx.dispatch_rpc(&mut sub_sess, "custom_agency_provider", None, "warp_to_content", &[PyRep::keyval([("dungeonID", PyRep::Integer(relic_did as i64))])], &kw, None).await.unwrap();
     step_until_warp_done(&c5_rel_handle, sub_sid).await;

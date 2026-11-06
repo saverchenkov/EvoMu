@@ -503,6 +503,15 @@ pub async fn activate_aoe_or_defender_module_with_cap(
     deduct_capacitor: bool,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    if matches!(mod_type.group_id, 72 | 80 | 353 | 842 | 1154) {
+        if let Err(e) = crate::services::inventory_fitting::fitting_module_cycles::enforce_space_module_cloak_and_warp_guard(
+            ctx, &sys_handle, char_id, ship_id, mod_type,
+        )
+        .await
+        {
+            return Some(Err(e));
+        }
+    }
             // 2. Smartbomb (`group_id == 72`, `feat:modules.smartbomb`, `feat:combat.smartbomb-aoe-damage`)
             // parity: feat:crimewatch.safety-setting-action-block, feat:crimewatch.limited-engagement-duel
             if mod_type.group_id == 72 {

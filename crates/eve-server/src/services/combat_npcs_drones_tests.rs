@@ -123,7 +123,7 @@ pub(super) fn make_drone_test_ctx() -> (ServerContext, SessionState, i64, i64, u
             vec![(1272, 10.0), (37, 2_000.0), (54, 10_000.0), (68, 45.0), (84, 35.0)],
         ),
     );
-    // EWAR drone 23707 (Hornet EC-300: cat 18, group 639, bw 5, vol 5, ecm 238 = 3.0)
+    // EWAR drone 23707 (Hornet EC-300: cat 18, group 639, bw 5, vol 5, ecm 238 = 15.0 for deterministic unit test)
     sde.types.insert(
         23_707,
         make_fighter_type(
@@ -131,7 +131,7 @@ pub(super) fn make_drone_test_ctx() -> (ServerContext, SessionState, i64, i64, u
             639,
             18,
             5.0,
-            vec![(1272, 5.0), (37, 2_400.0), (54, 15_000.0), (238, 3.0)],
+            vec![(1272, 5.0), (37, 2_400.0), (54, 15_000.0), (238, 15.0)],
         ),
     );
     // Stasis Webifier EWAR drone 23711 (group 641, web -35%, neut 60, tp +25%)
