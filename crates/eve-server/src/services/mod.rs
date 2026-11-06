@@ -453,3 +453,10 @@ mod market_orders_deep_extra_unit_tests;
 #[cfg(test)]
 mod market_quote_deep_extra_unit_tests;
 
+#[cfg(test)]
+mod pve_special_sites_abyssal_deep_extra_unit_tests;
+
+#[cfg(test)]
+mod pve_incursion_lifecycle_deep_extra_unit_tests;
+
+
