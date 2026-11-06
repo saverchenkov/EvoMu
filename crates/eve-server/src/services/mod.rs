@@ -491,3 +491,7 @@ mod moon_mining_deep_extra_unit_tests;
 mod pve_missions_deep_extra_unit_tests;
 #[cfg(test)]
 mod pve_burners_lp_escalations_deep_extra_unit_tests;
+#[cfg(test)]
+mod wallet_accounting_store_deep_extra_unit_tests;
+#[cfg(test)]
+mod mail_chat_notifications_deep_extra_unit_tests;
