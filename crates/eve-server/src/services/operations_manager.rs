@@ -111,20 +111,30 @@ pub fn mark_new_character_tutorial_pending(
     save_store(snap, &store, now_unix);
 }
 
+pub(super) fn is_npe_record_completed(n: &eve_db::NpeProgressRecord) -> bool {
+    n.completed || (n.node_graph_id != 716 && n.current_node_id >= 4)
+}
+
 /// Returns whether `char_id` is eligible to play/launch the tutorial (tutorial initialized as
 /// unfinished and not yet skipped or completed).
 pub fn can_character_play_tutorial(snap: &eve_db::WorldStateSnapshot, char_id: i64) -> bool {
-    let npe_completed = snap
-        .npe_progress
-        .get(&char_id)
-        .is_some_and(|n| n.completed || n.current_node_id >= 4);
-    if npe_completed {
+    let npe = snap.npe_progress.get(&char_id);
+    if npe.is_some_and(is_npe_record_completed) {
         return false;
     }
-    load_store(snap)
-        .by_character
-        .get(&char_id)
-        .is_some_and(|r| !r.tutorial_skipped && r.tutorial_finished == Some(false))
+    match load_store(snap).by_character.get(&char_id) {
+        Some(r) => {
+            if r.tutorial_skipped {
+                return false;
+            }
+            match r.tutorial_finished {
+                Some(false) => true,
+                Some(true) => false,
+                None => npe.is_some_and(|n| !is_npe_record_completed(n)),
+            }
+        }
+        None => npe.is_some_and(|n| !is_npe_record_completed(n)),
+    }
 }
 
 /// Resolves the character's active operation/tutorial dungeon tuple `(dungeon_id, room_id, instance_id, dungeon_name)`
@@ -294,7 +304,7 @@ pub fn handle(
                 let npe_completed = snap
                     .npe_progress
                     .get(&char_id)
-                    .is_some_and(|n| n.completed || n.current_node_id >= 4);
+                    .is_some_and(is_npe_record_completed);
                 load_store(snap)
                     .by_character
                     .get(&char_id)
@@ -329,7 +339,7 @@ pub fn handle(
                 let npe_skipped = snap
                     .npe_progress
                     .get(&char_id)
-                    .is_some_and(|n| n.completed || n.current_node_id >= 4);
+                    .is_some_and(is_npe_record_completed);
                 let op_skipped = load_store(snap)
                     .by_character
                     .get(&char_id)
@@ -355,7 +365,7 @@ pub fn handle(
                 let npe_finished = snap
                     .npe_progress
                     .get(&target_char_id)
-                    .is_some_and(|n| n.completed || n.current_node_id >= 4);
+                    .is_some_and(is_npe_record_completed);
                 if npe_finished {
                     return true;
                 }
@@ -1015,6 +1025,13 @@ pub fn handle(
             }
 
             if event_name == "start_tutorial" {
+                if let Err(err) =
+                    crate::services::air_npe_nodegraph_pocket::validate_npe_start_or_entry(
+                        ctx, char_id,
+                    )
+                {
+                    return Some(Err(err));
+                }
                 let (state_id, path_id) = match extra_data {
                     Some(PyRep::Dict(dict)) => {
                         let sid = dict.iter().find_map(|(k, v)| {
@@ -1066,12 +1083,14 @@ pub fn handle(
                         rec.tutorial_finished == Some(false) || rec.active_site_id.is_some()
                     })
                 });
-                let _ = crate::services::air_npe_nodegraph_runner::on_skip_air_npe(
+                if let Err(err) = crate::services::air_npe_nodegraph_runner::on_skip_air_npe(
                     ctx,
                     Some(session),
                     char_id,
                     now,
-                );
+                ) {
+                    return Some(Err(err));
+                }
                 if had_active {
                     crate::services::notify_emitters_tournaments_anomalies::emit_progression_left(ctx, char_id);
                 }
@@ -1211,14 +1230,16 @@ pub fn handle(
                 )));
             }
 
-            if let Some(npe_rep) = crate::services::air_npe_nodegraph_runner::on_client_npe_event(
+            match crate::services::air_npe_nodegraph_runner::try_client_npe_event(
                 ctx,
                 session,
                 char_id,
                 &event_name,
                 extra_data,
             ) {
-                return Some(Ok(npe_rep));
+                Ok(Some(npe_rep)) => return Some(Ok(npe_rep)),
+                Err(err) => return Some(Err(err)),
+                Ok(None) => {}
             }
 
             Some(handle_operation_task_client_event(

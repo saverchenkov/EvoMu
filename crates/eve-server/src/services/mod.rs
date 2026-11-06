@@ -560,6 +560,8 @@ mod r7_tc_p0_arena_abyssal_tests;
 #[cfg(test)]
 mod r7_tc_p0_raid_ess_tests;
 #[cfg(test)]
+mod r7_td_p0_npe_career_tests;
+#[cfg(test)]
 mod r6_t4_econ_security_tests;
 #[cfg(test)]
 mod r7_tb_p1a_security_tests;

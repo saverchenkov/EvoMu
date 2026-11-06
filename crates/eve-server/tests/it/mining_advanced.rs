@@ -1505,8 +1505,13 @@ async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
     assert_eq!(ctx.db.with_snapshot(|snap| snap.active_missions.get(&(char_id, mission_id)).map(|m| m.state.clone())).as_deref(), Some("Completed"));
     assert_eq!(ctx.db.with_snapshot(|snap| snap.items.get(&ore_item_id).map(|it| it.quantity).unwrap_or(0)), 0);
 
-    let _ = ctx.db.record_mining_ledger_entry(char_id, system_id, 1230, 3_500, now);
-    let _ = ctx.db.record_mining_ledger_entry(char_id, system_id, 1228, 1_500, now);
+    let mut earned_ind_cp = 0u32;
+    for g in ctx.quasar_gateway.progression.career_goals.get_or_init_goals(char_id as u32) {
+        if g.def.career_id == 2 && earned_ind_cp < 750 {
+            let _ = ctx.quasar_gateway.progression.career_goals.mark_completed(char_id as u32, &g.uuid, now);
+            earned_ind_cp += g.def.career_points;
+        }
+    }
 
     let goal_res = ctx
         .dispatch_rpc(&mut sess, "seasonManager", None, "get_character_progress_by_character_id", &[PyRep::Integer(2)], &kw, None)
@@ -1514,8 +1519,8 @@ async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
         .expect("seasonManager.get_character_progress_by_character_id");
     let PyRep::KeyVal(goal_kv) = goal_res else { panic!("Expected KeyVal") };
     assert_eq!(goal_kv["goalID"].as_i64(), Some(2));
-    assert_eq!(goal_kv["currentProgress"].as_i64(), Some(5_000));
-    assert_eq!(goal_kv["verifiedFromLedger"], PyRep::Bool(true));
+    assert_eq!(goal_kv["currentProgress"].as_i64(), Some(earned_ind_cp as i64));
+    assert_eq!(goal_kv["verifiedFromCareerPoints"], PyRep::Bool(true));
 }
 
 }

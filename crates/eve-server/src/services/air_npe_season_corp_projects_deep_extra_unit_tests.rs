@@ -10,7 +10,7 @@ use crate::services::social_corp_fleet::social_corp_projects::{
 };
 use crate::services::{air_npe_nodegraph_runner as air, season_manager};
 use eve_db::{
-    corp_roles, IskCents, MiningLedgerRecord, VirtualServerClock, WorldRepository,
+    corp_roles, IskCents, VirtualServerClock, WorldRepository,
 };
 use eve_machonet::service_roles::ROLE_GML;
 use eve_machonet::SessionState;
@@ -57,6 +57,7 @@ fn ensure_pilot(ctx: &ServerContext, char_id: i64, corp_id: i64, corp_role: u64)
         ch.balance = IskCents::from_isk(10_000_000);
         ch.free_skill_points = 0.0;
         snap.characters.insert(char_id, ch);
+        crate::services::operations_manager::mark_new_character_tutorial_pending(snap, char_id, 1_800_000_000);
     });
 }
 
@@ -232,23 +233,19 @@ fn season_manager_selection_events_rewards_and_goal_payouts() {
     );
     let milestones = crate::services::quasar_career_goals::default_career_milestones();
     let mine_ms = milestones.iter().find(|m| m.career_id == Some(2)).unwrap();
-    let req_qty = (((mine_ms.required_points as u64) * 2) / 3).max(1);
     assert_eq!(
         call_season(&ctx, &mut sess, "claim_goal_reward", &[PyRep::Integer(mine_ms.milestone_id as i64)], &kw)
             .unwrap_err()
             .code,
         "GoalProgressIncomplete"
     );
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.mining_ledger.push(MiningLedgerRecord {
-            character_id: char_id,
-            solar_system_id: 30_000_142,
-            type_id: 1230,
-            quantity: req_qty as i64,
-            date: "2026-11-06".into(),
-            timestamp_unix: 1_800_000_000,
-        });
-    });
+    let mut earned_cp = 0u32;
+    for g in ctx.quasar_gateway.progression.career_goals.get_or_init_goals(char_id as u32) {
+        if g.def.career_id == 2 && earned_cp < mine_ms.required_points {
+            let _ = ctx.quasar_gateway.progression.career_goals.mark_completed(char_id as u32, &g.uuid, 1_800_000_000);
+            earned_cp += g.def.career_points;
+        }
+    }
     let goal_res = call_season(&ctx, &mut sess, "claim_goal_reward", &[PyRep::Integer(mine_ms.milestone_id as i64)], &kw).unwrap();
     assert!(dict_get(&goal_res, "freeSkillPoints").and_then(|v| v.as_f64()).unwrap() > 0.0);
     assert_eq!(

@@ -417,7 +417,13 @@ async fn test_mn18_mining_missions_market_and_goals() {
     });
     assert_eq!(remaining_ore, 4_500);
 
-    let _ = now;
+    let mut earned_ind_cp = 0u32;
+    for g in ctx.quasar_gateway.progression.career_goals.get_or_init_goals(char_id as u32) {
+        if g.def.career_id == 2 && earned_ind_cp < 750 {
+            let _ = ctx.quasar_gateway.progression.career_goals.mark_completed(char_id as u32, &g.uuid, now);
+            earned_ind_cp += g.def.career_points;
+        }
+    }
     let goal_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -433,12 +439,12 @@ async fn test_mn18_mining_missions_market_and_goals() {
 
     let PyRep::KeyVal(g_kv) = goal_res else { panic!() };
     assert_eq!(g_kv["goalID"].as_i64(), Some(2));
-    assert_eq!(g_kv["currentProgress"].as_i64(), Some(mined_mission_units));
-    assert_eq!(g_kv["verifiedFromLedger"], PyRep::Bool(true));
+    assert_eq!(g_kv["currentProgress"].as_i64(), Some(earned_ind_cp as i64));
+    assert_eq!(g_kv["verifiedFromCareerPoints"], PyRep::Bool(true));
 
     let claim_goal_res = ctx
         .dispatch_rpc(&mut sess, "seasonManager", None, "claim_goal_reward", &[PyRep::Integer(2)], &kw, None)
         .await
         .expect("seasonManager.claim_goal_reward");
-    assert_eq!(claim_goal_res.dict_get("spReward").and_then(|v| v.as_f64()), Some(50_000.0));
+    assert_eq!(claim_goal_res.dict_get("spReward").and_then(|v| v.as_f64()), Some(100_000.0));
 }

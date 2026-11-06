@@ -348,12 +348,27 @@ impl CareerGoalManager {
             .as_ref()
             .map(|d| {
                 d.with_snapshot(|s| {
-                    s.quasar_state_blobs
+                    let mut out = s
+                        .quasar_state_blobs
                         .get("quasar_career_milestones")
                         .and_then(|json| {
                             serde_json::from_str::<HashMap<u32, HashSet<u32>>>(json).ok()
                         })
-                        .unwrap_or_default()
+                        .unwrap_or_default();
+                    let valid_mids: HashSet<u32> = default_career_milestones()
+                        .into_iter()
+                        .map(|m| m.milestone_id)
+                        .collect();
+                    for (&cid, npe) in &s.npe_progress {
+                        if let Ok(u32_cid) = u32::try_from(cid) {
+                            for &gid in &npe.claimed_goals {
+                                if valid_mids.contains(&gid) {
+                                    out.entry(u32_cid).or_default().insert(gid);
+                                }
+                            }
+                        }
+                    }
+                    out
                 })
             })
             .unwrap_or_default();
@@ -666,13 +681,20 @@ impl CareerGoalManager {
     }
 
     pub fn get_character_milestones(&self, character_id: u32) -> Vec<(CareerMilestoneDef, bool, bool)> {
-        let claimed_set = self
+        let mut claimed_set = self
             .claimed_milestones
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .get(&character_id)
             .cloned()
             .unwrap_or_default();
+        if let Some(ref db) = self.db {
+            db.with_snapshot(|snap| {
+                if let Some(npe) = snap.npe_progress.get(&(character_id as i64)) {
+                    claimed_set.extend(&npe.claimed_goals);
+                }
+            });
+        }
 
         let total_cp = self.career_points_for_character(character_id, None);
 
@@ -688,6 +710,63 @@ impl CareerGoalManager {
                 (m.clone(), reached, claimed)
             })
             .collect()
+    }
+
+    pub fn is_milestone_claimed(
+        &self,
+        character_id: u32,
+        milestone_id: u32,
+        snap: &eve_db::WorldStateSnapshot,
+    ) -> bool {
+        let in_mem = self
+            .claimed_milestones
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&character_id)
+            .is_some_and(|s| s.contains(&milestone_id));
+        let in_npe = snap
+            .npe_progress
+            .get(&(character_id as i64))
+            .is_some_and(|n| n.claimed_goals.contains(&milestone_id));
+        let in_blob = snap
+            .quasar_state_blobs
+            .get("quasar_career_milestones")
+            .and_then(|j| serde_json::from_str::<HashMap<u32, HashSet<u32>>>(j).ok())
+            .and_then(|m| m.get(&character_id).map(|s| s.contains(&milestone_id)))
+            .unwrap_or(false);
+        in_mem || in_npe || in_blob
+    }
+
+    pub fn mark_milestone_claimed_in_snapshot(
+        &self,
+        character_id: u32,
+        milestone_id: u32,
+        snap: &mut eve_db::WorldStateSnapshot,
+    ) {
+        let json = {
+            let mut cm = self
+                .claimed_milestones
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            cm.entry(character_id).or_default().insert(milestone_id);
+            serde_json::to_string(&*cm).ok()
+        };
+        if let Some(j) = json {
+            snap.quasar_state_blobs
+                .insert("quasar_career_milestones".into(), j);
+        }
+        let npe = snap
+            .npe_progress
+            .entry(character_id as i64)
+            .or_insert_with(|| eve_db::NpeProgressRecord {
+                character_id: character_id as i64,
+                node_graph_id: 473,
+                current_node_id: 1,
+                completed: false,
+                career_goal_progress: Default::default(),
+                claimed_goals: Default::default(),
+            });
+        npe.claimed_goals.insert(milestone_id);
     }
 
     /// DERIVED: Claims an authentic AIR Career Program milestone reward (graduation 1..=4 or overall CP milestone 101..=104).
@@ -713,37 +792,17 @@ impl CareerGoalManager {
             return Err((STATUS_FORBIDDEN, format!("Career points {cp} below milestone threshold {}", milestone.required_points)));
         }
 
-        {
-            let mut cm = self
-                .claimed_milestones
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            let claimed_set = cm.entry(character_id).or_default();
-            if claimed_set.contains(&milestone_id) {
+        db.try_with_mut_snapshot(|snap| {
+            if self.is_milestone_claimed(character_id, milestone_id, snap) {
                 return Err((STATUS_FORBIDDEN, "Career milestone reward already claimed".into()));
             }
-            claimed_set.insert(milestone_id);
-        }
-
-        if milestone.sp_reward > 0.0 {
-            let credit_res = db.try_with_mut_snapshot(|snap| {
-                let Some(ch) = snap.characters.get_mut(&(character_id as i64)) else {
-                    return Err("Character not found".to_string());
-                };
-                ch.free_skill_points += milestone.sp_reward;
-                Ok(())
-            });
-            if credit_res.is_err() {
-                let mut cm = self
-                    .claimed_milestones
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner());
-                if let Some(claimed_set) = cm.get_mut(&character_id) {
-                    claimed_set.remove(&milestone_id);
-                }
+            let Some(ch) = snap.characters.get_mut(&(character_id as i64)) else {
                 return Err((STATUS_BAD_REQUEST, "Unable to credit career milestone reward".into()));
-            }
-        }
+            };
+            ch.free_skill_points += milestone.sp_reward;
+            self.mark_milestone_claimed_in_snapshot(character_id, milestone_id, snap);
+            Ok(())
+        })?;
         self.save_to_db();
 
         Ok(milestone)

@@ -5,9 +5,12 @@
 
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::air_npe_nodegraph_runner::{
-    load_runner_state, save_runner_state, NPE_DUNGEON_SCENE_1_ID,
+    load_runner_state, save_runner_state, AIR_NPE_STATE_ACTIVE, NPE_DUNGEON_SCENE_1_ID,
 };
-use crate::services::operations_manager::{load_store, save_store};
+use crate::services::operations_manager::{
+    can_character_play_tutorial, load_store, save_store,
+};
+use eve_proto::BridgeRpcError;
 use crate::services::pve_dungeon_runtime::{
     with_dungeon_runtime_store, DungeonNpcGroup, DungeonRuntimeInstance, DungeonRuntimeObject,
     DungeonRuntimeRoom, DungeonTrigger, DungeonTriggerAction, DungeonTriggerKind,
@@ -236,19 +239,234 @@ pub(crate) fn spawn_or_move_ship_in_pocket(
     sys_handle.try_set_ball_position(ship_id, spawn_pos);
 }
 
-pub(crate) fn cleanup_npe_pocket_and_restore_ui(
+pub fn is_starter_or_school_solar_system(ctx: &ServerContext, sys_id: u32) -> bool {
+    if !ctx.sde.schools.is_empty() {
+        return ctx
+            .sde
+            .schools
+            .values()
+            .any(|s| s.solar_system_id == sys_id && s.solar_system_id > 0);
+    }
+    matches!(
+        sys_id,
+        30_000_141
+            | 30_000_142
+            | 30_003_489
+            | 30_005_042
+            | 30_001_672
+            | 30_002_547
+            | 30_002_505
+            | 30_003_410
+            | 30_001_392
+            | 30_001_407
+            | 30_004_971
+            | 30_002_715
+            | 30_005_305
+    )
+}
+
+pub(crate) fn check_npe_snapshot_combat_timers(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    now: u64,
+) -> Result<(), BridgeRpcError> {
+    let sp6 = crate::sp6_lifecycle::load_sp6_state_from_snap(snap);
+    let snap_blocked = sp6.pvp_timers_until.get(&char_id).copied().unwrap_or(0) > now
+        || sp6.npc_timers_until.get(&char_id).copied().unwrap_or(0) > now
+        || sp6.weapon_timers_until.get(&char_id).copied().unwrap_or(0) > now
+        || sp6.criminal_timers_until.get(&char_id).copied().unwrap_or(0) > now
+        || snap
+            .crimewatch_aggressions
+            .iter()
+            .any(|((a, v), r)| (*a == char_id || *v == char_id) && r.expires_unix > now);
+    if snap_blocked {
+        return Err(BridgeRpcError::user_error("NpeBlockedInCombat"));
+    }
+    Ok(())
+}
+
+pub(crate) fn check_npe_live_combat_or_scramble(
+    ctx: &ServerContext,
+    char_id: i64,
+    sys_id: u32,
+    ship_id: i64,
+    in_space: bool,
+    now: u64,
+) -> Result<(), BridgeRpcError> {
+    let cw_blocked = ctx
+        .crimewatch
+        .read()
+        .ok()
+        .and_then(|cw| {
+            cw.states
+                .get(&char_id)
+                .map(|s| s.is_weapon_timer_active(now) || s.is_pvp_active(now) || s.is_criminal(now))
+        })
+        .unwrap_or(false);
+    if cw_blocked {
+        return Err(BridgeRpcError::user_error("NpeBlockedInCombat"));
+    }
+    let scrambled = in_space
+        && ship_id > 0
+        && (ctx.systems.is_ball_scrambled_sync(sys_id, ship_id)
+            || ctx
+                .systems
+                .active_system_handles()
+                .into_iter()
+                .find(|(id, _)| *id == sys_id)
+                .is_some_and(|(_, h)| {
+                    h.ballpark
+                        .try_read()
+                        .is_ok_and(|bp| bp.is_ball_scrambled(ship_id))
+                }));
+    if scrambled {
+        return Err(BridgeRpcError::user_error("WarpScrambled"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_npe_start_or_entry(
+    ctx: &ServerContext,
+    char_id: i64,
+) -> Result<(), BridgeRpcError> {
+    let now = ctx.now_unix();
+    let (sys_id, ship_id, in_space) = ctx.db.with_snapshot(|snap| {
+        let Some(ch) = snap.characters.get(&char_id) else {
+            return Err(BridgeRpcError::user_error("CharacterNotFound"));
+        };
+        if !can_character_play_tutorial(snap, char_id) {
+            return Err(BridgeRpcError::user_error("TutorialNotActive"));
+        }
+        if !is_starter_or_school_solar_system(ctx, ch.solar_system_id) {
+            return Err(BridgeRpcError::user_error("NpeStarterSystemRequired"));
+        }
+        check_npe_snapshot_combat_timers(snap, char_id, now)?;
+        Ok((
+            ch.solar_system_id,
+            ch.active_ship_id,
+            ch.station_id.is_none() && ch.structure_id.is_none(),
+        ))
+    })?;
+    check_npe_live_combat_or_scramble(ctx, char_id, sys_id, ship_id, in_space, now)
+}
+
+fn station_system_info(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    dest_id: i64,
+    fallback_const: u32,
+    fallback_reg: u32,
+) -> Option<(u32, u32, u32, bool)> {
+    if let Some(st) = ctx.sde.stations.get(&dest_id) {
+        return Some((st.solar_system_id, st.constellation_id, st.region_id, false));
+    }
+    if let Some(s) = snap.structures.get(&dest_id) {
+        let (cid, rid) = ctx
+            .sde
+            .solar_systems
+            .get(&s.solar_system_id)
+            .map(|sys| (sys.constellation_id, sys.region_id))
+            .unwrap_or((fallback_const, fallback_reg));
+        return Some((s.solar_system_id, cid, rid, true));
+    }
+    None
+}
+
+fn resolve_npe_dock_target(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    origin_station: Option<i64>,
+    home_station: i64,
+    expected_sys: u32,
+    fallback_const: u32,
+    fallback_reg: u32,
+) -> Option<(i64, u32, u32, u32, bool)> {
+    let allowed_sys = |sid: u32| sid == expected_sys || is_starter_or_school_solar_system(ctx, sid);
+    if let Some(orig) = origin_station.filter(|&id| id > 0) {
+        if let Some((sid, cid, rid, is_struct)) =
+            station_system_info(ctx, snap, orig, fallback_const, fallback_reg)
+        {
+            if allowed_sys(sid) {
+                return Some((orig, sid, cid, rid, is_struct));
+            }
+        }
+    }
+    if home_station > 0 {
+        if let Some((sid, cid, rid, is_struct)) =
+            station_system_info(ctx, snap, home_station, fallback_const, fallback_reg)
+        {
+            if allowed_sys(sid) {
+                return Some((home_station, sid, cid, rid, is_struct));
+            }
+        }
+    }
+    if let Some(st) = ctx.sde.stations.values().find(|s| s.solar_system_id == expected_sys) {
+        return Some((
+            st.station_id,
+            st.solar_system_id,
+            st.constellation_id,
+            st.region_id,
+            false,
+        ));
+    }
+    None
+}
+
+pub(crate) fn try_cleanup_npe_pocket_and_restore_ui(
     ctx: &ServerContext,
     mut session: Option<&mut SessionState>,
     char_id: i64,
-) -> (Vec<i64>, Option<i64>) {
+    require_active_completion: bool,
+) -> Result<(Vec<i64>, Option<i64>), BridgeRpcError> {
+    let now = ctx.now_unix();
+    let live_info = ctx.db.with_snapshot(|snap| {
+        snap.characters.get(&char_id).map(|c| {
+            (
+                c.solar_system_id,
+                c.active_ship_id,
+                c.station_id.is_none() && c.structure_id.is_none(),
+            )
+        })
+    });
+    if let Some((sys_id, ship_id, in_space)) = live_info {
+        check_npe_live_combat_or_scramble(ctx, char_id, sys_id, ship_id, in_space, now)?;
+    }
     let (stopped_instances, stop_master_by_id, pocket_cleanup, restore_station) =
-        ctx.db.with_mut_snapshot(|snap| {
+        ctx.db.try_with_mut_snapshot(|snap| {
             let mut stopped = Vec::new();
             let mut master_by_id = None;
             let mut pocket_info = None;
             let mut station_restore = None;
 
-            if let Some(mut runner) = load_runner_state(snap, char_id) {
+            let runner_opt = load_runner_state(snap, char_id);
+            let ch_info = snap.characters.get(&char_id).map(|c| {
+                (
+                    c.solar_system_id,
+                    c.station_id.is_none() && c.structure_id.is_none(),
+                )
+            });
+            if let Some((sys_id, in_space)) = ch_info {
+                check_npe_snapshot_combat_timers(snap, char_id, now)?;
+                let in_pocket = runner_opt.as_ref().is_some_and(|r| r.moved_into_pocket);
+                if (in_space || in_pocket) && !is_starter_or_school_solar_system(ctx, sys_id) {
+                    return Err(BridgeRpcError::user_error("NpeStarterSystemRequired"));
+                }
+                if require_active_completion {
+                    let active_ok = runner_opt.as_ref().is_some_and(|r| {
+                        r.state_id == AIR_NPE_STATE_ACTIVE
+                            && !r.completed
+                            && !r.skipped
+                            && (!in_space || r.moved_into_pocket)
+                    }) && is_starter_or_school_solar_system(ctx, sys_id);
+                    if !active_ok {
+                        return Err(BridgeRpcError::user_error("TutorialNotActive"));
+                    }
+                }
+            } else if require_active_completion {
+                return Err(BridgeRpcError::user_error("CharacterNotFound"));
+            }
+
+            if let Some(mut runner) = runner_opt {
                 if let Some(sid) = runner.scene_client_instance_id.take() {
                     stopped.push(sid);
                 }
@@ -269,40 +487,69 @@ pub(crate) fn cleanup_npe_pocket_and_restore_ui(
                     ));
                 }
                 if runner.moved_into_pocket {
-                    if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    let expected_sys = runner
+                        .origin_solar_system_id
+                        .or(runner.pocket_solar_system_id)
+                        .or_else(|| snap.characters.get(&char_id).map(|c| c.solar_system_id))
+                        .unwrap_or(30_000_142);
+                    let dock_target = snap.characters.get(&char_id).and_then(|ch| {
                         if ch.station_id.is_none() && ch.structure_id.is_none() {
-                            let target_station = runner
-                                .origin_station_id
-                                .unwrap_or(ch.home_station_id);
+                            resolve_npe_dock_target(
+                                ctx,
+                                snap,
+                                runner.origin_station_id,
+                                ch.home_station_id,
+                                expected_sys,
+                                ch.constellation_id,
+                                ch.region_id,
+                            )
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some((dest_station, new_sys_id, new_const_id, new_reg_id, is_struct)) =
+                        dock_target
+                    {
+                        if let Some(ch) = snap.characters.get_mut(&char_id) {
+                            let old_sys_id = ch.solar_system_id;
                             let ship_id = ch.active_ship_id;
-                            let sys_id = ch.solar_system_id;
-                            if target_station > 0 {
-                                ch.station_id = Some(target_station);
-                                ch.system_epoch += 1;
-                                ch.version += 1;
-                                if let Some(ship) = snap.items.get_mut(&ship_id) {
-                                    ship.location_id = target_station;
-                                    ship.flag = InventoryFlag::Hangar;
-                                    ship.version += 1;
-                                }
-                                station_restore = Some((
-                                    target_station,
-                                    sys_id,
-                                    ship_id,
-                                    ch.user_id,
-                                    ch.corporation_id,
-                                    ch.alliance_id,
-                                    ch.constellation_id,
-                                    ch.region_id,
-                                ));
+                            if is_struct {
+                                ch.station_id = None;
+                                ch.structure_id = Some(dest_station);
+                            } else {
+                                ch.station_id = Some(dest_station);
+                                ch.structure_id = None;
                             }
+                            ch.solar_system_id = new_sys_id;
+                            ch.constellation_id = new_const_id;
+                            ch.region_id = new_reg_id;
+                            ch.system_epoch += 1;
+                            ch.version += 1;
+                            snap.item_positions.remove(&ship_id);
+                            if let Some(ship) = snap.items.get_mut(&ship_id) {
+                                ship.location_id = dest_station;
+                                ship.flag = InventoryFlag::Hangar;
+                                ship.version += 1;
+                            }
+                            station_restore = Some((
+                                dest_station,
+                                is_struct,
+                                old_sys_id,
+                                new_sys_id,
+                                ship_id,
+                                ch.user_id,
+                                ch.corporation_id,
+                                ch.alliance_id,
+                                new_const_id,
+                                new_reg_id,
+                            ));
                         }
                     }
                 }
                 save_runner_state(snap, &runner);
             }
-            (stopped, master_by_id, pocket_info, station_restore)
-        });
+            Ok((stopped, master_by_id, pocket_info, station_restore))
+        })?;
 
     if let Some((inst_id, sys_id, dungeon_id)) = pocket_cleanup {
         let balls_to_remove = with_dungeon_runtime_store(ctx, |store| {
@@ -340,8 +587,10 @@ pub(crate) fn cleanup_npe_pocket_and_restore_ui(
     }
 
     if let Some((
-        target_station,
-        sys_id,
+        dest_station,
+        is_struct,
+        old_sys_id,
+        new_sys_id,
         ship_id,
         uid,
         corp_id,
@@ -350,12 +599,24 @@ pub(crate) fn cleanup_npe_pocket_and_restore_ui(
         reg_id,
     )) = restore_station
     {
-        ctx.systems.get_or_spawn(sys_id).try_remove_ball(ship_id);
+        ctx.systems.get_or_spawn(old_sys_id).try_remove_ball(ship_id);
         if let Some(sess) = session.as_deref_mut() {
-            sess.station_id = Some(target_station);
-            sess.structure_id = None;
-            sess.solar_system_id = Some(sys_id);
+            if is_struct {
+                sess.station_id = None;
+                sess.structure_id = Some(dest_station);
+            } else {
+                sess.station_id = Some(dest_station);
+                sess.structure_id = None;
+            }
+            sess.solar_system_id = Some(new_sys_id);
+            sess.constellation_id = Some(const_id);
+            sess.region_id = Some(reg_id);
         }
+        let (station_rep, structure_rep, change_key) = if is_struct {
+            (PyRep::None, PyRep::Integer(dest_station), "structureid")
+        } else {
+            (PyRep::Integer(dest_station), PyRep::None, "stationid")
+        };
         let sess_rep = PyRep::keyval([
             ("userid", PyRep::Integer(uid as i64)),
             ("charid", PyRep::Integer(char_id)),
@@ -365,30 +626,45 @@ pub(crate) fn cleanup_npe_pocket_and_restore_ui(
                 alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
             ),
             ("shipid", PyRep::Integer(ship_id)),
-            ("stationid", PyRep::Integer(target_station)),
-            ("structureid", PyRep::None),
-            ("solarsystemid2", PyRep::Integer(i64::from(sys_id))),
-            ("solarsystemid", PyRep::Integer(i64::from(sys_id))),
-            ("locationid", PyRep::Integer(target_station)),
+            ("stationid", station_rep),
+            ("structureid", structure_rep),
+            ("solarsystemid2", PyRep::Integer(i64::from(new_sys_id))),
+            ("solarsystemid", PyRep::Integer(i64::from(new_sys_id))),
+            ("locationid", PyRep::Integer(dest_station)),
             ("constellationid", PyRep::Integer(i64::from(const_id))),
             ("regionid", PyRep::Integer(i64::from(reg_id))),
         ]);
+        let mut changes = vec![(
+            PyRep::String(change_key.into()),
+            PyRep::Tuple(vec![PyRep::None, PyRep::Integer(dest_station)]),
+        )];
+        if old_sys_id != new_sys_id {
+            changes.push((
+                PyRep::String("solarsystemid2".into()),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(i64::from(old_sys_id)),
+                    PyRep::Integer(i64::from(new_sys_id)),
+                ]),
+            ));
+        }
         ctx.notify(
             NotificationTarget::Character(char_id),
             "OnSessionChanged",
             "charid",
-            vec![
-                PyRep::Bool(false),
-                sess_rep,
-                PyRep::Dict(vec![(
-                    PyRep::String("stationid".into()),
-                    PyRep::Tuple(vec![PyRep::None, PyRep::Integer(target_station)]),
-                )]),
-            ],
+            vec![PyRep::Bool(false), sess_rep, PyRep::Dict(changes)],
         );
     }
 
-    (stopped_instances, stop_master_by_id)
+    Ok((stopped_instances, stop_master_by_id))
+}
+
+#[cfg(test)]
+pub(crate) fn cleanup_npe_pocket_and_restore_ui(
+    ctx: &ServerContext,
+    session: Option<&mut SessionState>,
+    char_id: i64,
+) -> (Vec<i64>, Option<i64>) {
+    try_cleanup_npe_pocket_and_restore_ui(ctx, session, char_id, false).unwrap_or_default()
 }
 
 #[cfg(test)]

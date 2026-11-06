@@ -2161,19 +2161,16 @@ async fn test_air_npe_state_persistence_and_career_goals() {
         Some(0)
     );
 
-    // Record server-observed mining events in the mining ledger
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.mining_ledger.push(MiningLedgerRecord {
-            character_id: char_id,
-            solar_system_id: 30_000_142,
-            type_id: 1230, // Veldspar
-            quantity: 1_000,
-            date: "2026-01-01".into(),
-            timestamp_unix: 1_704_067_200,
-        });
-    });
+    // Earn >= 750 Industrialist Career Points (career_id = 2) for Graduation milestone 2
+    let mut earned_ind_cp = 0u32;
+    for g in ctx.quasar_gateway.progression.career_goals.get_or_init_goals(char_id as u32) {
+        if g.def.career_id == 2 && earned_ind_cp < 750 {
+            let _ = ctx.quasar_gateway.progression.career_goals.mark_completed(char_id as u32, &g.uuid, 1_704_067_200);
+            earned_ind_cp += g.def.career_points;
+        }
+    }
 
-    // Verify progress updated from server events
+    // Verify progress updated from accumulated Industrialist Career Points
     let updated_goal = rpc(
         &ctx,
         &mut sess,
@@ -2182,10 +2179,10 @@ async fn test_air_npe_state_persistence_and_career_goals() {
         &[PyRep::Integer(2)],
     )
     .await
-    .expect("get_character_progress after mining");
+    .expect("get_character_progress after career points");
     assert_eq!(
         updated_goal.dict_get("currentProgress").and_then(|v| v.as_i64()),
-        Some(1000)
+        Some(earned_ind_cp as i64)
     );
 
     // Claim goal reward
@@ -2204,7 +2201,7 @@ async fn test_air_npe_state_persistence_and_career_goals() {
     assert_eq!(claim_res.dict_get("goalID").and_then(|v| v.as_i64()), Some(2));
     assert_eq!(
         claim_res.dict_get("spReward").and_then(|v| v.as_f64()),
-        Some(50_000.0)
+        Some(100_000.0)
     );
 
     let sp_after = ctx.db.with_snapshot(|snap| {

@@ -21,15 +21,16 @@
 
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::air_npe_nodegraph_pocket::{
-    cleanup_npe_pocket_and_restore_ui, spawn_or_get_npe_pocket, spawn_or_move_ship_in_pocket,
-    NPE_POCKET_ANCHOR_POS,
+    check_npe_live_combat_or_scramble, check_npe_snapshot_combat_timers,
+    is_starter_or_school_solar_system, spawn_or_get_npe_pocket, spawn_or_move_ship_in_pocket,
+    try_cleanup_npe_pocket_and_restore_ui, validate_npe_start_or_entry, NPE_POCKET_ANCHOR_POS,
 };
 use crate::services::notify_emitters_space_dungeons::emit_dungeon_progression_notifications;
 use crate::services::notify_emitters_operations_nodegraph::{
     start_client_node_graph_instance, stop_client_node_graph_instances_by_id,
 };
 use crate::services::operations_manager::{
-    load_store, push_operation_event, save_store, sync_air_npe_skip,
+    can_character_play_tutorial, load_store, push_operation_event, save_store, sync_air_npe_skip,
 };
 use eve_db::{InventoryFlag, WorldStateSnapshot};
 use eve_machonet::SessionState;
@@ -636,14 +637,37 @@ pub fn transition_character_into_npe_pocket(
     char_id: i64,
 ) -> Result<(), BridgeRpcError> {
     let now = ctx.now_unix();
+    let live_info = ctx.db.with_snapshot(|snap| {
+        snap.characters.get(&char_id).map(|c| {
+            (
+                c.solar_system_id,
+                c.active_ship_id,
+                c.station_id.is_none() && c.structure_id.is_none(),
+            )
+        })
+    });
+    if let Some((sys_id, ship_id, in_space)) = live_info {
+        check_npe_live_combat_or_scramble(ctx, char_id, sys_id, ship_id, in_space, now)?;
+    }
     let (sys_id, old_station_id, ship_id, ship_type_id, sess_info) =
-        ctx.db.with_mut_snapshot(|snap| {
-            let Some(ch) = snap.characters.get_mut(&char_id) else {
-                return (30_000_141_u32, None, 0_i64, 0_u32, None);
+        ctx.db.try_with_mut_snapshot(|snap| {
+            let Some(ch) = snap.characters.get(&char_id) else {
+                return Err(BridgeRpcError::user_error("CharacterNotFound"));
             };
+            if !can_character_play_tutorial(snap, char_id) {
+                return Err(BridgeRpcError::user_error("TutorialNotActive"));
+            }
+            if !is_starter_or_school_solar_system(ctx, ch.solar_system_id) {
+                return Err(BridgeRpcError::user_error("NpeStarterSystemRequired"));
+            }
             let s_id = ch.solar_system_id;
             let prev_st = ch.station_id.or(ch.structure_id);
             let active_ship = ch.active_ship_id;
+            check_npe_snapshot_combat_timers(snap, char_id, now)?;
+            if active_ship <= 0 {
+                return Err(BridgeRpcError::user_error("NoActiveShip"));
+            }
+            let ch = snap.characters.get_mut(&char_id).unwrap();
             ch.station_id = None;
             ch.structure_id = None;
             ch.system_epoch += 1;
@@ -667,12 +691,8 @@ pub fn transition_character_into_npe_pocket(
                 ch.constellation_id,
                 ch.region_id,
             ));
-            (s_id, prev_st, active_ship, stype, s_tuple)
-        });
-
-    if ship_id <= 0 {
-        return Err(BridgeRpcError::user_error("NoActiveShip"));
-    }
+            Ok((s_id, prev_st, active_ship, stype, s_tuple))
+        })?;
 
     let (pocket_inst_id, _, _) =
         spawn_or_get_npe_pocket(ctx, char_id, sys_id, NPE_DUNGEON_SCENE_1_ID);
@@ -1088,13 +1108,13 @@ fn advance_runner_checkpoint(
 }
 
 /// Handles AIR NPE client events sent via `operationsManager.process_client_event`.
-pub fn on_client_npe_event(
+pub fn try_client_npe_event(
     ctx: &ServerContext,
     session: &mut SessionState,
     char_id: i64,
     event_name: &str,
     _extra_data: Option<&PyRep>,
-) -> Option<PyRep> {
+) -> Result<Option<PyRep>, BridgeRpcError> {
     let ev = event_name.trim().to_ascii_lowercase();
     if matches!(
         ev.as_str(),
@@ -1104,15 +1124,15 @@ pub fn on_client_npe_event(
             | "enter_tutorial_pocket"
             | "move_to_dungeon"
     ) {
+        validate_npe_start_or_entry(ctx, char_id)?;
         let has_runner = ctx
             .db
             .with_snapshot(|snap| load_runner_state(snap, char_id).is_some());
         if !has_runner {
             on_start_tutorial(ctx, session, char_id, AIR_NPE_STATE_ACTIVE, None);
         }
-        if transition_character_into_npe_pocket(ctx, Some(session), char_id).is_ok() {
-            return Some(PyRep::Bool(true));
-        }
+        transition_character_into_npe_pocket(ctx, Some(session), char_id)?;
+        return Ok(Some(PyRep::Bool(true)));
     }
 
     let is_gm = session.has_gm_role();
@@ -1121,22 +1141,36 @@ pub fn on_client_npe_event(
             return None;
         }
         let is_active = ctx.db.with_snapshot(|snap| {
-            load_runner_state(snap, char_id).is_some_and(|r| r.state_id == AIR_NPE_STATE_ACTIVE)
+            load_runner_state(snap, char_id)
+                .is_some_and(|r| r.state_id == AIR_NPE_STATE_ACTIVE && !r.completed && !r.skipped)
         });
-        if is_active {
-            complete_air_npe(ctx, Some(session), char_id, ctx.now_unix());
-            return Some(PyRep::Bool(true));
+        if !is_active {
+            return Err(BridgeRpcError::user_error("TutorialNotActive"));
         }
+        complete_air_npe_checked(ctx, Some(session), char_id, ctx.now_unix())?;
+        return Ok(Some(PyRep::Bool(true)));
     }
 
     let is_active = ctx.db.with_snapshot(|snap| {
         load_runner_state(snap, char_id).is_some_and(|r| r.state_id == AIR_NPE_STATE_ACTIVE)
     });
     if is_active && advance_runner_checkpoint(ctx, Some(session), char_id, &ev, is_gm) {
-        return Some(PyRep::Bool(true));
+        return Ok(Some(PyRep::Bool(true)));
     }
 
-    None
+    Ok(None)
+}
+
+pub fn on_client_npe_event(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    char_id: i64,
+    event_name: &str,
+    extra_data: Option<&PyRep>,
+) -> Option<PyRep> {
+    try_client_npe_event(ctx, session, char_id, event_name, extra_data)
+        .ok()
+        .flatten()
 }
 
 /// Handles `node_graph.process_client_graph_message` when targeting an active AIR NPE graph.
@@ -1153,9 +1187,11 @@ pub fn on_client_graph_message(
     if !is_air_npe_graph_id(graph_id) {
         return false;
     }
-    let has_runner = ctx
-        .db
-        .with_snapshot(|snap| load_runner_state(snap, char_id).is_some());
+    let has_runner = ctx.db.with_snapshot(|snap| {
+        load_runner_state(snap, char_id)
+            .is_some_and(|r| r.state_id == AIR_NPE_STATE_ACTIVE && !r.completed && !r.skipped)
+            && can_character_play_tutorial(snap, char_id)
+    });
     if !has_runner {
         return false;
     }
@@ -1170,16 +1206,14 @@ pub fn on_client_graph_message(
             | "move_to_dungeon"
             | "enter_tutorial_pocket"
     ) {
-        let _ = transition_character_into_npe_pocket(ctx, Some(session), char_id);
-        return true;
+        return transition_character_into_npe_pocket(ctx, Some(session), char_id).is_ok();
     }
 
     if msg_lower == "complete_air_npe" {
         if !is_gm {
             return true;
         }
-        complete_air_npe(ctx, Some(session), char_id, ctx.now_unix());
-        return true;
+        return complete_air_npe_checked(ctx, Some(session), char_id, ctx.now_unix()).is_ok();
     }
 
     if advance_runner_checkpoint(ctx, Some(session), char_id, &msg_lower, is_gm) {
@@ -1234,7 +1268,7 @@ pub fn on_skip_air_npe(
     now_unix: u64,
 ) -> Result<(u32, u32, bool), BridgeRpcError> {
     let (stopped_instances, stop_master_by_id) =
-        cleanup_npe_pocket_and_restore_ui(ctx, session, char_id);
+        try_cleanup_npe_pocket_and_restore_ui(ctx, session, char_id, false)?;
 
     for inst_id in stopped_instances {
         ctx.notify(
@@ -1280,16 +1314,14 @@ pub fn on_skip_air_npe(
     Ok((graph_id, curr_node, completed))
 }
 
-/// Completes AIR NPE cleanly: stops active client node graphs, despawns NPE pocket,
-/// marks NPE & tutorial finished (`AIR_NPE_STATE_COMPLETED = 2`), and emits `OnAirNpeStateChanged([char_id, 2])`.
-pub fn complete_air_npe(
+pub fn complete_air_npe_checked(
     ctx: &ServerContext,
     session: Option<&mut SessionState>,
     char_id: i64,
     now_unix: u64,
-) {
+) -> Result<(), BridgeRpcError> {
     let (stopped_instances, stop_master_by_id) =
-        cleanup_npe_pocket_and_restore_ui(ctx, session, char_id);
+        try_cleanup_npe_pocket_and_restore_ui(ctx, session, char_id, true)?;
 
     for inst_id in stopped_instances {
         ctx.notify(
@@ -1346,6 +1378,18 @@ pub fn complete_air_npe(
             PyRep::Integer(AIR_NPE_STATE_COMPLETED),
         ],
     );
+    Ok(())
+}
+
+/// Completes AIR NPE cleanly: stops active client node graphs, despawns NPE pocket,
+/// marks NPE & tutorial finished (`AIR_NPE_STATE_COMPLETED = 2`), and emits `OnAirNpeStateChanged([char_id, 2])`.
+pub fn complete_air_npe(
+    ctx: &ServerContext,
+    session: Option<&mut SessionState>,
+    char_id: i64,
+    now_unix: u64,
+) {
+    let _ = complete_air_npe_checked(ctx, session, char_id, now_unix);
 }
 
 #[cfg(test)]

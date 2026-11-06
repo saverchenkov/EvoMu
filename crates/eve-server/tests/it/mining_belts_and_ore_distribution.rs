@@ -414,7 +414,7 @@ async fn test_mining_goals_from_ledger_events() {
     .expect_err("Claiming unearned career goal must fail");
     assert_eq!(claim_err.code, "GoalProgressIncomplete"); // rpc-lint: allow goal reward error assertion
 
-    // 2. Positive: Genuine mining events in space record to mining_ledger and drive goal progress
+    // 2. Positive: Genuine mining events in space record to mining_ledger; Career Points drive milestone progress
     let now = ctx.now_unix();
     let _ = ctx.db.record_mining_ledger_entry_with_waste(PILOT_1, PERIMETER_SYS, 1230, 25_000, 500, now);
 
@@ -422,6 +422,14 @@ async fn test_mining_goals_from_ledger_events() {
     assert_eq!(ledger.len(), 1);
     assert_eq!(ledger[0].0.quantity, 25_000);
     assert_eq!(ledger[0].1, 500);
+
+    let mut earned_ind_cp = 0u32;
+    for g in ctx.quasar_gateway.progression.career_goals.get_or_init_goals(PILOT_1 as u32) {
+        if g.def.career_id == 2 && earned_ind_cp < 750 {
+            let _ = ctx.quasar_gateway.progression.career_goals.mark_completed(PILOT_1 as u32, &g.uuid, now);
+            earned_ind_cp += g.def.career_points;
+        }
+    }
 
     let prog_after = rpc(
         &ctx,
@@ -431,30 +439,19 @@ async fn test_mining_goals_from_ledger_events() {
         &[PyRep::Integer(2)],
     )
     .await
-    .expect("get_character_progress_by_character_id after ledger event");
+    .expect("get_character_progress_by_character_id after career points");
 
     let PyRep::KeyVal(after_kv) = prog_after else { panic!("Expected KeyVal") };
     assert_eq!(
         after_kv.get("currentProgress"),
-        Some(&PyRep::Integer(25_000)),
-        "Mining goal progress must match genuine ledger quantity"
+        Some(&PyRep::Integer(earned_ind_cp as i64)),
+        "Career milestone progress must reflect accumulated Industrialist Career Points"
     );
     assert_eq!(
-        after_kv.get("verifiedFromLedger"),
+        after_kv.get("verifiedFromCareerPoints"),
         Some(&PyRep::Bool(true)),
-        "Mining goal must be verified from ledger"
+        "Career milestone must be verified from Career Points"
     );
-
-    // Record additional mining harvest to reach career milestone target (100,000 units)
-    let _ = ctx.db.record_mining_ledger_entry_with_waste(PILOT_1, PERIMETER_SYS, 1230, 75_000, 0, now + 10);
-
-    let total_ledger: i64 = ctx
-        .db
-        .get_mining_ledger_with_waste(PILOT_1)
-        .iter()
-        .map(|r| r.0.quantity)
-        .sum();
-    assert_eq!(total_ledger, 100_000);
 
     // Successfully claim career mining milestone
     let claim_res = rpc(
@@ -465,13 +462,13 @@ async fn test_mining_goals_from_ledger_events() {
         &[PyRep::Integer(2)],
     )
     .await
-    .expect("claim_goal_reward must succeed with sufficient ledger volume");
+    .expect("claim_goal_reward must succeed with >= 750 Industrialist Career Points");
 
     let PyRep::KeyVal(claim_kv) = claim_res else { panic!("Expected KeyVal") };
     assert_eq!(
         claim_kv.get("spReward"),
-        Some(&PyRep::Real(50_000.0)),
-        "Career mining milestone must award 50,000 SP"
+        Some(&PyRep::Real(100_000.0)),
+        "Industrialist Graduation milestone must award 100,000 SP"
     );
 
     // Idempotency: duplicate claim must be rejected

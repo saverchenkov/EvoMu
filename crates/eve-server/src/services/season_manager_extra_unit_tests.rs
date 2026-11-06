@@ -316,14 +316,15 @@ fn claim_challenge_rewards_isk_next_challenge_item_delivery_omega_goals_and_care
     let err = call_sm(&ctx, &mut space_sess, "claim_goal_reward", &[PyRep::Integer(mining_ms.milestone_id as i64)]).unwrap_err();
     assert_eq!(err.code, "GoalProgressIncomplete");
 
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.mining_ledger.push(MiningLedgerRecord {
-            character_id: char_id, solar_system_id: 30_000_142, type_id: 1230,
-            quantity: 100_000, date: "2026-11-05".into(), timestamp_unix: 200,
-        });
-    });
+    let mut earned_ind_cp = 0u32;
+    for g in ctx.quasar_gateway.progression.career_goals.get_or_init_goals(char_id as u32) {
+        if g.def.career_id == 2 && earned_ind_cp < mining_ms.required_points {
+            let _ = ctx.quasar_gateway.progression.career_goals.mark_completed(char_id as u32, &g.uuid, 200);
+            earned_ind_cp += g.def.career_points;
+        }
+    }
     let prog_goal = call_sm(&ctx, &mut space_sess, "get_character_progress_by_character_id", &[PyRep::Integer(mining_ms.milestone_id as i64)]).unwrap();
-    assert_eq!(prog_goal.dict_get("verifiedFromLedger"), Some(&PyRep::Bool(true)));
+    assert_eq!(prog_goal.dict_get("verifiedFromCareerPoints"), Some(&PyRep::Bool(true)));
 
     let goal_ok = call_sm(&ctx, &mut space_sess, "claim_goal_reward", &[PyRep::Integer(mining_ms.milestone_id as i64)]).unwrap();
     assert!(goal_ok.dict_get("freeSkillPoints").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);

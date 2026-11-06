@@ -333,18 +333,14 @@ async fn test_seasons_data_end_time_selection_and_challenges() {
     assert_eq!(items_after, items_before, "Rejected claims must not mint items");
 
     // 8. feat:pve.seasons-challenges: Claim career goal reward (claim_goal_reward)
-    // Pre-populate completed career goal in npe_progress
-    ctx.db.with_mut_snapshot(|snap| {
-        let npe = snap.npe_progress.entry(PILOT_1).or_insert_with(|| eve_db::NpeProgressRecord {
-            character_id: PILOT_1,
-            node_graph_id: 473,
-            current_node_id: 1,
-            completed: false,
-            career_goal_progress: Default::default(),
-            claimed_goals: Default::default(),
-        });
-        npe.career_goal_progress.insert(1, 500);
-    });
+    // Earn >= 750 Explorer Career Points to unlock Career Graduation milestone 1
+    let mut earned_cp = 0u32;
+    for g in ctx.quasar_gateway.progression.career_goals.get_or_init_goals(PILOT_1 as u32) {
+        if g.def.career_id == 1 && earned_cp < 750 {
+            let _ = ctx.quasar_gateway.progression.career_goals.mark_completed(PILOT_1 as u32, &g.uuid, 1_700_000_000);
+            earned_cp += g.def.career_points;
+        }
+    }
 
     let sp_before = ctx.db.with_snapshot(|s| s.characters.get(&PILOT_1).map(|c| c.free_skill_points).unwrap_or(0.0));
     let goal_claim = rpc(&ctx, &mut sess, "seasonManager", "claim_goal_reward", &[PyRep::Integer(1)])
