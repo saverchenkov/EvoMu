@@ -311,6 +311,12 @@ mod mailing_lists_ops_extra_unit_tests;
 mod implant_plugging_extra_unit_tests;
 #[cfg(test)]
 mod tactical_module_mechanics_extra_unit_tests;
+#[cfg(test)]
+mod contracts_deep_extra_unit_tests;
+#[cfg(test)]
+mod industry_deep_extra_unit_tests;
+#[cfg(test)]
+mod reprocessing_deep_extra_unit_tests;
 
 
 
