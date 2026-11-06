@@ -482,3 +482,8 @@ pub(crate) fn corp_lp_flag_take_authorized(
 #[path = "lp_store_catalog_tests.rs"]
 mod lp_store_catalog_tests;
 
+#[path = "lp_store_catalog_cov_unit_tests.rs"]
+#[cfg(test)]
+mod lp_store_catalog_cov_unit_tests;
+
+

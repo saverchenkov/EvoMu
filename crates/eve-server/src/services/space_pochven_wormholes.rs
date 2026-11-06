@@ -506,3 +506,8 @@ pub async fn open_pochven_wormhole_and_spawn_guards(
 #[cfg(test)] #[path = "space_pochven_wormholes_tests.rs"]
 mod space_pochven_wormholes_tests;
 
+#[path = "space_pochven_wormholes_cov_unit_tests.rs"]
+#[cfg(test)]
+mod space_pochven_wormholes_cov_unit_tests;
+
+

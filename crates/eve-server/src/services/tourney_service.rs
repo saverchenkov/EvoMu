@@ -1336,4 +1336,9 @@ fn ruleset_allowed_ship_types(
 #[cfg(test)] #[path = "tourney_service_tests.rs"]
 mod tourney_service_tests;
 
+#[path = "tourney_service_cov_unit_tests.rs"]
+#[cfg(test)]
+mod tourney_service_cov_unit_tests;
+
+
 

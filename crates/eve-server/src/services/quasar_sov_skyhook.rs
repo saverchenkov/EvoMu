@@ -255,3 +255,8 @@ pub fn register_query_handlers(router: &PublicGatewayRouter, db: Arc<WorldReposi
 #[path = "quasar_sov_skyhook_tests.rs"]
 mod quasar_sov_skyhook_tests;
 
+#[path = "quasar_sov_skyhook_cov_unit_tests.rs"]
+#[cfg(test)]
+mod quasar_sov_skyhook_cov_unit_tests;
+
+

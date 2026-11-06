@@ -366,3 +366,8 @@ pub fn register_campaign_definition_handlers(
 #[cfg(test)] #[path = "quasar_campaign_definitions_tests.rs"]
 mod quasar_campaign_definitions_tests;
 
+#[path = "quasar_campaign_definitions_cov_unit_tests.rs"]
+#[cfg(test)]
+mod quasar_campaign_definitions_cov_unit_tests;
+
+
