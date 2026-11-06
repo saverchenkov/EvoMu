@@ -1,0 +1,561 @@
+//! Deep branch-coverage and mutation-killing unit tests for `router::dispatch`:
+//! session revocation & `MultiLoginBlocked` exemptions, `enable_living_world` / `enable_quasar_gateway`
+//! feature flag gates, GM/QA role bitmask enforcement across `slash` / `devToolsProvider` /
+//! `sessionMgr` / `dungeon` / `keeper` / `publicQaToolsServer`, `MachoBindObject` argument shapes &
+//! piggybacked sub-calls, WAL error rollback, and Sovereignty Hub prospecting deposit respawn ticks.
+
+#![forbid(unsafe_code)]
+
+use super::dispatch::{
+    current_dispatch_wal_error, record_dispatch_wal_error, take_dispatch_wal_error,
+    tick_sov_prospecting_deposit_respawn,
+};
+use super::ServerContext;
+use crate::services::mining_sites::SOV_PROSPECTING_DEPOSITS;
+use eve_db::{
+    AsteroidRecord, CosmicAnomalyRecord, CosmicSignatureRecord, InventoryFlag, InventoryItemRecord,
+    UpwellStructureRecord, VirtualServerClock, WorldRepository,
+};
+use eve_destiny::{Ball, CombatState, MovementMode};
+use eve_machonet::service_roles::{
+    ROLE_GML, ROLE_PLAYER, ROLE_QA, ROLE_ROLEADMIN, ROLE_SPAWN,
+};
+use eve_machonet::SessionState;
+use eve_proto::PyRep;
+use eve_sde::SdeRegistry;
+use glam::DVec3;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+
+static SHARED_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
+
+fn test_ctx() -> ServerContext {
+    if let Some(sde) = SHARED_SDE.get() {
+        ServerContext::with_sde_and_repository(
+            Arc::clone(sde),
+            Arc::new(WorldRepository::with_demo_seed()),
+        )
+        .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED)
+    } else {
+        let ctx = ServerContext::new();
+        let _ = SHARED_SDE.set(Arc::clone(&ctx.sde));
+        ctx
+    }
+}
+
+fn make_authed_session(session_id: u64, user_id: u64, char_id: i64, role: u64) -> SessionState {
+    let mut s = SessionState::new(session_id);
+    s.user_id = Some(user_id);
+    s.character_id = Some(char_id);
+    s.corporation_id = Some(1_000_009);
+    s.solar_system_id = Some(30_000_142);
+    s.station_id = Some(60_003_760);
+    s.ship_id = Some(100_000_001);
+    s.role = role;
+    s
+}
+
+#[tokio::test]
+async fn session_revocation_multilogin_blocked_exemptions_and_kick_ban_state_wipe() {
+    let ctx = test_ctx();
+    let now = 1_800_000_000u64;
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now)));
+    let kw = HashMap::new();
+
+    // Ensure user 1 is a normal player (not ROLE_ADMIN) so kick/ban operations apply
+    let user_id = 1u64;
+    let char_id = 90_000_001i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        for acc in snap.accounts.values_mut() {
+            if acc.user_id == user_id {
+                acc.role = ROLE_PLAYER;
+            }
+        }
+    });
+
+    // Session 10 acquires the online lock for user 1
+    ctx.db
+        .acquire_online_lock_with_computer_hash(
+            user_id,
+            10,
+            Some(char_id),
+            Some("hw-hash-1".into()),
+            true,
+            now,
+        )
+        .expect("session 10 acquires lock");
+
+    // Session 20 is a second concurrent session for the same user_id
+    let mut sess20 = make_authed_session(20, user_id, char_id, ROLE_PLAYER);
+    let b20 = ctx
+        .bind_object(&sess20, "station", 60_003_760)
+        .expect("bind station on sess20");
+
+    // 1) Exempt calls (`authentication.Ping` and `petitioner.MayPetition`) bypass revocation check
+    let ping_res = ctx
+        .dispatch_rpc(&mut sess20, "authentication", None, "Ping", &[], &kw, None)
+        .await;
+    assert_ne!(ping_res.as_ref().err().map(|e| e.code.as_str()), Some("MultiLoginBlocked"));
+    assert!(ctx.verify_bound_object(&sess20, b20).is_ok());
+    let pet_res = ctx
+        .dispatch_rpc(&mut sess20, "petitioner", None, "MayPetition", &[], &kw, None)
+        .await;
+    assert_ne!(pet_res.as_ref().err().map(|e| e.code.as_str()), Some("MultiLoginBlocked"));
+
+    // 2) `multiLoginBlocker.Login` bypasses MultiLoginBlocked in dispatch_rpc_inner
+    let mlb_res = ctx
+        .dispatch_rpc(&mut sess20, "multiLoginBlocker", None, "Login", &[PyRep::String("hw-hash-2".into())], &kw, None)
+        .await;
+    assert_ne!(mlb_res.as_ref().err().map(|e| e.code.as_str()), Some("MultiLoginBlocked"));
+
+    // Re-lock to session 10 and verify a normal RPC on session 20 returns MultiLoginBlocked,
+    // releases session 20's bound objects, but preserves session 20's user_id!
+    ctx.db
+        .acquire_online_lock_with_computer_hash(user_id, 10, Some(char_id), Some("hw-hash-1".into()), true, now)
+        .unwrap();
+    ctx.db.clear_revocation_on_fresh_login(user_id, 20);
+    let b20_again = ctx.bind_object(&sess20, "station", 60_003_760).unwrap();
+
+    let blocked_err = ctx
+        .dispatch_rpc(&mut sess20, "charMgr", None, "GetPublicInfo3", &[PyRep::Integer(char_id)], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(blocked_err.code, "MultiLoginBlocked");
+    assert_eq!(sess20.user_id, Some(user_id), "MultiLoginBlocked must not wipe user_id");
+    assert_eq!(ctx.verify_bound_object(&sess20, b20_again).unwrap_err().code, "InvalidBoundObject");
+
+    // 3) Kicking user 1 revokes session 10 with SessionKicked and wipes all session fields
+    let mut sess10 = make_authed_session(10, user_id, char_id, ROLE_GML);
+    let b10 = ctx.bind_object(&sess10, "station", 60_003_760).unwrap();
+    ctx.db.kick_user(user_id, "GM kick test", now);
+
+    let kick_err = ctx
+        .dispatch_rpc(&mut sess10, "charMgr", None, "GetPublicInfo3", &[PyRep::Integer(char_id)], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(kick_err.code, "SessionKicked");
+    assert_eq!(
+        (sess10.user_id, sess10.role, sess10.character_id, sess10.corporation_id, sess10.station_id, sess10.solar_system_id, sess10.ship_id),
+        (None, 0, None, None, None, None, None)
+    );
+    assert_eq!(ctx.verify_bound_object(&sess10, b10).unwrap_err().code, "InvalidBoundObject");
+
+    // 4) Banning user 1 revokes with UserBanned and wipes session state
+    ctx.db.clear_revocation_on_fresh_login(user_id, 30);
+    ctx.db
+        .ban_account_by_id_or_username(&user_id.to_string(), now + 3_600, "Bottling")
+        .expect("ban user 1");
+    let mut sess30 = make_authed_session(30, user_id, char_id, ROLE_PLAYER);
+    let ban_err = ctx
+        .dispatch_rpc(&mut sess30, "charMgr", None, "GetPublicInfo3", &[PyRep::Integer(char_id)], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(ban_err.code, "UserBanned");
+    assert_eq!((sess30.user_id, sess30.character_id), (None, None));
+}
+
+#[tokio::test]
+async fn feature_flags_time_control_and_gm_qa_role_bitmask_enforcement_matrix() {
+    let mut ctx = test_ctx();
+    let now = 1_800_000_000u64;
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now)));
+    let char_id = 90_000_001i64;
+    let kw = HashMap::new();
+
+    // 1) Feature flag gates: taleMgr (enable_living_world) and publicGatewaySvc (enable_quasar_gateway)
+    ctx.feature_flags.enable_living_world = false;
+    ctx.feature_flags.enable_quasar_gateway = false;
+    let mut gm_sess = make_authed_session(101, 1, char_id, ROLE_GML);
+
+    let tale_err = ctx
+        .dispatch_rpc(&mut gm_sess, "taleMgr", None, "GetGlobalWorldEventTales", &[], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(tale_err.code, "FeatureDisabled"); // rpc-lint: allow error code assertion
+
+    let q_err = ctx
+        .dispatch_rpc(&mut gm_sess, "publicGatewaySvc", None, "SendRequest", &[], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(q_err.code, "FeatureDisabled"); // rpc-lint: allow error code assertion
+
+    ctx.feature_flags.enable_living_world = true;
+    ctx.feature_flags.enable_quasar_gateway = true;
+
+    // 2) timeControl.AdvanceClock: non-GM rejected, negative secs rejected, default +12s & explicit +5s + warp tick
+    let mut player_sess = make_authed_session(102, 1, char_id, ROLE_PLAYER);
+    assert_eq!(
+        ctx.dispatch_rpc(&mut player_sess, "timeControl", None, "AdvanceClock", &[], &kw, None)
+            .await
+            .unwrap_err()
+            .code,
+        "InsufficientRole"
+    );
+    assert_eq!(
+        ctx.dispatch_rpc(&mut gm_sess, "timeControl", None, "AdvanceClock", &[PyRep::Integer(-1)], &kw, None)
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidArgument"
+    );
+
+    // Spawn active ship in Warp mode so AdvanceClock exercises the warp-tick loop
+    let ship_id = ctx.db.with_snapshot(|s| s.characters[&char_id].active_ship_id);
+    let sys_id = ctx.db.with_snapshot(|s| s.characters[&char_id].solar_system_id);
+    ctx.systems.get_or_spawn(sys_id).try_spawn_ball_with_combat(
+        Ball {
+            id: ship_id,
+            type_id: 606,
+            position: DVec3::ZERO,
+            velocity: DVec3::new(1_000.0, 0.0, 0.0),
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 1.0,
+            mode: MovementMode::Warp {
+                origin: DVec3::ZERO,
+                destination: DVec3::new(100_000_000.0, 0.0, 0.0),
+                warp_speed_au_s: 3.0,
+                total_distance: 100_000_000.0,
+                phase: eve_destiny::WarpPhase::Cruising,
+                elapsed_warp_time: 1.0,
+            },
+        },
+        CombatState::default(),
+    );
+
+    let before = ctx.now_unix();
+    let adv_default = ctx
+        .dispatch_rpc(&mut gm_sess, "timeControl", None, "AdvanceClock", &[], &kw, None)
+        .await
+        .expect("AdvanceClock default 12s");
+    assert_eq!((adv_default, ctx.now_unix()), (PyRep::Bool(true), before + 12));
+
+    let adv_explicit = ctx
+        .dispatch_rpc(&mut gm_sess, "timeControl", None, "AdvanceClock", &[PyRep::Integer(5)], &kw, None)
+        .await
+        .expect("AdvanceClock explicit 5s");
+    assert_eq!((adv_explicit, ctx.now_unix()), (PyRep::Bool(true), before + 17));
+
+    // 3) timeControl.FastForwardSessionTimer / harness.ClearSessionTimer
+    crate::services::space_destiny::record_session_change_timer(&ctx, char_id, ctx.now_unix(), sys_id, 1, "jump");
+    assert!(crate::services::space_destiny::check_session_change_timer_active(&ctx, char_id, ctx.now_unix(), None).is_some());
+    assert_eq!(
+        ctx.dispatch_rpc(&mut player_sess, "timeControl", None, "FastForwardSessionTimer", &[], &kw, None)
+            .await
+            .unwrap_err()
+            .code,
+        "InsufficientRole"
+    );
+    let ff_ok = ctx
+        .dispatch_rpc(&mut gm_sess, "harness", None, "ClearSessionTimer", &[], &kw, None)
+        .await
+        .expect("ClearSessionTimer");
+    assert_eq!(ff_ok, PyRep::Bool(true));
+    assert!(crate::services::space_destiny::check_session_change_timer_active(&ctx, char_id, ctx.now_unix(), None).is_none());
+
+    // 4) GM vs QA role gates across slash, devToolsProvider, sessionMgr, keeper, dungeon, publicQaToolsServer
+    for (svc, method) in [
+        ("slash", "SlashCmd"),
+        ("devToolsProvider", "GetDevTools"), // rpc-lint: allow pre-existing GM gate for a server-internal name; refusing it is the point
+        ("sessionMgr", "PerformSessionChange"),
+        ("keeper", "GetLevelEditor"),
+        ("dungeon", "DEGetDungeons"),
+        ("dungeon", "DEGetRooms"),
+        ("dungeon", "DEGetArchetypes"),
+        ("dungeon", "DEGetFactions"),
+        ("dungeon", "DEGetRoomObjectPaletteData"),
+        ("publicQaToolsServer", "CanGiveItemForMultifit"),
+    ] {
+        let err = ctx
+            .dispatch_rpc(&mut player_sess, svc, None, method, &[], &kw, None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "InsufficientRole", "player must be denied {svc}.{method}");
+    }
+
+    // ROLE_QA is allowed on `slash` (via slash_subrole) and `publicQaToolsServer`,
+    // but DENIED on `devToolsProvider`, `sessionMgr`, `keeper.GetLevelEditor`, and `dungeon.DEGet*`!
+    let mut qa_sess = make_authed_session(103, 1, char_id, ROLE_QA);
+    let slash_qa = ctx
+        .dispatch_rpc(&mut qa_sess, "slash", None, "SlashCmd", &[PyRep::String("/whoami".into())], &kw, None)
+        .await;
+    assert!(slash_qa.is_ok(), "ROLE_QA must pass slash_subrole check for /whoami");
+    for (subrole, cmd) in [(ROLE_SPAWN, "/spawn 606"), (ROLE_ROLEADMIN, "/role 90000001 0")] {
+        let mut sub_sess = make_authed_session(104, 1, char_id, subrole);
+        let res = ctx
+            .dispatch_rpc(&mut sub_sess, "slash", None, "SlashCmd", &[PyRep::String(cmd.into())], &kw, None)
+            .await;
+        assert_ne!(
+            res.as_ref().err().map(|e| e.message.starts_with("UserError: GM_InsufficientRole")),
+            Some(true),
+            "slash_subrole must bypass central dispatch GM gate"
+        );
+    }
+    let qa_tools_res = ctx
+        .dispatch_rpc(&mut qa_sess, "publicQaToolsServer", None, "CanGiveItemForMultifit", &[], &kw, None)
+        .await;
+    assert_ne!(qa_tools_res.as_ref().err().map(|e| e.code.as_str()), Some("InsufficientRole"));
+    for (svc, method) in [
+        ("devToolsProvider", "GetDevTools"), // rpc-lint: allow pre-existing GM gate for a server-internal name; refusing it is the point
+        ("sessionMgr", "PerformSessionChange"),
+        ("keeper", "GetLevelEditor"),
+        ("dungeon", "DEGetDungeons"),
+    ] {
+        let err = ctx
+            .dispatch_rpc(&mut qa_sess, svc, None, method, &[], &kw, None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "InsufficientRole", "ROLE_QA without GM role must be rejected on {svc}.{method}");
+    }
+}
+
+#[tokio::test]
+async fn macho_resolve_and_bind_object_argument_shapes_beyonce_and_piggybacked_subcalls() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001i64;
+    let kw = HashMap::new();
+
+    // 1) MachoResolveObject requires auth and returns MACHO_PROXY_NODE_ID
+    let mut unauth = SessionState::new(301);
+    assert!(ctx
+        .dispatch_rpc(&mut unauth, "charMgr", None, "MachoResolveObject", &[], &kw, None)
+        .await
+        .is_err());
+
+    let mut sess = make_authed_session(302, 1, char_id, ROLE_PLAYER);
+    let node_rep = ctx
+        .dispatch_rpc(&mut sess, "charMgr", None, "MachoResolveObject", &[], &kw, None)
+        .await
+        .expect("MachoResolveObject");
+    assert_eq!(node_rep, PyRep::Integer(eve_machonet::MACHO_PROXY_NODE_ID as i64));
+
+    // 2) MachoBindObject argument shapes: String, Token, Tuple(Int), Tuple(Str), empty Tuple, None
+    for bind_arg in [
+        PyRep::String("moniker_alpha".into()),
+        PyRep::Token("moniker_token".into()),
+        PyRep::Tuple(vec![PyRep::Integer(3_018_922)]),
+        PyRep::Tuple(vec![PyRep::String("moniker_tuple_str".into())]),
+    ] {
+        let rep = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "agentMgr",
+                None,
+                "MachoBindObject",
+                &[bind_arg],
+                &kw,
+                None,
+            )
+            .await
+            .expect("MachoBindObject valid arg shape");
+        let PyRep::Tuple(items) = rep else {
+            panic!("Expected (oid, call_result) tuple");
+        };
+        assert_eq!(items.len(), 2);
+        assert!(items[0].as_i64().unwrap_or(0) > 0);
+        assert_eq!(items[1], PyRep::None);
+    }
+
+    for invalid_arg in [
+        vec![],
+        vec![PyRep::None],
+        vec![PyRep::String(String::new())],
+        vec![PyRep::Tuple(vec![])],
+        vec![PyRep::Tuple(vec![PyRep::None])],
+    ] {
+        let err = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "agentMgr",
+                None,
+                "MachoBindObject",
+                &invalid_arg,
+                &kw,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "InvalidArgument");
+    }
+
+    // 3) Piggybacked sub-call on charMgr with args & kwargs + machoNet:26000 wire format
+    let piggy_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charMgr",
+            None,
+            "MachoBindObject",
+            &[
+                PyRep::Integer(char_id),
+                PyRep::Tuple(vec![
+                    PyRep::String("GetPublicInfo3".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(char_id)]),
+                    PyRep::Dict(vec![(PyRep::String("flag".into()), PyRep::Integer(1))]),
+                ]),
+            ],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("MachoBindObject with piggybacked GetPublicInfo3");
+    let PyRep::Tuple(pair) = piggy_rep else {
+        panic!("Expected 2-tuple from MachoBindObject");
+    };
+    assert!(matches!(pair[0], PyRep::SubStruct(_)));
+    assert_ne!(pair[1], PyRep::None);
+
+    // 4) skillMgr2.GetSkills over machoNet:26000 converts Rowset into Dict of KeyVals with skillRank
+    let skills_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "skillMgr2",
+            None,
+            "GetSkills",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("skillMgr2.GetSkills machoNet:26000");
+    let PyRep::Dict(entries) = skills_rep else {
+        panic!("Expected Dict from skillMgr2.GetSkills for machoNet:26000");
+    };
+    assert!(!entries.is_empty());
+    let (_, first_kv) = &entries[0];
+    assert!(first_kv.dict_get("skillRank").is_some());
+    assert!(first_kv.dict_get("effectiveSkillLevel").is_some());
+}
+
+#[tokio::test]
+async fn wal_error_rollback_and_sov_prospecting_deposit_respawn_lifecycle() {
+    let ctx = test_ctx();
+    let now = 1_800_000_000u64;
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now)));
+
+    // 1) Task-local WAL error recording outside scope returns false / None
+    assert!(!record_dispatch_wal_error("outside_scope"));
+    assert_eq!(current_dispatch_wal_error(), None);
+    assert_eq!(take_dispatch_wal_error(), None);
+
+    // 2) Sovereignty Hub prospecting deposit depletion -> cleared timer -> respawn tick
+    let sys_id = 30_004_759u32;
+    let hub_id = 1_000_000_888_001i64;
+    let upgrade_def = &SOV_PROSPECTING_DEPOSITS[0];
+    let upgrade_tid = upgrade_def.upgrade_type_id;
+    let respawn_secs = upgrade_def.respawn_seconds;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            hub_id,
+            UpwellStructureRecord {
+                structure_id: hub_id,
+                type_id: 32_458,
+                owner_corp_id: 98_000_001,
+                solar_system_id: sys_id,
+                name: "Sov Hub".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 1_000,
+                shield_hp: 10_000.0,
+                armor_hp: 10_000.0,
+                hull_hp: 10_000.0,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            888_101,
+            InventoryItemRecord {
+                item_id: 888_101,
+                type_id: upgrade_tid,
+                owner_id: 98_000_001,
+                location_id: hub_id,
+                flag: InventoryFlag::SubSystemSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.cosmic_anomalies
+            .entry(sys_id)
+            .or_default()
+            .push(CosmicAnomalyRecord {
+                anomaly_id: "SOV-ORE-1".into(),
+                solar_system_id: sys_id,
+                name: "Depleted Sov Deposit".into(),
+                anomaly_type: "SovOre".into(),
+                position: [1_000.0, 0.0, 0.0],
+                signal_strength: 1.0,
+                ore_types: vec![],
+                remaining_volume: 100.0,
+                created_unix: now - 100,
+                lifetime_seconds: 0,
+                cleared: false,
+            });
+        snap.cosmic_signatures
+            .entry(sys_id)
+            .or_default()
+            .push(CosmicSignatureRecord {
+                signature_id: "SOV-ORE-1".into(),
+                solar_system_id: sys_id,
+                sig_group: "SovOre".into(),
+                type_name: "Depleted Sov Deposit".into(),
+                position: [1_000.0, 0.0, 0.0],
+                signal_strength: 1.0,
+                wormhole_type_id: None,
+                destination_system_id: None,
+                created_unix: now - 100,
+                lifetime_seconds: 0,
+                max_mass_kg: 0.0,
+                remaining_mass_kg: 0.0,
+                max_jump_mass_kg: 0.0,
+                collapsed: false,
+            });
+        // Depleted asteroid (quantity == 0)
+        snap.asteroids.insert(
+            888_201,
+            AsteroidRecord {
+                asteroid_id: 888_201,
+                solar_system_id: sys_id,
+                belt_id: 0,
+                type_id: 1230,
+                quantity: 0,
+                initial_quantity: 1_000,
+                position: (1_000.0, 0.0, 0.0),
+                radius: 100.0,
+            },
+        );
+    });
+
+    // Tick 1 at `now`: marks anomaly cleared, stamps respawn_secs, collapses signature
+    tick_sov_prospecting_deposit_respawn(&ctx, sys_id).await;
+    ctx.db.with_snapshot(|snap| {
+        let anom = &snap.cosmic_anomalies[&sys_id][0];
+        assert!(anom.cleared);
+        assert_eq!(anom.lifetime_seconds, respawn_secs);
+        assert_eq!(anom.created_unix, now);
+        let sig = &snap.cosmic_signatures[&sys_id][0];
+        assert!(sig.collapsed);
+        assert_eq!(sig.signal_strength, 0.0);
+    });
+
+    // Tick 2 at `now + respawn_secs`: respawns fresh SovOre anomaly, signature, and asteroid rocks
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(
+        now + respawn_secs + 1,
+    )));
+    tick_sov_prospecting_deposit_respawn(&ctx, sys_id).await;
+    ctx.db.with_snapshot(|snap| {
+        let anoms = &snap.cosmic_anomalies[&sys_id];
+        assert_eq!(anoms.len(), 1);
+        assert!(!anoms[0].cleared);
+        assert!(anoms[0].remaining_volume > 0.0);
+        let has_fresh_asteroids = snap
+            .asteroids
+            .values()
+            .any(|a| a.solar_system_id == sys_id && a.quantity > 0);
+        assert!(has_fresh_asteroids, "respawned SovOre site must seed fresh asteroids");
+    });
+}
