@@ -281,6 +281,40 @@ impl ServerContext {
             bound_id.is_none() && service == "multiLoginBlocker" && method == "Login";
         let is_exempt_petitioner_call =
             bound_id.is_none() && service == "petitioner" && method == "MayPetition";
+
+        if !is_exempt_auth_call
+            && !is_exempt_petitioner_call
+            && !session.has_gm_role()
+            && (self.is_shutting_down()
+                || crate::services::serverops_cluster::is_downtime_active_in_db(self))
+        {
+            self.release_session_bindings(session.session_id);
+            self.quasar_gateway.unsubscribe_session(session.session_id);
+            if let Some(uid) = session.user_id {
+                let _ = self.db.release_online_lock(uid, session.session_id);
+            }
+            self.disconnect_session(
+                session.session_id,
+                "ClusterShuttingDown",
+                "Cluster is undergoing scheduled daily downtime",
+            );
+            session.user_id = None;
+            session.role = 0;
+            session.character_id = None;
+            session.corporation_id = None;
+            session.alliance_id = None;
+            session.station_id = None;
+            session.structure_id = None;
+            session.solar_system_id = None;
+            session.constellation_id = None;
+            session.region_id = None;
+            session.ship_id = None;
+            return Err(BridgeRpcError {
+                code: "ClusterShuttingDown".into(),
+                message: "Cluster is undergoing scheduled daily downtime; non-GM gameplay RPCs are rejected".into(),
+            });
+        }
+
         if !is_exempt_auth_call && !is_exempt_petitioner_call {
             if let Some(uid) = session.user_id {
                 if let Some((code, msg)) =

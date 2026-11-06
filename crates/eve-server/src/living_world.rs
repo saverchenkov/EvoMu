@@ -492,14 +492,11 @@ impl LivingWorldDirector {
         db: &WorldRepository,
         sde: &eve_sde::SdeRegistry,
     ) -> Result<NpcMiningStepResult, String> {
-        let (sys_id, ship_type_id, cargo_type, current_cargo, dest_station_id) = {
+        let (sys_id, ship_type_id, cargo_type, current_cargo, dest_station_id, destroyed) = {
             let guard = self.convoys.read().unwrap_or_else(|e| e.into_inner());
             let c = guard
                 .get(&convoy_id)
                 .ok_or_else(|| format!("Convoy {convoy_id} not found"))?;
-            if c.destroyed {
-                return Err(format!("Convoy {convoy_id} is destroyed"));
-            }
             if c.archetype != NpcArchetype::MiningOp {
                 return Err(format!("Convoy {convoy_id} is not a MiningOp"));
             }
@@ -509,10 +506,22 @@ impl LivingWorldDirector {
                 c.cargo_type_id,
                 c.cargo_quantity,
                 c.destination_station_id,
+                c.destroyed,
             )
         };
 
         let handle = systems.get_or_spawn(sys_id);
+        let hauler_ball_id = convoy_id + 1_000_000;
+        if destroyed {
+            let _ = handle.remove_ball(hauler_ball_id).await;
+            let _ = handle.remove_ball(convoy_id).await;
+            db.with_mut_snapshot(|snap| {
+                snap.items.retain(|_, item| {
+                    !(item.location_id == hauler_ball_id && item.flag == eve_db::InventoryFlag::Cargo)
+                });
+            });
+            return Err(format!("Convoy {convoy_id} is destroyed"));
+        }
         let asteroids = handle
             .populate_asteroid_belt_entities()
             .await
@@ -524,6 +533,9 @@ impl LivingWorldDirector {
             .or_else(|| asteroids.iter().find(|a| !a.depleted && a.remaining_units > 0));
 
         let Some(target) = target_ast else {
+            let hauler_ball_id = convoy_id + 1_000_000;
+            let _ = handle.remove_ball(hauler_ball_id).await;
+            let _ = handle.remove_ball(convoy_id).await;
             return Err(format!("No minable asteroids remaining in system {sys_id}"));
         };
 
@@ -685,6 +697,34 @@ impl LivingWorldDirector {
                         snap.items.retain(|_, item| {
                             !(item.location_id == hauler_ball_id && item.flag == eve_db::InventoryFlag::Cargo)
                         });
+                        if let Some(existing) = snap.items.values_mut().find(|it| {
+                            it.owner_id == 1
+                                && it.location_id == dest_station_id
+                                && it.type_id == ore_type_id
+                                && it.flag == eve_db::InventoryFlag::Hangar
+                                && !it.singleton
+                        }) {
+                            existing.quantity =
+                                existing.quantity.saturating_add(in_transit_cargo as i32);
+                            existing.version += 1;
+                        } else {
+                            snap.next_entity_id += 1;
+                            let iid = snap.next_entity_id;
+                            snap.items.insert(
+                                iid,
+                                eve_db::InventoryItemRecord {
+                                    item_id: iid,
+                                    type_id: ore_type_id,
+                                    owner_id: 1,
+                                    location_id: dest_station_id,
+                                    flag: eve_db::InventoryFlag::Hangar,
+                                    quantity: in_transit_cargo as i32,
+                                    singleton: false,
+                                    version: 1,
+                                    ..Default::default()
+                                },
+                            );
+                        }
                         let ore_price = snap
                             .market_orders
                             .values()
@@ -732,15 +772,22 @@ impl LivingWorldDirector {
                             );
                         }
                     });
-                    let hauler_tid = hauler_type_for_system(sde, sys_id);
-                    let (h_ball, h_combat) = sde_ball_and_combat(sde, hauler_ball_id, hauler_tid, dest_station_pos);
-                    let _ = handle.spawn_ball_with_combat(h_ball, h_combat).await;
-                    let _ = handle
-                        .set_movement_mode(
-                            hauler_ball_id,
-                            eve_destiny::MovementMode::new_warp(dest_station_pos, belt_hauler_pos, 3.0),
-                        )
-                        .await;
+                    if extraction.remaining_units > 0 || final_cargo > 0 {
+                        let hauler_tid = hauler_type_for_system(sde, sys_id);
+                        let (h_ball, h_combat) =
+                            sde_ball_and_combat(sde, hauler_ball_id, hauler_tid, dest_station_pos);
+                        let _ = handle.spawn_ball_with_combat(h_ball, h_combat).await;
+                        let _ = handle
+                            .set_movement_mode(
+                                hauler_ball_id,
+                                eve_destiny::MovementMode::new_warp(
+                                    dest_station_pos,
+                                    belt_hauler_pos,
+                                    3.0,
+                                ),
+                            )
+                            .await;
+                    }
                 }
             }
         } else if hold_full {
@@ -748,29 +795,48 @@ impl LivingWorldDirector {
             let loaded_units = final_cargo;
             final_cargo = 0;
             db.with_mut_snapshot(|snap| {
-                snap.next_entity_id += 1;
-                let item_id = snap.next_entity_id;
-                snap.items.insert(
-                    item_id,
-                    eve_db::InventoryItemRecord {
+                if let Some(existing) = snap.items.values_mut().find(|it| {
+                    it.owner_id == owner_corp_id
+                        && it.location_id == hauler_ball_id
+                        && it.type_id == ore_type_id
+                        && it.flag == eve_db::InventoryFlag::Cargo
+                        && !it.singleton
+                }) {
+                    existing.quantity = existing.quantity.saturating_add(loaded_units);
+                    existing.version += 1;
+                } else {
+                    snap.next_entity_id += 1;
+                    let item_id = snap.next_entity_id;
+                    snap.items.insert(
                         item_id,
-                        type_id: ore_type_id,
-                        owner_id: owner_corp_id,
-                        location_id: hauler_ball_id,
-                        flag: eve_db::InventoryFlag::Cargo,
-                        quantity: loaded_units,
-                        singleton: false,
-                        version: 1,
-                        ..Default::default()
-                    },
-                );
+                        eve_db::InventoryItemRecord {
+                            item_id,
+                            type_id: ore_type_id,
+                            owner_id: owner_corp_id,
+                            location_id: hauler_ball_id,
+                            flag: eve_db::InventoryFlag::Cargo,
+                            quantity: loaded_units,
+                            singleton: false,
+                            version: 1,
+                            ..Default::default()
+                        },
+                    );
+                }
             });
+            if hauler_snap.is_none() {
+                let hauler_tid = hauler_type_for_system(sde, sys_id);
+                let (h_ball, h_combat) =
+                    sde_ball_and_combat(sde, hauler_ball_id, hauler_tid, belt_hauler_pos);
+                let _ = handle.spawn_ball_with_combat(h_ball, h_combat).await;
+            }
             let _ = handle
                 .set_movement_mode(
                     hauler_ball_id,
                     eve_destiny::MovementMode::new_warp(belt_hauler_pos, dest_station_pos, 3.0),
                 )
                 .await;
+        } else if extraction.remaining_units == 0 && final_cargo == 0 && in_transit_cargo == 0 {
+            let _ = handle.remove_ball(hauler_ball_id).await;
         }
 
         // Update convoy state

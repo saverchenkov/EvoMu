@@ -651,6 +651,7 @@ pub async fn handle(
         }
         // rpc-lint: allow legacy Crucible / parity ledger service feat:character.portrait-upload
         ("photoUploadSvc", "Upload") => {
+            const MAX_PORTRAIT_UPLOAD_BYTES: usize = 512 * 1024;
             let user_id = match ServerContext::require_auth(session) {
                 Ok(u) => u,
                 Err(e) => return Some(Err(e)),
@@ -664,14 +665,42 @@ pub async fn handle(
                     };
                     (*cid, d)
                 }
-                Some(PyRep::Bytes(b)) => (session.character_id.unwrap_or(0), b.clone()),
-                Some(PyRep::String(s)) => (session.character_id.unwrap_or(0), s.as_bytes().to_vec()),
+                Some(PyRep::Bytes(b)) => match session.character_id {
+                    Some(cid) => (cid, b.clone()),
+                    None => {
+                        return Some(Err(BridgeRpcError {
+                            code: "SessionError".into(),
+                            message: "photoUploadSvc.Upload requires an authenticated character"
+                                .into(),
+                        }));
+                    }
+                },
+                Some(PyRep::String(s)) => match session.character_id {
+                    Some(cid) => (cid, s.as_bytes().to_vec()),
+                    None => {
+                        return Some(Err(BridgeRpcError {
+                            code: "SessionError".into(),
+                            message: "photoUploadSvc.Upload requires an authenticated character"
+                                .into(),
+                        }));
+                    }
+                },
                 _ => (0, Vec::new()),
             };
-            if char_id == 0 || portrait_data.is_empty() {
+            if char_id <= 0 || portrait_data.is_empty() {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArguments".into(),
                     message: "photoUploadSvc.Upload requires characterID and portrait data".into(),
+                }));
+            }
+            if portrait_data.len() > MAX_PORTRAIT_UPLOAD_BYTES {
+                return Some(Err(BridgeRpcError {
+                    code: "PortraitTooLarge".into(),
+                    message: format!(
+                        "Portrait upload size {} exceeds maximum {} bytes",
+                        portrait_data.len(),
+                        MAX_PORTRAIT_UPLOAD_BYTES
+                    ),
                 }));
             }
             let is_owner = ctx.db.with_snapshot(|s| {
@@ -685,13 +714,10 @@ pub async fn handle(
             }
             let hex_str = portrait_data.iter().map(|b| format!("{b:02x}")).collect::<String>();
             ctx.db.with_mut_snapshot(|snap| {
-                snap.service_state_blobs.insert(format!("portrait:{char_id}"), hex_str.clone());
                 for sz in [32, 64, 128, 256, 512, 1024] {
-                    snap.service_state_blobs.insert(
-                        format!("portrait:{char_id}:{sz}"),
-                        hex_str.clone(),
-                    );
+                    snap.service_state_blobs.remove(&format!("portrait:{char_id}:{sz}"));
                 }
+                snap.service_state_blobs.insert(format!("portrait:{char_id}"), hex_str);
                 snap.character_doll_info.entry(char_id).or_default().1 = format!("portrait:{char_id}");
             });
             Some(Ok(PyRep::Bool(true)))

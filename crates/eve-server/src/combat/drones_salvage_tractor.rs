@@ -637,9 +637,10 @@ pub async fn execute_wreck_salvage_cycle(
     ]))
 }
 
-/// Auto-repeating Salvager module (`effectSalvaging`) / Salvage Drone (`CmdSalvage`) cycle loop:
-/// stops immediately on `Err` (`SalvageTooMuchLootBody`, range, target) or `InsufficientAccessChance`,
-/// and repeats 10s salvage cycles while `reason == "CycleRollFailed"` until the wreck is salvaged.
+/// Auto-repeating Salvager module (`effectSalvaging`) / Salvage Drone (`CmdSalvage`) cycle execution:
+/// executes a single salvage cycle with capacitor check/consumption and, on `CycleRollFailed`,
+/// schedules the next cycle attempt through the `SystemActor` `auto_repeat` module cycle timer
+/// instead of running synchronous multi-cycle rolls in one call.
 pub async fn execute_wreck_salvage_auto_repeat(
     ctx: &ServerContext,
     sys_id: u32,
@@ -648,24 +649,94 @@ pub async fn execute_wreck_salvage_auto_repeat(
     wreck_id: i64,
     salvager_type_id_opt: Option<u32>,
 ) -> Result<eve_proto::PyRep, eve_proto::BridgeRpcError> {
-    let mut last_rep =
+    execute_wreck_salvage_cycle_scheduled(
+        ctx,
+        sys_id,
+        char_id,
+        ship_id,
+        wreck_id,
+        None,
+        salvager_type_id_opt,
+        true,
+    )
+    .await
+}
+
+/// Executes one timed salvage attempt (checking & deducting module capacitor) and optionally
+/// queues the next `ActiveModuleCycle` (`auto_repeat`) when `reason == "CycleRollFailed"`.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_wreck_salvage_cycle_scheduled(
+    ctx: &ServerContext,
+    sys_id: u32,
+    char_id: i64,
+    ship_id: i64,
+    wreck_id: i64,
+    module_item_id_opt: Option<i64>,
+    salvager_type_id_opt: Option<u32>,
+    schedule_repeat_on_fail: bool,
+) -> Result<eve_proto::PyRep, eve_proto::BridgeRpcError> {
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let mod_type_id = salvager_type_id_opt.unwrap_or(32787);
+    let mod_sde = ctx.sde.types.get(&mod_type_id);
+    let cap_cost = mod_sde
+        .and_then(|t| {
+            t.default_attributes
+                .get(&eve_sde::attr_ids::CAPACITOR_NEED)
+                .copied()
+        })
+        .unwrap_or(0.0)
+        .max(0.0);
+    let duration_s = (mod_sde
+        .and_then(|t| t.default_attributes.get(&73).copied())
+        .unwrap_or(10_000.0)
+        / 1_000.0)
+        .max(1.0);
+
+    if cap_cost > 0.0 {
+        if let Ok(Some(cs)) = sys_handle.get_combat_state(ship_id).await {
+            if cs.capacitor + 1e-6 < cap_cost {
+                return Err(eve_proto::BridgeRpcError {
+                    code: "NotEnoughCapacitor".into(),
+                    message: format!(
+                        "Ship {ship_id} lacks capacitor ({:.1}/{:.1} GJ) to cycle salvager",
+                        cs.capacitor, cap_cost
+                    ),
+                });
+            }
+            let _ = sys_handle
+                .set_capacitor(ship_id, (cs.capacitor - cap_cost).max(0.0))
+                .await;
+        }
+    }
+
+    let rep =
         execute_wreck_salvage_cycle(ctx, sys_id, char_id, ship_id, wreck_id, salvager_type_id_opt)
             .await?;
-    for _ in 1..32 {
-        if !format!("{last_rep:?}").contains("CycleRollFailed") {
-            break;
+
+    let is_roll_failed = rep.dict_get("salvaged").and_then(|v| v.as_bool()) == Some(false)
+        && rep.dict_get("reason").and_then(|v| v.as_str()) == Some("CycleRollFailed");
+    if schedule_repeat_on_fail && is_roll_failed {
+        let resolved_mod_id = module_item_id_opt.unwrap_or(wreck_id);
+        if !sys_handle.has_active_module_cycle_sync(ship_id, resolved_mod_id) {
+            let _ = sys_handle
+                .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+                    ship_id,
+                    module_id: resolved_mod_id,
+                    module_type_id: mod_type_id,
+                    owner_char_id: Some(char_id),
+                    effect_name: "effectSalvaging".to_string(),
+                    target_id: Some(wreck_id),
+                    repeat: 1000,
+                    duration_s,
+                    elapsed_s: 0.0,
+                    cap_need_per_cycle: cap_cost,
+                    ..Default::default()
+                })
+                .await;
         }
-        last_rep = execute_wreck_salvage_cycle(
-            ctx,
-            sys_id,
-            char_id,
-            ship_id,
-            wreck_id,
-            salvager_type_id_opt,
-        )
-        .await?;
     }
-    Ok(last_rep)
+
+    Ok(rep)
 }
 
 /// Simulates a tractor beam pull on a wreck towards the player ship:

@@ -302,13 +302,15 @@ pub async fn activate_salvager_or_tractor_module(
             ),
         }));
     }
-    let res = crate::combat::drones_salvage_tractor::execute_wreck_salvage_auto_repeat(
+    let res = crate::combat::drones_salvage_tractor::execute_wreck_salvage_cycle_scheduled(
         ctx,
         sys_id,
         char_id,
         ship_id,
         wreck_id,
+        Some(module_id),
         Some(mod_type.type_id),
+        true,
     )
     .await;
     Some(res)

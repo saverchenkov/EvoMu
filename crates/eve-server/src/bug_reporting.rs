@@ -14,9 +14,9 @@ use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{error, info, warn};
@@ -24,6 +24,14 @@ use uuid::Uuid;
 
 pub const DEFAULT_BUG_QUEUE_DIR: &str = ".evomu-bugs/queue";
 pub const DEFAULT_TRAILING_CAPTURE_DURATION: Duration = Duration::from_millis(1500);
+/// Maximum request body accepted for `POST /bugs/api/issue` (2 MiB).
+pub const MAX_BUG_ISSUE_BODY_BYTES: usize = 2 * 1024 * 1024;
+/// Maximum raw upload body accepted for `POST /bugs/api/attachment/{issueID}` (8 MiB).
+pub const MAX_BUG_ATTACHMENT_BYTES: usize = 8 * 1024 * 1024;
+/// Maximum number of bug report bundles retained in memory/disk before oldest-first eviction.
+pub const MAX_STORED_BUG_REPORTS: usize = 256;
+/// Maximum total bytes retained across all queued bug report bundles and attachments (64 MiB).
+pub const MAX_BUG_QUEUE_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 /// Maximum uncompressed size extracted per text entry from `igbr.zip` (4 MiB zip-bomb guard).
 const MAX_ZIP_TEXT_ENTRY_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum lines kept from `logs.txt` inside the JSON summary (`igbr.zip` still retains full raw logs).
@@ -32,17 +40,43 @@ const MAX_CLIENT_LOG_TAIL_LINES: usize = 60;
 const MAX_ATTACHMENTS_PER_REPORT: usize = 16;
 
 /// Per-`ServerContext` bug reporting state (avoids process-global env-var races in parallel tests
-/// and maps active `EBR-*` report IDs to their staged JSON paths for immediate attachment linking).
-#[derive(Debug, Default)]
+/// and maps active `EBR-*` report IDs to their staged JSON paths with bounded FIFO eviction).
+#[derive(Debug)]
 pub struct BugReportingRuntime {
     queue_dir_override: RwLock<Option<PathBuf>>,
     report_paths: Mutex<HashMap<String, PathBuf>>,
+    report_order: Mutex<VecDeque<String>>,
     next_report_seq: AtomicU64,
+    max_reports: AtomicUsize,
+    max_total_bytes: AtomicU64,
+}
+
+impl Default for BugReportingRuntime {
+    fn default() -> Self {
+        Self {
+            queue_dir_override: RwLock::new(None),
+            report_paths: Mutex::new(HashMap::new()),
+            report_order: Mutex::new(VecDeque::new()),
+            next_report_seq: AtomicU64::new(0),
+            max_reports: AtomicUsize::new(MAX_STORED_BUG_REPORTS),
+            max_total_bytes: AtomicU64::new(MAX_BUG_QUEUE_TOTAL_BYTES),
+        }
+    }
 }
 
 impl BugReportingRuntime {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn set_storage_limits(&self, max_reports: usize, max_total_bytes: u64) {
+        self.max_reports.store(max_reports.max(1), Ordering::Relaxed);
+        self.max_total_bytes
+            .store(max_total_bytes.max(1024), Ordering::Relaxed);
+    }
+
+    pub fn stored_report_count(&self) -> usize {
+        self.report_paths.lock().map(|g| g.len()).unwrap_or(0)
     }
 
     pub fn set_queue_dir_override(&self, dir: Option<PathBuf>) {
@@ -65,8 +99,79 @@ impl BugReportingRuntime {
     }
 
     pub fn register_report_path(&self, report_key: impl Into<String>, path: PathBuf) {
-        if let Ok(mut guard) = self.report_paths.lock() {
-            guard.insert(report_key.into(), path);
+        let key: String = report_key.into();
+        let max_reports = self.max_reports.load(Ordering::Relaxed);
+        let max_bytes = self.max_total_bytes.load(Ordering::Relaxed);
+        let mut evicted_paths = Vec::new();
+        if let (Ok(mut paths), Ok(mut order)) = (self.report_paths.lock(), self.report_order.lock()) {
+            if !paths.contains_key(&key) {
+                order.push_back(key.clone());
+            }
+            paths.insert(key, path.clone());
+            while order.len() > max_reports {
+                if let Some(old_key) = order.pop_front() {
+                    if let Some(old_path) = paths.remove(&old_key) {
+                        evicted_paths.push((old_key, old_path));
+                    }
+                }
+            }
+        }
+        let qdir = self.effective_queue_dir();
+        for (old_key, old_path) in evicted_paths {
+            remove_report_files(&qdir, &old_key, &old_path);
+        }
+        self.enforce_disk_limits(&qdir, max_reports, max_bytes);
+    }
+
+    pub fn enforce_disk_limits(&self, qdir: &Path, max_reports: usize, max_total_bytes: u64) {
+        let Ok(entries) = std::fs::read_dir(qdir) else {
+            return;
+        };
+        let mut bundles: Vec<(SystemTime, PathBuf, u64)> = Vec::new();
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if !p.is_file() {
+                continue;
+            }
+            if p.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let meta = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let modified = meta.modified().unwrap_or(UNIX_EPOCH);
+            bundles.push((modified, p, meta.len()));
+        }
+        bundles.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+        let attachments_root = qdir.join("attachments");
+        let mut total_bytes = directory_tree_bytes(qdir);
+        let mut remaining = bundles.len();
+        for (_, path, file_len) in bundles {
+            if remaining <= max_reports && total_bytes <= max_total_bytes {
+                break;
+            }
+            let report_key = extract_report_key_from_path(&path);
+            let mut removed_bytes = file_len;
+            if std::fs::remove_file(&path).is_err() {
+                removed_bytes = 0;
+            }
+            if let Some(ref key) = report_key {
+                let attach_dir = attachments_root.join(key);
+                if attach_dir.exists() {
+                    removed_bytes = removed_bytes.saturating_add(directory_tree_bytes(&attach_dir));
+                    let _ = std::fs::remove_dir_all(&attach_dir);
+                }
+                if let Ok(mut paths) = self.report_paths.lock() {
+                    paths.remove(key);
+                }
+                if let Ok(mut order) = self.report_order.lock() {
+                    order.retain(|k| k != key);
+                }
+            }
+            total_bytes = total_bytes.saturating_sub(removed_bytes);
+            remaining = remaining.saturating_sub(1);
         }
     }
 
@@ -571,7 +676,7 @@ pub fn handle_bugs_http_request(
             HttpResponse::json(200, "OK", json!({ "categories": categories }))
         }
 
-        ("POST", "/issue") => handle_post_bug_issue(ctx, body),
+        ("POST", "/issue") => handle_post_bug_issue(ctx, headers, body),
 
         ("POST", rest) if rest.starts_with("/attachment/") => {
             let issue_id = rest.trim_start_matches("/attachment/");
@@ -589,7 +694,77 @@ pub fn handle_bugs_http_request(
     }
 }
 
-fn handle_post_bug_issue(ctx: &ServerContext, body: &[u8]) -> HttpResponse {
+fn directory_tree_bytes(path: &Path) -> u64 {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return 0;
+    };
+    if meta.is_file() {
+        return meta.len();
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| directory_tree_bytes(&entry.path()))
+        .sum()
+}
+
+fn extract_report_key_from_path(path: &Path) -> Option<String> {
+    let fname = path.file_name()?.to_str()?;
+    let stem = fname.strip_suffix(".json")?;
+    let (_, key) = stem.split_once('_')?;
+    Some(key.to_string())
+}
+
+fn remove_report_files(qdir: &Path, report_key: &str, report_path: &Path) {
+    let _ = std::fs::remove_file(report_path);
+    let attach_dir = qdir.join("attachments").join(report_key);
+    if attach_dir.exists() {
+        let _ = std::fs::remove_dir_all(&attach_dir);
+    }
+}
+
+fn verify_optional_bug_reporter_auth(
+    ctx: &ServerContext,
+    headers: &HashMap<String, String>,
+) -> Result<Option<(u64, Option<i64>)>, HttpResponse> {
+    let auth_entry = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+        .map(|(_, v)| v.clone());
+    let Some(auth_val) = auth_entry else {
+        return Ok(None);
+    };
+    let mut normalized = HashMap::new();
+    normalized.insert("authorization".to_string(), auth_val);
+    let claims = crate::sso::verify_esi_bearer_token(ctx, &normalized, None)?;
+    Ok(Some((
+        claims.user_id,
+        (claims.character_id > 0).then_some(claims.character_id),
+    )))
+}
+
+fn handle_post_bug_issue(
+    ctx: &ServerContext,
+    headers: &HashMap<String, String>,
+    body: &[u8],
+) -> HttpResponse {
+    if body.len() > MAX_BUG_ISSUE_BODY_BYTES {
+        return HttpResponse::json(
+            413,
+            "Payload Too Large",
+            json!({
+                "error": "payload_too_large",
+                "error_description": format!("Bug report body exceeds {} bytes", MAX_BUG_ISSUE_BODY_BYTES)
+            }),
+        );
+    }
+    let verified_caller = match verify_optional_bug_reporter_auth(ctx, headers) {
+        Ok(caller) => caller,
+        Err(resp) => return resp,
+    };
+
     let payload: serde_json::Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(e) => {
@@ -630,7 +805,7 @@ fn handle_post_bug_issue(ctx: &ServerContext, body: &[u8]) -> HttpResponse {
         .unwrap_or("")
         .trim()
         .to_string();
-    let reporter_uid = payload
+    let _spoofed_reporter_uid = payload
         .get("originalReporterId")
         .and_then(|v| {
             v.as_str()
@@ -670,37 +845,48 @@ fn handle_post_bug_issue(ctx: &ServerContext, body: &[u8]) -> HttpResponse {
     let seq = ctx.bug_reporting.next_seq();
     let report_key = format!("EBR-{seq:04}-{}", &incident_id[..6].to_ascii_uppercase());
 
-    // Correlate with live online session so manual F12 reports get full RPC Flight Recorder + pilot context
-    let online_sess = reporter_uid.and_then(|uid| ctx.db.get_online_session(uid));
-    let session_id = online_sess.as_ref().map(|s| s.session_id).unwrap_or(0);
-    let inferred_cid = online_sess
-        .as_ref()
-        .and_then(|s| s.character_id)
-        .or_else(|| parse_char_id_from_session_info(&raw_description))
-        .or_else(|| {
-            reporter_uid.and_then(|uid| {
+    // Bind live session / FlightRecorder snapshots strictly to an authenticated caller session.
+    // Unauthenticated requests must never resolve arbitrary client-supplied user/character IDs.
+    let (sess_snap, flight_recorder, inferred_cid) = if let Some((auth_uid, auth_cid)) = verified_caller {
+        let online_sess = ctx.db.get_online_session(auth_uid);
+        let session_id = online_sess.as_ref().map(|s| s.session_id).unwrap_or(0);
+        let caller_cid = online_sess
+            .as_ref()
+            .and_then(|s| s.character_id)
+            .or(auth_cid)
+            .or_else(|| {
+                parse_char_id_from_session_info(&raw_description).filter(|cid| {
+                    ctx.db.with_snapshot(|snap| {
+                        snap.characters
+                            .get(cid)
+                            .is_some_and(|c| c.user_id == auth_uid)
+                    })
+                })
+            })
+            .or_else(|| {
                 ctx.db.with_snapshot(|snap| {
                     snap.characters
                         .values()
-                        .find(|c| c.user_id == uid)
+                        .find(|c| c.user_id == auth_uid)
                         .map(|c| c.character_id)
                 })
-            })
-        });
-
-    let mut sess_snap = BugSessionSnapshot {
-        session_id,
-        user_id: reporter_uid,
-        character_id: inferred_cid,
-        address: String::new(),
-        ..Default::default()
-    };
-    enrich_session_snapshot(ctx, &mut sess_snap, None);
-
-    let flight_recorder = if session_id > 0 {
-        ctx.flight_recorder.get_history(session_id, now_millis, 20)
+            });
+        let mut snap = BugSessionSnapshot {
+            session_id,
+            user_id: Some(auth_uid),
+            character_id: caller_cid,
+            address: String::new(),
+            ..Default::default()
+        };
+        enrich_session_snapshot(ctx, &mut snap, None);
+        let fr = if session_id > 0 {
+            ctx.flight_recorder.get_history(session_id, now_millis, 20)
+        } else {
+            Vec::new()
+        };
+        (snap, fr, caller_cid)
     } else {
-        Vec::new()
+        (BugSessionSnapshot::default(), Vec::new(), None)
     };
     let server_logs_before = global_log_ring().snapshot_recent(40);
 
@@ -980,6 +1166,16 @@ fn handle_post_bug_attachment(
             json!({ "error": "invalid_issue_id", "error_description": "Invalid bug report key" }),
         );
     }
+    if body.len() > MAX_BUG_ATTACHMENT_BYTES {
+        return HttpResponse::json(
+            413,
+            "Payload Too Large",
+            json!({
+                "error": "payload_too_large",
+                "error_description": format!("Attachment exceeds {} bytes", MAX_BUG_ATTACHMENT_BYTES)
+            }),
+        );
+    }
 
     let Some(report_json_path) = ctx.bug_reporting.lookup_report_path(issue_id) else {
         return HttpResponse::json(
@@ -1029,6 +1225,11 @@ fn handle_post_bug_attachment(
             json!({ "error": "storage_error", "error_description": e.to_string() }),
         );
     }
+    ctx.bug_reporting.enforce_disk_limits(
+        &qdir,
+        ctx.bug_reporting.max_reports.load(Ordering::Relaxed),
+        ctx.bug_reporting.max_total_bytes.load(Ordering::Relaxed),
+    );
 
     let rel_attachment = format!("attachments/{issue_id}/{safe_filename}");
     let mut extracted_fitting: Option<String> = None;

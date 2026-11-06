@@ -619,16 +619,27 @@ pub fn initiate_cluster_downtime_shutdown(ctx: &ServerContext) -> usize {
             .collect()
     });
     let mut gm_session_ids = BTreeSet::new();
-    let mut non_gm_users = Vec::new();
+    let mut non_gm_users = BTreeSet::new();
     let mut non_gm_session_ids = BTreeSet::new();
     for (uid, sid) in ctx.db.online_sessions_snapshot() {
         if gm_uids.contains(&uid) {
             gm_session_ids.insert(sid);
         } else {
-            non_gm_users.push(uid);
+            non_gm_users.insert(uid);
             non_gm_session_ids.insert(sid);
         }
     }
+    ctx.db.with_mut_snapshot(|snap| {
+        for (&uid, os) in &snap.sessions {
+            if gm_uids.contains(&uid) {
+                gm_session_ids.insert(os.session_id);
+            } else {
+                non_gm_users.insert(uid);
+                non_gm_session_ids.insert(os.session_id);
+            }
+        }
+        snap.sessions.retain(|&uid, _| gm_uids.contains(&uid));
+    });
 
     let closer_sids: Vec<u64> = ctx
         .session_closers
@@ -642,10 +653,13 @@ pub fn initiate_cluster_downtime_shutdown(ctx: &ServerContext) -> usize {
             continue;
         }
         ctx.disconnect_session(sid, "ClusterShutdown", "Daily cluster downtime");
+        ctx.release_session_bindings(sid);
+        ctx.quasar_gateway.unsubscribe_session(sid);
         disconnected.insert(sid);
     }
     for sid in &non_gm_session_ids {
         ctx.disconnect_session(*sid, "ClusterShutdown", "Daily cluster downtime");
+        ctx.release_session_bindings(*sid);
         ctx.quasar_gateway.unsubscribe_session(*sid);
         disconnected.insert(*sid);
     }
@@ -1096,6 +1110,16 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
         ("missionNpcsRespawned".into(), mission_npcs_respawned as i64),
         ("wormholeSitesDespawned".into(), wormhole_sites_despawned as i64),
     ])
+}
+
+/// Returns `true` when daily downtime is currently active in persisted DB state (`downtime_until_unix > now`).
+pub fn is_downtime_active_in_db(ctx: &ServerContext) -> bool {
+    let now = ctx.now_unix();
+    ctx.db.with_snapshot(|snap| {
+        load_downtime_state(snap)
+            .downtime_until_unix
+            .is_some_and(|until| now < until)
+    })
 }
 
 /// Begins the scheduled `11:00–11:15 UTC` daily downtime window (`tick_background_cluster`):
