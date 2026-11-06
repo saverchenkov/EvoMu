@@ -515,3 +515,6 @@ mod crab_beacons_filament_arena_deep_extra_unit_tests;
 mod pve_dungeon_ess_insurgency_deep_extra_unit_tests;
 #[cfg(test)]
 mod fighters_module_cycles_deep_extra_unit_tests;
+mod structure_lifecycle_control_deep_extra_unit_tests;
+#[cfg(test)]
+mod mining_compression_cyno_portal_deep_extra_unit_tests;
