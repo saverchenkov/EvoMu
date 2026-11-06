@@ -244,18 +244,6 @@ mod space_destiny_extra_unit_tests;
 #[cfg(test)]
 mod social_corp_fleet_extra_unit_tests;
 #[cfg(test)]
-mod quasar_cosmetics_drafts_extra_unit_tests;
-#[cfg(test)]
-mod quasar_cosmetics_live_extra_unit_tests;
-#[cfg(test)]
-mod quasar_cosmetics_skinr_seq_extra_unit_tests;
-#[cfg(test)]
-mod quasar_daily_goals_extra_unit_tests;
-#[cfg(test)]
-mod quasar_economy_planetary_industry_extra_unit_tests;
-#[cfg(test)]
-mod quasar_fleet_navigation_services_extra_unit_tests;
-#[cfg(test)]
 mod space_probe_scanning_extra_unit_tests;
 #[cfg(test)]
 mod space_probe_scanning_unit_tests;
@@ -271,20 +259,6 @@ mod quasar_cosmetics_market_extra_unit_tests;
 mod quasar_cosmetics_skinr_extra_unit_tests;
 #[cfg(test)]
 mod quasar_skills_clones_extra_unit_tests;
-#[cfg(test)]
-mod pve_dungeon_runtime_rpc_extra_unit_tests;
-#[cfg(test)]
-mod fitting_saved_multifit_extra_unit_tests;
-#[cfg(test)]
-mod combat_wrecks_killmails_extra_unit_tests;
-#[cfg(test)]
-mod industry_jobs_extra_unit_tests;
-#[cfg(test)]
-mod character_clones_implants_extra_unit_tests;
-#[cfg(test)]
-mod pve_incursion_sites_extra_unit_tests;
-
-
 #[cfg(test)]
 mod fw_gameplay_extra_unit_tests;
 #[cfg(test)]
@@ -302,38 +276,41 @@ mod station_structure_extra_unit_tests;
 #[cfg(test)]
 mod structure_lifecycle_extra_unit_tests;
 #[cfg(test)]
-mod inventory_fitting_extra_unit_tests;
+mod pve_incursion_lifecycle_extra_unit_tests;
 #[cfg(test)]
-mod fleet_social_chat_extra_unit_tests;
+mod pi_helpers_extra_unit_tests;
 #[cfg(test)]
-mod social_corp_projects_extra_unit_tests;
+mod combat_fighters_abilities_extra_unit_tests;
 #[cfg(test)]
-mod pve_special_sites_extra_unit_tests;
+mod wormhole_lifecycle_ops_extra_unit_tests;
 #[cfg(test)]
-mod fleet_social_fleet_ops_extra_unit_tests;
+mod fleet_social_corp_tail_extra_unit_tests;
 #[cfg(test)]
-mod mining_advanced_extra_unit_tests;
+mod season_manager_extra_unit_tests;
 #[cfg(test)]
-mod market_contracts_extra_unit_tests;
+mod quasar_progression_extra_extra_unit_tests;
 #[cfg(test)]
-mod quasar_corp_domain_extra_unit_tests;
+mod mining_sites_extra_unit_tests;
 #[cfg(test)]
-mod air_npe_nodegraph_runner_extra_unit_tests;
+mod tourney_service_extra_unit_tests;
 #[cfg(test)]
-mod mining_compression_extra_unit_tests;
+mod quasar_space_services_extra_unit_tests;
 #[cfg(test)]
-mod pvp_filament_mgr_extra_unit_tests;
+mod project_discovery_extra_unit_tests;
 #[cfg(test)]
-mod combat_missiles_aoe_extra_unit_tests;
+mod combat_legacy_ess_extra_unit_tests;
 #[cfg(test)]
-mod pve_dungeon_cache_extra_unit_tests;
+mod serverops_cluster_extra_unit_tests;
 #[cfg(test)]
-mod shipcaster_ops_extra_unit_tests;
+mod agents_missions_helpers_extra_unit_tests;
 #[cfg(test)]
-mod industry_pi_extra_unit_tests;
+mod notify_emitters_skills_trade_godma_extra_unit_tests;
 #[cfg(test)]
-mod structure_profiles_rpc_extra_unit_tests;
+mod mailing_lists_ops_extra_unit_tests;
 #[cfg(test)]
-mod quasar_social_freelance_extra_unit_tests;
+mod implant_plugging_extra_unit_tests;
 #[cfg(test)]
-mod quasar_career_goals_extra_unit_tests;
+mod tactical_module_mechanics_extra_unit_tests;
+
+
+
