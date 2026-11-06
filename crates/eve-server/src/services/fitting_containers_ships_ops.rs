@@ -522,3 +522,8 @@ pub(crate) async fn handle_ext_tail(
         _ => handle_ships_mastery_and_fitting_ext(ctx, session, bound_entry, service, method, args, kwargs).await,
     }
 }
+
+#[cfg(test)]
+#[path = "fitting_containers_ships_ops_cov_unit_tests.rs"]
+mod fitting_containers_ships_ops_cov_unit_tests;
+

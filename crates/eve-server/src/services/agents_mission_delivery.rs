@@ -170,3 +170,8 @@ pub(crate) fn verify_and_consume_mission_delivery_items(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "agents_mission_delivery_cov_unit_tests.rs"]
+mod agents_mission_delivery_cov_unit_tests;
+

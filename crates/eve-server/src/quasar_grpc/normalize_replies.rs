@@ -937,3 +937,8 @@ pub(crate) fn keyval_to_dict_recursive(rep: PyRep) -> PyRep {
         other => other,
     }
 }
+
+#[cfg(test)]
+#[path = "normalize_replies_cov_unit_tests.rs"]
+mod normalize_replies_cov_unit_tests;
+

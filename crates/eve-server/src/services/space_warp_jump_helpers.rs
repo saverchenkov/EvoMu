@@ -119,3 +119,8 @@ pub(crate) async fn handle_undock(
     }
     Some(res)
 }
+
+#[cfg(test)]
+#[path = "space_warp_jump_helpers_cov_unit_tests.rs"]
+mod space_warp_jump_helpers_cov_unit_tests;
+

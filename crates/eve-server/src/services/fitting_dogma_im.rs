@@ -204,6 +204,208 @@ fn handle_item_get_info(
     ]))
 }
 
+#[derive(Clone, Debug, Default)]
+struct DogmaSessionCheckState {
+    character_id: i64,
+    ship_id: Option<i64>,
+    solar_system_id: Option<u32>,
+    station_id: Option<i64>,
+    corporation_id: Option<i64>,
+    check_count: u64,
+    updated_at: u64,
+}
+
+fn dogma_session_check_store(
+) -> &'static std::sync::RwLock<HashMap<(u64, u64), DogmaSessionCheckState>> {
+    static STORE: std::sync::OnceLock<
+        std::sync::RwLock<HashMap<(u64, u64), DogmaSessionCheckState>>,
+    > = std::sync::OnceLock::new();
+    STORE.get_or_init(|| std::sync::RwLock::new(HashMap::new()))
+}
+
+fn lookup_session_check_i64(
+    spec: Option<&PyRep>,
+    kwargs: &HashMap<String, PyRep>,
+    keys: &[&str],
+) -> Option<i64> {
+    for &k in keys {
+        if let Some(val) = kwargs.get(k).and_then(|v| v.as_i64()) {
+            return Some(val);
+        }
+        if let Some(rep) = spec {
+            if let Some(val) = rep.dict_get(k).and_then(|v| v.as_i64()) {
+                return Some(val);
+            }
+        }
+    }
+    None
+}
+
+fn handle_dogma_set_session_check(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let now_unix = ctx.now_unix();
+    let clear_requested =
+        matches!(args.first(), Some(PyRep::None)) && kwargs.is_empty();
+    let spec = args.first().filter(|a| !matches!(a, PyRep::None));
+
+    if !clear_requested {
+        if let Some(exp_char) = lookup_session_check_i64(spec, kwargs, &["charid", "charID"]) {
+            if exp_char != char_id {
+                return Err(BridgeRpcError {
+                    code: "SessionCheckMismatch".into(),
+                    message: format!(
+                        "Session check charid {exp_char} does not match {char_id}"
+                    ),
+                });
+            }
+        }
+        if let Some(exp_sys) = lookup_session_check_i64(
+            spec,
+            kwargs,
+            &["solarsystemid2", "solarsystemid", "solarSystemID"],
+        ) {
+            if session.solar_system_id.map(i64::from) != Some(exp_sys) {
+                return Err(BridgeRpcError {
+                    code: "SessionCheckMismatch".into(),
+                    message: format!(
+                        "Session check solarsystemid2 {exp_sys} does not match {:?}",
+                        session.solar_system_id
+                    ),
+                });
+            }
+        }
+        if let Some(exp_ship) = lookup_session_check_i64(spec, kwargs, &["shipid", "shipID"]) {
+            if session.ship_id != Some(exp_ship) {
+                return Err(BridgeRpcError {
+                    code: "SessionCheckMismatch".into(),
+                    message: format!(
+                        "Session check shipid {exp_ship} does not match {:?}",
+                        session.ship_id
+                    ),
+                });
+            }
+        }
+        if let Some(exp_station) =
+            lookup_session_check_i64(spec, kwargs, &["stationid", "stationID"])
+        {
+            if session.station_id != Some(exp_station) {
+                return Err(BridgeRpcError {
+                    code: "SessionCheckMismatch".into(),
+                    message: format!(
+                        "Session check stationid {exp_station} does not match {:?}",
+                        session.station_id
+                    ),
+                });
+            }
+        }
+        if let Some(exp_corp) = lookup_session_check_i64(spec, kwargs, &["corpid", "corpID"]) {
+            if session.corporation_id != Some(exp_corp) {
+                return Err(BridgeRpcError {
+                    code: "SessionCheckMismatch".into(),
+                    message: format!(
+                        "Session check corpid {exp_corp} does not match {:?}",
+                        session.corporation_id
+                    ),
+                });
+            }
+        }
+    }
+
+    let ship_in_db = session.ship_id.is_some_and(|sid| {
+        ctx.db.with_snapshot(|snap| {
+            snap.items
+                .get(&sid)
+                .is_some_and(|it| it.owner_id == char_id)
+        })
+    });
+    let fitting_valid = match session.ship_id {
+        Some(sid) if ship_in_db => ctx.get_or_rebuild_ship_fitting(char_id, sid).is_ok(),
+        Some(_) => false,
+        None => true,
+    };
+
+    let key = (ctx.instance_id, session.session_id);
+    let (check_count, session_check_rep) = if clear_requested {
+        let mut guard = dogma_session_check_store()
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.remove(&key);
+        (0u64, PyRep::None)
+    } else {
+        let mut guard = dogma_session_check_store()
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let entry = guard.entry(key).or_default();
+        entry.character_id = char_id;
+        entry.ship_id = session.ship_id;
+        entry.solar_system_id = session.solar_system_id;
+        entry.station_id = session.station_id;
+        entry.corporation_id = session.corporation_id;
+        entry.check_count += 1;
+        entry.updated_at = now_unix;
+        let mut check_fields = vec![("charid", PyRep::Integer(entry.character_id))];
+        if let Some(corp) = entry.corporation_id {
+            check_fields.push(("corpid", PyRep::Integer(corp)));
+        }
+        if let Some(ship) = entry.ship_id {
+            check_fields.push(("shipid", PyRep::Integer(ship)));
+        }
+        if let Some(sys) = entry.solar_system_id {
+            check_fields.push(("solarsystemid2", PyRep::Integer(i64::from(sys))));
+        }
+        if let Some(station) = entry.station_id {
+            check_fields.push(("stationid", PyRep::Integer(station)));
+        }
+        (entry.check_count, PyRep::keyval(check_fields))
+    };
+
+    Ok(PyRep::keyval([
+        ("valid", PyRep::Bool(fitting_valid)),
+        ("characterID", PyRep::Integer(char_id)),
+        (
+            "shipID",
+            session.ship_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+        ),
+        (
+            "solarSystemID",
+            session
+                .solar_system_id
+                .map(|s| PyRep::Integer(i64::from(s)))
+                .unwrap_or(PyRep::None),
+        ),
+        (
+            "stationID",
+            session
+                .station_id
+                .map(PyRep::Integer)
+                .unwrap_or(PyRep::None),
+        ),
+        (
+            "corporationID",
+            session
+                .corporation_id
+                .map(PyRep::Integer)
+                .unwrap_or(PyRep::None),
+        ),
+        (
+            "boundObjectID",
+            bound_entry
+                .map(|b| PyRep::Integer(b.object_id))
+                .unwrap_or(PyRep::None),
+        ),
+        ("sessionCheck", session_check_rep),
+        ("fittingValid", PyRep::Bool(fitting_valid)),
+        ("checkCount", PyRep::Integer(check_count as i64)),
+        ("updatedAt", PyRep::Integer(now_unix as i64)),
+    ]))
+}
+
 pub(crate) async fn handle_dogma_im(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -211,9 +413,14 @@ pub(crate) async fn handle_dogma_im(
     service: &str,
     method: &str,
     args: &[PyRep],
-    _kwargs: &HashMap<String, PyRep>,
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
+        // parity: rpc:dogmaIM.SetSessionCheck
+        ("dogmaIM", "SetSessionCheck") => {
+            Some(handle_dogma_set_session_check(ctx, session, bound_entry, args, kwargs))
+        }
+
         // rpc-lint: allow tools/client-harness/run_journeys bridge probe calls GetShipAttributes
         ("dogmaIM", "GetAllInfo") | ("dogmaIM", "GetShipAttributes") => {
             let (_, char_id) = match ServerContext::require_character(session) {

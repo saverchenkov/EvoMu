@@ -645,3 +645,8 @@ pub(crate) fn is_known_special_site_instance_id(ctx: &ServerContext, instance_id
                 .any(|s| s.instance_id == instance_id)
     })
 }
+
+#[cfg(test)]
+#[path = "r6_t1_p0_helpers_cov_unit_tests.rs"]
+mod r6_t1_p0_helpers_cov_unit_tests;
+

@@ -181,3 +181,8 @@ pub(crate) fn check_mail_recipient_blocks(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "character_contacts_helpers_cov_unit_tests.rs"]
+mod character_contacts_helpers_cov_unit_tests;
+

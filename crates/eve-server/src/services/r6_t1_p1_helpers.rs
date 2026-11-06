@@ -406,3 +406,8 @@ pub(crate) fn parse_fighter_point_target_args(
     Ok((fighter_ids, slot_id, target_point))
 }
 
+#[cfg(test)]
+#[path = "r6_t1_p1_helpers_cov_unit_tests.rs"]
+mod r6_t1_p1_helpers_cov_unit_tests;
+
+

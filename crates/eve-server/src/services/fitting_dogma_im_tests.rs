@@ -361,3 +361,111 @@ async fn dogma_im_inspection_targeting_weapon_banks_and_damage_values() {
     .expect("GetLayerDamageValuesByItems ok");
     assert!(matches!(dmg_dict, PyRep::Dict(_)));
 }
+
+// parity: rpc:dogmaIM.SetSessionCheck
+#[tokio::test]
+async fn dogma_im_set_session_check_validates_updates_and_clears() {
+    eve_testkit::attest(&["rpc:dogmaIM.SetSessionCheck"]);
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let mut unauth = SessionState::new(96_398);
+    let unauth_err = handle_dogma_im(
+        &ctx,
+        &mut unauth,
+        None,
+        "dogmaIM",
+        "SetSessionCheck",
+        &[],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect_err("unauthenticated rejected");
+    assert_eq!(unauth_err.code, "Unauthorized");
+
+    let char_id = 90_000_001i64;
+    let ship_id = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .find(|it| it.owner_id == char_id && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 6))
+            .map(|it| it.item_id)
+    });
+    let mut session = SessionState::new(96_399);
+    session.user_id = Some(1);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(1_000_009);
+    session.solar_system_id = Some(30_000_142);
+    session.ship_id = ship_id;
+
+    let check_spec = PyRep::Dict(vec![
+        (PyRep::String("charid".into()), PyRep::Integer(char_id)),
+        (PyRep::String("solarsystemid2".into()), PyRep::Integer(30_000_142)),
+    ]);
+    let first = handle_dogma_im(
+        &ctx,
+        &mut session,
+        None,
+        "dogmaIM",
+        "SetSessionCheck",
+        &[check_spec.clone()],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("first SetSessionCheck");
+    assert_eq!(first.dict_get("valid"), Some(&PyRep::Bool(true)));
+    assert_eq!(first.dict_get("characterID"), Some(&PyRep::Integer(char_id)));
+    assert_eq!(first.dict_get("checkCount"), Some(&PyRep::Integer(1)));
+    let inner = first.dict_get("sessionCheck").expect("sessionCheck");
+    assert_eq!(inner.dict_get("charid"), Some(&PyRep::Integer(char_id)));
+
+    let second = handle_dogma_im(
+        &ctx,
+        &mut session,
+        None,
+        "dogmaIM",
+        "SetSessionCheck",
+        &[check_spec],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("second SetSessionCheck");
+    assert_eq!(second.dict_get("checkCount"), Some(&PyRep::Integer(2)));
+
+    let wrong_sys = PyRep::Dict(vec![(
+        PyRep::String("solarsystemid2".into()),
+        PyRep::Integer(30_002_187),
+    )]);
+    let mismatch = handle_dogma_im(
+        &ctx,
+        &mut session,
+        None,
+        "dogmaIM",
+        "SetSessionCheck",
+        &[wrong_sys],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect_err("wrong system rejected");
+    assert_eq!(mismatch.code, "SessionCheckMismatch");
+
+    let cleared = handle_dogma_im(
+        &ctx,
+        &mut session,
+        None,
+        "dogmaIM",
+        "SetSessionCheck",
+        &[PyRep::None],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("clear SetSessionCheck");
+    assert_eq!(cleared.dict_get("valid"), Some(&PyRep::Bool(true)));
+    assert_eq!(cleared.dict_get("sessionCheck"), Some(&PyRep::None));
+    assert_eq!(cleared.dict_get("checkCount"), Some(&PyRep::Integer(0)));
+}

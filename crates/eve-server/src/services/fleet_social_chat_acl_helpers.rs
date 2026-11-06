@@ -208,3 +208,8 @@ pub(crate) fn authorize_and_fetch_channel_members(
     }
     Ok((chan, acl))
 }
+
+#[cfg(test)]
+#[path = "fleet_social_chat_acl_helpers_cov_unit_tests.rs"]
+mod fleet_social_chat_acl_helpers_cov_unit_tests;
+

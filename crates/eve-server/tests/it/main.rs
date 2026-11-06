@@ -489,3 +489,4 @@ mod parity_shard_4_cosmetics_tests;
 mod parity_shard_4_progression_tests;
 mod parity_shard_4_sovereignty_tests;
 mod parity_shard_4_commerce_ops_tests;
+mod parity_plan_z_closure_tests;

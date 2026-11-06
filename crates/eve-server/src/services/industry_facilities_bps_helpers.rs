@@ -191,3 +191,8 @@ pub fn is_fulcrum_pirate_ship_bonus_applicable(
 pub fn facility_tax_note_id(facility_id: i64) -> i64 {
     -(1_000_000_000_000_i64.saturating_add(facility_id.abs()))
 }
+
+#[cfg(test)]
+#[path = "industry_facilities_bps_helpers_cov_unit_tests.rs"]
+mod industry_facilities_bps_helpers_cov_unit_tests;
+
