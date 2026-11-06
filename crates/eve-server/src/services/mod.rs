@@ -455,7 +455,6 @@ mod sov_fw_deep_extra_unit_tests;
 
 #[cfg(test)]
 mod fleet_social_deep_extra_unit_tests;
-
 #[cfg(test)]
 mod combat_crimewatch_deep_extra_unit_tests;
 #[cfg(test)]
@@ -476,3 +475,9 @@ mod pve_incursion_lifecycle_deep_extra_unit_tests;
 mod market_orders_deep_extra_unit_tests;
 #[cfg(test)]
 mod market_quote_deep_extra_unit_tests;
+#[cfg(test)]
+mod fitting_containers_ships_deep_extra_unit_tests;
+#[cfg(test)]
+mod space_probe_scanning_deep_extra_unit_tests;
+#[cfg(test)]
+mod character_skill_clone_deep_extra_unit_tests;
