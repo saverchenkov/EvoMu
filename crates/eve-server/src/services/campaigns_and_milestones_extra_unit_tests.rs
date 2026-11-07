@@ -368,9 +368,11 @@ async fn info_gathering_fifo_cap_milestones_and_community_tracks_edge_branches()
         .await
         .unwrap();
     let bal0 = ctx.db.with_snapshot(|s| s.characters[&cid].balance.raw_cents());
+    ctx.db.clock().advance_secs(7_200);
     let _ = call_milestone_mgr(&ctx, &mut sess, "ClaimRewards", &[PyRep::Integer(1)])
         .await
         .unwrap();
+    ctx.db.clock().advance_secs(7_200);
     let _ = call_milestone_mgr(&ctx, &mut sess, "ClaimRewards", &[PyRep::Integer(2)])
         .await
         .unwrap();

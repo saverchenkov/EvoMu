@@ -2053,6 +2053,7 @@ async fn test_crates_claim_loot_and_milestones_one_time_rewards() {
         .expect("ProcessCharacterLogon");
     assert_eq!(logon_res, PyRep::None);
 
+    ctx.db.clock().advance_secs(7_200);
     let claim_res = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
         .await
         .expect("ClaimRewards(1) must succeed once");

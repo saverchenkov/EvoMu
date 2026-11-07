@@ -445,6 +445,7 @@ async fn test_milestone_logon_and_claims_live() {
     assert_eq!(order_err.code, "MilestonePrerequisiteNotMet");
 
     // 4. Claim milestone 1 -> credits 100,000 ISK and emits OnLoginMilestoneAchieved
+    ctx.db.clock().advance_secs(7_200);
     let bal_before = ctx
         .db
         .with_snapshot(|s| s.characters.get(&char_id).unwrap().balance.0);

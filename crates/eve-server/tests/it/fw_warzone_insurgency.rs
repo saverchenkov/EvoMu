@@ -248,12 +248,14 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
             "ShipTypeNotAllowedInComplex"
         );
     }
-    // Destroyer (`16242` Thrasher) -> Novice, Cruiser (`621` Caracal) -> Small, BS (`638` Raven) -> Medium, Dread (`19726` Phoenix) -> Large (`ShipTooLargeForGate`).
+    // Destroyer (`16242` Thrasher) -> Novice, Cruiser (`621` Caracal) -> Small, BS (`638` Raven) -> Medium,
+    // Dread (`19726` Phoenix) -> Large & Open (`ShipTooLargeForGate`), Capsule (`670`) -> all gates (`ShipTypeNotAllowedInComplex`).
     for (hull_tid, gid, gpos) in [
         (16_242u32, novice_gate, novice_pos),
         (621, small_gate, small_pos),
         (638, medium_gate, medium_pos),
         (19_726, large_gate, large_pos),
+        (19_726, open_gate, open_pos),
     ] {
         set_hull(&ctx, gal_ship, hull_tid, gpos + DVec3::new(1_000.0, 0.0, 0.0)).await;
         assert_eq!(
@@ -261,8 +263,13 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
             "ShipTooLargeForGate"
         );
     }
-    // Dreadnought (`19726`) CAN enter `Open` complex; Empire Navy Frigate (`17841` Federation Navy Comet) CAN enter `Novice` complex!
-    set_hull(&ctx, gal_ship, 19_726, open_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
+    set_hull(&ctx, gal_ship, 670, open_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
+    assert_eq!(
+        rpc_call(&ctx, &mut s_gal, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(open_gate)]).await.unwrap_err().code,
+        "ShipTypeNotAllowedInComplex"
+    );
+    // Battleship (`638` Raven) CAN enter `Open` complex; Empire Navy Frigate (`17841` Federation Navy Comet) CAN enter `Novice` complex!
+    set_hull(&ctx, gal_ship, 638, open_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
     assert!(rpc_call(&ctx, &mut s_gal, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(open_gate)]).await.is_ok());
     set_hull(&ctx, gal_ship, 17_841, novice_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
     let navy_novice = rpc_call(&ctx, &mut s_gal, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(novice_gate)]).await.expect("Navy Frigate allowed in Novice");

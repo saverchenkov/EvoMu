@@ -137,6 +137,7 @@ async fn test_login_campaign_and_milestone_claim_lifecycle() {
     });
     assert!(persisted_logon, "ProcessCharacterLogon must persist milestone_logons");
 
+    ctx.db.clock().advance_secs(7_200);
     let claim = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
         .await
         .expect("ClaimRewards(1) succeeds once after ProcessCharacterLogon");

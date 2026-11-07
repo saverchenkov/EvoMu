@@ -18,6 +18,7 @@ use crate::services::insurgency_services::{
     get_campaign_phase_and_timer, init_insurgency_campaign, insurgency_stage,
     insurgency_system_corruption_stage, is_stronghold_invulnerable_in_db, FACTION_ANGEL_CARTEL,
     FACTION_GURISTAS, PHASE_ACTIVE, PHASE_FORECASTING, PHASE_WINDDOWN,
+    PIRATE_FOB_STRUCTURE_BASE_ID,
 };
 use crate::services::sov_gameplay::{
     apply_adm_scaled_vulnerability_window_in_snap, apply_mercenary_den_weapon_damage,
@@ -399,7 +400,7 @@ fn insurgency_stages_suppression_dampening_and_stronghold_vulnerability_kill_mut
     let ctx = make_ctx();
     let sys_id = 30_002_813_u32;
     let camp_id = 501_i64;
-    let stronghold_id = 1_898_000_000 + camp_id * 10 + 1;
+    let stronghold_id = PIRATE_FOB_STRUCTURE_BASE_ID + camp_id;
     let now = ctx.now_unix();
     init_insurgency_campaign(
         &ctx,
@@ -407,7 +408,7 @@ fn insurgency_stages_suppression_dampening_and_stronghold_vulnerability_kill_mut
         FACTION_GURISTAS,
         FACTION_CALDARI,
         sys_id,
-        vec![sys_id],
+        vec![sys_id, sys_id + 1, sys_id + 2, sys_id + 3, sys_id + 4],
     );
     ctx.db.with_snapshot(|snap| {
         let camp = &snap.insurgency_runtime.campaigns[&camp_id];
@@ -439,13 +440,23 @@ fn insurgency_stages_suppression_dampening_and_stronghold_vulnerability_kill_mut
     }));
 
     // Push suppression to Stage 5 (1000 pts) before corruption reaches Stage 5:
-    // Stronghold is invulnerable during Forecasting, then vulnerable once Active, and corruption is capped at 800 (Stage 4)
+    // Stronghold is invulnerable during Forecasting & before 5 Stage-5 systems, then vulnerable once Active with 5 Stage-5 systems,
+    // and corruption is capped at 800 (Stage 4)
     let (sup_pts2, sup_stg2) = add_system_suppression(&ctx, camp_id, sys_id, 400);
     assert_eq!((sup_pts2, sup_stg2), (1_000, 5));
     assert!(is_stronghold_invulnerable_in_db(&ctx.db, sys_id, stronghold_id));
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(camp) = snap.insurgency_runtime.campaigns.get_mut(&camp_id) {
             camp.forecasting_end_unix = now;
+        }
+    });
+    // Still invulnerable with only 1 Stage-5 suppressed system
+    assert!(is_stronghold_invulnerable_in_db(&ctx.db, sys_id, stronghold_id));
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(camp) = snap.insurgency_runtime.campaigns.get_mut(&camp_id) {
+            for off in 1..=4_u32 {
+                camp.suppression_points.insert(sys_id + off, 1_000);
+            }
         }
     });
     assert!(!is_stronghold_invulnerable_in_db(&ctx.db, sys_id, stronghold_id));

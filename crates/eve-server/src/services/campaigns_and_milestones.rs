@@ -1076,19 +1076,19 @@ fn handle_milestone_process_logon(
     let (_, char_id) = ServerContext::require_character(session)?;
     let now = ctx.now_unix();
 
-    let already_claimed = ctx.db.with_mut_snapshot(|snap| {
+    let (already_claimed, logon_unix) = ctx.db.with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
-        ext.milestone_logons.insert(char_id, now);
+        let logon_unix = *ext.milestone_logons.entry(char_id).or_insert(now);
         let claimed = ext
             .claimed_milestones
             .get(&char_id)
             .is_some_and(|v| v.contains(&1));
         save_cosmetics_ui_state(snap, &ext);
-        claimed
+        (claimed, logon_unix)
     });
 
     if !already_claimed {
-        let end_ft = ctx.now_blueos_filetime_ticks().saturating_add(7_200 * 10_000_000);
+        let end_ft = ((logon_unix as i64) + 7_200 + 11_644_473_600) * 10_000_000;
         crate::services::notify_emitters_skills_trade_godma::emit_login_milestone_timer_started(
             ctx,
             char_id,
@@ -1116,17 +1116,18 @@ fn handle_milestone_claim_rewards(
         ));
     }
 
+    let now = ctx.now_unix();
     let reward_isk: i64 = 100_000 * milestone_id.min(10);
     let add_cents: i64 = reward_isk.saturating_mul(100);
 
     ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
-        if !ext.milestone_logons.contains_key(&char_id) {
+        let Some(&logon_unix) = ext.milestone_logons.get(&char_id) else {
             return Err(err(
                 "MilestonePrerequisiteNotMet",
                 "ProcessCharacterLogon must be called before claiming milestone rewards",
             ));
-        }
+        };
 
         let claimed = ext.claimed_milestones.entry(char_id).or_default();
         if claimed.contains(&milestone_id) {
@@ -1141,6 +1142,17 @@ fn handle_milestone_claim_rewards(
             return Err(err(
                 "MilestonePrerequisiteNotMet",
                 format!("Milestone {} must be claimed before milestone {milestone_id}", milestone_id - 1),
+            ));
+        }
+
+        let required_secs = (milestone_id as u64).saturating_mul(7_200);
+        if now < logon_unix.saturating_add(required_secs) {
+            return Err(err(
+                "MilestoneTimerNotElapsed",
+                format!(
+                    "Milestone {milestone_id} requires {required_secs}s online time since logon (elapsed {}s)",
+                    now.saturating_sub(logon_unix)
+                ),
             ));
         }
 

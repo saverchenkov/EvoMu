@@ -327,6 +327,9 @@ pub struct PersistedFwState {
     /// Last unix timestamp when an active FW complex capture was stepped: `complex_id -> last_step_unix`.
     #[serde(default)]
     pub complex_last_step_unix: HashMap<i64, u64>,
+    /// Militia faction currently holding progress on each active FW complex: `complex_id -> faction_id`.
+    #[serde(default)]
+    pub complex_capturing_faction: HashMap<i64, i64>,
     /// Accumulated capture seconds elapsed inside complex: `complex_id -> elapsed_seconds`.
     #[serde(default)]
     pub complex_seconds_elapsed: HashMap<i64, u64>,

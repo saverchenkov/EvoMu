@@ -598,18 +598,19 @@ async fn test_r5_218_219_220_221_223_224_mining_moon_drill_asset_safety_fw_insur
                 active_end_unix: now_u + 50_000,
                 winddown_end_unix: now_u + 60_000,
                 corruption_points: HashMap::new(),
-                suppression_points: HashMap::new(),
+                suppression_points: [(sys_id, 1_000), (sys_id + 1, 1_000), (sys_id + 2, 1_000), (sys_id + 3, 1_000), (sys_id + 4, 1_000)].into_iter().collect(),
             },
         );
     });
+    let fob_id = eve_server::services::insurgency_services::PIRATE_FOB_STRUCTURE_BASE_ID + 1;
     assert!(
-        eve_server::services::insurgency_services::is_insurgency_stronghold_invulnerable(&ctx, sys_id, 1_898_000_011),
+        eve_server::services::insurgency_services::is_insurgency_stronghold_invulnerable(&ctx, sys_id, fob_id),
         "Stronghold must be invulnerable during Forecasting under simulated clock"
     );
     ctx.db.clock().advance_secs(2_000);
     assert!(
-        !eve_server::services::insurgency_services::is_insurgency_stronghold_invulnerable(&ctx, sys_id, 1_898_000_011),
-        "Stronghold must become vulnerable once simulated clock enters Active phase"
+        !eve_server::services::insurgency_services::is_insurgency_stronghold_invulnerable(&ctx, sys_id, fob_id),
+        "Stronghold must become vulnerable once simulated clock enters Active phase and Stage-5 suppression is met"
     );
 
     // R6-P1-01: FW complex tick rejects pod/cloak, preserves tick across off-grid ally, pauses contested, and de-plexes for defender

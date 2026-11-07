@@ -470,7 +470,8 @@ impl Ballpark {
         true
     }
 
-    fn emit_damage_and_destruction_events(
+    /// Emits `OnDamageStateChange` (and `TerminalExplosion` + ball removal when `destroyed`).
+    pub fn emit_damage_and_destruction_events(
         &mut self,
         ball_id: BallId,
         grid_id: Option<u64>,

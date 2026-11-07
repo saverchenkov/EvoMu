@@ -518,6 +518,7 @@ async fn test_milestones_and_community_tracks() {
     // rpc-lint: allow error code check
     assert_eq!(invalid_milestone.code, "InvalidMilestoneID");
 
+    ctx.db.clock().advance_secs(7_200);
     let claim_ok = rpc(
         &ctx,
         &mut sess,

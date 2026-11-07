@@ -491,6 +491,7 @@ async fn notify_batch9_milestones_redeeming_crates_and_assembly() {
         .any(|(e, _)| e == "OnLoginMilestoneAchieved"));
 
     // Positive 1b: ClaimRewards grants milestone reward once and emits OnLoginMilestoneAchieved
+    ctx.db.clock().advance_secs(7_200);
     assert!(rpc(&ctx, &mut sess_a, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
         .await
         .is_ok());

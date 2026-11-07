@@ -14,6 +14,7 @@ use crate::services::insurgency_services::{
     add_system_suppression, get_campaign_phase_and_timer, insurgency_stage, with_insurgency_runtime,
     FACTION_ANGEL_CARTEL, FACTION_GURISTAS, PHASE_ACTIVE, PHASE_WINDDOWN,
     PIRATE_STRONGHOLD_ANGEL_TYPE, PIRATE_STRONGHOLD_GURISTAS_TYPE,
+    PIRATE_STRONGHOLD_WRECK_TYPE,
 };
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
@@ -171,6 +172,7 @@ pub async fn apply_pirate_fob_structure_damage(
     let now = ctx.now_unix();
     enum FobStep {
         Damaged {
+            sys_id: u32,
             state: String,
             shield_hp: f64,
             armor_hp: f64,
@@ -186,6 +188,8 @@ pub async fn apply_pirate_fob_structure_damage(
             systems: Vec<u32>,
             attacker_fac: i64,
             contrib_pts: i64,
+            wreck_id: i64,
+            pos: [f64; 3],
         },
     }
 
@@ -308,6 +312,7 @@ pub async fn apply_pirate_fob_structure_damage(
                 let h_hp = st.hull_hp;
                 snap.insurgency_runtime.fob_armor_reinforced_until.insert(camp_id, until);
                 return Ok(FobStep::Damaged {
+                    sys_id: st_sys,
                     state: "ArmorReinforced".into(),
                     shield_hp: s_hp,
                     armor_hp: a_hp,
@@ -319,6 +324,7 @@ pub async fn apply_pirate_fob_structure_damage(
                 });
             }
             return Ok(FobStep::Damaged {
+                sys_id: st_sys,
                 state: st.state.clone(),
                 shield_hp: st.shield_hp,
                 armor_hp: st.armor_hp,
@@ -336,6 +342,7 @@ pub async fn apply_pirate_fob_structure_damage(
         let contrib_pts = pts_for_dealt(take_hull);
         if st.hull_hp > 0.0 {
             return Ok(FobStep::Damaged {
+                sys_id: st_sys,
                 state: st.state.clone(),
                 shield_hp: st.shield_hp,
                 armor_hp: st.armor_hp,
@@ -348,17 +355,44 @@ pub async fn apply_pirate_fob_structure_damage(
         }
 
         st.state = "Destroyed".into();
+        for site in snap.insurgency_runtime.insurgency_instances.iter_mut() {
+            if site.solar_system_id == st_sys && site.site_type == "PirateStronghold" {
+                site.completed = true;
+            }
+        }
+        let pos = snap.item_positions.remove(&structure_id).unwrap_or(st.position);
+        snap.items.remove(&structure_id);
+        snap.next_entity_id += 1;
+        let wreck_id = snap.next_entity_id;
+        snap.items.insert(
+            wreck_id,
+            eve_db::InventoryItemRecord {
+                item_id: wreck_id,
+                type_id: PIRATE_STRONGHOLD_WRECK_TYPE,
+                owner_id: attacker_char_id.max(500_001),
+                location_id: i64::from(st_sys),
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(wreck_id, pos);
         Ok(FobStep::Destroyed {
             sys_id: st_sys,
             camp_id,
             systems,
             attacker_fac,
             contrib_pts,
+            wreck_id,
+            pos,
         })
     })?;
 
     match step {
         FobStep::Damaged {
+            sys_id,
             state,
             shield_hp,
             armor_hp,
@@ -368,6 +402,13 @@ pub async fn apply_pirate_fob_structure_damage(
             attacker_fac,
             contrib_pts,
         } => {
+            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            if let Ok(Some(mut cs)) = sys_handle.get_combat_state(structure_id).await {
+                cs.shield_hp = shield_hp;
+                cs.armor_hp = armor_hp;
+                cs.structure_hp = hull_hp;
+                let _ = sys_handle.set_combat_state(structure_id, cs).await;
+            }
             if state == "ArmorReinforced" && reinf_until > 0 {
                 let _ = crate::services::cluster_macho_misc_services::schedule_zarzakh_horizon_siege(
                     ctx,
@@ -390,8 +431,25 @@ pub async fn apply_pirate_fob_structure_damage(
             systems,
             attacker_fac,
             contrib_pts,
+            wreck_id,
+            pos,
         } => {
-            let _ = ctx.systems.get_or_spawn(sys_id).remove_ball(structure_id).await;
+            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let _ = sys_handle.remove_ball(structure_id).await;
+            let _ = sys_handle
+                .spawn_ball(eve_destiny::Ball {
+                    id: wreck_id,
+                    type_id: PIRATE_STRONGHOLD_WRECK_TYPE,
+                    position: DVec3::from_array(pos),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 1.0,
+                    mass: 10_000_000.0,
+                    radius: 500.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                })
+                .await;
             record_insurgency_contribution(ctx, camp_id, attacker_char_id, attacker_fac, contrib_pts);
             for s in &systems {
                 let _ = add_system_suppression(ctx, camp_id, *s, 200);
@@ -405,6 +463,143 @@ pub async fn apply_pirate_fob_structure_damage(
                 ("hullHP", PyRep::Real(0.0)),
                 ("reinforcedUntilUnix", PyRep::Integer(0)),
             ]))
+        }
+    }
+}
+
+/// Handles ballpark/weapon damage against a unified Pirate FOB inside `SystemActor`, enforcing
+/// Stage-5 Suppression gating and `3h ± 1h` `ArmorReinforced` timers in sync with `UpwellStructureRecord`.
+pub(crate) fn handle_fob_ball_damage_in_actor(
+    db_opt: Option<&eve_db::WorldRepository>,
+    solar_system_id: u32,
+    ball_id: i64,
+    damage: eve_destiny::DamageVector,
+    ballpark: &mut eve_destiny::Ballpark,
+    now_unix: u64,
+) -> Option<(f64, bool, Option<eve_destiny::Ball>)> {
+    let db = db_opt?;
+    let camp_id = db.with_snapshot(|snap| {
+        crate::services::insurgency_services::match_fob_campaign_for_ball_in_snap(
+            snap,
+            solar_system_id,
+            ball_id,
+        )
+    })?;
+    let ball_snap = ballpark.balls.get(&ball_id).cloned();
+    let grid_id = ballpark.ball_grid_ids.get(&ball_id).copied();
+
+    enum ActorFobOutcome {
+        Invulnerable,
+        ShieldPhase { shield: f64, armor: f64, hull: f64 },
+        ArmorPhase { hull: f64 },
+    }
+
+    let prep = db.with_snapshot(|snap| {
+        if crate::services::insurgency_services::is_fob_invulnerable_in_snap(
+            snap,
+            camp_id,
+            ball_id,
+            now_unix,
+        ) {
+            return ActorFobOutcome::Invulnerable;
+        }
+        let existing_reinf = snap
+            .insurgency_runtime
+            .fob_armor_reinforced_until
+            .get(&camp_id)
+            .copied();
+        let (s, a, h) = snap
+            .structures
+            .get(&ball_id)
+            .map(|st| (st.shield_hp, st.armor_hp, st.hull_hp))
+            .unwrap_or((2_500.0, 2_500.0, 3_500.0));
+        if existing_reinf.is_none() {
+            ActorFobOutcome::ShieldPhase { shield: s, armor: a, hull: h }
+        } else {
+            ActorFobOutcome::ArmorPhase { hull: h }
+        }
+    });
+
+    match prep {
+        ActorFobOutcome::Invulnerable => Some((0.0, false, ball_snap)),
+        ActorFobOutcome::ShieldPhase { shield, armor, hull } => {
+            let (applied, new_s, new_a, s_ratio, a_ratio, h_ratio) = {
+                let cs = ballpark.combat_states.entry(ball_id).or_default();
+                cs.max_shield_hp = 2_500.0;
+                cs.max_armor_hp = 2_500.0;
+                cs.max_structure_hp = 3_500.0;
+                cs.shield_hp = shield.clamp(0.0, 2_500.0);
+                cs.armor_hp = armor.clamp(0.0, 2_500.0);
+                let orig_hull = hull.clamp(0.0, 3_500.0);
+                // Prevent excess weapon damage in phase 1 from bleeding through armor into hull.
+                cs.structure_hp = 1.0e18;
+                let (raw_applied, _) = cs.apply_damage(damage);
+                cs.structure_hp = orig_hull;
+                if cs.armor_hp <= 1e-6 {
+                    cs.armor_hp = 0.0;
+                }
+                let dealt = raw_applied.min(shield + armor);
+                let sr = (cs.shield_hp / cs.max_shield_hp).clamp(0.0, 1.0);
+                let ar = (cs.armor_hp / cs.max_armor_hp).clamp(0.0, 1.0);
+                let hr = (cs.structure_hp / cs.max_structure_hp).clamp(0.0, 1.0);
+                (dealt, cs.shield_hp, cs.armor_hp, sr, ar, hr)
+            };
+            db.with_mut_snapshot(|snap| {
+                let became_reinf = new_a <= 1e-6;
+                let until = if became_reinf {
+                    let jitter = fob_reinforcement_jitter_secs(camp_id, now_unix);
+                    let secs = ((FOB_ARMOR_REINFORCEMENT_BASE_SECS as i64) + jitter).max(7_200) as u64;
+                    let u = now_unix + secs;
+                    snap.insurgency_runtime.fob_armor_reinforced_until.insert(camp_id, u);
+                    u
+                } else {
+                    0
+                };
+                if let Some(st) = snap.structures.get_mut(&ball_id) {
+                    st.shield_hp = new_s;
+                    st.armor_hp = if became_reinf { 0.0 } else { new_a };
+                    st.hull_hp = hull;
+                    st.last_damage_unix = now_unix;
+                    if became_reinf {
+                        st.state = "ArmorReinforced".into();
+                        st.reinforced_until_unix = until;
+                    } else if new_s <= 1e-6 {
+                        st.state = "ArmorVulnerable".into();
+                    }
+                }
+            });
+            ballpark.emit_damage_and_destruction_events(ball_id, grid_id, s_ratio, a_ratio, h_ratio, false);
+            Some((applied, false, ball_snap))
+        }
+        ActorFobOutcome::ArmorPhase { hull } => {
+            let (applied, destroyed, new_h, s_ratio, a_ratio, h_ratio) = {
+                let cs = ballpark.combat_states.entry(ball_id).or_default();
+                cs.max_shield_hp = 2_500.0;
+                cs.max_armor_hp = 2_500.0;
+                cs.max_structure_hp = 3_500.0;
+                cs.shield_hp = 0.0;
+                cs.armor_hp = 0.0;
+                cs.structure_hp = hull.clamp(0.0, 3_500.0);
+                let (applied, destroyed) = cs.apply_damage(damage);
+                let hr = (cs.structure_hp / cs.max_structure_hp).clamp(0.0, 1.0);
+                (applied, destroyed, cs.structure_hp, 0.0, 0.0, hr)
+            };
+            db.with_mut_snapshot(|snap| {
+                if let Some(st) = snap.structures.get_mut(&ball_id) {
+                    st.shield_hp = 0.0;
+                    st.armor_hp = 0.0;
+                    st.last_damage_unix = now_unix;
+                    if destroyed {
+                        st.hull_hp = 0.0;
+                        st.state = "Destroyed".into();
+                    } else {
+                        st.hull_hp = new_h;
+                        st.state = "HullVulnerable".into();
+                    }
+                }
+            });
+            ballpark.emit_damage_and_destruction_events(ball_id, grid_id, s_ratio, a_ratio, h_ratio, destroyed);
+            Some((applied, destroyed, ball_snap))
         }
     }
 }

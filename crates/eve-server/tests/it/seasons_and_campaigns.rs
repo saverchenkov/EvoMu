@@ -481,6 +481,7 @@ async fn test_login_campaigns_seasonal_and_milestones() {
     assert_eq!(logon_res, PyRep::None);
 
     // Positive milestoneID succeeds once and rejects duplicate claims
+    ctx.db.clock().advance_secs(7_200);
     let claim_res = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
         .await
         .expect("ClaimRewards(1) must succeed once");

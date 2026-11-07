@@ -166,41 +166,12 @@ pub fn init_insurgency_campaign(
         suppression_points: HashMap::new(),
     };
 
-    let stronghold_id = 1_898_000_000 + campaign_id * 10 + 1;
-    with_insurgency_runtime(ctx, |rt| {
-        rt.campaigns.insert(campaign_id, campaign);
-        let name = if pirate_faction == FACTION_ANGEL_CARTEL {
-            "Angel Cartel Stronghold"
-        } else {
-            "Guristas Stronghold"
-        };
-        rt.insurgency_instances.push(InsurgencySiteRecord {
-            instance_id: stronghold_id,
-            solar_system_id: fob_system,
-            site_type: "PirateStronghold".into(),
-            name: name.into(),
-            corruption_reward: 500.0,
-            completed: false,
-        });
-    });
-
-    let type_id = if pirate_faction == FACTION_ANGEL_CARTEL {
-        PIRATE_STRONGHOLD_ANGEL_TYPE
-    } else {
-        PIRATE_STRONGHOLD_GURISTAS_TYPE
-    };
-    let pos = [100_000.0, 0.0, 50_000.0];
     ctx.db.with_mut_snapshot(|snap| {
+        snap.insurgency_runtime.campaigns.insert(campaign_id, campaign);
         for &sys in &systems {
             snap.system_states.entry(sys).or_default().solar_system_id = sys;
         }
-        if !snap.items.contains_key(&stronghold_id) {
-            snap.items.insert(stronghold_id, eve_db::InventoryItemRecord {
-                item_id: stronghold_id, type_id, owner_id: pirate_faction, location_id: fob_system as i64,
-                flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true, version: 1, ..Default::default()
-            });
-            snap.item_positions.insert(stronghold_id, pos);
-        }
+        ensure_unified_pirate_fob_in_snap(snap, Some(&ctx.sde), campaign_id);
     });
 
     let initial_campaign_state = if now < fc_end {
@@ -546,128 +517,201 @@ pub fn spawn_ice_heist(ctx: &ServerContext, sys_id: u32) -> i64 {
     })
 }
 
-/// Spawns a Pirate Stronghold site instance for an insurgency campaign in its FOB system and seeds world items.
-// parity: feat:pve.pirate-strongholds
-pub fn spawn_pirate_stronghold(ctx: &ServerContext, campaign_id: i64) -> Option<i64> {
-    let (fob, fid, id) = with_insurgency_runtime(ctx, |rt| {
-        let camp = rt.campaigns.get(&campaign_id)?;
-        let fob = camp.fob_solar_system_id;
-        let fid = camp.pirate_faction_id;
-        let name = if fid == FACTION_ANGEL_CARTEL {
-            "Angel Cartel Stronghold"
-        } else {
-            "Guristas Stronghold"
-        };
-        let id = 1_898_000_000 + campaign_id * 10 + 1;
-        if let Some(existing) = rt.insurgency_instances.iter().find(|s| s.solar_system_id == fob && s.site_type == "PirateStronghold") {
-            return Some((fob, fid, existing.instance_id));
+/// Re-exported unified Pirate FOB ID base (`1_897_000_000 + campaign_id`).
+pub use crate::services::fw_gameplay::fw_gameplay_insurgency::PIRATE_FOB_STRUCTURE_BASE_ID;
+
+/// Returns the unified Pirate FOB entity ID (`PIRATE_FOB_STRUCTURE_BASE_ID + campaign_id`).
+#[inline]
+pub(crate) fn unified_fob_id(campaign_id: i64) -> i64 {
+    PIRATE_FOB_STRUCTURE_BASE_ID + campaign_id
+}
+
+/// Ensures the single unified Pirate FOB (`UpwellStructureRecord`, `PirateStronghold` site record,
+/// and world item/position) exists in `snap` for `campaign_id`.
+pub(crate) fn ensure_unified_pirate_fob_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    sde_opt: Option<&eve_sde::SdeRegistry>,
+    campaign_id: i64,
+) -> Option<(u32, i64, i64, u32, [f64; 3], bool)> {
+    let camp = snap.insurgency_runtime.campaigns.get(&campaign_id)?.clone();
+    let fob_sys = camp.fob_solar_system_id;
+    let pirate_fac = camp.pirate_faction_id;
+    let fob_id = unified_fob_id(campaign_id);
+    let fob_type = if pirate_fac == FACTION_ANGEL_CARTEL {
+        PIRATE_STRONGHOLD_ANGEL_TYPE
+    } else {
+        PIRATE_STRONGHOLD_GURISTAS_TYPE
+    };
+    let name = if pirate_fac == FACTION_ANGEL_CARTEL {
+        "Angel Cartel Forward Operating Base"
+    } else {
+        "Guristas Forward Operating Base"
+    };
+    let owner_corp = sde_opt
+        .map(|sde| crate::services::fw_gameplay::militia_lp_corp_id(sde, pirate_fac))
+        .unwrap_or(1_000_127);
+    let pos = [95_000.0, 0.0, 45_000.0];
+    let st = snap
+        .structures
+        .entry(fob_id)
+        .or_insert_with(|| eve_db::UpwellStructureRecord {
+            structure_id: fob_id,
+            type_id: fob_type,
+            owner_corp_id: owner_corp,
+            solar_system_id: fob_sys,
+            name: name.into(),
+            state: "ShieldVulnerable".into(),
+            position: pos,
+            quantum_core_installed: true,
+            fuel_blocks: 10_000,
+            shield_hp: 2_500.0,
+            armor_hp: 2_500.0,
+            hull_hp: 3_500.0,
+            reinforced_until_unix: 0,
+            last_damage_unix: 0,
+            last_damage_tick: 0,
+            self_destruct_at_unix: None,
+        });
+    let is_destroyed = st.state == "Destroyed";
+
+    if let Some(existing) = snap
+        .insurgency_runtime
+        .insurgency_instances
+        .iter_mut()
+        .find(|s| s.solar_system_id == fob_sys && s.site_type == "PirateStronghold")
+    {
+        if existing.instance_id != fob_id {
+            let old_id = existing.instance_id;
+            snap.items.remove(&old_id);
+            snap.item_positions.remove(&old_id);
+            existing.instance_id = fob_id;
         }
-        rt.insurgency_instances.push(InsurgencySiteRecord {
-            instance_id: id,
-            solar_system_id: fob,
+        if is_destroyed {
+            existing.completed = true;
+        }
+    } else {
+        snap.insurgency_runtime.insurgency_instances.push(InsurgencySiteRecord {
+            instance_id: fob_id,
+            solar_system_id: fob_sys,
             site_type: "PirateStronghold".into(),
             name: name.into(),
             corruption_reward: 500.0,
-            completed: false,
-        });
-        Some((fob, fid, id))
-    })?;
-
-    let type_id = if fid == FACTION_ANGEL_CARTEL {
-        PIRATE_STRONGHOLD_ANGEL_TYPE
-    } else {
-        PIRATE_STRONGHOLD_GURISTAS_TYPE
-    };
-    let pos = [100_000.0, 0.0, 50_000.0];
-    ctx.db.with_mut_snapshot(|snap| {
-        if !snap.items.contains_key(&id) {
-            snap.items.insert(id, eve_db::InventoryItemRecord {
-                item_id: id, type_id, owner_id: fid, location_id: fob as i64,
-                flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true, version: 1, ..Default::default()
-            });
-            snap.item_positions.insert(id, pos);
-        }
-    });
-
-    Some(id)
-}
-
-/// Ensures the pirate stronghold is spawned into space with real `CombatState` in its FOB system.
-// parity: feat:pve.pirate-strongholds
-pub async fn ensure_stronghold_in_space(ctx: &ServerContext, campaign_id: i64) -> Option<i64> {
-    let stronghold_id = spawn_pirate_stronghold(ctx, campaign_id)?;
-    let (fob_system, pirate_faction) = read_insurgency_runtime(ctx, |rt| {
-        let camp = rt.campaigns.get(&campaign_id)?;
-        Some((camp.fob_solar_system_id, camp.pirate_faction_id))
-    })?;
-    let type_id = if pirate_faction == FACTION_ANGEL_CARTEL {
-        PIRATE_STRONGHOLD_ANGEL_TYPE
-    } else {
-        PIRATE_STRONGHOLD_GURISTAS_TYPE
-    };
-    let sys_handle = ctx.systems.get_or_spawn(fob_system);
-    let ball_exists = sys_handle.get_ball_snapshot(stronghold_id).await.map(|b| b.is_some()).unwrap_or(false);
-    if !ball_exists {
-        let pos = glam::DVec3::new(100_000.0, 0.0, 50_000.0);
-        let ball = eve_destiny::Ball {
-            id: stronghold_id,
-            type_id,
-            position: pos,
-            velocity: glam::DVec3::ZERO,
-            max_velocity: 0.0,
-            inertia: 1.0,
-            mass: 10_000_000.0,
-            radius: 1_000.0,
-            speed_fraction: 0.0,
-            mode: eve_destiny::MovementMode::Stop,
-        };
-        let mut cs = ctx.build_type_combat_state(type_id);
-        if cs.max_structure_hp <= 0.0 {
-            cs.max_shield_hp = 50_000.0;
-            cs.shield_hp = 50_000.0;
-            cs.max_armor_hp = 50_000.0;
-            cs.armor_hp = 50_000.0;
-            cs.max_structure_hp = 100_000.0;
-            cs.structure_hp = 100_000.0;
-        }
-        let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
-
-        let entity = crate::services::combat_crimewatch::ExtendedNpcEntity {
-            ball_id: stronghold_id,
-            type_id,
-            faction_id: pirate_faction as u32,
-            archetype: "PirateStronghold".into(),
-            solar_system_id: fob_system,
-            spawn_group_id: campaign_id as u32,
-            target_id: None,
-            aggression_threat: HashMap::new(),
-            threat_table: HashMap::new(),
-            bounty_isk: 30_000_000.0,
-            optimal_range: 50_000.0,
-            orbit_range: 30_000.0,
-            damage_vector: eve_destiny::DamageVector { em: 50.0, explosive: 50.0, kinetic: 50.0, thermal: 50.0 },
-            entropic_cycles: 0,
-            drifter_overshield_hp: 0.0,
-            drifter_doomsday_fired: false,
-            web_speed_factor: 0.0,
-            web_range: 0.0,
-            scram_strength: 0.0,
-            scram_range: 0.0,
-            neut_amount: 0.0,
-            ecm_jammed: false,
-            remote_shield_rep: 0.0,
-            remote_armor_rep: 0.0,
-            remote_rep_range: 0.0,
-            tag_drop_type_id: None,
-            spawn_position: pos,
-            sleeper_wh_class: 0,
-            custom_cargo_loot: None,
-        };
-        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-            rt.npc_entities.insert(stronghold_id, entity);
+            completed: is_destroyed,
         });
     }
-    Some(stronghold_id)
+
+    if !is_destroyed && !snap.items.contains_key(&fob_id) {
+        snap.items.insert(
+            fob_id,
+            eve_db::InventoryItemRecord {
+                item_id: fob_id,
+                type_id: fob_type,
+                owner_id: pirate_fac,
+                location_id: i64::from(fob_sys),
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(fob_id, pos);
+    }
+
+    Some((fob_sys, pirate_fac, fob_id, fob_type, pos, is_destroyed))
+}
+
+/// Finds the campaign ID owning `ball_id` in `solar_system_id` if it matches the campaign's unified FOB.
+pub(crate) fn match_fob_campaign_for_ball_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    solar_system_id: u32,
+    ball_id: i64,
+) -> Option<i64> {
+    if let Some(st) = snap.structures.get(&ball_id) {
+        if st.solar_system_id == solar_system_id
+            && matches!(st.type_id, PIRATE_STRONGHOLD_GURISTAS_TYPE | PIRATE_STRONGHOLD_ANGEL_TYPE)
+        {
+            if let Some(&cid) = snap
+                .insurgency_runtime
+                .campaigns
+                .iter()
+                .find(|(&id, c)| {
+                    c.fob_solar_system_id == solar_system_id && unified_fob_id(id) == ball_id
+                })
+                .map(|(id, _)| id)
+            {
+                return Some(cid);
+            }
+        }
+    }
+    for (&cid, camp) in &snap.insurgency_runtime.campaigns {
+        if camp.fob_solar_system_id == solar_system_id && ball_id == unified_fob_id(cid) {
+            return Some(cid);
+        }
+    }
+    None
+}
+
+/// Checks whether a unified Pirate FOB in `camp_id` is currently attackable (Stage-5 Suppression goal
+/// met before initial reinforcement, and not inside `ArmorReinforced` timer or non-`Active` phase).
+pub(crate) fn is_fob_invulnerable_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    camp_id: i64,
+    ball_id: i64,
+    now_unix: u64,
+) -> bool {
+    let Some(camp) = snap.insurgency_runtime.campaigns.get(&camp_id) else {
+        return false;
+    };
+    let (phase, _) = get_campaign_phase_and_timer(camp, now_unix);
+    if phase != PHASE_ACTIVE {
+        return true;
+    }
+    let emp_mod = snap
+        .insurgency_runtime
+        .empire_ambition_modifier
+        .get(&camp.pirate_faction_id)
+        .copied()
+        .unwrap_or(0)
+        .min(5);
+    let supp_goal = usize::from(5 + emp_mod);
+    let s5 = camp
+        .suppression_points
+        .values()
+        .filter(|&&pts| insurgency_stage(pts) >= 5)
+        .count();
+    let existing_reinf = snap
+        .insurgency_runtime
+        .fob_armor_reinforced_until
+        .get(&camp_id)
+        .copied();
+    if existing_reinf.is_none() && s5 < supp_goal {
+        return true;
+    }
+    if let Some(until) = existing_reinf {
+        if now_unix < until {
+            return true;
+        }
+    }
+    if let Some(st) = snap.structures.get(&ball_id) {
+        if st.state == "Destroyed" || (st.state == "ArmorReinforced" && now_unix < st.reinforced_until_unix) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Ensures the unified Pirate FOB is seeded in world/structure state for `campaign_id`.
+// parity: feat:pve.pirate-strongholds
+pub fn spawn_pirate_stronghold(ctx: &ServerContext, campaign_id: i64) -> Option<i64> {
+    ctx.db
+        .with_mut_snapshot(|snap| ensure_unified_pirate_fob_in_snap(snap, Some(&ctx.sde), campaign_id).map(|(_, _, id, _, _, _)| id))
+}
+
+/// Ensures the unified pirate FOB is spawned into space with `CombatState` and NPC metadata.
+// parity: feat:pve.pirate-strongholds
+pub async fn ensure_stronghold_in_space(ctx: &ServerContext, campaign_id: i64) -> Option<i64> {
+    crate::services::fw_gameplay::fw_gameplay_insurgency::ensure_campaign_pirate_fob(ctx, campaign_id).await
 }
 
 #[derive(Debug, Clone)]
@@ -680,9 +724,8 @@ pub struct StrongholdDestructionInfo {
     pub new_suppression_stage: u8,
 }
 
-/// Returns true if `ball_id` in `solar_system_id` is an insurgency stronghold that is currently invulnerable
-/// (i.e. its campaign is NOT in `Active` phase).
-/// DERIVED (synthetic): Strongholds / FOBs are invulnerable during Forecasting and WindDown phases.
+/// Returns true if `ball_id` in `solar_system_id` is an insurgency FOB/stronghold that is currently
+/// invulnerable (non-`Active` campaign phase, Stage-5 suppression goal not yet met, or `ArmorReinforced`).
 // parity: feat:pve.pirate-strongholds
 pub fn is_stronghold_invulnerable_in_db(
     db: &eve_db::WorldRepository,
@@ -691,23 +734,8 @@ pub fn is_stronghold_invulnerable_in_db(
 ) -> bool {
     let now = db.clock().now_unix_secs();
     db.with_snapshot(|snap| {
-        for camp in snap.insurgency_runtime.campaigns.values() {
-            if camp.fob_solar_system_id == solar_system_id {
-                let is_sh_id = ball_id == 1_898_000_000 + camp.campaign_id * 10 + 1;
-                let is_sh_type = snap.items.get(&ball_id).map(|it| {
-                    it.type_id == PIRATE_STRONGHOLD_GURISTAS_TYPE || it.type_id == PIRATE_STRONGHOLD_ANGEL_TYPE
-                }).unwrap_or(false);
-                let has_site_match = snap.insurgency_runtime.insurgency_instances.iter().any(|s| {
-                    s.solar_system_id == solar_system_id
-                        && s.site_type == "PirateStronghold"
-                        && (s.instance_id == ball_id || is_sh_id || is_sh_type)
-                        && !s.completed
-                });
-                if has_site_match || is_sh_id || is_sh_type {
-                    let (phase, _) = get_campaign_phase_and_timer(camp, now);
-                    return phase != PHASE_ACTIVE;
-                }
-            }
+        if let Some(camp_id) = match_fob_campaign_for_ball_in_snap(snap, solar_system_id, ball_id) {
+            return is_fob_invulnerable_in_snap(snap, camp_id, ball_id, now);
         }
         false
     })
@@ -825,10 +853,123 @@ pub fn notify_stronghold_destruction(
     }
 }
 
-/// Handles combat destruction of a pirate stronghold in space:
-/// verifies the campaign is in `Active` phase (strongholds are invulnerable during `Forecasting` or `WindDown`),
-/// marks the site completed, transitions campaign phase to `WindDown`,
-/// awards +500 suppression to the FOB solar system, and spawns the FOB wreck (type 79386).
+/// Handles combat destruction of a unified Pirate FOB in space, transitioning to `WindDown`,
+/// awarding suppression, spawning the wreck (`79386`), and resolving the campaign as `Some("EmpireWin")`.
+// parity: feat:pve.pirate-strongholds
+pub async fn on_insurgency_stronghold_destroyed_with_sde(
+    systems: &crate::system_actor::SystemRegistry,
+    db: &eve_db::WorldRepository,
+    sde_opt: Option<&eve_sde::SdeRegistry>,
+    solar_system_id: u32,
+    ball_id: i64,
+    killer_char_id: Option<i64>,
+) -> Option<(
+    StrongholdDestructionInfo,
+    Option<crate::services::fw_gameplay::fw_gameplay_insurgency::CampaignResolutionEffects>,
+)> {
+    let now = db.clock().now_unix_secs();
+    let destruction_info = db.with_mut_snapshot(|snap| {
+        let camp_id = match_fob_campaign_for_ball_in_snap(snap, solar_system_id, ball_id)?;
+        let camp = snap.insurgency_runtime.campaigns.get_mut(&camp_id)?;
+        let (phase, _) = get_campaign_phase_and_timer(camp, now);
+        if phase != PHASE_ACTIVE {
+            return None;
+        }
+        if snap.insurgency_runtime.campaign_outcomes.contains_key(&camp_id) {
+            return None;
+        }
+        camp.forecasting_end_unix = camp.forecasting_end_unix.min(now);
+        camp.active_end_unix = now;
+        camp.winddown_end_unix = now + WINDDOWN_DURATION_SECS;
+
+        let p = camp.suppression_points.entry(solar_system_id).or_insert(0);
+        let old_supp = *p;
+        *p = (*p + 500).max(0);
+        let new_supp = *p;
+        let s_stage = insurgency_stage(*p).max(1);
+        if let Some(st) = snap.system_states.get_mut(&solar_system_id) {
+            st.insurgency_suppression_stage = s_stage;
+        }
+
+        for site in snap.insurgency_runtime.insurgency_instances.iter_mut() {
+            if site.solar_system_id == solar_system_id && site.site_type == "PirateStronghold" {
+                site.completed = true;
+            }
+        }
+        if let Some(st) = snap.structures.get_mut(&ball_id) {
+            st.shield_hp = 0.0;
+            st.armor_hp = 0.0;
+            st.hull_hp = 0.0;
+            st.state = "Destroyed".into();
+        }
+
+        let pos = snap
+            .item_positions
+            .remove(&ball_id)
+            .unwrap_or([95_000.0, 0.0, 45_000.0]);
+        snap.items.remove(&ball_id);
+
+        snap.next_entity_id += 1;
+        let wreck_id = snap.next_entity_id;
+        snap.items.insert(
+            wreck_id,
+            eve_db::InventoryItemRecord {
+                item_id: wreck_id,
+                type_id: PIRATE_STRONGHOLD_WRECK_TYPE,
+                owner_id: killer_char_id.unwrap_or(500_001),
+                location_id: i64::from(solar_system_id),
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(wreck_id, pos);
+
+        let res_effects =
+            crate::services::fw_gameplay::fw_gameplay_insurgency::resolve_insurgency_campaign_in_snap(
+                snap,
+                sde_opt,
+                camp_id,
+                Some("EmpireWin"),
+                now,
+            )
+            .ok();
+
+        Some((
+            StrongholdDestructionInfo {
+                campaign_id: camp_id,
+                solar_system_id,
+                killer_char_id,
+                old_suppression: old_supp,
+                new_suppression: new_supp,
+                new_suppression_stage: s_stage,
+            },
+            res_effects,
+            wreck_id,
+            pos,
+        ))
+    });
+    let (info, res_effects, wreck_id, pos) = destruction_info?;
+    let sys_handle = systems.get_or_spawn(solar_system_id);
+    let wreck_ball = eve_destiny::Ball {
+        id: wreck_id,
+        type_id: PIRATE_STRONGHOLD_WRECK_TYPE,
+        position: glam::DVec3::new(pos[0], pos[1], pos[2]),
+        velocity: glam::DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 10_000_000.0,
+        radius: 500.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    };
+    let _ = sys_handle.spawn_ball(wreck_ball).await;
+    Some((info, res_effects))
+}
+
+/// Wrapper for combat destruction of a unified Pirate FOB when `SdeData` is unavailable.
 // parity: feat:pve.pirate-strongholds
 pub async fn on_insurgency_stronghold_destroyed_core(
     systems: &crate::system_actor::SystemRegistry,
@@ -837,75 +978,16 @@ pub async fn on_insurgency_stronghold_destroyed_core(
     ball_id: i64,
     killer_char_id: Option<i64>,
 ) -> Option<StrongholdDestructionInfo> {
-    let now = db.clock().now_unix_secs();
-    let destruction_info = db.with_mut_snapshot(|snap| {
-        let mut matched = None;
-        for camp in snap.insurgency_runtime.campaigns.values_mut() {
-            if camp.fob_solar_system_id == solar_system_id {
-                let is_sh_id = ball_id == 1_898_000_000 + camp.campaign_id * 10 + 1;
-                let is_sh_type = snap.items.get(&ball_id).map(|it| it.type_id == PIRATE_STRONGHOLD_GURISTAS_TYPE || it.type_id == PIRATE_STRONGHOLD_ANGEL_TYPE).unwrap_or(false);
-                let has_site_match = snap.insurgency_runtime.insurgency_instances.iter().any(|s| {
-                    s.solar_system_id == solar_system_id
-                        && s.site_type == "PirateStronghold"
-                        && (s.instance_id == ball_id || is_sh_id || is_sh_type)
-                        && !s.completed
-                });
-                if has_site_match || is_sh_id || is_sh_type {
-                    let (phase, _) = get_campaign_phase_and_timer(camp, now);
-                    if phase != PHASE_ACTIVE {
-                        return None;
-                    }
-                    camp.forecasting_end_unix = camp.forecasting_end_unix.min(now);
-                    camp.active_end_unix = now;
-                    camp.winddown_end_unix = now + WINDDOWN_DURATION_SECS;
-
-                    let p = camp.suppression_points.entry(solar_system_id).or_insert(0);
-                    let old_supp = *p;
-                    *p = (*p + 500).max(0);
-                    let new_supp = *p;
-                    let s_stage = insurgency_stage(*p).max(1);
-                    if let Some(st) = snap.system_states.get_mut(&solar_system_id) {
-                        st.insurgency_suppression_stage = s_stage;
-                    }
-                    matched = Some((camp.campaign_id, old_supp, new_supp, s_stage));
-                    break;
-                }
-            }
-        }
-        let Some((camp_id, old_supp, new_supp, s_stage)) = matched else {
-            return None;
-        };
-
-        for site in snap.insurgency_runtime.insurgency_instances.iter_mut() {
-            if site.solar_system_id == solar_system_id && site.site_type == "PirateStronghold" {
-                site.completed = true;
-            }
-        }
-
-        let pos = snap.item_positions.remove(&ball_id).unwrap_or([100_000.0, 0.0, 50_000.0]);
-        snap.items.remove(&ball_id);
-
-        snap.next_entity_id += 1;
-        let wreck_id = snap.next_entity_id;
-        snap.items.insert(wreck_id, eve_db::InventoryItemRecord {
-            item_id: wreck_id, type_id: PIRATE_STRONGHOLD_WRECK_TYPE, owner_id: killer_char_id.unwrap_or(500001),
-            location_id: solar_system_id as i64, flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true, version: 1, ..Default::default()
-        });
-        snap.item_positions.insert(wreck_id, pos);
-        Some((StrongholdDestructionInfo {
-            campaign_id: camp_id, solar_system_id, killer_char_id,
-            old_suppression: old_supp, new_suppression: new_supp, new_suppression_stage: s_stage,
-        }, wreck_id, pos))
-    });
-    let Some((info, wreck_id, pos)) = destruction_info else { return None; };
-    let sys_handle = systems.get_or_spawn(solar_system_id);
-    let wreck_ball = eve_destiny::Ball {
-        id: wreck_id, type_id: PIRATE_STRONGHOLD_WRECK_TYPE, position: glam::DVec3::new(pos[0], pos[1], pos[2]),
-        velocity: glam::DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 10_000_000.0, radius: 500.0,
-        speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop,
-    };
-    let _ = sys_handle.spawn_ball(wreck_ball).await;
-    Some(info)
+    on_insurgency_stronghold_destroyed_with_sde(
+        systems,
+        db,
+        None,
+        solar_system_id,
+        ball_id,
+        killer_char_id,
+    )
+    .await
+    .map(|(info, _)| info)
 }
 
 fn are_fw_factions_allied(a: i64, b: i64) -> bool {

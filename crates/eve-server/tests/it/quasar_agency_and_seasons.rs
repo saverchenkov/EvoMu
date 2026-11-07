@@ -387,6 +387,7 @@ async fn test_pve_dungeons_milestones_and_mto() {
         .iter()
         .any(|n| n.event == "OnMilestoneTimerStarted"));
 
+    ctx.db.clock().advance_secs(7_200);
     let bal_before = ctx.db.with_snapshot(|s| s.characters[&PILOT_A].balance.0);
     let claim_rep = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
         .await

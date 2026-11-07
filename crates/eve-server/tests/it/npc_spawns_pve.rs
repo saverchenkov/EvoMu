@@ -1114,13 +1114,13 @@ async fn test_sde_backed_pirate_strongholds_homefront_and_triglavian_sites() {
         "Killing Triglavian boss must shift EDENCOM (+0.15) and Triglavian (-0.15) standings"
     );
 
-    // 3. Pirate Strongholds (`feat:pve.pirate-strongholds`): Forecasting invulnerability via dogmaIM.Activate -> clock advance to Active -> destruction & WindDown
+    // 3. Pirate Strongholds (`feat:pve.pirate-strongholds`): Forecasting & pre-Stage-5 invulnerability -> Stage-5 Active -> ArmorReinforced -> destruction & EmpireWin
     let fob_sys = 30_002_048u32;
     init_insurgency_campaign(&ctx, 901, FACTION_GURISTAS, 500_001, fob_sys, vec![gammel]);
     let sh_id = ensure_stronghold_in_space(&ctx, 901).await.expect("Stronghold spawned");
     let (mut fob_sess, fob_guns) = setup_space_pilot(
         &ctx, 7503, "demo", "demo-secret", 90_000_001, fob_sys, 910_403, 23773, 41160, 20811,
-        924_200, DVec3::new(60_000.0, 0.0, 50_000.0),
+        924_200, DVec3::new(90_000.0, 0.0, 45_000.0),
     )
     .await;
     let fob_beyonce = bind_beyonce(&ctx, &mut fob_sess, fob_sys).await;
@@ -1141,16 +1141,37 @@ async fn test_sde_backed_pirate_strongholds_homefront_and_triglavian_sites() {
         let _ = fob_handle.step_manual(1.0).await;
     }
     let sh_hp0 = fob_handle.get_combat_state(sh_id).await.unwrap().unwrap().shield_hp;
-    rpc(&ctx, &mut fob_sess, "dogmaIM", "Activate", &[PyRep::Integer(fob_guns[0]), PyRep::Integer(sh_id)]).await.unwrap();
+    let fc_res = rpc(&ctx, &mut fob_sess, "dogmaIM", "Activate", &[PyRep::Integer(fob_guns[0]), PyRep::Integer(sh_id)]).await;
+    if let Err(err) = fc_res {
+        assert_eq!(err.code, "FobInvulnerableInPhase");
+    }
     assert_eq!(fob_handle.get_combat_state(sh_id).await.unwrap().unwrap().shield_hp, sh_hp0, "Stronghold must be invulnerable during Forecasting phase");
 
     ctx.advance_secs(FORECASTING_DURATION_SECS + 60);
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(c) = s.insurgency_runtime.campaigns.get_mut(&901) {
+            for offset in 1..=5_u32 {
+                let sys_k = fob_sys + offset;
+                if !c.systems.contains(&sys_k) {
+                    c.systems.push(sys_k);
+                }
+                c.suppression_points.insert(sys_k, 1_000);
+            }
+        }
+    });
     rpc(&ctx, &mut fob_sess, "dogmaIM", "Activate", &[PyRep::Integer(fob_guns[0]), PyRep::Integer(sh_id)]).await.unwrap();
-    assert!(fob_handle.get_combat_state(sh_id).await.unwrap().unwrap().shield_hp < sh_hp0, "Stronghold must take real weapon damage in Active phase");
+    assert!(fob_handle.get_combat_state(sh_id).await.unwrap().unwrap().shield_hp < sh_hp0, "Stronghold must take real weapon damage in Active phase once Stage-5 suppression is met");
+
+    let big_dmg = eve_destiny::DamageVector { em: 100_000.0, thermal: 100_000.0, kinetic: 100_000.0, explosive: 100_000.0 };
+    let _ = fob_handle.apply_damage_with_attacker(sh_id, big_dmg, Some(90_000_001)).await;
+    let reinf_until = ctx.db.with_snapshot(|s| s.insurgency_runtime.fob_armor_reinforced_until.get(&901).copied().unwrap_or(0));
+    assert!(reinf_until > ctx.now_unix(), "FOB enters 3h±1h ArmorReinforced before hull destruction");
+    ctx.advance_secs(reinf_until.saturating_sub(ctx.now_unix()) + 10);
 
     warp_lock_and_destroy_via_rpc(&ctx, &mut fob_sess, fob_beyonce, fob_sys, 910_403, &fob_guns, sh_id, None, 1_500).await;
     let PyRep::List(inst_after) = rpc(&ctx, &mut fob_sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyInstances", &[PyRep::Integer(fob_sys as i64)]).await.unwrap() else { panic!() };
     assert_eq!(inst_after.iter().find(|i| i.dict_get("instanceID") == Some(&PyRep::Integer(sh_id))).unwrap().dict_get("completed"), Some(&PyRep::Bool(true)));
+    assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.campaign_outcomes.get(&901).cloned()), Some("EmpireWin".to_string()));
     let PyRep::Tuple(fob_snap1) = rpc(&ctx, &mut fob_sess, "insurgencySolarsystem", "GetLocalCampaignClientSnapshot", &[]).await.unwrap() else { panic!() };
     assert_eq!(fob_snap1[1].dict_get("phase"), Some(&PyRep::String(PHASE_WINDDOWN.into())));
     assert!(fob_handle.ballpark.read().unwrap().balls.values().any(|b| b.type_id == PIRATE_STRONGHOLD_WRECK_TYPE));

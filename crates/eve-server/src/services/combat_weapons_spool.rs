@@ -828,7 +828,16 @@ pub async fn handle_ship_or_npc_destruction(
             }
         }
     }
-    if let Some(sh_info) = crate::services::insurgency_services::on_insurgency_stronghold_destroyed_core(&ctx.systems, &ctx.db, sys_id, target_ball_id, Some(attacker_char_id)).await {
+    if let Some((sh_info, res_opt)) = crate::services::insurgency_services::on_insurgency_stronghold_destroyed_with_sde(&ctx.systems, &ctx.db, Some(&ctx.sde), sys_id, target_ball_id, Some(attacker_char_id)).await {
+        if let Some(res) = res_opt {
+            crate::services::fw_gameplay::fw_gameplay_insurgency::emit_campaign_resolution_effects_core(
+                &ctx.db,
+                Some(&ctx.quasar_gateway),
+                Some(ctx.pending_notifications.as_ref()),
+                Some(&ctx.notify_tx),
+                &res,
+            );
+        }
         crate::services::insurgency_services::notify_stronghold_destruction(&ctx.db, Some(&ctx.quasar_gateway), Some(&ctx.pending_notifications), Some(&ctx.notify_tx), &sh_info);
     }
 

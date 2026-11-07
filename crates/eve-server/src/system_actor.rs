@@ -893,7 +893,9 @@ impl SystemRegistry {
                                     } else {
                                         let _ = reply.send(None);
                                     }
-                                } else if let Some((applied, destroyed, ball_opt)) = crate::services::mobile_deployables::handle_ball_damage_in_actor(&db_opt, &sde_opt, solar_system_id, ball_id, damage, &mut ballpark, now_unix).or_else(|| ballpark.apply_damage_to_ball(ball_id, damage)) {
+                                } else if let Some((applied, destroyed, ball_opt)) = crate::services::mobile_deployables::handle_ball_damage_in_actor(&db_opt, &sde_opt, solar_system_id, ball_id, damage, &mut ballpark, now_unix)
+                                    .or_else(|| crate::services::fw_gameplay::fw_gameplay_insurgency::handle_fob_ball_damage_in_actor(db_opt.as_deref(), solar_system_id, ball_id, damage, &mut ballpark, now_unix))
+                                    .or_else(|| ballpark.apply_damage_to_ball(ball_id, damage)) {
                                     if applied > 0.0 || damage.total() > 0.0 {
                                         let entry = rah_incoming_damage.entry(ball_id).or_insert([0.0; 4]);
                                         entry[0] += damage.em;

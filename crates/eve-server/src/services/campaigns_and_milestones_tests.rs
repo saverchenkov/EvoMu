@@ -285,6 +285,7 @@ async fn info_gathering_milestones_and_community_tracks() {
         .code,
         "MilestonePrerequisiteNotMet"
     );
+    ctx.db.clock().advance_secs(7_200);
     assert_eq!(
         handle(
             &ctx,

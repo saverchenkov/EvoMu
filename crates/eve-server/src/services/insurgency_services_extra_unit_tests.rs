@@ -228,13 +228,17 @@ async fn stronghold_destruction_outcomes_and_notifications() {
             .is_none()
     );
 
-    // Transition to Active and set suppression to 400 so +500 reaches stage 5 (900)
+    // Transition to Active and set suppression to 400 on fob_sys (with 5 Stage-5 suppressed campaign systems)
+    // so +500 on fob_sys reaches stage 5 (900) upon destruction.
     let now = ctx.now_unix();
     with_insurgency_runtime(&ctx, |rt| {
         let c = rt.campaigns.get_mut(&camp_id).unwrap();
         c.forecasting_end_unix = now.saturating_sub(500);
         c.active_end_unix = now + 5000;
         c.winddown_end_unix = now + 10_000;
+        for offset in 1..=5_u32 {
+            c.suppression_points.insert(fob_sys + offset, 1_000);
+        }
         c.suppression_points.insert(fob_sys, 400);
     });
 

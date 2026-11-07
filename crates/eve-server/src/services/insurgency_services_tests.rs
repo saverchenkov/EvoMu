@@ -59,17 +59,20 @@ async fn insurgency_services_stages_campaigns_and_rpc_mutations() {
     init_insurgency_campaign(&ctx, camp_id, FACTION_GURISTAS, 500_001, fob_sys, vec![fob_sys]);
 
     let sh_id = ensure_stronghold_in_space(&ctx, camp_id).await.unwrap();
-    assert_eq!(sh_id, 1_898_000_000 + camp_id * 10 + 1);
-    // In Forecasting phase, stronghold is invulnerable
+    assert_eq!(sh_id, PIRATE_FOB_STRUCTURE_BASE_ID + camp_id);
+    // In Forecasting phase (and before 5 Stage-5 suppressed systems), FOB/stronghold is invulnerable
     assert!(is_insurgency_stronghold_invulnerable(&ctx, fob_sys, sh_id));
 
-    // Switch campaign into Active phase
+    // Switch campaign into Active phase and reach 5 Stage-5 suppressed systems while leaving fob_sys at 0
     let now = ctx.now_unix();
     with_insurgency_runtime(&ctx, |rt| {
         if let Some(c) = rt.campaigns.get_mut(&camp_id) {
             c.forecasting_end_unix = now.saturating_sub(100);
             c.active_end_unix = now + 86_400;
             c.winddown_end_unix = now + 2 * 86_400;
+            for offset in 1..=5_u32 {
+                c.suppression_points.insert(fob_sys + offset, 1_000);
+            }
         }
     });
     assert!(!is_insurgency_stronghold_invulnerable(&ctx, fob_sys, sh_id));

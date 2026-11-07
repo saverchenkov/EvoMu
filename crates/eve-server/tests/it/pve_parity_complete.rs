@@ -620,13 +620,25 @@ async fn test_pve_insurgency_campaigns_and_strongholds_complete() {
     let s_pts = snap_s_tup[1].dict_get("suppressionPoints").and_then(|v| v.as_i64()).unwrap_or(0);
     assert!(s_pts > 0, "Caldari complex capture pulse near beacon awards suppression points");
 
-    // 7. Pirate stronghold destruction via real combat damage
+    // 7. Pirate stronghold / FOB destruction via real combat damage (Stage-5 Suppression + 3h±1h ArmorReinforced)
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&PILOT_INSURGENT) {
             ch.solar_system_id = fob_sys;
         }
     });
     sess.solar_system_id = Some(fob_sys);
+
+    let dmg = eve_destiny::DamageVector { em: 1.0e7, thermal: 1.0e7, kinetic: 1.0e7, explosive: 1.0e7 };
+    let pre_s5_res = fob_handle.apply_damage_with_attacker(stronghold_id, dmg, Some(PILOT_INSURGENT)).await;
+    assert!(matches!(pre_s5_res, Ok(Some((0.0, false, _)))), "FOB must be invulnerable before 5 Stage-5 suppressed systems");
+
+    with_insurgency_runtime(&ctx, |rt| {
+        if let Some(c) = rt.campaigns.get_mut(&camp_id) {
+            for offset in 1..=5_u32 {
+                c.suppression_points.insert(fob_sys + offset, 1_000);
+            }
+        }
+    });
 
     // BF-PVE-STRONGHOLD-NOTIFY-TEST-03: Drain prior notifications and Quasar cache before destruction
     ctx.drain_notifications_for_char(PILOT_INSURGENT);
@@ -636,10 +648,25 @@ async fn test_pve_insurgency_campaigns_and_strongholds_complete() {
         q.current_bytes = 0;
     }
 
-    let dmg = eve_destiny::DamageVector { em: 1.0e7, thermal: 1.0e7, kinetic: 1.0e7, explosive: 1.0e7 };
+    let phase1_res = fob_handle.apply_damage_with_attacker(stronghold_id, dmg, Some(PILOT_INSURGENT)).await;
+    assert!(matches!(phase1_res, Ok(Some((applied, false, _))) if applied > 0.0), "Phase 1 hit must deplete shield/armor into ArmorReinforced without one-shotting hull");
+    let mid_hit_res = fob_handle.apply_damage_with_attacker(stronghold_id, dmg, Some(PILOT_INSURGENT)).await;
+    assert!(matches!(mid_hit_res, Ok(Some((0.0, false, _)))), "FOB must be invulnerable during ArmorReinforced timer");
+
+    let reinf_until = ctx.db.with_snapshot(|s| s.insurgency_runtime.fob_armor_reinforced_until.get(&camp_id).copied().unwrap_or(0));
+    let delta = reinf_until.saturating_sub(ctx.now_unix()) + 10;
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(c) = s.insurgency_runtime.campaigns.get_mut(&camp_id) {
+            c.active_end_unix = c.active_end_unix.max(ctx.now_unix() + delta + 3_600);
+            c.winddown_end_unix = c.active_end_unix + 86_400;
+        }
+    });
+    ctx.db.clock().advance_secs(delta);
+
     let res = fob_handle.apply_damage_with_attacker(stronghold_id, dmg, Some(PILOT_INSURGENT)).await;
-    assert!(matches!(res, Ok(Some((_, true, _)))), "Stronghold structure ball must be destroyed by combat damage");
+    assert!(matches!(res, Ok(Some((_, true, _)))), "Stronghold structure ball must be destroyed after ArmorReinforced expires");
     assert!(fob_handle.get_ball_snapshot(stronghold_id).await.unwrap().is_none(), "Destroyed stronghold removed from ballpark");
+    assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.campaign_outcomes.get(&camp_id).cloned()), Some("EmpireWin".to_string()));
 
     // Stronghold site is marked completed in dungeonInstanceCacheMgr
     let inst_after = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetPirateInsurgencyInstances", &[PyRep::Integer(fob_sys as i64)], &kw, None).await.expect("GetPirateInsurgencyInstances after destruction");
@@ -5402,6 +5429,7 @@ async fn test_pve_milestones_progression_tracking() {
     assert_eq!(skipped_err.code, "MilestonePrerequisiteNotMet");
 
     // 4. Claim Milestone 1: grants rewards once, logs journal, emits OnLoginMilestoneAchieved
+    ctx.db.clock().advance_secs(7_200);
     let bal_before = ctx.db.with_snapshot(|s| s.characters[&PILOT_A].balance.0);
     let claim1_rep = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
         .await
@@ -5431,6 +5459,7 @@ async fn test_pve_milestones_progression_tracking() {
     assert_eq!(dup_err.code, "MilestoneAlreadyClaimed");
 
     // 5. Progression advances: Milestone 2 can now be claimed
+    ctx.db.clock().advance_secs(7_200);
     let claim2_rep = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(2)])
         .await
         .expect("ClaimRewards(2) must succeed after Milestone 1");

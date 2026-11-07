@@ -63,6 +63,7 @@ async fn test_milestones_task_tracker_and_fighters() {
         .expect("ProcessCharacterLogon");
     assert_eq!(logon_res, PyRep::None);
 
+    ctx.db.clock().advance_secs(7_200);
     let claim_ok = ctx
         .dispatch_rpc(&mut sess, "milestoneMgr", None, "ClaimRewards", &[PyRep::Integer(1)], &kw, None)
         .await

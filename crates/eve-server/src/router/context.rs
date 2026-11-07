@@ -218,7 +218,16 @@ impl ServerContext {
                         if let Some(pws) = pw.upgrade() { crate::services::pve_exploration::notify_pve_destruction_events(&db, &pws, &tx, kid, clr, esc, step); }
                     }
                     crate::services::pve_dungeon_runtime::on_dungeon_npc_killed_core(&sys, &db, &sde, pw.upgrade().as_deref(), Some(&tx), sys_id, npc_id, killer_opt.unwrap_or(0)).await;
-                    if let Some(sh_info) = crate::services::insurgency_services::on_insurgency_stronghold_destroyed_core(&sys, &db, sys_id, npc_id, killer_opt).await {
+                    if let Some((sh_info, res_opt)) = crate::services::insurgency_services::on_insurgency_stronghold_destroyed_with_sde(&sys, &db, Some(&sde), sys_id, npc_id, killer_opt).await {
+                        if let Some(res) = res_opt {
+                            crate::services::fw_gameplay::fw_gameplay_insurgency::emit_campaign_resolution_effects_core(
+                                &db,
+                                gww.upgrade().as_deref(),
+                                pw.upgrade().as_deref(),
+                                Some(&tx),
+                                &res,
+                            );
+                        }
                         crate::services::insurgency_services::notify_stronghold_destruction(
                             &db,
                             gww.upgrade().as_deref(),

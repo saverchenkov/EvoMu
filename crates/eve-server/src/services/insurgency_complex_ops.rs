@@ -733,6 +733,7 @@ pub async fn activate_outpost_raid_gate_in_space(
             message: "Active ship ball not found in space".into(),
         });
     };
+    crate::services::fw_gameplay::check_gate_tackle_and_nav_locks(ctx, &sys_handle, ship_id, &sb).await?;
     let gate_pos = sys_handle
         .get_ball_snapshot(gate_id)
         .await
@@ -749,6 +750,7 @@ pub async fn activate_outpost_raid_gate_in_space(
 
     let pocket = raid.size.pocket_position();
     let _ = sys_handle.set_ball_position(ship_id, pocket).await;
+    let _ = sys_handle.set_speed_fraction(ship_id, 0.0).await;
     ctx.db.with_mut_snapshot(|snap| {
         snap.item_positions.insert(ship_id, [pocket.x, pocket.y, pocket.z]);
     });

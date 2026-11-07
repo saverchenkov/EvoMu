@@ -337,6 +337,58 @@ pub async fn ensure_warzone_sites_spawned(ctx: &ServerContext, sys_id: u32) {
     }
 }
 
+/// Verifies tackle, warp state, navigation-lock modules, immobilizing modules, and Warp Core Stabilizers
+/// before activating an acceleration gate.
+pub(crate) async fn check_gate_tackle_and_nav_locks(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    ship_id: i64,
+    ship_ball: &Ball,
+) -> Result<(), BridgeRpcError> {
+    if matches!(ship_ball.mode, MovementMode::Warp { .. }) {
+        return Err(BridgeRpcError {
+            code: "ShipInWarp".into(),
+            message: "Cannot activate an acceleration gate while warping".into(),
+        });
+    }
+    if let Err(reason) = crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp") {
+        return Err(BridgeRpcError {
+            code: "ShipNavigationLocked".into(),
+            message: reason.message,
+        });
+    }
+    if let Err(reason) = crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "warp") {
+        return Err(BridgeRpcError {
+            code: "ImmobilizingModuleActive".into(),
+            message: reason.message,
+        });
+    }
+    let has_wcs = ctx.db.with_snapshot(|snap| {
+        snap.items.values().any(|item| {
+            item.location_id == ship_id
+                && matches!(item.flag as u16, 11..=34)
+                && ctx.sde.types.get(&item.type_id).is_some_and(|t| t.group_id == 315)
+        })
+    });
+    if has_wcs {
+        return Err(BridgeRpcError {
+            code: "WarpCoreStabilizerRestricted".into(),
+            message: "Ships fitted with Warp Core Stabilizers cannot activate this acceleration gate".into(),
+        });
+    }
+    let is_scrambled = sys_handle
+        .is_ball_scrambled(ship_id)
+        .await
+        .unwrap_or_else(|_| sys_handle.is_ball_scrambled_sync(ship_id));
+    if is_scrambled {
+        return Err(BridgeRpcError {
+            code: "WarpScrambled".into(),
+            message: "Cannot activate acceleration gate while warp scrambled or disrupted".into(),
+        });
+    }
+    Ok(())
+}
+
 /// Validates a live ship ball's solar system, `<= 2,500 m` proximity, and FW complex hull-size/meta/faction
 /// rules on `keeper.ActivateAccelerationGate`, then warps the ship into the complex capture pocket and
 /// registers occupancy for `tick_fw_gameplay`.
@@ -402,14 +454,29 @@ pub async fn activate_fw_complex_gate_in_space(
             ),
         });
     }
+    check_gate_tackle_and_nav_locks(ctx, &sys_handle, ship_id, &ship_ball).await?;
 
     let ship_type_id = ship_ball.type_id;
-    let (group_id, meta_group_id, faction_id) = ctx
+    let (group_id, meta_group_id, faction_id, rig_size, sde_mass) = ctx
         .sde
         .types
         .get(&ship_type_id)
-        .map(|t| (t.group_id, t.meta_group_id, t.faction_id))
-        .unwrap_or((0, None, None));
+        .map(|t| {
+            (
+                t.group_id,
+                t.meta_group_id,
+                t.faction_id,
+                t.default_attributes.get(&1547).copied().unwrap_or(0.0),
+                t.default_attributes.get(&4).copied().unwrap_or(ship_ball.mass),
+            )
+        })
+        .unwrap_or((0, None, None, 0.0, ship_ball.mass));
+    if ship_type_id == 670 || group_id == 29 {
+        return Err(BridgeRpcError {
+            code: "ShipTypeNotAllowedInComplex".into(),
+            message: "Capsules cannot activate FW complex acceleration gates".into(),
+        });
+    }
 
     let is_empire_faction = matches!(faction_id, None | Some(500_001..=500_004));
     let is_t1_or_navy_frigate = group_id == 25
@@ -463,21 +530,50 @@ pub async fn activate_fw_complex_gate_in_space(
                 return too_large("Large");
             }
         }
-        _ => {}
+        _ => {
+            let is_capital_hull = rig_size >= 4.0
+                || sde_mass > 500_000_000.0
+                || ship_ball.mass > 500_000_000.0
+                || matches!(
+                    group_id,
+                    30 | 485 | 513 | 547 | 659 | 883 | 902 | 1538 | 4594 | 5120
+                );
+            if is_capital_hull {
+                return too_large(&tier);
+            }
+        }
     }
 
     let pocket_pos = pocket_pos_for_complex(gate_id);
-    if let Ok(mut bp) = sys_handle.ballpark.write() {
-        if let Some(b) = bp.balls.get_mut(&ship_id) {
-            b.position = pocket_pos;
-            b.velocity = DVec3::ZERO;
-            b.mode = MovementMode::Stop;
+    let existing_occ: Vec<(i64, i64)> = ctx.db.with_snapshot(|snap| {
+        snap.fw_runtime
+            .complex_occupants
+            .get(&gate_id)
+            .cloned()
+            .unwrap_or_default()
+    });
+    let mut someone_on_grid = false;
+    for (other_c, other_s) in existing_occ {
+        if other_c == char_id {
+            continue;
+        }
+        if let Ok(Some((_, ob))) = sys_handle.get_ball_snapshot(other_s).await {
+            if ob.position.distance(pocket_pos) <= 30_000.0
+                && !matches!(ob.mode, MovementMode::Warp { .. })
+            {
+                someone_on_grid = true;
+                break;
+            }
         }
     }
+    let _ = sys_handle.set_ball_position(ship_id, pocket_pos).await;
+    let _ = sys_handle.set_speed_fraction(ship_id, 0.0).await;
     let now_unix = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions
+            .insert(ship_id, [pocket_pos.x, pocket_pos.y, pocket_pos.z]);
         let occ = snap.fw_runtime.complex_occupants.entry(gate_id).or_default();
-        if occ.is_empty() {
+        if !someone_on_grid {
             // The capture timer only runs while a pilot holds the pocket: restart its step clock on entry.
             snap.fw_runtime.complex_last_step_unix.insert(gate_id, now_unix);
         }
@@ -704,7 +800,12 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
                 continue;
             }
             if let Ok(Some((_, b))) = sys_handle.get_ball_snapshot(shid).await {
-                if b.position.distance(pocket) <= 30_000.0 {
+                let is_pod = b.type_id == 670
+                    || ctx.sde.types.get(&b.type_id).is_some_and(|t| t.group_id == 29);
+                if !is_pod
+                    && !matches!(b.mode, MovementMode::Warp { .. })
+                    && b.position.distance(pocket) <= 30_000.0
+                {
                     let fac = ctx
                         .db
                         .with_snapshot(|s| s.characters.get(&cid).and_then(|c| c.war_faction_id));
@@ -714,15 +815,16 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
                 }
             }
         }
-        if present.is_empty() {
-            continue;
-        }
-        let first_fac = present[0].1;
         let hold_timer = |ctx: &ServerContext| {
             ctx.db.with_mut_snapshot(|s| {
                 s.fw_runtime.complex_last_step_unix.insert(gid, now_unix);
             });
         };
+        if present.is_empty() {
+            hold_timer(ctx);
+            continue;
+        }
+        let first_fac = present[0].1;
         if present.iter().any(|&(_, f)| f != first_fac) {
             // Contested by opposing militia ships inside the capture pocket -> timer paused!
             hold_timer(ctx);
@@ -762,7 +864,23 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
             let Some(entry) = snap.fw_runtime.fw_complexes.get_mut(&gid) else {
                 return false;
             };
-            entry.3 = (entry.3 + delta_pct).clamp(0.0, 100.0);
+            let prev_cap = snap.fw_runtime.complex_capturing_faction.get(&gid).copied();
+            if prev_cap.is_some_and(|cf| cf != first_fac) && entry.3 > 0.0 {
+                if entry.3 > delta_pct {
+                    entry.3 = (entry.3 - delta_pct).max(0.0);
+                } else {
+                    let rem = (delta_pct - entry.3).clamp(0.0, 100.0);
+                    entry.3 = rem;
+                    if rem > 0.0 {
+                        snap.fw_runtime.complex_capturing_faction.insert(gid, first_fac);
+                    } else {
+                        snap.fw_runtime.complex_capturing_faction.remove(&gid);
+                    }
+                }
+            } else {
+                snap.fw_runtime.complex_capturing_faction.insert(gid, first_fac);
+                entry.3 = (entry.3 + delta_pct).clamp(0.0, 100.0);
+            }
             if entry.3 >= 100.0 && !entry.4 {
                 entry.4 = true;
                 let cd_key = format!("{sys_id}:{tier}");
@@ -772,6 +890,7 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
                 snap.fw_runtime.complex_guards_cleared.remove(&gid);
                 snap.fw_runtime.complex_seconds_elapsed.remove(&gid);
                 snap.fw_runtime.complex_last_step_unix.remove(&gid);
+                snap.fw_runtime.complex_capturing_faction.remove(&gid);
                 true
             } else {
                 false
@@ -1004,6 +1123,9 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
             .map(|&(cid, f, _)| (cid, f))
             .collect();
         if all_on_grid.is_empty() {
+            ctx.db.with_mut_snapshot(|s| {
+                s.fw_runtime.complex_last_step_unix.insert(bf_id, now_unix);
+            });
             continue;
         }
         let last_step = ctx.db.with_snapshot(|s| {

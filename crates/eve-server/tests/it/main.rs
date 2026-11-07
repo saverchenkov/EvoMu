@@ -524,3 +524,4 @@ mod navigation_warp_tunnel_immobility;
 mod binding_checkout_and_starter_plex_security;
 mod superweapon_atomic_validation;
 mod disconnect_emergency_warp_and_cyno;
+mod r8_shard_k_fw_fob_milestone_exploits;

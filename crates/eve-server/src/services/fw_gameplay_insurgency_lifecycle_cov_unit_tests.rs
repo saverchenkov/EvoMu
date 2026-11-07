@@ -11,6 +11,9 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
     make_fighter_ctx_and_session, make_fighter_type,
 };
 use crate::services::fw_gameplay::fw_gameplay_insurgency::record_insurgency_contribution;
+use crate::services::insurgency_services::{
+    PIRATE_STRONGHOLD_ANGEL_TYPE, PIRATE_STRONGHOLD_GURISTAS_TYPE,
+};
 use eve_db::durable_domain_types::{PersistedInsurgencyCampaign, PersistedInsurgencySiteRecord};
 use eve_db::snapshot_ext::FwSystemOccupationRecord;
 use eve_db::{CharacterRecord, IskCents, VirtualServerClock};
@@ -468,16 +471,6 @@ async fn tick_insurgency_surrender_unlock_auto_frontline_phases_and_ambition_tri
                 corruption_reward: 100.0,
                 completed: false,
             });
-        snap.insurgency_runtime
-            .insurgency_instances
-            .push(PersistedInsurgencySiteRecord {
-                instance_id: 2,
-                solar_system_id: fl_a,
-                site_type: "PirateStronghold".into(),
-                name: "Pirate Stronghold".into(),
-                corruption_reward: 500.0,
-                completed: false,
-            });
     });
 
     // Tick 1: unlocks fl_a I-Hub, auto-seeds campaign in Forecasting phase (4 systems via BFS)
@@ -489,13 +482,16 @@ async fn tick_insurgency_surrender_unlock_auto_frontline_phases_and_ambition_tri
         assert_eq!(snap.system_states[&fl_a].fw_contested_pct, 100.0);
         assert_eq!(snap.fw_runtime.ihub_vulnerable.get(&fl_a).copied(), Some(true));
         assert_eq!(snap.fw_runtime.ihub_vulnerable.get(&fl_b).copied(), Some(false));
-        assert_eq!(snap.insurgency_runtime.insurgency_instances.len(), 2);
-        assert!(snap
-            .insurgency_runtime
-            .insurgency_instances
-            .iter()
-            .all(|s| s.site_type == "PirateStronghold" && s.instance_id != 1));
         let (&id, camp) = snap.insurgency_runtime.campaigns.iter().next().unwrap();
+        assert_eq!(snap.insurgency_runtime.insurgency_instances.len(), 1);
+        assert_eq!(
+            snap.insurgency_runtime.insurgency_instances[0].site_type,
+            "PirateStronghold"
+        );
+        assert_eq!(
+            snap.insurgency_runtime.insurgency_instances[0].instance_id,
+            PIRATE_FOB_STRUCTURE_BASE_ID + id
+        );
         assert_eq!(camp.systems.len(), 4);
         assert!(!snap.insurgency_runtime.active_state_notified.contains(&id));
         id
