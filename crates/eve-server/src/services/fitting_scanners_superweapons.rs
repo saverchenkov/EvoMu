@@ -262,29 +262,29 @@ pub fn apply_active_dbuffs_and_system_effects_to_ship_attrs(
     if let Some(sys_id) = sys_id_opt {
         if (32_000_000..=32_999_999).contains(&sys_id) {
             let pocket_weather = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-                reg.abyssal_pockets.values().find(|p| p.abyssal_solar_system_id == sys_id || p.ship_id == ship_id).map(|p| (p.weather, p.weather_penalty_pct, p.weather_bonus_pct))
+                reg.abyssal_pockets
+                    .values()
+                    .find(|p| p.abyssal_solar_system_id == sys_id || p.ship_id == ship_id)
+                    .map(|p| (p.weather, p.weather_penalty_pct, p.weather_bonus_pct, p.saved_ship_attrs.clone()))
             });
-            if let Some((w, pen, bon)) = pocket_weather {
+            if let Some((w, pen, bon, saved)) = pocket_weather {
                 use crate::services::pve_special_sites::AbyssalWeatherKind;
-                match w {
-                    AbyssalWeatherKind::Firestorm => {
-                        if let Some(v) = attrs.get_mut(&110) { *v *= 1.0 + pen / 100.0; }
-                        if let Some(v) = attrs.get_mut(&265) { *v *= 1.0 + bon / 100.0; }
-                    }
-                    AbyssalWeatherKind::Gamma => {
-                        if let Some(v) = attrs.get_mut(&272) { *v *= 1.0 + pen / 100.0; }
-                        if let Some(v) = attrs.get_mut(&263) { *v *= 1.0 + bon / 100.0; }
-                    }
-                    AbyssalWeatherKind::Electrical => {
-                        if let Some(v) = attrs.get_mut(&271) { *v *= 1.0 + pen / 100.0; }
-                        if let Some(v) = attrs.get_mut(&55) { *v *= 1.0 - bon / 100.0; }
-                    }
-                    AbyssalWeatherKind::Exotic => {
-                        if let Some(v) = attrs.get_mut(&273) { *v *= 1.0 + pen / 100.0; }
-                        if let Some(v) = attrs.get_mut(&564) { *v *= 1.0 + bon / 100.0; }
-                    }
-                    AbyssalWeatherKind::Dark => {
-                        if let Some(v) = attrs.get_mut(&37) { *v *= 1.0 + bon / 100.0; }
+                let (pen_attr, bon_attr, bon_mult) = match w {
+                    AbyssalWeatherKind::Firestorm => (Some(110), 265, 1.0 + bon / 100.0),
+                    AbyssalWeatherKind::Gamma => (Some(272), 263, 1.0 + bon / 100.0),
+                    AbyssalWeatherKind::Electrical => (Some(271), 55, 1.0 - bon / 100.0),
+                    AbyssalWeatherKind::Exotic => (Some(273), 564, 1.0 + bon / 100.0),
+                    AbyssalWeatherKind::Dark => (None, 37, 1.0 + bon / 100.0),
+                };
+                for (aid, factor) in pen_attr
+                    .into_iter()
+                    .map(|id| (id, 1.0 + pen / 100.0))
+                    .chain(std::iter::once((bon_attr, bon_mult)))
+                {
+                    if !saved.contains_key(&aid) {
+                        if let Some(v) = attrs.get_mut(&aid) {
+                            *v *= factor;
+                        }
                     }
                 }
             }

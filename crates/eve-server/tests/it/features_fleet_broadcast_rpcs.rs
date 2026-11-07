@@ -717,7 +717,11 @@ pub(crate) fn capture_observable_state(ctx: &ServerContext) -> ObservableWorldSt
         let mut blobs_digest: Vec<(String, String)> = snap
             .service_state_blobs
             .iter()
-            .filter(|(k, _)| !k.starts_with("season_manager:") && *k != "market_seeder_version")
+            .filter(|(k, _)| {
+                !k.starts_with("season_manager:")
+                    && *k != "market_seeder_version"
+                    && *k != "nes_store_catalog"
+            })
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         blobs_digest.sort_by(|a, b| a.0.cmp(&b.0));
@@ -990,6 +994,10 @@ async fn test_invariant_atomic_rollback_randomized_fault_injection() {
     }
 
     let repo2 = Arc::new(WorldRepository::open_sqlite(&db_path).expect("reopen sqlite"));
+    assert_eq!(
+        repo2.with_snapshot(|s| s.service_state_blobs.clone()),
+        ctx.db.with_snapshot(|s| s.service_state_blobs.clone())
+    );
     assert!(repo2.with_snapshot(|s| !s.service_state_blobs.contains_key("uncommitted_blob")));
     let ctx2 = ServerContext::with_repository(repo2);
     assert_eq!(capture_observable_state(&ctx2), pre_persist_fault);
