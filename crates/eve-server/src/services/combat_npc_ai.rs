@@ -1367,27 +1367,12 @@ pub async fn destroy_specialized_npc_with_hint(
     crate::services::combat_crimewatch::combat_npc_encounters::step_encounter_wave_on_kill(ctx, solar_system_id, npc_ball_id, pos).await;
 
     // PvE exploration sites & escalations: progress waves, clear sites, roll escalations (`feat:pve.escalations`, `feat:pve.expeditions`)
-    crate::services::pve_exploration::handle_pve_site_npc_destruction(
-        ctx,
-        solar_system_id,
-        npc_ball_id,
-        killer_char_id,
-    ).await;
+    crate::services::pve_exploration::handle_pve_site_npc_destruction(ctx, solar_system_id, npc_ball_id, killer_char_id).await;
 
     // Multi-room dungeon runtime triggers (`OnKill`, gate unlocks, wave spawns, completion) (`feat:pve.dungeon-system`)
-    crate::services::pve_dungeon_runtime::on_dungeon_npc_killed(
-        ctx,
-        solar_system_id,
-        npc_ball_id,
-        killer_char_id,
-    )
-    .await;
+    crate::services::pve_dungeon_runtime::on_dungeon_npc_killed(ctx, solar_system_id, npc_ball_id, killer_char_id).await;
 
-    crate::services::combat_crimewatch::combat_npc_encounters::record_npc_kill_progression(
-        ctx,
-        killer_char_id,
-        npc_type_id,
-    );
+    crate::services::combat_crimewatch::combat_npc_encounters::record_npc_kill_progression(ctx, killer_char_id, npc_type_id);
 
     (wreck_id, effective_bounty, dropped_types)
 }

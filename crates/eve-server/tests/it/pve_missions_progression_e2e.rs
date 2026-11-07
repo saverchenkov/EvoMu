@@ -3,7 +3,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::parity_shard_2_common::{
+use crate::pve_e2e_common::{
     bind_service, buy_fit_combat_ship, create_player_pilot, drain_all_notifications,
     fly_stargates_to, fresh_player_ctx, kv_get, login_existing_player, reload_ctx_from_sqlite,
     rpc_ok, undock_from_station, warp_and_dock_at_station, warp_and_engage_ball, JITA_STATION,

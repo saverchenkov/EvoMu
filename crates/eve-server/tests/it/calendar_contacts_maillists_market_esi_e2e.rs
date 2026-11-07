@@ -14,7 +14,7 @@ use crate::industry_live_support::{
     board_loaded_freighter, buy, deploy_online_upwell, fuel_cargo, fund_pilots, int, items_at,
     login, move_item, rpc, train_skills, upwell_cargo, PERIMETER_SYS, PILOT_1, PILOT_2,
 };
-use crate::parity_shard_1_support::{
+use crate::esi_live_e2e_support::{
     assert_etag_304, cleanup_sqlite_files, esi_call, issue_token, reload_repo, temp_db_path,
 };
 use eve_proto::PyRep;

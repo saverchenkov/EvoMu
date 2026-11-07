@@ -15,7 +15,7 @@ use crate::industry_live_support::{
     fund_pilots, install, int, items_at, login, move_item, nearest_system, rpc, train_skills,
     travel, upwell_cargo, warp_to, JITA_STATION, PERIMETER_SYS, PILOT_1, PILOT_2,
 };
-use crate::parity_shard_1_support::{
+use crate::esi_live_e2e_support::{
     assert_etag_304, cleanup_sqlite_files, destroy_target_live, esi_call, issue_token, reload_repo,
     temp_db_path,
 };

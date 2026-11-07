@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 
 use crate::common;
-use crate::parity_shard_5_crimewatch_sec_status_tests::{
+use crate::crimewatch_sec_status_tags_e2e::{
     find_timer_notification, fire_and_destroy_target, login_player_session, open_sqlite_ctx, rpc,
     undock_player_to_space, TempSqliteDb, ASABONA_SYSTEM, SHIP_VELATOR,
 };

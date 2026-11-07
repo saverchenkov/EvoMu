@@ -14,7 +14,7 @@ use crate::industry_live_support::{
     small_mineral_bp, train_skills, upwell_cargo, JITA_STATION, PERIMETER_SYS, PILOT_1,
     PILOT_2,
 };
-use crate::parity_shard_1_support::{
+use crate::esi_live_e2e_support::{
     assert_etag_304, cleanup_sqlite_files, deploy_online_upwell_slow, dock_station_slow, esi_call,
     issue_token, reload_repo, temp_db_path, travel_slow,
 };

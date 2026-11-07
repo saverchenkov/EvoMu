@@ -17,7 +17,7 @@ use eve_server::services::pve_special_sites::{read_pve_special_reg, with_pve_spe
 use eve_server::services::pve_exploration::{
     ensure_system_pve_sites_seeded, with_pve_exploration_reg, HackingNodeKind,
 };
-use crate::parity_shard_2_common::{
+use crate::pve_e2e_common::{
     bind_service, buy_fit_combat_ship, buy_item_at_station, configure_sqlite_blob_and_reload,
     create_player_pilot, drain_all_notifications, ensure_skills_for_types, fly_stargates_to,
     fresh_player_ctx, fund_pilot_isk, kv_get, login_existing_player, move_ship_to_ball,

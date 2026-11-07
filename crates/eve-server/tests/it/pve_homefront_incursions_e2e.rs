@@ -14,7 +14,7 @@ use eve_server::services::pve_special_sites::{
     read_pve_special_reg, with_pve_special_reg as with_incursion_reg,
 };
 use eve_server::services::pve_special_sites_combat::get_drifter_hive_for_system;
-use crate::parity_shard_2_common::{
+use crate::pve_e2e_common::{
     bind_service, buy_fit_combat_ship, buy_fit_combat_ship_with_ammo, buy_item_at_station,
     create_player_pilot, drain_all_notifications, ensure_skills_for_types,
     fleet_warp_and_engage_ball, fly_stargates_to, fresh_player_ctx, fund_pilot_isk,

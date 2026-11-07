@@ -19,7 +19,7 @@ use eve_server::services::pve_exploration::{
 use eve_server::services::wormhole_pve_escalations::{
     process_wormhole_sites_on_downtime, step_wormhole_pve_system,
 };
-use crate::parity_shard_2_common::{
+use crate::pve_e2e_common::{
     bind_service, buy_fit_combat_ship, buy_fit_combat_ship_with_ammo, buy_item_at_station,
     create_player_pilot, drain_all_notifications, find_kspace_entrance_to_c5,
     fleet_warp_and_engage_ball, fly_stargates_to, fresh_player_ctx, fund_pilot_isk,
@@ -202,7 +202,7 @@ async fn test_wormhole_sentries_capital_escalations_cap_drifter_downtime_e2e() {
     fund_pilot_isk(&ctx, &mut sess2, 12).await;
     fund_pilot_isk(&ctx, &mut sess3, 12).await;
     fund_pilot_isk(&ctx, &mut cyno_sess, 4).await;
-    crate::parity_shard_2_common::ensure_skills_for_types(&ctx, &mut cyno_sess, cyno_cid, JITA_STATION, &[11_963, 21_096, 28_758, 30_488, 3412, 25_810, 25_811]).await;
+    crate::pve_e2e_common::ensure_skills_for_types(&ctx, &mut cyno_sess, cyno_cid, JITA_STATION, &[11_963, 21_096, 28_758, 30_488, 3412, 25_810, 25_811]).await;
     for (sid, tgt_lvl) in [(3412_i64, 5_i64), (25_810, 5), (25_811, 5)] {
         rpc_ok(&ctx, &mut cyno_sess, "skillMgr2", "SaveSkillQueue", &[PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(sid), PyRep::Integer(tgt_lvl)])])]).await;
         ctx.advance_secs(86_400 * 45);
@@ -212,9 +212,9 @@ async fn test_wormhole_sentries_capital_escalations_cap_drifter_downtime_e2e() {
     let (dread_id, guns1) = buy_fit_combat_ship_with_ammo(&ctx, &mut sess1, cid1, JITA_STATION, 19_720, 37_296, 17_686, 3, 100).await;
     let (carrier_id, guns2) = buy_fit_combat_ship_with_ammo(&ctx, &mut sess2, cid2, JITA_STATION, 19_722, 20_452, 17_670, 3, 5_000).await;
     let (dread2_id, guns3) = buy_fit_combat_ship_with_ammo(&ctx, &mut sess3, cid3, JITA_STATION, 19_720, 37_298, 17_686, 3, 100).await;
-    crate::parity_shard_2_common::ensure_skills_for_types(&ctx, &mut sess1, cid1, JITA_STATION, &[20_280]).await;
-    crate::parity_shard_2_common::ensure_skills_for_types(&ctx, &mut sess2, cid2, JITA_STATION, &[20_280]).await;
-    crate::parity_shard_2_common::ensure_skills_for_types(&ctx, &mut sess3, cid3, JITA_STATION, &[20_280]).await;
+    crate::pve_e2e_common::ensure_skills_for_types(&ctx, &mut sess1, cid1, JITA_STATION, &[20_280]).await;
+    crate::pve_e2e_common::ensure_skills_for_types(&ctx, &mut sess2, cid2, JITA_STATION, &[20_280]).await;
+    crate::pve_e2e_common::ensure_skills_for_types(&ctx, &mut sess3, cid3, JITA_STATION, &[20_280]).await;
     let mut sieges = Vec::new();
     for (s_ref, sid_cap, fuel_tid) in [(&mut sess1, dread_id, 16_274_u32), (&mut sess2, carrier_id, 17_889_u32), (&mut sess3, dread2_id, 16_274_u32)] {
         let cid_cap = s_ref.character_id.unwrap();
