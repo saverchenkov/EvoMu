@@ -511,14 +511,18 @@ async fn call_component_from_client_item_trader_validation_and_trade_execution()
         "NotAnItemTrader"
     );
 
-    // Find a real non-insurgency itemTrader type and recipe in SDE
+    // Find a real non-insurgency itemTrader type and recipe in SDE deterministically
     let recipes_table = ctx.sde.load_cfsd_nested("res:/staticdata/itemtraderrecipes.fsdbinary").expect("itemtraderrecipes");
-    let (trader_tid, recipe_id, _range_m) = ctx
+    let mut candidate_tids: Vec<u32> = ctx
         .sde
         .types
         .keys()
         .copied()
         .filter(|&tid| !matches!(tid, 78_868..=78_871 | 79_115 | 79_116))
+        .collect();
+    candidate_tids.sort_unstable();
+    let (trader_tid, recipe_id, range_m) = candidate_tids
+        .into_iter()
         .find_map(|tid| {
             let (recipes, range_m) = ctx.sde.item_trader_component_for_type(tid).ok()??;
             let rid = *recipes.iter().find(|r| recipes_table.contains_key(&r.to_string()))?;
@@ -526,10 +530,12 @@ async fn call_component_from_client_item_trader_validation_and_trade_execution()
         })
         .expect("SDE itemTrader type with recipe");
 
+    let trader_radius = ctx.sde.types.get(&trader_tid).map(|t| t.radius).unwrap_or(500.0);
+    let out_of_range_x = trader_radius + 50.0 + range_m + 10_000.0;
     let sys_h = ctx.systems.get_or_spawn(sys_id);
     let _ = sys_h
         .spawn_ball(Ball {
-            id: ship_id, type_id: 20_185, position: DVec3::new(50_000.0, 0.0, 0.0),
+            id: ship_id, type_id: 20_185, position: DVec3::new(out_of_range_x, 0.0, 0.0),
             velocity: DVec3::ZERO, max_velocity: 200.0, inertia: 1.0, mass: 1_000_000.0,
             radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop,
         })

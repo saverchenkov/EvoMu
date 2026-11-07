@@ -58,7 +58,12 @@ fn test_ctx_with_custom<F: FnOnce(&mut SdeRegistry)>(mutate_sde: F) -> ServerCon
 
 fn ensure_char(ctx: &ServerContext, char_id: i64, corp_id: i64, sys_id: u32, ship_id: i64, fleet_id: Option<i64>) {
     ctx.db.with_mut_snapshot(|snap| {
-        let mut ch = snap.characters.values().next().cloned().expect("demo seed character");
+        let mut ch = snap
+            .characters
+            .get(&90_000_001)
+            .cloned()
+            .or_else(|| snap.characters.values().min_by_key(|c| c.character_id).cloned())
+            .expect("demo seed character");
         ch.character_id = char_id;
         ch.user_id = char_id as u64;
         ch.name = format!("Pilot {char_id}");
@@ -70,6 +75,11 @@ fn ensure_char(ctx: &ServerContext, char_id: i64, corp_id: i64, sys_id: u32, shi
         ch.security_status = 5.0;
         ch.fleet_id = fleet_id;
         ch.clone_grade = 1;
+        ch.jump_fatigue_minutes = 0.0;
+        ch.jump_cooldown_until_unix = 0;
+        ch.jump_fatigue_until_unix = 0;
+        ch.last_clone_jump_unix = 0;
+        ch.autopilot_waypoints.clear();
         snap.characters.entry(char_id).or_insert(ch);
         snap.accounts.insert(
             format!("user_{char_id}"),

@@ -213,6 +213,7 @@ fn module_reactivation_delay_lifecycle_and_clock_controls() {
 #[tokio::test]
 async fn advance_secs_expires_jetcans_moon_extractions_and_delivers_moon_probes() {
     let ctx = test_ctx();
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
     let char_id = 90_000_001_i64;
     let sys_id = 30_000_142_u32;
     let now = ctx.now_unix_secs();

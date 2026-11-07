@@ -1033,11 +1033,11 @@ fn test_r66_p1_3_nine_maps_sqlite_persistence_restart_and_rollback() {
 
 #[test]
 fn test_create_character_accepts_v24_undefined_ancestry_64() {
-    let sde = SdeRegistry::open(std::path::Path::new(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../data/evomu_sde.sqlite"
-    )))
-    .expect("open SDE");
+    let sde_path = std::env::var("EVOMU_SDE_PATH")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/evomu_sde.sqlite").into());
+    let sde = SdeRegistry::open(std::path::Path::new(&sde_path)).expect("open SDE");
     let repo = WorldRepository::new_empty();
     let created = repo
         .create_character(1, "V24 Pilot", 8, 8, 64, 22, &sde)

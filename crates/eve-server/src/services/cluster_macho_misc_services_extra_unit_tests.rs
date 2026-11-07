@@ -106,6 +106,7 @@ fn landing_pad_timestamp_boundaries_ballpark_variants_and_persistence_roundtrip(
 #[test]
 fn horizon_siege_direct_skip_transitions_instability_cap_and_active_preservation() {
     let ctx = test_ctx();
+    ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
     let now = ctx.now_unix();
 
     // Schedule twice in Warning -> instability_points goes 50 -> 100 and caps at 100 on 3rd schedule

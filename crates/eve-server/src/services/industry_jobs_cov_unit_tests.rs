@@ -85,7 +85,12 @@ fn build_ctx() -> (ServerContext, SessionState, i64, i64, i64) {
     // Second station in Jita (30_000_142) for same-system remote facility check
     let mut st2: StationInfo = sde.stations[&60_003_760].clone();
     st2.station_id = 60_003_761;
-    sde.stations.insert(60_003_761, st2);
+    sde.stations.insert(60_003_761, st2.clone());
+    if let Some(jita) = sde.solar_systems.get_mut(&30_000_142) {
+        if !jita.stations.iter().any(|s| s.station_id == 60_003_761) {
+            jita.stations.push(st2);
+        }
+    }
 
     sde.blueprints.insert(
         688,
@@ -269,7 +274,7 @@ fn queries_auth_params_remote_range_reactions_and_composite_reactor() {
         handle_industry_jobs(&ctx, &mut sess, "industryManager", "InstallJob", &[PyRep::Integer(10), PyRep::Integer(688), PyRep::Integer(1), PyRep::Integer(1), PyRep::Integer(69_999_999)], &kw).unwrap().unwrap_err().code,
         "FacilityNotFound"
     );
-    let remote_st = ctx.sde.stations.values().find(|s| s.solar_system_id != 30_000_142).unwrap().station_id;
+    let remote_st = ctx.sde.stations.values().filter(|s| s.solar_system_id != 30_000_142).min_by_key(|s| s.station_id).unwrap().station_id;
     assert_eq!(
         handle_industry_jobs(&ctx, &mut sess, "industryManager", "InstallJob", &[PyRep::Integer(10), PyRep::Integer(688), PyRep::Integer(3), PyRep::Integer(1), PyRep::Integer(remote_st)], &kw).unwrap().unwrap_err().code,
         "FacilityOutOfRemoteRange"
@@ -279,7 +284,8 @@ fn queries_auth_params_remote_range_reactions_and_composite_reactor() {
         .sde
         .stations
         .values()
-        .find(|s| s.solar_system_id == 30_000_142 && s.station_id != station_id)
+        .filter(|s| s.solar_system_id == 30_000_142 && s.station_id != station_id)
+        .min_by_key(|s| s.station_id)
         .unwrap()
         .station_id;
     ctx.db.with_mut_snapshot(|snap| {
