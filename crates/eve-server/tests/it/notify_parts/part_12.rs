@@ -9,7 +9,7 @@ pub(crate) mod parity_notify_batch_part2 {
 // End-to-end integration tests for `notify:OnCaptureChanged`.
 
 
-use super::parity_notify_batch::{
+use super::super::part_11::parity_notify_batch::{
     drain_events, new_ctx, rpc, JITA_SYSTEM, PILOT_A, PILOT_B,
 };
 use crate::common;
