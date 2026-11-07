@@ -586,7 +586,7 @@ async fn test_industry_blueprint_data_facilities_jobs() {
         &[PyRep::keyval([
             ("blueprintID", PyRep::Integer(rifter_bpo_id)),
             ("blueprintTypeID", PyRep::Integer(RIFTER_BP_TYPE_ID as i64)),
-            ("facilityID", PyRep::Integer(raitaru_id)),
+            ("facilityID", PyRep::Integer(JITA_STATION_ID)),
             ("activityID", PyRep::Integer(1)),
             ("runs", PyRep::Integer(1)),
         ])],
@@ -601,7 +601,7 @@ async fn test_industry_blueprint_data_facilities_jobs() {
         );
     });
 
-    let trit_before_all = ctx.db.with_snapshot(|snap| {
+    let _trit_before_all = ctx.db.with_snapshot(|snap| {
         snap.items
             .values()
             .filter(|i| i.owner_id == 90_000_001 && i.location_id == JITA_STATION_ID && i.type_id == TRITANIUM_TYPE_ID)
@@ -616,7 +616,7 @@ async fn test_industry_blueprint_data_facilities_jobs() {
         &[PyRep::keyval([
             ("blueprintID", PyRep::Integer(rifter_bpo_id)),
             ("blueprintTypeID", PyRep::Integer(RIFTER_BP_TYPE_ID as i64)),
-            ("facilityID", PyRep::Integer(raitaru_id)),
+            ("facilityID", PyRep::Integer(JITA_STATION_ID)),
             ("activityID", PyRep::Integer(1)),
             ("runs", PyRep::Integer(1_000)),
         ])],
@@ -637,7 +637,7 @@ async fn test_industry_blueprint_data_facilities_jobs() {
         &[PyRep::keyval([
             ("blueprintID", PyRep::Integer(rifter_bpo_id)),
             ("blueprintTypeID", PyRep::Integer(RIFTER_BP_TYPE_ID as i64)),
-            ("facilityID", PyRep::Integer(raitaru_id)),
+            ("facilityID", PyRep::Integer(JITA_STATION_ID)),
             ("activityID", PyRep::Integer(1)),
             ("runs", PyRep::Integer(2)),
         ])],
@@ -647,6 +647,30 @@ async fn test_industry_blueprint_data_facilities_jobs() {
     assert_eq!(wallet_err.code, "InsufficientFunds");
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&90_000_001).unwrap().balance = s1_bal_before_job;
+    });
+
+    // Move BPO and manufacturing minerals to the Raitaru so facility-local V24 checks pass
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(bp) = snap.items.get_mut(&rifter_bpo_id) {
+            bp.location_id = raitaru_id;
+            bp.flag = InventoryFlag::Hangar;
+        }
+        for item in snap.items.values_mut() {
+            if item.owner_id == 90_000_001
+                && item.location_id == JITA_STATION_ID
+                && item.flag == InventoryFlag::Hangar
+                && matches!(item.type_id, 34..=40)
+            {
+                item.location_id = raitaru_id;
+            }
+        }
+    });
+    let trit_before_raitaru = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .filter(|i| i.owner_id == 90_000_001 && i.location_id == raitaru_id && i.type_id == TRITANIUM_TYPE_ID)
+            .map(|i| i.quantity)
+            .sum::<i32>()
     });
 
     let job_arg = PyRep::keyval([
@@ -682,13 +706,13 @@ async fn test_industry_blueprint_data_facilities_jobs() {
         let t = snap
             .items
             .values()
-            .filter(|i| i.owner_id == 90_000_001 && i.location_id == JITA_STATION_ID && i.type_id == TRITANIUM_TYPE_ID)
+            .filter(|i| i.owner_id == 90_000_001 && i.location_id == raitaru_id && i.type_id == TRITANIUM_TYPE_ID)
             .map(|i| i.quantity)
             .sum::<i32>();
         (f, t)
     });
     assert_eq!(bp_flag_during, Some(InventoryFlag::Locked));
-    assert_eq!(trit_before_all - trit_after_install, expected_trit);
+    assert_eq!(trit_before_raitaru - trit_after_install, expected_trit);
 
     assert!(eiv > 0.0);
     assert!(sci > 0.0 && sci <= 0.50);
@@ -756,7 +780,24 @@ async fn test_industry_blueprint_data_facilities_jobs() {
             .get(&delivered_id)
             .map(|i| (i.owner_id, i.location_id, i.flag, i.quantity))
     });
-    assert_eq!(delivered_item, Some((90_000_001, JITA_STATION_ID, InventoryFlag::Hangar, 2)));
+    assert_eq!(delivered_item, Some((90_000_001, raitaru_id, InventoryFlag::Hangar, 2)));
+
+    // Move BPO and materials to JITA_STATION_ID before testing NPC station installation
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(bp) = snap.items.get_mut(&rifter_bpo_id) {
+            bp.location_id = JITA_STATION_ID;
+            bp.flag = InventoryFlag::Hangar;
+        }
+        for item in snap.items.values_mut() {
+            if item.owner_id == 90_000_001
+                && item.location_id == raitaru_id
+                && item.flag == InventoryFlag::Hangar
+                && matches!(item.type_id, 34..=40)
+            {
+                item.location_id = JITA_STATION_ID;
+            }
+        }
+    });
 
     // Also install a job at NPC station JITA_STATION_ID to verify fixed NPC facility tax (10%) is charged on install
     let npc_install = rpc(

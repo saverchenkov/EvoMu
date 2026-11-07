@@ -169,6 +169,8 @@ async fn test_insurance_contracts_get_for_ship_and_corp_roles() {
         let corp = eve_db::CorporationRecord {
             corporation_id: test_corp_id, name: "Corp Ins".into(), ticker: "CI".into(), ceo_id: 999_888,
             master_wallet: corp_initial_bal,
+            members: std::collections::HashSet::from([char_id]),
+            member_roles: HashMap::from([(char_id, eve_db::corp_roles::ROLE_DIRECTOR)]),
             wallet_divisions: eve_db::CorporationRecord::default_wallet_divisions(corp_initial_bal),
             ..Default::default()
         };
@@ -233,6 +235,11 @@ async fn test_insurance_contracts_get_for_ship_and_corp_roles() {
     let PyRep::List(c_list) = my_contracts else { panic!("expected List") };
     assert!(!c_list.is_empty());
 
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(corp) = s.corporations.get_mut(&test_corp_id) {
+            corp.member_roles.insert(char_id, 0);
+        }
+    });
     let corp_denied = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "GetContracts", &[PyRep::Bool(true)], &kw, None).await.unwrap_err();
     assert_eq!(corp_denied.code, "CorpRoleDenied");
 
@@ -594,8 +601,15 @@ async fn test_ship_bays_scoop_store_board_space_and_password() {
     ];
     ctx.dispatch_rpc(&mut sess, "ship", None, "ConfigureShip", &[PyRep::Integer(orca_id), PyRep::Dict(allow_fleet_cfg)], &kw, None).await.unwrap();
 
-    // Fleet member now has access without any password
-    let add_fleet_ok = ctx.dispatch_rpc(&mut sess_foreign, "invbroker", None, "Add", &[PyRep::Integer(ore_id), PyRep::Integer(orca_id), PyRep::Integer(155)], &kw, None).await.unwrap();
+    // Fleet member requires ship password while one is configured (#176), succeeds with password, and succeeds without once cleared (#510)
+    let fleet_pw_err = ctx.dispatch_rpc(&mut sess_foreign, "invbroker", None, "Add", &[PyRep::Integer(ore_id), PyRep::Integer(orca_id), PyRep::Integer(155)], &kw, None).await.unwrap_err();
+    assert_eq!(fleet_pw_err.code, "FleetHangarAccessDenied");
+    let add_fleet_pw = ctx.dispatch_rpc(&mut sess_foreign, "invbroker", None, "Add", &[PyRep::Integer(ore_id), PyRep::Integer(orca_id), PyRep::Integer(155)], &kw_with_pw, None).await.unwrap();
+    assert!(matches!(add_fleet_pw, PyRep::KeyVal(_)));
+    ctx.dispatch_rpc(&mut sess, "ship", None, "SetShipPassword", &[PyRep::Integer(orca_id), PyRep::String(String::new())], &kw, None).await.unwrap();
+    let ore_id2 = 820_022i64;
+    seed_item(&ctx, ore_id2, 1228, foreign_char_id, station_id, InventoryFlag::Hangar, 20, false);
+    let add_fleet_ok = ctx.dispatch_rpc(&mut sess_foreign, "invbroker", None, "Add", &[PyRep::Integer(ore_id2), PyRep::Integer(orca_id), PyRep::Integer(155)], &kw, None).await.unwrap();
     assert!(matches!(add_fleet_ok, PyRep::KeyVal(_)));
 
     // Persistence across SQLite restart: POS forcefield password persists
@@ -774,7 +788,7 @@ async fn test_ship_bays_scoop_store_board_space_and_password() {
     ctx.dispatch_rpc(&mut sess_foreign, "ship", None, "SetShipPassword", &[PyRep::String("wrong-pass".into())], &kw, None).await.unwrap();
 
     ctx.db.with_mut_snapshot(|s| {
-        if let Some(t) = s.items.get_mut(&tower_id) { t.location_id = sys_id as i64; t.type_id = 16213; }
+        if let Some(t) = s.items.get_mut(&tower_id) { t.location_id = sys_id as i64; t.type_id = 16213; t.singleton = true; }
         s.item_positions.insert(tower_id, [orca_pos.x + 200.0, orca_pos.y, orca_pos.z]);
         if let Some(st) = s.starbase_settings.get_mut(&tower_id) {
             st.password = Some("pos-hostile".into());

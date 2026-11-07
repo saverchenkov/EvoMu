@@ -210,8 +210,14 @@ async fn test_parity_notify_analysis_kredits_and_campaign_enrollment() {
     let p2_after = rpc(&ctx, &mut s2, "loginCampaignManager", "get_client_campaign_state", &[])
         .await
         .expect("p2 campaign state after");
-    assert_eq!(p1_after.dict_get("campaignID"), Some(&PyRep::Integer(alt_campaign)));
-    assert_eq!(p2_after.dict_get("campaignID"), p2_before.dict_get("campaignID"));
+    assert_eq!(
+        p1_after.dict_get("static_data").and_then(|d| d.dict_get("campaign_id")),
+        Some(&PyRep::Integer(alt_campaign))
+    );
+    assert_eq!(
+        p2_after.dict_get("static_data").and_then(|d| d.dict_get("campaign_id")),
+        p2_before.dict_get("static_data").and_then(|d| d.dict_get("campaign_id"))
+    );
 }
 
 #[tokio::test]

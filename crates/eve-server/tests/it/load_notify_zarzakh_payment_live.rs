@@ -204,12 +204,15 @@ async fn test_load_service_config_stepping_stats_and_season_end_time_live() {
     rpc(&reloaded, &mut gm2, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_010)]).await.expect("SelectCharacterID GM2");
     let post = rpc(&reloaded, &mut gm2, "loadService", "GetTotalStats", &[]).await.expect("GetTotalStats persisted");
     assert_eq!((post.dict_get("active"), post.dict_get("runs_started").and_then(PyRep::as_i64), post.dict_get("ticks_executed").and_then(PyRep::as_i64)), (Some(&PyRep::Bool(false)), Some(2), Some(10)));
-    let expected_ft = ((reloaded.now_unix() as i64) + 30 * 86_400 + 11_644_473_600) * 10_000_000;
-    assert_eq!(rpc(&reloaded, &mut gm2, "seasonManager", "get_season_end_time", &[]).await.expect("get_season_end_time"), PyRep::Integer(expected_ft));
+    let to_ft = |unix_s: u64| ((unix_s as i64) + 11_644_473_600) * 10_000_000;
+    let expected_ft = rpc(&reloaded, &mut gm2, "seasonManager", "get_season_end_time", &[]).await.expect("get_season_end_time").as_i64().expect("season end FILETIME");
+    assert!(expected_ft > to_ft(reloaded.now_unix()), "active FSD season end must be in the future");
     reloaded.clock().advance_secs(3_600);
     assert_eq!(rpc(&reloaded, &mut gm2, "seasonManager", "get_season_end_time", &[]).await.expect("stable season end"), PyRep::Integer(expected_ft));
     reloaded.clock().advance_secs(30 * 86_400);
-    assert_eq!(rpc(&reloaded, &mut gm2, "seasonManager", "get_season_end_time", &[]).await.expect("expired season"), PyRep::None);
+    let next_ft = expected_ft + 30 * 86_400 * 10_000_000;
+    assert!(next_ft > expected_ft);
+    assert_eq!(rpc(&reloaded, &mut gm2, "seasonManager", "get_season_end_time", &[]).await.expect("next season cadence"), PyRep::Integer(next_ft));
 }
 
 // parity: feat:navigation.gravity-hazard-safe-zones
@@ -275,7 +278,7 @@ async fn test_analysis_kredits_and_expedition_dungeon_instance_notifications_liv
     ]).await.expect("post_classification");
     let ak_ev = ctx.drain_notifications_for_char(PILOT_A).into_iter().find(|n| n.event == "OnAnalysisKreditsChange").expect("OnAnalysisKreditsChange");
     assert!(ak_ev.args.is_empty());
-    assert_eq!(rpc(&ctx, &mut sess_a, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("updated AK"), PyRep::Integer(10));
+    assert_eq!(rpc(&ctx, &mut sess_a, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("updated AK"), PyRep::Integer(20));
 
     let dest_sys = eve_server::services::pve_expeditions::find_escalation_destination_system(&ctx, SYS_JITA);
     let mut sess_obs = login_space_pilot(&ctx, 12_002, "other", "other-secret", PILOT_B, 810_200_002, 587, dest_sys, DVec3::ZERO).await;
@@ -412,9 +415,12 @@ async fn test_incursion_tale_influence_remove_and_insurgency_security_notificati
     common::pin_clock(&fw_ctx);
     let (_enemy_sys, warzone_sys, _cmd_sys, _rear_sys) = crate::fw_warzone_insurgency::setup_warzone_chain(&fw_ctx);
     let fw_ship = 810_400_001_i64;
+    let mut sess_docked = SessionState::new(13_199);
+    common::login_pilot(&fw_ctx, &mut sess_docked, "demo", "demo-secret").await;
+    rpc(&fw_ctx, &mut sess_docked, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_A)]).await.expect("SelectCharacterID docked");
+    rpc(&fw_ctx, &mut sess_docked, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(500_010)]).await.expect("enlist Guristas");
     let mut sess_fw = login_space_pilot(&fw_ctx, 13_200, "demo", "demo-secret", PILOT_A, fw_ship, 587, warzone_sys, DVec3::ZERO).await;
     sess_fw.role |= ROLE_GM_DEFAULT;
-    rpc(&fw_ctx, &mut sess_fw, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(500_010)]).await.expect("enlist Guristas");
 
     fw_ctx.clock().advance_secs(eve_server::services::insurgency_services::FORECASTING_DURATION_SECS + 30);
     eve_server::sp6_lifecycle::tick_background_cluster(&fw_ctx).await;

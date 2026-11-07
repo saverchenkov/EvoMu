@@ -388,6 +388,26 @@ async fn test_macho_net_cluster_mgmt_rpcs() {
         .expect_err("non-GM GracefulShutdown must fail");
     assert_eq!(non_gm_err.code, "InsufficientRole");
 
+    // Verify non-GM GracefulShutdownStarted and TerminateAllClients are rejected before cluster shutdown starts
+    let pre_err = ctx
+        .dispatch_rpc(&mut regular_sess, "machoNet", None, "GracefulShutdownStarted", &[], &kw, None)
+        .await
+        .expect_err("non-GM GracefulShutdownStarted must fail");
+    assert_eq!(pre_err.code, "InsufficientRole");
+    let pre_term_err = ctx
+        .dispatch_rpc(
+            &mut regular_sess,
+            "machoNet",
+            None,
+            "TerminateAllClients",
+            &[PyRep::String("Pre-shutdown auth check".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("non-GM TerminateAllClients must fail");
+    assert_eq!(pre_term_err.code, "InsufficientRole");
+
     let gm_res = ctx
         .dispatch_rpc(
             &mut gm_sess,
@@ -430,12 +450,12 @@ async fn test_macho_net_cluster_mgmt_rpcs() {
         .expect_err("non-GM login during shutdown must fail");
     assert!(login_err.code == "ClusterShuttingDown" || login_err.code == "AuthenticationFailed");
 
-    // 11. machoNet.GracefulShutdownStarted: GM authorization check
+    // 11. machoNet.GracefulShutdownStarted: non-GM rejected during shutdown; GM succeeds
     let non_gm_err = ctx
         .dispatch_rpc(&mut regular_sess, "machoNet", None, "GracefulShutdownStarted", &[], &kw, None)
         .await
         .expect_err("non-GM GracefulShutdownStarted must fail");
-    assert_eq!(non_gm_err.code, "InsufficientRole");
+    assert_eq!(non_gm_err.code, "ClusterShuttingDown");
 
     let gm_res = ctx
         .dispatch_rpc(&mut gm_sess, "machoNet", None, "GracefulShutdownStarted", &[], &kw, None)
@@ -445,7 +465,7 @@ async fn test_macho_net_cluster_mgmt_rpcs() {
     assert!(ctx.is_shutting_down());
     assert!(get_cluster_state(&ctx).shutdown_in_progress);
 
-    // 12. machoNet.GracefulShutdownComplete: GM authorization check and deduplication
+    // 12. machoNet.GracefulShutdownComplete: non-GM rejected and deduplication
     let non_gm_err = ctx
         .dispatch_rpc(
             &mut regular_sess,
@@ -458,7 +478,7 @@ async fn test_macho_net_cluster_mgmt_rpcs() {
         )
         .await
         .expect_err("non-GM GracefulShutdownComplete must fail");
-    assert_eq!(non_gm_err.code, "InsufficientRole");
+    assert_eq!(non_gm_err.code, "ClusterShuttingDown");
 
     let gm_res = ctx
         .dispatch_rpc(
@@ -511,8 +531,8 @@ async fn test_macho_net_cluster_mgmt_rpcs() {
             None,
         )
         .await
-        .expect_err("non-GM TerminateAllClients must fail");
-    assert_eq!(non_gm_err.code, "InsufficientRole");
+        .expect_err("non-GM TerminateAllClients during shutdown must fail");
+    assert_eq!(non_gm_err.code, "ClusterShuttingDown");
 
     let gm_res = ctx
         .dispatch_rpc(

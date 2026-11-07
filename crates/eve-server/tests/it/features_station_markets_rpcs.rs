@@ -942,6 +942,7 @@ async fn test_gm_tournament_match_bans_and_cleanup_grid() {
                     skin_id: None,
                     skin_material_set_id: None,
                     jump_target: None,
+                    ..eve_destiny::SlimItemMeta::default()
                 },
             )
             .await;

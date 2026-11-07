@@ -145,6 +145,7 @@ async fn spawn_target(
         skin_id: None,
         skin_material_set_id: None,
         jump_target: None,
+        ..SlimItemMeta::default()
     };
     let _ = sys_h
         .spawn_ball_with_meta(

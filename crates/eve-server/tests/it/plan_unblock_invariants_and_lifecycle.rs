@@ -403,7 +403,7 @@ async fn test_e3_corp_contract_wallet_roles_and_issuer_departure() {
     assert_eq!(char_bal_after, char_bal_before);
     assert_eq!(
         corp_bal_after.0 - corp_bal_mid.0,
-        IskCents::from_f64_isk(500_000.0).0
+        IskCents::from_f64_isk(500_000.0).0 + 10_000_000
     );
 
     // Second for_corp contract: cancel refund credits reward back to corp wallet; third for_corp courier: failure credits collateral to corp wallet

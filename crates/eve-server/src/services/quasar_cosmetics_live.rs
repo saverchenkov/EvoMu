@@ -1229,12 +1229,12 @@ pub async fn broadcast_ship_skin_cosmetic_change(
             ],
         );
         let handle = ctx.systems.get_or_spawn(sys_id);
-        let is_cloaked = handle
+        let (is_cloaked, war_faction_id) = handle
             .ballpark
             .read()
             .ok()
-            .and_then(|bp| bp.ball_slim_meta.get(&ship_id).map(|m| m.is_cloaked))
-            .unwrap_or(false);
+            .and_then(|bp| bp.ball_slim_meta.get(&ship_id).map(|m| (m.is_cloaked, m.war_faction_id)))
+            .unwrap_or((false, None));
         let _ = handle
             .change_slim_item(
                 ship_id,
@@ -1250,6 +1250,7 @@ pub async fn broadcast_ship_skin_cosmetic_change(
                     skin_id: new_sid,
                     skin_material_set_id: new_mat,
                     jump_target: None,
+                    war_faction_id,
                 },
             )
             .await;

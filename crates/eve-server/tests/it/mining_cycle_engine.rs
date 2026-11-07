@@ -419,7 +419,7 @@ async fn test_mn04_activation_requirements_and_cycle_interruptions() {
     let mut cs = sys.get_combat_state(p.ship_id).await.unwrap().unwrap();
     cs.is_cloaked = true;
     sys.set_combat_state(p.ship_id, cs.clone()).await.unwrap();
-    assert_eq!(activate(&mut p, laser, near).await.unwrap_err(), "CannotActivateWhileCloaked");
+    assert_eq!(activate(&mut p, laser, near).await.unwrap_err(), "CannotActivateCloaked");
     cs.is_cloaked = false;
     sys.set_combat_state(p.ship_id, cs).await.unwrap();
     // Online module required.

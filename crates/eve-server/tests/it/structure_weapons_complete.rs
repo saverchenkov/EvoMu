@@ -219,7 +219,7 @@ async fn spawn_grid_entity(
         group_id: grp,
         skin_id: None,
         skin_material_set_id: None,
-        jump_target: None,
+        jump_target: None, ..SlimItemMeta::default()
     };
     let _ = sys_h
         .spawn_ball_with_meta(

@@ -13,7 +13,7 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
 use eve_server::services::campaigns_and_milestones::{
-    DEFAULT_LOGIN_CAMPAIGN_ID, DEFAULT_SEASONAL_CAMPAIGN_ID, GREGORIAN_EPOCH_ORDINAL,
+    DEFAULT_SEASONAL_CAMPAIGN_ID, GREGORIAN_EPOCH_ORDINAL,
 };
 use eve_db::InventoryFlag;
 
@@ -120,20 +120,20 @@ async fn test_login_and_seasonal_campaigns() {
     )
     .await
     .expect("get_client_campaign_state");
-    assert!(
-        field(&state1, "static_data")
-            .dict_get("campaign_id")
-            .and_then(|v| v.as_i64())
-            .is_some()
-    );
+    let active_cid = field(&state1, "static_data")
+        .dict_get("campaign_id")
+        .and_then(|v| v.as_i64())
+        .expect("active campaign_id");
+    let campaigns = eve_server::services::campaigns_and_milestones::get_sde_login_campaigns(&ctx.sde);
+    let active_camp = &campaigns[&active_cid];
     assert_eq!(
         field(field(&state1, "static_data"), "titleMessageID").as_i64(),
-        Some(709_008)
+        Some(i64::from(active_camp.campaign_name_id))
     );
     let item_progress = field(&state1, "item_progress");
     assert_eq!(field(item_progress, "next_reward_index").as_i64(), Some(1));
     assert_eq!(field(item_progress, "num_claimed_rewards").as_i64(), Some(0));
-    assert_eq!(field(item_progress, "reward_count").as_i64(), Some(30));
+    assert_eq!(field(item_progress, "reward_count").as_i64(), Some(active_camp.track_length() as i64));
 
     // 2. loginCampaignManager.claim_reward: returns 4-tuple and delivers SDE day 0 rewards into home station hangar
     let claim1 = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
@@ -148,13 +148,15 @@ async fn test_login_and_seasonal_campaigns() {
     assert_eq!(claim1_tuple[2], PyRep::None);
     let bucket_prog = &claim1_tuple[3];
 
+    let day1_alpha = active_camp.alpha_rewards.values().next().expect("day 1 alpha reward");
+    let day1_omega = active_camp.omega_rewards.values().next().expect("day 1 omega reward");
     assert_eq!(
         field(reward_item, "campaign_id").as_i64(),
-        Some(DEFAULT_LOGIN_CAMPAIGN_ID)
+        Some(active_cid)
     );
     assert_eq!(field(reward_item, "reward_index").as_i64(), Some(1));
-    assert_eq!(field(reward_item, "typeID").as_i64(), Some(80_937));
-    assert_eq!(field(reward_item, "quantity").as_i64(), Some(1));
+    assert_eq!(field(reward_item, "typeID").as_i64(), Some(i64::from(day1_alpha.type_id)));
+    assert_eq!(field(reward_item, "quantity").as_i64(), Some(i64::from(day1_alpha.quantity)));
     let claimed_item_id1 = field(reward_item, "itemID")
         .as_i64()
         .expect("delivered alpha reward itemID");
@@ -162,7 +164,7 @@ async fn test_login_and_seasonal_campaigns() {
     assert_eq!(field(next_prog, "num_claimed_rewards").as_i64(), Some(1));
     assert_eq!(field(bucket_prog, "progress").as_i64(), Some(1));
 
-    // PILOT_1 is Omega (clone_grade 2): both Alpha (80937) and Omega (49809) SDE rewards are delivered to home station hangar
+    // PILOT_1 is Omega (clone_grade 2): both Alpha and Omega SDE rewards are delivered to home station hangar
     ctx.db.with_snapshot(|s| {
         assert_eq!(s.characters.get(&PILOT_1).unwrap().free_skill_points, init_sp);
         assert_eq!(s.items.len(), init_items + 2);
@@ -170,14 +172,14 @@ async fn test_login_and_seasonal_campaigns() {
         assert_eq!(alpha_item.owner_id, PILOT_1);
         assert_eq!(alpha_item.location_id, home_station_id);
         assert_eq!(alpha_item.flag, InventoryFlag::Hangar);
-        assert_eq!(alpha_item.type_id, 80_937);
-        assert_eq!(alpha_item.quantity, 1);
+        assert_eq!(alpha_item.type_id, day1_alpha.type_id);
+        assert_eq!(alpha_item.quantity, day1_alpha.quantity as i32);
         assert!(s.items.values().any(|it| {
             it.owner_id == PILOT_1
                 && it.location_id == home_station_id
                 && it.flag == InventoryFlag::Hangar
-                && it.type_id == 49_809
-                && it.quantity == 1
+                && it.type_id == day1_omega.type_id
+                && it.quantity == day1_omega.quantity as i32
         }));
     });
 
@@ -210,7 +212,9 @@ async fn test_login_and_seasonal_campaigns() {
         Some(1)
     );
 
-    // Claim day 2: delivers SDE day 1 Alpha (82052) and Omega (29266) rewards
+    // Claim day 2: delivers SDE day 2 Alpha and Omega rewards
+    let day2_alpha = active_camp.alpha_rewards.values().nth(1).expect("day 2 alpha reward");
+    let day2_omega = active_camp.omega_rewards.values().nth(1).expect("day 2 omega reward");
     let claim2 = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
         .await
         .expect("claim_reward day 2");
@@ -218,11 +222,11 @@ async fn test_login_and_seasonal_campaigns() {
         panic!("expected 4-tuple from claim_reward day 2");
     };
     assert_eq!(field(&claim2_tuple[0], "reward_index").as_i64(), Some(2));
-    assert_eq!(field(&claim2_tuple[0], "typeID").as_i64(), Some(82_052));
+    assert_eq!(field(&claim2_tuple[0], "typeID").as_i64(), Some(i64::from(day2_alpha.type_id)));
     ctx.db.with_snapshot(|s| {
         assert_eq!(s.items.len(), init_items + 4);
-        assert!(s.items.values().any(|it| it.owner_id == PILOT_1 && it.type_id == 82_052));
-        assert!(s.items.values().any(|it| it.owner_id == PILOT_1 && it.type_id == 29_266));
+        assert!(s.items.values().any(|it| it.owner_id == PILOT_1 && it.type_id == day2_alpha.type_id));
+        assert!(s.items.values().any(|it| it.owner_id == PILOT_1 && it.type_id == day2_omega.type_id));
     });
 
     // 3. seasonalLoginCampaignManager.get_active_campaign: (None, None, None, None) before GM schedules an SDE seasonal campaign

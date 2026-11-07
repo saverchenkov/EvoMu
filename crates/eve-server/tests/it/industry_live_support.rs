@@ -225,10 +225,13 @@ pub(crate) async fn install(ctx: &ServerContext, sess: &mut SessionState, bp: i6
 async fn settle(ctx: &ServerContext, sess: &SessionState, max_steps: usize) {
     let (sys, ship) = (sess.solar_system_id.unwrap(), sess.ship_id.unwrap());
     let h = ctx.systems.get_or_spawn(sys);
+    let mut seen_warp = false;
     for i in 0..max_steps {
         let _ = h.step_manual(1.0).await;
         let warping = matches!(h.get_ball_snapshot(ship).await, Ok(Some((_, ref b))) if matches!(b.mode, eve_destiny::MovementMode::Warp { .. }));
-        if i > 20 && !warping {
+        if warping {
+            seen_warp = true;
+        } else if seen_warp || i > 120 {
             break;
         }
     }
@@ -367,6 +370,20 @@ pub(crate) fn fuel_cargo() -> Vec<(u32, i64)> {
 pub(crate) async fn deploy_online_upwell(ctx: &ServerContext, sess: &mut SessionState, sys_id: u32, hull_tid: u32, services: &[u32], fuel_qty: i64) -> (i64, Vec<i64>) {
     let owner = sess.character_id.unwrap();
     travel(ctx, sess, sys_id).await;
+    let ship_id = sess.ship_id.unwrap();
+    if let Ok(Some((_, b))) = ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(ship_id).await {
+        if b.velocity.length_squared() > 1.0 {
+            if let Some(clear_planet) = ctx
+                .sde
+                .celestials_in_system(sys_id)
+                .into_iter()
+                .filter(|c| c.group_id == 7 && (c.position - b.position).dot(b.velocity) > 0.0)
+                .min_by_key(|c| c.celestial_id)
+            {
+                warp_to(ctx, sess, clear_planet.celestial_id, 0.0).await;
+            }
+        }
+    }
     let sun = ctx.sde.celestials_in_system(sys_id).into_iter().find(|c| c.group_id == 6).expect("sun").celestial_id;
     warp_to(ctx, sess, sun, 100_000.0).await;
     let anc = rpc(ctx, sess, "structureDeployment", "Anchor", &[PyRep::Integer(i64::from(hull_tid)), PyRep::String("Live Industry Complex".into())])

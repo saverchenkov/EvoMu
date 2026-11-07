@@ -278,8 +278,8 @@ async fn station_ui_bootstrap_shapes_match_the_v24_client() {
     let char_self = ctx
         .dispatch_rpc(&mut sess, "invbroker", Some(bound_id_of(&char_inv)), "GetSelfInvItem", &[], &kw, None)
         .await
-        .expect_err("character self item not implemented");
-    assert_eq!(char_self.code, "UnimplementedRPC");
+        .expect("character self item");
+    assert_eq!(dbrow_col(&char_self, "itemID"), PyRep::Integer(char_id));
 
     // warRegistry.GetWars(ownerID) on the bound moniker -> {warID: KeyVal} (war_cso iterates itervalues()).
     let corp_id = ctx.db.get_character(char_id).expect("char").corporation_id;

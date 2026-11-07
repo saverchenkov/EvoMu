@@ -107,7 +107,7 @@ async fn test_metaliminal_storms_roaming_dogma_effects_and_sites() {
     let initial_centers = with_pve_special_reg(&ctx, |reg| {
         reg.roaming_storms.iter().map(|s| (s.storm_id, s.center_solar_system_id, s.weather)).collect::<Vec<_>>()
     });
-    assert_eq!(initial_centers.len(), 4, "Must have 4 roaming metaliminal storms");
+    assert_eq!(initial_centers.len(), 8, "Must have 8 roaming metaliminal storms");
     for (_, center, _) in &initial_centers {
         let sec = ctx.sde.solar_systems.get(center).map(|s| s.security_status).unwrap_or(1.0);
         assert!(sec < 0.45, "Storm center must be nullsec/lowsec, not highsec");

@@ -370,12 +370,12 @@ async fn test_mercenary_den_development_anarchy_and_skyhook_workforce() {
     .unwrap();
     let _ = drain_quasar(&mut rx);
 
-    // Stage 1 (Dev 0): 65 IDK/hr, 0% workforce disruption
+    // Stage 1 (Dev 0): planet-scaled 76 IDK/hr (#525), 0% workforce disruption
     ctx.advance_secs(3_600);
     let d_1h = q_sov_rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_req(1, den_id as u64))
         .await.payload.unwrap().value;
     let info_1h = field(&field(&d_1h, 4).unwrap(), 2).unwrap();
-    assert_eq!(varint(&info_1h, 1), Some(65));
+    assert_eq!(varint(&info_1h, 1), Some(76));
     assert_eq!(ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available), base_wf);
 
     // Advance to Day 8 (Dev 40, Anarchy 40 -> UI Anarchy level 2 / proto stage 3):

@@ -689,8 +689,8 @@ async fn test_p7_destiny_binary_stream_undock_movement_and_stargate_jump() {
     let (a5, args5) = extract_action(5);
     assert_eq!(a5, "WarpTo");
     assert_eq!(args5[0], PyRep::Integer(ship_id));
-    assert_eq!(args5.len(), 5);
-    assert_eq!(args5[4], PyRep::Integer(50));
+    assert_eq!(args5.len(), 6);
+    assert_eq!(args5[5], PyRep::Integer(50));
 
     // Warp tunnel visual goes out as OnSpecialFX('effects.Warping'); OnActivatingWarp is raised by
     // the client's own destiny tick and must never appear on the wire.
@@ -1051,6 +1051,30 @@ async fn test_p7_on_slim_item_change_when_pilot_in_space_changes_corp() {
     )
     .await
     .expect("SelectCharacterID pilot 1");
+    // While docked, Pilot 1 creates a new corporation via real V24 client RPC corpRegistry.AddCorporation (#505 requires docked)
+    ctx.advance_secs(12);
+    let create_corp = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "corpRegistry",
+            None,
+            "AddCorporation",
+            &[
+                PyRep::String("Grid Observer Slim Corp".into()),
+                PyRep::String("GOSC".into()),
+                PyRep::Real(0.05),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("corpRegistry.AddCorporation while docked");
+    let PyRep::KeyVal(corp_kv) = &create_corp else {
+        panic!("Expected KeyVal from AddCorporation");
+    };
+    let new_corp_id = corp_kv["corporationID"].as_i64().expect("corporationID");
+    assert!(new_corp_id >= 98_000_001);
+    ctx.advance_secs(12);
     let undock1 = ctx
         .dispatch_rpc(&mut sess1, "stationSvc", None, "Undock", &[], &kw, None)
         .await
@@ -1108,29 +1132,38 @@ async fn test_p7_on_slim_item_change_when_pilot_in_space_changes_corp() {
         .await
         .expect("drain initial ship 2");
 
-    // While undocked in space, Pilot 1 creates a new corporation via real V24 client RPC corpRegistry.AddCorporation
+    // While undocked in space, corpRegistry.AddCorporation is rejected (#505)
     ctx.advance_secs(12);
-    let create_corp = ctx
+    let in_space_corp_err = ctx
         .dispatch_rpc(
             &mut sess1,
             "corpRegistry",
             None,
             "AddCorporation",
             &[
-                PyRep::String("Grid Observer Slim Corp".into()),
-                PyRep::String("GOSC".into()),
+                PyRep::String("InSpace Fail Corp".into()),
+                PyRep::String("ISFC".into()),
                 PyRep::Real(0.05),
             ],
             &kw,
             None,
         )
         .await
-        .expect("corpRegistry.AddCorporation while in space");
-    let PyRep::KeyVal(corp_kv) = &create_corp else {
-        panic!("Expected KeyVal from AddCorporation");
-    };
-    let new_corp_id = corp_kv["corporationID"].as_i64().expect("corporationID");
-    assert!(new_corp_id >= 98_000_001);
+        .expect_err("corpRegistry.AddCorporation must fail while undocked in space");
+    assert_eq!(in_space_corp_err.code, "MustBeDocked");
+
+    // Enlisting the corporation in Factional Warfare while in space updates ship1's SlimItem and notifies grid observers
+    ctx.dispatch_rpc(
+        &mut sess1,
+        "facWarMgr",
+        None,
+        "JoinFactionAsCorporation",
+        &[PyRep::Integer(500_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("facWarMgr.JoinFactionAsCorporation in space");
 
     // Observer Pilot 2 drains DoDestinyUpdate notifications and must receive OnSlimItemChange(ship1_id, foo.SlimItem)
     let (_tick, evs2, pyrep_updates2) = jita_handle

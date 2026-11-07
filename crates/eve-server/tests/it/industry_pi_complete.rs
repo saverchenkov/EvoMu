@@ -478,15 +478,17 @@ async fn run_industry_jobs_suite() -> (usize, f64, f64, i64, &'static str) {
             let bpo_id = seed_item(snap, RIFTER_BP_TYPE_ID, char_id, JITA_STATION_ID, InventoryFlag::Hangar, 1, true, false, None);
             let bpo2_id = seed_item(snap, RIFTER_BP_TYPE_ID, char_id, JITA_STATION_ID, InventoryFlag::Hangar, 1, true, false, None);
             let bpc_id = seed_item(snap, RIFTER_BP_TYPE_ID, char_id, JITA_STATION_ID, InventoryFlag::Hangar, 1, true, true, Some(5));
-            if let Some(bp) = ctx.sde.blueprints.get(&RIFTER_BP_TYPE_ID) {
-                if let Some(inv_act) = bp.activities.get("invention").or_else(|| bp.activities.get("8")) {
-                    for mat in &inv_act.materials { seed_item(snap, mat.type_id, char_id, JITA_STATION_ID, InventoryFlag::Hangar, (mat.quantity as i32) * 10, false, false, None); }
-                    for sk_req in &inv_act.skills { snap.skills.entry(char_id).or_default().insert(sk_req.type_id, TrainedSkillRecord { type_id: sk_req.type_id, level: 5, skill_points: 256_000.0 }); }
+            for bp_tid in [RIFTER_BP_TYPE_ID, 30_558_u32] {
+                if let Some(bp) = ctx.sde.blueprints.get(&bp_tid) {
+                    if let Some(inv_act) = bp.activities.get("invention").or_else(|| bp.activities.get("8")) {
+                        for mat in &inv_act.materials { seed_item(snap, mat.type_id, char_id, JITA_STATION_ID, InventoryFlag::Hangar, (mat.quantity as i32) * 10, false, false, None); }
+                        for sk_req in &inv_act.skills { snap.skills.entry(char_id).or_default().insert(sk_req.type_id, TrainedSkillRecord { type_id: sk_req.type_id, level: 5, skill_points: 256_000.0 }); }
+                    }
                 }
             }
             let dec_id = seed_item(snap, 34_201, char_id, JITA_STATION_ID, InventoryFlag::Hangar, 5, false, false, None);
             let rel_id = seed_item(snap, 30_558, char_id, JITA_STATION_ID, InventoryFlag::Hangar, 2, false, false, None);
-            for dtid in [20_411_u32, 20_412_u32, 20_424_u32, 20_172_u32] { seed_item(snap, dtid, char_id, JITA_STATION_ID, InventoryFlag::Hangar, 20, false, false, None); }
+            for dtid in [20_114_u32, 20_420_u32, 20_411_u32, 20_412_u32, 20_424_u32, 20_172_u32] { seed_item(snap, dtid, char_id, JITA_STATION_ID, InventoryFlag::Hangar, 20, false, false, None); }
             let (react_bp_tid, react_mats) = ctx.sde.blueprints.values().find_map(|bp| {
                 bp.activities.get("reaction").or_else(|| bp.activities.get("9")).filter(|a| !a.materials.is_empty() && !a.products.is_empty()).map(|a| (bp.blueprint_type_id, a.materials.clone()))
             }).unwrap();

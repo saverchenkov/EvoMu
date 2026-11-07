@@ -94,16 +94,31 @@ fn local_chat_payload(msg: &str) -> Vec<u8> {
 }
 
 async fn warp_to_item(ctx: &ServerContext, sess: &mut SessionState, sys_id: u32, target_id: i64) {
+    let h = ctx.systems.get_or_spawn(sys_id);
+    let ship_id = sess.ship_id.unwrap();
+    for _ in 0..12 {
+        if let Ok(Some(cs)) = h.get_combat_state(ship_id).await {
+            if cs.capacitor >= cs.max_capacitor * 0.99 {
+                break;
+            }
+        }
+        ctx.advance_secs(15);
+        h.step_manual(15.0).await.expect("recharge capacitor");
+    }
     rpc(ctx, sess, "beyonce", "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(target_id), PyRep::Real(0.0)])
         .await
         .expect("CmdWarpToStuff");
-    let h = ctx.systems.get_or_spawn(sys_id);
-    for _ in 0..30 {
+    let mut seen_warp = false;
+    for i in 0..300 {
         ctx.advance_secs(5);
         h.step_manual(5.0).await.expect("step warp");
-        let ship_id = sess.ship_id.unwrap();
-        if h.get_ball_snapshot(ship_id).await.unwrap().is_some_and(|(_, b)| !matches!(b.mode, eve_destiny::MovementMode::Warp { .. })) {
-            break;
+        if let Some((_, b)) = h.get_ball_snapshot(ship_id).await.unwrap() {
+            let warping = matches!(b.mode, eve_destiny::MovementMode::Warp { .. });
+            if warping {
+                seen_warp = true;
+            } else if seen_warp || i > 48 {
+                break;
+            }
         }
     }
 }
@@ -367,9 +382,9 @@ async fn test_live_excavator_drones_mining_goals_and_market_supply_chain() {
     // Client probe scanner / Agency ice-belt query seeds the regional IceBelt anomaly.
     rpc(&ctx, &mut s1, "dungeonInstanceCacheMgr", "GetIceBeltInstances", &[]).await.expect("GetIceBeltInstances");
     let (veld_ast_id, ice_ast_id, ice_type) = ctx.db.with_snapshot(|s| {
-        let veld = s.asteroids.values().find(|a| a.solar_system_id == JOSAMETO_SYS && a.type_id == 1230 && a.quantity >= 10_000).unwrap().asteroid_id;
+        let veld = s.asteroids.values().filter(|a| a.solar_system_id == JOSAMETO_SYS && a.type_id == 1230 && a.quantity >= 10_000).min_by_key(|a| a.asteroid_id).unwrap().asteroid_id;
         let is_ice = |tid: u32| ctx.sde.types.get(&tid).is_some_and(|t| t.group_id == 465);
-        let ice = s.asteroids.values().find(|a| a.solar_system_id == JOSAMETO_SYS && is_ice(a.type_id) && a.quantity >= 5).expect("regional IceBelt spawned");
+        let ice = s.asteroids.values().filter(|a| a.solar_system_id == JOSAMETO_SYS && is_ice(a.type_id) && a.quantity >= 5).min_by_key(|a| a.asteroid_id).expect("regional IceBelt spawned");
         (veld, ice.asteroid_id, ice.type_id)
     });
 
@@ -417,11 +432,17 @@ async fn test_live_excavator_drones_mining_goals_and_market_supply_chain() {
     rpc(&ctx, &mut s1, "stationSvc", "Undock", &[]).await.unwrap();
     ctx.advance_secs(11);
     slash(&ctx, &mut s1, &format!("/tr {JOSAMETO_SYS}")).await;
-    warp_to_item(&ctx, &mut s1, JOSAMETO_SYS, veld_ast_id).await;
     let jos_h = ctx.systems.get_or_spawn(JOSAMETO_SYS);
+    let _ = jos_h.set_ball_position(venture_id, eve_destiny::DVec3::new(200_000.0, 0.0, 0.0)).await;
+    warp_to_item(&ctx, &mut s1, JOSAMETO_SYS, veld_ast_id).await;
     rpc(&ctx, &mut s1, "dogmaIM", "AddTarget", &[PyRep::Integer(veld_ast_id)]).await.unwrap();
-    ctx.advance_secs(10);
-    jos_h.step_manual(10.0).await.unwrap();
+    for _ in 0..6 {
+        ctx.advance_secs(5);
+        jos_h.step_manual(5.0).await.unwrap();
+        if jos_h.get_target_locks(venture_id).await.unwrap().iter().any(|l| l.target_id == veld_ast_id && l.locked) {
+            break;
+        }
+    }
     rpc(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(miner_mod), PyRep::Integer(veld_ast_id)]).await.unwrap();
     ctx.advance_secs(65);
     tick_background_cluster(&ctx).await;

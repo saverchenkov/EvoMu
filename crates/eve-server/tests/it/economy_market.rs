@@ -750,6 +750,10 @@ pub(crate) mod market_instant_matching {
         });
         assert!(has_buyer_j && has_seller_j && has_tax_j, "Both buyer and seller + sales tax must be journaled on BuyMultipleItems");
 
+        // Visibility (3447) level 1 allows solar-system ranged remote buying (orderRange = 0)
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.skills.entry(90_000_001).or_default().insert(3447, eve_db::TrainedSkillRecord { type_id: 3447, level: 1, skill_points: 1000.0 });
+        });
         // BuyMultipleItems with orderRange = 0 (solar system) fills the 5.0 ISK order at other_jita_st and delivers to other_jita_st
         let mb_sys = rpc(
             &ctx,

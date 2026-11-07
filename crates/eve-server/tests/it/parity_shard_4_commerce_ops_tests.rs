@@ -343,7 +343,7 @@ async fn payment_purchase_schedules_tokens_and_fast_checkout() {
     let disabled_fc = ctx.dispatch_rpc(&mut player, "FastCheckoutService", None, "BuyOffer", &[PyRep::Integer(1), PyRep::Integer(1)], &HashMap::new(), None).await.unwrap_err();
     assert_eq!(disabled_fc.code.as_str(), "FastCheckoutDisabled");
     eve_server::services::fast_checkout_and_activity::set_user_fast_checkout_enabled(&ctx, uid, true);
-    let missing_fc = ctx.dispatch_rpc(&mut player, "FastCheckoutService", None, "BuyOffer", &[PyRep::Integer(1), PyRep::Integer(1), PyRep::String("hash".into())], &HashMap::new(), None).await.unwrap_err();
+    let missing_fc = ctx.dispatch_rpc(&mut player, "FastCheckoutService", None, "BuyOffer", &[PyRep::Integer(999_999), PyRep::Integer(1), PyRep::String("hash".into())], &HashMap::new(), None).await.unwrap_err();
     assert_eq!(missing_fc.code.as_str(), "OfferNotFound");
 
     let cycle_out = ctx.dispatch_rpc(&mut player, "FastCheckoutService", None, "RequestMiningCycleOutput", &[PyRep::Integer(metenox_id)], &HashMap::new(), None).await.expect("RequestMiningCycleOutput");
@@ -377,6 +377,19 @@ async fn freelance_project_delete_and_hypernet_relay_lifecycle() {
     let corp_id = 98_000_001i64;
     seed_pilot(&ctx.db, dir_cid, 6421, "CorpDirector", corp_id, 50_000_000_00, 500);
     seed_pilot(&ctx.db, member_cid, 6422, "CorpMember", corp_id, 50_000_000_00, 500);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord {
+            corporation_id: corp_id,
+            name: "Commerce Ops Corp".into(),
+            ticker: "COC".into(),
+            ceo_id: dir_cid,
+            members: std::collections::HashSet::from([dir_cid, member_cid]),
+            member_roles: HashMap::from([(dir_cid, corp_roles::ROLE_DIRECTOR), (member_cid, 0)]),
+            ..Default::default()
+        };
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(corp_id, corp);
+    });
 
     let mut dir = sess(42, 6421, dir_cid, corp_id, corp_roles::ROLE_DIRECTOR);
     let mut member = sess(43, 6422, member_cid, corp_id, 0);

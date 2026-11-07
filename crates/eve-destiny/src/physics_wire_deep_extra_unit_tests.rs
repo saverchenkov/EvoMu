@@ -458,6 +458,7 @@ fn wire_slim_meta_damage_state_set_state_and_destiny_event_edge_cases() {
         skin_id: None,
         skin_material_set_id: None,
         jump_target: None,
+        ..SlimItemMeta::default()
     };
     if let PyRep::Dict(entries) = slim_item_dict(&dyn_ball, &bare_meta) {
         let map: std::collections::BTreeMap<String, PyRep> = entries

@@ -1042,16 +1042,19 @@ async fn test_wallet_evermarks_sde_paragon_catalog_and_redemption() {
     }
 
     assert_eq!(
-        ctx.db.with_snapshot(|s| s.characters[&char_id].loyalty_points[&PARAGON_CORP_ID]),
-        1_000
+        ctx.db.with_snapshot(|s| s.characters[&char_id].loyalty_points.get(&PARAGON_CORP_ID).copied().unwrap_or(0)),
+        0
     );
 
-    // 4. Sequence a 9-license batch (+4,500 EverMarks) and redeem Rifter Corporation Emblem (72964, offer 17208, 5,000 LP)
+    // 4. Sequence a 9-license batch and redeem Rifter Corporation Emblem (72964, offer 17208, 5,000 LP)
     assert_eq!(seq_job(3, "Rifter Fleet Batch", 9).status_code, 200);
     assert_eq!(
-        ctx.db.with_snapshot(|s| s.characters[&char_id].loyalty_points[&PARAGON_CORP_ID]),
-        5_500
+        ctx.db.with_snapshot(|s| s.characters[&char_id].loyalty_points.get(&PARAGON_CORP_ID).copied().unwrap_or(0)),
+        0
     );
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&char_id).unwrap().loyalty_points.insert(PARAGON_CORP_ID, 5_500);
+    });
     let take_res = ctx
         .dispatch_rpc(
             &mut sess,

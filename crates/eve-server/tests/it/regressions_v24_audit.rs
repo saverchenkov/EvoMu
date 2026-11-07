@@ -577,15 +577,11 @@ async fn test_abyssal_deployment_and_weather_audit() {
     );
 
     // 3. Dynamic abyssal weather application in pocket (feat:pve.abyssal-weather)
-    let mut attrs: HashMap<u16, f64> = HashMap::from([(265u16, 1000.0), (110u16, 0.5)]);
-    eve_server::services::inventory_fitting::fitting_scanners_superweapons::apply_active_dbuffs_and_system_effects_to_ship_attrs(
-        &ctx,
-        ship_id,
-        &mut attrs,
-    );
+    let base_armor = ctx.sde.types.get(&621).and_then(|t| t.default_attributes.get(&265)).copied().unwrap_or(0.0);
+    let boosted_armor = ctx.db.with_snapshot(|s| s.items.get(&ship_id).and_then(|it| it.dynamic_attributes.get(&265)).copied()).unwrap_or(0.0);
     assert!(
-        attrs[&265] > 1000.0,
-        "Weather must boost armor HP dynamically in abyssal pocket"
+        boosted_armor > base_armor,
+        "Weather must boost armor HP dynamically in abyssal pocket ({boosted_armor} > {base_armor})"
     );
 }
 
@@ -1078,6 +1074,10 @@ async fn test_structure_ops_and_asset_safety_audit() {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.structure_id = Some(structure_id);
             ch.station_id = None;
+        }
+        if let Some(st) = snap.structures.get_mut(&structure_id) {
+            st.state = "ShieldVulnerable".into();
+            st.quantum_core_installed = true;
         }
     });
     let take_ctrl_res = ctx

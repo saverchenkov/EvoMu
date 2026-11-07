@@ -249,7 +249,10 @@ pub async fn handle(
                 let is_unlocked = unlocked_until > now_u;
                 let rem_secs = if is_unlocked { (unlocked_until - now_u) as i64 } else { 0 };
                 let total_pulses = if is_unlocked { (unlocked_until - now_u).div_ceil(60) as i64 } else { 0 };
-                let active_links = if st.and_then(|s| s.ess_linked_character_id).is_some() { 1 } else { 0 };
+                let main_linked = st.and_then(|s| s.ess_linked_character_id);
+                let reserve_linked = pulse_st.reserve_linked_character_id;
+                let active_links = i64::from(main_linked.is_some()) + i64::from(reserve_linked.is_some());
+                let linked_char = main_linked.or(reserve_linked);
                 PyRep::Dict(vec![
                     (PyRep::String("solarSystemID".into()), PyRep::Integer(i64::from(sys_id))),
                     (PyRep::String("activeLinks".into()), PyRep::Integer(active_links)),
@@ -262,7 +265,7 @@ pub async fn handle(
                     (PyRep::String("dbsMultiplier".into()), PyRep::Real(st.map(|s| s.dbs_multiplier).unwrap_or(1.0))),
                     (
                         PyRep::String("linkedCharacterID".into()),
-                        st.and_then(|s| s.ess_linked_character_id).map(PyRep::Integer).unwrap_or(PyRep::None),
+                        linked_char.map(PyRep::Integer).unwrap_or(PyRep::None),
                     ),
                     (
                         PyRep::String("linkStartedTick".into()),

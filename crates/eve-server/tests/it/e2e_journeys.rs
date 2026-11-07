@@ -389,6 +389,10 @@ async fn test_e2e_01_to_18_integration_journeys() {
         wh_in_kv.get("solarSystemID"),
         Some(&PyRep::Integer(31_000_005))
     );
+    let exit_wh_id = wh_in_kv
+        .get("exitWormholeBallID")
+        .and_then(PyRep::as_i64)
+        .expect("exitWormholeBallID");
     ctx.advance_secs(12);
     let wh_vfk = ctx
         .dispatch_rpc(
@@ -396,7 +400,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
             "wormholeMgr",
             None,
             "WormholeJump",
-            &[PyRep::Integer(750_000_001)],
+            &[PyRep::Integer(exit_wh_id)],
             &kw,
             None,
         )
@@ -409,6 +413,10 @@ async fn test_e2e_01_to_18_integration_journeys() {
         wh_vfk_kv.get("solarSystemID"),
         Some(&PyRep::Integer(30_002_904))
     );
+    let exit_wh_vfk_id = wh_vfk_kv
+        .get("exitWormholeBallID")
+        .and_then(PyRep::as_i64)
+        .expect("exitWormholeBallID in VFK-IV");
 
     // E2E-06: Combat against test-spawned NPC pirate ball 700_000_001 in Null-Sec VFK-IV (30002904) & ESS Main Bank Hack
     let hed_handle = ctx.systems.get_or_spawn(30_002_904);
@@ -576,6 +584,10 @@ async fn test_e2e_01_to_18_integration_journeys() {
     });
     assert_eq!(remaining_clip, 120 - shots_fired);
 
+    // Let the 60s post-gate-jump cloak expire before attempting to link the ESS
+    for _ in 0..61 {
+        let _ = hed_handle.step_manual(1.0).await.unwrap();
+    }
     let ess_start = ctx
         .dispatch_rpc(
             &mut sess,
@@ -626,7 +638,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
             "wormholeMgr",
             None,
             "WormholeJump",
-            &[PyRep::Integer(750_000_001)],
+            &[PyRep::Integer(exit_wh_vfk_id)],
             &kw,
             None,
         )

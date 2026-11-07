@@ -284,31 +284,35 @@ async fn test_industry_and_campaign_mgr_rpcs() {
     let login_state = rpc(&ctx, &mut sess, "loginCampaignManager", "get_client_campaign_state", &[])
         .await
         .expect("get_client_campaign_state");
-    assert!(
-        field(field(&login_state, "static_data"), "campaign_id")
-            .as_i64()
-            .is_some()
-    );
+    let active_cid = field(field(&login_state, "static_data"), "campaign_id")
+        .as_i64()
+        .expect("active campaign_id");
+    let expected_alpha_tid = eve_server::services::campaigns_and_milestones::get_sde_login_campaigns(&ctx.sde)[&active_cid]
+        .alpha_rewards
+        .values()
+        .next()
+        .expect("day 1 alpha reward")
+        .type_id;
     assert_eq!(
         field(field(&login_state, "item_progress"), "num_claimed_rewards").as_i64(),
         Some(0)
     );
 
-    // 5. loginCampaignManager.claim_reward: delivers SDE day 0 rewards (80937 + 49809) and returns 4-tuple
+    // 5. loginCampaignManager.claim_reward: delivers SDE day 0 rewards and returns 4-tuple
     let login_claim = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
         .await
         .expect("claim_reward");
     let PyRep::Tuple(login_claim_tuple) = &login_claim else {
         panic!("expected Tuple from claim_reward");
     };
-    assert_eq!(field(&login_claim_tuple[0], "typeID").as_i64(), Some(80_937));
+    assert_eq!(field(&login_claim_tuple[0], "typeID").as_i64(), Some(i64::from(expected_alpha_tid)));
     let alpha_item_id = field(&login_claim_tuple[0], "itemID")
         .as_i64()
         .expect("delivered alpha itemID");
     ctx.db.with_snapshot(|snap| {
         let item = snap.items.get(&alpha_item_id).expect("minted login reward item");
         assert_eq!(item.owner_id, PILOT_1);
-        assert_eq!(item.type_id, 80_937);
+        assert_eq!(item.type_id, expected_alpha_tid);
         assert_eq!(item.flag, eve_db::InventoryFlag::Hangar);
     });
 

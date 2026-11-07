@@ -342,6 +342,7 @@ async fn test_live_crimewatch_system_criminal_and_disapproval_flag_notifications
 
     let victim2 = common::gm_pilot_in_space(&ctx, 95_204, 95_000_004, 47466, ZARZAKH_SYS).await;
     let z_handle = ctx.systems.get_or_spawn(ZARZAKH_SYS);
+    let _ = z_handle.set_ball_position(victim2.ship_id, DVec3::new(15_000.0, 0.0, 0.0)).await;
     let z_gate_id = ctx
         .sde
         .stargates()
@@ -366,22 +367,25 @@ async fn test_live_crimewatch_system_criminal_and_disapproval_flag_notifications
         "beyonce",
         Some(victim2.beyonce),
         "CmdWarpToStuff",
-        &[PyRep::String("item".into()), PyRep::Integer(z_gate_id), PyRep::Real(0.0)],
+        &[PyRep::String("item".into()), PyRep::Integer(z_gate_id), PyRep::Real(5_000.0)],
         &HashMap::new(),
         None,
     )
     .await
     .expect("Warp victim2 to Zarzakh gate");
-    for _ in 0..40 {
+    let (mut a_warped, mut v_warped) = (false, false);
+    for i in 0..150 {
         ctx.advance_secs(1);
         let _ = z_handle.tick().await;
         if let (Ok(Some((_, a_b))), Ok(Some((_, v_b)))) = (
             z_handle.get_ball_snapshot(attacker2.ship_id).await,
             z_handle.get_ball_snapshot(victim2.ship_id).await,
         ) {
-            if !matches!(a_b.mode, MovementMode::Warp { .. })
-                && !matches!(v_b.mode, MovementMode::Warp { .. })
-            {
+            let aw = matches!(a_b.mode, MovementMode::Warp { .. });
+            let vw = matches!(v_b.mode, MovementMode::Warp { .. });
+            if aw { a_warped = true; }
+            if vw { v_warped = true; }
+            if !aw && !vw && ((a_warped && v_warped) || i > 40) {
                 break;
             }
         }
@@ -395,7 +399,7 @@ async fn test_live_crimewatch_system_criminal_and_disapproval_flag_notifications
     ctx.dispatch_rpc(&mut attacker2.sess, "dogmaIM", Some(z_dogma_oid), "AddTarget", &[PyRep::Integer(victim2.ship_id)], &HashMap::new(), None)
         .await
         .expect("AddTarget in Zarzakh");
-    for _ in 0..30 {
+    for _ in 0..60 {
         ctx.advance_secs(1);
         let _ = z_handle.tick().await;
         if z_handle

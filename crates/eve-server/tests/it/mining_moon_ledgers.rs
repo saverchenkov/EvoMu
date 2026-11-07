@@ -740,7 +740,7 @@ async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
     ctx.dispatch_rpc(&mut session, "moonExtractions", None, "StartNewExtraction", &[PyRep::Integer(auto_structure_id), PyRep::Integer(518_400)], &kw, None)
         .await
         .expect("StartNewExtraction on auto_structure_id");
-    ctx.advance_time_seconds(518_400 + 10_800);
+    ctx.advance_time_seconds(518_400 + 12_000);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let PyRep::Tuple(auto_tup) = ctx
         .dispatch_rpc(&mut session, "moonExtractions", None, "GetExtractionAndEventIDFromStructureID", &[PyRep::Integer(auto_structure_id)], &kw, None)

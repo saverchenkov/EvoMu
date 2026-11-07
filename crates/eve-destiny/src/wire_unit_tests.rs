@@ -399,6 +399,7 @@ fn slim_item_meta_and_dict_covers_stargate_wormhole_npc_and_player_ship() {
         skin_id: Some(111),
         skin_material_set_id: Some(222),
         jump_target: None,
+        ..SlimItemMeta::default()
     };
     let npc_dict = slim_item_dict(&npc_ball, &npc_meta);
     if let PyRep::Dict(entries) = npc_dict {

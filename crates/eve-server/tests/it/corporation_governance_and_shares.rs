@@ -891,7 +891,7 @@ async fn test_corp_projects_goals_and_freelance_workflows() {
 
     let ctx = ServerContext::new();
     let mut sess1 = select_pilot(&ctx, 63_101, "demo", "demo-secret", PILOT_1).await;
-    let sess2 = select_pilot(&ctx, 63_102, "other", "other-secret", PILOT_2).await;
+    let mut sess2 = select_pilot(&ctx, 63_102, "other", "other-secret", PILOT_2).await;
 
     // Create corporation
     let created = rpc(
@@ -1043,6 +1043,8 @@ async fn test_corp_projects_goals_and_freelance_workflows() {
     let fl_id_wire = fl_out[2..22].to_vec();
 
     // Pilot 2 commits to freelance job via real V24 Quasar CommitRequest
+    sess2.corporation_id = Some(corp_id);
+    ctx.sync_session(&mut sess2);
     let commit_fl = q_req(&sess2, "eve_public.freelance.project.api.CommitRequest", fl_id_wire);
     assert_eq!(commit_fl.status_code, eve_server::quasar_gateway::STATUS_OK, "{}", commit_fl.status_message);
 

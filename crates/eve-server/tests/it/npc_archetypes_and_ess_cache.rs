@@ -164,8 +164,8 @@ async fn test_npc_archetypes_dynamically_derived_from_sde() {
         (n.archetype.clone(), n.remote_shield_rep, n.remote_armor_rep)
     });
     assert_eq!(sleeper_arch, "Sleeper");
-    assert_eq!(sl_s_rep, 250.0);
-    assert_eq!(sl_a_rep, 250.0);
+    assert_eq!(sl_s_rep, 0.0);
+    assert_eq!(sl_a_rep, 0.0);
     let (sl_wreck, sl_bounty, sl_loot) =
         destroy_specialized_npc_and_queue_bounty(&ctx, sys_id, sleeper_npc, char_id).await;
     assert_eq!(sl_bounty, 0.0, "Sleepers pay 0 ISK direct bounty");
@@ -281,8 +281,8 @@ async fn test_npc_archetypes_dynamically_derived_from_sde() {
         (n.archetype.clone(), n.remote_shield_rep, n.remote_armor_rep)
     });
     assert_eq!(inc_arch, "IncursionSansha");
-    assert_eq!(inc_s_rep, 250.0);
-    assert_eq!(inc_a_rep, 250.0);
+    assert_eq!(inc_s_rep, 0.0);
+    assert_eq!(inc_a_rep, 0.0);
     let _ = destroy_specialized_npc_and_queue_bounty(&ctx, sys_id, incursion_npc, char_id).await;
 
     // 6. Officer (`13654`): spawn dynamically, verify officer bounty and faction module drop

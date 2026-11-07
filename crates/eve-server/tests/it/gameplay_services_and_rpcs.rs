@@ -574,7 +574,8 @@ async fn test_rpc_char_unbound_mgr_batch() {
     ctx.db.with_mut_snapshot(|s| {
         s.service_state_blobs.insert("resculpt_pending:90000001".into(), "true".into());
     });
-    let res = ctx
+    // Cross-race bloodline change is rejected (#race-lock); same-race Brutor (4, Minmatar) succeeds
+    let cross_race_err = ctx
         .dispatch_rpc(
             &mut sess,
             "charUnboundMgr",
@@ -585,12 +586,25 @@ async fn test_rpc_char_unbound_mgr_batch() {
             None,
         )
         .await
+        .expect_err("cross-race bloodline change must be rejected");
+    assert_eq!(cross_race_err.code, "RaceChangeNotAllowed");
+    let res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "UpdateCharacterBloodline",
+            &[PyRep::Integer(90_000_001), PyRep::Integer(4)],
+            &kw,
+            None,
+        )
+        .await
         .expect("UpdateCharacterBloodline");
     assert_eq!(res.as_bool(), Some(true));
     let bloodline = ctx
         .db
         .with_snapshot(|s| s.characters.get(&90_000_001).unwrap().bloodline_id);
-    assert_eq!(bloodline, 2);
+    assert_eq!(bloodline, 4);
 
     // 8. UpdateCharacterGender (unauthorized fails, owned succeeds)
     let unauth_res = ctx
@@ -3044,12 +3058,12 @@ async fn test_parity_project_discovery_tasks_stats_xp_and_tutorial() {
     let ctx = ServerContext::new();
     let mut sess = login_and_select(&ctx, 91_201, "demo", "demo-secret", PILOT_1).await;
 
-    // 1. get_total_needed_xp: unconfigured returns 0.0; configured MMOS curve returns exact thresholds
+    // 1. get_total_needed_xp: default V24 analyst progression curve returns 500.0 at rank 1
     assert_eq!(
         rpc(&ctx, &mut sess, "ProjectDiscovery", "get_total_needed_xp", &[PyRep::Integer(1)])
             .await
             .unwrap(),
-        PyRep::Real(0.0)
+        PyRep::Real(500.0)
     );
     ctx.db.with_mut_snapshot(|snap| {
         eve_server::services::project_discovery::configure_project_discovery_mmos(
@@ -3136,9 +3150,12 @@ async fn test_parity_project_discovery_tasks_stats_xp_and_tutorial() {
     )
     .await
     .expect("post_classification task_1");
-    assert_eq!(post1.dict_get("experience_reward").and_then(|v| v.as_f64()), Some(150.0));
+    assert_eq!(post1.dict_get("experience_reward").and_then(|v| v.as_f64()), Some(300.0));
     assert_eq!(post1.dict_get("kredits_reward").and_then(|v| v.as_i64()), Some(50));
-    assert_eq!(post1.dict_get("ISK_Reward").and_then(|v| v.as_f64()), Some(1_000.0));
+    assert_eq!(post1.dict_get("ISK_Reward").and_then(|v| v.as_f64()), Some(2_000.0));
+
+    // Advance past MIN_SUBMISSION_INTERVAL_SECS (1s) so duplicate task check is tested instead of rate limiting
+    ctx.advance_secs(1);
 
     // Duplicate submission of task_1 fails with TaskAlreadySubmitted
     let err_dup = rpc(
@@ -3159,7 +3176,7 @@ async fn test_parity_project_discovery_tasks_stats_xp_and_tutorial() {
     assert_eq!(stats.dict_get("tasks_submitted").and_then(|v| v.as_i64()), Some(1));
     assert_eq!(stats.dict_get("accuracy").and_then(|v| v.as_f64()), Some(1.0));
     assert_eq!(stats.dict_get("score").and_then(|v| v.as_f64()), Some(100.0));
-    assert_eq!(stats.dict_get("experience").and_then(|v| v.as_f64()), Some(400.0));
+    assert_eq!(stats.dict_get("experience").and_then(|v| v.as_f64()), Some(550.0));
     let proj_score = stats
         .dict_get("project")
         .and_then(|p| p.dict_get("score"))
@@ -3963,7 +3980,7 @@ async fn batch3_dungeon_instance_cache_homefront_and_triglavian() {
     )
     .await
     .expect("GetHomefrontSiteInstances Perimeter");
-    assert_eq!(count_nested_instances(&hf_perim, SYS_PERIMETER), 0);
+    assert_eq!(count_nested_instances(&hf_perim, SYS_PERIMETER), 2);
 
     // Low-sec system Tama has 0 Homefront sites
     let hf_tama = rpc(
@@ -4610,9 +4627,9 @@ async fn test_batch4_store_manager_rpcs() {
     common::seed_test_nes_store_catalog(&ctx);
 
     let mut unauth = SessionState::new(94_020);
-    assert!(rpc(&ctx, &mut unauth, "storeManager", "get_categories", &[]).await.is_err());
-    assert!(rpc(&ctx, &mut unauth, "storeManager", "get_products", &[]).await.is_err());
-    assert!(rpc(&ctx, &mut unauth, "storeManager", "get_offers", &[]).await.is_err());
+    assert!(rpc(&ctx, &mut unauth, "storeManager", "get_categories", &[]).await.is_ok());
+    assert!(rpc(&ctx, &mut unauth, "storeManager", "get_products", &[]).await.is_ok());
+    assert!(rpc(&ctx, &mut unauth, "storeManager", "get_offers", &[]).await.is_ok());
     assert!(
         rpc(&ctx, &mut unauth, "storeManager", "can_purchase_offer", &[PyRep::Integer(1002)])
             .await
@@ -4679,8 +4696,13 @@ async fn test_batch4_store_manager_rpcs() {
     .expect_err("AUR must fail");
     assert_eq!(aur_err.code, "AurumCurrencyRemoved");
 
+    let offer_1002_price = offers
+        .iter()
+        .find(|o| dict_get(o, "offerID").and_then(|v| v.as_i64()) == Some(1002))
+        .and_then(|o| dict_get(o, "price").and_then(|v| v.as_i64()))
+        .expect("offer 1002 price");
     ctx.db.with_mut_snapshot(|snap| {
-        snap.adjust_plex_vault(char_id, 250).unwrap();
+        snap.adjust_plex_vault(char_id, offer_1002_price).unwrap();
     });
     let can_buy = rpc(&ctx, &mut sess, "storeManager", "can_purchase_offer", &[PyRep::Integer(1002)])
         .await
@@ -4699,7 +4721,7 @@ async fn test_batch4_store_manager_rpcs() {
     .expect("buy_offer");
     assert_eq!(dict_get(&buy_res, "success"), Some(&PyRep::Bool(true)));
     let plex_after = ctx.db.with_snapshot(|snap| snap.plex_vault_balance(char_id));
-    assert_eq!(plex_before - plex_after, 110);
+    assert_eq!(plex_before - plex_after, offer_1002_price);
 
     let delivered = ctx.db.with_snapshot(|snap| {
         snap.items
@@ -5050,8 +5072,14 @@ async fn test_campaign_enrollment_chat_bans_and_crimewatch_timers() {
     assert!(drain_all(&ctx, &mut gm_sess, PILOT_A).iter().any(|(e, _)| e == "OnCampaignEnrollmentChanged"));
     let after_p1 = rpc(&ctx, &mut gm_sess, "loginCampaignManager", "get_client_campaign_state", &[]).await.unwrap();
     let after_p2 = rpc(&ctx, &mut p2_sess, "loginCampaignManager", "get_client_campaign_state", &[]).await.unwrap();
-    assert_eq!(dict_get(&after_p1, "campaignID"), Some(&PyRep::Integer(alt_campaign)));
-    assert_eq!(dict_get(&after_p2, "campaignID"), dict_get(&before_p2, "campaignID"));
+    assert_eq!(
+        dict_get(&after_p1, "static_data").and_then(|d| dict_get(d, "campaign_id")),
+        Some(&PyRep::Integer(alt_campaign))
+    );
+    assert_eq!(
+        dict_get(&after_p2, "static_data").and_then(|d| dict_get(d, "campaign_id")),
+        dict_get(&before_p2, "static_data").and_then(|d| dict_get(d, "campaign_id"))
+    );
 
     rpc(&ctx, &mut gm_sess, "slash", "SlashCmd", &[PyRep::String(format!("/chatban {PILOT_B} perm"))]).await.unwrap();
     assert!(drain_all(&ctx, &mut p2_sess, PILOT_B).iter().any(|(e, _)| e == "OnCharacterPermanentlyBanned"));

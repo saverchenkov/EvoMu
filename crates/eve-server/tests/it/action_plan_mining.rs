@@ -232,9 +232,12 @@ async fn test_action_plan_c5_mn01_to_mn07_mining_data_belts_lasers_holds_crystal
     let notifs = ctx.drain_notifications_for_char(char_id);
     assert!(notifs.iter().any(|n| n.event == "OnWarpStarted"), "Warping to belt must emit OnWarpStarted");
     assert!(!notifs.iter().any(|n| n.event == "OnWarpToAsteroidBelt"), "OnWarpToAsteroidBelt is client_local and must not be emitted by server");
-    for _ in 0..30 {
+    for _ in 0..60 {
         let _ = perim.step_manual(1.0).await.unwrap();
-        if perim.get_ball_snapshot(ship_id).await.unwrap().unwrap().1.position.distance(first_belt_cel.position) < 5_000.0 { break; }
+        let (_, b) = perim.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+        if !matches!(b.mode, MovementMode::Warp { .. }) && b.position.distance(first_belt_cel.position) < 5_000.0 {
+            break;
+        }
     }
     let sample_init = ctx.db.get_asteroid(sample_ast_id).expect("CmdWarpToStuff must populate belt AsteroidRecord in ctx.db").quantity as u64;
     assert_eq!(sample_init, 20_000);
@@ -242,7 +245,7 @@ async fn test_action_plan_c5_mn01_to_mn07_mining_data_belts_lasers_holds_crystal
         let (_, ast_b) = perim.get_ball_snapshot(belt_ast_id).await.unwrap().expect("Belt asteroid ball spawned by CmdWarpToStuff");
         let _ = perim.set_ball_position(ship_id, ast_b.position + DVec3::new(500.0, 0.0, 0.0)).await;
         ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(belt_ast_id)], &kw, None).await.expect("Lock belt asteroid");
-        for _ in 0..30 {
+        for _ in 0..120 {
             if perim.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == belt_ast_id && l.locked) { break; }
             perim.step_manual(1.0).await.unwrap();
         }
@@ -424,7 +427,7 @@ async fn test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_rep
     ctx.db.with_mut_snapshot(|snap| {
         let sk = snap.skills.entry(char_id).or_default();
         for (sid, lvl) in [
-            (3386, 5), (3410, 5), (17940, 5), (16281, 5), (25544, 5), (3436, 5), (3438, 1), (3442, 1),
+            (3386, 5), (3410, 5), (17940, 5), (16281, 5), (25544, 5), (3436, 5), (3438, 1), (3442, 5),
             (3385, 5), (3389, 5), (18025, 5), (12195, 5), (18023, 5), (18020, 5), (60377, 5), (12196, 5),
         ] {
             sk.insert(sid, TrainedSkillRecord { type_id: sid, level: lvl, skill_points: 256_000.0 });

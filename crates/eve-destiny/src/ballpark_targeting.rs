@@ -296,6 +296,10 @@ impl Ballpark {
                 )
                 || matches!(ball.mode, MovementMode::Field | MovementMode::Mushroom)
                 || matches!(ball.mode, MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning)
+                || matches!(
+                    pre_step_balls.get(&id).map(|b| &b.mode),
+                    Some(MovementMode::Warp { phase, .. }) if *phase != WarpPhase::Aligning
+                )
                 || self.combat_states.get(&id).is_some_and(|cs| {
                     let mut c = cs.clone();
                     c.sync_action_breaks();

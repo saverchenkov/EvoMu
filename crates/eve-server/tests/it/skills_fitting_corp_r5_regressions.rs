@@ -64,8 +64,8 @@ async fn r5_225_226_227_231_corp_wallet_transfer_applications_titles_votes_and_a
         }
         let roles_a = HashMap::from([
             (ceo_a, u64::MAX),
-            // Junior Accountant (512) + AccountCanTake1 (1 << 20), NO AccountCanTake2 (1 << 21)
-            (jr_acct, 512 | (1u64 << 20)),
+            // Junior Accountant (512) + AccountCanTake1 (1 << 27), NO AccountCanTake2 (1 << 28)
+            (jr_acct, 512 | eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]),
             (member_no_shares, 0),
         ]);
         let mut corp_rec_a = CorporationRecord {

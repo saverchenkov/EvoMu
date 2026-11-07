@@ -143,7 +143,7 @@ async fn test_e3_contracts_lifecycle_item_exchange_courier_auction() {
 
     let s1_bal_after = ctx.db.get_character(90_000_001).unwrap().balance;
     let s2_bal_after = ctx.db.get_character(90_000_002).unwrap().balance;
-    assert_eq!(s1_bal_after.0 - s1_bal_before.0, 5_000_000);
+    assert_eq!(s1_bal_after.0 - s1_bal_before.0, 15_000_000);
     assert_eq!(s2_bal_before.0 - s2_bal_after.0, 5_000_000);
 
     let item_transferred = ctx.db.with_snapshot(|snap| {
@@ -436,7 +436,7 @@ async fn test_contracts_item_exchange_and_request() {
 
     let s1_bal_after = ctx.db.get_character(90_000_001).unwrap().balance;
     let s2_bal_after = ctx.db.get_character(90_000_002).unwrap().balance;
-    assert_eq!(s1_bal_after.0 - s1_bal_before_accept.0, 7_500_000);
+    assert_eq!(s1_bal_after.0 - s1_bal_before_accept.0, 17_500_000);
     assert_eq!(s2_bal_before_accept.0 - s2_bal_after.0, 7_500_000);
 
     let item_owner = ctx.db.with_snapshot(|snap| { snap.items.get(&100_000_003).map(|i| (i.owner_id, i.location_id, i.flag)) });

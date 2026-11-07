@@ -231,6 +231,7 @@ fn warp_bubble_interception_and_ballpark_lifecycle_actions() {
         skin_material_set_id: Some(5678),
         is_cloaked: false,
         jump_target: None,
+        ..SlimItemMeta::default()
     };
     assert!(park.change_slim_item(101, new_meta));
     assert!(park.set_ball_wormhole_stages(101, 2, 0.75));

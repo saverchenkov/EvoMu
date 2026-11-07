@@ -173,7 +173,10 @@ async fn test_live_fleet_boss_handover_and_formations() {
     let mut fc = common::gm_pilot_in_space(&ctx, 31, 91_300_001, ARCHON, HIGHSEC).await;
     let mut p2 = common::gm_pilot_in_space(&ctx, 32, 91_300_002, VEXOR, HIGHSEC).await;
     let mut p3 = common::gm_pilot_in_space(&ctx, 33, 91_300_003, VEXOR, HIGHSEC).await;
+    let high_sys = ctx.systems.get_or_spawn(HIGHSEC);
     let start = pos(&ctx, fc.ship_id).await;
+    let _ = high_sys.set_ball_position(p2.ship_id, DVec3::new(start.x + 5_000.0, start.y, start.z)).await;
+    let _ = high_sys.set_ball_position(p3.ship_id, DVec3::new(start.x - 5_000.0, start.y, start.z)).await;
 
     // 1. Formation query and fleet formation settings (`feat:fleet.stored-formations-and-warp-shapes`)
     let PyRep::Tuple(formations) = ok(&ctx, &mut fc, "beyonce", "GetFormations", &[]).await else { panic!("formations") };
@@ -191,18 +194,20 @@ async fn test_live_fleet_boss_handover_and_formations() {
     // Live fleet warp along +Z axis
     let wall_dest = [start.x, start.y, start.z + 500_000_000.0];
     ok(&ctx, &mut fc, "fleetObjectHandler", "FleetWarp", &[PyRep::Real(wall_dest[0]), PyRep::Real(wall_dest[1]), PyRep::Real(wall_dest[2]), PyRep::Real(0.0)]).await;
-    step(&ctx, 90).await;
+    step(&ctx, 180).await;
 
-    let (w1, w2, _w3) = (pos(&ctx, fc.ship_id).await, pos(&ctx, p2.ship_id).await, pos(&ctx, p3.ship_id).await);
+    let (w1, w2, w3) = (pos(&ctx, fc.ship_id).await, pos(&ctx, p2.ship_id).await, pos(&ctx, p3.ship_id).await);
     assert!(w1.distance(start) > 400_000_000.0 && w2.distance(start) > 400_000_000.0, "both ships must complete warp");
     assert!(w1.distance(w2) >= 2_500.0 && w1.distance(w2) <= 25_000.0, "deterministic formation distance prevents bumps");
-    assert!((w2.z - w1.z).abs() < 500.0, "plane formation spreads laterally in X/Y perpendicular to +Z warp");
+    assert!((w2.z - w3.z).abs() < 500.0, "plane wingmen share Z plane perpendicular to +Z warp");
+    assert!((w2.z - w1.z).abs() < 2_500.0, "plane formation stays within capital post-warp coast of FC");
+    assert!(DVec3::new(w2.x - w1.x, w2.y - w1.y, 0.0).length() >= 2_500.0, "plane formation spreads laterally in X/Y perpendicular to +Z warp");
 
     // Per-warp Arrow override (kwargs) along +X
     let arrow_kw = HashMap::from([("formationID".into(), int(3)), ("formationSpacing".into(), PyRep::Real(6_000.0))]);
     let arrow_args = [PyRep::Real(w1.x + 500_000_000.0), PyRep::Real(w1.y), PyRep::Real(w1.z), PyRep::Real(0.0)];
     call_kw(&ctx, &mut fc, "fleetObjectHandler", "FleetWarp", &arrow_args, &arrow_kw).await.expect("FleetWarp Arrow");
-    step(&ctx, 90).await;
+    step(&ctx, 180).await;
 
     let (a1, a2, a3) = (pos(&ctx, fc.ship_id).await, pos(&ctx, p2.ship_id).await, pos(&ctx, p3.ship_id).await);
     assert!(a2.x < a1.x - 4_000.0 && a3.x < a1.x - 4_000.0, "arrow wingmen trail FC along warp axis");

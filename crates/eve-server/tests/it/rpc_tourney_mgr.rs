@@ -388,9 +388,14 @@ async fn test_tourney_bans_and_restrictions() {
     let Some(PyRep::List(bb_list)) = fancy_bans.dict_get("bans").and_then(|b| b.dict_get("blue")) else { panic!("expected blue bans list"); };
     assert_eq!(rb_list.len(), 4, "Autoban must have recorded 4 bans for red");
     assert_eq!(bb_list.len(), 4, "Autoban must have recorded 4 bans for blue");
+    let blue_autoban_0 = bb_list[0].as_i64().expect("blue autoban type id");
 
-    // 5. Verify unauthorized pilot (non-GM, non-referee) is denied from BanShipType / UnBanShipType
-    let mut sess_unauth = select_pilot(&ctx, 80_099, "other", "other-secret", P2).await;
+    // 5. Verify unauthorized pilot (non-GM, non-referee, non-captain) is denied from BanShipType / UnBanShipType
+    let mut sess_unauth = sess.clone();
+    sess_unauth.session_id = 80_099;
+    sess_unauth.user_id = Some(80_099);
+    sess_unauth.character_id = Some(90_000_099);
+    sess_unauth.role = 0;
     let unauth_ban = rpc(
         &ctx,
         &mut sess_unauth,
@@ -422,6 +427,17 @@ async fn test_tourney_bans_and_restrictions() {
     .await
     .expect("BanShipType Red");
     assert_eq!(ban_red, PyRep::Bool(true));
+
+    let free_blue = rpc(
+        &ctx,
+        &mut sess,
+        "tourneyMgr",
+        "UnBanShipType",
+        &[PyRep::Integer(2001), PyRep::Integer(1), PyRep::Integer(blue_autoban_0)],
+    )
+    .await
+    .expect("UnBanShipType Blue autoban slot");
+    assert_eq!(free_blue, PyRep::Bool(true));
 
     let ban_blue = rpc(
         &ctx,

@@ -362,6 +362,11 @@ pub fn slim_item_dict(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
     } else {
         PyRep::None
     };
+    let war_faction_rep = meta
+        .war_faction_id
+        .filter(|&w| w > 0)
+        .map(PyRep::Integer)
+        .unwrap_or(PyRep::None);
     let wire_type_id = match ball.type_id {
         0 => 6,
         32882 | 56002 => 55914,
@@ -376,6 +381,7 @@ pub fn slim_item_dict(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
         ("charID", char_rep),
         ("corpID", corp_rep),
         ("allianceID", alliance_rep),
+        ("warFactionID", war_faction_rep),
         ("securityStatus", PyRep::Real(meta.security_status)),
         ("radius", PyRep::Real(ball.radius)),
         ("skinID", meta.skin_id.map(|s| PyRep::Integer(i64::from(s))).unwrap_or(PyRep::None)),

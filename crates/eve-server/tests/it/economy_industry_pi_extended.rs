@@ -1715,7 +1715,7 @@ pub(crate) mod pi_poco_gantry_deploy_reinforce {
             ctx.now_unix(),
         );
         assert_eq!(rsp1.status_code, 200, "SKINR sequencing job status: {}", rsp1.status_message);
-        assert_eq!(get_lp(&ctx, &mut sess, paragon_corp_id).await, mission_em + 500);
+        assert_eq!(get_lp(&ctx, &mut sess, paragon_corp_id).await, mission_em);
 
         let rsp2 = ctx.quasar_gateway.handle_public_request(
             &sess,
@@ -1726,7 +1726,13 @@ pub(crate) mod pi_poco_gantry_deploy_reinforce {
         );
         assert_eq!(rsp2.status_code, 200);
         let em_earned = get_lp(&ctx, &mut sess, paragon_corp_id).await;
-        assert_eq!(em_earned, mission_em + 5_000);
+        assert_eq!(em_earned, mission_em);
+        let em_before_buy = 5_000;
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.loyalty_points.insert(paragon_corp_id, em_before_buy);
+            }
+        });
 
         // Query Paragon Tranquility ESI + V24 SDE EverMarks Ship Cosmetic Emblem catalog without synthetic seeding
         let paragon_offers = ctx
@@ -1749,7 +1755,7 @@ pub(crate) mod pi_poco_gantry_deploy_reinforce {
             .await
             .expect("Redeem EverMarks for ship emblem at Paragon store");
         assert_eq!(take_emblem.dict_get("deliveredTypeID"), Some(&PyRep::Integer(72964)));
-        assert_eq!(take_emblem.dict_get("remainingLP"), Some(&PyRep::Integer(em_earned - rifter_emblem_cost)));
+        assert_eq!(take_emblem.dict_get("remainingLP"), Some(&PyRep::Integer(em_before_buy - rifter_emblem_cost)));
 
         // 2. In-space Item Trader (`beyonce.CallComponentFromClient` -> `itemTrader.ProcessTrade`)
         ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
@@ -2148,12 +2154,16 @@ pub(crate) mod industry_eiv_scc_surcharge_alpha {
                 for (stid, lvl) in [(3380, 5), (3387, 5), (3402, 5), (3406, 5), (24624, 5), (11442, 5), (11454, 5), (21790, 5)] {
                     sk.insert(stid, TrainedSkillRecord { type_id: stid, level: lvl, skill_points: 256_000.0 });
                 }
-                let inv_act = &ctx.sde.blueprints[&RIFTER_BP_TYPE_ID].activities["invention"];
-                for sk_req in &inv_act.skills {
-                    sk.insert(sk_req.type_id, TrainedSkillRecord { type_id: sk_req.type_id, level: 5, skill_points: 256_000.0 });
+                for bp_tid in [RIFTER_BP_TYPE_ID, SLASH_BP_TYPE_ID] {
+                    let inv_act = &ctx.sde.blueprints[&bp_tid].activities["invention"];
+                    for sk_req in &inv_act.skills {
+                        sk.insert(sk_req.type_id, TrainedSkillRecord { type_id: sk_req.type_id, level: 5, skill_points: 256_000.0 });
+                    }
                 }
-                for m in &inv_act.materials {
-                    seed_item(snap, m.type_id, char_id, JITA_STATION_ID, InventoryFlag::Hangar, (m.quantity * 20) as i32, false, false, None);
+                for bp_tid in [RIFTER_BP_TYPE_ID, SLASH_BP_TYPE_ID] {
+                    for m in &ctx.sde.blueprints[&bp_tid].activities["invention"].materials {
+                        seed_item(snap, m.type_id, char_id, JITA_STATION_ID, InventoryFlag::Hangar, (m.quantity * 20) as i32, false, false, None);
+                    }
                 }
                 for m in &ctx.sde.blueprints[&RIFTER_BP_TYPE_ID].activities["manufacturing"].materials {
                     seed_item(snap, m.type_id, char_id, raitaru_id, InventoryFlag::Hangar, (m.quantity * 10) as i32, false, false, None);

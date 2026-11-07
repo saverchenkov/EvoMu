@@ -873,15 +873,16 @@ async fn batch10_expedition_signatures_signal_tracker_and_probes() {
 
     // Negative: advancing wave 1 -> 2 of a 2-wave anomaly does NOT complete or spawn an expedition
     let _ = rpc(&ctx, &mut sess, "scanSvc", "GetCombatAnomalyInstances", &[]).await.unwrap();
-    let site_id = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+    let (site_id, site_pos) = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
         let sites = reg.sites_by_system.get_mut(&SYS_JITA).unwrap();
         let s = sites.iter_mut().find(|s| s.site_category == "CombatAnomaly").unwrap();
         s.current_wave = 1;
         s.total_waves = 2;
         s.cleared = false;
         s.active_npc_ball_ids.clear();
-        s.site_id.clone()
+        (s.site_id.clone(), s.position)
     });
+    let _ = ctx.systems.get_or_spawn(SYS_JITA).set_ball_position(700_301, glam::DVec3::from_array(site_pos)).await;
     rpc(&ctx, &mut sess, "keeper", "EnterNextDungeonRoom", &[PyRep::String(site_id.clone())]).await.unwrap();
     let wave1_obs = drain_all(&ctx, &mut obs_sess, PILOT_B);
     assert!(!has_notif(&wave1_obs, "OnCosmicSignatureAdded"));
@@ -1425,7 +1426,7 @@ async fn batch10_tales_storms_and_cosmic_anomalies() {
         }
     });
     // Negative: advancing 5s (before withdraw_until_sec) does NOT emit OnTaleRemove
-    ctx.clock().advance_secs(5);
+    ctx.advance_secs(5);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(!has_notif(
         &drain_all(&ctx, &mut sess, PILOT_A),
@@ -1433,7 +1434,7 @@ async fn batch10_tales_storms_and_cosmic_anomalies() {
     ));
 
     // Positive: advancing 35s crosses withdrawal expiry -> ends incursion and emits OnTaleRemove
-    ctx.clock().advance_secs(35);
+    ctx.advance_secs(35);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let rem_notifs = drain_all(&ctx, &mut sess, PILOT_A);
     let tr_args = find_notif(&rem_notifs, "OnTaleRemove");

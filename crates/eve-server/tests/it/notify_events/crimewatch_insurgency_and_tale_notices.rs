@@ -352,11 +352,11 @@ async fn test_batch4_interference_incursion_tale_remove_and_tourney_ban() {
         if let Some(inc) = reg.incursions.get_mut(&inc_cid) { inc.state = "Withdrawing".into(); }
         if let Some(meta) = reg.incursion_lifecycle.get_mut(&inc_cid) { meta.withdraw_until_sec = Some(now_u + 30); }
     });
-    ctx.clock().advance_secs(5);
+    ctx.advance_secs(5);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(!has_notif(&drain_all(&ctx, PILOT_A), "OnTaleRemove"));
 
-    ctx.clock().advance_secs(35);
+    ctx.advance_secs(35);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let tale_notifs = drain_all(&ctx, PILOT_A);
     let (_, tale_id_type, tale_args) = find_notif(&tale_notifs, "OnTaleRemove").expect("OnTaleRemove emitted");

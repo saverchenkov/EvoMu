@@ -452,6 +452,7 @@ pub async fn activate_interdiction_sphere_launcher(
                 skin_id: None,
                 skin_material_set_id: None,
                 jump_target: None,
+                ..eve_destiny::SlimItemMeta::default()
             },
         )
         .await
