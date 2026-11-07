@@ -176,4 +176,8 @@ pub struct Sp6PersistedState {
 #[cfg(test)] mod db_deep_extra_unit_tests;
 #[cfg(test)]
 mod gateway_tokens_cov_unit_tests;
+#[cfg(test)]
+mod gateway_and_inventory_edge_tests;
+#[cfg(test)]
+mod pkce_and_sso_edge_tests;
 

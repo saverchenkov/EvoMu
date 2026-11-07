@@ -173,20 +173,19 @@ fn cfsd_opt_str(buf: &[u8], rel: u64) -> Option<String> {
 }
 
 fn cfsd_records(raw: &[u8], stride: usize) -> Vec<usize> {
-    if raw.len() < 56 || stride == 0 {
+    if stride == 0 {
         return Vec::new();
     }
     let buckets = usize::try_from(u64_le(raw, 48)).unwrap_or(0);
-    let max_buckets = (raw.len().saturating_sub(56)) / 8;
-    let buckets = buckets.min(max_buckets);
     let mut out = Vec::new();
     for b in 0..buckets {
-        let Some(boff) = u64_le(raw, 56 + b * 8)
-            .checked_add(0)
-            .and_then(|v| (v != 0).then_some(v))
-            .and_then(|v| usize::try_from(v).ok())
-        else {
-            continue;
+        let boff_pos = 56 + b * 8;
+        let boff = match u64_le(raw, boff_pos) {
+            0 => continue,
+            v => match usize::try_from(v) {
+                Ok(v) => v,
+                Err(_) => continue,
+            },
         };
         let Some(abs) = 32_usize.checked_add(boff) else {
             continue;
@@ -194,10 +193,10 @@ fn cfsd_records(raw: &[u8], stride: usize) -> Vec<usize> {
         let Some(cnt_pos) = abs.checked_sub(8) else {
             continue;
         };
-        if cnt_pos.checked_add(8).is_none_or(|end| end > raw.len()) {
+        let n = usize::try_from(u64_le(raw, cnt_pos)).unwrap_or(0);
+        if n == 0 {
             continue;
         }
-        let n = usize::try_from(u64_le(raw, cnt_pos)).unwrap_or(0);
         for i in 0..n {
             let Some(off) = i.checked_mul(stride).and_then(|d| abs.checked_add(d)) else {
                 break;

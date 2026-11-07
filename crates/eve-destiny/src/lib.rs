@@ -34,6 +34,10 @@ mod mutation_math_and_grid_tests;
 mod ballpark_deep_extra_unit_tests;
 #[cfg(test)]
 mod physics_wire_deep_extra_unit_tests;
+#[cfg(test)]
+mod navigation_and_bumping_edge_tests;
+#[cfg(test)]
+mod physics_math_and_warp_edge_tests;
 
 pub type BallId = i64;
 

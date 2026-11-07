@@ -1,10 +1,10 @@
 //! Comprehensive unit and mutation-killing tests for `sqlite_store::notes_lp_sequence_store`
 //! (`apply_d6_migration`, `compute_d6_fingerprints`, `load_d6`, `sync_d6`, and `rollback_d6`).
 
-use super::fingerprints::{fp_json, fp_sp6_lifecycle, TableFingerprints};
+use super::fingerprints::{fp_sp6_lifecycle, TableFingerprints};
 use super::notes_lp_sequence_store::{
-    apply_d6_migration, compute_d6_fingerprints, load_d6, rollback_d6, sync_d6, D6Fingerprints,
-    D6_SCHEMA_VERSION,
+    apply_d6_migration, compute_d6_fingerprints, fp_owner_note, load_d6, rollback_d6, sync_d6,
+    D6Fingerprints, D6_SCHEMA_VERSION,
 };
 use super::schema::apply_migrations;
 use crate::snapshot_ext::LpRewardLogEntry;
@@ -421,7 +421,7 @@ fn rollback_d6_restores_counters_on_clean_maps_and_detects_deleted_keys() {
         assert!(sync_d6(&tx, &snap, &mut fp).unwrap());
         tx.commit().unwrap();
     }
-    assert_eq!(fp.d6.owner_notes[&1], fp_json(&snap.owner_notes[&1]));
+    assert_eq!(fp.d6.owner_notes[&1], fp_owner_note(&snap.owner_notes[&1]));
 
     // 1. When ONLY ID counters are mutated (`!(dirty_notes || dirty_lp || dirty_logs || dirty_sp6)`),
     // `rollback_d6` restores all 4 counters and returns early without reloading SQLite tables.

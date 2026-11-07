@@ -248,9 +248,6 @@ pub(crate) fn fsd_dict_entries(buf: &[u8], pos: usize, item_size: usize) -> Vec<
     let Some(body_start) = pos.checked_add(4) else {
         return Vec::new();
     };
-    if body_start > buf.len() {
-        return Vec::new();
-    }
     let Some(body_end) = body_start.checked_add(u32_le(buf, pos) as usize) else {
         return Vec::new();
     };
@@ -264,9 +261,6 @@ pub(crate) fn fsd_dict_entries(buf: &[u8], pos: usize, item_size: usize) -> Vec<
     let Some(footer) = footer_len_pos.checked_sub(footer_size) else {
         return Vec::new();
     };
-    if footer.checked_add(4).is_none_or(|end| end > body_end) {
-        return Vec::new();
-    }
     let cnt = u32_le(buf, footer) as usize;
     let mut entries = Vec::new();
     for i in 0..cnt {

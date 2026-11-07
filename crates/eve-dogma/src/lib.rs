@@ -1111,5 +1111,7 @@ pub fn apply_wormhole_phenomenon_to_attributes(
 #[cfg(test)] mod dogma_cov_unit_tests;
 #[cfg(test)]
 mod dogma_fitting_and_modifier_unit_tests;
+#[cfg(test)]
+mod fitting_heat_and_load_edge_tests;
 
 

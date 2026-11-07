@@ -1029,4 +1029,6 @@ mod tests;
 #[cfg(test)] mod quasar_extra_unit_tests;
 #[cfg(test)] mod proto_deep_extra_unit_tests;
 #[cfg(test)] mod proto_cov_unit_tests;
+#[cfg(test)]
+mod marshal_dbrow_and_quasar_edge_tests;
 

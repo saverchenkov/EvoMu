@@ -336,18 +336,30 @@ impl SdeRegistry {
     /// Looks up a single localized string by `lang` and `messageID` using an on-demand per-locale cache.
     pub fn localized_message(&self, lang: &str, message_id: u32) -> Option<String> {
         let norm = normalize_localization_fsd_lang(lang)?;
-        static LOC_BY_LANG: OnceLock<Mutex<HashMap<&'static str, Arc<HashMap<u32, String>>>>> =
-            OnceLock::new();
+        let res_path = format!("res:/localizationfsd/localization_fsd_{norm}.pickle");
+        let resolved_path = self.cdn_resource_path(&res_path).ok()?;
+        let cache_key = (norm, self.db_path.clone(), resolved_path);
+        static LOC_BY_LANG: OnceLock<
+            Mutex<
+                HashMap<
+                    (&'static str, Option<std::path::PathBuf>, std::path::PathBuf),
+                    Arc<HashMap<u32, String>>,
+                >,
+            >,
+        > = OnceLock::new();
         let cache = LOC_BY_LANG.get_or_init(|| Mutex::new(HashMap::new()));
         let arc_map = {
             let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-            guard.get(norm).cloned()
-        }
-        .unwrap_or_else(|| {
-            let loaded = Arc::new(self.load_all_localized_messages(norm).unwrap_or_default());
-            let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-            Arc::clone(guard.entry(norm).or_insert(loaded))
-        });
+            guard.get(&cache_key).cloned()
+        };
+        let arc_map = match arc_map {
+            Some(m) => m,
+            None => {
+                let loaded = Arc::new(self.load_all_localized_messages(norm).ok()?);
+                let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+                Arc::clone(guard.entry(cache_key).or_insert(loaded))
+            }
+        };
         arc_map.get(&message_id).cloned()
     }
 
@@ -356,56 +368,88 @@ impl SdeRegistry {
         self.localized_message("en-us", message_id)
     }
 
-    fn fsd_localization_ids(&self) -> &'static FsdLocalizationIds {
-        static IDS: OnceLock<FsdLocalizationIds> = OnceLock::new();
-        IDS.get_or_init(|| {
-            let types = self
-                .load_raw_types_fsdbinary()
-                .map(|(_, m)| {
-                    m.into_iter()
-                        .map(|(tid, r)| (tid, (r.type_name_id, r.description_id)))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let groups = self
-                .read_cfsd_bytes("res:/staticdata/groups.fsdbinary", 32)
-                .map(|(raw, recs)| {
-                    recs.into_iter()
-                        .map(|rec| (u32_le(&raw, rec), u32_le(&raw, rec + 12)))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let categories = self
-                .read_cfsd_bytes("res:/staticdata/categories.fsdbinary", 48)
-                .map(|(raw, recs)| {
-                    recs.into_iter()
-                        .map(|rec| (u32_le(&raw, rec), u32_le(&raw, rec + 20)))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let market_groups = self
-                .read_cfsd_bytes("res:/staticdata/marketgroups.fsdbinary", 28)
-                .map(|(raw, recs)| {
-                    recs.into_iter()
-                        .map(|rec| {
-                            let mgid = u32_le(&raw, rec);
-                            let name_id = u32_le(&raw, rec + 12);
-                            let mask = u32_le(&raw, rec + 24);
-                            let desc_id = ((mask & 1) != 0)
-                                .then(|| u32_le(&raw, rec + 4))
-                                .filter(|&v| v > 0);
-                            (mgid, (name_id, desc_id))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            FsdLocalizationIds {
-                types,
-                groups,
-                categories,
-                market_groups,
-            }
-        })
+    fn fsd_localization_ids(&self) -> Arc<FsdLocalizationIds> {
+        type FsdIdsKey = (
+            Option<std::path::PathBuf>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        static IDS_CACHE: OnceLock<Mutex<HashMap<FsdIdsKey, Arc<FsdLocalizationIds>>>> =
+            OnceLock::new();
+        let key: FsdIdsKey = (
+            self.db_path.clone(),
+            self.resources
+                .get("res:/staticdata/types.fsdbinary")
+                .map(|r| r.cdn_relative_path.clone()),
+            self.resources
+                .get("res:/staticdata/groups.fsdbinary")
+                .map(|r| r.cdn_relative_path.clone()),
+            self.resources
+                .get("res:/staticdata/categories.fsdbinary")
+                .map(|r| r.cdn_relative_path.clone()),
+            self.resources
+                .get("res:/staticdata/marketgroups.fsdbinary")
+                .map(|r| r.cdn_relative_path.clone()),
+        );
+        let cache = IDS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Some(existing) = cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned()
+        {
+            return existing;
+        }
+        let types = self
+            .load_raw_types_fsdbinary()
+            .map(|(_, m)| {
+                m.into_iter()
+                    .map(|(tid, r)| (tid, (r.type_name_id, r.description_id)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let groups = self
+            .read_cfsd_bytes("res:/staticdata/groups.fsdbinary", 32)
+            .map(|(raw, recs)| {
+                recs.into_iter()
+                    .map(|rec| (u32_le(&raw, rec), u32_le(&raw, rec + 12)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let categories = self
+            .read_cfsd_bytes("res:/staticdata/categories.fsdbinary", 48)
+            .map(|(raw, recs)| {
+                recs.into_iter()
+                    .map(|rec| (u32_le(&raw, rec), u32_le(&raw, rec + 20)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let market_groups = self
+            .read_cfsd_bytes("res:/staticdata/marketgroups.fsdbinary", 28)
+            .map(|(raw, recs)| {
+                recs.into_iter()
+                    .map(|rec| {
+                        let mgid = u32_le(&raw, rec);
+                        let name_id = u32_le(&raw, rec + 12);
+                        let mask = u32_le(&raw, rec + 24);
+                        let desc_id = ((mask & 1) != 0)
+                            .then(|| u32_le(&raw, rec + 4))
+                            .filter(|&v| v > 0);
+                        (mgid, (name_id, desc_id))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let built = Arc::new(FsdLocalizationIds {
+            types,
+            groups,
+            categories,
+            market_groups,
+        });
+        let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        Arc::clone(guard.entry(key).or_insert(built))
     }
 
     pub fn localized_type_name(&self, lang: &str, type_id: TypeId) -> Option<String> {

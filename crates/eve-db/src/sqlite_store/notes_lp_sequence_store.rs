@@ -69,7 +69,7 @@ pub fn apply_d6_migration(conn: &Connection) -> Result<(), String> {
 }
 
 #[inline]
-fn fp_owner_note(n: &OwnerNoteRecord) -> u64 {
+pub fn fp_owner_note(n: &OwnerNoteRecord) -> u64 {
     let mut h = super::fingerprints::FnvHasher::new();
     h.write_i64(n.note_id);
     h.write_i64(n.character_id);
@@ -296,7 +296,7 @@ pub fn rollback_d6(conn: &Connection, snap: &mut WorldStateSnapshot, fp: &TableF
         || snap
             .owner_notes
             .iter()
-            .any(|(k, v)| df.owner_notes.get(k) != Some(&fp_json(v)));
+            .any(|(k, v)| df.owner_notes.get(k) != Some(&fp_owner_note(v)));
     let dirty_lp = snap.corp_lp_balances != df.corp_lp_balances;
     let dirty_logs = snap.char_lp_logs.len() != df.char_lp_logs.len()
         || snap
