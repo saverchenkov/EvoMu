@@ -1,4 +1,4 @@
-//! Non-GM end-to-end integration tests for Shard 3 parity remediation (Part 4: Live NPCs —
+//! Non-GM end-to-end integration tests for Live NPCs —
 //! NPC Mining Operations with Defense Escort & Hauler Transit, Multi-Gate Hauler Convoys,
 //! Faction Navy Patrols, Zarzakh Gate Guns & Deathless Patrols, Wormhole Sleeper EWAR by Class,
 //! and Pochven Hypnosian Sleepers across Faded / Normal / Aroused tiers).

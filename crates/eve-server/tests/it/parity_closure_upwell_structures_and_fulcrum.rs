@@ -1,4 +1,4 @@
-//! Non-GM end-to-end integration tests for Shard 3 parity remediation (Part 3: Upwell Structures —
+//! Non-GM end-to-end integration tests for Upwell Structures —
 //! Anchor Restrictions, Structure Directory, Profiles & Delayed Control Release, Defense Settings,
 //! Low-Power Repair Shop Quotes & Restoration, and The Fulcrum Alignment Services in Zarzakh).
 
@@ -35,6 +35,29 @@ async fn setup_corp_director(
     ticker: &str,
 ) -> (PlayerPilot, i64) {
     let mut pilot = spawn_player_combat_pilot(ctx, sess_id, user, name, HURRICANE_TYPE, false).await;
+    let sys_id = pilot.sess.solar_system_id.expect("solar_system_id");
+    let station_id = ctx
+        .sde
+        .stations
+        .values()
+        .find(|s| s.solar_system_id == sys_id)
+        .map(|s| s.station_id)
+        .expect("station in pilot solar system");
+    let st_pos = ctx.sde.stations[&station_id].position;
+    ctx.systems
+        .get_or_spawn(sys_id)
+        .set_ball_position(pilot.ship_id, st_pos)
+        .await;
+    call_rpc(
+        ctx,
+        &mut pilot.sess,
+        "stationSvc",
+        "Dock",
+        &[PyRep::Integer(station_id)],
+    )
+    .await
+    .expect("stationSvc.Dock before AddCorporation");
+    ctx.advance_secs(31);
     let res = call_rpc(
         ctx,
         &mut pilot.sess,
@@ -49,6 +72,10 @@ async fn setup_corp_director(
         .or_else(|| res.dict_get("corporationID").and_then(PyRep::as_i64))
         .unwrap_or_else(|| ctx.db.with_snapshot(|s| s.characters[&pilot.char_id].corporation_id));
     pilot.corp_id = corp_id;
+    call_rpc(ctx, &mut pilot.sess, "ship", "Undock", &[])
+        .await
+        .expect("ship.Undock after corporation setup");
+    ctx.advance_secs(31);
     (pilot, corp_id)
 }
 

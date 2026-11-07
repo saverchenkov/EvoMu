@@ -1,9 +1,9 @@
-//! Non-GM E2E integration tests for Shard 3 parity remediation (Part 2B: ADM, Dev Indices, Entosis, Command Nodes, Skyhooks & Warp Vector).
+//! Non-GM E2E integration tests for Sovereignty ADM, Dev Indices, Entosis, Command Nodes, Skyhooks & Warp Vector.
 #![forbid(unsafe_code)]
 #![allow(dead_code)]
 
 use crate::parity_shard_3_closure_helpers::*;
-use crate::parity_shard_3_closure_part2::{
+use crate::parity_closure_sov_hub_and_upgrade_sites::{
     first_claimable_null_sys, setup_player_alliance, ENTOSIS_LINK_I_TYPE, HURRICANE_TYPE,
 };
 use eve_db::{InventoryFlag, InventoryItemRecord};

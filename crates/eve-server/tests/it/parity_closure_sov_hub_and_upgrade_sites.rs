@@ -1,6 +1,5 @@
-//! Non-GM end-to-end integration tests for Shard 3 parity remediation (Part 2: Sovereignty Hub
-//! Anchoring, ADM, Dev Indices, Entosis Counter-Capture, Command Nodes, Upgrade Sites,
-//! `sovMgr.GetSovStructuresInfoForSolarSystem`, Skyhook Reagent Maturity, and Warp Vectors).
+//! Non-GM end-to-end integration tests for Sovereignty Hub Anchoring, Upgrade Sites,
+//! and `sovMgr.GetSovStructuresInfoForSolarSystem`.
 
 #![forbid(unsafe_code)]
 
@@ -38,6 +37,29 @@ pub(crate) async fn setup_player_alliance(
     alliance_name: &str,
     alliance_short: &str,
 ) -> (i64, i64) {
+    let sys_id = pilot.sess.solar_system_id.expect("solar_system_id");
+    let station_id = ctx
+        .sde
+        .stations
+        .values()
+        .find(|s| s.solar_system_id == sys_id)
+        .map(|s| s.station_id)
+        .expect("station in pilot solar system");
+    let st_pos = ctx.sde.stations[&station_id].position;
+    ctx.systems
+        .get_or_spawn(sys_id)
+        .set_ball_position(pilot.ship_id, st_pos)
+        .await;
+    call_rpc(
+        ctx,
+        &mut pilot.sess,
+        "stationSvc",
+        "Dock",
+        &[PyRep::Integer(station_id)],
+    )
+    .await
+    .expect("stationSvc.Dock before AddCorporation");
+    ctx.advance_secs(31);
     let corp_res = call_rpc(
         ctx,
         &mut pilot.sess,
@@ -79,6 +101,10 @@ pub(crate) async fn setup_player_alliance(
     });
     pilot.corp_id = corp_id;
     pilot.sess.alliance_id = Some(alliance_id);
+    call_rpc(ctx, &mut pilot.sess, "ship", "Undock", &[])
+        .await
+        .expect("ship.Undock after corporation setup");
+    ctx.advance_secs(31);
     (corp_id, alliance_id)
 }
 

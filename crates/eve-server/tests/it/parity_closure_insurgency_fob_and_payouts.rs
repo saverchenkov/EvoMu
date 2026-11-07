@@ -1,4 +1,4 @@
-//! Non-GM E2E integration tests for Shard 3 parity remediation (Part 1A: FW Supply Sites & System Capture).
+//! Non-GM E2E integration tests for Insurgency Lifecycle, Pirate FOB, Ambition & Contribution Payouts.
 #![forbid(unsafe_code)]
 #![allow(dead_code)]
 
