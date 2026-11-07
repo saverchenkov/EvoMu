@@ -138,6 +138,10 @@ fn r7_td_06_freelance_escrow_payout_wallet_sync_role_and_item_lock_enforced() {
             c
         });
         corp.set_division_balance(1, IskCents::from_isk(5_000_000));
+        corp.members
+            .extend([dir_cid as i64, worker_cid as i64, pm_no_take_cid as i64]);
+        corp.member_roles
+            .insert(dir_cid as i64, corp_roles::ROLE_DIRECTOR);
         corp.member_roles
             .insert(pm_no_take_cid as i64, corp_roles::ROLE_PROJECT_MANAGER);
         snap.items.insert(

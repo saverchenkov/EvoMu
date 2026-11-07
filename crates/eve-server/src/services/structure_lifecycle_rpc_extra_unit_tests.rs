@@ -43,7 +43,11 @@ pub(super) fn clone_type_with(
     attrs: &[(u16, f64)],
 ) {
     let reg = Arc::make_mut(sde);
-    let mut rec: InvType = reg.types.values().next().cloned().expect("base sde type");
+    let mut rec: InvType = reg
+        .types
+        .get(&35832)
+        .cloned()
+        .unwrap_or_else(|| reg.types.values().next().cloned().expect("base sde type"));
     rec.type_id = new_tid;
     rec.group_id = group_id;
     rec.category_id = category_id;
@@ -53,6 +57,7 @@ pub(super) fn clone_type_with(
     rec.radius = 5_000.0;
     rec.mass = 1.0e11;
     rec.default_attributes.clear();
+    rec.effect_ids.clear();
     for &(k, v) in attrs {
         rec.default_attributes.insert(k, v);
     }

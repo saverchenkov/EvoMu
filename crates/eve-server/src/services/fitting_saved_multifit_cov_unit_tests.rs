@@ -275,7 +275,16 @@ async fn insurance_svc_personal_corp_void_old_and_error_branches() {
     .expect("replace with exact platinum cost");
 
     // Corp ship insurance: wrong corp -> OwnershipViolation; member without director/accountant role -> CorpRoleDenied; CEO succeeds
-    let mut wrong_corp = make_session(char_id, 999_999, Some(station_id), None);
+    let outsider_char_id = 96_610_003i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut outsider = snap.characters[&char_id].clone();
+        outsider.character_id = outsider_char_id;
+        outsider.user_id = 9003;
+        outsider.name = "OutsiderPilot".into();
+        outsider.corporation_id = 999_999;
+        snap.characters.insert(outsider_char_id, outsider);
+    });
+    let mut wrong_corp = make_session(outsider_char_id, 999_999, Some(station_id), None);
     let err_wc = handle_ships_and_services(
         &ctx, &mut wrong_corp, None, "insuranceSvc", "InsureShip",
         &[PyRep::Integer(corp_ship_id), PyRep::Real(1.0), PyRep::Bool(true)], &empty_kw,

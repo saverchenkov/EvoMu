@@ -176,6 +176,20 @@ fn market_group_types_and_place_buy_order_corporate_and_error_branches() {
     ctx.db.with_mut_snapshot(|s| {
         s.corporations.get_mut(&buyer_corp_id).unwrap().member_roles.insert(buyer_id, corp_roles::ROLE_TRADER);
     });
+    assert_eq!(
+        handle_trading(
+            &ctx, &mut sess, "marketProxy", "PlaceBuyOrder",
+            &[PyRep::Integer(JITA_STATION_ID), PyRep::Integer(34), PyRep::Real(25.0), PyRep::Integer(20), PyRep::Integer(-1), PyRep::Integer(1), PyRep::Integer(90), PyRep::Bool(true), PyRep::Integer(1000)], &kw,
+        ).unwrap().unwrap_err().code,
+        "CorpRoleRequired"
+    );
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.corporations.get_mut(&buyer_corp_id).unwrap().member_roles.insert(
+            buyer_id,
+            corp_roles::ROLE_TRADER | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0],
+        );
+    });
     let corp_buy = handle_trading(
         &ctx, &mut sess, "marketProxy", "PlaceBuyOrder",
         &[PyRep::Integer(JITA_STATION_ID), PyRep::Integer(34), PyRep::Real(25.0), PyRep::Integer(20), PyRep::Integer(-1), PyRep::Integer(1), PyRep::Integer(90), PyRep::Bool(true), PyRep::Integer(1000)], &kw,
