@@ -39,7 +39,7 @@ pub async fn handle_cmd_return_bay(
     let ship_pos = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(glam::DVec3::ZERO);
     let max_ctrl_range = crate::services::combat_crimewatch::combat_npcs_drones::compute_drone_control_range(ctx, char_id, ship_id);
 
-    let candidates: Vec<DroneSpaceState> = with_combat_runtime(ctx, |rt| {
+    let mut candidates: Vec<DroneSpaceState> = with_combat_runtime(ctx, |rt| {
         rt.active_drones_in_space.values().filter(|d| {
             d.solar_system_id == sys_id
                 && (d.parent_ship_id == ship_id || (d.owner_char_id == char_id && d.parent_ship_id == 0))
@@ -47,6 +47,7 @@ pub async fn handle_cmd_return_bay(
                 && filter_drone_ids.as_ref().map(|f| f.contains(&d.ball_id) || f.contains(&d.drone_item_id)).unwrap_or(true)
         }).cloned().collect()
     });
+    candidates.sort_by_key(|d| d.ball_id);
 
     // Pre-validate all drone IDs before mutating any state
     let mut drones_with_dist: Vec<(DroneSpaceState, f64)> = Vec::with_capacity(candidates.len());

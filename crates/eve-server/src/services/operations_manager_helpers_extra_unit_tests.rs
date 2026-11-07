@@ -360,11 +360,19 @@ fn client_and_server_task_events_invbroker_fitting_charges_and_space_wreck_looti
         None
     );
 
-    // Find a server task with event name and test advance_and_notify_server_operation_tasks with sink
+    // Find a deterministic server task with event name and test advance_and_notify_server_operation_tasks with sink
     let server_tid_opt = defs
         .task_event_names
         .iter()
-        .find(|(tid, ev)| !ev.starts_with("client_") && defs.task_to_op.contains_key(tid))
+        .filter(|(&tid, ev)| {
+            !ev.starts_with("client_")
+                && defs
+                    .task_to_op
+                    .get(&tid)
+                    .is_some_and(|op_id| defs.sde_operations.contains(op_id))
+                && defs.task_target_values.get(&tid).copied().unwrap_or(1) <= 100
+        })
+        .min_by_key(|(&tid, _)| tid)
         .map(|(&tid, ev)| (tid, ev.clone()));
     if let Some((srv_tid, srv_ev)) = server_tid_opt {
         let op_id = defs.task_to_op[&srv_tid];
