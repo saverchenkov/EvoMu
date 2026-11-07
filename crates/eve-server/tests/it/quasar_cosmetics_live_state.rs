@@ -570,9 +570,13 @@ async fn test_seasons_manager_endpoints_and_selection() {
         PyRep::Integer(t) => t,
         other => panic!("expected Integer end filetime ticks, got {other:?}"),
     };
+    const SEASON_EPOCH_BASE_FT: i64 = 133_500_000_000_000_000;
+    const SEASON_EPOCH_DURATION_FT: i64 = 30 * 86_400 * 10_000_000;
     let now_ft = ctx.now_blueos_filetime_ticks();
+    let epoch_idx = (now_ft - SEASON_EPOCH_BASE_FT).div_euclid(SEASON_EPOCH_DURATION_FT);
+    let expected_epoch_end_ft = SEASON_EPOCH_BASE_FT + (epoch_idx + 1) * SEASON_EPOCH_DURATION_FT;
     assert!(end_time_ft > now_ft, "season end filetime must be in the future");
-    assert_eq!(end_time_ft, now_ft + 30 * 86_400 * 10_000_000);
+    assert_eq!(end_time_ft, expected_epoch_end_ft);
 
     // 2. get_season_data_for_character returns active season configuration and challenge definitions
     let season_data_rep = ctx

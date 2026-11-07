@@ -32,7 +32,7 @@ fn planet_star_resources_and_skyhook_admin_handlers() {
     register_handlers(&router, Arc::clone(&db), Arc::clone(&sde));
 
     let cid = 90_000_001_i64;
-    let corp_id = 1_000_009_i64;
+    let corp_id = 98_000_001_i64;
     let skyhook_id = 79_500_001_i64;
     let sys_id = 30_000_142_u32;
 
@@ -41,6 +41,13 @@ fn planet_star_resources_and_skyhook_admin_handlers() {
             ch.corporation_id = corp_id;
             ch.solar_system_id = sys_id;
         }
+        let corp = snap.corporations.entry(corp_id).or_insert_with(|| eve_db::CorporationRecord {
+            corporation_id: corp_id,
+            ceo_id: cid,
+            ..Default::default()
+        });
+        corp.members.insert(cid);
+        corp.member_roles.insert(cid, corp_roles::ROLE_DIRECTOR);
         snap.structures.insert(
             skyhook_id,
             UpwellStructureRecord {
