@@ -814,7 +814,6 @@ async fn sync_insurgency_system_npcs(
     if let Some(tid) = desired_pirate {
         if !has_pirate {
             let spawn_pos = waypoints[0] + pirate_offset;
-            let next_pos = waypoints[1 % waypoints.len()] + pirate_offset;
             let bid = spawn_specialized_npc_entity(
                 ctx,
                 sys_id,
@@ -829,18 +828,11 @@ async fn sync_insurgency_system_npcs(
                     npc.custom_cargo_loot = crate::services::insurgency_complex_ops::named_insurgency_roamer_loot_drop(tid);
                 }
             });
-            let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
-            if spawn_pos.distance(next_pos) >= 150_000.0 {
-                let _ = bp.set_mode(bid, eve_destiny::MovementMode::new_warp(spawn_pos, next_pos, 3.0));
-            } else {
-                let _ = bp.goto_point(bid, next_pos);
-            }
         }
     }
     if let Some(tid) = desired_enforcer {
         if !has_enforcer {
             let spawn_pos = waypoints[0] + enforcer_offset;
-            let next_pos = waypoints[1 % waypoints.len()] + enforcer_offset;
             let bid = spawn_specialized_npc_entity(
                 ctx,
                 sys_id,
@@ -855,12 +847,6 @@ async fn sync_insurgency_system_npcs(
                     npc.custom_cargo_loot = crate::services::insurgency_complex_ops::named_insurgency_roamer_loot_drop(tid);
                 }
             });
-            let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
-            if spawn_pos.distance(next_pos) >= 150_000.0 {
-                let _ = bp.set_mode(bid, eve_destiny::MovementMode::new_warp(spawn_pos, next_pos, 3.0));
-            } else {
-                let _ = bp.goto_point(bid, next_pos);
-            }
         }
     }
     let should_deploy_ci = with_mut_combat_ephemeral(ctx, |rt| {
