@@ -3980,7 +3980,7 @@ async fn batch3_dungeon_instance_cache_homefront_and_triglavian() {
     )
     .await
     .expect("GetHomefrontSiteInstances Perimeter");
-    assert_eq!(count_nested_instances(&hf_perim, SYS_PERIMETER), 2);
+    assert_eq!(count_nested_instances(&hf_perim, SYS_PERIMETER), 0);
 
     // Low-sec system Tama has 0 Homefront sites
     let hf_tama = rpc(

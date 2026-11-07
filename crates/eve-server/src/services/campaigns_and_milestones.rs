@@ -1063,7 +1063,7 @@ fn handle_milestone_process_logon(
 
     let (already_claimed, remaining_secs) = ctx.db.with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
-        ext.milestone_logons.insert(char_id, now);
+        ext.milestone_logons.entry(char_id).or_insert(now);
         let st = playtime::record_milestone_logon(snap, char_id, now);
         let claimed = ext
             .claimed_milestones
