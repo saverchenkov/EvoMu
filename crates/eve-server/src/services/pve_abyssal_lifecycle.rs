@@ -54,6 +54,15 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
     abyssal_sys: SolarSystemId,
     now_unix: u64,
 ) -> SolarSystemId {
+    let already_origin = with_pve_special_reg(ctx, |reg| {
+        reg.abyssal_pockets
+            .get(&char_id)
+            .filter(|p| p.collapsed_destroyed)
+            .map(|p| p.origin_solar_system_id)
+    });
+    if let Some(origin_sys) = already_origin {
+        return origin_sys;
+    }
     let pocket_cleanup = with_pve_special_reg(ctx, |reg| {
         let (pid, pocket_sys, origin_sys, bound_tid, npcs) = {
             let p = reg.abyssal_pockets.get_mut(&char_id)?;
@@ -74,7 +83,11 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
         };
         let mut coop_pilots: Vec<(CharacterId, ItemId)> = vec![(char_id, ship_id)];
         for other in reg.abyssal_pockets.values_mut() {
-            if other.pocket_id == pid && other.character_id != char_id {
+            if other.pocket_id == pid
+                && other.character_id != char_id
+                && !other.collapsed_destroyed
+                && !other.completed
+            {
                 other.collapsed_destroyed = true;
                 other.completed = true;
                 coop_pilots.push((other.character_id, other.ship_id));
@@ -714,9 +727,7 @@ pub fn reconcile_abyssal_login(
             if !p.completed && !p.collapsed_destroyed && now < p.collapse_at_sec {
                 return AbyssalLoginAction::Active(p.abyssal_solar_system_id);
             }
-            if !p.completed && (p.collapsed_destroyed || now >= p.collapse_at_sec) {
-                p.collapsed_destroyed = true;
-                p.completed = true;
+            if !p.completed && !p.collapsed_destroyed && now >= p.collapse_at_sec {
                 return AbyssalLoginAction::CollapsedDestroy {
                     ship_id: p.ship_id,
                     abyssal_sys: p.abyssal_solar_system_id,

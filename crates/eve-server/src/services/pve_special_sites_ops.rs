@@ -157,25 +157,10 @@ pub fn init_drifter_hives_from_sde(sde: &SdeRegistry, reg: &mut PveSpecialSitesR
         (31_000_005, 5642, "Sentinel Hive", 34_556, "Sentinel Element"),
     ];
 
-    let mut drifter_cruisers: Vec<u32> = sde
-        .types
-        .values()
-        .filter(|t| t.published && t.group_id == 1666)
-        .map(|t| t.type_id)
-        .collect();
-    drifter_cruisers.sort_unstable();
-    let r1_a = drifter_cruisers.first().copied().unwrap_or(47_958);
-    let r1_b = drifter_cruisers.get(1).copied().unwrap_or(47_959);
-
-    let mut drifter_bs: Vec<u32> = sde
-        .types
-        .values()
-        .filter(|t| t.published && t.group_id == 1667)
-        .map(|t| t.type_id)
-        .collect();
-    drifter_bs.sort_unstable();
-    let r2_a = drifter_bs.first().copied().unwrap_or(47_956);
-    let r2_b = drifter_bs.get(1).copied().unwrap_or(47_957);
+    let r1_a = sde.types.get(&47_958).map(|t| t.type_id).unwrap_or(47_958);
+    let r1_b = sde.types.get(&47_959).map(|t| t.type_id).unwrap_or(47_959);
+    let r2_a = sde.types.get(&47_956).map(|t| t.type_id).unwrap_or(47_956);
+    let r2_b = sde.types.get(&47_957).map(|t| t.type_id).unwrap_or(47_957);
 
     let warden_tid = sde
         .types

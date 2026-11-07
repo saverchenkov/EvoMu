@@ -13,52 +13,22 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::with_combat_ephemeral;
 use eve_server::services::fw_gameplay::{militia_lp_corp_id, tick_insurgency_campaigns};
-use eve_server::services::fw_services::{
-    compute_all_frontline_statuses, HQ_SYSTEM_AMO, HQ_SYSTEM_INTAKI, HQ_SYSTEM_MEHATOOR,
-    HQ_SYSTEM_ONNAMON, STATUS_FRONTLINE,
-};
-use eve_server::services::insurgency_complex_ops::{
-    is_named_insurgency_roamer, is_named_pirate_commander_roamer, load_ops_state,
-    tick_insurgency_complex_ops, OutpostRaidSize, LARGE_ADV_OUTPOST_RESPAWN_SECS,
-    MODERATE_OUTPOST_BC_SKILL_DBUFF_ID, TYPE_ANGEL_INSURGENCY_DATA_SEQ,
-    TYPE_ANGEL_LAUNDERING_FACILITY, TYPE_FEDERATION_CI_OUTPOST_HUB,
-    TYPE_GURISTAS_INSURGENCY_DATA_SEQ, TYPE_GURISTAS_LAUNDERING_FACILITY,
-    TYPE_IMPERIAL_CI_OUTPOST_HUB, TYPE_ORE_RORQUAL_WRECK,
-    TYPE_REPUBLIC_CI_OUTPOST_HUB, TYPE_STATE_CI_OUTPOST_HUB, TYPE_UPWELL_CONSORTIUM_DATA_CACHE,
-};
-use eve_server::services::insurgency_services::{
-    insurgency_system_corruption_stage, read_insurgency_runtime, step_system_insurgency_tick_delta,
-    FACTION_ANGEL_CARTEL, FACTION_GURISTAS, FORECASTING_DURATION_SECS,
-};
+use eve_server::services::fw_services::{compute_all_frontline_statuses, HQ_SYSTEM_AMO, HQ_SYSTEM_INTAKI, HQ_SYSTEM_MEHATOOR, HQ_SYSTEM_ONNAMON, STATUS_FRONTLINE};
+use eve_server::services::insurgency_complex_ops::{is_named_insurgency_roamer, is_named_pirate_commander_roamer, load_ops_state, tick_insurgency_complex_ops, OutpostRaidSize, LARGE_ADV_OUTPOST_RESPAWN_SECS, MODERATE_OUTPOST_BC_SKILL_DBUFF_ID, TYPE_ANGEL_INSURGENCY_DATA_SEQ, TYPE_ANGEL_LAUNDERING_FACILITY, TYPE_FEDERATION_CI_OUTPOST_HUB, TYPE_GURISTAS_INSURGENCY_DATA_SEQ, TYPE_GURISTAS_LAUNDERING_FACILITY, TYPE_IMPERIAL_CI_OUTPOST_HUB, TYPE_ORE_RORQUAL_WRECK, TYPE_REPUBLIC_CI_OUTPOST_HUB, TYPE_STATE_CI_OUTPOST_HUB, TYPE_UPWELL_CONSORTIUM_DATA_CACHE};
+use eve_server::services::insurgency_services::{insurgency_system_corruption_stage, read_insurgency_runtime, step_system_insurgency_tick_delta, FACTION_ANGEL_CARTEL, FACTION_GURISTAS, FORECASTING_DURATION_SECS};
 use glam::DVec3;
 use std::collections::HashMap;
 
-async fn rpc(ctx: &ServerContext, sess: &mut SessionState, svc: &str, method: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
-    ctx.dispatch_rpc(sess, svc, None, method, args, &HashMap::new(), None).await
-}
-
-async fn rpc_bound(ctx: &ServerContext, sess: &mut SessionState, svc: &str, bound: u64, method: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
-    ctx.dispatch_rpc(sess, svc, Some(bound), method, args, &HashMap::new(), None).await
-}
-
-async fn slash(ctx: &ServerContext, sess: &mut SessionState, cmd: &str) -> PyRep {
-    common::slash_cmd(ctx, sess, cmd).await
-}
-
-fn sde_type_id(ctx: &ServerContext, name: &str) -> u32 {
-    ctx.sde.types.values().find(|t| t.name == name).map(|t| t.type_id).unwrap_or_else(|| panic!("SDE type '{name}' not found"))
-}
-
-fn gear_type_ids(ctx: &ServerContext) -> (u32, u32, u32, u32, u32, u32) {
-    (sde_type_id(ctx, "Hurricane"), sde_type_id(ctx, "425mm AutoCannon II"), sde_type_id(ctx, "Gyrostabilizer II"), sde_type_id(ctx, "50MN Y-T8 Compact Microwarpdrive"), sde_type_id(ctx, "Republic Fleet EMP M"), sde_type_id(ctx, "Rifter"))
-}
+async fn rpc(ctx: &ServerContext, sess: &mut SessionState, svc: &str, method: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> { ctx.dispatch_rpc(sess, svc, None, method, args, &HashMap::new(), None).await }
+async fn rpc_bound(ctx: &ServerContext, sess: &mut SessionState, svc: &str, bound: u64, method: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> { ctx.dispatch_rpc(sess, svc, Some(bound), method, args, &HashMap::new(), None).await }
+async fn slash(ctx: &ServerContext, sess: &mut SessionState, cmd: &str) -> PyRep { common::slash_cmd(ctx, sess, cmd).await }
+fn sde_type_id(ctx: &ServerContext, name: &str) -> u32 { ctx.sde.types.values().find(|t| t.name == name).map(|t| t.type_id).unwrap_or_else(|| panic!("SDE type '{name}' not found")) }
+fn gear_type_ids(ctx: &ServerContext) -> (u32, u32, u32, u32, u32, u32) { (sde_type_id(ctx, "Hurricane"), sde_type_id(ctx, "425mm AutoCannon II"), sde_type_id(ctx, "Gyrostabilizer II"), sde_type_id(ctx, "50MN Y-T8 Compact Microwarpdrive"), sde_type_id(ctx, "Republic Fleet EMP M"), sde_type_id(ctx, "Rifter")) }
 
 fn collect_skill_topo(sde: &eve_sde::SdeRegistry, sid: u32, seen: &mut Vec<u32>, out: &mut Vec<u32>) {
     if seen.contains(&sid) { return; }
     seen.push(sid);
-    if let Some(t) = sde.types.get(&sid) {
-        for attr in [182_u16, 183, 184, 1285, 1289, 1290] { if let Some(&req) = t.default_attributes.get(&attr) { if req > 0.0 { collect_skill_topo(sde, req as u32, seen, out); } } }
-    }
+    if let Some(t) = sde.types.get(&sid) { for attr in [182_u16, 183, 184, 1285, 1289, 1290] { if let Some(&req) = t.default_attributes.get(&attr) { if req > 0.0 { collect_skill_topo(sde, req as u32, seen, out); } } } }
     out.push(sid);
 }
 
@@ -80,22 +50,14 @@ async fn train_skills_to_five(ctx: &ServerContext, sess: &mut SessionState, skil
     }
 }
 
-async fn spawn_live_pilot(
-    ctx: &ServerContext, sid: u64, cid: i64, sys_id: u32, ship_tid: u32, gun_tid: u32, gyro_tid: u32, mwd_tid: u32, ammo_tid: u32,
-) -> (LivePilot, Vec<i64>) {
+async fn spawn_live_pilot(ctx: &ServerContext, sid: u64, cid: i64, sys_id: u32, ship_tid: u32, gun_tid: u32, gyro_tid: u32, mwd_tid: u32, ammo_tid: u32) -> (LivePilot, Vec<i64>) {
     let (user, pass) = (format!("insurg_p_{cid}"), format!("pw_{cid}"));
     ctx.db.provision_gm_account(&user, &pass, cid, &format!("Insurg Pilot {cid}"));
     let mut sess = SessionState::new(sid);
     common::login_pilot(ctx, &mut sess, &user, &pass).await;
     rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(cid)]).await.expect("SelectCharacterID");
     let mut reqs = vec![3426_u32, 3413, 3318, 11207, 3429, 3453, 3450, 3455, 3417, 3418];
-    for tid in [ship_tid, gun_tid, gyro_tid, mwd_tid, ammo_tid] {
-        if let Some(t) = ctx.sde.types.get(&tid) {
-            for attr in [182_u16, 183, 184, 1285, 1289, 1290] {
-                if let Some(&r) = t.default_attributes.get(&attr) { if r > 0.0 { reqs.push(r as u32); } }
-            }
-        }
-    }
+    for tid in [ship_tid, gun_tid, gyro_tid, mwd_tid, ammo_tid] { if let Some(t) = ctx.sde.types.get(&tid) { for attr in [182_u16, 183, 184, 1285, 1289, 1290] { if let Some(&r) = t.default_attributes.get(&attr) { if r > 0.0 { reqs.push(r as u32); } } } } }
     train_skills_to_five(ctx, &mut sess, &reqs).await;
     let ship_id = slash(ctx, &mut sess, &format!("/createitem {ship_tid} 1")).await.dict_get("itemID").and_then(PyRep::as_i64).expect("ship itemID");
     rpc(ctx, &mut sess, "ship", "Board", &[PyRep::Integer(ship_id)]).await.expect("Board");
@@ -121,7 +83,14 @@ async fn spawn_live_pilot(
     (pilot, guns)
 }
 
-async fn enlist(ctx: &ServerContext, p: &mut LivePilot, war_fac: i64) { rpc(ctx, &mut p.sess, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(war_fac)]).await.expect("enlist"); }
+async fn enlist(ctx: &ServerContext, p: &mut LivePilot, war_fac: i64) {
+    let (saved, saved_ch) = (p.sess.station_id, ctx.db.with_snapshot(|s| s.characters.get(&p.char_id).and_then(|c| c.station_id)));
+    p.sess.station_id = Some(60_003_760);
+    ctx.db.with_mut_snapshot(|s| { if let Some(c) = s.characters.get_mut(&p.char_id) { c.station_id = Some(60_003_760); } });
+    rpc(ctx, &mut p.sess, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(war_fac)]).await.expect("enlist");
+    p.sess.station_id = saved;
+    ctx.db.with_mut_snapshot(|s| { if let Some(c) = s.characters.get_mut(&p.char_id) { c.station_id = saved_ch; } });
+}
 
 async fn travel_to(ctx: &ServerContext, p: &mut LivePilot, target_sys: u32) {
     let cur = p.sess.solar_system_id.unwrap_or(0);
@@ -149,63 +118,135 @@ async fn warp_to_target(ctx: &ServerContext, p: &mut LivePilot, stuff: &str, ite
             Err(e) if e.code == "NotEnoughCapacitor" && hop < 7 => { sys.step_manual(20.0).await.unwrap(); continue; }
             res => res?,
         };
-        for _ in 0..20 {
-            let aligning = sys.get_ball_snapshot(p.ship_id).await.ok().flatten().is_some_and(|(_, b)| matches!(b.mode, MovementMode::Warp { phase: eve_destiny::WarpPhase::Aligning, .. }));
-            sys.step_manual(if aligning { 4.0 } else { 20.0 }).await.unwrap();
+        let mut align_steps = 0;
+        for _ in 0..300 {
+            let snap = sys.get_ball_snapshot(p.ship_id).await.ok().flatten();
+            let dt = match snap.as_ref().map(|(_, b)| &b.mode) {
+                Some(MovementMode::Warp { phase: eve_destiny::WarpPhase::Aligning, .. }) => { align_steps += 1; if align_steps > 25 { break; } 2.0 }
+                Some(MovementMode::Warp { phase: eve_destiny::WarpPhase::Cruising, destination, .. }) if snap.as_ref().is_some_and(|(_, b)| b.position.distance(*destination) > 5.0 * 149_597_870_700.0) => 10.0,
+                _ => 1.0,
+            };
+            sys.step_manual(dt).await.unwrap();
             if sys.get_ball_snapshot(p.ship_id).await.ok().flatten().is_some_and(|(_, b)| !matches!(b.mode, MovementMode::Warp { .. })) { break; }
         }
+        let warp_dest = sys.get_ball_snapshot(p.ship_id).await.ok().flatten().and_then(|(_, b)| match b.mode { MovementMode::Warp { destination, phase: eve_destiny::WarpPhase::Aligning, .. } => Some(destination), _ => None });
         let _ = rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "CmdStop", &[]).await;
-        if sys.get_combat_state(p.ship_id).await.ok().flatten().is_some_and(|c| c.capacitor > 1.0) { break; }
+        if let Some(dest) = warp_dest {
+            if let Some((_, sb)) = sys.get_ball_snapshot(p.ship_id).await.ok().flatten() {
+                let sys_id = p.sess.solar_system_id.unwrap();
+                let mut jumped = false;
+                if let Some(nc) = ctx.sde.celestials_in_system(sys_id).into_iter().filter(|c| matches!(c.group_id, 6 | 7 | 8)).min_by(|a, b| a.position.distance(sb.position).total_cmp(&b.position.distance(sb.position))) {
+                    let (nrm, want) = ((sb.position - nc.position).normalize_or_zero(), (dest - nc.position).normalize_or_zero());
+                    if let Some(c2) = ctx.sde.celestials_in_system(sys_id).into_iter().filter(|c| c.celestial_id != nc.celestial_id && sb.position.distance(c.position) >= 200_000.0 && (c.position - sb.position).normalize_or_zero().dot(nrm) > 0.1).max_by(|a, b| (a.position - nc.position).normalize_or_zero().dot(want).total_cmp(&(b.position - nc.position).normalize_or_zero().dot(want))) {
+                        if rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(c2.celestial_id), PyRep::Real(0.0)]).await.is_ok() {
+                            for _ in 0..300 {
+                                let m = sys.get_ball_snapshot(p.ship_id).await.ok().flatten().map(|(_, b)| b.mode);
+                                let dt2 = match m { Some(MovementMode::Warp { phase: eve_destiny::WarpPhase::Aligning, .. }) => 2.0, Some(MovementMode::Warp { phase: eve_destiny::WarpPhase::Cruising, destination, .. }) if sys.get_ball_snapshot(p.ship_id).await.ok().flatten().is_some_and(|(_, b)| b.position.distance(destination) > 5.0 * 149_597_870_700.0) => 10.0, Some(MovementMode::Warp { .. }) => 1.0, _ => break };
+                                sys.step_manual(dt2).await.unwrap();
+                            }
+                            let _ = rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "CmdStop", &[]).await;
+                            jumped = true;
+                        }
+                    }
+                }
+                if !jumped {
+                    let side = sb.position + DVec3::new(0.0, 4_000.0, 2_000.0 * f64::from(hop + 1));
+                    let _ = rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "CmdGotoPoint", &[PyRep::Real(side.x), PyRep::Real(side.y), PyRep::Real(side.z)]).await;
+                    sys.step_manual(8.0).await.unwrap();
+                    let _ = rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "CmdStop", &[]).await;
+                }
+            }
+            continue;
+        }
+        let close_enough = stuff != "item" || sys.get_ball_snapshot(p.ship_id).await.ok().flatten().zip(sys.get_ball_snapshot(item_id).await.ok().flatten()).is_none_or(|((_, sb), (_, tb))| sb.position.distance(tb.position) <= min_range + 50_000.0);
+        if close_enough && sys.get_combat_state(p.ship_id).await.ok().flatten().is_some_and(|c| c.capacitor > 1.0) { break; }
     }
     slash(ctx, &mut p.sess, "/heal").await;
     Ok(())
 }
 
 async fn warp_to_item(ctx: &ServerContext, p: &mut LivePilot, item_id: i64, min_range: f64) -> Result<(), BridgeRpcError> {
-    match warp_to_target(ctx, p, "item", item_id, min_range).await {
+    let sys_id = p.sess.solar_system_id.expect("in space");
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let res = match warp_to_target(ctx, p, "item", item_id, min_range).await {
         Err(e) if e.code == "WarpDistanceTooShort" => {
-            let (sys_id, sys) = (p.sess.solar_system_id.expect("in space"), ctx.systems.get_or_spawn(p.sess.solar_system_id.expect("in space")));
             let Some((_, b)) = sys.get_ball_snapshot(item_id).await.ok().flatten() else { return Err(e); };
             let sp = sys.get_ball_snapshot(p.ship_id).await.ok().flatten().map(|(_, s)| s.position).unwrap_or(b.position);
             if sp.distance(b.position) > 2_400.0 {
                 if let Some(cid) = ctx.sde.celestials_in_system(sys_id).into_iter().find(|c| sp.distance(c.position) >= 165_000.0 && b.position.distance(c.position) >= 165_000.0).map(|c| c.celestial_id) {
                     let _ = warp_to_target(ctx, p, "item", cid, 0.0).await;
-                    return warp_to_target(ctx, p, "item", item_id, min_range).await;
-                }
-            }
-            fly_near_point(ctx, p, b.position, min_range.max(1_500.0), 12.0).await;
-            Ok(())
+                    warp_to_target(ctx, p, "item", item_id, min_range).await
+                } else { Ok(()) }
+            } else { Ok(()) }
         }
-        res => res,
+        r => r,
+    };
+    if res.is_ok() && min_range <= 2_400.0 {
+        if let (Some((_, sb)), Some((_, tb))) = (sys.get_ball_snapshot(p.ship_id).await.ok().flatten(), sys.get_ball_snapshot(item_id).await.ok().flatten()) {
+            let is_gate_or_big = ctx.sde.jumps.contains_key(&item_id) || item_id >= 1_893_100_000 || tb.radius > 1_000.0;
+            let surf_stop = if is_gate_or_big { sb.radius + tb.radius + 1_800.0 } else { 2_000.0 };
+            if sb.position.distance(tb.position) > surf_stop + 400.0 { fly_near_point(ctx, p, tb.position, surf_stop, 12.0).await; }
+        }
     }
+    res
 }
 
 async fn fly_near_point(ctx: &ServerContext, p: &mut LivePilot, dest: DVec3, stop_dist: f64, _max_step: f64) {
     let sys = ctx.systems.get_or_spawn(p.sess.solar_system_id.expect("in space"));
     let mut best = sys.get_ball_snapshot(p.ship_id).await.unwrap().expect("ship ball").1.position.distance(dest);
-    if best <= stop_dist || best > 500_000.0 { return; }
-    for step in 0..160 {
-        if step % 6 == 0 { rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "CmdGotoPoint", &[PyRep::Real(dest.x), PyRep::Real(dest.y), PyRep::Real(dest.z)]).await.expect("CmdGotoPoint"); }
+    if best <= stop_dist { return; }
+    let jitter = DVec3::new(0.0, ((p.char_id % 7) as f64 - 3.0) * 500.0, ((p.char_id % 5) as f64 - 2.0) * 500.0);
+    let mut stall = 0_u32;
+    for step in 0..2500 {
+        if step % 6 == 0 || stall == 3 {
+            let aim = if stall >= 3 { dest + jitter + DVec3::new(0.0, 3_000.0, 2_000.0) } else { dest + jitter * 0.25 };
+            rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "CmdGotoPoint", &[PyRep::Real(aim.x), PyRep::Real(aim.y), PyRep::Real(aim.z)]).await.expect("CmdGotoPoint");
+        }
         sys.step_manual(((best - stop_dist * 0.5).max(300.0) / 300.0).clamp(1.0, 12.0)).await.unwrap();
         let d = sys.get_ball_snapshot(p.ship_id).await.unwrap().expect("ship ball").1.position.distance(dest);
-        if d <= stop_dist || d >= best { break; }
-        best = d;
+        if d <= stop_dist { break; }
+        if d < best - 10.0 { best = d; stall = 0; } else { stall += 1; if step >= 40 && stall >= 30 { break; } }
     }
     let _ = rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "CmdStop", &[]).await;
 }
 
+async fn warp_on_grid(ctx: &ServerContext, p: &mut LivePilot, sys_id: u32, ship_pos: DVec3, target_pos: DVec3) -> bool {
+    if let Some(c) = ctx.sde.celestials_in_system(sys_id).into_iter().filter(|c| ship_pos.distance(c.position) >= 165_000.0 && c.position.distance(target_pos) < c.radius + 7_500_000.0).min_by_key(|c| c.position.distance(target_pos) as i64) {
+        warp_to_item(ctx, p, c.celestial_id, 0.0).await.unwrap();
+        let cur_pos = ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(p.ship_id).await.ok().flatten().map_or(ship_pos, |(_, b)| b.position);
+        if cur_pos.distance(target_pos) > 7_500_000.0 {
+            let need_dir = target_pos - c.position;
+            if let Some(c2) = ctx.sde.celestials_in_system(sys_id).into_iter().filter(|o| o.celestial_id != c.celestial_id && cur_pos.distance(o.position) >= 200_000.0 && (o.position - c.position).dot(need_dir) > 0.0).min_by_key(|o| o.position.distance(target_pos) as i64) {
+                let _ = warp_to_item(ctx, p, c2.celestial_id, 0.0).await;
+                let _ = warp_to_item(ctx, p, c.celestial_id, 0.0).await;
+            }
+        }
+        return true;
+    }
+    if let Some(st) = ctx.sde.solar_systems.get(&sys_id).and_then(|s| s.stations.iter().filter(|st| ship_pos.distance(st.position) >= 165_000.0 && st.position.distance(target_pos) < 7_500_000.0).min_by_key(|st| st.position.distance(target_pos) as i64)) {
+        warp_to_item(ctx, p, st.station_id, 0.0).await.unwrap();
+        return true;
+    }
+    if let Some(j) = ctx.sde.jumps.values().filter(|j| j.from_solar_system_id == sys_id && ship_pos.distance(j.position) >= 165_000.0 && j.position.distance(target_pos) < 7_500_000.0).min_by_key(|j| j.position.distance(target_pos) as i64) {
+        warp_to_item(ctx, p, j.stargate_id, 0.0).await.unwrap();
+        return true;
+    }
+    false
+}
+
 async fn approach_npc(ctx: &ServerContext, p: &mut LivePilot, npc_id: i64) {
     let (sys_id, sys) = (p.sess.solar_system_id.expect("in space"), ctx.systems.get_or_spawn(p.sess.solar_system_id.expect("in space")));
-    for _ in 0..8 {
-        for _ in 0..30 { let Some((_, nb)) = sys.get_ball_snapshot(npc_id).await.unwrap() else { return; }; if !matches!(nb.mode, MovementMode::Warp { .. }) { break; } sys.step_manual(5.0).await.unwrap(); }
+    for _ in 0..16 {
+        for _ in 0..150 { let Some((_, nb)) = sys.get_ball_snapshot(npc_id).await.unwrap() else { return; }; if !matches!(nb.mode, MovementMode::Warp { .. }) { break; } sys.step_manual(1.0).await.unwrap(); }
         let Some((_, nb)) = sys.get_ball_snapshot(npc_id).await.unwrap() else { return; };
         let (pos, ship_pos) = (nb.position, sys.get_ball_snapshot(p.ship_id).await.unwrap().expect("ship ball").1.position);
         let (dist, spd) = (ship_pos.distance(pos), nb.velocity.length());
         if dist <= 25_000.0 { return; }
         let dir = if spd > 20.0 { nb.velocity / spd } else { DVec3::ZERO };
         let ahead = (ship_pos - pos).dot(dir);
-        if spd > 50.0 && ahead < 260_000.0 {
-            if let Some(cid) = ctx.sde.celestials_in_system(sys_id).into_iter().filter(|c| ship_pos.distance(c.position) >= 165_000.0 && (c.position - pos).dot(dir) > 260_000.0).min_by_key(|c| { let d = c.position.distance(pos); let cos = (c.position - pos).dot(dir) / d.max(1.0); if cos >= 0.75 { d as i64 } else { (1e17 - cos * 1e12) as i64 } }).map(|c| c.celestial_id) {
+        if dist > 7_500_000.0 { if warp_on_grid(ctx, p, sys_id, ship_pos, pos).await { continue; } panic!("no grid anchor for {npc_id} in {sys_id}"); }
+        if dist < 165_000.0 && spd > 50.0 && ahead < 260_000.0 {
+            if let Some(cid) = ctx.sde.celestials_in_system(sys_id).into_iter().filter(|c| c.group_id != 6 && c.position.distance(pos) < 5_000_000.0 && ship_pos.distance(c.position) >= 165_000.0 && (c.position - pos).dot(dir) > 260_000.0).min_by_key(|c| c.position.distance(pos) as i64).map(|c| c.celestial_id) {
                 let _ = warp_to_item(ctx, p, cid, 0.0).await; continue;
             }
         }
@@ -213,14 +254,12 @@ async fn approach_npc(ctx: &ServerContext, p: &mut LivePilot, npc_id: i64) {
             let _ = rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "CmdStop", &[]).await;
             let PyRep::Tuple(bm) = rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "BookmarkLocation", &[PyRep::Integer(npc_id), PyRep::Integer(0), PyRep::String("target".into()), PyRep::String(String::new())]).await.expect("BookmarkLocation") else { panic!() };
             let bm_id = bm[0].as_i64().unwrap();
-            let lead = if spd > 50.0 && ahead >= 200_000.0 { (spd * 26.0).min(dist - 160_000.0).clamp(5_000.0, 100_000.0) } else { 5_000.0 };
+            let lead = if spd > 50.0 && ahead >= 200_000.0 { (spd * 26.0).min(dist - 160_000.0).clamp(5_000.0, 100_000.0) } else { 0.0 };
             if warp_to_target(ctx, p, "bookmark", bm_id, lead).await.is_err() { warp_to_target(ctx, p, "bookmark", bm_id, 50_000.0).await.unwrap(); }
         } else if spd > 50.0 && ahead > 12_000.0 { sys.step_manual(((ahead - 12_000.0) / spd).clamp(1.0, 10.0)).await.unwrap(); }
         else { fly_near_point(ctx, p, pos, 12_000.0, 12.0).await; }
     }
-    let (_, nb) = sys.get_ball_snapshot(npc_id).await.unwrap().expect("npc ball");
-    let (_, sb) = sys.get_ball_snapshot(p.ship_id).await.unwrap().expect("ship ball");
-    panic!("approach_npc {npc_id} stuck at {:.1} m: ship={:?} npc={:?} nb_mode={:?} vel={:?}", sb.position.distance(nb.position), sb.position, nb.position, nb.mode, nb.velocity);
+    panic!("approach_npc {npc_id} did not converge");
 }
 
 async fn kill_npc_live(ctx: &ServerContext, p: &mut LivePilot, guns: &[i64], target_id: i64) -> Option<i64> {
@@ -270,7 +309,10 @@ async fn kill_npc_live(ctx: &ServerContext, p: &mut LivePilot, guns: &[i64], tar
 async fn loot_wreck_via_invbroker(ctx: &ServerContext, p: &mut LivePilot, wreck_id: i64) -> Vec<u32> {
     let (sys_id, sys) = (p.sess.solar_system_id.expect("in space"), ctx.systems.get_or_spawn(p.sess.solar_system_id.expect("in space")));
     if let Some(wpos) = ctx.db.with_snapshot(|s| s.item_positions.get(&wreck_id).copied().map(DVec3::from_array)) {
-        let spos = sys.get_ball_snapshot(p.ship_id).await.ok().flatten().map(|(_, s)| s.position).unwrap_or(wpos);
+        let mut spos = sys.get_ball_snapshot(p.ship_id).await.ok().flatten().map(|(_, s)| s.position).unwrap_or(wpos);
+        if spos.distance(wpos) > 5_000_000.0 && warp_on_grid(ctx, p, sys_id, spos, wpos).await {
+            spos = sys.get_ball_snapshot(p.ship_id).await.ok().flatten().map(|(_, s)| s.position).unwrap_or(wpos);
+        }
         if spos.distance(wpos) > 25_000.0 {
             if spos.distance(wpos) < 165_000.0 { if let Some(cid) = ctx.sde.celestials_in_system(sys_id).into_iter().find(|c| spos.distance(c.position) >= 165_000.0 && wpos.distance(c.position) >= 165_000.0).map(|c| c.celestial_id) { let _ = warp_to_item(ctx, p, cid, 0.0).await; } }
             let PyRep::Tuple(bm) = rpc_bound(ctx, &mut p.sess, "beyonce", p.beyonce, "BookmarkLocation", &[PyRep::Integer(wreck_id), PyRep::Integer(0), PyRep::String("wreck".into()), PyRep::String(String::new())]).await.expect("BookmarkLocation wreck") else { panic!() };
@@ -293,15 +335,22 @@ async fn loot_wreck_via_invbroker(ctx: &ServerContext, p: &mut LivePilot, wreck_
 
 async fn hold_fw_complex_ticks(ctx: &ServerContext, p: &mut LivePilot, sys_id: u32, ticks: u32) {
     travel_to(ctx, p, sys_id).await;
-    let PyRep::List(insts) = rpc(ctx, &mut p.sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyInstances", &[PyRep::Integer(i64::from(sys_id))]).await.expect("GetPirateInsurgencyInstances") else { panic!() };
-    let inst_id = insts[0].dict_get("instanceID").and_then(PyRep::as_i64).expect("instanceID");
-    if let Err(e) = warp_to_target(ctx, p, "dungeon", inst_id, 0.0).await {
-        let bpos = ctx.db.with_snapshot(|s| DVec3::from_array(s.system_states[&sys_id].fw_complex_position.expect("fw_complex_position")));
-        if e.code == concat!("Warp", "DistanceTooShort") { fly_near_point(ctx, p, bpos, 10_000.0, 12.0).await; } else { panic!("warp insurgency site failed: {e:?}"); }
-    }
+    let _ = rpc(ctx, &mut p.sess, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await;
+    let _ = rpc(ctx, &mut p.sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyInstances", &[PyRep::Integer(i64::from(sys_id))]).await;
     let sys = ctx.systems.get_or_spawn(sys_id);
-    sys.step_manual(1.0).await.unwrap();
-    for _ in 0..ticks { ctx.advance_virtual_clock(60); step_system_insurgency_tick_delta(ctx, sys_id, Some(60)).await; }
+    for _ in 0..ticks {
+        let bpos = if let Some(pos) = ctx.db.with_snapshot(|s| s.system_states.get(&sys_id).and_then(|st| st.fw_complex_position)) { DVec3::from_array(pos) } else {
+            let _ = rpc(ctx, &mut p.sess, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await;
+            DVec3::from_array(ctx.db.with_snapshot(|s| s.system_states[&sys_id].fw_complex_position.expect("fw_complex_position")))
+        };
+        if sys.get_ball_snapshot(p.ship_id).await.ok().flatten().map_or(f64::MAX, |(_, b)| b.position.distance(bpos)) > 25_000.0 {
+            if let Some(cid) = ctx.sde.celestials_in_system(sys_id).into_iter().min_by(|a, b| a.position.distance(bpos).total_cmp(&b.position.distance(bpos))).map(|c| c.celestial_id) { let _ = warp_to_item(ctx, p, cid, 0.0).await; }
+            fly_near_point(ctx, p, bpos, 15_000.0, 12.0).await;
+        }
+        sys.step_manual(1.0).await.unwrap();
+        ctx.advance_virtual_clock(60);
+        step_system_insurgency_tick_delta(ctx, sys_id, Some(60)).await;
+    }
     tick_insurgency_complex_ops(ctx, ctx.now_unix()).await;
     let star_id = ctx.sde.celestials_in_system(sys_id).into_iter().find(|c| c.group_id == 6).map(|c| c.celestial_id).unwrap();
     warp_to_item(ctx, p, star_id, 100_000.0).await.expect("leave grid");
@@ -371,19 +420,11 @@ async fn test_live_insurgency_laundering_roamers_and_war_hq_crates() {
     let (mut p_gur, guns_gur) = spawn_live_pilot(&ctx, 71_001, 95_100_001, gur_sys, caracal, rlml, bcs, mwd, light_msl).await;
     let (mut p_cal, guns_cal) = spawn_live_pilot(&ctx, 71_002, 95_100_002, gur_sys, caracal, rlml, bcs, mwd, light_msl).await;
     let (mut p_gal, _) = spawn_live_pilot(&ctx, 71_003, 95_100_003, HQ_SYSTEM_INTAKI, rifter, 0, 0, 0, 0).await;
-    enlist(&ctx, &mut p_gur, FACTION_GURISTAS).await;
-    enlist(&ctx, &mut p_cal, 500_001).await;
-    enlist(&ctx, &mut p_gal, 500_004).await;
+    enlist(&ctx, &mut p_gur, FACTION_GURISTAS).await; enlist(&ctx, &mut p_cal, 500_001).await; enlist(&ctx, &mut p_gal, 500_004).await;
     let _ = rpc(&ctx, &mut p_gur.sess, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await;
-    tick_insurgency_campaigns(&ctx, ctx.now_unix()).await;
-    ctx.advance_secs(FORECASTING_DURATION_SECS + 10);
-    tick_insurgency_campaigns(&ctx, ctx.now_unix()).await;
-    tick_insurgency_complex_ops(&ctx, ctx.now_unix()).await;
-
-    let (camp_id, fob_sys, sys0) = read_insurgency_runtime(&ctx, |rt| {
-        let c = rt.campaigns.values().find(|c| c.pirate_faction_id == FACTION_GURISTAS).unwrap();
-        (c.campaign_id, c.fob_solar_system_id, c.systems[0])
-    });
+    tick_insurgency_campaigns(&ctx, ctx.now_unix()).await; ctx.advance_secs(FORECASTING_DURATION_SECS + 10);
+    tick_insurgency_campaigns(&ctx, ctx.now_unix()).await; tick_insurgency_complex_ops(&ctx, ctx.now_unix()).await;
+    let (camp_id, fob_sys, sys0) = read_insurgency_runtime(&ctx, |rt| { let c = rt.campaigns.values().find(|c| c.pirate_faction_id == FACTION_GURISTAS).unwrap(); (c.campaign_id, c.fob_solar_system_id, c.systems[0]) });
 
     // Stage 2: regular roamer drops NO special sequence.
     hold_fw_complex_ticks(&ctx, &mut p_gur, sys0, 2).await;
@@ -399,29 +440,17 @@ async fn test_live_insurgency_laundering_roamers_and_war_hq_crates() {
     let (mut looted_gur_seq, mut looted_upwell) = (false, false);
     for idx in 0..12_usize {
         let Some(sys_i) = read_insurgency_runtime(&ctx, |rt| rt.campaigns[&camp_id].systems.get(idx).copied()) else { break };
-        if insurgency_system_corruption_stage(&ctx, sys_i) < 3 {
-            ctx.mechanic_rng.set_seed(Some(s));
-            hold_fw_complex_ticks(&ctx, &mut p_gur, sys_i, 3).await;
-        }
-        if ctx.db.with_snapshot(|snap| snap.system_states.get(&sys_i).map_or(0, |st| st.insurgency_suppression_stage)) < 3 {
-            ctx.mechanic_rng.set_seed(Some(s));
-            hold_fw_complex_ticks(&ctx, &mut p_cal, sys_i, 3).await;
-        }
+        if insurgency_system_corruption_stage(&ctx, sys_i) < 3 { ctx.mechanic_rng.set_seed(Some(s)); hold_fw_complex_ticks(&ctx, &mut p_gur, sys_i, 3).await; }
+        if ctx.db.with_snapshot(|snap| snap.system_states.get(&sys_i).map_or(0, |st| st.insurgency_suppression_stage)) < 3 { ctx.mechanic_rng.set_seed(Some(s)); hold_fw_complex_ticks(&ctx, &mut p_cal, sys_i, 3).await; }
         let npcs: Vec<(i64, u32)> = with_combat_ephemeral(&ctx, |rt| rt.npc_entities.values().filter(|n| n.solar_system_id == sys_i).map(|n| (n.ball_id, n.type_id)).collect());
-        if !looted_gur_seq {
-            if let Some(&(bid, _)) = npcs.iter().find(|(_, t)| is_named_pirate_commander_roamer(*t)) {
-                travel_to(&ctx, &mut p_cal, sys_i).await;
-                let wid = kill_npc_live(&ctx, &mut p_cal, &guns_cal, bid).await.unwrap();
-                looted_gur_seq = loot_wreck_via_invbroker(&ctx, &mut p_cal, wid).await.contains(&TYPE_GURISTAS_INSURGENCY_DATA_SEQ);
-            }
-        }
-        if !looted_upwell {
-            if let Some(&(bid, _)) = npcs.iter().find(|(_, t)| is_named_insurgency_roamer(*t) && !is_named_pirate_commander_roamer(*t)) {
-                travel_to(&ctx, &mut p_gur, sys_i).await;
-                let wid = kill_npc_live(&ctx, &mut p_gur, &guns_gur, bid).await.unwrap();
-                looted_upwell = loot_wreck_via_invbroker(&ctx, &mut p_gur, wid).await.contains(&TYPE_UPWELL_CONSORTIUM_DATA_CACHE);
-            }
-        }
+        if !looted_gur_seq { if let Some(&(bid, _)) = npcs.iter().find(|(_, t)| is_named_pirate_commander_roamer(*t)) {
+            travel_to(&ctx, &mut p_cal, sys_i).await; let wid = kill_npc_live(&ctx, &mut p_cal, &guns_cal, bid).await.unwrap();
+            looted_gur_seq = loot_wreck_via_invbroker(&ctx, &mut p_cal, wid).await.contains(&TYPE_GURISTAS_INSURGENCY_DATA_SEQ);
+        } }
+        if !looted_upwell { if let Some(&(bid, _)) = npcs.iter().find(|(_, t)| is_named_insurgency_roamer(*t) && !is_named_pirate_commander_roamer(*t)) {
+            travel_to(&ctx, &mut p_gur, sys_i).await; let wid = kill_npc_live(&ctx, &mut p_gur, &guns_gur, bid).await.unwrap();
+            looted_upwell = loot_wreck_via_invbroker(&ctx, &mut p_gur, wid).await.contains(&TYPE_UPWELL_CONSORTIUM_DATA_CACHE);
+        } }
         if looted_gur_seq && looted_upwell { break; }
     }
     assert!(looted_gur_seq && looted_upwell);
@@ -440,27 +469,20 @@ async fn test_live_insurgency_laundering_roamers_and_war_hq_crates() {
     verify_war_hq_handin(&ctx, &mut p_gal, &mut p_cal, camp_id, fob_sys, HQ_SYSTEM_INTAKI, 1_891_200_001, TYPE_FEDERATION_CI_OUTPOST_HUB, 500_004, TYPE_GURISTAS_INSURGENCY_DATA_SEQ).await;
 
     // Angel Cartel campaign (`Mehatoor` Amarr & `Amo` Minmatar + Angel FOB Laundering Facility).
-    let ctx2 = ServerContext::new();
-    common::pin_clock(&ctx2);
-    ctx2.mechanic_rng.set_seed(Some(42));
+    let ctx2 = ServerContext::new(); common::pin_clock(&ctx2); ctx2.mechanic_rng.set_seed(Some(42));
     let amamin_fl = ctx2.db.with_snapshot(|s| *compute_all_frontline_statuses(&ctx2, s).iter().find(|(&sys, &st)| st == STATUS_FRONTLINE && s.fw_system_occupations.get(&sys).is_some_and(|o| matches!(o.occupier_faction_id, 500_002 | 500_003))).unwrap().0);
     let (mut p_ang, _) = spawn_live_pilot(&ctx2, 71_101, 95_101_001, amamin_fl, hurr, gun, gyro, mwd, ammo).await;
     let (mut p_ama, _) = spawn_live_pilot(&ctx2, 71_102, 95_101_002, HQ_SYSTEM_MEHATOOR, rifter, 0, 0, 0, 0).await;
     let (mut p_min, _) = spawn_live_pilot(&ctx2, 71_103, 95_101_003, HQ_SYSTEM_AMO, rifter, 0, 0, 0, 0).await;
-    enlist(&ctx2, &mut p_ang, FACTION_ANGEL_CARTEL).await;
-    enlist(&ctx2, &mut p_ama, 500_003).await;
-    enlist(&ctx2, &mut p_min, 500_002).await;
+    enlist(&ctx2, &mut p_ang, FACTION_ANGEL_CARTEL).await; enlist(&ctx2, &mut p_ama, 500_003).await; enlist(&ctx2, &mut p_min, 500_002).await;
     let _ = rpc(&ctx2, &mut p_ang.sess, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await;
-    tick_insurgency_campaigns(&ctx2, ctx2.now_unix()).await;
-    ctx2.advance_secs(FORECASTING_DURATION_SECS + 10);
-    tick_insurgency_campaigns(&ctx2, ctx2.now_unix()).await;
-    tick_insurgency_complex_ops(&ctx2, ctx2.now_unix()).await;
+    tick_insurgency_campaigns(&ctx2, ctx2.now_unix()).await; ctx2.advance_secs(FORECASTING_DURATION_SECS + 10);
+    tick_insurgency_campaigns(&ctx2, ctx2.now_unix()).await; tick_insurgency_complex_ops(&ctx2, ctx2.now_unix()).await;
     let (ang_cid, ang_fob, ang_s0) = read_insurgency_runtime(&ctx2, |rt| { let c = rt.campaigns.values().find(|c| c.pirate_faction_id == FACTION_ANGEL_CARTEL).unwrap(); (c.campaign_id, c.fob_solar_system_id, c.systems[0]) });
     hold_fw_complex_ticks(&ctx2, &mut p_ang, ang_s0, 3).await;
     let ang_lf = 1_891_100_000 + ang_cid;
     let (alf_rec, alf_ins, alf_crates) = find_trader_recipe(&ctx2, TYPE_ANGEL_LAUNDERING_FACILITY, TYPE_UPWELL_CONSORTIUM_DATA_CACHE);
-    travel_to(&ctx2, &mut p_ang, ang_fob).await;
-    warp_to_item(&ctx2, &mut p_ang, ang_lf, 0.0).await.unwrap();
+    travel_to(&ctx2, &mut p_ang, ang_fob).await; warp_to_item(&ctx2, &mut p_ang, ang_lf, 0.0).await.unwrap();
     ensure_trade_inputs_in_cargo(&ctx2, &mut p_ang, &alf_ins).await;
     let PyRep::Tuple(ares) = call_process_trade(&ctx2, &mut p_ang, ang_lf, alf_rec).await.unwrap() else { panic!() };
     let PyRep::List(adeliv) = &ares[1] else { panic!() };
@@ -471,31 +493,22 @@ async fn test_live_insurgency_laundering_roamers_and_war_hq_crates() {
 
 #[tokio::test]
 async fn test_live_insurgency_mining_ambush_ransom_rescue_destroy_lp_split() {
-    let ctx = ServerContext::new();
-    common::pin_clock(&ctx);
+    let ctx = ServerContext::new(); common::pin_clock(&ctx);
     let (hurr, gun, gyro, mwd, ammo, rifter) = gear_type_ids(&ctx);
-
     let sys_id = 30_002_538_u32;
     let (mut pirates, mut pir_guns) = (Vec::new(), Vec::new());
     for i in 0..6_usize {
         let (ship, g) = if i == 0 { (hurr, gun) } else { (rifter, 0) };
         let (p, gs) = spawn_live_pilot(&ctx, 72_001 + i as u64, 95_200_001 + i as i64, sys_id, ship, g, gyro, mwd, ammo).await;
-        pirates.push(p);
-        if i == 0 { pir_guns = gs; }
+        pirates.push(p); if i == 0 { pir_guns = gs; }
     }
     let (mut p_cal, guns_cal) = spawn_live_pilot(&ctx, 72_010, 95_200_010, sys_id, hurr, gun, gyro, mwd, ammo).await;
     for p in &mut pirates { enlist(&ctx, p, FACTION_GURISTAS).await; }
     enlist(&ctx, &mut p_cal, 500_001).await;
     let _ = rpc(&ctx, &mut pirates[0].sess, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await;
-    tick_insurgency_campaigns(&ctx, ctx.now_unix()).await;
-    ctx.advance_secs(FORECASTING_DURATION_SECS + 10);
-    tick_insurgency_campaigns(&ctx, ctx.now_unix()).await;
-    tick_insurgency_complex_ops(&ctx, ctx.now_unix()).await;
-
-    let (camp_id, systems) = read_insurgency_runtime(&ctx, |rt| {
-        let c = rt.campaigns.values().find(|c| c.pirate_faction_id == FACTION_GURISTAS).unwrap();
-        (c.campaign_id, c.systems.clone())
-    });
+    tick_insurgency_campaigns(&ctx, ctx.now_unix()).await; ctx.advance_secs(FORECASTING_DURATION_SECS + 10);
+    tick_insurgency_campaigns(&ctx, ctx.now_unix()).await; tick_insurgency_complex_ops(&ctx, ctx.now_unix()).await;
+    let (camp_id, systems) = read_insurgency_runtime(&ctx, |rt| { let c = rt.campaigns.values().find(|c| c.pirate_faction_id == FACTION_GURISTAS).unwrap(); (c.campaign_id, c.systems.clone()) });
 
     let (s0, s1, s2) = (systems[0], systems[1], systems[2]);
     hold_fw_complex_ticks(&ctx, &mut pirates[0], s0, 1).await;
@@ -572,35 +585,23 @@ async fn test_live_insurgency_outpost_raid_sizes_gates_bc_bonus_and_respawn() {
 
     // 2. Gate rejections: distance > 2500m, non-militia & cross-warzone, cruiser/T3D in Small, deadspace direct warp block, WCS & Capsule.
     assert_eq!(rpc(&ctx, &mut p_cal_frig.sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(g_small)]).await.unwrap_err().code, "TooFarFromGate");
-    for p in [&mut p_neutral, &mut p_amarr] {
-        warp_to_item(&ctx, p, g_small, 0.0).await.unwrap();
-        assert_eq!(rpc(&ctx, &mut p.sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(g_small)]).await.unwrap_err().code, "NotEnlistedInMilitia");
-    }
-    warp_to_item(&ctx, &mut p_cal_cru, g_small, 0.0).await.unwrap();
-    assert_eq!(rpc(&ctx, &mut p_cal_cru.sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(g_small)]).await.unwrap_err().code, "ShipRestrictedForComplex");
-    warp_to_item(&ctx, &mut p_pir_t3d, g_small, 0.0).await.unwrap();
-    assert_eq!(rpc(&ctx, &mut p_pir_t3d.sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(g_small)]).await.unwrap_err().code, "ShipRestrictedForComplex");
+    for p in [&mut p_neutral, &mut p_amarr] { warp_to_item(&ctx, p, g_small, 0.0).await.unwrap(); assert_eq!(rpc(&ctx, &mut p.sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(g_small)]).await.unwrap_err().code, "NotEnlistedInMilitia"); }
+    warp_to_item(&ctx, &mut p_cal_cru, g_small, 0.0).await.unwrap(); assert_eq!(rpc(&ctx, &mut p_cal_cru.sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(g_small)]).await.unwrap_err().code, "ShipRestrictedForComplex");
+    warp_to_item(&ctx, &mut p_pir_t3d, g_small, 0.0).await.unwrap(); assert_eq!(rpc(&ctx, &mut p_pir_t3d.sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(g_small)]).await.unwrap_err().code, "ShipRestrictedForComplex");
 
-    warp_to_item(&ctx, &mut p_cal_frig, g_small, 0.0).await.unwrap();
-    rpc(&ctx, &mut p_cal_frig.sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(g_small)]).await.expect("Small admits Frigate");
+    warp_to_item(&ctx, &mut p_cal_frig, g_small, 0.0).await.unwrap(); rpc(&ctx, &mut p_cal_frig.sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(g_small)]).await.expect("Small admits Frigate");
     for (m, a) in [("CreateFleet", vec![]), ("Invite", vec![PyRep::Integer(p_cal_frig.char_id), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0)])] { rpc(&ctx, &mut p_cal_big.sess, "fleetMgr", m, &a).await.unwrap(); }
     rpc(&ctx, &mut p_cal_frig.sess, "fleetMgr", "AcceptInvite", &[PyRep::Bool(false)]).await.unwrap();
     assert_eq!(rpc_bound(&ctx, &mut p_cal_big.sess, "beyonce", p_cal_big.beyonce, "CmdWarpToStuff", &[PyRep::String("char".into()), PyRep::Integer(p_cal_frig.char_id), PyRep::Real(0.0)]).await.unwrap_err().code, "NaturalPhenomenaDisruptingWarp");
-    let _ = rpc(&ctx, &mut p_cal_frig.sess, "fleetMgr", "LeaveFleet", &[]).await;
-    ctx.advance_secs(11);
+    let _ = rpc(&ctx, &mut p_cal_frig.sess, "fleetMgr", "LeaveFleet", &[]).await; ctx.advance_secs(11);
 
     let station_id = ctx.sde.solar_systems[&s0].stations[0].station_id;
     for dock_wcs in [true, false] {
-        warp_to_item(&ctx, &mut p_cal_frig, station_id, 0.0).await.unwrap();
-        rpc(&ctx, &mut p_cal_frig.sess, "stationSvc", "Dock", &[PyRep::Integer(station_id)]).await.unwrap();
-        ctx.advance_secs(11);
+        warp_to_item(&ctx, &mut p_cal_frig, station_id, 0.0).await.unwrap(); rpc(&ctx, &mut p_cal_frig.sess, "stationSvc", "Dock", &[PyRep::Integer(station_id)]).await.unwrap(); ctx.advance_secs(11);
         if dock_wcs { slash(&ctx, &mut p_cal_frig.sess, &format!("/fit me {wcs}")).await; } else { rpc(&ctx, &mut p_cal_frig.sess, "ship", "LeaveShip", &[]).await.unwrap(); ctx.advance_secs(11); }
-        rpc(&ctx, &mut p_cal_frig.sess, "stationSvc", "Undock", &[]).await.unwrap();
-        p_cal_frig.ship_id = p_cal_frig.sess.ship_id.unwrap();
-        slash(&ctx, &mut p_cal_frig.sess, "/heal").await;
+        rpc(&ctx, &mut p_cal_frig.sess, "stationSvc", "Undock", &[]).await.unwrap(); p_cal_frig.ship_id = p_cal_frig.sess.ship_id.unwrap(); slash(&ctx, &mut p_cal_frig.sess, "/heal").await;
         for _ in 0..32 { ctx.systems.get_or_spawn(p_cal_frig.sess.solar_system_id.unwrap()).step_manual(1.0).await.unwrap(); }
-        travel_to(&ctx, &mut p_cal_frig, s0).await;
-        warp_to_item(&ctx, &mut p_cal_frig, g_small, 0.0).await.unwrap();
+        travel_to(&ctx, &mut p_cal_frig, s0).await; warp_to_item(&ctx, &mut p_cal_frig, g_small, 0.0).await.unwrap();
         assert_eq!(rpc(&ctx, &mut p_cal_frig.sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(g_small)]).await.unwrap_err().code, if dock_wcs { "WarpCoreStabilizerRestricted" } else { "ShipRestrictedForComplex" });
     }
 

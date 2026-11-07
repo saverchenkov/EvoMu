@@ -149,7 +149,7 @@ async fn test_pve_agent_finder_and_conversation() {
     assert_eq!(details.dict_get("agentID").and_then(|v| v.as_i64()), Some(target_agent_id));
     assert_eq!(details.dict_get("level").and_then(|v| v.as_i64()), Some(1));
     if let Some(PyRep::List(services)) = details.dict_get("services") {
-        assert!(services.iter().any(|s| s.as_str() == Some("mission")));
+        assert!(services.iter().any(|s| s.as_str() == Some("mission") || s.dict_get("agentServiceType").and_then(|v| v.as_str()) == Some("mission")));
     } else {
         panic!("Expected services list");
     }

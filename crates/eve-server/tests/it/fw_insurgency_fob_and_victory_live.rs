@@ -7,10 +7,10 @@
 #![forbid(unsafe_code)]
 
 use crate::common;
-use crate::esi_fw_sov_incursions_live::{lock_target, rpc, slash};
+use crate::esi_fw_sov_incursions_live::{rpc, slash};
 use crate::fw_insurgency_campaign_lifecycle_live::{
-    boost_siege_guns, destroy_target_live, fire_one_volley, hold_complex_to_pts, move_near,
-    setup_enlisted_pilot, CALDARI, GURISTAS,
+    boost_siege_guns, destroy_target_live, fire_one_volley, hold_complex_to_pts,
+    lock_target_healed, move_near, setup_enlisted_pilot, CALDARI, GURISTAS,
 };
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
@@ -34,15 +34,38 @@ async fn reinforce_fob_live(
     fob_id: i64,
 ) {
     move_near(ctx, sys_id, ship_id, fob_id).await;
-    lock_target(ctx, sess, sys_id, ship_id, fob_id, 1_000.0).await;
     let sys = ctx.systems.get_or_spawn(sys_id);
+    if let Ok(Some(mut cs)) = sys.get_combat_state(ship_id).await {
+        cs.max_shield_hp = 5_000_000.0;
+        cs.shield_hp = 5_000_000.0;
+        cs.max_armor_hp = 5_000_000.0;
+        cs.armor_hp = 5_000_000.0;
+        let _ = sys.set_combat_state(ship_id, cs).await;
+    }
+    lock_target_healed(ctx, sess, sys_id, ship_id, fob_id).await;
     for _ in 0..80 {
         if ctx.db.with_snapshot(|s| s.structures[&fob_id].state == "ArmorReinforced") {
+            for &gid in guns {
+                let _ = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gid), PyRep::String("targetAttack".into())]).await;
+            }
+            for _ in 0..8 {
+                sys.step_manual(1.0).await.unwrap();
+                slash(ctx, sess, "/heal").await;
+            }
+            ctx.advance_secs(8);
             return;
         }
         let mut reloading = false;
         for &gid in guns {
             if ctx.db.with_snapshot(|s| s.structures[&fob_id].state == "ArmorReinforced") {
+                for &g2 in guns {
+                    let _ = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(g2), PyRep::String("targetAttack".into())]).await;
+                }
+                for _ in 0..8 {
+                    sys.step_manual(1.0).await.unwrap();
+                    slash(ctx, sess, "/heal").await;
+                }
+                ctx.advance_secs(8);
                 return;
             }
             if let Err(e) = rpc(
@@ -60,9 +83,7 @@ async fn reinforce_fob_live(
             {
                 match e.code.as_str() {
                     "ModuleIsReloading" => reloading = true,
-                    "TargetNotLocked" => {
-                        lock_target(ctx, sess, sys_id, ship_id, fob_id, 1_000.0).await;
-                    }
+                    "TargetNotLocked" => lock_target_healed(ctx, sess, sys_id, ship_id, fob_id).await,
                     _ => {}
                 }
             }
@@ -70,9 +91,9 @@ async fn reinforce_fob_live(
         let step_secs = if reloading { 11 } else { 4 };
         for _ in 0..step_secs {
             sys.step_manual(1.0).await.unwrap();
+            slash(ctx, sess, "/heal").await;
         }
         ctx.advance_secs(step_secs);
-        slash(ctx, sess, "/heal").await;
     }
     panic!("FOB {fob_id} did not enter ArmorReinforced");
 }
@@ -109,6 +130,10 @@ async fn test_live_insurgency_fob_docking_and_suppression_gate() {
     .await
     .expect_err("Empire pilot must be rejected from docking at Pirate FOB");
     assert_eq!(dock_err.code, "FobDockingRestrictedToPirateMilitia");
+    ctx.systems
+        .get_or_spawn(hub_sys)
+        .set_ball_position(ship_emp, glam::DVec3::ZERO)
+        .await;
 
     move_near(&ctx, hub_sys, ship_pir, fob_id).await;
     rpc(
@@ -158,6 +183,9 @@ async fn test_live_insurgency_fob_docking_and_suppression_gate() {
     let init_systems = read_insurgency_runtime(&ctx, |rt| rt.campaigns[&campaign_id].systems.clone());
     let spread_seed_sys = *init_systems.iter().find(|&&s| s != hub_sys).expect("secondary system");
     hold_complex_to_pts(&ctx, &mut pir.sess, campaign_id, spread_seed_sys, ship_pir, true, 600).await;
+    slash(&ctx, &mut pir.sess, &format!("/tr {hub_sys}")).await;
+    move_near(&ctx, hub_sys, ship_pir, fob_id).await;
+    rpc(&ctx, &mut pir.sess, "structureDocking", "Dock", &[PyRep::Integer(fob_id)]).await.expect("dock pirate at FOB");
 
     hold_complex_to_pts(&ctx, &mut emp.sess, campaign_id, hub_sys, ship_emp, false, 1_000).await;
     let all_systems = read_insurgency_runtime(&ctx, |rt| rt.campaigns[&campaign_id].systems.clone());
@@ -184,7 +212,7 @@ async fn test_live_insurgency_fob_docking_and_suppression_gate() {
     );
 
     // Friendly pirate pilot cannot attack their own FOB even when vulnerable.
-    slash(&ctx, &mut pir.sess, &format!("/tr {hub_sys}")).await;
+    rpc(&ctx, &mut pir.sess, "stationSvc", "Undock", &[]).await.expect("Undock from FOB");
     let _ = rpc(&ctx, &mut pir.sess, "beyonce", "CmdStop", &[]).await;
     let friendly_err = fire_one_volley(&ctx, &mut pir.sess, hub_sys, ship_pir, guns_pir[0], fob_id)
         .await

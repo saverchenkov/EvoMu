@@ -144,7 +144,6 @@ pub fn handle_get_homefront_site_instances(
     };
 
     let reply = with_pve_special_reg(ctx, |reg| {
-        ensure_homefront_sites_for_system_locked(ctx, reg, sys_id);
         let mut by_dungeon: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
         if let Some(list) = reg.homefront_sites.get(&sys_id) {
             for s in list {

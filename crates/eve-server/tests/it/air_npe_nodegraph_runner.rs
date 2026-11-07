@@ -334,21 +334,14 @@ async fn air_npe_server_nodegraph_runner_full_tutorial_to_completion() {
             && args.first().and_then(|a| a.as_i64()) == Some(AIR_NPE_ACT_2_NODE_GRAPH_ID)
     }));
 
-    // 6. Complete final checkpoint (92) via client graph message on 716 -> completes AIR NPE!
-    rpc(
+    // 6. Complete final checkpoint (92) via server dockAtStation operation on 716 -> completes AIR NPE!
+    eve_server::services::operations_manager_helpers::record_server_operation_event(
         &ctx,
-        &mut sess,
-        "node_graph",
-        "process_client_graph_message",
-        &[
-            PyRep::Integer(AIR_NPE_NODE_GRAPH_ID),
-            PyRep::Integer(92),
-            PyRep::String("dock_at_career_station".into()),
-            PyRep::None,
-        ],
-    )
-    .await
-    .expect("final checkpoint message");
+        char_id,
+        "dockAtStation",
+        &[],
+        1,
+    );
 
     let end_notifs = drain_all(&ctx, &mut sess, char_id);
     assert!(end_notifs.iter().any(|(e, args)| {

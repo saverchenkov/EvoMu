@@ -253,6 +253,15 @@ async fn test_fitting_state_locks_and_pochven_anchoring() {
     let mod_id = grant(&ctx, OWNER, st_id, 35894, InventoryFlag::Hangar, 1);
 
     // Refit refused while AnchorVulnerable -> StructureFittingLockedInState
+    let saved_station = sess.station_id;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&OWNER) {
+            ch.station_id = None;
+            ch.structure_id = Some(st_id);
+        }
+    });
+    sess.station_id = None;
+    sess.structure_id = Some(st_id);
     let err_anchor = rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(mod_id), PyRep::Integer(st_id), PyRep::Integer(InventoryFlag::ServiceSlot0 as i64)]).await
         .expect_err("refit must be refused while AnchorVulnerable");
     assert_eq!(err_anchor.code, "StructureFittingLockedInState");
@@ -314,6 +323,14 @@ async fn test_fitting_state_locks_and_pochven_anchoring() {
     });
     let ok_refit = rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(mod_id), PyRep::Integer(st_id), PyRep::Integer(InventoryFlag::ServiceSlot0 as i64)]).await;
     assert!(ok_refit.is_ok(), "refit must succeed at full shields in ShieldVulnerable: {ok_refit:?}");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&OWNER) {
+            ch.structure_id = None;
+            ch.station_id = saved_station;
+        }
+    });
+    sess.structure_id = None;
+    sess.station_id = saved_station;
 
     // Pochven anchoring restrictions: Upwell refused, existing ones remain, Customs Office requires >= 1.5 Triglavian standing
     let pochven_sys = ctx.sde.solar_systems.values().find(|s| s.region_id == life::POCHVEN_REGION_ID).map(|s| s.solar_system_id).expect("Pochven system");
@@ -421,25 +438,74 @@ async fn test_reinforce_hour_hack_reveal_and_ewar_immunity() {
     assert_eq!(before.dict_get("reinforceHour"), Some(&PyRep::None), "reinforceHour must be hidden before hack");
 
     // Data Analyzer hack reveals reinforce hour to hacker
-    let _data_mod = grant(&ctx, OTHER_PILOT, hacker_ship, 22175, InventoryFlag::MedSlot7, 1);
+    let data_an_ii = ctx.sde.types.values().find(|t| t.name == "Data Analyzer II").map(|t| t.type_id).unwrap_or(22175);
+    let memetic_rig = ctx.sde.types.values().find(|t| t.name == "Memetic Algorithm Bank II").map(|t| t.type_id);
+    let heron_tid = ctx.sde.types.values().find(|t| t.name == "Buzzard").map(|t| t.type_id).unwrap_or(605);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(OTHER_PILOT).or_default().insert(21_718, eve_db::TrainedSkillRecord {
+            type_id: 21_718, level: 5, skill_points: 256_000.0,
+        });
+        if let Some(sh) = snap.items.get_mut(&hacker_ship) {
+            sh.type_id = heron_tid;
+        }
+    });
+    let _data_mod = grant(&ctx, OTHER_PILOT, hacker_ship, data_an_ii, InventoryFlag::MedSlot7, 1);
+    if let Some(rig_tid) = memetic_rig {
+        let _r0 = grant(&ctx, OTHER_PILOT, hacker_ship, rig_tid, InventoryFlag::RigSlot0, 1);
+        let _r1 = grant(&ctx, OTHER_PILOT, hacker_ship, rig_tid, InventoryFlag::RigSlot1, 1);
+    }
     let start = rpc(&ctx, &mut hacker_sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(st_id)]).await.expect("StartNewGameInstance");
     assert_eq!(start.dict_get("status").and_then(|v| v.as_str()), Some("InProgress"));
+    let grid_size = start.dict_get("gridSize").and_then(|v| v.as_i64()).unwrap_or(24) as u32;
+    let mut revealed: std::collections::HashSet<u32> = std::collections::HashSet::from([0]);
+    let mut non_blocking: std::collections::HashSet<u32> = std::collections::HashSet::from([0]);
+    let mut blockers: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut core_tile: Option<u32> = None;
     let mut won = false;
-    for _pass in 0..8 {
-        for tile in 1..24 {
-            for _ in 0..5 {
-                if let Ok(step) = rpc(&ctx, &mut hacker_sess, "hackingMgr", "ClickedOnTile", &[PyRep::Integer(st_id), PyRep::Integer(tile)]).await {
-                    if step.dict_get("status").and_then(|v| v.as_str()) == Some("Won") {
-                        won = true;
-                        break;
-                    }
-                } else {
-                    break;
-                }
+    for _ in 0..(grid_size * 4) {
+        let target = if let Some(c) = core_tile {
+            c
+        } else if let Some(t) = (0..grid_size).find(|&t| {
+            !revealed.contains(&t)
+                && non_blocking
+                    .iter()
+                    .any(|&adj| eve_server::services::pve_hacking_sites::hacking_hex_distance(adj, t) == 1)
+        }) {
+            t
+        } else if let Some(&b) = blockers.iter().next() {
+            for slot in 0..4_i64 {
+                let _ = rpc(&ctx, &mut hacker_sess, "hackingMgr", "UsedUtilityElementOnVirus", &[PyRep::Integer(st_id), PyRep::Integer(slot), PyRep::Integer(b as i64)]).await;
             }
-            if won { break; }
+            b
+        } else {
+            break;
+        };
+        if core_tile == Some(target) {
+            for slot in 0..4_i64 {
+                let _ = rpc(&ctx, &mut hacker_sess, "hackingMgr", "UsedUtilityElementOnVirus", &[PyRep::Integer(st_id), PyRep::Integer(slot), PyRep::Integer(target as i64)]).await;
+            }
         }
-        if won { break; }
+        let step = rpc(&ctx, &mut hacker_sess, "hackingMgr", "ClickedOnTile", &[PyRep::Integer(st_id), PyRep::Integer(target as i64)]).await
+            .unwrap_or_else(|e| panic!("ClickedOnTile({target}) failed: {e:?}"));
+        revealed.insert(target);
+        let status = step.dict_get("status").and_then(|v| v.as_str()).unwrap_or("");
+        if status == "Won" {
+            won = true;
+            break;
+        }
+        if status == "Failed" {
+            break;
+        }
+        let kind = step.dict_get("nodeKind").and_then(|v| v.as_str()).unwrap_or("");
+        let coh = step.dict_get("nodeCoherence").and_then(|v| v.as_i64()).unwrap_or(0);
+        if kind == "SystemCore" && coh > 0 {
+            core_tile = Some(target);
+        } else if matches!(kind, "Firewall" | "Antivirus" | "RestorationNode" | "VirusSuppressor") && coh > 0 {
+            blockers.insert(target);
+        } else {
+            blockers.remove(&target);
+            non_blocking.insert(target);
+        }
     }
     assert!(won, "Data Analyzer hack must complete with Won");
 

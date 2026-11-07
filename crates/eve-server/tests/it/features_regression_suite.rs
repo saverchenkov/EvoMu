@@ -698,8 +698,12 @@ async fn test_blocking_findings_b01_to_b15_tama_structure_and_clone_regressions(
         .await;
     assert_eq!(npc_anchor_err.unwrap_err().code, "NpcCorpCannotAnchorStructure");
 
-    // Create a player corporation on sess (90_000_001) before anchoring structures
+    // Create a player corporation on sess (90_000_001) while docked before anchoring structures
     ctx.advance_secs(12);
+    let saved_station = sess.station_id;
+    let saved_char_stn = ctx.db.with_snapshot(|s| s.characters.get(&sess.character_id.unwrap()).and_then(|c| c.station_id));
+    sess.station_id = Some(60_003_760);
+    ctx.db.with_mut_snapshot(|s| { if let Some(c) = s.characters.get_mut(&sess.character_id.unwrap()) { c.station_id = Some(60_003_760); } });
     ctx.dispatch_rpc(
         &mut sess,
         "corpRegistry",
@@ -715,6 +719,8 @@ async fn test_blocking_findings_b01_to_b15_tama_structure_and_clone_regressions(
     )
     .await
     .expect("AddCorporation TVC");
+    sess.station_id = saved_station;
+    ctx.db.with_mut_snapshot(|s| { if let Some(c) = s.characters.get_mut(&sess.character_id.unwrap()) { c.station_id = saved_char_stn; } });
     ctx.advance_secs(7 * 86_400);
 
     // Anchoring needs 1,000 km clearance from gates/stations/structures: fly 5,000,000 km off the gate.

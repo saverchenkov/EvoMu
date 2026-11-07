@@ -12,6 +12,7 @@ use glam::DVec3;
 use std::collections::{HashMap, HashSet};
 
 const JITA_SYS: u32 = 30_000_142;
+const NULL_SYS: u32 = 30_004_759;
 const TYPE_VELATOR: u32 = 606;
 const TYPE_DATA_ANALYZER_I: u32 = 22_175;
 const SKILL_HACKING: u32 = 21_718;
@@ -378,15 +379,20 @@ async fn test_live_pve_hacking_failure_outcomes_and_ghost_detonation() {
 
     let mut p = gm_hacker_in_space(&ctx, 9702, 97_001_002).await;
     ensure_system_pve_sites_seeded(&ctx, JITA_SYS).await;
+    ensure_system_pve_sites_seeded(&ctx, NULL_SYS).await;
 
     let (can1_id, can1_pos, can2_id, can2_pos, ghost_can_id, ghost_pos) =
         with_pve_exploration_reg(&ctx, |reg| {
-            let std_site = reg.sites_by_system[&JITA_SYS]
+            let std_null_site = reg.sites_by_system[&NULL_SYS]
                 .iter()
-                .find(|s| s.site_category == "Data" && s.ghost_detonate_after_sec == 0 && s.hackable_can_ids.len() >= 2)
-                .expect("seeded Data site with >=2 cans");
-            let c1 = std_site.hackable_can_ids[0];
-            let c2 = std_site.hackable_can_ids[1];
+                .find(|s| s.site_category == "Data" && s.ghost_detonate_after_sec == 0 && !s.hackable_can_ids.is_empty())
+                .expect("seeded Nullsec Data site with >=1 can");
+            let c1 = std_null_site.hackable_can_ids[0];
+            let std_jita_site = reg.sites_by_system[&JITA_SYS]
+                .iter()
+                .find(|s| s.site_category == "Data" && s.ghost_detonate_after_sec == 0 && !s.hackable_can_ids.is_empty())
+                .expect("seeded Jita Data site with >=1 can");
+            let c2 = std_jita_site.hackable_can_ids[0];
             let ghost_site = reg.sites_by_system[&JITA_SYS]
                 .iter()
                 .find(|s| s.ghost_detonate_after_sec > 0 && !s.hackable_can_ids.is_empty())
@@ -401,9 +407,9 @@ async fn test_live_pve_hacking_failure_outcomes_and_ghost_detonation() {
             };
             (
                 c1,
-                pos_of(c1, std_site.position),
+                pos_of(c1, std_null_site.position),
                 c2,
-                pos_of(c2, std_site.position),
+                pos_of(c2, std_jita_site.position),
                 gc,
                 DVec3::from_array(ghost_site.position),
             )
@@ -476,6 +482,8 @@ async fn test_live_pve_hacking_failure_outcomes_and_ghost_detonation() {
     }
 
     // 1. Standard container: 1st failure leaves can alive; 2nd failure destroys can with 0 ship damage & locks out
+    slash_cmd(&ctx, &mut p.sess, &format!("/giveskill {SKILL_HACKING} 0")).await;
+    slash_cmd(&ctx, &mut p.sess, &format!("/tr {NULL_SYS}")).await;
     move_pilot_to(&ctx, &mut p, can1_pos + DVec3::new(1_500.0, 0.0, 0.0)).await;
     let s1 = ctx
         .dispatch_rpc(
@@ -520,7 +528,7 @@ async fn test_live_pve_hacking_failure_outcomes_and_ghost_detonation() {
         !ctx.db.with_snapshot(|s| s.items.contains_key(&can1_id)),
         "Container item must be deleted after 2nd hack failure"
     );
-    let sys = ctx.systems.get_or_spawn(JITA_SYS);
+    let sys = ctx.systems.get_or_spawn(NULL_SYS);
     let cs_after_std = sys.get_combat_state(p.ship_id).await.unwrap().unwrap();
     assert!(
         (cs_after_std.shield_hp - cs_after_std.max_shield_hp).abs() < 1e-3,
@@ -541,6 +549,8 @@ async fn test_live_pve_hacking_failure_outcomes_and_ghost_detonation() {
     assert_eq!(lockout_err.code, "HackingGameAlreadyFinished");
 
     // 2. Standard container Core Kill: unlocks & spews loot
+    slash_cmd(&ctx, &mut p.sess, &format!("/tr {JITA_SYS}")).await;
+    slash_cmd(&ctx, &mut p.sess, &format!("/giveskill {SKILL_HACKING} 5")).await;
     move_pilot_to(&ctx, &mut p, can2_pos + DVec3::new(1_500.0, 0.0, 0.0)).await;
     let s_win = ctx
         .dispatch_rpc(

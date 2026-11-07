@@ -259,8 +259,8 @@ pub(crate) async fn upgrade_omega_live(
     .await
     .expect("PlaceBuyOrder PLEX");
     let mut buy_req = Vec::new();
-    encode_varint_field(1, 1002, &mut buy_req);
-    encode_varint_field(2, 4, &mut buy_req);
+    encode_varint_field(1, 1001, &mut buy_req);
+    encode_varint_field(2, 1, &mut buy_req);
     let resp = quasar_call(
         ctx,
         buyer,
@@ -268,6 +268,21 @@ pub(crate) async fn upgrade_omega_live(
         buy_req,
     );
     assert_eq!(resp.status_code, 200, "NES PLEX Omega purchase");
+    // Seeded market stocks 44992 (PLEX) and PlaceBuyOrder deposits PLEX directly into the PLEX Vault;
+    // buy 1,050 more PLEX and extend Omega twice (+60d = 90d total) so long sov/freighter tests stay Omega.
+    let _ = crate::industry_live_support::buy(ctx, buyer, 44_992, 1_050).await;
+    for _ in 0..2 {
+        let mut buy_req2 = Vec::new();
+        encode_varint_field(1, 1001, &mut buy_req2);
+        encode_varint_field(2, 1, &mut buy_req2);
+        let resp2 = quasar_call(
+            ctx,
+            buyer,
+            "eve_public.plex.vault.api.PurchaseRequest",
+            buy_req2,
+        );
+        assert_eq!(resp2.status_code, 200, "NES PLEX Omega extension");
+    }
     for sid in [3330_i64, 3342, 3327, 20_342, 20_526] {
         let _ = rpc(ctx, buyer, "skillMgr2", "PurchaseSkills", &[PyRep::List(vec![PyRep::Integer(sid)])]).await;
     }
@@ -284,7 +299,7 @@ pub(crate) async fn upgrade_omega_live(
     rpc(ctx, buyer, "skillMgr2", "SaveNewQueue", &[PyRep::List(queue)])
         .await
         .expect("queue Caldari Freighter skills");
-    ctx.advance_virtual_clock(50 * 86_400);
+    ctx.advance_virtual_clock(45 * 86_400);
     rpc(ctx, buyer, "skillMgr2", "GetSkillQueueAndFreePoints", &[])
         .await
         .expect("complete Caldari Freighter skills");

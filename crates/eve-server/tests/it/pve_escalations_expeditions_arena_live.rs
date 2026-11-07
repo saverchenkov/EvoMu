@@ -30,21 +30,13 @@ async fn bind_oid(ctx: &ServerContext, p: &mut LivePilot, svc: &str, arg: PyRep)
 }
 fn drain(ctx: &ServerContext, p: &mut LivePilot) -> Vec<(String, Vec<PyRep>)> {
     let mut out = p.sess.drain_notifications();
-    for n in ctx.drain_notifications_for_char(p.char_id) {
-        if !out.iter().any(|(e, a)| e == &n.event && a == &n.args) { out.push((n.event, n.args)); }
-    }
+    for n in ctx.drain_notifications_for_char(p.char_id) { if !out.iter().any(|(e, a)| e == &n.event && a == &n.args) { out.push((n.event, n.args)); } }
     out
 }
 fn extract_rowset_rows(rep: &PyRep) -> (Vec<String>, Vec<Vec<PyRep>>) {
-    match rep {
-        PyRep::Rowset { columns, rows } | PyRep::TupleSet { columns, rows } => (columns.clone(), rows.clone()),
-        PyRep::IndexRowset { columns, items, .. } => (columns.clone(), items.iter().map(|(_, r)| r.clone()).collect()),
-        _ => (Vec::new(), Vec::new()),
-    }
+    match rep { PyRep::Rowset { columns, rows } | PyRep::TupleSet { columns, rows } => (columns.clone(), rows.clone()), PyRep::IndexRowset { columns, items, .. } => (columns.clone(), items.iter().map(|(_, r)| r.clone()).collect()), _ => (Vec::new(), Vec::new()) }
 }
-fn row_col<'a>(cols: &[String], row: &'a [PyRep], name: &str) -> Option<&'a PyRep> {
-    cols.iter().position(|c| c == name).and_then(|i| row.get(i))
-}
+fn row_col<'a>(cols: &[String], row: &'a [PyRep], name: &str) -> Option<&'a PyRep> { cols.iter().position(|c| c == name).and_then(|i| row.get(i)) }
 async fn create_item_id(ctx: &ServerContext, gm: &mut LivePilot, type_id: u32, qty: i32) -> i64 {
     slash_cmd(ctx, &mut gm.sess, &format!("/createitem {type_id} {qty}")).await.dict_get("itemID").and_then(|v| v.as_i64()).expect("/createitem itemID")
 }
@@ -55,8 +47,7 @@ async fn dock_gm_at(ctx: &ServerContext, gm: &mut LivePilot, sys_id: u32, stn_id
     ctx.advance_secs(12);
     if gm.sess.solar_system_id != Some(sys_id) { slash_cmd(ctx, &mut gm.sess, &format!("/tr {sys_id}")).await; }
     let sys_h = ctx.systems.get_or_spawn(sys_id);
-    let sid = gm.sess.ship_id.unwrap_or(gm.ship_id);
-    sys_h.set_ball_position(sid, ctx.sde.stations[&stn_id].position + DVec3::new(300.0, 0.0, 0.0)).await;
+    sys_h.set_ball_position(gm.sess.ship_id.unwrap_or(gm.ship_id), ctx.sde.stations[&stn_id].position + DVec3::new(300.0, 0.0, 0.0)).await;
     sys_h.step_manual(0.1).await.unwrap();
     ok(ctx, gm, "stationSvc", "Dock", &[PyRep::Integer(stn_id)]).await;
 }
@@ -64,14 +55,11 @@ async fn dock_gm_at(ctx: &ServerContext, gm: &mut LivePilot, sys_id: u32, stn_id
 async fn fly_stargates_to(ctx: &ServerContext, p: &mut LivePilot, target_sys: u32) {
     let start_sys = p.sess.solar_system_id.expect("pilot in space");
     if start_sys == target_sys { return; }
-    let mut visited = HashSet::from([start_sys]);
-    let mut queue = std::collections::VecDeque::from([(start_sys, Vec::<(i64, u32)>::new())]);
-    let mut route = None;
+    let (mut visited, mut queue, mut route) = (HashSet::from([start_sys]), std::collections::VecDeque::from([(start_sys, Vec::<(i64, u32)>::new())]), None);
     while let Some((sys, path)) = queue.pop_front() {
         if sys == target_sys { route = Some(path); break; }
         for j in ctx.sde.jumps.values().filter(|j| j.from_solar_system_id == sys && visited.insert(j.to_solar_system_id)) {
-            let mut next = path.clone();
-            next.push((j.stargate_id, j.to_solar_system_id));
+            let mut next = path.clone(); next.push((j.stargate_id, j.to_solar_system_id));
             queue.push_back((j.to_solar_system_id, next));
         }
     }
@@ -80,19 +68,32 @@ async fn fly_stargates_to(ctx: &ServerContext, p: &mut LivePilot, target_sys: u3
         let cur_sys = p.sess.solar_system_id.unwrap();
         let sys_h = ctx.systems.get_or_spawn(cur_sys);
         p.beyonce = bind_oid(ctx, p, "beyonce", PyRep::Integer(i64::from(cur_sys))).await;
-        ok(ctx, p, "beyonce", "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(gate_id)]).await;
-        for _ in 0..240 {
-            sys_h.step_manual(5.0).await.unwrap();
-            ctx.advance_secs(5);
-            if sys_h.get_ball_snapshot(p.ship_id).await.unwrap().is_some_and(|(_, b)| !matches!(b.mode, MovementMode::Warp { .. })) { break; }
+        for hop in 0..8 {
+            let _ = ok(ctx, p, "beyonce", "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(gate_id), PyRep::Real(0.0)]).await;
+            for _ in 0..240 {
+                sys_h.step_manual(5.0).await.unwrap(); ctx.advance_secs(5);
+                if sys_h.get_ball_snapshot(p.ship_id).await.unwrap().is_some_and(|(_, b)| !matches!(b.mode, MovementMode::Warp { .. })) { break; }
+            }
+            let dist = match (sys_h.get_ball_snapshot(p.ship_id).await.unwrap(), sys_h.get_ball_snapshot(gate_id).await.unwrap()) {
+                (Some((_, sb)), Some((_, gb))) => sb.position.distance(gb.position),
+                _ => 0.0,
+            };
+            if dist <= 150_000.0 || hop == 7 { break; }
+            for _ in 0..12 { sys_h.step_manual(10.0).await.unwrap(); ctx.advance_secs(10); }
         }
         if let (Some((_, sb)), Some((_, gb))) = (sys_h.get_ball_snapshot(p.ship_id).await.unwrap(), sys_h.get_ball_snapshot(gate_id).await.unwrap()) {
-            if sb.position.distance(gb.position) > 2_400.0 {
-                ok(ctx, p, "beyonce", "CmdGotoPoint", &[PyRep::Real(gb.position.x), PyRep::Real(gb.position.y), PyRep::Real(gb.position.z)]).await;
-                for _ in 0..15 {
+            let mut d_surf = (sb.position.distance(gb.position) - gb.radius).max(0.0);
+            if d_surf > 2_000.0 {
+                for step in 0..800 {
+                    if step % 10 == 0 {
+                        ok(ctx, p, "beyonce", "CmdGotoPoint", &[PyRep::Real(gb.position.x), PyRep::Real(gb.position.y), PyRep::Real(gb.position.z)]).await;
+                    }
                     sys_h.step_manual(2.0).await.unwrap();
                     ctx.advance_secs(2);
-                    if sys_h.get_ball_snapshot(p.ship_id).await.unwrap().is_some_and(|(_, b)| b.position.distance(gb.position) <= 2_400.0) { break; }
+                    if let Some((_, b)) = sys_h.get_ball_snapshot(p.ship_id).await.unwrap() {
+                        d_surf = (b.position.distance(gb.position) - gb.radius).max(0.0);
+                        if d_surf <= 2_000.0 { break; }
+                    }
                 }
             }
         }
@@ -559,7 +560,9 @@ async fn test_live_proving_grounds_validation_queue_and_sphere_hazard() {
     if let Some(fil_1v1) = ctx.sde.types.values().filter(|t| (t.group_id == 4050 || t.group_id == 4743) && !t.name.starts_with("Expired"))
         .find(|t| {
             let sp = get_pvp_filament_match_spec(&ctx.sde, t.type_id);
-            sp.fleet_size == 1 && sp.ship_restrictions_list_id.is_none_or(|lid| ctx.sde.type_lists.get(&lid).is_some_and(|tl| tl.contains(&ctx.sde.types[&allowed_hull])))
+            sp.fleet_size == 1
+                && sp.number_of_fleets == 2
+                && sp.ship_restrictions_list_id.is_none_or(|lid| ctx.sde.type_lists.get(&lid).is_some_and(|tl| tl.contains(&ctx.sde.types[&allowed_hull])))
         }).map(|t| t.type_id)
     {
         let mut p5 = gm_pilot_in_space(&ctx, 65, 96_200_005, allowed_hull, JITA_SYS).await;

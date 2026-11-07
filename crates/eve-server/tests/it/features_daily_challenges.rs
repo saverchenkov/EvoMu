@@ -1551,19 +1551,12 @@ async fn test_b36_abyssal_activation_and_deadspace_pocket_rules() {
         )
         .await;
 
-    let agency_rep = ctx
-        .dispatch_rpc(&mut sess, "custom_agency_provider", None, "get_content_data", &[], &kw, None)
+    ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetSignatureInstances", &[], &kw, None)
         .await
-        .expect("custom_agency_provider.get_content_data");
+        .expect("dungeonInstanceCacheMgr.GetSignatureInstances");
     ctx.dispatch_rpc(&mut sess, "scanMgr", None, "GetSignatures", &[], &kw, None)
         .await
         .expect("scanMgr.GetSignatures");
-    let PyRep::List(pieces) = agency_rep else { panic!() };
-    let dsg_did = pieces
-        .iter()
-        .find(|p| p.dict_get("contentType").and_then(|v| v.as_str()) == Some("signature"))
-        .and_then(|p| p.dict_get("dungeonID").and_then(|v| v.as_i64()))
-        .expect("Deadspace signature dungeonID");
     let dsg_pos = ctx.db.with_snapshot(|s| {
         s.cosmic_signatures[&jita_sys]
             .iter()
@@ -1577,6 +1570,22 @@ async fn test_b36_abyssal_activation_and_deadspace_pocket_rules() {
     ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RequestScans", &[PyRep::Real(600_000_000_000.0), PyRep::Real(120.0), PyRep::List(probes)], &kw, None)
         .await
         .unwrap();
+    let agency_rep = ctx
+        .dispatch_rpc(&mut sess, "custom_agency_provider", None, "get_content_data", &[], &kw, None)
+        .await
+        .expect("custom_agency_provider.get_content_data");
+    let PyRep::List(pieces) = agency_rep else { panic!() };
+    let dsg_did = pieces
+        .iter()
+        .find(|p| {
+            p.dict_get("contentType").and_then(|v| v.as_str()) == Some("signature")
+                && matches!(
+                    p.dict_get("dungeonID").and_then(|v| v.as_i64()),
+                    Some(59 | 98 | 106 | 110 | 119)
+                )
+        })
+        .and_then(|p| p.dict_get("dungeonID").and_then(|v| v.as_i64()))
+        .expect("Deadspace signature dungeonID");
     ctx.dispatch_rpc(&mut sess, "beyonce", None, "CmdWarpToStuff", &[PyRep::String("scan".into()), PyRep::String("DSG-30000142".into())], &kw, None)
         .await
         .unwrap();
@@ -2155,8 +2164,7 @@ async fn test_b36_ess_grid_warp_and_module_restrictions() {
     ctx.dispatch_rpc(&mut sess_a, "fleetObjectHandler", None, "Invite", &[PyRep::Integer(pilot_b), PyRep::None, PyRep::None, PyRep::Integer(4)], &kw, None)
         .await
         .expect("Invite pilot_b");
-    let fb_b = ctx.bind_object(&mut sess_b, "fleetObjectHandler", fid).unwrap();
-    ctx.dispatch_rpc(&mut sess_b, "fleetObjectHandler", Some(fb_b), "AcceptInvite", &[PyRep::Integer(fid)], &kw, None)
+    ctx.dispatch_rpc(&mut sess_b, "fleetObjectHandler", None, "AcceptInvite", &[PyRep::Integer(fid)], &kw, None)
         .await
         .expect("AcceptInvite pilot_b");
 

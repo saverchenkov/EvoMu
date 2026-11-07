@@ -267,37 +267,35 @@ async fn test_pve_incursion_payout_fleet_and_influence_scaling() {
     ).await.unwrap().unwrap();
     assert!(dead, "Boss ball must be destroyed");
 
-    // Influence was 1.0; delta for Vanguard is 0.05 -> new influence is 0.95
-    // influence_scale = (1.0 - 0.95 * 0.50) = 0.525.
-    // 5 pilots in 5-pilot Vanguard -> fleet_scale = 1.0. Total scale = 0.525.
-    // base_isk = 10,395,000 -> isk = round(10,395,000 * 0.525) = 5,457,375 ISK.
-    // base_lp = 1,400 -> lp = round(1,400 * 0.525) = 735 LP.
+    // Payout scales only with on-grid fleet size (influence does not change payouts).
+    // 5 pilots in 5-pilot Vanguard -> fleet_scale = 1.0.
+    // base_isk = 10,395,000, base_lp = 1,400.
     let p_after_isk = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance.0);
     let p_after_lp = ctx.db.with_snapshot(|s| s.characters[&90_000_001].loyalty_points.get(&1_000_125).copied().unwrap_or(0));
     let isk_diff = p_after_isk - p_inits[&90_000_001].0;
     let lp_diff = p_after_lp - p_inits[&90_000_001].1;
 
-    assert_eq!(isk_diff, 5_457_375 * 100, "ISK payout must scale with constellation influence (5,457,375 ISK)");
-    assert_eq!(lp_diff, 735, "CONCORD LP payout must scale with constellation influence (735 LP)");
+    assert_eq!(isk_diff, 10_395_000 * 100, "ISK payout must match full Vanguard base (10,395,000 ISK)");
+    assert_eq!(lp_diff, 1_400, "CONCORD LP payout must match full Vanguard base (1,400 LP)");
 
     // Verify all 5 on-grid fleet members received the payout
     for &pid in &pids {
         let (bal, lp) = ctx.db.with_snapshot(|s| (s.characters[&pid].balance.0, s.characters[&pid].loyalty_points.get(&1_000_125).copied().unwrap_or(0)));
-        assert_eq!(bal - p_inits[&pid].0, 5_457_375 * 100, "All fleet members in site must receive identical payout");
-        assert_eq!(lp - p_inits[&pid].1, 735, "All fleet members in site must receive identical LP");
+        assert_eq!(bal - p_inits[&pid].0, 10_395_000 * 100, "All fleet members in site must receive identical payout");
+        assert_eq!(lp - p_inits[&pid].1, 1_400, "All fleet members in site must receive identical LP");
     }
 
     // Verify Wallet Journal entry
     let journal = ctx.db.with_snapshot(|s| s.wallet_journal.clone());
-    assert!(journal.iter().any(|j| j.character_id == 90_000_001 && j.entry_type == "CorporateRewardPayout" && j.amount == IskCents::from_isk(5_457_375)));
+    assert!(journal.iter().any(|j| j.character_id == 90_000_001 && j.entry_type == "CorporateRewardPayout" && j.amount == IskCents::from_isk(10_395_000)));
 
     // Verify Incursion LP Log
     let logs_rep = ctx.dispatch_rpc(&mut sess, "incursion", None, "GetIncursionLPLog", &[], &kw, None).await.expect("GetIncursionLPLog");
     let PyRep::List(logs) = logs_rep else { panic!("Expected List") };
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].dict_get("siteID").and_then(|v| v.as_str()), Some(site_id.as_str()));
-    assert_eq!(logs[0].dict_get("iskEarned").and_then(|v| v.as_i64()), Some(5_457_375));
-    assert_eq!(logs[0].dict_get("concordLpEarned").and_then(|v| v.as_i64()), Some(735));
+    assert_eq!(logs[0].dict_get("iskEarned").and_then(|v| v.as_i64()), Some(10_395_000));
+    assert_eq!(logs[0].dict_get("concordLpEarned").and_then(|v| v.as_i64()), Some(1_400));
     assert_eq!(logs[0].dict_get("fleetSize").and_then(|v| v.as_i64()), Some(5));
 
     // Next wave boss must have cleanly respawned once escort waves clear
@@ -310,8 +308,7 @@ async fn test_pve_incursion_payout_fleet_and_influence_scaling() {
     assert!(vg_sys.get_ball_snapshot(next_boss_bid).await.unwrap().is_some(), "Next wave boss must exist in space");
 
     // Overstack fleet testing: 11 pilots in Vanguard (1 over max_optimal_pilots=10)
-    // over_scale = 1.0 - 1 * 0.12 = 0.88; influence_scale = 1.0 - 0.90 * 0.50 = 0.55
-    // total_scale = 0.88 * 0.55 = 0.484 -> 5,031,180 ISK (vs 5,717,250 at full scale)
+    // over_scale = incursion_overstack_ratio(1) = 0.925 -> 10,395,000 * 0.925 = 9,615,375 ISK
     let overstack_pids: Vec<i64> = (90_000_001..=90_000_011).collect();
     ctx.db.with_mut_snapshot(|snap| {
         let template = snap.characters[&90_000_001].clone();
@@ -341,7 +338,7 @@ async fn test_pve_incursion_payout_fleet_and_influence_scaling() {
     assert!(dead2);
     let p_post_overstack = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance.0);
     let overstack_isk_earned = (p_post_overstack - p_pre_overstack) / 100;
-    assert_eq!(overstack_isk_earned, 5_031_180, "11 pilots (1 over optimal 10) experiences 12% overstack decay: 5,031,180 ISK");
+    assert_eq!(overstack_isk_earned, 9_615_375, "11 pilots (1 over optimal 10) experiences overstack ratio 0.925: 9,615,375 ISK");
 }
 
 // ============================================================================
@@ -421,7 +418,7 @@ async fn test_pve_incursion_mothership_multiwave_and_conclusion() {
 
     let (_, ms_dead, _) = hq_sys.apply_damage_with_attacker(
         ms_boss_bid,
-        DamageVector { em: 100_000.0, thermal: 100_000.0, kinetic: 100_000.0, explosive: 100_000.0 },
+        DamageVector { em: 50_000_000.0, thermal: 50_000_000.0, kinetic: 50_000_000.0, explosive: 50_000_000.0 },
         Some(90_000_001),
     ).await.unwrap().unwrap();
     assert!(ms_dead, "The Kundalini Manifest must be destroyed");
@@ -440,11 +437,11 @@ async fn test_pve_incursion_mothership_multiwave_and_conclusion() {
         assert!(hq_sys.get_ball_snapshot(e_bid).await.unwrap().is_none(), "Escort ball {e_bid} must be removed from space");
     }
 
-    // Verify Mothership payout disbursed (63,000,000 ISK base at 0.0 influence * 0.20 solo fleet scale = 12,600,000 ISK, 2,800 LP)
+    // Verify Mothership payout disbursed (63,000,000 ISK / 14,000 LP base scaled 1/40 = 0.025 for solo pilot vs min_pilots=40)
     let post_ms_bal = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance.0);
     let post_ms_lp = ctx.db.with_snapshot(|s| s.characters[&90_000_001].loyalty_points.get(&1_000_125).copied().unwrap_or(0));
-    assert_eq!((post_ms_bal - pre_ms_bal) / 100, 12_600_000, "Mothership payout ISK must be 12,600,000 ISK scaled for solo pilot");
-    assert_eq!(post_ms_lp - pre_ms_lp, 2_800, "Mothership payout CONCORD LP must be 2,800 LP scaled for solo pilot");
+    assert_eq!((post_ms_bal - pre_ms_bal) / 100, 1_575_000, "Mothership payout ISK must be 1,575,000 ISK scaled 1/40 for solo pilot");
+    assert_eq!(post_ms_lp - pre_ms_lp, 350, "Mothership payout CONCORD LP must be 350 LP scaled 1/40 for solo pilot");
 
     // Verify incursion penalties withdrew from system
     let eff_ended = get_incursion_effects_for_system(&ctx, hq_sys_id);

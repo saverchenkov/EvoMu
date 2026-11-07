@@ -396,7 +396,7 @@ async fn test_b29_crimewatch_persist_restart_and_movement_restrictions() {
         eve_server::services::combat_crimewatch::create_kill_right(&ctx, 500_001, PILOT_2, PILOT_1, 1_000_000.0);
         ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&PILOT_1).unwrap().security_status = -2.5);
 
-        // 3. Live remote-assisting Criminal PILOT_1 in highsec -> suspect flag on PILOT_3
+        // 3. Live remote-assisting Criminal PILOT_1 in highsec -> criminal flag inheritance on PILOT_3
         rpc(&ctx, &mut s3, "crimewatch", "SetSafetyLevel", &[PyRep::Integer(0)]).await;
         rpc(&ctx, &mut s3, "dogmaIM", "AddTarget", &[PyRep::Integer(86_300_001)]).await;
         ctx.advance_secs(10);
@@ -409,7 +409,7 @@ async fn test_b29_crimewatch_persist_restart_and_movement_restrictions() {
             let cw = ctx.crimewatch.read().unwrap();
             (
                 cw.states.get(&PILOT_1).map(|c| c.criminal_flag_until_unix).unwrap_or(0),
-                cw.states.get(&PILOT_3).map(|c| c.suspect_flag_until_unix).unwrap_or(0),
+                cw.states.get(&PILOT_3).map(|c| c.criminal_flag_until_unix).unwrap_or(0),
             )
         };
         assert!(ce > t0 && se > t0, "expected ce > t0 ({ce} vs {t0}) and se > t0 ({se} vs {t0})");
@@ -433,7 +433,7 @@ async fn test_b29_crimewatch_persist_restart_and_movement_restrictions() {
         let st3 = rpc(&ctx2, &mut s3, "crimewatch", "GetClientStates", &[]).await;
         let PyRep::Tuple(top3) = &st3 else { panic!("expected Tuple from GetClientStates, got {st3:?}"); };
         let PyRep::Tuple(timers3) = &top3[0] else { panic!("expected timers Tuple, got {:?}", top3[0]); };
-        assert!(timers3.contains(&PyRep::Tuple(vec![PyRep::Integer(302), PyRep::Integer(unix_to_ft(susp_exp))])));
+        assert!(timers3.contains(&PyRep::Tuple(vec![PyRep::Integer(301), PyRep::Integer(unix_to_ft(susp_exp))])));
         ctx2.db.with_snapshot(|snap| {
             assert!(!snap.kill_rights.is_empty());
             assert_eq!(snap.zarzakh_gate_locks.get(&PILOT_4).map(|(g, _)| *g), Some(zz_allowed_gate));

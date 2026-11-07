@@ -3231,13 +3231,13 @@ async fn test_crab_negative_exploits_subcap_11019_double_link_resonance_and_dron
         snap.module_online_states.insert(amp_id, true);
     });
     ctx.invalidate_ship_fitting(carrier_id);
+
+    ctx.advance_secs(CRAB_LINK_DURATION_SECS);
     let expected_post_fit_em_res = ctx.build_ship_combat_state(PILOT_1, carrier_id, TYPE_ARCHON).shield_resonance[0];
     assert!(
         expected_post_fit_em_res < clean_base_res[0],
         "Fitted EM Shield Amplifier lowers EM damage resonance"
     );
-
-    ctx.advance_secs(CRAB_LINK_DURATION_SECS);
     let post_unlink_res = sys_handle.get_combat_state(carrier_id).await.unwrap().unwrap().shield_resonance;
     assert!(
         (post_unlink_res[0] - expected_post_fit_em_res).abs() < 1e-6,
@@ -5422,11 +5422,17 @@ async fn test_pve_milestones_progression_tracking() {
         "OnMilestoneTimerStarted must be dispatched on logon"
     );
 
-    // 3. Milestone progression tracking: Milestone 2 cannot be claimed before Milestone 1
+    // 3. Unknown milestone ID (e.g. 2) fails closed with InvalidMilestoneID,
+    //    and Milestone 1 cannot be claimed before 119 minutes of play time
     let skipped_err = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(2)])
         .await
-        .expect_err("claiming milestone 2 without milestone 1 must fail prerequisite");
-    assert_eq!(skipped_err.code, "MilestonePrerequisiteNotMet");
+        .expect_err("claiming unknown milestone 2 must fail with InvalidMilestoneID");
+    assert_eq!(skipped_err.code, "InvalidMilestoneID");
+
+    let early_err = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
+        .await
+        .expect_err("claiming milestone 1 before 119 minutes must fail prerequisite");
+    assert_eq!(early_err.code, "MilestonePrerequisiteNotMet");
 
     // 4. Claim Milestone 1: grants rewards once, logs journal, emits OnLoginMilestoneAchieved
     ctx.db.clock().advance_secs(7_200);
@@ -5458,19 +5464,11 @@ async fn test_pve_milestones_progression_tracking() {
         .expect_err("duplicate ClaimRewards(1) must fail");
     assert_eq!(dup_err.code, "MilestoneAlreadyClaimed");
 
-    // 5. Progression advances: Milestone 2 can now be claimed
+    // 5. Unknown milestone 2 remains invalid even after completing Milestone 1
     ctx.db.clock().advance_secs(7_200);
-    let claim2_rep = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(2)])
+    let unk_err = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(2)])
         .await
-        .expect("ClaimRewards(2) must succeed after Milestone 1");
-    assert_eq!(claim2_rep, PyRep::None);
-
-    let bal_after = ctx.db.with_snapshot(|s| s.characters[&PILOT_A].balance.0);
-    assert!(bal_after > bal_mid, "Milestone 2 must award additional ISK");
-
-    let dup2_err = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(2)])
-        .await
-        .expect_err("duplicate ClaimRewards(2) must fail");
-    assert_eq!(dup2_err.code, "MilestoneAlreadyClaimed");
+        .expect_err("unknown milestone 2 must continue to reject with InvalidMilestoneID");
+    assert_eq!(unk_err.code, "InvalidMilestoneID");
 }
 }

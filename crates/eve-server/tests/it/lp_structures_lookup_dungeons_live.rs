@@ -63,6 +63,7 @@ async fn test_lp_store_personal_and_corp_purchase_live() {
         .find(|a| {
             a.corporation_id == CALDARI_NAVY_CORP
                 && a.level == 1
+                && a.agent_type_id == 2
                 && a.division_id != 22
                 && a.station_id.is_some()
                 && a.solar_system_id.is_some()
@@ -117,7 +118,7 @@ async fn test_lp_store_personal_and_corp_purchase_live() {
         .expect("Expected at least one Caldari Navy offer with lpCost <= 5000");
     let offer_id = chosen.dict_get("offerID").and_then(|v| v.as_i64()).unwrap();
     let lp_cost = chosen.dict_get("lpCost").and_then(|v| v.as_i64()).unwrap();
-    let isk_cost = chosen.dict_get("iskCost").and_then(|v| v.as_i64()).unwrap_or(0);
+    let isk_cost = chosen.dict_get("iskCost").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let reward_type_id = chosen.dict_get("typeID").and_then(|v| v.as_i64()).unwrap() as u32;
     let reward_qty = chosen.dict_get("qty").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
 
@@ -131,7 +132,7 @@ async fn test_lp_store_personal_and_corp_purchase_live() {
     }
 
     // Earn Caldari Navy LP via real L1 agent missions
-    for _ in 0..15 {
+    for _ in 0..45 {
         let lp_bals = ok(&ctx, &mut pilot, "LPSvc", "GetAllMyCharacterWalletLPBalances", &[]).await;
         let cur_lp = match &lp_bals {
             PyRep::List(items) => items
@@ -194,6 +195,7 @@ async fn test_lp_store_personal_and_corp_purchase_live() {
 
     // 2. Corporation LP store purchase (`rpc:LPStoreMgr.TakeOfferForCorporation`)
     common::slash_cmd(&ctx, &mut pilot.sess, "/giveskill 3363 5").await;
+    ctx.advance_secs(12);
     let corp_id = id_from(
         &ok(&ctx, &mut pilot, "corpRegistry", "AddCorporation", &[PyRep::String("LP Test Corp".into()), PyRep::String("LPTC".into())]).await,
         "corporationID",
@@ -204,7 +206,7 @@ async fn test_lp_store_personal_and_corp_purchase_live() {
         &mut pilot,
         "LPSvc",
         "TransferLPFromMyWalletToOtherCorp",
-        &[PyRep::Integer(CALDARI_NAVY_CORP), PyRep::Integer(corp_id), PyRep::Integer(lp_cost)],
+        &[PyRep::Integer(corp_id), PyRep::Integer(CALDARI_NAVY_CORP), PyRep::Integer(lp_cost)],
     )
     .await;
     ok(
@@ -212,7 +214,7 @@ async fn test_lp_store_personal_and_corp_purchase_live() {
         &mut pilot,
         "account",
         "GiveCash",
-        &[PyRep::Integer(corp_id), PyRep::Real((isk_cost.max(10_000) * 2) as f64), PyRep::String("LP funding".into())],
+        &[PyRep::Integer(corp_id), PyRep::Real(isk_cost.max(10_000.0) * 2.0), PyRep::String("LP funding".into())],
     )
     .await;
 
@@ -233,18 +235,53 @@ async fn test_lp_store_personal_and_corp_purchase_live() {
         }
     }
 
-    let saved_role = pilot.sess.corp_role;
-    pilot.sess.corp_role = 0;
-    rpc(
+    let mut member =
+        common::gm_pilot_in_space(&ctx, 102, 91_500_002, VELATOR_TYPE, agent_sys_id).await;
+    ctx.dispatch_rpc(
+        &mut member.sess,
+        "beyonce",
+        Some(member.beyonce),
+        "CmdWarpToStuff",
+        &[PyRep::String("item".into()), PyRep::Integer(station_id)],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("member CmdWarpToStuff");
+    for _ in 0..120 {
+        sys.step_manual(1.0).await.unwrap();
+    }
+    ok(&ctx, &mut member, "stationSvc", "Dock", &[PyRep::Integer(station_id)]).await;
+    let app_rep = ok(
         &ctx,
-        &mut pilot.sess,
+        &mut member,
+        "corpRegistry",
+        "InsertApplication",
+        &[PyRep::Integer(corp_id), PyRep::String("join".into())],
+    )
+    .await;
+    let app_id = id_from(&app_rep, "applicationID");
+    ctx.advance_secs(12);
+    ok(
+        &ctx,
+        &mut pilot,
+        "corpRegistry",
+        "UpdateApplicationOffer",
+        &[PyRep::Integer(app_id), PyRep::String("Accepted".into())],
+    )
+    .await;
+    member.sess.corporation_id = Some(corp_id);
+    member.sess.corp_role = 0;
+    let err = rpc(
+        &ctx,
+        &mut member.sess,
         "LPStoreMgr",
         "TakeOfferForCorporation",
         &[PyRep::Integer(CALDARI_NAVY_CORP), PyRep::Integer(offer_id), PyRep::Integer(1)],
     )
     .await
     .expect_err("Unprivileged member must be rejected");
-    pilot.sess.corp_role = saved_role;
+    assert_eq!(err.code, "InsufficientCorporationRole", "unexpected error: {err:?}");
 
     ok(
         &ctx,
@@ -275,7 +312,20 @@ async fn test_structures_docking_acl_live() {
     let mut visitor = common::gm_pilot_in_space(&ctx, 202, 91_500_012, VELATOR_TYPE, PERIMETER).await;
 
     common::slash_cmd(&ctx, &mut owner.sess, "/giveskill 3363 5").await;
+    let saved_owner_st = owner.sess.station_id;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&owner.char_id) {
+            ch.station_id = Some(60_003_760);
+        }
+    });
+    owner.sess.station_id = Some(60_003_760);
     ok(&ctx, &mut owner, "corpRegistry", "AddCorporation", &[PyRep::String("ACL Structure Corp".into()), PyRep::String("ACLS".into())]).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&owner.char_id) {
+            ch.station_id = saved_owner_st;
+        }
+    });
+    owner.sess.station_id = saved_owner_st;
     ctx.advance_secs(7 * 86_400 + 30);
 
     common::stock_ship_bay(&ctx, &mut owner, ASTRAHUS_TYPE, 1, 5).await;
@@ -353,14 +403,40 @@ async fn test_lookup_warable_and_npc_standings_live() {
     common::slash_cmd(&ctx, &mut pilot_a.sess, "/giveskill 3363 5").await;
     common::slash_cmd(&ctx, &mut pilot_b.sess, "/giveskill 3363 5").await;
 
+    let saved_a = pilot_a.sess.station_id;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&pilot_a.char_id) {
+            ch.station_id = Some(60_003_760);
+        }
+    });
+    pilot_a.sess.station_id = Some(60_003_760);
     let corp_a = id_from(
         &ok(&ctx, &mut pilot_a, "corpRegistry", "AddCorporation", &[PyRep::String("Alpha War Corp".into()), PyRep::String("ALPH".into())]).await,
         "corporationID",
     );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&pilot_a.char_id) {
+            ch.station_id = saved_a;
+        }
+    });
+    pilot_a.sess.station_id = saved_a;
+    let saved_b = pilot_b.sess.station_id;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&pilot_b.char_id) {
+            ch.station_id = Some(60_003_760);
+        }
+    });
+    pilot_b.sess.station_id = Some(60_003_760);
     let corp_b = id_from(
         &ok(&ctx, &mut pilot_b, "corpRegistry", "AddCorporation", &[PyRep::String("Beta Target Corp".into()), PyRep::String("BETA".into())]).await,
         "corporationID",
     );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&pilot_b.char_id) {
+            ch.station_id = saved_b;
+        }
+    });
+    pilot_b.sess.station_id = saved_b;
 
     let PyRep::List(before_list) = ok(
         &ctx,

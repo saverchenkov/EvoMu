@@ -532,19 +532,40 @@ pub fn emit_campaign_resolution_effects_core(
                 .map(|c| c.character_id)
                 .collect()
         });
+        let update_args = db.with_snapshot(|snap| {
+            let rt = &snap.insurgency_runtime;
+            rt.campaigns
+                .get(&res.campaign_id)
+                .map(|c| {
+                    let emp_mod = rt
+                        .empire_ambition_modifier
+                        .get(&c.pirate_faction_id)
+                        .copied()
+                        .unwrap_or(0);
+                    vec![
+                        crate::services::insurgency_services::build_campaign_snapshot_for_system(
+                            c,
+                            sys,
+                            now_unix,
+                            emp_mod,
+                        ),
+                    ]
+                })
+                .unwrap_or_else(|| vec![PyRep::Integer(res.campaign_id), PyRep::Integer(5)])
+        });
         for cid in system_chars {
             let (pkt, mpkt) = crate::router::ServerContext::build_macho_notification_packet(
                 cid,
                 None,
                 "OnInsurgencyCampaignUpdatedForLocation",
                 "solarsystemid",
-                vec![PyRep::Integer(res.campaign_id), PyRep::Integer(5)],
+                update_args.clone(),
             );
             let notif1 = crate::router::cache_notifications::PendingMachoNotification {
                 recipient_char_id: cid,
                 event: "OnInsurgencyCampaignUpdatedForLocation".into(),
                 id_type: "solarsystemid".into(),
-                args: vec![PyRep::Integer(res.campaign_id), PyRep::Integer(5)],
+                args: update_args.clone(),
                 packet: pkt,
                 marshaled_packet: mpkt,
                 created_filetime: now_ft,

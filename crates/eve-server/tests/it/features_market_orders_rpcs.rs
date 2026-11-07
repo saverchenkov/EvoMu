@@ -564,6 +564,9 @@ async fn test_b22_corp_settings_mail_and_structure_defaults() {
 
     ctx.db.with_mut_snapshot(|s| {
         s.corp_governance.get_mut(&target_corp_id).unwrap().accept_structures = true;
+        if let Some(st) = s.structures.get_mut(&st_id) {
+            st.state = "ShieldVulnerable".into();
+        }
     });
     rpc(
         &ctx,

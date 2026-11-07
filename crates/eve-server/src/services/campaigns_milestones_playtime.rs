@@ -298,9 +298,8 @@ pub fn emit_account_change_isk(
     );
 }
 
-/// Resolves the character's reward delivery station/structure from active session docking,
-/// persistent character docking, or configured character `home_station_id` (without hardcoded
-/// system/station constants).
+/// Resolves the character's reward delivery station/structure from active session docking or
+/// persistent character docking (`None` when undocked in space so rewards enqueue in redeeming bay).
 pub fn resolve_reward_station_id(
     sess_docked: Option<i64>,
     c: &eve_db::CharacterRecord,
@@ -309,5 +308,4 @@ pub fn resolve_reward_station_id(
         .filter(|&id| id > 0)
         .or_else(|| c.station_id.filter(|&id| id > 0))
         .or_else(|| c.structure_id.filter(|&id| id > 0))
-        .or_else(|| (c.home_station_id > 0).then_some(c.home_station_id))
 }

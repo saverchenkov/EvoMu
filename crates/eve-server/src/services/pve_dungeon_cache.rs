@@ -174,9 +174,11 @@ pub fn seed_system_ice_belt_from_sde(ctx: &ServerContext, sys_id: SolarSystemId)
     });
 }
 
-/// Parses `DNG-<dungeonID>-<instanceID>` site IDs used by the SDE-seeded mining/ice sites.
+/// Parses `DNG-<dungeonID>-<instanceID>` (or lowercase `dng-`) site IDs used by SDE mining/ice/seasonal sites.
 pub fn parse_dng_site_id(site_id: &str) -> Option<(u32, i64)> {
-    let rest = site_id.strip_prefix("DNG-")?;
+    let rest = site_id
+        .strip_prefix("DNG-")
+        .or_else(|| site_id.strip_prefix("dng-"))?;
     let (d, i) = rest.split_once('-')?;
     Some((d.parse().ok()?, i.parse().ok()?))
 }

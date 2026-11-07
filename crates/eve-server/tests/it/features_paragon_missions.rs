@@ -668,9 +668,11 @@ async fn test_structure_directory_accessible_structures_and_services() {
     assert_eq!(mkt_map.len(), 1);
     assert_eq!(mkt_map[0].1.dict_get("services"), Some(&PyRep::Dict(vec![(PyRep::Integer(5), PyRep::Integer(1)), (PyRep::Integer(4), PyRep::Integer(1))])));
     let PyRep::List(map_rows) = rpc(&ctx, &mut mkt_sess, "structureDirectory", "GetStructureMapData", &[PyRep::Integer(i64::from(JITA_SYS))]).await.unwrap() else { panic!("List") };
-    assert_eq!(map_rows.len(), 3);
+    assert_eq!(map_rows.len(), 1);
     let hub_map_row = map_rows.iter().find(|r| format!("{r:?}").contains(&ST_HUB.to_string())).unwrap();
     assert!(format!("{hub_map_row:?}").contains("5") && format!("{hub_map_row:?}").contains("4"));
+    let PyRep::List(dir_map_rows) = rpc(&ctx, &mut dir_sess, "structureDirectory", "GetStructureMapData", &[PyRep::Integer(i64::from(JITA_SYS))]).await.unwrap() else { panic!("List") };
+    assert_eq!(dir_map_rows.len(), 3);
     assert_eq!(rpc(&ctx, &mut out_sess, "structureDirectory", "GetMyCharacterStructures", &[]).await.unwrap(), PyRep::Dict(vec![]));
     assert_eq!(rpc(&ctx, &mut out_sess, "structureDirectory", "GetMyDockableStructures", &[PyRep::Integer(i64::from(JITA_SYS))]).await.unwrap(), PyRep::List(vec![]));
     assert_eq!(rpc(&ctx, &mut out_sess, "structureDirectory", "CheckMyDockingAccessToStructures", &[PyRep::List(vec![PyRep::Integer(ST_HUB), PyRep::Integer(ST_PRIVATE)])]).await.unwrap(), PyRep::List(vec![]));

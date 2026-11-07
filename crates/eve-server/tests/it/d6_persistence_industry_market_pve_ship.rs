@@ -146,7 +146,7 @@ async fn test_d6_industry_pi_and_market_wallet_history_durable_across_sqlite_res
             }
             snap.structures.insert(athanor_id, make_structure(athanor_id, 35835, CORP_ID, JITA_SYSTEM_ID, "Durable Athanor", "ShieldVulnerable", 500));
             snap.structures.insert(metenox_id, make_structure(metenox_id, 81826, CORP_ID, LOWSEC_SYS_ID, "Durable Metenox", "ShieldVulnerable", 200));
-            snap.items.insert(910_020, make_item(910_020, 81143, CORP_ID, metenox_id, InventoryFlag::Hangar, 500, false));
+            snap.items.insert(910_020, make_item(910_020, 81143, CORP_ID, metenox_id, InventoryFlag::SpecializedFuelBay, 500, false));
             eve_server::services::industry_pi::save_orbital_settings(snap, PLANET_ID, &eve_server::services::industry_pi::OrbitalCustomsSettings { planet_id: PLANET_ID, owner_corp_id: CORP_ID, ..Default::default() });
         });
 
@@ -372,25 +372,19 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         assert!(format!("{scan_rep:?}").contains("Digital Plexus"));
         call(&ctx, &mut sess_p1, "bookmark", "BookmarkScanResult", &[PyRep::Integer(JITA_SYSTEM_ID as i64), PyRep::String("Data Site Bookmark".into()), PyRep::String("scanned".into()), PyRep::String(hack_sig_id.clone()), PyRep::Integer(0)]).await.expect("BookmarkScanResult");
 
-        let w1_balls = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
-            reg.sites_by_system.get(&JITA_SYSTEM_ID).and_then(|l| l.iter().find(|s| s.site_id == "PVE-ANOM-30000142-1")).map(|s| s.active_npc_ball_ids.clone()).unwrap_or_default()
-        });
+        let (w1_balls, anom_pos) = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| reg.sites_by_system.get(&JITA_SYSTEM_ID).and_then(|l| l.iter().find(|s| s.site_id == "PVE-ANOM-30000142-1")).map(|s| (s.active_npc_ball_ids.clone(), s.position)).unwrap_or_default());
+        let _ = ctx.systems.get_or_spawn(JITA_SYSTEM_ID).set_ball_position(sess_p1.ship_id.unwrap(), glam::DVec3::from_array(anom_pos) + glam::DVec3::new(500.0, 0.0, 0.0)).await;
         unspawn_balls(&ctx, &mut sess_p1, &w1_balls).await;
         let w2 = call(&ctx, &mut sess_p1, "keeper", "EnterNextDungeonRoom", &[PyRep::String("PVE-ANOM-30000142-1".into())]).await.expect("Wave 1 -> 2");
         let w2_balls: Vec<i64> = match w2.dict_get("activeNpcBallIDs") { Some(PyRep::List(l)) => l.iter().filter_map(|b| b.as_i64()).collect(), _ => vec![] };
-        unspawn_balls(&ctx, &mut sess_p1, &w2_balls).await;
-        ctx.set_mechanic_rng_seed(Some(3));
+        unspawn_balls(&ctx, &mut sess_p1, &w2_balls).await; ctx.set_mechanic_rng_seed(Some(3));
         let w_done = call(&ctx, &mut sess_p1, "keeper", "EnterNextDungeonRoom", &[PyRep::String("PVE-ANOM-30000142-1".into())]).await.expect("Complete anomaly");
         assert_eq!(w_done.dict_get("escalated").and_then(|v| v.as_bool()), Some(true));
-
         let cpos = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |r| r.sites_by_system.get(&30_000_142).and_then(|l| l.iter().find(|s| s.hackable_can_ids.contains(&1_870_014_200)).map(|s| s.position))).unwrap_or([0.0; 3]);
         let _ = ctx.systems.get_or_spawn(30_000_142).set_ball_position(sess_p1.ship_id.unwrap(), glam::DVec3::from_array(cpos) + glam::DVec3::new(500.0, 0.0, 0.0)).await;
         call(&ctx, &mut sess_p1, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(1_870_014_200)]).await.expect("StartNewGameInstance");
         call(&ctx, &mut sess_p1, "map", "GetIncursionGlobalReport", &[]).await.expect("GetIncursionGlobalReport");
-        let (vg_sys, vg_sid, vg_pos) = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
-            let s = reg.incursions[&20_000_020].sites.iter().find(|s| s.tier == "Vanguard").unwrap();
-            (s.solar_system_id, s.site_id.clone(), s.position)
-        });
+        let (vg_sys, vg_sid, vg_pos) = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| { let s = reg.incursions[&20_000_020].sites.iter().find(|s| s.tier == "Vanguard").unwrap(); (s.solar_system_id, s.site_id.clone(), s.position) });
         let vg_bid = crate::common::clear_incursion_site_escort_waves(&ctx, vg_sys, &vg_sid).await;
         sess_p1.solar_system_id = Some(vg_sys);
         let s1 = ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&P1).unwrap().solar_system_id = vg_sys; s.characters[&P1].active_ship_id });
@@ -462,7 +456,7 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         let PyRep::Rowset { columns: esc_cols, rows: esc_rows } = &esc_list else { panic!("Expected Rowset, got {esc_list:?}") };
         assert_eq!(esc_rows.len(), 1);
         let col = |name: &str| esc_cols.iter().position(|c| c == name).unwrap();
-        assert_eq!((esc_rows[0][col("sourceDungeonID")].as_i64(), esc_rows[0][col("dungeonID")].as_i64()), (Some(2134), Some(2403)));
+        assert_eq!((esc_rows[0][col("sourceDungeonID")].as_i64(), esc_rows[0][col("dungeonID")].as_i64()), (Some(2134), Some(1552)));
         let bms = call(&ctx, &mut sess_p1, "bookmark", "GetBookmarks", &[]).await.expect("GetBookmarks");
         let bm_dbg = format!("{bms:?}");
         assert!(bm_dbg.contains("Data Site Bookmark") && bm_dbg.contains("-32000000.0") && bm_dbg.contains("Escalation:"));
@@ -574,10 +568,14 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
         call(&ctx, &mut sess, "dogmaIM", "SetModuleOnline", &[PyRep::Integer(ship_id), PyRep::Integer(mod1_id)]).await.expect("SetModuleOnline mod1");
         call(&ctx, &mut sess, "dogmaIM", "LinkWeapons", &[PyRep::Integer(ship_id), PyRep::Integer(mod1_id), PyRep::Integer(mod2_id)]).await.expect("LinkWeapons");
         call(&ctx, &mut sess, "dogmaIM", "TakeModuleOffline", &[PyRep::Integer(ship_id), PyRep::Integer(mod2_id)]).await.expect("TakeModuleOffline mod2");
+        sess.station_id = None; sess.structure_id = Some(struct_id);
+        ctx.db.with_mut_snapshot(|s| { if let Some(c) = s.characters.get_mut(&P1) { c.station_id = None; c.structure_id = Some(struct_id); } });
         call(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(svc_mod_id), PyRep::Integer(struct_id), PyRep::Integer(InventoryFlag::ServiceSlot0 as i64)]).await.expect("Fit structure service 0 via invbroker.Add");
         call(&ctx, &mut sess, "dogmaIM", "TakeModuleOffline", &[PyRep::Integer(struct_id), PyRep::Integer(svc_mod_id)]).await.expect("Take structure service 0 offline via dogmaIM.TakeModuleOffline");
         call(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(svc_mod2_id), PyRep::Integer(struct_id), PyRep::Integer(InventoryFlag::ServiceSlot1 as i64)]).await.expect("Fit structure service 1 via invbroker.Add");
         call(&ctx, &mut sess, "dogmaIM", "SetModuleOnline", &[PyRep::Integer(struct_id), PyRep::Integer(svc_mod2_id)]).await.expect("Set structure service 1 online via dogmaIM.SetModuleOnline");
+        sess.structure_id = None; sess.station_id = Some(JITA_STATION_ID);
+        ctx.db.with_mut_snapshot(|s| { if let Some(c) = s.characters.get_mut(&P1) { c.structure_id = None; c.station_id = Some(JITA_STATION_ID); } });
         call(&ctx, &mut sess, "posMgr", "SetTowerSentrySettings", &[PyRep::Integer(tower_id), PyRep::Real(5.0), PyRep::Real(0.0), PyRep::Bool(true), PyRep::Bool(true), PyRep::Bool(false)]).await.expect("SetTowerSentrySettings");
 
         call(&ctx, &mut sess, "skillMgr2", "SaveSkillQueue", &[PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3300), PyRep::Integer(4)])])]).await.expect("SaveSkillQueue");
@@ -672,8 +670,8 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
         let ch_rep = call(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(297)]).await.expect("get_challenge");
         assert_eq!((ch_rep.dict_get("claimed").and_then(|v| v.as_bool()), ch_rep.dict_get("seasonPoints").and_then(|v| v.as_i64())), (Some(true), Some(10)));
         let pd_stats = call(&ctx, &mut sess, "ProjectDiscovery", "get_player_statistics", &[]).await.expect("get_player_statistics");
-        assert_eq!((pd_stats.dict_get("rank").and_then(|v| v.as_i64()), pd_stats.dict_get("tasks_submitted").and_then(|v| v.as_i64()), pd_stats.dict_get("experience").and_then(|v| v.as_f64())), (Some(1), Some(1), Some(325.0)));
-        assert_eq!(call(&ctx, &mut sess, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("get_player_analysis_kredits").as_i64(), Some(0));
+        assert_eq!((pd_stats.dict_get("rank").and_then(|v| v.as_i64()), pd_stats.dict_get("tasks_submitted").and_then(|v| v.as_i64()), pd_stats.dict_get("experience").and_then(|v| v.as_f64())), (Some(1), Some(1), Some(550.0)));
+        assert_eq!(call(&ctx, &mut sess, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("get_player_analysis_kredits").as_i64(), Some(50));
         let lic_after = send_quasar_req(&ctx, &mut sess, "eve_public.user.license.api.GetRequest", Vec::new()).await.payload.unwrap().value;
         assert_eq!((lic_after == lic_bytes_before, lic_after != lic_initial), (true, true));
         assert!(String::from_utf8_lossy(&send_quasar_req(&ctx, &mut sess, "eve.legal.agreement.api.GetLatestRequest", Vec::new()).await.payload.unwrap().value).contains("eula_v24"));

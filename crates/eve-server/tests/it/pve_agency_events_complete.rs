@@ -187,7 +187,11 @@ async fn test_dungeon_instance_cache_returns_current_per_system_instances() {
     assert_eq!(combat.keys().copied().collect::<Vec<_>>(), vec![HEK], "only the session system");
     let hek_combat = combat[&HEK].clone();
     assert!(!hek_combat.is_empty(), "Hek has combat anomalies");
-    assert_eq!(hek_combat, expected_registry(&ctx, HEK, false));
+    let mut expected_hek_combat = expected_registry(&ctx, HEK, false);
+    for (did, iids) in expected_anomalies(&ctx, HEK, "SeasonalEventSite") {
+        expected_hek_combat.entry(did).or_default().extend(iids);
+    }
+    assert_eq!(hek_combat, expected_hek_combat);
     for did in hek_combat.keys() {
         assert!(ctx.sde.dungeons.contains_key(did), "combat dungeon {did} is a real SDE dungeon");
     }
@@ -220,7 +224,11 @@ async fn test_dungeon_instance_cache_returns_current_per_system_instances() {
         !combat_after[&HEK].get(&victim_did).is_some_and(|ids| ids.contains(&victim_iid)),
         "completed anomaly {victim_site} must no longer be listed"
     );
-    assert_eq!(combat_after[&HEK], expected_registry(&ctx, HEK, false));
+    let mut expected_hek_after = expected_registry(&ctx, HEK, false);
+    for (did, ids) in expected_anomalies(&ctx, HEK, "SeasonalEventSite") {
+        expected_hek_after.entry(did).or_default().extend(ids);
+    }
+    assert_eq!(combat_after[&HEK], expected_hek_after);
 
     // --- Ore anomalies: SDE-seeded archetype-27 deposits of this system.
     let ore = instances(&ctx, &mut hek, "GetOreAnomalyInstances").await;
@@ -298,7 +306,11 @@ async fn test_dungeon_instance_cache_returns_current_per_system_instances() {
     let mut tama = in_space(&ctx, 9605, TAMA, 760_000_005).await;
     let tama_combat = instances(&ctx, &mut tama, "GetCombatAnomalyInstances").await;
     assert_eq!(tama_combat.keys().copied().collect::<Vec<_>>(), vec![TAMA]);
-    assert_eq!(tama_combat[&TAMA], expected_registry(&ctx, TAMA, false));
+    let mut expected_tama_combat = expected_registry(&ctx, TAMA, false);
+    for (did, ids) in expected_anomalies(&ctx, TAMA, "SeasonalEventSite") {
+        expected_tama_combat.entry(did).or_default().extend(ids);
+    }
+    assert_eq!(tama_combat[&TAMA], expected_tama_combat);
     let hek_ids: BTreeSet<i64> = hek_combat.values().flatten().copied().collect();
     assert!(tama_combat[&TAMA].values().flatten().all(|i| !hek_ids.contains(i)));
 

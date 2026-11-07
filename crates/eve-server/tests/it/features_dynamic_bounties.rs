@@ -86,11 +86,15 @@ async fn test_b35_10_align_server_tick_rounding() {
 
         let _ = sys.step_manual(1.0).await;
         let (_, b_enter) = sys.get_ball_snapshot(sid).await.unwrap().unwrap();
-        assert!(
-            matches!(b_enter.mode, MovementMode::Warp { phase: eve_destiny::WarpPhase::Accelerating | eve_destiny::WarpPhase::Cruising, .. }),
-            "Case {idx}: must enter warp on whole server tick {expected_ticks}"
-        );
         assert!(b_enter.velocity.length() >= align_threshold, "Velocity on tick {expected_ticks} must reach >= 75% max velocity");
+
+        let _ = sys.step_manual(1.0).await;
+        let (_, b_warp) = sys.get_ball_snapshot(sid).await.unwrap().unwrap();
+        assert!(
+            matches!(b_warp.mode, MovementMode::Warp { phase: eve_destiny::WarpPhase::Accelerating | eve_destiny::WarpPhase::Cruising, .. }),
+            "Case {idx}: must enter warp on tick {} after reaching >= 75% max velocity",
+            expected_ticks + 1
+        );
         let _ = sys.remove_ball(sid).await;
     }
 }

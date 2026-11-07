@@ -1084,7 +1084,7 @@ async fn test_structure_auto_defense_round_robin_no_volley_multiplication() {
     rpc(&ctx, &mut dir_sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(prof), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(17), PyRep::Tuple(vec![PyRep::Bool(true), PyRep::Bool(true), PyRep::Bool(true), PyRep::Real(0.0), PyRep::Bool(true)]), PyRep::Integer(0)])])]).await.unwrap();
     let st_id = 1_000_000_300_010i64;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.structures.insert(st_id, eve_db::UpwellStructureRecord { structure_id: st_id, type_id: 35833, owner_corp_id: corp_id, solar_system_id: lowsec_sys, state: eve_server::services::station_structure::structure_lifecycle::STATE_SHIELD_VULNERABLE.into(), position: [0.0, 0.0, 0.0], ..Default::default() });
+        snap.structures.insert(st_id, eve_db::UpwellStructureRecord { structure_id: st_id, type_id: 35833, owner_corp_id: corp_id, solar_system_id: lowsec_sys, state: eve_server::services::station_structure::structure_lifecycle::STATE_SHIELD_VULNERABLE.into(), position: [0.0, 0.0, 0.0], quantum_core_installed: true, ..Default::default() });
         snap.items.insert(911_001, eve_db::InventoryItemRecord { item_id: 911_001, type_id: 35922, owner_id: corp_id, location_id: st_id, flag: eve_db::InventoryFlag::HiSlot0, quantity: 1, singleton: true, version: 1, ..Default::default() });
         snap.items.insert(911_011, eve_db::InventoryItemRecord { item_id: 911_011, type_id: 37847, owner_id: corp_id, location_id: st_id, flag: eve_db::InventoryFlag::HiSlot0, quantity: 10, singleton: false, version: 1, ..Default::default() });
         snap.module_online_states.insert(911_001, true);

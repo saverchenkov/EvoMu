@@ -323,6 +323,10 @@ async fn measure_live_pvp_loot_drop_fraction(
     rpc_call(ctx, killer_sess, "crimewatch", "SetSafetyLevel", &[PyRep::Integer(0)]).await.unwrap();
     rpc_call(ctx, killer_sess, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::Integer(victim_ship)]).await.unwrap();
     let _ = rpc_call(ctx, killer_sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gun_id)]).await;
+    fast_forward_secs(ctx, 12);
+    for _ in 0..12 {
+        sys_h.step_manual(1.0).await.unwrap();
+    }
     let dropped = ctx.db.with_mut_snapshot(|s| {
         let cnt = (0..N_ITEMS).filter(|&k| s.items.contains_key(&(item_base_id + k))).count();
         for k in 0..N_ITEMS { s.items.remove(&(item_base_id + k)); }
@@ -746,6 +750,10 @@ async fn measure_live_npc_kill_bounty_and_sec_gain(
         }
     }
     let _ = rpc_call(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gun_id)]).await;
+    fast_forward_secs(ctx, 12);
+    for _ in 0..12 {
+        sys_h.step_manual(1.0).await.unwrap();
+    }
     assert!(sys_h.get_ball_snapshot(npc_ball_id).await.unwrap().is_none(), "NPC rat {npc_ball_id} must be destroyed by live turret cycles");
     let bounty = with_combat_runtime(ctx, |rt| rt.pending_bounty_ticks.get(&(sys_id, cid)).copied().unwrap_or(0.0));
     let sec_gain = ctx.db.with_snapshot(|s| s.characters[&cid].security_status);
@@ -822,6 +830,10 @@ async fn measure_live_militia_pvp_kill_lp(
         .await
         .expect("live militia PvP ship kill");
     let _ = rpc_call(ctx, killer_sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gun_id)]).await;
+    fast_forward_secs(ctx, 12);
+    for _ in 0..12 {
+        sys_h.step_manual(1.0).await.unwrap();
+    }
     let lp_after = ctx
         .db
         .with_snapshot(|s| s.characters[&killer_cid].loyalty_points.get(&militia_corp).copied().unwrap_or(0));

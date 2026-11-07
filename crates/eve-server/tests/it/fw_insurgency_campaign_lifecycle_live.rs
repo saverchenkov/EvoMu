@@ -221,87 +221,58 @@ pub(crate) async fn destroy_target_live(
         let step_secs = if reloading { 11 } else { 4 };
         for _ in 0..step_secs {
             sys.step_manual(1.0).await.unwrap();
+            slash(ctx, sess, "/heal").await;
         }
         ctx.advance_secs(step_secs);
-        slash(ctx, sess, "/heal").await;
     }
     panic!("target {target_id} was not destroyed after 120 volleys");
 }
 
-pub(crate) async fn fire_one_volley(
-    ctx: &ServerContext,
-    sess: &mut SessionState,
-    sys_id: u32,
-    ship_id: i64,
-    gun_id: i64,
-    target_id: i64,
-) -> Result<PyRep, eve_proto::BridgeRpcError> {
+pub(crate) async fn lock_target_healed(ctx: &ServerContext, sess: &mut SessionState, sys_id: u32, ship_id: i64, target_id: i64) {
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    if sys.get_target_locks(ship_id).await.unwrap_or_default().iter().any(|l| l.target_id == target_id && l.locked) { return; }
+    rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(target_id)]).await.expect("AddTarget");
+    for _ in 0..45 {
+        if sys.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == target_id && l.locked) { return; }
+        sys.step_manual(1.0).await.unwrap();
+        slash(ctx, sess, "/heal").await;
+    }
+    assert!(sys.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == target_id && l.locked));
+}
+
+pub(crate) async fn fire_one_volley(ctx: &ServerContext, sess: &mut SessionState, sys_id: u32, ship_id: i64, gun_id: i64, target_id: i64) -> Result<PyRep, eve_proto::BridgeRpcError> {
     move_near(ctx, sys_id, ship_id, target_id).await;
-    lock_target(ctx, sess, sys_id, ship_id, target_id, 1_000.0).await;
-    rpc(
-        ctx,
-        sess,
-        "dogmaIM",
-        "Activate",
-        &[
-            PyRep::Integer(gun_id),
-            PyRep::String("targetAttack".into()),
-            PyRep::Integer(target_id),
-        ],
-    )
-    .await
+    lock_target_healed(ctx, sess, sys_id, ship_id, target_id).await;
+    rpc(ctx, sess, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::String("targetAttack".into()), PyRep::Integer(target_id)]).await
 }
 
 pub(crate) async fn boost_siege_guns(ctx: &ServerContext, sess: &mut SessionState, guns: &[i64]) {
-    for &gid in guns {
-        slash(ctx, sess, &format!("/setattr {gid} 64 5000.0")).await;
-    }
+    for &gid in guns { slash(ctx, sess, &format!("/setattr {gid} 64 5000.0")).await; }
 }
 
-pub(crate) async fn hold_complex_to_pts(
-    ctx: &ServerContext,
-    sess: &mut SessionState,
-    campaign_id: i64,
-    sys_id: u32,
-    ship_id: i64,
-    is_pirate: bool,
-    target_pts: i64,
-) {
+pub(crate) async fn hold_complex_to_pts(ctx: &ServerContext, sess: &mut SessionState, campaign_id: i64, sys_id: u32, ship_id: i64, is_pirate: bool, target_pts: i64) {
     slash(ctx, sess, &format!("/tr {sys_id}")).await;
     let _ = rpc(ctx, sess, "beyonce", "CmdStop", &[]).await;
-    let _ = rpc(
-        ctx,
-        sess,
-        "dungeonInstanceCacheMgr",
-        "GetPirateInsurgencyInstances",
-        &[PyRep::Integer(i64::from(sys_id))],
-    )
-    .await;
-    let beacon_pos = ctx.db.with_snapshot(|s| {
-        s.system_states[&sys_id]
-            .fw_complex_position
-            .expect("fw_complex_position")
-    });
+    let _ = rpc(ctx, sess, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await;
+    let _ = rpc(ctx, sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyInstances", &[PyRep::Integer(i64::from(sys_id))]).await;
+    let beacon_pos = ctx.db.with_snapshot(|s| s.system_states[&sys_id].fw_complex_position.expect("fw_complex_position"));
     let sys = ctx.systems.get_or_spawn(sys_id);
-    sys.set_ball_position(ship_id, DVec3::from_array(beacon_pos))
-        .await;
-    sys.step_manual(1.0).await.unwrap();
-
+    sys.set_ball_position(ship_id, DVec3::from_array(beacon_pos)).await;
     for _ in 0..30 {
-        let cur_pts = read_insurgency_runtime(ctx, |rt| {
-            rt.campaigns.get(&campaign_id).map_or(0, |c| {
-                if is_pirate {
-                    c.corruption_points.get(&sys_id).copied().unwrap_or(0)
-                } else {
-                    c.suppression_points.get(&sys_id).copied().unwrap_or(0)
-                }
-            })
-        });
+        let cur_pts = read_insurgency_runtime(ctx, |rt| rt.campaigns.get(&campaign_id).map_or(0, |c| if is_pirate { c.corruption_points.get(&sys_id).copied().unwrap_or(0) } else { c.suppression_points.get(&sys_id).copied().unwrap_or(0) }));
         if cur_pts >= target_pts {
             sys.set_ball_position(ship_id, DVec3::ZERO).await;
+            slash(ctx, sess, "/heal").await;
             return;
         }
-        sys.step_manual(60.0).await.unwrap();
+        let beacon_now = match ctx.db.with_snapshot(|s| s.system_states[&sys_id].fw_complex_position) {
+            Some(pos) => pos,
+            None => { let _ = rpc(ctx, sess, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await; ctx.db.with_snapshot(|s| s.system_states[&sys_id].fw_complex_position.expect("fw_complex_position respawned")) }
+        };
+        let target_v = DVec3::from_array(beacon_now);
+        if sys.get_ball_snapshot(ship_id).await.unwrap().is_none_or(|(_, b)| b.position.distance(target_v) > 500.0) { sys.set_ball_position(ship_id, target_v).await; }
+        slash(ctx, sess, "/heal").await;
+        for _ in 0..12 { sys.step_manual(5.0).await.unwrap(); slash(ctx, sess, "/heal").await; }
         ctx.advance_virtual_clock(60);
         step_system_insurgency_tick(ctx, sys_id).await;
     }

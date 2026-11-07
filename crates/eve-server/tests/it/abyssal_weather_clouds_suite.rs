@@ -560,6 +560,7 @@ async fn test_abyssal_trace_scanning_and_fleet_entry() {
 async fn test_abyssal_timer_collapse_and_pod_death() {
     // parity: feat:abyssal.timer-collapse-death, feat:navigation.filament-abyssal
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let kw = HashMap::new();
     let origin_sys = 30_000_002_u32; // Lashesih (0.8 high-sec)
     let amarr_station = 60_008_494_i64; // Amarr VIII (system 30002187)
@@ -632,6 +633,14 @@ async fn test_abyssal_timer_collapse_and_pod_death() {
     let trace_id = dep.dict_get("traceBallID").and_then(|v| v.as_i64()).unwrap();
     let ent1 = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(trace_id)], &kw, None).await.expect("Enter 1");
     let abyssal_sys = ent1.dict_get("solarSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
+    let abyss_handle = ctx.systems.get_or_spawn(abyssal_sys);
+    let lethal = DamageVector { em: 1e7, thermal: 1e7, kinetic: 1e7, explosive: 1e7 };
+    let r1_npcs = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
+        reg.abyssal_pockets.get(&char_id).unwrap().rooms[0].npc_ball_ids.clone()
+    });
+    for npc_id in r1_npcs {
+        let _ = abyss_handle.apply_damage_with_attacker(npc_id, lethal, Some(char_id)).await;
+    }
     ctx.advance_secs(300);
     ctx.dispatch_rpc(&mut sess2, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(trace_id)], &kw, None).await.expect("Late joiner Enter 2");
 

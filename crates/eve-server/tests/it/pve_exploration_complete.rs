@@ -105,6 +105,10 @@ async fn test_pve_combat_anomalies_waves_and_escalations() {
 
     // 3. Enter High-Sec Guristas Hideaway: Wave 1 -> Wave 2 -> Complete + Escalate
     let site_id = "PVE-ANOM-30000142-1";
+    let anom_pos = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system.get(&30_000_142).and_then(|l| l.iter().find(|s| s.site_id == site_id)).map(|s| s.position).unwrap_or([0.0; 3])
+    });
+    let _ = ctx.systems.get_or_spawn(30_000_142).set_ball_position(710_001_001, DVec3::from_array(anom_pos) + DVec3::new(500.0, 0.0, 0.0)).await;
     let alive_err = ctx.dispatch_rpc(&mut sess, "scanSvc", None, "EnterCombatAnomaly", &[PyRep::String(site_id.into()), PyRep::Bool(true)], &kw, None).await.expect_err("Cannot advance wave while NPCs are alive");
     assert_eq!(alive_err.code, "WaveNpcsRemaining");
 

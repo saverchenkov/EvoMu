@@ -426,7 +426,7 @@ async fn test_b30_industry_pi_and_market_wallet_history_durable() {
             quantum_core_installed: true, fuel_blocks: 200, shield_hp: 10000.0, armor_hp: 10000.0, hull_hp: 10000.0,
             reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
         });
-        snap.items.insert(910_020, make_item(910_020, 81143, CORP_ID, metenox_id, InventoryFlag::Hangar, 500, false));
+        snap.items.insert(910_020, make_item(910_020, 81143, CORP_ID, metenox_id, InventoryFlag::SpecializedFuelBay, 500, false));
         save_orbital_settings(snap, JITA_PLANET_ID, &OrbitalCustomsSettings { planet_id: JITA_PLANET_ID, owner_corp_id: CORP_ID, ..Default::default() });
     });
 

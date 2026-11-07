@@ -1114,7 +1114,7 @@ async fn test_wormhole_decay_stages_propulsion_mass_collapse_and_static_respawn(
     let scan_initial = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(wh_sys_id as i64)], &kw, None).await.unwrap();
     let PyRep::List(sigs_init) = scan_initial.dict_get("signatures").unwrap() else { panic!() };
     let s_init = sigs_init.iter().find(|s| s.dict_get("signatureID").and_then(|v| v.as_str()) == Some(&static_sig_id)).unwrap();
-    assert_eq!(s_init.dict_get("massStabilityDescription").and_then(|v| v.as_str()), Some("This wormhole has not yet had its stability significantly disrupted"));
+    assert_eq!(s_init.dict_get("massStabilityDescription").and_then(|v| v.as_str()), Some("This wormhole has not yet had its stability significantly disrupted by ships passing through it."));
 
     // Mass reduction with active propulsion module (50MN MWD I = +50,000,000 kg), destabilization stages, and collapse
     let wh_item_id = wormhole_item_id_for_signature(wh_sys_id, &static_sig_id);
@@ -1135,8 +1135,8 @@ async fn test_wormhole_decay_stages_propulsion_mass_collapse_and_static_respawn(
     assert!((jump_1.dict_get("remainingMassKg").and_then(|v| v.as_f64()).unwrap() - (2_000_000_000.0 - expected_jump_mass)).abs() < 1.0);
 
     for (rem_mass, expected_desc) in [
-        (600_000_000.0, "This wormhole has had its stability reduced by ships passing through it"),
-        (180_000_000.0, "This wormhole has had its stability critically disrupted"),
+        (600_000_000.0, "This wormhole has had its stability reduced by ships passing through it, but not to a critical degree yet."),
+        (180_000_000.0, "This wormhole has had its stability critically disrupted by the mass of numerous ships passing through and is on the verge of collapse."),
     ] {
         ctx.advance_secs(301);
         ctx.db.with_mut_snapshot(|snap| {
@@ -2401,6 +2401,7 @@ async fn test_pve_ghost_sites_sleeper_caches_and_wormhole_sites() {
 
     // 2. Sleeper Cache (SLC-30000142): attempting passage before hacking Rift Generator fails, solving puzzle unlocks passage
     let rift_can_id = site_cans("SLC-30000142")[0];
+    let _ = sys_142.set_ball_position(710_001_004, DVec3::from_array(slc_pos) + DVec3::new(500.0, 0.0, 0.0)).await;
 
     let rift_err = ctx
         .dispatch_rpc(
@@ -2417,7 +2418,6 @@ async fn test_pve_ghost_sites_sleeper_caches_and_wormhole_sites() {
     assert_eq!(rift_err.code, "RiftPassageUnstable");
 
     // Hack the Spatial Rift Generator Control to stabilize the rift, disable sentries, and clear gas hazard
-    let _ = sys_142.set_ball_position(710_001_004, DVec3::from_array(slc_pos) + DVec3::new(500.0, 0.0, 0.0)).await;
     ctx.dispatch_rpc(
         &mut sess,
         "hackingMgr",

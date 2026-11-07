@@ -634,7 +634,18 @@ async fn spawn_static_space_object(
     pos: DVec3,
 ) {
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let radius = ctx.sde.types.get(&type_id).map(|t| t.radius.max(50.0)).unwrap_or(250.0);
+    let radius = if matches!(
+        type_id,
+        TYPE_MINING_AMBUSH_BEACON
+            | TYPE_OUTPOST_BEACON_SMALL
+            | TYPE_OUTPOST_BEACON_MEDIUM
+            | TYPE_OUTPOST_BEACON_MODERATE
+            | TYPE_OUTPOST_BEACON_LARGE_ADV
+    ) {
+        250.0
+    } else {
+        ctx.sde.types.get(&type_id).map(|t| t.radius.max(50.0)).unwrap_or(250.0)
+    };
     let needs_db = ctx.db.with_snapshot(|snap| {
         !snap.items.contains_key(&item_id) || snap.item_positions.get(&item_id) != Some(&[pos.x, pos.y, pos.z])
     });

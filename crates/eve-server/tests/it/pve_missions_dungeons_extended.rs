@@ -161,7 +161,7 @@ async fn test_mission_lp_isk_reward_formula() {
 
     // Verify LP has (1.6288 - true_sec) * (1 + 0.1 * 4) multiplier
     let sec_factor = (1.6288 - true_sec).max(0.01);
-    let manual_expected_lp = ((base_lp as f64) * sec_factor).round() as i64;
+    let conn_factor = 1.0 + 0.10 * 4.0; let manual_expected_lp = ((base_lp as f64) * sec_factor * conn_factor).round() as i64;
     assert_eq!(expected_lp, manual_expected_lp);
 
     // Accept and complete mission
