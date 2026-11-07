@@ -21,10 +21,11 @@ use eve_server::services::wormhole_pve_escalations::{
 };
 use crate::parity_shard_2_common::{
     bind_service, buy_fit_combat_ship, buy_fit_combat_ship_with_ammo, buy_item_at_station,
-    create_player_pilot, drain_all_notifications, find_kspace_entrance_to_c5, fly_stargates_to,
-    fresh_player_ctx, fund_pilot_isk, jump_through_wormhole_to, kv_get, move_ship_to_ball,
-    reload_ctx_from_sqlite, rpc_ok, rpc_res, undock_from_station, wait_for_warp_end,
-    warp_and_engage_ball, JITA_STATION, JITA_SYS, LOWSEC_NOURVUKAIKEN_SYS,
+    create_player_pilot, drain_all_notifications, find_kspace_entrance_to_c5,
+    fleet_warp_and_engage_ball, fly_stargates_to, fresh_player_ctx, fund_pilot_isk,
+    jump_through_wormhole_to, kv_get, move_ship_to_ball, reload_ctx_from_sqlite, rpc_ok, rpc_res,
+    undock_from_station, wait_for_warp_end, warp_and_engage_ball, JITA_STATION, JITA_SYS,
+    LOWSEC_NOURVUKAIKEN_SYS,
 };
 
 // parity: feat:pve.insurgency-laundering
@@ -197,9 +198,9 @@ async fn test_wormhole_sentries_capital_escalations_cap_drifter_downtime_e2e() {
     let (mut sess2, cid2, _) = create_player_pilot(&ctx, 53_102, "wh_cap2", "WH Carrier Pilot", JITA_SYS).await;
     let (mut sess3, cid3, _) = create_player_pilot(&ctx, 53_103, "wh_cap3", "WH Third Cap", JITA_SYS).await;
     let (mut cyno_sess, cyno_cid, _) = create_player_pilot(&ctx, 53_104, "wh_cyno4", "WH Cyno Pilot", JITA_SYS).await;
-    fund_pilot_isk(&ctx, &mut sess1, 4).await;
-    fund_pilot_isk(&ctx, &mut sess2, 4).await;
-    fund_pilot_isk(&ctx, &mut sess3, 4).await;
+    fund_pilot_isk(&ctx, &mut sess1, 12).await;
+    fund_pilot_isk(&ctx, &mut sess2, 12).await;
+    fund_pilot_isk(&ctx, &mut sess3, 12).await;
     fund_pilot_isk(&ctx, &mut cyno_sess, 4).await;
     crate::parity_shard_2_common::ensure_skills_for_types(&ctx, &mut cyno_sess, cyno_cid, JITA_STATION, &[11_963, 21_096, 28_758, 30_488, 3412, 25_810, 25_811]).await;
     for (sid, tgt_lvl) in [(3412_i64, 5_i64), (25_810, 5), (25_811, 5)] {
@@ -207,17 +208,25 @@ async fn test_wormhole_sentries_capital_escalations_cap_drifter_downtime_e2e() {
         ctx.advance_secs(86_400 * 45);
         let _ = rpc_ok(&ctx, &mut cyno_sess, "skillMgr2", "GetSkills", &[]).await;
     }
-    let (k_entry_sys, k_sig_id, wh_c5_sys) = find_kspace_entrance_to_c5(&ctx, 1_000_000_000.0).await;
 
-    let (dread_id, guns1) = buy_fit_combat_ship_with_ammo(&ctx, &mut sess1, cid1, JITA_STATION, 19_720, 41_153, 17_674, 3, 5_000).await;
-    let (carrier_id, _) = buy_fit_combat_ship(&ctx, &mut sess2, cid2, JITA_STATION, 19_722, 41_153, 17_674, 0).await;
-    let (dread2_id, _) = buy_fit_combat_ship(&ctx, &mut sess3, cid3, JITA_STATION, 19_720, 41_153, 17_674, 0).await;
-    for (s_ref, sid_cap, fuel_tid) in [(&mut sess1, dread_id, 16_274_u32), (&mut sess2, carrier_id, 17_888_u32), (&mut sess3, dread2_id, 16_274_u32)] {
+    let (dread_id, guns1) = buy_fit_combat_ship_with_ammo(&ctx, &mut sess1, cid1, JITA_STATION, 19_720, 37_296, 17_686, 3, 100).await;
+    let (carrier_id, guns2) = buy_fit_combat_ship_with_ammo(&ctx, &mut sess2, cid2, JITA_STATION, 19_722, 20_452, 17_670, 3, 5_000).await;
+    let (dread2_id, guns3) = buy_fit_combat_ship_with_ammo(&ctx, &mut sess3, cid3, JITA_STATION, 19_720, 37_298, 17_686, 3, 100).await;
+    crate::parity_shard_2_common::ensure_skills_for_types(&ctx, &mut sess1, cid1, JITA_STATION, &[20_280]).await;
+    crate::parity_shard_2_common::ensure_skills_for_types(&ctx, &mut sess2, cid2, JITA_STATION, &[20_280]).await;
+    crate::parity_shard_2_common::ensure_skills_for_types(&ctx, &mut sess3, cid3, JITA_STATION, &[20_280]).await;
+    let mut sieges = Vec::new();
+    for (s_ref, sid_cap, fuel_tid) in [(&mut sess1, dread_id, 16_274_u32), (&mut sess2, carrier_id, 17_889_u32), (&mut sess3, dread2_id, 16_274_u32)] {
         let cid_cap = s_ref.character_id.unwrap();
         let fid_bay = buy_item_at_station(&ctx, s_ref, cid_cap, JITA_STATION, fuel_tid, 30_000).await;
         rpc_ok(&ctx, s_ref, "invbroker", "Add", &[PyRep::Integer(fid_bay), PyRep::Integer(sid_cap), PyRep::Integer(133)]).await;
-        let fid_cargo = buy_item_at_station(&ctx, s_ref, cid_cap, JITA_STATION, fuel_tid, 10_000).await;
+        let fid_cargo = buy_item_at_station(&ctx, s_ref, cid_cap, JITA_STATION, fuel_tid, 1_000).await;
         rpc_ok(&ctx, s_ref, "invbroker", "Add", &[PyRep::Integer(fid_cargo), PyRep::Integer(sid_cap), PyRep::Integer(5)]).await;
+        let stront = buy_item_at_station(&ctx, s_ref, cid_cap, JITA_STATION, 16_275, 550).await;
+        rpc_ok(&ctx, s_ref, "invbroker", "Add", &[PyRep::Integer(stront), PyRep::Integer(sid_cap), PyRep::Integer(5)]).await;
+        let sm = buy_item_at_station(&ctx, s_ref, cid_cap, JITA_STATION, 20_280, 1).await;
+        rpc_ok(&ctx, s_ref, "invbroker", "Add", &[PyRep::Integer(sm), PyRep::Integer(sid_cap), PyRep::Integer(30)]).await;
+        sieges.push(sm);
     }
     let cyno_ship = buy_item_at_station(&ctx, &mut cyno_sess, cyno_cid, JITA_STATION, 11_963, 1).await;
     ctx.advance_secs(11);
@@ -233,6 +242,7 @@ async fn test_wormhole_sentries_capital_escalations_cap_drifter_downtime_e2e() {
     rpc_ok(&ctx, &mut cyno_sess, "invbroker", "Add", &[PyRep::Integer(probes), PyRep::Integer(cyno_ship), PyRep::Integer(28)]).await;
     let ozone = buy_item_at_station(&ctx, &mut cyno_sess, cyno_cid, JITA_STATION, 16_273, 500).await;
     rpc_ok(&ctx, &mut cyno_sess, "invbroker", "Add", &[PyRep::Integer(ozone), PyRep::Integer(cyno_ship), PyRep::Integer(5)]).await;
+    let (k_entry_sys, k_sig_id, wh_c5_sys) = find_kspace_entrance_to_c5(&ctx, 1_000_000_000.0).await;
 
     let _ = rpc_ok(&ctx, &mut cyno_sess, "fleetMgr", "CreateFleet", &[]).await;
     for (cap_cid, s_ref) in [(cid1, &mut sess1), (cid2, &mut sess2), (cid3, &mut sess3)] {
@@ -250,13 +260,7 @@ async fn test_wormhole_sentries_capital_escalations_cap_drifter_downtime_e2e() {
     let sig_pos = sigs.iter().find(|s| s.signature_id == k_sig_id).expect("k_sig_id").position;
     let wh_ball_id = eve_server::services::space_destiny::wormhole_item_id_for_signature(k_entry_sys, &k_sig_id);
     let cyno_d = bind_service(&ctx, &mut cyno_sess, "dogmaIM", PyRep::Integer(cyno_ship)).await as u64;
-    let _ = ctx.dispatch_rpc(&mut cyno_sess, "dogmaIM", Some(cyno_d), "Activate", &[PyRep::Integer(probe_launcher), PyRep::String("launchScanners".into()), PyRep::None, PyRep::Integer(0)], &HashMap::new(), None).await.unwrap();
-    let scan_b = bind_service(&ctx, &mut cyno_sess, "scanMgr", PyRep::Integer(i64::from(k_entry_sys))).await as u64;
-    let probe_targets: Vec<PyRep> = (0..8)
-        .map(|_| PyRep::List(vec![PyRep::Real(sig_pos[0]), PyRep::Real(sig_pos[1]), PyRep::Real(sig_pos[2]), PyRep::Integer(1)]))
-        .collect();
-    let scan_rep = ctx.dispatch_rpc(&mut cyno_sess, "scanMgr", Some(scan_b), "RequestScans", &[PyRep::List(probe_targets)], &HashMap::new(), None).await.unwrap();
-    let PyRep::List(rows) = &scan_rep else { panic!("expected RequestScans list: {scan_rep:?}"); };
+    let rows = crate::common::probe_scan(&ctx, &mut cyno_sess, glam::DVec3::from_array(sig_pos), 0.25 * 149_597_870_700.0).await;
     let k_row = rows.iter().find(|r| kv_get(r, "signatureID").and_then(|v| v.as_str()) == Some(k_sig_id.as_str())).expect("k_sig_id row");
     assert_eq!(kv_get(k_row, "resolved"), Some(&PyRep::Bool(true)), "cyno scan must resolve {k_sig_id}: {k_row:?}");
     move_ship_to_ball(&ctx, &mut cyno_sess, k_entry_sys, cyno_ship, "item", PyRep::Integer(wh_ball_id)).await;
@@ -312,46 +316,31 @@ async fn test_wormhole_sentries_capital_escalations_cap_drifter_downtime_e2e() {
     );
 
     for (idx, &sid) in [dread_id, carrier_id, dread2_id].iter().enumerate() {
-        let s_sess = match idx {
-            0 => &mut sess1,
-            1 => &mut sess2,
-            _ => &mut sess3,
-        };
+        let s_sess = match idx { 0 => &mut sess1, 1 => &mut sess2, _ => &mut sess3 };
         let wh_b = bind_service(&ctx, s_sess, "beyonce", PyRep::Integer(i64::from(wh_c5_sys))).await as u64;
         let _ = ctx.dispatch_rpc(s_sess, "beyonce", Some(wh_b), "CmdSetSpeedFraction", &[PyRep::Real(0.1)], &HashMap::new(), None).await;
         let _ = wh_sys.step_manual(2.0).await;
         let _ = ctx.dispatch_rpc(s_sess, "beyonce", Some(wh_b), "CmdStop", &[], &HashMap::new(), None).await;
         let _ = wh_sys.step_manual(1.0).await;
-        move_ship_to_ball(&ctx, s_sess, wh_c5_sys, sid, "site", PyRep::String(combat_site_id.clone())).await;
+        move_ship_to_ball(&ctx, s_sess, wh_c5_sys, sid, "dungeon", PyRep::String(combat_site_id.clone())).await;
     }
+    let _ = wh_sys.step_manual(2.0).await;
 
     let (esc_caps_count, avenger_count) = with_pve_exploration_reg(&ctx, |reg| {
-        let s = reg.sites_by_system[&wh_c5_sys]
-            .iter()
-            .find(|s| s.site_id == combat_site_id)
-            .unwrap();
-        let total_avengers: usize = s
-            .active_escalation_capitals
-            .iter()
-            .map(|c| c.avenger_ball_ids.len())
-            .sum();
+        let s = reg.sites_by_system[&wh_c5_sys].iter().find(|s| s.site_id == combat_site_id).unwrap();
+        let total_avengers: usize = s.active_escalation_capitals.iter().map(|c| c.avenger_ball_ids.len()).sum();
         (s.active_escalation_capitals.len(), total_avengers)
     });
-    assert_eq!(
-        esc_caps_count, 2,
-        "wormhole site must cap capital escalations at 2 capitals even when 3 capitals land on grid"
-    );
-    assert!(
-        avenger_count >= 2,
-        "capital escalation must spawn Upgraded Avenger wave"
-    );
+    assert_eq!(esc_caps_count, 2, "wormhole site must cap capital escalations at 2 capitals even when 3 capitals land on grid");
+    assert!(avenger_count >= 2, "capital escalation must spawn Upgraded Avenger wave");
 
+    for (s_ref, sid_cap, sm) in [(&mut sess1, dread_id, sieges[0]), (&mut sess2, carrier_id, sieges[1]), (&mut sess3, dread2_id, sieges[2])] {
+        let d_oid = bind_service(&ctx, s_ref, "dogmaIM", PyRep::Integer(sid_cap)).await as u64;
+        ctx.dispatch_rpc(s_ref, "dogmaIM", Some(d_oid), "Activate", &[PyRep::Integer(sm)], &HashMap::new(), None).await.unwrap();
+    }
     for _wave in 0..8 {
         let rem_npcs = with_pve_exploration_reg(&ctx, |reg| {
-            let s = reg.sites_by_system[&wh_c5_sys]
-                .iter()
-                .find(|s| s.site_id == combat_site_id)
-                .unwrap();
+            let s = reg.sites_by_system[&wh_c5_sys].iter().find(|s| s.site_id == combat_site_id).unwrap();
             let mut v = s.active_npc_ball_ids.clone();
             for cap in &s.active_escalation_capitals {
                 v.extend(cap.avenger_ball_ids.iter().copied());
@@ -368,32 +357,16 @@ async fn test_wormhole_sentries_capital_escalations_cap_drifter_downtime_e2e() {
             break;
         }
         for nid in live_ids {
-            warp_and_engage_ball(&ctx, &mut sess1, wh_c5_sys, dread_id, &guns1, nid, "site", PyRep::String(combat_site_id.clone())).await;
+            fleet_warp_and_engage_ball(&ctx, &mut [(&mut sess1, dread_id, &guns1), (&mut sess2, carrier_id, &guns2), (&mut sess3, dread2_id, &guns3)], wh_c5_sys, nid, "dungeon", PyRep::String(combat_site_id.clone())).await;
         }
     }
     let _ = sleeper_npcs;
     ctx.advance_secs(10);
     step_wormhole_pve_system(&ctx, wh_c5_sys, 10.0).await;
 
-    let relay_id = wh_sys
-        .list_balls()
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .find(|b| b.type_id == 41_589)
-        .map(|b| b.id);
+    let relay_id = wh_sys.list_balls().await.unwrap_or_default().into_iter().find(|b| b.type_id == 41_589).map(|b| b.id);
     let rid = relay_id.expect("clearing C5 Sleeper site with capitals must spawn Decloaked Transmission Relay (41589)");
-    warp_and_engage_ball(
-        &ctx,
-        &mut sess1,
-        wh_c5_sys,
-        dread_id,
-        &guns1,
-        rid,
-        "item",
-        PyRep::Integer(rid),
-    )
-    .await;
+    fleet_warp_and_engage_ball(&ctx, &mut [(&mut sess1, dread_id, &guns1), (&mut sess2, carrier_id, &guns2), (&mut sess3, dread2_id, &guns3)], wh_c5_sys, rid, "item", PyRep::Integer(rid)).await;
     ctx.advance_secs(12);
     step_wormhole_pve_system(&ctx, wh_c5_sys, 12.0).await;
     let drifter_boss = wh_sys

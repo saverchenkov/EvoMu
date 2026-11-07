@@ -17,11 +17,12 @@ fn shared_base_world() -> &'static (Arc<eve_sde::SdeRegistry>, eve_db::WorldStat
         let base_ctx = ServerContext::new();
         let _ = eve_server::world_seeder::seed_full_market_catalog(&base_ctx.db, &base_ctx.sde);
         let mut keep: HashSet<u32> = HashSet::from([
-            608, 623, 642, 644, 2006, 11_567, 11_963, 19_720, 19_722, 22_428, 23_911, 23_915, 28_352, 178, 181, 183, 184, 185, 193, 198, 201, 204,
-            205, 230, 238, 254, 262, 267, 380, 484, 486, 488, 494, 519, 1319, 2364, 2420, 2506, 2508, 2510, 2873, 2929, 3300, 3327, 3412, 3413,
-            3417, 3418, 3426, 3449, 3452, 3455, 3456, 3581, 3831, 9327, 10_190, 11_269, 11_299, 11_489, 12_779, 16_273, 16_274, 16_275, 17_648,
-            17_674, 17_686, 17_887, 17_888, 17_889, 17_938, 20_280, 20_316, 20_452, 21_096, 21_611, 22_175, 22_177, 24_550, 25_810, 25_811, 25_936,
-            28_756, 28_758, 30_013, 30_488, 33_180, 33_201, 37_298, 41_153, 41_314, 41_332, 44_992, 60_244, 78_848,
+            608, 623, 642, 644, 2006, 11_567, 11_963, 19_720, 19_722, 22_428, 23_911, 23_915, 28_352, 28_659, 28_665, 178, 181, 183, 184, 185, 193,
+            198, 201, 204, 205, 230, 238, 254, 262, 267, 380, 484, 486, 488, 494, 519, 1319, 1978, 2364, 2420, 2506, 2508, 2510, 2873, 2929, 3057,
+            3186, 3300, 3327, 3412, 3413, 3417, 3418, 3426, 3449, 3452, 3455, 3456, 3581, 3831, 9327, 10_190, 11_269, 11_299, 11_489, 12_775, 12_779,
+            12_816, 16_273, 16_274, 16_275, 17_648, 17_674, 17_686, 17_887, 17_888, 17_889, 17_938, 20_280, 20_316, 20_452, 21_096, 21_611, 22_175,
+            22_177, 24_550, 25_810, 25_811, 25_936, 28_756, 28_758, 30_013, 30_488, 33_180, 33_201, 33_400, 37_296, 37_298, 37_300, 37_304, 40_631, 41_153,
+            41_314, 41_330, 41_332, 44_992, 60_244, 78_848,
         ]);
         for t in base_ctx.sde.types.values() {
             let is_pg = matches!(t.group_id, 4050 | 4743);
@@ -38,7 +39,12 @@ fn shared_base_world() -> &'static (Arc<eve_sde::SdeRegistry>, eve_db::WorldStat
         let (seeds, mut req) = (keep.iter().copied().collect::<Vec<_>>(), std::collections::BTreeMap::new());
         for tid in seeds { collect_req_skills(&base_ctx.sde, tid, &mut req, 0); }
         keep.extend(req.keys().copied());
-        base_ctx.db.with_mut_snapshot(|s| s.market_orders.retain(|_, o| o.station_id == JITA_STATION && (!o.is_bid || o.type_id == 44_992) && keep.contains(&o.type_id)));
+        base_ctx.db.with_mut_snapshot(|s| {
+            s.market_orders.retain(|_, o| o.station_id == JITA_STATION && (!o.is_bid || o.type_id == 44_992) && keep.contains(&o.type_id));
+            for o in s.market_orders.values_mut().filter(|o| o.is_bid && o.type_id == 44_992) {
+                o.price = eve_db::IskCents::from_isk(5_000_000); o.vol_remaining = 10_000_000; o.vol_entered = 10_000_000; o.is_npc = true; o.escrow = eve_db::IskCents::from_isk(5_000_000 * 10_000_000);
+            }
+        });
         (base_ctx.sde.clone(), base_ctx.db.with_snapshot(Clone::clone))
     })
 }
@@ -52,9 +58,7 @@ pub fn fresh_player_ctx() -> ServerContext {
     ctx
 }
 pub struct TempSqliteFile(pub std::path::PathBuf);
-impl Drop for TempSqliteFile {
-    fn drop(&mut self) { for ext in ["", "-wal", "-shm"] { let _ = std::fs::remove_file(format!("{}{ext}", self.0.display())); } }
-}
+impl Drop for TempSqliteFile { fn drop(&mut self) { for ext in ["", "-wal", "-shm"] { let _ = std::fs::remove_file(format!("{}{ext}", self.0.display())); } } }
 fn reload_ctx_with_blob(ctx: &ServerContext, blob: Option<(&str, &str)>) -> ServerContext {
     let u = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let _g = TempSqliteFile(std::env::temp_dir().join(format!("evomu_parity_shard2_{}_{u}.sqlite", std::process::id())));
@@ -75,15 +79,9 @@ fn reload_ctx_with_blob(ctx: &ServerContext, blob: Option<(&str, &str)>) -> Serv
 }
 pub fn reload_ctx_from_sqlite(ctx: &ServerContext) -> ServerContext { reload_ctx_with_blob(ctx, None) }
 pub fn configure_sqlite_blob_and_reload(ctx: &ServerContext, blob_key: &str, blob_val: &str) -> ServerContext { reload_ctx_with_blob(ctx, Some((blob_key, blob_val))) }
-pub async fn rpc_res(ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
-    ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None).await
-}
-pub async fn rpc_ok(ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep]) -> PyRep {
-    rpc_res(ctx, sess, service, method, args).await.unwrap_or_else(|e| panic!("RPC {service}.{method} failed: {e:?}"))
-}
-pub async fn rpc_err(ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep]) -> BridgeRpcError {
-    rpc_res(ctx, sess, service, method, args).await.expect_err(&format!("Expected {service}.{method} to return Err"))
-}
+pub async fn rpc_res(ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> { ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None).await }
+pub async fn rpc_ok(ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep]) -> PyRep { rpc_res(ctx, sess, service, method, args).await.unwrap_or_else(|e| panic!("RPC {service}.{method} failed: {e:?}")) }
+pub async fn rpc_err(ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep]) -> BridgeRpcError { rpc_res(ctx, sess, service, method, args).await.expect_err(&format!("Expected {service}.{method} to return Err")) }
 fn extract_bound_id(rep: &PyRep) -> Option<i64> {
     match rep {
         PyRep::Integer(v) => Some(*v), PyRep::Tuple(t) => t.iter().find_map(extract_bound_id),
@@ -151,9 +149,10 @@ pub async fn create_player_pilot(ctx: &ServerContext, sess_id: u64, user: &str, 
 }
 
 pub async fn fund_pilot_isk(ctx: &ServerContext, sess: &mut SessionState, packs: i64) {
+    let packs = packs.max(20);
     rpc_ok(ctx, sess, "FastCheckoutService", "BuyOffer", &[PyRep::Integer(4), PyRep::Integer(packs)]).await;
     let plex_best = rpc_ok(ctx, sess, "marketProxy", "GetPlexBest", &[]).await;
-    let p = (plex_best.dict_get("bestBidPrice").and_then(PyRep::as_f64).unwrap_or(4_700_000.0) * 0.99).max(1_000.0);
+    let p = (plex_best.dict_get("bestBidPrice").and_then(PyRep::as_f64).unwrap_or(5_000_000.0) * 0.99).max(1_000.0);
     let s = 10.0_f64.powi(p.log10().floor() as i32 - 3);
     rpc_ok(ctx, sess, "marketProxy", "PlacePlexSellOrder", &[PyRep::Real((p / s).floor() * s), PyRep::Integer(packs * 500), PyRep::Integer(90)]).await;
 }
@@ -204,15 +203,12 @@ pub async fn undock_from_station(ctx: &ServerContext, sess: &mut SessionState, s
 
 pub async fn wait_for_warp_end(ctx: &ServerContext, sys_id: SolarSystemId, ship_id: i64) {
     let sys_h = ctx.systems.get_or_spawn(sys_id);
-    let p0 = sys_h.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position);
     let mut saw_warp = false;
     for i in 0..80 {
-        let _ = sys_h.step_manual(if i == 0 { 12.0 } else { 40.0 }).await;
         match sys_h.get_ball_snapshot(ship_id).await.ok().flatten() {
-            Some((_, b)) if matches!(b.mode, eve_destiny::MovementMode::Warp { .. }) => saw_warp = true,
-            Some((_, b)) if saw_warp || p0.is_some_and(|s| b.position.distance(s) > 10_000.0) || i >= 4 => break,
-            _ if saw_warp || i >= 4 => break,
-            _ => {}
+            Some((_, b)) if matches!(b.mode, eve_destiny::MovementMode::Warp { .. }) => { saw_warp = true; let _ = sys_h.step_manual(60.0).await; }
+            _ if saw_warp || i >= 1 => break,
+            _ => { let _ = sys_h.step_manual(15.0).await; }
         }
     }
 }
@@ -226,13 +222,14 @@ pub async fn move_ship_to_ball(ctx: &ServerContext, sess: &mut SessionState, sys
             let Some(((_, s), (_, t))) = sys_h.get_ball_snapshot(ship_id).await.ok().flatten().zip(sys_h.get_ball_snapshot(tid).await.ok().flatten()) else { break };
             if s.position.distance(t.position) < 151_000.0 { break; }
         } else if hop > 0 { break; }
-        if hop > 0 { let _ = sys_h.step_manual(240.0).await; }
         match ctx.dispatch_rpc(sess, "beyonce", Some(b_oid), "CmdWarpToStuff", &[PyRep::String(stuff_type.into()), target_rep.clone()], &empty, None).await {
             Ok(_) => wait_for_warp_end(ctx, sys_id, ship_id).await,
-            Err(e) if (e.code == "NotEnoughCapacitor" || e.code == "ShipInvulnerable") && hop < 22 => {
-                let _ = sys_h.step_manual(65.0).await;
-                continue;
+            Err(e) if e.code == "ShipInvulnerable" && hop < 22 => {
+                let _ = ctx.dispatch_rpc(sess, "beyonce", Some(b_oid), "CmdStop", &[], &empty, None).await;
+                let _ = sys_h.step_manual(60.0).await;
+                let _ = sys_h.step_manual(10.0).await;
             }
+            Err(e) if e.code == "NotEnoughCapacitor" && hop < 22 => { for _ in 0..4 { let _ = sys_h.step_manual(60.0).await; } }
             Err(_) => break,
         }
     }
@@ -243,21 +240,30 @@ pub async fn move_ship_to_ball(ctx: &ServerContext, sess: &mut SessionState, sys
     let d0 = s.position.distance(t.position);
     if in_range(d0, s.radius, t.radius) || d0 >= 200_000.0 { return; }
     let prop_id = ctx.db.with_snapshot(|s| s.items.values().find(|it| it.location_id == ship_id && (19..=26).contains(&(it.flag as u16)) && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 46)).map(|it| it.item_id));
-    if d0 > 5_000.0 { if let Some(pid) = prop_id { let _ = sys_h.step_manual(120.0).await; let _ = ctx.dispatch_rpc(sess, "dogmaIM", None, "Activate", &[PyRep::Integer(pid)], &empty, None).await; } }
-    for (phase, max_iters) in [(0_u8, 120_u32), (1_u8, 60_u32)] {
-        let Some(((_, s), (_, t))) = sys_h.get_ball_snapshot(ship_id).await.ok().flatten().zip(sys_h.get_ball_snapshot(tid).await.ok().flatten()) else { break };
-        if in_range(s.position.distance(t.position), s.radius, t.radius) { break; }
-        let (cmd, args) = if phase == 0 { ("CmdFollowBall", vec![PyRep::Integer(tid), PyRep::Real(0.0)]) } else { ("CmdGotoPoint", vec![PyRep::Real(t.position.x), PyRep::Real(t.position.y), PyRep::Real(t.position.z)]) };
-        let _ = ctx.dispatch_rpc(sess, "beyonce", Some(b_oid), cmd, &args, &empty, None).await;
-        let _ = ctx.dispatch_rpc(sess, "beyonce", Some(b_oid), "CmdSetSpeedFraction", &[PyRep::Real(1.0)], &empty, None).await;
-        for _ in 0..max_iters {
-            let Some(((_, s2), (_, t2))) = sys_h.get_ball_snapshot(ship_id).await.ok().flatten().zip(sys_h.get_ball_snapshot(tid).await.ok().flatten()) else { break };
-            let d = s2.position.distance(t2.position);
-            if in_range(d, s2.radius, t2.radius) { break; }
-            let rem_d = if is_surf_target { (d - t2.radius - s2.radius).max(0.0) } else { d };
-            let dt = if phase == 1 { if rem_d > 4_000.0 { 12.0 } else { 1.0 } } else if rem_d > 12_000.0 { 25.0 } else if rem_d > 1_800.0 { if is_surf_target { 12.0 } else { 5.0 } } else { break };
-            let _ = sys_h.step_manual(dt).await;
+    if d0 > 5_000.0 {
+        if let Some(pid) = prop_id {
+            if ctx.dispatch_rpc(sess, "dogmaIM", None, "Activate", &[PyRep::Integer(pid)], &empty, None).await.is_err() {
+                let _ = sys_h.step_manual(65.0).await;
+                let _ = ctx.dispatch_rpc(sess, "dogmaIM", None, "Activate", &[PyRep::Integer(pid)], &empty, None).await;
+            }
         }
+    }
+    let _ = ctx.dispatch_rpc(sess, "beyonce", Some(b_oid), "CmdGotoPoint", &[PyRep::Real(t.position.x), PyRep::Real(t.position.y), PyRep::Real(t.position.z)], &empty, None).await;
+    let _ = ctx.dispatch_rpc(sess, "beyonce", Some(b_oid), "CmdSetSpeedFraction", &[PyRep::Real(1.0)], &empty, None).await;
+    for iter in 0..120_u32 {
+        let Some(((_, s2), (_, t2))) = sys_h.get_ball_snapshot(ship_id).await.ok().flatten().zip(sys_h.get_ball_snapshot(tid).await.ok().flatten()) else { break };
+        let d = s2.position.distance(t2.position);
+        if in_range(d, s2.radius, t2.radius) { break; }
+        let rem_d = if is_surf_target { (d - t2.radius - s2.radius).max(0.0) } else { d };
+        if rem_d < 4_500.0 {
+            if let Some(pid) = prop_id { let _ = ctx.dispatch_rpc(sess, "dogmaIM", None, "Deactivate", &[PyRep::Integer(pid)], &empty, None).await; }
+        }
+        if iter % 15 == 14 || !matches!(s2.mode, eve_destiny::MovementMode::GotoDirection { .. } | eve_destiny::MovementMode::Follow { .. }) || s2.speed_fraction < 0.99 {
+            let _ = ctx.dispatch_rpc(sess, "beyonce", Some(b_oid), "CmdGotoPoint", &[PyRep::Real(t2.position.x), PyRep::Real(t2.position.y), PyRep::Real(t2.position.z)], &empty, None).await;
+            let _ = ctx.dispatch_rpc(sess, "beyonce", Some(b_oid), "CmdSetSpeedFraction", &[PyRep::Real(1.0)], &empty, None).await;
+        }
+        let max_step = if rem_d < 4_500.0 { 1.0 } else { 55.0 };
+        let _ = sys_h.step_manual(((rem_d / s2.max_velocity.max(50.0)) * 0.85).clamp(0.4, max_step)).await;
     }
     if let Some(pid) = prop_id { let _ = ctx.dispatch_rpc(sess, "dogmaIM", None, "Deactivate", &[PyRep::Integer(pid)], &empty, None).await; }
     let _ = ctx.dispatch_rpc(sess, "beyonce", Some(b_oid), "CmdStop", &[], &empty, None).await;
@@ -273,62 +279,44 @@ pub async fn warp_and_dock_at_station(ctx: &ServerContext, sess: &mut SessionSta
     let sys_h = ctx.systems.get_or_spawn(sys_id);
     for _ in 0..10 {
         if sess.character_id.is_some_and(|cid| ctx.db.get_character(cid).ok().and_then(|c| c.station_id) == Some(target_station_id)) { break; }
-        let _ = sys_h.step_manual(10.0).await;
-        ctx.advance_secs(10);
+        let _ = sys_h.step_manual(10.0).await; ctx.advance_secs(10);
     }
     if let Some(ch) = sess.character_id.and_then(|cid| ctx.db.get_character(cid).ok()) {
-        sess.solar_system_id = Some(ch.solar_system_id); sess.station_id = ch.station_id;
-        sess.region_id = ctx.sde.solar_systems.get(&ch.solar_system_id).map(|s| s.region_id);
+        sess.solar_system_id = Some(ch.solar_system_id); sess.station_id = ch.station_id; sess.region_id = ctx.sde.solar_systems.get(&ch.solar_system_id).map(|s| s.region_id);
     }
 }
-
 pub async fn fly_stargates_to(ctx: &ServerContext, sess: &mut SessionState, dest_sys: SolarSystemId) {
     let start_sys = sess.solar_system_id.unwrap_or(JITA_SYS);
     if start_sys == dest_sys { return; }
-    if sess.station_id.is_some() {
-        undock_from_station(ctx, sess, start_sys).await;
-        ctx.advance_secs(11);
-    }
+    if sess.station_id.is_some() { undock_from_station(ctx, sess, start_sys).await; ctx.advance_secs(11); }
     let ship_id = sess.ship_id.expect("active ship in fly_stargates_to");
     let (mut visited, mut prev, mut queue) = (HashSet::from([start_sys]), HashMap::new(), VecDeque::from([start_sys]));
     while let Some(cur) = queue.pop_front() {
         if cur == dest_sys { break; }
-        for j in ctx.sde.jumps.values().filter(|j| j.from_solar_system_id == cur) {
-            if visited.insert(j.to_solar_system_id) {
-                prev.insert(j.to_solar_system_id, (cur, j.stargate_id, j.destination_stargate_id));
-                queue.push_back(j.to_solar_system_id);
-            }
-        }
+        for j in ctx.sde.jumps.values().filter(|j| j.from_solar_system_id == cur && (j.to_solar_system_id != 30_100_000 || dest_sys == 30_100_000)) { if visited.insert(j.to_solar_system_id) { prev.insert(j.to_solar_system_id, (cur, j.stargate_id, j.destination_stargate_id)); queue.push_back(j.to_solar_system_id); } }
     }
     let (mut hops, mut trace) = (Vec::new(), dest_sys);
-    while trace != start_sys {
-        let (p_sys, fg, tg) = prev[&trace];
-        hops.push((p_sys, fg, tg, trace));
-        trace = p_sys;
-    }
+    while trace != start_sys { let (p_sys, fg, tg) = prev[&trace]; hops.push((p_sys, fg, tg, trace)); trace = p_sys; }
     hops.reverse();
     for (cur_sys, fg, _tg, next_sys) in hops {
         let _ = bind_service(ctx, sess, "beyonce", PyRep::Integer(i64::from(cur_sys))).await;
         move_ship_to_ball(ctx, sess, cur_sys, ship_id, "item", PyRep::Integer(fg)).await;
         ctx.advance_secs(11);
         rpc_ok(ctx, sess, "beyonce", "CmdStargateJump", &[PyRep::Integer(fg), PyRep::Integer(i64::from(next_sys))]).await;
+        sess.solar_system_id = Some(next_sys);
     }
+    sess.solar_system_id = Some(dest_sys); sess.station_id = None; sess.region_id = ctx.sde.solar_systems.get(&dest_sys).map(|s| s.region_id); let _ = bind_service(ctx, sess, "beyonce", PyRep::Integer(i64::from(dest_sys))).await;
 }
-
 pub fn drain_all_notifications(ctx: &ServerContext, sess: &mut SessionState, char_id: i64) -> Vec<(String, Vec<PyRep>)> {
     let mut out = sess.drain_notifications();
-    if let Ok(mut pending) = ctx.pending_notifications.write() {
-        if let Some(items) = pending.remove(&char_id) { out.extend(items.into_iter().map(|i| (i.event, i.args))); }
-    }
+    if let Ok(mut pending) = ctx.pending_notifications.write() { if let Some(items) = pending.remove(&char_id) { out.extend(items.into_iter().map(|i| (i.event, i.args))); } }
     out
 }
-
 pub async fn upgrade_to_omega(ctx: &ServerContext, sess: &mut SessionState) {
     if sess.address.is_empty() { sess.address = "127.0.0.1:26000".into(); }
-    rpc_ok(ctx, sess, "FastCheckoutService", "BuyOffer", &[PyRep::Integer(4), PyRep::Integer(18)]).await;
-    rpc_ok(ctx, sess, "storeManager", "buy_offer", &[PyRep::Integer(1002), PyRep::String("PLX".into()), PyRep::Integer(80)]).await;
+    rpc_ok(ctx, sess, "FastCheckoutService", "BuyOffer", &[PyRep::Integer(4), PyRep::Integer(35)]).await;
+    rpc_ok(ctx, sess, "storeManager", "buy_offer", &[PyRep::Integer(1001), PyRep::String("PLX".into()), PyRep::Integer(60)]).await;
 }
-
 fn collect_req_skills(sde: &eve_sde::SdeRegistry, tid: u32, out: &mut std::collections::BTreeMap<u32, u8>, depth: u8) {
     if depth > 8 { return; }
     let Some(t) = sde.types.get(&tid) else { return };
@@ -343,7 +331,6 @@ fn collect_req_skills(sde: &eve_sde::SdeRegistry, tid: u32, out: &mut std::colle
         }
     }
 }
-
 pub async fn ensure_skills_for_types(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, station_id: i64, type_ids: &[u32]) {
     let mut req = std::collections::BTreeMap::from([(3300_u32, 1_u8), (3327, 1), (3413, 4), (3417, 4), (3418, 4), (3426, 4), (3449, 4), (3452, 4), (3455, 4)]);
     let mut needs_omega = false;
@@ -352,10 +339,7 @@ pub async fn ensure_skills_for_types(ctx: &ServerContext, sess: &mut SessionStat
         if let Some(t) = ctx.sde.types.get(&tid) {
             if t.category_id == 16 { req.entry(tid).and_modify(|e| *e = (*e).max(4)).or_insert(4); }
             if t.default_attributes.get(&861).copied().unwrap_or(0.0) > 0.0 {
-                for &(js, jl) in &[(3456_u32, 4_u8), (21_611, 5)] {
-                    req.entry(js).and_modify(|e| *e = (*e).max(jl)).or_insert(jl);
-                    collect_req_skills(&ctx.sde, js, &mut req, 0);
-                }
+                for &(js, jl) in &[(3456_u32, 4_u8), (21_611, 5)] { req.entry(js).and_modify(|e| *e = (*e).max(jl)).or_insert(jl); collect_req_skills(&ctx.sde, js, &mut req, 0); }
             }
             if matches!(t.group_id, 485 | 547 | 4594 | 1538 | 30 | 659 | 883) || (t.category_id == 6 && !matches!(t.group_id, 25 | 237 | 31)) { needs_omega = true; }
         }
@@ -412,7 +396,7 @@ pub async fn buy_fit_combat_ship_with_ammo(ctx: &ServerContext, sess: &mut Sessi
         });
         let cur_sz = ctx.sde.types.get(&turret_type_id).and_then(|t| t.default_attributes.get(&128).copied()).unwrap_or(1.0);
         let cur_pg = ctx.sde.types.get(&turret_type_id).and_then(|t| t.default_attributes.get(&30).copied()).unwrap_or(10.0);
-        if (cur_sz - want_sz).abs() > 0.1 || cur_pg > ship_pg || ctx.sde.types.get(&turret_type_id).is_some_and(|t| !matches!(t.group_id, 53 | 55 | 74)) {
+        if (cur_sz - want_sz).abs() > 0.1 || cur_pg > ship_pg || ctx.sde.types.get(&turret_type_id).is_some_and(|t| !matches!(t.group_id, 53 | 55 | 74 | 1986)) {
             let mut cands: Vec<_> = ctx.sde.types.values().filter(|t| {
                 t.published && t.meta_group_id.unwrap_or(1) == 1 && matches!(t.group_id, 55 | 53 | 74) && t.base_price > 0.0 && !t.name.starts_with("Civilian")
                     && t.default_attributes.get(&128).copied().is_some_and(|sz| (sz - want_sz).abs() < 0.1 || (want_sz > 3.5 && (sz - 3.0).abs() < 0.1))
@@ -451,7 +435,7 @@ pub async fn buy_fit_combat_ship_with_ammo(ctx: &ServerContext, sess: &mut Sessi
         let armor = if pg_of(11269) <= free_pg && cpu_of(11269) <= free_cpu { 11269 } else { 11299 };
         if low_slots >= 1 && pg_of(armor) <= free_pg && cpu_of(armor) <= free_cpu { free_pg -= pg_of(armor); free_cpu -= cpu_of(armor); extras.push((armor, 11)); train_tids.push(armor); }
         let dmg_name = match ctx.sde.types.get(&turret_type_id).map(|t| t.group_id) {
-            Some(55) => "Gyrostabilizer II", Some(74) => "Magnetic Field Stabilizer II", _ => "Heat Sink II",
+            Some(55) => "Gyrostabilizer II", Some(74) => "Magnetic Field Stabilizer II", Some(1986) => "Entropic Radiation Sink II", _ => "Heat Sink II",
         };
         if let Some(dmg_mod) = ctx.sde.types.values().find(|t| t.published && t.category_id == 7 && t.name == dmg_name).map(|t| t.type_id) {
             for slot_idx in 0..low_slots.saturating_sub(1).min(3) {
@@ -467,7 +451,6 @@ pub async fn buy_fit_combat_ship_with_ammo(ctx: &ServerContext, sess: &mut Sessi
     rpc_ok(ctx, sess, "ship", "Board", &[PyRep::Integer(ship_id)]).await;
     ctx.advance_secs(11);
     sess.ship_id = Some(ship_id);
-
     let mut guns = Vec::new();
     for idx in 0..gun_count {
         let gid = buy_item_at_station(ctx, sess, char_id, station_id, turret_type_id, 1).await;
@@ -486,111 +469,126 @@ pub async fn buy_fit_combat_ship_with_ammo(ctx: &ServerContext, sess: &mut Sessi
     }
     (ship_id, guns)
 }
-
 pub async fn warp_and_engage_ball(ctx: &ServerContext, sess: &mut SessionState, sys_id: SolarSystemId, ship_id: i64, guns: &[i64], target_ball_id: i64, warp_stuff_type: &str, warp_target: PyRep) {
+    fleet_warp_and_engage_ball(ctx, &mut [(sess, ship_id, guns)], sys_id, target_ball_id, warp_stuff_type, warp_target).await;
+}
+pub async fn fleet_warp_and_engage_ball(ctx: &ServerContext, fleet: &mut [(&mut SessionState, i64, &[i64])], sys_id: SolarSystemId, target_ball_id: i64, warp_stuff_type: &str, warp_target: PyRep) {
     let sys = ctx.systems.get_or_spawn(sys_id);
     if sys.get_combat_state(target_ball_id).await.ok().flatten().is_none() || sys.get_ball_snapshot(target_ball_id).await.ok().flatten().is_none() { return; }
     let empty = HashMap::new();
-    let b_oid = bind_service(ctx, sess, "beyonce", PyRep::Integer(i64::from(sys_id))).await as u64;
-    let dist_to = || async { sys.get_ball_snapshot(ship_id).await.ok().flatten().zip(sys.get_ball_snapshot(target_ball_id).await.ok().flatten()).map_or(0.0, |((_, sb), (_, tb))| sb.position.distance(tb.position)) };
-    for hop in 0..24 {
-        if dist_to().await < 151_000.0 { break; }
-        let _ = sys.step_manual(if hop > 0 { 240.0 } else { 60.0 }).await;
-        match ctx.dispatch_rpc(sess, "beyonce", Some(b_oid), "CmdWarpToStuff", &[PyRep::String(warp_stuff_type.into()), warp_target.clone()], &empty, None).await {
-            Ok(_) => wait_for_warp_end(ctx, sys_id, ship_id).await,
-            Err(e) if e.code == "NotEnoughCapacitor" && hop < 22 => continue,
-            Err(_) => break,
-        }
-    }
-    if dist_to().await >= 151_000.0 {
-        if let Some((_, tb)) = sys.get_ball_snapshot(target_ball_id).await.ok().flatten() {
-            if let Some(rigid) = sys.list_balls().await.unwrap_or_default().into_iter().filter(|b| b.id != ship_id && matches!(b.mode, eve_destiny::MovementMode::Rigid)).min_by(|a, b| a.position.distance(tb.position).partial_cmp(&b.position.distance(tb.position)).unwrap_or(std::cmp::Ordering::Equal)) {
-                let _ = sys.step_manual(240.0).await;
-                let _ = ctx.dispatch_rpc(sess, "beyonce", Some(b_oid), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(rigid.id)], &empty, None).await;
-                wait_for_warp_end(ctx, sys_id, ship_id).await;
+    let mut best_dist = 25_000.0_f64;
+    let mut w_cyc = 8.0_f64;
+    let mut b_oids = Vec::with_capacity(fleet.len());
+    for (sess, ship_id, guns) in fleet.iter_mut() {
+        let b_oid = bind_service(ctx, sess, "beyonce", PyRep::Integer(i64::from(sys_id))).await as u64;
+        b_oids.push(b_oid);
+        let (w_opt, w_fo, cyc, is_msl) = guns.first().and_then(|&gid| ctx.db.with_snapshot(|s| s.items.get(&gid).and_then(|it| ctx.sde.types.get(&it.type_id)))).map_or((12_000.0, 8_000.0, 8.0, false), |t| (
+            t.default_attributes.get(&54).copied().unwrap_or(10_000.0),
+            t.default_attributes.get(&158).copied().unwrap_or(5_000.0),
+            (t.default_attributes.get(&51).copied().unwrap_or(8_000.0) / 1000.0).clamp(4.0, 15.0),
+            matches!(t.group_id, 506..=511),
+        ));
+        w_cyc = w_cyc.min(cyc);
+        let engage_dist = if is_msl { 25_000.0 } else { (w_opt + w_fo * 0.65).max(8_000.0) };
+        if b_oids.len() == 1 { best_dist = engage_dist; } else { best_dist = best_dist.min(engage_dist); }
+        let dist_to = || async { sys.get_ball_snapshot(*ship_id).await.ok().flatten().zip(sys.get_ball_snapshot(target_ball_id).await.ok().flatten()).map_or(0.0, |((_, sb), (_, tb))| sb.position.distance(tb.position)) };
+        for hop in 0..24 {
+            if dist_to().await < 151_000.0 { break; }
+            if hop > 0 { let _ = sys.step_manual(240.0).await; }
+            match ctx.dispatch_rpc(sess, "beyonce", Some(b_oid), "CmdWarpToStuff", &[PyRep::String(warp_stuff_type.into()), warp_target.clone()], &empty, None).await {
+                Ok(_) => wait_for_warp_end(ctx, sys_id, *ship_id).await,
+                Err(e) if (e.code == "NotEnoughCapacitor" || e.code == "ShipInvulnerable") && hop < 22 => { let _ = sys.step_manual(65.0).await; }
+                Err(_) => break,
             }
         }
-    }
-    let prop_id = ctx.db.with_snapshot(|s| s.items.values().find(|it| it.location_id == ship_id && (19..=26).contains(&(it.flag as u16)) && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 46)).map(|it| it.item_id));
-    if dist_to().await > 10_000.0 {
-        if let Some(pid) = prop_id { let _ = sys.step_manual(90.0).await; let _ = ctx.dispatch_rpc(sess, "dogmaIM", None, "Activate", &[PyRep::Integer(pid)], &empty, None).await; }
-        let _ = ctx.dispatch_rpc(sess, "beyonce", Some(b_oid), "CmdFollowBall", &[PyRep::Integer(target_ball_id), PyRep::Real(1_500.0)], &empty, None).await;
-        let _ = ctx.dispatch_rpc(sess, "beyonce", Some(b_oid), "CmdSetSpeedFraction", &[PyRep::Real(1.0)], &empty, None).await;
-        for _ in 0..80 { let d = dist_to().await; if d <= 10_000.0 { break; } let _ = sys.step_manual(if d > 25_000.0 { 22.0 } else { 8.0 }).await; }
-    }
-    if let Some(pid) = prop_id { let _ = ctx.dispatch_rpc(sess, "dogmaIM", None, "Deactivate", &[PyRep::Integer(pid)], &empty, None).await; }
-    if let Ok(locks) = sys.get_target_locks(ship_id).await {
-        for lk in locks.into_iter().filter(|l| l.target_id != target_ball_id) { let _ = ctx.dispatch_rpc(sess, "dogmaIM", None, "RemoveTarget", &[PyRep::Integer(lk.target_id)], &empty, None).await; }
-    }
-    let _ = ctx.dispatch_rpc(sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(target_ball_id)], &empty, None).await;
-    for _ in 0..6 {
-        if sys.get_target_locks(ship_id).await.ok().is_some_and(|ls| ls.iter().any(|l| l.target_id == target_ball_id && l.locked)) { break; }
-        let _ = sys.step_manual(6.0).await;
-    }
-    for step in 0..220 {
-        if sys.get_combat_state(target_ball_id).await.ok().flatten().is_none() || sys.get_ball_snapshot(target_ball_id).await.ok().flatten().is_none() { break; }
-        if sys.get_combat_state(ship_id).await.ok().flatten().is_none() || sys.get_ball_snapshot(ship_id).await.ok().flatten().is_none() { return; }
-        if step == 0 || dist_to().await > 12_000.0 {
-            let _ = ctx.dispatch_rpc(sess, "beyonce", Some(b_oid), "CmdFollowBall", &[PyRep::Integer(target_ball_id), PyRep::Real(1_200.0)], &empty, None).await;
+        if dist_to().await >= 151_000.0 {
+            if let Some((_, tb)) = sys.get_ball_snapshot(target_ball_id).await.ok().flatten() {
+                if let Some(rigid) = sys.list_balls().await.unwrap_or_default().into_iter().filter(|b| b.id != *ship_id && matches!(b.mode, eve_destiny::MovementMode::Rigid)).min_by(|a, b| a.position.distance(tb.position).partial_cmp(&b.position.distance(tb.position)).unwrap_or(std::cmp::Ordering::Equal)) {
+                    let _ = sys.step_manual(240.0).await;
+                    let _ = ctx.dispatch_rpc(sess, "beyonce", Some(b_oid), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(rigid.id)], &empty, None).await;
+                    wait_for_warp_end(ctx, sys_id, *ship_id).await;
+                }
+            }
+        }
+        let prop_id = ctx.db.with_snapshot(|s| s.items.values().find(|it| it.location_id == *ship_id && (19..=26).contains(&(it.flag as u16)) && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 46)).map(|it| it.item_id));
+        if dist_to().await > engage_dist {
+            if let Some(pid) = prop_id {
+                if ctx.dispatch_rpc(sess, "dogmaIM", None, "Activate", &[PyRep::Integer(pid)], &empty, None).await.is_err() {
+                    let _ = sys.step_manual(65.0).await;
+                    let _ = ctx.dispatch_rpc(sess, "dogmaIM", None, "Activate", &[PyRep::Integer(pid)], &empty, None).await;
+                }
+            }
+            let _ = ctx.dispatch_rpc(sess, "beyonce", Some(b_oid), "CmdFollowBall", &[PyRep::Integer(target_ball_id), PyRep::Real(1_500.0)], &empty, None).await;
             let _ = ctx.dispatch_rpc(sess, "beyonce", Some(b_oid), "CmdSetSpeedFraction", &[PyRep::Real(1.0)], &empty, None).await;
-        }
-        for &gid in guns {
-            match ctx.dispatch_rpc(sess, "dogmaIM", None, "Activate", &[PyRep::Integer(gid), PyRep::String("targetAttack".into()), PyRep::Integer(target_ball_id)], &empty, None).await {
-                Ok(rep) if rep.dict_get("destroyed") == Some(&PyRep::Bool(true)) => { let _ = sys.step_manual(1.0).await; return; }
-                Ok(_) => {}
-                Err(e) if e.code == "ModuleAlreadyActive" => {}
-                Err(e) if e.code == "ModuleIsReloading" => { let _ = sys.step_manual(12.0).await; break; }
-                Err(e) if e.code == "TargetNotLocked" => {
-                    let _ = ctx.dispatch_rpc(sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(target_ball_id)], &empty, None).await;
-                    let _ = sys.step_manual(6.0).await; break;
-                }
-                Err(e) if e.code == "TargetOutOfRange" => {
-                    let _ = ctx.dispatch_rpc(sess, "beyonce", Some(b_oid), "CmdFollowBall", &[PyRep::Integer(target_ball_id), PyRep::Real(800.0)], &empty, None).await;
-                    let _ = ctx.dispatch_rpc(sess, "beyonce", Some(b_oid), "CmdSetSpeedFraction", &[PyRep::Real(1.0)], &empty, None).await;
-                    let _ = sys.step_manual(15.0).await; break;
-                }
-                Err(e) if e.code == "NotEnoughCapacitor" => { let _ = sys.step_manual(18.0).await; break; }
-                Err(e) if e.code == "NoAmmoLoaded" => {
-                    let cargo_ammo = ctx.db.with_snapshot(|s| s.items.values().find(|it| it.location_id == ship_id && it.flag == eve_db::InventoryFlag::Cargo && it.quantity > 0 && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 8)).map(|it| it.item_id));
-                    if let Some(aid) = cargo_ammo {
-                        let _ = ctx.dispatch_rpc(sess, "dogmaIM", None, "LoadAmmo", &[PyRep::Integer(ship_id), PyRep::List(guns.iter().map(|&g| PyRep::Integer(g)).collect()), PyRep::List(vec![PyRep::Integer(aid)])], &empty, None).await;
-                        break;
-                    }
-                    return;
-                }
-                Err(e) => panic!("dogmaIM.Activate failed on ball {target_ball_id}: {e:?}"),
+            for _ in 0..80 {
+                let Some(((_, sb), (_, tb))) = sys.get_ball_snapshot(*ship_id).await.ok().flatten().zip(sys.get_ball_snapshot(target_ball_id).await.ok().flatten()) else { break };
+                let d = sb.position.distance(tb.position);
+                if d <= engage_dist * 0.85 { break; }
+                let max_s = if d < engage_dist * 1.5 { 2.0 } else { 55.0 };
+                let _ = sys.step_manual(((d - engage_dist * 0.7) / sb.max_velocity.max(80.0) * 0.8).clamp(0.5, max_s)).await;
             }
         }
-        let _ = sys.step_manual(7.0).await;
+        if let Some(pid) = prop_id { let _ = ctx.dispatch_rpc(sess, "dogmaIM", None, "Deactivate", &[PyRep::Integer(pid)], &empty, None).await; }
+        let _ = ctx.dispatch_rpc(sess, "beyonce", Some(b_oid), "CmdStop", &[], &empty, None).await;
+        if let Ok(locks) = sys.get_target_locks(*ship_id).await {
+            for lk in locks.into_iter().filter(|l| l.target_id != target_ball_id) { let _ = ctx.dispatch_rpc(sess, "dogmaIM", None, "RemoveTarget", &[PyRep::Integer(lk.target_id)], &empty, None).await; }
+        }
+        let _ = ctx.dispatch_rpc(sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(target_ball_id)], &empty, None).await;
+    }
+    for _ in 0..4 {
+        let mut locked = true;
+        for (_, sid, _) in fleet.iter() { if !sys.get_target_locks(*sid).await.ok().is_some_and(|ls| ls.iter().any(|l| l.target_id == target_ball_id && l.locked)) { locked = false; break; } }
+        if locked { break; }
+        let _ = sys.step_manual(24.0).await;
+    }
+    for _step in 0..220 {
+        if sys.get_combat_state(target_ball_id).await.ok().flatten().is_none() || sys.get_ball_snapshot(target_ball_id).await.ok().flatten().is_none() { break; }
+        let mut any_alive = false;
+        for (idx, (sess, ship_id, guns)) in fleet.iter_mut().enumerate() {
+            if sys.get_combat_state(*ship_id).await.ok().flatten().is_none() || sys.get_ball_snapshot(*ship_id).await.ok().flatten().is_none() { continue; }
+            any_alive = true;
+            if let Some(((_, sb), (_, tb))) = sys.get_ball_snapshot(*ship_id).await.ok().flatten().zip(sys.get_ball_snapshot(target_ball_id).await.ok().flatten()) {
+                if sb.position.distance(tb.position) > best_dist * 1.15 {
+                    let _ = ctx.dispatch_rpc(sess, "beyonce", Some(b_oids[idx]), "CmdFollowBall", &[PyRep::Integer(target_ball_id), PyRep::Real((best_dist * 0.5).max(1_200.0))], &empty, None).await;
+                    let _ = ctx.dispatch_rpc(sess, "beyonce", Some(b_oids[idx]), "CmdSetSpeedFraction", &[PyRep::Real(1.0)], &empty, None).await;
+                }
+            }
+            let (mut need_reload, mut wait_reload) = (false, false);
+            for &gid in *guns {
+                match ctx.dispatch_rpc(sess, "dogmaIM", None, "Activate", &[PyRep::Integer(gid), PyRep::String("targetAttack".into()), PyRep::Integer(target_ball_id)], &empty, None).await {
+                    Ok(rep) if rep.dict_get("destroyed") == Some(&PyRep::Bool(true)) => { let _ = sys.step_manual(1.0).await; return; }
+                    Err(e) if e.code == "NoAmmoLoaded" => { need_reload = true; }
+                    Err(e) if matches!(e.code.as_str(), "ModuleIsReloading" | "ModuleReloading") => { wait_reload = true; }
+                    Ok(_) | Err(_) => {}
+                }
+            }
+            if need_reload { if let Some(aid) = guns.first().and_then(|gid| ctx.db.with_snapshot(|s| s.items.get(gid).and_then(|m| ctx.sde.types.get(&m.type_id)).and_then(|wt| s.items.values().find(|i| i.location_id == *ship_id && matches!(i.flag as u16, 5 | 136) && i.quantity >= guns.len() as i32 && ctx.sde.types.get(&i.type_id).is_some_and(|ct| ServerContext::is_charge_compatible_with_weapon(wt, ct))).map(|i| i.item_id)))) { let _ = ctx.dispatch_rpc(sess, "dogmaIM", None, "LoadAmmo", &[PyRep::Integer(*ship_id), PyRep::List(guns.iter().map(|&g| PyRep::Integer(g)).collect()), PyRep::List(vec![PyRep::Integer(aid)])], &empty, None).await; wait_reload = true; } }
+            if wait_reload { ctx.advance_secs(11); }
+        }
+        if !any_alive { return; }
+        let _ = sys.step_manual(w_cyc).await;
     }
 }
-
 pub async fn find_kspace_entrance_to_c5(ctx: &ServerContext, required_jump_mass_kg: f64) -> (SolarSystemId, String, SolarSystemId) {
     let jita_pos = ctx.sde.solar_systems.get(&JITA_SYS).map(|s| glam::DVec3::from_array(s.galactic_pos_ly)).unwrap_or(glam::DVec3::ZERO);
-    let mut kspace: Vec<(SolarSystemId, f64)> = ctx.sde.solar_systems.iter()
-        .filter(|(&sid, sys)| sid < 31_000_000 && (sid as usize) % 6 == 4 && sys.region_id != 10_000_070 && sys.security_status < 0.45)
-        .filter_map(|(&sid, sys)| { let d = glam::DVec3::from_array(sys.galactic_pos_ly).distance(jita_pos); (d <= 12.0).then_some((sid, d)) })
-        .collect();
+    let mut kspace: Vec<(SolarSystemId, f64)> = ctx.sde.solar_systems.iter().filter(|(&sid, sys)| sid < 31_000_000 && (sid as usize) % 6 == 4 && sys.region_id != 10_000_070 && sys.security_status < 0.45).filter_map(|(&sid, sys)| { let d = glam::DVec3::from_array(sys.galactic_pos_ly).distance(jita_pos); (d <= 12.0).then_some((sid, d)) }).collect();
     kspace.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     for (k_sys, _) in kspace {
         let (sigs, _) = eve_server::services::space_destiny::ensure_system_signatures_and_anomalies(ctx, k_sys).await;
-        if let Some((sig_id, dest)) = sigs.into_iter().find_map(|s| {
-            let ok = s.sig_group == "Wormhole" && !s.signature_id.starts_with("K162-") && !s.collapsed && s.max_jump_mass_kg >= required_jump_mass_kg && s.remaining_mass_kg > 0.0;
-            ok.then_some(s.destination_system_id).flatten().filter(|&d| eve_server::services::wormhole_lifecycle_ops::system_wormhole_profile_sde(&ctx.sde, d).0 == 5).map(|d| (s.signature_id, d))
-        }) { return (k_sys, sig_id, dest); }
+        if let Some((sig_id, dest)) = sigs.into_iter().find_map(|s| (s.sig_group == "Wormhole" && !s.signature_id.starts_with("K162-") && !s.collapsed && s.max_jump_mass_kg >= required_jump_mass_kg && s.remaining_mass_kg > 0.0).then_some(s.destination_system_id).flatten().filter(|&d| eve_server::services::wormhole_lifecycle_ops::system_wormhole_profile_sde(&ctx.sde, d).0 == 5).map(|d| (s.signature_id, d))) { return (k_sys, sig_id, dest); }
     }
     panic!("seeded K-space wormhole entrance into C5 wormhole system");
 }
-
 pub async fn jump_through_wormhole_to(ctx: &ServerContext, sess: &mut SessionState, ship_id: i64, k_entry_sys: SolarSystemId, k_sig_id: &str, target_wh_sys: SolarSystemId) {
     fly_stargates_to(ctx, sess, k_entry_sys).await;
-    let wh_ball_id = k_sig_id.strip_prefix("K162-").map_or_else(
-        || eve_server::services::space_destiny::wormhole_item_id_for_signature(k_entry_sys, k_sig_id),
-        |orig| eve_server::services::space_destiny::wormhole_exit_item_id_for_signature(k_entry_sys, orig),
-    );
+    let wh_ball_id = k_sig_id.strip_prefix("K162-").map_or_else(|| eve_server::services::space_destiny::wormhole_item_id_for_signature(k_entry_sys, k_sig_id), |orig| eve_server::services::space_destiny::wormhole_exit_item_id_for_signature(k_entry_sys, orig));
     move_ship_to_ball(ctx, sess, k_entry_sys, ship_id, "item", PyRep::Integer(wh_ball_id)).await;
+    let sys_h = ctx.systems.get_or_spawn(k_entry_sys);
+    let wh_pos = ctx.db.with_snapshot(|snap| snap.cosmic_signatures.get(&k_entry_sys).and_then(|sigs| sigs.iter().find(|s| s.signature_id == k_sig_id || k_sig_id.strip_prefix("K162-") == Some(&s.signature_id)).map(|s| eve_server::services::space_destiny::space_pochven_wormholes::pochven_wormhole_ball_position(&ctx.sde, s))));
+    if let Some(pos) = wh_pos { let _ = sys_h.set_ball_position(ship_id, pos + glam::DVec3::new(500.0, 0.0, 0.0)).await; }
     ctx.advance_secs(11);
     rpc_ok(ctx, sess, "wormholeMgr", "WormholeJump", &[PyRep::String(k_sig_id.into())]).await;
     let _ = ctx.systems.get_or_spawn(target_wh_sys).step_manual(8.0).await;
+    sess.solar_system_id = Some(target_wh_sys); sess.station_id = None; sess.region_id = ctx.sde.solar_systems.get(&target_wh_sys).map(|s| s.region_id); let _ = bind_service(ctx, sess, "beyonce", PyRep::Integer(i64::from(target_wh_sys))).await;
     assert_eq!(sess.solar_system_id, Some(target_wh_sys));
 }

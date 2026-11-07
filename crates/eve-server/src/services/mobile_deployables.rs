@@ -599,34 +599,107 @@ pub fn step_mobile_deployables_in_actor(
 ) {
     let (Some(db), Some(sde)) = (db_opt, sde_opt) else { return; };
 
-    // 0. Process pending MMJU 12s spools, Mobile Observatory 10m pings, and Mobile Siphon cycles before expiry removal
-    crate::services::mobile_deployables_ext::step_ext_deployables_in_actor(
-        ballpark,
-        Some(active_module_cycles),
-        deactivation_hook,
-        sde,
-        db,
-        rng_opt.or(Some(mechanic_rng)),
-        solar_system_id,
-        now_unix,
-    );
+    use crate::services::mobile_deployables_ext::{
+        GROUP_MOBILE_SIPHON, OBSERVATORY_PING_INTERVAL_SECS, OBSERVATORY_TOTAL_PINGS, SIPHON_CYCLE_SECS,
+    };
 
-    // 1. Expiry sweep: find all deployables in this solar system where now_unix >= expires_at_unix
-    let expired_ids: Vec<i64> = db.with_snapshot(|snap| {
-        let st = read_deployable_state_snap(snap);
-        st.deployables
+    // Single lightweight snapshot check to return early on idle ticks without repeated locks/JSON parses.
+    let (needs_ext, expired_ids, has_timer_transition, active_mtus) = db.with_snapshot(|snap| {
+        let meta_due = snap.sp6_lifecycle.space_object_meta.values().any(|meta| {
+            !meta.anchor_completed
+                && meta
+                    .anchor_start_unix
+                    .is_some_and(|start| now_unix >= start.saturating_add(meta.anchoring_delay_secs as u64))
+        });
+        let Some(note) = snap.owner_notes.get(&MOBILE_DEPLOYABLE_NOTE_ID) else {
+            return (false, Vec::new(), meta_due, Vec::new());
+        };
+        let st: MobileDeployableRuntimeState = serde_json::from_str(&note.note).unwrap_or_default();
+        if st.deployables.is_empty() && st.mmju_spools.is_empty() {
+            return (false, Vec::new(), meta_due, Vec::new());
+        }
+
+        let mmju_due = st
+            .mmju_spools
             .values()
-            .filter(|r| r.solar_system_id == solar_system_id && now_unix >= r.expires_at_unix)
-            .map(|r| r.item_id)
-            .collect()
+            .any(|e| e.solar_system_id == solar_system_id && now_unix >= e.complete_at_unix);
+        let mut ext_due = mmju_due;
+        let mut expired = Vec::new();
+        let mut dep_due = false;
+        let mut mtus = Vec::new();
+
+        for r in st.deployables.values() {
+            if r.solar_system_id != solar_system_id {
+                continue;
+            }
+            let active_t0 = r.anchor_start_unix.saturating_add(r.anchor_duration_secs);
+            if now_unix >= r.expires_at_unix {
+                expired.push(r.item_id);
+            }
+            if r.reinforced_until_unix.is_some_and(|u| now_unix >= u)
+                || (!r.is_unanchored && !r.anchor_completed && r.anchor_start_unix > 0 && now_unix >= active_t0)
+            {
+                dep_due = true;
+            }
+            if !ext_due && !r.is_unanchored && now_unix >= active_t0 {
+                if r.group_id == GROUP_MOBILE_OBSERVATORY && snap.items.contains_key(&r.item_id) {
+                    let eff_now = now_unix.min(r.expires_at_unix.saturating_sub(1));
+                    let due_pings = (((eff_now.saturating_sub(active_t0)) / OBSERVATORY_PING_INTERVAL_SECS) as u32 + 1)
+                        .min(OBSERVATORY_TOTAL_PINGS);
+                    if due_pings > st.observatory_pings_done.get(&r.item_id).copied().unwrap_or(0) {
+                        ext_due = true;
+                    }
+                } else if r.group_id == GROUP_MOBILE_SIPHON && now_unix < r.expires_at_unix {
+                    let last_t = st.siphon_last_cycle_unix.get(&r.item_id).copied().unwrap_or(active_t0).max(active_t0);
+                    if now_unix.saturating_sub(last_t) >= SIPHON_CYCLE_SECS {
+                        ext_due = true;
+                    }
+                }
+            }
+            if r.group_id == GROUP_MOBILE_TRACTOR
+                && !r.is_unanchored
+                && snap.items.contains_key(&r.item_id)
+                && (r.anchor_completed || (r.anchor_start_unix > 0 && now_unix >= active_t0))
+            {
+                mtus.push(r.clone());
+            }
+        }
+
+        (ext_due, expired, dep_due || meta_due, mtus)
     });
 
+    if !needs_ext && expired_ids.is_empty() && !has_timer_transition && active_mtus.is_empty() {
+        return;
+    }
+
+    // 0. Process pending MMJU 12s spools, Mobile Observatory 10m pings, and Mobile Siphon cycles before expiry removal
+    if needs_ext {
+        crate::services::mobile_deployables_ext::step_ext_deployables_in_actor(
+            ballpark,
+            Some(active_module_cycles),
+            deactivation_hook,
+            sde,
+            db,
+            rng_opt.or(Some(mechanic_rng)),
+            solar_system_id,
+            now_unix,
+        );
+    }
+
+    // 1. Expiry sweep: find all deployables in this solar system where now_unix >= expires_at_unix
     if !expired_ids.is_empty() {
         for &eid in &expired_ids {
             ballpark.balls.remove(&eid);
             ballpark.combat_states.remove(&eid);
         }
         db.with_mut_snapshot(|snap| {
+            write_deployable_state_snap(snap, |st| {
+                for &eid in &expired_ids {
+                    st.deployables.remove(&eid);
+                    st.observatory_pings_done.remove(&eid);
+                    st.siphon_last_cycle_unix.remove(&eid);
+                }
+            });
             for eid in expired_ids {
                 let child_ids: Vec<i64> = snap
                     .items
@@ -640,52 +713,31 @@ pub fn step_mobile_deployables_in_actor(
                 snap.items.remove(&eid);
                 snap.item_positions.remove(&eid);
                 snap.sp6_lifecycle.space_object_meta.remove(&eid);
-                write_deployable_state_snap(snap, |st| {
-                    st.deployables.remove(&eid);
-                    st.observatory_pings_done.remove(&eid);
-                    st.siphon_last_cycle_unix.remove(&eid);
-                });
             }
         });
     }
 
     // 2. Clear expired reinforcement timers and mark completed anchoring transitions
-    let has_timer_transition = db.with_snapshot(|snap| {
-        let st = read_deployable_state_snap(snap);
-        let dep_due = st.deployables.values().any(|rec| {
-            rec.solar_system_id == solar_system_id
-                && (rec.reinforced_until_unix.is_some_and(|u| now_unix >= u)
-                    || (!rec.is_unanchored
-                        && !rec.anchor_completed
-                        && rec.anchor_start_unix > 0
-                        && now_unix >= rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs)))
-        });
-        dep_due
-            || snap.sp6_lifecycle.space_object_meta.values().any(|meta| {
-                !meta.anchor_completed
-                    && meta
-                        .anchor_start_unix
-                        .is_some_and(|start| now_unix >= start.saturating_add(meta.anchoring_delay_secs as u64))
-            })
-    });
     if has_timer_transition {
         db.with_mut_snapshot(|snap| {
-            write_deployable_state_snap(snap, |st| {
-                for rec in st.deployables.values_mut() {
-                    if rec.solar_system_id == solar_system_id {
-                        if rec.reinforced_until_unix.is_some_and(|u| now_unix >= u) {
-                            rec.reinforced_until_unix = None;
-                        }
-                        if !rec.is_unanchored
-                            && !rec.anchor_completed
-                            && rec.anchor_start_unix > 0
-                            && now_unix >= rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs)
-                        {
-                            rec.anchor_completed = true;
+            if snap.owner_notes.contains_key(&MOBILE_DEPLOYABLE_NOTE_ID) {
+                write_deployable_state_snap(snap, |st| {
+                    for rec in st.deployables.values_mut() {
+                        if rec.solar_system_id == solar_system_id {
+                            if rec.reinforced_until_unix.is_some_and(|u| now_unix >= u) {
+                                rec.reinforced_until_unix = None;
+                            }
+                            if !rec.is_unanchored
+                                && !rec.anchor_completed
+                                && rec.anchor_start_unix > 0
+                                && now_unix >= rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs)
+                            {
+                                rec.anchor_completed = true;
+                            }
                         }
                     }
-                }
-            });
+                });
+            }
             for meta in snap.sp6_lifecycle.space_object_meta.values_mut() {
                 if !meta.anchor_completed {
                     if let Some(start) = meta.anchor_start_unix {
@@ -700,126 +752,112 @@ pub fn step_mobile_deployables_in_actor(
     }
 
     // 3. MTU tractoring and looting
-    let active_mtus: Vec<MobileDeployableRecord> = db.with_snapshot(|snap| {
-        let st = read_deployable_state_snap(snap);
-        st.deployables
-            .values()
-            .filter(|r| {
-                r.solar_system_id == solar_system_id
-                    && r.group_id == GROUP_MOBILE_TRACTOR
-                    && !r.is_unanchored
-                    && snap.items.contains_key(&r.item_id)
-                    && (r.anchor_completed || (r.anchor_start_unix > 0 && now_unix >= r.anchor_start_unix.saturating_add(r.anchor_duration_secs)))
-            })
-            .cloned()
-            .collect()
-    });
+    enum MtuScan {
+        MissingItem,
+        Skip,
+        Candidates(Vec<(i64, f64, DVec3)>),
+    }
 
     for mtu in active_mtus {
-        // Skip and remove records whose item was deleted/destroyed (MD-P0-1)
-        if !db.with_snapshot(|snap| snap.items.contains_key(&mtu.item_id)) {
-            db.with_mut_snapshot(|snap| {
-                write_deployable_state_snap(snap, |st| {
-                    st.deployables.remove(&mtu.item_id);
-                });
-            });
-            continue;
-        }
-
-        // Owner must be present in the solar system and active in space (not docked elsewhere)
-        let is_docked_or_elsewhere = db.with_snapshot(|snap| {
-            snap.characters.get(&mtu.owner_id).is_some_and(|c| {
-                c.station_id.is_some() || c.structure_id.is_some() || c.solar_system_id != solar_system_id
-            })
-        });
-        if is_docked_or_elsewhere {
-            continue;
-        }
-
-        let owner_in_system = ballpark.ball_slim_meta.values().any(|m| m.char_id == Some(mtu.owner_id))
-            || db.with_snapshot(|snap| {
-                snap.characters.get(&mtu.owner_id).is_some_and(|c| {
-                    c.solar_system_id == solar_system_id && c.station_id.is_none() && c.structure_id.is_none()
-                })
-            });
-        if !owner_in_system {
-            continue;
-        }
-
         let mtu_pos = DVec3::from_array(mtu.position);
         let mtu_type = sde.types.get(&mtu.type_id);
         let mtu_capacity = mtu_type
             .map(|t| t.capacity)
             .filter(|&c| c > 0.0)
             .unwrap_or(27_000.0); // Derived fallback: 27,000 m³
-
         // SDE dogma attribute 54 (maxRange) or 76 (maxTargetRange) for MTU tractor beam range (MD-P1-4)
         let max_tractor_range = mtu_type
             .and_then(|t| t.default_attributes.get(&54).or_else(|| t.default_attributes.get(&76)).copied())
             .unwrap_or(125_000.0); // Derived fallback: 125km
-
         // SDE dogma attribute 1045 (maxTractorVelocity) for MTU tractor beam pulling speed (MD-P1-4)
         let tractor_speed = mtu_type
             .and_then(|t| t.default_attributes.get(&1045).copied())
             .unwrap_or(1_000.0); // Derived fallback: 1,000 m/s
         let loot_radius = 2_500.0; // Derived: standard EVE looting radius
 
-        let current_mtu_vol: f64 = db.with_snapshot(|snap| {
-            snap.items
-                .values()
-                .filter(|c| c.location_id == mtu.item_id && c.quantity > 0)
-                .map(|c| {
-                    let u_vol = crate::services::inventory_fitting::fitting_containers_ships::effective_item_unit_volume(sde, c);
-                    u_vol * (c.quantity.max(1) as f64)
-                })
-                .sum()
-        });
+        let owner_in_ballpark = ballpark.ball_slim_meta.values().any(|m| m.char_id == Some(mtu.owner_id));
+        let scan = db.with_snapshot(|snap| {
+            if !snap.items.contains_key(&mtu.item_id) {
+                return MtuScan::MissingItem;
+            }
+            let owner_char = snap.characters.get(&mtu.owner_id);
+            if owner_char.is_some_and(|c| {
+                c.station_id.is_some() || c.structure_id.is_some() || c.solar_system_id != solar_system_id
+            }) {
+                return MtuScan::Skip;
+            }
+            let owner_in_system = owner_in_ballpark
+                || owner_char.is_some_and(|c| {
+                    c.solar_system_id == solar_system_id && c.station_id.is_none() && c.structure_id.is_none()
+                });
+            if !owner_in_system {
+                return MtuScan::Skip;
+            }
 
-        // Find candidate wrecks and cargo containers within range owned by MTU owner (MD-P1-1)
-        let candidates = db.with_snapshot(|snap| {
-            let mut list = Vec::new();
+            let mut current_mtu_vol = 0.0;
+            let mut raw_targets: Vec<(i64, DVec3)> = Vec::new();
             for it in snap.items.values() {
-                if it.location_id != solar_system_id as i64 || it.item_id == mtu.item_id {
+                if it.location_id == mtu.item_id && it.quantity > 0 {
+                    let u_vol = crate::services::inventory_fitting::fitting_containers_ships::effective_item_unit_volume(sde, it);
+                    current_mtu_vol += u_vol * (it.quantity.max(1) as f64);
+                    continue;
+                }
+                if it.location_id != solar_system_id as i64 || it.item_id == mtu.item_id || it.owner_id != mtu.owner_id {
                     continue;
                 }
                 let is_wreck = sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 186);
-                let is_container = it.type_id == 23 || sde.types.get(&it.type_id).is_some_and(|t| matches!(t.group_id, 12 | 340 | 448));
+                let is_container = it.type_id == 23
+                    || sde.types.get(&it.type_id).is_some_and(|t| matches!(t.group_id, 12 | 340 | 448));
                 if !is_wreck && !is_container {
                     continue;
                 }
-                if it.owner_id != mtu.owner_id {
-                    continue;
-                }
-
-                // Exclude empty wrecks and cargo containers (MD-P1-1)
-                let items_in_target: Vec<&eve_db::InventoryItemRecord> = snap.items
-                    .values()
-                    .filter(|c| c.location_id == it.item_id && c.quantity > 0)
-                    .collect();
-                if items_in_target.is_empty() {
-                    continue;
-                }
-
                 if let Some(pos_arr) = snap.item_positions.get(&it.item_id) {
-                    let p = DVec3::from_array(*pos_arr);
-                    let dist = (p - mtu_pos).length();
-                    if dist <= max_tractor_range {
-                        // Targets sitting in loot range that cannot fit in MTU capacity are processed (MD-P1-1)
-                        if dist <= loot_radius {
-                            let can_loot_any = items_in_target.iter().any(|c| {
-                                let u_vol = crate::services::inventory_fitting::fitting_containers_ships::effective_item_unit_volume(sde, c);
-                                current_mtu_vol + u_vol * (c.quantity.max(1) as f64) <= mtu_capacity
-                            });
-                            if !can_loot_any {
-                                continue;
-                            }
-                        }
-                        list.push((it.item_id, dist, p));
-                    }
+                    raw_targets.push((it.item_id, DVec3::from_array(*pos_arr)));
                 }
             }
-            list
+
+            let mut list = Vec::new();
+            for (tid, p) in raw_targets {
+                let dist = (p - mtu_pos).length();
+                if dist > max_tractor_range {
+                    continue;
+                }
+                let mut has_any = false;
+                let mut can_loot_any = false;
+                for c in snap.items.values() {
+                    if c.location_id == tid && c.quantity > 0 {
+                        has_any = true;
+                        if dist <= loot_radius {
+                            let u_vol = crate::services::inventory_fitting::fitting_containers_ships::effective_item_unit_volume(sde, c);
+                            if current_mtu_vol + u_vol * (c.quantity.max(1) as f64) <= mtu_capacity {
+                                can_loot_any = true;
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                if !has_any || (dist <= loot_radius && !can_loot_any) {
+                    continue;
+                }
+                list.push((tid, dist, p));
+            }
+            MtuScan::Candidates(list)
         });
+
+        let candidates = match scan {
+            MtuScan::MissingItem => {
+                db.with_mut_snapshot(|snap| {
+                    write_deployable_state_snap(snap, |st| {
+                        st.deployables.remove(&mtu.item_id);
+                    });
+                });
+                continue;
+            }
+            MtuScan::Skip => continue,
+            MtuScan::Candidates(list) => list,
+        };
 
         if candidates.is_empty() {
             continue;

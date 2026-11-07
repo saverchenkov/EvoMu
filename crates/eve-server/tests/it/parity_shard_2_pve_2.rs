@@ -357,15 +357,17 @@ async fn test_crab_beacon_activation_ceq_interference_notify_e2e() {
     rpc_ok(&ctx, &mut sess, "ship", "Board", &[PyRep::Integer(carrier_id)]).await;
     ctx.advance_secs(11);
     sess.ship_id = Some(carrier_id);
-    let expander_id = buy_item_at_station(&ctx, &mut sess, char_id, JITA_STATION, 1319, 1).await;
-    rpc_ok(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(expander_id), PyRep::Integer(carrier_id), PyRep::Integer(11)]).await;
+    for slot in 11..=13 {
+        let expander_id = buy_item_at_station(&ctx, &mut sess, char_id, JITA_STATION, 1319, 1).await;
+        rpc_ok(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(expander_id), PyRep::Integer(carrier_id), PyRep::Integer(slot)]).await;
+    }
     let fuel_id = buy_item_at_station(&ctx, &mut sess, char_id, JITA_STATION, 17_887, 25_000).await;
     rpc_ok(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(fuel_id), PyRep::Integer(carrier_id), PyRep::Integer(133)]).await;
 
     let beacon_stack = buy_item_at_station(&ctx, &mut sess, char_id, JITA_STATION, TYPE_CRAB_BEACON, 4).await;
-    rpc_ok(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(beacon_stack), PyRep::Integer(carrier_id), PyRep::Integer(155)]).await;
+    rpc_ok(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(beacon_stack), PyRep::Integer(carrier_id), PyRep::Integer(5)]).await;
 
-    let (escort_ship, escort_guns) = buy_fit_combat_ship(&ctx, &mut escort_sess, escort_cid, JITA_STATION, 19_720, 486, 201, 4).await;
+    let (escort_ship, escort_guns) = buy_fit_combat_ship(&ctx, &mut escort_sess, escort_cid, JITA_STATION, 642, 2929, 12_779, 6).await;
     let esc_fuel = buy_item_at_station(&ctx, &mut escort_sess, escort_cid, JITA_STATION, 16_274, 25_000).await;
     rpc_ok(&ctx, &mut escort_sess, "invbroker", "Add", &[PyRep::Integer(esc_fuel), PyRep::Integer(escort_ship), PyRep::Integer(5)]).await;
 
@@ -422,18 +424,17 @@ async fn test_crab_beacon_activation_ceq_interference_notify_e2e() {
     ).await.unwrap();
     let cyno_beacon_id = dict_get(&cyno_rep, "beaconID").and_then(|v| v.as_i64()).expect("cyno beaconID");
 
-    for cap_sess in [&mut sess, &mut escort_sess] {
-        undock_from_station(&ctx, cap_sess, JITA_SYS).await;
-        ctx.advance_secs(35);
-        let jita_b = bind_service(&ctx, cap_sess, "beyonce", PyRep::Integer(i64::from(JITA_SYS))).await as u64;
-        ctx.dispatch_rpc(
-            cap_sess, "beyonce", Some(jita_b), "CmdJumpToFleetModuleBeacon",
-            &[PyRep::Integer(cyno_cid), PyRep::Integer(i64::from(crab_sys)), PyRep::Integer(cyno_beacon_id)],
-            &HashMap::new(), None,
-        ).await.unwrap();
-        cap_sess.solar_system_id = Some(crab_sys);
-        let _ = bind_service(&ctx, cap_sess, "beyonce", PyRep::Integer(i64::from(crab_sys))).await;
-    }
+    undock_from_station(&ctx, &mut sess, JITA_SYS).await;
+    ctx.advance_secs(35);
+    let jita_b = bind_service(&ctx, &mut sess, "beyonce", PyRep::Integer(i64::from(JITA_SYS))).await as u64;
+    ctx.dispatch_rpc(
+        &mut sess, "beyonce", Some(jita_b), "CmdJumpToFleetModuleBeacon",
+        &[PyRep::Integer(cyno_cid), PyRep::Integer(i64::from(crab_sys)), PyRep::Integer(cyno_beacon_id)],
+        &HashMap::new(), None,
+    ).await.unwrap();
+    sess.solar_system_id = Some(crab_sys);
+    let _ = bind_service(&ctx, &mut sess, "beyonce", PyRep::Integer(i64::from(crab_sys))).await;
+    fly_stargates_to(&ctx, &mut escort_sess, crab_sys).await;
     let nour_b_oid = bind_service(&ctx, &mut sess, "beyonce", PyRep::Integer(i64::from(crab_sys))).await as u64;
     let crab_sys_h = ctx.systems.get_or_spawn(crab_sys);
     for cap_sess in [&mut sess, &mut escort_sess] {
@@ -457,31 +458,14 @@ async fn test_crab_beacon_activation_ceq_interference_notify_e2e() {
                 &ctx,
                 &mut sess,
                 "invbroker",
-                "Add",
-                &[
-                    PyRep::Integer(beacon_stack),
-                    PyRep::Integer(carrier_id),
-                    PyRep::Integer(5),
-                    PyRep::Integer(1),
-                ],
+                "SplitStack",
+                &[PyRep::Integer(beacon_stack), PyRep::Integer(1)],
             )
             .await;
-            dict_get(&sp, "itemID")
+            dict_get(&sp, "newItemID")
                 .and_then(|v| v.as_i64())
-                .expect("split CRAB beacon itemID")
+                .expect("split CRAB beacon newItemID")
         } else {
-            rpc_ok(
-                &ctx,
-                &mut sess,
-                "invbroker",
-                "Add",
-                &[
-                    PyRep::Integer(beacon_stack),
-                    PyRep::Integer(carrier_id),
-                    PyRep::Integer(5),
-                ],
-            )
-            .await;
             beacon_stack
         };
         let (dx, dy) = anchor_offsets[idx];
@@ -516,6 +500,7 @@ async fn test_crab_beacon_activation_ceq_interference_notify_e2e() {
                     }
                     ctx.advance_secs(210);
                     tick_crab_beacons_in_system(&ctx, crab_sys).await;
+                    if read_pve_special_reg(&ctx, |reg| reg.crab_beacons.get(&bid).map(|r| r.phase)) == Some(CrabBeaconPhase::LootRestricted) { break; }
                 }
                 let phase = read_pve_special_reg(&ctx, |reg| reg.crab_beacons.get(&bid).map(|r| r.phase));
                 assert_eq!(phase, Some(CrabBeaconPhase::LootRestricted), "clearing Rogue Drone waves + 10m scan must enter LootRestricted");
@@ -549,7 +534,7 @@ async fn test_crab_beacon_activation_ceq_interference_notify_e2e() {
     assert!(notes.iter().any(|(ev, _)| ev == "OnSolarsystemInterferenceChanged"), "must emit OnSolarsystemInterferenceChanged");
 
     let level = get_system_interference_level_decayed(&ctx, crab_sys, ctx.now_unix());
-    assert!(level > 0.21 && level <= 3.0 * CRAB_INTERFERENCE_DELTA + 0.01, "interference must reflect 3 CRAB links, got {level}");
+    assert!(level > 0.50 && level <= 0.35 + 3.0 * CRAB_INTERFERENCE_DELTA + 0.01, "interference must reflect cyno + 3 CRAB links, got {level}");
 
     let ctx2 = reload_ctx_from_sqlite(&ctx);
     let persisted_level = get_system_interference_level_decayed(&ctx2, crab_sys, ctx2.now_unix());
