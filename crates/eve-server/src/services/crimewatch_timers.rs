@@ -1084,6 +1084,73 @@ pub(crate) fn is_war_interference_assistance(ctx: &ServerContext, helper_char_id
     })
 }
 
+/// Pure read-only Crimewatch safety-level precheck (`SafetyLevel::Green` / `SafetyLevel::Yellow`)
+/// before consuming superweapon isotopes, draining capacitor, or mutating any Crimewatch timer.
+pub fn precheck_pvp_aggression_safety(
+    ctx: &ServerContext,
+    attacker_char_id: i64,
+    sys_id: u32,
+    target_id: i64,
+    is_pod_target: bool,
+) -> Result<(), BridgeRpcError> {
+    if (32_000_000..=33_000_000).contains(&sys_id) {
+        return Ok(());
+    }
+    let now_unix = ctx.now_unix();
+    let sys_sec = with_combat_runtime(ctx, |rt| rt.modified_system_securities.get(&sys_id).copied())
+        .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0));
+    let (victim_char_opt, is_anchored_cont, is_secure_cont, is_unanchored_jetcan) = ctx.db.with_snapshot(|snap| {
+        let vcid = if snap.characters.contains_key(&target_id) {
+            Some(target_id)
+        } else {
+            snap.characters.values().find(|c| c.active_ship_id == target_id).map(|c| c.character_id)
+                .or_else(|| snap.items.get(&target_id).and_then(|it| snap.characters.contains_key(&it.owner_id).then_some(it.owner_id)))
+        };
+        let anchored = snap.sp6_lifecycle.space_object_meta.get(&target_id).is_some_and(|m| m.anchor_start_unix.is_some());
+        let it_tid = snap.items.get(&target_id).map(|i| i.type_id).unwrap_or(0);
+        let is_mobile = crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, it_tid);
+        let secure = ctx.sde.types.get(&it_tid).is_some_and(|t| matches!(t.group_id, 340 | 448));
+        (vcid, anchored && !is_mobile, secure, (it_tid == 23 && !anchored) || is_mobile)
+    });
+
+    if let Some(vcid) = victim_char_opt.filter(|&v| v != attacker_char_id) {
+        let v_suspect_or_crim = {
+            let cw = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner());
+            cw.states
+                .get(&vcid)
+                .is_some_and(|st| st.is_suspect(now_unix) || st.is_criminal(now_unix))
+        };
+        let has_le = with_combat_runtime(ctx, |rt| rt.has_limited_engagement_with(vcid, attacker_char_id, now_unix));
+        let is_legal = ctx.db.with_snapshot(|snap| is_legal_war_or_suspect_target(snap, attacker_char_id, vcid, now_unix))
+            || v_suspect_or_crim || has_le;
+        let effective_sec = if is_unanchored_jetcan { sys_sec.min(0.40) } else { sys_sec };
+        if !is_legal {
+            let safety = with_combat_runtime(ctx, |rt| rt.safety_levels.get(&attacker_char_id).copied().unwrap_or(SafetyLevel::Red));
+            let concord_suppressed = !is_pod_target
+                && crate::services::combat_npc_police::is_concord_suppressed_in_system(ctx, sys_id);
+            let would_be_criminal = (effective_sec >= 0.45 && !concord_suppressed)
+                || (sys_sec > 0.0 && is_pod_target)
+                || is_anchored_cont
+                || (is_secure_cont && sys_sec >= 0.45);
+            let would_be_suspect = !would_be_criminal && effective_sec > 0.0;
+            if safety == SafetyLevel::Green && (would_be_criminal || would_be_suspect) {
+                return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
+            }
+            if safety == SafetyLevel::Yellow && would_be_criminal {
+                return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
+            }
+        }
+    } else if is_pod_target && sys_sec > 0.0 {
+        let safety = with_combat_runtime(ctx, |rt| {
+            rt.safety_levels.get(&attacker_char_id).copied().unwrap_or(SafetyLevel::Red)
+        });
+        if matches!(safety, SafetyLevel::Green | SafetyLevel::Yellow) {
+            return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
+        }
+    }
+    Ok(())
+}
+
 /// Evaluates ship safety, triggers 60s Weapons Timer, applies CrimeWatch Suspect/Criminal/CONCORD/PvP
 /// timers + security-status loss, and creates/refreshes 300s bidirectional Limited Engagements when legal.
 pub fn evaluate_and_record_pvp_aggression(
@@ -1092,6 +1159,7 @@ pub fn evaluate_and_record_pvp_aggression(
     if (32_000_000..=33_000_000).contains(&sys_id) {
         return Ok(());
     }
+    precheck_pvp_aggression_safety(ctx, attacker_char_id, sys_id, target_id, is_pod_target)?;
     let now_unix = ctx.now_unix();
     let sys_sec = with_combat_runtime(ctx, |rt| rt.modified_system_securities.get(&sys_id).copied())
         .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0));
@@ -1119,22 +1187,6 @@ pub fn evaluate_and_record_pvp_aggression(
         let is_legal = ctx.db.with_snapshot(|snap| is_legal_war_or_suspect_target(snap, attacker_char_id, vcid, now_unix))
             || v_suspect_or_crim || has_le;
         let effective_sec = if is_unanchored_jetcan { sys_sec.min(0.40) } else { sys_sec };
-        if !is_legal {
-            let safety = with_combat_runtime(ctx, |rt| rt.safety_levels.get(&attacker_char_id).copied().unwrap_or(SafetyLevel::Red));
-            let concord_suppressed = !is_pod_target
-                && crate::services::combat_npc_police::is_concord_suppressed_in_system(ctx, sys_id);
-            let would_be_criminal = (effective_sec >= 0.45 && !concord_suppressed)
-                || (sys_sec > 0.0 && is_pod_target)
-                || is_anchored_cont
-                || (is_secure_cont && sys_sec >= 0.45);
-            let would_be_suspect = !would_be_criminal && effective_sec > 0.0;
-            if safety == SafetyLevel::Green && (would_be_criminal || would_be_suspect) {
-                return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
-            }
-            if safety == SafetyLevel::Yellow && would_be_criminal {
-                return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
-            }
-        }
         let is_new_agg = is_new_pvp_aggression(ctx, attacker_char_id, vcid, is_pod_target, now_unix);
         let c_stage = crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id);
         {

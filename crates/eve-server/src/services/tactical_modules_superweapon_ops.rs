@@ -90,6 +90,208 @@ fn parse_vec3_arg(arg: Option<&PyRep>) -> Option<DVec3> {
     ))
 }
 
+fn check_superweapon_fuel_available(
+    ctx: &ServerContext,
+    ship_id: i64,
+    fuel_tid: u32,
+    fuel_qty: i32,
+    kind: &str,
+) -> Result<(), BridgeRpcError> {
+    ctx.db
+        .with_snapshot(|snap| {
+            let total_avail: i64 = snap
+                .items
+                .values()
+                .filter(|i| {
+                    i.location_id == ship_id
+                        && i.type_id == fuel_tid
+                        && matches!(i.flag as u16, 5 | 133)
+                        && i.flag != eve_db::InventoryFlag::Locked
+                        && i.quantity > 0
+                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                })
+                .map(|i| i64::from(i.quantity))
+                .sum();
+            if total_avail >= i64::from(fuel_qty) {
+                Ok(())
+            } else if total_avail > 0 {
+                Err(format!(
+                    "Insufficient {kind} fuel (type {fuel_tid}): need {fuel_qty}, have {total_avail}"
+                ))
+            } else {
+                Err(format!(
+                    "Missing required {kind} fuel (type {fuel_tid}, quantity {fuel_qty})"
+                ))
+            }
+        })
+        .map_err(|message| BridgeRpcError {
+            code: "InsufficientFuel".into(),
+            message,
+        })
+}
+
+fn deduct_superweapon_fuel(
+    ctx: &ServerContext,
+    ship_id: i64,
+    fuel_tid: u32,
+    fuel_qty: i32,
+    kind: &str,
+) -> Result<(i32, Vec<(eve_db::InventoryFlag, i32)>), BridgeRpcError> {
+    ctx.db
+        .try_with_mut_snapshot(|snap| {
+            let mut stacks: Vec<(u8, i64, eve_db::InventoryFlag, i32)> = snap
+                .items
+                .values()
+                .filter(|i| {
+                    i.location_id == ship_id
+                        && i.type_id == fuel_tid
+                        && matches!(i.flag as u16, 5 | 133)
+                        && i.flag != eve_db::InventoryFlag::Locked
+                        && i.quantity > 0
+                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                })
+                .map(|i| (if (i.flag as u16) == 133 { 0 } else { 1 }, i.item_id, i.flag, i.quantity))
+                .collect();
+            stacks.sort_by_key(|&(prio, iid, _, _)| (prio, iid));
+            let total_avail: i64 = stacks.iter().map(|&(_, _, _, q)| i64::from(q)).sum();
+            if total_avail < i64::from(fuel_qty) {
+                return Err(if total_avail > 0 {
+                    format!("Insufficient {kind} fuel (type {fuel_tid}): need {fuel_qty}, have {total_avail}")
+                } else {
+                    format!("Missing required {kind} fuel (type {fuel_tid}, quantity {fuel_qty})")
+                });
+            }
+            let mut remaining = fuel_qty;
+            let mut consumed_by_flag: Vec<(eve_db::InventoryFlag, i32)> = Vec::new();
+            for (_, fid, flag, _) in stacks {
+                if remaining <= 0 {
+                    break;
+                }
+                let mut remove_stack = false;
+                let mut took = 0;
+                if let Some(it) = snap.items.get_mut(&fid) {
+                    took = remaining.min(it.quantity);
+                    it.quantity -= took;
+                    it.version += 1;
+                    remaining -= took;
+                    remove_stack = it.quantity <= 0;
+                }
+                if took > 0 {
+                    if let Some((_, q)) = consumed_by_flag.iter_mut().find(|(f, _)| *f == flag) {
+                        *q += took;
+                    } else {
+                        consumed_by_flag.push((flag, took));
+                    }
+                }
+                if remove_stack {
+                    snap.items.remove(&fid);
+                }
+            }
+            Ok((fuel_qty, consumed_by_flag))
+        })
+        .map_err(|message| BridgeRpcError {
+            code: "InsufficientFuel".into(),
+            message,
+        })
+}
+
+fn refund_superweapon_fuel(
+    ctx: &ServerContext,
+    ship_id: i64,
+    owner_char_id: i64,
+    fuel_tid: u32,
+    consumed_by_flag: &[(eve_db::InventoryFlag, i32)],
+) {
+    if consumed_by_flag.is_empty() {
+        return;
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        for &(flag, qty) in consumed_by_flag {
+            if qty <= 0 {
+                continue;
+            }
+            if let Some(existing) = snap
+                .items
+                .values_mut()
+                .find(|i| i.location_id == ship_id && i.type_id == fuel_tid && i.flag == flag && !i.singleton)
+            {
+                existing.quantity += qty;
+                existing.version += 1;
+                continue;
+            }
+            snap.next_entity_id += 1;
+            let new_id = snap.next_entity_id;
+            snap.items.insert(
+                new_id,
+                eve_db::InventoryItemRecord {
+                    item_id: new_id,
+                    type_id: fuel_tid,
+                    owner_id: owner_char_id,
+                    location_id: ship_id,
+                    flag,
+                    quantity: qty,
+                    singleton: false,
+                    ..eve_db::InventoryItemRecord::default()
+                },
+            );
+        }
+    });
+}
+
+fn precheck_doomsday_structure_target(
+    ctx: &ServerContext,
+    sys_id: u32,
+    attacker_char_id: i64,
+    target_id: i64,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    let is_upwell_or_sov =
+        crate::services::station_structure::structure_lifecycle_rpc::validate_upwell_structure_attack_precheck(
+            ctx,
+            sys_id,
+            attacker_char_id,
+            target_id,
+            now_unix,
+        )?;
+    if is_upwell_or_sov {
+        let can_take_weapon_damage = ctx.db.with_snapshot(|snap| {
+            let Some(st) = snap.structures.get(&target_id) else {
+                return true;
+            };
+            st.type_id == crate::services::sov_gameplay::TYPE_MERCENARY_DEN
+                || st.type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK
+                || matches!(
+                    st.type_id,
+                    crate::services::pve_fob_observatory::FOB_GURISTAS_TYPE_ID
+                        | crate::services::pve_fob_observatory::FOB_BLOOD_RAIDER_TYPE_ID
+                        | crate::services::insurgency_services::PIRATE_STRONGHOLD_ANGEL_TYPE
+                        | crate::services::insurgency_services::PIRATE_STRONGHOLD_GURISTAS_TYPE
+                        | crate::services::fw_gameplay::TYPE_FW_IHUB
+                )
+                || snap.fw_runtime.supply_sites.contains_key(&target_id)
+                || ctx.sde.types.get(&st.type_id).is_some_and(|t| t.group_id == 4644)
+                || crate::services::station_structure::structure_lifecycle::structure_profile(ctx, st.type_id).is_some()
+        });
+        if !can_take_weapon_damage {
+            return Err(BridgeRpcError {
+                code: "StructureInvulnerable".into(),
+                message: format!("Structure {target_id} is invulnerable to direct weapon and superweapon damage"),
+            });
+        }
+    }
+    if crate::services::insurgency_services::is_insurgency_stronghold_invulnerable(ctx, sys_id, target_id)
+        || ctx.db.with_snapshot(|snap| {
+            snap.items
+                .get(&target_id)
+                .and_then(|it| it.dynamic_attributes.get(&2110).copied())
+                .is_some_and(|v| v <= 0.0)
+        })
+    {
+        return Err(BridgeRpcError::user_error("TargetInvulnerable"));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn activate_superweapon_with_args(
     ctx: &ServerContext,
@@ -131,12 +333,16 @@ pub async fn activate_superweapon_with_args(
             message: "Superweapons can only be activated on Titans (group 30) or Lancer Dreadnoughts (group 4594)".into(),
         });
     }
-    let sys_sec = ctx
-        .sde
-        .solar_systems
-        .get(&sys_id)
-        .map(|s| s.security_status)
-        .unwrap_or(0.0);
+    let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        rt.modified_system_securities.get(&sys_id).copied()
+    })
+    .unwrap_or_else(|| {
+        ctx.sde
+            .solar_systems
+            .get(&sys_id)
+            .map(|s| s.security_status)
+            .unwrap_or(0.0)
+    });
     if sys_sec >= 0.45 {
         return Err(BridgeRpcError {
             code: "CannotActivateDoomsdayInHighSec".into(),
@@ -224,46 +430,9 @@ pub async fn activate_superweapon_with_args(
             None
         };
 
-        // Pre-validate and consume SDE-defined isotopes (attrs 713/714) BEFORE applying capacitor drain, beam damage, or debuffs (#203)
         let lance_fuel_tid = mod_type.default_attributes.get(&713).map(|&v| v as u32).unwrap_or(16274);
         let lance_fuel_qty = mod_type.default_attributes.get(&714).map(|&v| v.round() as i32).unwrap_or(20_000);
-        let consumed_fuel = ctx
-            .db
-            .with_mut_snapshot(|snap| {
-                let is_fuel = |i: &&eve_db::InventoryItemRecord| {
-                    i.location_id == ship_id && i.type_id == lance_fuel_tid && matches!(i.flag as u16, 5 | 133) && i.quantity > 0
-                };
-                let cand = snap
-                    .items
-                    .values()
-                    .find(|i| is_fuel(i) && (i.flag as u16) == 133 && i.quantity >= lance_fuel_qty)
-                    .or_else(|| snap.items.values().find(|i| is_fuel(i) && i.quantity >= lance_fuel_qty))
-                    .or_else(|| snap.items.values().find(|i| is_fuel(i)))
-                    .map(|i| (i.item_id, i.quantity));
-                match cand {
-                    Some((fid, avail)) if avail >= lance_fuel_qty => {
-                        let mut rem = 0;
-                        if let Some(it) = snap.items.get_mut(&fid) {
-                            it.quantity -= lance_fuel_qty;
-                            rem = it.quantity;
-                        }
-                        if rem <= 0 {
-                            snap.items.remove(&fid);
-                        }
-                        Ok(lance_fuel_qty)
-                    }
-                    Some((_, avail)) => Err(format!("Insufficient lance fuel (type {lance_fuel_tid}): need {lance_fuel_qty}, have {avail}")),
-                    None => Err(format!("Missing required lance isotopes (type {lance_fuel_tid}, quantity {lance_fuel_qty})")),
-                }
-            })
-            .map_err(|message| BridgeRpcError {
-                code: "InsufficientFuel".into(),
-                message,
-            })?;
-
-        if let Some(cur_cap) = cur_cap_opt {
-            let _ = sys.set_capacitor(ship_id, (cur_cap - cap_cost).max(0.0)).await;
-        }
+        check_superweapon_fuel_available(ctx, ship_id, lance_fuel_tid, lance_fuel_qty, "lance")?;
 
         let base_range = mod_type.default_attributes.get(&54).copied().unwrap_or(50_000.0);
         let range_bonus_pct = ship_type_opt.and_then(|t| t.default_attributes.get(&5418).copied()).unwrap_or(20.0);
@@ -302,7 +471,30 @@ pub async fn activate_superweapon_with_args(
         let beam_radius = mod_type.default_attributes.get(&2263).copied().unwrap_or(2_500.0);
         let neut_radius = mod_type.default_attributes.get(&2259).copied().unwrap_or(10_000.0).max(beam_radius);
         let caster_lock_secs = (mod_type.default_attributes.get(&73).copied().unwrap_or(300_000.0) / 1_000.0).round() as u64;
-        let hit_targets = crate::services::r6_t1_p0_helpers::execute_lancer_beam_attack(
+
+        // Validate Crimewatch safety across ALL eligible cone targets BEFORE deducting isotopes or draining capacitor (`#478`).
+        let _ = crate::services::r6_t1_p0_helpers::collect_and_precheck_lancer_cone_targets(
+            ctx,
+            &sys,
+            sys_id,
+            char_id,
+            ship_id,
+            &all_balls,
+            ship_pos,
+            beam_dir,
+            effective_range,
+            neut_radius,
+            now_unix,
+        )
+        .await?;
+
+        let (consumed_fuel, consumed_stacks) =
+            deduct_superweapon_fuel(ctx, ship_id, lance_fuel_tid, lance_fuel_qty, "lance")?;
+        if let Some(cur_cap) = cur_cap_opt {
+            let _ = sys.set_capacitor(ship_id, (cur_cap - cap_cost).max(0.0)).await;
+        }
+
+        let hit_targets = match crate::services::r6_t1_p0_helpers::execute_lancer_beam_attack(
             ctx,
             &sys,
             sys_id,
@@ -321,7 +513,17 @@ pub async fn activate_superweapon_with_args(
             victim_debuff_secs,
             now_unix,
         )
-        .await?;
+        .await
+        {
+            Ok(hits) => hits,
+            Err(err) => {
+                refund_superweapon_fuel(ctx, ship_id, char_id, lance_fuel_tid, &consumed_stacks);
+                if let Some(cur_cap) = cur_cap_opt {
+                    let _ = sys.set_capacitor(ship_id, cur_cap).await;
+                }
+                return Err(err);
+            }
+        };
         let db_key = db_key_of(ctx);
         {
             let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
@@ -400,9 +602,16 @@ pub async fn activate_superweapon_with_args(
             if tcs.is_cloaked {
                 return Err(BridgeRpcError::user_error("CannotTargetCloaked"));
             }
-            if tcs.is_tethered {
+            if tcs.is_tethered
+                || tcs.is_invulnerable()
+                || tcs.undock_invulnerable_remaining_ticks > 0
+                || tcs.gate_cloak_remaining_ticks > 0
+            {
                 return Err(BridgeRpcError::user_error("TargetInvulnerable"));
             }
+        }
+        if crate::services::space_destiny::is_location_change_invulnerable(ctx, tid, now_unix) {
+            return Err(BridgeRpcError::user_error("TargetInvulnerable"));
         }
         let locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
         if !locks.iter().any(|l| l.target_id == tid && l.locked) {
@@ -452,6 +661,14 @@ pub async fn activate_superweapon_with_args(
                 });
             }
         }
+        crate::services::combat_crimewatch::crimewatch_timers::precheck_pvp_aggression_safety(
+            ctx,
+            char_id,
+            sys_id,
+            tid,
+            tb.type_id == 670,
+        )?;
+        precheck_doomsday_structure_target(ctx, sys_id, char_id, tid, now_unix)?;
         single_target_victim_char = vic_char_opt;
         single_target_is_player_struct = is_p_struct;
         Some(tb)
@@ -472,39 +689,28 @@ pub async fn activate_superweapon_with_args(
 
     let fuel_tid = mod_type.default_attributes.get(&713).map(|&v| v as u32).unwrap_or(16274);
     let fuel_qty = mod_type.default_attributes.get(&714).map(|&v| v.round() as i32).unwrap_or(50_000);
-    let consumed_fuel = ctx
-        .db
-        .with_mut_snapshot(|snap| {
-            let is_fuel = |i: &&eve_db::InventoryItemRecord| {
-                i.location_id == ship_id && i.type_id == fuel_tid && matches!(i.flag as u16, 5 | 133) && i.quantity > 0
-            };
-            let cand = snap
-                .items
-                .values()
-                .find(|i| is_fuel(i) && (i.flag as u16) == 133 && i.quantity >= fuel_qty)
-                .or_else(|| snap.items.values().find(|i| is_fuel(i) && i.quantity >= fuel_qty))
-                .or_else(|| snap.items.values().find(|i| is_fuel(i)))
-                .map(|i| (i.item_id, i.quantity));
-            match cand {
-                Some((fid, avail)) if avail >= fuel_qty => {
-                    let mut rem = 0;
-                    if let Some(it) = snap.items.get_mut(&fid) {
-                        it.quantity -= fuel_qty;
-                        rem = it.quantity;
-                    }
-                    if rem == 0 {
-                        snap.items.remove(&fid);
-                    }
-                    Ok(fuel_qty)
-                }
-                Some((_, avail)) => Err(format!("Insufficient superweapon fuel (type {fuel_tid}): need {fuel_qty}, have {avail}")),
-                None => Err(format!("Missing required superweapon fuel (type {fuel_tid}, quantity {fuel_qty})")),
+    let dd_cap_cost = mod_type.default_attributes.get(&6).copied().unwrap_or(0.0);
+    let dd_cur_cap_opt = if dd_cap_cost > 0.0 {
+        if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
+            if cs.capacitor + 1e-4 < dd_cap_cost {
+                return Err(BridgeRpcError {
+                    code: "NotEnoughCapacitor".into(),
+                    message: format!("Insufficient capacitor for Doomsday: need {dd_cap_cost:.1} GJ"),
+                });
             }
-        })
-        .map_err(|message| BridgeRpcError {
-            code: "InsufficientFuel".into(),
-            message,
-        })?;
+            Some(cs.capacitor)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    check_superweapon_fuel_available(ctx, ship_id, fuel_tid, fuel_qty, "superweapon")?;
+    let (consumed_fuel, consumed_stacks) =
+        deduct_superweapon_fuel(ctx, ship_id, fuel_tid, fuel_qty, "superweapon")?;
+    if let Some(cur_cap) = dd_cur_cap_opt {
+        let _ = sys.set_capacitor(ship_id, (cur_cap - dd_cap_cost).max(0.0)).await;
+    }
 
     let em_dmg = mod_type.default_attributes.get(&114).copied().unwrap_or(0.0);
     let ex_dmg = mod_type.default_attributes.get(&116).copied().unwrap_or(0.0);
@@ -568,6 +774,21 @@ pub async fn activate_superweapon_with_args(
             })
             .await;
     } else if let Some(tb) = single_target_ball {
+        let (app, destroyed) =
+            match crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
+                ctx, &sys, sys_id, char_id, tb.id, dmg_vec, 10.0, now_unix,
+            )
+            .await
+            {
+                Ok(res) => res.map(|(a, d, _)| (a, d)).unwrap_or((0.0, false)),
+                Err(err) => {
+                    refund_superweapon_fuel(ctx, ship_id, char_id, fuel_tid, &consumed_stacks);
+                    if let Some(cur_cap) = dd_cur_cap_opt {
+                        let _ = sys.set_capacitor(ship_id, cur_cap).await;
+                    }
+                    return Err(err);
+                }
+            };
         // Apply 300s jump/dock/tether/cloak lock and 30s self-immobilization cycle on single-target Doomsday (`#496`).
         ctx.tactical_state
             .write()
@@ -587,12 +808,6 @@ pub async fn activate_superweapon_with_args(
                 ..Default::default()
             })
             .await;
-        let (app, destroyed) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
-            ctx, &sys, sys_id, char_id, tb.id, dmg_vec, 10.0, now_unix,
-        )
-        .await?
-        .map(|(a, d, _)| (a, d))
-        .unwrap_or((0.0, false));
         crate::services::combat_crimewatch::record_killmail_assist_action(
             ctx,
             tb.id,

@@ -798,6 +798,12 @@ pub(crate) fn handle_add_module_cycle(
     if cycle.grants_interdiction_nullification {
         ballpark.set_interdiction_nullified(cycle.ship_id, true);
     }
+    if cycle.started_at_unix == 0 {
+        cycle.started_at_unix = db_opt
+            .as_ref()
+            .map(|db| db.clock().now_unix_secs())
+            .unwrap_or(0);
+    }
     active_module_cycles.push(cycle);
     reconcile_tackle_and_bubbles(
         ballpark,
@@ -1081,6 +1087,99 @@ pub(super) fn apply_destiny_event_in_actor(
         }
     }
     known
+}
+
+impl SystemHandle {
+    pub fn is_ball_warping_sync(&self, ship_id: BallId) -> bool {
+        self.ballpark
+            .read()
+            .is_ok_and(|bp| bp.balls.get(&ship_id).is_some_and(|b| matches!(b.mode, MovementMode::Warp { .. })))
+    }
+
+    pub fn committed_warp_destination_sync(&self, ship_id: BallId) -> Option<DVec3> {
+        self.ballpark.read().ok().and_then(|bp| {
+            bp.balls.get(&ship_id).and_then(|b| match b.mode {
+                MovementMode::Warp { destination, phase, .. }
+                    if phase != eve_destiny::WarpPhase::Aligning =>
+                {
+                    Some(destination)
+                }
+                _ => None,
+            })
+        })
+    }
+
+    pub fn is_ball_aligning_warp_sync(&self, ship_id: BallId) -> bool {
+        self.ballpark.read().is_ok_and(|bp| {
+            bp.balls.get(&ship_id).is_some_and(|b| {
+                matches!(b.mode, MovementMode::Warp { phase: eve_destiny::WarpPhase::Aligning, .. })
+            })
+        })
+    }
+
+    pub fn max_active_module_cycle_expiry_unix_sync(
+        &self,
+        ship_id: BallId,
+        cyno_expiry_unix: u64,
+        now_unix: u64,
+    ) -> u64 {
+        let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
+        let mut max_exp = cyno_expiry_unix;
+        for c in st
+            .active_module_cycles
+            .iter()
+            .filter(|c| c.ship_id == ship_id && c.duration_s > 0.0)
+        {
+            if matches!(
+                c.effect_name.as_str(),
+                "cynosuralGeneration" | "cynosuralGenerationCovert" | "jumpPortalGeneration"
+            ) && cyno_expiry_unix > 0
+            {
+                continue;
+            }
+            let elapsed = if c.started_at_unix > 0 {
+                c.elapsed_s.max(now_unix.saturating_sub(c.started_at_unix) as f64)
+            } else {
+                c.elapsed_s
+            };
+            let rem_secs = (c.duration_s - elapsed).max(0.0).ceil() as u64;
+            let extra_lance = if matches!(
+                c.effect_name.as_str(),
+                "superWeaponLanceWarmup" | "superWeaponLanceBeam"
+            ) && c.repeat > 0
+            {
+                c.repeat as u64
+            } else {
+                0
+            };
+            let exp = now_unix.saturating_add(rem_secs).saturating_add(extra_lance);
+            max_exp = max_exp.max(exp);
+        }
+        max_exp
+    }
+}
+
+impl SystemRegistry {
+    pub fn is_ball_in_committed_warp_sync(&self, solar_system_id: SolarSystemId, ball_id: BallId) -> bool {
+        let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
+        guard
+            .get(&solar_system_id)
+            .is_some_and(|h| h.committed_warp_destination_sync(ball_id).is_some())
+    }
+
+    pub fn max_active_module_cycle_expiry_unix_sync(
+        &self,
+        solar_system_id: SolarSystemId,
+        ship_id: BallId,
+        cyno_expiry_unix: u64,
+        now_unix: u64,
+    ) -> u64 {
+        let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
+        guard
+            .get(&solar_system_id)
+            .map(|h| h.max_active_module_cycle_expiry_unix_sync(ship_id, cyno_expiry_unix, now_unix))
+            .unwrap_or(cyno_expiry_unix)
+    }
 }
 
 #[cfg(test)]

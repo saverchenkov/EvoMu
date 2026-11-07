@@ -665,7 +665,7 @@ pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
     });
 
     let (mut completed_safe_logoffs, mut aborted_safe_logoffs) = (Vec::<SafeLogoffEntry>::new(), Vec::<(i64, &'static str)>::new());
-    let (mut expired_disconnected, mut due_self_destructs) = (Vec::<DisconnectedShipEntry>::new(), Vec::<SelfDestructPersistedEntry>::new());
+    let mut due_self_destructs = Vec::<SelfDestructPersistedEntry>::new();
     let (mut due_abyssal, mut active_warping_disconnected) = (Vec::<AbyssalPersistedSession>::new(), Vec::<DisconnectedShipEntry>::new());
 
     // Evaluate blocking space conditions outside `with_mut_sp6_state` so we never re-enter `ctx.db`
@@ -744,7 +744,11 @@ pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
 
         for disc in st.disconnected_ships.values_mut() {
             if !disc.removed_from_space {
-                if ctx.systems.is_ball_scrambled_sync(disc.solar_system_id, disc.ship_id) {
+                if ctx.systems.is_ball_scrambled_sync(disc.solar_system_id, disc.ship_id)
+                    && !ctx
+                        .systems
+                        .is_ball_in_committed_warp_sync(disc.solar_system_id, disc.ship_id)
+                {
                     disc.emergency_warp_dest = None;
                 } else if disc.emergency_warp_dest.is_some() {
                     active_warping_disconnected.push(disc.clone());
@@ -800,7 +804,7 @@ pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
         let Some(dest_arr) = disc.emergency_warp_dest else {
             continue;
         };
-        if !handle.is_ball_scrambled_sync(disc.ship_id) {
+        if !handle.is_ball_scrambled_sync(disc.ship_id) || handle.is_ball_warping_sync(disc.ship_id) {
             let (_gid, _cid, mass, radius, max_vel, inertia, warp_speed_au_s) =
                 sde_ship_physics(&ctx.sde, disc.ship_type_id);
             let cur_pos = handle
@@ -820,7 +824,17 @@ pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
         }
     }
 
-    let step_iters = if secs > 0 { secs.min(45) } else { 0 };
+    for disc in super::disconnect_hold::collect_expired_disconnected_ships_filtered(
+        ctx, now_unix, true,
+    ) {
+        super::disconnect_hold::finalize_expired_disconnected_ship(ctx, disc);
+    }
+
+    let step_iters = if secs == 0 {
+        0
+    } else {
+        secs.min(45)
+    };
     let mut finished_warps: std::collections::HashSet<i64> = std::collections::HashSet::new();
     for _ in 0..step_iters {
         for &sys_id in active_systems.keys() {
@@ -842,10 +856,6 @@ pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
                 let Some(dest_arr) = disc.emergency_warp_dest else {
                     continue;
                 };
-                if handle.is_ball_scrambled_sync(disc.ship_id) {
-                    finished_warps.insert(disc.char_id);
-                    continue;
-                }
                 let (_pos, arrived) =
                     handle.reconcile_disconnected_warp_sync(disc.ship_id, DVec3::from_array(dest_arr));
                 if arrived {
@@ -892,14 +902,8 @@ pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
         });
     }
 
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
-        for disc in st.disconnected_ships.values_mut() {
-            if !disc.removed_from_space && now_unix >= disc.remove_at_unix {
-                disc.removed_from_space = true;
-                expired_disconnected.push(disc.clone());
-            }
-        }
-    });
+    let expired_disconnected =
+        super::disconnect_hold::collect_expired_disconnected_ships(ctx, now_unix);
 
     // 3. Finalize completed 30s Safe Logoffs (`plan:SP-6`, `feat:character.safe-logoff`)
     // parity: feat:character.safe-logoff
@@ -918,6 +922,11 @@ pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
                 Ok(())
             });
         }
+        super::disconnect_hold::cleanup_ship_modules_and_cyno_on_despawn(
+            ctx,
+            entry.char_id,
+            entry.ship_id,
+        );
         handle.try_remove_ball(entry.ship_id);
         ctx.notify(
             NotificationTarget::Character(entry.char_id),
@@ -930,21 +939,7 @@ pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
 
     // 4. Finalize expired ungraceful logoff / disconnect ship removal timers (`plan:SP-6`)
     for disc in expired_disconnected {
-        let handle = ctx.systems.get_or_spawn(disc.solar_system_id);
-        let final_pos = handle
-            .get_ball_position_sync(disc.ship_id)
-            .map(|v| [v.x, v.y, v.z])
-            .unwrap_or(disc.last_position);
-        handle.try_remove_ball(disc.ship_id);
-        with_mut_sp6_state(&ctx.db, |st, snap| {
-            if snap.items.contains_key(&disc.ship_id) {
-                snap.item_positions.insert(disc.ship_id, final_pos);
-            }
-            if let Some(d) = st.disconnected_ships.get_mut(&disc.char_id) {
-                d.last_position = final_pos;
-                d.removed_from_space = true;
-            }
-        });
+        super::disconnect_hold::finalize_expired_disconnected_ship(ctx, disc);
     }
 
     // 5. Detonate due server-driven self-destructs (`feat:lifecycle.self-destruct-server-timer`)

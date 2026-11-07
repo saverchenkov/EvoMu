@@ -128,6 +128,8 @@ pub struct ActiveModuleCycle {
     pub grappler_optimal_m: f64,
     pub grappler_falloff_m: f64,
     pub grappler_speed_factor_pct: f64,
+    /// Unix timestamp (seconds) when this module cycle was added or began its current cycle (`#498`).
+    pub started_at_unix: u64,
 }
 
 #[derive(Debug, Clone)]

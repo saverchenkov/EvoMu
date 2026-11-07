@@ -58,16 +58,46 @@ pub struct TacticalModulesState {
 }
 
 pub fn is_clone_vat_bay_active_required(ctx: &ServerContext, ship_id: i64) -> bool {
-    let db_key = db_key_of(ctx);
-    ctx.tactical_state
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone_vat_bay_activated_ships
-        .contains(&(db_key, ship_id))
+    let (db_key, inst_key) = (db_key_of(ctx), ctx.instance_id as usize);
+    let st = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
+    st.clone_vat_bay_activated_ships.contains(&(db_key, ship_id))
+        || st.clone_vat_bay_activated_ships.contains(&(inst_key, ship_id))
 }
 
 fn db_key_of(ctx: &ServerContext) -> usize { db_ptr_key(&ctx.db) }
 pub(crate) fn db_ptr_key(db: &Arc<eve_db::WorldRepository>) -> usize { Arc::as_ptr(db) as usize }
+
+/// Returns the latest Unix expiry timestamp of any active navigation-locking effect or link on `ship_id`.
+pub fn ship_navigation_lock_expiry_unix(ctx: &ServerContext, ship_id: i64) -> u64 {
+    let (db_key, inst_key) = (db_key_of(ctx), ctx.instance_id as usize);
+    let mut max_exp = 0_u64;
+    {
+        let st = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
+        for k in [db_key, inst_key] {
+            if let Some(&u) = st.lance_caster_lock_until.get(&(k, ship_id)) {
+                max_exp = max_exp.max(u);
+            }
+            if let Some(&u) = st.lance_victim_debuff_until.get(&(k, ship_id)) {
+                max_exp = max_exp.max(u);
+            }
+            if let Some(ent) = st.entosis_active_links.get(&(k, ship_id)) {
+                max_exp = max_exp.max(ent.expires_unix);
+            }
+        }
+    }
+    let skyhook_exp = ctx.db.with_snapshot(|snap| {
+        snap.sov_runtime
+            .skyhook_silo_links
+            .values()
+            .filter(|&&(_, sid, _, _)| sid == ship_id)
+            .map(|&(_, _, completes_at, _)| completes_at)
+            .max()
+            .unwrap_or(0)
+    });
+    max_exp = max_exp.max(skyhook_exp);
+    max_exp = max_exp.max(crate::services::pve_crab_beacons::ship_crab_link_expiry_unix(ctx, ship_id));
+    max_exp
+}
 
 pub fn has_lance_caster_lock(ctx: &ServerContext, ship_id: i64) -> bool {
     let now_unix = ctx.now_unix_secs();

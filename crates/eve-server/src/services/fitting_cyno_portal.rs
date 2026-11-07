@@ -139,6 +139,8 @@ pub fn on_cyno_ship_destroyed(ctx: &ServerContext, ship_id: i64) {
             st.destroyed_beacons.insert(k, b);
         }
     }
+    st.beacons
+        .retain(|&(k, _), b| !(k == key && b.ship_id == ship_id && b.expires_at_unix <= now));
     drop(st);
     for (sys_id, bridger_ship_id, portal_mod_id, ball_id) in removed_bridges {
         let sys = ctx.systems.get_or_spawn(sys_id);
@@ -173,6 +175,25 @@ pub(crate) fn active_cyno_beacon_counts(ctx: &ServerContext) -> HashMap<i64, i64
         }
     }
     counts
+}
+
+/// Returns the latest Unix expiry timestamp of any cyno beacon or jump bridge tied to `ship_id`.
+pub(crate) fn ship_cyno_activity_expiry_unix(ctx: &ServerContext, ship_id: i64) -> u64 {
+    let key = ctx_key(ctx);
+    let mut max_exp = 0_u64;
+    if let Ok(state) = cyno_state().read() {
+        for (&(k, _), b) in &state.beacons {
+            if k == key && b.ship_id == ship_id {
+                max_exp = max_exp.max(b.expires_at_unix);
+            }
+        }
+        for (&(k, _), br) in &state.bridges {
+            if k == key && br.bridger_ship_id == ship_id {
+                max_exp = max_exp.max(br.expires_at_unix);
+            }
+        }
+    }
+    max_exp
 }
 
 fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {

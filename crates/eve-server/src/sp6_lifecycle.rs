@@ -18,6 +18,7 @@
 
 mod cluster_tick;
 mod cluster_tick_downtime;
+mod disconnect_hold;
 mod drone_reconnect_finish;
 pub mod drone_return;
 
@@ -495,8 +496,13 @@ pub fn safe_logoff_blocking_space_conditions(
         })
     });
     let has_nav_lock = !crate::services::structure_control_ops::is_structure_vessel(ctx, ship_id)
-        && crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "safe logoff")
-            .is_err();
+        && (crate::services::tactical_modules::check_ship_navigation_lock(
+            ctx,
+            ship_id,
+            "safe logoff",
+        )
+        .is_err()
+            || crate::services::tactical_modules::is_clone_vat_bay_active_required(ctx, ship_id));
     let has_active_mods = has_persisted_active_mods
         || has_nav_lock
         || ctx.systems.has_active_modules_or_cloak_sync(sys_id, ship_id)
@@ -731,7 +737,7 @@ pub fn maybe_abort_safe_logoff_on_action(
 }
 
 /// Computes a deterministic 1,000,000 km (`1e9 m`) emergency-warp destination vector in deep space.
-fn compute_emergency_warp_destination(current_pos: DVec3, char_id: i64, ship_id: i64) -> DVec3 {
+pub(super) fn compute_emergency_warp_destination(current_pos: DVec3, char_id: i64, ship_id: i64) -> DVec3 {
     let seed = (char_id as u64)
         .wrapping_mul(6364136223846793005)
         .wrapping_add(ship_id as u64)
@@ -847,71 +853,18 @@ pub async fn handle_character_logoff_or_disconnect(
         rt.authorized_shipping_storage.retain(|&(_, c)| c != char_id);
     });
 
-    let (weap_until, npc_until, pvp_until, crim_until) =
-        active_timers_for_char(ctx, char_id, now_unix);
-    let has_active_combat_engagement = sys_handle.has_active_modules_or_cloak_sync(ship_id)
-        || !sys_handle
-            .get_target_locks(ship_id)
-            .await
-            .unwrap_or_default()
-            .is_empty();
-    let base_remove_secs = if has_active_combat_engagement {
-        NPC_TIMER_SECS
-    } else {
-        UNAGGRESSED_LOGOFF_REMOVE_SECS
-    };
-    let remove_at_unix = pvp_until
-        .max(crim_until)
-        .max(npc_until)
-        .max(weap_until)
-        .max(now_unix.saturating_add(base_remove_secs));
-
-    let sys_sec = ctx
-        .sde
-        .solar_systems
-        .get(&sys_id)
-        .map(|s| s.security_status)
-        .unwrap_or(0.5);
-    let in_abyssal = (32_000_000..=32_999_999).contains(&sys_id);
-    let is_ball_scrambled = sys_handle
-        .ballpark
-        .read()
-        .is_ok_and(|bp| bp.is_ball_scrambled(ship_id))
-        || ctx.systems.is_ball_scrambled_sync(sys_id, ship_id);
-    let is_scrambled = in_abyssal
-        || is_ball_scrambled
-        || (sys_sec >= 0.45 && crim_until > now_unix);
-
-    ctx.active_warps.lock().unwrap_or_else(|e| e.into_inner()).remove(&ship_id);
-
-    // Emergency warp is prohibited while warp-scrambled, in Abyssal space, as a highsec criminal,
-    // or under an active Weapons timer (`feat:account.logout`, `plan:SP-6`).
-    let emergency_warp_dest = if !is_scrambled && weap_until <= now_unix {
-        let dest = compute_emergency_warp_destination(current_pos, char_id, ship_id);
-        if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
-            cs.is_emergency_warping = true;
-            let _ = sys_handle.set_combat_state(ship_id, cs).await;
-        }
-        let _ = sys_handle
-            .set_movement_mode(ship_id, MovementMode::new_warp(current_pos, dest, warp_speed_au_s))
-            .await;
-        Some([dest.x, dest.y, dest.z])
-    } else {
-        None
-    };
-
-    let entry = DisconnectedShipEntry {
+    let entry = disconnect_hold::build_disconnected_ship_entry(
+        ctx,
+        &sys_handle,
         char_id,
         ship_id,
         ship_type_id,
-        solar_system_id: sys_id,
-        disconnected_at_unix: now_unix,
-        remove_at_unix,
-        emergency_warp_dest,
-        last_position: [current_pos.x, current_pos.y, current_pos.z],
-        removed_from_space: false,
-        pre_warp_position: Some([current_pos.x, current_pos.y, current_pos.z]),
-    };
+        sys_id,
+        current_pos,
+        warp_speed_au_s,
+        now_unix,
+    )
+    .await;
 
     with_mut_sp6_state(&ctx.db, |st, snap| {
         snap.item_positions
@@ -1046,8 +999,12 @@ pub fn reconnect_character_in_space_sync(
             ))
         })?;
 
-    ctx.active_warps.lock().unwrap_or_else(|e| e.into_inner()).remove(&ship_id);
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let keep_client_warp =
+        pre_warp_pos_opt.is_none() && sys_handle.committed_warp_destination_sync(ship_id).is_some();
+    if !keep_client_warp {
+        ctx.active_warps.lock().unwrap_or_else(|e| e.into_inner()).remove(&ship_id);
+    }
     let (group_id, category_id, mass, radius, max_vel, inertia, warp_speed) =
         sde_ship_physics(&ctx.sde, ship_type_id);
 

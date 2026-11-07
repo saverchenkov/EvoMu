@@ -769,6 +769,7 @@ pub(crate) fn step_cycles_and_capacitor(
                 finished_indices.push(idx);
             } else {
                 cycle.elapsed_s -= cycle.duration_s;
+                if let Some(db_ref) = db_opt { cycle.started_at_unix = db_ref.clock().now_unix_secs(); }
                 // Handle ASB, AAR, and Cap Booster charge consumption for the next cycle (`DG-4`)
                 if cycle.is_asb {
                     let mut consumed_charge = false;
@@ -1374,7 +1375,12 @@ impl SystemHandle {
             !matches!(b.mode, MovementMode::Warp { .. }) || (b.position - dest).length() <= 2_500.0
         });
         if arrived {
-            let _ = bp.set_ball_position(ship_id, dest);
+            if bp.balls.get(&ship_id).is_some_and(|b| {
+                matches!(b.mode, MovementMode::Warp { .. })
+                    || (!bp.is_ball_scrambled(ship_id) && (b.position - dest).length() <= 50_000.0)
+            }) {
+                let _ = bp.set_ball_position(ship_id, dest);
+            }
             let _ = bp.set_mode(ship_id, MovementMode::Stop);
             if let Some(b) = bp.balls.get_mut(&ship_id) {
                 b.velocity = DVec3::ZERO;

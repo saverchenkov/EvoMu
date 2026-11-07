@@ -243,29 +243,23 @@ pub(crate) async fn enforce_legacy_pvp_safety_and_concord(
     Ok((has_legal_engagement, None))
 }
 
-/// `R6-T1-04` (`#358`): Resolves eligible non-tethered, non-invulnerable targets in a
-/// Disruptive Lance cylinder, enforces low-sec safety & Crimewatch aggression for every
-/// hit player ship or capsule, and applies damage/debuffs without forcibly untethering ships.
+/// Resolves eligible non-tethered, non-invulnerable targets in a Disruptive Lance cylinder and
+/// validates Crimewatch safety across all cone targets before any isotope deduction, capacitor
+/// drain, or Crimewatch timer mutation (`#478`).
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn execute_lancer_beam_attack(
+pub(crate) async fn collect_and_precheck_lancer_cone_targets(
     ctx: &ServerContext,
     sys: &SystemHandle,
     sys_id: u32,
     char_id: i64,
     ship_id: i64,
-    ship_type_id: u32,
-    mod_type_id: u32,
     all_balls: &[Ball],
     ship_pos: DVec3,
     beam_dir: DVec3,
     effective_range: f64,
-    beam_radius: f64,
     neut_radius: f64,
-    total_dmg_vec: DamageVector,
-    neut_amount_gj: f64,
-    victim_debuff_secs: u64,
     now_unix: u64,
-) -> Result<Vec<i64>, BridgeRpcError> {
+) -> Result<Vec<(Ball, f64)>, BridgeRpcError> {
     let mut eligible: Vec<(Ball, f64)> = Vec::new();
     for b in all_balls {
         if b.id == ship_id {
@@ -307,6 +301,57 @@ pub(crate) async fn execute_lancer_beam_attack(
         }
         eligible.push((b.clone(), perp_dist));
     }
+
+    for (b, _) in &eligible {
+        crate::services::combat_crimewatch::crimewatch_timers::precheck_pvp_aggression_safety(
+            ctx,
+            char_id,
+            sys_id,
+            b.id,
+            b.type_id == 670,
+        )?;
+    }
+
+    Ok(eligible)
+}
+
+/// `R6-T1-04` (`#358`): Resolves eligible non-tethered, non-invulnerable targets in a
+/// Disruptive Lance cylinder, enforces low-sec safety & Crimewatch aggression for every
+/// hit player ship or capsule, and applies damage/debuffs without forcibly untethering ships.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_lancer_beam_attack(
+    ctx: &ServerContext,
+    sys: &SystemHandle,
+    sys_id: u32,
+    char_id: i64,
+    ship_id: i64,
+    ship_type_id: u32,
+    mod_type_id: u32,
+    all_balls: &[Ball],
+    ship_pos: DVec3,
+    beam_dir: DVec3,
+    effective_range: f64,
+    beam_radius: f64,
+    neut_radius: f64,
+    total_dmg_vec: DamageVector,
+    neut_amount_gj: f64,
+    victim_debuff_secs: u64,
+    now_unix: u64,
+) -> Result<Vec<i64>, BridgeRpcError> {
+    let eligible = collect_and_precheck_lancer_cone_targets(
+        ctx,
+        sys,
+        sys_id,
+        char_id,
+        ship_id,
+        all_balls,
+        ship_pos,
+        beam_dir,
+        effective_range,
+        neut_radius,
+        now_unix,
+    )
+    .await?;
 
     let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
         rt.modified_system_securities.get(&sys_id).copied()

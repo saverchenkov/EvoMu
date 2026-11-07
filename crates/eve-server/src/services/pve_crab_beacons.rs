@@ -210,6 +210,21 @@ pub fn is_ship_crab_linked(ctx: &ServerContext, ship_id: i64, now_unix: u64) -> 
     })
 }
 
+/// Returns the latest Unix completion timestamp of any active CRAB beacon link tied to `ship_id`.
+pub fn ship_crab_link_expiry_unix(ctx: &ServerContext, ship_id: i64) -> u64 {
+    if !has_special_sites_state(ctx) {
+        return 0;
+    }
+    read_pve_special_reg(ctx, |reg| {
+        reg.crab_beacons
+            .values()
+            .filter(|b| b.phase == CrabBeaconPhase::Linking && b.linked_ship_id == Some(ship_id))
+            .map(|b| b.link_completes_at_sec)
+            .max()
+            .unwrap_or(0)
+    })
+}
+
 /// Checks whether `char_id` may view or take loot from `container_id` if it is a CRAB beacon.
 /// Returns `Ok(None)` if `container_id` is not a CRAB beacon, `Ok(Some(true))` if allowed,
 /// or `Err(...)` if the scan is still in progress or the 2-minute deployer restriction is active.

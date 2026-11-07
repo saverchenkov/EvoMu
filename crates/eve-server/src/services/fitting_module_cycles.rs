@@ -1213,6 +1213,7 @@ pub(crate) async fn handle_module_cycles(
                 } else {
                     None
                 },
+                started_at_unix: ctx.now_unix_secs(),
             };
 
             if let Err(e) = sys.add_module_cycle(cycle).await {

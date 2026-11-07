@@ -324,7 +324,10 @@ pub fn validate_upwell_structure_attack_precheck(
         return Ok(false);
     }
     life::sync_all_structures(ctx);
-    let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.0);
+    let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        rt.modified_system_securities.get(&sys_id).copied()
+    })
+    .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.0));
     ctx.db.with_snapshot(|snap| {
         let Some(st) = snap.structures.get(&target_ball_id) else {
             return Ok(false);
