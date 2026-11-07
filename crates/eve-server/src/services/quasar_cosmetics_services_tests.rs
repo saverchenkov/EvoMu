@@ -72,7 +72,7 @@ fn state_persistence_ship_palette_and_quasar_config_handlers() {
         shared_sde(),
     );
     let now = 1_760_000_000u64;
-    let member = sess(Some(1), Some(90_000_001), Some(98_000_001), service_roles::ROLE_PLAYER_DEFAULT, 0);
+    let member = sess(Some(2), Some(90_000_002), Some(98_000_001), service_roles::ROLE_PLAYER_DEFAULT, 0);
     let director = sess(
         Some(1),
         Some(90_000_001),

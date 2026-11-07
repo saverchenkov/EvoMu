@@ -26,6 +26,9 @@ fn char_session(char_id: i64, corp_id: i64) -> SessionState {
 #[test]
 fn store_manager_catalog_and_offer_purchase_lifecycle() {
     let ctx = make_test_context();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs.remove("nes_store_catalog");
+    });
     let char_id = 90_000_001;
     let station_id = 60_003_760;
     let mut session = char_session(char_id, 98_000_001);

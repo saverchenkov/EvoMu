@@ -308,12 +308,23 @@ fn dispatch_medals_roles_titles_bookmarks_projects_and_opportunities() {
         ("/characters/{character_id}/bookmarks/folders", &p_char),
         ("/corporations/{corporation_id}/bookmarks", &p_corp),
         ("/corporations/{corporation_id}/bookmarks/folders", &p_corp),
-        ("/corporations/{corporation_id}/projects", &p_corp),
     ] {
         let res = dispatch_char_social_route(&ctx, "GET", path, p, &empty_q, b"").unwrap();
         assert_eq!(res.status_code, 200, "failed on {path}");
         assert!(body(&res).is_array(), "expected array on {path}");
     }
+    assert!(
+        dispatch_char_social_route(
+            &ctx,
+            "GET",
+            "/corporations/{corporation_id}/projects",
+            &p_corp,
+            &empty_q,
+            b"",
+        )
+        .is_none(),
+        "corporation projects route is dispatched by corp_governance_routes"
+    );
 
     let opp_groups = dispatch_char_social_route(
         &ctx,

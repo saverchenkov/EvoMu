@@ -113,6 +113,9 @@ fn note_helpers_and_store_manager_targeted_omega_kwargs_and_overflow_branches() 
     });
 
     // 2. Empty session.address does not seed store catalog
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs.remove("nes_store_catalog");
+    });
     let mut sess = SessionState {
         user_id: Some(1),
         character_id: Some(char_id),
