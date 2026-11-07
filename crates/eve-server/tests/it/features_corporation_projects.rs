@@ -80,6 +80,22 @@ async fn kill_npc_with_turret_rpc(
     npc_id: i64,
 ) {
     let sys_h = ctx.systems.get_or_spawn(sys_id);
+    for _ in 0..300 {
+        let warping = sys_h
+            .get_ball_snapshot(npc_id)
+            .await
+            .unwrap()
+            .is_some_and(|(_, b)| matches!(b.mode, MovementMode::Warp { .. }));
+        let invuln = sys_h
+            .get_combat_state(npc_id)
+            .await
+            .unwrap()
+            .is_some_and(|cs| cs.is_warp_exit_invulnerable() || cs.is_cloaked || cs.gate_cloak_remaining_ticks > 0);
+        if !warping && !invuln {
+            break;
+        }
+        sys_h.step_manual(if warping { 2.0 } else { 1.0 }).await.unwrap();
+    }
     let npc_pos = sys_h.get_ball_snapshot(npc_id).await.unwrap().expect("NPC ball").1.position;
     let _ = sys_h.set_movement_mode(ship_id, MovementMode::Stop).await;
     let _ = sys_h.set_ball_position(ship_id, npc_pos + DVec3::new(1_200.0, 0.0, 0.0)).await;
@@ -88,6 +104,7 @@ async fn kill_npc_with_turret_rpc(
     let _ = sys_h.set_combat_state(npc_id, cs).await;
     let _ = rpc_call(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gun_id)]).await;
     lock_target_via_rpc(ctx, sess, sys_id, ship_id, npc_id).await;
+    let npc_pos = sys_h.get_ball_snapshot(npc_id).await.unwrap().expect("NPC ball").1.position;
     let _ = sys_h.set_movement_mode(ship_id, MovementMode::Stop).await;
     let _ = sys_h.set_ball_position(ship_id, npc_pos + DVec3::new(1_200.0, 0.0, 0.0)).await;
     rpc_call(
