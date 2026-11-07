@@ -393,11 +393,12 @@ fn facilities_jobs_format_mining_extractions_and_observers_edge_cases() {
 
         snap.industry_jobs.insert(104, mk_job(104, char_id, 60_003_760, 8, 555_001, 688, 11_372, 1, 1_700_000_000, 100, "Failed"));
 
-        let mining_cutoff = now.saturating_sub(30 * 86_400);
+        let mining_recent = now.saturating_sub(29 * 86_400 + 86_000);
+        let mining_expired = now.saturating_sub(30 * 86_400 + 60);
         snap.mining_ledger = vec![
-            MiningLedgerRecord { character_id: char_id, solar_system_id: 30_000_142, type_id: 1230, quantity: 100, date: String::new(), timestamp_unix: mining_cutoff },
-            MiningLedgerRecord { character_id: char_id, solar_system_id: 30_000_142, type_id: 1230, quantity: 250, date: format_date_utc(mining_cutoff), timestamp_unix: now },
-            MiningLedgerRecord { character_id: char_id, solar_system_id: 30_000_142, type_id: 1230, quantity: 999, date: String::new(), timestamp_unix: mining_cutoff - 1 },
+            MiningLedgerRecord { character_id: char_id, solar_system_id: 30_000_142, type_id: 1230, quantity: 100, date: String::new(), timestamp_unix: mining_recent },
+            MiningLedgerRecord { character_id: char_id, solar_system_id: 30_000_142, type_id: 1230, quantity: 250, date: format_date_utc(mining_recent), timestamp_unix: now },
+            MiningLedgerRecord { character_id: char_id, solar_system_id: 30_000_142, type_id: 1230, quantity: 999, date: String::new(), timestamp_unix: mining_expired },
             MiningLedgerRecord { character_id: char_id, solar_system_id: 30_000_142, type_id: 1230, quantity: 0, date: String::new(), timestamp_unix: now },
         ];
 
