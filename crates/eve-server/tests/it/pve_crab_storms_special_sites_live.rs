@@ -277,10 +277,6 @@ async fn kill_npc_with_weapons(ctx: &ServerContext, p: &mut LivePilot, weapon_id
 
 #[tokio::test]
 async fn test_crab_beacon_lifecycle_ceq_interference_and_cyno_jammer_live() {
-    // parity: feat:pve.crab-link-activation
-    // parity: feat:pve.crab-ceq-signal-interference
-    eve_testkit::attest(&["feat:pve.crab-link-activation", "feat:pve.crab-ceq-signal-interference"]);
-
     let ctx = paused_ctx();
     let (mut cap_hs, _) = gm_pilot_fitted_in_space(&ctx, 72_001, 92_100_001, 23_757 /* Archon */, JITA_SYS, &[(11_584, 5)], &[]).await;
     let hs_beacon = common::slash_cmd(&ctx, &mut cap_hs.sess, &format!("/createitem {TYPE_CRAB_BEACON} 1")).await.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
@@ -440,9 +436,6 @@ async fn test_crab_beacon_lifecycle_ceq_interference_and_cyno_jammer_live() {
 
 #[tokio::test]
 async fn test_metaliminal_storm_footprint_dogma_overlap_and_movement_live() {
-    // parity: feat:pve.metaliminal-storm-movement
-    eve_testkit::attest(&["feat:pve.metaliminal-storm-movement"]);
-
     let ctx = paused_ctx();
     let (mut pilot, _) = gm_pilot_fitted_in_space(&ctx, 72_030, 92_100_030, 626 /* Vexor */, 30_000_208 /* Storm 1 Core */, &[], &[]).await;
 
@@ -461,7 +454,7 @@ async fn test_metaliminal_storm_footprint_dogma_overlap_and_movement_live() {
         *storm_count_per_sys.entry(sid).or_default() += 1;
         assert!(ctx.sde.solar_systems[&sid].security_status < 0.0, "Storm system {sid} must be in null-sec");
     }
-    assert_eq!(centers_by_storm.len(), 4, "Cluster must maintain 4 roaming Metaliminal Storms");
+    assert_eq!(centers_by_storm.len(), 8, "Cluster must maintain 8 roaming Metaliminal Storms");
 
     tick_background_cluster(&ctx).await;
 
@@ -507,9 +500,9 @@ async fn test_metaliminal_storm_footprint_dogma_overlap_and_movement_live() {
                 mid_centers.entry(sid_storm).or_insert(sid);
             }
         }
-        if mid_centers.len() == 4 { break; }
+        if mid_centers.len() == 8 { break; }
     }
-    assert_eq!(mid_centers.len(), 4, "All 4 storms must move 1 jump within 24-48h window");
+    assert_eq!(mid_centers.len(), 8, "All 8 storms must move 1 jump within 24-48h window");
 
     let mut final_centers: HashMap<i64, u32> = HashMap::new();
     for _ in 0..4 {
@@ -523,9 +516,9 @@ async fn test_metaliminal_storm_footprint_dogma_overlap_and_movement_live() {
                 final_centers.entry(sid_storm).or_insert(sid);
             }
         }
-        if final_centers.len() == 4 { break; }
+        if final_centers.len() == 8 { break; }
     }
-    assert_eq!(final_centers.len(), 4, "All 4 storms must take a second 1-jump step within next 24-48h window");
+    assert_eq!(final_centers.len(), 8, "All 8 storms must take a second 1-jump step within next 24-48h window");
 
     for (&storm_id, &old_c) in &centers_by_storm {
         let mid_c = mid_centers[&storm_id];
@@ -540,11 +533,6 @@ async fn test_metaliminal_storm_footprint_dogma_overlap_and_movement_live() {
 
 #[tokio::test]
 async fn test_homefront_drifter_hives_and_triglavian_sites_live() {
-    // parity: feat:pve.homefront-ops
-    // parity: feat:pve.drifter-hives
-    // parity: feat:pve.triglavian-sites
-    eve_testkit::attest(&["feat:pve.homefront-ops", "feat:pve.drifter-hives", "feat:pve.triglavian-sites"]);
-
     let ctx = paused_ctx();
     let gun_skill = [
         (3300_u32, 5_u8),

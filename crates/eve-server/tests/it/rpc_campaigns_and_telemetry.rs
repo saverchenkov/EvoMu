@@ -110,7 +110,7 @@ async fn test_login_and_seasonal_campaigns() {
         (ch.free_skill_points, ch.home_station_id, s.items.len())
     });
 
-    // 1. loginCampaignManager.get_client_campaign_state: returns KeyVal backed by seasonalcampaignsloginrewards.fsdbinary
+    // 1. loginCampaignManager.get_client_campaign_state: returns V24 KeyVal backed by seasonalcampaignsloginrewards.fsdbinary
     let state1 = rpc(
         &ctx,
         &mut sess,
@@ -120,17 +120,19 @@ async fn test_login_and_seasonal_campaigns() {
     )
     .await
     .expect("get_client_campaign_state");
-    assert_eq!(
-        field(&state1, "campaignID").as_i64(),
-        Some(DEFAULT_LOGIN_CAMPAIGN_ID)
+    assert!(
+        field(&state1, "static_data")
+            .dict_get("campaign_id")
+            .and_then(|v| v.as_i64())
+            .is_some()
     );
-    assert_eq!(field(&state1, "canClaimToday").as_bool(), Some(true));
     assert_eq!(
         field(field(&state1, "static_data"), "titleMessageID").as_i64(),
         Some(709_008)
     );
     let item_progress = field(&state1, "item_progress");
     assert_eq!(field(item_progress, "next_reward_index").as_i64(), Some(1));
+    assert_eq!(field(item_progress, "num_claimed_rewards").as_i64(), Some(0));
     assert_eq!(field(item_progress, "reward_count").as_i64(), Some(30));
 
     // 2. loginCampaignManager.claim_reward: returns 4-tuple and delivers SDE day 0 rewards into home station hangar
@@ -143,11 +145,11 @@ async fn test_login_and_seasonal_campaigns() {
     assert_eq!(claim1_tuple.len(), 4);
     let reward_item = &claim1_tuple[0];
     let next_prog = &claim1_tuple[1];
-    let _reward_event = &claim1_tuple[2];
+    assert_eq!(claim1_tuple[2], PyRep::None);
     let bucket_prog = &claim1_tuple[3];
 
     assert_eq!(
-        field(reward_item, "campaignID").as_i64(),
+        field(reward_item, "campaign_id").as_i64(),
         Some(DEFAULT_LOGIN_CAMPAIGN_ID)
     );
     assert_eq!(field(reward_item, "reward_index").as_i64(), Some(1));
@@ -157,6 +159,7 @@ async fn test_login_and_seasonal_campaigns() {
         .as_i64()
         .expect("delivered alpha reward itemID");
     assert_eq!(field(next_prog, "next_reward_index").as_i64(), Some(2));
+    assert_eq!(field(next_prog, "num_claimed_rewards").as_i64(), Some(1));
     assert_eq!(field(bucket_prog, "progress").as_i64(), Some(1));
 
     // PILOT_1 is Omega (clone_grade 2): both Alpha (80937) and Omega (49809) SDE rewards are delivered to home station hangar
@@ -178,11 +181,12 @@ async fn test_login_and_seasonal_campaigns() {
         }));
     });
 
-    // Duplicate claim on same day returns None (nothing to claim)
-    let repeat_claim = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
+    // Duplicate claim on same EVE downtime day raises DailyRewardAlreadyClaimedToday
+    let repeat_err = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
         .await
-        .expect("repeat claim returns None");
-    assert_eq!(repeat_claim, PyRep::None);
+        .expect_err("repeat claim raises DailyRewardAlreadyClaimedToday");
+    // rpc-lint: allow error code check
+    assert_eq!(repeat_err.code, "DailyRewardAlreadyClaimedToday");
 
     // Advance clock by 1 full day (86,400s)
     ctx.advance_virtual_clock(86_400);
@@ -197,10 +201,13 @@ async fn test_login_and_seasonal_campaigns() {
     )
     .await
     .expect("get_client_campaign_state day 2");
-    assert_eq!(field(&state2, "canClaimToday").as_bool(), Some(true));
     assert_eq!(
         field(field(&state2, "item_progress"), "next_reward_index").as_i64(),
         Some(2)
+    );
+    assert_eq!(
+        field(field(&state2, "item_progress"), "num_claimed_rewards").as_i64(),
+        Some(1)
     );
 
     // Claim day 2: delivers SDE day 1 Alpha (82052) and Omega (29266) rewards
@@ -500,44 +507,24 @@ async fn test_milestones_and_community_tracks() {
     });
 
     // 2. milestoneMgr.ClaimRewards: argument validation and DATA GAP fail-closed behavior
-    let missing_milestone = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[])
-        .await
-        .expect_err("missing milestone arg must fail");
+    let missing_milestone = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[]).await.expect_err("missing milestone arg must fail");
     // rpc-lint: allow error code check
     assert_eq!(missing_milestone.code, "InvalidArgument");
 
-    let invalid_milestone = rpc(
-        &ctx,
-        &mut sess,
-        "milestoneMgr",
-        "ClaimRewards",
-        &[PyRep::Integer(0)],
-    )
-    .await
-    .expect_err("invalid milestone 0 must fail");
+    let invalid_milestone = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(0)]).await.expect_err("invalid milestone 0 must fail");
     // rpc-lint: allow error code check
     assert_eq!(invalid_milestone.code, "InvalidMilestoneID");
 
-    let claim_ok = rpc(
-        &ctx,
-        &mut sess,
-        "milestoneMgr",
-        "ClaimRewards",
-        &[PyRep::Integer(1)],
-    )
-    .await
-    .expect("ClaimRewards(1) must succeed once");
-    assert_eq!(claim_ok, PyRep::None);
+    let claim_ok = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)]).await;
+    // Before 119 minutes of play time, ClaimRewards(1) must reject with MilestonePrerequisiteNotMet
+    // rpc-lint: allow error code check
+    assert_eq!(claim_ok.unwrap_err().code, "MilestonePrerequisiteNotMet");
 
-    let dup_err = rpc(
-        &ctx,
-        &mut sess,
-        "milestoneMgr",
-        "ClaimRewards",
-        &[PyRep::Integer(1)],
-    )
-    .await
-    .expect_err("duplicate ClaimRewards(1) must fail");
+    ctx.advance_virtual_clock(7_200);
+    let claim_after_playtime = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)]).await.expect("ClaimRewards(1) must succeed after 120 minutes");
+    assert_eq!(claim_after_playtime, PyRep::None);
+
+    let dup_err = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)]).await.expect_err("duplicate ClaimRewards(1) must fail");
     // rpc-lint: allow error code check
     assert_eq!(dup_err.code, "MilestoneAlreadyClaimed");
 

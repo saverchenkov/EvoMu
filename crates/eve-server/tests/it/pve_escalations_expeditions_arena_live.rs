@@ -316,10 +316,6 @@ async fn warp_to_stuff_and_clear_site(
 
 #[tokio::test]
 async fn test_live_escalations_and_multi_step_expeditions() {
-    // parity: feat:pve.escalations
-    // parity: feat:pve.expeditions
-    eve_testkit::attest(&["feat:pve.escalations", "feat:pve.expeditions"]);
-
     let ctx = ServerContext::new();
     pin_clock(&ctx);
 
@@ -430,9 +426,6 @@ async fn test_live_escalations_and_multi_step_expeditions() {
 
 #[tokio::test]
 async fn test_live_proving_grounds_validation_queue_and_sphere_hazard() {
-    // parity: feat:pve.proving-grounds-queue-and-rewards
-    eve_testkit::attest(&["feat:pve.proving-grounds-queue-and-rewards"]);
-
     let ctx = ServerContext::new();
     pin_clock(&ctx);
 
@@ -627,9 +620,6 @@ async fn test_live_proving_grounds_validation_queue_and_sphere_hazard() {
 
 #[tokio::test]
 async fn test_live_proving_grounds_arena_timer_expiry_destruction() {
-    // parity: feat:pve.proving-grounds-queue-and-rewards
-    eve_testkit::attest(&["feat:pve.proving-grounds-queue-and-rewards"]);
-
     let ctx = ServerContext::new();
     pin_clock(&ctx);
 

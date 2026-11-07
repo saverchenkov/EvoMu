@@ -432,11 +432,8 @@ async fn test_live_crimewatch_system_criminal_and_disapproval_flag_notifications
 
 #[tokio::test]
 async fn test_live_campaign_enrollment_and_tournament_ban_notifications() {
-    // parity: notify:OnCampaignEnrollmentChanged, notify:OnTournamentPerformBan
-    eve_testkit::attest(&[
-        "notify:OnCampaignEnrollmentChanged",
-        "notify:OnTournamentPerformBan",
-    ]);
+    // parity: notify:OnTournamentPerformBan
+    eve_testkit::attest(&["notify:OnTournamentPerformBan"]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);

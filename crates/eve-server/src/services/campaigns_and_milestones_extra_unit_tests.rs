@@ -348,7 +348,7 @@ async fn info_gathering_fifo_cap_milestones_and_community_tracks_edge_branches()
         "InvalidArgument"
     );
 
-    // 2. milestoneMgr upper bound (> 64) and sequential milestone 1 -> 2 reward calculation
+    // 2. milestoneMgr V24 120-minute milestone bounds, play-time accumulation, and 500,000 ISK payout
     assert_eq!(
         call_milestone_mgr(&ctx, &mut sess, "ClaimRewards", &[])
             .await
@@ -357,7 +357,7 @@ async fn info_gathering_fifo_cap_milestones_and_community_tracks_edge_branches()
         "InvalidArgument"
     );
     assert_eq!(
-        call_milestone_mgr(&ctx, &mut sess, "ClaimRewards", &[PyRep::Integer(65)])
+        call_milestone_mgr(&ctx, &mut sess, "ClaimRewards", &[PyRep::Integer(2)])
             .await
             .unwrap_err()
             .code,
@@ -367,15 +367,25 @@ async fn info_gathering_fifo_cap_milestones_and_community_tracks_edge_branches()
     let _ = call_milestone_mgr(&ctx, &mut sess, "ProcessCharacterLogon", &[])
         .await
         .unwrap();
+    // Split play time across multiple sessions reaching 119m grace threshold
+    ctx.advance_virtual_clock(3_600);
+    let _ = call_milestone_mgr(&ctx, &mut sess, "ProcessCharacterLogon", &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        call_milestone_mgr(&ctx, &mut sess, "ClaimRewards", &[PyRep::Integer(1)])
+            .await
+            .unwrap_err()
+            .code,
+        "MilestonePrerequisiteNotMet"
+    );
+    ctx.advance_virtual_clock(3_540);
     let bal0 = ctx.db.with_snapshot(|s| s.characters[&cid].balance.raw_cents());
     let _ = call_milestone_mgr(&ctx, &mut sess, "ClaimRewards", &[PyRep::Integer(1)])
         .await
         .unwrap();
-    let _ = call_milestone_mgr(&ctx, &mut sess, "ClaimRewards", &[PyRep::Integer(2)])
-        .await
-        .unwrap();
     let bal2 = ctx.db.with_snapshot(|s| s.characters[&cid].balance.raw_cents());
-    assert_eq!(bal2 - bal0, 30_000_000);
+    assert_eq!(bal2 - bal0, 50_000_000);
 
     assert_eq!(
         call_milestone_mgr(&ctx, &mut sess, "ProcessCharacterLogon", &[])

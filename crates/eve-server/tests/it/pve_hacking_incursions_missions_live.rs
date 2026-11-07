@@ -124,9 +124,6 @@ async fn move_pilot_to(ctx: &ServerContext, p: &mut LivePilot, pos: DVec3) {
 // ============================================================================
 #[tokio::test]
 async fn test_live_pve_hacking_node_types_and_self_repair_mechanics() {
-    // parity: feat:pve.hacking-node-types
-    eve_testkit::attest(&["feat:pve.hacking-node-types"]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
@@ -375,9 +372,6 @@ async fn test_live_pve_hacking_node_types_and_self_repair_mechanics() {
 // ============================================================================
 #[tokio::test]
 async fn test_live_pve_hacking_failure_outcomes_and_ghost_detonation() {
-    // parity: feat:pve.hacking-failure-outcome
-    eve_testkit::attest(&["feat:pve.hacking-failure-outcome"]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();

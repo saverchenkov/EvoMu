@@ -248,9 +248,37 @@ pub fn resolve_mission_npc_type(ctx: &ServerContext) -> u32 {
         .unwrap_or(0)
 }
 
-/// // DERIVED: Formulaic mission reward calculation (base ISK = base LP * 1000)
-/// Mission LP reward = base LP x (1.6288 - the agent system's true security) x (1 + 0.1 x matching division Connections skill: Distribution, Mining or Security).
-/// ISK reward is +5% per Negotiation level. Both credited and journaled on completion.
+/// Resolves the Connections skill (`Mining Connections = 3893`, `Distribution Connections = 3894`,
+/// `Security Connections = 3895`) for an NPC corporation division using V24 SDE division metadata.
+pub fn resolve_division_connections_skill(
+    ctx: &ServerContext,
+    division_id: u32,
+) -> Option<eve_db::TypeId> {
+    if let Ok(divisions) = ctx.sde.load_npc_corporation_divisions() {
+        if let Some(div) = divisions.values().find(|d| d.division_id == division_id) {
+            let lower = div.internal_name.to_lowercase();
+            if lower.contains("distribution") {
+                return Some(3894);
+            }
+            if lower.contains("mining") {
+                return Some(3893);
+            }
+            if lower.contains("security") {
+                return Some(3895);
+            }
+        }
+    }
+    match division_id {
+        22 | 27 => Some(3894),                    // Distribution Connections
+        23 => Some(3893),                         // Mining Connections
+        24 | 20 | 21 | 25 | 26 | 28 => Some(3895), // Security Connections
+        _ => None,
+    }
+}
+
+/// Computes mission rewards `(isk_reward, lp_reward, bonus_reward)` from V24 SDE templates,
+/// dungeon difficulty, agent solar-system true security, and character Connections/Negotiation skills
+/// (`feat:pve.mission-lp-isk-reward-formula`, `feat:pve.mission-complete`, `plan:E-5`).
 pub fn compute_character_mission_rewards(
     ctx: &ServerContext,
     char_id: i64,
@@ -268,44 +296,60 @@ pub fn compute_character_mission_rewards(
         .map(|s| s.security_status)
         .unwrap_or(1.0);
 
-    let conn_skill_id = match agent_info.map(|a| a.division_id) {
-        Some(22) => Some(3893), // Distribution Connections
-        Some(23) => Some(3894), // Mining Connections
-        Some(24 | 20 | 21 | 25..=28) => Some(3895), // Security Connections
-        _ => None,
-    };
+    let conn_skill_id = agent_info.and_then(|a| resolve_division_connections_skill(ctx, a.division_id));
 
-    let (is_alpha, neg_lvl, conn_lvl, offered_lvl) =
-        ctx.db.with_snapshot(|snap| {
-            let alpha = snap
-                .characters
-                .get(&char_id)
-                .is_some_and(|c| c.clone_grade <= 1);
-            let sk = snap.skills.get(&char_id);
-            let neg = sk.and_then(|m| m.get(&3356)).map_or(0, |s| s.level);
-            let conn = conn_skill_id
-                .and_then(|sid| sk.and_then(|m| m.get(&sid)))
-                .map_or(0, |s| s.level);
-            let olvl = load_mission_meta(snap, char_id, mission_id).and_then(|m| m.offered_level);
-            (alpha, neg, conn, olvl)
-        });
+    let (is_alpha, neg_lvl, conn_lvl, offered_lvl) = ctx.db.with_snapshot(|snap| {
+        let alpha = snap
+            .characters
+            .get(&char_id)
+            .is_some_and(|c| c.clone_grade <= 1);
+        let sk = snap.skills.get(&char_id);
+        let neg = sk.and_then(|m| m.get(&3356)).map_or(0, |s| s.level);
+        let conn = conn_skill_id
+            .and_then(|sid| sk.and_then(|m| m.get(&sid)))
+            .map_or(0, |s| s.level);
+        let olvl = load_mission_meta(snap, char_id, mission_id).and_then(|m| m.offered_level);
+        (alpha, neg, conn, olvl)
+    });
 
-    let min_level_lp = i64::from(offered_lvl.unwrap_or(1).max(1)) * 100;
+    let dungeon_diff = tmpl
+        .and_then(|t| t.dungeon_id)
+        .and_then(|did| ctx.sde.dungeons.get(&did))
+        .and_then(|d| d.difficulty)
+        .and_then(|d| u8::try_from(d).ok())
+        .filter(|&d| (1..=5).contains(&d));
+    let effective_lvl = offered_lvl
+        .or(dungeon_diff)
+        .or_else(|| agent_info.map(|a| a.level))
+        .unwrap_or(1)
+        .clamp(1, 5);
+
+    let min_level_lp = i64::from(effective_lvl) * 100;
     let base_lp = tmpl.map_or(min_level_lp, |t| {
-        if is_alpha && t.lp_alpha > 0 {
-            t.lp_alpha.max(min_level_lp)
+        let sde_raw = if is_alpha && t.lp_alpha > 0 {
+            t.lp_alpha
+        } else if is_alpha && t.lp_omega > 0 {
+            (t.lp_omega / 2).max(1)
         } else {
-            t.lp_omega.max(min_level_lp)
+            t.lp_omega
+        };
+        if sde_raw > 0 {
+            sde_raw.max(min_level_lp)
+        } else if is_storyline_template(t)
+            || t.content_template
+                .as_deref()
+                .is_some_and(|ct| ct.contains("EpicArc"))
+        {
+            (min_level_lp.saturating_mul(3) / 2).max(min_level_lp)
+        } else {
+            min_level_lp
         }
     });
 
-    // LP reward = base LP x (1.6288 - true_sec) x (1 + 0.1 x matching division Connections skill)
     let sec_factor = (1.6288 - true_sec).max(0.01);
     let conn_factor = 1.0 + 0.10 * (conn_lvl.min(5) as f64);
     let lp_reward = ((base_lp as f64) * sec_factor * conn_factor).round() as i64;
 
-    // DERIVED: Formulaic mission reward calculation (base ISK = base LP * 1000)
-    // ISK reward = base ISK x (1 + 0.05 x Negotiation level)
     let base_isk = base_lp.saturating_mul(1_000);
     let neg_factor = 1.0 + 0.05 * (neg_lvl.min(5) as f64);
     let isk_reward = ((base_isk as f64) * neg_factor).round() as i64;

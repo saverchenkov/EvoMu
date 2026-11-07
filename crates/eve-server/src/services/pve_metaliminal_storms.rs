@@ -389,9 +389,19 @@ pub fn sync_metaliminal_storm_effects_and_sites(ctx: &ServerContext) {
         );
     }
 
-    for (sid, tids) in added_by_sys {
-        crate::services::notify_emitters_tournaments_anomalies::emit_system_effect_started(ctx, sid, tids);
+    for (sid, tids) in &added_by_sys {
+        crate::services::notify_emitters_tournaments_anomalies::emit_system_effect_started(ctx, *sid, tids.clone());
     }
+    let changed_sys: Vec<SolarSystemId> = added_by_sys
+        .keys()
+        .copied()
+        .chain(removed_beacons.iter().map(|(s, _, _)| *s))
+        .collect();
+    crate::services::pve_special_sites_shard2_helpers::notify_storm_ship_dogma_updates(
+        ctx,
+        &changed_sys,
+        &effect_lists_by_sys,
+    );
     let mut cleared_env_systems = HashSet::new();
     for (sid, item_id, old_tid) in removed_beacons {
         let effect_id = ctx
@@ -419,6 +429,7 @@ pub fn sync_metaliminal_storm_effects_and_sites(ctx: &ServerContext) {
 pub fn get_all_roaming_weather_systems(ctx: &ServerContext) -> Vec<PyRep> {
     crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
     with_pve_special_reg(ctx, |reg| {
+        crate::services::pve_special_sites_shard2_helpers::ensure_full_roaming_storm_set(ctx, reg);
         let mut out = Vec::new();
         let mut seen: HashSet<(u32, SolarSystemId)> = HashSet::new();
         for storm in &reg.roaming_storms {

@@ -739,7 +739,11 @@ impl ServerContext {
             let now = self.now_unix_secs();
             crate::services::fleet_social::sweep_expired_bookmarks_and_notify(self, now);
             let mut balls_to_remove: Vec<(u32, i64)> = Vec::new();
-            self.db.with_mut_snapshot(|snap| {
+            let has_space_decay = self.db.with_snapshot(|snap| {
+                snap.items.values().any(|it| it.type_id == 23 && it.flag == eve_db::InventoryFlag::None && (30_000_000..=33_000_000).contains(&it.location_id) && snap.sp6_lifecycle.space_object_meta.get(&it.item_id).and_then(|m| m.created_unix).is_some_and(|c| now >= c.saturating_add(3600)))
+                    || snap.moon_extractions.values().any(|e| e.status != "Decayed" && e.status != "Cancelled" && now >= e.natural_decay_unix)
+            });
+            if has_space_decay { self.db.with_mut_snapshot(|snap| {
                 // Despawn Cargo Containers (`type_id = 23`) in space (`InventoryFlag::None`) after 3600s (`feat:mining.jetcan-mining`).
                 let expired_jetcans: Vec<(i64, u32)> = snap
                     .items
@@ -789,7 +793,7 @@ impl ServerContext {
                         ext.status = "Decayed".to_string();
                     }
                 }
-            });
+            }); }
 
             for (sys_id, ball_id) in balls_to_remove {
                 let handle = self.systems.get_or_spawn(sys_id);

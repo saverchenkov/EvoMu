@@ -643,6 +643,11 @@ pub fn evacuate_void_space_session_sync(
 
 /// Sweeps any expired `void_space_sessions` during cluster time progression.
 pub fn sweep_expired_void_space_sessions_sync(ctx: &ServerContext, now_unix: u64) {
+    if !crate::services::pve_special_sites::read_pve_special_reg(ctx, |reg| {
+        reg.void_space_sessions.values().any(|vs| vs.expires_at_sec > 0 && now_unix >= vs.expires_at_sec)
+    }) {
+        return;
+    }
     let expired: Vec<VoidSpaceSessionRecord> = with_pve_special_reg(ctx, |reg| {
         let due_cids: Vec<CharacterId> = reg
             .void_space_sessions

@@ -415,11 +415,8 @@ async fn test_live_probe_launch_warp_scan_and_state_transitions() {
     );
 }
 
-// parity: notify:OnSolarsystemInterferenceChanged
 #[tokio::test]
 async fn test_live_solarsystem_interference_changed_via_crab_beacon() {
-    eve_testkit::attest(&["notify:OnSolarsystemInterferenceChanged"]);
-
     let ctx = paused_ctx();
     let mut cap_pilot = common::gm_pilot_in_space(&ctx, 71, 92_500_001, ARCHON, NULLSEC).await;
     let mut observer = common::gm_pilot_in_space(&ctx, 72, 92_500_002, VEXOR, NULLSEC).await;

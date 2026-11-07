@@ -646,7 +646,15 @@ pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
 
     // 0. Sweep expired market orders and check season transitions across cluster ticks.
     crate::services::notify_emitters_seasons_tactical::check_and_emit_season_transitions(ctx);
-    let swept = ctx.db.with_mut_snapshot(|s| crate::services::market_contracts::sweep_expired_orders(s, now_unix));
+    let any_due = ctx.db.with_snapshot(|s| {
+        s.market_order_meta.keys().copied().chain(s.owner_notes.values().filter(|n| n.character_id == -4).map(|n| n.item_id)).any(|oid| {
+            s.market_orders.get(&oid).is_some_and(|o| !o.is_npc && o.vol_remaining > 0 && {
+                let m = crate::services::market_trading::load_market_order_meta(s, o, now_unix);
+                m.issue_unix.saturating_add((m.duration.max(1) as u64).saturating_mul(86_400)) <= now_unix
+            })
+        })
+    });
+    let swept = if any_due { ctx.db.with_mut_snapshot(|s| crate::services::market_contracts::sweep_expired_orders(s, now_unix)) } else { Vec::new() };
     if !swept.is_empty() {
         crate::services::market_contracts::emit_expired_order_notifications(ctx, &swept);
     }
@@ -706,7 +714,10 @@ pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
         .map(|entry| entry.char_id)
         .collect();
 
-    with_mut_sp6_state(&ctx.db, |st, snap| {
+    let has_sp6_work = !rt_self_destructs.is_empty() || !blocked_safe_char_ids.is_empty() || super::with_sp6_state(&ctx.db, |st| {
+        !st.disconnected_ships.is_empty() || !st.self_destructs.is_empty() || !st.abyssal_sessions.is_empty() || st.safe_logoffs.values().any(|e| !e.completed)
+    });
+    if has_sp6_work { with_mut_sp6_state(&ctx.db, |st, snap| {
         for cd in rt_self_destructs {
             st.self_destructs.entry(cd.ship_id).or_insert(cd);
         }
@@ -775,7 +786,7 @@ pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
                 due_abyssal.push(ab);
             }
         }
-    });
+    }); }
 
     for (cid, reason) in aborted_safe_logoffs {
         ctx.notify(
@@ -825,7 +836,7 @@ pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
     for _ in 0..step_iters {
         for &sys_id in active_systems.keys() {
             crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai_sync(ctx, sys_id);
-            if let Some(mgr) = ctx.npc_spawns.write().unwrap_or_else(|e| e.into_inner()).get_mut(&sys_id) {
+            if let Some(mgr) = ctx.npc_spawns.write().unwrap_or_else(|e| e.into_inner()).get_mut(&sys_id).filter(|m| !m.entities.is_empty()) {
                 let tick = ctx.systems.get_or_spawn(sys_id).ballpark.read().map(|b| b.current_tick).unwrap_or(0);
                 mgr.step_ai_sync(ctx, sys_id, tick, 1.0);
             }
@@ -892,14 +903,14 @@ pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
         });
     }
 
-    with_mut_sp6_state(&ctx.db, |st, _snap| {
+    if has_sp6_work { with_mut_sp6_state(&ctx.db, |st, _snap| {
         for disc in st.disconnected_ships.values_mut() {
             if !disc.removed_from_space && now_unix >= disc.remove_at_unix {
                 disc.removed_from_space = true;
                 expired_disconnected.push(disc.clone());
             }
         }
-    });
+    }); }
 
     // 3. Finalize completed 30s Safe Logoffs (`plan:SP-6`, `feat:character.safe-logoff`)
     // parity: feat:character.safe-logoff
@@ -966,42 +977,23 @@ pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
 
     // 6b. Sweep expired Void Space sessions, despawn expired un-entered Abyssal trace balls, and clear expired Zarzakh gate locks.
     crate::services::pve_abyssal_lifecycle::sweep_expired_void_space_sessions_sync(ctx, now_unix);
-    let expired_traces: Vec<(u32, i64)> =
-        crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+    if crate::services::pve_special_sites::read_pve_special_reg(ctx, |reg| reg.abyssal_traces.values().any(|t| t.expires_at_sec > 0 && now_unix >= t.expires_at_sec)) {
+        let expired_traces: Vec<(u32, i64)> = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
             let mut out = Vec::new();
-            reg.abyssal_traces.retain(|&tid, t| {
-                if t.expires_at_sec > 0 && now_unix >= t.expires_at_sec {
-                    out.push((t.origin_solar_system_id, tid));
-                    false
-                } else {
-                    true
-                }
-            });
+            reg.abyssal_traces.retain(|&tid, t| if t.expires_at_sec > 0 && now_unix >= t.expires_at_sec { out.push((t.origin_solar_system_id, tid)); false } else { true });
             out
         });
-    for (origin_sys, tid) in expired_traces {
-        ctx.systems.get_or_spawn(origin_sys).try_remove_ball(tid);
+        for (origin_sys, tid) in expired_traces { ctx.systems.get_or_spawn(origin_sys).try_remove_ball(tid); }
     }
-    let expired_zarzakh_locks: Vec<(i64, i64)> = ctx.db.with_mut_snapshot(|snap| {
-        let mut out = Vec::new();
-        snap.zarzakh_gate_locks.retain(|&cid, &mut (gate_id, exp)| {
-            if now_unix >= exp {
-                out.push((cid, gate_id));
-                false
-            } else {
-                true
-            }
+    if ctx.db.with_snapshot(|s| s.zarzakh_gate_locks.values().any(|&(_, exp)| now_unix >= exp)) {
+        let expired_zarzakh_locks: Vec<(i64, i64)> = ctx.db.with_mut_snapshot(|snap| {
+            let mut out = Vec::new();
+            snap.zarzakh_gate_locks.retain(|&cid, &mut (gate_id, exp)| if now_unix >= exp { out.push((cid, gate_id)); false } else { true });
+            out
         });
-        out
-    });
-    for (cid, gate_id) in expired_zarzakh_locks {
-        crate::services::quasar_sov_services::publish_stargate_lock_deactivated_notice(
-            &ctx.quasar_gateway,
-            cid,
-            30_100_000,
-            gate_id,
-            now_unix,
-        );
+        for (cid, gate_id) in expired_zarzakh_locks {
+            crate::services::quasar_sov_services::publish_stargate_lock_deactivated_notice(&ctx.quasar_gateway, cid, 30_100_000, gate_id, now_unix);
+        }
     }
 
     crate::services::notify_emitters_skills_trade_godma::sweep_due_login_milestones_and_alpha_injectors(
@@ -1015,7 +1007,9 @@ pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
     let mut balls_to_remove: Vec<(u32, i64, bool)> = Vec::new();
     let mut bubbles_to_activate: Vec<(u32, i64, DVec3, f64)> = Vec::new();
 
-    with_mut_sp6_state(&ctx.db, |st, snap| {
+    let has_step7 = super::with_sp6_state(&ctx.db, |st| !st.space_object_meta.is_empty())
+        || ctx.db.with_snapshot(|s| !crate::services::mobile_deployables::read_deployable_state_snap(s).deployables.is_empty());
+    if has_step7 { with_mut_sp6_state(&ctx.db, |st, snap| {
         let mut expired_ids: Vec<(i64, u32, bool)> = Vec::new();
         let mut newly_anchored_ids: Vec<i64> = Vec::new();
         let deployable_state = crate::services::mobile_deployables::read_deployable_state_snap(snap);
@@ -1127,7 +1121,7 @@ pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
                 dst.deployables.remove(iid);
             }
         });
-    });
+    }); }
 
     if !balls_to_remove.is_empty() {
         with_mut_combat_runtime(ctx, |rt| {

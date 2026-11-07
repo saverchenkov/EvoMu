@@ -163,7 +163,6 @@ async fn destroy_npc_via_turrets(ctx: &ServerContext, sess: &mut SessionState, s
 // parity: rpc:loadService.SetConfig
 // parity: rpc:loadService.StartLoad
 // parity: rpc:loadService.StopLoad
-// parity: rpc:seasonManager.get_season_end_time
 #[tokio::test]
 async fn test_load_service_config_stepping_stats_and_season_end_time_live() {
     eve_testkit::attest(&[
@@ -171,7 +170,6 @@ async fn test_load_service_config_stepping_stats_and_season_end_time_live() {
         "rpc:loadService.SetConfig",
         "rpc:loadService.StartLoad",
         "rpc:loadService.StopLoad",
-        "rpc:seasonManager.get_season_end_time",
     ]);
 
     let db_tmp = TempSqlitePath::new("load_season");
@@ -254,17 +252,8 @@ async fn test_zarzakh_gravity_hazard_safe_zones_and_killmail_pipeline_live() {
     assert!(ship_gone && has_capsule && has_killmail);
 }
 
-// parity: notify:OnAnalysisKreditsChange
-// parity: notify:OnDungeonInstanceAdded
-// parity: notify:OnDungeonInstanceRemoved
 #[tokio::test]
 async fn test_analysis_kredits_and_expedition_dungeon_instance_notifications_live() {
-    eve_testkit::attest(&[
-        "notify:OnAnalysisKreditsChange",
-        "notify:OnDungeonInstanceAdded",
-        "notify:OnDungeonInstanceRemoved",
-    ]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
@@ -342,16 +331,10 @@ async fn test_analysis_kredits_and_expedition_dungeon_instance_notifications_liv
     ]);
 }
 
-// parity: notify:OnInfluenceUpdate
 // parity: notify:OnSecurityModified
-// parity: notify:OnTaleRemove
 #[tokio::test]
 async fn test_incursion_tale_influence_remove_and_insurgency_security_notifications_live() {
-    eve_testkit::attest(&[
-        "notify:OnInfluenceUpdate",
-        "notify:OnSecurityModified",
-        "notify:OnTaleRemove",
-    ]);
+    eve_testkit::attest(&["notify:OnSecurityModified"]);
 
     let inc_ctx = ServerContext::new();
     common::pin_clock(&inc_ctx);

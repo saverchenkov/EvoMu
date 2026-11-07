@@ -633,11 +633,10 @@ pub fn sync_incursion_system_effect_beacons(ctx: &ServerContext) {
 /// Advances incursion influence regeneration, withdrawal timers, and respawn cadence when the
 /// simulated PvE clock moves forward.
 pub fn advance_incursion_lifecycles(ctx: &ServerContext) {
-    let has_state = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs.contains_key("incursions_state")
-            || snap.owner_notes.contains_key(&-8_300_000_000_000)
+    let has_incursions = crate::services::pve_special_sites::read_pve_special_reg(ctx, |reg| {
+        !reg.incursions.is_empty()
     });
-    if !has_state {
+    if !has_incursions {
         return;
     }
     let (started_tales, ended_tales, regen_updates, balls_to_despawn, balls_to_spawn) =

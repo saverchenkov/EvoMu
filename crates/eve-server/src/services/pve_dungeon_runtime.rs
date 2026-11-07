@@ -3,6 +3,9 @@
 
 #![forbid(unsafe_code)]
 
+#[path = "pve_dungeon_runtime_shard2_helpers.rs"]
+mod shard2_helpers;
+
 use crate::router::ServerContext;
 use crate::services::notify_emitters_space_dungeons::{
     emit_dungeon_progression_notifications, emit_exiting_dungeon_on_warp_if_present,
@@ -511,13 +514,13 @@ pub fn resolve_deadspace_or_escalation_warp_target(
         if site_pos.is_some() {
             return Ok(site_pos);
         }
-        let fw_pos = ctx.db.with_snapshot(|snap| {
-            let has_fw = snap.fw_runtime.fw_complexes.iter().any(|(&gid, (csys, _, _, _, done))| gid == target_id && *csys == sys_id && !*done)
-                || snap.insurgency_runtime.insurgency_instances.iter().any(|s| s.instance_id == target_id && s.solar_system_id == sys_id && !s.completed);
-            has_fw.then(|| snap.system_states.get(&sys_id).and_then(|st| st.fw_complex_position).map(DVec3::from_array)).flatten()
-        });
-        if fw_pos.is_some() {
-            return Ok(fw_pos);
+        if let Some(pos) = shard2_helpers::resolve_fw_or_special_warp_target(
+            ctx,
+            sys_id,
+            target_id,
+            target_str_opt,
+        ) {
+            return Ok(Some(pos));
         }
     }
 
@@ -530,33 +533,7 @@ pub fn find_active_dungeon_id_at_position(
     sys_id: SolarSystemId,
     pos: [f64; 3],
 ) -> Option<u32> {
-    let runtime_did = with_dungeon_runtime_store(ctx, |store| {
-        store.instances.values().find_map(|inst| {
-            if inst.completed || inst.despawned || inst.solar_system_id != sys_id {
-                return None;
-            }
-            let near_entry = inst
-                .entry_gate_pos
-                .is_some_and(|ep| dist3(pos, ep) <= 150_000.0);
-            let near_room = inst
-                .rooms
-                .iter()
-                .any(|r| dist3(pos, r.position) <= 150_000.0);
-            (near_entry || near_room).then_some(inst.dungeon_id)
-        })
-    });
-    if runtime_did.is_some() {
-        return runtime_did;
-    }
-
-    with_pve_exploration_reg(ctx, |reg| {
-        reg.sites_by_system.get(&sys_id).and_then(|sites| {
-            sites
-                .iter()
-                .find(|s| !s.cleared && dist3(pos, s.position) <= 150_000.0)
-                .map(|s| s.dungeon_id)
-        })
-    })
+    shard2_helpers::find_active_dungeon_id_at_position(ctx, sys_id, pos)
 }
 
 /// Called on warp initiation (`CmdWarpToStuff`) to emit `OnExitingDungeon` when leaving an active dungeon pocket.

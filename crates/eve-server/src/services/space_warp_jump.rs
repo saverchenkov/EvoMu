@@ -262,7 +262,7 @@ async fn handle_cmd_warp_to_stuff(
             };
             resolved_pos = Some(pos);
         }
-        "mission" | "dungeon" | "location" | "epinstance" => {
+        "mission" | "dungeon" | "location" | "epinstance" | "site" => {
             resolved_pos =
                 crate::services::pve_dungeon_runtime::resolve_deadspace_or_escalation_warp_target(
                     ctx,

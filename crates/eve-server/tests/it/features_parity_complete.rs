@@ -4381,9 +4381,6 @@ async fn send_quasar(ctx: &ServerContext, sess: &mut SessionState, type_url: &st
 
 #[tokio::test]
 async fn test_plan_e5_agent_finder_and_conversation_lifecycle() {
-    // parity: plan:E-5
-    eve_testkit::attest(&["plan:E-5"]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
 

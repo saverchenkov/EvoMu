@@ -6,6 +6,8 @@ use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
 
+const ALREADY_CLAIMED_ERR: &str = "DailyRewardAlreadyClaimedToday";
+
 const PILOT_ID: i64 = 90_000_001;
 const JITA_STATION: i64 = 60_003_760;
 
@@ -76,12 +78,13 @@ async fn test_login_campaign_and_milestone_claim_lifecycle() {
     )
     .await
     .expect("get_client_campaign_state");
+    let prog_before = dict_get(&state_before, "item_progress").expect("item_progress");
     assert_eq!(
-        dict_get(&state_before, "can_claim_today").and_then(|v| v.as_bool()),
-        Some(true)
+        dict_get(prog_before, "next_reward_timestamp").and_then(|v| v.as_i64()),
+        Some(0)
     );
     assert_eq!(
-        dict_get(&state_before, "total_days_claimed").and_then(|v| v.as_i64()),
+        dict_get(prog_before, "num_claimed_rewards").and_then(|v| v.as_i64()),
         Some(0)
     );
 
@@ -99,20 +102,22 @@ async fn test_login_campaign_and_milestone_claim_lifecycle() {
     )
     .await
     .expect("get_client_campaign_state after claim");
-    assert_eq!(
-        dict_get(&state_after, "can_claim_today").and_then(|v| v.as_bool()),
-        Some(false)
+    let prog_after = dict_get(&state_after, "item_progress").expect("item_progress");
+    assert!(
+        dict_get(prog_after, "next_reward_timestamp")
+            .and_then(|v| v.as_i64())
+            .is_some_and(|ts| ts > 0)
     );
     assert_eq!(
-        dict_get(&state_after, "total_days_claimed").and_then(|v| v.as_i64()),
+        dict_get(prog_after, "num_claimed_rewards").and_then(|v| v.as_i64()),
         Some(1)
     );
 
-    // Second claim same day returns None
+    // Second claim same day raises DailyRewardAlreadyClaimedToday
     let second_claim = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
         .await
-        .expect("second claim_reward");
-    assert_eq!(second_claim, PyRep::None);
+        .expect_err("second claim_reward must fail");
+    assert_eq!(second_claim.code, ALREADY_CLAIMED_ERR);
 
     // milestoneMgr: ClaimRewards before ProcessCharacterLogon fails
     let prereq_err = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
@@ -137,9 +142,10 @@ async fn test_login_campaign_and_milestone_claim_lifecycle() {
     });
     assert!(persisted_logon, "ProcessCharacterLogon must persist milestone_logons");
 
+    ctx.advance_virtual_clock(7_200);
     let claim = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
         .await
-        .expect("ClaimRewards(1) succeeds once after ProcessCharacterLogon");
+        .expect("ClaimRewards(1) succeeds once after ProcessCharacterLogon + 120m playtime");
     assert_eq!(claim, PyRep::None);
     let dup_err = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
         .await

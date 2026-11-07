@@ -1233,6 +1233,9 @@ fn metenox_output_bay_remaining_capacity(sde: &SdeRegistry, snap: &eve_db::World
 
 /// Server-driven hourly Metenox Moon Drill production tick (`plan:MN-14`, `R-MN14-FALSE`, `R-MN14-PROD-TICK`).
 pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_unix: u64) {
+    if !ctx.db.with_snapshot(|s| s.structures.values().any(|st| st.quantum_core_installed && ctx.sde.types.get(&st.type_id).is_some_and(|t| t.group_id == 4744))) {
+        return;
+    }
     let fuel_per_cycle = metenox_fuel_per_cycle(&ctx.sde);
     let gas_per_cycle: u32 = METENOX_MAGMATIC_GAS_PER_CYCLE;
 

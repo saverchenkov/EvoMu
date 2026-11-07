@@ -493,12 +493,8 @@ async fn test_lookup_warable_and_npc_standings_live() {
 
 #[tokio::test]
 async fn test_homefront_sites_and_escalations_live() {
-    // parity: rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances
     // parity: rpc:dungeonExplorationMgr.GetMyEscalatingPathDetails
-    eve_testkit::attest(&[
-        "rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances",
-        "rpc:dungeonExplorationMgr.GetMyEscalatingPathDetails",
-    ]);
+    eve_testkit::attest(&["rpc:dungeonExplorationMgr.GetMyEscalatingPathDetails"]);
 
     let ctx = paused_ctx();
     let mut pilot = common::gm_pilot_in_space(&ctx, 401, 91_500_031, VELATOR_TYPE, JITA).await;

@@ -6,6 +6,9 @@
 
 #![forbid(unsafe_code)]
 
+#[path = "pve_expeditions_shard2_helpers.rs"]
+mod shard2_helpers;
+
 use serde::{Deserialize, Serialize};
 
 use crate::router::ServerContext;
@@ -136,16 +139,26 @@ pub async fn create_escalation_expedition_core(
     char_id: CharacterId,
     solar_system_id: SolarSystemId,
     source_dungeon_id: u32,
-    dungeon_name: &str,
+    _dungeon_name: &str,
     _pos: [f64; 3],
 ) -> Option<EscalatingPathEntry> {
-    let (exp_base_did, exp_default_name, total_steps) = expedition_dungeon_chain(source_dungeon_id);
+    let chain = shard2_helpers::resolve_sde_escalation_chain(sde, source_dungeon_id, solar_system_id);
+    let exp_base_did = chain.dungeon_for_step(1);
     let exp_name = sde
         .dungeons
         .get(&exp_base_did)
         .map(|d| d.name.trim().to_string())
-        .unwrap_or_else(|| exp_default_name.to_string());
+        .unwrap_or_else(|| chain.expedition_name.clone());
+    let total_steps = chain.total_steps;
     let dest_sys_id = find_escalation_destination_system_sde(sde, solar_system_id);
+    let journal_text = shard2_helpers::format_escalation_journal_text(
+        sde,
+        &exp_name,
+        1,
+        total_steps,
+        exp_base_did,
+        dest_sys_id,
+    );
 
     let (entry, _created_ts) = crate::services::pve_exploration::with_pve_exploration_reg_db(db, db.clock().now_unix_secs(), |reg| {
         let ts = now_sec(reg);
@@ -159,14 +172,11 @@ pub async fn create_escalation_expedition_core(
             destination_solar_system_id: dest_sys_id,
             step_index: 1,
             total_steps,
-            journal_text: format!(
-                "Logs recovered from {dungeon_name} point to coordinates for '{exp_name}' (Step 1/{total_steps}) in solar system {dest_sys_id}."
-            ),
+            journal_text,
             created_at_sec: ts,
             expires_at_sec: ts + 86_400,
             dungeons_entered: vec![source_dungeon_id],
-            // DERIVED: synthetic expedition journal template message ID (no SDE escalation message table)
-            journal_entry_template_id: 280_001,
+            journal_entry_template_id: chain.journal_template_id,
         };
         reg.escalations_by_char.entry(char_id).or_default().push(e.clone());
         (e, ts)
@@ -329,7 +339,7 @@ pub async fn spawn_expedition_site_instance_core(
             probe_required: false,
             signal_strength: 1.0,
             current_room: 1,
-            total_rooms: 1,
+            total_rooms: shard2_helpers::sde_dungeon_room_count(sde, entry.expedition_dungeon_id),
             current_wave: 1,
             total_waves: 2,
             active_npc_ball_ids: spawned_ids,
@@ -383,12 +393,19 @@ pub async fn advance_expedition_step_core(
             entry.step_index += 1;
             let next_dest = find_escalation_destination_system_sde(sde, entry.destination_solar_system_id);
             entry.destination_solar_system_id = next_dest;
-            let (exp_base_did, _, _) = expedition_dungeon_chain(entry.source_dungeon_id);
-            entry.expedition_dungeon_id = expedition_dungeon_for_step(exp_base_did, entry.step_index);
+            let chain = shard2_helpers::resolve_sde_escalation_chain(sde, entry.source_dungeon_id, next_dest);
+            entry.expedition_dungeon_id = chain.dungeon_for_step(entry.step_index);
+            if let Some(d) = sde.dungeons.get(&entry.expedition_dungeon_id) {
+                entry.expedition_name = d.name.trim().to_string();
+            }
             entry.expires_at_sec = ts + 86_400;
-            entry.journal_text = format!(
-                "Intelligence confirmed at previous encounter. Target coordinates updated for '{}' (Step {}/{}) in solar system {}.",
-                entry.expedition_name, entry.step_index, entry.total_steps, next_dest
+            entry.journal_text = shard2_helpers::format_escalation_journal_text(
+                sde,
+                &entry.expedition_name,
+                entry.step_index,
+                entry.total_steps,
+                entry.expedition_dungeon_id,
+                next_dest,
             );
             updated_entry = Some(entry.clone());
         } else {
@@ -646,17 +663,17 @@ fn dungeon_instance_kv_for_id(
 }
 
 pub fn get_my_escalating_path_details_rowset(ctx: &ServerContext, char_id: CharacterId) -> PyRep {
-    let (active_entries, expired_instance_ids) =
+    let (active_entries, expired_entries) =
         crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
             let now = now_sec(reg);
-            let mut expired_ids = Vec::new();
+            let mut expired = Vec::new();
             let active = if let Some(list) = reg.escalations_by_char.get_mut(&char_id) {
                 let mut kept = Vec::new();
                 for e in list.drain(..) {
                     if now < e.expires_at_sec {
                         kept.push(e);
                     } else {
-                        expired_ids.push(e.instance_id);
+                        expired.push(e);
                     }
                 }
                 *list = kept.clone();
@@ -664,17 +681,36 @@ pub fn get_my_escalating_path_details_rowset(ctx: &ServerContext, char_id: Chara
             } else {
                 Vec::new()
             };
-            (active, expired_ids)
+            (active, expired)
         });
 
-    if !expired_instance_ids.is_empty() {
+    if !expired_entries.is_empty() {
+        let expired_instance_ids: Vec<i64> = expired_entries.iter().map(|e| e.instance_id).collect();
         ctx.db.with_mut_snapshot(|snap| {
             snap.bookmarks.retain(|_, b| {
                 !(b.owner_id == char_id
                     && b.item_id
                         .is_some_and(|iid| expired_instance_ids.contains(&iid)))
             });
+            for e in &expired_entries {
+                let sig_id = expedition_sig_id(e.instance_id, e.step_index);
+                if let Some(sigs) = snap.cosmic_signatures.get_mut(&e.destination_solar_system_id) {
+                    for s in sigs.iter_mut().filter(|s| s.signature_id == sig_id) {
+                        s.collapsed = true;
+                    }
+                }
+            }
         });
+        for e in &expired_entries {
+            let sig_id = expedition_sig_id(e.instance_id, e.step_index);
+            crate::services::notify_emitters_tournaments_anomalies::emit_dungeon_instance_removed(
+                ctx,
+                e.destination_solar_system_id,
+                e.instance_id,
+                &sig_id,
+                i64::from(e.expedition_dungeon_id),
+            );
+        }
         ctx.notify(
             crate::router::NotificationTarget::Character(char_id),
             "OnEscalatingPathChange",

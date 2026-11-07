@@ -32,16 +32,9 @@ pub fn ensure_homefront_sites_for_system_locked(
         return;
     }
 
-    // Dynamically query SDE archetype 70 dungeons for Empire Homefront Operations
-    let mut candidate_dids: Vec<u32> = ctx
-        .sde
-        .dungeons
-        .values()
-        .filter(|d| d.archetype_id == Some(70))
-        .map(|d| d.dungeon_id)
-        .collect();
-    candidate_dids.sort_unstable();
-    if candidate_dids.is_empty() {
+    // Dynamically query SDE archetype 70 dungeons and operations.fsdbinary for Homefront Operations
+    let templates = crate::services::pve_special_sites_shard2_helpers::resolve_sde_homefront_templates(&ctx.sde);
+    if templates.is_empty() {
         reg.homefront_sites.insert(sys_id, Vec::new());
         return;
     }
@@ -49,59 +42,60 @@ pub fn ensure_homefront_sites_for_system_locked(
     let rng = crate::rng::MechanicRng::seeded(
         (sys_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ ctx.now_unix(),
     );
-    let idx1 = (rng.try_next_u64().unwrap_or(sys_id as u64) as usize) % candidate_dids.len();
-    let idx2 = if candidate_dids.len() > 1 {
-        let step = 1 + ((rng.try_next_u64().unwrap_or(1) as usize) % (candidate_dids.len() - 1));
-        (idx1 + step) % candidate_dids.len()
+    let idx1 = (rng.try_next_u64().unwrap_or(sys_id as u64) as usize) % templates.len();
+    let idx2 = if templates.len() > 1 {
+        let step = 1 + ((rng.try_next_u64().unwrap_or(1) as usize) % (templates.len() - 1));
+        (idx1 + step) % templates.len()
     } else {
         idx1
     };
 
     let base_inst = (sys_id as i64) * 1000;
-    let did1 = candidate_dids[idx1];
-    let did2 = candidate_dids[idx2];
-    let d1_name = ctx
-        .sde
-        .dungeons
-        .get(&did1)
-        .map(|d| d.name.clone())
-        .unwrap_or_else(|| "Homefront Operation".into());
-    let d2_name = ctx
-        .sde
-        .dungeons
-        .get(&did2)
-        .map(|d| d.name.clone())
-        .unwrap_or_else(|| "Homefront Operation".into());
+    let t1 = &templates[idx1];
+    let t2 = &templates[idx2];
+    let (boss1, boss2) =
+        crate::services::pve_special_sites_shard2_helpers::resolve_homefront_faction_boss_types(
+            &ctx.sde, sys_id,
+        );
+    let isk1 = crate::services::pve_special_sites_shard2_helpers::compute_homefront_base_pilot_isk(
+        &ctx.sde,
+        sys_id,
+        t1.difficulty,
+        0,
+    );
+    let isk2 = crate::services::pve_special_sites_shard2_helpers::compute_homefront_base_pilot_isk(
+        &ctx.sde,
+        sys_id,
+        t2.difficulty,
+        1,
+    );
 
-    // DERIVED: EVE University Wiki "Homefront Operations" highsec optimal 5-pilot payout
-    // (17,230,000 ISK per pilot for Empire Raid / Abyssal Artifact Recovery; 15,500,000 ISK for secondary operations).
-    // Hostile wave boss NPC types use real SDE Abyssal/Triglavian combat entities (48090 Starving Damavik, 48092 Striking Damavik).
     reg.homefront_sites.insert(
         sys_id,
         vec![
             HomefrontSiteRecord {
                 instance_id: base_inst + 1,
-                dungeon_id: did1,
-                dungeon_name: d1_name,
+                dungeon_id: t1.dungeon_id,
+                dungeon_name: t1.dungeon_name.clone(),
                 solar_system_id: sys_id,
                 optimal_fleet_size: 5,
-                base_pilot_isk: 17_230_000,
+                base_pilot_isk: isk1,
                 completed: false,
                 reward_paid_isk: 0,
                 boss_npc_ball_id: 1_897_700_000 + (base_inst + 1),
-                boss_type_id: 48_090,
+                boss_type_id: boss1,
             },
             HomefrontSiteRecord {
                 instance_id: base_inst + 2,
-                dungeon_id: did2,
-                dungeon_name: d2_name,
+                dungeon_id: t2.dungeon_id,
+                dungeon_name: t2.dungeon_name.clone(),
                 solar_system_id: sys_id,
                 optimal_fleet_size: 5,
-                base_pilot_isk: 15_500_000,
+                base_pilot_isk: isk2,
                 completed: false,
                 reward_paid_isk: 0,
                 boss_npc_ball_id: 1_897_700_000 + (base_inst + 2),
-                boss_type_id: 48_092,
+                boss_type_id: boss2,
             },
         ],
     );
@@ -150,6 +144,7 @@ pub fn handle_get_homefront_site_instances(
     };
 
     let reply = with_pve_special_reg(ctx, |reg| {
+        ensure_homefront_sites_for_system_locked(ctx, reg, sys_id);
         let mut by_dungeon: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
         if let Some(list) = reg.homefront_sites.get(&sys_id) {
             for s in list {

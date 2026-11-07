@@ -6,11 +6,13 @@
 // - `feat:navigation.approach`
 // - `feat:navigation.orbit`
 // - `feat:navigation.keep-at-range`
+
+#![forbid(unsafe_code)]
+
+const ALREADY_CLAIMED_ERR: &str = "DailyRewardAlreadyClaimedToday";
 // - `feat:navigation.align-to`
 // - `feat:navigation.goto-point`
 // - `feat:navigation.stop-ship`
-
-#![forbid(unsafe_code)]
 
 use std::collections::HashMap;
 
@@ -2053,6 +2055,7 @@ async fn test_crates_claim_loot_and_milestones_one_time_rewards() {
         .expect("ProcessCharacterLogon");
     assert_eq!(logon_res, PyRep::None);
 
+    ctx.advance_secs(7_200);
     let claim_res = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
         .await
         .expect("ClaimRewards(1) must succeed once");
@@ -2070,6 +2073,7 @@ async fn test_crates_claim_loot_and_milestones_one_time_rewards() {
 #[allow(unused_imports)]
 pub mod pve_closure_part2 {
 
+use super::ALREADY_CLAIMED_ERR;
 use crate::common;
 use eve_db::MiningLedgerRecord;
 use eve_machonet::SessionState;
@@ -2234,12 +2238,24 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
 
     let init_items = ctx.db.with_snapshot(|s| s.items.len());
 
-    // 1. Daily login campaign (SDE campaign 2261)
+    // 1. Daily login campaign (backed by SDE seasonalcampaignsloginrewards)
     let state = rpc(&ctx, &mut sess, "loginCampaignManager", "get_client_campaign_state", &[])
         .await
         .expect("get_client_campaign_state");
-    assert_eq!(state.dict_get("campaignID").and_then(|v| v.as_i64()), Some(2261));
-    assert_eq!(state.dict_get("canClaimToday").and_then(|v| v.as_bool()), Some(true));
+    assert!(
+        state
+            .dict_get("static_data")
+            .and_then(|d| d.dict_get("campaign_id"))
+            .and_then(|v| v.as_i64())
+            .is_some()
+    );
+    assert_eq!(
+        state
+            .dict_get("item_progress")
+            .and_then(|d| d.dict_get("next_reward_timestamp"))
+            .and_then(|v| v.as_i64()),
+        Some(0)
+    );
 
     let claim1 = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
         .await
@@ -2251,11 +2267,11 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
     assert_eq!(claim1_tuple[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(80_937));
     assert!(claim1_tuple[0].dict_get("itemID").and_then(|v| v.as_i64()).is_some());
 
-    // Duplicate claim on same day returns None (nothing to claim)
-    let repeat_day1 = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
+    // Duplicate claim on same day raises DailyRewardAlreadyClaimedToday
+    let repeat_err = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
         .await
-        .expect("Duplicate daily claim returns None");
-    assert_eq!(repeat_day1, PyRep::None);
+        .expect_err("Duplicate daily claim raises UserError");
+    assert_eq!(repeat_err.code, ALREADY_CLAIMED_ERR);
 
     // Advance clock by 1 full day (86,400 seconds)
     ctx.advance_virtual_clock(86_400);
@@ -2263,7 +2279,13 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
     let state_day2 = rpc(&ctx, &mut sess, "loginCampaignManager", "get_client_campaign_state", &[])
         .await
         .expect("get_client_campaign_state day 2");
-    assert_eq!(state_day2.dict_get("canClaimToday").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        state_day2
+            .dict_get("item_progress")
+            .and_then(|d| d.dict_get("next_reward_index"))
+            .and_then(|v| v.as_i64()),
+        Some(2)
+    );
 
     let claim2 = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
         .await
@@ -2984,12 +3006,22 @@ async fn test_pve_air_career_program_daily_goals_and_login_campaign() {
 
     // 3. Login Campaign
     let state1 = rpc(&ctx, &mut sess, "loginCampaignManager", "get_client_campaign_state", &[]).await.unwrap();
-    assert_eq!(state1.dict_get("can_claim_today"), Some(&PyRep::Bool(true)));
+    assert_eq!(
+        state1
+            .dict_get("item_progress")
+            .and_then(|d| d.dict_get("next_reward_timestamp")),
+        Some(&PyRep::Integer(0))
+    );
     assert!(!matches!(rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[]).await.unwrap(), PyRep::None));
-    assert!(matches!(rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[]).await.unwrap(), PyRep::None));
+    assert!(rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[]).await.is_err());
 
     ctx.advance_secs(86_400);
     let state2 = rpc(&ctx, &mut sess, "loginCampaignManager", "get_client_campaign_state", &[]).await.unwrap();
-    assert_eq!(state2.dict_get("can_claim_today"), Some(&PyRep::Bool(true)));
+    assert_eq!(
+        state2
+            .dict_get("item_progress")
+            .and_then(|d| d.dict_get("next_reward_index")),
+        Some(&PyRep::Integer(2))
+    );
 }
 }

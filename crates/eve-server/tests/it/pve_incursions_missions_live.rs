@@ -134,9 +134,6 @@ async fn join_fleet(ctx: &ServerContext, boss: &mut LivePilot, member: &mut Live
 // ============================================================================
 #[tokio::test]
 async fn test_live_pve_incursion_fleet_payout_scaling_and_on_grid() {
-    // parity: feat:pve.incursion-payout
-    eve_testkit::attest(&["feat:pve.incursion-payout"]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ensure_special_sites_spawned(&ctx).await;
@@ -363,9 +360,6 @@ async fn test_live_pve_incursion_fleet_payout_scaling_and_on_grid() {
 // ============================================================================
 #[tokio::test]
 async fn test_live_pve_mission_complete_rewards_bonus_standings_and_items() {
-    // parity: feat:pve.mission-complete
-    eve_testkit::attest(&["feat:pve.mission-complete"]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();

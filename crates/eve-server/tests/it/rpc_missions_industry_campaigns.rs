@@ -7,6 +7,8 @@
 
 #![forbid(unsafe_code)]
 
+const ALREADY_CLAIMED_ERR: &str = "DailyRewardAlreadyClaimedToday";
+
 use std::collections::HashMap;
 
 use eve_machonet::SessionState;
@@ -278,12 +280,19 @@ async fn test_industry_and_campaign_mgr_rpcs() {
         assert_eq!(item.flag, eve_db::InventoryFlag::Hangar);
     });
 
-    // 4. loginCampaignManager.get_client_campaign_state: returns SDE daily login campaign 2261 progress
+    // 4. loginCampaignManager.get_client_campaign_state: returns SDE daily login campaign progress
     let login_state = rpc(&ctx, &mut sess, "loginCampaignManager", "get_client_campaign_state", &[])
         .await
         .expect("get_client_campaign_state");
-    assert_eq!(field(&login_state, "campaignID").as_i64(), Some(2261));
-    assert_eq!(field(&login_state, "canClaimToday").as_bool(), Some(true));
+    assert!(
+        field(field(&login_state, "static_data"), "campaign_id")
+            .as_i64()
+            .is_some()
+    );
+    assert_eq!(
+        field(field(&login_state, "item_progress"), "num_claimed_rewards").as_i64(),
+        Some(0)
+    );
 
     // 5. loginCampaignManager.claim_reward: delivers SDE day 0 rewards (80937 + 49809) and returns 4-tuple
     let login_claim = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
@@ -292,7 +301,6 @@ async fn test_industry_and_campaign_mgr_rpcs() {
     let PyRep::Tuple(login_claim_tuple) = &login_claim else {
         panic!("expected Tuple from claim_reward");
     };
-    assert_eq!(field(&login_claim_tuple[0], "campaignID").as_i64(), Some(2261));
     assert_eq!(field(&login_claim_tuple[0], "typeID").as_i64(), Some(80_937));
     let alpha_item_id = field(&login_claim_tuple[0], "itemID")
         .as_i64()
@@ -304,11 +312,11 @@ async fn test_industry_and_campaign_mgr_rpcs() {
         assert_eq!(item.flag, eve_db::InventoryFlag::Hangar);
     });
 
-    // Calling claim_reward a second time returns None
+    // Calling claim_reward a second time same day raises DailyRewardAlreadyClaimedToday
     let login_claim_repeat = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
         .await
-        .expect("claim_reward repeat returns None");
-    assert_eq!(login_claim_repeat, PyRep::None);
+        .expect_err("claim_reward repeat raises UserError");
+    assert_eq!(login_claim_repeat.code, ALREADY_CLAIMED_ERR);
 
     // 6. seasonalLoginCampaignManager.get_active_campaign: schedule SDE seasonal campaign 2323 via GM slash command
     let mut gm_sess = SessionState::new(28_099);

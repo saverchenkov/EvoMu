@@ -4,11 +4,13 @@
 
 #![forbid(unsafe_code)]
 
+#[path = "pve_crab_beacons_shard2_helpers.rs"]
+mod shard2_helpers;
+
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::pve_special_sites::{
-    advance_roaming_storms, ensure_special_sites_initialized, next_spec_seq,
-    read_pve_special_reg, spec_now_sec, sync_metaliminal_storm_effects_and_sites,
-    with_pve_special_reg, with_pve_special_reg_db, SystemInterferenceRecord,
+    advance_roaming_storms, next_spec_seq, read_pve_special_reg, spec_now_sec,
+    sync_metaliminal_storm_effects_and_sites, with_pve_special_reg, with_pve_special_reg_db,
 };
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
 use eve_destiny::{Ball, CombatState, MovementMode};
@@ -22,6 +24,16 @@ use std::sync::Arc;
 pub const GROUP_CRAB_BEACON: u32 = 4137;
 pub const TYPE_CRAB_BEACON: TypeId = 60_244;
 pub const TYPE_CARRIER_CRAB_BEACON: TypeId = 92_183;
+#[cfg(test)]
+const TYPE_ROGUE_DRONE_INFESTATION_DATA: TypeId = 60_459;
+#[cfg(test)]
+const TYPE_RADICAL_DRONE_DDA_MUTA: TypeId = 60_476;
+#[cfg(test)]
+const TYPE_RADICAL_FIGHTER_FSU_MUTA: TypeId = 60_477;
+#[cfg(test)]
+const WAVE_1_DRONES: [TypeId; 3] = [0; 3];
+#[cfg(test)]
+const WAVE_2_DRONES: [TypeId; 4] = [0; 4];
 
 /// Capital ship link duration: 4 minutes (`240s`).
 pub const CRAB_LINK_DURATION_SECS: u64 = 240;
@@ -37,17 +49,6 @@ pub const CRAB_LINK_RANGE_M: f64 = 15_000.0;
 pub const CRAB_CEQ_COST: i64 = 30;
 /// Per-CRAB Signal Interference increase (`1/12` -> refused at 12 CRABs).
 pub const CRAB_INTERFERENCE_DELTA: f64 = 1.0 / 12.0;
-
-// DERIVED: V24 Rogue Drone CRAB wave NPCs (`group_id = 4037`) and CRAB loot types (`60459`, `60476`, `60477`)
-// verified in `evomu_sde.sqlite`; wave composition & drop counts are deterministic EvoMu defaults since NPC loot tables are server-only.
-const WAVE_1_DRONES: &[TypeId] = &[60_255, 60_316, 60_317];
-const WAVE_2_DRONES: &[TypeId] = &[60_318, 60_331, 60_332, 60_505];
-const WAVE_3_DRONES: &[TypeId] = &[60_333, 60_506, 60_517];
-
-// V24 CRAB special loot items
-const TYPE_ROGUE_DRONE_INFESTATION_DATA: TypeId = 60_459;
-const TYPE_RADICAL_DRONE_DDA_MUTA: TypeId = 60_476;
-const TYPE_RADICAL_FIGHTER_FSU_MUTA: TypeId = 60_477;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrabBeaconPhase {
@@ -426,13 +427,14 @@ fn build_rogue_drone_combat(sde: &SdeRegistry, type_id: TypeId) -> CombatState {
 
 fn spawn_crab_rogue_drone_wave(ctx: &ServerContext, beacon_id: i64, wave_num: u8) {
     let spawned_info = with_pve_special_reg(ctx, |reg| {
-        let drone_types = match wave_num {
-            1 => WAVE_1_DRONES,
-            2 => WAVE_2_DRONES,
-            _ => WAVE_3_DRONES,
-        };
+        let beacon_tid = reg
+            .crab_beacons
+            .get(&beacon_id)
+            .map(|r| r.type_id)
+            .unwrap_or(TYPE_CRAB_BEACON);
+        let drone_types = shard2_helpers::resolve_crab_wave_drone_types(&ctx.sde, beacon_tid, wave_num);
         let mut allocated = Vec::with_capacity(drone_types.len());
-        for &tid in drone_types {
+        for tid in drone_types {
             let seq = next_spec_seq(reg);
             allocated.push((1_897_000_000 + seq, tid));
         }
@@ -525,10 +527,16 @@ fn prune_dead_crab_wave_drones(ctx: &ServerContext, beacon_id: i64) -> (u8, usiz
 
 fn finalize_crab_scan_success(ctx: &ServerContext, beacon_id: i64, now: u64) {
     let info = with_pve_special_reg(ctx, |reg| {
-        let mut loot_ids = Vec::with_capacity(3);
-        for _ in 0..3 {
+        let beacon_tid = reg
+            .crab_beacons
+            .get(&beacon_id)
+            .map(|r| r.type_id)
+            .unwrap_or(TYPE_CRAB_BEACON);
+        let reward_specs = shard2_helpers::resolve_crab_completion_rewards(&ctx.sde, beacon_tid);
+        let mut loot_entries = Vec::with_capacity(reward_specs.len());
+        for (tid, qty) in reward_specs {
             let seq = next_spec_seq(reg);
-            loot_ids.push(1_897_500_000 + seq);
+            loot_entries.push((1_897_500_000 + seq, tid, qty));
         }
         let rec = reg.crab_beacons.get_mut(&beacon_id)?;
         if rec.phase != CrabBeaconPhase::Scanning {
@@ -537,18 +545,16 @@ fn finalize_crab_scan_success(ctx: &ServerContext, beacon_id: i64, now: u64) {
         rec.phase = CrabBeaconPhase::LootRestricted;
         rec.self_destruct_at_sec = now.saturating_add(CRAB_LOOT_EXCLUSIVE_SECS);
         let drones_to_clear = std::mem::take(&mut rec.wave_npc_ball_ids);
-        let data_qty = if rec.type_id == TYPE_CARRIER_CRAB_BEACON { 10 } else { 15 };
         Some((
             rec.solar_system_id,
             rec.deployer_char_id,
             rec.self_destruct_at_sec,
             drones_to_clear,
-            loot_ids,
-            data_qty,
+            loot_entries,
         ))
     });
 
-    let Some((sys_id, deployer_char_id, self_destruct_at_sec, drones_to_clear, loot_ids, data_qty)) =
+    let Some((sys_id, deployer_char_id, self_destruct_at_sec, drones_to_clear, loot_entries)) =
         info
     else {
         return;
@@ -564,12 +570,7 @@ fn finalize_crab_scan_success(ctx: &ServerContext, beacon_id: i64, now: u64) {
             beacon_item.flag = InventoryFlag::None;
             beacon_item.version += 1;
         }
-        let rewards = [
-            (loot_ids[0], TYPE_ROGUE_DRONE_INFESTATION_DATA, data_qty),
-            (loot_ids[1], TYPE_RADICAL_DRONE_DDA_MUTA, 1),
-            (loot_ids[2], TYPE_RADICAL_FIGHTER_FSU_MUTA, 1),
-        ];
-        for (iid, tid, qty) in rewards {
+        for (iid, tid, qty) in loot_entries {
             snap.items.insert(
                 iid,
                 InventoryItemRecord {
@@ -578,7 +579,7 @@ fn finalize_crab_scan_success(ctx: &ServerContext, beacon_id: i64, now: u64) {
                     owner_id: deployer_char_id,
                     location_id: beacon_id,
                     flag: InventoryFlag::Cargo,
-                    quantity: qty,
+                    quantity: qty.clamp(1, i64::from(i32::MAX)) as i32,
                     singleton: false,
                     version: 1,
                     ..Default::default()
@@ -599,6 +600,9 @@ fn finalize_crab_scan_success(ctx: &ServerContext, beacon_id: i64, now: u64) {
             ]),
         ],
     );
+    let level = get_system_interference_level_decayed(ctx, sys_id, now);
+    let band = if level >= 0.70 { 3 } else if level >= 0.35 { 2 } else { 1 };
+    shard2_helpers::emit_interference_changed_clusterwide(ctx, sys_id, level, band);
 }
 
 fn self_destruct_crab_beacon(ctx: &ServerContext, beacon_id: i64) {
@@ -920,12 +924,9 @@ pub async fn on_crab_wave_npc_destroyed(
                 {
                     let next_w = b.waves_spawned + 1;
                     b.waves_spawned = next_w;
-                    let drone_types = match next_w {
-                        2 => WAVE_2_DRONES,
-                        _ => WAVE_3_DRONES,
-                    };
+                    let drone_types = shard2_helpers::resolve_crab_wave_drone_types(sde, b.type_id, next_w);
                     let mut allocated = Vec::with_capacity(drone_types.len());
-                    for &tid in drone_types {
+                    for tid in drone_types {
                         reg.next_seq += 1;
                         let bid = 1_897_000_000 + reg.next_seq;
                         b.wave_npc_ball_ids.push(bid);
@@ -1120,11 +1121,14 @@ pub async fn handle_crab_component_call(
                 return Err(BridgeRpcError::user_error("CrabBeaconAlreadyActive"));
             }
 
-            // Deduct 30 CEQ (100 cap -> 3 activations; 4th refused with InsufficientEnergy)
+            let (effective_ceq_cost, interference_cost_mod) =
+                shard2_helpers::effective_crab_ceq_cost(CRAB_CEQ_COST, current_level);
+
+            // Deduct interference-scaled CEQ (30 base at 100 cap -> 3 activations; 4th refused with InsufficientEnergy)
             let updated_energy = crate::services::character_energy::consume_character_energy(
                 ctx,
                 char_id,
-                CRAB_CEQ_COST,
+                effective_ceq_cost,
             )?;
 
             // Increase system signal interference by 1/12 (refused at 12 CRABs)
@@ -1189,6 +1193,8 @@ pub async fn handle_crab_component_call(
                 ("scanCompletesAtUnix", PyRep::Integer(scan_completes as i64)),
                 ("selfDestructAtUnix", PyRep::Integer(self_destruct_at as i64)),
                 ("resistanceBonusPct", PyRep::Real(10.0)),
+                ("ceqCost", PyRep::Integer(effective_ceq_cost)),
+                ("interferenceCostModifier", PyRep::Real(interference_cost_mod)),
                 ("ceqRemaining", PyRep::Integer(updated_energy.current_energy)),
                 ("systemInterference", PyRep::Real(new_interference)),
             ]))
@@ -1230,7 +1236,17 @@ pub fn on_server_clock_advanced(ctx: &ServerContext, delta_sec: u64) {
         false
     };
     tick_all_crab_beacons(ctx);
-    if delta_sec > 0 {
+    let inc_due = delta_sec > 0 && read_pve_special_reg(ctx, |reg| {
+        !reg.incursions.is_empty() && (reg.incursion_lifecycle.len() < reg.incursions.len()
+            || reg.incursions.iter().any(|(cid, inc)| {
+                let m = reg.incursion_lifecycle.get(cid);
+                (inc.state == "Withdrawing" && m.is_some_and(|x| now_u >= x.withdraw_until_sec.unwrap_or(x.last_site_completed_sec + 172_800)))
+                    || (inc.state != "Ended" && inc.state != "Withdrawing" && inc.influence < 1.0
+                        && now_u.saturating_sub(m.map_or(0, |x| x.last_regen_sec.max(x.last_site_completed_sec))) >= 60)
+            })
+            || reg.incursions.values().filter(|i| i.state != "Ended").count() < 3)
+    });
+    if inc_due {
         crate::services::pve_incursion_lifecycle::advance_incursion_lifecycles(ctx);
     }
     if should_move_storms {
@@ -1264,69 +1280,19 @@ pub fn get_system_interference_level_decayed(
     })
 }
 
-fn apply_interference_activity(
-    ctx: &ServerContext,
-    solar_system_id: SolarSystemId,
-    activity_delta: f64,
-) -> Option<(f64, u8)> {
-    ensure_special_sites_initialized(ctx);
-    let delta = activity_delta.clamp(0.0, 1.0);
-    let now_sec = ctx.now_unix();
-    let (prev_level, level, old_band, new_band) = with_pve_special_reg(ctx, |reg| {
-        let entry = reg
-            .interference_by_system
-            .entry(solar_system_id)
-            .or_insert(SystemInterferenceRecord {
-                solar_system_id,
-                interference_level: 0.0,
-                band: 1,
-                last_updated_sec: now_sec,
-            });
-        let initial_level = entry.interference_level;
-        if entry.last_updated_sec > 0 && now_sec > entry.last_updated_sec {
-            let elapsed = now_sec - entry.last_updated_sec;
-            let decay = (elapsed as f64) / INTERFERENCE_DECAY_WINDOW_SECS;
-            entry.interference_level = (entry.interference_level - decay).max(0.0);
-        }
-        let prev = entry.band;
-        if delta > 0.0 {
-            entry.interference_level = (entry.interference_level + delta).clamp(0.0, 1.0);
-        }
-        entry.band = if entry.interference_level >= 0.70 {
-            3
-        } else if entry.interference_level >= 0.35 {
-            2
-        } else {
-            1
-        };
-        entry.last_updated_sec = now_sec;
-        (initial_level, entry.interference_level, prev, entry.band)
-    });
-    if (level - prev_level).abs() > 1e-9 || new_band != old_band {
-        Some((level, new_band))
-    } else {
-        None
-    }
-}
-
 pub fn record_system_interference_activity_with_char(
     ctx: &ServerContext,
     _char_id: i64,
     solar_system_id: SolarSystemId,
     activity_delta: f64,
 ) {
-    if let Some((level, new_band)) = apply_interference_activity(ctx, solar_system_id, activity_delta) {
-        let local_state = crate::services::pve_special_sites::build_interference_state_keyval(
-            solar_system_id,
-            level,
-            new_band,
-        );
-        ctx.notify(
-            NotificationTarget::SolarSystem(solar_system_id),
-            "OnSolarsystemInterferenceChanged",
-            "solarsystemid",
-            vec![PyRep::Integer(solar_system_id as i64), local_state],
-        );
+    if let Some((level, new_band)) = shard2_helpers::apply_interference_activity(
+        ctx,
+        solar_system_id,
+        activity_delta,
+        INTERFERENCE_DECAY_WINDOW_SECS,
+    ) {
+        shard2_helpers::emit_interference_changed_clusterwide(ctx, solar_system_id, level, new_band);
     }
 }
 
@@ -1336,7 +1302,12 @@ pub fn record_system_interference_activity(
     solar_system_id: SolarSystemId,
     activity_delta: f64,
 ) {
-    if let Some((level, new_band)) = apply_interference_activity(ctx, solar_system_id, activity_delta) {
+    if let Some((level, new_band)) = shard2_helpers::apply_interference_activity(
+        ctx,
+        solar_system_id,
+        activity_delta,
+        INTERFERENCE_DECAY_WINDOW_SECS,
+    ) {
         let local_state = crate::services::pve_special_sites::build_interference_state_keyval(
             solar_system_id,
             level,

@@ -7,6 +7,8 @@ use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::season_manager::fsd_challenge_definitions;
 
+const ALREADY_CLAIMED_ERR: &str = "DailyRewardAlreadyClaimedToday";
+
 use crate::common::{self, pin_clock};
 
 const ERR_CHALLENGE_NOT_COMPLETED: &str = "ChallengeNotCompleted";
@@ -68,14 +70,6 @@ fn dict_entries(rep: &PyRep) -> &[(PyRep, PyRep)] {
     }
 }
 
-// parity: rpc:seasonManager.get_max_active_challenges
-// parity: rpc:seasonManager.reload_fsd_data
-// parity: rpc:seasonManager.fill_up_and_return_challenges_for_character
-// parity: rpc:seasonManager.get_challenge
-// parity: rpc:seasonManager.challenge_is_dormant
-// parity: rpc:seasonManager.get_challenge_expiration_date
-// parity: rpc:seasonManager.process_client_event
-// parity: rpc:seasonManager.claim_challenge_rewards
 #[tokio::test]
 async fn test_season_manager_challenges_and_fsd_live() {
     let ctx = ServerContext::new();
@@ -299,8 +293,6 @@ async fn test_season_manager_challenges_and_fsd_live() {
     );
 }
 
-// parity: rpc:loginCampaignManager.get_client_campaign_state
-// parity: rpc:loginCampaignManager.claim_reward
 #[tokio::test]
 async fn test_login_campaign_lifecycle_live() {
     let ctx = ServerContext::new();
@@ -309,7 +301,7 @@ async fn test_login_campaign_lifecycle_live() {
     let char_id = 94_100_003i64;
     let mut sess = login_player_char(&ctx, 31_003, char_id).await;
 
-    // 1. Initial campaign state: can_claim_today == true, total_days_claimed == 0
+    // 1. Initial campaign state: V24 static_data + item_progress + bucket_progress
     let state0 = rpc(
         &ctx,
         &mut sess,
@@ -319,13 +311,17 @@ async fn test_login_campaign_lifecycle_live() {
     )
     .await
     .expect("get_client_campaign_state");
-    assert_eq!(
-        state0.dict_get("can_claim_today").and_then(|v| v.as_bool()),
-        Some(true)
+    assert!(
+        state0
+            .dict_get("static_data")
+            .and_then(|d| d.dict_get("campaign_id"))
+            .and_then(|v| v.as_i64())
+            .is_some()
     );
     assert_eq!(
         state0
-            .dict_get("total_days_claimed")
+            .dict_get("item_progress")
+            .and_then(|d| d.dict_get("num_claimed_rewards"))
             .and_then(|v| v.as_i64()),
         Some(0)
     );
@@ -339,6 +335,7 @@ async fn test_login_campaign_lifecycle_live() {
         panic!("expected 4-tuple from claim_reward, got {claim1:?}");
     };
     assert_eq!(parts1.len(), 4);
+    assert_eq!(parts1[2], PyRep::None);
     assert_eq!(
         parts1[0].dict_get("reward_index").and_then(|v| v.as_i64()),
         Some(1)
@@ -356,7 +353,7 @@ async fn test_login_campaign_lifecycle_live() {
         "claim_reward must emit OnRedeemingTokensUpdated"
     );
 
-    // 3. Same-day repeat claim returns None and state shows can_claim_today == false
+    // 3. Same-day repeat claim raises DailyRewardAlreadyClaimedToday and state shows next_reward_timestamp > 0
     let state1 = rpc(
         &ctx,
         &mut sess,
@@ -366,21 +363,25 @@ async fn test_login_campaign_lifecycle_live() {
     )
     .await
     .expect("get_client_campaign_state after claim");
-    assert_eq!(
-        state1.dict_get("can_claim_today").and_then(|v| v.as_bool()),
-        Some(false)
+    assert!(
+        state1
+            .dict_get("item_progress")
+            .and_then(|d| d.dict_get("next_reward_timestamp"))
+            .and_then(|v| v.as_i64())
+            .is_some_and(|ts| ts > 0)
     );
     assert_eq!(
         state1
-            .dict_get("total_days_claimed")
+            .dict_get("item_progress")
+            .and_then(|d| d.dict_get("num_claimed_rewards"))
             .and_then(|v| v.as_i64()),
         Some(1)
     );
 
-    let repeat_claim = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
+    let repeat_err = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
         .await
-        .expect("repeat claim_reward");
-    assert_eq!(repeat_claim, PyRep::None);
+        .expect_err("repeat claim_reward must raise UserError");
+    assert_eq!(repeat_err.code, ALREADY_CLAIMED_ERR);
 
     // 4. Advance clock by 24h -> day 2 claim succeeds
     ctx.advance_secs(86_400);
@@ -396,8 +397,6 @@ async fn test_login_campaign_lifecycle_live() {
     );
 }
 
-// parity: rpc:milestoneMgr.ProcessCharacterLogon
-// parity: rpc:milestoneMgr.ClaimRewards
 #[tokio::test]
 async fn test_milestone_logon_and_claims_live() {
     let ctx = ServerContext::new();
@@ -432,7 +431,7 @@ async fn test_milestone_logon_and_claims_live() {
         "ProcessCharacterLogon must emit OnMilestoneTimerStarted"
     );
 
-    // 3. Out-of-order milestone 2 before 1 fails
+    // 3. Unknown milestone ID (> 1) fails with InvalidMilestoneID
     let order_err = rpc(
         &ctx,
         &mut sess,
@@ -441,10 +440,23 @@ async fn test_milestone_logon_and_claims_live() {
         &[PyRep::Integer(2)],
     )
     .await
-    .expect_err("milestone 2 before 1 must fail");
-    assert_eq!(order_err.code, "MilestonePrerequisiteNotMet");
+    .expect_err("unknown milestone 2 must fail");
+    assert_eq!(order_err.code, "InvalidMilestoneID");
 
-    // 4. Claim milestone 1 -> credits 100,000 ISK and emits OnLoginMilestoneAchieved
+    // Claiming before 119-minute play-time grace period fails with MilestonePrerequisiteNotMet
+    let early_err = rpc(
+        &ctx,
+        &mut sess,
+        "milestoneMgr",
+        "ClaimRewards",
+        &[PyRep::Integer(1)],
+    )
+    .await
+    .expect_err("early claim before 119m must fail");
+    assert_eq!(early_err.code, "MilestonePrerequisiteNotMet");
+
+    // 4. Advance clock by 120m -> claim milestone 1 -> credits 500,000 ISK and emits OnLoginMilestoneAchieved
+    ctx.advance_secs(7_200);
     let bal_before = ctx
         .db
         .with_snapshot(|s| s.characters.get(&char_id).unwrap().balance.0);
@@ -463,7 +475,7 @@ async fn test_milestone_logon_and_claims_live() {
     let bal_after = ctx
         .db
         .with_snapshot(|s| s.characters.get(&char_id).unwrap().balance.0);
-    assert_eq!(bal_after - bal_before, 100_000 * 100);
+    assert_eq!(bal_after - bal_before, 500_000 * 100);
     let claim_notifs = ctx.drain_notifications_for_char(char_id);
     assert!(
         claim_notifs

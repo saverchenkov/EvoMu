@@ -2,10 +2,13 @@
 
 #![forbid(unsafe_code)]
 
+const ALREADY_CLAIMED_ERR: &str = "DailyRewardAlreadyClaimedToday";
+
 use super::*;
 use crate::services::account_services::account_services_tests::{
     auth_session, test_ctx, PyRepTestExt,
 };
+use crate::services::cosmetics_ui_ops::SeasonalCampaignSchedule;
 use eve_proto::PyRep;
 use std::collections::HashMap;
 
@@ -61,25 +64,22 @@ async fn date_helpers_login_campaigns_and_seasonal_campaigns() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(
-        state_rep.dict_get("canClaimToday"),
-        Some(&PyRep::Bool(true))
-    );
+    let item_prog = state_rep.dict_get("item_progress").expect("item_progress");
+    assert_eq!(item_prog.dict_get("num_claimed_rewards"), Some(&PyRep::Integer(0)));
+    assert_eq!(item_prog.dict_get("next_reward_index"), Some(&PyRep::Integer(1)));
 
     let claim_rep = handle(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[], &kw)
         .await
         .unwrap()
         .unwrap();
-    assert!(matches!(claim_rep, PyRep::Tuple(_)));
+    assert!(matches!(claim_rep, PyRep::Tuple(ref v) if v.len() == 4));
 
-    // Second claim on same day returns PyRep::None
-    assert_eq!(
-        handle(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[], &kw)
-            .await
-            .unwrap()
-            .unwrap(),
-        PyRep::None
-    );
+    // Second claim on same EVE downtime day raises DailyRewardAlreadyClaimedToday
+    let repeat_err = handle(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(repeat_err.code, ALREADY_CLAIMED_ERR);
 
     // Seasonal login campaign: no schedule vs active schedule + Alpha claim + retro Omega claim
     let no_sched = handle(
@@ -283,8 +283,24 @@ async fn info_gathering_milestones_and_community_tracks() {
         .unwrap()
         .unwrap_err()
         .code,
+        "InvalidMilestoneID"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "milestoneMgr",
+            "ClaimRewards",
+            &[PyRep::Integer(1)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
         "MilestonePrerequisiteNotMet"
     );
+    ctx.advance_virtual_clock(7_200);
     assert_eq!(
         handle(
             &ctx,

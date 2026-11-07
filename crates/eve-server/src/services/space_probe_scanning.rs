@@ -1361,13 +1361,15 @@ pub fn tick_probe_warp_end(ctx: &ServerContext) {
         }
         let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(PROBE_STATE_SCANNING as i64)]);
     }
-    let due_scans = ctx.db.with_mut_snapshot(|snap| {
+    let has_due_scans = ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs.get("pending_probe_scans").and_then(|s| serde_json::from_str::<Vec<(i64, Vec<i64>, Vec<PyRep>, Vec<PyRep>, Vec<PyRep>, i64)>>(s).ok()).is_some_and(|all| all.iter().any(|(_, _, _, _, _, end_ft)| now_ft >= *end_ft))
+    });
+    let due_scans = if has_due_scans { ctx.db.with_mut_snapshot(|snap| {
         let all: Vec<(i64, Vec<i64>, Vec<PyRep>, Vec<PyRep>, Vec<PyRep>, i64)> = snap.service_state_blobs.get("pending_probe_scans").and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
-        if all.is_empty() { return Vec::new(); }
         let (done, rem): (Vec<_>, Vec<_>) = all.into_iter().partition(|(_, _, _, _, _, end_ft)| now_ft >= *end_ft);
         if let Ok(js) = serde_json::to_string(&rem) { snap.service_state_blobs.insert("pending_probe_scans".into(), js); }
         done
-    });
+    }) } else { Vec::new() };
     for (char_id, p_ids, scan_probe_ids, rows, idle_probes, _) in due_scans {
         if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
             for pid in &p_ids {

@@ -3877,7 +3877,6 @@ fn count_nested_instances(rep: &PyRep, expected_sys: u32) -> usize {
 
 #[tokio::test]
 async fn batch3_dungeon_instance_cache_homefront_and_triglavian() {
-    // parity: rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances
     let ctx = new_ctx();
     let mut unauth = SessionState::default();
     assert!(rpc(
@@ -4015,7 +4014,6 @@ async fn batch3_dungeon_instance_cache_homefront_and_triglavian() {
 
 #[tokio::test]
 async fn batch3_season_manager_challenges_and_queries() {
-    // parity: rpc:seasonManager.get_season_end_time
     let ctx = new_ctx();
     let mut sess = login_char(&ctx, 103, PILOT_ID).await;
 

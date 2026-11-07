@@ -297,7 +297,7 @@ fn rewards_divisions_alpha_vs_omega_target_resolution_and_security_encounters() 
     let mut ctx = make_ctx(1_775_000_000);
     let mut sde = (*ctx.sde).clone();
 
-    // Seed agents in divisions 22 (Distribution -> 3893), 23 (Mining -> 3894), 24 (Security -> 3895), and 18 (R&D -> None)
+    // Seed agents in divisions 22 (Distribution -> 3894), 23 (Mining -> 3893), 24 (Security -> 3895), and 18 (R&D -> None)
     for (aid, div, a_type, lvl) in [
         (3_100_001, 22, 2, 1),
         (3_100_002, 23, 2, 2),
@@ -340,17 +340,17 @@ fn rewards_divisions_alpha_vs_omega_target_resolution_and_security_encounters() 
         }
         let sk = snap.skills.entry(char_id).or_default();
         sk.insert(
-            3893,
+            3894,
             TrainedSkillRecord {
-                type_id: 3893,
+                type_id: 3894,
                 level: 3,
                 skill_points: 20_000.0,
             },
         );
         sk.insert(
-            3894,
+            3893,
             TrainedSkillRecord {
-                type_id: 3894,
+                type_id: 3893,
                 level: 5,
                 skill_points: 256_000.0,
             },

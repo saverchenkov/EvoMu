@@ -261,8 +261,9 @@ async fn r7_465_login_reward_packaging_expiry_item_change_and_campaign_scoped_cl
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(state_b.dict_get("total_days_claimed"), Some(&PyRep::Integer(0)));
-    assert_eq!(state_b.dict_get("can_claim_today"), Some(&PyRep::Bool(true)));
+    let prog_b = state_b.dict_get("item_progress").expect("item_progress");
+    assert_eq!(prog_b.dict_get("num_claimed_rewards"), Some(&PyRep::Integer(0)));
+    assert_eq!(prog_b.dict_get("next_reward_timestamp"), Some(&PyRep::Integer(0)));
 
     let rep_b = campaigns_and_milestones::handle(
         &ctx,
