@@ -576,8 +576,12 @@ async fn test_journey_undock_navigate() {
     call_bound_rpc(&ctx, &mut sess, "beyonce", bey_bid, "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(stargate_id), PyRep::Real(0.0)])
         .await
         .expect("CmdWarpToStuff celestial");
-    for _ in 0..20 {
-        let _ = sys_h.tick().await;
+    for _ in 0..600 {
+        let _ = sys_h.step_manual(1.0).await;
+        let warping = matches!(sys_h.get_ball_snapshot(ship_id).await, Ok(Some((_, ref b))) if matches!(b.mode, eve_destiny::MovementMode::Warp { .. }));
+        if !warping {
+            break;
+        }
     }
 
     let bm = call_rpc(

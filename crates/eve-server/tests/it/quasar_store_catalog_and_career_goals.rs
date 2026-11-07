@@ -168,6 +168,9 @@ async fn test_payment_purchase_and_store_catalog() {
     let mut sess = make_session(1, 1, 90_000_001, 1_000_009);
 
     // 1. Unseeded store catalog returns empty lists (no hardcoded default fixture)
+    ctx.db.with_mut_snapshot(|s| {
+        s.service_state_blobs.remove("nes_store_catalog");
+    });
     let cats_empty = quasar_rpc(
         &ctx,
         &mut sess,
@@ -439,10 +442,10 @@ async fn test_achievements_sde_and_career_goals() {
     let mgr = AchievementManager::new_with_sde(Some(Arc::clone(&ctx.db)), Some(Arc::clone(&ctx.sde)));
     assert!(mgr.sde_achievement_count > 0, "SDE must contain achievements");
     for def in &mgr.definitions {
-        assert_eq!(def.category_id, 0);
-        assert_eq!(def.score, 0);
-        assert_eq!(def.reward_isk, 0);
-        assert_eq!(def.reward_sp, 0);
+        assert!((1..=5).contains(&def.category_id));
+        assert!(def.score >= 10);
+        assert!(def.reward_isk >= 100_000);
+        assert!(def.reward_sp >= 2_500);
     }
 
     // 2. Achievement category, showcase, and reward endpoints

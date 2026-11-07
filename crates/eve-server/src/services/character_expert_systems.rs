@@ -455,7 +455,7 @@ pub fn handle(
 
             let update_res = ctx
                 .db
-                .with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                .try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                     let blob_key = node_graph_bb_blob_key(char_id, graph_id);
                     let mut bb: HashMap<String, String> = snap
                         .service_state_blobs

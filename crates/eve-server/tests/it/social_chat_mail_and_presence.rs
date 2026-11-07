@@ -118,6 +118,18 @@ async fn test_social_chat_item_fitting_hyperlinks() {
         );
     });
 
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp_id) = s1.corporation_id {
+            if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+                corp.member_roles
+                    .entry(P1)
+                    .and_modify(|r| *r |= eve_db::corp_roles::ROLE_DIRECTOR)
+                    .or_insert(eve_db::corp_roles::ROLE_DIRECTOR);
+            }
+        }
+    });
+    s1.corp_role |= eve_db::corp_roles::ROLE_DIRECTOR;
+
     // (e) Bookmark folder with recipient P2 in accessGroupIDs
     let bm_rep = rpc(
         &ctx,
@@ -126,7 +138,7 @@ async fn test_social_chat_item_fitting_hyperlinks() {
         "AddFolder",
         &[
             PyRep::String("HQ Bookmarks".into()),
-            PyRep::Bool(false),
+            PyRep::Bool(true),
             PyRep::List(vec![PyRep::Integer(P2)]),
         ],
     )

@@ -288,7 +288,11 @@ async fn test_small_ship_standard_shattered_drifter_and_thera_systems() {
         arrival_dist <= 6_000.0,
         "Arriving ship must spawn within ~5 km of exit wormhole (got {arrival_dist:.1} m)"
     );
-    let base_devoter_armor = ctx.build_ship_combat_state(char_id, hic_ship_id, 12017).max_armor_hp;
+    let base_devoter_armor = ctx
+        .get_or_rebuild_ship_fitting(char_id, hic_ship_id)
+        .expect("devoter fitting")
+        .ship
+        .get_attribute(eve_sde::attr_ids::ARMOR_HP, &ctx.sde);
 
     ctx.advance_secs(315);
     let _ = ctx.systems.get_or_spawn(c13_dest_sys).step_manual(31.0).await;
@@ -511,6 +515,7 @@ async fn test_small_ship_standard_shattered_drifter_and_thera_systems() {
     let k_beacon_pos = DVec3::from_array(k_beacon_rec.position);
 
     ctx.advance_secs(15);
+    let _ = shat_handle.remove_ball(ship_id).await;
     let _ = ensure_system_signatures_and_anomalies(&ctx, k_side_sys).await;
     let drifter_test_ship = 620_000_005_i64;
     let base_bs_shield = ctx.build_ship_combat_state(char_id, drifter_test_ship, 644).max_shield_hp;
@@ -544,7 +549,10 @@ async fn test_small_ship_standard_shattered_drifter_and_thera_systems() {
     assert!(post_guard_ball.speed_fraction < 1.0, "K-space Drifter battleship guards must web target");
 
     // Jump into Conflux Eyrie (31000004) via wormholeMgr.WormholeJump and assert C2 Pulsar (+44% shield HP) system effect!
-    let _ = k_handle.set_ball_position(drifter_test_ship, k_beacon_pos + DVec3::new(500.0, 0.0, 0.0)).await;
+    // Despawn drifter_test_ship before advancing 12s so Drifter guards cannot re-trigger a 10s podding cooldown during advance_secs.
+    let _ = k_handle.remove_ball(drifter_test_ship).await;
+    ctx.advance_secs(12);
+    place_ship(&ctx, &mut sess, char_id, k_side_sys, drifter_test_ship, 644, k_beacon_pos + DVec3::new(500.0, 0.0, 0.0), 103_600_000.0).await;
     let jump_drifter_rep = ctx
         .dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(k_beacon_wh_id)], &kw, None)
         .await

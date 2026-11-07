@@ -322,7 +322,7 @@ async fn test_r4_189_entitlement_redeem_rolls_back_on_second_stack_overflow() {
 #[tokio::test]
 async fn test_r4_190_plex_store_validates_recipient_before_deducting_plex_and_allows_free_offers()
 {
-    let ctx = ServerContext::new();
+    let mut ctx = ServerContext::new();
     let now = ctx.now_unix();
 
     // Seed 500 PLEX for user 1, a paid offer 9189 (100 PLEX), and a free (0-PLEX) offer 9190 in catalog
@@ -398,7 +398,8 @@ async fn test_r4_190_plex_store_validates_recipient_before_deducting_plex_and_al
         "PLEX must not be deducted when recipient character validation fails"
     );
 
-    // 2. Purchasing 0-PLEX offer 9190 for valid character 90_000_001 deducts 0 PLEX (not 1 PLEX)
+    // 2. Purchasing 0-PLEX offer 9190 requires free_fast_checkout_plex and deducts 0 PLEX
+    ctx.set_free_fast_checkout_plex(true);
     let mut free_id = Vec::new();
     encode_string_field(1, "9190", &mut free_id);
     let mut free_buf = Vec::new();

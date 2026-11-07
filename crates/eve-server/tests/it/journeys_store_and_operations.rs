@@ -81,6 +81,9 @@ async fn test_journey_cosmetics_store() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
+    ctx.db.with_mut_snapshot(|s| {
+        s.service_state_blobs.remove("nes_store_catalog");
+    });
     crate::common::seed_test_nes_store_catalog(&ctx);
 
     let mut sess = SessionState::new(506);

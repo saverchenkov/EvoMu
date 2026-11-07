@@ -573,7 +573,12 @@ async fn test_esi_incursions_live_spawn_and_influence_decay() {
 
     let ms_boss_bid = crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys_id, &ms_site_id).await;
     hq_sys.set_ball_position(ship_id, ms_pos).await;
-    let (_, ms_dead, _) = hq_sys.apply_damage_with_attacker(ms_boss_bid, nuke, Some(PILOT_1)).await.unwrap().unwrap();
+    let mut ms_nuke = nuke;
+    ms_nuke.em = 20_000_000.0;
+    ms_nuke.thermal = 20_000_000.0;
+    ms_nuke.kinetic = 20_000_000.0;
+    ms_nuke.explosive = 20_000_000.0;
+    let (_, ms_dead, _) = hq_sys.apply_damage_with_attacker(ms_boss_bid, ms_nuke, Some(PILOT_1)).await.unwrap().unwrap();
     assert!(ms_dead);
 
     let wdr = call_esi(&router, EsiHttpRequest::new("GET", "/v1/incursions/"), 200);

@@ -237,7 +237,7 @@ async fn settle(ctx: &ServerContext, sess: &SessionState, max_steps: usize) {
 
 pub(crate) async fn warp_to(ctx: &ServerContext, sess: &mut SessionState, target: i64, dist: f64) {
     match rpc(ctx, sess, "beyonce", "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(target), PyRep::Real(dist)]).await {
-        Ok(_) => settle(ctx, sess, 600).await,
+        Ok(_) => settle(ctx, sess, 4000).await,
         Err(e) if e.code == "WarpDistanceTooShort" => {}
         Err(e) => panic!("warp to {target}: {e:?}"),
     }

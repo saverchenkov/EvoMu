@@ -359,7 +359,12 @@ async fn test_esi_incursions_wars_and_single_killmail_reflect_live_state() {
 
     // Defeat the Mothership encounter via live combat -> state transitions to `"withdrawing"`, `has_boss: false`.
     let ms_boss_bid = crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys, &ms_site_id).await;
-    let (_, ms_dead, _) = hq_handle.apply_damage_with_attacker(ms_boss_bid, lethal, Some(90_000_001)).await.unwrap().unwrap();
+    let mut ms_lethal = lethal;
+    ms_lethal.em = 20_000_000.0;
+    ms_lethal.thermal = 20_000_000.0;
+    ms_lethal.kinetic = 20_000_000.0;
+    ms_lethal.explosive = 20_000_000.0;
+    let (_, ms_dead, _) = hq_handle.apply_damage_with_attacker(ms_boss_bid, ms_lethal, Some(90_000_001)).await.unwrap().unwrap();
     assert!(ms_dead);
 
     let incursions_withdrawing = call(&router, EsiHttpRequest::new("GET", "/v1/incursions/"), 200);
@@ -447,6 +452,52 @@ async fn test_esi_incursions_wars_and_single_killmail_reflect_live_state() {
                         security_status: 0.5,
                     },
                 ],
+            },
+        );
+        snap.combat_crimewatch_state.detailed_killmails.insert(
+            killmail_id,
+            eve_db::DetailedKillmail {
+                kill_id: killmail_id,
+                kill_time_unix: km_time_unix,
+                solar_system_id: 30_000_142,
+                victim_character_id: victim_id,
+                victim_corporation_id: def_corp,
+                victim_alliance_id: Some(def_alliance),
+                victim_ship_type_id: 587,
+                victim_damage_taken: 1_840.0,
+                victim_position: [12_500.0, -4_000.0, 8_500.0],
+                attackers: vec![
+                    eve_db::KillmailAttackerEntry {
+                        character_id: attacker_id,
+                        corporation_id: aggr_corp,
+                        alliance_id: None,
+                        ship_type_id: 587,
+                        weapon_type_id: 484,
+                        damage_done: 1_200.0,
+                        final_blow: true,
+                        security_status: 1.75,
+                    },
+                    eve_db::KillmailAttackerEntry {
+                        character_id: wingman_id,
+                        corporation_id: aggr_corp,
+                        alliance_id: None,
+                        ship_type_id: 585,
+                        weapon_type_id: 484,
+                        damage_done: 640.0,
+                        final_blow: false,
+                        security_status: 0.5,
+                    },
+                ],
+                dropped_items: vec![],
+                destroyed_items: vec![eve_db::KillmailItemEntry {
+                    type_id: 34,
+                    flag: InventoryFlag::Cargo as u16,
+                    qty_dropped: 0,
+                    qty_destroyed: 250,
+                    singleton: false,
+                }],
+                total_value_isk: 2_500_000.0,
+                killmail_hash: String::new(),
             },
         );
         for (cid, aid) in [

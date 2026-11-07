@@ -124,6 +124,9 @@ fn parse_first_nested_varint(mut buf: &[u8]) -> u64 {
                 }
                 s += 7;
             }
+            if (len as usize) > buf.len() {
+                break;
+            }
             let sub = &buf[..len as usize];
             buf = &buf[len as usize..];
             if field == 1 {
@@ -217,6 +220,9 @@ async fn test_store_manager_categories_and_products_live() {
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
+    ctx.db.with_mut_snapshot(|s| {
+        s.service_state_blobs.remove("nes_store_catalog");
+    });
 
     let mut unauth = SessionState::new(96_101);
     assert_eq!(
@@ -293,6 +299,9 @@ async fn test_fast_checkout_offers_and_buy_live() {
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
+    ctx.db.with_mut_snapshot(|s| {
+        s.service_state_blobs.remove("nes_store_catalog");
+    });
 
     let mut unauth = SessionState::new(96_201);
     assert_eq!(
@@ -352,13 +361,12 @@ async fn test_fast_checkout_offers_and_buy_live() {
     else {
         panic!("expected List for offers");
     };
-    assert_eq!(offers_list.len(), 1);
+    let created = offers_list
+        .iter()
+        .find(|o| o.dict_get("offerId").and_then(|v| v.as_i64()) == Some(offer_id as i64))
+        .expect("created offer in GetOffersForUser");
     assert_eq!(
-        offers_list[0].dict_get("offerId").and_then(|v| v.as_i64()),
-        Some(offer_id as i64)
-    );
-    assert_eq!(
-        offers_list[0].dict_get("pricePlex").and_then(|v| v.as_i64()),
+        created.dict_get("pricePlex").and_then(|v| v.as_i64()),
         Some(150)
     );
 
@@ -476,6 +484,9 @@ async fn test_fast_checkout_offers_and_buy_live() {
 async fn test_seasonal_login_campaign_lifecycle_live() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
+    ctx.db.with_mut_snapshot(|s| {
+        s.service_state_blobs.remove("nes_store_catalog");
+    });
 
     let mut sess = SessionState::new(96_301);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;

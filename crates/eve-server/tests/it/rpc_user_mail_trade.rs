@@ -143,7 +143,11 @@ async fn test_usersvc_account_profile_and_tokens() {
     let PyRep::String(tok) = tok_rep else {
         panic!("expected String token");
     };
-    assert!(tok.starts_with("sso-tok-"));
+    let verified = ctx
+        .db
+        .verify_quasar_bearer_jwt(&tok, ctx.now_unix())
+        .expect("GetUserToken must return valid signed JWT");
+    assert_eq!(verified.user_id, s.user_id.unwrap());
 
     // 4. GetSessionPlaytimeMinutes
     let pt_rep = rpc(&ctx, &mut s, "userSvc", "GetSessionPlaytimeMinutes", &[])

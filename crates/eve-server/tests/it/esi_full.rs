@@ -1302,7 +1302,8 @@ async fn test_esi_b2_market_history_structure_and_corp_orders_live_http_and_sqli
             ..Default::default()
         };
         corp.member_roles.insert(ceo_id, ROLE_DIRECTOR);
-        corp.member_roles.insert(trader_id, ROLE_TRADER);
+        corp.member_roles
+            .insert(trader_id, ROLE_TRADER | eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]);
         snap.corporations.insert(corp_id, corp);
         for cid in [ceo_id, trader_id] {
             if let Some(ch) = snap.characters.get_mut(&cid) {
@@ -2741,7 +2742,11 @@ async fn test_esi_corp_roles_personnel_manager_and_grantable_role_gate() {
         snap.corporations.insert(corp1, corp);
         snap.corp_role_assignments.insert(
             (corp1, grantable_id),
-            eve_db::CorpMemberRoleAssignment { character_id: grantable_id, grantable_roles: ROLE_FACTORY_MANAGER, ..Default::default() },
+            eve_db::CorpMemberRoleAssignment {
+                character_id: grantable_id,
+                grantable_roles: eve_db::corp_roles::ROLE_PERSONNEL_MANAGER,
+                ..Default::default()
+            },
         );
         Ok(())
     });

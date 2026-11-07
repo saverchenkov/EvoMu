@@ -176,9 +176,9 @@ pub fn default_fsd_seasons(
         .unwrap_or(583_380);
 
     // DATA GAP: V24 FSD ships no live season start/end schedule or active-challenge cap;
-    // synthesize a 30-day window from init_start_ft and a default cap of 4.
-    let base_start_ft: i64 = init_start_ft;
-    let base_end_ft: i64 = base_start_ft + 30 * 86_400 * 10_000_000;
+    // align with the fixed 30-day cadence epoch covering `init_start_ft` and default cap 4.
+    let (base_start_ft, base_end_ft) =
+        crate::services::season_manager::ops::active_fsd_epoch_window_ft(init_start_ft);
     let max_ch = 4_i64;
 
     if let Ok(tracks) = sde.load_cfsd_nested("res:/staticdata/community_track_templates.fsdbinary") {

@@ -291,9 +291,11 @@ pub fn resolve_season_end_time_readonly(
     now_ft: i64,
 ) -> Option<i64> {
     if let Some(json) = snap.service_state_blobs.get(SEASON_CONFIG_KEY) {
-        if let Ok(cfg) = serde_json::from_str::<SeasonConfig>(json) {
-            if cfg.end_time_ft > 0 {
-                return (cfg.end_time_ft > now_ft).then_some(cfg.end_time_ft);
+        if let Ok(raw) = serde_json::from_str::<serde_json::Value>(json) {
+            if let Some(explicit_end_ft) = raw.get("end_time_ft").and_then(|v| v.as_i64()) {
+                if explicit_end_ft > 0 {
+                    return (explicit_end_ft > now_ft).then_some(explicit_end_ft);
+                }
             }
         }
     }

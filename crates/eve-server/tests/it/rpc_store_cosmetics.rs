@@ -62,6 +62,9 @@ async fn test_store_manager_categories_offers_and_purchases() {
     // mechanics against a test-seeded catalog.
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
+    ctx.db.with_mut_snapshot(|s| {
+        s.service_state_blobs.remove("nes_store_catalog");
+    });
     common::seed_test_nes_store_catalog(&ctx);
     let mut sess = setup_pilot_session(&ctx).await;
 
@@ -278,6 +281,9 @@ async fn test_ship_cosmetics_manager_licenses_and_first_party() {
     // parity: rpc:shipCosmeticsMgr.RemoveSkin
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
+    ctx.db.with_mut_snapshot(|s| {
+        s.service_state_blobs.remove("nes_store_catalog");
+    });
     common::seed_test_nes_store_catalog(&ctx);
     let mut sess = setup_pilot_session(&ctx).await;
 

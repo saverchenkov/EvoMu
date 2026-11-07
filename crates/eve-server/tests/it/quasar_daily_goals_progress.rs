@@ -300,7 +300,7 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
     .await;
     assert_eq!(comp_rsp.status_code, STATUS_OK);
     let comp_wm = WireMessage::decode(&comp_rsp.payload.unwrap().value).expect("decode completed");
-    assert_eq!(comp_wm.fields.iter().filter(|f| f.field_number == 1).count(), 3);
+    assert_eq!(comp_wm.fields.iter().filter(|f| f.field_number == 1).count(), 4);
 
     let goals_now = ctx.quasar_gateway.progression.daily_goals.get_or_init_goals(char_id);
     let combat_goal = goals_now.iter().find(|g| g.template.category == 1).unwrap();
@@ -354,8 +354,8 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
         let ch = &s.characters[&(char_id as i64)];
         (ch.balance.0, ch.free_skill_points)
     });
-    assert_eq!(after_isk, initial_isk + IskCents::from_isk(1_500_000).0);
-    assert!((after_sp - (initial_sp + 15_000.0)).abs() < 1e-6);
+    assert_eq!(after_isk, initial_isk + IskCents::from_isk(2_000_000).0);
+    assert!((after_sp - (initial_sp + 25_000.0)).abs() < 1e-6);
 
     // 4. Advance virtual clock by 86,400s (next 11:00 UTC downtime bucket) -> daily goals reset cleanly
     ctx.advance_virtual_clock(86_400);

@@ -726,8 +726,21 @@ async fn test_quasar_accounting_loyalty_contracts() {
     sess.corp_role = eve_db::corp_roles::ROLE_ACCOUNTANT;
     sess.role = eve_machonet::service_roles::ROLE_GM_MASK;
 
-    // Seed wallet journal entry
+    // Seed wallet journal entry and authoritative corporation role for 90_000_001
     ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap
+            .corporations
+            .entry(1_000_170)
+            .or_insert_with(|| eve_db::CorporationRecord {
+                corporation_id: 1_000_170,
+                name: "Republic Military School".into(),
+                ticker: "RMS".into(),
+                ceo_id: 90_000_001,
+                ..Default::default()
+            });
+        corp.members.insert(90_000_001);
+        corp.member_roles
+            .insert(90_000_001, eve_db::corp_roles::ROLE_ACCOUNTANT);
         snap.wallet_journal.push(eve_db::WalletJournalEntry {
             entry_id: 88001,
             character_id: 90_000_001,

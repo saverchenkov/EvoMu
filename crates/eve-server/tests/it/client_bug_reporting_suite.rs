@@ -433,6 +433,32 @@ async fn test_f12_bugreporter_http_endpoints_zip_extraction_and_security_guards(
     );
 
     let empty_hdrs = HashMap::new();
+    let now_unix = ctx.now_unix();
+    let pkce_code = ctx
+        .db
+        .authorize_pkce(
+            "demo",
+            "demo-secret",
+            90_000_001,
+            "evomu-bugreport-test",
+            "https://localhost/callback",
+            vec![],
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+            "S256",
+            now_unix,
+        )
+        .expect("authorize bug reporter pkce");
+    let bearer_tok = ctx
+        .db
+        .exchange_pkce_code(
+            &pkce_code,
+            "evomu-bugreport-test",
+            "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+            now_unix,
+        )
+        .expect("exchange bug reporter pkce")
+        .access_token;
+    let auth_hdrs = HashMap::from([("authorization".to_string(), format!("Bearer {bearer_tok}"))]);
 
     // 1. GET /bugs/api/status -> {"isOnline": true}
     let st_resp = handle_bugs_http_request(&ctx, "GET", "/bugs/api/status", &empty_hdrs, b"");
@@ -462,7 +488,7 @@ async fn test_f12_bugreporter_http_endpoints_zip_extraction_and_security_guards(
     });
     let issue_bytes = serde_json::to_vec(&issue_payload).unwrap();
     let issue_resp =
-        handle_bugs_http_request(&ctx, "POST", "/bugs/api/issue", &empty_hdrs, &issue_bytes);
+        handle_bugs_http_request(&ctx, "POST", "/bugs/api/issue", &auth_hdrs, &issue_bytes);
     assert_eq!(issue_resp.status_code, 201);
     let issue_json: serde_json::Value = serde_json::from_slice(&issue_resp.body).unwrap();
     let report_id = issue_json["id"].as_str().expect("id field").to_string();

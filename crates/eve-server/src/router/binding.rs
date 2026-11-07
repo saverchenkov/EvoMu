@@ -521,6 +521,39 @@ impl ServerContext {
             return cs;
         }
         let mut cs = self.build_type_combat_state(type_id);
+        {
+            use eve_sde::attr_ids as a;
+            let mut eff_attrs: std::collections::HashMap<u16, f64> = [
+                (a::SHIELD_CAPACITY, cs.max_shield_hp), (a::ARMOR_HP, cs.max_armor_hp),
+                (a::HP_STRUCT, cs.max_structure_hp), (a::CAPACITOR_CAPACITY, cs.max_capacitor),
+                (a::SIGNATURE_RADIUS, cs.signature_radius),
+                (a::SHIELD_RECHARGE_RATE, cs.shield_recharge_time_ms),
+                (a::RECHARGE_RATE, cs.capacitor_recharge_time_ms),
+                (a::SHIELD_EM_DAMAGE_RESONANCE, cs.shield_resonance[0]),
+                (a::SHIELD_THERMAL_DAMAGE_RESONANCE, cs.shield_resonance[1]),
+                (a::SHIELD_KINETIC_DAMAGE_RESONANCE, cs.shield_resonance[2]),
+                (a::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE, cs.shield_resonance[3]),
+                (a::ARMOR_EM_DAMAGE_RESONANCE, cs.armor_resonance[0]),
+                (a::ARMOR_THERMAL_DAMAGE_RESONANCE, cs.armor_resonance[1]),
+                (a::ARMOR_KINETIC_DAMAGE_RESONANCE, cs.armor_resonance[2]),
+                (a::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE, cs.armor_resonance[3]),
+                (a::EM_DAMAGE_RESONANCE, cs.structure_resonance[0]),
+                (a::THERMAL_DAMAGE_RESONANCE, cs.structure_resonance[1]),
+                (a::KINETIC_DAMAGE_RESONANCE, cs.structure_resonance[2]),
+                (a::EXPLOSIVE_DAMAGE_RESONANCE, cs.structure_resonance[3]),
+            ].into_iter().collect();
+            crate::services::inventory_fitting::fitting_scanners_superweapons::apply_active_dbuffs_and_system_effects_to_ship_attrs(self, ship_id, &mut eff_attrs);
+            (cs.max_shield_hp, cs.shield_hp) = (eff_attrs[&a::SHIELD_CAPACITY], eff_attrs[&a::SHIELD_CAPACITY]);
+            (cs.max_armor_hp, cs.armor_hp) = (eff_attrs[&a::ARMOR_HP], eff_attrs[&a::ARMOR_HP]);
+            (cs.max_structure_hp, cs.structure_hp) = (eff_attrs[&a::HP_STRUCT], eff_attrs[&a::HP_STRUCT]);
+            (cs.max_capacitor, cs.capacitor) = (eff_attrs[&a::CAPACITOR_CAPACITY], eff_attrs[&a::CAPACITOR_CAPACITY]);
+            cs.signature_radius = eff_attrs[&a::SIGNATURE_RADIUS];
+            cs.shield_recharge_time_ms = eff_attrs[&a::SHIELD_RECHARGE_RATE];
+            cs.capacitor_recharge_time_ms = eff_attrs[&a::RECHARGE_RATE];
+            cs.shield_resonance = [eff_attrs[&a::SHIELD_EM_DAMAGE_RESONANCE], eff_attrs[&a::SHIELD_THERMAL_DAMAGE_RESONANCE], eff_attrs[&a::SHIELD_KINETIC_DAMAGE_RESONANCE], eff_attrs[&a::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE]];
+            cs.armor_resonance = [eff_attrs[&a::ARMOR_EM_DAMAGE_RESONANCE], eff_attrs[&a::ARMOR_THERMAL_DAMAGE_RESONANCE], eff_attrs[&a::ARMOR_KINETIC_DAMAGE_RESONANCE], eff_attrs[&a::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE]];
+            cs.structure_resonance = [eff_attrs[&a::EM_DAMAGE_RESONANCE], eff_attrs[&a::THERMAL_DAMAGE_RESONANCE], eff_attrs[&a::KINETIC_DAMAGE_RESONANCE], eff_attrs[&a::EXPLOSIVE_DAMAGE_RESONANCE]];
+        }
         cs.rng_state = eve_destiny::CombatState::seed_rng_from_u64(
             (ship_id as u64) ^ (char_id as u64).rotate_left(17) ^ (u64::from(type_id) << 32),
         );

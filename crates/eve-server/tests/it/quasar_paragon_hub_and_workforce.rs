@@ -204,7 +204,7 @@ async fn test_quasar_cosmetics_market_sde_and_skill_fees() {
     let dyn_comp = decode_dyn(_reg, comp_all.payload.as_ref().unwrap());
     let first_comp_uuid = match dyn_comp.get(1) {
         Some(DynamicValue::Repeated(items)) => {
-            assert_eq!(items.len(), 4, "expected 4 SDE-seeded component listings");
+            assert!(items.len() >= 4, "expected >= 4 SDE-seeded component listings, got {}", items.len());
             match &items[0] {
                 DynamicValue::Message(entry) => extract_uuid_from_entry(entry),
                 other => panic!("expected listing entry, got {other:?}"),

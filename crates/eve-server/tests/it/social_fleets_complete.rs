@@ -714,7 +714,7 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
     let jump_rep = ctx.dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(wh_item_id)], &kw, None).await.expect("WormholeJump to Thera");
     let PyRep::KeyVal(jkv) = &jump_rep else { panic!("Expected KeyVal from WormholeJump") };
     assert_eq!((sess.solar_system_id, &jkv["isThera"], &jkv["wormholeClass"]), (Some(31_000_005), &PyRep::Bool(true), &PyRep::Integer(12)));
-    assert_eq!((&jkv["massStage"], &jkv["wormholeSize"], &jkv["lifetimeStage"], &jkv["wormholeAge"]), (&PyRep::String("Stable".into()), &PyRep::Real(1.0), &PyRep::String("Healthy".into()), &PyRep::Integer(1)));
+    assert_eq!((&jkv["massStage"], &jkv["wormholeSize"], &jkv["lifetimeStage"], &jkv["wormholeAge"]), (&PyRep::String("Stable".into()), &PyRep::Real(1.0), &PyRep::String("BeginningToDecay".into()), &PyRep::Integer(1)));
     assert!((jkv["remainingMassKg"].as_f64().unwrap() - (2_000_000_000.0 - 1_700_000.0)).abs() < 1.0);
 
     // 3. Thera & Shattered W-space rules (`feat:navigation.wormhole-thera`)
@@ -764,6 +764,7 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
     assert_eq!(pol_after, PyRep::None);
 
     // 5. Intermediate mass & lifetime stages (`feat:navigation.wormhole-lifetime`)
+    let base_rifter_cs = ctx.build_ship_combat_state(90_000_001, 600_000_001, 587);
     ctx.db.with_mut_snapshot(|snap| {
         let wh = snap.cosmic_signatures.get_mut(&30_000_142).unwrap().iter_mut().find(|s| s.signature_id == wh_sig_id).unwrap();
         wh.remaining_mass_kg = 800_000_000.0;
@@ -775,7 +776,6 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
     assert_eq!(dkv["wormholeSize"], PyRep::Real(0.5));
     assert_eq!(dkv["environmentalEffect"], PyRep::String("Wolf-Rayet".into()));
 
-    let base_rifter_cs = ctx.build_ship_combat_state(90_000_001, 600_000_001, 587);
     let wr_handle = ctx.systems.get_or_spawn(31_000_028);
     let wr_cs = wr_handle.get_combat_state(600_000_001).await.unwrap().unwrap();
     assert!((wr_cs.max_armor_hp - base_rifter_cs.max_armor_hp * 1.30).abs() < 1.0);
@@ -1062,7 +1062,15 @@ async fn test_so_bookmarks_expiry_copy_move_corp_bookmarks_and_scanning_features
         snap.skills.entry(90_000_001).or_default().insert(3363, eve_db::TrainedSkillRecord { type_id: 3363, level: 5, skill_points: 256_000.0 });
     });
     ctx.advance_secs(12);
+    sess1.station_id = Some(60_003_760);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) { ch.station_id = Some(60_003_760); }
+    });
     ctx.dispatch_rpc(&mut sess1, "corpRegistry", None, "AddCorporation", &[PyRep::String("Bookmark Corp".into()), PyRep::String("BMCP".into()), PyRep::Real(0.05)], &kw, None).await.unwrap();
+    sess1.station_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) { ch.station_id = None; }
+    });
     ctx.advance_secs(7 * 86_400);
     let corp_id = sess1.corporation_id.unwrap();
     let app = ctx.dispatch_rpc(&mut sess2, "corpRegistry", None, "InsertApplication", &[PyRep::Integer(corp_id), PyRep::String("Joining".into())], &kw, None).await.unwrap();

@@ -69,7 +69,7 @@ async fn test_quasar_corporation_goals_complete() {
             c
         });
         corp.ceo_id = 90000001;
-        corp.master_wallet = eve_db::IskCents::from_isk(10_000_000);
+        corp.set_division_balance(1, eve_db::IskCents::from_isk(10_000_000));
     });
 
     // 1. Non-director cannot create a corporation goal; CEO creates goal with 500,000 ISK reward_pools debiting master_wallet
@@ -215,12 +215,12 @@ async fn test_quasar_corporation_goals_complete() {
     );
     assert_eq!(red_rsp.status_code, STATUS_OK, "Redeem failed: {}", red_rsp.status_message);
     let isk_after = ctx.db.with_snapshot(|s| s.characters[&90000001].balance.0);
-    assert_eq!(isk_after - isk_before, eve_db::IskCents::from_isk(50_000).0);
+    assert_eq!(isk_after - isk_before, eve_db::IskCents::from_isk(250_000).0);
     let has_goal_journal = ctx.db.with_snapshot(|s| {
         s.wallet_journal.iter().any(|e| {
             e.character_id == 90000001
                 && e.entry_type == "CorporationGoalReward"
-                && e.amount == eve_db::IskCents::from_isk(50_000)
+                && e.amount == eve_db::IskCents::from_isk(250_000)
         })
     });
     assert!(has_goal_journal, "RedeemMyRewardsRequest must append CorporationGoalReward journal entry");

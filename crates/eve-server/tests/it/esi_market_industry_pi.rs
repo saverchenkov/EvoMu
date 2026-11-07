@@ -494,10 +494,10 @@ async fn test_esi6_industry_jobs_fields_and_completion() {
                 eve_db::TrainedSkillRecord { type_id: sid, level: 3, skill_points: 8_000.0 },
             );
         }
-        for (idx, dc_tid) in [20424_u32, 20172, 20411, 20412, 20414, 20416].into_iter().enumerate() {
+        for (idx, dc_tid) in [20424_u32, 20172, 20411, 20412, 20414, 20416, 25887].into_iter().enumerate() {
             snap.items.insert(
                 925_200 + idx as i64,
-                make_item(925_200 + idx as i64, dc_tid, char_id, jita_station, InventoryFlag::Hangar, 10, false),
+                make_item(925_200 + idx as i64, dc_tid, char_id, jita_station, InventoryFlag::Hangar, 50, false),
             );
         }
     });
@@ -5212,7 +5212,8 @@ pub(crate) mod esi_corp_mining_customs_offices {
                 ..Default::default()
             };
             corp.member_roles.insert(ceo_id, ROLE_DIRECTOR);
-            corp.member_roles.insert(trader_id, ROLE_TRADER);
+            corp.member_roles
+                .insert(trader_id, ROLE_TRADER | eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]);
             snap.corporations.insert(corp_id, corp);
             for cid in [ceo_id, trader_id] {
                 if let Some(ch) = snap.characters.get_mut(&cid) {
@@ -6647,7 +6648,11 @@ pub(crate) mod esi_char_public_contracts_live {
             snap.corporations.insert(corp1, corp);
             snap.corp_role_assignments.insert(
                 (corp1, grantable_id),
-                eve_db::CorpMemberRoleAssignment { character_id: grantable_id, grantable_roles: ROLE_FACTORY_MANAGER, ..Default::default() },
+                eve_db::CorpMemberRoleAssignment {
+                    character_id: grantable_id,
+                    grantable_roles: eve_db::corp_roles::ROLE_PERSONNEL_MANAGER,
+                    ..Default::default()
+                },
             );
             Ok(())
         });

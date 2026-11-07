@@ -891,7 +891,7 @@ async fn test_phase_2_esi1_sso_oauth2_pkce_http_server_and_macho_sso_login() {
         "/v2/oauth/token",
         &[("Content-Type", "application/x-www-form-urlencoded")],
         &format!(
-            "grant_type=authorization_code&client_id=eveLauncherTQ&code={code2}&code_verifier={verifier}"
+            "grant_type=authorization_code&client_id=eveLauncherTQ&code={code2}&code_verifier={verifier}&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback"
         ),
     )
     .await;

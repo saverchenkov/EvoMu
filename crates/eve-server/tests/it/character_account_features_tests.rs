@@ -249,11 +249,11 @@ async fn test_feat_account_queue_pop_cap_and_character_locks() {
     .await
     .expect("photoUploadSvc.Upload");
 
-    // Verify snapshot storage.
+    // Verify snapshot storage (only canonical `portrait:{char_id}` key is retained; per-size keys are cleared).
     ctx.db.with_snapshot(|snap| {
         assert!(snap.service_state_blobs.contains_key(&format!("portrait:{char_id}")));
         for sz in [32, 64, 128, 256, 512, 1024] {
-            assert!(snap.service_state_blobs.contains_key(&format!("portrait:{char_id}:{sz}")));
+            assert!(!snap.service_state_blobs.contains_key(&format!("portrait:{char_id}:{sz}")));
         }
     });
 

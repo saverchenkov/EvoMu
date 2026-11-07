@@ -61,11 +61,12 @@ async fn test_project_discovery_state_and_tasks() {
     assert_eq!(tkv.get("score").and_then(|v| v.as_f64()), Some(0.0));
     assert_eq!(tkv.get("accuracy").and_then(|v| v.as_f64()), Some(0.0));
     assert_eq!(tkv.get("project").and_then(|p| p.dict_get("score")).and_then(|v| v.as_f64()), Some(0.0));
-    assert!(matches!(tkv.get("projects"), Some(PyRep::List(l)) if !l.is_empty()));
+    assert!(matches!(tkv.get("projects"), Some(PyRep::Dict(d)) if !d.is_empty()));
+    assert!(matches!(tkv.get("project_list"), Some(PyRep::List(l)) if !l.is_empty()));
 
-    // 4. get_total_needed_xp: unconfigured store returns 0.0; persisted MMOS config in ProjectDiscoveryStore drives thresholds
+    // 4. get_total_needed_xp: unconfigured store returns default rank 1 threshold (500.0); persisted MMOS config in ProjectDiscoveryStore drives thresholds
     let needed_unseeded = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_total_needed_xp", &[PyRep::Integer(1)]).await.expect("get_total_needed_xp unseeded");
-    assert_eq!(needed_unseeded, PyRep::Real(0.0));
+    assert_eq!(needed_unseeded, PyRep::Real(500.0));
     ctx.db.with_mut_snapshot(|snap| {
         eve_server::services::project_discovery::configure_project_discovery_mmos(
             snap, 2_000.0, 250.0, 150.0, 75.0, 50,
@@ -97,7 +98,7 @@ async fn test_project_discovery_state_and_tasks() {
     let parsed_json: serde_json::Value = serde_json::from_str(data_json).expect("valid json");
     assert_eq!(parsed_json["task_id"], "task_1");
     assert_eq!(parsed_json["project_id"], "mcgill-polyseg");
-    assert_eq!(parsed_json["samples"], 10);
+    assert_eq!(parsed_json["samples"], 20);
     assert_eq!(parsed_json["fetch_count"], 1);
     let data2 = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_data_from_url", &[PyRep::String("https://projectdiscovery.eveonline.com/tasks/1".into())]).await.expect("get_data_from_url 2");
     let parsed_json2: serde_json::Value = serde_json::from_str(data2.as_str().unwrap()).expect("valid json 2");
@@ -128,10 +129,10 @@ async fn test_project_discovery_state_and_tasks() {
     // 9. new_training_task & 10. get_remaining_bonus_samples
     let train = rpc(&ctx, &mut p1, "ProjectDiscovery", "new_training_task", &[PyRep::Integer(3)]).await.expect("new_training_task");
     let PyRep::KeyVal(tr_kv) = train else { panic!("expected KeyVal from new_training_task") };
-    assert_eq!(tr_kv.get("task_id").and_then(|v| v.as_str()), Some("training_task_03"));
-    assert_eq!(tr_kv.get("taskId").and_then(|v| v.as_str()), Some("training_task_03"));
+    assert_eq!(tr_kv.get("task_id").and_then(|v| v.as_str()), Some("eb4c6403-e878-43cf-a009-9c8c566ae90f"));
+    assert_eq!(tr_kv.get("taskId").and_then(|v| v.as_str()), Some("eb4c6403-e878-43cf-a009-9c8c566ae90f"));
     assert!(tr_kv.get("solution").is_some());
-    assert_eq!(rpc(&ctx, &mut p1, "ProjectDiscovery", "get_remaining_bonus_samples", &[]).await.expect("get_remaining_bonus_samples"), PyRep::Integer(10));
+    assert_eq!(rpc(&ctx, &mut p1, "ProjectDiscovery", "get_remaining_bonus_samples", &[]).await.expect("get_remaining_bonus_samples"), PyRep::Integer(20));
 
     // 11. post_classification negative checks (empty/whitespace string and empty list)
     assert_eq!(rpc(&ctx, &mut p1, "ProjectDiscovery", "post_classification", &[PyRep::String("task_1".into()), PyRep::String("   ".into())]).await.unwrap_err().code.to_ascii_lowercase(), "invalidclassification");
@@ -141,11 +142,11 @@ async fn test_project_discovery_state_and_tasks() {
     assert_eq!(state_pre.dict_get("experience").and_then(|v| v.as_f64()), Some(0.0));
     assert_eq!(rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("get_player_analysis_kredits pre"), PyRep::Integer(0));
 
-    // Valid post_classification (also verify ISK_Reward from const.pyj ISK_MULTIPLIERS = [500, 800, 1000])
+    // Valid post_classification (also verify ISK_Reward from const.pyj ISK_MULTIPLIERS = [500, 800, 1000] doubled by bonus sample)
     let post = rpc(&ctx, &mut p1, "ProjectDiscovery", "post_classification", &[PyRep::String("task_1".into()), PyRep::List(vec![PyRep::Real(1.23)])]).await.expect("post_classification");
-    assert_eq!(post.dict_get("experience_reward").and_then(|v| v.as_f64()), Some(150.0));
+    assert_eq!(post.dict_get("experience_reward").and_then(|v| v.as_f64()), Some(300.0));
     assert_eq!(post.dict_get("kredits_reward").and_then(|v| v.as_i64()), Some(50));
-    assert_eq!(post.dict_get("ISK_Reward").and_then(|v| v.as_f64()), Some(1_000.0));
+    assert_eq!(post.dict_get("ISK_Reward").and_then(|v| v.as_f64()), Some(2_000.0));
     let xp_notifs: Vec<_> = ctx.drain_notifications_for_char(P1).into_iter().filter(|n| n.event == "OnProjectDiscoveryExperience").collect();
     assert!(!xp_notifs.is_empty());
     assert_eq!(xp_notifs[0].args.len(), 1, "OnProjectDiscoveryExperience must emit 1 arg (total_xp)");
@@ -153,7 +154,7 @@ async fn test_project_discovery_state_and_tasks() {
     assert_eq!(rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("get_player_analysis_kredits post"), PyRep::Integer(50));
     assert!(eve_server::services::project_discovery::spend_analysis_kredits(&ctx, P1, 100).is_err());
     assert_eq!(eve_server::services::project_discovery::spend_analysis_kredits(&ctx, P1, 20).expect("spend AK"), 30);
-    assert_eq!(rpc(&ctx, &mut p1, "ProjectDiscovery", "get_remaining_bonus_samples", &[]).await.expect("get_remaining_bonus_samples post"), PyRep::Integer(9));
+    assert_eq!(rpc(&ctx, &mut p1, "ProjectDiscovery", "get_remaining_bonus_samples", &[]).await.expect("get_remaining_bonus_samples post"), PyRep::Integer(19));
 
     let stats_after = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_statistics", &[]).await.expect("get_player_statistics after");
     let PyRep::KeyVal(after_kv) = stats_after else { panic!("expected KeyVal") };
@@ -217,8 +218,8 @@ async fn test_project_discovery_tutorial_and_rewards() {
     assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "get_is_player_entitled_to_tutorial_reward", &[]).await.expect("ent lvl 2"), PyRep::Bool(false));
     assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("rew lvl 2"), PyRep::Bool(false));
 
-    // 7. get_tutorial_xp_reward (0.0 until MMOS config is seeded in ProjectDiscoveryStore)
-    assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "get_tutorial_xp_reward", &[PyRep::Integer(2)]).await.expect("get_tutorial_xp_reward unseeded"), PyRep::Real(0.0));
+    // 7. get_tutorial_xp_reward (DEFAULT_TUTORIAL_XP_REWARD = 500.0 until MMOS config overrides it)
+    assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "get_tutorial_xp_reward", &[PyRep::Integer(2)]).await.expect("get_tutorial_xp_reward unseeded"), PyRep::Real(500.0));
     ctx.db.with_mut_snapshot(|snap| {
         eve_server::services::project_discovery::configure_project_discovery_mmos(
             snap, 2_000.0, 250.0, 150.0, 75.0, 50,

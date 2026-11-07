@@ -209,7 +209,7 @@ async fn test_cosmetics_skinr_designer_and_sequencing_studio_live() {
     designer_sess.role = 0;
 
     // 3. Initiate sequencing job: consumes PLEX, creates job, and produces job UUID + skin hex
-    let plex_before = ctx.db.get_character(designer_cid as i64).unwrap().plex_balance;
+    let plex_before = ctx.db.with_snapshot(|s| s.unified_plex_balance(designer_cid as i64));
     let init_rsp = quasar_rpc(
         &ctx,
         &mut designer_sess,
@@ -227,7 +227,7 @@ async fn test_cosmetics_skinr_designer_and_sequencing_studio_live() {
     let skin_hex = String::from_utf8(bytes(&skin_id_sub, 1)).expect("skin hex");
     assert!(!skin_hex.is_empty(), "Must receive valid skin hex");
 
-    let plex_after_init = ctx.db.get_character(designer_cid as i64).unwrap().plex_balance;
+    let plex_after_init = ctx.db.with_snapshot(|s| s.unified_plex_balance(designer_cid as i64));
     assert!(plex_after_init < plex_before, "Sequencing job must consume PLEX");
 
     // Verify active sequencing job via GetAllActiveRequest
@@ -255,7 +255,7 @@ async fn test_cosmetics_skinr_designer_and_sequencing_studio_live() {
     ).await;
     assert_eq!(comp_rsp.status_code, STATUS_OK, "CompleteEarlyRequest failed: {}", comp_rsp.status_message);
 
-    let plex_after_comp = ctx.db.get_character(designer_cid as i64).unwrap().plex_balance;
+    let plex_after_comp = ctx.db.with_snapshot(|s| s.unified_plex_balance(designer_cid as i64));
     assert!(plex_after_comp < plex_after_init, "Early completion must charge PLEX");
 
     // Active sequencing jobs should now be 0

@@ -111,6 +111,9 @@ async fn test_quasar_batch2_freelance_projects_and_item_delivery_e2e() {
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
+    ctx.db.with_mut_snapshot(|s| {
+        s.service_state_blobs.remove("nes_store_catalog");
+    });
     let _reg = QuasarDescriptorRegistry::open_default().expect("quasar descriptors");
     let now = ctx.now_unix();
 
@@ -282,6 +285,9 @@ async fn test_quasar_batch2_payment_schedules_and_tokens_e2e() {
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
+    ctx.db.with_mut_snapshot(|s| {
+        s.service_state_blobs.remove("nes_store_catalog");
+    });
     let reg = QuasarDescriptorRegistry::open_default().expect("quasar descriptors");
     let now = ctx.now_unix();
 
@@ -400,6 +406,9 @@ async fn test_quasar_batch2_store_catalog_and_target_audience_e2e() {
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
+    ctx.db.with_mut_snapshot(|s| {
+        s.service_state_blobs.remove("nes_store_catalog");
+    });
     let reg = QuasarDescriptorRegistry::open_default().expect("quasar descriptors");
     let admin = make_session(401, 1, 90_000_001, 1_000_009, true);
 

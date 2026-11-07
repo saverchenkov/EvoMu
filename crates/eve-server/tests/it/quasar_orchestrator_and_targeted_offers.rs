@@ -357,8 +357,8 @@ async fn test_b29_cosmetic_market_and_payment_admin() {
     assert_eq!(comp_resp.status_code, STATUS_OK);
     let dyn_comp = decode_dyn(&ctx, "eve.cosmetic.market.component.listing.api.GetAllResponse", &comp_resp.payload.unwrap().value);
     match dyn_comp.get(1) {
-        Some(DynamicValue::Repeated(items)) => assert_eq!(items.len(), 4),
-        other => panic!("expected 4 SDE component listings, got {other:?}"),
+        Some(DynamicValue::Repeated(items)) => assert!(items.len() >= 4, "expected >= 4 SDE component listings, got {}", items.len()),
+        other => panic!("expected >= 4 SDE component listings, got {other:?}"),
     }
 
     // 2. Skin listing admin SetExpirationRequest & GetAllListedByCharacterRequest

@@ -846,6 +846,17 @@ async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
     // 4. Shared Bookmark Folders: create corporation via real RPCs, verify access-group rights (view/use vs manage/admin),
     // AddToKnownFolders / RemoveFromKnownFolders, and OnSharedBookmarksFolderUpdated notifications
     ctx.advance_secs(12);
+    // AddCorporation requires caller to be docked; temporarily dock sess1, then return to space for bookmarking.
+    let saved_station = sess1.station_id;
+    let saved_structure = sess1.structure_id;
+    sess1.station_id = Some(60_003_760);
+    sess1.structure_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = Some(60_003_760);
+            ch.structure_id = None;
+        }
+    });
     let create_corp_rep = ctx
         .dispatch_rpc(
             &mut sess1,
@@ -858,6 +869,14 @@ async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
         )
         .await
         .expect("AddCorporation for shared bookmarks");
+    sess1.station_id = saved_station;
+    sess1.structure_id = saved_structure;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = saved_station;
+            ch.structure_id = saved_structure;
+        }
+    });
     let PyRep::KeyVal(cc_kv) = &create_corp_rep else { panic!() };
     let corp_id = cc_kv["corporationID"].as_i64().unwrap();
 

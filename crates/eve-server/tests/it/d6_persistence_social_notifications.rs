@@ -403,7 +403,12 @@ async fn test_d6_mail_state_labels_trash_mailing_lists_and_calendar_persist_acro
     let ev_details = call(&ctx2, &mut sess2, "calendarMgr", "GetEventDetails", &[PyRep::Integer(event_id)]).await;
     assert!(format!("{ev_details:?}").contains("Stratop Formup") && format!("{ev_details:?}").contains("Bring doctrines"));
 
-    let esi_params = HashMap::from([("character_id".to_string(), "90000002".to_string()), ("event_id".to_string(), event_id.to_string())]);
+    let esi_params_denied = HashMap::from([("character_id".to_string(), "90000002".to_string()), ("event_id".to_string(), event_id.to_string())]);
+    let esi_att_denied = dispatch_char_social_route(&ctx2, "GET", "/characters/{character_id}/calendar/{event_id}/attendees", &esi_params_denied, &HashMap::new(), b"")
+        .expect("ESI calendar attendees auth check");
+    assert_eq!(esi_att_denied.status_code, 403);
+
+    let esi_params = HashMap::from([("character_id".to_string(), "90000001".to_string()), ("event_id".to_string(), event_id.to_string())]);
     let esi_att = dispatch_char_social_route(&ctx2, "GET", "/characters/{character_id}/calendar/{event_id}/attendees", &esi_params, &HashMap::new(), b"")
         .expect("ESI calendar attendees after restart");
     assert_eq!(esi_att.status_code, 200);

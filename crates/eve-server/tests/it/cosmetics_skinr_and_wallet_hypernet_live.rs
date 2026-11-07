@@ -364,7 +364,7 @@ async fn test_live_skinr_paragon_hub_isk_plex_listings_and_market() {
     assert_eq!(market_entries.len(), 2);
 
     let buyer_isk_0 = ctx.db.get_character(buyer_id).unwrap().balance.0;
-    let buyer_plex_0 = ctx.db.get_character(buyer_id).unwrap().plex_balance;
+    let buyer_plex_0 = ctx.db.with_snapshot(|s| s.unified_plex_balance(buyer_id));
     for entry in &market_entries {
         let luuid = field(&field(entry, 1).unwrap(), 1).unwrap();
         let mut buy_req = Vec::new();
@@ -379,7 +379,7 @@ async fn test_live_skinr_paragon_hub_isk_plex_listings_and_market() {
         );
     }
     assert_eq!(buyer_isk_0 - ctx.db.get_character(buyer_id).unwrap().balance.0, IskCents::from_isk(1_000_000).0);
-    assert_eq!(buyer_plex_0 - ctx.db.get_character(buyer_id).unwrap().plex_balance, 50);
+    assert_eq!(buyer_plex_0 - ctx.db.with_snapshot(|s| s.unified_plex_balance(buyer_id)), 50);
 
     // Verify buyer owns both purchased SKIN licenses
     let mut buyer_lic_id = Vec::new();
@@ -568,6 +568,9 @@ async fn test_live_wallet_evermarks_gameplay_accrual_and_nes_store() {
     assert_eq!(int(&buy_emblem, "remainingLP"), em_char_earned - ecost);
 
     // 2. New Eden Store: create category, product, and offer via Quasar admin RPCs (no snapshot helper!)
+    ctx.db.with_mut_snapshot(|s| {
+        s.service_state_blobs.remove("nes_store_catalog");
+    });
     dock_station(&ctx, &mut s1, JITA_STATION).await;
     s1.role = service_roles::ROLE_GM_DEFAULT;
     seed_nes_store_via_quasar_admin(&ctx, &mut s1).await;

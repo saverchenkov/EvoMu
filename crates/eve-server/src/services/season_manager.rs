@@ -90,7 +90,7 @@ pub fn save_season_state_to_blobs(snap: &mut eve_db::WorldStateSnapshot, char_id
 pub use super::season_fsd::*;
 
 #[path = "season_manager_ops.rs"]
-mod ops;
+pub(crate) mod ops;
 
 /// Challenge keyvals for `st`, sorted by challenge ID.
 fn sorted_challenge_keyvals(st: &CharacterSeasonState) -> Vec<PyRep> {

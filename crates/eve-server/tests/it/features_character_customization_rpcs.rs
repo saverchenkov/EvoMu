@@ -469,7 +469,7 @@ async fn test_b23_concord_response_scaling_and_highsec_criminal_restrictions() {
         false,
         now,
     );
-    let reports = cw_director.step_concord(&ctx, now + 1_000, 42).await;
+    let reports = cw_director.step_concord(&ctx, now + 10, 42).await;
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0].webbed_speed_fraction, 0.0);
     assert_eq!(reports[0].warp_scramble_strength, 100);
@@ -1056,6 +1056,7 @@ async fn test_b23_skinr_plex_pricing_and_sec_office_tag_remediation() {
     encode_bytes_field(3, &layout, &mut init_req);
     encode_varint_field(5, 1, &mut init_req);
 
+    let plex_before = ctx.db.with_snapshot(|s| s.unified_plex_balance(cid as i64));
     let init_rsp = quasar_rpc(
         &ctx,
         &mut sess,
@@ -1064,8 +1065,8 @@ async fn test_b23_skinr_plex_pricing_and_sec_office_tag_remediation() {
     )
     .await;
     assert_eq!(init_rsp.status_code, STATUS_OK);
-    let plex_after = ctx.db.with_snapshot(|s| s.characters[&(cid as i64)].plex_balance);
-    assert_eq!(plex_after, 75, "Tier 1 SKINR sequencing must debit 25 whole PLEX (100 - 25 = 75)");
+    let plex_after = ctx.db.with_snapshot(|s| s.unified_plex_balance(cid as i64));
+    assert_eq!(plex_after, plex_before - 25, "Tier 1 SKINR sequencing must debit 25 whole PLEX");
 
     // Sequencing PLEX cost is not skill-discounted (Ship_SKINR.md:54), remaining constant at 25 PLEX
     ctx.db.with_mut_snapshot(|s| {
@@ -1082,8 +1083,8 @@ async fn test_b23_skinr_plex_pricing_and_sec_office_tag_remediation() {
     )
     .await;
     assert_eq!(init_rsp2.status_code, STATUS_OK);
-    let plex_after2 = ctx.db.with_snapshot(|s| s.characters[&(cid as i64)].plex_balance);
-    assert_eq!(plex_after2, 50, "Tier 1 SKINR sequencing must debit 25 whole PLEX (75 - 25 = 50)");
+    let plex_after2 = ctx.db.with_snapshot(|s| s.unified_plex_balance(cid as i64));
+    assert_eq!(plex_after2, plex_before - 50, "Tier 1 SKINR sequencing must debit 25 whole PLEX again");
 
     // 2. R-B23-04: ApplyTagsForSecStatus rejects High-Sec Jita & qty <= 0, accepts SDE 33141 at Security Office, charges ISK, records journal, crosses 0.0, and preserves excess tags
     let kw = HashMap::new();

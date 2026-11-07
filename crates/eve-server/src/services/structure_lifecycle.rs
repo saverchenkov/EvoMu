@@ -672,7 +672,14 @@ fn emit_structure_left_space_and_spawn_drops(ctx: &ServerContext, snap: &WorldSt
         let structs = crate::services::sov_services::collect_sov_structures_from_snap(snap, st.solar_system_id);
         let changes = eve_proto::PyRep::Dict(vec![(eve_proto::PyRep::Integer(st.structure_id), eve_proto::PyRep::List(vec![eve_proto::PyRep::Integer(0)]))]);
         let structs_args = vec![eve_proto::PyRep::Integer(i64::from(st.solar_system_id)), eve_proto::PyRep::List(structs), changes];
-        for (cid, uid) in &sys_recips {
+        let mut all_recips: Vec<(i64, Option<u64>)> = snap
+            .sessions
+            .values()
+            .filter_map(|os| os.character_id.map(|cid| (cid, Some(os.user_id))))
+            .collect();
+        all_recips.sort_by_key(|(cid, _)| *cid);
+        all_recips.dedup_by_key(|(cid, _)| *cid);
+        for (cid, uid) in &all_recips {
             for (ev, args) in [("OnSovereigntyChanged", sov_args.clone()), ("OnSolarSystemSovStructuresUpdated", structs_args.clone())] {
                 let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(*cid, *uid, ev, "solarsystemid", args.clone());
                 let notif = crate::router::PendingMachoNotification { recipient_char_id: *cid, event: ev.into(), id_type: "solarsystemid".into(), args, packet, marshaled_packet, created_filetime: now_ft };

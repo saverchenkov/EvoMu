@@ -716,7 +716,23 @@ async fn test_so2_fleet_manager_hierarchy_broadcast_and_fleet_warp() {
         "OnFleetInvite notification required"
     );
 
-    // Pilot 2 binds fleetObjectHandler and accepts invite via AcceptInvite
+    // Pilot 2 accepts invite via unbound fleetObjectHandler, then binds fleetObjectHandler once a member
+    ctx.advance_secs(12);
+    let join_rep = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "fleetObjectHandler",
+            None,
+            "AcceptInvite",
+            &[PyRep::Integer(fid)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("AcceptInvite");
+    assert!(is_keyval(&join_rep));
+    assert_eq!(sess2.fleet_id, Some(fid));
+
     let bind2_rep = ctx
         .dispatch_rpc(
             &mut sess2,
@@ -733,22 +749,6 @@ async fn test_so2_fleet_manager_hierarchy_broadcast_and_fleet_warp() {
         panic!()
     };
     let fleet_bound_id2 = bind2_tuple[0].as_i64().unwrap() as u64;
-
-    ctx.advance_secs(12);
-    let join_rep = ctx
-        .dispatch_rpc(
-            &mut sess2,
-            "fleetObjectHandler",
-            Some(fleet_bound_id2),
-            "AcceptInvite",
-            &[PyRep::Integer(fid)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("AcceptInvite");
-    assert!(is_keyval(&join_rep));
-    assert_eq!(sess2.fleet_id, Some(fid));
 
     // Move Pilot 2 into Wing 2 ("Skirmish Wing"), Squad 2 ("Interceptors") as SquadMember (role 4)
     ctx.dispatch_rpc(

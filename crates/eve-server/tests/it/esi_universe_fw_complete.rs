@@ -261,12 +261,23 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
         if snap.fw_system_occupations.is_empty() {
             snap.backfill_fw_system_occupations();
         }
+        let frontline_ids: HashSet<u32> = ctx
+            .sde
+            .jumps
+            .values()
+            .filter(|j| {
+                snap.fw_system_occupations
+                    .get(&j.to_solar_system_id)
+                    .is_some_and(|n| n.occupier_faction_id == 500_001)
+            })
+            .map(|j| j.from_solar_system_id)
+            .collect();
         let target_sys = snap
             .fw_system_occupations
             .values_mut()
-            .filter(|o| o.occupier_faction_id == 500_004)
+            .filter(|o| o.occupier_faction_id == 500_004 && frontline_ids.contains(&o.solar_system_id))
             .min_by_key(|o| o.solar_system_id)
-            .expect("Gallente FW warzone system in SDE");
+            .expect("Gallente frontline FW warzone system in SDE");
         target_sys.victory_points = 0;
         target_sys.victory_points_threshold = 200;
         let sid = target_sys.solar_system_id;
@@ -1223,6 +1234,7 @@ async fn test_crimewatch_kill_rights_gain_and_sell() {
         s.kill_rights.remove(&dogma_kr_id);
         if let Some(ch) = s.characters.get_mut(&criminal_id) {
             ch.solar_system_id = highsec_sys;
+            ch.active_ship_id = crim_ship;
         }
     });
 
@@ -1536,6 +1548,8 @@ async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions() {
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.security_status = -9.0;
+            ch.station_id = Some(60_003_760);
+            ch.solar_system_id = 30_000_142;
         }
     });
     let highsec_err = rpc(
@@ -1662,11 +1676,11 @@ async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions() {
     let PyRep::Rowset { columns, rows, .. } = txs else {
         panic!("expected Rowset, got {txs:?}");
     };
-    assert_eq!(rows.len(), 6, "2 illegal PvP aggressions (no CONCORD duplicate) + 4 tag turn-ins recorded");
+    assert_eq!(rows.len(), 7, "3 illegal PvP aggressions (no CONCORD duplicate) + 4 tag turn-ins recorded");
     let row0: std::collections::HashMap<&str, &PyRep> = columns
         .iter()
         .map(|s| s.as_str())
-        .zip(rows[2].iter())
+        .zip(rows[3].iter())
         .collect();
     let expected_ft = (now as i64 + 11_644_473_600) * 10_000_000;
     assert_eq!(row0.get("eventDate"), Some(&&PyRep::Integer(expected_ft)));
@@ -1675,7 +1689,7 @@ async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions() {
     assert_eq!(row0.get("modification"), Some(&&PyRep::Real(0.5)));
     assert_eq!(row0.get("newValue"), Some(&&PyRep::Real(-8.5)));
     assert_eq!(row0.get("otherOwnerID"), Some(&&PyRep::None));
-    assert_eq!(row0.get("otherTypeID"), Some(&&PyRep::None));
+    assert_eq!(row0.get("otherTypeID"), Some(&&PyRep::Integer(33138)));
 }
 
 }

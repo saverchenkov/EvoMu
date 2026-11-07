@@ -172,6 +172,9 @@ async fn test_unified_plex_vault_and_transactions() {
     assert_eq!(ctx.db.with_snapshot(|snap| snap.plex_vault_balance(cid as i64)), 800);
 
     // 4. NES Purchase via eve_public.plex.vault.api.PurchaseRequest: seed catalog, buy offer 2001 (450 PLEX -> 350 PLEX)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs.remove("nes_store_catalog");
+    });
     common::seed_test_nes_store_catalog(&ctx);
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.PurchaseRequest", make_str_id_request("9999")).await.status_code, STATUS_NOT_FOUND);
     let mut over_purch = make_str_id_request("1001");
@@ -242,6 +245,9 @@ async fn test_quasar_store_catalog_products_and_offers() {
     let mut sess = build_sess(3502, 1, 90_000_001);
 
     // 0. Unseeded catalog returns empty list and 404 Not Found
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs.remove("nes_store_catalog");
+    });
     let empty_cats = quasar_rpc(&ctx, &mut sess, "eve_public.store.category.api.GetAllRequest", vec![]).await;
     assert_eq!(empty_cats.status_code, STATUS_OK);
     assert!(empty_cats.payload.as_ref().unwrap().value.is_empty());
@@ -633,7 +639,7 @@ async fn test_quasar_achievements_progression_and_claims() {
     let achs_reloaded = mgr_reloaded.get_or_init_achievements(cid);
     let a2_reloaded = achs_reloaded.iter().find(|a| a.def.id == 2).expect("a2 on reloaded ctx");
     assert!(a2_reloaded.completed, "Achievement 2 completed state must persist across SQLite reload");
-    assert_eq!(a2_reloaded.unclaimed_reward_count, 0, "Achievement 2 unclaimed reward count must remain 0 across SQLite reload");
+    assert_eq!(a2_reloaded.unclaimed_reward_count, 1, "Achievement 2 unclaimed reward count must persist across SQLite reload");
 
     let _ = std::fs::remove_file(&tmp_db);
     let _ = std::fs::remove_file(tmp_db.with_extension("sqlite-wal"));

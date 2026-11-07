@@ -1233,11 +1233,9 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             if let Some((_, _, _, eff_tid)) =
                 eve_dogma::resolve_system_wormhole_phenomenon(&ctx.sde, dest_sys_id, None)
             {
+                // `combat_state` already includes SDE system phenomena via `build_ship_combat_state` ->
+                // `apply_active_dbuffs_and_system_effects_to_ship_attrs`; apply phenomenon only to ball kinematics here.
                 let mut eff_attrs = std::collections::HashMap::from([
-                    (eve_sde::attr_ids::SHIELD_CAPACITY, combat_state.max_shield_hp),
-                    (eve_sde::attr_ids::ARMOR_HP, combat_state.max_armor_hp),
-                    (eve_sde::attr_ids::SIGNATURE_RADIUS, combat_state.signature_radius),
-                    (eve_sde::attr_ids::CAPACITOR_CAPACITY, combat_state.max_capacitor),
                     (eve_sde::attr_ids::MAX_VELOCITY, new_ball.max_velocity),
                     (eve_sde::attr_ids::AGILITY, new_ball.inertia),
                 ]);
@@ -1248,17 +1246,6 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
                     false,
                     &mut eff_attrs,
                 ) {
-                    combat_state.max_shield_hp =
-                        *eff_attrs.get(&eve_sde::attr_ids::SHIELD_CAPACITY).unwrap_or(&combat_state.max_shield_hp);
-                    combat_state.shield_hp = combat_state.max_shield_hp;
-                    combat_state.max_armor_hp =
-                        *eff_attrs.get(&eve_sde::attr_ids::ARMOR_HP).unwrap_or(&combat_state.max_armor_hp);
-                    combat_state.armor_hp = combat_state.max_armor_hp;
-                    combat_state.signature_radius =
-                        *eff_attrs.get(&eve_sde::attr_ids::SIGNATURE_RADIUS).unwrap_or(&combat_state.signature_radius);
-                    combat_state.max_capacitor =
-                        *eff_attrs.get(&eve_sde::attr_ids::CAPACITOR_CAPACITY).unwrap_or(&combat_state.max_capacitor);
-                    combat_state.capacitor = combat_state.max_capacitor;
                     new_ball.max_velocity =
                         *eff_attrs.get(&eve_sde::attr_ids::MAX_VELOCITY).unwrap_or(&new_ball.max_velocity);
                     new_ball.inertia =

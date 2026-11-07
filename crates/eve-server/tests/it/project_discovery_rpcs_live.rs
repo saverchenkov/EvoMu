@@ -45,24 +45,24 @@ async fn test_project_discovery_tutorial_xp_and_training_live() {
     let mut pilot = login_pilot_char(&ctx, 71_001, "demo", "demo-secret", 90_000_001).await;
     let mut gm = login_pilot_char(&ctx, 71_002, "gm_pd_1", "gm-pass", 90_000_003).await;
 
-    // 1. Default maximum bonus samples is 10
+    // 1. Default maximum bonus samples is 20 for Omega clone_grade
     let max_bonus_init = rpc(&ctx, &mut pilot, "ProjectDiscovery", "get_maximum_bonus_samples", &[])
         .await
         .expect("get_maximum_bonus_samples initial");
-    assert_eq!(max_bonus_init, PyRep::Integer(10));
+    assert_eq!(max_bonus_init, PyRep::Integer(20));
 
     // 2. new_training_task returns real training tasks with solution
     let train1 = rpc(&ctx, &mut pilot, "ProjectDiscovery", "new_training_task", &[])
         .await
         .expect("new_training_task default");
-    assert_eq!(train1.dict_get("task_id").and_then(|v| v.as_str()), Some("training_task_01"));
+    assert_eq!(train1.dict_get("task_id").and_then(|v| v.as_str()), Some("ed134308-e080-49bc-be56-169a5f839c96"));
     assert_eq!(train1.dict_get("level").and_then(|v| v.as_i64()), Some(1));
     assert!(train1.dict_get("solution").is_some());
 
     let train3 = rpc(&ctx, &mut pilot, "ProjectDiscovery", "new_training_task", &[PyRep::Integer(3)])
         .await
         .expect("new_training_task 3");
-    assert_eq!(train3.dict_get("task_id").and_then(|v| v.as_str()), Some("training_task_03"));
+    assert_eq!(train3.dict_get("task_id").and_then(|v| v.as_str()), Some("eb4c6403-e878-43cf-a009-9c8c566ae90f"));
     assert_eq!(train3.dict_get("task_number").and_then(|v| v.as_i64()), Some(3));
 
     // 3. give_tutorial_rewards is false before tutorial completion
@@ -241,9 +241,9 @@ async fn test_project_discovery_tasks_url_classification_and_stats_live() {
     )
     .await
     .expect("post_classification 1");
-    assert_eq!(post1.dict_get("experience_reward").and_then(|v| v.as_f64()), Some(200.0));
+    assert_eq!(post1.dict_get("experience_reward").and_then(|v| v.as_f64()), Some(400.0));
     assert_eq!(post1.dict_get("kredits_reward").and_then(|v| v.as_i64()), Some(25));
-    assert_eq!(post1.dict_get("ISK_Reward").and_then(|v| v.as_f64()), Some(1000.0));
+    assert_eq!(post1.dict_get("ISK_Reward").and_then(|v| v.as_f64()), Some(2000.0));
     assert_eq!(
         rpc(&ctx, &mut pilot, "ProjectDiscovery", "get_remaining_bonus_samples", &[])
             .await
@@ -251,7 +251,8 @@ async fn test_project_discovery_tasks_url_classification_and_stats_live() {
         PyRep::Integer(9)
     );
 
-    // 3. post_classification on inaccurate task_2
+    // 3. post_classification on inaccurate task_2 (2x bonus XP)
+    ctx.advance_secs(5);
     let _t2 = rpc(&ctx, &mut pilot, "ProjectDiscovery", "get_new_task", &[])
         .await
         .expect("get_new_task 2");
@@ -264,10 +265,11 @@ async fn test_project_discovery_tasks_url_classification_and_stats_live() {
     )
     .await
     .expect("post_classification 2");
-    assert_eq!(post2.dict_get("experience_reward").and_then(|v| v.as_f64()), Some(50.0));
+    assert_eq!(post2.dict_get("experience_reward").and_then(|v| v.as_f64()), Some(100.0));
     assert_eq!(post2.dict_get("kredits_reward").and_then(|v| v.as_i64()), Some(0));
 
-    // 4. post_classification on accurate task_3 triggers rank-up to rank 2 (450 XP >= 300 XP)
+    // 4. post_classification on accurate task_3 reaches 900 XP (>= 300/600/900 thresholds -> rank 4)
+    ctx.advance_secs(5);
     let _t3 = rpc(&ctx, &mut pilot, "ProjectDiscovery", "get_new_task", &[])
         .await
         .expect("get_new_task 3");
@@ -280,14 +282,14 @@ async fn test_project_discovery_tasks_url_classification_and_stats_live() {
     )
     .await
     .expect("post_classification 3");
-    assert_eq!(post3.dict_get("rank").and_then(|v| v.as_i64()), Some(2));
+    assert_eq!(post3.dict_get("rank").and_then(|v| v.as_i64()), Some(4));
 
     // 5. get_player_statistics reflects rank, XP, accuracy, score, and tasks_submitted
     let stats = rpc(&ctx, &mut pilot, "ProjectDiscovery", "get_player_statistics", &[])
         .await
         .expect("get_player_statistics");
-    assert_eq!(stats.dict_get("rank").and_then(|v| v.as_i64()), Some(2));
-    assert_eq!(stats.dict_get("experience").and_then(|v| v.as_f64()), Some(450.0));
+    assert_eq!(stats.dict_get("rank").and_then(|v| v.as_i64()), Some(4));
+    assert_eq!(stats.dict_get("experience").and_then(|v| v.as_f64()), Some(900.0));
     assert_eq!(stats.dict_get("tasks_submitted").and_then(|v| v.as_i64()), Some(3));
     assert_eq!(stats.dict_get("accuracy").and_then(|v| v.as_f64()), Some(0.91));
     assert_eq!(stats.dict_get("score").and_then(|v| v.as_f64()), Some(91.0));

@@ -57,10 +57,22 @@ fn seed_test_fixtures(ctx: &ServerContext) {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {
             ch.alliance_id = Some(alliance_id);
         }
-        if let Some(corp) = snap.corporations.get_mut(&1_000_170) {
-            corp.ceo_id = 90_000_001;
-            corp.members.insert(90_000_001);
-        }
+        let corp = snap
+            .corporations
+            .entry(1_000_170)
+            .or_insert_with(|| eve_db::CorporationRecord {
+                corporation_id: 1_000_170,
+                name: "Republic Military School".to_string(),
+                ticker: "RMS".to_string(),
+                ceo_id: 90_000_001,
+                ..Default::default()
+            });
+        corp.ceo_id = 90_000_001;
+        corp.members.insert(90_000_001);
+        corp.member_roles.insert(
+            90_000_001,
+            eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_ACCOUNTANT,
+        );
     });
 }
 

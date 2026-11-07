@@ -565,6 +565,9 @@ async fn test_esi_live_market_history_and_loyalty_offers() {
     ]);
 
     let (ctx, router, spec, mut s1, mut s2, _) = setup_world(9401, None).await;
+    ctx.db.with_mut_snapshot(|s| {
+        s.market_orders.retain(|_, o| o.type_id != 34);
+    });
     common::slash_cmd(&ctx, &mut s1, "/giveitem 34 2000").await;
     ctx.advance_secs(12);
     let trit_id = find_hangar_items(&ctx, PILOT_1, JITA_STATION, 34)[0].0;

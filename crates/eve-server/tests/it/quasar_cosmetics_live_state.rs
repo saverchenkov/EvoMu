@@ -315,6 +315,18 @@ async fn corporation_palette_requires_editor_roles() {
     for (cid, corp) in [(90_000_001, CORP), (90_000_002, CORP), (90_000_003, CORP), (90_000_004, OTHER_CORP)] {
         place_char(&ctx, cid, corp, None);
     }
+    ctx.db.with_mut_snapshot(|s| {
+        let corp = s.corporations.entry(CORP as i64).or_insert_with(|| eve_db::CorporationRecord {
+            corporation_id: CORP as i64,
+            ceo_id: 90_000_001,
+            ..Default::default()
+        });
+        corp.members.insert(90_000_001);
+        corp.members.insert(90_000_002);
+        corp.members.insert(90_000_003);
+        corp.member_roles.insert(90_000_001, eve_db::corp_roles::ROLE_DIRECTOR);
+        corp.member_roles.insert(90_000_003, 1 << 35);
+    });
     let mut director = player(63_001, 90_000_001, CORP, eve_db::corp_roles::ROLE_DIRECTOR);
     let mut member = player(63_002, 90_000_002, CORP, 0);
     let mut brand = player(63_003, 90_000_003, CORP, 1 << 35);
@@ -374,6 +386,16 @@ async fn structure_paintwork_follows_license_issue_and_revoke() {
     place_char(&ctx, 90_000_002, CORP, Some(system));
     place_char(&ctx, 90_000_003, OTHER_CORP, Some(system));
     place_char(&ctx, 90_000_004, CORP, Some(system));
+    ctx.db.with_mut_snapshot(|s| {
+        let corp = s.corporations.entry(CORP as i64).or_insert_with(|| eve_db::CorporationRecord {
+            corporation_id: CORP as i64,
+            ceo_id: 90_000_001,
+            ..Default::default()
+        });
+        corp.members.insert(90_000_002);
+        corp.members.insert(90_000_004);
+        corp.member_roles.insert(90_000_004, eve_db::corp_roles::ROLE_DIRECTOR);
+    });
     let mut gm = build_sess(64_001, 90_000_001, CORP);
     let mut member = player(64_002, 90_000_002, CORP, 0);
     let mut outsider = player(64_003, 90_000_003, OTHER_CORP, 0);

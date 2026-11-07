@@ -852,17 +852,23 @@ async fn test_esi5_corporation_members_limit_titles_and_roles_history() {
     );
     assert_eq!(
         roles,
-        json!([{
-            "character_id": ceo_id,
-            "roles": ["Director"],
-            "grantable_roles": ["Personnel_Manager"],
-            "roles_at_hq": ["Station_Manager"],
-            "grantable_roles_at_hq": ["Config_Equipment"],
-            "roles_at_base": ["Factory_Manager"],
-            "grantable_roles_at_base": ["Junior_Accountant"],
-            "roles_at_other": ["Security_Officer"],
-            "grantable_roles_at_other": ["Auditor"]
-        }])
+        json!([
+            {
+                "character_id": ceo_id,
+                "roles": ["Director", "Factory_Manager", "Station_Manager"],
+                "grantable_roles": ["Personnel_Manager", "Config_Equipment"],
+                "roles_at_hq": ["Station_Manager", "Hangar_Take_1"],
+                "grantable_roles_at_hq": ["Hangar_Query_1", "Config_Equipment"],
+                "roles_at_base": ["Factory_Manager", "Container_Take_1"],
+                "grantable_roles_at_base": ["Junior_Accountant"],
+                "roles_at_other": ["Deliveries_Take", "Security_Officer"],
+                "grantable_roles_at_other": ["Auditor"]
+            },
+            {
+                "character_id": wingman_id,
+                "roles": ["Factory_Manager"]
+            }
+        ])
     );
 
     let role_history = check_cached_get(

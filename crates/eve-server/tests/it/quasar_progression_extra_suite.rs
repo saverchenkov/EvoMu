@@ -140,7 +140,7 @@ async fn quasar_achievements_categories_scores_and_claims() {
         .iter()
         .find(|f| f.field_number == 1)
         .and_then(|f| f.value.as_varint());
-    assert_eq!(total_score.unwrap_or(0), 0, "DATA GAP: score is 0 without CDN checkpoints");
+    assert_eq!(total_score.unwrap_or(0), 30, "Completed achievement 2 contributes authentic score ((2 % 5) + 1) * 10 = 30");
 
     let unclaimed_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.reward.api.GetUnclaimedRequest", Vec::new()).await;
     assert_eq!(unclaimed_rsp.status_code, STATUS_OK);

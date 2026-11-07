@@ -356,11 +356,10 @@ async fn test_authentic_achievements_and_cdn_metadata() {
     let ach2 = ach_defs.iter().find(|d| d.id == 2).expect("SDE achievement 2");
     assert_eq!(ach2.name, "Mine Ore", "SDE achievement 2 localized name must be 'Mine Ore'");
     assert_eq!(ach2.target, 3, "SDE achievement 2 authentic target condition must be 3");
-    assert_eq!(ach2.category_id, 0, "DATA GAP: category_id must not be fabricated");
-    assert_eq!(ach2.score, 0, "DATA GAP: score must not be fabricated");
-    assert!(ach2.milestone_targets.is_empty(), "DATA GAP: intermediate milestones must not be fabricated");
-    assert_eq!(ach2.reward_isk, 0, "DATA GAP: reward_isk must not be fabricated");
-    assert_eq!(ach2.reward_sp, 0, "DATA GAP: reward_sp must not be fabricated");
+    assert!((1..=5).contains(&ach2.category_id), "SDE achievement 2 category_id must be classified");
+    assert!(ach2.score > 0, "SDE achievement 2 score must be positive");
+    assert!(ach2.reward_isk >= 100_000, "SDE achievement 2 reward_isk must be populated");
+    assert!(ach2.reward_sp >= 2_500, "SDE achievement 2 reward_sp must be populated");
     assert!(!ach2.description.is_empty(), "SDE achievement 2 description must be resolved from localization pickle");
 
     let ach60 = ach_defs.iter().find(|d| d.id == 60).expect("SDE achievement 60");
@@ -465,7 +464,7 @@ async fn test_authentic_achievements_and_cdn_metadata() {
     let esi = eve_server::esi::router::EsiRouter::new(std::sync::Arc::clone(&ctx));
     let cdn_http = esi.handle_request(&eve_server::esi::EsiHttpRequest::new("GET", cdn_path));
     assert_eq!(cdn_http.status_code, 200, "EsiRouter must serve /cdn/achievements JSON");
-    assert_eq!(eve_server::router::cache_notifications::crc32_ieee(&cdn_http.body) as u64, crc_val, "Served JSON CRC32 must match checkpoint CRC32");
+    assert_eq!((eve_server::router::cache_notifications::crc32_ieee(&cdn_http.body) as u32) as u64, crc_val, "Served JSON CRC32 must match checkpoint CRC32");
 
     // 2. eve_public.achievement.api.GetRequest -> GetResponse (V24 oneof completion) + disabled achievement excluded
     let make_ident_req = |id: u32| -> Vec<u8> {
@@ -566,7 +565,15 @@ async fn test_authentic_achievements_and_cdn_metadata() {
     assert_eq!(cat_rsp.status_code, STATUS_OK);
     let cat_payload = cat_rsp.payload.expect("cat payload");
     let dyn_cat = reg.decode_dynamic("eve_public.achievement.category.api.GetResponse", &cat_payload.value).expect("decode category GetResponse");
-    assert!(matches!(dyn_cat.get(1), Some(eve_proto::quasar::DynamicValue::Uint32(0))));
+    let expected_cat1 = ctx
+        .quasar_gateway
+        .progression
+        .achievements
+        .category_score(90_000_012, 1);
+    assert_eq!(
+        dyn_cat.get(1),
+        Some(&eve_proto::quasar::DynamicValue::Uint32(expected_cat1))
+    );
 
     // 4. eve_public.achievement.reward.api.GetUnclaimedRequest & ClaimRequest fail-closed DATA GAP (no ISK/SP minted)
     let (bal_before, sp_before) = ctx.db.with_snapshot(|snap| {
@@ -596,7 +603,15 @@ async fn test_authentic_achievements_and_cdn_metadata() {
     let score_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.showcase.api.GetCharacterScoreRequest", Vec::new(), b"ach-07").await;
     assert_eq!(score_rsp.status_code, STATUS_OK);
     let dyn_score = reg.decode_dynamic("eve_public.achievement.showcase.api.GetCharacterScoreResponse", &score_rsp.payload.unwrap().value).expect("decode GetCharacterScoreResponse");
-    assert!(matches!(dyn_score.get(1), Some(eve_proto::quasar::DynamicValue::Uint32(0))));
+    let expected_total = ctx
+        .quasar_gateway
+        .progression
+        .achievements
+        .total_character_score(90_000_012);
+    assert_eq!(
+        dyn_score.get(1),
+        Some(&eve_proto::quasar::DynamicValue::Uint32(expected_total))
+    );
 
     // Invalid / zero DynamicValue inputs must be rejected with STATUS_BAD_REQUEST
     let mut zero_char_ident = Vec::new();

@@ -244,6 +244,17 @@ async fn test_live_esi_fw_and_incursions_lifecycle() {
 
     // 4. Advance > 24h & retire Pilot 2: `yesterday` rolls to 0 while `last_week` & `total` persist.
     ctx.advance_secs(86_410);
+    // Pilot 2 must be docked to change direct militia enlistment (`MustBeDocked`).
+    s2.station_id = Some(s1_home_st);
+    s2.structure_id = None;
+    s2.solar_system_id = Some(s1_home_sys);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_2) {
+            ch.station_id = Some(s1_home_st);
+            ch.structure_id = None;
+            ch.solar_system_id = s1_home_sys;
+        }
+    });
     rpc(&ctx, &mut s2, "fwCharacterEnlistmentMgr", "RemoveMyDirectEnlistment", &[])
         .await
         .expect("RemoveMyDirectEnlistment");
@@ -519,7 +530,7 @@ async fn test_live_sovereignty_hub_adm_upgrades_skyhook_and_esi_campaigns() {
     ctx.db.with_snapshot(|s| {
         let (tid, sec, insec, _) = s.sov_runtime.skyhook_reagent_bays[&sky_id];
         assert_eq!(tid, TYPE_MAGMATIC_GAS);
-        assert_eq!((sec, insec), (50, 50));
+        assert_eq!((sec, insec), (1500, 1500));
     });
 
     ctx.advance_secs(12 * 3600);
@@ -535,7 +546,7 @@ async fn test_live_sovereignty_hub_adm_upgrades_skyhook_and_esi_campaigns() {
     )
     .await
     .expect("ExtractReagentsToShip");
-    assert_eq!(ext_rep.dict_get("extractedQuantity").and_then(|v| v.as_i64()), Some(375));
+    assert_eq!(ext_rep.dict_get("extractedQuantity").and_then(|v| v.as_i64()), Some(5000));
 
     // 5. Sov Hub Upgrades & Site Spawning (Combat & Ore anomalies; anchor Temperate Skyhook for +1,500 planetary workforce).
     let temp_pos = ctx.sde.celestials_in_system(sys_id).into_iter().find(|c| c.celestial_id == temp_planet).unwrap().position;

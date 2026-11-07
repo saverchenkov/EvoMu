@@ -364,20 +364,20 @@ async fn test_project_discovery_authentic_tasks_and_bonus_samples() {
 
     let mut sess = login_pilot(&ctx, 89_001, PILOT).await;
 
-    // 1. Initial bonus samples: max is 10, remaining starts at 10
+    // 1. Initial bonus samples: Omega pilot max is 20, remaining starts at 20
     let max_bonus_init = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_maximum_bonus_samples", &[])
         .await
         .expect("get_maximum_bonus_samples initial");
-    assert_eq!(max_bonus_init, PyRep::Integer(10));
+    assert_eq!(max_bonus_init, PyRep::Integer(20));
 
     let rem_bonus_init = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_remaining_bonus_samples", &[])
         .await
         .expect("get_remaining_bonus_samples initial");
-    assert_eq!(rem_bonus_init, PyRep::Integer(10));
+    assert_eq!(rem_bonus_init, PyRep::Integer(20));
 
     // 2. Configure MMOS bonus sample pool via server helper
     ctx.db.with_mut_snapshot(|snap| {
-        eve_server::services::project_discovery::configure_project_discovery_bonus_samples(snap, 20);
+        eve_server::services::project_discovery::configure_project_discovery_bonus_samples(snap, 25);
         eve_server::services::project_discovery::configure_project_discovery_mmos(
             snap, 2_000.0, 500.0, 200.0, 50.0, 100,
         );
@@ -387,7 +387,7 @@ async fn test_project_discovery_authentic_tasks_and_bonus_samples() {
     let max_bonus_updated = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_maximum_bonus_samples", &[])
         .await
         .expect("get_maximum_bonus_samples updated");
-    assert_eq!(max_bonus_updated, PyRep::Integer(20));
+    assert_eq!(max_bonus_updated, PyRep::Integer(25));
 
     // 3. Issue authentic task via get_new_task
     let task_rep = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_new_task", &[])
@@ -467,11 +467,15 @@ async fn test_project_discovery_authentic_tasks_and_bonus_samples() {
     assert_eq!(val["task_id"], "task_1");
     assert_eq!(val["task_number"], 1);
     assert_eq!(val["project_id"], "mcgill-polyseg");
-    assert_eq!(val["samples"], 20);
+    assert_eq!(val["samples"], 25);
     assert_eq!(val["fetch_count"], 1);
     assert_eq!(val["task_type"], "standard");
     assert!(val["experiment"]["cell_type"].as_str().is_some());
-    assert!(val["assets"]["image_url"].as_str().unwrap().contains("sample_1.png"));
+    let img_url = val["assets"]["image_url"].as_str().unwrap();
+    assert!(
+        img_url.ends_with(".png") && img_url.contains('-'),
+        "expected UUID image_url ending in .png, got {img_url:?}"
+    );
     assert!(val["clusters"].as_array().expect("clusters array").len() >= 2);
 
     // Second fetch increments fetch_count
@@ -489,7 +493,15 @@ async fn test_project_discovery_authentic_tasks_and_bonus_samples() {
 
     // 6. Submit classification consuming a bonus sample:
     let submit_payload = PyRep::Dict(vec![
-        (PyRep::String("polygons".into()), PyRep::List(vec![])),
+        (
+            PyRep::String("polygons".into()),
+            PyRep::List(vec![PyRep::List(vec![
+                PyRep::Tuple(vec![PyRep::Real(0.4), PyRep::Real(0.4)]),
+                PyRep::Tuple(vec![PyRep::Real(0.6), PyRep::Real(0.4)]),
+                PyRep::Tuple(vec![PyRep::Real(0.6), PyRep::Real(0.6)]),
+                PyRep::Tuple(vec![PyRep::Real(0.4), PyRep::Real(0.6)]),
+            ])]),
+        ),
     ]);
     let submit_rep = rpc(
         &ctx,
@@ -506,20 +518,20 @@ async fn test_project_discovery_authentic_tasks_and_bonus_samples() {
     assert_eq!(res_kv.get("gotBonusXP"), Some(&PyRep::Bool(true)));
     assert_eq!(
         res_kv.get("bonusSamplesAfterClassification"),
-        Some(&PyRep::Integer(19))
+        Some(&PyRep::Integer(24))
     );
 
     let rem_after_submit = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_remaining_bonus_samples", &[])
         .await
         .expect("get_remaining_bonus_samples after submit");
-    assert_eq!(rem_after_submit, PyRep::Integer(19));
+    assert_eq!(rem_after_submit, PyRep::Integer(24));
 
     // 7. Daily bonus sample refill: advance virtual clock by 25 hours (>86,400s)
     ctx.advance_secs(90_000);
     let rem_refilled = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_remaining_bonus_samples", &[])
         .await
         .expect("get_remaining_bonus_samples after daily reset");
-    assert_eq!(rem_refilled, PyRep::Integer(20));
+    assert_eq!(rem_refilled, PyRep::Integer(25));
 }
 
 }
@@ -621,13 +633,13 @@ async fn test_project_discovery_end_to_end_flows() {
     // =========================================================================
     // 1. rpc:ProjectDiscovery.get_tutorial_xp_reward
     // =========================================================================
-    // In unseeded default state, tutorial XP reward returns 0.0
+    // In unseeded default state, tutorial XP reward returns DEFAULT_TUTORIAL_XP_REWARD (500.0)
     let unseeded_reward = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_tutorial_xp_reward", &[]).await.expect("get_tutorial_xp_reward unseeded");
-    assert_eq!(unseeded_reward, PyRep::Real(0.0));
+    assert_eq!(unseeded_reward, PyRep::Real(500.0));
 
     // Also accepts optional integer argument
     let unseeded_with_arg = rpc(&ctx, &mut sess, "ProjectDiscovery", "get_tutorial_xp_reward", &[PyRep::Integer(1)]).await.expect("get_tutorial_xp_reward unseeded with arg");
-    assert_eq!(unseeded_with_arg, PyRep::Real(0.0));
+    assert_eq!(unseeded_with_arg, PyRep::Real(500.0));
 
     // Seed MMOS configuration: 2500.0 xp per rank, 350.0 tutorial xp reward
     ctx.db.with_mut_snapshot(|snap| {
@@ -695,12 +707,12 @@ async fn test_project_discovery_end_to_end_flows() {
     // 2a. Call with no arguments -> defaults to current tutorial level 1
     let train_default = rpc(&ctx, &mut sess, "ProjectDiscovery", "new_training_task", &[]).await.expect("new_training_task no args");
     let PyRep::KeyVal(t1_kv) = train_default else { panic!("expected KeyVal from new_training_task") };
-    assert_eq!(t1_kv.get("task_id").and_then(|v| v.as_str()), Some("training_task_01"));
-    assert_eq!(t1_kv.get("taskId").and_then(|v| v.as_str()), Some("training_task_01"));
-    assert_eq!(t1_kv.get("taskID").and_then(|v| v.as_str()), Some("training_task_01"));
+    assert_eq!(t1_kv.get("task_id").and_then(|v| v.as_str()), Some("ed134308-e080-49bc-be56-169a5f839c96"));
+    assert_eq!(t1_kv.get("taskId").and_then(|v| v.as_str()), Some("ed134308-e080-49bc-be56-169a5f839c96"));
+    assert_eq!(t1_kv.get("taskID").and_then(|v| v.as_str()), Some("ed134308-e080-49bc-be56-169a5f839c96"));
     assert_eq!(t1_kv.get("level").and_then(|v| v.as_i64()), Some(1));
     assert_eq!(t1_kv.get("task_number").and_then(|v| v.as_i64()), Some(1));
-    assert_eq!(t1_kv.get("solution"), Some(&PyRep::List(vec![PyRep::Integer(1)])));
+    assert!(matches!(t1_kv.get("solution"), Some(PyRep::List(polys)) if !polys.is_empty()));
 
     // 2b. Call with non-positive arguments (0 or -5) -> falls back to current tutorial level
     let train_zero = rpc(&ctx, &mut sess, "ProjectDiscovery", "new_training_task", &[PyRep::Integer(0)]).await.expect("new_training_task arg 0");
@@ -711,7 +723,7 @@ async fn test_project_discovery_end_to_end_flows() {
 
     // 2c. Call with explicit task number (e.g. 4) while level is 1
     let train_task4 = rpc(&ctx, &mut sess, "ProjectDiscovery", "new_training_task", &[PyRep::Integer(4)]).await.expect("new_training_task arg 4");
-    assert_eq!(train_task4.dict_get("task_id").and_then(|v| v.as_str()), Some("training_task_04"));
+    assert_eq!(train_task4.dict_get("task_id").and_then(|v| v.as_str()), Some("21cbef0c-684e-4a4c-b1fe-be6e24d894c2"));
     assert_eq!(train_task4.dict_get("task_number").and_then(|v| v.as_i64()), Some(4));
     assert_eq!(train_task4.dict_get("level").and_then(|v| v.as_i64()), Some(1));
 
@@ -719,7 +731,7 @@ async fn test_project_discovery_end_to_end_flows() {
     let _ = rpc(&ctx, &mut sess, "ProjectDiscovery", "increase_tutorial_level", &[]).await.expect("inc to 2");
     let _ = rpc(&ctx, &mut sess, "ProjectDiscovery", "increase_tutorial_level", &[]).await.expect("inc to 3");
     let train_lvl3 = rpc(&ctx, &mut sess, "ProjectDiscovery", "new_training_task", &[]).await.expect("new_training_task at lvl 3");
-    assert_eq!(train_lvl3.dict_get("task_id").and_then(|v| v.as_str()), Some("training_task_03"));
+    assert_eq!(train_lvl3.dict_get("task_id").and_then(|v| v.as_str()), Some("eb4c6403-e878-43cf-a009-9c8c566ae90f"));
     assert_eq!(train_lvl3.dict_get("task_number").and_then(|v| v.as_i64()), Some(3));
     assert_eq!(train_lvl3.dict_get("level").and_then(|v| v.as_i64()), Some(3));
 
@@ -764,7 +776,7 @@ async fn test_project_discovery_end_to_end_flows() {
     assert_eq!(parsed1["task_id"], "task_1");
     assert_eq!(parsed1["task_number"], 1);
     assert_eq!(parsed1["project_id"], "mcgill-polyseg");
-    assert_eq!(parsed1["samples"], 10);
+    assert_eq!(parsed1["samples"], 20);
     assert_eq!(parsed1["fetch_count"], 1);
 
     // Second fetch: state transition increments fetch_count to 2

@@ -258,6 +258,12 @@ pub fn apply_active_dbuffs_and_system_effects_to_ship_attrs(
                 let owner_id = snap.items.get(&ship_id).map(|i| i.owner_id)?;
                 snap.characters.get(&owner_id).map(|c| c.solar_system_id)
             })
+            .or_else(|| {
+                snap.characters
+                    .values()
+                    .find(|c| c.active_ship_id == ship_id)
+                    .map(|c| c.solar_system_id)
+            })
     });
     if let Some(sys_id) = sys_id_opt {
         if (32_000_000..=32_999_999).contains(&sys_id) {

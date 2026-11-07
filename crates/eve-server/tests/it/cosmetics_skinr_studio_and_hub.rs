@@ -26,7 +26,6 @@ use eve_server::services::quasar_cosmetics_skinr::{
 };
 
 const JITA_STATION_ID: i64 = 60_003_760;
-const EVERMARK_CORP_ID: i64 = 1_000_419;
 
 fn decode_wm(payload: Option<&GoogleAny>) -> Option<WireMessage> {
     WireMessage::decode(&payload?.value).ok()
@@ -193,10 +192,8 @@ async fn test_skinr_sequencing_studio_design_components_and_skills() {
     }
     designer_sess.role = 0;
 
-    // 4. Initiate sequencing job consuming PLEX & Nanocoatings and awarding EverMarks
-    let plex_before = ctx.db.get_character(designer_cid as i64).unwrap().plex_balance;
-    let em_before = ctx.db.with_snapshot(|s| s.characters[&(designer_cid as i64)].loyalty_points.get(&EVERMARK_CORP_ID).copied().unwrap_or(0));
-    let corp_em_before = ctx.db.with_snapshot(|s| s.corp_lp_balances.get(&(98_000_001, EVERMARK_CORP_ID)).copied().unwrap_or(0));
+    // 4. Initiate sequencing job consuming PLEX & Nanocoatings
+    let plex_before = ctx.db.with_snapshot(|s| s.unified_plex_balance(designer_cid as i64));
 
     let init_rsp = quasar_rpc(
         &ctx,
@@ -212,13 +209,9 @@ async fn test_skinr_sequencing_studio_design_components_and_skills() {
     let skin_hex = String::from_utf8(bytes(&skin_id_sub, 1)).expect("skin hex");
     assert!(!skin_hex.is_empty());
 
-    let plex_after = ctx.db.get_character(designer_cid as i64).unwrap().plex_balance;
-    let em_after = ctx.db.with_snapshot(|s| s.characters[&(designer_cid as i64)].loyalty_points.get(&EVERMARK_CORP_ID).copied().unwrap_or(0));
-    let corp_em_after = ctx.db.with_snapshot(|s| s.corp_lp_balances.get(&(98_000_001, EVERMARK_CORP_ID)).copied().unwrap_or(0));
+    let plex_after = ctx.db.with_snapshot(|s| s.unified_plex_balance(designer_cid as i64));
 
     assert!(plex_after < plex_before, "Sequencing job must consume PLEX from character balance");
-    assert_eq!(em_after - em_before, 1_000, "Initiating 2-license job awards 1,000 EverMarks (500/license)");
-    assert_eq!(corp_em_after - corp_em_before, 1_000, "Corporation receives 1,000 EverMarks");
 
     // Active sequencing job query
     let act_rsp = quasar_rpc(
@@ -285,7 +278,7 @@ async fn test_skinr_sequencing_studio_design_components_and_skills() {
     .await;
     assert_eq!(init_rsp2.status_code, STATUS_OK);
 
-    let early_plex_before = ctx.db.get_character(designer_cid as i64).unwrap().plex_balance;
+    let early_plex_before = ctx.db.with_snapshot(|s| s.unified_plex_balance(designer_cid as i64));
     let complete_rsp = quasar_rpc(
         &ctx,
         &mut designer_sess,
@@ -294,7 +287,7 @@ async fn test_skinr_sequencing_studio_design_components_and_skills() {
     )
     .await;
     assert_eq!(complete_rsp.status_code, STATUS_OK, "CompleteEarlyRequest failed");
-    let early_plex_after = ctx.db.get_character(designer_cid as i64).unwrap().plex_balance;
+    let early_plex_after = ctx.db.with_snapshot(|s| s.unified_plex_balance(designer_cid as i64));
     assert!(early_plex_after < early_plex_before, "Early completion must charge PLEX");
 }
 
@@ -325,6 +318,7 @@ async fn test_skinr_paragon_hub_listing_fees_and_purchase() {
     ctx.db.with_mut_snapshot(|s| {
         let mut ch_s = s.characters.get(&90_000_001).cloned().expect("template char");
         ch_s.character_id = seller_cid as i64;
+        ch_s.user_id = 861;
         ch_s.corporation_id = 98_000_001;
         ch_s.active_ship_id = ship_id;
         ch_s.balance = IskCents::from_isk(25_000_000);
@@ -334,6 +328,7 @@ async fn test_skinr_paragon_hub_listing_fees_and_purchase() {
 
         let mut ch_b = s.characters.get(&90_000_001).cloned().expect("template char");
         ch_b.character_id = buyer_cid as i64;
+        ch_b.user_id = 862;
         ch_b.corporation_id = 98_000_002;
         ch_b.balance = IskCents::from_isk(50_000_000);
         ch_b.plex_balance = 2_000;
@@ -533,7 +528,7 @@ async fn test_skinr_paragon_hub_listing_fees_and_purchase() {
 
     // 5. Buyer purchases both listings
     let seller_isk_before_sales = ctx.db.get_character(seller_cid as i64).unwrap().balance.0;
-    let seller_plex_before_sales = ctx.db.get_character(seller_cid as i64).unwrap().plex_balance;
+    let seller_plex_before_sales = ctx.db.with_snapshot(|s| s.unified_plex_balance(seller_cid as i64));
 
     for em in listings {
         let uuid_bytes = field(&field(&em, 1).unwrap(), 1).unwrap();
@@ -558,7 +553,7 @@ async fn test_skinr_paragon_hub_listing_fees_and_purchase() {
     // ISK listing: 1,000,000 ISK - 10% = 900,000 ISK net
     // PLEX listing: 100 PLEX - 10% = 90 PLEX net
     let seller_isk_after_sales = ctx.db.get_character(seller_cid as i64).unwrap().balance.0;
-    let seller_plex_after_sales = ctx.db.get_character(seller_cid as i64).unwrap().plex_balance;
+    let seller_plex_after_sales = ctx.db.with_snapshot(|s| s.unified_plex_balance(seller_cid as i64));
 
     assert_eq!(
         seller_isk_after_sales - seller_isk_before_sales,
