@@ -1,5 +1,5 @@
 //! Live non-GM end-to-end tests for Parity Shard 1 Calendar, Contacts/Labels, Mail Lists,
-//! Market Prices, and Structure Orders ESI routes (`parity_shard_1_closure.rs`):
+//! Market Prices, and Structure Orders ESI routes (`calendar_contacts_maillists_market_esi_e2e.rs`):
 //! - Calendar events: `calendarMgr.CreatePersonalEvent`, `calendarMgr.CreateCorporationEvent`,
 //!   `calendarMgr.UpdateEventResponse`, `calendarMgr.GetResponsesToEvent` -> all 8 calendar rows + SQLite reload
 //! - Character/Corporation/Alliance contacts & labels + Mail lists -> all 9 social/mail rows + SQLite reload

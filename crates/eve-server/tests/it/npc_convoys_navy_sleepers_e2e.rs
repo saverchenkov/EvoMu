@@ -5,7 +5,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::parity_shard_3_closure_helpers::{
+use crate::sov_and_insurgency_tail_helpers::{
     call_rpc, lock_player_target, move_player_near_ball, spawn_player_combat_pilot,
 };
 use eve_proto::PyRep;

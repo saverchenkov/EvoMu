@@ -3,7 +3,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::parity_shard_3_closure_helpers::{
+use crate::sov_and_insurgency_tail_helpers::{
     call_rpc, new_sqlite_ctx, reload_ctx_from_sqlite, spawn_player_combat_pilot, PlayerPilot,
 };
 use eve_db::{InventoryFlag, InventoryItemRecord};

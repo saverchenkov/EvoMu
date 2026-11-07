@@ -2,8 +2,8 @@
 #![forbid(unsafe_code)]
 #![allow(dead_code)]
 
-use crate::parity_shard_3_closure_helpers::*;
-use crate::parity_closure_sov_hub_and_upgrade_sites::{
+use crate::sov_and_insurgency_tail_helpers::*;
+use crate::sov_hub_and_upgrade_sites_e2e::{
     first_claimable_null_sys, setup_player_alliance, ENTOSIS_LINK_I_TYPE, HURRICANE_TYPE,
 };
 use eve_db::{InventoryFlag, InventoryItemRecord};
