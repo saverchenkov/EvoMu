@@ -13,7 +13,7 @@ fn temp_db_path(label: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("evomu_{label}_{}_{nanos}.sqlite", std::process::id()))
 }
 
-fn populate_world_part2(snap: &mut WorldStateSnapshot) {
+fn populate_world_extended_state(snap: &mut WorldStateSnapshot) {
     snap.paused_skill_queues.insert(2002);
     snap.sov_prospecting_levels.insert(30000142, 4);
     snap.last_mission_decline_times.insert(2001, 1000);
@@ -486,8 +486,8 @@ fn full_snapshot_sync_rollback_and_reload_roundtrip() {
 
     let repo = WorldRepository::open_sqlite(&path).expect("open sqlite");
     repo.with_mut_snapshot(|snap| {
-        super::world_snapshot_sync_rollback_tests::populate_world_part1(snap);
-        populate_world_part2(snap);
+        super::world_snapshot_sync_rollback_tests::populate_world_core_entities(snap);
+        populate_world_extended_state(snap);
     });
 
     let err = repo.try_with_mut_snapshot(|snap| {
@@ -613,8 +613,8 @@ fn full_snapshot_sync_rollback_and_reload_roundtrip() {
 #[test]
 fn snapshot_contract_wrap_id_and_helper_edges() {
     let mut snap = WorldStateSnapshot::default();
-    super::world_snapshot_sync_rollback_tests::populate_world_part1(&mut snap);
-    populate_world_part2(&mut snap);
+    super::world_snapshot_sync_rollback_tests::populate_world_core_entities(&mut snap);
+    populate_world_extended_state(&mut snap);
 
     let e1 = snap.alloc_entity_id();
     let e2 = snap.alloc_entity_id();

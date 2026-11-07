@@ -1,4 +1,4 @@
-//! Second half of end-to-end journey helpers (`E2E-09` through `E2E-17`).
+//! End-to-end journey RPC helpers for missions, fleets, living world, and crimewatch (`E2E-09` through `E2E-17`).
 
 use crate::router::ServerContext;
 use eve_machonet::SessionState;

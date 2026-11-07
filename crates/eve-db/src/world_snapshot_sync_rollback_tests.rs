@@ -2,7 +2,7 @@ use crate::types::*;
 use crate::IskCents;
 use std::collections::{HashMap, HashSet};
 
-pub(crate) fn populate_world_part1(snap: &mut WorldStateSnapshot) {
+pub(crate) fn populate_world_core_entities(snap: &mut WorldStateSnapshot) {
     snap.next_entity_id = 10_000_900;
     snap.wal_seq = 42;
     snap.markets_seeded = true;

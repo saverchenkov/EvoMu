@@ -5,7 +5,7 @@
 #![forbid(unsafe_code)]
 
 use super::evedb_sqlite_cov_tests::build_populated_snapshot;
-use super::evedb_sqlite_cov_tests_part2::open_migrated_conn;
+use super::evedb_sqlite_load_errors_and_schema_tests::open_migrated_conn;
 use crate::sqlite_store::corp_crimewatch_store::compute_d6_corp_crimewatch_fingerprints;
 use crate::sqlite_store::fingerprints::{
     compute_fingerprints, fp_character, fp_contract, fp_item, fp_market_order,

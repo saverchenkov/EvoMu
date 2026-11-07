@@ -1,4 +1,4 @@
-//! Part 2 of unit and mutation-killing tests for `eve-dogma`.
+//! Fitting, wormhole phenomenon, and modifier unit tests for `eve-dogma`.
 
 use super::*;
 use eve_sde::{DogmaEffectType, EffectModifierSpec, SdeRegistry};
@@ -17,7 +17,7 @@ fn base_seed() -> (SdeRegistry, DogmaEffectType) {
 }
 
 #[test]
-fn test_cov_part2_implants_boosters_drones_and_effective_module_state() {
+fn test_implants_boosters_drones_and_effective_module_state() {
     let (mut sde, mut eff_tpl) = base_seed();
     eff_tpl.effect_category = 0;
     let inv_tpl = sde.types.values().next().unwrap().clone();
@@ -198,7 +198,7 @@ fn test_cov_part2_implants_boosters_drones_and_effective_module_state() {
 }
 
 #[test]
-fn test_cov_part2_wormhole_phenomena_and_t3c_subsystems() {
+fn test_wormhole_phenomena_and_t3c_subsystems() {
     let mut sde = SdeRegistry::open(SdeRegistry::default_db_path()).expect("open default SDE");
 
     // Non-capsuleer and Sleepers are never affected by wormhole phenomena
@@ -296,7 +296,7 @@ fn test_cov_part2_wormhole_phenomena_and_t3c_subsystems() {
 }
 
 #[test]
-fn test_cov_part2_cpu_pg_online_rollbacks_low_rack_heat_and_self_modifiers() {
+fn test_cpu_pg_online_rollbacks_low_rack_heat_and_self_modifiers() {
     let (mut sde, mut eff_tpl) = base_seed();
     eff_tpl.effect_category = 0;
     let inv_tpl = sde.types.values().next().unwrap().clone();
@@ -405,7 +405,7 @@ fn test_cov_part2_cpu_pg_online_rollbacks_low_rack_heat_and_self_modifiers() {
 }
 
 #[test]
-fn test_cov_part2_kill_lib_and_combat_eval_mutants() {
+fn test_kill_lib_and_combat_eval_mutants() {
     let mut sde = SdeRegistry::with_canonical_seed();
     let base_item = DogmaItemState::from_sde(1, 587, &sde);
     let node = |opcode, value_f64, attribute_id, operator, arg1, arg2| DogmaExpressionNode {

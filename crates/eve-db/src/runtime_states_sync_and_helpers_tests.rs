@@ -27,7 +27,7 @@ fn runtime_domain_states_sp6_and_rollback_reload() {
 
     let repo = WorldRepository::open_sqlite(&path).expect("open sqlite");
     repo.with_mut_snapshot(|snap| {
-        super::world_snapshot_sync_rollback_tests::populate_world_part1(snap);
+        super::world_snapshot_sync_rollback_tests::populate_world_core_entities(snap);
 
         snap.char_contact_notifications.insert(
             2001,
@@ -302,7 +302,7 @@ fn repositories_ledger_flags_and_governance_coverage() {
     let repo = WorldRepository::open_sqlite(&path).expect("open sqlite");
 
     repo.with_mut_snapshot(|snap| {
-        super::world_snapshot_sync_rollback_tests::populate_world_part1(snap);
+        super::world_snapshot_sync_rollback_tests::populate_world_core_entities(snap);
 
         let mut gov = CorpGovState::default();
         gov.pending_friendly_fire = Some((true, 2000));

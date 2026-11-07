@@ -561,5 +561,5 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     .await
     .unwrap();
 
-    super::journeys_and_catalog_part2::run_e2e_09_to_12(&ctx, &mut session).await;
+    super::journeys_and_catalog_rpc_tests::run_e2e_09_to_12(&ctx, &mut session).await;
 }

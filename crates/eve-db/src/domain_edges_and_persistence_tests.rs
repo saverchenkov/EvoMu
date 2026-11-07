@@ -338,7 +338,7 @@ fn sqlite_full_table_reload_and_snapshot_contract_edges() {
     let repo = WorldRepository::open_sqlite(&path).expect("open sqlite");
 
     repo.with_mut_snapshot(|snap| {
-        super::world_snapshot_sync_rollback_tests::populate_world_part1(snap);
+        super::world_snapshot_sync_rollback_tests::populate_world_core_entities(snap);
 
         snap.standing_transactions.insert(
             2001,

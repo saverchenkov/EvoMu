@@ -31,9 +31,9 @@ mod r6_persist_regression_tests;
 #[cfg(test)]
 mod evedb_sqlite_cov_tests;
 #[cfg(test)]
-mod evedb_sqlite_cov_tests_part2;
+mod evedb_sqlite_load_errors_and_schema_tests;
 #[cfg(test)]
-mod evedb_sqlite_cov_tests_part3;
+mod evedb_sqlite_fingerprints_and_sync_tests;
 #[cfg(test)]
 mod notes_lp_sequence_store_cov_unit_tests;
 #[cfg(test)]
