@@ -35,20 +35,25 @@ pub(crate) fn temp_sqlite_path(tag: &str) -> PathBuf {
 }
 
 pub(crate) fn open_sqlite_ctx(path: &std::path::Path, seed_demo: bool) -> ServerContext {
+    static TEST_SDE: std::sync::OnceLock<std::sync::Arc<eve_sde::SdeRegistry>> =
+        std::sync::OnceLock::new();
     let repo = eve_db::WorldRepository::open_sqlite(path).expect("open_sqlite");
     repo.with_mut_snapshot(|snap| {
         snap.markets_seeded = true;
+        if seed_demo {
+            let tpl = eve_db::WorldRepository::with_demo_seed()
+                .with_snapshot(|s| s.characters.values().next().cloned().expect("demo char"));
+            snap.characters.entry(tpl.character_id).or_insert(tpl);
+        }
     });
     if seed_demo {
-        let tpl = eve_db::WorldRepository::with_demo_seed()
-            .with_snapshot(|s| s.characters.values().next().cloned().expect("demo char"));
-        repo.with_mut_snapshot(|snap| {
-            snap.characters.entry(tpl.character_id).or_insert(tpl);
-        });
         repo.provision_player_account("demo", "demo-secret");
         repo.provision_player_account("demo2", "demo2-secret");
     }
-    let ctx = ServerContext::with_repository(std::sync::Arc::new(repo))
+    let sde = TEST_SDE
+        .get_or_init(|| std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed()))
+        .clone();
+    let ctx = ServerContext::with_sde_and_repository(sde, std::sync::Arc::new(repo))
         .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED);
     crate::common::pin_clock(&ctx);
     ctx

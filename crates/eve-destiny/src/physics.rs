@@ -296,33 +296,46 @@ impl Ballpark {
         }
 
         // Check 2,000m surface-to-surface proximity decloak and active Breacher Pod DoT
-        let updated_positions: Vec<(BallId, DVec3, f64)> = self
-            .balls
-            .values()
-            .map(|b| (b.id, b.position, b.radius))
-            .collect();
-
-        let cloaked_snapshot: std::collections::HashSet<BallId> = self
+        let any_cloaked = self
             .combat_states
-            .iter()
-            .filter_map(|(&id, c)| if c.is_cloaked { Some(id) } else { None })
-            .collect();
+            .values()
+            .any(|cs| cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0);
+        let updated_positions: Vec<(BallId, DVec3, f64)> = if any_cloaked {
+            self.balls
+                .values()
+                .map(|b| (b.id, b.position, b.radius))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let cloaked_snapshot: std::collections::HashSet<BallId> = if any_cloaked {
+            self.combat_states
+                .iter()
+                .filter_map(|(&id, c)| if c.is_cloaked { Some(id) } else { None })
+                .collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+        let combat_ball_ids: Vec<BallId> = self.combat_states.keys().copied().collect();
         let mut proximity_decloaked = Vec::new();
         let mut mjfg_completed_ids = Vec::new();
         let mut dot_updates = Vec::new();
-        for &(id_a, pos_a, rad_a) in &updated_positions {
-            let is_cmd_destroyer = self
+        for id_a in combat_ball_ids {
+            let Some((pos_a, rad_a, type_a, mode_a)) = self
                 .balls
                 .get(&id_a)
-                .is_some_and(|b| (37480..=37483).contains(&b.type_id));
+                .map(|b| (b.position, b.radius, b.type_id, b.mode.clone()))
+            else {
+                continue;
+            };
+            let is_cmd_destroyer = (37480..=37483).contains(&type_a);
             let is_scrambled = self.is_ball_scrambled(id_a);
             let has_target_locks = self
                 .target_locks
                 .get(&id_a)
                 .is_some_and(|locks| !locks.is_empty());
-            let is_in_warp_tunnel_a = self.balls.get(&id_a).is_some_and(|b| {
-                matches!(b.mode, MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning)
-            });
+            let is_in_warp_tunnel_a =
+                matches!(mode_a, MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning);
             let is_field_or_bubble_b = |id_b: BallId| {
                 self.warp_bubble_mgr.bubbles.contains_key(&id_b)
                     || self.balls.get(&id_b).is_some_and(|b| {

@@ -466,20 +466,30 @@ pub async fn step_wreck_and_jetcan_decay(
     solar_system_id: u32,
     now_unix: u64,
 ) -> Vec<i64> {
-    let mut expired: Vec<i64> = with_mut_combat_runtime(ctx, |rt| {
-        let mut exp = Vec::new();
-        for (&iid, entry) in &rt.container_lifetimes {
-            if entry.solar_system_id == solar_system_id
+    let has_expired = with_combat_runtime(ctx, |rt| {
+        rt.container_lifetimes.values().any(|entry| {
+            entry.solar_system_id == solar_system_id
                 && now_unix >= entry.created_unix.saturating_add(entry.lifetime_secs)
-            {
-                exp.push(iid);
-            }
-        }
-        for iid in &exp {
-            rt.container_lifetimes.remove(iid);
-        }
-        exp
+        })
     });
+    let mut expired: Vec<i64> = if has_expired {
+        with_mut_combat_runtime(ctx, |rt| {
+            let mut exp = Vec::new();
+            for (&iid, entry) in &rt.container_lifetimes {
+                if entry.solar_system_id == solar_system_id
+                    && now_unix >= entry.created_unix.saturating_add(entry.lifetime_secs)
+                {
+                    exp.push(iid);
+                }
+            }
+            for iid in &exp {
+                rt.container_lifetimes.remove(iid);
+            }
+            exp
+        })
+    } else {
+        Vec::new()
+    };
     let mut expired_bubbles: Vec<i64> = Vec::new();
     ctx.db.with_snapshot(|snap| {
         for item in snap.items.values() {

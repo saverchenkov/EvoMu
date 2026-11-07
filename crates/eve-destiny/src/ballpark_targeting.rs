@@ -255,117 +255,133 @@ impl Ballpark {
         pre_positions: &BTreeMap<BallId, (DVec3, DVec3, f64)>,
         dt: f64,
     ) {
-        let ball_keys: Vec<BallId> = self.balls.keys().copied().collect();
-        let uncollided_balls = self.balls.clone();
+        struct BumpEntry<'a> {
+            id: BallId,
+            uncol: &'a crate::Ball,
+            cur_pos: DVec3,
+            cur_vel: DVec3,
+            radius: f64,
+            mass: f64,
+            is_static: bool,
+            mb_parent: Option<BallId>,
+            modified: bool,
+        }
+
+        let mut entries: Vec<BumpEntry<'_>> = Vec::with_capacity(self.balls.len());
+        let mut dyn_indices: Vec<usize> = Vec::new();
+
+        for (&id, ball) in &self.balls {
+            let group_id = self.ball_group_ids.get(&id).copied().unwrap_or(0);
+            // Asteroid Belt (`group 9`), Abyssal Spatial Hazard Clouds (`group 1971`), and
+            // Abyssal Automated Pylons (`group 1973`/`1981`, whose `radius` encodes their
+            // 15-40 km aura range) are volumetric/non-solid markers that must not eject ships;
+            // solid celestial hulls (Star `group 6`, Planet `group 7`, Moon `group 8`),
+            // stations, structures, stargates, and asteroids collide normally.
+            if matches!(group_id, 9 | 1971 | 1973 | 1981)
+                || matches!(
+                    ball.type_id,
+                    47_437
+                        | 47_438
+                        | 47_439
+                        | 47_440
+                        | 47_441
+                        | 47_469
+                        | 47_470
+                        | 47_472
+                        | 47_473
+                        | 47_620
+                        | 48_254
+                        | 64_896
+                        | 80_876
+                )
+                || matches!(ball.mode, MovementMode::Field | MovementMode::Mushroom)
+                || matches!(ball.mode, MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning)
+                || self.combat_states.get(&id).is_some_and(|cs| {
+                    let mut c = cs.clone();
+                    c.sync_action_breaks();
+                    c.gate_cloak_remaining_ticks > 0
+                        || c.undock_invulnerable_remaining_ticks > 0
+                        || c.is_cloaked
+                })
+            {
+                continue;
+            }
+            let slim_cat = self.ball_slim_meta.get(&id).map(|m| m.category_id).unwrap_or(0);
+            let is_station_or_struct =
+                matches!(group_id, 6 | 7 | 8 | 15 | 1404..=1410 | 1657 | 2016 | 2017)
+                    || slim_cat == 65;
+            let is_static = self.is_static_ball(id)
+                || matches!(ball.mode, MovementMode::Miniball)
+                || is_station_or_struct
+                || matches!(slim_cat, 2 | 3 | 22 | 23 | 40 | 46 | 65);
+            let mb_parent = self.miniball_states.get(&id).map(|m| m.parent_id);
+            let idx = entries.len();
+            if !is_static {
+                dyn_indices.push(idx);
+            }
+            entries.push(BumpEntry {
+                id,
+                uncol: ball,
+                cur_pos: ball.position,
+                cur_vel: ball.velocity,
+                radius: ball.radius,
+                mass: ball.mass.max(1.0),
+                is_static,
+                mb_parent,
+                modified: false,
+            });
+        }
+
+        if dyn_indices.is_empty() {
+            return;
+        }
+
         let mut best_swept: BTreeMap<BallId, (f64, DVec3, DVec3)> = BTreeMap::new();
         let mut collision_events = Vec::new();
         let mut bumped_dynamic_ids = BTreeSet::new();
         let restitution = 0.8;
 
-        for i in 0..ball_keys.len() {
-            let id_a = ball_keys[i];
-            let group_a = self.ball_group_ids.get(&id_a).copied().unwrap_or(0);
-            let is_station_or_struct_a =
-                matches!(group_a, 6 | 7 | 8 | 15 | 1404..=1410 | 1657 | 2016 | 2017)
-                    || self
-                        .ball_slim_meta
-                        .get(&id_a)
-                        .is_some_and(|m| m.category_id == 65);
-            let is_static_a = self.is_static_ball(id_a)
-                || matches!(self.balls[&id_a].mode, MovementMode::Miniball)
-                || is_station_or_struct_a
-                || self
-                    .ball_slim_meta
-                    .get(&id_a)
-                    .is_some_and(|m| matches!(m.category_id, 2 | 3 | 22 | 23 | 40 | 46 | 65));
+        for i in 0..entries.len() {
+            let is_static_a = entries[i].is_static;
+            let start_dyn = if is_static_a {
+                dyn_indices.partition_point(|&j| j <= i)
+            } else {
+                0
+            };
+            let j_count = if is_static_a {
+                dyn_indices.len() - start_dyn
+            } else {
+                entries.len().saturating_sub(i + 1)
+            };
 
-            for j in (i + 1)..ball_keys.len() {
-                let id_b = ball_keys[j];
-                let group_b = self.ball_group_ids.get(&id_b).copied().unwrap_or(0);
-                let type_a = self.balls[&id_a].type_id;
-                let type_b = self.balls[&id_b].type_id;
-                // Asteroid Belt (`group 9`), Abyssal Spatial Hazard Clouds (`group 1971`), and
-                // Abyssal Automated Pylons (`group 1973`/`1981`, whose `radius` encodes their
-                // 15-40 km aura range) are volumetric/non-solid markers that must not eject ships;
-                // solid celestial hulls (Star `group 6`, Planet `group 7`, Moon `group 8`),
-                // stations, structures, stargates, and asteroids collide normally.
-                if matches!(group_a, 9 | 1971 | 1973 | 1981)
-                    || matches!(group_b, 9 | 1971 | 1973 | 1981)
-                    || matches!(
-                        type_a,
-                        47_437 | 47_438 | 47_439 | 47_440 | 47_441 | 47_469 | 47_470 | 47_472 | 47_473 | 47_620 | 48_254 | 64_896 | 80_876
-                    )
-                    || matches!(
-                        type_b,
-                        47_437 | 47_438 | 47_439 | 47_440 | 47_441 | 47_469 | 47_470 | 47_472 | 47_473 | 47_620 | 48_254 | 64_896 | 80_876
-                    )
-                {
-                    continue;
-                }
-                let is_station_or_struct_b =
-                    matches!(group_b, 6 | 7 | 8 | 15 | 1404..=1410 | 1657 | 2016 | 2017)
-                        || self
-                            .ball_slim_meta
-                            .get(&id_b)
-                            .is_some_and(|m| m.category_id == 65);
-                let is_static_b = self.is_static_ball(id_b)
-                    || matches!(self.balls[&id_b].mode, MovementMode::Miniball)
-                    || is_station_or_struct_b
-                    || self
-                        .ball_slim_meta
-                        .get(&id_b)
-                        .is_some_and(|m| matches!(m.category_id, 2 | 3 | 22 | 23 | 40 | 46 | 65));
+            for step in 0..j_count {
+                let j = if is_static_a {
+                    dyn_indices[start_dyn + step]
+                } else {
+                    i + 1 + step
+                };
+                let (left, right) = entries.split_at_mut(j);
+                let a = &mut left[i];
+                let b = &mut right[0];
+                let id_a = a.id;
+                let id_b = b.id;
+                let is_static_b = b.is_static;
 
-                if is_static_a && is_static_b {
-                    continue;
-                }
-                let mb_parent_a = self.miniball_states.get(&id_a).map(|m| m.parent_id);
-                let mb_parent_b = self.miniball_states.get(&id_b).map(|m| m.parent_id);
-                if mb_parent_a == Some(id_b)
-                    || mb_parent_b == Some(id_a)
-                    || (mb_parent_a.is_some() && mb_parent_a == mb_parent_b)
-                {
-                    continue;
-                }
-                if matches!(
-                    self.balls[&id_a].mode,
-                    MovementMode::Field | MovementMode::Mushroom
-                ) || matches!(
-                    self.balls[&id_b].mode,
-                    MovementMode::Field | MovementMode::Mushroom
-                ) {
-                    continue;
-                }
-                if self.combat_states.get(&id_a).is_some_and(|cs| {
-                    let mut c = cs.clone();
-                    c.sync_action_breaks();
-                    c.gate_cloak_remaining_ticks > 0
-                        || c.undock_invulnerable_remaining_ticks > 0
-                        || c.is_cloaked
-                }) || self.combat_states.get(&id_b).is_some_and(|cs| {
-                    let mut c = cs.clone();
-                    c.sync_action_breaks();
-                    c.gate_cloak_remaining_ticks > 0
-                        || c.undock_invulnerable_remaining_ticks > 0
-                        || c.is_cloaked
-                }) {
-                    continue;
-                }
-
-                if matches!(self.balls[&id_a].mode, MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning)
-                    || matches!(self.balls[&id_b].mode, MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning)
+                if a.mb_parent == Some(id_b)
+                    || b.mb_parent == Some(id_a)
+                    || (a.mb_parent.is_some() && a.mb_parent == b.mb_parent)
                 {
                     continue;
                 }
 
-                let uncol_a = &uncollided_balls[&id_a];
-                let uncol_b = &uncollided_balls[&id_b];
+                let uncol_a = a.uncol;
+                let uncol_b = b.uncol;
                 let pre_a = pre_step_balls.get(&id_a).unwrap_or(uncol_a);
                 let pre_b = pre_step_balls.get(&id_b).unwrap_or(uncol_b);
-                let rad_a = uncol_a.radius;
-                let rad_b = uncol_b.radius;
-                let mass_a = uncol_a.mass.max(1.0);
-                let mass_b = uncol_b.mass.max(1.0);
+                let rad_a = a.radius;
+                let rad_b = b.radius;
+                let mass_a = a.mass;
+                let mass_b = b.mass;
                 let min_dist = rad_a + rad_b;
 
                 // Exact `_destiny.so` `DoCollision` swept-sphere collision (`0x293d4`):
@@ -484,14 +500,8 @@ impl Ballpark {
                     }
                 }
 
-                let (pos_a, vel_a) = {
-                    let b = &self.balls[&id_a];
-                    (b.position, b.velocity)
-                };
-                let (pos_b, vel_b) = {
-                    let b = &self.balls[&id_b];
-                    (b.position, b.velocity)
-                };
+                let (pos_a, vel_a) = (a.cur_pos, a.cur_vel);
+                let (pos_b, vel_b) = (b.cur_pos, b.cur_vel);
                 let delta = pos_a - pos_b;
                 let dist = delta.length();
 
@@ -508,20 +518,14 @@ impl Ballpark {
                         if v_rel < 0.0 {
                             let total_inv_mass = (1.0 / mass_a) + (1.0 / mass_b);
                             let impulse = -(1.0 + restitution) * v_rel / total_inv_mass;
-                            if let Some(ba) = self.balls.get_mut(&id_a) {
-                                ba.velocity += normal * (impulse / mass_a);
-                            }
-                            if let Some(bb) = self.balls.get_mut(&id_b) {
-                                bb.velocity -= normal * (impulse / mass_b);
-                            }
+                            a.cur_vel += normal * (impulse / mass_a);
+                            b.cur_vel -= normal * (impulse / mass_b);
                         }
                         let total_mass = mass_a + mass_b;
-                        if let Some(ba) = self.balls.get_mut(&id_a) {
-                            ba.position += normal * (overlap * (mass_b / total_mass));
-                        }
-                        if let Some(bb) = self.balls.get_mut(&id_b) {
-                            bb.position -= normal * (overlap * (mass_a / total_mass));
-                        }
+                        a.cur_pos += normal * (overlap * (mass_b / total_mass));
+                        b.cur_pos -= normal * (overlap * (mass_a / total_mass));
+                        a.modified = true;
+                        b.modified = true;
                         bumped_dynamic_ids.insert(id_a);
                         bumped_dynamic_ids.insert(id_b);
                     } else if !is_static_a && is_static_b {
@@ -529,28 +533,22 @@ impl Ballpark {
                             continue;
                         }
                         if v_rel < 0.0 {
-                            if let Some(ba) = self.balls.get_mut(&id_a) {
-                                ba.velocity -= normal * ((1.0 + restitution) * v_rel);
-                            }
+                            a.cur_vel -= normal * ((1.0 + restitution) * v_rel);
                             collision_events.push((id_a, id_b));
                         }
-                        if let Some(ba) = self.balls.get_mut(&id_a) {
-                            ba.position += normal * overlap;
-                        }
+                        a.cur_pos += normal * overlap;
+                        a.modified = true;
                         bumped_dynamic_ids.insert(id_a);
                     } else if is_static_a && !is_static_b {
                         if overlap > 10_000.0 {
                             continue;
                         }
                         if v_rel < 0.0 {
-                            if let Some(bb) = self.balls.get_mut(&id_b) {
-                                bb.velocity += normal * ((1.0 + restitution) * v_rel);
-                            }
+                            b.cur_vel += normal * ((1.0 + restitution) * v_rel);
                             collision_events.push((id_a, id_b));
                         }
-                        if let Some(bb) = self.balls.get_mut(&id_b) {
-                            bb.position -= normal * overlap;
-                        }
+                        b.cur_pos -= normal * overlap;
+                        b.modified = true;
                         bumped_dynamic_ids.insert(id_b);
                     }
 
@@ -558,6 +556,18 @@ impl Ballpark {
                         collision_events.push((id_a, id_b));
                     }
                 }
+            }
+        }
+
+        let pending_ball_updates: Vec<(BallId, DVec3, DVec3)> = entries
+            .into_iter()
+            .filter(|e| e.modified)
+            .map(|e| (e.id, e.cur_pos, e.cur_vel))
+            .collect();
+        for (id, pos, vel) in pending_ball_updates {
+            if let Some(b) = self.balls.get_mut(&id) {
+                b.position = pos;
+                b.velocity = vel;
             }
         }
 

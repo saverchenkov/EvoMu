@@ -11,7 +11,7 @@
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity;
 use crate::services::combat_crimewatch::crimewatch_timers::faction_police_sec_threshold;
-use crate::services::combat_crimewatch::with_mut_combat_runtime;
+use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
 use eve_destiny::DamageVector;
 use eve_sde::SolarSystemId;
 use glam::DVec3;
@@ -607,7 +607,7 @@ pub async fn step_empire_navy_patrols(
         return Vec::new();
     }
 
-    let already_present = with_mut_combat_runtime(ctx, |rt| {
+    let already_present = with_combat_runtime(ctx, |rt| {
         rt.npc_entities
             .values()
             .any(|n| (n.archetype == "Navy" || n.archetype.ends_with("Navy")) && n.solar_system_id == solar_system_id)

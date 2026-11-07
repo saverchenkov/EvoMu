@@ -1381,7 +1381,9 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
 
     // 2. Campaign 1 Pirate Victory (`5 + 0` Stage-5 corrupted systems via live 60s pulses + `tick_background_cluster`):
     //    - Pirate Ambition modifier rises `0 -> 1` (requiring `6` Stage-5 systems next campaign!)
-    //    - Winner (`pir_cid`, 100% >= 45% share) gets `1,500,000 LP` with Guristas (`1000434`/`militia_lp_corp_id`) + ISK
+    //    - Winner (`pir_cid`, 100% >= 45% share) gets `1,500,000 LP` campaign payout + `71,250 LP` from capturing
+    //      the 5 lowsec warzone insurgency complexes (`22,500` Frontline + `15,000` Command + `3 * 11,250` Rearguard)
+    //      with Guristas (`1000434`/`militia_lp_corp_id`) + `150,000,000` ISK campaign payout
     //    - Loser (`emp_cid`, 100% >= 45% share) gets `0.4x` (`600,000 LP`) with State Protectorate (`1000180`) + ISK
     //    - Surrendered FOB system's FW I-Hub unlocks after `25h` (`90,000s`) for live `dogmaIM.Activate` weapon attack!
     fast_forward_secs(&ctx, FORECASTING_DURATION_SECS + 10);
@@ -1429,7 +1431,11 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
     assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.pirate_ambition_modifier[&500_010]), 1);
     let pir_lp_total: i64 = ctx.db.with_snapshot(|s| s.characters[&pir_cid].loyalty_points.values().sum::<i64>()) - pir_lp0;
     let emp_lp_gain = ctx.db.with_snapshot(|s| s.characters[&emp_cid].loyalty_points[&1_000_180]) - emp_lp0;
-    assert_eq!(pir_lp_total, INSURGENCY_MAX_PAYOUT_LP, "winner at >=45% share receives max 1,500,000 LP");
+    assert_eq!(
+        pir_lp_total,
+        INSURGENCY_MAX_PAYOUT_LP + 71_250,
+        "winner at >=45% share receives max 1,500,000 LP campaign payout + 71,250 lowsec complex completion LP"
+    );
     assert_eq!(emp_lp_gain, 600_000, "loser at >=45% share receives 0.4x (600,000 LP)");
     let pir_isk_gain = ctx.db.with_snapshot(|s| s.characters[&pir_cid].balance.to_wire_f64()) - pir_isk0;
     let emp_isk_gain = ctx.db.with_snapshot(|s| s.characters[&emp_cid].balance.to_wire_f64()) - emp_isk0;
@@ -1528,7 +1534,15 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
         s.characters.get_mut(&pir_cid).unwrap().solar_system_id = first_sys;
         s.items.get_mut(&pir_ship).unwrap().location_id = first_sys as i64;
     });
-    let _ = sh0.spawn_ball(make_ball(pir_ship, 621, first_beacon)).await;
+    let _ = sh0.remove_ball(pir_ship).await;
+    let mut pir_tank_cs = ctx.build_type_combat_state(621);
+    pir_tank_cs.shield_hp = 5_000_000.0;
+    pir_tank_cs.max_shield_hp = 5_000_000.0;
+    pir_tank_cs.armor_hp = 5_000_000.0;
+    pir_tank_cs.max_armor_hp = 5_000_000.0;
+    pir_tank_cs.structure_hp = 5_000_000.0;
+    pir_tank_cs.max_structure_hp = 5_000_000.0;
+    let _ = sh0.spawn_ball_with_combat(make_ball(pir_ship, 621, first_beacon), pir_tank_cs).await;
     for _ in 0..3 {
         sh0.step_manual(60.0).await.unwrap();
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
@@ -1569,7 +1583,14 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
             s.items.get_mut(&emp_ship).unwrap().location_id = tsys as i64;
         });
         let sh = ctx.systems.get_or_spawn(tsys);
-        let _ = sh.spawn_ball(make_ball(emp_ship, 19_722, DVec3::from_array(t_beacon))).await;
+        let mut emp_tank_cs = ctx.build_type_combat_state(19_722);
+        emp_tank_cs.shield_hp = 5_000_000.0;
+        emp_tank_cs.max_shield_hp = 5_000_000.0;
+        emp_tank_cs.armor_hp = 5_000_000.0;
+        emp_tank_cs.max_armor_hp = 5_000_000.0;
+        emp_tank_cs.structure_hp = 5_000_000.0;
+        emp_tank_cs.max_structure_hp = 5_000_000.0;
+        let _ = sh.spawn_ball_with_combat(make_ball(emp_ship, 19_722, DVec3::from_array(t_beacon)), emp_tank_cs).await;
         let pulses = if idx < 5 { 5 } else { 3 };
         for _ in 0..pulses {
             sh.step_manual(60.0).await.unwrap();
@@ -4094,11 +4115,19 @@ async fn test_e2e_skyhook_reagent_maturity_and_theft() {
         .await.expect("anchor Skyhook");
     let skyhook_id = rep.dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
 
-    // Advance 1h (inside 2h theft window) + tick -> 50 Magmatic Gas harvested, split 50/50 between Secure (25) and Surplus (25).
+    // Advance 1h (inside 2h theft window) + tick -> V24 planet-scaled Magmatic Gas harvested, split 50/50 between Secure and Surplus.
     ctx.advance_secs(3_600);
     tick_background_cluster(&ctx).await;
+    let expected_hourly = eve_server::services::quasar_sov_skyhook::planet_hourly_reagent_yield(
+        &ctx.sde,
+        Some(lava_planet),
+        Some(null_sys),
+        TYPE_MAGMATIC_GAS,
+    );
+    let expected_sec = expected_hourly / 2;
+    let expected_insec = expected_hourly - expected_sec;
     let (rtype, sec0, insec0, _) = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&skyhook_id]);
-    assert_eq!((rtype, sec0, insec0), (TYPE_MAGMATIC_GAS, 25, 25));
+    assert_eq!((rtype, sec0, insec0), (TYPE_MAGMATIC_GAS, expected_sec, expected_insec));
 
     // Hostile cruiser shoots shield <= 10% and links to steal from Surplus bay while Secure bay stays intact!
     let thief_cid = 90_000_203i64;
@@ -4132,7 +4161,7 @@ async fn test_e2e_skyhook_reagent_maturity_and_theft() {
     tick_background_cluster(&ctx).await;
 
     let (_, sec_after_theft, insec_after_theft, _) = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&skyhook_id]);
-    assert!(sec_after_theft >= 25, "Secure bay must not be stolen");
+    assert!(sec_after_theft >= expected_sec, "Secure bay must not be stolen");
     assert!(insec_after_theft < insec_before_theft, "Surplus bay must be stolen");
 
     // Advance full maturity cycle -> Surplus reagents mature into Secure bay!

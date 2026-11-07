@@ -68,9 +68,21 @@ pub fn apply_d6_migration(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+#[inline]
+fn fp_owner_note(n: &OwnerNoteRecord) -> u64 {
+    let mut h = super::fingerprints::FnvHasher::new();
+    h.write_i64(n.note_id);
+    h.write_i64(n.character_id);
+    h.write_i64(n.item_id);
+    h.write_str(&n.label);
+    h.write_str(&n.note);
+    h.write_u64(n.timestamp_unix);
+    h.0
+}
+
 pub fn compute_d6_fingerprints(snap: &WorldStateSnapshot) -> D6Fingerprints {
     D6Fingerprints {
-        owner_notes: snap.owner_notes.iter().map(|(&k, v)| (k, fp_json(v))).collect(),
+        owner_notes: snap.owner_notes.iter().map(|(&k, v)| (k, fp_owner_note(v))).collect(),
         corp_lp_balances: snap.corp_lp_balances.clone(),
         char_lp_logs: snap.char_lp_logs.iter().map(|(&k, v)| (k, fp_json(v))).collect(),
         next_alliance_id: snap.next_alliance_id,
@@ -185,7 +197,7 @@ pub fn sync_d6(
         df.owner_notes.remove(&nid);
     }
     for (&nid, note) in &snap.owner_notes {
-        let h = fp_json(note);
+        let h = fp_owner_note(note);
         if df.owner_notes.get(&nid) != Some(&h) {
             changed = true;
             tx.execute(

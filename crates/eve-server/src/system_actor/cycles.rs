@@ -1199,23 +1199,22 @@ pub(crate) fn remove_all_ship_module_cycles(
         }
     }
     if let Some(db_ref) = effective_db {
-        db_ref.with_mut_snapshot(|snap| {
-            let ship_mod_ids: Vec<i64> = snap.items.values().filter(|it| it.location_id == ship_id).map(|it| it.item_id).collect();
-            for mid in ship_mod_ids {
-                snap.module_active_states.remove(&mid);
-                snap.module_active_charges.remove(&mid);
-            }
+        let dirty = db_ref.with_snapshot(|s| {
+            (!s.module_active_states.is_empty() || !s.module_active_charges.is_empty())
+                && s.items.values().any(|it| it.location_id == ship_id && (s.module_active_states.contains(&it.item_id) || s.module_active_charges.contains_key(&it.item_id)))
         });
+        if dirty {
+            db_ref.with_mut_snapshot(|s| {
+                for it in s.items.values().filter(|it| it.location_id == ship_id) {
+                    s.module_active_states.remove(&it.item_id);
+                    s.module_active_charges.remove(&it.item_id);
+                }
+            });
+        }
     }
     if !removed_cycles.is_empty() {
-        reconcile_tackle_and_bubbles(
-            ballpark,
-            active_module_cycles,
-            base_scramble_strengths,
-            base_core_strengths,
-            effective_db,
-            if reentrant_db { None } else { deactivation_hook },
-        );
+        let hook = if reentrant_db { None } else { deactivation_hook };
+        reconcile_tackle_and_bubbles(ballpark, active_module_cycles, base_scramble_strengths, base_core_strengths, effective_db, hook);
         if !reentrant_db {
             for (removed, _) in &removed_cycles {
                 emit_cycle_deactivation(removed, ballpark, effective_db, deactivation_hook);

@@ -340,7 +340,17 @@ async fn r7_tb_07_step_concord_validates_active_non_capsule_ship_and_despawns_co
     assert!(reports_live[0].death_result.is_ok());
     let concord_ball_id = reports_live[0].concord_ball_id;
     assert!(
+        sys.get_ball_snapshot(concord_ball_id).await.unwrap().is_some(),
+        "Transient CONCORD Commander ball must remain on grid immediately after execution"
+    );
+    cw.step_concord(
+        &ctx,
+        now + 80 + crate::combat::crimewatch::CONCORD_ON_GRID_DURATION_SECS,
+        124,
+    )
+    .await;
+    assert!(
         sys.get_ball_snapshot(concord_ball_id).await.unwrap().is_none(),
-        "Transient CONCORD Commander ball must be despawned after execution"
+        "Transient CONCORD Commander ball must despawn once its on-grid execution window elapses"
     );
 }

@@ -41,6 +41,17 @@ pub fn apply_d6_batch4_migration(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn fp_str_map(map: &HashMap<String, String>) -> u64 {
+    let mut xor = (map.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    for (k, v) in map {
+        let mut h = FnvHasher::new();
+        h.write_str(k);
+        h.write_str(v);
+        xor ^= h.finish();
+    }
+    xor
+}
+
 fn fp_map<K: Serialize, V: Serialize>(map: &HashMap<K, V>) -> u64 {
     let mut xor = (map.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
     for (k, v) in map {
@@ -142,8 +153,8 @@ fn compute_blob_hashes(snap: &WorldStateSnapshot) -> HashMap<&'static str, u64> 
     m.insert("loyalty_store_offers", fp_map(&snap.loyalty_store_offers));
     m.insert("system_jump_events", fp_json(&snap.system_jump_events));
     m.insert("system_kill_events", fp_json(&snap.system_kill_events));
-    m.insert("quasar_state_blobs", fp_map(&snap.quasar_state_blobs));
-    m.insert("service_state_blobs", fp_map(&snap.service_state_blobs));
+    m.insert("quasar_state_blobs", fp_str_map(&snap.quasar_state_blobs));
+    m.insert("service_state_blobs", fp_str_map(&snap.service_state_blobs));
     m
 }
 

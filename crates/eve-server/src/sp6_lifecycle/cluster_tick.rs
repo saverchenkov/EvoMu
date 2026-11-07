@@ -1273,23 +1273,7 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
         );
     }
 
-    let mut temp_cw = crate::combat::crimewatch::CrimeWatchDirector::new();
-    if let Ok(mut cw) = ctx.crimewatch.write() {
-        for (&cid, st) in cw.states.iter_mut() {
-            if let Some((_, arrival_unix, _, _)) = st.pending_concord_arrival {
-                if now_unix >= arrival_unix {
-                    let cloned = st.clone();
-                    st.pending_concord_arrival = None;
-                    temp_cw.states.insert(cid, cloned);
-                }
-            }
-        }
-    }
-    if !temp_cw.states.is_empty() {
-        let mut seed_buf = [0u8; 8];
-        let _ = getrandom::getrandom(&mut seed_buf);
-        let _ = temp_cw.step_concord(ctx, now_unix, u64::from_le_bytes(seed_buf)).await;
-    }
+    crate::combat::crimewatch::tick_concord_responses(ctx, now_unix).await;
 
     let _ = crate::services::mining_cycle::process_mining_cycles(ctx).await;
     let _ = crate::sp6_lifecycle::step_repeating_drone_mining(ctx, now_unix).await;

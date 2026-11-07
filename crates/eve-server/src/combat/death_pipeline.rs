@@ -614,9 +614,13 @@ pub fn execute_death_pipeline_sync_inner(
                 )
             },
             |iid| {
-                let mut rng_buf = [0u8; 8];
-                let _ = getrandom::getrandom(&mut rng_buf);
-                let entropy = rng_seed.wrapping_add(u64::from_le_bytes(rng_buf));
+                let entropy = if rng_seed != 0 {
+                    rng_seed
+                } else {
+                    let mut rng_buf = [0u8; 8];
+                    let _ = getrandom::getrandom(&mut rng_buf);
+                    u64::from_le_bytes(rng_buf)
+                };
                 let mixed = (entropy ^ (iid as u64)).wrapping_mul(6364136223846793005);
                 ((mixed ^ (mixed >> 32)) >> 32) as f64 / 4294967296.0
             },

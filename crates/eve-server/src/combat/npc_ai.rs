@@ -125,6 +125,40 @@ pub fn clone_soldier_type_for_security_and_faction(
         500_020 => 574, // Asteroid Serpentis BattleCruiser / Clone Soldiers
         _ => 556,
     };
+    if sde.types.len() > 1_000 {
+        static CLONE_SOLDIER_CATALOG_BY_LEN: std::sync::OnceLock<
+            std::sync::Mutex<std::collections::HashMap<(usize, usize), Vec<(u32, u32, String)>>>,
+        > = std::sync::OnceLock::new();
+        let key = (
+            sde.types.len(),
+            (33_130u32..=33_250)
+                .filter(|id| sde.types.contains_key(id))
+                .count(),
+        );
+        let map = CLONE_SOLDIER_CATALOG_BY_LEN
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+        let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+        let catalog = guard.entry(key).or_insert_with(|| {
+            let mut rows: Vec<(u32, u32, String)> = sde
+                .types
+                .values()
+                .filter(|t| {
+                    matches!(t.group_id, 551 | 552 | 556 | 566 | 574)
+                        && t.name.contains("Clone Soldier")
+                })
+                .map(|t| (t.type_id, t.group_id, t.name.clone()))
+                .collect();
+            rows.sort_unstable_by_key(|r| r.0);
+            rows
+        });
+        if let Some(&(tid, _, _)) = catalog
+            .iter()
+            .find(|&&(_, gid, ref name)| gid == target_group_id && name.contains(tier))
+        {
+            return Some(tid);
+        }
+        return clone_soldier_type_for_security(sys_sec);
+    }
     let mut matches: Vec<u32> = sde
         .types
         .values()
@@ -458,9 +492,7 @@ impl NpcSpawnManager {
         }
 
         // In low-sec (0.1..=0.4), spawn a Clone Soldier at the first asteroid belt if not on respawn cooldown (`feat:npc.clone-soldier-spawns`).
-        if let Some(cs_type_id) =
-            clone_soldier_type_for_security_and_faction(&ctx.sde, sys_sec, reg_faction)
-        {
+        if clone_soldier_tier_for_security(sys_sec).is_some() {
             if let Some(rt_until) = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
                 rt.clone_soldier_cooldown_until.get(&sys_id).copied()
             }) {
@@ -479,16 +511,20 @@ impl NpcSpawnManager {
                     })
                 });
             if !on_cooldown {
-                let cs_ball_id = crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity(
-                    ctx,
-                    sys_id,
-                    cs_type_id,
-                    "CloneSoldier",
-                    reg_faction,
-                    belt_positions[0],
-                )
-                .await;
-                all_spawned.push(cs_ball_id);
+                if let Some(cs_type_id) =
+                    clone_soldier_type_for_security_and_faction(&ctx.sde, sys_sec, reg_faction)
+                {
+                    let cs_ball_id = crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity(
+                        ctx,
+                        sys_id,
+                        cs_type_id,
+                        "CloneSoldier",
+                        reg_faction,
+                        belt_positions[0],
+                    )
+                    .await;
+                    all_spawned.push(cs_ball_id);
+                }
             }
 
             // Low-sec Mordu's Legion Special Warfare Unit belt spawn (SDE groups 1285..=1287, faction 500018)
@@ -1094,14 +1130,20 @@ pub(crate) fn handle_npc_ai_ball_destructions(
     }
     let now_unix = ctx.now_unix();
     for (attacker_npc_id, target_id, dead_ball) in destructions {
-        let removed_drone = crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-            let d = rt.active_drones_in_space.remove(&target_id);
-            if d.is_some() {
-                rt.active_drone_miners.remove(&target_id);
-                rt.drone_next_ready_unix.remove(&target_id);
-            }
-            d
-        });
+        let removed_drone = if crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+            rt.active_drones_in_space.contains_key(&target_id)
+        }) {
+            crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                let d = rt.active_drones_in_space.remove(&target_id);
+                if d.is_some() {
+                    rt.active_drone_miners.remove(&target_id);
+                    rt.drone_next_ready_unix.remove(&target_id);
+                }
+                d
+            })
+        } else {
+            None
+        };
         if let Some(d) = removed_drone {
             ctx.db.with_mut_snapshot(|snap| {
                 snap.items.remove(&d.drone_item_id);
