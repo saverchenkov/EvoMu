@@ -778,6 +778,12 @@ pub fn handle_clone_jump(
                 0,
                 timer_reason,
             );
+            ctx.invalidate_bound_objects_for_session_transition(
+                char_id,
+                dest_sys_id,
+                session.station_id.or(session.structure_id),
+                timer_reason,
+            );
             if timer_reason == "clone_jump" {
                 crate::services::map_service::record_solar_system_visit(ctx, char_id, dest_sys_id);
             }

@@ -909,10 +909,10 @@ impl ServerContext {
         if let Some(res) = services::industry_pi::handle(self, session, effective_service, method, args, kwargs, bound_entry.as_ref()) {
             return res;
         }
-        if let Some(res) = Box::pin(services::agents_missions::handle(self, session, effective_service, method, args, kwargs)).await {
+        if let Some(res) = Box::pin(services::agents_missions::handle_with_bound(self, session, bound_entry.as_ref(), effective_service, method, args, kwargs)).await {
             return res;
         }
-        if let Some(res) = Box::pin(services::fleet_social::handle(self, session, effective_service, method, args, kwargs)).await {
+        if let Some(res) = Box::pin(services::fleet_social::handle_with_bound(self, session, bound_entry.as_ref(), effective_service, method, args, kwargs)).await {
             return res;
         }
         if let Some(res) = Box::pin(services::social_corp_fleet::handle(

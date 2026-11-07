@@ -1033,15 +1033,27 @@ pub(crate) fn handle_kick_out_members(
                 &released_controllers,
             );
             for &(tid, npc_corp, old_role, old_alliance) in &removed_members {
+                let (act_ship, m_sys, m_dock) = ctx.db.with_snapshot(|s| {
+                    s.characters
+                        .get(&tid)
+                        .map(|c| (c.active_ship_id, c.solar_system_id, c.station_id.or(c.structure_id)))
+                        .unwrap_or((0, session.solar_system_id.unwrap_or(30_000_142), session.station_id.or(session.structure_id)))
+                });
                 if tid == char_id {
                     session.corporation_id = Some(npc_corp);
                     session.alliance_id = None;
                     session.corp_role = 0;
-                    if let Some(act_ship) = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id)) {
-                        if act_ship != 0 {
-                            session.ship_id = Some(act_ship);
-                        }
+                    if act_ship != 0 {
+                        session.ship_id = Some(act_ship);
                     }
+                }
+                if corp_id != npc_corp {
+                    ctx.invalidate_bound_objects_for_session_transition(
+                        tid,
+                        m_sys,
+                        m_dock,
+                        "corp_change",
+                    );
                 }
                 emit_member_removed_notifications(
                     ctx,
@@ -1107,6 +1119,20 @@ pub fn execute_pending_auto_kicks_for_docked_char(
                     session.ship_id = Some(act_ship);
                 }
             }
+        }
+        if corp_id != npc_corp {
+            let (c_sys, c_dock) = ctx.db.with_snapshot(|s| {
+                s.characters
+                    .get(&char_id)
+                    .map(|c| (c.solar_system_id, c.station_id.or(c.structure_id)))
+                    .unwrap_or((30_000_142, None))
+            });
+            ctx.invalidate_bound_objects_for_session_transition(
+                char_id,
+                c_sys,
+                c_dock,
+                "corp_change",
+            );
         }
         emit_member_removed_notifications(
             ctx,

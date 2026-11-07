@@ -149,6 +149,12 @@ pub(crate) fn handle_self_destruct_clone(
             session.constellation_id = Some(ch.constellation_id);
             session.region_id = Some(ch.region_id);
             session.ship_id = Some(capsule.item_id);
+            ctx.invalidate_bound_objects_for_session_transition(
+                char_id,
+                ch.solar_system_id,
+                ch.station_id.or(ch.structure_id),
+                "self_destruct_clone",
+            );
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnCloneDestruction",

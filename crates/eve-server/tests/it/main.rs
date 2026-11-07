@@ -521,3 +521,4 @@ mod r8_shard_b_biomass_esi_market;
 mod r8_shard_b_combat_tactical_warp;
 mod cosmetics_skinr_redemption_and_logo_persistence;
 mod navigation_warp_tunnel_immobility;
+mod binding_checkout_and_starter_plex_security;

@@ -14,7 +14,18 @@ pub fn handle_pi_orbital_registry(
     kwargs: &HashMap<String, PyRep>,
     bound_entry: Option<&crate::router::BoundObjectEntry>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let bound_planet = bound_entry.and_then(|b| (b.service == "planetOrbitalRegistryBroker" || b.service == "planetMgr").then_some(b.object_id));
+    let bound_planet = bound_entry.and_then(|b| {
+        if b.service == "planetMgr" {
+            Some(b.object_id)
+        } else if b.service == "planetOrbitalRegistryBroker" {
+            let is_sys = u32::try_from(b.object_id)
+                .ok()
+                .is_some_and(|id| ctx.sde.solar_systems.contains_key(&id));
+            (!is_sys).then_some(b.object_id)
+        } else {
+            None
+        }
+    });
 
     match (service, method) {
         // Planetary Customs Office & Skyhook Registry Broker (`planetOrbitalRegistryBroker`, `feat:pi.customs-office`, `feat:pi.poco-settings`, `feat:pi.skyhook-pi`)
@@ -23,7 +34,7 @@ pub fn handle_pi_orbital_registry(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(raw_id) = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64())) else {
+            let Some(raw_id) = args.first().and_then(|a| a.as_i64()).or(bound_planet) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "GetTaxRate requires planetID".into(),
@@ -43,7 +54,7 @@ pub fn handle_pi_orbital_registry(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(raw_id) = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64())) else {
+            let Some(raw_id) = args.first().and_then(|a| a.as_i64()).or(bound_planet) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "GetSettingsInfo requires planetID".into(),
@@ -88,7 +99,7 @@ pub fn handle_pi_orbital_registry(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(raw_id) = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64())) else {
+            let Some(raw_id) = args.first().and_then(|a| a.as_i64()).or(bound_planet) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidOrbitalID".into(),
                     message: "UpdateSettings requires orbitalID".into(),
@@ -258,7 +269,7 @@ pub fn handle_pi_orbital_registry(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(planet_id) = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64())) else {
+            let Some(planet_id) = args.first().and_then(|a| a.as_i64()).or(bound_planet) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "RevertOrbitalsToInterBus requires planetID".into(),

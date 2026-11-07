@@ -1128,10 +1128,14 @@ pub fn execute_death_pipeline_sync_inner(
         );
     }
 
-    let new_sys_id = ctx
+    let (new_sys_id, new_dock_id) = ctx
         .db
-        .with_snapshot(|s| s.characters.get(&victim_char_id).map(|c| c.solar_system_id))
-        .unwrap_or(sys_id);
+        .with_snapshot(|s| {
+            s.characters
+                .get(&victim_char_id)
+                .map(|c| (c.solar_system_id, c.station_id.or(c.structure_id)))
+        })
+        .unwrap_or((sys_id, None));
     let death_reason = if is_pod { "podding" } else { "ship_loss" };
     crate::services::space_destiny::record_session_change_timer(
         ctx,
@@ -1139,6 +1143,12 @@ pub fn execute_death_pipeline_sync_inner(
         now_unix,
         new_sys_id,
         0,
+        death_reason,
+    );
+    ctx.invalidate_bound_objects_for_session_transition(
+        victim_char_id,
+        new_sys_id,
+        new_dock_id,
         death_reason,
     );
 

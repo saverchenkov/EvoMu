@@ -247,6 +247,19 @@ fn moniker_bind_and_verify_authorization_matrix_across_all_services() {
     }
 
     // 7) Context-authorized vs unauthorized object bindings across corp/alliance/fleet/planet/trade/pos/structure services
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.wars.insert(
+            700_000_001,
+            eve_db::WarRecord {
+                war_id: 700_000_001,
+                aggressor_corp_id: 98_000_111,
+                defender_corp_id: 98_000_222,
+                mutual: false,
+                started_unix: 1_800_000_000,
+                active: true,
+            },
+        );
+    });
     sess.corporation_id = Some(98_000_111);
     sess.alliance_id = Some(99_000_111);
     sess.fleet_id = Some(77_000_111);
@@ -258,7 +271,7 @@ fn moniker_bind_and_verify_authorization_matrix_across_all_services() {
         ("allianceRegistry", 99_000_111_i64, 99_000_222_i64),
         ("fleetObjectHandler", 77_000_111_i64, 77_000_222_i64),
         ("warRegistry", 98_000_111_i64, 98_000_222_i64),
-        ("warStatisticMgr", 99_000_111_i64, 99_000_222_i64),
+        ("warStatisticMgr", 700_000_001_i64, 700_000_999_i64),
         ("voucher", char_id, char_id + 1),
         ("trademgr", 10_000_002_i64, 999_999_i64),
         ("devIndexManager", i64::from(sys_id), i64::from(other_sys)),
@@ -595,4 +608,67 @@ fn alpha_omega_skill_prerequisites_and_projected_ewar_signature_radius_math() {
         vec![900_001]
     );
     assert_eq!(ctx.effective_target_signature_radius(900_001, 100.0), 100.0);
+}
+
+#[test]
+fn binding_auth_and_session_transitions_enforce_service_rules() {
+    let ctx = ServerContext::new();
+    let mut sess = SessionState::new(42);
+    sess.user_id = Some(1);
+    sess.character_id = Some(90_000_001);
+    sess.corporation_id = Some(98_000_001);
+    sess.solar_system_id = Some(30_000_142);
+    sess.station_id = None;
+    sess.structure_id = None;
+
+    assert!(ctx.bind_object(&sess, "tourneyMgr", 0).is_err());
+    assert!(ctx.bind_object(&sess, "tourneyMgr", 1).is_ok());
+
+    assert!(ctx.bind_object(&sess, "planetOrbitalRegistryBroker", 99_999_999).is_err());
+    let pi_sys_bind = ctx
+        .bind_object(&sess, "planetOrbitalRegistryBroker", 30_000_142)
+        .expect("valid system");
+
+    // Undocked character cannot bind officeManager
+    assert!(ctx.bind_object(&sess, "officeManager", 98_000_001).is_err());
+    sess.station_id = Some(60_003_760);
+    let office_bind = ctx
+        .bind_object(&sess, "officeManager", 98_000_001)
+        .expect("docked office bind");
+
+    // Seeded vs unseeded warStatisticMgr
+    assert!(ctx.bind_object(&sess, "warStatisticMgr", 888_888).is_err());
+    ctx.db.with_mut_snapshot(|s| {
+        s.wars.insert(
+            700_000_002,
+            eve_db::WarRecord {
+                war_id: 700_000_002,
+                aggressor_corp_id: 98_000_001,
+                defender_corp_id: 98_000_002,
+                mutual: false,
+                started_unix: 1_800_000_000,
+                active: true,
+            },
+        );
+    });
+    assert!(ctx.bind_object(&sess, "warStatisticMgr", 700_000_002).is_ok());
+
+    assert!(ctx.bind_object(&sess, "entity", 0).is_err());
+    let entity_bind = ctx.bind_object(&sess, "entity", 30_000_142).expect("entity bind");
+
+    // Jumping to another solar system evicts system-scoped entity binding while valid SDE system stays bound.
+    sess.solar_system_id = Some(30_000_144);
+    ctx.invalidate_bound_objects_for_session_transition(90_000_001, 30_000_144, None, "stargate_jump");
+    assert!(ctx.verify_bound_object(&sess, entity_bind).is_err());
+    assert!(ctx.verify_bound_object(&sess, pi_sys_bind).is_ok());
+
+    let entity_bind_2 = ctx.bind_object(&sess, "entity", 30_000_144).expect("entity bind 2");
+
+    // Corporation change evicts officeManager
+    ctx.invalidate_bound_objects_for_session_transition(90_000_001, 30_000_144, Some(60_003_760), "corp_change");
+    assert!(ctx.verify_bound_object(&sess, office_bind).is_err());
+
+    // Ship loss to clone station evicts space entity binding
+    ctx.invalidate_bound_objects_for_session_transition(90_000_001, 30_000_142, Some(60_003_760), "ship_loss");
+    assert!(ctx.verify_bound_object(&sess, entity_bind_2).is_err());
 }

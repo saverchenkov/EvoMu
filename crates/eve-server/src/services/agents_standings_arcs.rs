@@ -865,12 +865,24 @@ pub async fn handle_extended(
     args: &[PyRep],
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    handle_extended_with_bound(ctx, session, None, service, method, args, _kwargs).await
+}
+
+pub(super) async fn handle_extended_with_bound(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    bound_entry: Option<&crate::router::BoundObjectEntry>,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    _kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("agentMgr", "agentID") => handle_agent_mgr_attr(ctx, session, service, "agentID", args),
-        ("agentMgr", "corporationID") => handle_agent_mgr_attr(ctx, session, service, "corporationID", args),
-        ("agentMgr", "factionID") => handle_agent_mgr_attr(ctx, session, service, "factionID", args),
-        ("agentMgr", "solarsystemID") => handle_agent_mgr_attr(ctx, session, service, "solarsystemID", args),
-        ("agentMgr", "stationID") => handle_agent_mgr_attr(ctx, session, service, "stationID", args),
+        ("agentMgr", "agentID") => handle_agent_mgr_attr(ctx, session, bound_entry, service, "agentID", args),
+        ("agentMgr", "corporationID") => handle_agent_mgr_attr(ctx, session, bound_entry, service, "corporationID", args),
+        ("agentMgr", "factionID") => handle_agent_mgr_attr(ctx, session, bound_entry, service, "factionID", args),
+        ("agentMgr", "solarsystemID") => handle_agent_mgr_attr(ctx, session, bound_entry, service, "solarsystemID", args),
+        ("agentMgr", "stationID") => handle_agent_mgr_attr(ctx, session, bound_entry, service, "stationID", args),
 
         ("agentMgr", "GetCompletedCareerAgentIDs") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
@@ -893,8 +905,12 @@ pub async fn handle_extended(
 
         ("agentMgr", "GetPlausibleMissionIDs") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let bound_aid = bound_entry
+                .filter(|b| b.service == "agentMgr" && b.object_id > 0)
+                .map(|b| b.object_id);
             let explicit_aid = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0);
-            let target_aid = explicit_aid
+            let target_aid = bound_aid
+                .or(explicit_aid)
                 .or_else(|| {
                     ctx.bound_objects.read().ok().and_then(|map| {
                         map.values()
@@ -1278,18 +1294,23 @@ pub async fn handle_extended(
 fn handle_agent_mgr_attr(
     ctx: &ServerContext,
     session: &SessionState,
+    bound_entry: Option<&crate::router::BoundObjectEntry>,
     service: &str,
     method: &str,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let agent_id = match args.first().and_then(|a| a.as_i64()).or_else(|| {
-        ctx.bound_objects.read().ok().and_then(|map| {
-            map.values()
-                .filter(|b| b.session_id == session.session_id && b.service == service && b.object_id > 0)
-                .max_by_key(|b| b.bound_id)
-                .map(|b| b.object_id)
-        })
-    }) {
+    let agent_id = match bound_entry
+        .filter(|b| b.service == service && b.object_id > 0)
+        .map(|b| b.object_id)
+        .or_else(|| args.first().and_then(|a| a.as_i64()))
+        .or_else(|| {
+            ctx.bound_objects.read().ok().and_then(|map| {
+                map.values()
+                    .filter(|b| b.session_id == session.session_id && b.service == service && b.object_id > 0)
+                    .max_by_key(|b| b.bound_id)
+                    .map(|b| b.object_id)
+            })
+        }) {
         Some(id) => id,
         None => {
             return Some(Err(BridgeRpcError {

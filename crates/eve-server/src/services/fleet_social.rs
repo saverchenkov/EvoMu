@@ -182,11 +182,33 @@ pub(super) fn parse_dest_id(args: &[PyRep], kwargs: &HashMap<String, PyRep>) -> 
         .or_else(|| kwargs.get("destinationID").and_then(|a| a.as_i64()))
 }
 
+fn resolve_office_station_id(
+    ctx: &ServerContext,
+    args: &[PyRep],
+    bound_entry: Option<&crate::router::BoundObjectEntry>,
+    default_station_id: i64,
+) -> i64 {
+    if let Some(oid) = bound_entry
+        .filter(|b| b.service == "officeManager" && b.object_id > 0)
+        .map(|b| b.object_id)
+    {
+        let is_station_or_struct = ctx.sde.stations.contains_key(&oid)
+            || ctx.db.with_snapshot(|s| s.structures.contains_key(&oid));
+        if is_station_or_struct {
+            return oid;
+        }
+    }
+    args.first()
+        .and_then(|a| a.as_i64())
+        .unwrap_or(default_station_id)
+}
+
 fn handle_office_manager(
     ctx: &ServerContext,
     session: &mut SessionState,
     method: &str,
     args: &[PyRep],
+    bound_entry: Option<&crate::router::BoundObjectEntry>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let (_, char_id) = match ServerContext::require_character(session) {
         Ok(v) => v,
@@ -206,7 +228,7 @@ fn handle_office_manager(
         "Bind" | "SetSessionCheck" | "PrimeOfficeItem" => Some(Ok(PyRep::None)),
 
         "GetPriceQuote" => {
-            let station_id = args.first().and_then(|a| a.as_i64()).unwrap_or(default_station_id);
+            let station_id = resolve_office_station_id(ctx, args, bound_entry, default_station_id);
             let occupied = ctx.db.with_snapshot(|snap| {
                 snap.items.values().filter(|i| i.location_id == station_id && i.type_id == 27).count()
             });
@@ -215,7 +237,7 @@ fn handle_office_manager(
         }
 
         "RentOffice" => {
-            let station_id = args.first().and_then(|a| a.as_i64()).unwrap_or(default_station_id);
+            let station_id = resolve_office_station_id(ctx, args, bound_entry, default_station_id);
             let is_docked_here = session.station_id == Some(station_id)
                 || session.structure_id == Some(station_id);
             if !is_docked_here {
@@ -355,10 +377,7 @@ fn handle_office_manager(
         }
 
         "GetMyCorporationsOffice" => {
-            let station_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .unwrap_or(default_station_id);
+            let station_id = resolve_office_station_id(ctx, args, bound_entry, default_station_id);
 
             let found = ctx.db.with_snapshot(|snap| {
                 snap.items.values().find_map(|i| {
@@ -406,10 +425,7 @@ fn handle_office_manager(
         }
 
         "GetCorporationsWithOffices" => {
-            let station_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .unwrap_or(default_station_id);
+            let station_id = resolve_office_station_id(ctx, args, bound_entry, default_station_id);
 
             let rows = ctx.db.with_snapshot(|snap| {
                 snap.items
@@ -432,10 +448,7 @@ fn handle_office_manager(
         }
 
         "GetEmptyOfficeCount" => {
-            let station_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .unwrap_or(default_station_id);
+            let station_id = resolve_office_station_id(ctx, args, bound_entry, default_station_id);
 
             let occupied = ctx.db.with_snapshot(|snap| {
                 snap.items
@@ -448,10 +461,7 @@ fn handle_office_manager(
         }
 
         "UnrentOffice" => {
-            let station_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .unwrap_or(default_station_id);
+            let station_id = resolve_office_station_id(ctx, args, bound_entry, default_station_id);
             let (is_ceo, roles) = get_effective_corp_roles(ctx, corp_id, char_id);
             let effective_roles = session.corp_role | roles;
             if !is_ceo
@@ -543,8 +553,20 @@ pub async fn handle(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    handle_with_bound(ctx, session, None, service, method, args, kwargs).await
+}
+
+pub async fn handle_with_bound(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    bound_entry: Option<&crate::router::BoundObjectEntry>,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
     if service == "officeManager" {
-        if let Some(res) = handle_office_manager(ctx, session, method, args) {
+        if let Some(res) = handle_office_manager(ctx, session, method, args, bound_entry) {
             return Some(res);
         }
     }

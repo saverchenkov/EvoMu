@@ -348,6 +348,7 @@ pub struct PublicGatewayRouter {
     pub next_notice_seq: AtomicU64,
     pub pending_notices: Arc<RwLock<Vec<(NoticeScope, GoogleAny)>>>,
     pub macho_notify_sink: Arc<RwLock<Option<MachoNotifySink>>>,
+    pub free_fast_checkout_plex: Arc<std::sync::atomic::AtomicBool>,
     pub progression: Arc<crate::services::quasar_progression::ProgressionManagers>,
     pub chat_moderation: Arc<crate::services::quasar_social_chat::ChatModerationState>,
 }
@@ -378,6 +379,7 @@ impl PublicGatewayRouter {
             next_notice_seq: AtomicU64::new(1),
             pending_notices: Arc::new(RwLock::new(Vec::new())),
             macho_notify_sink: Arc::new(RwLock::new(None)),
+            free_fast_checkout_plex: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         router.register_builtin_core_handlers(Arc::clone(&db), Arc::clone(&sde));
         crate::services::quasar_social::register_social_services(&router, Arc::clone(&db));

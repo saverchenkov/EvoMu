@@ -993,11 +993,20 @@ pub(super) fn handle_corps(
                 Ok((corp_id, applicant_id, old_corp_id, status_str, app_msg, app_ts, welcome_mail_id, released)) => {
                     crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
                     if status_str == "Accepted" {
-                        let (old_ally, new_ally, old_role) = ctx.db.with_snapshot(|s| {
+                        let fallback_sys = session.solar_system_id.unwrap_or(30_000_142);
+                        let fallback_dock = session.station_id.or(session.structure_id);
+                        let (old_ally, new_ally, old_role, app_sys, app_dock) = ctx.db.with_snapshot(|s| {
+                            let (sys_id, dock_id) = s
+                                .characters
+                                .get(&applicant_id)
+                                .map(|c| (c.solar_system_id, c.station_id.or(c.structure_id)))
+                                .unwrap_or((fallback_sys, fallback_dock));
                             (
                                 s.corporations.get(&old_corp_id).and_then(|c| c.alliance_id),
                                 s.corporations.get(&corp_id).and_then(|c| c.alliance_id),
                                 s.corporations.get(&old_corp_id).and_then(|c| c.member_roles.get(&applicant_id).copied()).unwrap_or(0),
+                                sys_id,
+                                dock_id,
                             )
                         });
                         if char_id == applicant_id {
@@ -1009,6 +1018,14 @@ pub(super) fn handle_corps(
                                     session.ship_id = Some(act_ship);
                                 }
                             }
+                        }
+                        if old_corp_id != corp_id {
+                            ctx.invalidate_bound_objects_for_session_transition(
+                                applicant_id,
+                                app_sys,
+                                app_dock,
+                                "corp_change",
+                            );
                         }
                         super::fleet_social_persistence::with_social_state(ctx, |s| {
                             s.forced_session_corp_sync.insert(applicant_id, (corp_id, new_ally, 0));

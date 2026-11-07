@@ -139,6 +139,12 @@ pub fn expire_user_omega_license(
             .unwrap_or_else(default_identity_store);
 
         st.omega_subscriptions.insert(user_id, 0);
+        if let Some(exp_map) = st.user_entitlement_expiries.get_mut(&user_id) {
+            exp_map.insert("omega".to_string(), 0);
+        }
+        if let Some(ent_list) = st.user_entitlements.get_mut(&user_id) {
+            ent_list.retain(|e| !e.eq_ignore_ascii_case("omega"));
+        }
 
         if let Ok(json) = serde_json::to_string(&st) {
             snap.owner_notes.insert(
@@ -152,6 +158,25 @@ pub fn expire_user_omega_license(
                     timestamp_unix: 0,
                 },
             );
+        }
+
+        if let Some(raw_acct) = snap
+            .item_custom_names
+            .get(&crate::services::account_services::ACCOUNT_SERVICES_STORE_KEY)
+        {
+            if let Ok(mut acct_store) = serde_json::from_str::<
+                crate::services::account_services::AccountServicesStore,
+            >(raw_acct)
+            {
+                if acct_store.subscription_expiry.insert(user_id, 0).is_some() {
+                    if let Ok(acct_json) = serde_json::to_string(&acct_store) {
+                        snap.item_custom_names.insert(
+                            crate::services::account_services::ACCOUNT_SERVICES_STORE_KEY,
+                            acct_json,
+                        );
+                    }
+                }
+            }
         }
 
         for ch in snap.characters.values_mut() {

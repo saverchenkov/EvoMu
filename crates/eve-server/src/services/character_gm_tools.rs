@@ -344,13 +344,11 @@ pub fn handle_char_unbound(
                                 });
                             }
                         }
-                        if crate::starter_characters::should_grant_default_starter_plex() {
+                        if crate::starter_characters::should_grant_default_starter_plex()
+                            && snap.characters.values().filter(|c| c.user_id == user_id).count() <= 1
+                        {
                             crate::starter_characters::grant_starter_plex_in_snapshot(
-                                snap,
-                                user_id,
-                                ch.character_id,
-                                ctx.feature_flags.starter_plex_balance,
-                                now_unix,
+                                snap, user_id, ch.character_id, ctx.feature_flags.starter_plex_balance, now_unix,
                             );
                         }
                     });

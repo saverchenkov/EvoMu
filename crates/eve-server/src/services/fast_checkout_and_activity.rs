@@ -171,13 +171,11 @@ fn default_free_plex_pack_offers() -> Vec<FastCheckoutOfferRecord> {
 }
 
 fn load_fast_checkout_offers_for_ctx(
-    ctx: &ServerContext,
+    _ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
 ) -> Vec<FastCheckoutOfferRecord> {
     let catalog_offers = load_catalog_plex_offers(snap);
-    let need_default_packs = catalog_offers.is_empty()
-        || (ctx.feature_flags.free_fast_checkout_plex
-            && !catalog_offers.iter().any(|o| o.plex_amount > 0));
+    let need_default_packs = !catalog_offers.iter().any(|o| o.plex_amount > 0);
     let mut offers = Vec::new();
     if need_default_packs {
         offers.extend(default_free_plex_pack_offers());
@@ -1067,102 +1065,113 @@ fn handle_buy_offer(
         });
     }
 
+    if offer.price_plex < 0 {
+        return Err(BridgeRpcError {
+            code: "InvalidOffer".into(),
+            message: format!("Offer {offer_id} has invalid negative PLEX price"),
+        });
+    }
+
     let total_plex = offer
         .plex_amount
         .checked_mul(quantity)
+        .filter(|&v| v >= 0)
         .ok_or_else(|| BridgeRpcError {
             code: "ArithmeticOverflow".into(),
             message: "Total PLEX quantity overflows i64".into(),
         })?;
-
-    // User Balance check:
-    if offer.price_plex > 0 {
-        let total_cost_plex = offer.price_plex.checked_mul(quantity).ok_or_else(|| BridgeRpcError {
+    let total_cost_plex = offer
+        .price_plex
+        .checked_mul(quantity)
+        .filter(|&v| v >= 0)
+        .ok_or_else(|| BridgeRpcError {
             code: "ArithmeticOverflow".into(),
             message: "Total PLEX price overflows i64".into(),
         })?;
-        let cur_plex = ctx.db.with_snapshot(|snap| {
-            active_char_id
-                .map(|cid| snap.plex_vault_balance(cid))
-                .or_else(|| snap.account_plex_vault.get(&user_id).copied())
-                .unwrap_or(0)
-        });
-        if cur_plex < total_cost_plex {
-            return Err(BridgeRpcError {
-                code: "UserError".into(),
-                message: format!("UserError: Insufficient balance: need {total_cost_plex} PLEX, have {cur_plex}"),
-            });
-        }
-    }
 
     let now_unix = ctx.now_unix();
-    let unit_cents = if free_plex_mode {
-        0
+    let unit_cents = if free_plex_mode || offer.price_plex > 0 {
+        0_u32
     } else {
         (offer.price_usd * 100.0).round().max(0.0) as u32
     };
-    let amount_in_cents = unit_cents.saturating_mul(quantity.min(i64::from(u32::MAX)) as u32);
-    let (tx_id, rem_plex, delivered_items_count) = ctx.db.try_with_mut_snapshot(|snap| {
+    let amount_in_cents = u32::try_from(quantity)
+        .ok()
+        .and_then(|q| unit_cents.checked_mul(q))
+        .ok_or_else(|| BridgeRpcError {
+            code: "ArithmeticOverflow".into(),
+            message: "Payment amount overflows u32".into(),
+        })?;
+    if !free_plex_mode && offer.price_plex <= 0 && amount_in_cents == 0 {
+        return Err(BridgeRpcError {
+            code: "InvalidOffer".into(),
+            message: format!("Offer {offer_id} has no valid price"),
+        });
+    }
+
+    let (tx_id, rem_plex, delivered_items_count, omega_notice) = ctx.db.try_with_mut_snapshot(|snap| {
         if amount_in_cents > 0 {
-            let tokens: Vec<crate::services::quasar_payment_store_types::PaymentTokenRecord> = snap
+            let mut tokens: Vec<crate::services::quasar_payment_store_types::PaymentTokenRecord> = snap
                 .service_state_blobs
                 .get("payment_tokens")
                 .and_then(|json| serde_json::from_str(json).ok())
                 .unwrap_or_default();
-            if !tokens
-                .iter()
-                .any(|t| t.user_id == user_id && t.is_quick_pay && !t.consumed)
-            {
+            let Some(token) = tokens
+                .iter_mut()
+                .find(|t| t.user_id == user_id && t.is_quick_pay && !t.consumed)
+            else {
                 return Err(BridgeRpcError {
                     code: "PaymentTokenRequired".into(),
                     message: "No active quick-pay payment token for user".into(),
                 });
+            };
+            token.consumed = true;
+            if let Ok(serialized_tokens) = serde_json::to_string(&tokens) {
+                snap.service_state_blobs
+                    .insert("payment_tokens".to_string(), serialized_tokens);
             }
         }
 
-        let mut cur_rem = active_char_id
-            .map(|cid| snap.plex_vault_balance(cid))
-            .or_else(|| snap.account_plex_vault.get(&user_id).copied())
-            .unwrap_or(0);
-        if offer.price_plex > 0 {
-            let total_cost_plex = offer.price_plex.checked_mul(quantity).ok_or_else(|| BridgeRpcError {
-                code: "ArithmeticOverflow".into(),
-                message: "Total PLEX price overflows i64".into(),
-            })?;
-            cur_rem = active_char_id
-                .and_then(|cid| snap.adjust_plex_vault(cid, -total_cost_plex))
-                .or_else(|| {
-                    let cur = snap.account_plex_vault.get(&user_id).copied().unwrap_or(0);
-                    let next = cur.checked_sub(total_cost_plex)?;
-                    snap.account_plex_vault.insert(user_id, next);
-                    Some(next)
-                })
+        let vault_uid = active_char_id
+            .and_then(|cid| snap.account_of_character(cid))
+            .unwrap_or(user_id);
+        let mut cur_rem = snap.account_plex_vault.get(&vault_uid).copied().unwrap_or(0);
+        if total_cost_plex > 0 {
+            let next = cur_rem
+                .checked_sub(total_cost_plex)
+                .filter(|&v| v >= 0)
                 .ok_or_else(|| BridgeRpcError {
                     code: "UserError".into(),
-                    message: "UserError: Insufficient PLEX balance in vault".into(),
+                    message: format!(
+                        "UserError: Insufficient balance: need {total_cost_plex} PLEX, have {cur_rem}"
+                    ),
                 })?;
+            snap.account_plex_vault.insert(vault_uid, next);
+            cur_rem = next;
         }
 
         if total_plex > 0 {
-            cur_rem = snap
-                .adjust_plex_vault(active_char_id.unwrap_or(user_id as i64), total_plex)
-                .or_else(|| {
-                    let cur = snap.account_plex_vault.get(&user_id).copied().unwrap_or(0);
-                    let next = cur.checked_add(total_plex)?;
-                    snap.account_plex_vault.insert(user_id, next);
-                    Some(next)
-                })
+            let next = cur_rem
+                .checked_add(total_plex)
+                .filter(|&v| v >= 0)
                 .ok_or_else(|| BridgeRpcError {
                     code: "ArithmeticOverflow".into(),
                     message: "Account PLEX vault overflows i64".into(),
                 })?;
+            snap.account_plex_vault.insert(vault_uid, next);
+            cur_rem = next;
         }
 
         snap.next_entity_id += 1;
         let tid = snap.next_entity_id as u64;
 
-        if offer.price_plex > 0 || total_plex > 0 {
-            let delta = if total_plex > 0 { total_plex } else { -offer.price_plex * quantity };
+        if total_cost_plex > 0 || total_plex > 0 {
+            let delta = total_plex
+                .checked_sub(total_cost_plex)
+                .ok_or_else(|| BridgeRpcError {
+                    code: "ArithmeticOverflow".into(),
+                    message: "Net PLEX delta overflows i64".into(),
+                })?;
             crate::services::quasar_payment_store::record_plex_transaction(
                 snap,
                 tid,
@@ -1217,11 +1226,21 @@ fn handle_buy_offer(
             }
         }
 
-        if offer.category_id == 1 {
-            if let Some(ch) = snap.characters.get_mut(&char_id) {
-                ch.clone_grade = 2;
-            }
-        }
+        let omega_notice = if offer.category_id == 1 {
+            let duration_secs = u64::try_from(quantity)
+                .unwrap_or(1)
+                .saturating_mul(30 * 86_400);
+            let (_, notice) =
+                crate::services::quasar_auth_user::activate_user_omega_license_in_snapshot(
+                    snap,
+                    user_id,
+                    duration_secs,
+                    now_unix,
+                );
+            Some(notice)
+        } else {
+            None
+        };
 
         if amount_in_cents > 0 {
             let mut receipts: Vec<crate::services::quasar_payment_store_types::PaymentReceiptRecord> =
@@ -1245,8 +1264,19 @@ fn handle_buy_offer(
             }
         }
 
-        Ok::<_, BridgeRpcError>((tid, cur_rem, delivered_count))
+        Ok::<_, BridgeRpcError>((tid, cur_rem, delivered_count, omega_notice))
     })?;
+
+    if let Some(notice) = omega_notice {
+        ctx.quasar_gateway
+            .pending_notices
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((
+                crate::quasar_gateway::NoticeScope::User(user_id as i32),
+                notice,
+            ));
+    }
 
     if total_plex > 0 {
         crate::services::quasar_payment_store::emit_balance_changed_notice(

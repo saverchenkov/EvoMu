@@ -322,6 +322,24 @@ pub fn resolve_target_agent_id(
     args: &[PyRep],
     _kwargs: &HashMap<String, PyRep>,
 ) -> (i64, bool) {
+    resolve_target_agent_id_with_bound(ctx, session, None, char_id, sys_id, args, _kwargs)
+}
+
+pub fn resolve_target_agent_id_with_bound(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&crate::router::BoundObjectEntry>,
+    char_id: i64,
+    sys_id: u32,
+    args: &[PyRep],
+    _kwargs: &HashMap<String, PyRep>,
+) -> (i64, bool) {
+    if let Some(bound_agent) = bound_entry
+        .filter(|b| b.service == "agentMgr" && b.object_id > 0)
+        .map(|b| b.object_id)
+    {
+        return (bound_agent, true);
+    }
     if let Some(first_val) = args.first().and_then(|a| a.as_i64()) {
         if ctx.sde.agents.contains_key(&first_val) {
             return (first_val, true);

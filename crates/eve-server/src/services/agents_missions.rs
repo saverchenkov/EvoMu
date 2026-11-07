@@ -42,8 +42,28 @@ pub async fn handle(
     args: &[PyRep],
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    if let Some(res) =
-        agents_standings_arcs::handle_extended(ctx, session, service, method, args, _kwargs).await
+    handle_with_bound(ctx, session, None, service, method, args, _kwargs).await
+}
+
+pub async fn handle_with_bound(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    bound_entry: Option<&crate::router::BoundObjectEntry>,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    _kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if let Some(res) = agents_standings_arcs::handle_extended_with_bound(
+        ctx,
+        session,
+        bound_entry,
+        service,
+        method,
+        args,
+        _kwargs,
+    )
+    .await
     {
         return Some(res);
     }
@@ -59,7 +79,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
             };
             let (agent_id, _) =
-                resolve_target_agent_id(ctx, session, char_id, sys_id, args, _kwargs);
+                resolve_target_agent_id_with_bound(ctx, session, bound_entry, char_id, sys_id, args, _kwargs);
             let Some(a) = ctx.sde.agents.get(&agent_id) else {
                 return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE") }));
             };
@@ -134,7 +154,7 @@ pub async fn handle(
         ("agentMgr", "GetStandingGainsForMission") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let sys_id = session.solar_system_id.unwrap_or(30_000_142);
-            let (agent_id, _) = resolve_target_agent_id(ctx, session, char_id, sys_id, args, _kwargs);
+            let (agent_id, _) = resolve_target_agent_id_with_bound(ctx, session, bound_entry, char_id, sys_id, args, _kwargs);
             let corp_id = ctx.sde.agents.get(&agent_id).map_or(1_000_035, |a| a.corporation_id);
             Some(Ok(PyRep::Dict(vec![
                 (PyRep::Integer(agent_id), PyRep::Real(0.15)),
@@ -161,7 +181,11 @@ pub async fn handle(
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
             };
-            let agent_id = args.first().and_then(|a| a.as_i64()).unwrap_or_else(|| resolve_target_agent_id(ctx, session, char_id, sys_id, args, _kwargs).0);
+            let agent_id = bound_entry
+                .filter(|b| b.service == "agentMgr" && b.object_id > 0)
+                .map(|b| b.object_id)
+                .or_else(|| args.first().and_then(|a| a.as_i64()))
+                .unwrap_or_else(|| resolve_target_agent_id_with_bound(ctx, session, bound_entry, char_id, sys_id, args, _kwargs).0);
             let Some(a) = ctx.sde.agents.get(&agent_id) else {
                 return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE") }));
             };
@@ -279,7 +303,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
             };
             let (agent_id, _) =
-                resolve_target_agent_id(ctx, session, char_id, sys_id, args, _kwargs);
+                resolve_target_agent_id_with_bound(ctx, session, bound_entry, char_id, sys_id, args, _kwargs);
             let mission_id =
                 match resolve_target_mission_id(ctx, char_id, agent_id, None, args, _kwargs) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some((m, meta)) = ctx.db.with_snapshot(|snap| {
@@ -372,13 +396,18 @@ pub async fn handle(
                 2_i64
             };
 
+            let bound_agent_id = bound_entry
+                .filter(|b| b.service == "agentMgr" && b.object_id > 0)
+                .map(|b| b.object_id);
             let (mut agent_id, mut explicit_agent) =
-                resolve_target_agent_id(ctx, session, char_id, sys_id, args, _kwargs);
+                resolve_target_agent_id_with_bound(ctx, session, bound_entry, char_id, sys_id, args, _kwargs);
 
             if (12..=19).contains(&action_id) {
-                if let Some(sid) = args.get(1).and_then(|a| a.as_i64()) {
-                    if ctx.sde.agents.contains_key(&sid) {
-                        agent_id = sid;
+                if bound_agent_id.is_none() {
+                    if let Some(sid) = args.get(1).and_then(|a| a.as_i64()) {
+                        if ctx.sde.agents.contains_key(&sid) {
+                            agent_id = sid;
+                        }
                     }
                 }
                 return agents_standings_arcs::handle_special_dialogue_action(
@@ -397,7 +426,7 @@ pub async fn handle(
                     } else {
                         args.first().and_then(|a| a.as_i64())
                     };
-                    if let Some(sid) = supplied_id {
+                    if let Some(sid) = supplied_id.filter(|_| bound_agent_id.is_none()) {
                         agent_id = sid;
                         explicit_agent = true;
                     }
@@ -1290,7 +1319,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
             };
             let (agent_id, _) =
-                resolve_target_agent_id(ctx, session, char_id, sys_id, args, _kwargs);
+                resolve_target_agent_id_with_bound(ctx, session, bound_entry, char_id, sys_id, args, _kwargs);
             let mission_id = match parse_mission_id(args).or_else(|_| {
                 resolve_target_mission_id(ctx, char_id, agent_id, None, args, _kwargs)
             }) {

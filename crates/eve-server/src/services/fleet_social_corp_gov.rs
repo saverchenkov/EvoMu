@@ -280,10 +280,22 @@ pub(super) fn handle_add_corporation(
             session.corporation_id = Some(corp_id);
             session.alliance_id = None;
             session.corp_role = u64::MAX;
-            if let Some(act_ship) = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id)) {
-                if act_ship != 0 {
-                    session.ship_id = Some(act_ship);
-                }
+            let (act_ship, c_sys, c_dock) = ctx.db.with_snapshot(|s| {
+                s.characters
+                    .get(&char_id)
+                    .map(|c| (c.active_ship_id, c.solar_system_id, c.station_id.or(c.structure_id)))
+                    .unwrap_or((0, session.solar_system_id.unwrap_or(30_000_142), session.station_id.or(session.structure_id)))
+            });
+            if act_ship != 0 {
+                session.ship_id = Some(act_ship);
+            }
+            if old_corp_id != corp_id {
+                ctx.invalidate_bound_objects_for_session_transition(
+                    char_id,
+                    c_sys,
+                    c_dock,
+                    "corp_change",
+                );
             }
             let mut sess_changes = vec![
                 (PyRep::String("corpid".into()), PyRep::Tuple(vec![PyRep::Integer(old_corp_id), PyRep::Integer(corp_id)])),

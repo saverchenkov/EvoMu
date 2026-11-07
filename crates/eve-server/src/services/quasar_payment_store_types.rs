@@ -655,10 +655,15 @@ pub struct PaymentReceiptRecord {
     pub timestamp_unix: u64,
 }
 
-pub fn register_plex_vault_extra_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
+pub fn register_plex_vault_extra_handlers(
+    router: &PublicGatewayRouter,
+    db: Arc<WorldRepository>,
+    free_fast_checkout_plex: Arc<std::sync::atomic::AtomicBool>,
+) {
     // 1. eve_public.plex.vault.api.PurchaseRequest -> PurchaseResponse
     let db_purch = Arc::clone(&db);
     let pending_purch = Arc::clone(&router.pending_notices);
+    let allow_free_plex = free_fast_checkout_plex;
     router.register_handler(
         "eve_public.plex.vault.api.PurchaseRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -728,6 +733,9 @@ pub fn register_plex_vault_extra_handlers(router: &PublicGatewayRouter, db: Arc<
                         .ok_or_else(|| format!("{STATUS_NOT_FOUND}:Offer {offer_id} not found"))?;
                     if offer.price_plex < 0 {
                         return Err(format!("{STATUS_BAD_REQUEST}:Offer {offer_id} has invalid negative PLEX price"));
+                    }
+                    if offer.price_plex == 0 && !allow_free_plex.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Err(format!("{STATUS_BAD_REQUEST}:Offer {offer_id} has invalid zero PLEX price"));
                     }
                     let total_cost = offer.price_plex.saturating_mul(qty as i64);
 

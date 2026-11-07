@@ -399,6 +399,10 @@ impl ServerContext {
         ctx.systems.set_belt_respawn_interval_secs(cfg.belt_respawn_interval_secs);
         ctx.systems.set_downtime_utc_secs_of_day(cfg.downtime_utc_secs_of_day);
         ctx.feature_flags = cfg.feature_flags.clone();
+        ctx.quasar_gateway.free_fast_checkout_plex.store(
+            ctx.feature_flags.free_fast_checkout_plex,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         ctx.esi_port = cfg.esi_port;
         if cfg.feature_flags.seed_demo {
             ctx.seed_demo_world_fixtures();
@@ -407,6 +411,13 @@ impl ServerContext {
             });
         }
         Ok(ctx)
+    }
+
+    pub fn set_free_fast_checkout_plex(&mut self, enabled: bool) {
+        self.feature_flags.free_fast_checkout_plex = enabled;
+        self.quasar_gateway
+            .free_fast_checkout_plex
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Explicitly seeds demo convoys (`800_000_001..=800_000_003`), nullsec ESS bank balances (`10M`/`25M` ISK),

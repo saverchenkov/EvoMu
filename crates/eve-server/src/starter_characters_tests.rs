@@ -156,3 +156,121 @@ async fn provision_starter_characters_creates_overrides_and_skips_invalid_or_exi
     assert!(created_bad.is_empty());
     assert!(ctx.db.get_characters_for_user(uid_bad).is_empty());
 }
+
+#[tokio::test]
+async fn starter_plex_grant_is_one_time_per_account_across_creations_and_deletions() {
+    let mut ctx = fast_test_context();
+    ctx.feature_flags.starter_plex_balance = 500;
+    let uid = ctx.db.provision_player_account("plex_pilot", "plex_pass");
+
+    let (bloodline_id, ancestry_id, school_id) = ctx
+        .sde
+        .races
+        .values()
+        .next()
+        .map(|_| (1_u32, 11_u32, 17_u32))
+        .unwrap_or((1, 11, 17));
+
+    let mut session = eve_machonet::SessionState::new(901);
+    session.user_id = Some(uid);
+    session.address = "127.0.0.1:26000".into();
+
+    let non_empty_info = || {
+        eve_proto::PyRep::Dict(vec![(
+            eve_proto::PyRep::String("head".into()),
+            eve_proto::PyRep::Integer(1),
+        )])
+    };
+    let c1 = ctx
+        .dispatch_rpc(
+            &mut session,
+            "charUnboundMgr",
+            None,
+            "CreateCharacterWithDoll",
+            &[
+                eve_proto::PyRep::String("FirstStarterPlex".into()),
+                eve_proto::PyRep::Integer(i64::from(bloodline_id)),
+                eve_proto::PyRep::Integer(1),
+                eve_proto::PyRep::Integer(i64::from(ancestry_id)),
+                non_empty_info(),
+                non_empty_info(),
+                eve_proto::PyRep::Integer(i64::from(school_id)),
+            ],
+            &std::collections::HashMap::new(),
+            None,
+        )
+        .await
+        .expect("first char")
+        .as_i64()
+        .expect("char id");
+    assert_eq!(ctx.db.with_snapshot(|s| s.plex_vault_balance(c1)), 500);
+
+    let c2 = ctx
+        .dispatch_rpc(
+            &mut session,
+            "charUnboundMgr",
+            None,
+            "CreateCharacterWithDoll",
+            &[
+                eve_proto::PyRep::String("SecondStarterPlex".into()),
+                eve_proto::PyRep::Integer(i64::from(bloodline_id)),
+                eve_proto::PyRep::Integer(1),
+                eve_proto::PyRep::Integer(i64::from(ancestry_id)),
+                non_empty_info(),
+                non_empty_info(),
+                eve_proto::PyRep::Integer(i64::from(school_id)),
+            ],
+            &std::collections::HashMap::new(),
+            None,
+        )
+        .await
+        .expect("second char")
+        .as_i64()
+        .expect("char id");
+    assert_eq!(ctx.db.with_snapshot(|s| s.plex_vault_balance(c2)), 500);
+
+    // Delete second character and recreate: one-time grant marker persists per user_id.
+    let _ = ctx
+        .dispatch_rpc(
+            &mut session,
+            "charUnboundMgr",
+            None,
+            "DeleteCharacter",
+            &[eve_proto::PyRep::Integer(c2)],
+            &std::collections::HashMap::new(),
+            None,
+        )
+        .await;
+    let c3 = ctx
+        .dispatch_rpc(
+            &mut session,
+            "charUnboundMgr",
+            None,
+            "CreateCharacterWithDoll",
+            &[
+                eve_proto::PyRep::String("ThirdStarterPlex".into()),
+                eve_proto::PyRep::Integer(i64::from(bloodline_id)),
+                eve_proto::PyRep::Integer(1),
+                eve_proto::PyRep::Integer(i64::from(ancestry_id)),
+                non_empty_info(),
+                non_empty_info(),
+                eve_proto::PyRep::Integer(i64::from(school_id)),
+            ],
+            &std::collections::HashMap::new(),
+            None,
+        )
+        .await
+        .expect("third char")
+        .as_i64()
+        .expect("char id");
+    assert_eq!(ctx.db.with_snapshot(|s| s.plex_vault_balance(c3)), 500);
+
+    let txs: Vec<_> = ctx
+        .db
+        .with_snapshot(crate::services::quasar_payment_store::get_plex_transactions)
+        .into_iter()
+        .filter(|t| t.user_id == uid)
+        .collect();
+    assert_eq!(txs.len(), 1);
+    assert!(txs[0].id > 0);
+}

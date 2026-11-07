@@ -1382,7 +1382,11 @@ fn register_payment_token_and_purchase_handlers(
         }),
     );
 
-    register_plex_vault_extra_handlers(router, Arc::clone(&db));
+    register_plex_vault_extra_handlers(
+        router,
+        Arc::clone(&db),
+        Arc::clone(&router.free_fast_checkout_plex),
+    );
 }
 
 #[cfg(test)]

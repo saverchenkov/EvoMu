@@ -26,7 +26,7 @@ fn shared_sde() -> Arc<SdeRegistry> {
 fn test_ctx(free_fast_checkout_plex: bool, starter_plex_balance: i64) -> ServerContext {
     let db = Arc::new(WorldRepository::with_demo_seed());
     let mut ctx = ServerContext::with_sde_and_repository(shared_sde(), db);
-    ctx.feature_flags.free_fast_checkout_plex = free_fast_checkout_plex;
+    ctx.set_free_fast_checkout_plex(free_fast_checkout_plex);
     ctx.feature_flags.starter_plex_balance = starter_plex_balance;
     ctx
 }
@@ -484,4 +484,158 @@ async fn fast_checkout_default_paid_vs_free_one_click_behavior() {
         .expect("nes buy ok");
     assert_eq!(ctx_free.db.with_snapshot(|s| s.plex_vault_balance(cid_free)), 51_000 - expected_cost);
     assert_eq!(nes_buy.dict_get("plexRemaining").and_then(|v| v.as_i64()), Some(51_000 - expected_cost));
+}
+
+#[tokio::test]
+async fn fast_checkout_consumes_tokens_blocks_negative_vault_and_rejects_unpriced_offers() {
+    let ctx = test_ctx(false, 0);
+    let uid = ctx.db.provision_player_account("checkout_sec_pilot", "sec_pass");
+    let cid = ctx
+        .db
+        .create_character(uid, "Checkout Sec", 1, 1, 11, 17, &shared_sde())
+        .expect("create char")
+        .character_id;
+
+    let mut sess = SessionState::new(910);
+    sess.user_id = Some(uid);
+    sess.character_id = Some(cid);
+    sess.corporation_id = Some(98_000_001);
+    sess.solar_system_id = Some(30_000_142);
+    sess.address = "127.0.0.1:26000".into();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.account_plex_vault.insert(uid, 600);
+        crate::services::quasar_payment_store::seed_default_store_catalog_if_empty(snap, &ctx.sde);
+        let mut cat = crate::services::quasar_payment_store_types::read_store_catalog(snap);
+        cat.offers.push(crate::services::quasar_payment_store_types::StoreOffer {
+            id: 9901,
+            name: "Unpriced Zero Offer".into(),
+            description: "Zero price".into(),
+            category_id: 2,
+            price_plex: 0,
+            product_ids: vec![],
+            targeted: false,
+            price_cents: None,
+            currency: None,
+        });
+        snap.service_state_blobs.insert(
+            "nes_store_catalog".into(),
+            serde_json::to_string(&cat).expect("json"),
+        );
+        let tokens = vec![PaymentTokenRecord {
+            id: 77_001,
+            user_id: uid,
+            token_str: "tok_quick_4242".into(),
+            is_quick_pay: true,
+            consumed: false,
+        }];
+        snap.service_state_blobs.insert(
+            "payment_tokens".into(),
+            serde_json::to_string(&tokens).expect("tokens"),
+        );
+    });
+
+    // Enable FastCheckout for user
+    crate::services::fast_checkout_and_activity::set_user_fast_checkout_enabled(&ctx, uid, true);
+
+    // 1. PLEX offer more expensive than vault (2 * 500 = 1000 > 600) fails atomically without negative balance
+    let over_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "FastCheckoutService",
+            None,
+            "BuyOffer",
+            &[PyRep::Integer(1001), PyRep::Integer(2), PyRep::String("sec_pass".into())],
+            &HashMap::new(),
+            None,
+        )
+        .await;
+    assert!(over_res.is_err());
+    assert_eq!(ctx.db.with_snapshot(|s| s.plex_vault_balance(cid)), 600);
+
+    // 2. Dual-priced offer (1002: price_plex > 0 and price_cents = Some(499)) settles in PLEX without USD double-charge
+    let dual_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "FastCheckoutService",
+            None,
+            "BuyOffer",
+            &[PyRep::Integer(1002), PyRep::Integer(1), PyRep::String("sec_pass".into())],
+            &HashMap::new(),
+            None,
+        )
+        .await;
+    assert!(dual_res.is_ok(), "dual_res failed: {dual_res:?}");
+    let receipts_after_dual: Vec<PaymentReceiptRecord> = ctx.db.with_snapshot(|s| {
+        s.service_state_blobs
+            .get("payment_receipts")
+            .and_then(|j| serde_json::from_str(j).ok())
+            .unwrap_or_default()
+    });
+    assert!(receipts_after_dual.is_empty());
+
+    // 3. USD offer consumes quick-pay token once; replay with same token fails
+    let usd_first = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "FastCheckoutService",
+            None,
+            "BuyOffer",
+            &[PyRep::Integer(1), PyRep::Integer(1), PyRep::String("sec_pass".into())],
+            &HashMap::new(),
+            None,
+        )
+        .await;
+    assert!(usd_first.is_ok());
+    let usd_replay = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "FastCheckoutService",
+            None,
+            "BuyOffer",
+            &[PyRep::Integer(1), PyRep::Integer(1), PyRep::String("sec_pass".into())],
+            &HashMap::new(),
+            None,
+        )
+        .await;
+    assert!(usd_replay.is_err());
+
+    // 4. Unpriced offer 9901 rejected across storeManager and Quasar PurchaseRequest when !free_fast_checkout_plex
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "storeManager", None, "buy_offer", &[PyRep::Integer(9901)], &HashMap::new(), None)
+        .await
+        .is_err());
+
+    let mut q_val = Vec::new();
+    eve_proto::quasar::encode_varint_field(1, 9901, &mut q_val);
+    let q_req = eve_proto::quasar::EvePublicRequest {
+        issued: Some(eve_proto::quasar::GoogleTimestamp { seconds: 1_700_000_010, nanos: 0 }),
+        correlation_uuid: vec![2; 16],
+        payload: Some(eve_proto::quasar::GoogleAny {
+            type_url: format!("{}eve_public.plex.vault.api.PurchaseRequest", eve_proto::quasar::TYPE_GOOGLEAPIS_PREFIX),
+            value: q_val,
+        }),
+        external_origin: "test".into(),
+        application_instance_uuid: Vec::new(),
+        authoritative_context: None,
+        trace_context: None,
+    };
+    let q_resp = ctx.quasar_gateway.handle_public_request(&sess, &q_req, None, false, 1_700_000_010);
+    assert_eq!(q_resp.status_code, crate::quasar_gateway::STATUS_BAD_REQUEST);
+
+    // 5. Expiring Omega clears AccountServicesStore.subscription_expiry and user_entitlement_expiries
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut acct = crate::services::account_services::load_store(snap);
+        acct.subscription_expiry.insert(uid, 9_999_999_999);
+        if let Ok(js) = serde_json::to_string(&acct) {
+            snap.item_custom_names.insert(crate::services::account_services::ACCOUNT_SERVICES_STORE_KEY, js);
+        }
+        crate::services::quasar_auth_user::activate_user_omega_license_in_snapshot(snap, uid, 30 * 86_400, 1_700_000_000);
+    });
+    crate::services::quasar_auth_user::expire_user_omega_license(&ctx.db, &ctx.quasar_gateway.pending_notices, uid);
+    ctx.db.with_snapshot(|snap| {
+        let acct = crate::services::account_services::load_store(snap);
+        assert_eq!(acct.subscription_expiry.get(&uid).copied(), Some(0));
+        assert_eq!(snap.characters.get(&cid).map(|c| c.clone_grade), Some(1));
+    });
 }
