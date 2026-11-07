@@ -526,3 +526,8 @@ mod superweapon_atomic_validation;
 mod disconnect_emergency_warp_and_cyno;
 mod r8_fw_complex_and_gate_exploits;
 mod r8_fob_siege_and_milestone_exploits;
+mod parity_shard_2_common;
+mod parity_shard_2_pve_1;
+mod parity_shard_2_pve_2;
+mod parity_shard_2_pve_3;
+mod parity_shard_2_pve_4;

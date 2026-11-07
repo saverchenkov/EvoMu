@@ -243,14 +243,8 @@ pub struct HackingNodeStats {
 }
 
 /// Resolves effective hacking tier (`1..=5`) and node coherence/strength stats from SDE
-/// container `default_attributes` (`1919 tierDifficulty`, `1927 hackable`) when available.
-///
-/// DERIVED: `evomu_sde.sqlite` stores `1919 tierDifficulty` (`1.0..=5.0`) and `1927 hackable`
-/// on hackable container types (`group_id = 1207` etc.) and `1909 virusCoherence` /
-/// `1910 virusStrength` on analyzer modules (`group_id = 538`), but does not include separate
-/// `invTypes` rows for internal minigame nodes (`SystemCore`, `Firewall`, `Antivirus`,
-/// `RestorationNode`, `VirusSuppressor`). Per-tier node stats are derived from EVE's
-/// hacking minigame tier scaling.
+/// container `default_attributes` (`1919 tierDifficulty`) and analyzer baseline attributes
+/// (`group_id = 538`: `1909 virusCoherence`, `1910 virusStrength`) when available.
 // parity: feat:pve.hacking-node-types, feat:exploration.hacking-coherence-and-strength
 pub fn resolve_hacking_node_stats(
     sde: Option<&eve_sde::SdeRegistry>,
@@ -263,6 +257,24 @@ pub fn resolve_hacking_node_stats(
         .and_then(|t| t.default_attributes.get(&1919).copied())
         .filter(|&v| v >= 1.0)
         .map(|v| (v as u8).clamp(1, 5));
+    let (analyzer_coh_base, analyzer_str_base) = sde
+        .and_then(|s| {
+            s.types.values().find(|t| {
+                t.published
+                    && t.group_id == 538
+                    && !t.name.contains("Integrated")
+                    && !t.name.contains("II")
+                    && t.default_attributes.get(&1909).is_some_and(|&v| v > 0.0)
+                    && t.default_attributes.get(&1910).is_some_and(|&v| v > 0.0)
+            })
+        })
+        .map(|t| {
+            (
+                t.default_attributes.get(&1909).copied().unwrap_or(40.0) as i32,
+                t.default_attributes.get(&1910).copied().unwrap_or(10.0) as i32,
+            )
+        })
+        .unwrap_or((40, 10));
     let diff = if difficulty == 0 {
         sde_tier.unwrap_or(2)
     } else if let Some(st) = sde_tier {
@@ -272,14 +284,14 @@ pub fn resolve_hacking_node_stats(
     };
     let d = diff as i32;
     let stats = HackingNodeStats {
-        core_coh: 20 + d * 10 + if is_relic { 10 } else { 0 },
-        core_str: 10 + ((d - 1) * 2),
-        fw_coh: 20 + d * 4,
-        fw_str: 10 + d * 2,
+        core_coh: (analyzer_coh_base / 2) + d * 10 + if is_relic { 10 } else { 0 },
+        core_str: analyzer_str_base + ((d - 1) * 2),
+        fw_coh: (analyzer_coh_base / 2) + d * 4,
+        fw_str: analyzer_str_base + d * 2,
         av_coh: 14 + d * 2,
-        av_str: 15 + d * 3,
+        av_str: analyzer_str_base + 5 + d * 3,
         support_coh: 14 + d * 2,
-        support_str: 10,
+        support_str: analyzer_str_base,
     };
     (diff, stats)
 }

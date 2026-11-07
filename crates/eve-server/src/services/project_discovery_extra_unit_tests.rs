@@ -62,7 +62,7 @@ fn bonus_sample_sync_task_generation_xp_curve_rank_and_config_variants() {
     // 3. project_discovery_total_needed_xp_from_store & rank_for_xp
     assert_eq!(project_discovery_total_needed_xp_from_store(&store, 0), 0.0);
     assert_eq!(project_discovery_total_needed_xp_from_store(&store, -5), 0.0);
-    assert_eq!(project_discovery_total_needed_xp_from_store(&store, 2), 0.0);
+    assert_eq!(project_discovery_total_needed_xp_from_store(&store, 2), 1_250.0);
     store.xp_per_rank = 500.0;
     store.xp_curve_by_rank.insert(2, 1_200.0);
     assert_eq!(project_discovery_total_needed_xp_from_store(&store, 1), 500.0);
@@ -117,8 +117,8 @@ fn classification_isk_tiers_loot_crates_task_eviction_url_fallbacks_and_slash_er
         );
     }
 
-    // Default unconfigured tutorial XP reward is 0.0 on get_tutorial_xp_reward, and 250.0 on give_tutorial_complete_experience
-    assert_eq!(call_pd(&ctx, &mut sess, "get_tutorial_xp_reward", &[]).unwrap(), PyRep::Real(0.0));
+    // Default unconfigured tutorial XP reward is 500.0 on get_tutorial_xp_reward
+    assert_eq!(call_pd(&ctx, &mut sess, "get_tutorial_xp_reward", &[]).unwrap(), PyRep::Real(500.0));
     // Configure small xp_per_rank (100.0) and tutorial_xp (250.0) so tutorial completion triggers rank up
     handle_project_discovery_slash(&ctx, "/pd config 100 250 100 10 15").unwrap().unwrap();
     for _ in 0..4 {
@@ -174,26 +174,33 @@ fn classification_isk_tiers_loot_crates_task_eviction_url_fallbacks_and_slash_er
     // XP goes 250 -> 260 (stays Rank 3, no loot crate yet)
     assert_eq!(sub1.dict_get("loot_crates"), Some(&PyRep::List(vec![])));
 
-    // Task 2: accurate classification with accuracy < 0.5 -> tier 0 ISK multiplier (500 * rank 3 = 1500), then ranks up 3 -> 4 (< 25) granting LOOT_CRATE_TYPE_ID
+    // Task 2: accurate classification with accuracy < 0.5 -> tier 0 ISK multiplier (500 * rank 6 on V24 XP curve = 3000), then ranks up and grants LOOT_CRATE_TYPE_ID
     ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
     handle_project_discovery_slash(&ctx, "/pd consensus 2 true").unwrap().unwrap();
     call_pd(&ctx, &mut sess, "get_new_task", &[]).unwrap();
     let sub2 = call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(2), PyRep::String("ok".into())]).unwrap();
-    assert_eq!(sub2.dict_get("ISK_Reward").and_then(|v| v.as_f64()), Some(1_500.0));
+    assert_eq!(sub2.dict_get("ISK_Reward").and_then(|v| v.as_f64()), Some(3_000.0));
     assert_eq!(
         sub2.dict_get("loot_crates"),
-        Some(&PyRep::List(vec![PyRep::Integer(LOOT_CRATE_TYPE_ID as i64)]))
+        Some(&PyRep::List(vec![
+            PyRep::Integer(LOOT_CRATE_TYPE_ID as i64),
+            PyRep::Integer(LOOT_CRATE_TYPE_ID as i64),
+        ]))
     );
 
-    // Jump rank to 24 with high XP gain so next submission crosses NEEDED_LEVEL_FOR_SUPERIOR_CRATES (25)
+    // Jump rank past NEEDED_LEVEL_FOR_SUPERIOR_CRATES (25) granting SUPERIOR_LOOT_CRATE_TYPE_ID
     ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
     handle_project_discovery_slash(&ctx, "/pd config 100 250 2500 10 15").unwrap().unwrap();
     handle_project_discovery_slash(&ctx, "/pd consensus 3 true").unwrap().unwrap();
     call_pd(&ctx, &mut sess, "get_new_task", &[]).unwrap();
     let sub3 = call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(3), PyRep::String("ok".into())]).unwrap();
+    let crates3 = match sub3.dict_get("loot_crates") {
+        Some(PyRep::List(v) | PyRep::Tuple(v)) => v,
+        other => panic!("expected loot_crates list, got {other:?}"),
+    };
     assert_eq!(
-        sub3.dict_get("loot_crates"),
-        Some(&PyRep::List(vec![PyRep::Integer(SUPERIOR_LOOT_CRATE_TYPE_ID as i64)]))
+        crates3.last().and_then(|v| v.as_i64()),
+        Some(SUPERIOR_LOOT_CRATE_TYPE_ID as i64)
     );
 
     // fix_task_id: non-GM rejected; invalid int/string rejected; valid integer & >64 tasks eviction

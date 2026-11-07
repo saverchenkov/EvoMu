@@ -101,7 +101,13 @@ pub fn select_full_market_types(sde: &SdeRegistry) -> Vec<TypeId> {
         .types
         .values()
         .filter(|t| {
-            t.published && t.market_group_id.is_some() && is_seeded_gameplay_category(t.category_id)
+            (t.published && is_seeded_gameplay_category(t.category_id))
+                || matches!(t.category_id, 9 | 16)
+                || matches!(t.group_id, 1978 | 4050 | 4176 | 4743)
+                || matches!(
+                    t.type_id,
+                    2899 | 3302 | 22_175 | 22_177 | 30_832 | 44_992 | 56_311
+                )
         })
         .map(|t| t.type_id)
         .collect();
@@ -233,6 +239,8 @@ fn seed_market_catalog_internal(
                     inv_type.base_price
                 } else if bom > 0.0 {
                     bom
+                } else if type_id == 44_992 {
+                    5_000_000.0
                 } else {
                     DEFAULT_FALLBACK_BASE_PRICE_ISK
                 };
@@ -247,6 +255,7 @@ fn seed_market_catalog_internal(
                     (fair_isk * 1.06).max(1.0)
                 };
                 let bid_isk = (fair_isk * 0.94).max(0.5);
+                let vol = if full_jita_catalog { 1_000_000 } else { 1_000 };
 
                 if existing.insert((1_000_035, station_id, type_id, false)) {
                     snap.next_entity_id += 1;
@@ -261,8 +270,8 @@ fn seed_market_catalog_internal(
                             type_id,
                             is_bid: false,
                             price: IskCents::from_f64_isk(ask_isk),
-                            vol_entered: 1_000,
-                            vol_remaining: 1_000,
+                            vol_entered: vol,
+                            vol_remaining: vol,
                             min_volume: 1,
                             is_npc: is_npc_seeded,
                             escrow: IskCents(0),
@@ -272,11 +281,14 @@ fn seed_market_catalog_internal(
                 }
 
                 let should_seed_bid = !is_npc_seeded
-                    && (baseline_set.contains(&type_id) || inv_type.meta_group_id == Some(2));
+                    && (baseline_set.contains(&type_id)
+                        || inv_type.meta_group_id == Some(2)
+                        || type_id == 44_992);
                 if should_seed_bid && existing.insert((1_000_125, station_id, type_id, true)) {
                     snap.next_entity_id += 1;
                     let bid_id = snap.next_entity_id;
-                    let escrow = IskCents::from_f64_isk(bid_isk * 500.0);
+                    let bid_vol = vol / 2;
+                    let escrow = IskCents::from_f64_isk(bid_isk * f64::from(bid_vol));
                     snap.market_orders.insert(
                         bid_id,
                         MarketOrderRecord {
@@ -287,8 +299,8 @@ fn seed_market_catalog_internal(
                             type_id,
                             is_bid: true,
                             price: IskCents::from_f64_isk(bid_isk),
-                            vol_entered: 500,
-                            vol_remaining: 500,
+                            vol_entered: bid_vol,
+                            vol_remaining: bid_vol,
                             min_volume: 1,
                             is_npc: false,
                             escrow,
@@ -380,6 +392,7 @@ fn seed_npc_skillbooks_and_faction_items(
 #[path = "world_seeder_tests.rs"]
 mod world_seeder_tests;
 
-#[cfg(test)] #[path = "world_seeder_extra_tests.rs"]
+#[cfg(test)]
+#[path = "world_seeder_extra_tests.rs"]
 mod world_seeder_extra_tests;
 

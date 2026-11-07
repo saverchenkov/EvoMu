@@ -129,6 +129,9 @@ pub(crate) fn sweep_expired_bookmarks(snap: &mut eve_db::WorldStateSnapshot, now
 
 /// Sweeps expired bookmarks in `ctx.db` and emits `OnRefreshBookmarks` / `OnSharedBookmarksFolderUpdated`.
 pub(crate) fn sweep_expired_bookmarks_and_notify(ctx: &ServerContext, now_unix: u64) -> Vec<i64> {
+    if !ctx.db.with_snapshot(|s| s.bookmark_expiries.values().any(|&exp| exp > 0 && now_unix >= exp)) {
+        return Vec::new();
+    }
     let (expired_ids, owners, shared_folder_bms) = ctx.db.with_mut_snapshot(|snap| {
         let mut owners = std::collections::BTreeSet::new();
         let mut shared_folder_bms: HashMap<(i64, i64), Vec<i64>> = HashMap::new();

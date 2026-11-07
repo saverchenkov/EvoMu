@@ -61,6 +61,30 @@ fn season_phase_label(cfg: &SeasonConfig, now_ft: i64) -> &'static str {
 /// `OnSeasonStarted`, `OnSeasonEnded`, and `OnSeasonSelectionCleared` when seasons transition.
 pub fn check_and_emit_season_transitions(ctx: &ServerContext) {
     let now_ft = ctx.now_blueos_filetime_ticks();
+    let needs_mut = ctx.db.with_snapshot(|snap| {
+        if !snap.service_state_blobs.contains_key(SEASONS_CATALOG_KEY)
+            || !snap.service_state_blobs.contains_key(ANNOUNCED_SEASON_INIT_KEY)
+        {
+            return true;
+        }
+        let mut catalog = load_seasons_catalog(snap, &ctx.sde, now_ft);
+        if let Some(cfg_json) = snap.service_state_blobs.get(SEASON_CONFIG_KEY) {
+            if let Ok(cfg) = serde_json::from_str::<SeasonConfig>(cfg_json) {
+                catalog.entry(cfg.season_id).or_insert(cfg);
+            }
+        }
+        let announced: BTreeMap<i64, String> = snap
+            .service_state_blobs
+            .get(ANNOUNCED_SEASON_STATES_KEY)
+            .and_then(|j| serde_json::from_str(j).ok())
+            .unwrap_or_default();
+        catalog
+            .iter()
+            .any(|(sid, cfg)| announced.get(sid).map(String::as_str) != Some(season_phase_label(cfg, now_ft)))
+    });
+    if !needs_mut {
+        return;
+    }
     let (newly_started, newly_ended, cleared_chars) = ctx.db.with_mut_snapshot(|snap| {
         let unseeded = !snap.service_state_blobs.contains_key(SEASONS_CATALOG_KEY);
         let mut catalog = load_seasons_catalog(snap, &ctx.sde, now_ft);

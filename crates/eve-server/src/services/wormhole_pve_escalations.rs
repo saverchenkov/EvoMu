@@ -330,7 +330,7 @@ pub fn on_decloaked_relay_attacked_sync(
         .insert(drifter_bid, 3);
 
     let dmg_mult = attr(64).unwrap_or(0.0);
-    let entity = ExtendedNpcEntity {
+    let mut entity = ExtendedNpcEntity {
         ball_id: drifter_bid,
         type_id: drifter_tid,
         faction_id: 500_024,
@@ -350,7 +350,7 @@ pub fn on_decloaked_relay_attacked_sync(
             explosive: attr(116).unwrap_or(0.0) * dmg_mult,
         },
         entropic_cycles: 0,
-        drifter_overshield_hp: 0.0, // no overshield attribute exists in the V24 SDE
+        drifter_overshield_hp: 0.0,
         drifter_doomsday_fired: false,
         web_speed_factor: attr(20).unwrap_or(0.0),
         web_range: attr(514).or_else(|| attr(580)).unwrap_or(0.0),
@@ -364,9 +364,12 @@ pub fn on_decloaked_relay_attacked_sync(
         tag_drop_type_id: None,
         spawn_position: spawn_pos,
         sleeper_wh_class: 6,
-        // Drifter loot tables are server-side (not in the SDE); no custom cargo is invented.
         custom_cargo_loot: None,
     };
+    crate::services::wormhole_pve_escalations_shard2_helpers::configure_drifter_response_boss_entity(
+        &ctx.sde,
+        &mut entity,
+    );
     ctx.combat_ephemeral
         .write()
         .unwrap_or_else(|e| e.into_inner())

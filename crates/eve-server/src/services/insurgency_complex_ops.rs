@@ -26,22 +26,18 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub const INSURGENCY_OPS_BLOB_KEY: &str = "insurgency_complex_ops";
-
 pub const TYPE_GURISTAS_LAUNDERING_FACILITY: u32 = 78_868;
 pub const TYPE_ANGEL_LAUNDERING_FACILITY: u32 = 78_869;
 pub const TYPE_FEDERATION_CI_OUTPOST_HUB: u32 = 78_870;
 pub const TYPE_IMPERIAL_CI_OUTPOST_HUB: u32 = 78_871;
 pub const TYPE_STATE_CI_OUTPOST_HUB: u32 = 79_115;
 pub const TYPE_REPUBLIC_CI_OUTPOST_HUB: u32 = 79_116;
-
 pub const TYPE_UPWELL_CONSORTIUM_DATA_CACHE: u32 = 78_848;
 pub const TYPE_GURISTAS_INSURGENCY_DATA_SEQ: u32 = 78_857;
 pub const TYPE_ANGEL_INSURGENCY_DATA_SEQ: u32 = 78_862;
-
 pub const TYPE_MINING_AMBUSH_BEACON: u32 = 78_994;
 pub const TYPE_ORE_RORQUAL: u32 = 79_589;
 pub const TYPE_ORE_RORQUAL_WRECK: u32 = 79_586;
-
 pub const TYPE_OUTPOST_BEACON_SMALL: u32 = 78_799;
 pub const TYPE_OUTPOST_BEACON_MEDIUM: u32 = 78_805;
 pub const TYPE_OUTPOST_BEACON_MODERATE: u32 = 97_658;
@@ -345,7 +341,7 @@ pub fn share_site_lp_up_to_5(base_lp_per_pilot: i64, pilot_count: usize) -> i64 
     }
 }
 
-fn credit_militia_lp(ctx: &ServerContext, char_id: i64, faction_id: i64, lp: i64) {
+pub(crate) fn credit_militia_lp(ctx: &ServerContext, char_id: i64, faction_id: i64, lp: i64) {
     if char_id <= 0 || lp <= 0 {
         return;
     }
@@ -492,6 +488,16 @@ pub fn append_insurgency_npc_wreck_loot(
             loot_to_insert.push((drop_tid, qty as i32, false));
         }
     }
+    if (79_329..=79_334).contains(&npc_type_id)
+        && !loot_to_insert.iter().any(|&(tid, _, _)| tid == 78_865)
+    {
+        loot_to_insert.push((78_865, 1, false));
+    }
+    if (79_358..=79_364).contains(&npc_type_id)
+        && !loot_to_insert.iter().any(|&(tid, _, _)| tid == 78_859)
+    {
+        loot_to_insert.push((78_859, 1, false));
+    }
     if npc_type_id == TYPE_ORE_RORQUAL && !loot_to_insert.iter().any(|&(tid, _, _)| tid == 17_867) {
         loot_to_insert.push((17_867, 5, false));
     }
@@ -583,6 +589,9 @@ pub fn on_insurgency_laundering_trade_completed(
     };
     credit_militia_lp(ctx, char_id, war_fac, LAUNDERING_BASE_LP_PER_TRADE * mult);
     let pts = LAUNDERING_CAMPAIGN_PTS_PER_TRADE * mult;
+    crate::services::insurgency_complex_ops_shard2_helpers::notify_insurgency_laundering_reward(
+        ctx, char_id, war_fac, sys_id,
+    );
 
     if matches!(trader_type_id, TYPE_GURISTAS_LAUNDERING_FACILITY | TYPE_ANGEL_LAUNDERING_FACILITY) {
         let camp_opt = ctx.db.with_snapshot(|snap| {
@@ -767,10 +776,12 @@ pub async fn activate_outpost_raid_gate_in_space(
             None => true,
         };
     let spawned_def_id = if need_spawn {
+        use crate::services::insurgency_complex_ops_shard2_helpers::resolve_sde_outpost_defender_type;
         let (def_tid, def_fac) = if is_pirate_raider {
-            (raid.size.mordus_defender_type_id(), 500_018_u32)
+            (resolve_sde_outpost_defender_type(&ctx.sde, 500_018, raid.size, raid.size.mordus_defender_type_id()), 500_018_u32)
         } else {
-            (raid.size.pirate_defender_type_id(raid.pirate_faction_id), raid.pirate_faction_id as u32)
+            let pf = raid.pirate_faction_id as u32;
+            (resolve_sde_outpost_defender_type(&ctx.sde, pf, raid.size, raid.size.pirate_defender_type_id(raid.pirate_faction_id)), pf)
         };
         Some(spawn_specialized_npc_entity(ctx, sys_id, def_tid, "InsurgencyOutpostDefender", def_fac, pocket + DVec3::new(3_500.0, 0.0, 0.0)).await)
     } else {
@@ -790,17 +801,14 @@ pub async fn activate_outpost_raid_gate_in_space(
                 r.last_step_unix = now;
             }
             if let Some(bid) = spawned_def_id {
-                if is_pirate_raider {
-                    r.mordus_defender_ball_id = Some(bid);
-                } else {
-                    r.pirate_defender_ball_id = Some(bid);
-                }
+                if is_pirate_raider { r.mordus_defender_ball_id = Some(bid); } else { r.pirate_defender_ball_id = Some(bid); }
             }
         }
         save_ops_state(snap, &ops);
     });
     if raid.size == OutpostRaidSize::Moderate && is_battlecruiser_group(ship_grp) {
         ctx.ship_fittings.write().unwrap_or_else(|e| e.into_inner()).remove(&ship_id);
+        crate::services::insurgency_complex_ops_shard2_helpers::notify_moderate_outpost_bc_bonus(ctx, char_id, ship_id, ship_grp, true);
     }
 
     Ok(PyRep::keyval([
@@ -1064,56 +1072,7 @@ pub async fn cleanup_orphan_insurgency_complex_ops(ctx: &ServerContext, orphan_s
     }
 }
 
-async fn collect_aligned_pilots_on_grid(
-    ctx: &ServerContext,
-    sys_id: u32,
-    anchor: DVec3,
-    range_m: f64,
-    allow_pirate_fac: Option<i64>,
-    opposing_empire_for_pirate: Option<i64>,
-) -> Vec<(i64, i64, i64, u32, bool)> {
-    let candidates: Vec<(i64, i64, i64, u32, bool)> = ctx.db.with_snapshot(|snap| {
-        snap.characters
-            .values()
-            .filter_map(|c| {
-                if c.solar_system_id != sys_id || c.station_id.is_some() || c.structure_id.is_some() || c.active_ship_id <= 0 {
-                    return None;
-                }
-                let wf = c.war_faction_id?;
-                let allowed = allow_pirate_fac == Some(wf)
-                    || opposing_empire_for_pirate.is_some_and(|pf| is_warzone_opposing_empire(pf, wf));
-                if !allowed {
-                    return None;
-                }
-                let stid = snap.items.get(&c.active_ship_id).map(|i| i.type_id).unwrap_or(0);
-                if stid == 0 || stid == 670 {
-                    return None;
-                }
-                let grp = ctx.sde.types.get(&stid).map(|t| t.group_id).unwrap_or(0);
-                let has_wcs = snap.items.values().any(|it| {
-                    it.location_id == c.active_ship_id
-                        && (11..=19).contains(&(it.flag as u16))
-                        && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 315)
-                });
-                Some((c.character_id, c.active_ship_id, wf, grp, has_wcs))
-            })
-            .collect()
-    });
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let mut out = Vec::new();
-    for (cid, shid, wf, grp, has_wcs) in candidates {
-        if sys_handle.get_combat_state(shid).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) {
-            continue;
-        }
-        if let Ok(Some((_, b))) = sys_handle.get_ball_snapshot(shid).await {
-            if !matches!(b.mode, MovementMode::Warp { .. }) && b.position.distance(anchor) <= range_m {
-                out.push((cid, shid, wf, grp, has_wcs));
-            }
-        }
-    }
-    out.sort_by_key(|&(cid, _, _, _, _)| cid);
-    out
-}
+use crate::services::insurgency_complex_ops_shard2_helpers::collect_aligned_pilots_on_grid;
 
 async fn release_and_warp_off_rorqual(ctx: &ServerContext, sys_id: u32, rorqual_ball_id: i64) {
     with_mut_combat_ephemeral(ctx, |rt| {
@@ -1328,60 +1287,58 @@ pub async fn tick_insurgency_complex_ops(ctx: &ServerContext, now_unix: u64) {
             save_single_raid(ctx, raid);
             continue;
         }
+        use crate::services::insurgency_complex_ops_shard2_helpers::resolve_sde_outpost_defender_type;
         let capturing_pirates = !pir_pilots.is_empty();
         if capturing_pirates && !raid.mordus_defender_cleared {
             if raid.mordus_defender_ball_id.is_none() {
-                raid.mordus_defender_ball_id = Some(spawn_specialized_npc_entity(ctx, sys_id, raid.size.mordus_defender_type_id(), "InsurgencyOutpostDefender", 500_018, pocket + DVec3::new(3_500.0, 0.0, 0.0)).await);
+                let m_tid = resolve_sde_outpost_defender_type(&ctx.sde, 500_018, raid.size, raid.size.mordus_defender_type_id());
+                raid.mordus_defender_ball_id = Some(spawn_specialized_npc_entity(ctx, sys_id, m_tid, "InsurgencyOutpostDefender", 500_018, pocket + DVec3::new(3_500.0, 0.0, 0.0)).await);
             }
             save_single_raid(ctx, raid);
             continue;
         }
         if !capturing_pirates && !raid.pirate_defender_cleared {
             if raid.pirate_defender_ball_id.is_none() {
-                raid.pirate_defender_ball_id = Some(spawn_specialized_npc_entity(ctx, sys_id, raid.size.pirate_defender_type_id(raid.pirate_faction_id), "InsurgencyOutpostDefender", raid.pirate_faction_id as u32, pocket + DVec3::new(3_500.0, 0.0, 0.0)).await);
+                let pf = raid.pirate_faction_id as u32;
+                let p_tid = resolve_sde_outpost_defender_type(&ctx.sde, pf, raid.size, raid.size.pirate_defender_type_id(raid.pirate_faction_id));
+                raid.pirate_defender_ball_id = Some(spawn_specialized_npc_entity(ctx, sys_id, p_tid, "InsurgencyOutpostDefender", pf, pocket + DVec3::new(3_500.0, 0.0, 0.0)).await);
             }
             save_single_raid(ctx, raid);
             continue;
         }
         let active_pilots = if capturing_pirates { &pir_pilots } else { &emp_pilots };
         let target_secs = raid.size.base_capture_duration_secs() as f64;
-        if capturing_pirates {
-            raid.weighted_elapsed_secs = (raid.weighted_elapsed_secs + dt as f64).min(target_secs);
-        } else {
-            raid.weighted_elapsed_secs = (raid.weighted_elapsed_secs - dt as f64).max(-target_secs);
-        }
+        raid.weighted_elapsed_secs = if capturing_pirates { (raid.weighted_elapsed_secs + dt as f64).min(target_secs) } else { (raid.weighted_elapsed_secs - dt as f64).max(-target_secs) };
         let capture_complete = (capturing_pirates && raid.weighted_elapsed_secs >= target_secs)
             || (!capturing_pirates && raid.weighted_elapsed_secs <= -target_secs);
         if capture_complete {
             raid.weighted_elapsed_secs = 0.0;
             let subpts = raid.size.contribution_subpoints();
             let _ = add_percentage_campaign_points(ctx, raid.campaign_id, sys_id, capturing_pirates, subpts);
-            let shared_lp = share_site_lp_up_to_5(raid.size.base_lp_reward(), active_pilots.len());
-            let contrib_pts = ((subpts / 100).max(1) / (active_pilots.len() as i64)).max(1);
-            for &(cid, _, wf, _, _) in active_pilots {
-                let supp_mult = if capturing_pirates { 1.0 } else { insurgency_suppression_empire_lp_multiplier(ctx, sys_id, wf) };
-                let lp = ((shared_lp as f64) * supp_mult).round() as i64;
-                credit_militia_lp(ctx, cid, wf, lp);
-                record_insurgency_contribution(ctx, raid.campaign_id, cid, wf, contrib_pts);
-            }
-            let (gid, bid, was_moderate) = (raid.gate_id, raid.beacon_id, raid.size == OutpostRaidSize::Moderate);
-            let prev_occ = std::mem::take(&mut raid.occupants);
-            let def_balls: Vec<i64> = [raid.mordus_defender_ball_id.take(), raid.pirate_defender_ball_id.take()].into_iter().flatten().collect();
-            raid.completed_on_cooldown = true;
-            raid.respawn_at_unix = now_unix + raid.size.respawn_delay_secs();
-            save_single_raid(ctx, raid);
-            if was_moderate && !prev_occ.is_empty() {
-                let mut fits = ctx.ship_fittings.write().unwrap_or_else(|e| e.into_inner());
-                for (_, shid) in prev_occ { fits.remove(&shid); }
-            }
-            remove_space_object(ctx, sys_id, gid).await;
-            remove_space_object(ctx, sys_id, bid).await;
-            remove_npc_balls(ctx, sys_id, &def_balls).await;
+        let shared_lp = share_site_lp_up_to_5(raid.size.base_lp_reward(), active_pilots.len());
+        let contrib_pts = ((subpts / 100).max(1) / (active_pilots.len() as i64)).max(1);
+        crate::services::insurgency_complex_ops_shard2_helpers::reward_aligned_insurgency_pilots(
+            ctx, raid.campaign_id, sys_id, active_pilots, shared_lp, contrib_pts, !capturing_pirates,
+        );
+        let bc_list: Vec<(i64, i64, u32)> = active_pilots.iter().filter_map(|&(cid, _, _, shid, is_bc)| is_bc.then_some((cid, i64::from(shid), 540_u32))).collect();
+        let (gid, bid, was_moderate) = (raid.gate_id, raid.beacon_id, raid.size == OutpostRaidSize::Moderate);
+        let prev_occ = std::mem::take(&mut raid.occupants);
+        let def_balls: Vec<i64> = [raid.mordus_defender_ball_id.take(), raid.pirate_defender_ball_id.take()].into_iter().flatten().collect();
+        raid.completed_on_cooldown = true;
+        raid.respawn_at_unix = now_unix + raid.size.respawn_delay_secs();
+        save_single_raid(ctx, raid);
+        if was_moderate {
+            crate::services::insurgency_complex_ops_shard2_helpers::clear_moderate_outpost_fits(ctx, &prev_occ, &bc_list);
+        }
+        remove_space_object(ctx, sys_id, gid).await;
+        remove_space_object(ctx, sys_id, bid).await;
+        remove_npc_balls(ctx, sys_id, &def_balls).await;
         } else {
             save_single_raid(ctx, raid);
         }
     }
 }
 
-#[cfg(test)] #[path = "insurgency_complex_ops_tests.rs"] mod insurgency_complex_ops_tests;
-
+#[cfg(test)]
+#[path = "insurgency_complex_ops_tests.rs"]
+mod insurgency_complex_ops_tests;

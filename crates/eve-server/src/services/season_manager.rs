@@ -89,6 +89,9 @@ pub fn save_season_state_to_blobs(snap: &mut eve_db::WorldStateSnapshot, char_id
 
 pub use super::season_fsd::*;
 
+#[path = "season_manager_shard2_helpers.rs"]
+mod shard2_helpers;
+
 /// Challenge keyvals for `st`, sorted by challenge ID.
 fn sorted_challenge_keyvals(st: &CharacterSeasonState) -> Vec<PyRep> {
     let mut list: Vec<_> = st.challenges.values().filter(|c| !c.claimed).collect();
@@ -130,13 +133,7 @@ fn resolve_season_bounds(
     sde: &eve_sde::SdeRegistry,
     now_ft: i64,
 ) -> (i64, usize) {
-    let catalog = load_seasons_catalog(snap, sde, now_ft);
-    let cfg = catalog.get(&st.selected_season_id).or_else(|| catalog.values().next());
-    let end_ft = cfg.map(|c| c.end_time_ft).unwrap_or(now_ft + 30 * 86_400 * 10_000_000);
-    let max_ch = cfg
-        .map(|c| usize::try_from(c.max_active_challenges.max(1)).unwrap_or(4))
-        .unwrap_or(4);
-    (end_ft, max_ch)
+    shard2_helpers::resolve_season_bounds_clean(st, snap, sde, now_ft)
 }
 
 fn read_character_season_state<F, R>(ctx: &ServerContext, char_id: i64, f: F) -> R
@@ -147,8 +144,8 @@ where
         let mut st = load_season_state_from_blobs(snap, char_id);
         let now_ft = ctx.now_blueos_filetime_ticks();
         let (season_end_ft, max_active) = resolve_season_bounds(&st, snap, &ctx.sde, now_ft);
-        let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
-        let _ = ensure_character_challenges_with_limit(&mut st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
+        let defs = shard2_helpers::load_localized_challenge_definitions(snap, &ctx.sde);
+        let _ = shard2_helpers::fill_and_normalize_character_challenges(&mut st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
         sync_character_challenges_with_defs(&mut st, &defs, snap, char_id);
         f(&st, snap)
     })
@@ -413,14 +410,15 @@ pub fn get_character_challenges_for_quasar(
 ) -> Vec<CharacterChallenge> {
     let mut state = load_season_state_from_blobs(snap, char_id);
     let defs = match sde {
-        Some(s) => load_challenge_definitions_with_sde(snap, s),
+        Some(s) => shard2_helpers::load_localized_challenge_definitions(snap, s),
         None => load_challenge_definitions(snap),
     };
+    let (_, default_end_ft) = shard2_helpers::active_fsd_epoch_window_ft(now_ft);
     let (season_end_ft, max_active) = match sde {
         Some(s) => resolve_season_bounds(&state, snap, s, now_ft),
-        None => (now_ft + 30 * 86_400 * 10_000_000, 4),
+        None => (default_end_ft, 4),
     };
-    let _ = ensure_character_challenges_with_limit(
+    let _ = shard2_helpers::fill_and_normalize_character_challenges(
         &mut state,
         &defs,
         snap,
@@ -497,27 +495,19 @@ pub fn handle_season_manager(
             Some(Ok(PyRep::Integer(max_ch)))
         }
         ("seasonManager", "get_season_end_time") => {
-            // DATA GAP: live season schedule timestamps are server-only; catalog seeds a 30-day
-            // window from init_start_ft when unconfigured (rpc:seasonManager.get_season_end_time)
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let end_ft_opt = ctx.db.with_mut_snapshot(|snap| {
+            let end_ft_opt = ctx.db.with_snapshot(|snap| {
                 let st = load_season_state_from_blobs(snap, char_id);
                 let now_ft = ctx.now_blueos_filetime_ticks();
-                let unseeded = !snap.service_state_blobs.contains_key(SEASONS_CATALOG_KEY);
-                let catalog = load_seasons_catalog(snap, &ctx.sde, now_ft);
-                let cfg_opt = catalog
-                    .get(&st.selected_season_id)
-                    .or_else(|| catalog.values().find(|c| c.end_time_ft > now_ft))
-                    .cloned();
-                if unseeded {
-                    if let Ok(json) = serde_json::to_string(&catalog) {
-                        snap.service_state_blobs.insert(SEASONS_CATALOG_KEY.into(), json);
-                    }
-                }
-                cfg_opt.and_then(|c| (c.end_time_ft > now_ft).then_some(c.end_time_ft))
+                shard2_helpers::resolve_season_end_time_readonly(
+                    snap,
+                    &ctx.sde,
+                    st.selected_season_id,
+                    now_ft,
+                )
             });
             Some(Ok(end_ft_opt.map(PyRep::Integer).unwrap_or(PyRep::None)))
         }
@@ -639,8 +629,8 @@ pub fn handle_season_manager(
             let res = with_season_state(ctx, char_id, |st, snap| {
                 let now_ft = ctx.now_blueos_filetime_ticks();
                 let (season_end_ft, max_active) = resolve_season_bounds(st, snap, &ctx.sde, now_ft);
-                let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
-                let expired = ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
+                let defs = shard2_helpers::load_localized_challenge_definitions(snap, &ctx.sde);
+                let expired = shard2_helpers::fill_and_normalize_character_challenges(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
                 sync_character_challenges_with_defs(st, &defs, snap, char_id);
                 Ok((sorted_challenge_dict(st), st.season_points, expired))
             });
@@ -667,11 +657,11 @@ pub fn handle_season_manager(
                 if let Some(c) = st.challenges.get(&ch_id).or_else(|| st.claimed_challenges.get(&ch_id)) {
                     Ok(challenge_to_keyval(c, st.season_points))
                 } else {
-                    let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
+                    let defs = shard2_helpers::load_localized_challenge_definitions(snap, &ctx.sde);
                     if let Some(def) = defs.iter().find(|d| d.challenge_id == ch_id) {
                         let now_ft = ctx.now_blueos_filetime_ticks();
                         let (season_end_ft, _) = resolve_season_bounds(st, snap, &ctx.sde, now_ft);
-                        let ch = def.to_character_challenge_with_end(st.selected_season_id, now_ft, season_end_ft);
+                        let ch = shard2_helpers::build_character_challenge(def, st.selected_season_id, snap, char_id, now_ft, season_end_ft, def.is_dormant);
                         Ok(challenge_to_keyval(&ch, st.season_points))
                     } else {
                         Err(BridgeRpcError {
@@ -699,7 +689,7 @@ pub fn handle_season_manager(
                     let is_dormant = c.is_dormant || (c.completed && !c.claimed);
                     Ok(PyRep::Bool(is_dormant))
                 } else {
-                    let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
+                    let defs = shard2_helpers::load_localized_challenge_definitions(snap, &ctx.sde);
                     if let Some(def) = defs.iter().find(|d| d.challenge_id == ch_id) {
                         Ok(PyRep::Bool(def.is_dormant))
                     } else {
@@ -727,11 +717,11 @@ pub fn handle_season_manager(
                 if let Some(c) = st.challenges.get(&ch_id).or_else(|| st.claimed_challenges.get(&ch_id)) {
                     Ok(PyRep::Integer(c.expiration_date))
                 } else {
-                    let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
+                    let defs = shard2_helpers::load_localized_challenge_definitions(snap, &ctx.sde);
                     if let Some(def) = defs.iter().find(|d| d.challenge_id == ch_id) {
                         let now_ft = ctx.now_blueos_filetime_ticks();
                         let (season_end_ft, _) = resolve_season_bounds(st, snap, &ctx.sde, now_ft);
-                        let ch = def.to_character_challenge_with_end(st.selected_season_id, now_ft, season_end_ft);
+                        let ch = shard2_helpers::build_character_challenge(def, st.selected_season_id, snap, char_id, now_ft, season_end_ft, def.is_dormant);
                         Ok(PyRep::Integer(ch.expiration_date))
                     } else {
                         Err(BridgeRpcError {
@@ -791,8 +781,8 @@ pub fn handle_season_manager(
             let res = with_season_state(ctx, char_id, |st, snap| {
                 let now_ft = ctx.now_blueos_filetime_ticks();
                 let (season_end_ft, max_active) = resolve_season_bounds(st, snap, &ctx.sde, now_ft);
-                let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
-                let expired = ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
+                let defs = shard2_helpers::load_localized_challenge_definitions(snap, &ctx.sde);
+                let expired = shard2_helpers::fill_and_normalize_character_challenges(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
                 sync_character_challenges_with_defs(st, &defs, snap, char_id);
                 let step = amount.min(1);
                 let mut updates: Vec<(i64, i64, bool)> = Vec::new();
@@ -900,8 +890,8 @@ pub fn handle_season_manager(
                 });
                 let now_ft = ctx.now_blueos_filetime_ticks();
                 let (season_end_ft, max_active) = resolve_season_bounds(st, snap, &ctx.sde, now_ft);
-                let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
-                let expired = ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
+                let defs = shard2_helpers::load_localized_challenge_definitions(snap, &ctx.sde);
+                let expired = shard2_helpers::fill_and_normalize_character_challenges(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
                 let def_opt = defs.iter().find(|d| d.challenge_id == ch_id).cloned();
                 sync_character_challenges_with_defs(st, &defs, snap, char_id);
                 if st.claimed_challenges.contains_key(&ch_id)
@@ -1161,8 +1151,8 @@ pub fn handle_season_manager(
             let res = with_season_state(ctx, char_id, |st, snap| {
                 let now_ft = ctx.now_blueos_filetime_ticks();
                 let (season_end_ft, max_active) = resolve_season_bounds(st, snap, &ctx.sde, now_ft);
-                let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
-                let expired = ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
+                let defs = shard2_helpers::load_localized_challenge_definitions(snap, &ctx.sde);
+                let expired = shard2_helpers::fill_and_normalize_character_challenges(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
                 sync_character_challenges_with_defs(st, &defs, snap, char_id);
                 let challenges = sorted_challenge_keyvals(st);
                 let claimed_cnt = (st.claimed_challenges.len()
@@ -1316,20 +1306,25 @@ pub fn handle_season_manager(
             }
             let res = with_season_state(ctx, char_id, |st, snap| {
                 let now_ft = ctx.now_blueos_filetime_ticks();
-                let defs = fsd_challenge_definitions(&ctx.sde).to_vec();
+                let mut defs = fsd_challenge_definitions(&ctx.sde).to_vec();
+                for def in &mut defs {
+                    shard2_helpers::localize_challenge_def(def, &ctx.sde);
+                }
                 if let Ok(json) = serde_json::to_string(&defs) {
                     snap.service_state_blobs.insert(SEASONAL_CHALLENGES_CONFIG_KEY.into(), json);
                 }
-                let seasons = default_fsd_seasons(&ctx.sde, now_ft);
+                let empty_snap = eve_db::WorldStateSnapshot::default();
+                let seasons = shard2_helpers::load_fsd_seasons_catalog_clean(&empty_snap, &ctx.sde, now_ft);
                 let cfg = seasons.get(&st.selected_season_id).or_else(|| seasons.values().next());
-                let season_end_ft = cfg.map(|c| c.end_time_ft).unwrap_or(now_ft + 30 * 86_400 * 10_000_000);
+                let (_, default_end_ft) = shard2_helpers::active_fsd_epoch_window_ft(now_ft);
+                let season_end_ft = cfg.map(|c| c.end_time_ft).unwrap_or(default_end_ft);
                 let max_active = cfg
                     .map(|c| usize::try_from(c.max_active_challenges.max(1)).unwrap_or(4))
                     .unwrap_or(4);
                 if let Ok(json) = serde_json::to_string(&seasons) {
                     snap.service_state_blobs.insert(SEASONS_CATALOG_KEY.into(), json);
                 }
-                let expired = ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
+                let expired = shard2_helpers::fill_and_normalize_character_challenges(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
                 Ok((st.season_points, expired))
             });
             match res {
@@ -1348,6 +1343,7 @@ pub fn handle_season_manager(
     }
 }
 
-#[cfg(test)] #[path = "season_manager_tests.rs"]
+#[cfg(test)]
+#[path = "season_manager_tests.rs"]
 mod season_manager_tests;
 

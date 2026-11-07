@@ -315,10 +315,8 @@ async fn hack_container_to_core_live(
     }
 }
 
-// parity: feat:pve.wormhole-capital-escalations, feat:pve.wormhole-drifter-response-escalation, feat:pve.wormhole-site-downtime-despawn, feat:pve.sleeper-sentry-towers, feat:pve.wormhole-site-capital-escalation-cap
 #[tokio::test]
 async fn test_wormhole_capital_escalations_sentries_drifter_relay_and_downtime_despawn() {
-    eve_testkit::attest(&["feat:pve.sleeper-sentry-towers", "feat:pve.wormhole-capital-escalations", "feat:pve.wormhole-drifter-response-escalation", "feat:pve.wormhole-site-capital-escalation-cap", "feat:pve.wormhole-site-downtime-despawn"]);
     let ctx = ctx_with_real_sde();
     let kw = HashMap::new();
     let char_id = 90_000_001_i64;

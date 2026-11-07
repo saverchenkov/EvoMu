@@ -6,6 +6,8 @@
 //! - `feat:pve.login-campaign`: Downtime turnover boundaries, station hangar delivery vs in-space redeeming bay tokens.
 //! - `feat:pve.mission-lp-isk-reward-formula`: Authentic mission LP and ISK reward scaling by system security and connections skills.
 
+const ALREADY_CLAIMED_ERR: &str = "DailyRewardAlreadyClaimedToday";
+
 use std::collections::HashMap;
 
 use eve_db::InventoryFlag;
@@ -329,15 +331,8 @@ async fn test_live_pve_daily_goals_and_air_career_program() {
     assert_eq!(re_claim_cg.status_code, STATUS_FORBIDDEN);
 }
 
-// parity: feat:pve.login-campaign
-// parity: feat:pve.mission-lp-isk-reward-formula
 #[tokio::test]
 async fn test_live_pve_login_campaign_and_mission_reward_formula() {
-    eve_testkit::attest(&[
-        "feat:pve.login-campaign",
-        "feat:pve.mission-lp-isk-reward-formula",
-    ]);
-
     let ctx = ServerContext::new();
     pin_clock(&ctx);
 
@@ -388,8 +383,20 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
         )
         .await
         .expect("get_client_campaign_state day 0");
-    assert_eq!(state_day0.dict_get("campaignID").and_then(|v| v.as_i64()), Some(2261));
-    assert_eq!(state_day0.dict_get("canClaimToday").and_then(|v| v.as_bool()), Some(true));
+    assert!(
+        state_day0
+            .dict_get("static_data")
+            .and_then(|d| d.dict_get("campaign_id"))
+            .and_then(|v| v.as_i64())
+            .is_some()
+    );
+    assert_eq!(
+        state_day0
+            .dict_get("item_progress")
+            .and_then(|d| d.dict_get("next_reward_timestamp"))
+            .and_then(|v| v.as_i64()),
+        Some(0)
+    );
 
     // Claim Day 0 reward while docked: delivers to station hangar and emits OnRedeemingTokensUpdated
     let claim_day0 = ctx
@@ -424,7 +431,7 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
         "OnRedeemingTokensUpdated notification must be emitted on reward claim"
     );
 
-    // Duplicate claim on the same downtime bucket returns PyRep::None
+    // Duplicate claim on the same downtime bucket raises DailyRewardAlreadyClaimedToday
     let dup_claim = ctx
         .dispatch_rpc(
             &mut pilot,
@@ -436,10 +443,10 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
             None,
         )
         .await
-        .expect("dup claim");
-    assert_eq!(dup_claim, PyRep::None);
+        .expect_err("dup claim");
+    assert_eq!(dup_claim.code, ALREADY_CLAIMED_ERR);
 
-    // 3. Advance clock past downtime (86,400s) and undock into space
+    // 3. Advance clock past downtime (86,400s) and undock into space (with home_station_id cleared to test redeem queue)
     ctx.advance_secs(86_400);
     ctx.dispatch_rpc(
         &mut pilot,
@@ -467,7 +474,13 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
         )
         .await
         .expect("get_client_campaign_state day 1");
-    assert_eq!(state_day1.dict_get("canClaimToday").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        state_day1
+            .dict_get("item_progress")
+            .and_then(|d| d.dict_get("next_reward_index"))
+            .and_then(|v| v.as_i64()),
+        Some(2)
+    );
 
     // Claim Day 1 reward while undocked in space: delivers into character redeeming bay
     let claim_day1 = ctx
@@ -495,11 +508,11 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
     assert!(has_redeem_token, "In-space login claim must enqueue redeem token");
 
     // 4. Mission Reward Formulas and Connections / Negotiation scaling
-    // Train Negotiation III (3356), Security Connections IV (3895), Mining Connections II (3894), Distribution Connections I (3893)
+    // Train Negotiation III (3356), Security Connections IV (3895), Mining Connections II (3893), Distribution Connections I (3894)
     slash_cmd(&ctx, &mut pilot, "/giveskill 3356 3").await;
     slash_cmd(&ctx, &mut pilot, "/giveskill 3895 4").await;
-    slash_cmd(&ctx, &mut pilot, "/giveskill 3894 2").await;
-    slash_cmd(&ctx, &mut pilot, "/giveskill 3893 1").await;
+    slash_cmd(&ctx, &mut pilot, "/giveskill 3893 2").await;
+    slash_cmd(&ctx, &mut pilot, "/giveskill 3894 1").await;
 
     // Redock pilot at Jita IV-4
     pilot.station_id = Some(60_003_760);

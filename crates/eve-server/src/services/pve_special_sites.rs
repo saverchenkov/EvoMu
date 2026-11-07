@@ -413,63 +413,8 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
         }
 
         init_homefront_sites(ctx, reg);
-        init_roaming_storms(ctx, reg);
-
-        for (sys_id, did, dname, elem_tid, elem_name) in [
-            (31_000_001_u32, 5648_u32, "Barbican Hive", 34_557_u32, "Barbican Element"),
-            (31_000_002, 5649, "Vidette Hive", 34_558, "Vidette Element"),
-            (31_000_003, 5650, "Conflux Hive", 34_559, "Conflux Element"),
-            (31_000_004, 5651, "Redoubt Hive", 34_560, "Redoubt Element"),
-            (31_000_005, 5642, "Sentinel Hive", 34_556, "Sentinel Element"),
-        ] {
-            let base_ball = 1_898_000_000 + ((did as i64) * 100);
-            let warden_npc_ball_id = base_ball + 30;
-            let rooms = vec![
-                DrifterHiveRoom {
-                    room_index: 1,
-                    room_name: "Perimeter Approach".into(),
-                    npc_ball_ids: vec![base_ball + 11, base_ball + 12],
-                    npc_type_ids: vec![47958, 47959], // Drifter Entanglement Cruiser, Drifter Nullwarp Cruiser
-                    beacon_ball_id: base_ball + 10,
-                    cleared: false,
-                    destroyed_npc_ball_ids: Vec::new(),
-                },
-                DrifterHiveRoom {
-                    room_index: 2,
-                    room_name: "Assembler Chamber".into(),
-                    npc_ball_ids: vec![base_ball + 21, base_ball + 22],
-                    npc_type_ids: vec![47956, 47957], // Drifter Vanguard Battleship, Drifter Assault Battleship
-                    beacon_ball_id: base_ball + 20,
-                    cleared: false,
-                    destroyed_npc_ball_ids: Vec::new(),
-                },
-                DrifterHiveRoom {
-                    room_index: 3,
-                    room_name: "Hive Sanctuary".into(),
-                    npc_ball_ids: vec![warden_npc_ball_id],
-                    npc_type_ids: vec![37473], // Artemis Tyrannos / Drifter Response Battleship
-                    beacon_ball_id: base_ball + 31,
-                    cleared: false,
-                    destroyed_npc_ball_ids: Vec::new(),
-                },
-            ];
-            reg.drifter_hives.insert(
-                sys_id,
-                DrifterHiveRecord {
-                    site_id: format!("DRIFTER-HIVE-{did}"),
-                    dungeon_id: did,
-                    dungeon_name: dname.into(),
-                    solar_system_id: sys_id,
-                    element_type_id: elem_tid,
-                    element_name: elem_name.into(),
-                    current_room: 1,
-                    total_rooms: 3,
-                    warden_npc_ball_id,
-                    cleared: false,
-                    rooms,
-                },
-            );
-        }
+        crate::services::pve_special_sites_shard2_helpers::ensure_full_roaming_storm_set(ctx, reg);
+        crate::services::pve_special_sites_shard2_helpers::init_drifter_hives_from_sde(&ctx.sde, reg);
 
         for sys_id in reg
             .edencom_minor_victory_systems
@@ -483,7 +428,11 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
                     .or_else(|| ctx.sde.regions.get(&s.region_id).and_then(|r| r.faction_id))
                     .or_else(|| s.stations.iter().find_map(|st| st.owner_faction_id.map(|f| f as u32)))
             }).unwrap_or(500_002);
-            ensure_triglavian_sites_for_system(reg, sys_id, empire_fac);
+            let is_edencom = reg.edencom_minor_victory_systems.contains(&sys_id);
+            let sites = crate::services::pve_special_sites_shard2_helpers::build_triglavian_sites_from_sde(
+                &ctx.sde, sys_id, is_edencom, empire_navy_ships(empire_fac),
+            );
+            reg.triglavian_sites.entry(sys_id).or_insert(sites);
         }
         reg.incursions.values().filter(|inc| inc.state != "Ended").map(|inc| (inc.tale_id, inc.staging_solar_system_id)).collect()
     });
@@ -893,9 +842,9 @@ pub async fn complete_special_dungeon_instance(
         crate::services::r6_t1_p0_helpers::verify_special_site_caller_on_grid(
             ctx, session, &sys_handle, char_id, DVec3::new(10_000.0, 0.0, 0.0), &hive.dungeon_name,
         ).await?;
-        let (kv, iid, blue_iid, elem_tid) = with_pve_special_reg(ctx, |reg| {
-            let next_iid = 1_899_000_000 + next_spec_seq(reg);
-            let next_blue = 1_899_100_000 + next_spec_seq(reg);
+        let (kv, loot_items) = with_pve_special_reg(ctx, |reg| {
+            let elem_t = reg.drifter_hives.get(&hive.solar_system_id).map(|h| h.element_type_id).unwrap_or(hive.element_type_id);
+            let items = crate::services::pve_special_sites_shard2_helpers::allocate_drifter_hive_bonus_loot(reg, elem_t);
             let h = reg.drifter_hives.get_mut(&hive.solar_system_id).unwrap();
             h.cleared = true;
             if let Some(r) = h.rooms.iter_mut().find(|r| r.room_index == h.total_rooms) {
@@ -913,7 +862,7 @@ pub async fn complete_special_dungeon_instance(
                 ("totalRooms", PyRep::Integer(h.total_rooms as i64)),
                 ("cleared", PyRep::Bool(true)),
             ]);
-            (kv, next_iid, next_blue, h.element_type_id)
+            (kv, items)
         });
         let ship_id = session.ship_id.unwrap_or(0);
         let spawned_cid = ctx.db.with_mut_snapshot(|snap| {
@@ -923,7 +872,7 @@ pub async fn complete_special_dungeon_instance(
                 char_id,
                 caller_sys,
                 ship_id,
-                &[(iid, elem_tid, 1), (blue_iid, 30_745, 5)],
+                &loot_items,
             )
         });
         if let Some(cid) = spawned_cid {
@@ -1048,43 +997,36 @@ pub async fn complete_special_dungeon_instance(
         crate::services::r6_t1_p0_helpers::verify_special_site_caller_on_grid(
             ctx, session, &sys_handle, char_id, trig_pos, &trig.dungeon_name,
         ).await?;
-        let loot_iid = with_pve_special_reg(ctx, |reg| {
+        let (loot_iid, nexus_iid) = with_pve_special_reg(ctx, |reg| {
             let seq_id = 1_899_500_000 + next_spec_seq(reg);
+            let nex_id = 1_899_600_000 + next_spec_seq(reg);
             if let Some(list) = reg.triglavian_sites.get_mut(&trig.solar_system_id) {
                 if let Some(s) = list.iter_mut().find(|s| s.instance_id == instance_id) {
                     s.completed = true;
                 }
             }
-            seq_id
+            (seq_id, nex_id)
         });
         let (gain_faction, lose_faction) = if trig.faction_owner_id == 500_027 { (500_026_i64, 500_027_i64) } else { (500_027_i64, 500_026_i64) };
         let ship_id = session.ship_id.unwrap_or(0);
-        let mut new_bal_isk = None;
-        let spawned_cid = ctx.db.with_mut_snapshot(|snap| {
-            if let Some(ch) = snap.characters.get_mut(&char_id) {
-                let g = ch.standings.entry(gain_faction).or_insert(0.0);
-                *g = (*g + 0.15).clamp(-10.0, 10.0);
-                let l = ch.standings.entry(lose_faction).or_insert(0.0);
-                *l = (*l - 0.15).clamp(-10.0, 10.0);
-                ch.balance = ch.balance.checked_add(IskCents::from_isk(trig.base_isk)).unwrap_or(ch.balance);
-                let new_bal = ch.balance;
-                new_bal_isk = Some(new_bal.to_wire_f64());
-                snap.append_journal(
-                    char_id,
-                    "CorporateRewardPayout",
-                    IskCents::from_isk(trig.base_isk),
-                    new_bal,
-                    format!("Triglavian site payout ({})", trig.dungeon_name),
-                );
-            }
-            deposit_loot_into_ship_or_container_in_snapshot(
+        let ((new_bal_isk, _standing_pair), spawned_cid) = ctx.db.with_mut_snapshot(|snap| {
+            let res_pair = crate::services::pve_special_sites_shard2_helpers::apply_triglavian_standings_and_isk(
+                snap,
+                char_id,
+                gain_faction,
+                lose_faction,
+                trig.base_isk,
+                &trig.dungeon_name,
+            );
+            let cid = deposit_loot_into_ship_or_container_in_snapshot(
                 snap,
                 &ctx.sde,
                 char_id,
                 caller_sys,
                 ship_id,
-                &[(loot_iid, 48_121, trig.survey_db_drop as i32)],
-            )
+                &[(loot_iid, 48_121, trig.survey_db_drop as i32), (nexus_iid, 30_747, 2)],
+            );
+            (res_pair, cid)
         });
         if let Some(cid) = spawned_cid {
             let _ = sys_handle.spawn_ball(make_site_npc_ball(cid, 23, DVec3::new(10_500.0, 0.0, 0.0))).await;
@@ -1182,8 +1124,11 @@ pub async fn handle_pve_special_sites(
             let is_pochven = ctx.sde.solar_systems.get(&sys_id).is_some_and(|s| s.region_id == 10_000_070);
 
             let by_dng = with_pve_special_reg(ctx, |reg| {
-                if is_pochven {
-                    ensure_triglavian_sites_for_system(reg, sys_id, 500_026);
+                if is_pochven && !reg.triglavian_sites.contains_key(&sys_id) {
+                    let sites = crate::services::pve_special_sites_shard2_helpers::build_triglavian_sites_from_sde(
+                        &ctx.sde, sys_id, false, empire_navy_ships(500_002),
+                    );
+                    reg.triglavian_sites.insert(sys_id, sites);
                 }
                 let mut map: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
                 if let Some(list) = reg.triglavian_sites.get(&sys_id) {

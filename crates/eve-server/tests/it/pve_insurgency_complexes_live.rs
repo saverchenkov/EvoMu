@@ -362,9 +362,6 @@ async fn verify_war_hq_handin(ctx: &ServerContext, pilot: &mut LivePilot, wrong_
 
 #[tokio::test]
 async fn test_live_insurgency_laundering_roamers_and_war_hq_crates() {
-    // parity: feat:pve.insurgency-laundering
-    eve_testkit::attest(&["feat:pve.insurgency-laundering"]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     ctx.mechanic_rng.set_seed(Some(42));
@@ -474,9 +471,6 @@ async fn test_live_insurgency_laundering_roamers_and_war_hq_crates() {
 
 #[tokio::test]
 async fn test_live_insurgency_mining_ambush_ransom_rescue_destroy_lp_split() {
-    // parity: feat:pve.insurgency-mining-ambush
-    eve_testkit::attest(&["feat:pve.insurgency-mining-ambush"]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let (hurr, gun, gyro, mwd, ammo, rifter) = gear_type_ids(&ctx);
@@ -546,9 +540,6 @@ async fn test_live_insurgency_mining_ambush_ransom_rescue_destroy_lp_split() {
 
 #[tokio::test]
 async fn test_live_insurgency_outpost_raid_sizes_gates_bc_bonus_and_respawn() {
-    // parity: feat:pve.insurgency-outpost-raid
-    eve_testkit::attest(&["feat:pve.insurgency-outpost-raid"]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 

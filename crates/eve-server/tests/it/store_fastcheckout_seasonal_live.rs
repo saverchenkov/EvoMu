@@ -474,15 +474,6 @@ async fn test_fast_checkout_offers_and_buy_live() {
 
 #[tokio::test]
 async fn test_seasonal_login_campaign_lifecycle_live() {
-    // parity: rpc:seasonalLoginCampaignManager.get_active_campaign
-    // parity: rpc:seasonalLoginCampaignManager.get_claim_history
-    // parity: rpc:seasonalLoginCampaignManager.claim_reward
-    eve_testkit::attest(&[
-        "rpc:seasonalLoginCampaignManager.get_active_campaign",
-        "rpc:seasonalLoginCampaignManager.get_claim_history",
-        "rpc:seasonalLoginCampaignManager.claim_reward",
-    ]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 

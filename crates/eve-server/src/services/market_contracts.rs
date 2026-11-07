@@ -105,7 +105,9 @@ pub(crate) fn sweep_expired_orders_filtered(
     owner_filter: Option<(i64, Option<i64>)>,
 ) -> Vec<(i64, i64, bool, TypeId, i64)> {
     let candidate_ids: Vec<i64> = snap.market_orders.values().filter(|o| {
-        !o.is_npc && o.vol_remaining > 0 && owner_filter.is_none_or(|(cid, corp_opt)| o.owner_id == cid || corp_opt == Some(o.owner_id))
+        !o.is_npc && o.vol_remaining > 0
+            && (snap.market_order_meta.contains_key(&o.order_id) || snap.owner_notes.contains_key(&-(4_000_000_000_000_i64.saturating_add(o.order_id.abs()))))
+            && owner_filter.is_none_or(|(cid, corp_opt)| o.owner_id == cid || corp_opt == Some(o.owner_id))
     }).map(|o| o.order_id).collect();
     let mut expired = Vec::new();
     for oid in candidate_ids {
@@ -1283,5 +1285,6 @@ pub fn handle(
     }
 }
 
-#[cfg(test)] #[path = "market_contracts_tests.rs"]
+#[cfg(test)]
+#[path = "market_contracts_tests.rs"]
 mod market_contracts_tests;

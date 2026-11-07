@@ -199,6 +199,18 @@ pub fn purge_expired_boosters_in_snapshot(
 
 /// Purges all expired boosters across the snapshot and invalidates affected ship fittings.
 pub fn purge_expired_boosters_all(ctx: &ServerContext, now_unix: u64) {
+    let any_expired = ctx.db.with_snapshot(|snap| {
+        snap.items.values().any(|item| {
+            item.flag == InventoryFlag::Booster
+                && item
+                    .dynamic_attributes
+                    .get(&DYN_ATTR_BOOSTER_EXPIRY_UNIX)
+                    .is_some_and(|&exp| exp > 0.0 && now_unix >= (exp as u64))
+        })
+    });
+    if !any_expired {
+        return;
+    }
     let ships = ctx
         .db
         .with_mut_snapshot(|snap| purge_expired_boosters_in_snapshot(snap, None, now_unix));

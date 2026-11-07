@@ -37,19 +37,6 @@ async fn login_pilot_char(
 
 #[tokio::test]
 async fn test_project_discovery_tutorial_xp_and_training_live() {
-    // parity: rpc:ProjectDiscovery.get_total_needed_xp
-    // parity: rpc:ProjectDiscovery.get_tutorial_xp_reward
-    // parity: rpc:ProjectDiscovery.give_tutorial_rewards
-    // parity: rpc:ProjectDiscovery.new_training_task
-    // parity: rpc:ProjectDiscovery.get_maximum_bonus_samples
-    eve_testkit::attest(&[
-        "rpc:ProjectDiscovery.get_total_needed_xp",
-        "rpc:ProjectDiscovery.get_tutorial_xp_reward",
-        "rpc:ProjectDiscovery.give_tutorial_rewards",
-        "rpc:ProjectDiscovery.new_training_task",
-        "rpc:ProjectDiscovery.get_maximum_bonus_samples",
-    ]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     ctx.db
@@ -144,19 +131,6 @@ async fn test_project_discovery_tutorial_xp_and_training_live() {
 
 #[tokio::test]
 async fn test_project_discovery_tasks_url_classification_and_stats_live() {
-    // parity: rpc:ProjectDiscovery.get_new_task
-    // parity: rpc:ProjectDiscovery.get_data_from_url
-    // parity: rpc:ProjectDiscovery.post_classification
-    // parity: rpc:ProjectDiscovery.get_player_statistics
-    // parity: rpc:ProjectDiscovery.get_remaining_bonus_samples
-    eve_testkit::attest(&[
-        "rpc:ProjectDiscovery.get_new_task",
-        "rpc:ProjectDiscovery.get_data_from_url",
-        "rpc:ProjectDiscovery.post_classification",
-        "rpc:ProjectDiscovery.get_player_statistics",
-        "rpc:ProjectDiscovery.get_remaining_bonus_samples",
-    ]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     ctx.db

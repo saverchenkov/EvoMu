@@ -116,14 +116,12 @@ pub async fn on_special_site_npc_destroyed_core(
             if let Some(list) = reg.homefront_sites.get_mut(&solar_system_id) {
                 for site in list.iter_mut() {
                     if site.boss_npc_ball_id == npc_ball_id && !site.completed {
-                        let mult = if fleet_count == site.optimal_fleet_size {
-                            1.0
-                        } else if fleet_count < site.optimal_fleet_size {
-                            (fleet_count as f64) / (site.optimal_fleet_size as f64)
-                        } else {
-                            0.75
-                        };
-                        let reward_paid = ((site.base_pilot_isk as f64) * mult).round() as i64;
+                        let reward_paid =
+                            crate::services::pve_special_sites_shard2_helpers::compute_homefront_combat_pilot_isk(
+                                site.base_pilot_isk,
+                                site.optimal_fleet_size,
+                                fleet_count,
+                            );
                         site.completed = true;
                         site.reward_paid_isk = reward_paid;
                         return Some((site.dungeon_name.clone(), reward_paid));
@@ -191,36 +189,33 @@ pub async fn on_special_site_npc_destroyed_core(
         }
         if let Some(cid) = killer_char_id {
             let spawned_cid = db.with_mut_snapshot(|snap| {
-                let j_id = (snap.wallet_journal.len() as i64) + 965_000;
-                let mut ship_id = 0;
-                if let Some(ch) = snap.characters.get_mut(&cid) {
-                    let g = ch.standings.entry(g_fac).or_insert(0.0);
-                    *g = (*g + 0.15).clamp(-10.0, 10.0);
-                    let l = ch.standings.entry(l_fac).or_insert(0.0);
-                    *l = (*l - 0.15).clamp(-10.0, 10.0);
-                    ch.balance = ch
-                        .balance
-                        .checked_add(IskCents::from_isk(base_isk))
-                        .unwrap_or(ch.balance);
-                    let new_bal = ch.balance;
-                    acct_changes.push((cid, new_bal.to_wire_f64()));
-                    ship_id = ch.active_ship_id;
-                    snap.wallet_journal.push(eve_db::WalletJournalEntry {
-                        entry_id: j_id,
-                        character_id: cid,
-                        entry_type: "CorporateRewardPayout".into(),
-                        amount: IskCents::from_isk(base_isk),
-                        balance_after: new_bal,
-                        reason: "Triglavian Site Payout".into(),
-                    });
+                let (new_bal_opt, _) =
+                    crate::services::pve_special_sites_shard2_helpers::apply_triglavian_standings_and_isk(
+                        snap,
+                        cid,
+                        g_fac,
+                        l_fac,
+                        base_isk,
+                        "Triglavian Site Payout",
+                    );
+                if let Some(nb) = new_bal_opt {
+                    acct_changes.push((cid, nb));
                 }
+                let ship_id = snap
+                    .characters
+                    .get(&cid)
+                    .map(|c| c.active_ship_id)
+                    .unwrap_or(0);
                 deposit_loot_into_ship_or_container_in_snapshot(
                     snap,
                     _sde,
                     cid,
                     solar_system_id,
                     ship_id,
-                    &[(loot_id, 48_121, db_drop as i32)],
+                    &[
+                        (loot_id, 48_121, db_drop as i32),
+                        (loot_id + 1_000_000, 30_747, 2),
+                    ],
                 )
             });
             if let Some(container_id) = spawned_cid {
@@ -283,11 +278,9 @@ pub async fn on_special_site_npc_destroyed_core(
         (
             spawn_next,
             hive_loot.map(|elem_tid| {
-                reg.next_seq += 1;
-                let elem_id = 1_899_000_000 + reg.next_seq;
-                reg.next_seq += 1;
-                let blue_id = 1_899_100_000 + reg.next_seq;
-                (elem_tid, elem_id, blue_id)
+                crate::services::pve_special_sites_shard2_helpers::allocate_drifter_hive_bonus_loot(
+                    reg, elem_tid,
+                )
             }),
         )
     });
@@ -336,7 +329,7 @@ pub async fn on_special_site_npc_destroyed_core(
         }
     }
 
-    if let Some((elem_tid, elem_id, blue_id)) = hive_loot {
+    if let Some(hive_items) = hive_loot {
         if let Some(cid) = killer_char_id {
             let spawned_cid = db.with_mut_snapshot(|snap| {
                 let ship_id = snap
@@ -350,7 +343,7 @@ pub async fn on_special_site_npc_destroyed_core(
                     cid,
                     solar_system_id,
                     ship_id,
-                    &[(elem_id, elem_tid, 1), (blue_id, 30_745, 5)],
+                    &hive_items,
                 )
             });
             if let Some(container_id) = spawned_cid {

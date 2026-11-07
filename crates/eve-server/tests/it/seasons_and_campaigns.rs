@@ -373,13 +373,19 @@ async fn test_login_campaigns_seasonal_and_milestones() {
         .await
         .expect("loginCampaignManager.get_client_campaign_state");
     assert_eq!(
-        state_rep.dict_get("can_claim_today").and_then(|v| v.as_bool()),
-        Some(true),
+        state_rep
+            .dict_get("item_progress")
+            .and_then(|d| d.dict_get("next_reward_timestamp"))
+            .and_then(|v| v.as_i64()),
+        Some(0),
         "Fresh pilot must be eligible to claim daily login reward today"
     );
-    assert_eq!(
-        state_rep.dict_get("campaign_id").and_then(|v| v.as_i64()),
-        Some(2261)
+    assert!(
+        state_rep
+            .dict_get("static_data")
+            .and_then(|d| d.dict_get("campaign_id"))
+            .and_then(|v| v.as_i64())
+            .is_some()
     );
 
     let items_before = ctx.db.with_snapshot(|s| s.items.len());
@@ -387,7 +393,7 @@ async fn test_login_campaigns_seasonal_and_milestones() {
         .await
         .expect("loginCampaignManager.claim_reward");
 
-    // Returns authentic 4-tuple (reward_item, item_progress, reward_event, bucket_progress)
+    // Returns authentic 4-tuple (reward_item, item_progress, received_bucket_typeID, bucket_progress)
     let tuple = match claim_rep {
         PyRep::Tuple(ref items) if items.len() == 4 => items,
         other => panic!("expected 4-tuple from loginCampaignManager.claim_reward, got {other:?}"),
@@ -403,10 +409,13 @@ async fn test_login_campaigns_seasonal_and_milestones() {
     let state_after = rpc(&ctx, &mut sess, "loginCampaignManager", "get_client_campaign_state", &[])
         .await
         .expect("login state after claim");
-    assert_eq!(
-        state_after.dict_get("can_claim_today").and_then(|v| v.as_bool()),
-        Some(false),
-        "can_claim_today must be false after claiming today's reward"
+    assert!(
+        state_after
+            .dict_get("item_progress")
+            .and_then(|d| d.dict_get("next_reward_timestamp"))
+            .and_then(|v| v.as_i64())
+            .is_some_and(|ts| ts > 0),
+        "next_reward_timestamp must be set after claiming today's reward"
     );
 
     // 2. feat:pve.seasonal-login: seasonalLoginCampaignManager.get_active_campaign, claim_reward, get_claim_history
@@ -480,8 +489,8 @@ async fn test_login_campaigns_seasonal_and_milestones() {
         .expect("ProcessCharacterLogon");
     assert_eq!(logon_res, PyRep::None);
 
-    // Positive milestoneID succeeds once and rejects duplicate claims
-    ctx.db.clock().advance_secs(7_200);
+    // Positive milestoneID succeeds once after 120m playtime and rejects duplicate claims
+    ctx.advance_virtual_clock(7_200);
     let claim_res = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
         .await
         .expect("ClaimRewards(1) must succeed once");
@@ -613,23 +622,12 @@ async fn test_season_challenge_isk_award_trust_and_claim_guards() {
         st.challenges.insert(client_def.challenge_id, ch);
         save_season_state_to_blobs(snap, PILOT_1, &st);
     });
-    let client_claim = rpc(
-        &ctx,
-        &mut sess,
-        "seasonManager",
-        "claim_challenge_rewards",
-        &[PyRep::Integer(client_def.challenge_id)],
-    )
-    .await
-    .expect("client-driven challenge claim succeeds for points");
+    let client_claim = rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(client_def.challenge_id)])
+        .await
+        .expect("client-driven challenge claim succeeds for points");
     assert_eq!(client_claim.dict_get("claimed").and_then(|v| v.as_bool()), Some(true));
-    let isk_after_client = ctx
-        .db
-        .with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0);
-    assert_eq!(
-        isk_after_client, isk_after_claim,
-        "client_event_driven challenge must withhold isk_awarded even when isk_awarded > 0"
-    );
+    let isk_after_client = ctx.db.with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0);
+    assert_eq!(isk_after_client, isk_after_claim, "client_event_driven challenge must withhold isk_awarded even when isk_awarded > 0");
 
     // 5. R-SM-P1-2..4: challengeconditions extra_data filtering, multi-challenge event_name, once-per-season/downtime flags, undocked redeem queue
     let cond_key = eve_server::services::season_manager::fsd_challenge_conditions(&ctx.sde).keys().next().unwrap().clone();

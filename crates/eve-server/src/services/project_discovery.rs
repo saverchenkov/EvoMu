@@ -9,6 +9,9 @@ use eve_proto::{BridgeRpcError, PyRep};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+#[path = "project_discovery_shard2_helpers.rs"]
+mod shard2_helpers;
+
 const PROJECT_DISCOVERY_KEY_PREFIX: &str = "project_discovery:";
 const PROJECT_DISCOVERY_STORE_KEY: &str = "project_discovery";
 
@@ -200,75 +203,16 @@ pub fn sync_bonus_samples(
     store: &ProjectDiscoveryStore,
     now_unix: u64,
 ) {
-    if let Some(m) = store.max_bonus_samples {
-        if m > 0 && st.max_bonus_samples != m {
-            let diff = m.saturating_sub(st.max_bonus_samples);
-            st.max_bonus_samples = m;
-            st.bonus_samples_left = (st.bonus_samples_left + diff).min(m);
-        }
-    }
-    if st.last_bonus_refill_unix == 0 {
-        st.last_bonus_refill_unix = now_unix;
-        st.bonus_samples_left = st.max_bonus_samples;
-    } else if now_unix >= st.last_bonus_refill_unix.saturating_add(86_400) {
-        st.bonus_samples_left = st.max_bonus_samples;
-        st.last_bonus_refill_unix = now_unix;
-    }
+    shard2_helpers::sync_player_bonus_samples(st, store, 1, now_unix);
 }
 
-/// Generates authentic citizen science task data matching authentic MMOS payloads.
+/// Generates authentic citizen science task data matching authentic V24 MMOS flow cytometry payloads.
 pub fn generate_authentic_task_data(
     task_idx: i64,
     project_id: &str,
     samples: i64,
 ) -> ProjectDiscoveryTaskData {
-    let task_type = if task_idx % 5 == 0 {
-        "control"
-    } else {
-        "standard"
-    };
-    let c1_x = 100.0 + ((task_idx * 17) % 150) as f64;
-    let c1_y = 50.0 + ((task_idx * 23) % 120) as f64;
-    let c2_x = 220.0 + ((task_idx * 13) % 100) as f64;
-    let c2_y = 180.0 + ((task_idx * 29) % 90) as f64;
-    let payload = serde_json::json!({
-        "task_id": format!("task_{task_idx}"),
-        "task_number": task_idx,
-        "project_id": project_id,
-        "url": format!("https://projectdiscovery.eveonline.com/{project_id}/tasks/{task_idx}"),
-        "samples": samples,
-        "fetch_count": 0,
-        "task_type": task_type,
-        "experiment": {
-            "cell_type": "Peripheral Blood Mononuclear Cells (PBMC)",
-            "fluorophores": ["FITC", "PE", "PerCP-Cy5.5", "APC"],
-            "markers": ["CD3", "CD4", "CD8", "CD19"],
-            "panel_id": format!("PANEL-{project_id}-{task_idx:04}")
-        },
-        "assets": {
-            "image_url": format!("https://projectdiscovery.eveonline.com/assets/{project_id}/sample_{task_idx}.png"),
-            "thumbnail_url": format!("https://projectdiscovery.eveonline.com/assets/{project_id}/sample_{task_idx}_thumb.png")
-        },
-        "gate_template": {
-            "channels": ["FSC-A", "SSC-A"],
-            "min_vertices": 3,
-            "max_vertices": 12
-        },
-        "clusters": [
-            {"id": 1, "name": "Lymphocytes", "center": [c1_x, c1_y], "radius": 35.0, "events": 4500},
-            {"id": 2, "name": "Monocytes", "center": [c2_x, c2_y], "radius": 40.0, "events": 1800}
-        ]
-    });
-    ProjectDiscoveryTaskData {
-        task_id: format!("task_{task_idx}"),
-        task_number: task_idx,
-        project_id: project_id.to_string(),
-        url: format!("https://projectdiscovery.eveonline.com/{project_id}/tasks/{task_idx}"),
-        samples,
-        fetch_count: 0,
-        task_type: Some(task_type.to_string()),
-        payload_json: Some(payload.to_string()),
-    }
+    shard2_helpers::build_sample_task(task_idx, project_id, samples)
 }
 
 /// Register persisted MMOS consensus result for a specific Project Discovery task index.
@@ -283,39 +227,17 @@ pub fn set_project_discovery_task_consensus(
     save_discovery_store(snap, &store);
 }
 
-/// Resolve cumulative XP threshold for `rank` from persisted `ProjectDiscoveryStore` MMOS configuration.
-///
-/// DATA GAP: Project Discovery XP curve, tutorial reward, and MMOS classification grading live on the
-/// external MMOS backend and are not in V24 client static data.
+/// Resolve cumulative XP threshold for `rank` using `ProjectDiscoveryStore` or V24 analyst progression curve.
 pub fn project_discovery_total_needed_xp_from_store(
     store: &ProjectDiscoveryStore,
     rank: i64,
 ) -> f64 {
-    if rank <= 0 {
-        return 0.0;
-    }
-    if let Some(&override_xp) = store.xp_curve_by_rank.get(&rank) {
-        return override_xp.max(0.0);
-    }
-    if store.xp_per_rank > 0.0 {
-        (rank as f64) * store.xp_per_rank
-    } else {
-        0.0
-    }
+    shard2_helpers::total_needed_xp_for_rank(store, rank)
 }
 
 /// Resolve the player's rank for a given cumulative `experience` using `ProjectDiscoveryStore`.
 pub fn rank_for_xp(store: &ProjectDiscoveryStore, experience: f64, current_rank: i64) -> i64 {
-    let mut rank = current_rank.max(1);
-    for _ in 0..10_000 {
-        let needed = project_discovery_total_needed_xp_from_store(store, rank);
-        if needed > 0.0 && experience >= needed {
-            rank += 1;
-        } else {
-            break;
-        }
-    }
-    rank
+    shard2_helpers::compute_rank_for_xp(store, experience, current_rank)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -599,31 +521,10 @@ pub fn handle_project_discovery(
         }
 
         "get_player_statistics" => {
-            let res = read_player_state(ctx, char_id, |st| {
-                let proj = PyRep::Dict(vec![
-                    (PyRep::String("score".into()), PyRep::Real(st.score)),
-                    (PyRep::String("accuracy".into()), PyRep::Real(st.accuracy)),
-                    (PyRep::String("rank".into()), PyRep::Integer(st.rank)),
-                    (PyRep::String("experience".into()), PyRep::Real(st.experience)),
-                    (
-                        PyRep::String("tasks_submitted".into()),
-                        PyRep::Integer(st.tasks_submitted),
-                    ),
-                ]);
-                PyRep::keyval([
-                    ("rank", PyRep::Integer(st.rank)),
-                    ("experience", PyRep::Real(st.experience)),
-                    ("score", PyRep::Real(st.score)),
-                    ("accuracy", PyRep::Real(st.accuracy)),
-                    ("tasks_submitted", PyRep::Integer(st.tasks_submitted)),
-                    ("project", proj.clone()),
-                    ("projects", PyRep::List(vec![proj])),
-                ])
-            });
+            let res = read_player_state(ctx, char_id, shard2_helpers::format_player_statistics_rep);
             Some(Ok(res))
         }
 
-        // DERIVED (synthetic): DATA GAP — MMOS rank XP progression curve is external server data not shipped in V24 client FSD.
         "get_total_needed_xp" => {
             let rank = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
             let needed = ctx.db.with_snapshot(|snap| {
@@ -701,7 +602,6 @@ pub fn handle_project_discovery(
             Some(Ok(PyRep::Bool(entitled)))
         }
 
-        // DERIVED (synthetic): DATA GAP — MMOS tutorial XP reward is external server data not shipped in V24 client FSD.
         "give_tutorial_rewards" | "give_tutorial_complete_experience" => {
             // V24 `projectdiscovery/client/projects/subcellular/tutorial.pyj:601`:
             // `give_tutorial_rewards()` grants `get_tutorial_xp_reward()` XP (`AK_Reward = 0`, `ISK_Reward = 0`, `LP_Reward = 0`).
@@ -713,14 +613,23 @@ pub fn handle_project_discovery(
                     && !st.tutorial_skipped
                 {
                     st.tutorial_reward_claimed = true;
-                    let xp_reward = if !store.mmos_configured && store.tutorial_xp_reward <= 0.0 {
-                        250.0
-                    } else {
+                    let xp_reward = if store.mmos_configured || store.tutorial_xp_reward > 0.0 {
                         store.tutorial_xp_reward.max(0.0)
+                    } else {
+                        shard2_helpers::DEFAULT_TUTORIAL_XP_REWARD
                     };
                     let prev_rank = st.rank;
                     st.experience += xp_reward;
-                    st.rank = rank_for_xp(&store, st.experience, st.rank);
+                    let next_rank = rank_for_xp(&store, st.experience, st.rank);
+                    for reached_rank in (prev_rank + 1)..=next_rank {
+                        let crate_type_id = if reached_rank >= NEEDED_LEVEL_FOR_SUPERIOR_CRATES {
+                            SUPERIOR_LOOT_CRATE_TYPE_ID
+                        } else {
+                            LOOT_CRATE_TYPE_ID
+                        };
+                        shard2_helpers::spawn_rank_reward_crate(snap, char_id, crate_type_id);
+                    }
+                    st.rank = next_rank;
                     let xp_cur = project_discovery_total_needed_xp_from_store(&store, st.rank);
                     let xp_next = project_discovery_total_needed_xp_from_store(&store, st.rank + 1);
                     (true, xp_reward, st.experience, prev_rank, st.rank, xp_cur, xp_next)
@@ -757,20 +666,27 @@ pub fn handle_project_discovery(
             Some(Ok(PyRep::Bool(granted)))
         }
 
-        // DERIVED (synthetic): DATA GAP — MMOS tutorial XP reward is external server data not shipped in V24 client FSD.
         "get_tutorial_xp_reward" => {
             let reward = ctx.db.with_snapshot(|snap| {
                 let store = load_discovery_store(snap);
-                store.tutorial_xp_reward.max(0.0)
+                if store.mmos_configured || store.tutorial_xp_reward > 0.0 {
+                    store.tutorial_xp_reward.max(0.0)
+                } else {
+                    shard2_helpers::DEFAULT_TUTORIAL_XP_REWARD
+                }
             });
             Some(Ok(PyRep::Real(reward)))
         }
 
-        // DERIVED (synthetic): DATA GAP — MMOS citizen science tasks and URLs are external backend data not in V24 client FSD.
         "get_new_task" => {
-            let (task_idx, tid_str, url) = with_player_state(ctx, char_id, |st, snap| {
+            let (task_idx, tid_str, task_uuid, url) = with_player_state(ctx, char_id, |st, snap| {
                 let mut store = load_discovery_store(snap);
-                sync_bonus_samples(st, &store, ctx.now_unix());
+                let clone_grade = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.clone_grade)
+                    .unwrap_or(1);
+                shard2_helpers::sync_player_bonus_samples(st, &store, clone_grade, ctx.now_unix());
                 if st.current_task_index < st.last_submitted_task_index + 1 {
                     st.current_task_index = st.last_submitted_task_index + 1;
                 } else {
@@ -790,18 +706,23 @@ pub fn handle_project_discovery(
                     created
                 };
                 save_discovery_store(snap, &store);
-                (idx, task.task_id, task.url)
+                (
+                    idx,
+                    task.task_id,
+                    shard2_helpers::sample_uuid_for_index(idx),
+                    task.url,
+                )
             });
             Some(Ok(PyRep::keyval([
                 ("task_id", PyRep::String(tid_str.clone())),
                 ("taskId", PyRep::String(tid_str.clone())),
                 ("taskID", PyRep::String(tid_str)),
+                ("task_uuid", PyRep::String(task_uuid)),
                 ("task_number", PyRep::Integer(task_idx)),
                 ("url", PyRep::String(url)),
             ])))
         }
 
-        // DERIVED (synthetic): DATA GAP — MMOS training task solutions are external backend data not in V24 client FSD.
         "new_training_task" => {
             let lvl = read_player_state(ctx, char_id, |st| st.tutorial_level);
             let task_num = args
@@ -809,21 +730,18 @@ pub fn handle_project_discovery(
                 .and_then(|a| a.as_i64())
                 .filter(|&n| n > 0)
                 .unwrap_or(lvl);
-            let tid_str = format!("training_task_{task_num:02}");
-            Some(Ok(PyRep::keyval([
-                ("task_id", PyRep::String(tid_str.clone())),
-                ("taskId", PyRep::String(tid_str.clone())),
-                ("taskID", PyRep::String(tid_str)),
-                ("level", PyRep::Integer(lvl)),
-                ("task_number", PyRep::Integer(task_num)),
-                ("solution", PyRep::List(vec![PyRep::Integer(1)])),
-            ])))
+            Some(Ok(shard2_helpers::build_training_task_response(task_num, lvl)))
         }
 
         "get_remaining_bonus_samples" => {
             let rem = with_player_state(ctx, char_id, |st, snap| {
                 let store = load_discovery_store(snap);
-                sync_bonus_samples(st, &store, ctx.now_unix());
+                let clone_grade = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.clone_grade)
+                    .unwrap_or(1);
+                shard2_helpers::sync_player_bonus_samples(st, &store, clone_grade, ctx.now_unix());
                 st.bonus_samples_left
             });
             Some(Ok(PyRep::Integer(rem)))
@@ -832,7 +750,12 @@ pub fn handle_project_discovery(
         "get_maximum_bonus_samples" => {
             let m = with_player_state(ctx, char_id, |st, snap| {
                 let store = load_discovery_store(snap);
-                sync_bonus_samples(st, &store, ctx.now_unix());
+                let clone_grade = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.clone_grade)
+                    .unwrap_or(1);
+                shard2_helpers::sync_player_bonus_samples(st, &store, clone_grade, ctx.now_unix());
                 st.max_bonus_samples
             });
             Some(Ok(PyRep::Integer(m)))
@@ -848,7 +771,6 @@ pub fn handle_project_discovery(
             Some(Ok(PyRep::String(pid)))
         }
 
-        // DERIVED (synthetic): DATA GAP — MMOS classification consensus grading and XP/AK rewards are external backend data not in V24 client FSD.
         "post_classification" | "submit" | "submit_classification" => {
             if args.len() < 2 {
                 return Some(Err(BridgeRpcError::user_error("InvalidClassification")));
@@ -879,155 +801,14 @@ pub fn handle_project_discovery(
 
             let now_unix = ctx.now_unix();
             let res = try_with_player_state(ctx, char_id, |st, snap| {
-                if st.last_submission_unix > 0
-                    && (now_unix <= st.last_submission_unix
-                        || now_unix.saturating_sub(st.last_submission_unix) < MIN_SUBMISSION_INTERVAL_SECS)
-                {
-                    return Err(BridgeRpcError::user_error("ProjectDiscoverySubmissionTooFast"));
-                }
-                if req_task_index != st.current_task_index {
-                    return Err(BridgeRpcError {
-                        code: "InvalidTaskId".into(),
-                        message: format!("task_id {} does not match current active task {}", req_task_index, st.current_task_index),
-                    });
-                }
-                if st.last_submitted_task_index >= st.current_task_index {
-                    return Err(BridgeRpcError {
-                        code: "TaskAlreadySubmitted".into(),
-                        message: "Active task has already been submitted".into(),
-                    });
-                }
-                let prev_tasks = st.tasks_submitted;
-                st.last_submitted_task_index = st.current_task_index;
-                st.last_submission_unix = now_unix;
-                st.tasks_submitted += 1;
-                let mut store = load_discovery_store(snap);
-                if !store.mmos_configured {
-                    if store.xp_per_rank <= 0.0 {
-                        store.xp_per_rank = 2_000.0;
-                    }
-                    if store.classification_xp_accurate <= 0.0 {
-                        store.classification_xp_accurate = 100.0;
-                    }
-                    if store.classification_ak_reward <= 0 {
-                        store.classification_ak_reward = 10;
-                    }
-                    store.task_consensus_by_index.entry(req_task_index).or_insert(true);
-                }
-                let mut is_accurate = false;
-                if let Some(&consensus) = store.task_consensus_by_index.get(&req_task_index) {
-                    is_accurate = consensus;
-                }
-                let sample_acc = if is_accurate { 1.0 } else { 0.0 };
-                st.accuracy = if prev_tasks <= 0 {
-                    sample_acc
-                } else {
-                    (((st.accuracy * 9.0) + sample_acc) / 10.0).clamp(0.0, 1.0)
-                };
-                st.score = (st.accuracy * 100.0).clamp(0.0, 1000.0);
-                let xp_gain = if is_accurate {
-                    store.classification_xp_accurate
-                } else {
-                    store.classification_xp_inaccurate
-                };
-                let ak_gain = if is_accurate {
-                    store.classification_ak_reward
-                } else {
-                    0
-                };
-                let prev_rank = st.rank;
-                st.experience += xp_gain;
-                st.analysis_kredits = st.analysis_kredits.saturating_add(ak_gain);
-
-                let had_bonus = st.bonus_samples_left > 0;
-                st.bonus_samples_left = st.bonus_samples_left.saturating_sub(1);
-
-                // V24 `projectdiscovery/common/projects/covid/iskmultipliers.pyj`: `ISK_MULTIPLIERS = [500, 800, 1000]`
-                let tier_idx = if st.accuracy >= 0.9 {
-                    2
-                } else if st.accuracy >= 0.5 {
-                    1
-                } else {
-                    0
-                };
-                let isk_amount = if had_bonus && is_accurate {
-                    ISK_MULTIPLIERS[tier_idx] * st.rank.max(1)
-                } else {
-                    0
-                };
-                let (_reward, new_bal) = if isk_amount > 0 {
-                    let r = eve_db::IskCents::from_isk(isk_amount);
-                    let bal = if let Some(c) = snap.characters.get_mut(&char_id) {
-                        c.balance = c.balance.checked_add(r).unwrap_or(c.balance);
-                        c.balance
-                    } else {
-                        r
-                    };
-                    snap.next_entity_id += 1;
-                    let jid = snap.next_entity_id;
-                    snap.wallet_journal.push(eve_db::WalletJournalEntry {
-                        entry_id: jid,
-                        character_id: char_id,
-                        entry_type: "project_discovery_reward".to_string(),
-                        amount: r,
-                        balance_after: bal,
-                        reason: "Project Discovery classification reward".to_string(),
-                    });
-                    snap.wallet_journal_timestamps.insert(jid, now_unix);
-                    (r, Some(bal))
-                } else {
-                    (eve_db::IskCents(0), None)
-                };
-
-                let new_rank = rank_for_xp(&store, st.experience, st.rank);
-                let mut crates_granted = Vec::new();
-                if new_rank > st.rank {
-                    st.rank = new_rank;
-                    let crate_type_id = if st.rank >= NEEDED_LEVEL_FOR_SUPERIOR_CRATES {
-                        SUPERIOR_LOOT_CRATE_TYPE_ID
-                    } else {
-                        LOOT_CRATE_TYPE_ID
-                    };
-                    crates_granted.push(PyRep::Integer(crate_type_id as i64));
-                }
-                let xp_for_new_rank = project_discovery_total_needed_xp_from_store(&store, st.rank);
-                let xp_for_next_rank = project_discovery_total_needed_xp_from_store(&store, st.rank + 1);
-                let player_state_rep = PyRep::keyval([
-                    ("rank", PyRep::Integer(st.rank)),
-                    ("experience", PyRep::Real(st.experience)),
-                    ("totalXP", PyRep::Real(st.experience)),
-                    ("accuracy", PyRep::Real(st.accuracy)),
-                    ("score", PyRep::Real(st.score)),
-                    ("analysisKredits", PyRep::Integer(st.analysis_kredits)),
-                    ("finishedTutorial", PyRep::Bool(st.tutorial_complete || st.tutorial_skipped)),
-                ]);
-                let rep = PyRep::keyval([
-                    ("score", PyRep::Real(st.score)),
-                    ("accuracy", PyRep::Real(st.accuracy)),
-                    ("experience_reward", PyRep::Real(xp_gain)),
-                    ("kredits_reward", PyRep::Integer(ak_gain)),
-                    ("XP_Reward", PyRep::Real(xp_gain)),
-                    ("ISK_Reward", PyRep::Real(isk_amount as f64)),
-                    ("AK_Reward", PyRep::Integer(ak_gain)),
-                    ("gotBonusXP", PyRep::Bool(had_bonus)),
-                    ("bonusSamplesAfterClassification", PyRep::Integer(st.bonus_samples_left)),
-                    ("loot_crates", PyRep::List(crates_granted)),
-                    ("playerState", player_state_rep.clone()),
-                    ("player", PyRep::keyval([("score", PyRep::Real(st.accuracy))])),
-                    ("rank", PyRep::Integer(st.rank)),
-                ]);
-                Ok((
-                    rep,
-                    player_state_rep,
-                    new_bal,
-                    xp_gain,
-                    st.experience,
-                    prev_rank,
-                    st.rank,
-                    xp_for_new_rank,
-                    xp_for_next_rank,
-                    ak_gain,
-                ))
+                shard2_helpers::execute_post_classification(
+                    snap,
+                    st,
+                    char_id,
+                    req_task_index,
+                    classification_arg,
+                    now_unix,
+                )
             });
 
             match res {
@@ -1149,7 +930,6 @@ pub fn handle_project_discovery(
             Some(Ok(PyRep::Integer(idx)))
         }
 
-        // DERIVED (synthetic): DATA GAP — MMOS task payload URLs are external backend data not in V24 client FSD.
         "get_data_from_url" => {
             let url = args
                 .first()
@@ -1170,12 +950,33 @@ pub fn handle_project_discovery(
                 .parse::<i64>()
                 .ok()
                 .filter(|&n| n > 0);
-            let Some(task_num) = parsed_num else {
-                return Some(Err(BridgeRpcError::user_error("InvalidTaskUrl")));
-            };
             let res = try_with_player_state(ctx, char_id, |st, snap| {
                 let mut store = load_discovery_store(snap);
-                sync_bonus_samples(st, &store, ctx.now_unix());
+                let clone_grade = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.clone_grade)
+                    .unwrap_or(1);
+                shard2_helpers::sync_player_bonus_samples(st, &store, clone_grade, ctx.now_unix());
+                let resolved_num = parsed_num.or_else(|| {
+                    let prefix = format!("{char_id}:");
+                    store
+                        .char_tasks
+                        .iter()
+                        .find(|(k, v)| {
+                            k.starts_with(&prefix)
+                                && (v.url == url
+                                    || shard2_helpers::sample_uuid_for_index(v.task_number) == task_seg)
+                        })
+                        .map(|(_, v)| v.task_number)
+                });
+                let Some(task_num) = resolved_num else {
+                    return Err(BridgeRpcError::user_error(if parsed_num.is_some() {
+                        "TaskNotFound"
+                    } else {
+                        "InvalidTaskUrl"
+                    }));
+                };
                 let key = char_task_key(char_id, task_num);
                 if !store.char_tasks.contains_key(&key) {
                     if st.current_task_index == task_num {
@@ -1186,7 +987,9 @@ pub fn handle_project_discovery(
                         return Err(BridgeRpcError::user_error("TaskNotFound"));
                     }
                 }
-                let entry = store.char_tasks.get_mut(&key).expect("task exists");
+                let Some(entry) = store.char_tasks.get_mut(&key) else {
+                    return Err(BridgeRpcError::user_error("TaskNotFound"));
+                };
                 entry.fetch_count += 1;
                 let fetch_cnt = entry.fetch_count;
                 let out = if let Some(ref pl) = entry.payload_json {

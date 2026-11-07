@@ -297,9 +297,10 @@ pub fn seed_incursion_for_constellation(
     reg: &mut PveSpecialSitesRegistry,
     constellation_id: ConstellationId,
 ) {
-    // DERIVED (synthetic — no tale IDs exist in the V24 client code or the SDE; live tale IDs are
-    // allocated by CCP's tale service): one stable tale per constellation, 800_000 + constellation.
-    let tale_id = 800_000 + (constellation_id as i64);
+    let tale_id = crate::services::pve_incursion_sites_shard2_helpers::allocate_persistent_incursion_tale_id(
+        reg,
+        constellation_id,
+    );
     let constellation_name = ctx
         .sde
         .constellations
@@ -330,7 +331,7 @@ pub fn seed_incursion_for_constellation(
 
     // Site payouts and pilot bands per wiki:Incursion_sites (high-sec vs low/null-sec); influence deltas DERIVED.
     let band = |sys: SolarSystemId, tier: &str| incursion_site_payout_band(&ctx.sde, sys, tier);
-    let sites = vec![
+    let mut sites = vec![
         make_incursion_site(
             constellation_id, 5164, "Override Transfer Array (Staging)", staging_solar_system_id,
             "Staging", band(staging_solar_system_id, "Staging"), 0.05, false,
@@ -372,6 +373,17 @@ pub fn seed_incursion_for_constellation(
             derive_incursion_site_position(&ctx.sde, hq_solar_system_id, 7),
         ),
     ];
+    for s in &mut sites {
+        if let Some((btid, esc)) = crate::services::pve_incursion_sites_shard2_helpers::resolve_sansha_encounter_from_sde(
+            &ctx.sde,
+            s.boss_npc_ball_id,
+            s.dungeon_id,
+            &s.tier,
+        ) {
+            s.boss_type_id = btid;
+            s.escort_spawns = esc;
+        }
+    }
 
     let now_sec = crate::services::pve_special_sites::spec_now_sec(reg);
     reg.incursion_lifecycle.insert(
@@ -709,6 +721,7 @@ pub async fn process_incursion_site_completion_and_payout_core(
         meta.last_site_completed_sec = sim_now;
         meta.last_regen_sec = sim_now;
 
+        let pre_state = inc.state.clone();
         let (next_boss_ball, ms_to_spawn) = if s_tier == "Mothership" {
             inc.influence = 0.0;
             inc.mothership_defeated = true;
@@ -741,7 +754,13 @@ pub async fn process_incursion_site_completion_and_payout_core(
             inc.sites[site_idx].boss_npc_ball_id += 1_000;
             let next_boss_bid = inc.sites[site_idx].boss_npc_ball_id;
             let (next_b_tid, fresh_escorts) =
-                get_sansha_encounter_composition(next_boss_bid, s_did, &s_tier);
+                crate::services::pve_incursion_sites_shard2_helpers::resolve_sansha_encounter_from_sde(
+                    sde,
+                    next_boss_bid,
+                    s_did,
+                    &s_tier,
+                )
+                .unwrap_or_else(|| get_sansha_encounter_composition(next_boss_bid, s_did, &s_tier));
             inc.sites[site_idx].boss_type_id = next_b_tid;
             let escorts: Vec<(i64, u32, [f64; 3])> = fresh_escorts
                 .iter()
@@ -768,6 +787,7 @@ pub async fn process_incursion_site_completion_and_payout_core(
             s_tier,
             inc.influence,
             inc.state.clone(),
+            pre_state,
             inc.mothership_spawned,
             inc.mothership_defeated,
             next_boss_ball,
@@ -791,6 +811,7 @@ pub async fn process_incursion_site_completion_and_payout_core(
         tier,
         new_influence,
         new_state,
+        pre_state,
         mothership_unlocked,
         incursion_ended,
         next_boss_ball,
@@ -898,14 +919,14 @@ pub async fn process_incursion_site_completion_and_payout_core(
         (0, 0, 0, 0.0)
     } else {
         let count = verified_pilots.len();
-        // Under-sized fleets: the wiki states the reward is reduced but publishes no ratios (data gap);
-        // EvoMu keeps the linear count / min_pilots share for those.
-        let under_scale = if count < min_pilots { (count as f64) / (min_pilots as f64) } else { 1.0 };
-        let scale = if tier == "Staging" {
-            1.0
-        } else {
-            under_scale * incursion_overstack_ratio(count.saturating_sub(max_opt))
-        };
+        let eff_state = if tier == "Mothership" { "Establishing" } else { pre_state.as_str() };
+        let scale =
+            crate::services::pve_incursion_sites_shard2_helpers::compute_incursion_fleet_payout_scale(
+                count,
+                min_pilots,
+                max_opt,
+                eff_state,
+            );
         let isk = ((base_isk as f64) * scale).round() as i64;
         let lp = ((base_lp as f64) * scale).round() as i64;
         (isk, lp, count, scale)
@@ -1261,20 +1282,7 @@ pub async fn handle_incursion_rpc(
                     .map(|entries| {
                         entries
                             .iter()
-                            .map(|e| {
-                                PyRep::keyval([
-                                    ("logID", PyRep::Integer(e.log_id)),
-                                    ("siteID", PyRep::String(e.site_id.clone())),
-                                    ("tier", PyRep::String(e.tier.clone())),
-                                    ("constellationID", PyRep::Integer(e.constellation_id as i64)),
-                                    ("solarSystemID", PyRep::Integer(e.solar_system_id as i64)),
-                                    ("iskEarned", PyRep::Integer(e.isk_earned)),
-                                    ("concordLpEarned", PyRep::Integer(e.concord_lp_earned)),
-                                    ("fleetSize", PyRep::Integer(e.fleet_size as i64)),
-                                    ("fleetScaleFactor", PyRep::Real(e.fleet_scale_factor)),
-                                    ("timestamp", PyRep::Integer(e.timestamp_filetime)),
-                                ])
-                            })
+                            .map(crate::services::pve_incursion_sites_shard2_helpers::encode_incursion_lp_log_row)
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default()
@@ -1288,44 +1296,11 @@ pub async fn handle_incursion_rpc(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let site_filter = args.first().and_then(|a| a.as_str()).map(str::to_string);
-            let cid_filter = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .and_then(|v| u32::try_from(v).ok());
             let now_ft = ctx.now_blueos_filetime_ticks();
             let synced_rows = with_pve_special_reg(ctx, |reg| {
-                let Some(entries) = reg.incursion_lp_logs.get_mut(&char_id) else {
-                    return Vec::new();
-                };
-                let mut matched = Vec::new();
-                for e in entries.iter_mut() {
-                    if e.timestamp_filetime <= 0 {
-                        e.timestamp_filetime = now_ft;
-                    }
-                    let keep = if let Some(ref sf) = site_filter {
-                        e.site_id == *sf
-                    } else if let Some(cf) = cid_filter {
-                        e.constellation_id == cf
-                    } else {
-                        true
-                    };
-                    if keep {
-                        matched.push(PyRep::keyval([
-                            ("logID", PyRep::Integer(e.log_id)),
-                            ("siteID", PyRep::String(e.site_id.clone())),
-                            ("tier", PyRep::String(e.tier.clone())),
-                            ("constellationID", PyRep::Integer(e.constellation_id as i64)),
-                            ("solarSystemID", PyRep::Integer(e.solar_system_id as i64)),
-                            ("iskEarned", PyRep::Integer(e.isk_earned)),
-                            ("concordLpEarned", PyRep::Integer(e.concord_lp_earned)),
-                            ("fleetSize", PyRep::Integer(e.fleet_size as i64)),
-                            ("fleetScaleFactor", PyRep::Real(e.fleet_scale_factor)),
-                            ("timestamp", PyRep::Integer(e.timestamp_filetime)),
-                        ]));
-                    }
-                }
-                matched
+                crate::services::pve_incursion_sites_shard2_helpers::sync_incursion_lp_log_rows(
+                    reg, char_id, args, now_ft,
+                )
             });
             if synced_rows.is_empty() {
                 Some(Ok(PyRep::None))

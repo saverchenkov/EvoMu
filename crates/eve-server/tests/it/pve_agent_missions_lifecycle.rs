@@ -505,10 +505,8 @@ async fn dock_pilot_at_station(
     ctx.dispatch_rpc(sess, "stationSvc", None, "Dock", &[PyRep::Integer(station_id)], &kw, None).await.expect("Dock");
 }
 
-// parity: plan:E-5
 #[tokio::test]
 async fn test_live_plan_e5_agent_missions_end_to_end() {
-    eve_testkit::attest(&["plan:E-5"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let char_id = 96_005_001_i64;
