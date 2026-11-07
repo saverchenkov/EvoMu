@@ -621,7 +621,7 @@ pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
         for inc in reg.incursions.values() {
             if inc.state == "Ended" || inc.state == "Withdrawing" { continue; }
             for s in &inc.sites {
-                if s.locked_until_low_influence && (inc.influence > 0.0 || !inc.mothership_spawned) {
+                if s.locked_until_low_influence && (!inc.mothership_spawned || inc.influence > 0.10) {
                     continue;
                 }
                 let on_final_wave = reg

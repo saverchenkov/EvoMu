@@ -227,6 +227,29 @@ fn test_incursion_system_effects_dbuffs_and_beacon_sync() {
     assert_eq!(dbuffs_scaled.len(), 2);
     assert!((dbuffs_scaled[0].1 - 20.0).abs() < 1e-6);
 
+    // Low influence before Mothership unlocks still jams cynos
+    with_pve_special_reg(&ctx, |reg| {
+        let i = reg.incursions.get_mut(&cid).unwrap();
+        i.influence = 0.05;
+        i.state = "Established".into();
+        i.mothership_spawned = false;
+    });
+    assert!(compute_incursion_system_effects(&ctx, inc.hq_solar_system_id).unwrap().cyno_jammed);
+
+    // Mobilizing with slight regen (<= 0.10) keeps cyno jammer dropped; > 0.10 re-engages it
+    with_pve_special_reg(&ctx, |reg| {
+        let i = reg.incursions.get_mut(&cid).unwrap();
+        i.influence = 0.02;
+        i.state = "Mobilizing".into();
+        i.mothership_spawned = true;
+    });
+    assert!(!compute_incursion_system_effects(&ctx, inc.hq_solar_system_id).unwrap().cyno_jammed);
+
+    with_pve_special_reg(&ctx, |reg| {
+        reg.incursions.get_mut(&cid).unwrap().influence = 0.12;
+    });
+    assert!(compute_incursion_system_effects(&ctx, inc.hq_solar_system_id).unwrap().cyno_jammed);
+
     // Withdrawing removes effects and beacons
     with_pve_special_reg(&ctx, |reg| {
         reg.incursions.get_mut(&cid).unwrap().state = "Withdrawing".into();

@@ -508,7 +508,7 @@ pub async fn process_incursion_site_completion_and_payout_core(
                     || site_id == site.dungeon_id.to_string();
                 if site.solar_system_id == site_sys && matches_id {
                     if site.locked_until_low_influence {
-                        if inc.influence > 0.0 || !inc.mothership_spawned {
+                        if !inc.mothership_spawned || inc.influence > 0.10 {
                             return Err(rpc_err(
                                 "MothershipSiteLocked",
                                 format!(
@@ -1082,7 +1082,7 @@ pub fn mark_incursion_boss_destroyed(
                 if (solar_system_id == 0 || site.solar_system_id == solar_system_id)
                     && site.boss_npc_ball_id == boss_ball_id
                 {
-                    if site.locked_until_low_influence && (inc.influence > 0.0 || !inc.mothership_spawned) {
+                    if site.locked_until_low_influence && (!inc.mothership_spawned || inc.influence > 0.10) {
                         return false;
                     }
                     if reg
@@ -1123,7 +1123,7 @@ pub async fn on_incursion_boss_destroyed_core(
             }
             for site in &mut inc.sites {
                 if site.solar_system_id == solar_system_id && site.boss_npc_ball_id == npc_ball_id {
-                    let locked = site.locked_until_low_influence && (inc.influence > 0.0 || !inc.mothership_spawned);
+                    let locked = site.locked_until_low_influence && (!inc.mothership_spawned || inc.influence > 0.10);
                     if locked {
                         return Some((site.site_id.clone(), true, false, false, None, None));
                     }

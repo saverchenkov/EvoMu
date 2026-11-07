@@ -506,7 +506,9 @@ pub(crate) fn compute_incursion_system_effects_in_snap(
         constellation_id: const_id,
         effect_type_id,
         influence: inf,
-        cyno_jammed: inf > 0.0,
+        // Drop Sansha cyno suppression while the Mothership encounter is mobilized (influence <= 0.10)
+        // so fleets can cyno in capitals even if slight influence regeneration occurs before engagement.
+        cyno_jammed: inf > 0.0 && ((!inc.mothership_spawned && inc.state != "Mobilizing") || inf > 0.10),
         shield_penalty: mag,
         armor_penalty: mag,
         capacitor_penalty: mag,
