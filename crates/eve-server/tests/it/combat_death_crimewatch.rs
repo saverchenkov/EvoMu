@@ -787,7 +787,19 @@ async fn test_c8_crimewatch_concord_timers_and_security_status() {
     }
     assert!(cw_director.get_or_create(char_id).is_criminal(now + 100));
 
-    // Spawn criminal ship in space
+    // Spawn criminal ship in space (and keep DB character/ship record consistent with space)
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(c) = s.characters.get_mut(&char_id) {
+            c.station_id = None;
+            c.structure_id = None;
+            c.solar_system_id = sys_id;
+            c.active_ship_id = ship_id;
+        }
+        if let Some(it) = s.items.get_mut(&ship_id) {
+            it.location_id = sys_id as i64;
+            it.singleton = true;
+        }
+    });
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let crim_ball = Ball {
         id: ship_id,

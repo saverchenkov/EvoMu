@@ -465,4 +465,26 @@ fn test_step_collision_bumping_dynamics_and_statics() {
         .collect();
     park.step_collision_bumping(&pre_swept_stat, &pre_pos_stat, 1.0);
     assert!(park.pending_events.iter().any(|e| matches!(e, DestinyEvent::Collision { ball_a: 200, ball_b: 601 } | DestinyEvent::Collision { ball_a: 601, ball_b: 200 })));
+
+    // 6. High-velocity swept static collision clamps post-bounce position outside static hull
+    let gate = make_test_ball(10, DVec3::ZERO, DVec3::ZERO, 15_000.0, 1e12);
+    park.add_static_ball(gate, 15);
+    let fast = Ball {
+        id: 602,
+        type_id: 11_198,
+        position: DVec3::new(15_500.0, 0.0, 0.0),
+        velocity: DVec3::new(-6_500.0, 0.0, 0.0),
+        max_velocity: 6_500.0,
+        inertia: 0.5,
+        mass: 1_500_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    assert!(park.add_ball(fast));
+    park.step(1.0);
+    assert!(
+        park.balls[&602].position.distance(DVec3::ZERO) >= 15_000.0 + 40.0 - 1e-6,
+        "High-velocity static swept collision must clamp ship outside gate hull"
+    );
 }

@@ -1917,8 +1917,8 @@ async fn test_corporation_structure_ownership_and_station_manager_roles() {
     assert_eq!(rpc(&ctx, &mut mgr_sess, "invbroker", Some(mgr_inv), "MultiAdd", &[PyRep::List(vec![PyRep::Integer(88_000_210)]), PyRep::Integer(struct_id), PyRep::Integer(InventoryFlag::Hangar as i64)]).await.unwrap_err().code, "CorpRoleDenied");
     assert_eq!(ctx.db.get_item(88_000_210).unwrap().flag, InventoryFlag::SpecializedFuelBay);
     assert_eq!(rpc(&ctx, &mut mgr_sess, "invbroker", Some(mgr_inv), "Add", &[PyRep::Integer(88_000_202), PyRep::Integer(struct_id), PyRep::Integer(InventoryFlag::ServiceSlot0 as i64)]).await.unwrap_err().code, "InsufficientCorpRoles");
-    assert_eq!(rpc(&ctx, &mut mgr_sess, "invbroker", Some(mgr_inv), "Add", &[PyRep::Integer(88_000_212), PyRep::Integer(struct_id), PyRep::Integer(InventoryFlag::Hangar as i64)]).await.unwrap_err().code, "InsufficientCorpRoles");
-    assert_eq!(rpc(&ctx, &mut mgr_sess, "invbroker", Some(mgr_inv), "MultiAdd", &[PyRep::List(vec![PyRep::Integer(88_000_212)]), PyRep::Integer(struct_id), PyRep::Integer(InventoryFlag::Hangar as i64)]).await.unwrap_err().code, "InvalidLocation");
+    assert_eq!(rpc(&ctx, &mut mgr_sess, "invbroker", Some(mgr_inv), "Add", &[PyRep::Integer(88_000_212), PyRep::Integer(struct_id), PyRep::Integer(InventoryFlag::Hangar as i64)]).await.unwrap_err().code, "CorpRoleDenied");
+    assert_eq!(rpc(&ctx, &mut mgr_sess, "invbroker", Some(mgr_inv), "MultiAdd", &[PyRep::List(vec![PyRep::Integer(88_000_212)]), PyRep::Integer(struct_id), PyRep::Integer(InventoryFlag::Hangar as i64)]).await.unwrap_err().code, "CorpRoleDenied");
     assert_eq!(rpc(&ctx, &mut mgr_sess, "dogmaIM", None, "DestroyFitting", &[PyRep::Integer(88_000_212)]).await.unwrap_err().code, "InsufficientCorpRoles");
     assert_eq!(ctx.db.get_item(88_000_212).unwrap().flag, InventoryFlag::ServiceSlot1);
 

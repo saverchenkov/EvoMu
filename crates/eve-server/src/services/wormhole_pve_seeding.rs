@@ -894,11 +894,11 @@ pub fn build_specialized_npc_components(
         scram_range,
         neut_amount: if is_static_structure { 0.0 } else { attr(97).unwrap_or(120.0) },
         ecm_jammed: false,
-        // Remote shield / armor repair amounts come from the NPC type's SDE `shieldBonus` (68) /
-        // `armorDamageAmount` (84) attributes for every archetype, Sleepers included.
-        remote_shield_rep: if is_static_structure { 0.0 } else { attr(68).unwrap_or(0.0) },
-        remote_armor_rep: if is_static_structure { 0.0 } else { attr(84).unwrap_or(0.0) },
-        remote_rep_range: 25_000.0,
+        // Remote shield / armor repair amounts come from NPC SDE attributes 1460 / 1455 (with
+        // fallback to module attributes 68 / 84) and assistance range from attr 1464.
+        remote_shield_rep: if is_static_structure { 0.0 } else { attr(1460).or_else(|| attr(68)).unwrap_or(0.0) },
+        remote_armor_rep: if is_static_structure { 0.0 } else { attr(1455).or_else(|| attr(84)).unwrap_or(0.0) },
+        remote_rep_range: attr(1464).unwrap_or(25_000.0),
         tag_drop_type_id: tag_drop,
         spawn_position: pos,
         sleeper_wh_class: wh_class,

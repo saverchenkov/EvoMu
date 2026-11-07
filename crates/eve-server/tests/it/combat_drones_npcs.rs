@@ -303,7 +303,8 @@ async fn test_c7_salvager_wreck_difficulty_tiers_and_tractor_beam_physics() {
         Some("InsufficientAccessChance")
     );
 
-    // Amarr Cruiser Wreck (`+20%`) with Salvager I has `accessChancePct == +20.0%` -> succeeds and yields T1 salvage (`25588`, `25595`)
+    // Amarr Cruiser Wreck (`+20%`) with Salvager I has `accessChancePct == +20.0%` -> succeeds with pinned RNG and yields T1 salvage (`25588`, `25595`)
+    ctx.mechanic_rng.set_seed(Some(3));
     let t1_ok = dispatch_combat_rpc(
         &ctx,
         &mut sess,
@@ -326,6 +327,7 @@ async fn test_c7_salvager_wreck_difficulty_tiers_and_tractor_beam_physics() {
     // - On Tech II wreck (`-10%`): `accessChancePct == 30.0%` -> yields T2 salvage (`25605`)
     // - On Sleeper Large Advanced Wreck (`-20%`): `accessChancePct == 20.0%` -> yields Sleeper salvage (`30259`)
     set_skill_level(&ctx, char_id, 3438, 5);
+    ctx.mechanic_rng.set_seed(Some(3));
     let t2_ok = dispatch_combat_rpc(
         &ctx,
         &mut sess,
@@ -338,6 +340,7 @@ async fn test_c7_salvager_wreck_difficulty_tiers_and_tractor_beam_physics() {
     .expect("Salvager II on T2 Wreck");
     assert_eq!(dict_get(&t2_ok, "salvaged").and_then(|v| v.as_bool()), Some(true));
 
+    ctx.mechanic_rng.set_seed(Some(3));
     let sl_ok = dispatch_combat_rpc(
         &ctx,
         &mut sess,
@@ -1132,11 +1135,11 @@ async fn test_c4_npc_archetypes_triglavian_drifter_sleeper_edencom_clone_soldier
     });
     assert!(dd_fired, "Drifter Battleship must fire its Doomsday once overshield is depleted");
 
-    // 3. Sleeper (`Sleepless Patroller` `30188`) remote repair on group peer, 0 bounty, and blue loot (`30744`) (`feat:npc.sleepers`, `feat:npc.npc-remote-repair`)
+    // 3. Sleeper (`Sleepless Preserver` `30194` logi NPC) remote repair on group peer, 0 bounty, and blue loot (`30744`) (`feat:npc.sleepers`, `feat:npc.npc-remote-repair`)
     let sleeper1 = spawn_specialized_npc_entity(
         &ctx,
         sys_id,
-        30188,
+        30194,
         "Sleeper",
         40,
         DVec3::new(7_000.0, 0.0, 0.0),

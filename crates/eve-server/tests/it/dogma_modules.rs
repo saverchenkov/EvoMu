@@ -896,7 +896,7 @@ async fn test_phase_4_dg3_online_offline_and_persistence() {
     };
     assert_eq!(changes.len(), 1);
     let PyRep::Tuple(t) = &changes[0] else { panic!("change tuple expected") };
-    assert_eq!(t.len(), 7);
+    assert_eq!(t.len(), 8);
     assert_eq!(t[0], PyRep::String("OnModuleAttributeChange".into()));
     assert_eq!(t[1], PyRep::Integer(char_id));
     assert_eq!(t[2], PyRep::Integer(ab_id));
@@ -904,6 +904,7 @@ async fn test_phase_4_dg3_online_offline_and_persistence() {
     assert!(matches!(t[4], PyRep::Integer(ft) if ft > 116_444_736_000_000_000));
     assert_eq!(t[5], PyRep::Real(1.0));
     assert_eq!(t[6], PyRep::Real(0.0));
+    assert_eq!(t[7], PyRep::None);
     assert!(notes.iter().all(|(n, _)| n != "OnModuleOnlineChange"));
 
     // Rebuild from snapshot to prove persistence across cache invalidation

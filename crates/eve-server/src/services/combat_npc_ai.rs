@@ -564,6 +564,9 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 let has_suspect_flag = ctx.crimewatch.read().ok().and_then(|cw| {
                     cw.states.get(&cid).map(|st| st.is_suspect(now_unix))
                 }).unwrap_or(false);
+                let has_disapproval_flag = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                    rt.disapproval_flags.get(&cid).copied().is_some_and(|exp| now_unix < exp)
+                });
                 let is_criminal = is_low_sec_criminal || has_criminal_flag;
                 let pilot_is_pirate = war_faction_id.is_some_and(crate::services::security_mgr::is_pirate_militia_faction);
                 let pilot_is_campaign_pirate = crate::services::security_mgr::is_pilot_aligned_with_insurgency_pirate(
@@ -601,7 +604,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 } else if is_outpost_defender {
                     if npc.faction_id == 500_018 { !pilot_is_pirate } else { pilot_is_same_pirate }
                 } else if is_zarzakh_gun {
-                    !has_criminal_flag && !has_suspect_flag
+                    !has_criminal_flag && !has_suspect_flag && !has_disapproval_flag
                 } else if is_navy {
                     standing > -5.0 && !is_criminal
                 } else if is_police {

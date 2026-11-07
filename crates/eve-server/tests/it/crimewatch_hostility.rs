@@ -1590,7 +1590,16 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands_e2e() {
         panic!("expected Rowset from GetSecurityStatusTransactions");
     };
     assert!(!rows.is_empty(), "Tag turn-in transactions must be recorded");
-    let row0: HashMap<&str, &PyRep> = columns.iter().map(|s| s.as_str()).zip(rows[0].iter()).collect();
+    let tag_row = rows
+        .iter()
+        .find(|r| {
+            columns
+                .iter()
+                .zip(r.iter())
+                .any(|(c, v)| c == "eventTypeID" && v == &PyRep::Integer(385))
+        })
+        .expect("Tag turn-in eventTypeID=385 row must be present");
+    let row0: HashMap<&str, &PyRep> = columns.iter().map(|s| s.as_str()).zip(tag_row.iter()).collect();
     assert_eq!(row0.get("eventTypeID"), Some(&&PyRep::Integer(385)), "Tag turn-in eventTypeID must be 385");
     assert_eq!(row0.get("locationID"), Some(&&PyRep::Integer(lowsec_sys_id as i64)));
     assert_eq!(row0.get("modification"), Some(&&PyRep::Real(0.5)));

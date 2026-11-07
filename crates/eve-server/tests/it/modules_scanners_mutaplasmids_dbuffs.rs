@@ -187,8 +187,10 @@ async fn test_titan_doomsday_single_target_and_lance_slash() {
         }
     });
     let sys = ctx.systems.get_or_spawn(null_sys_id);
+    let mut titan_cs = ctx.build_type_combat_state(11567);
+    titan_cs.capacitor = titan_cs.max_capacitor;
     let _ = sys
-        .spawn_ball(
+        .spawn_ball_with_combat(
             Ball {
                 id: titan_id,
                 type_id: 11567,
@@ -201,6 +203,7 @@ async fn test_titan_doomsday_single_target_and_lance_slash() {
                 speed_fraction: 0.0,
                 mode: MovementMode::Stop,
             },
+            titan_cs,
         )
         .await;
     let _ = sys

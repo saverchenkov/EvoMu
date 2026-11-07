@@ -217,13 +217,18 @@ fn test_warp_continuous_physics_curves_and_visual_handoff() {
                     }
                 }
                 WarpPhase::Cruising => {
+                    // `step_warp_ball` updates `ball.mode.phase` to `Cruising` at the end of the
+                    // transition tick whose velocity was integrated at `t <= t_accel_end`; every
+                    // subsequent tick in `Cruising` travels at `warp_speed_au * AU_METERS`.
+                    if saw_cruise {
+                        let cruise_expected = warp_speed_au * AU_METERS;
+                        let diff_ratio = (speed - cruise_expected).abs() / cruise_expected;
+                        assert!(
+                            diff_ratio < 0.05,
+                            "Cruising speed must match warp_speed_au_s * AU_METERS: got {speed}, expected {cruise_expected}"
+                        );
+                    }
                     saw_cruise = true;
-                    let cruise_expected = warp_speed_au * AU_METERS;
-                    let diff_ratio = (speed - cruise_expected).abs() / cruise_expected;
-                    assert!(
-                        diff_ratio < 0.05,
-                        "Cruising speed must match warp_speed_au_s * AU_METERS: got {speed}, expected {cruise_expected}"
-                    );
                 }
                 WarpPhase::Decelerating => {
                     saw_deceleration = true;

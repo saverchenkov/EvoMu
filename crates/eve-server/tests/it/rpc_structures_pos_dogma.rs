@@ -297,7 +297,7 @@ async fn test_structure_settings_parity() {
     assert!(profile_id >= 70_000_001);
     assert_eq!(rpc(&ctx, &mut sess, "structureSettings", "UpdateProfile", &[PyRep::Integer(profile_id), PyRep::String("Updated Trade Profile".into()), PyRep::String("Updated Desc".into())]).await.expect("UpdateProfile"), PyRep::Bool(true));
     let mut sess_blocked = setup_pilot(&ctx, 102, "other", "other-secret", PILOT2).await;
-    rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(group_id), PyRep::List(vec![PyRep::Integer(PILOT1)]), PyRep::Bool(false)]).await.expect("allow pilot1 in group");
+    rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(group_id), PyRep::List(vec![PyRep::Integer(PILOT1)]), PyRep::Integer(2)]).await.expect("allow pilot1 in group");
     assert_eq!(rpc(&ctx, &mut sess, "structureSettings", "SaveProfileSettings", &[PyRep::Integer(profile_id), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(4), PyRep::Integer(group_id), PyRep::Real(0.025)]), PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(group_id), PyRep::Real(0.0)])])]).await.expect("SaveProfileSettings on profile_id"), PyRep::Bool(true));
     assert_eq!(rpc(&ctx, &mut sess, "structureSettings", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(structure_id)]), PyRep::Integer(profile_id)]).await.expect("ChangeProfiles"), PyRep::Bool(true));
     assert_eq!(
@@ -476,11 +476,13 @@ async fn test_dogma_im_parity() {
     assert_eq!(st_info.dict_get("solarSystemID"), Some(&PyRep::Integer(i64::from(SYS_JITA))));
     assert_eq!(st_info.dict_get("stationTypeID"), Some(&PyRep::Integer(52678)));
 
-    // 1. dogmaIM.SetSessionCheck (client_local -> UnimplementedRPC)
-    let sc_err = rpc(&ctx, &mut sess, "dogmaIM", "SetSessionCheck", &[])
+    // 1. dogmaIM.SetSessionCheck returns verified session-check metadata
+    let sc_rep = rpc(&ctx, &mut sess, "dogmaIM", "SetSessionCheck", &[])
         .await
-        .expect_err("dogmaIM.SetSessionCheck authenticated");
-    assert_eq!(sc_err.code, "UnimplementedRPC");
+        .expect("dogmaIM.SetSessionCheck authenticated");
+    assert_eq!(sc_rep.dict_get("valid"), Some(&PyRep::Bool(true)));
+    assert_eq!(sc_rep.dict_get("characterID"), Some(&PyRep::Integer(PILOT1)));
+    assert_eq!(sc_rep.dict_get("checkCount"), Some(&PyRep::Integer(1)));
 
     // 2. dogmaIM.GetRequiredSkillLevels
     // Query by ship typeID 587 (Rifter)

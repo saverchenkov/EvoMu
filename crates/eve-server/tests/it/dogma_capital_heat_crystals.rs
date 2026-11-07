@@ -767,6 +767,25 @@ async fn test_dg4_siege_triage_bastion_industrial_core_phenomena_and_zpme() {
         if let Some(m) = snap.items.get_mut(&siege_id) {
             m.type_id = 43658;
         }
+        snap.items.retain(|_, i| !(i.location_id == ship_id && matches!(i.type_id, 16274 | 16275)));
+        snap.items.insert(
+            901_000_991,
+            eve_db::InventoryItemRecord {
+                item_id: 901_000_991,
+                type_id: 16274,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 50_000,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
     });
     ctx.invalidate_ship_fitting(ship_id);
     let ship_info_before_phenom = ctx

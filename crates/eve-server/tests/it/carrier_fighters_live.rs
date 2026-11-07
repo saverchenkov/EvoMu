@@ -135,7 +135,10 @@ async fn test_live_heavy_bombs_space_superiority_and_tube_rearm() {
     let mut far = common::gm_pilot_in_space(&ctx, 5, 91_100_005, VEXOR, NULLSEC).await;
     let sys = ctx.systems.get_or_spawn(NULLSEC);
     let origin = sys.get_ball_snapshot(aeon.ship_id).await.unwrap().unwrap().1.position;
-    let v_pos = common::fly_to(&ctx, &mut victim, origin + DVec3::X * 5_000.0).await;
+    sys.set_ball_position(archon.ship_id, origin + DVec3::Y * 8_000.0).await;
+    sys.set_ball_position(victim.ship_id, origin + DVec3::X * 7_000.0).await;
+    sys.set_ball_position(far.ship_id, origin + DVec3::X * 20_000.0).await;
+    let v_pos = common::fly_to(&ctx, &mut victim, origin + DVec3::X * 7_500.0).await;
     let f_pos = common::fly_to(&ctx, &mut far, v_pos + DVec3::X * 40_000.0).await;
     let bomb_point = v_pos + DVec3::X * 12_000.0;
     assert!(bomb_point.distance(origin) > 16_000.0 && bomb_point.distance(origin) < 90_000.0, "carriers outside blast: {v_pos:?}");

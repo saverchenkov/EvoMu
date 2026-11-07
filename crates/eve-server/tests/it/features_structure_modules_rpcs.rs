@@ -21,6 +21,7 @@ async fn test_b22_mobile_observatory_and_standup_point_defense() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut s1 = select_pilot(&ctx, 55_201, "demo", "demo-secret", PILOT_1).await;
     let mut s2 = select_pilot(&ctx, 55_202, "other", "other-secret", PILOT_2).await;
 

@@ -794,6 +794,10 @@ pub(crate) async fn handle_module_cycles(
             let duration_s = if duration_ms > 0.0 { duration_ms / 1000.0 } else { 1.0 };
             let mut cap_need = mod_state.get_attribute(attr_ids::CAPACITOR_NEED, &ctx.sde);
             let speed_factor = mod_state.get_attribute(attr_ids::SPEED_FACTOR, &ctx.sde);
+            let has_speed_factor_attr = mod_type.group_id == 46
+                || mod_type.effect_ids.iter().any(|&eid| matches!(eid, 6730 | 6731))
+                || mod_type.default_attributes.contains_key(&attr_ids::SPEED_FACTOR)
+                || mod_state.base_attributes.contains_key(&attr_ids::SPEED_FACTOR);
             let speed_boost_factor = if mod_type.group_id == 330 {
                 let is_covert_cloak = mod_type.effect_ids.iter().any(|&eid| {
                     ctx.sde.effects.get(&eid).is_some_and(|e| e.name == "cloakingWarpSafe" || e.is_warp_safe)
@@ -803,7 +807,11 @@ pub(crate) async fn handle_module_cycles(
                 }
                 let vel_mod = mod_state.get_attribute(306, &ctx.sde);
                 if is_covert_cloak || (vel_mod - 1.0).abs() < 1e-6 { 0.0 } else if vel_mod > 0.0 && vel_mod < 1.0 { vel_mod - 1.0 } else { 0.0 }
-            } else if speed_factor > 0.0 { speed_factor / 100.0 } else { 0.0 };
+            } else if has_speed_factor_attr && speed_factor > 0.0 {
+                speed_factor / 100.0
+            } else {
+                0.0
+            };
             let raw_shield = mod_state.get_attribute(68, &ctx.sde);
             let raw_armor = mod_state.get_attribute(84, &ctx.sde);
             let raw_hull = mod_state.get_attribute(83, &ctx.sde);

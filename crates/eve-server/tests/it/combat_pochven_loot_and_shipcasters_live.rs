@@ -177,13 +177,17 @@ async fn test_combat_pochven_loot_drop_live() {
         "Victim ship must be destroyed by live weapon fire"
     );
 
-    // 8. Inspect wreck spawned in space at Pochven system
+    // 8. Inspect wreck spawned in space at Pochven system (exclude victim's ejected capsule type 670)
     let wreck = ctx
         .db
         .with_snapshot(|s| {
             s.items
                 .values()
-                .find(|i| i.location_id == pochven_sys as i64 && i.owner_id == victim_char_id)
+                .find(|i| {
+                    i.location_id == pochven_sys as i64
+                        && i.owner_id == victim_char_id
+                        && i.type_id != 670
+                })
                 .cloned()
         })
         .expect("Wreck container item must exist in space in Pochven");

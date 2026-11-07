@@ -461,8 +461,15 @@ impl Ballpark {
                                 } else {
                                     0.5 * dt
                                 };
-                                let p_final =
+                                let mut p_final =
                                     uncol_a.position + (v_final - uncol_a.velocity) * pos_coeff;
+                                if is_static_b {
+                                    let d_static = p_final - uncol_b.position;
+                                    if d_static.length() < min_dist {
+                                        p_final = uncol_b.position
+                                            + d_static.normalize_or_zero() * min_dist;
+                                    }
+                                }
                                 if best_swept.get(&id_a).is_none_or(|&(bt, _, _)| t_col < bt) {
                                     best_swept.insert(id_a, (t_col, p_final, v_final));
                                 }
@@ -486,8 +493,15 @@ impl Ballpark {
                                 } else {
                                     0.5 * dt
                                 };
-                                let p_final =
+                                let mut p_final =
                                     uncol_b.position + (v_final - uncol_b.velocity) * pos_coeff;
+                                if is_static_a {
+                                    let d_static = p_final - uncol_a.position;
+                                    if d_static.length() < min_dist {
+                                        p_final = uncol_a.position
+                                            + d_static.normalize_or_zero() * min_dist;
+                                    }
+                                }
                                 if best_swept.get(&id_b).is_none_or(|&(bt, _, _)| t_col < bt) {
                                     best_swept.insert(id_b, (t_col, p_final, v_final));
                                 }

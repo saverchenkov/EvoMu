@@ -451,7 +451,18 @@ async fn test_insurance_voiding_and_12_week_expiry() {
     let sys_id = 30_000_142;
     seed_pilot(&ctx, char_id, ship_id, sys_id, DVec3::ZERO).await;
 
-    let mut sess = make_session(char_id, ship_id, sys_id, Some(60_003_760));
+    let station_id = 60_003_760i64;
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&char_id) {
+            ch.station_id = Some(station_id);
+            ch.solar_system_id = sys_id;
+        }
+        if let Some(it) = s.items.get_mut(&ship_id) {
+            it.location_id = station_id;
+            it.singleton = true;
+        }
+    });
+    let mut sess = make_session(char_id, ship_id, sys_id, Some(station_id));
     let cost_isk = 1.0_f64; // Platinum fraction (1.0)
 
     // 1. Insure ship via real insuranceSvc.InsureShip RPC (12-week contract = 7,257,600s)

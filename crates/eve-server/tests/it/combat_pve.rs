@@ -837,6 +837,18 @@ async fn test_c8_crimewatch_state_machine_timers_flags_and_concord() {
 
     // 5. CONCORD arrival after security-based delay:
     // Spawns real CONCORD ships and executes criminal through the canonical death pipeline (C-3)
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(c) = s.characters.get_mut(&char_id) {
+            c.station_id = None;
+            c.structure_id = None;
+            c.solar_system_id = sys_id;
+            c.active_ship_id = ship_id;
+        }
+        if let Some(it) = s.items.get_mut(&ship_id) {
+            it.location_id = sys_id as i64;
+            it.singleton = true;
+        }
+    });
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let crim_pos = DVec3::new(50_000.0, 0.0, 0.0);
     let crim_ball = Ball {

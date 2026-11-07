@@ -1665,16 +1665,25 @@ async fn test_e2e_crimewatch_sec_status_loss_caps_tags_and_transactions() {
     let PyRep::Rowset { columns, rows, .. } = txs else {
         panic!("expected Rowset");
     };
-    assert_eq!(rows.len(), 5, "1 illegal PvP aggression + 4 tag turn-ins");
+    assert_eq!(rows.len(), 6, "1 illegal PvP aggression + 1 NPC ratting sec gain + 4 tag turn-ins");
+    let tag_row = rows
+        .iter()
+        .find(|r| {
+            columns
+                .iter()
+                .zip(r.iter())
+                .any(|(c, v)| c == "eventTypeID" && v == &PyRep::Integer(385))
+        })
+        .expect("at least one eventTypeID=385 tag turn-in row");
     let row_map: std::collections::HashMap<&str, &PyRep> =
-        columns.iter().map(|s| s.as_str()).zip(rows[1].iter()).collect();
+        columns.iter().map(|s| s.as_str()).zip(tag_row.iter()).collect();
     assert!(row_map.contains_key("eventDate"));
     assert_eq!(row_map.get("eventTypeID"), Some(&&PyRep::Integer(385)));
     assert_eq!(row_map.get("locationID"), Some(&&PyRep::Integer(lowsec_sys_id as i64)));
     assert_eq!(row_map.get("modification"), Some(&&PyRep::Real(0.5)));
     assert_eq!(row_map.get("newValue"), Some(&&PyRep::Real(-8.5)));
     assert_eq!(row_map.get("otherOwnerID"), Some(&&PyRep::None));
-    assert_eq!(row_map.get("otherTypeID"), Some(&&PyRep::None));
+    assert_eq!(row_map.get("otherTypeID"), Some(&&PyRep::Integer(33138)));
 }
 }
 
@@ -2779,7 +2788,19 @@ async fn test_parity_lifecycle_industry_and_corp_quit() {
     ])]).await.expect("Install corp job");
     let corp_job_id = corp_job_res.dict_get("jobID").and_then(|v| v.as_i64()).unwrap();
 
-    // 2. Corp quit cleanup (`feat:lifecycle.corp-quit-cleanup`)
+    // 2. Corp quit cleanup (`feat:lifecycle.corp-quit-cleanup`): strip roles before KickOutMember per #505
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(corp) = s.corporations.get_mut(&player_corp_id) {
+            corp.member_roles.remove(&pilot_char_id);
+        }
+        s.corp_role_assignments.remove(&(player_corp_id, pilot_char_id));
+        if let Some(gov) = s.corp_governance.get_mut(&player_corp_id) {
+            gov.pending_role_grants.remove(&pilot_char_id);
+            gov.pending_title_role_grants.remove(&pilot_char_id);
+            gov.pending_scoped_role_grants.remove(&pilot_char_id);
+            gov.role_drop_timestamps.remove(&pilot_char_id);
+        }
+    });
     let quit_rep = rpc(&ctx, &mut sess, "corpRegistry", "KickOutMember", &[PyRep::Integer(pilot_char_id)]).await.expect("KickOutMember");
     assert_eq!(quit_rep.dict_get("removed"), Some(&PyRep::Bool(true)));
 
@@ -2793,7 +2814,7 @@ async fn test_parity_lifecycle_industry_and_corp_quit() {
         assert!(!gov.member_titles.contains_key(&pilot_char_id), "Titles cleaned up on quit");
         assert!(!gov.member_account_keys.contains_key(&pilot_char_id), "Account keys cleaned up on quit");
         assert!(!gov.pending_role_grants.contains_key(&pilot_char_id), "Pending role grants cleaned up on quit");
-        assert!(!gov.shares.contains_key(&pilot_char_id), "Shares returned to company shares on quit");
+        assert_eq!(gov.shares.get(&pilot_char_id), Some(&250), "Personal shares preserved on departure per #505");
 
         let old_chan = snap.chat_channels.get(&format!("corpid:{player_corp_id}"));
         if let Some(c) = old_chan {

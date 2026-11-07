@@ -1245,18 +1245,19 @@ async fn test_combat_insurance_void_and_expiry_and_pochven_loot_drop() {
         "Voiding/repackaging ship must remove active insurance contract"
     );
 
-    // Re-assemble, re-insure, advance clock > 12 weeks -> expired contract pays 40% fallback + EVE-mail!
+    // Re-assemble, re-insure (while docked in station), undock to Pochven, advance clock > 12 weeks -> expired contract pays 40% fallback + EVE-mail!
+    let station_id = 60_003_760i64;
     ctx.db.with_mut_snapshot(|s| {
         if let Some(it) = s.items.get_mut(&ship_id) {
             it.singleton = true;
-            it.location_id = pochven_sys as i64;
+            it.location_id = station_id;
         }
         if let Some(ch) = s.characters.get_mut(&char_id) {
-            ch.station_id = None;
-            ch.solar_system_id = pochven_sys;
+            ch.station_id = Some(station_id);
+            ch.solar_system_id = 30_000_142;
         }
     });
-    sess.station_id = Some(60_003_760);
+    sess.station_id = Some(station_id);
     ctx.dispatch_rpc(
         &mut sess,
         "insuranceSvc",
@@ -1268,6 +1269,15 @@ async fn test_combat_insurance_void_and_expiry_and_pochven_loot_drop() {
     )
     .await
     .expect("Re-InsureShip");
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(it) = s.items.get_mut(&ship_id) {
+            it.location_id = pochven_sys as i64;
+        }
+        if let Some(ch) = s.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.solar_system_id = pochven_sys;
+        }
+    });
     sess.station_id = None;
     sess.solar_system_id = Some(pochven_sys);
     ctx.advance_time_seconds(12 * 7 * 86_400 + 30);

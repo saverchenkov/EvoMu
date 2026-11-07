@@ -552,7 +552,7 @@ async fn siege_triage_and_disruptive_lance_v24_mechanics() {
     let mut victim_sess = seed_pilot(&ctx, 91016, 81016, 19724, NULL_SYS, false);
     spawn_in_space(&ctx, 91016, 81016, 19724, NULL_SYS, DVec3::new(50_000.0, 0.0, 0.0)).await;
     let _ = seed_pilot(&ctx, 91017, 81017, 624, NULL_SYS, false);
-    spawn_in_space(&ctx, 91017, 81017, 624, NULL_SYS, DVec3::new(50_000.0, 10_000.0, 0.0)).await;
+    spawn_in_space(&ctx, 91017, 81017, 624, NULL_SYS, DVec3::new(50_000.0, 15_000.0, 0.0)).await;
 
     rpc(&ctx, &mut bane_sess, "dogmaIM", "Activate", vec![PyRep::Integer(71016)]).await.expect("activate Siege on Bane");
     let lance_res = rpc(&ctx, &mut bane_sess, "dogmaIM", "Activate", vec![PyRep::Integer(71017), PyRep::String("default".into()), PyRep::Integer(81016)]).await.expect("fire Disruptive Lance");
@@ -1497,7 +1497,8 @@ async fn test_waypoints_warp_vector_and_align_tick_rounding() {
         .expect("UseVector succeeds after 300s cooldown");
 
     // 3. Server-Tick Sub-Tick Align Rounding (`feat:navigation.align-server-tick-rounding`)
-    // Exact align time = ln(4) * inertia * mass / 1e6 = 3.200000 s -> ceil(3.2) = 4 ticks!
+    // Exact align time = ln(4) * inertia * mass / 1e6 = 3.200000 s.
+    // Per `_destiny.so`, warp entry checks `already_aligned` at tick start (`t = 4.0` -> enters warp on tick 5).
     let t_align_3_2_inertia = 3.2 / 4.0_f64.ln();
     let align_origin = DVec3::new(50_000_000_000.0, 0.0, 0.0);
     let align_dest = align_origin + DVec3::new(10_000_000.0, 0.0, 0.0);
@@ -1516,7 +1517,7 @@ async fn test_waypoints_warp_vector_and_align_tick_rounding() {
     .await
     .unwrap();
 
-    for tick_idx in 1..=3 {
+    for tick_idx in 1..=4 {
         sys.step_manual(1.0).await.unwrap();
         let (_, b) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
         assert!(
@@ -1525,17 +1526,17 @@ async fn test_waypoints_warp_vector_and_align_tick_rounding() {
         );
     }
     sys.step_manual(1.0).await.unwrap();
-    let (_, b_t4) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let (_, b_t5) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     assert!(
         matches!(
-            b_t4.mode,
+            b_t5.mode,
             MovementMode::Warp {
                 phase: WarpPhase::Accelerating | WarpPhase::Cruising | WarpPhase::Decelerating,
                 ..
             }
         ),
-        "Ship with 3.2s align time must enter warp on tick 4 (4.0s): got {:?}",
-        b_t4.mode
+        "Ship with 3.2s align time must enter warp on tick 5 (after reaching 75% at 4.0s): got {:?}",
+        b_t5.mode
     );
 }
 
@@ -2017,11 +2018,14 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
     ]).await.unwrap_err();
     assert_eq!(jump_blocked.code, "WarpScrambled", "Warp disruption bubble must block capital cyno jump");
 
-    // Disconnect emergency logoff warp inside bubble is NOT blocked when ship has no point scramble
+    // Disconnect emergency logoff warp inside active bubble is blocked for non-nullified ships (#429)
     let disc_entry = handle_character_logoff_or_disconnect(&ctx, dread_char)
         .await
         .expect("Disconnect emergency warp entry");
-    assert!(disc_entry.emergency_warp_dest.is_some(), "Bubble alone must NOT prevent disconnect emergency logoff warp");
+    assert!(
+        disc_entry.emergency_warp_dest.is_none(),
+        "Active warp disruption bubble must block non-nullified disconnect emergency logoff warp (#429)"
+    );
 
     // 2. Interdiction Nullification Module (`feat:navigation.interdiction-nullification-module`)
     let mut cruiser_sess = seed_pilot(&ctx, 94_028, 84_028, 621, 30_000_142, true); // Caracal (T1 Cruiser)
@@ -3047,7 +3051,18 @@ async fn test_reconnect_in_space_clears_emergency_warp_bubble_immunity() {
     let sys = ctx.systems.get_or_spawn(sys_id);
     sys.add_interdiction_sphere(999_002, origin, 25_000.0).await.unwrap();
 
-    // Disconnect inside active bubble -> initiates emergency warp with is_emergency_warping = true
+    // Disconnect inside active bubble with non-nullified ship is blocked by #429
+    let disc_blocked = eve_server::sp6_lifecycle::handle_character_logoff_or_disconnect(&ctx, char_id)
+        .await
+        .expect("disconnect entry");
+    assert!(disc_blocked.emergency_warp_dest.is_none(), "Non-nullified ship inside bubble must not emergency warp (#429)");
+
+    // With interdiction nullification active, disconnect inside active bubble initiates emergency warp
+    {
+        let mut cs = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+        cs.is_interdiction_nullified = true;
+        sys.set_combat_state(ship_id, cs).await.unwrap();
+    }
     let disc = eve_server::sp6_lifecycle::handle_character_logoff_or_disconnect(&ctx, char_id)
         .await
         .expect("disconnect entry");
@@ -3066,6 +3081,7 @@ async fn test_reconnect_in_space_clears_emergency_warp_bubble_immunity() {
     {
         let mut bp = sys.ballpark.write().unwrap();
         bp.combat_states.get_mut(&ship_id).unwrap().is_emergency_warping = true;
+        bp.combat_states.get_mut(&ship_id).unwrap().is_interdiction_nullified = false;
         bp.set_mode(ship_id, MovementMode::Stop).unwrap();
         assert!(!bp.combat_states[&ship_id].is_emergency_warping);
     }
@@ -3245,8 +3261,8 @@ async fn test_nosferatu_relative_cap_grappler_mutadaptive_rar_and_blockade_runne
     assert_eq!(sys.get_combat_state(ship_tgt).await.unwrap().unwrap().capacitor, 150.0);
     rpc(&ctx, &mut sess_src, "dogmaIM", "Deactivate", vec![PyRep::Integer(nos_id)]).await.unwrap();
 
-    // 1b. Relative cap comparison:
-    // When Source % >= Target % (80% > 50%), standard hull does not drain even if absolute GJ is lower (120 < 2000)
+    // 1b. Absolute cap comparison (`wiki:Capacitor_warfare`):
+    // Even when Source % >= Target % (80% > 50%), standard hull drains when Source absolute GJ < Target absolute GJ (120 < 2000)
     let mut s_cs2 = sys.get_combat_state(ship_src).await.unwrap().unwrap();
     s_cs2.capacitor_recharge_time_ms = 0.0;
     s_cs2.max_capacitor = 150.0;
@@ -3261,8 +3277,8 @@ async fn test_nosferatu_relative_cap_grappler_mutadaptive_rar_and_blockade_runne
         PyRep::Integer(nos_id), PyRep::String("energyNosferatuFalloff".into()), PyRep::Integer(ship_tgt), PyRep::Integer(0),
     ]).await.unwrap();
     for _ in 0..3 { sys.step_manual(1.0).await.unwrap(); }
-    assert_eq!(sys.get_combat_state(ship_tgt).await.unwrap().unwrap().capacitor, 2_000.0);
-    assert_eq!(sys.get_combat_state(ship_src).await.unwrap().unwrap().capacitor, 120.0);
+    assert_eq!(sys.get_combat_state(ship_tgt).await.unwrap().unwrap().capacitor, 1_992.0);
+    assert_eq!(sys.get_combat_state(ship_src).await.unwrap().unwrap().capacitor, 128.0);
     rpc(&ctx, &mut sess_src, "dogmaIM", "Deactivate", vec![PyRep::Integer(nos_id)]).await.unwrap();
 
     // When Source % < Target % (26.7% < 50%) and absolute GJ is lower (40 < 2000), drain occurs
@@ -3971,23 +3987,33 @@ async fn test_warp_bubble_warp_entry_only_and_shuttle_emergency_exemptions() {
         assert_eq!(destination, dest, "Despawned bubble during alignment must not trap ship");
     }
 
-    // (b) is_emergency_warping disconnect warp is exempt from origin-bubble alignment cancellation,
-    //     but is still intercepted by destination drag/catch bubbles.
+    // (b) Non-nullified disconnect emergency warp inside an origin bubble is canceled by #429,
+    //     while a ship starting outside origin bubble (with is_emergency_warping) is caught by destination bubbles.
     bp.warp_bubble_mgr.add_bubble(eve_destiny::WarpBubble::new(5002, origin, 20_000.0));
     bp.warp_bubble_mgr.add_bubble(eve_destiny::WarpBubble::new(5003, bubble_center, 20_000.0));
     let mut cs_emerg = eve_destiny::CombatState::default();
     cs_emerg.is_emergency_warping = true;
-    bp.combat_states.insert(1002, cs_emerg);
+    bp.combat_states.insert(1002, cs_emerg.clone());
     bp.add_ball(Ball {
         id: 1002, type_id: 587, position: origin, velocity: DVec3::ZERO,
         max_velocity: 365.0, inertia: 1.0, mass: 1_067_000.0, radius: 37.0,
         speed_fraction: 0.0, mode: MovementMode::new_warp(origin, dest, 3.0),
     });
     for _ in 0..5 { bp.step(1.0); }
-    let MovementMode::Warp { destination, phase, .. } = bp.balls[&1002].mode else {
-        panic!("Expected emergency warp to enter warp out of origin bubble");
+    assert_eq!(bp.balls[&1002].mode, MovementMode::Stop, "Non-nullified emergency warp inside origin bubble must be aborted (#429)");
+
+    let clear_origin = DVec3::new(30_000.0, 0.0, 0.0);
+    bp.combat_states.insert(1004, cs_emerg);
+    bp.add_ball(Ball {
+        id: 1004, type_id: 587, position: clear_origin, velocity: DVec3::ZERO,
+        max_velocity: 365.0, inertia: 1.0, mass: 1_067_000.0, radius: 37.0,
+        speed_fraction: 0.0, mode: MovementMode::new_warp(clear_origin, dest, 3.0),
+    });
+    for _ in 0..5 { bp.step(1.0); }
+    let MovementMode::Warp { destination, phase, .. } = bp.balls[&1004].mode else {
+        panic!("Expected emergency warp outside origin bubble to enter warp");
     };
-    assert_ne!(phase, eve_destiny::WarpPhase::Aligning, "Emergency warp must not be aborted by origin bubble");
+    assert_ne!(phase, eve_destiny::WarpPhase::Aligning, "Emergency warp outside origin bubble must not be aborted");
     assert!((destination.x - 99_980_000.0).abs() < 1e-3, "Emergency warp must still be caught by destination bubble");
 
     // (c) Newly spawned group 31 shuttle warping toward a bubbled destination is exempt

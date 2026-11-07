@@ -405,6 +405,12 @@ async fn test_mining_goals_and_mineral_market_supply_chain_live() {
     }
 
     let (mut buyer, _) = gm_pilot_fitted_in_space(&ctx, 71_003, 91_100_003, 606, PERIMETER_SYS, &[], &[]).await;
+    ctx.db.with_mut_snapshot(|s| {
+        s.skills.entry(buyer.char_id).or_default().insert(
+            3447,
+            eve_db::TrainedSkillRecord { type_id: 3447, skill_points: 250.0, level: 1 },
+        );
+    });
     common::slash_cmd(&ctx, &mut buyer.sess, "/giveisk 1000000").await;
     ctx.systems.get_or_spawn(PERIMETER_SYS).set_ball_position(buyer.ship_id, DVec3::from(st_p.position)).await;
     ok(&ctx, &mut buyer.sess, "stationSvc", "Dock", &[int(perim_station)]).await;

@@ -327,7 +327,7 @@ async fn test_modules_disruptive_lance() {
     let b_char = 952_403;
     let b_ship = 962_403;
     seed_pilot(&ctx, b_char, b_ship, 624, NULL_SYS, false);
-    spawn_ship_in_space(&ctx, b_char, b_ship, 624, NULL_SYS, DVec3::new(50_000.0, 10_000.0, 0.0)).await;
+    spawn_ship_in_space(&ctx, b_char, b_ship, 624, NULL_SYS, DVec3::new(50_000.0, 15_000.0, 0.0)).await;
 
     // Activate Siege first
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(siege_mod)], &kw, None).await.expect("Activate Siege");

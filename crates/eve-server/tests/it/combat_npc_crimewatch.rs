@@ -801,25 +801,42 @@ async fn test_c8_crimewatch_faction_police_killrights_tags_and_sentries() {
     assert!(!attacked_pod && can_dock_pod, "Capsules must not be attacked by Faction Police and may dock");
 
     // 9. Kill Rights (`feat:crimewatch.kill-rights`) via live illegal aggression + CONCORD step
-    let _ = ctx
-        .systems
-        .get_or_spawn(highsec_id)
-        .spawn_ball_with_combat(
-            Ball {
-                id: ship_a,
-                type_id: 587,
-                position: DVec3::ZERO,
-                velocity: DVec3::ZERO,
-                max_velocity: 350.0,
-                inertia: 3.0,
-                mass: 1_200_000.0,
-                radius: 35.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-            ctx.build_type_combat_state(587),
-        )
-        .await;
+    ctx.db.with_mut_snapshot(|s| {
+        for (cid, sid) in [(char_a, ship_a), (char_b, ship_b)] {
+            if let Some(c) = s.characters.get_mut(&cid) {
+                c.station_id = None;
+                c.structure_id = None;
+                c.solar_system_id = highsec_id;
+                c.active_ship_id = sid;
+            }
+            if let Some(it) = s.items.get_mut(&sid) {
+                it.location_id = highsec_id as i64;
+                it.singleton = true;
+            }
+        }
+    });
+    sess_b.solar_system_id = Some(highsec_id);
+    for (sid, pos) in [(ship_a, DVec3::ZERO), (ship_b, DVec3::new(1_500.0, 0.0, 0.0))] {
+        let _ = ctx
+            .systems
+            .get_or_spawn(highsec_id)
+            .spawn_ball_with_combat(
+                Ball {
+                    id: sid,
+                    type_id: 587,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 350.0,
+                    inertia: 3.0,
+                    mass: 1_200_000.0,
+                    radius: 35.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                ctx.build_type_combat_state(587),
+            )
+            .await;
+    }
     let now_kr = ctx.now_unix();
     let mut cw = eve_server::combat::crimewatch::CrimeWatchDirector::new();
     let _ = cw.handle_combat_aggression_with_pod(
