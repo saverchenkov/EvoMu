@@ -505,8 +505,7 @@ impl ServerContext {
     }
 
     pub fn new() -> Self {
-        #[cfg(test)]
-        let _env_read_guard = crate::lock_test_env_read();
+        let _env_read_guard = acquire_test_env_read_guard();
         #[cfg(any(test, feature = "demo-seed"))]
         let db = {
             let disable_demo = std::env::var("EVOMU_DISABLE_DEMO_SEED").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
@@ -1355,6 +1354,15 @@ impl ServerContext {
             || ex.invite_details.keys().any(|&(fid, _)| fid == fleet_id)
             || ex.invite_timestamps.keys().any(|&(fid, _)| fid == fleet_id)
     }
+}
+
+#[cfg(not(test))]
+#[inline]
+fn acquire_test_env_read_guard() {}
+
+#[cfg(test)]
+fn acquire_test_env_read_guard() -> Option<std::sync::RwLockReadGuard<'static, ()>> {
+    crate::lock_test_env_read()
 }
 
 #[cfg(test)]

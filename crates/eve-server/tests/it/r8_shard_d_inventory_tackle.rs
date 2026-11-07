@@ -66,7 +66,7 @@ fn seed_stack(
 
 #[tokio::test]
 async fn test_r8_487_split_stack_locks_passwords_plastic_wrap_tubes_colocation_and_overflow() {
-    // parity: rpc:invbroker.SplitStack, rpc:contractProxy.SplitStack, rpc:invbroker.MultiMerge, rpc:invbroker.ALSCLockItems, rpc:invbroker.SetPassword
+    // parity: rpc:invbroker.SplitStack, rpc:contractProxy.SplitStack, feat:inventory.split-merge, feat:inventory.secure-containers
     let ctx = paused_ctx();
     let kw = HashMap::new();
 
@@ -118,6 +118,44 @@ async fn test_r8_487_split_stack_locks_passwords_plastic_wrap_tubes_colocation_a
     assert_eq!(merge_trunc_err.code, "StackFailed");
     assert_eq!(ctx.db.get_item(base_trit).unwrap().quantity, 100);
 
+    // Happy-path SplitStack + MultiMerge (feat:inventory.split-merge)
+    let split_ok = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "invbroker",
+            None,
+            "SplitStack",
+            &[PyRep::Integer(base_trit), PyRep::Integer(25)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("valid SplitStack must create a new stack");
+    let new_split_id = split_ok
+        .dict_get("newItemID")
+        .and_then(|v| v.as_i64())
+        .expect("SplitStack returns newItemID");
+    assert_eq!(ctx.db.get_item(base_trit).unwrap().quantity, 75);
+    assert_eq!(ctx.db.get_item(new_split_id).unwrap().quantity, 25);
+
+    ctx.dispatch_rpc(
+        &mut s1,
+        "invbroker",
+        None,
+        "MultiMerge",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(new_split_id),
+            PyRep::Integer(merge_dst_trit),
+            PyRep::Integer(25),
+        ])])],
+        &kw,
+        None,
+    )
+    .await
+    .expect("valid MultiMerge must merge identical stacks");
+    assert_eq!(ctx.db.get_item(merge_dst_trit).unwrap().quantity, 75);
+    assert!(ctx.db.get_item(new_split_id).is_none());
+
     // 2. ALSC item lock: splitting a locked stack inside an ALSC container must NOT mint unlocked units
     let alsc_id = 848_700_010_i64;
     let alsc_trit = 848_700_011_i64;
@@ -138,6 +176,14 @@ async fn test_r8_487_split_stack_locks_passwords_plastic_wrap_tubes_colocation_a
         .expect_err("contractProxy.SplitStack must also reject ALSC locked stack");
     assert_eq!(cp_alsc_err.code, "ALSCItemLocked");
     assert_eq!(ctx.db.with_snapshot(|s| s.items.len()), count_before);
+    let alsc_logs = ctx
+        .dispatch_rpc(&mut s1, "invbroker", None, "ALSCLogGet", &[PyRep::Integer(alsc_id)], &kw, None)
+        .await
+        .expect("ALSCLogGet must return container lock logs");
+    assert!(
+        matches!(alsc_logs.dict_get("entries"), Some(PyRep::List(entries)) if !entries.is_empty()),
+        "ALSC container lock must record an audit log entry"
+    );
 
     // 3. InventoryFlag::Locked, Impounded, AssetSafetyWrapRecord, and Plastic Wrap (3468) rejected at both RPC and DB layers
     for (idx, flag) in [InventoryFlag::Locked, InventoryFlag::Impounded]
@@ -246,6 +292,19 @@ async fn test_r8_487_split_stack_locks_passwords_plastic_wrap_tubes_colocation_a
         .await
         .expect_err("passworded container must block SplitStack before password entry");
     assert_eq!(pw_err.code, "ALSCPasswordRequired");
+
+    let mut pw_kw = HashMap::new();
+    pw_kw.insert("password".into(), PyRep::String("vault-pw".into()));
+    let pw_split_ok = ctx
+        .dispatch_rpc(&mut s2, "invbroker", None, "SplitStack", &[PyRep::Integer(pw_stack), PyRep::Integer(10)], &pw_kw, None)
+        .await
+        .expect("passworded container must allow SplitStack with valid password");
+    let pw_new_id = pw_split_ok
+        .dict_get("newItemID")
+        .and_then(|v| v.as_i64())
+        .expect("SplitStack with valid password returns newItemID");
+    assert_eq!(ctx.db.get_item(pw_stack).unwrap().quantity, 30);
+    assert_eq!(ctx.db.get_item(pw_new_id).unwrap().quantity, 10);
 
     // 5. Active fighter tube load & remote station co-location checks
     let remote_stack = 848_700_050_i64;

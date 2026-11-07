@@ -35,8 +35,13 @@ async fn spawn_beacon(
 
 #[tokio::test]
 async fn aligning_warp_cancellation_cleans_active_warps_and_restores_massive_state() {
-    // parity: feat:navigation.warp-align, rpc:beyonce.CmdWarpToStuff, rpc:beyonce.CmdStop, rpc:beyonce.CmdGotoPoint
-    eve_testkit::attest(&["feat:navigation.warp-align"]);
+    // parity: feat:navigation.align-to, feat:navigation.stop-ship, feat:navigation.goto-point, destiny:GotoPoint, rpc:beyonce.CmdWarpToStuff, rpc:beyonce.CmdStop, rpc:beyonce.CmdSetSpeedFraction
+    eve_testkit::attest(&[
+        "feat:navigation.align-to",
+        "feat:navigation.stop-ship",
+        "feat:navigation.goto-point",
+        "destiny:GotoPoint",
+    ]);
 
     let ctx = Arc::new(ServerContext::new());
     common::pin_clock(&ctx);
@@ -91,6 +96,8 @@ async fn aligning_warp_cancellation_cleans_active_warps_and_restores_massive_sta
     // Step 0.5s so the ship is mid-alignment (< 75% max speed) and still in WarpPhase::Aligning.
     handle.step_manual(0.5).await.expect("step 0.5s align");
     let (_, aligning_ball) = handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let v_align = aligning_ball.velocity.length();
+    assert!(v_align > 0.0 && v_align < 0.75 * aligning_ball.max_velocity);
     assert!(
         matches!(
             aligning_ball.mode,
@@ -136,7 +143,7 @@ async fn aligning_warp_cancellation_cleans_active_warps_and_restores_massive_sta
     }
     let (_, stopped_ball) = handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     assert_eq!(stopped_ball.mode, MovementMode::Stop);
-    assert!(stopped_ball.velocity.length() <= stopped_ball.max_velocity + 1e-6);
+    assert!(stopped_ball.velocity.length() < v_align * 0.25);
     assert!((stopped_ball.position - ship_ball0.position).length() < 5_000.0);
 
     // 3. Re-initiate warp and verify CmdGotoPoint and CmdSetSpeedFraction(0.5) also cleanly cancel Aligning warp.
@@ -152,15 +159,24 @@ async fn aligning_warp_cancellation_cleans_active_warps_and_restores_massive_sta
     .await
     .unwrap();
     assert!(ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    {
+        let mut bp = handle.ballpark.write().unwrap();
+        let _ = bp.drain_observer_events(observer_id);
+    }
+    let goto_target = DVec3::new(
+        ship_ball0.position.x + 10_000.0,
+        ship_ball0.position.y,
+        ship_ball0.position.z,
+    );
     ctx.dispatch_rpc(
         &mut sess,
         "beyonce",
         Some(beyonce_id),
         "CmdGotoPoint",
         &[
-            PyRep::Real(ship_ball0.position.x + 10_000.0),
-            PyRep::Real(ship_ball0.position.y),
-            PyRep::Real(ship_ball0.position.z),
+            PyRep::Real(goto_target.x),
+            PyRep::Real(goto_target.y),
+            PyRep::Real(goto_target.z),
         ],
         &kw,
         None,
@@ -168,6 +184,19 @@ async fn aligning_warp_cancellation_cleans_active_warps_and_restores_massive_sta
     .await
     .expect("CmdGotoPoint must cancel Aligning warp");
     assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+    let goto_events = {
+        let mut bp = handle.ballpark.write().unwrap();
+        bp.drain_observer_events(observer_id)
+    };
+    assert!(
+        goto_events.iter().any(|ev| matches!(
+            ev,
+            DestinyEvent::GotoPoint { ball_id, .. } if *ball_id == ship_id
+        )),
+        "CmdGotoPoint must emit DestinyEvent::GotoPoint"
+    );
+    let (_, goto_ball) = handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(matches!(goto_ball.mode, MovementMode::GotoDirection { .. }));
 
     ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_id), "CmdStop", &[], &kw, None)
         .await
@@ -199,14 +228,58 @@ async fn aligning_warp_cancellation_cleans_active_warps_and_restores_massive_sta
     .await
     .expect("CmdSetSpeedFraction(<0.75) must cancel Aligning warp");
     assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+
+    // 4. Verify align formula: align_time = ln(4)*inertia*mass/1e6 enters warp at >= 75% velocity.
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_id), "CmdStop", &[], &kw, None)
+        .await
+        .unwrap();
+    for _ in 0..15 {
+        handle.step_manual(1.0).await.unwrap();
+    }
+    let (_, rest_ball) = handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let align_secs = 4.0_f64.ln() * rest_ball.inertia * rest_ball.mass / 1.0e6;
+    let align_ticks = align_secs.ceil().max(1.0) as usize;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(beyonce_id),
+        "CmdWarpToStuff",
+        &[PyRep::String("item".into()), PyRep::Integer(dest_beacon_id)],
+        &kw,
+        None,
+    )
+    .await
+    .unwrap();
+    for _ in 0..align_ticks {
+        handle.step_manual(1.0).await.unwrap();
+    }
+    let (_, aligned_ball) = handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(
+        aligned_ball.velocity.length() >= 0.75 * aligned_ball.max_velocity - 0.5,
+        "Ship must reach >= 75% max velocity by ceil(ln(4)*inertia*mass/1e6)={align_ticks}s"
+    );
+    handle.step_manual(1.0).await.unwrap();
+    let (_, warped_ball) = handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            warped_ball.mode,
+            MovementMode::Warp {
+                phase: WarpPhase::Accelerating | WarpPhase::Cruising,
+                ..
+            }
+        ),
+        "Ship must enter warp after reaching 75% velocity, got {:?}",
+        warped_ball.mode
+    );
 }
 
 #[tokio::test]
 async fn active_warp_tunnel_rejects_all_subwarp_rpcs_and_prevents_slingshot_past_bubble() {
-    // parity: feat:navigation.warp-tunnel, feat:modules.interdiction-sphere, rpc:beyonce.CmdWarpToStuff
+    // parity: feat:modules.interdiction-sphere, feat:navigation.goto-point, destiny:GotoPoint, rpc:beyonce.CmdWarpToStuff, rpc:beyonce.CmdStop, rpc:beyonce.CmdGotoDirection, rpc:beyonce.CmdSteerDirection, rpc:beyonce.CmdSetSpeedFraction, rpc:beyonce.CmdOrbit, rpc:beyonce.CmdFollowBall, rpc:beyonce.CmdAlignTo
     eve_testkit::attest(&[
-        "feat:navigation.warp-tunnel",
         "feat:modules.interdiction-sphere",
+        "feat:navigation.goto-point",
+        "destiny:GotoPoint",
     ]);
 
     let ctx = Arc::new(ServerContext::new());
