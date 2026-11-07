@@ -7,6 +7,7 @@ use glam::DVec3;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[cfg(test)]
 #[path = "combat_npcs_drones_control_tests.rs"]
 mod combat_npcs_drones_control_tests;
 

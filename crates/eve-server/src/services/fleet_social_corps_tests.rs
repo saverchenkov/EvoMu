@@ -1,5 +1,6 @@
 //! Unit tests for `fleet_social_corps` public info, updates, divisions, members, and cash transfers.
 
+#[cfg(test)]
 #[path = "fleet_social_corps_apps_tests.rs"]
 mod fleet_social_corps_apps_tests;
 

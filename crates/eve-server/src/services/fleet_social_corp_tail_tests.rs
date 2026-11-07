@@ -1,5 +1,6 @@
 //! Unit tests for `fleet_social_corp_tail` role updates, delayed hangar grants, blockers, and vote creation.
 
+#[cfg(test)]
 #[path = "fleet_social_corp_tail_lifecycle_tests.rs"]
 mod fleet_social_corp_tail_lifecycle_tests;
 

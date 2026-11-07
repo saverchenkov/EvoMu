@@ -59,6 +59,8 @@ mod config_starter_state_deep_extra_unit_tests;
 #[cfg(test)]
 mod fast_checkout_plex_tests;
 #[cfg(test)]
+mod fast_checkout_offers_and_tokens_tests;
+#[cfg(test)]
 mod flight_recorder_misc_deep_extra_unit_tests;
 #[cfg(test)]
 mod formulas_extra_unit_tests;
@@ -73,7 +75,11 @@ mod quasar_gateway_deep_extra_unit_tests;
 #[cfg(test)]
 mod quasar_grpc_extra_unit_tests;
 #[cfg(test)]
+mod quasar_grpc_payload_and_jwt_unit_tests;
+#[cfg(test)]
 mod quasar_grpc_unit_tests;
+#[cfg(test)]
+mod quasar_grpc_notifications_and_errors_unit_tests;
 #[cfg(test)]
 mod r7_tb_p1b_security_tests;
 #[cfg(test)]

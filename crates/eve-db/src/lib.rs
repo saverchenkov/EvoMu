@@ -36,9 +36,13 @@ mod world_snapshot_sync_rollback_tests;
 #[cfg(test)]
 mod world_snapshot_extended_sync_tests;
 #[cfg(test)]
+mod world_snapshot_extended_sync_roundtrip_tests;
+#[cfg(test)]
 mod runtime_states_sync_and_helpers_tests;
 #[cfg(test)]
 mod domain_edges_and_persistence_tests;
+#[cfg(test)]
+mod sqlite_reload_and_contract_edges_tests;
 #[cfg(test)]
 mod sqlite_error_and_wal_delta_tests;
 

@@ -8,6 +8,7 @@ use eve_machonet::SessionState;
 use glam::DVec3;
 use std::sync::Arc;
 
+#[cfg(test)]
 #[path = "combat_weapons_destruction_tests.rs"]
 mod combat_weapons_destruction_tests;
 

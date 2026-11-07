@@ -1,5 +1,6 @@
 //! Unit tests for `fleet_social_bookmarks` creation, retrieval, updates, and deletion.
 
+#[cfg(test)]
 #[path = "fleet_social_bookmarks_folders_tests.rs"]
 mod fleet_social_bookmarks_folders_tests;
 

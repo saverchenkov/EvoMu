@@ -28,6 +28,8 @@ mod combat_mechanics_tests;
 #[cfg(test)]
 mod salvage_ai_death_tests;
 #[cfg(test)]
+mod npc_ai_and_self_destruct_tests;
+#[cfg(test)]
 mod combat_weapons_deep_extra_unit_tests;
 
 

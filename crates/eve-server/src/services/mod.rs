@@ -219,11 +219,15 @@ mod combat_crimewatch_extra_unit_tests;
 #[cfg(test)]
 mod combat_fighters_extra_unit_tests;
 #[cfg(test)]
+mod combat_fighters_tubes_and_scoop_unit_tests;
+#[cfg(test)]
 mod combat_weapons_extra_unit_tests;
 #[cfg(test)]
 mod combat_weapons_spool_extra_unit_tests;
 #[cfg(test)]
 mod contracts_service_extra_unit_tests;
+#[cfg(test)]
+mod contracts_wtb_and_auction_lifecycle_unit_tests;
 #[cfg(test)]
 mod fitting_containers_ships_extra_unit_tests;
 #[cfg(test)]
@@ -231,7 +235,11 @@ mod fitting_containers_ships_unit_tests;
 #[cfg(test)]
 mod fitting_module_cycles_helpers_extra_unit_tests;
 #[cfg(test)]
+mod fitting_cycle_actions_and_mercden_unit_tests;
+#[cfg(test)]
 mod fleet_social_corp_gov_extra_unit_tests;
+#[cfg(test)]
+mod fleet_social_corp_shares_and_votes_unit_tests;
 #[cfg(test)]
 mod fw_gameplay_insurgency_extra_unit_tests;
 #[cfg(test)]
@@ -243,13 +251,21 @@ mod pve_ess_reserve_banks_extra_unit_tests;
 #[cfg(test)]
 mod fitting_ship_bays_extra_unit_tests;
 #[cfg(test)]
+mod fitting_ship_jettison_and_holds_unit_tests;
+#[cfg(test)]
 mod insurgency_complex_ops_extra_unit_tests;
 #[cfg(test)]
+mod insurgency_raid_gate_and_ticks_unit_tests;
+#[cfg(test)]
 mod pve_exploration_extra_unit_tests;
+#[cfg(test)]
+mod pve_exploration_packets_and_waves_unit_tests;
 #[cfg(test)]
 mod space_destiny_extra_unit_tests;
 #[cfg(test)]
 mod social_corp_fleet_extra_unit_tests;
+#[cfg(test)]
+mod social_alliance_and_corp_delivery_unit_tests;
 #[cfg(test)]
 mod r7_tb_p0_security_tests;
 #[cfg(test)]
@@ -269,13 +285,19 @@ mod tactical_modules_extra_unit_tests;
 #[cfg(test)]
 mod quasar_cosmetics_market_extra_unit_tests;
 #[cfg(test)]
+mod quasar_cosmetics_skin_purchase_unit_tests;
+#[cfg(test)]
 mod quasar_cosmetics_skinr_extra_unit_tests;
 #[cfg(test)]
 mod quasar_skills_clones_extra_unit_tests;
 #[cfg(test)]
 mod fw_gameplay_extra_unit_tests;
 #[cfg(test)]
+mod fw_gameplay_supply_and_ihub_unit_tests;
+#[cfg(test)]
 mod structure_lifecycle_rpc_extra_unit_tests;
+#[cfg(test)]
+mod structure_fitting_and_delivery_unit_tests;
 #[cfg(test)]
 mod auth_cache_extra_unit_tests;
 #[cfg(test)]
@@ -286,6 +308,8 @@ mod fitting_module_cycles_extra_unit_tests;
 mod combat_npc_ai_extra_unit_tests;
 #[cfg(test)]
 mod station_structure_extra_unit_tests;
+#[cfg(test)]
+mod station_upwell_docking_and_pos_unit_tests;
 #[cfg(test)]
 mod structure_lifecycle_extra_unit_tests;
 #[cfg(test)]
@@ -303,6 +327,8 @@ mod season_manager_extra_unit_tests;
 #[cfg(test)]
 mod quasar_progression_extra_extra_unit_tests;
 #[cfg(test)]
+mod quasar_progression_milestones_unit_tests;
+#[cfg(test)]
 mod mining_sites_extra_unit_tests;
 #[cfg(test)]
 mod tourney_service_extra_unit_tests;
@@ -314,6 +340,8 @@ mod project_discovery_extra_unit_tests;
 mod combat_legacy_ess_extra_unit_tests;
 #[cfg(test)]
 mod serverops_cluster_extra_unit_tests;
+#[cfg(test)]
+mod serverops_rebalance_and_maintenance_unit_tests;
 #[cfg(test)]
 mod agents_missions_helpers_extra_unit_tests;
 #[cfg(test)]
@@ -327,7 +355,11 @@ mod tactical_module_mechanics_extra_unit_tests;
 #[cfg(test)]
 mod contracts_deep_extra_unit_tests;
 #[cfg(test)]
+mod contracts_courier_and_auction_unit_tests;
+#[cfg(test)]
 mod industry_deep_extra_unit_tests;
+#[cfg(test)]
+mod industry_jobs_and_facilities_unit_tests;
 #[cfg(test)]
 mod reprocessing_deep_extra_unit_tests;
 
@@ -347,6 +379,8 @@ mod jump_clone_names_extra_unit_tests;
 mod fitting_dogma_im_extra_unit_tests;
 
 #[cfg(test)]
+mod fitting_targeting_and_ecm_unit_tests;
+#[cfg(test)]
 mod pve_abyssal_pylons_extra_unit_tests;
 
 #[cfg(test)]
@@ -359,23 +393,35 @@ mod character_gm_tools_extra_unit_tests;
 mod character_skills_extra_unit_tests;
 
 #[cfg(test)]
+mod character_skills_injection_and_rpcs_unit_tests;
+#[cfg(test)]
 mod mobile_deployables_extra_unit_tests;
 
 #[cfg(test)]
 mod space_nav_travel_extra_unit_tests;
 
 #[cfg(test)]
+mod space_destiny_commands_and_tether_unit_tests;
+#[cfg(test)]
 mod wallet_services_ext_extra_unit_tests;
 
+#[cfg(test)]
+mod wallet_station_direct_trade_unit_tests;
 #[cfg(test)]
 mod structure_upwell_ops_extra_unit_tests;
 
 #[cfg(test)]
+mod structure_upwell_unanchor_and_clones_unit_tests;
+#[cfg(test)]
 mod crimewatch_bounty_extra_unit_tests;
 
 #[cfg(test)]
+mod crimewatch_bounty_and_tags_unit_tests;
+#[cfg(test)]
 mod sov_services_extra_unit_tests;
 
+#[cfg(test)]
+mod sov_hub_hacks_and_clone_reset_unit_tests;
 #[cfg(test)]
 mod notify_emitters_tournaments_anomalies_extra_unit_tests;
 
@@ -455,8 +501,12 @@ mod lookup_svc_extra_unit_tests;
 mod market_price_history_extra_unit_tests;
 
 #[cfg(test)]
+mod market_crossed_order_fills_unit_tests;
+#[cfg(test)]
 mod fleet_social_corp_tail_dispatch_extra_unit_tests;
 
+#[cfg(test)]
+mod fleet_social_corp_assets_and_aggression_unit_tests;
 #[cfg(test)]
 mod quasar_sov_mercden_extra_unit_tests;
 
@@ -477,13 +527,21 @@ mod wormhole_lifecycle_deep_extra_unit_tests;
 #[cfg(test)]
 mod structures_pos_deep_extra_unit_tests;
 #[cfg(test)]
+mod structures_asset_safety_and_pos_unit_tests;
+#[cfg(test)]
 mod planetary_interaction_deep_extra_unit_tests;
 #[cfg(test)]
 mod abyssal_void_mgr_deep_extra_unit_tests;
 #[cfg(test)]
+mod abyssal_void_collapse_and_jump_unit_tests;
+#[cfg(test)]
 mod pve_special_sites_abyssal_deep_extra_unit_tests;
 #[cfg(test)]
+mod pve_abyssal_hazards_and_progression_unit_tests;
+#[cfg(test)]
 mod pve_incursion_lifecycle_deep_extra_unit_tests;
+#[cfg(test)]
+mod pve_incursion_completion_and_tales_unit_tests;
 #[cfg(test)]
 mod market_orders_deep_extra_unit_tests;
 #[cfg(test)]
@@ -548,6 +606,8 @@ mod r6_t3_p1_security_tests;
 #[cfg(test)]
 mod r6_t4_p0_security_tests;
 #[cfg(test)]
+mod quasar_grpc_and_corp_security_tests;
+#[cfg(test)]
 mod quasar_r6_plex_skin_regression_tests;
 #[cfg(test)]
 mod r6_t2_p1_security_tests;
@@ -586,5 +646,7 @@ mod quasar_sso_local_dev_jwt_security_tests;
 mod plex_ship_skyhook_link_security_tests;
 #[cfg(test)]
 mod corp_registry_ops_extra_unit_tests;
+#[cfg(test)]
+mod corp_registry_actions_and_tracking_unit_tests;
 #[cfg(test)]
 mod r8_shard_h_security_tests;

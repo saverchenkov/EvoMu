@@ -1,5 +1,6 @@
 //! Unit tests for `fleet_social_chat` XMPP/LSC channels, moderation, delayed local, and contacts/CSPA.
 
+#[cfg(test)]
 #[path = "fleet_social_chat_channels_tests.rs"]
 mod fleet_social_chat_channels_tests;
 

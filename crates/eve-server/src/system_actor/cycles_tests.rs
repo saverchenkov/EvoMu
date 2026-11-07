@@ -5,6 +5,7 @@ use glam::DVec3;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+#[cfg(test)]
 #[path = "cycles_thermodynamics_tests.rs"]
 mod cycles_thermodynamics_tests;
 
