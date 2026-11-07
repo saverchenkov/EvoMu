@@ -117,7 +117,7 @@ pub async fn on_special_site_npc_destroyed_core(
                 for site in list.iter_mut() {
                     if site.boss_npc_ball_id == npc_ball_id && !site.completed {
                         let reward_paid =
-                            crate::services::pve_special_sites_shard2_helpers::compute_homefront_combat_pilot_isk(
+                            crate::services::pve_special_sites_ops::compute_homefront_combat_pilot_isk(
                                 site.base_pilot_isk,
                                 site.optimal_fleet_size,
                                 fleet_count,
@@ -190,7 +190,7 @@ pub async fn on_special_site_npc_destroyed_core(
         if let Some(cid) = killer_char_id {
             let spawned_cid = db.with_mut_snapshot(|snap| {
                 let (new_bal_opt, _) =
-                    crate::services::pve_special_sites_shard2_helpers::apply_triglavian_standings_and_isk(
+                    crate::services::pve_special_sites_ops::apply_triglavian_standings_and_isk(
                         snap,
                         cid,
                         g_fac,
@@ -278,7 +278,7 @@ pub async fn on_special_site_npc_destroyed_core(
         (
             spawn_next,
             hive_loot.map(|elem_tid| {
-                crate::services::pve_special_sites_shard2_helpers::allocate_drifter_hive_bonus_loot(
+                crate::services::pve_special_sites_ops::allocate_drifter_hive_bonus_loot(
                     reg, elem_tid,
                 )
             }),

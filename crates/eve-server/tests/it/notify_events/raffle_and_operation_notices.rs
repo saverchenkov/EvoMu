@@ -2,7 +2,7 @@
 #[allow(unused_imports)]
 use super::*;
 
-mod notify_live_rpc_closure {
+mod notify_live_rpc_events {
     #[allow(unused_imports)]
     use super::*;
 
@@ -188,9 +188,9 @@ async fn test_notify_live_hypernet_raffle_notifications() {
 
 }
 
-// Folded submodule: notify_p7_sp1_sp2_closure
+// Folded submodule: notify_operation_and_market_events
 #[allow(unused_imports, dead_code)]
-mod notify_p7_sp1_sp2_closure {
+mod notify_operation_and_market_events {
     #[allow(unused_imports)]
     use super::*;
 

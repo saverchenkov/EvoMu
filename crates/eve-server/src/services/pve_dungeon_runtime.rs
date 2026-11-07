@@ -3,8 +3,8 @@
 
 #![forbid(unsafe_code)]
 
-#[path = "pve_dungeon_runtime_shard2_helpers.rs"]
-mod shard2_helpers;
+#[path = "pve_dungeon_runtime_ops.rs"]
+mod ops;
 
 use crate::router::ServerContext;
 use crate::services::notify_emitters_space_dungeons::{
@@ -514,7 +514,7 @@ pub fn resolve_deadspace_or_escalation_warp_target(
         if site_pos.is_some() {
             return Ok(site_pos);
         }
-        if let Some(pos) = shard2_helpers::resolve_fw_or_special_warp_target(
+        if let Some(pos) = ops::resolve_fw_or_special_warp_target(
             ctx,
             sys_id,
             target_id,
@@ -533,7 +533,7 @@ pub fn find_active_dungeon_id_at_position(
     sys_id: SolarSystemId,
     pos: [f64; 3],
 ) -> Option<u32> {
-    shard2_helpers::find_active_dungeon_id_at_position(ctx, sys_id, pos)
+    ops::find_active_dungeon_id_at_position(ctx, sys_id, pos)
 }
 
 /// Called on warp initiation (`CmdWarpToStuff`) to emit `OnExitingDungeon` when leaving an active dungeon pocket.

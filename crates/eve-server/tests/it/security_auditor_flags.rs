@@ -811,12 +811,12 @@ async fn test_s10_doc_reconciliation_and_labels() {
             let after = &rest[idx + 2..];
             if let Some(close) = after.find(')') {
                 let target = &after[..close];
-                let path_part = target.split('#').next().unwrap_or("").trim();
-                if path_part.starts_with("./") || path_part.starts_with("../") {
-                    let resolved = base_dir.join(path_part);
+                let path_segment = target.split('#').next().unwrap_or("").trim();
+                if path_segment.starts_with("./") || path_segment.starts_with("../") {
+                    let resolved = base_dir.join(path_segment);
                     assert!(
                         resolved.exists(),
-                        "S-10: broken relative link `{path_part}` in {doc_rel} (resolved to {})",
+                        "S-10: broken relative link `{path_segment}` in {doc_rel} (resolved to {})",
                         resolved.display()
                     );
                 }
@@ -996,7 +996,7 @@ async fn test_s7_structures_skyhooks_pi_range_checks() {
 }
 
 #[tokio::test]
-async fn test_z5_auditor_flagged_rows_closure_suite() {
+async fn test_auditor_flagged_rows_verification_suite() {
     // parity: rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:multiLoginBlocker.Login, rpc:slash.SlashCmd
     // Composite test closing the auditor-flagged ledger rows:
     // - feat:account.account-bans

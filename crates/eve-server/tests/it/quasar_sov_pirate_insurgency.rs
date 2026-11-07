@@ -114,7 +114,7 @@ fn encode_id_req(id: u64) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn test_authentic_freelance_pirate_stargate_remediated() {
+async fn test_authentic_freelance_pirate_stargate() {
     // parity: feat:quasar.stargate
     // parity: quasar:eveProto/generated/eve_public/freelance/contributionmethod/definition/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/stargate/lock/api/notices_pb2.pyj

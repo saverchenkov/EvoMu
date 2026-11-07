@@ -3682,7 +3682,7 @@ async fn test_unscoped_corruption5_rejected_lowsec_sec_loss_and_vorton_arc_notif
 
 // Folded submodule: parity_fw_sov_batch_closure
 #[allow(unused_imports, dead_code)]
-pub(crate) mod warzone_and_sovereignty_batch_closure {
+pub(crate) mod warzone_and_sovereignty_suite {
     use super::*;
 
 // End-to-end parity closure tests for FW, Sovereignty, and Insurgency features.

@@ -218,10 +218,10 @@ async fn r7_465_login_reward_packaging_expiry_item_change_and_campaign_scoped_cl
     .await
     .unwrap()
     .unwrap();
-    let PyRep::Tuple(parts_a) = rep_a else {
+    let PyRep::Tuple(entries_a) = rep_a else {
         panic!("expected tuple from claim_reward");
     };
-    let item_id_a = parts_a[0].dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
+    let item_id_a = entries_a[0].dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
 
     let expected_singleton = get_sde_login_campaigns(&ctx.sde)[&camp_a]
         .alpha_rewards
@@ -276,11 +276,11 @@ async fn r7_465_login_reward_packaging_expiry_item_change_and_campaign_scoped_cl
     .await
     .unwrap()
     .unwrap();
-    let PyRep::Tuple(parts_b) = rep_b else {
+    let PyRep::Tuple(entries_b) = rep_b else {
         panic!("expected tuple from campaign B claim_reward");
     };
     assert_eq!(
-        parts_b[0].dict_get("reward_index"),
+        entries_b[0].dict_get("reward_index"),
         Some(&PyRep::Integer(1)),
         "new campaign must start at day index 1 after rotating active_login_campaign_id"
     );

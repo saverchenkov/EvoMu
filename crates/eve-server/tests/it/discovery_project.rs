@@ -614,7 +614,7 @@ fn varint(m: &WireMessage, field: u32) -> Option<u64> {
 }
 
 #[tokio::test]
-async fn test_project_discovery_parity_closure() {
+async fn test_project_discovery_end_to_end_flows() {
     let ctx = ServerContext::new();
     let mut sess = select_pilot(&ctx, 62_001, "demo", "demo-secret", PILOT).await;
 

@@ -73,7 +73,7 @@ async fn quasar_rpc(
 }
 
 #[tokio::test]
-async fn test_q5_q6_social_and_economy_package_closure() {
+async fn test_social_and_economy_quasar_services() {
     let ctx = ServerContext::new();
     let mut sess = make_session(1, 1, 90_000_001, 1_000_009);
     let mut unauth = SessionState::new(2);

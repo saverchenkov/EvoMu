@@ -875,7 +875,7 @@ async fn test_corp_governance_welcome_mails_structures_alliance() {
 }
 
 #[tokio::test]
-async fn test_corp_projects_goals_freelance_and_plan_closure() {
+async fn test_corp_projects_goals_and_freelance_workflows() {
     // parity: feat:corporation.corp-project-reward-pool
     // parity: feat:corporation.corp-project-close-expiry
     // parity: feat:corporation.corp-goals

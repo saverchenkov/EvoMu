@@ -65,7 +65,7 @@ pub(super) fn grant_all_skills_for_types(ctx: &ServerContext, char_id: i64, type
 }
 
 #[tokio::test]
-async fn test_combat_ewar_and_capacitor_warfare_closure() {
+async fn test_combat_ewar_and_capacitor_warfare_mechanics() {
     // parity: feat:combat.nosferatu-drain-cap, feat:combat.energy-neutralizer-cycle, feat:combat.target-painter-bloom, feat:combat.sensor-dampener-targeting-range, feat:combat.sensor-dampener-scan-resolution, feat:combat.tracking-disruptor-optimal-falloff, feat:combat.tracking-disruptor-tracking-speed, feat:combat.guidance-disruptor-missiles, feat:combat.ecm-burst-radius, rpc:charUnboundMgr.SelectCharacterID
     eve_testkit::attest(&[
         "feat:combat.nosferatu-drain-cap", "feat:combat.energy-neutralizer-cycle", "feat:combat.target-painter-bloom",

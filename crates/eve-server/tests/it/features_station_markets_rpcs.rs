@@ -704,7 +704,7 @@ async fn b34_tenebrex_jammer_state_and_reinforcement() {
 }
 
 #[allow(unused_imports, dead_code, unused_variables, unused_mut)]
-pub(crate) mod w34_closure {
+pub(crate) mod station_market_and_contract_rpcs {
     use super::*;
 
 // Live integration tests for newly-closed feature rows (`EvoMu-w34`):

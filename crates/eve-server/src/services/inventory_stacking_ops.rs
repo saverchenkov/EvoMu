@@ -528,8 +528,8 @@ pub(in crate::services) fn handle_stack_ops(
                     }
                     if req_qty < src_qty {
                         match ctx.db.split_stack(char_id, src_id, req_qty) {
-                            Ok((_orig, split_part)) => {
-                                src_id = split_part.item_id;
+                            Ok((_orig, split_segment)) => {
+                                src_id = split_segment.item_id;
                             }
                             Err(e) => {
                                 return Some(Err(BridgeRpcError {

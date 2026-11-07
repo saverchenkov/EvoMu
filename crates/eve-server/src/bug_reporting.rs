@@ -1008,9 +1008,9 @@ fn extract_multipart_file<'a>(
         .or_else(|| after_open.strip_prefix(b"\n"))?;
 
     let hdr_end_rel = find_bytes(after_open, b"\r\n\r\n")?;
-    let part_hdr_str = String::from_utf8_lossy(&after_open[..hdr_end_rel]);
+    let header_str = String::from_utf8_lossy(&after_open[..hdr_end_rel]);
     let mut filename = "attachment.bin".to_string();
-    for line in part_hdr_str.lines() {
+    for line in header_str.lines() {
         if line.to_ascii_lowercase().starts_with("content-disposition:") {
             for seg in line.split(';') {
                 let seg = seg.trim();

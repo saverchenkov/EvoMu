@@ -464,7 +464,7 @@ impl WorldRepository {
         acc.check_active_restriction(now_unix)?;
         let candidate_hash = if let Some(rest) = acc.password_token.strip_prefix("$argon2id$v=19$")
         {
-            let Some((params_part, tail)) = rest.split_once('$') else {
+            let Some((params_segment, tail)) = rest.split_once('$') else {
                 return Err(DbError::InvalidCredentials);
             };
             let Some((salt_hex, _digest_hex)) = tail.split_once('$') else {
@@ -473,7 +473,7 @@ impl WorldRepository {
             let mut m_cost = 19_456u32;
             let mut t_cost = 2u32;
             let mut p_cost = 1u32;
-            for kv in params_part.split(',') {
+            for kv in params_segment.split(',') {
                 if let Some(v) = kv.strip_prefix("m=") {
                     m_cost = v.parse().map_err(|_| DbError::InvalidCredentials)?;
                 } else if let Some(v) = kv.strip_prefix("t=") {

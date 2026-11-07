@@ -741,7 +741,7 @@ async fn spawn_test_ship(
 }
 
 #[tokio::test]
-async fn test_lp_store_mgr_gameplay_closure() {
+async fn test_lp_store_mgr_gameplay() {
     // DATA GAP: LP store corporation offer catalog is server-only and not present in V24 client FSD.
     // Tests authentic LP/ISK deduction, required item trade-in consumption, and hangar delivery mechanics.
     let ctx = ServerContext::new();
@@ -982,7 +982,7 @@ async fn test_lp_store_mgr_gameplay_closure() {
 }
 
 #[tokio::test]
-async fn test_standing_mgr_npc_npc_standings_closure() {
+async fn test_standing_mgr_npc_npc_standings() {
     // DATA GAP: V24 client SDE does not ship the full server-side inter-NPC standings matrix;
     // stands open until static data provenance is available, while GetNPCNPCStandings returns derived faction pairs.
     let ctx = ServerContext::new();
@@ -1028,7 +1028,7 @@ async fn test_standing_mgr_npc_npc_standings_closure() {
 }
 
 #[tokio::test]
-async fn test_shipcaster_and_starter_travel_closure() {
+async fn test_shipcaster_and_starter_travel() {
     // DATA GAP: Starter and interstellar shipcaster structures and linkages are server-side.
     // Tests CanCharacterJump weapons timer and capital ship restrictions, proximity check, and ball transfer.
     let ctx = ServerContext::new();

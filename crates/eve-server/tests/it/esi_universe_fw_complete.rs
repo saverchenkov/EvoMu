@@ -1042,7 +1042,7 @@ fn spawn_ship(
 }
 
 #[tokio::test]
-async fn test_crimewatch_kill_rights_gain_and_sell_closure() {
+async fn test_crimewatch_kill_rights_gain_and_sell() {
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let now = ctx.now_unix();
@@ -1342,7 +1342,7 @@ async fn test_crimewatch_kill_rights_gain_and_sell_closure() {
 }
 
 #[tokio::test]
-async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions_closure() {
+async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions() {
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let now = ctx.now_unix();

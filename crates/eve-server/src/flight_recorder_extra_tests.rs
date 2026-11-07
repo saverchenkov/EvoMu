@@ -61,8 +61,8 @@ fn summarize_args_exact_boundaries_for_args_kwargs_and_160_char_limit() {
     );
 
     // Case-insensitive method redaction checks.
-    for kw_part in ["LOGIN", "AuTh", "PaSsWoRd", "ToKeN", "SeCrEt"] {
-        let m = format!("do_{kw_part}_check");
+    for keyword_token in ["LOGIN", "AuTh", "PaSsWoRd", "ToKeN", "SeCrEt"] {
+        let m = format!("do_{keyword_token}_check");
         assert_eq!(
             summarize_args("svc", &m, &[PyRep::String("pw".into())], &empty_kw),
             "(***redacted credentials***)"

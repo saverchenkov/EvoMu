@@ -2127,7 +2127,7 @@ use eve_server::services::station_structure::structure_lifecycle as life;
 use glam::DVec3;
 
 #[tokio::test]
-async fn test_sov_hub_anchor_upgrades_power_and_fuel_closure() {
+async fn test_sov_hub_anchor_upgrades_power_and_fuel() {
     // parity: feat:sovereignty.sov-hub-fuel
     // parity: feat:sovereignty.sov-hub-upgrades
     // parity: feat:sovereignty.sov-power
@@ -2345,7 +2345,7 @@ async fn test_sov_hub_anchor_upgrades_power_and_fuel_closure() {
 }
 
 #[tokio::test]
-async fn test_sov_workforce_reagents_and_mercenary_den_closure() {
+async fn test_sov_workforce_reagents_and_mercenary_den() {
     // parity: feat:sovereignty.sov-workforce
     // parity: feat:sovereignty.sov-reagents
     // parity: feat:sovereignty.mercenary-den
@@ -2631,7 +2631,7 @@ use eve_server::services::structure_acl_defense_rules::TYPE_MOBILE_CYNO_INHIBITO
 use glam::DVec3;
 
 #[tokio::test]
-async fn test_fw_boosters_lp_store_and_consumption_closure() {
+async fn test_fw_boosters_lp_store_and_consumption() {
     // parity: feat:fw.fw-boosters
     eve_testkit::attest(&["feat:fw.fw-boosters"]);
 
@@ -2749,7 +2749,7 @@ async fn test_fw_boosters_lp_store_and_consumption_closure() {
 }
 
 #[tokio::test]
-async fn test_abyssal_bioadaptive_cache_rewards_closure() {
+async fn test_abyssal_bioadaptive_cache_rewards() {
     // parity: feat:abyssal.bioadaptive-cache-rewards
     eve_testkit::attest(&["feat:abyssal.bioadaptive-cache-rewards"]);
 
@@ -2910,7 +2910,7 @@ async fn test_abyssal_bioadaptive_cache_rewards_closure() {
 }
 
 #[tokio::test]
-async fn test_cyno_lighting_rules_and_blockade_runner_scan_immunity_closure() {
+async fn test_cyno_lighting_rules_and_blockade_runner_scan_immunity() {
     // parity: feat:modules.cyno-lighting-rules
     // parity: feat:ships.blockade-runner-cargo-scan-immunity
     eve_testkit::attest(&[

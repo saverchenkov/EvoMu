@@ -1250,7 +1250,7 @@ fn root_dir() -> PathBuf {
 
 #[tokio::test]
 // parity: plan:P-2, plan:P-3, plan:P-4
-async fn test_z1_systematic_rpc_catalog_dispatch_closure_and_wire_formatting() {
+async fn test_systematic_rpc_catalog_dispatch_and_wire_formatting() {
     // parity: rpc:charUnboundMgr.GetCharacterInfo, rpc:charUnboundMgr.SelectCharacterID, rpc:corpRegistry.AddCorporation, rpc:account.GetWalletDivisionsInfo, rpc:marketProxy.GetCharOrders, rpc:marketProxy.GetOrders, rpc:slash.SlashCmd, rpc:stationSvc.GetStation
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();

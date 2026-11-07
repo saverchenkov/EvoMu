@@ -668,7 +668,7 @@ async fn test_crimewatch_npc_sec_gain_caps_intervals_and_tag_bands_e2e() {
     assert!(!npc_rows.is_empty(), "Transactions log must record eventTypeID 378 for NPC kills");
 }
 
-pub(crate) mod crimewatch_drones_closure {
+pub(crate) mod crimewatch_drones_lifecycle {
 //! End-to-end integration tests closing Crimewatch parity rows:
 //! - `feat:crimewatch.concord-response-scaling`
 //! - `feat:crimewatch.criminal-wreck-auto-abandon`
@@ -1366,7 +1366,7 @@ pub(crate) mod weapons_timer_drone_bandwidth_and_corp_structures {
 //! - `feat:drones.carrier-launch-tubes-and-flight-control`
 //! - `feat:corporation.corp-structure-ownership`
 
-use super::crimewatch_drones_closure::{fit_online, lock_target, new_ctx, rpc, seed_item, spawn_pilot};
+use super::crimewatch_drones_lifecycle::{fit_online, lock_target, new_ctx, rpc, seed_item, spawn_pilot};
 use eve_db::{CorporationRecord, InventoryFlag, TrainedSkillRecord, UpwellStructureRecord};
 use eve_destiny::{Ball, MovementMode};
 use eve_proto::PyRep;

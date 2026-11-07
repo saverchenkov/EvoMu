@@ -2,9 +2,9 @@
 
 #![forbid(unsafe_code)]
 
-// Folded submodule: closure
+// Submodule: deployables_and_air_opportunities
 #[allow(unused_imports, dead_code)]
-mod closure {
+mod deployables_and_air_opportunities {
     use super::*;
 
 // Integration tests for open `feat:` rows (Batch 6).

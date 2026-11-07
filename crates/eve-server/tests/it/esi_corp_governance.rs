@@ -887,7 +887,7 @@ async fn test_esi5_corporation_members_limit_titles_and_roles_history() {
 }
 
 #[tokio::test]
-async fn test_esi5_corporation_structures_timers_starbase_detail_and_plan_closure() {
+async fn test_esi_corporation_structures_timers_and_starbase_detail() {
     // parity: esi:GET /corporations/{corporation_id}/starbases/{starbase_id}
     eve_testkit::attest(&[
         "esi:GET /corporations/{corporation_id}/starbases/{starbase_id}",

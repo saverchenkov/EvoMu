@@ -396,15 +396,15 @@ pub fn register_item_delivery_and_definitions(
                 now_u,
             );
 
-            let mut part_contrib = Vec::new();
-            encode_uuid_field(1, &uuid, &mut part_contrib);
-            encode_char_id_field(2, cid, &mut part_contrib);
-            encode_varint_field(3, char_total_prog, &mut part_contrib);
+            let mut participant_contrib = Vec::new();
+            encode_uuid_field(1, &uuid, &mut participant_contrib);
+            encode_char_id_field(2, cid, &mut participant_contrib);
+            encode_varint_field(3, char_total_prog, &mut participant_contrib);
             ctx_queue_notice(
                 NoticeScope::Corporation(corpid),
                 GoogleAny {
                     type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.ParticipantContributedNotice"),
-                    value: part_contrib,
+                    value: participant_contrib,
                 },
                 now_u,
             );

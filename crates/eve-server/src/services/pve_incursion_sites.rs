@@ -297,7 +297,7 @@ pub fn seed_incursion_for_constellation(
     reg: &mut PveSpecialSitesRegistry,
     constellation_id: ConstellationId,
 ) {
-    let tale_id = crate::services::pve_incursion_sites_shard2_helpers::allocate_persistent_incursion_tale_id(
+    let tale_id = crate::services::pve_incursion_sites_ops::allocate_persistent_incursion_tale_id(
         reg,
         constellation_id,
     );
@@ -374,7 +374,7 @@ pub fn seed_incursion_for_constellation(
         ),
     ];
     for s in &mut sites {
-        if let Some((btid, esc)) = crate::services::pve_incursion_sites_shard2_helpers::resolve_sansha_encounter_from_sde(
+        if let Some((btid, esc)) = crate::services::pve_incursion_sites_ops::resolve_sansha_encounter_from_sde(
             &ctx.sde,
             s.boss_npc_ball_id,
             s.dungeon_id,
@@ -754,7 +754,7 @@ pub async fn process_incursion_site_completion_and_payout_core(
             inc.sites[site_idx].boss_npc_ball_id += 1_000;
             let next_boss_bid = inc.sites[site_idx].boss_npc_ball_id;
             let (next_b_tid, fresh_escorts) =
-                crate::services::pve_incursion_sites_shard2_helpers::resolve_sansha_encounter_from_sde(
+                crate::services::pve_incursion_sites_ops::resolve_sansha_encounter_from_sde(
                     sde,
                     next_boss_bid,
                     s_did,
@@ -921,7 +921,7 @@ pub async fn process_incursion_site_completion_and_payout_core(
         let count = verified_pilots.len();
         let eff_state = if tier == "Mothership" { "Establishing" } else { pre_state.as_str() };
         let scale =
-            crate::services::pve_incursion_sites_shard2_helpers::compute_incursion_fleet_payout_scale(
+            crate::services::pve_incursion_sites_ops::compute_incursion_fleet_payout_scale(
                 count,
                 min_pilots,
                 max_opt,
@@ -1282,7 +1282,7 @@ pub async fn handle_incursion_rpc(
                     .map(|entries| {
                         entries
                             .iter()
-                            .map(crate::services::pve_incursion_sites_shard2_helpers::encode_incursion_lp_log_row)
+                            .map(crate::services::pve_incursion_sites_ops::encode_incursion_lp_log_row)
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default()
@@ -1298,7 +1298,7 @@ pub async fn handle_incursion_rpc(
             };
             let now_ft = ctx.now_blueos_filetime_ticks();
             let synced_rows = with_pve_special_reg(ctx, |reg| {
-                crate::services::pve_incursion_sites_shard2_helpers::sync_incursion_lp_log_rows(
+                crate::services::pve_incursion_sites_ops::sync_incursion_lp_log_rows(
                     reg, char_id, args, now_ft,
                 )
             });

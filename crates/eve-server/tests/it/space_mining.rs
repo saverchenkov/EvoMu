@@ -1813,9 +1813,9 @@ async fn test_mining_wormhole_sites_phased_fields_and_market_goals() {
 
 }
 
-// Folded submodule: mining_mn_closure
+// Folded submodule: mining_mechanics_suite
 #[allow(unused_imports, dead_code)]
-mod mining_mn_closure {
+mod mining_mechanics_suite {
     use super::*;
 
 // Phase 5M (`MN-01`, `MN-02`, `MN-09`, `MN-17`, `MN-18`) and `OF-28` closure integration tests.
@@ -2732,7 +2732,7 @@ async fn test_e5_agent_finder_and_conversation_lifecycle() {
 }
 
 
-pub(crate) mod npc_mining_batch_closure {
+pub(crate) mod npc_mining_operations_suite {
     #[allow(unused_imports)]
     use super::*;
 

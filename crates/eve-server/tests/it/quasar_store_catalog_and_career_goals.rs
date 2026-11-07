@@ -163,7 +163,7 @@ fn raw_msg(fields: &[(u32, RawField)], num: u32) -> Option<Vec<(u32, RawField)>>
 }
 
 #[tokio::test]
-async fn test_q3_payment_purchase_and_store_catalog_closure() {
+async fn test_payment_purchase_and_store_catalog() {
     let ctx = ServerContext::new();
     let mut sess = make_session(1, 1, 90_000_001, 1_000_009);
 
@@ -430,7 +430,7 @@ async fn test_q3_payment_purchase_and_store_catalog_closure() {
 }
 
 #[tokio::test]
-async fn test_q4_achievements_sde_and_career_goals_closure() {
+async fn test_achievements_sde_and_career_goals() {
     let ctx = ServerContext::new();
     let mut sess = make_session(1, 1, 90_000_001, 1_000_009);
     let mut unauth = SessionState::new(2);
@@ -604,7 +604,7 @@ async fn test_q7_q8_sovereignty_planet_resources_and_mercenary_den() {
 }
 
 #[tokio::test]
-async fn test_q9_cosmetics_market_and_skinr_sequencing_closure() {
+async fn test_cosmetics_market_and_skinr_sequencing() {
     let ctx = ServerContext::new();
     let mut sess = make_session(1, 1, 90_000_001, 1_000_009);
 

@@ -4,8 +4,8 @@
 
 #![forbid(unsafe_code)]
 
-#[path = "pve_crab_beacons_shard2_helpers.rs"]
-mod shard2_helpers;
+#[path = "pve_crab_beacons_ops.rs"]
+mod ops;
 
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::pve_special_sites::{
@@ -450,7 +450,7 @@ fn spawn_crab_rogue_drone_wave(ctx: &ServerContext, beacon_id: i64, wave_num: u8
             .get(&beacon_id)
             .map(|r| r.type_id)
             .unwrap_or(TYPE_CRAB_BEACON);
-        let drone_types = shard2_helpers::resolve_crab_wave_drone_types(&ctx.sde, beacon_tid, wave_num);
+        let drone_types = ops::resolve_crab_wave_drone_types(&ctx.sde, beacon_tid, wave_num);
         let mut allocated = Vec::with_capacity(drone_types.len());
         for tid in drone_types {
             let seq = next_spec_seq(reg);
@@ -550,7 +550,7 @@ fn finalize_crab_scan_success(ctx: &ServerContext, beacon_id: i64, now: u64) {
             .get(&beacon_id)
             .map(|r| r.type_id)
             .unwrap_or(TYPE_CRAB_BEACON);
-        let reward_specs = shard2_helpers::resolve_crab_completion_rewards(&ctx.sde, beacon_tid);
+        let reward_specs = ops::resolve_crab_completion_rewards(&ctx.sde, beacon_tid);
         let mut loot_entries = Vec::with_capacity(reward_specs.len());
         for (tid, qty) in reward_specs {
             let seq = next_spec_seq(reg);
@@ -620,7 +620,7 @@ fn finalize_crab_scan_success(ctx: &ServerContext, beacon_id: i64, now: u64) {
     );
     let level = get_system_interference_level_decayed(ctx, sys_id, now);
     let band = if level >= 0.70 { 3 } else if level >= 0.35 { 2 } else { 1 };
-    shard2_helpers::emit_interference_changed_clusterwide(ctx, sys_id, level, band);
+    ops::emit_interference_changed_clusterwide(ctx, sys_id, level, band);
 }
 
 fn self_destruct_crab_beacon(ctx: &ServerContext, beacon_id: i64) {
@@ -942,7 +942,7 @@ pub async fn on_crab_wave_npc_destroyed(
                 {
                     let next_w = b.waves_spawned + 1;
                     b.waves_spawned = next_w;
-                    let drone_types = shard2_helpers::resolve_crab_wave_drone_types(sde, b.type_id, next_w);
+                    let drone_types = ops::resolve_crab_wave_drone_types(sde, b.type_id, next_w);
                     let mut allocated = Vec::with_capacity(drone_types.len());
                     for tid in drone_types {
                         reg.next_seq += 1;
@@ -1140,7 +1140,7 @@ pub async fn handle_crab_component_call(
             }
 
             let (effective_ceq_cost, interference_cost_mod) =
-                shard2_helpers::effective_crab_ceq_cost(CRAB_CEQ_COST, current_level);
+                ops::effective_crab_ceq_cost(CRAB_CEQ_COST, current_level);
 
             // Deduct interference-scaled CEQ (30 base at 100 cap -> 3 activations; 4th refused with InsufficientEnergy)
             let updated_energy = crate::services::character_energy::consume_character_energy(
@@ -1304,13 +1304,13 @@ pub fn record_system_interference_activity_with_char(
     solar_system_id: SolarSystemId,
     activity_delta: f64,
 ) {
-    if let Some((level, new_band)) = shard2_helpers::apply_interference_activity(
+    if let Some((level, new_band)) = ops::apply_interference_activity(
         ctx,
         solar_system_id,
         activity_delta,
         INTERFERENCE_DECAY_WINDOW_SECS,
     ) {
-        shard2_helpers::emit_interference_changed_clusterwide(ctx, solar_system_id, level, new_band);
+        ops::emit_interference_changed_clusterwide(ctx, solar_system_id, level, new_band);
     }
 }
 
@@ -1320,7 +1320,7 @@ pub fn record_system_interference_activity(
     solar_system_id: SolarSystemId,
     activity_delta: f64,
 ) {
-    if let Some((level, new_band)) = shard2_helpers::apply_interference_activity(
+    if let Some((level, new_band)) = ops::apply_interference_activity(
         ctx,
         solar_system_id,
         activity_delta,

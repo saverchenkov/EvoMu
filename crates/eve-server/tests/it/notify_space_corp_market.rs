@@ -1931,9 +1931,9 @@ async fn notify_batch9_ccp_notification_server_msg_localization_and_service_map(
 
 }
 
-// Folded submodule: notify_w34_closure
+// Folded submodule: notify_space_corp_market_suite
 #[allow(unused_imports, dead_code)]
-mod notify_w34_closure {
+mod notify_space_corp_market_suite {
     use super::*;
 
 // Live V24 integration tests for newly-closed server notifications (`EvoMu-w34`):

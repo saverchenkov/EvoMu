@@ -779,7 +779,7 @@ async fn try_anchor(
 }
 
 #[tokio::test]
-async fn test_remediated_upwell_anchoring_restrictions_end_to_end() {
+async fn test_upwell_anchoring_restrictions_end_to_end() {
     let ctx = new_ctx();
     let mut sess = login_with_new_corp(&ctx, 8101, PERIMETER, "Anchor Rules Corp", "ANCR").await;
     let open_perim = DVec3::new(0.0, 5.0e9, 0.0);
@@ -1085,7 +1085,7 @@ async fn test_remediated_upwell_anchoring_restrictions_end_to_end() {
 }
 
 #[tokio::test]
-async fn test_remediated_pochven_anchoring_and_customs_office_standing() {
+async fn test_pochven_anchoring_and_customs_office_standing() {
     // parity: feat:structures.pochven-anchoring-restrictions
     eve_testkit::attest(&["feat:structures.pochven-anchoring-restrictions"]);
 
@@ -1345,7 +1345,7 @@ async fn move_pilot_to_system(ctx: &ServerContext, sess: &mut SessionState, sys_
 }
 
 #[tokio::test]
-async fn test_remediated_structure_control_and_boarding_lifecycle() {
+async fn test_structure_control_and_boarding_lifecycle() {
     // parity: rpc:structureControl.BoardStructure, rpc:structureControl.EjectFromStructure, rpc:structureControl.GetStructurePilot, rpc:structureControl.ReleaseControl, rpc:structureControl.TakeControl
     eve_testkit::attest(&[
         "rpc:structureControl.BoardStructure",
@@ -1533,7 +1533,7 @@ async fn test_remediated_structure_control_and_boarding_lifecycle() {
 }
 
 #[tokio::test]
-async fn test_remediated_structure_defense_settings_and_auto_fire_ballpark() {
+async fn test_structure_defense_settings_and_auto_fire_ballpark() {
 
     let ctx = new_ctx();
     let mut sess = login_with_new_corp(&ctx, 8106, RANCER, "Defense Grid Corp", "DEFG").await;
@@ -2077,7 +2077,7 @@ async fn spawn_pilot_ship(
 }
 
 #[tokio::test]
-async fn test_remediated_docking_acl_and_upwell_hull_matrix() {
+async fn test_docking_acl_and_upwell_hull_matrix() {
     // parity: feat:structures.docking-acl
     eve_testkit::attest(&["feat:structures.docking-acl"]);
 
@@ -2226,7 +2226,7 @@ async fn test_remediated_docking_acl_and_upwell_hull_matrix() {
 }
 
 #[tokio::test]
-async fn test_remediated_repairshop_service_quotes_and_restoration() {
+async fn test_repairshop_service_quotes_and_restoration() {
     let ctx = new_ctx();
     let mut sess = setup_owner_corp(&ctx, 8210, PERIMETER, "Repair Grid Corp", "REPR").await;
     let corp_id = sess.corporation_id.expect("corp");
@@ -2379,7 +2379,7 @@ async fn test_remediated_repairshop_service_quotes_and_restoration() {
 }
 
 #[tokio::test]
-async fn test_remediated_mobile_cyno_inhibitor_lifecycle_and_activation() {
+async fn test_mobile_cyno_inhibitor_lifecycle_and_activation() {
     let ctx = new_ctx();
     let mut sess = setup_owner_corp(&ctx, 8220, PERIMETER, "Cyno Inhibitor Corp", "CINH").await;
     let corp_id = sess.corporation_id.expect("corp");
@@ -2640,7 +2640,7 @@ async fn spawn_pilot_ship(
 }
 
 #[tokio::test]
-async fn test_remediated_structure_directory_and_profiles_visibility() {
+async fn test_structure_directory_and_profiles_visibility() {
 
     let ctx = new_ctx();
     let mut sess = setup_owner_corp(&ctx, 8230, PERIMETER, "Directory Corp", "DIRC").await;
@@ -2922,7 +2922,7 @@ async fn test_remediated_structure_directory_and_profiles_visibility() {
 }
 
 #[tokio::test]
-async fn test_remediated_structure_control_release_and_flex_zero_arg_release() {
+async fn test_structure_control_release_and_flex_zero_arg_release() {
     // parity: rpc:structureControl.TakeControl, rpc:structureControl.ReleaseControl, rpc:structureControl.GetStructurePilot
     eve_testkit::attest(&[
         "rpc:structureControl.TakeControl",
@@ -3238,7 +3238,7 @@ fn has_shipid_session_change(notifs: &[eve_server::router::PendingMachoNotificat
 }
 
 #[tokio::test]
-async fn test_remediated_involuntary_structure_control_release_session_sync() {
+async fn test_involuntary_structure_control_release_session_sync() {
     // parity: rpc:structureControl.TakeControl, rpc:structureControl.GetStructurePilot
     eve_testkit::attest(&[
         "rpc:structureControl.TakeControl",
@@ -3418,7 +3418,7 @@ async fn test_remediated_involuntary_structure_control_release_session_sync() {
 }
 
 #[tokio::test]
-async fn test_remediated_bf01_bf02_upwell_market_acl_offline_filter_and_corp_div1_ledger() {
+async fn test_upwell_market_acl_offline_filter_and_corp_div1_ledger() {
     // parity: feat:market.structure-markets, rpc:marketProxy.PlaceBuyOrder, rpc:marketProxy.PlaceMultiSellOrder, rpc:marketProxy.ModifyCharOrder, rpc:marketProxy.GetStationAsks, rpc:reprocessingSvc.Reprocess, rpc:jumpCloneSvc.InstallCloneInStructure
     eve_testkit::attest(&[
         "feat:market.structure-markets",
@@ -3663,7 +3663,7 @@ async fn test_remediated_bf01_bf02_upwell_market_acl_offline_filter_and_corp_div
 }
 
 #[tokio::test]
-async fn test_remediated_bf03_bf04_structure_control_immobility_and_direct_structure_profile_save() {
+async fn test_structure_control_immobility_and_direct_structure_profile_save() {
     // parity: rpc:structureControl.TakeControl, rpc:beyonce.CmdWarpToStuff, rpc:structureDocking.Dock, rpc:abyssalMgr.AbyssalEntranceDeployment
     eve_testkit::attest(&[
         "rpc:structureControl.TakeControl",
@@ -6922,7 +6922,7 @@ fn register_char(ctx: &ServerContext, uid: u64, cid: i64, corp_id: i64, sys_id: 
 }
 
 #[tokio::test]
-async fn test_wallet_nes_evermarks_hypernet_closure() {
+async fn test_wallet_nes_evermarks_hypernet() {
 
     let ctx = ServerContext::new();
     let t0 = 1_800_000_000_u64;
@@ -7113,7 +7113,7 @@ async fn test_wallet_nes_evermarks_hypernet_closure() {
 }
 
 #[tokio::test]
-async fn test_structures_anchoring_profiles_defense_directory_closure() {
+async fn test_structures_anchoring_profiles_defense_directory() {
     let ctx = ServerContext::new();
     let t0 = 1_800_000_000_u64;
     ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(t0)));
@@ -7283,7 +7283,7 @@ async fn test_structures_anchoring_profiles_defense_directory_closure() {
 }
 
 #[tokio::test]
-async fn test_cosmetics_skinr_designer_and_market_closure() {
+async fn test_cosmetics_skinr_designer_and_market() {
     let ctx = ServerContext::new();
     let t0 = 1_800_000_000_u64;
     ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(t0)));
@@ -7386,7 +7386,7 @@ async fn test_cosmetics_skinr_designer_and_market_closure() {
 }
 
 #[tokio::test]
-async fn test_serverops_daily_jobs_and_time_dilation_closure() {
+async fn test_serverops_daily_jobs_and_time_dilation() {
     let ctx = ServerContext::new();
     let t0 = 1_800_000_000_u64;
     ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(t0)));

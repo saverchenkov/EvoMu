@@ -33,7 +33,7 @@ pub fn ensure_homefront_sites_for_system_locked(
     }
 
     // Dynamically query SDE archetype 70 dungeons and operations.fsdbinary for Homefront Operations
-    let templates = crate::services::pve_special_sites_shard2_helpers::resolve_sde_homefront_templates(&ctx.sde);
+    let templates = crate::services::pve_special_sites_ops::resolve_sde_homefront_templates(&ctx.sde);
     if templates.is_empty() {
         reg.homefront_sites.insert(sys_id, Vec::new());
         return;
@@ -54,16 +54,16 @@ pub fn ensure_homefront_sites_for_system_locked(
     let t1 = &templates[idx1];
     let t2 = &templates[idx2];
     let (boss1, boss2) =
-        crate::services::pve_special_sites_shard2_helpers::resolve_homefront_faction_boss_types(
+        crate::services::pve_special_sites_ops::resolve_homefront_faction_boss_types(
             &ctx.sde, sys_id,
         );
-    let isk1 = crate::services::pve_special_sites_shard2_helpers::compute_homefront_base_pilot_isk(
+    let isk1 = crate::services::pve_special_sites_ops::compute_homefront_base_pilot_isk(
         &ctx.sde,
         sys_id,
         t1.difficulty,
         0,
     );
-    let isk2 = crate::services::pve_special_sites_shard2_helpers::compute_homefront_base_pilot_isk(
+    let isk2 = crate::services::pve_special_sites_ops::compute_homefront_base_pilot_isk(
         &ctx.sde,
         sys_id,
         t2.difficulty,

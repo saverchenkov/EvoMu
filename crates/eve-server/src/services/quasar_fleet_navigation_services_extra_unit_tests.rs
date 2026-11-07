@@ -137,15 +137,15 @@ fn admin_daily_goal_handlers_partial_progress_unknown_uuid_and_explicit_target_c
     ok_id.set(1, DynamicValue::Bytes(g1_uuid.to_vec()));
     let mut char_sub = DynamicQuasarMessage::new("char");
     char_sub.set(1, DynamicValue::Int32(other_cid as i32));
-    let mut part_prog = DynamicQuasarMessage::new("req");
-    part_prog.set(1, DynamicValue::Message(Box::new(ok_id.clone())));
-    part_prog.set(2, DynamicValue::Message(Box::new(char_sub.clone())));
-    part_prog.set(3, DynamicValue::Int64(5));
+    let mut participant_progress = DynamicQuasarMessage::new("req");
+    participant_progress.set(1, DynamicValue::Message(Box::new(ok_id.clone())));
+    participant_progress.set(2, DynamicValue::Message(Box::new(char_sub.clone())));
+    participant_progress.set(3, DynamicValue::Int64(5));
     dispatch_dyn(
         &router,
         &admin_no_char,
         "eve.dailygoal.api.admin.ProgressRequest",
-        &part_prog,
+        &participant_progress,
     )
     .expect("partial progress for explicit target_cid");
     let g1_after = router

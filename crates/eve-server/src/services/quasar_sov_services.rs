@@ -603,13 +603,13 @@ pub fn register_handlers(
             }),
         );
 
-        let db_part = Arc::clone(&db);
-        let sde_part = Arc::clone(&sde);
+        let db_entry = Arc::clone(&db);
+        let sde_entry = Arc::clone(&sde);
         router.register_handler(
             "eve.factionwarfare.warzone.api.GetParticipantsRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
                 let wz_id = required_id(dyn_msg, 1, "Warzone")? as u64;
-                let (factions, pirate_faction) = db_part.with_snapshot(|snap| {
+                let (factions, pirate_faction) = db_entry.with_snapshot(|snap| {
                     let (pair, default_pirate): ([u32; 2], u32) = match wz_id {
                         1 => ([500_001, 500_004], 500_010),
                         2 => ([500_002, 500_003], 500_011),
@@ -617,7 +617,7 @@ pub fn register_handlers(
                     };
                     let factions: Vec<u64> = pair
                         .into_iter()
-                        .filter(|fid| sde_part.factions.get(fid).is_some_and(|f| f.militia_corporation_id.is_some()))
+                        .filter(|fid| sde_entry.factions.get(fid).is_some_and(|f| f.militia_corporation_id.is_some()))
                         .map(u64::from)
                         .collect();
                     let pirate = snap
@@ -629,15 +629,15 @@ pub fn register_handlers(
                         .unwrap_or(u64::from(default_pirate));
                     Ok((factions, pirate))
                 })?;
-                let mut part_buf = Vec::new();
+                let mut staging_buf = Vec::new();
                 for fid in factions {
-                    encode_id_field(1, fid, &mut part_buf);
+                    encode_id_field(1, fid, &mut staging_buf);
                 }
-                if sde_part.factions.contains_key(&(pirate_faction as u32)) {
-                    encode_id_field(2, pirate_faction, &mut part_buf);
+                if sde_entry.factions.contains_key(&(pirate_faction as u32)) {
+                    encode_id_field(2, pirate_faction, &mut staging_buf);
                 }
                 let mut out = Vec::new();
-                encode_bytes_field(1, &part_buf, &mut out);
+                encode_bytes_field(1, &staging_buf, &mut out);
                 Ok(GoogleAny {
                     type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.factionwarfare.warzone.api.GetParticipantsResponse"),
                     value: out,

@@ -596,10 +596,10 @@ pub fn register_handlers(
                 };
                 let mut out = Vec::new();
                 encode_id_field(1, warzone_id, &mut out);
-                let mut part_buf = Vec::new();
-                encode_id_field(1, camp.target_faction_id as u64, &mut part_buf);
-                encode_id_field(2, camp.pirate_faction_id as u64, &mut part_buf);
-                encode_bytes_field(2, &part_buf, &mut out);
+                let mut staging_buf = Vec::new();
+                encode_id_field(1, camp.target_faction_id as u64, &mut staging_buf);
+                encode_id_field(2, camp.pirate_faction_id as u64, &mut staging_buf);
+                encode_bytes_field(2, &staging_buf, &mut out);
                 encode_id_field(3, camp.fob_solar_system_id as u64, &mut out);
                 for &sys_id in &camp.systems {
                     encode_id_field(4, sys_id as u64, &mut out);

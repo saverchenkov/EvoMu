@@ -1969,9 +1969,9 @@ async fn test_jetcan_wreck_sma_and_fleet_hangar() {
 
 }
 
-// Folded submodule: ships_modules_closure
+// Folded submodule: ships_modules_fitting_suite
 #[allow(unused_imports, dead_code)]
-mod ships_modules_closure {
+mod ships_modules_fitting_suite {
     use super::*;
 
 // Integration tests closing `ships.*` and `modules.*` parity rows:

@@ -507,12 +507,12 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let cid = ctx.effective_character_id().unwrap_or(0);
             let (char_prog, unredeemed) = proj.contributors.get(&cid).copied().unwrap_or((0, 0));
             // V24 `ParticipationState`: 1 = COMMITTED, 0 = UNSPECIFIED (not participating).
-            let part_state = u64::from(proj.committed_participants.contains(&cid));
+            let participant_state = u64::from(proj.committed_participants.contains(&cid));
             let attr = encode_project_attributes(&proj);
 
             let mut out = Vec::new();
             encode_bytes_field(1, &attr, &mut out);
-            encode_varint_field(2, part_state, &mut out);
+            encode_varint_field(2, participant_state, &mut out);
             encode_varint_field(3, char_prog as u64, &mut out);
             encode_varint_field(4, unredeemed as u64, &mut out);
 
@@ -733,14 +733,14 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     );
 
     // 9. GetParticipationDetailsRequest -> GetParticipationDetailsResponse
-    let state_part = Arc::clone(&state);
+    let state_entry = Arc::clone(&state);
     router.register_handler(
         "eve_public.freelance.project.api.GetParticipationDetailsRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let uuid = extract_uuid(dyn_msg.get(1))
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".to_string()))?;
-            state_part.refresh_from_db(ctx_now_unix(ctx));
-            let projects = state_part.projects.read().unwrap_or_else(|e| e.into_inner());
+            state_entry.refresh_from_db(ctx_now_unix(ctx));
+            let projects = state_entry.projects.read().unwrap_or_else(|e| e.into_inner());
             let p = projects
                 .get(&uuid)
                 .cloned()
@@ -751,7 +751,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 return Err((STATUS_UNAUTHENTICATED, "Unauthenticated".to_string()));
             };
             if crate::quasar_gateway::require_admin_role(ctx).is_err() {
-                check_corp_admin_role(ctx, state_part.db.as_ref(), caller_cid, p.owner_corp_id)?;
+                check_corp_admin_role(ctx, state_entry.db.as_ref(), caller_cid, p.owner_corp_id)?;
             }
 
             let (slice, next_tok) = paginate_slice(dyn_msg.get(2), &p.committed_participants);

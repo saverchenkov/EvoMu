@@ -1465,7 +1465,7 @@ async fn test_esi6_contracts_character_corporation_and_public_routes() {
 }
 
 #[tokio::test]
-async fn test_esi6_planetary_interaction_and_plan_closure() {
+async fn test_esi_planetary_interaction_schematics_and_colonies() {
     // parity: esi:GET /universe/schematics/{schematic_id}
     // parity: feat:esi.planetary-interaction.schematics
     // parity: plan:ESI-6
@@ -3246,7 +3246,7 @@ pub(crate) mod esi6_contracts_character_corporation_public {
     }
 
     #[tokio::test]
-    async fn test_esi6_planetary_interaction_and_plan_closure() {
+    async fn test_esi_planetary_interaction_planets_and_customs_offices() {
         // parity: esi:GET /characters/{character_id}/planets, esi:GET /characters/{character_id}/planets/{planet_id}
         // parity: esi:GET /corporations/{corporation_id}/customs_offices, esi:GET /universe/schematics/{schematic_id}
         // parity: feat:esi.planetary-interaction.colonies, feat:esi.planetary-interaction.layout

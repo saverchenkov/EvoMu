@@ -74,7 +74,7 @@ pub(super) fn grant_all_skills_for_types(ctx: &ServerContext, char_id: i64, type
 }
 
 #[tokio::test]
-async fn test_combat_repairs_ancillary_smartbomb_and_salvage_legality_closure() {
+async fn test_combat_repairs_ancillary_smartbomb_and_salvage_legality() {
     // parity: feat:combat.passive-shield-recharge-peak, feat:combat.active-shield-boost-cycle-start, feat:combat.active-armor-repair-cycle-end, feat:combat.remote-repair-falloff, feat:combat.ancillary-armor-repairer-paste, feat:combat.ancillary-shield-booster-charges, feat:combat.smartbomb-aoe-damage, feat:combat.wreck-salvaging-vs-looting-legality, rpc:charUnboundMgr.SelectCharacterID
     eve_testkit::attest(&[
         "feat:combat.passive-shield-recharge-peak",

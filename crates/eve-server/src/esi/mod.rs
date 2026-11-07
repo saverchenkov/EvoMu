@@ -370,13 +370,13 @@ async fn read_http11_request(stream: &mut TcpStream) -> std::io::Result<Option<E
         let mut decoded = Vec::new();
         loop {
             let size_line = read_bounded_line(&mut reader).await?;
-            let hex_part = size_line
+            let hex_slice = size_line
                 .trim_end_matches(&['\r', '\n'][..])
                 .split(';')
                 .next()
                 .unwrap_or("")
                 .trim();
-            let chunk_size = usize::from_str_radix(hex_part, 16).map_err(|_| {
+            let chunk_size = usize::from_str_radix(hex_slice, 16).map_err(|_| {
                 std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid HTTP chunk size")
             })?;
             if decoded.len().saturating_add(chunk_size) > MAX_HTTP_BODY_BYTES {

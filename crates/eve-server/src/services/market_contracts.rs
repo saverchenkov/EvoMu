@@ -82,10 +82,10 @@ pub fn compute_relist_fee_cents(
     let old_total = old_price.checked_mul_qty(qty).unwrap_or(IskCents(0));
     let new_total = new_price.checked_mul_qty(qty).unwrap_or(IskCents(0));
     let discount_factor = 0.50 - 0.06 * (adv_broker_lvl.min(5) as f64);
-    let base_part = (new_total.0 as f64) * broker_rate * discount_factor;
+    let base_value = (new_total.0 as f64) * broker_rate * discount_factor;
     let inc_cents = (new_total.0 - old_total.0).max(0);
-    let delta_part = (inc_cents as f64) * broker_rate;
-    let raw = IskCents((base_part + delta_part).round() as i64);
+    let delta_value = (inc_cents as f64) * broker_rate;
+    let raw = IskCents((base_value + delta_value).round() as i64);
     raw.max(IskCents(10_000)) // 100.00 ISK minimum fee floor
 }
 

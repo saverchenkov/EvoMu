@@ -366,7 +366,7 @@ pub fn on_decloaked_relay_attacked_sync(
         sleeper_wh_class: 6,
         custom_cargo_loot: None,
     };
-    crate::services::wormhole_pve_escalations_shard2_helpers::configure_drifter_response_boss_entity(
+    crate::services::wormhole_pve_escalations_ops::configure_drifter_response_boss_entity(
         &ctx.sde,
         &mut entity,
     );

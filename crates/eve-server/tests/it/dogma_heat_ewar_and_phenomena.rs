@@ -544,9 +544,9 @@ async fn test_dogma_wormhole_phenomena_effects_and_system_classes() {
     assert_eq!(hud_drifter.dict_get("effectTypeID").and_then(|v| v.as_i64()), Some(30875));
 }
 
-// Folded submodule: modules_ships_overheat_closure
+// Folded submodule: modules_ships_overheat_mechanics
 #[allow(unused_imports, dead_code)]
-mod modules_ships_overheat_closure {
+mod modules_ships_overheat_mechanics {
     use super::*;
 
 // Integration tests for modules, ships, and overheat closure rows.

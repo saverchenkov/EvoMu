@@ -3840,7 +3840,7 @@ async fn test_parity_remediation_quasar_payment_schedules_tokens_and_store() {
 }
 
 #[allow(unused_imports, dead_code, unused_variables, unused_mut)]
-pub(crate) mod parity_plan_canonical_closure {
+pub(crate) mod quasar_gateway_canonical_suite {
     #[allow(unused_imports)]
     use super::*;
 use std::collections::HashMap;
@@ -4230,7 +4230,7 @@ async fn test_canonical_plan_t8_t9_t10_t11_harnesses_and_oracles() {
 // 4. plan:Z-1 & plan:Z-2: RPC & Notification Closure
 // =========================================================================
 #[tokio::test]
-async fn test_canonical_plan_z1_z2_rpc_and_notify_closure() {
+async fn test_canonical_rpc_and_notify_dispatch() {
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
     let empty_kw = HashMap::new();
@@ -4302,7 +4302,7 @@ async fn test_canonical_plan_z1_z2_rpc_and_notify_closure() {
 
 }
 
-pub(crate) mod parity_plan_fake_closure {
+pub(crate) mod gameplay_service_handlers_suite {
     #[allow(unused_imports)]
     use super::*;
 
@@ -4878,7 +4878,7 @@ async fn test_plan_q6_economy_and_industry_quasar_packages() {
 }
 
 
-pub(crate) mod parity_plan_remaining_closure {
+pub(crate) mod feature_integration_suite {
     #[allow(unused_imports)]
     use super::*;
 
@@ -5386,7 +5386,7 @@ async fn test_plan_z3_destiny_binary_stream_ball_mode() {
 }
 
 #[tokio::test]
-async fn test_plan_z5_feature_parity_closure() {
+async fn test_end_to_end_feature_verification() {
     let ctx = ServerContext::new();
 
     // 1. Character lifecycle creation with starting race, bloodline, and skills

@@ -413,8 +413,8 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
         }
 
         init_homefront_sites(ctx, reg);
-        crate::services::pve_special_sites_shard2_helpers::ensure_full_roaming_storm_set(ctx, reg);
-        crate::services::pve_special_sites_shard2_helpers::init_drifter_hives_from_sde(&ctx.sde, reg);
+        crate::services::pve_special_sites_ops::ensure_full_roaming_storm_set(ctx, reg);
+        crate::services::pve_special_sites_ops::init_drifter_hives_from_sde(&ctx.sde, reg);
 
         for sys_id in reg
             .edencom_minor_victory_systems
@@ -429,7 +429,7 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
                     .or_else(|| s.stations.iter().find_map(|st| st.owner_faction_id.map(|f| f as u32)))
             }).unwrap_or(500_002);
             let is_edencom = reg.edencom_minor_victory_systems.contains(&sys_id);
-            let sites = crate::services::pve_special_sites_shard2_helpers::build_triglavian_sites_from_sde(
+            let sites = crate::services::pve_special_sites_ops::build_triglavian_sites_from_sde(
                 &ctx.sde, sys_id, is_edencom, empire_navy_ships(empire_fac),
             );
             reg.triglavian_sites.entry(sys_id).or_insert(sites);
@@ -844,7 +844,7 @@ pub async fn complete_special_dungeon_instance(
         ).await?;
         let (kv, loot_items) = with_pve_special_reg(ctx, |reg| {
             let elem_t = reg.drifter_hives.get(&hive.solar_system_id).map(|h| h.element_type_id).unwrap_or(hive.element_type_id);
-            let items = crate::services::pve_special_sites_shard2_helpers::allocate_drifter_hive_bonus_loot(reg, elem_t);
+            let items = crate::services::pve_special_sites_ops::allocate_drifter_hive_bonus_loot(reg, elem_t);
             let h = reg.drifter_hives.get_mut(&hive.solar_system_id).unwrap();
             h.cleared = true;
             if let Some(r) = h.rooms.iter_mut().find(|r| r.room_index == h.total_rooms) {
@@ -1010,7 +1010,7 @@ pub async fn complete_special_dungeon_instance(
         let (gain_faction, lose_faction) = if trig.faction_owner_id == 500_027 { (500_026_i64, 500_027_i64) } else { (500_027_i64, 500_026_i64) };
         let ship_id = session.ship_id.unwrap_or(0);
         let ((new_bal_isk, _standing_pair), spawned_cid) = ctx.db.with_mut_snapshot(|snap| {
-            let res_pair = crate::services::pve_special_sites_shard2_helpers::apply_triglavian_standings_and_isk(
+            let res_pair = crate::services::pve_special_sites_ops::apply_triglavian_standings_and_isk(
                 snap,
                 char_id,
                 gain_faction,
@@ -1125,7 +1125,7 @@ pub async fn handle_pve_special_sites(
 
             let by_dng = with_pve_special_reg(ctx, |reg| {
                 if is_pochven && !reg.triglavian_sites.contains_key(&sys_id) {
-                    let sites = crate::services::pve_special_sites_shard2_helpers::build_triglavian_sites_from_sde(
+                    let sites = crate::services::pve_special_sites_ops::build_triglavian_sites_from_sde(
                         &ctx.sde, sys_id, false, empire_navy_ships(500_002),
                     );
                     reg.triglavian_sites.insert(sys_id, sites);

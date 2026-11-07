@@ -138,7 +138,7 @@ fn drain_notices(rx: &mut Receiver<EvePublicNotice>) -> Vec<EvePublicNotice> {
 }
 
 #[tokio::test]
-async fn test_authentic_career_goals_and_milestones_remediated() {
+async fn test_authentic_career_goals_and_milestones() {
     // DATA GAP: Individual AIR Career Program goal UUIDs, targets, and rewards are server-authored and not shipped in V24 client FSD.
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -297,7 +297,7 @@ async fn test_authentic_career_goals_and_milestones_remediated() {
 }
 
 #[tokio::test]
-async fn test_authentic_campaign_definitions_remediated() {
+async fn test_authentic_campaign_definitions() {
     // parity: quasar:eveProto/generated/eve_public/campaign/contributionmethod/definition/api/requests_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/campaign/contributionmethod/definition/api/requests_pb2.pyj",
@@ -339,7 +339,7 @@ async fn test_authentic_campaign_definitions_remediated() {
 }
 
 #[tokio::test]
-async fn test_authentic_achievements_and_cdn_metadata_remediated() {
+async fn test_authentic_achievements_and_cdn_metadata() {
     // DATA GAP: Achievement showcase scores, category bucketing, and milestone reward amounts are server-authored CDN Checkpoint data in V24 and not present in res:/staticdata/achievements.static.
 
     let ctx = std::sync::Arc::new(ServerContext::new());

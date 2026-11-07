@@ -702,7 +702,7 @@ async fn test_pve_insurgency_campaigns_and_strongholds_complete() {
 }
 
 
-pub(crate) mod pve_data_relic_ded_wormhole_remediated {
+pub(crate) mod pve_data_relic_ded_wormhole_sites {
     #[allow(unused_imports)]
     use super::*;
 
@@ -1089,7 +1089,7 @@ async fn test_pve_ded_complexes_gating_overseer_wrecks_and_wormhole_sleepers() {
 }
 
 
-pub(crate) mod pve_crab_and_storms_closure {
+pub(crate) mod pve_crab_and_storms_lifecycle {
     #[allow(unused_imports)]
     use super::*;
 
@@ -1769,7 +1769,7 @@ async fn test_metaliminal_storm_core_periphery_movement_and_overlap() {
 }
 
 
-pub(crate) mod pve_incursions_parity_closure {
+pub(crate) mod pve_incursions_lifecycle {
     #[allow(unused_imports)]
     use super::*;
 
@@ -2425,7 +2425,7 @@ async fn test_incursion_payout_on_grid_only_and_world_event_tales() {
 }
 
 
-pub(crate) mod pve_incursions_parity_closure_part2 {
+pub(crate) mod pve_incursions_topology_and_payouts {
     #[allow(unused_imports)]
     use super::*;
 

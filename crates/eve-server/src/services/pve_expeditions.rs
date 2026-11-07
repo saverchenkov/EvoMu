@@ -6,8 +6,8 @@
 
 #![forbid(unsafe_code)]
 
-#[path = "pve_expeditions_shard2_helpers.rs"]
-mod shard2_helpers;
+#[path = "pve_expeditions_ops.rs"]
+mod ops;
 
 use serde::{Deserialize, Serialize};
 
@@ -142,7 +142,7 @@ pub async fn create_escalation_expedition_core(
     _dungeon_name: &str,
     _pos: [f64; 3],
 ) -> Option<EscalatingPathEntry> {
-    let chain = shard2_helpers::resolve_sde_escalation_chain(sde, source_dungeon_id, solar_system_id);
+    let chain = ops::resolve_sde_escalation_chain(sde, source_dungeon_id, solar_system_id);
     let exp_base_did = chain.dungeon_for_step(1);
     let exp_name = sde
         .dungeons
@@ -151,7 +151,7 @@ pub async fn create_escalation_expedition_core(
         .unwrap_or_else(|| chain.expedition_name.clone());
     let total_steps = chain.total_steps;
     let dest_sys_id = find_escalation_destination_system_sde(sde, solar_system_id);
-    let journal_text = shard2_helpers::format_escalation_journal_text(
+    let journal_text = ops::format_escalation_journal_text(
         sde,
         &exp_name,
         1,
@@ -339,7 +339,7 @@ pub async fn spawn_expedition_site_instance_core(
             probe_required: false,
             signal_strength: 1.0,
             current_room: 1,
-            total_rooms: shard2_helpers::sde_dungeon_room_count(sde, entry.expedition_dungeon_id),
+            total_rooms: ops::sde_dungeon_room_count(sde, entry.expedition_dungeon_id),
             current_wave: 1,
             total_waves: 2,
             active_npc_ball_ids: spawned_ids,
@@ -393,13 +393,13 @@ pub async fn advance_expedition_step_core(
             entry.step_index += 1;
             let next_dest = find_escalation_destination_system_sde(sde, entry.destination_solar_system_id);
             entry.destination_solar_system_id = next_dest;
-            let chain = shard2_helpers::resolve_sde_escalation_chain(sde, entry.source_dungeon_id, next_dest);
+            let chain = ops::resolve_sde_escalation_chain(sde, entry.source_dungeon_id, next_dest);
             entry.expedition_dungeon_id = chain.dungeon_for_step(entry.step_index);
             if let Some(d) = sde.dungeons.get(&entry.expedition_dungeon_id) {
                 entry.expedition_name = d.name.trim().to_string();
             }
             entry.expires_at_sec = ts + 86_400;
-            entry.journal_text = shard2_helpers::format_escalation_journal_text(
+            entry.journal_text = ops::format_escalation_journal_text(
                 sde,
                 &entry.expedition_name,
                 entry.step_index,

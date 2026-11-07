@@ -315,7 +315,7 @@ async fn test_b33_faction_activity_admin_and_payment_schedule() {
 }
 
 #[tokio::test]
-async fn test_b33_achievement_and_goal_admin_closure() {
+async fn test_achievement_and_goal_admin() {
     let ctx = ServerContext::new();
     let cid = 90_000_020i64;
     let mut admin_sess = make_session(4, 20, cid, 1_000_009, true);
@@ -444,7 +444,7 @@ async fn test_b33_achievement_and_goal_admin_closure() {
 }
 
 #[tokio::test]
-async fn test_b33_sovereignty_hub_resources_and_fuel_closure() {
+async fn test_sovereignty_hub_resources_and_fuel() {
     let ctx = ServerContext::new();
     let cid = 90_000_030i64;
     let corp_id = 1_000_009i64;
@@ -522,7 +522,7 @@ async fn test_b33_sovereignty_hub_resources_and_fuel_closure() {
 }
 
 #[tokio::test]
-async fn test_b33_mercenary_den_activities_and_notices_closure() {
+async fn test_mercenary_den_activities_and_notices() {
     let ctx = ServerContext::new();
     let cid = 90_000_040i64;
     let corp_id = 1_000_009i64;
@@ -625,7 +625,7 @@ async fn test_b33_mercenary_den_activities_and_notices_closure() {
 }
 
 #[tokio::test]
-async fn test_b33_skyhook_admin_closure() {
+async fn test_skyhook_admin() {
     let ctx = ServerContext::new();
     let (cid, corp_id, skyhook_id, sys_id) = (90_000_050i64, 1_000_009i64, 1_070_000_001i64, 30_000_142u32);
     let mut player_sess = make_session(9, 50, cid, corp_id, false);

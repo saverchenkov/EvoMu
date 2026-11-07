@@ -493,7 +493,7 @@ async fn test_navigation_align_to_and_vector_steering() {
 
 
 #[allow(unused_imports)]
-pub mod remediated_suite {
+pub mod navigation_waypoints_and_wormholes {
 
 
 use crate::common;
@@ -799,7 +799,7 @@ async fn test_navigation_wormhole_statics() {
 }
 
 #[allow(unused_imports)]
-pub mod remediated_part2 {
+pub mod navigation_docking_and_undocking {
 
 
 use crate::common;
@@ -1394,7 +1394,7 @@ async fn test_navigation_warp_vector() {
 }
 
 #[allow(unused_imports)]
-pub mod pve_closure {
+pub mod pve_missions_and_progression {
 
 use crate::common;
 use eve_db::{
@@ -2071,7 +2071,7 @@ async fn test_crates_claim_loot_and_milestones_one_time_rewards() {
 }
 
 #[allow(unused_imports)]
-pub mod pve_closure_part2 {
+pub mod pve_mining_and_agents {
 
 use super::ALREADY_CLAIMED_ERR;
 use crate::common;
@@ -2524,7 +2524,7 @@ async fn test_cosmos_constellations_storyline_agents_and_sites() {
 
 }
 
-pub(crate) mod pve_nav_batch_closure {
+pub(crate) mod pve_incursions_and_homefront_suite {
     #[allow(unused_imports)]
     use super::*;
 

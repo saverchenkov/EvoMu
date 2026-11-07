@@ -149,7 +149,7 @@ fn make_lp_op_req(op_uuid: [u8; 16], cid: Option<u32>, corp_id: Option<u32>, iss
 // ============================================================================
 
 #[tokio::test]
-async fn test_b34_daily_goal_admin_and_events_closure() {
+async fn test_daily_goal_admin_and_events() {
     // parity: quasar:eveProto/generated/eve/dailygoal/api/admin/requests_pb2.pyj, quasar:eveProto/generated/eve/dailygoal/api/api_pb2.pyj, quasar:eveProto/generated/eve/dailygoal/api/events_pb2.pyj
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -329,7 +329,7 @@ async fn test_b34_daily_goal_admin_and_events_closure() {
 // ============================================================================
 
 #[tokio::test]
-async fn test_b34_loyalty_points_wallet_assetholding_closure() {
+async fn test_loyalty_points_wallet_assetholding() {
     // parity: quasar:eveProto/generated/eve/loyaltypoints/wallet/wallet_pb2.pyj, quasar:eveProto/generated/eve/loyaltypoints/wallet/api/api_pb2.pyj, quasar:eveProto/generated/eve/loyaltypoints/wallet/assetholding/operation/operation_pb2.pyj, quasar:eveProto/generated/eve/loyaltypoints/wallet/assetholding/operation/api/requests_pb2.pyj, quasar:eveProto/generated/eve/loyaltypoints/wallet/assetholding/operation/api/events_pb2.pyj
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -466,7 +466,7 @@ async fn test_b34_loyalty_points_wallet_assetholding_closure() {
 // ============================================================================
 
 #[tokio::test]
-async fn test_b34_solarsystem_bounty_npc_and_ess_bank_closure() {
+async fn test_solarsystem_bounty_npc_and_ess_bank() {
     // parity: quasar:eveProto/generated/eve/solarsystem/bounty/npc_pb2.pyj, quasar:eveProto/generated/eve/solarsystem/bounty/bank/bank_pb2.pyj, quasar:eveProto/generated/eve/solarsystem/bounty/bank/mainbank_pb2.pyj, quasar:eveProto/generated/eve/solarsystem/bounty/bank/reservebank_pb2.pyj
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);

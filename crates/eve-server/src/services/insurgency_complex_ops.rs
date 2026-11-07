@@ -589,7 +589,7 @@ pub fn on_insurgency_laundering_trade_completed(
     };
     credit_militia_lp(ctx, char_id, war_fac, LAUNDERING_BASE_LP_PER_TRADE * mult);
     let pts = LAUNDERING_CAMPAIGN_PTS_PER_TRADE * mult;
-    crate::services::insurgency_complex_ops_shard2_helpers::notify_insurgency_laundering_reward(
+    crate::services::insurgency_complex_ops_ext::notify_insurgency_laundering_reward(
         ctx, char_id, war_fac, sys_id,
     );
 
@@ -776,7 +776,7 @@ pub async fn activate_outpost_raid_gate_in_space(
             None => true,
         };
     let spawned_def_id = if need_spawn {
-        use crate::services::insurgency_complex_ops_shard2_helpers::resolve_sde_outpost_defender_type;
+        use crate::services::insurgency_complex_ops_ext::resolve_sde_outpost_defender_type;
         let (def_tid, def_fac) = if is_pirate_raider {
             (resolve_sde_outpost_defender_type(&ctx.sde, 500_018, raid.size, raid.size.mordus_defender_type_id()), 500_018_u32)
         } else {
@@ -808,7 +808,7 @@ pub async fn activate_outpost_raid_gate_in_space(
     });
     if raid.size == OutpostRaidSize::Moderate && is_battlecruiser_group(ship_grp) {
         ctx.ship_fittings.write().unwrap_or_else(|e| e.into_inner()).remove(&ship_id);
-        crate::services::insurgency_complex_ops_shard2_helpers::notify_moderate_outpost_bc_bonus(ctx, char_id, ship_id, ship_grp, true);
+        crate::services::insurgency_complex_ops_ext::notify_moderate_outpost_bc_bonus(ctx, char_id, ship_id, ship_grp, true);
     }
 
     Ok(PyRep::keyval([
@@ -1072,7 +1072,7 @@ pub async fn cleanup_orphan_insurgency_complex_ops(ctx: &ServerContext, orphan_s
     }
 }
 
-use crate::services::insurgency_complex_ops_shard2_helpers::collect_aligned_pilots_on_grid;
+use crate::services::insurgency_complex_ops_ext::collect_aligned_pilots_on_grid;
 
 async fn release_and_warp_off_rorqual(ctx: &ServerContext, sys_id: u32, rorqual_ball_id: i64) {
     with_mut_combat_ephemeral(ctx, |rt| {
@@ -1287,7 +1287,7 @@ pub async fn tick_insurgency_complex_ops(ctx: &ServerContext, now_unix: u64) {
             save_single_raid(ctx, raid);
             continue;
         }
-        use crate::services::insurgency_complex_ops_shard2_helpers::resolve_sde_outpost_defender_type;
+        use crate::services::insurgency_complex_ops_ext::resolve_sde_outpost_defender_type;
         let capturing_pirates = !pir_pilots.is_empty();
         if capturing_pirates && !raid.mordus_defender_cleared {
             if raid.mordus_defender_ball_id.is_none() {
@@ -1317,7 +1317,7 @@ pub async fn tick_insurgency_complex_ops(ctx: &ServerContext, now_unix: u64) {
             let _ = add_percentage_campaign_points(ctx, raid.campaign_id, sys_id, capturing_pirates, subpts);
         let shared_lp = share_site_lp_up_to_5(raid.size.base_lp_reward(), active_pilots.len());
         let contrib_pts = ((subpts / 100).max(1) / (active_pilots.len() as i64)).max(1);
-        crate::services::insurgency_complex_ops_shard2_helpers::reward_aligned_insurgency_pilots(
+        crate::services::insurgency_complex_ops_ext::reward_aligned_insurgency_pilots(
             ctx, raid.campaign_id, sys_id, active_pilots, shared_lp, contrib_pts, !capturing_pirates,
         );
         let bc_list: Vec<(i64, i64, u32)> = active_pilots.iter().filter_map(|&(cid, _, _, shid, is_bc)| is_bc.then_some((cid, i64::from(shid), 540_u32))).collect();
@@ -1328,7 +1328,7 @@ pub async fn tick_insurgency_complex_ops(ctx: &ServerContext, now_unix: u64) {
         raid.respawn_at_unix = now_unix + raid.size.respawn_delay_secs();
         save_single_raid(ctx, raid);
         if was_moderate {
-            crate::services::insurgency_complex_ops_shard2_helpers::clear_moderate_outpost_fits(ctx, &prev_occ, &bc_list);
+            crate::services::insurgency_complex_ops_ext::clear_moderate_outpost_fits(ctx, &prev_occ, &bc_list);
         }
         remove_space_object(ctx, sys_id, gid).await;
         remove_space_object(ctx, sys_id, bid).await;

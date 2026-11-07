@@ -310,8 +310,8 @@ pub(super) fn neg_rows_for_caller(
     my_corp: i64,
 ) -> Result<Vec<Vec<PyRep>>, BridgeRpcError> {
     ctx.db.with_snapshot(|snap| {
-        let is_part = is_war_participant_corp(snap, war_id, my_corp);
-        if kind == NegKind::Surrender && !is_part {
+        let is_participant = is_war_participant_corp(snap, war_id, my_corp);
+        if kind == NegKind::Surrender && !is_participant {
             return Err(BridgeRpcError {
                 code: "NotWarParticipant".into(),
                 message: "Only war participants may view surrender negotiations".into(),
@@ -324,7 +324,7 @@ pub(super) fn neg_rows_for_caller(
             .filter(|n| {
                 n.war_id == war_id
                     && n.kind == kind
-                    && (is_part || (kind == NegKind::Ally && n.from_corp == my_corp))
+                    && (is_participant || (kind == NegKind::Ally && n.from_corp == my_corp))
             })
             .map(|n| {
                 vec![

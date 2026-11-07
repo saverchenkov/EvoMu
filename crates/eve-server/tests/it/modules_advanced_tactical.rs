@@ -1159,9 +1159,9 @@ async fn target_spectrum_breaker_cehe_rsb_rtc_ancillary_remote_and_auto_targeter
 
 }
 
-// Folded submodule: nav_tactical_modules_closure
+// Folded submodule: nav_tactical_modules_suite
 #[allow(unused_imports, dead_code)]
-mod nav_tactical_modules_closure {
+mod nav_tactical_modules_suite {
     use super::*;
 
 // End-to-End Integration Tests closing Navigation parity rows (Part 1):

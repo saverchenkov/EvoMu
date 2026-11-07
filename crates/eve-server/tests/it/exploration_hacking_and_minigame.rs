@@ -595,7 +595,7 @@ async fn test_exploration_hack_failure_container_explosion() {
 }
 
 
-pub(crate) mod scanning_exploration_wormholes_closure {
+pub(crate) mod scanning_exploration_wormholes_suite {
     #[allow(unused_imports)]
     use super::*;
 
@@ -1276,7 +1276,7 @@ async fn test_wormhole_system_phenomena_dogma_modifiers_and_hud() {
 }
 
 
-pub(crate) mod pve_hacking_parity_closure {
+pub(crate) mod pve_hacking_mechanics_suite {
     #[allow(unused_imports)]
     use super::*;
 

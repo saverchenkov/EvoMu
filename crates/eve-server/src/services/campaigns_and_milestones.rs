@@ -23,8 +23,8 @@ use eve_proto::{BridgeRpcError, PyRep};
 use crate::router::ServerContext;
 use crate::services::cosmetics_ui_ops::{load_cosmetics_ui_state, save_cosmetics_ui_state};
 
-#[path = "campaigns_and_milestones_shard2_helpers.rs"]
-mod shard2_helpers;
+#[path = "campaigns_milestones_playtime.rs"]
+mod playtime;
 
 /// FIFO buffer capacity for client telemetry events.
 pub const MAX_TELEMETRY_EVENTS: usize = 1_000;
@@ -378,7 +378,7 @@ pub async fn handle(
         }
         ("loginCampaignManager", "enroll_in_campaign")
         | ("loginCampaignManager", "select_campaign") => {
-            Some(shard2_helpers::handle_login_campaign_enroll(ctx, session, args))
+            Some(playtime::handle_login_campaign_enroll(ctx, session, args))
         }
         // parity: rpc:seasonalLoginCampaignManager.get_active_campaign
         ("seasonalLoginCampaignManager", "get_active_campaign") => {
@@ -443,7 +443,7 @@ fn handle_login_campaign_get_state(
     ctx.db.with_snapshot(|snap| {
         let ext = load_cosmetics_ui_state(snap);
         let (campaign_id, is_rookie, campaign) =
-            shard2_helpers::resolve_daily_campaign(snap, char_id, now, campaigns)?;
+            playtime::resolve_daily_campaign(snap, char_id, now, campaigns)?;
         let track_length = campaign.track_length();
 
         let claimed_days = ext
@@ -467,7 +467,7 @@ fn handle_login_campaign_get_state(
         for (&day_idx, rw) in &campaign.alpha_rewards {
             let day_1 = i64::from(day_idx) + 1;
             let label_msg_id =
-                shard2_helpers::resolve_reward_label_message_id(ctx, rw.type_id, campaign);
+                playtime::resolve_reward_label_message_id(ctx, rw.type_id, campaign);
             let mut entries = vec![
                 ("typeID", PyRep::Integer(i64::from(rw.type_id))),
                 ("quantity", PyRep::Integer(i64::from(rw.quantity))),
@@ -545,14 +545,14 @@ fn handle_login_campaign_claim_reward(
     let (res, spawned_items) = ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
         let (campaign_id, _is_rookie, campaign) =
-            shard2_helpers::resolve_daily_campaign(snap, char_id, now, campaigns)?;
+            playtime::resolve_daily_campaign(snap, char_id, now, campaigns)?;
         let track_length = campaign.track_length();
 
         let (docked_station_id, clone_grade) = snap
             .characters
             .get(&char_id)
             .map(|c| {
-                let stn = shard2_helpers::resolve_reward_station_id(sess_docked, c);
+                let stn = playtime::resolve_reward_station_id(sess_docked, c);
                 (stn, c.clone_grade)
             })
             .ok_or_else(|| err("CharacterNotFound", format!("Character {char_id} not found")))?;
@@ -714,7 +714,7 @@ fn handle_seasonal_login_get_active_campaign(
     let campaigns = get_sde_login_campaigns(&ctx.sde);
     ctx.db.with_snapshot(|snap| {
         let ext = load_cosmetics_ui_state(snap);
-        let Some(sched) = shard2_helpers::active_seasonal_schedule_from_snapshot(snap, &ext, now)
+        let Some(sched) = playtime::active_seasonal_schedule_from_snapshot(snap, &ext, now)
         else {
             return Ok(PyRep::Tuple(vec![
                 PyRep::None,
@@ -765,7 +765,7 @@ fn handle_seasonal_login_get_claim_history(
     let now = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
         let ext = load_cosmetics_ui_state(snap);
-        let Some(sched) = shard2_helpers::active_seasonal_schedule_from_snapshot(snap, &ext, now)
+        let Some(sched) = playtime::active_seasonal_schedule_from_snapshot(snap, &ext, now)
         else {
             return Ok(PyRep::Dict(Vec::new()));
         };
@@ -801,7 +801,7 @@ fn handle_seasonal_login_claim_reward(
 
     let (rep, outcome) = ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
-        let sched = shard2_helpers::active_seasonal_schedule_from_snapshot(snap, &ext, now)
+        let sched = playtime::active_seasonal_schedule_from_snapshot(snap, &ext, now)
             .ok_or_else(|| err("NoActiveCampaign", "No seasonal campaign is currently active"))?;
         let campaign_id = sched.campaign_id;
         let campaign = campaigns.get(&campaign_id).ok_or_else(|| {
@@ -1064,13 +1064,13 @@ fn handle_milestone_process_logon(
     let (already_claimed, remaining_secs) = ctx.db.with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
         ext.milestone_logons.insert(char_id, now);
-        let st = shard2_helpers::record_milestone_logon(snap, char_id, now);
+        let st = playtime::record_milestone_logon(snap, char_id, now);
         let claimed = ext
             .claimed_milestones
             .get(&char_id)
-            .is_some_and(|v| v.contains(&shard2_helpers::MILESTONE_HUNDRED_AND_TWENTY_MINUTES_ID));
+            .is_some_and(|v| v.contains(&playtime::MILESTONE_HUNDRED_AND_TWENTY_MINUTES_ID));
         save_cosmetics_ui_state(snap, &ext);
-        let rem = shard2_helpers::MILESTONE_REWARD_NUMBER_OF_MINUTES_SECS
+        let rem = playtime::MILESTONE_REWARD_NUMBER_OF_MINUTES_SECS
             .saturating_sub(st.accumulated_playtime_secs);
         (claimed, rem)
     });
@@ -1099,7 +1099,7 @@ fn handle_milestone_claim_rewards(
         .first()
         .and_then(|v| v.as_i64())
         .ok_or_else(|| err("InvalidArgument", "ClaimRewards requires milestone_id integer"))?;
-    if milestone_id != shard2_helpers::MILESTONE_HUNDRED_AND_TWENTY_MINUTES_ID {
+    if milestone_id != playtime::MILESTONE_HUNDRED_AND_TWENTY_MINUTES_ID {
         return Err(err(
             "InvalidMilestoneID",
             format!("Unknown milestone_id {milestone_id}"),
@@ -1107,7 +1107,7 @@ fn handle_milestone_claim_rewards(
     }
 
     let now = ctx.now_unix();
-    let reward_isk = shard2_helpers::MILESTONE_HUNDRED_AND_TWENTY_MINUTES_REWARD_ISK;
+    let reward_isk = playtime::MILESTONE_HUNDRED_AND_TWENTY_MINUTES_REWARD_ISK;
     let add_cents: i64 = reward_isk.saturating_mul(100);
 
     let (bal_after_cents, _) = ctx.db.try_with_mut_snapshot(|snap| {
@@ -1127,25 +1127,25 @@ fn handle_milestone_claim_rewards(
             ));
         }
 
-        let mut st = shard2_helpers::load_milestone_state(snap, char_id).ok_or_else(|| {
+        let mut st = playtime::load_milestone_state(snap, char_id).ok_or_else(|| {
             err(
                 "MilestonePrerequisiteNotMet",
                 "ProcessCharacterLogon must be called before claiming milestone rewards",
             )
         })?;
         let total_played = st.accumulated_playtime_now(now);
-        if total_played < shard2_helpers::MILESTONE_REWARD_NUMBER_OF_MINUTES_GRACE_PERIOD_SECS {
+        if total_played < playtime::MILESTONE_REWARD_NUMBER_OF_MINUTES_GRACE_PERIOD_SECS {
             return Err(err(
                 "MilestonePrerequisiteNotMet",
                 format!(
                     "Milestone {milestone_id} requires {}s accumulated play time (elapsed: {total_played}s)",
-                    shard2_helpers::MILESTONE_REWARD_NUMBER_OF_MINUTES_GRACE_PERIOD_SECS
+                    playtime::MILESTONE_REWARD_NUMBER_OF_MINUTES_GRACE_PERIOD_SECS
                 ),
             ));
         }
         st.accumulated_playtime_secs = total_played;
         st.last_activity_unix = now;
-        shard2_helpers::save_milestone_state(snap, char_id, &st);
+        playtime::save_milestone_state(snap, char_id, &st);
 
         let char_rec = snap
             .characters
@@ -1166,7 +1166,7 @@ fn handle_milestone_claim_rewards(
         Ok((bal_after.0, add_cents))
     })?;
 
-    shard2_helpers::emit_account_change_isk(ctx, session, char_id, bal_after_cents);
+    playtime::emit_account_change_isk(ctx, session, char_id, bal_after_cents);
     crate::services::notify_emitters_character_services::emit_login_milestone_achieved(
         ctx,
         char_id,

@@ -9,8 +9,10 @@ use eve_proto::{BridgeRpcError, PyRep};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[path = "project_discovery_shard2_helpers.rs"]
-mod shard2_helpers;
+#[path = "project_discovery_ops.rs"]
+mod ops;
+#[path = "project_discovery_rewards.rs"]
+mod rewards;
 
 const PROJECT_DISCOVERY_KEY_PREFIX: &str = "project_discovery:";
 const PROJECT_DISCOVERY_STORE_KEY: &str = "project_discovery";
@@ -203,7 +205,7 @@ pub fn sync_bonus_samples(
     store: &ProjectDiscoveryStore,
     now_unix: u64,
 ) {
-    shard2_helpers::sync_player_bonus_samples(st, store, 1, now_unix);
+    rewards::sync_player_bonus_samples(st, store, 1, now_unix);
 }
 
 /// Generates authentic citizen science task data matching authentic V24 MMOS flow cytometry payloads.
@@ -212,7 +214,7 @@ pub fn generate_authentic_task_data(
     project_id: &str,
     samples: i64,
 ) -> ProjectDiscoveryTaskData {
-    shard2_helpers::build_sample_task(task_idx, project_id, samples)
+    ops::build_sample_task(task_idx, project_id, samples)
 }
 
 /// Register persisted MMOS consensus result for a specific Project Discovery task index.
@@ -232,12 +234,12 @@ pub fn project_discovery_total_needed_xp_from_store(
     store: &ProjectDiscoveryStore,
     rank: i64,
 ) -> f64 {
-    shard2_helpers::total_needed_xp_for_rank(store, rank)
+    rewards::total_needed_xp_for_rank(store, rank)
 }
 
 /// Resolve the player's rank for a given cumulative `experience` using `ProjectDiscoveryStore`.
 pub fn rank_for_xp(store: &ProjectDiscoveryStore, experience: f64, current_rank: i64) -> i64 {
-    shard2_helpers::compute_rank_for_xp(store, experience, current_rank)
+    rewards::compute_rank_for_xp(store, experience, current_rank)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -521,7 +523,7 @@ pub fn handle_project_discovery(
         }
 
         "get_player_statistics" => {
-            let res = read_player_state(ctx, char_id, shard2_helpers::format_player_statistics_rep);
+            let res = read_player_state(ctx, char_id, rewards::format_player_statistics_rep);
             Some(Ok(res))
         }
 
@@ -616,7 +618,7 @@ pub fn handle_project_discovery(
                     let xp_reward = if store.mmos_configured || store.tutorial_xp_reward > 0.0 {
                         store.tutorial_xp_reward.max(0.0)
                     } else {
-                        shard2_helpers::DEFAULT_TUTORIAL_XP_REWARD
+                        rewards::DEFAULT_TUTORIAL_XP_REWARD
                     };
                     let prev_rank = st.rank;
                     st.experience += xp_reward;
@@ -627,7 +629,7 @@ pub fn handle_project_discovery(
                         } else {
                             LOOT_CRATE_TYPE_ID
                         };
-                        shard2_helpers::spawn_rank_reward_crate(snap, char_id, crate_type_id);
+                        rewards::spawn_rank_reward_crate(snap, char_id, crate_type_id);
                     }
                     st.rank = next_rank;
                     let xp_cur = project_discovery_total_needed_xp_from_store(&store, st.rank);
@@ -672,7 +674,7 @@ pub fn handle_project_discovery(
                 if store.mmos_configured || store.tutorial_xp_reward > 0.0 {
                     store.tutorial_xp_reward.max(0.0)
                 } else {
-                    shard2_helpers::DEFAULT_TUTORIAL_XP_REWARD
+                    rewards::DEFAULT_TUTORIAL_XP_REWARD
                 }
             });
             Some(Ok(PyRep::Real(reward)))
@@ -686,7 +688,7 @@ pub fn handle_project_discovery(
                     .get(&char_id)
                     .map(|c| c.clone_grade)
                     .unwrap_or(1);
-                shard2_helpers::sync_player_bonus_samples(st, &store, clone_grade, ctx.now_unix());
+                rewards::sync_player_bonus_samples(st, &store, clone_grade, ctx.now_unix());
                 if st.current_task_index < st.last_submitted_task_index + 1 {
                     st.current_task_index = st.last_submitted_task_index + 1;
                 } else {
@@ -709,7 +711,7 @@ pub fn handle_project_discovery(
                 (
                     idx,
                     task.task_id,
-                    shard2_helpers::sample_uuid_for_index(idx),
+                    ops::sample_uuid_for_index(idx),
                     task.url,
                 )
             });
@@ -730,7 +732,7 @@ pub fn handle_project_discovery(
                 .and_then(|a| a.as_i64())
                 .filter(|&n| n > 0)
                 .unwrap_or(lvl);
-            Some(Ok(shard2_helpers::build_training_task_response(task_num, lvl)))
+            Some(Ok(ops::build_training_task_response(task_num, lvl)))
         }
 
         "get_remaining_bonus_samples" => {
@@ -741,7 +743,7 @@ pub fn handle_project_discovery(
                     .get(&char_id)
                     .map(|c| c.clone_grade)
                     .unwrap_or(1);
-                shard2_helpers::sync_player_bonus_samples(st, &store, clone_grade, ctx.now_unix());
+                rewards::sync_player_bonus_samples(st, &store, clone_grade, ctx.now_unix());
                 st.bonus_samples_left
             });
             Some(Ok(PyRep::Integer(rem)))
@@ -755,7 +757,7 @@ pub fn handle_project_discovery(
                     .get(&char_id)
                     .map(|c| c.clone_grade)
                     .unwrap_or(1);
-                shard2_helpers::sync_player_bonus_samples(st, &store, clone_grade, ctx.now_unix());
+                rewards::sync_player_bonus_samples(st, &store, clone_grade, ctx.now_unix());
                 st.max_bonus_samples
             });
             Some(Ok(PyRep::Integer(m)))
@@ -801,7 +803,7 @@ pub fn handle_project_discovery(
 
             let now_unix = ctx.now_unix();
             let res = try_with_player_state(ctx, char_id, |st, snap| {
-                shard2_helpers::execute_post_classification(
+                rewards::execute_post_classification(
                     snap,
                     st,
                     char_id,
@@ -957,7 +959,7 @@ pub fn handle_project_discovery(
                     .get(&char_id)
                     .map(|c| c.clone_grade)
                     .unwrap_or(1);
-                shard2_helpers::sync_player_bonus_samples(st, &store, clone_grade, ctx.now_unix());
+                rewards::sync_player_bonus_samples(st, &store, clone_grade, ctx.now_unix());
                 let resolved_num = parsed_num.or_else(|| {
                     let prefix = format!("{char_id}:");
                     store
@@ -966,7 +968,7 @@ pub fn handle_project_discovery(
                         .find(|(k, v)| {
                             k.starts_with(&prefix)
                                 && (v.url == url
-                                    || shard2_helpers::sample_uuid_for_index(v.task_number) == task_seg)
+                                    || ops::sample_uuid_for_index(v.task_number) == task_seg)
                         })
                         .map(|(_, v)| v.task_number)
                 });

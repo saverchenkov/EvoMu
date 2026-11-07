@@ -1318,7 +1318,7 @@ fn crowset_header_has_column(rep: &PyRep, col_name: &str) -> bool {
 }
 
 #[tokio::test]
-async fn test_rpc_map_svc_part1_batch() {
+async fn test_rpc_map_svc_beacons_sov_incursions() {
     // parity: rpc:map.GetBeaconCount, rpc:map.GetCurrentSovData, rpc:map.GetDeadspaceComplexMap, rpc:map.GetFacWarZoneInfo, rpc:map.GetIncursionGlobalReport
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
@@ -1584,7 +1584,7 @@ async fn test_rpc_map_svc_part1_batch() {
 }
 
 #[tokio::test]
-async fn test_rpc_map_svc_part2_batch() {
+async fn test_rpc_map_svc_stations_history_visits() {
     // parity: rpc:map.GetIndustryJobsOverLast24Hours, rpc:map.GetMyExtraMapInfo, rpc:map.GetMyExtraMapInfoAgents, rpc:map.GetRecentSovActivity, rpc:map.GetSecurityModifiedSystems, rpc:map.GetSolarSystemVisits, rpc:map.GetStationCount, rpc:map.GetStationInfo, rpc:map.GetSystemsInIncursions
     let mut sde = eve_sde::SdeRegistry::with_canonical_seed();
     // Seed 300 stations across two regions (10000002 The Forge and 10000043 Domain) so we verify
@@ -4838,7 +4838,7 @@ async fn parity_rpc_localization_update_qa_wrap() {
 
 }
 
-// Folded submodule: parity_fake_remediation_rpc_notify_part1
+// Submodule: rpc_agent_probes_and_timers
 #[allow(unused_imports, dead_code)]
 pub(crate) mod rpc_agent_probes_and_timers {
     use super::*;
@@ -4937,7 +4937,7 @@ fn chat_bcast_req(msg: &str) -> EvePublicRequest {
 
 // parity: rpc:agentMgr.GetPlausibleMissionIDs
 #[tokio::test]
-async fn test_remediated_agent_plausible_missions_and_cache_rowset() {
+async fn test_agent_plausible_missions_and_cache_rowset() {
     eve_testkit::attest(&[
         "rpc:agentMgr.GetPlausibleMissionIDs",
     ]);
@@ -4973,7 +4973,7 @@ async fn test_remediated_agent_plausible_missions_and_cache_rowset() {
 }
 
 #[tokio::test]
-async fn test_remediated_probe_scanning_lifecycle_notifications() {
+async fn test_probe_scanning_lifecycle_notifications() {
     let ctx = new_ctx();
     let jita_pos = ctx.sde.stations[&JITA_STATION].position + DVec3::new(1_000.0, 0.0, 0.0);
     let (ship_id, launcher_id, probe_stack_id) = (630_000_001_i64, 630_000_010_i64, 630_000_011_i64);
@@ -5029,7 +5029,7 @@ async fn test_remediated_probe_scanning_lifecycle_notifications() {
 }
 
 #[tokio::test]
-async fn test_remediated_campaign_enrollment_chat_bans_and_crimewatch_timers() {
+async fn test_campaign_enrollment_chat_bans_and_crimewatch_timers() {
     let ctx = new_ctx();
     let mut gm_sess = SessionState::new(91_003);
     common::login_pilot(&ctx, &mut gm_sess, "demo", "demo-secret").await;

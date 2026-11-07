@@ -90,7 +90,7 @@ fn make_admin_grant_char_and_title(char_id: u32, title_id: u32) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn test_parity_quasar_achievement_closure() {
+async fn test_quasar_achievement_progress() {
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -186,7 +186,7 @@ async fn test_parity_quasar_achievement_closure() {
 }
 
 #[tokio::test]
-async fn test_parity_quasar_career_closure() {
+async fn test_quasar_career_goals() {
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -311,7 +311,7 @@ async fn test_parity_quasar_career_closure() {
 }
 
 #[tokio::test]
-async fn test_parity_quasar_cosmetic_closure() {
+async fn test_quasar_cosmetic_catalog() {
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);

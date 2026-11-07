@@ -513,7 +513,7 @@ async fn test_tactical_fleet_join_watchlist_and_broadcasts() {
 }
 
 #[tokio::test]
-async fn test_fleet_boss_handover_closure() {
+async fn test_fleet_boss_handover() {
     let ctx = std::sync::Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
 

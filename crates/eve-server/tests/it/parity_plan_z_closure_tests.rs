@@ -20,7 +20,7 @@ fn repo_root() -> PathBuf {
 
 // parity: plan:Z-1, plan:Z-2, plan:Z-5
 #[tokio::test]
-async fn test_parity_plan_z1_z2_z5_rpc_notify_feature_closure() {
+async fn test_rpc_notify_and_feature_dispatch() {
     eve_testkit::attest(&["plan:Z-1", "plan:Z-2", "plan:Z-5"]);
 
     let root = repo_root();
