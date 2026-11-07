@@ -642,6 +642,17 @@ async fn test_abyssal_hull_rules_and_timer_collapse() {
         .expect("Cruiser enters pocket");
     let abyssal_sys = enter_rep.dict_get("solarSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
 
+    // Clear Room 1 NPCs so Triglavian Damaviks do not destroy and pod the unfitted Caracal
+    // during `advance_secs(1100)` before the 1200s pocket collapse deadline is tested.
+    let abyss_handle = ctx.systems.get_or_spawn(abyssal_sys);
+    let lethal = DamageVector { em: 1e7, thermal: 1e7, kinetic: 1e7, explosive: 1e7 };
+    let r1_npcs = with_pve_special_reg(&ctx, |reg| {
+        reg.abyssal_pockets.get(&char_id).unwrap().rooms[0].npc_ball_ids.clone()
+    });
+    for npc_id in r1_npcs {
+        let _ = abyss_handle.apply_damage_with_attacker(npc_id, lethal, Some(char_id)).await;
+    }
+
     let wallet_before = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
 
     // Advance 1100s (< 1200s): Cluster tick does NOT collapse pocket before expiration
