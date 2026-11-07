@@ -81,7 +81,7 @@ mod quasar_grpc_unit_tests;
 #[cfg(test)]
 mod quasar_grpc_notifications_and_errors_unit_tests;
 #[cfg(test)]
-mod r7_tb_p1b_security_tests;
+mod bug_reporting_cluster_salvage_security_tests;
 #[cfg(test)]
 mod rng_extra_unit_tests;
 #[cfg(test)]

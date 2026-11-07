@@ -267,9 +267,9 @@ mod social_corp_fleet_extra_unit_tests;
 #[cfg(test)]
 mod social_alliance_and_corp_delivery_unit_tests;
 #[cfg(test)]
-mod r7_tb_p0_security_tests;
+mod space_logoff_repair_macho_security_tests;
 #[cfg(test)]
-mod r7_td_p1_security_tests;
+mod corp_goal_crate_reprocess_security_tests;
 #[cfg(test)]
 mod pve_security_validation_tests;
 #[cfg(test)]
@@ -621,25 +621,25 @@ mod r6_t1_p1_security_tests;
 #[cfg(test)]
 mod r6_t1_p1_security_tests_combat;
 #[cfg(test)]
-mod r7_tc_p0_arena_abyssal_tests;
+mod proving_grounds_abyssal_security_tests;
 #[cfg(test)]
-mod r7_tc_p0_raid_ess_tests;
+mod insurgency_outpost_ess_security_tests;
 #[cfg(test)]
-mod r7_td_p0_npe_career_tests;
+mod npe_career_docking_security_tests;
 #[cfg(test)]
 mod r6_t4_econ_security_tests;
 #[cfg(test)]
-mod r7_tb_p1a_security_tests;
+mod combat_reconnect_npc_concord_security_tests;
 #[cfg(test)]
-mod r7_tb_p1a_security_tests_tackle;
+mod combat_drones_propulsion_death_security_tests;
 #[cfg(test)]
-mod r7_td_p0b_security_tests;
+mod discovery_freelance_escrow_security_tests;
 #[cfg(test)]
-mod r7_tc_p1_arena_tourney_abyss_tests;
+mod arena_tourney_abyss_security_tests;
 #[cfg(test)]
-mod r7_tc_p1_insurgency_crab_fob_tests;
+mod insurgency_crab_fob_security_tests;
 #[cfg(test)]
-mod r7_tc_p1_incursion_dungeon_exp_tests;
+mod incursion_dungeon_expedition_security_tests;
 #[cfg(test)]
 mod quasar_sso_local_dev_jwt_security_tests;
 #[cfg(test)]

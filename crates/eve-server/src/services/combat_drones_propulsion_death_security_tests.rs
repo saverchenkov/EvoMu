@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use super::r7_tb_p1a_security_tests::make_p1a_ctx_and_session;
+use super::combat_reconnect_npc_concord_security_tests::make_p1a_ctx_and_session;
 use crate::combat::death_pipeline::execute_death_pipeline_sync_inner;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_item;
 use crate::services::combat_crimewatch::{with_mut_combat_runtime, DroneSpaceState};
