@@ -520,11 +520,11 @@ async fn test_cluster_admin_and_db2_fail_closed_guards() {
 }
 
 #[allow(unused_imports, dead_code, unused_variables, unused_mut)]
-pub(crate) mod part2 {
+pub(crate) mod atomic_rollback_and_quasar_gateway_domains {
     use super::*;
 
 // Integration tests for `feat:invariant.atomic-rollback-all-stores` and
-// Quasar `plex` / `character` / `user` gateway domains (batch 11 part 2).
+// Quasar `plex` / `character` / `user` gateway domains.
 
 
 use crate::common;
@@ -1176,17 +1176,17 @@ async fn test_quasar_plex_character_and_user_gateway_domains() {
 }
 
 #[allow(unused_imports, dead_code, unused_variables, unused_mut)]
-pub(crate) mod part3 {
+pub(crate) mod cross_protocol_single_source_of_truth {
     use super::*;
 
 // Integration test for `feat:invariant.single-source-of-truth`:
 // Contacts, mail labels & deleted mail, custom item names, CSPA charges, war records,
 // alliances, and PLEX balances read identically across MachoNet client RPC, ESI, and
-// Quasar live and after SQLite restart (batch 11 part 3).
+// Quasar live and after SQLite restart.
 
 
 use crate::common;
-use crate::features_fleet_broadcast_rpcs::part2::{
+use crate::features_fleet_broadcast_rpcs::atomic_rollback_and_quasar_gateway_domains::{
     cleanup_sqlite_path, quasar_rpc, rpc, select_char, temp_sqlite_path,
 };
 use eve_db::{
@@ -1787,7 +1787,7 @@ async fn test_b11_multithread_wal_error_survives_await_and_rolls_back() {
     mem_ctx.db.save_to_sqlite(&db_path).expect("save_to_sqlite");
     let ctx = ServerContext::from_sqlite(&db_path).expect("from_sqlite");
     let mut sess = select_char(&ctx, 72_049, "demo", "demo-secret", P1).await;
-    let before = crate::features_fleet_broadcast_rpcs::part2::capture_observable_state(&ctx);
+    let before = crate::features_fleet_broadcast_rpcs::atomic_rollback_and_quasar_gateway_domains::capture_observable_state(&ctx);
     let conn = rusqlite::Connection::open(&db_path).expect("open sqlite");
     conn.execute_batch(
         "CREATE TRIGGER abort_char_upd BEFORE UPDATE ON characters BEGIN SELECT RAISE(ABORT, 'injected_mt_wal_fail'); END;",
@@ -1813,7 +1813,7 @@ async fn test_b11_multithread_wal_error_survives_await_and_rolls_back() {
     );
     assert!(err.message.contains("injected_mt_wal_fail"));
     tokio::task::yield_now().await;
-    assert_eq!(crate::features_fleet_broadcast_rpcs::part2::capture_observable_state(&ctx), before);
+    assert_eq!(crate::features_fleet_broadcast_rpcs::atomic_rollback_and_quasar_gateway_domains::capture_observable_state(&ctx), before);
     let _ = std::fs::remove_file(&db_path);
 }
 

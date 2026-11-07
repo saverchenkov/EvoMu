@@ -3,7 +3,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::features_fleet_broadcast_rpcs::part2::{quasar_rpc, rpc, select_char};
+use crate::features_fleet_broadcast_rpcs::atomic_rollback_and_quasar_gateway_domains::{quasar_rpc, rpc, select_char};
 use crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite;
 use eve_db::InventoryFlag;
 use eve_proto::quasar::{

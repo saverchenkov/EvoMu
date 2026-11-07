@@ -1678,7 +1678,6 @@ async fn test_e2e_crimewatch_sec_status_loss_caps_tags_and_transactions() {
 }
 }
 
-// Folded submodule: parity_crimewatch_insurance_closure_part2
 #[allow(unused_imports, dead_code)]
 pub(crate) mod combat_insurance_void_and_expiry {
     use super::*;
@@ -1957,8 +1956,8 @@ async fn test_e2e_insurance_void_and_expiry() {
 }
 
 #[allow(unused_imports)]
-pub(crate) mod features_combat_part2 {
-//! Dedicated end-to-end integration tests for `feat:drones.*` fighter parity rows (Part 2).
+pub(crate) mod fighter_squadron_abilities_and_scaling {
+//! Dedicated end-to-end integration tests for `feat:drones.*` fighter parity rows.
 
 use eve_db::{InventoryFlag, IskCents};
 use eve_destiny::{Ball, DamageVector, DVec3, MovementMode};

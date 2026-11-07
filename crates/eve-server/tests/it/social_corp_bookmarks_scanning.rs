@@ -603,7 +603,7 @@ async fn test_so5_scanning_dscan_probes_and_acceleration_gates() {
 
 
 #[allow(unused_imports)]
-mod social_corp_bookmarks_scanning_part2 {
+mod shared_bookmark_folders_and_scan_bookmarks {
     use super::*;
 
 // Track 4: Phase 8 Bookmarks (`SO-4`), Scanning & Dungeons (`SO-5`), and Wormholes (`SO-6`) Integration Tests.

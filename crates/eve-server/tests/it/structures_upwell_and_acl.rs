@@ -5668,7 +5668,7 @@ mod plan_upwell_structures_ops_b {
     use super::*;
 
 // Upwell Structure Clone Bay, Service Modules, Repairshop, Access Profiles, Directory,
-// Fitting & Hull Types parity tests (`plan_upwell_structures_closure_part2.rs`).
+// Fitting & Hull Types parity tests.
 
 use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord};
 use eve_machonet::SessionState;
@@ -6267,7 +6267,7 @@ mod plan_upwell_structures_ops_c {
     use super::*;
 
 // Upwell Structure Anchoring, Quantum Core, Pochven, Palatine Keepstar, Tethering & Docking Lock
-// parity tests (`plan_upwell_structures_closure_part3.rs`).
+// Upwell structure lifecycle parity tests.
 
 use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord};
 use eve_destiny::{Ball, DamageVector, MovementMode};
@@ -6376,7 +6376,7 @@ async fn pilot_in_space(ctx: &ServerContext, sess_id: u64) -> SessionState {
     rpc(ctx, &mut sess, "authentication", "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())]).await.expect("Login");
     rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(OWNER)]).await.expect("Select");
     ctx.advance_secs(12);
-    rpc(ctx, &mut sess, "corpRegistry", "AddCorporation", &[PyRep::String("Upwell Part3 Corp".into()), PyRep::String("UPW3".into())]).await.expect("AddCorporation");
+    rpc(ctx, &mut sess, "corpRegistry", "AddCorporation", &[PyRep::String("Upwell Citadels Corp".into()), PyRep::String("UPWC".into())]).await.expect("AddCorporation");
     ctx.advance_virtual_clock(7 * 86_400 + 12);
     rpc(ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock");
     sess

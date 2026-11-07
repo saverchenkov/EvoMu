@@ -521,11 +521,11 @@ async fn test_drifters_overshield_lux_kontos_doomsday_and_wreck() {
 }
 
 
-pub(crate) mod npc_spawns_pve_closure_part2 {
+pub(crate) mod npc_mining_convoys_concord_and_strongholds {
     #[allow(unused_imports)]
     use super::*;
 
-// Part 2 of V24.01 NPC & PvE closure integration tests:
+// Integration tests for V24.01 NPC & PvE features:
 // Living World NPC Mining Ops & Hauler Convoys, CONCORD & Faction Police enforcement,
 // and SDE-backed Pirate Strongholds, Homefront Operations, and Triglavian Sites.
 

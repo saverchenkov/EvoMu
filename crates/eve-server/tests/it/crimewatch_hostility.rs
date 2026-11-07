@@ -1,4 +1,4 @@
-//! Dedicated integration test suite (Part 1) for `plan:C-7` (`Salvage, tractor, drones`) and drone/salvage lifecycle closure.
+//! Dedicated integration test suite for `plan:C-7` (`Salvage, tractor, drones`) and drone/salvage lifecycle closure.
 
 use eve_db::{AccountRecord, CharacterRecord, InventoryFlag, InventoryItemRecord, IskCents, NeuralAttributes, TrainedSkillRecord};
 use eve_destiny::{Ball, DamageVector, MovementMode};
@@ -514,8 +514,8 @@ async fn test_plan_c7_salvage_with_loot_and_tractor_beams() {
     assert!((jetcan_ball.position - pulled_wreck.position).length() < 1.0);
 }
 
-pub(crate) mod plan_c7_crimewatch_closure_part2 {
-//! Dedicated integration test suite (Part 2) for fighter lifecycle, war targets, high-sec criminal movement, wormhole aggression exemption, and wreck/jetcan item taking.
+pub(crate) mod fighter_abandon_war_targets_and_wrecks {
+//! Dedicated integration test suite for fighter lifecycle, war targets, high-sec criminal movement, wormhole aggression exemption, and wreck/jetcan item taking.
 
 use super::{dict_get, far_celestial_id, item_rec, setup_pilot_in_space};
 use eve_db::{InventoryFlag, IskCents, PersistedNegKind, PersistedWarMeta, PersistedWarNegotiation, UpwellStructureRecord, WarRecord};

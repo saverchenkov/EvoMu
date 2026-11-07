@@ -572,7 +572,7 @@ const PILOT1: i64 = 90_000_001;
 const PILOT2: i64 = 90_000_002;
 
 #[tokio::test]
-async fn test_rpc_missing_batch3_part1() {
+async fn test_alert_stat_logger_queue_and_tunneling_rpcs() {
     // parity: rpc:alert.LogModeChanged, rpc:alert.SendProxyStackTraceAlert
     // parity: rpc:clientStatLogger.LogString, rpc:externalQueueMgr.PublishProxyEvent
     // parity: rpc:machoNet.ReloadClientCodeHash, rpc:tcpRawProxyService.GetESPTunnelingAddressByNodeID
@@ -899,7 +899,7 @@ async fn test_rpc_missing_batch3_part1() {
 }
 
 #[tokio::test]
-async fn test_rpc_missing_batch3_part2() {
+async fn test_session_mgr_user_svc_and_db2_rpcs() {
     // parity: rpc:sessionMgr.EndAllGameSessions, rpc:sessionMgr.RemoveSessionsFromServer
     // parity: rpc:userSvc.ProcessEVESessionCreated, rpc:DB2.CallProc
     // DATA GAP: Triaged NA in docs/parity/triage.json (dev/QA/cluster RPCs): rpc:debug.Exec

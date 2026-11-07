@@ -523,11 +523,11 @@ async fn sov_info_adm_scaling_dev_indices_and_map_data() {
 }
 
 
-pub(crate) mod sov_fw_complete_part2 {
+pub(crate) mod fw_allied_militia_lp_guards {
     #[allow(unused_imports)]
     use super::*;
 
-// Behavioural parity tests for  /  rows (Part 2).
+// Behavioural parity tests for allied militia LP guards and faction warfare rules.
 
 use crate::common;
 

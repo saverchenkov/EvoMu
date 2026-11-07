@@ -646,9 +646,8 @@ async fn test_b41_proving_grounds_fleet_queue_restrictions_boundary_timeout_and_
     assert_eq!(exit_rep.dict_get("originSystemID").and_then(PyRep::as_i64), Some(i64::from(jita)));
 }
 
-// Folded submodule: part2
 #[allow(unused_imports, dead_code)]
-mod part2 {
+mod insurgency_outpost_raid_and_proving_grounds {
     use super::*;
 
 // Additional integration tests:

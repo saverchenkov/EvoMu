@@ -269,7 +269,7 @@ async fn test_ship_clone_vat_bookmarks_standings_agents_and_item_locking_notific
 mod notify_real_emitters_batch8 {
     use super::*;
 
-// Real server-side emission & RPC tests for Notify/RPC Batch 8 (Part 1: Seasons).
+// Real server-side emission & RPC tests for Seasons notifications and RPCs.
 //
 // Covers all 10 Group 1 Seasons parity rows:
 // - `rpc:seasonManager.get_season_data_for_character`
@@ -777,12 +777,11 @@ async fn notify_batch8_seasons_lifecycle_and_challenges() {
 
 }
 
-// Folded submodule: notify_real_emitters_batch8_part2
 #[allow(unused_imports, dead_code)]
-mod notify_real_emitters_batch8_part2 {
+mod hypernet_raffles_and_plex_vault_notifications {
     use super::*;
 
-// Real server-side emission & RPC tests for Notify/RPC Batch 8 (Part 2: HyperNet Raffles & PLEX Vault).
+// Real server-side emission & RPC tests for HyperNet Raffles & PLEX Vault.
 //
 // Covers 7 Group 2 HyperNet Raffles & PLEX Vault parity rows:
 // - `rpc:raffleMgr.QA_SeedRaffles`
@@ -1320,12 +1319,11 @@ async fn notify_batch8_hypernet_raffles_and_plex_vault() {
 
 }
 
-// Folded submodule: notify_real_emitters_batch8_part3
 #[allow(unused_imports, dead_code)]
-mod notify_real_emitters_batch8_part3 {
+mod operations_and_air_npe_notifications {
     use super::*;
 
-// Real server-side emission & RPC tests for Notify/RPC Batch 8 (Part 3: Operations & AIR NPE).
+// Real server-side emission & RPC tests for Operations & AIR NPE.
 //
 // Covers the V24-triggered Group 3 Operations / NPE parity rows:
 // - `notify:OnOperationTaskSkipped`
@@ -1610,12 +1608,11 @@ async fn notify_batch8_operations_npe_and_client_node_graphs() {
 
 }
 
-// Folded submodule: notify_real_emitters_batch8_part4
 #[allow(unused_imports, dead_code)]
-mod notify_real_emitters_batch8_part4 {
+mod combat_ewar_cloak_and_invuln_notifications {
     use super::*;
 
-// Real server-side emission tests for Notify/RPC Batch 8 (Part 4: Combat, EWAR, Cloak, Invuln, Fleet, Drones & Ammo).
+// Real server-side emission tests for Combat, EWAR, Cloak, and Invulnerability notifications.
 //
 // Covers 14 Group 4 parity rows across two test functions (`<= 15` tags each):
 // - Test 1 (`6` rows): `OnJamStart`, `OnEwarEnd`, `OnJumpCloakUpdated`,
@@ -2270,12 +2267,11 @@ async fn notify_batch8_combat_ewar_cloak_and_invuln() {
 
 }
 
-// Folded submodule: notify_real_emitters_batch8_part6
 #[allow(unused_imports, dead_code)]
-mod notify_real_emitters_batch8_part6 {
+mod combat_ammo_drones_and_fleet_notifications {
     use super::*;
 
-// Real server-side emission tests for Notify/RPC Batch 8 (Part 4: Combat, EWAR, Cloak, Invuln, Fleet, Drones & Ammo).
+// Real server-side emission tests for Combat, EWAR, Cloak, Invuln, Fleet, Drones & Ammo notifications.
 //
 // Covers all 17 Group 4 parity rows across two test functions (`<= 15` tags each):
 // - Test 1 (`9` rows): `OnCombatMessage`, `OnEffectMessage`, `OnJamStart`, `OnEwarEnd`,
@@ -2962,7 +2958,7 @@ async fn notify_batch8_ammo_drones_and_fleet_events() {
 
 }
 
-pub mod part2 {
+pub mod skills_implants_wallet_and_contract_notifications {
     use super::*;
 
 #[tokio::test]

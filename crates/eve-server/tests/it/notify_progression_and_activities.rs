@@ -1,4 +1,4 @@
-//! Real production server-to-client `notify:On*` emission integration tests (Batch 10, Part 1).
+//! Real production server-to-client `notify:On*` emission integration tests for Abyssal, Zarzakh, and Proving Grounds.
 //!
 //! Covers Abyssal Deadspace, Void Space, Space White-Out, Zarzakh Deathzone, Proving Grounds
 //! matchmaking, and Tournament arena/match state transitions via live RPCs and cluster ticks.
@@ -570,12 +570,11 @@ async fn batch10_proving_grounds_and_tournament_notifications() {
     assert_eq!(find_notif(&leave_notifs, "OnLeaveTournamentSystem"), &[]);
 }
 
-// Folded submodule: notify_real_emitters_batch10_part2
 #[allow(unused_imports, dead_code)]
-mod notify_real_emitters_batch10_part2 {
+mod dungeon_triggers_probes_and_expedition_notifications {
     use super::*;
 
-// Real production server-to-client `notify:On*` emission integration tests (Batch 10, Part 2).
+// Real production server-to-client `notify:On*` emission integration tests for Dungeon Triggers, Scanner Probes, and Expeditions.
 //
 // Covers Dungeon Editor, Dungeon Values, all 5 Dungeon Room Triggers, Signal Tracker full state,
 // Scanner Probe repositioning (`OnProbeWarpEnd`), and Escalation Expeditions
@@ -964,12 +963,11 @@ async fn batch10_expedition_signatures_signal_tracker_and_probes() {
 
 }
 
-// Folded submodule: notify_real_emitters_batch10_part3
 #[allow(unused_imports, dead_code)]
-mod notify_real_emitters_batch10_part3 {
+mod progression_incursion_and_storm_notifications {
     use super::*;
 
-// Real production server-to-client `notify:On*` emission integration tests (Batch 10, Part 3).
+// Real production server-to-client `notify:On*` emission integration tests for Progression, Incursions, and Storms.
 //
 // Covers Progression & Tutorial Conversations (`operationsManager`), Sansha Incursion Tales
 // (`OnTaleData`, `OnInfluenceUpdate`, `OnTaleRemove`), and Roaming Metaliminal Storms
@@ -1535,12 +1533,11 @@ async fn batch10_tales_storms_and_cosmic_anomalies() {
 
 }
 
-// Folded submodule: notify_real_emitters_batch10_part4
 #[allow(unused_imports, dead_code)]
-mod notify_real_emitters_batch10_part4 {
+mod ess_fw_hacking_security_and_mining_notifications {
     use super::*;
 
-// Real production server-to-client `notify:On*` emission integration tests (Batch 10, Part 4).
+// Real production server-to-client `notify:On*` emission integration tests for ESS, FW, Hacking, Security, and Mining.
 //
 // Covers ESS Reserve Bank inventory full (`OnEssReserveBankInventoryFull`), FW complex capture
 // ticks (`OnCaptureChanged`), Hacking tile selection (`OnLocalHackProgressUpdated`), Pirate
@@ -2012,12 +2009,11 @@ async fn batch10_ess_fw_hacking_security_dbs_and_mining() {
 
 }
 
-// Folded submodule: notify_real_emitters_batch10_part5
 #[allow(unused_imports, dead_code)]
-mod notify_real_emitters_batch10_part5 {
+mod destiny_clock_esi_map_and_discovery_notifications {
     use super::*;
 
-// Real production server-to-client `notify:On*` / `notify:Do*` emission integration tests (Batch 10, Part 5).
+// Real production server-to-client `notify:On*` / `notify:Do*` emission integration tests for Destiny, Clock, ESI Map, and Discovery.
 //
 // Covers `DoDestinyUpdates`, `DoSimClockRebase`, `OnDestinationChange` (via ESI HTTP),
 // `OnServerMapDataPush`, `OnSystemActivityUpdated` (via `industryManager.InstallJob`),

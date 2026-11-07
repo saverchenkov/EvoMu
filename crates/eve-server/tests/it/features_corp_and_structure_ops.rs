@@ -654,10 +654,10 @@ async fn test_navigation_jump_fatigue_cloak_and_thera_e2e() {
 }
 
 #[allow(unused_imports, dead_code, unused_variables, unused_mut)]
-pub(crate) mod batch2_part2 {
+pub(crate) mod milestones_paperdoll_insurance_and_jump_fatigue {
     use super::*;
 
-// End-to-end integration tests for `work/open-feats-and-rpcs-batch2` (part 2).
+// End-to-end integration tests for milestones, paperdoll, insurance, and jump fatigue RPCs.
 
 use std::collections::HashMap;
 

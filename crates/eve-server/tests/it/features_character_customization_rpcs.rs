@@ -681,10 +681,10 @@ async fn test_b23_limited_engagement_duel_safety_and_third_party_assistance() {
 }
 
 #[allow(unused_imports, dead_code, unused_variables, unused_mut)]
-pub(crate) mod part2 {
+pub(crate) mod abyssal_exit_suspect_war_interference_and_skinr {
     use super::*;
 
-// Integration tests for Batch 23 remediation (Abyssal exit suspect flag, war interference, command burst filter, CONCORD & jump-in).
+// Integration tests for Abyssal exit suspect flag, war interference, command burst filter, CONCORD, jump-in, and SKINR customization.
 
 use crate::crimewatch_hostility::{dict_get, item_rec, setup_pilot_in_space};
 use eve_db::{InventoryFlag, WarRecord};

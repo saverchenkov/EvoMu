@@ -1,4 +1,4 @@
-// Phase 7 Alliances & Wars Integration Tests (`SO-3` Part 1).
+// Phase 7 Alliances & Wars Integration Tests (`SO-3`).
 
 use crate::common;
 use eve_machonet::SessionState;
@@ -451,10 +451,10 @@ async fn test_wars_declaration_hq_eligibility_mutual_peace_allies_and_stats() {
 
 
 #[allow(unused_imports)]
-mod social_alliances_wars_complete_part2 {
+mod corp_deliveries_bookmarks_and_registry_ops {
     use super::*;
 
-// Phase 7 Corporation Deliveries, Goals, Bookmarks & Registry Integration Tests (`SO-3` Part 2).
+// Phase 7 Corporation Deliveries, Goals, Bookmarks & Registry Integration Tests (`SO-3`).
 
 use crate::common;
 use eve_machonet::SessionState;

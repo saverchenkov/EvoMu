@@ -574,7 +574,7 @@ async fn test_sp7_self_destruct_server_timer_detonates_without_second_client_cal
 
 
 
-pub(crate) mod sp6_logoff_and_server_tick_part2 {
+pub(crate) mod abyssal_disconnect_collapse_and_salvage_lifecycle {
     #[allow(unused_imports)]
     use super::*;
 

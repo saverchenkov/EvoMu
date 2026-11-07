@@ -1,4 +1,4 @@
-//! Integration tests for open Zarzakh & Deathless Shipcaster `feat:navigation.*` rows (batch 8, part 1):
+//! Integration tests for Zarzakh & Deathless Shipcaster `feat:navigation.*` rows:
 //! - `feat:navigation.deathless-shipcaster-zarzakh`
 //! - `feat:navigation.zarzakh-emanation-lock`
 //! - `feat:navigation.zarzakh-fulcrum-gates`
@@ -640,10 +640,10 @@ async fn test_zarzakh_fulcrum_gates_dscan_size_bubbles_and_docking() {
 }
 
 #[allow(unused_imports, dead_code, unused_variables, unused_mut)]
-pub(crate) mod part2 {
+pub(crate) mod zarzakh_gate_toll_and_horizon_siege {
     use super::*;
 
-// Integration tests for open Zarzakh `feat:navigation.*` rows (batch 8, part 2):
+// Integration tests for Zarzakh gate toll and horizon siege `feat:navigation.*` rows:
 // - `feat:navigation.zarzakh-gate-toll`
 // - `feat:navigation.zarzakh-local-horizon-siege`
 

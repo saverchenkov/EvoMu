@@ -2236,7 +2236,7 @@ async fn test_space_navigation_ansiblex_and_bastion_blocks() {
 }
 
 #[allow(unused_imports)]
-pub mod jump_cloak_part2 {
+pub mod jump_cloak_targeting_delay_and_overrides {
 
 
 use super::jump_cloak::setup_nav_pilot;

@@ -586,8 +586,8 @@ async fn run_industry_jobs_suite() -> (usize, f64, f64, i64, &'static str) {
 }
 
 
-pub(crate) mod part2 {
-// Planetary Industry (`E-6`) complete parity integration tests (Part 2).
+pub(crate) mod planetary_industry_routes_and_orbitals {
+// Planetary Industry (`E-6`) complete parity integration tests.
 
 use crate::common;
 use eve_db::{
@@ -1092,8 +1092,8 @@ async fn run_pi_full_suite() -> (Option<bool>, Option<i64>, f64, i64, i64) {
 
 }
 
-pub(crate) mod part3 {
-// Industry, Research, and Reactions (`E-4`) complete parity integration tests (Part 3).
+pub(crate) mod industry_auth_and_pi_simulation_regressions {
+// Industry, Research, and Reactions (`E-4`) complete parity integration tests.
 
 use crate::common;
 use eve_db::{

@@ -658,10 +658,10 @@ async fn test_ch3_jump_clones_implants_and_pod_death() {
 
 
 #[allow(unused_imports)]
-mod char_progression_part2 {
+mod gm_commands_and_neural_remaps {
     use super::*;
 
-// GM slash commands and neural attribute remap integration tests (`character_progression` part 2).
+// GM slash commands and neural attribute remap integration tests.
 
 
 use crate::character_progression::issue_token_with_scopes;

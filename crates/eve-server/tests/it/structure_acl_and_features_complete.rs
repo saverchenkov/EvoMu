@@ -587,11 +587,11 @@ async fn test_structure_board_eject_and_defense_acl_control() {
 }
 
 
-pub(crate) mod structure_acl_and_features_complete_part2 {
+pub(crate) mod structure_anchoring_ewar_immunity_and_defense {
     #[allow(unused_imports)]
     use super::*;
 
-// Part 2 of Upwell structure anchoring restrictions, fitting state locks, EWAR immunity,
+// Upwell structure anchoring restrictions, fitting state locks, EWAR immunity,
 // and mobile cynosural inhibitors (`feat:structures.*`).
 
 use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord};

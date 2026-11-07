@@ -237,7 +237,7 @@ async fn test_tick_size_relist_fee_broker_minimum_scc_surcharge_and_durations() 
         );
     });
     // Modify from 12,340.0 (total 123,400 ISK) to 20,000.0 (total 200,000 ISK):
-    // base_part = 200,000 * 0.03 * 0.20 = 1,200 ISK; delta_part = (200,000 - 123,400) * 0.03 = 2,298 ISK; total relist fee = 3,498.00 ISK
+    // base_portion = 200,000 * 0.03 * 0.20 = 1,200 ISK; delta_portion = (200,000 - 123,400) * 0.03 = 2,298 ISK; total relist fee = 3,498.00 ISK
     let mod_res = rpc(
         &ctx,
         &mut s1,

@@ -543,12 +543,11 @@ async fn test_opportunities_complete_from_events_and_persist() {
 
 }
 
-// Folded submodule: part2_closure
 #[allow(unused_imports, dead_code)]
-mod part2_closure {
+mod mission_timers_ship_boarding_and_mercenary_dens {
     use super::*;
 
-// Integration tests for corroborated `feat:` rows (Batch 6 Part 2).
+// Integration tests for mission timers, ship boarding, and Mercenary Den `feat:` rows.
 //
 // Covers mission bonus timers, mission offer expiry without penalty,
 // mission level clone/space restrictions, research agent daily missions,

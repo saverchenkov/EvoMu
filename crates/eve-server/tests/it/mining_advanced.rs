@@ -491,7 +491,7 @@ async fn test_metenox_moon_drill_fuel_exhaustion_regression() {
 }
 
 
-pub(crate) mod action_plan_mining_part2 {
+pub(crate) mod moon_extraction_metenox_and_mining_ledgers {
     #[allow(unused_imports)]
     use super::*;
 
@@ -1088,12 +1088,11 @@ async fn test_action_plan_mn13_to_mn16_moons_metenox_sites_ledgers() {
 }
 }
 
-// Folded submodule: mining_advanced_part2
 #[allow(unused_imports, dead_code)]
-mod mining_advanced_part2 {
+mod ore_compression_npc_mining_and_goals {
     use super::*;
 
-// Advanced Mining Systems Integration Tests Part 2 (`MN-16`..`MN-18`).
+// Advanced Mining Systems Integration Tests (`MN-16`..`MN-18`).
 
 
 use super::{create_auth_session, make_item, make_structure};

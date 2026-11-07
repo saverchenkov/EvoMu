@@ -1,7 +1,7 @@
 //! End-to-end integration test suite closing all features parity items.
 
-pub(crate) mod features_parity_part1 {
-// Acceptance test suite Part 1 covering:
+pub(crate) mod character_creation_and_home_station_suite {
+// Acceptance test suite covering:
 // - Test 1: Character Creation, Lifecycle, Selection, and Home Station
 // - Test 2: Skills Engine, Queue, Injectors (Large/Small), and Extractor
 // - Test 3: Attributes, Neural/Bonus Remap, Implants, Pod Death, and Boosters
@@ -541,8 +541,8 @@ async fn test_character_creation_lifecycle_selection_home_station() {
 
 }
 
-pub(crate) mod features_parity_part2 {
-// Acceptance test suite Part 2 covering:
+pub(crate) mod slash_commands_navigation_and_sso_suite {
+// Acceptance test suite covering:
 // - Test 4: Slash Dispatcher, GM Commands (skill, isk, item, tr, heal, spawn, attr, fit, kill), Asset Safety GM Timer, and Skin Tools
 // - Test 5: Warp Speed Formula, Autopilot Routing & Waypoints, Stargate Jumping & Gate Cloak
 // - Test 6: Account SSO Login, Native machoNet Handshake, Multi-Login Blocker, Account Roles, Legal Agreements, Language Setting, Launcher Status
@@ -1517,8 +1517,8 @@ async fn test_account_sso_handshake_multilogin_roles_eula_language_status() {
 
 }
 
-pub(crate) mod features_parity_part3 {
-// Acceptance test suite Part 3 covering:
+pub(crate) mod skills_queue_attributes_and_implants_suite {
+// Acceptance test suite covering:
 // - Test 2: Skills Engine, Queue, Injectors (Large/Small), and Extractor
 // - Test 3: Attributes, Neural/Bonus Remap, Implants, Pod Death, and Boosters
 // 
@@ -2055,13 +2055,12 @@ async fn test_attributes_remaps_implants_boosters() {
 
 }
 
-// Folded submodule: parity_fake_remediation_feat_part1
 #[allow(unused_imports, dead_code)]
-pub(crate) mod features_parity_part4 {
+pub(crate) mod wormhole_decay_hacking_and_skyhooks_suite {
     #[allow(unused_imports)]
     use super::*;
 
-// Integration tests remediating `FLAGGED_FAKE` `feat:*` parity rows.
+// Integration tests for wormhole decay, hacking, and sovereignty skyhooks `feat:*` rows.
 //
 // Covers:
 // - `feat:wormholes.lifetime-decay-stages`
@@ -2578,14 +2577,13 @@ async fn test_skyhook_reagent_harvest_secure_surplus_split() {
 }
 }
 
-// Folded submodule: parity_fake_remediation_part1
 #[allow(unused_imports, dead_code)]
-pub(crate) mod features_parity_part5 {
+pub(crate) mod esi_social_governance_and_sov_map_suite {
     #[allow(unused_imports)]
     use super::*;
 
-// End-to-end remediation integration tests for ESI social, calendar, contacts,
-// mailing lists, corporation governance, and sovereignty map (`esi:*` fake_done closure).
+// End-to-end integration tests for ESI social, calendar, contacts,
+// mailing lists, corporation governance, and sovereignty map (`esi:*`).
 
 
 use crate::esi_market_industry_pi::{issue_token_with_scopes, rpc_call};
@@ -3190,15 +3188,14 @@ async fn test_parity_remediation_esi_corp_governance_roles_limit_and_sov_map() {
 }
 }
 
-// Folded submodule: parity_fake_remediation_part2
 #[allow(unused_imports, dead_code)]
-pub(crate) mod features_parity_part6 {
+pub(crate) mod esi_blueprints_and_quasar_commerce_suite {
     #[allow(unused_imports)]
     use super::*;
 
-// End-to-end remediation integration tests for ESI corp blueprints/structures
+// End-to-end integration tests for ESI corp blueprints/structures
 // and Quasar title definitions, space CDN, freelance projects/item delivery,
-// and payment schedules/tokens/store (`esi:*` & `quasar:*` fake_done closure).
+// and payment schedules/tokens/store (`esi:*` & `quasar:*`).
 
 
 use crate::esi_market_industry_pi::{issue_token_with_scopes, make_item, rpc_call};

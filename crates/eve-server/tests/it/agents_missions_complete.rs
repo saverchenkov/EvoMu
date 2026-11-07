@@ -681,11 +681,11 @@ async fn test_invbroker_partial_split_container_and_multiadd_validation_regressi
 }
 
 
-pub(crate) mod agents_missions_part2 {
+pub(crate) mod mission_lifecycle_and_standings {
     #[allow(unused_imports)]
     use super::*;
 
-// Integration tests for Mission Lifecycle and Standings Formulas (Part 2 of Agents & Missions).
+// Integration tests for Mission Lifecycle and Standings Formulas.
 
 use crate::common;
 use eve_db::{
@@ -1339,11 +1339,11 @@ async fn test_agent_dialogue_and_access_standings() {
 }
 
 
-pub(crate) mod agents_missions_part3 {
+pub(crate) mod special_agents_arcs_and_lp_store {
     #[allow(unused_imports)]
     use super::*;
 
-// Integration tests for Special Agents, Arcs, and LP Store (Part 3 of Agents & Missions).
+// Integration tests for Special Agents, Arcs, and LP Store.
 
 use crate::common;
 use eve_db::{

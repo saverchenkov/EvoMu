@@ -1,4 +1,4 @@
-//! Real server-side emission tests for Notify Batch 7 (Part 1: Mining, Probes, Scanners & Space).
+//! Real server-side emission tests for Mining, Probes, Scanners & Space.
 
 use crate::common;
 use eve_db::{InventoryFlag, InventoryItemRecord};
@@ -116,12 +116,11 @@ pub(crate) fn find_notif<'a>(notifs: &'a [(String, Vec<PyRep>)], event: &str) ->
         .unwrap_or_else(|| panic!("expected notification {event} in {notifs:?}"))
 }
 
-// Folded submodule: notify_real_emitters_batch7_part2
 #[allow(unused_imports, dead_code)]
-mod notify_real_emitters_batch7_part2 {
+mod fitting_weapons_drones_stances_and_skills_notifications {
     use super::*;
 
-// Real server-side emission tests for Notify Batch 7 (Part 2: Fitting, Weapon Banks,
+// Real server-side emission tests for Fitting, Weapon Banks,
 // Drones, Stances, Conduit Jump, Character Energy, Skill Injectors & Skill Bundles).
 
 use crate::notify_structures_clones_pi::{
@@ -522,12 +521,11 @@ async fn notify_batch7_weapons_fittings_drones_stances_jump_and_skills() {
 
 }
 
-// Folded submodule: notify_real_emitters_batch7_part3
 #[allow(unused_imports, dead_code)]
-mod notify_real_emitters_batch7_part3 {
+mod cosmetics_petitions_mail_pi_and_escalation_notifications {
     use super::*;
 
-// Real server-side emission tests for Notify Batch 7 (Part 3: Cosmetics, Petitions,
+// Real server-side emission tests for Cosmetics, Petitions,
 // Mail Undelete, Planetary Interaction Launches, Orbital State & Escalations).
 
 use crate::notify_structures_clones_pi::{
@@ -861,12 +859,11 @@ async fn notify_batch7_cosmetics_petitions_mail_pi_and_escalations() {
 
 }
 
-// Folded submodule: notify_real_emitters_batch7_part4
 #[allow(unused_imports, dead_code)]
-mod notify_real_emitters_batch7_part4 {
+mod missions_fw_sov_filaments_and_tournament_notifications {
     use super::*;
 
-// Real server-side emission tests for Notify Batch 7 (Part 4: Agent Missions,
+// Real server-side emission tests for Agent Missions,
 // Faction Warfare, Sovereignty Dev Index, PVP Filaments & Tournaments).
 
 use crate::notify_structures_clones_pi::{

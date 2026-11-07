@@ -569,10 +569,10 @@ async fn test_esi4_calendar_list_event_respond_and_attendees() {
 
 
 #[allow(unused_imports)]
-mod char_esi_social_mail_part2 {
+mod esi_character_public_roles_and_loyalty {
     use super::*;
 
-// ESI-4 integration tests (Part 2): Character public info, corp history, CSPA, roles,
+// ESI character public info, corp history, CSPA, roles,
 // titles, notifications, and loyalty points.
 
 
@@ -906,10 +906,10 @@ async fn test_esi4_character_notifications_and_loyalty_points() {
 
 
 #[allow(unused_imports)]
-mod char_esi_social_mail_part3 {
+mod esi_contacts_labels_and_mail_persistence {
     use super::*;
 
-// ESI-4 integration tests (Part 3): Character/Corp/Alliance contacts & labels and Mail
+// ESI Character/Corp/Alliance contacts & labels and Mail
 // send/read/update/delete/labels/lists backed by MachoNet RPCs + SQLite restart persistence.
 
 

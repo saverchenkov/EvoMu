@@ -1,8 +1,8 @@
 //! In-process integration smoke tests for `plan:T-6` (journeys 1..=29).
 //! Note: `journey:*` ledger rows remain open until real V24 client execution via `tools/client-harness/run_journeys`.
 
-pub(crate) mod part1 {
-// In-process integration smoke tests for `plan:T-6` (part 1: journeys 1..=13).
+pub(crate) mod client_journeys_login_through_missions {
+// In-process integration smoke tests for `plan:T-6` (journeys 1..=13).
 // Note: `journey:*` ledger rows remain open until real V24 client execution via `tools/client-harness/run_journeys`.
 
 use crate::common::{login_pilot, pin_clock, probe_scan};
@@ -669,8 +669,8 @@ async fn test_journey_13_missions() {
 
 }
 
-pub(crate) mod part2 {
-// In-process integration smoke tests for `plan:T-6` (part 2: journeys 14..=29).
+pub(crate) mod client_journeys_exploration_through_endgame {
+// In-process integration smoke tests for `plan:T-6` (journeys 14..=29).
 // Note: `journey:*` ledger rows remain open until real V24 client execution via `tools/client-harness/run_journeys`.
 
 use crate::common::{login_pilot, pin_clock, probe_scan, scan_row_field};

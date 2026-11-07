@@ -65,10 +65,10 @@ pub(crate) async fn setup_pilot(ctx: &ServerContext, char_id: i64) -> SessionSta
 }
 
 #[allow(unused_imports, dead_code, unused_variables, unused_mut)]
-pub(crate) mod part2 {
+pub(crate) mod space_skin_broadcast_and_structure_directory {
     use super::*;
 
-// Integration tests for open `feat:` parity rows (Batch 7, Part 2).
+// Integration tests for open `feat:` space skin and structure directory parity rows.
 //
 // Covers:
 // - Ship SKIN application in space with observer slim/cosmetic updates & SQLite persistence (`feat:cosmetics.skin-apply`)

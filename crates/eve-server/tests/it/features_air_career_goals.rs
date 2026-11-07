@@ -1,4 +1,4 @@
-//! Integration tests for open `feat:structures.*` parity rows (Batch 38, Part 1).
+//! Integration tests for open `feat:structures.*` parity rows.
 
 #![forbid(unsafe_code)]
 
@@ -447,12 +447,11 @@ async fn test_reinforce_hour_hack_reveal_and_ewar_immunity() {
     assert!(after.dict_get("reinforceHour").and_then(|v| v.as_i64()).is_some(), "reinforceHour must be revealed after hack");
 }
 
-// Folded submodule: part2
 #[allow(unused_imports, dead_code)]
-mod part2 {
+mod structure_reinforce_tether_and_fulcrum {
     use super::*;
 
-// Integration tests for open `feat:structures.*` parity rows (Batch 38, Part 2).
+// Integration tests for Upwell structure reinforcement, tethering, and fulcrum parity rows.
 
 
 use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord};

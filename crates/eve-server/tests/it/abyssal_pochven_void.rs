@@ -653,11 +653,11 @@ async fn test_pochven_travel_conduits_filaments_and_gates() {
 }
 
 
-pub(crate) mod abyssal_pochven_part2 {
+pub(crate) mod warp_vector_bookmarks {
     #[allow(unused_imports)]
     use super::*;
 
-// Integration tests for Warp Vector mechanics (Part 2).
+// Integration tests for Warp Vector mechanics.
 
 
 use crate::common;

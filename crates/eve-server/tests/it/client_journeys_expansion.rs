@@ -645,11 +645,11 @@ async fn test_journey_cosmetics_store() {
 }
 
 
-pub(crate) mod client_journeys_expansion_part2 {
+pub(crate) mod client_market_ui_journey {
     #[allow(unused_imports)]
     use super::*;
 
-// Authentic Live EVE Client Market UI Journey Test Driver (Part 2 of `client_journeys_expansion`).
+// Authentic Live EVE Client Market UI Journey Test Driver.
 
 
 use crate::client_journeys_expansion::{call_rpc, dict_get};

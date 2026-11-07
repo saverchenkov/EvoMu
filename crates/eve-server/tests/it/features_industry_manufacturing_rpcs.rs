@@ -1,4 +1,4 @@
-//! End-to-end integration tests for Batch 33 open `feat:mining.*` rows (part 1: Foreman bursts,
+//! End-to-end integration tests for `feat:mining.*` Foreman bursts,
 //! harvester validity, phased asteroid field lifecycle, Mobile Phase Anchor, Prismaticite &
 //! Unrefined Mineral reactions, and wormhole ore sites).
 
@@ -678,10 +678,10 @@ async fn test_b33_phased_asteroid_field_mobile_anchor_and_prismaticite() {
 }
 
 #[allow(unused_imports, dead_code, unused_variables, unused_mut)]
-pub(crate) mod part2 {
+pub(crate) mod moon_mining_reprocessing_and_remote_repairers {
     use super::*;
 
-// End-to-end integration tests for Batch 33 open `feat:mining.*` and `feat:modules.*` rows (part 2:
+// End-to-end integration tests for `feat:mining.*` and `feat:modules.*` rows (
 // moon extraction duration/yield, auto-fracture, moon ore class by security, Upwell refinery
 // base yield, NPC reprocessing tax curve, Scrapmetal exclusions, ARSB/ARAR, and Auto Targeting System).
 

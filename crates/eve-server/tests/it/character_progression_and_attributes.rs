@@ -86,7 +86,7 @@ async fn quasar_rpc(
             seconds: ctx.now_unix() as i64,
             nanos: 0,
         }),
-        correlation_uuid: b"parity-misc-part1-01".to_vec(),
+        correlation_uuid: b"parity-char-prog-01".to_vec(),
         payload: Some(GoogleAny {
             type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
             value: payload_bytes,
@@ -561,7 +561,7 @@ async fn test_parity_misc_plan_t10_and_t11_client_oracle_and_destiny_diff() {
     )
     .await;
     assert_eq!(resp.status_code, STATUS_OK);
-    assert_eq!(resp.correlation_uuid, b"parity-misc-part1-01");
+    assert_eq!(resp.correlation_uuid, b"parity-char-prog-01");
     assert!(resp.payload.is_some());
 
     // T-11: Destiny differential physics step + wire encoding

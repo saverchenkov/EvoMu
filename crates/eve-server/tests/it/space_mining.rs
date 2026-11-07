@@ -1205,13 +1205,12 @@ async fn test_r3_track1_mining_pve_fw_regressions() {
 
 }
 
-// Folded submodule: mining_survey_scanner_part2
 #[allow(unused_imports, dead_code)]
-mod mining_survey_scanner_part2 {
+mod mining_crystals_reprocessing_and_foreman_bursts {
     use super::*;
 
 // Phase 5M mining crystal tiers, scrapmetal exclusions, Prismaticite/Unrefined Mineral
-// reactions, Mining Foreman Burst charges, and phased asteroid fields (`MN-07`..`MN-08`, part 2).
+// reactions, Mining Foreman Burst charges, and phased asteroid fields (`MN-07`..`MN-08`).
 
 
 use eve_db::{
@@ -2737,7 +2736,7 @@ pub(crate) mod npc_mining_batch_closure {
     #[allow(unused_imports)]
     use super::*;
 
-// E2E parity integration tests for NPC & Mining features (Part 1).
+// E2E parity integration tests for NPC & Mining features.
 
 
 use crate::features_market_orders_rpcs::{rpc, select_pilot, PILOT_1, PILOT_2};
@@ -3334,11 +3333,11 @@ async fn test_parity_excavator_drones_ore_and_ice() {
 }
 
 
-pub(crate) mod npc_mining_batch_closure_part2 {
+pub(crate) mod mining_goals_npc_standings_lookup_and_downtime {
     #[allow(unused_imports)]
     use super::*;
 
-// E2E parity integration tests for Mining Market/Goals, Standings, Lookup, and Downtime (Part 2).
+// E2E parity integration tests for Mining Market/Goals, Standings, Lookup, and Downtime.
 
 
 use crate::features_market_orders_rpcs::{rpc, select_pilot, PILOT_1, PILOT_2};

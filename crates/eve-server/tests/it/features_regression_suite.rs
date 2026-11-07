@@ -474,11 +474,11 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
 }
 
 
-pub(crate) mod regressions_b01_b15_part2 {
+pub(crate) mod tama_structure_and_clone_regressions {
     #[allow(unused_imports)]
     use super::*;
 
-// Integration regression tests covering blocking findings B-01 through B-15 (Part 2: Tama structure lifecycle, fueling, clones, and carriers).
+// Integration regression tests covering Tama structure lifecycle, fueling, clones, and carriers.
 
 
 use eve_machonet::SessionState;

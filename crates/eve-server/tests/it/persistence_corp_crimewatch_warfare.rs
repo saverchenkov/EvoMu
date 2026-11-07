@@ -516,9 +516,9 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
 }
 
 
-pub(crate) mod warfare_part2 {
+pub(crate) mod warfare_fw_sov_insurgency_persistence {
     use super::*;
-    // SQLite restart durability and transactional rollback integration tests for `D-6` Batch 3 (Part 2):
+    // SQLite restart durability and transactional rollback integration tests:
     // Warfare / FW / Sov / Insurgency (`feat:lifecycle.warfare-durable`).
 
     use eve_db::{IskCents, TrainedSkillRecord};

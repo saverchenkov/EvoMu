@@ -1,4 +1,4 @@
-//! Comprehensive Inventory (14 rows), Ships (8 rows), and Fitting (10 rows) integration test suite (Part 1).
+//! Comprehensive Inventory (14 rows), Ships (8 rows), and Fitting (10 rows) integration test suite.
 
 use crate::common;
 
@@ -926,12 +926,11 @@ async fn test_repackage_assemble_trash_encoded_crystal_and_item_locking() {
     });
 }
 
-// Folded submodule: inventory_ships_fitting_complete_part2
 #[allow(unused_imports, dead_code)]
-mod inventory_ships_fitting_complete_part2 {
+mod ship_boarding_fitting_slots_and_multifit {
     use super::*;
 
-// Comprehensive Inventory, Ships, and Fitting integration test suite (Part 2).
+// Comprehensive Inventory, Ships, and Fitting integration test suite.
 
 use crate::common;
 
@@ -1523,12 +1522,11 @@ async fn test_fitting_slots_cpu_pwg_hardpoints_rigs_saved_multifit_ghost_inspace
 
 }
 
-// Folded submodule: inventory_ships_fitting_complete_part3
 #[allow(unused_imports, dead_code)]
-mod inventory_ships_fitting_complete_part3 {
+mod jetcan_wreck_sma_and_asset_safety {
     use super::*;
 
-// Comprehensive Inventory, Ships, and Fitting integration test suite (Part 3: Asset Safety, SMA, Fleet Hangar, Jetcan, and Wreck Looting).
+// Comprehensive Inventory, Ships, and Fitting integration test suite: Asset Safety, SMA, Fleet Hangar, Jetcan, and Wreck Looting.
 
 use crate::common;
 

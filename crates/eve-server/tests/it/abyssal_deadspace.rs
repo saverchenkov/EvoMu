@@ -656,7 +656,7 @@ async fn test_abyssal_staggered_coop_r1_to_r2_preserves_conduit_cache_and_intera
 }
 
 
-pub(crate) mod abyssal_deadspace_part2 {
+pub(crate) mod abyssal_pocket_hazards_and_weather {
     #[allow(unused_imports)]
     use super::*;
 
@@ -1345,7 +1345,7 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
 }
 
 
-pub(crate) mod abyssal_deadspace_part3 {
+pub(crate) mod abyssal_fleet_entry_and_downtime {
     #[allow(unused_imports)]
     use super::*;
 

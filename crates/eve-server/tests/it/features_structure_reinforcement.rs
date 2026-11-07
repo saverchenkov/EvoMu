@@ -1,4 +1,4 @@
-//! Batch 39 open `feat:` parity integration tests (part 1: Mobile Cyno Beacon, Mobile Micro Jump Unit, Mobile Observatory).
+//! Open `feat:` parity integration tests for Mobile Cyno Beacon, Mobile Micro Jump Unit, and Mobile Observatory.
 
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord};
 use eve_destiny::{Ball, DamageVector, MovementMode};
@@ -387,12 +387,11 @@ async fn test_b39_mobile_observatory_decloak_ping() {
     assert!(low_handle.get_ball_snapshot(obs_id).await.unwrap().is_none());
 }
 
-// Folded submodule: part2
 #[allow(unused_imports, dead_code)]
-mod part2 {
+mod standup_structure_weapons {
     use super::*;
 
-// `open_feats_b39_part2` — Standup Structure Weapons (`feat:structures.standup-point-defense-battery`,
+// Standup Structure Weapons (`feat:structures.standup-point-defense-battery`,
 // `feat:structures.standup-guided-bomb-launcher`, `feat:structures.standup-superweapon-arcing-vorton`).
 
 use eve_db::{CorporationRecord, InventoryFlag, InventoryItemRecord, UpwellStructureRecord};
@@ -904,12 +903,11 @@ async fn test_b39_standup_falloff_bomb_safety_timers_and_kills() {
 
 }
 
-// Folded submodule: part3
 #[allow(unused_imports, dead_code)]
-mod part3 {
+mod clone_vat_bay_fuel_and_fleet_cloning {
     use super::*;
 
-// Batch 39 open `feat:` parity integration tests (part 3: Clone Vat Bay fuel, immobilization, fleet clone install & CloneJump).
+// Open `feat:` parity integration tests for Clone Vat Bay fuel, immobilization, fleet clone install, and CloneJump.
 
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord};
 use eve_destiny::{Ball, MovementMode};
@@ -1425,12 +1423,11 @@ async fn test_b39_clone_vat_bay_titan_and_rorqual_install_and_jump() {
 
 }
 
-// Folded submodule: part4
 #[allow(unused_imports, dead_code)]
-mod part4 {
+mod covert_cyno_and_jump_portal_generator {
     use super::*;
 
-// `open_feats_b39_part4` — Covert Cynosural Field & Covert Jump Portal Generator
+// Covert Cynosural Field & Covert Jump Portal Generator
 // (`feat:modules.covert-cyno-rules`, `feat:modules.covert-jump-portal-generator`).
 
 use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};

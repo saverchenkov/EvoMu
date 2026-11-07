@@ -454,7 +454,7 @@ async fn test_ch3_character_creation_and_starter_assets() {
 
 
 #[allow(unused_imports)]
-mod char_creation_sheet_part2 {
+mod character_sheet_biography_and_notes {
     use super::*;
 
 // Integration tests for Character Sheet & Notes (`CH-4`).
@@ -932,7 +932,7 @@ async fn test_ch4_character_sheet_biography_and_notes() {
 
 
 #[allow(unused_imports)]
-mod char_creation_sheet_part3 {
+mod jump_clones_implants_and_cooldown {
     use super::*;
 
 // Integration tests for Jump Clones (`S-4`).

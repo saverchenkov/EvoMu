@@ -503,16 +503,16 @@ async fn test_review_r8_regressions() {
     assert_eq!(orders_11372, 0);
     assert_eq!(orders_47749, 0);
 
-    let (s1, s2) = self::regressions_r8_part2::run_r8_part2(&ctx, s1, s2).await;
-    self::regressions_r8_part3::run_r8_part3(&ctx, s1, s2).await;
+    let (s1, s2) = self::fitting_and_combat_regressions::run_fitting_and_combat_regressions(&ctx, s1, s2).await;
+    self::planetary_industry_and_structure_regressions::run_planetary_industry_and_structure_regressions(&ctx, s1, s2).await;
 }
 
 
-pub(crate) mod regressions_r8_part2 {
+pub(crate) mod fitting_and_combat_regressions {
     #[allow(unused_imports)]
     use super::*;
 
-// Integration regression tests covering Round 8 findings (Part 2).
+// Integration regression tests covering fitting and combat findings.
 
 
 use eve_db::InventoryFlag;
@@ -521,7 +521,7 @@ use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
 
-pub(crate) async fn run_r8_part2(
+pub(crate) async fn run_fitting_and_combat_regressions(
     ctx: &ServerContext,
     mut s1: SessionState,
     s2: SessionState,
@@ -1589,11 +1589,11 @@ pub(crate) async fn run_r8_part2(
 }
 
 
-pub(crate) mod regressions_r8_part3 {
+pub(crate) mod planetary_industry_and_structure_regressions {
     #[allow(unused_imports)]
     use super::*;
 
-// Integration regression tests covering Round 8 findings (Part 3).
+// Integration regression tests covering planetary industry and structure findings.
 
 
 use eve_db::InventoryFlag;
@@ -1602,7 +1602,7 @@ use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
 
-pub(crate) async fn run_r8_part3(
+pub(crate) async fn run_planetary_industry_and_structure_regressions(
     ctx: &ServerContext,
     mut s1: SessionState,
     mut s2: SessionState,

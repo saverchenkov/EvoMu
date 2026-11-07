@@ -1,4 +1,4 @@
-//! End-to-end integration tests for `feat:lifecycle.*` parity rows (Batch 30, Part 1).
+//! End-to-end integration tests for fleet lifecycle parity rows (`feat:lifecycle.*`).
 //!
 //! Covers:
 //! - `feat:lifecycle.fleet-kick-session`, `feat:lifecycle.fleet-login-consistency`,
@@ -565,10 +565,10 @@ async fn test_b30_industry_pi_and_market_wallet_history_durable() {
 }
 
 #[allow(unused_imports, dead_code, unused_variables, unused_mut)]
-pub(crate) mod part2 {
+pub(crate) mod mail_market_expiry_jetcan_and_mission_durability {
     use super::*;
 
-// End-to-end integration tests for `feat:lifecycle.*` parity rows (Batch 30, Part 2).
+// End-to-end integration tests for mail, market order expiry, jetcan, and mission persistence (`feat:lifecycle.*`).
 //
 // Covers:
 // - `feat:lifecycle.mail-no-global-cap`, `feat:lifecycle.mail-state-persist`,

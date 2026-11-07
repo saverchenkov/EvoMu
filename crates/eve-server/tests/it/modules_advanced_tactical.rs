@@ -577,9 +577,8 @@ async fn siege_triage_and_disruptive_lance_v24_mechanics() {
 }
 
 
-// Folded submodule: modules_advanced_tactical_part2
 #[allow(unused_imports, dead_code)]
-mod modules_advanced_tactical_part2 {
+mod entosis_command_bursts_and_ewar_modules {
     use super::*;
 
 // End-to-End Integration Tests for Tactical, Capital, Command, Fitting & Support Modules (`feat:modules.*`).
@@ -1847,12 +1846,11 @@ fn test_realistic_player_ship_stargate_and_station_collision_separation() {
 
 }
 
-// Folded submodule: nav_tactical_modules_closure_part2
 #[allow(unused_imports, dead_code)]
-mod nav_tactical_modules_closure_part2 {
+mod warp_bubble_drag_nullifier_and_mjd_spool {
     use super::*;
 
-// End-to-End Integration Tests closing Interdiction & MJD/Propulsion parity rows (Part 2):
+// End-to-End Integration Tests closing Interdiction & MJD/Propulsion parity rows:
 // `feat:navigation.warp-bubble-drag-and-catch`, `feat:navigation.interdiction-nullification-module`,
 // `feat:modules.interdiction-probe-variants`, `feat:navigation.micro-jump-drive-spool`,
 // and `feat:navigation.warp-scramble-propulsion-shutoff`.
@@ -2539,13 +2537,12 @@ fn test_warp_catch_bubble_350km_in_front_of_destination() {
 
 }
 
-// Folded submodule: nav_tactical_modules_closure_part3
 #[allow(unused_imports, dead_code)]
-mod nav_tactical_modules_closure_part3 {
+mod overheat_rack_heat_and_nanite_repair {
     use super::*;
 
 // End-to-End Integration Tests closing Overheat Rack Heat and Probabilistic Heat Damage Propagation
-// parity rows (Part 3):
+// parity rows:
 // `feat:modules.overheat-rack-heat-generation` and `feat:modules.overheat-damage-propagation`.
 
 use crate::modules_advanced_tactical::*;
@@ -3180,12 +3177,11 @@ async fn test_emergency_warp_stopped_by_warp_scrambler_during_alignment() {
 
 }
 
-// Folded submodule: nav_tactical_modules_closure_part4
 #[allow(unused_imports, dead_code)]
-mod nav_tactical_modules_closure_part4 {
+mod nosferatu_grappler_and_mutadaptive_repairer {
     use super::*;
 
-// End-to-End Integration Tests closing Nosferatu, Grappler, and Mutadaptive RAR (Part 4):
+// End-to-End Integration Tests closing Nosferatu, Grappler, and Mutadaptive RAR:
 // `feat:modules.energy-nosferatu-relative-capacitor`, `feat:modules.stasis-grappler-mechanics`,
 // and `feat:modules.mutadaptive-remote-armor-repairer`.
 
@@ -3687,9 +3683,8 @@ async fn test_wubble_destroyed_during_arming_cancels_detonation() {
 
 }
 
-// Folded submodule: nav_tactical_modules_closure_part5
 #[allow(unused_imports, dead_code)]
-mod nav_tactical_modules_closure_part5 {
+mod interdiction_launcher_and_warp_vector_negatives {
     use super::*;
 
 // Negative integration tests for `R-INT-01` (Interdiction Sphere Launcher activation

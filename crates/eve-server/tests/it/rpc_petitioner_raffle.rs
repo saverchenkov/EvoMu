@@ -531,8 +531,8 @@ async fn test_raffle_queries_and_subscriptions() {
     assert!(matches!(&fg_price[0], PyRep::KeyVal(kv) if kv.get("raffle_id") == Some(&PyRep::Integer(raf_b))));
 
     // 4. GetCreatedParticipated & GetMyRaffleHistory
-    let PyRep::List(created_part) = rpc(&ctx, &mut p1, "raffleProxy", "GetCreatedParticipated", &[]).await.expect("GetCreatedParticipated") else { panic!("expected List"); };
-    assert!(created_part.len() >= 2);
+    let PyRep::List(created_participated) = rpc(&ctx, &mut p1, "raffleProxy", "GetCreatedParticipated", &[]).await.expect("GetCreatedParticipated") else { panic!("expected List"); };
+    assert!(created_participated.len() >= 2);
     let PyRep::List(history) = rpc(&ctx, &mut p2, "raffleProxy", "GetMyRaffleHistory", &[]).await.expect("GetMyRaffleHistory") else { panic!("expected List"); };
     assert!(history.iter().any(|r| matches!(r, PyRep::KeyVal(kv) if kv.get("raffle_id") == Some(&PyRep::Integer(raf_c)))));
 }

@@ -1,6 +1,4 @@
 //! Phase 5M Survey Scanner & Compression (`MN-10, MN-11`).
-//!
-//! Split into `mining_moon_ledgers_part2.rs` and `mining_moon_ledgers_part3.rs` so each test file stays under 685 lines.
 
 #![forbid(unsafe_code)]
 
@@ -395,9 +393,8 @@ async fn test_mn11_compression_space_and_structure_and_gas() {
     assert_eq!(get_dict_val(&decomp_res, "decompressedUnits").unwrap().as_i64(), Some(178));
 }
 
-// Folded submodule: mining_moon_ledgers_part2
 #[allow(unused_imports, dead_code)]
-mod mining_moon_ledgers_part2 {
+mod moon_survey_probes_extraction_and_drill_ledger {
     use super::*;
 
 // Phase 5M Moon Survey Probes, Moon Extraction, Fracture, Decay, Metenox Drill & Corp Ledger (`MN-13, MN-14, MN-16`).
@@ -865,9 +862,8 @@ async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
 
 }
 
-// Folded submodule: mining_moon_ledgers_part3
 #[allow(unused_imports, dead_code)]
-mod mining_moon_ledgers_part3 {
+mod reprocessing_yield_tax_and_structure_rigs {
     use super::*;
 
 // Phase 5M Reprocessing Yield, Tax, Scrapmetal, Structure & Rigs (`MN-12, C-6`).

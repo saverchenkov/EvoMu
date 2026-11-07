@@ -1,4 +1,4 @@
-//! Integration tests (part 1) remediating auditor-flagged rows across V24 sov skyhooks,
+//! Integration tests across V24 sov skyhooks,
 //! FW occupation, system interference decay, and abyssal trace/weather.
 
 use std::collections::HashMap;
@@ -590,11 +590,11 @@ async fn test_abyssal_deployment_and_weather_audit() {
 }
 
 
-pub(crate) mod regressions_v24_audit_part2 {
+pub(crate) mod ess_fighters_and_structure_ops_audit {
     #[allow(unused_imports)]
     use super::*;
 
-// Integration tests (part 2) remediating auditor-flagged rows across ESS reserve pulses,
+// Integration tests across ESS reserve pulses,
 // fighters launching/abilities, and structure ops/asset safety.
 
 use std::collections::HashMap;

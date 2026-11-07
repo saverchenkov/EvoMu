@@ -1,4 +1,4 @@
-//! Integration tests for Batch 36 open `feat:pve.*` parity rows (part 1: R&D access, RP formula, datacores).
+//! Integration tests for `feat:pve.*` R&D access, RP formula, and datacore parity rows.
 
 #![forbid(unsafe_code)]
 
@@ -454,12 +454,11 @@ async fn test_b36_rnd_agent_access_rp_formula_and_datacore_purchase() {
     let _ = std::fs::remove_file(&db_path);
 }
 
-// Folded submodule: part2
 #[allow(unused_imports, dead_code)]
-mod part2 {
+mod storyline_mission_offer_counter {
     use super::*;
 
-// Integration tests for Batch 36 open `feat:pve.*` parity rows (part 2: Storyline offer counter).
+// Integration tests for `feat:pve.*` Storyline mission offer counter parity rows.
 
 
 use std::collections::{HashMap, VecDeque};
@@ -1119,12 +1118,11 @@ async fn test_b36_storyline_offer_counter() {
 
 }
 
-// Folded submodule: part3
 #[allow(unused_imports, dead_code)]
-mod part3 {
+mod abyssal_activation_and_deadspace_pocket_rules {
     use super::*;
 
-// Integration tests for Batch 36 open `feat:pve.*` parity rows (part 3: Abyssal activation & Deadspace pockets).
+// Integration tests for `feat:pve.*` Abyssal activation and Deadspace pocket rules.
 
 
 use std::collections::HashMap;
@@ -1721,12 +1719,11 @@ async fn test_b36_abyssal_activation_and_deadspace_pocket_rules() {
 
 }
 
-// Folded submodule: part4
 #[allow(unused_imports, dead_code)]
-mod part4 {
+mod ess_grid_warp_and_module_restrictions {
     use super::*;
 
-// Integration tests for Batch 36 open `feat:pve.*` parity rows (part 4: ESS grid warp & module restrictions).
+// Integration tests for `feat:pve.*` ESS grid warp and module restrictions.
 
 
 use std::collections::HashMap;
@@ -2234,12 +2231,11 @@ async fn test_b36_ess_grid_warp_and_module_restrictions() {
 
 }
 
-// Folded submodule: part5
 #[allow(unused_imports, dead_code)]
-mod part5 {
+mod ess_main_autopayout_and_reserve_key_tiers {
     use super::*;
 
-// Integration tests for Batch 36 open `feat:pve.*` parity rows (part 5: ESS Main Bank autopayout,
+// Integration tests for `feat:pve.*` ESS Main Bank autopayout,
 // 1 Hz ballpark NPC ESS pooling, & SQLite-durable server-tick Reserve Bank key tiers).
 
 

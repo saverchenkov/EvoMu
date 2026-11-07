@@ -480,10 +480,10 @@ async fn b34_cyno_covert_cyno_portal_jammer_and_lance() {
 }
 
 #[allow(unused_imports, dead_code, unused_variables, unused_mut)]
-pub(crate) mod part2 {
+pub(crate) mod cyno_lighting_and_tenebrex_jammer_rules {
     use super::*;
 
-// Batch 34 Part 2: Normal Cyno Lighting Rules, Tenebrex Jammer State/Reinforcement,
+// Normal Cyno Lighting Rules, Tenebrex Jammer State/Reinforcement,
 // and Strengthened Bastion & Command Burst Assertions.
 
 use crate::modules_advanced_tactical::*;

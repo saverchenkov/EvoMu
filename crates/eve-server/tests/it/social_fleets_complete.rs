@@ -636,7 +636,7 @@ async fn test_so3_corporation_roles_public_info_governance_shares_votes_and_alli
 
 
 #[allow(unused_imports)]
-mod social_fleets_complete_part2 {
+mod wormholes_fleet_formations_bookmarks_and_chat {
     use super::*;
 
 // Track 4: Wormholes, Fleets, Bookmarks, Scanning & Social Features (`SO-6`, Fleets, Bookmarks, Social).

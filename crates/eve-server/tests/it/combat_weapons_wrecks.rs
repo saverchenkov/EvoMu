@@ -870,8 +870,8 @@ async fn test_c1_triglavian_entropic_spool_and_edencom_vorton_arc_and_sig_radius
 }
 
 #[allow(unused_imports)]
-pub(crate) mod features_combat_part1 {
-//! Dedicated end-to-end integration tests for open `feat:modules.*`, `feat:ships.*`, and `feat:combat.*` parity rows (Part 1).
+pub(crate) mod cyno_jump_bridge_and_escape_bay {
+//! Dedicated end-to-end integration tests for open `feat:modules.*`, `feat:ships.*`, and `feat:combat.*` parity rows.
 
 use crate::modules_advanced_tactical::{build_ctx, seed_pilot, NULL_SYS};
 use crate::features_bounties_ess::{give_item, put_in_fleet, set_skill, spawn_ship_in_space, DEST_NULL_SYS};

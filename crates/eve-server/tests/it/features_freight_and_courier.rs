@@ -1,5 +1,5 @@
 //! Integration tests for Pirate Insurgency Corruption (Stages 1–5) system effects and
-//! effect removal upon stage drop (`feat:fw.corruption-suppression-effects`, Part 1).
+//! effect removal upon stage drop (`feat:fw.corruption-suppression-effects`).
 
 #![forbid(unsafe_code)]
 
@@ -668,13 +668,12 @@ async fn test_corruption_all_stages_1_to_5_and_drop_removal() {
     assert_eq!(rpc_call(&ctx, &mut s_emp, "dogmaIM", "Activate", &[PyRep::Integer(emp_gun), PyRep::Integer(neu_ship)]).await.unwrap_err().code, "CantDoInCurrentSafetyLevel");
 }
 
-// Folded submodule: part2
 #[allow(unused_imports, dead_code)]
-mod part2 {
+mod insurgency_suppression_effects_and_rpc_auth {
     use super::*;
 
 // Integration tests for Pirate Insurgency Suppression (Stages 1–5) system effects,
-// effect removal upon stage drop, and negative RPC auth/validation (`feat:fw.corruption-suppression-effects`, Part 2).
+// effect removal upon stage drop, and negative RPC auth/validation (`feat:fw.corruption-suppression-effects`).
 
 
 use crate::features_freight_and_courier::{

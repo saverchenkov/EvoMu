@@ -412,7 +412,7 @@ async fn test_ship_lifecycle_leave_ship_jettison_and_drop() {
 }
 
 
-pub(crate) mod ship_operations_and_insurance_contracts_part2 {
+pub(crate) mod ship_bays_boarding_and_corp_hangars {
     #[allow(unused_imports)]
     use super::*;
 

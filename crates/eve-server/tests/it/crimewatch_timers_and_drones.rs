@@ -1356,7 +1356,7 @@ async fn test_crimewatch_safety_setting_green_yellow_red_enforcement() {
 
 }
 
-pub(crate) mod crimewatch_drones_closure_part2 {
+pub(crate) mod weapons_timer_drone_bandwidth_and_corp_structures {
 //! End-to-end integration tests closing Crimewatch movement, Drones, Fighters, and Corporation Structure rows:
 //! - `feat:crimewatch.weapons-timer-dock-jump-gate`
 //! - `feat:lifecycle.crimewatch-highsec-criminal-movement`

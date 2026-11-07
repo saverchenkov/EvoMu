@@ -1,4 +1,4 @@
-//! Real server-side emission tests for Notify Batch 9 (Part 1: Skills & Injectors).
+//! Real server-side emission tests for Skills & Injectors notifications.
 
 use crate::common;
 use crate::notify_structures_clones_pi::{
@@ -436,12 +436,11 @@ async fn notify_batch9_skill_bundles_refresh_logon_and_mct() {
     assert_eq!(find_notif(&mct_notifs, "OnMultipleCharactersTrainingUpdated"), &[]);
 }
 
-// Folded submodule: notify_real_emitters_batch9_part2
 #[allow(unused_imports, dead_code)]
-mod notify_real_emitters_batch9_part2 {
+mod milestones_redeeming_crates_and_assembly_notifications {
     use super::*;
 
-// Real server-side emission tests for Notify Batch 9 (Part 2: Milestones, Redeeming, Crates, Character & Subscription).
+// Real server-side emission tests for Milestones, Redeeming, Crates, Character & Subscription.
 
 use crate::notify_structures_clones_pi::{
     drain_all, find_notif, make_item, new_ctx, rpc, JITA_STATION, PILOT_A,
@@ -841,12 +840,11 @@ async fn notify_batch9_password_player_state_brain_and_subscription() {
 
 }
 
-// Folded submodule: notify_real_emitters_batch9_part3
 #[allow(unused_imports, dead_code)]
-mod notify_real_emitters_batch9_part3 {
+mod diplomacy_fittings_offers_and_nes_notifications {
     use super::*;
 
-// Real server-side emission tests for Notify Batch 9 (Part 3: Diplomacy, Fittings, Offers, NES, Agents & Datacores).
+// Real server-side emission tests for Diplomacy, Fittings, Offers, NES, Agents & Datacores.
 
 use crate::notify_structures_clones_pi::{
     drain_all, find_notif, new_ctx, rpc, JITA_STATION, PILOT_A, PILOT_B,
@@ -1274,12 +1272,11 @@ async fn notify_batch9_agents_epic_journal_and_datacores() {
 
 }
 
-// Folded submodule: notify_real_emitters_batch9_part4
 #[allow(unused_imports, dead_code)]
-mod notify_real_emitters_batch9_part4 {
+mod facilities_industry_trade_and_godma_notifications {
     use super::*;
 
-// Real server-side emission tests for Notify Batch 9 (Part 4: Facilities, Industry, Trade, Market, Godma & Cache).
+// Real server-side emission tests for Facilities, Industry, Trade, Market, Godma & Cache.
 
 use crate::notify_structures_clones_pi::{
     drain_all, find_notif, login_in_space, make_item, new_ctx, rpc, JITA_STATION,
@@ -1773,12 +1770,11 @@ async fn notify_batch9_godma_and_location_cache_invalidation() {
 
 }
 
-// Folded submodule: notify_real_emitters_batch9_part5
 #[allow(unused_imports, dead_code)]
-mod notify_real_emitters_batch9_part5 {
+mod jump_queue_flagged_lists_and_cfg_notifications {
     use super::*;
 
-// Real server-side emission tests for Notify Batch 9 (Part 5: JumpQueue, FlaggedLists, CfgDataChanged, CCPNotification, ServerMessage, Localization & ServiceMapping).
+// Real server-side emission tests for JumpQueue, FlaggedLists, CfgDataChanged, CCPNotification, ServerMessage, Localization & ServiceMapping.
 
 use crate::notify_structures_clones_pi::{
     drain_all, find_notif, login_in_space, new_ctx, rpc, JITA_STATION, PILOT_A,
@@ -3276,7 +3272,7 @@ async fn test_batch3_target_multi_event_and_kill_notification() {
 
 }
 
-pub(crate) mod parity_notify_batch3_part2 {
+pub(crate) mod probe_scanning_lifecycle_notifications {
     #[allow(unused_imports)]
     use super::*;
 
@@ -3599,7 +3595,7 @@ async fn test_batch3_probe_scanning_lifecycle_notifications() {
 
 }
 
-pub(crate) mod parity_notify_batch3_part3 {
+pub(crate) mod dungeon_instance_fw_and_incursion_notifications {
     #[allow(unused_imports)]
     use super::*;
 

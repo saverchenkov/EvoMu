@@ -1,9 +1,9 @@
-//! End-to-end parity closure tests for Quasar `sovereignty`, `space`,
-//! `store`, and `user` domains (part 2).
+//! End-to-end parity tests for Quasar `sovereignty`, `space`,
+//! `store`, and `user` domains.
 
 #![forbid(unsafe_code)]
 
-use crate::features_fleet_broadcast_rpcs::part2::{quasar_rpc, select_char};
+use crate::features_fleet_broadcast_rpcs::atomic_rollback_and_quasar_gateway_domains::{quasar_rpc, select_char};
 use crate::quasar_info_panels_and_plex_payments::{
     drain_notices, encode_double_field, encode_seq_id,
 };

@@ -518,7 +518,7 @@ async fn q8_faction_warfare_and_operations() {
     assert_eq!(lb_rsp.status_code, STATUS_OK);
 
     let get_all_req = "eve.factionwarfare.warzone.api.GetAllRequest";
-    let get_part_req = "eve.factionwarfare.warzone.api.GetParticipantsRequest";
+    let get_participants_req = "eve.factionwarfare.warzone.api.GetParticipantsRequest";
     {
         let wz_rsp = call_req(&ctx, &session, get_all_req, Vec::new(), true);
         assert_eq!(wz_rsp.status_code, STATUS_OK);
@@ -536,21 +536,21 @@ async fn q8_faction_warfare_and_operations() {
         let mut wz1_id = Vec::new();
         encode_varint_field(1, 1, &mut wz1_id);
         encode_bytes_field(1, &wz1_id, &mut wz1_req);
-        let p1_rsp = call_req(&ctx, &session, get_part_req, wz1_req, true);
+        let p1_rsp = call_req(&ctx, &session, get_participants_req, wz1_req, true);
         assert_eq!(p1_rsp.status_code, STATUS_OK);
         let p1_wm = eve_proto::quasar::WireMessage::decode(&p1_rsp.payload.unwrap().value).unwrap();
-        let part_msg = eve_proto::quasar::WireMessage::decode(
+        let participants_msg = eve_proto::quasar::WireMessage::decode(
             p1_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap(),
         )
         .unwrap();
-        let fac_ids: Vec<u64> = part_msg
+        let fac_ids: Vec<u64> = participants_msg
             .fields
             .iter()
             .filter(|f| f.field_number == 1)
             .filter_map(|f| eve_proto::quasar::WireMessage::decode(f.value.as_bytes()?).ok())
             .filter_map(|m| m.fields.first()?.value.as_varint())
             .collect();
-        let pirate_id = part_msg
+        let pirate_id = participants_msg
             .fields
             .iter()
             .find(|f| f.field_number == 2)
@@ -564,7 +564,7 @@ async fn q8_faction_warfare_and_operations() {
         encode_varint_field(1, 99, &mut bad_id);
         encode_bytes_field(1, &bad_id, &mut bad_wz);
         assert_eq!(
-            call_req(&ctx, &session, get_part_req, bad_wz, true).status_code,
+            call_req(&ctx, &session, get_participants_req, bad_wz, true).status_code,
             eve_server::quasar_gateway::STATUS_NOT_FOUND
         );
     }
