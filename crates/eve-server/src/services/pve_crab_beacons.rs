@@ -1258,11 +1258,12 @@ pub fn on_server_clock_advanced(ctx: &ServerContext, delta_sec: u64) {
         !reg.incursions.is_empty() && (reg.incursion_lifecycle.len() < reg.incursions.len()
             || reg.incursions.iter().any(|(cid, inc)| {
                 let m = reg.incursion_lifecycle.get(cid);
-                (inc.state == "Withdrawing" && m.is_some_and(|x| now_u >= x.withdraw_until_sec.unwrap_or(x.last_site_completed_sec + 172_800)))
+                m.is_none_or(|x| x.spawned_at_sec == 0)
+                    || (inc.state == "Withdrawing" && m.is_some_and(|x| now_u >= x.withdraw_until_sec.unwrap_or(x.last_site_completed_sec + crate::services::pve_incursion_lifecycle::INCURSION_WITHDRAWAL_DURATION_SEC)))
                     || (inc.state != "Ended" && inc.state != "Withdrawing" && inc.influence < 1.0
-                        && now_u.saturating_sub(m.map_or(0, |x| x.last_regen_sec.max(x.last_site_completed_sec))) >= 60)
+                        && now_u > m.map_or(0, |x| x.last_regen_sec.max(x.last_site_completed_sec)))
             })
-            || reg.incursions.values().filter(|i| i.state != "Ended").count() < 3)
+            || reg.incursions.values().filter(|i| i.state != "Ended").count() < crate::services::pve_incursion_lifecycle::TARGET_ACTIVE_INCURSIONS)
     });
     if inc_due {
         crate::services::pve_incursion_lifecycle::advance_incursion_lifecycles(ctx);

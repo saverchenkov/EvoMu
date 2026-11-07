@@ -257,24 +257,16 @@ pub fn resolve_hacking_node_stats(
         .and_then(|t| t.default_attributes.get(&1919).copied())
         .filter(|&v| v >= 1.0)
         .map(|v| (v as u8).clamp(1, 5));
+    let base_analyzer_tid = if is_relic { 22_177 } else { 22_175 };
     let (analyzer_coh_base, analyzer_str_base) = sde
-        .and_then(|s| {
-            s.types.values().find(|t| {
-                t.published
-                    && t.group_id == 538
-                    && !t.name.contains("Integrated")
-                    && !t.name.contains("II")
-                    && t.default_attributes.get(&1909).is_some_and(|&v| v > 0.0)
-                    && t.default_attributes.get(&1910).is_some_and(|&v| v > 0.0)
-            })
-        })
+        .and_then(|s| s.get_type(base_analyzer_tid).or_else(|| s.get_type(22_175)))
         .map(|t| {
             (
                 t.default_attributes.get(&1909).copied().unwrap_or(40.0) as i32,
-                t.default_attributes.get(&1910).copied().unwrap_or(10.0) as i32,
+                t.default_attributes.get(&1910).copied().unwrap_or(20.0) as i32,
             )
         })
-        .unwrap_or((40, 10));
+        .unwrap_or((40, 20));
     let diff = if difficulty == 0 {
         sde_tier.unwrap_or(2)
     } else if let Some(st) = sde_tier {
@@ -283,15 +275,17 @@ pub fn resolve_hacking_node_stats(
         difficulty.clamp(1, 5)
     };
     let d = diff as i32;
+    let base_coh = analyzer_coh_base / 2;
+    let base_str = analyzer_str_base / 2;
     let stats = HackingNodeStats {
-        core_coh: (analyzer_coh_base / 2) + d * 10 + if is_relic { 10 } else { 0 },
-        core_str: analyzer_str_base + ((d - 1) * 2),
-        fw_coh: (analyzer_coh_base / 2) + d * 4,
-        fw_str: analyzer_str_base + d * 2,
+        core_coh: base_coh + d * 10 + if is_relic { 10 } else { 0 },
+        core_str: base_str + ((d - 1) * 2),
+        fw_coh: base_coh + d * 4,
+        fw_str: base_str + d * 2,
         av_coh: 14 + d * 2,
-        av_str: analyzer_str_base + 5 + d * 3,
+        av_str: base_str + 5 + d * 3,
         support_coh: 14 + d * 2,
-        support_str: analyzer_str_base,
+        support_str: base_str,
     };
     (diff, stats)
 }
