@@ -2,14 +2,14 @@
 #[allow(unused_imports)]
 use super::*;
 
-pub(crate) mod parity_notify_batch_part2 {
+pub(crate) mod parity_notify_capture_batch {
     #[allow(unused_imports)]
     use super::*;
 
 // End-to-end integration tests for `notify:OnCaptureChanged`.
 
 
-use super::super::part_11::parity_notify_batch::{
+use super::super::discovery_campaigns_and_cluster_notices::parity_notify_batch::{
     drain_events, new_ctx, rpc, JITA_SYSTEM, PILOT_A, PILOT_B,
 };
 use crate::common;

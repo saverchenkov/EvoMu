@@ -332,5 +332,3 @@ async fn test_batch5_space_combat_arena_and_ess() {
 }
 
 }
-
-// Folded submodule: notify_real_emitters_batch6

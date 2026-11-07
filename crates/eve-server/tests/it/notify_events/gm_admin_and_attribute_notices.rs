@@ -308,5 +308,3 @@ async fn test_batch3_gm_and_admin_rpc_notifications() {
 
 
 }
-
-// Folded submodule: notify_real_emitters_batch5

@@ -2,11 +2,11 @@
 #[allow(unused_imports)]
 use super::*;
 
-mod parity_notifies_part2 {
+mod seasons_plex_and_dogma_notices {
     #[allow(unused_imports)]
     use super::*;
 
-// Runtime integration tests for open `notify:*` parity rows (Part 2).
+// Runtime integration tests for seasons, campaigns, PLEX, and dogma notifications.
 
 
 use crate::common;

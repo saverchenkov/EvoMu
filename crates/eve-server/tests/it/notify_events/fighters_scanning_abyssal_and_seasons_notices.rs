@@ -161,7 +161,7 @@ async fn notify_batch2_fighters_ewar_mutual_wars_strip_and_tracker() {
         if let Some(s) = snap.items.get_mut(&carrier_id) { s.type_id = 11_567; }
         snap.items.insert(phenom_id, make_item(phenom_id, 43_658, PILOT_A, carrier_id, InventoryFlag::HiSlot1, 1, true));
         snap.module_online_states.insert(phenom_id, true);
-        snap.items.insert(fuel_id, make_item(fuel_id, 16_275, PILOT_A, carrier_id, InventoryFlag::Cargo, 5_000, false));
+        snap.items.insert(fuel_id, make_item(fuel_id, 16_274, PILOT_A, carrier_id, InventoryFlag::Cargo, 40_000, false));
     });
     ctx.invalidate_ship_fitting(carrier_id);
     rpc(&ctx, &mut sess_a, "dogmaIM", "Activate", &[PyRep::Integer(phenom_id), PyRep::String("TitanPhenomenaGenerator".into()), PyRep::None, PyRep::Integer(1)]).await.expect("Phenomena");
@@ -552,5 +552,3 @@ async fn notify_batch2_void_exit_seasons_expert_systems_and_node_graphs() {
     let npe_stop_notifs = drain_all(&ctx, &mut sess, PILOT_A);
     assert!(!npe_stop_notifs.iter().any(|(e, _)| e == "OnStopClientNodeGraphById"));
 }
-
-// Folded submodule: notify_real_emitters_batch3

@@ -133,33 +133,43 @@ async fn login_in_space(
 }
 
 
-#[path = "notify_parts/part_01.rs"]
-mod part_01;
-#[path = "notify_parts/part_02.rs"]
-mod part_02;
-#[path = "notify_parts/part_03.rs"]
-mod part_03;
-#[path = "notify_parts/part_04.rs"]
-mod part_04;
-#[path = "notify_parts/part_05.rs"]
-mod part_05;
-#[path = "notify_parts/part_06.rs"]
-mod part_06;
-#[path = "notify_parts/part_07.rs"]
-mod part_07;
-#[path = "notify_parts/part_08.rs"]
-mod part_08;
-#[path = "notify_parts/part_09.rs"]
-mod part_09;
-#[path = "notify_parts/part_10.rs"]
-mod part_10;
-#[path = "notify_parts/part_11.rs"]
-mod part_11;
-#[path = "notify_parts/part_12.rs"]
-mod part_12;
-#[path = "notify_parts/part_13.rs"]
-mod part_13;
-#[path = "notify_parts/part_14.rs"]
-mod part_14;
-#[path = "notify_parts/part_15.rs"]
-mod part_15;
+#[path = "notify_events/abyssal_operations_and_node_graph_notices.rs"]
+mod abyssal_operations_and_node_graph_notices;
+#[path = "notify_events/clock_kredits_bans_and_capture_notices.rs"]
+mod clock_kredits_bans_and_capture_notices;
+#[path = "notify_events/combat_and_missile_message_notices.rs"]
+mod combat_and_missile_message_notices;
+#[path = "notify_events/crimewatch_insurgency_and_tale_notices.rs"]
+mod crimewatch_insurgency_and_tale_notices;
+#[path = "notify_events/criminal_timer_and_fw_capture_notices.rs"]
+mod criminal_timer_and_fw_capture_notices;
+#[path = "notify_events/discovery_campaigns_and_cluster_notices.rs"]
+mod discovery_campaigns_and_cluster_notices;
+#[path = "notify_events/dungeon_escalation_and_fw_bunker_notices.rs"]
+mod dungeon_escalation_and_fw_bunker_notices;
+#[path = "notify_events/dungeon_progression_notices.rs"]
+mod dungeon_progression_notices;
+#[path = "notify_events/dungeon_triggers_and_decloak_notices.rs"]
+mod dungeon_triggers_and_decloak_notices;
+#[path = "notify_events/fighters_scanning_abyssal_and_seasons_notices.rs"]
+mod fighters_scanning_abyssal_and_seasons_notices;
+#[path = "notify_events/fw_insurgency_and_safelogoff_notices.rs"]
+mod fw_insurgency_and_safelogoff_notices;
+#[path = "notify_events/gm_admin_and_attribute_notices.rs"]
+mod gm_admin_and_attribute_notices;
+#[path = "notify_events/operation_replay_and_container_password_notices.rs"]
+mod operation_replay_and_container_password_notices;
+#[path = "notify_events/raffle_and_operation_notices.rs"]
+mod raffle_and_operation_notices;
+#[path = "notify_events/seasons_plex_and_dogma_notices.rs"]
+mod seasons_plex_and_dogma_notices;
+#[path = "notify_events/session_localization_and_load_rpcs.rs"]
+mod session_localization_and_load_rpcs;
+#[path = "notify_events/sim_clock_disapproval_and_cache_notices.rs"]
+mod sim_clock_disapproval_and_cache_notices;
+#[path = "notify_events/station_arena_and_space_notices.rs"]
+mod station_arena_and_space_notices;
+#[path = "notify_events/station_pod_and_ess_notices.rs"]
+mod station_pod_and_ess_notices;
+#[path = "notify_events/target_lock_warzone_and_crimewatch_notices.rs"]
+mod target_lock_warzone_and_crimewatch_notices;

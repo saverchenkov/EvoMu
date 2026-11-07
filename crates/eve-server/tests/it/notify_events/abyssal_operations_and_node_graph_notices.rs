@@ -2,11 +2,11 @@
 #[allow(unused_imports)]
 use super::*;
 
-mod parity_notifies_part1 {
+mod abyssal_operations_and_node_graph_notices {
     #[allow(unused_imports)]
     use super::*;
 
-// Runtime integration tests for open `notify:*` parity rows (Part 1).
+// Runtime integration tests for abyssal, void-space, operations, and node-graph notifications.
 
 
 use crate::common;
@@ -544,4 +544,3 @@ async fn test_parity_notifies_dungeons_cloak_and_space() {
 
 }
 
-// Folded submodule: parity_notifies_part2
