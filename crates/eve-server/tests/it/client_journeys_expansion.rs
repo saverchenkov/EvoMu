@@ -146,7 +146,14 @@ async fn test_journey_launch_login() {
     assert_eq!(sess.user_id, Some(1), "Demo user ID 1 must be set in session");
 
     let user_token = call_rpc(&ctx, &mut sess, "userSvc", "GetUserToken", &[]).await.expect("GetUserToken");
-    assert_eq!(user_token, PyRep::String("sso-tok-1".into()), "GetUserToken must return deterministic sso-tok-1");
+    let PyRep::String(user_token_str) = user_token else {
+        panic!("GetUserToken must return a String JWT");
+    };
+    let verified = ctx
+        .db
+        .verify_quasar_bearer_jwt(&user_token_str, ctx.now_unix())
+        .expect("GetUserToken must return valid signed JWT");
+    assert_eq!(verified.user_id, 1, "GetUserToken JWT must bind to user_id 1");
 
     let mut hm = MachoHandshakeStateMachine::new(VersionExchange::default(), 1, 5001, 7001);
     assert!(!hm.is_authenticated(), "Handshake starts unauthenticated");

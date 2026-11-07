@@ -8,7 +8,7 @@ use super::evedb_sqlite_cov_tests::build_populated_snapshot;
 use super::evedb_sqlite_load_errors_and_schema_tests::open_migrated_conn;
 use crate::sqlite_store::corp_crimewatch_store::compute_d6_corp_crimewatch_fingerprints;
 use crate::sqlite_store::fingerprints::{
-    compute_fingerprints, fp_character, fp_contract, fp_item, fp_market_order,
+    compute_fingerprints, fp_asteroid, fp_character, fp_contract, fp_item, fp_market_order,
     fp_market_orders_digest, fp_system_state,
 };
 use crate::sqlite_store::industry_market_pve_store::compute_d6_batch4_fingerprints;
@@ -18,8 +18,8 @@ use crate::sqlite_store::notes_lp_sequence_store::rollback_d6;
 use crate::sqlite_store::rollback::rollback_dirty_from_sqlite;
 use crate::sqlite_store::sync::{replace_sqlite_from_snapshot, sync_dirty_to_sqlite};
 use crate::types::{
-    CharacterRecord, ContractRecord, InventoryItemRecord, MailRecord, MarketOrderRecord,
-    SystemDynamicState, WalletJournalEntry,
+    AsteroidRecord, CharacterRecord, ContractRecord, InventoryItemRecord, MailRecord,
+    MarketOrderRecord, SystemDynamicState, WalletJournalEntry,
 };
 use crate::IskCents;
 
@@ -311,4 +311,35 @@ fn evedb_kills_all_remaining_sqlite_store_mutants() {
         tx.commit().expect("commit");
         assert!(d.full_snapshot.is_some(), "sub_idx {sub_idx} must set cold_changed");
     }
+}
+
+#[test]
+fn fp_asteroid_sensitive_to_all_ten_fields() {
+    let base = AsteroidRecord {
+        asteroid_id: 70_000_001,
+        solar_system_id: 30_000_142,
+        belt_id: 40_009_082,
+        type_id: 1230,
+        quantity: 10_000,
+        initial_quantity: 15_000,
+        position: (1.5, -2.5, 3.5),
+        radius: 125.0,
+    };
+    let h0 = fp_asteroid(&base);
+    assert_ne!(fp_asteroid(&AsteroidRecord { asteroid_id: 70_000_002, ..base }), h0);
+    assert_ne!(fp_asteroid(&AsteroidRecord { solar_system_id: 30_000_143, ..base }), h0);
+    assert_ne!(fp_asteroid(&AsteroidRecord { belt_id: 40_009_083, ..base }), h0);
+    assert_ne!(fp_asteroid(&AsteroidRecord { type_id: 1228, ..base }), h0);
+    assert_ne!(fp_asteroid(&AsteroidRecord { quantity: 9_999, ..base }), h0);
+    assert_ne!(fp_asteroid(&AsteroidRecord { initial_quantity: 15_001, ..base }), h0);
+    assert_ne!(fp_asteroid(&AsteroidRecord { position: (1.6, -2.5, 3.5), ..base }), h0);
+    assert_ne!(fp_asteroid(&AsteroidRecord { position: (1.5, -2.6, 3.5), ..base }), h0);
+    assert_ne!(fp_asteroid(&AsteroidRecord { position: (1.5, -2.5, 3.6), ..base }), h0);
+    assert_ne!(fp_asteroid(&AsteroidRecord { radius: 125.5, ..base }), h0);
+
+    let mut snap = build_populated_snapshot();
+    let asteroid_id = base.asteroid_id;
+    snap.asteroids.insert(asteroid_id, base);
+    let fp = compute_fingerprints(&snap);
+    assert_eq!(fp.asteroids[&asteroid_id], h0);
 }

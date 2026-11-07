@@ -64,8 +64,8 @@ pub(super) fn grant_all_skills_for_types(ctx: &ServerContext, char_id: i64, type
     });
 }
 
-#[tokio::test]
-async fn test_combat_ewar_and_capacitor_warfare_mechanics() {
+#[test]
+fn test_combat_ewar_and_capacitor_warfare_mechanics() {
     // parity: feat:combat.nosferatu-drain-cap, feat:combat.energy-neutralizer-cycle, feat:combat.target-painter-bloom, feat:combat.sensor-dampener-targeting-range, feat:combat.sensor-dampener-scan-resolution, feat:combat.tracking-disruptor-optimal-falloff, feat:combat.tracking-disruptor-tracking-speed, feat:combat.guidance-disruptor-missiles, feat:combat.ecm-burst-radius, rpc:charUnboundMgr.SelectCharacterID
     eve_testkit::attest(&[
         "feat:combat.nosferatu-drain-cap", "feat:combat.energy-neutralizer-cycle", "feat:combat.target-painter-bloom",
@@ -73,6 +73,23 @@ async fn test_combat_ewar_and_capacitor_warfare_mechanics() {
         "feat:combat.tracking-disruptor-optimal-falloff", "feat:combat.tracking-disruptor-tracking-speed",
         "feat:combat.guidance-disruptor-missiles", "feat:combat.ecm-burst-radius",
     ]);
+
+    std::thread::Builder::new()
+        .name("test_combat_ewar".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(test_combat_ewar_and_capacitor_warfare_mechanics_impl());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn test_combat_ewar_and_capacitor_warfare_mechanics_impl() {
 
     let ctx = ServerContext::new();
     let kw = HashMap::new();

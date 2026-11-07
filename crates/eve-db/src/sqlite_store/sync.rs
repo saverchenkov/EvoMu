@@ -1188,7 +1188,7 @@ pub fn sync_dirty_to_sqlite(
         fp.asteroids.remove(&id);
     }
     for (&id, ast) in &snap.asteroids {
-        let h = fp_json(ast);
+        let h = fp_asteroid(ast);
         if fp.asteroids.get(&id) != Some(&h) {
             cold_changed = true;
             tx.execute(

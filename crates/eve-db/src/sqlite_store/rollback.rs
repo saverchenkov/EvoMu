@@ -640,7 +640,7 @@ pub fn rollback_dirty_from_sqlite(
     snap.asteroids
         .retain(|id, _| fp.asteroids.contains_key(id));
     for (&id, &eh) in &fp.asteroids {
-        if snap.asteroids.get(&id).map(fp_json) != Some(eh) {
+        if snap.asteroids.get(&id).map(fp_asteroid) != Some(eh) {
             let ast_res = conn.query_row(
                 "SELECT asteroid_id, solar_system_id, belt_id, type_id, quantity, initial_quantity, x, y, z, radius FROM asteroids WHERE asteroid_id = ?1",
                 params![id],

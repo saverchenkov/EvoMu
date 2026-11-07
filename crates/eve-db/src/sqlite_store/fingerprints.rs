@@ -609,6 +609,22 @@ pub(crate) fn fp_json<T: serde::Serialize>(val: &T) -> u64 {
     h.finish()
 }
 
+#[inline]
+pub fn fp_asteroid(a: &AsteroidRecord) -> u64 {
+    let mut h = FnvHasher::new();
+    h.write_i64(a.asteroid_id);
+    h.write_u32(a.solar_system_id);
+    h.write_i64(a.belt_id);
+    h.write_u32(a.type_id);
+    h.write_i64(a.quantity);
+    h.write_i64(a.initial_quantity);
+    h.write_u64(a.position.0.to_bits());
+    h.write_u64(a.position.1.to_bits());
+    h.write_u64(a.position.2.to_bits());
+    h.write_u64(a.radius.to_bits());
+    h.finish()
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TableFingerprints {
     pub next_entity_id: i64,
@@ -771,7 +787,7 @@ pub fn compute_fingerprints(snap: &WorldStateSnapshot) -> TableFingerprints {
         fp.licensed_skins.insert(cid, fp_json(skins));
     }
     for (&id, ast) in &snap.asteroids {
-        fp.asteroids.insert(id, fp_json(ast));
+        fp.asteroids.insert(id, fp_asteroid(ast));
     }
     for (&cid, &v) in &snap.character_last_jump_unix {
         fp.character_last_jump_unix.insert(cid, v);

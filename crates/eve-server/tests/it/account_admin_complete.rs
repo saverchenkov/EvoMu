@@ -619,7 +619,14 @@ async fn test_user_svc_profile_logoff_feedback_and_multi_training() {
         .expect("GetCreateDate");
     assert!(cdate.as_i64().is_some());
     let utok = ctx.dispatch_rpc(&mut sess, "userSvc", None, "GetUserToken", &[], &kw, None).await.expect("GetUserToken");
-    assert!(matches!(utok, PyRep::String(s) if s.starts_with("sso-tok-")));
+    let PyRep::String(utok_str) = utok else {
+        panic!("expected String JWT from userSvc.GetUserToken");
+    };
+    let verified = ctx
+        .db
+        .verify_quasar_bearer_jwt(&utok_str, ctx.now_unix())
+        .expect("valid GetUserToken JWT");
+    assert_eq!(verified.user_id, sess.user_id.unwrap());
 
     // 2. CastUpvote, CastDownvote
     let up = ctx.dispatch_rpc(&mut sess, "userSvc", None, "CastUpvote", &[PyRep::Integer(101)], &kw, None).await.expect("CastUpvote");
