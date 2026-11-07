@@ -60,16 +60,17 @@ async fn test_lp_store_personal_and_corp_purchase_live() {
         .sde
         .agents
         .values()
-        .find(|a| {
+        .filter(|a| {
             a.corporation_id == CALDARI_NAVY_CORP
                 && a.level == 1
                 && a.agent_type_id == 2
-                && a.division_id != 22
+                && a.division_id == 24
                 && a.station_id.is_some()
                 && a.solar_system_id.is_some()
         })
+        .min_by_key(|a| a.agent_id)
         .cloned()
-        .expect("Caldari Navy L1 non-courier agent in SDE");
+        .expect("Caldari Navy L1 security agent in SDE");
     let caldari_agent_id = agent.agent_id;
     let agent_sys_id = agent.solar_system_id.unwrap();
     let station_id = agent.station_id.unwrap();

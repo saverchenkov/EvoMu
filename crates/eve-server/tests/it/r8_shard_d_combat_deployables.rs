@@ -78,7 +78,7 @@ fn seed_item(
 
 #[tokio::test]
 async fn test_r8_499_aoe_doomsday_fuel_flags_contract_locks_and_post_death_cancellation() {
-    // parity: feat:modules.doomsday-bosonic-field, feat:modules.doomsday-gtfo-reaper
+    // regression: feat:modules.doomsday-bosonic-field, feat:modules.doomsday-gtfo-reaper
     let ctx = paused_ctx();
     let titan = common::gm_pilot_in_space(&ctx, 1, 91_499_001, AVATAR, NULLSEC_SYS).await;
     let victim = common::gm_pilot_in_space(&ctx, 2, 91_499_002, VEXOR, NULLSEC_SYS).await;
@@ -199,7 +199,7 @@ async fn test_r8_499_aoe_doomsday_fuel_flags_contract_locks_and_post_death_cance
 
 #[tokio::test]
 async fn test_r8_501_nested_sma_and_container_loot_rigs_orphans_and_turret_disconnected_capsule() {
-    // parity: feat:ships.ship-maintenance-bay, feat:lifecycle.world-unobserved-system-sim
+    // regression: feat:ships.ship-maintenance-bay, feat:lifecycle.world-unobserved-system-sim
     let ctx = paused_ctx();
     let c1 = common::gm_pilot_in_space(&ctx, 1, 91_501_001, ARCHON, NULLSEC_SYS).await;
     let attacker = common::gm_pilot_in_space(&ctx, 2, 91_501_002, VEXOR, NULLSEC_SYS).await;
@@ -308,7 +308,7 @@ async fn test_r8_501_nested_sma_and_container_loot_rigs_orphans_and_turret_disco
 
 #[tokio::test]
 async fn test_r8_511_mobile_depot_anchoring_cleanup_shield_resists_and_mmju_restrictions() {
-    // parity: feat:structures.mobile-depot-lifetime-reinforce, feat:structures.mobile-micro-jump-unit
+    // regression: feat:structures.mobile-depot-lifetime-reinforce, feat:structures.mobile-micro-jump-unit
     let ctx = paused_ctx();
     let pilot = common::gm_pilot_in_space(&ctx, 1, 91_511_001, VEXOR, NULLSEC_SYS).await;
     let other = common::gm_pilot_in_space(&ctx, 2, 91_511_002, VEXOR, NULLSEC_SYS).await;

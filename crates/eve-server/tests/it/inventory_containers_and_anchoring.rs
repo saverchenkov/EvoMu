@@ -329,6 +329,7 @@ async fn test_secure_container_anchoring_rules_and_security() {
     eve_testkit::attest(&["feat:inventory.secure-container-anchoring"]);
 
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let mut sess = select_pilot(&ctx, 60_051, "demo", "demo-secret", CHAR1_ID).await;
 
     let (ship_id, cont_id) = (824_001i64, 824_002i64);
