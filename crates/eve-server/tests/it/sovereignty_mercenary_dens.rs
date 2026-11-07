@@ -847,6 +847,7 @@ async fn test_sov_cyno_jammer_upgrade_and_hub_hacking_parity() {
             },
         );
         snap.module_online_states.insert(984_100, true);
+        snap.skills.entry(hacker_cid).or_default().insert(21_718, eve_db::TrainedSkillRecord { type_id: 21_718, level: 5, skill_points: 256_000.0 });
     });
     ctx.invalidate_ship_fitting(hacker_ship);
     lock_target_via_rpc(&ctx, &mut s_hacker, null_sys, hacker_ship, hub_id).await;
@@ -855,38 +856,27 @@ async fn test_sov_cyno_jammer_upgrade_and_hub_hacking_parity() {
 
     rpc_call(&ctx, &mut s_hacker, "dogmaIM", "Activate", &[PyRep::Integer(984_100), PyRep::String("dataHacking".into()), PyRep::Integer(hub_id)])
         .await.expect("start Data Analyzer on Sov Hub");
-    rpc_call(&ctx, &mut s_hacker, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(hub_id)])
-        .await.expect("start hacking board");
 
     let mut progress_values = Vec::new();
     let mut won = false;
-    for _pass in 0..8 {
-        for tile in 1..24i64 {
-            for _ in 0..5 {
-                if let Ok(step) = rpc_call(&ctx, &mut s_hacker, "hackingMgr", "ClickedOnTile", &[PyRep::Integer(hub_id), PyRep::Integer(tile)]).await {
-                    for n in ctx.drain_notifications_for_char(PILOT) {
-                        if n.event == "OnLocalHackProgressUpdated" {
-                            assert_eq!(n.args[0].as_i64(), Some(hub_id));
-                            if let Some(p) = n.args[1].as_f64() {
-                                progress_values.push(p);
-                            }
-                        } else if n.event == "OnSovHubHacked" {
-                            assert_eq!(n.args[0].as_i64(), Some(hub_id));
-                        }
+    for _attempt in 0..2 {
+        let start_rep = rpc_call(&ctx, &mut s_hacker, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(hub_id)])
+            .await.expect("start hacking board");
+        let grid_size = start_rep.dict_get("gridSize").and_then(|v| v.as_i64()).unwrap_or(24) as u32;
+        let res = crate::sovereignty_equinox_gameplay::hack_board_to_win_with(&ctx, &mut s_hacker, hub_id, grid_size, |_| {
+            for n in ctx.drain_notifications_for_char(PILOT) {
+                if n.event == "OnLocalHackProgressUpdated" {
+                    assert_eq!(n.args[0].as_i64(), Some(hub_id));
+                    if let Some(p) = n.args[1].as_f64() {
+                        progress_values.push(p);
                     }
-                    if step.dict_get("status").and_then(|v| v.as_str()) == Some("Won") {
-                        won = true;
-                        break;
-                    }
-                } else {
-                    break;
+                } else if n.event == "OnSovHubHacked" {
+                    assert_eq!(n.args[0].as_i64(), Some(hub_id));
                 }
             }
-            if won {
-                break;
-            }
-        }
-        if won {
+        }).await;
+        if res.is_some() {
+            won = true;
             break;
         }
     }
@@ -968,11 +958,17 @@ async fn test_mercenary_den_lifecycle_evolution_and_anarchy_parity() {
         .await.unwrap().dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
     let _ = drain_quasar(&mut rx);
 
-    // Stage 1 (0..19): 65 IDK/hr, 0% workforce disruption.
+    // Stage 1 (0..19): planet-scaled IDK/hr, 0% workforce disruption.
+    let exp_rate1 = eve_server::services::quasar_sov_mercden::planet_scaled_infomorphs_per_hour(
+        Some(&ctx.sde),
+        null_sys,
+        temp_planet,
+        1,
+    );
     ctx.advance_secs(2 * 3_600);
     let d_2h = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_req(1, den_id as u64)).await.payload.unwrap().value;
     let info_2h = field(&field(&d_2h, 4).unwrap(), 2).unwrap();
-    assert_eq!(varint(&info_2h, 1), Some(130), "2h at stage 1 yields 2 * 65 = 130 IDK");
+    assert_eq!(varint(&info_2h, 1), Some(2 * u64::from(exp_rate1)), "2h at stage 1 yields 2 * planet-scaled IDK/hr");
     assert_eq!(ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available), base_wf);
 
     // Advance to Day 4 (Dev 20, Anarchy 20 -> Stage 2): 68 IDK/hr, still 0% workforce disruption.
@@ -1009,12 +1005,18 @@ async fn test_mercenary_den_lifecycle_evolution_and_anarchy_parity() {
     assert_eq!(ext.dict_get("ownerShare").and_then(|v| v.as_i64()), Some(2_250));
     assert_eq!(ext.dict_get("taxShare").and_then(|v| v.as_i64()), Some(750));
 
+    let exp_rate5 = eve_server::services::quasar_sov_mercden::planet_scaled_infomorphs_per_hour(
+        Some(&ctx.sde),
+        null_sys,
+        temp_planet,
+        5,
+    );
     ctx.advance_secs(3_600);
     let d_s5 = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_req(1, den_id as u64)).await.payload.unwrap().value;
     let info_s5 = field(&field(&d_s5, 4).unwrap(), 2).unwrap();
-    assert_eq!(varint(&info_s5, 1), Some(78), "1h at stage 5 yields 78 IDK");
+    assert_eq!(varint(&info_s5, 1), Some(u64::from(exp_rate5)), "1h at stage 5 yields planet-scaled IDK/hr");
 
-    // Completing an MTO at max Development (100) grants +350 bonus infomorphs (78 -> 428) and lowers Anarchy 100 -> 90 (stage 4: -300 wf)!
+    // Completing an MTO at max Development (100) grants +350 bonus infomorphs and lowers Anarchy 100 -> 90 (stage 4: -300 wf)!
     let acts = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenRequest", id_req(1, den_id as u64)).await.payload.unwrap().value;
     let first_act = fields(&acts, 1).into_iter().next().unwrap();
     let mut start_req = Vec::new();
@@ -1045,7 +1047,7 @@ async fn test_mercenary_den_lifecycle_evolution_and_anarchy_parity() {
         }
         step_weapon_ticks(&ctx, null_sys).await;
     }
-    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.mercenary_dens[&den_id].infomorphs), 428);
+    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.mercenary_dens[&den_id].infomorphs), exp_rate5 + 350);
     assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.mercenary_dens[&den_id].anarchy_level), 90);
     assert_eq!(ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available) + 300, base_wf);
 

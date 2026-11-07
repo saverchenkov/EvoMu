@@ -569,20 +569,7 @@ async fn notify_batch9_milestones_redeeming_crates_and_assembly() {
         .is_err());
 
     // Positive: ClaimLoot on a valid crate (type 40520 or 3466/crate)
-    let crate_type_id = ctx
-        .sde
-        .types
-        .values()
-        .find(|t| {
-            (t.name.contains("Crate")
-                || t.name.contains("Box")
-                || t.name.contains("Cache")
-                || t.name.contains("Bundle")
-                || t.name.contains("Package"))
-                && ctx.sde.type_materials.get(&t.type_id).is_some_and(|m| !m.is_empty())
-        })
-        .map(|t| t.type_id)
-        .unwrap_or(40520);
+    let crate_type_id = 50_036_u32; // Amaranthine Divide Facial Augmentation Package (fixed loot crate)
     let crate_id = 920_000_011_i64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
@@ -4039,6 +4026,14 @@ async fn test_batch3_facwar_bunker_vulnerable() {
             })
             .expect("Frontline FW system occupation")
     });
+    let prev_station = sess_a.station_id;
+    let enlist_st = prev_station.unwrap_or(JITA_STATION);
+    sess_a.station_id = Some(enlist_st);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.station_id = Some(enlist_st);
+        }
+    });
     rpc(
         &ctx,
         &mut sess_a,
@@ -4048,8 +4043,10 @@ async fn test_batch3_facwar_bunker_vulnerable() {
     )
     .await
     .unwrap();
+    sess_a.station_id = prev_station;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.station_id = prev_station;
             ch.solar_system_id = fw_sys;
         }
     });

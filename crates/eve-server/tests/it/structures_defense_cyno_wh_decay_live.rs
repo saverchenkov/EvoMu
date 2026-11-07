@@ -85,6 +85,12 @@ async fn test_structures_board_eject_and_defense_settings_live() {
     ctx.advance_secs(31);
 
     // 1. Create a player corporation and age it past the 7-day anchoring requirement.
+    let dock_st = ctx.db.with_mut_snapshot(|s| {
+        let ch = s.characters.get_mut(&char_id).unwrap();
+        ch.station_id = Some(ch.home_station_id);
+        ch.home_station_id
+    });
+    pilot.sess.station_id = Some(dock_st);
     let _ = ok(
         &ctx,
         &mut pilot,
@@ -96,6 +102,10 @@ async fn test_structures_board_eject_and_defense_settings_live() {
         ],
     )
     .await;
+    pilot.sess.station_id = None;
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&char_id).unwrap().station_id = None;
+    });
     ctx.advance_secs(7 * 86_400 + 31);
 
     // 2. Deploy Astrahus in space via live anchoring RPC.

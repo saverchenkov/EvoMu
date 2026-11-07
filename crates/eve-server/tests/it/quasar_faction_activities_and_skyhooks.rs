@@ -456,6 +456,9 @@ async fn test_sovereignty_hub_resources_and_fuel() {
     let fuel_item_id = 9_900_001i64;
     ctx.db.with_mut_snapshot(|snap| {
         seed_char(snap, cid, 30, corp_id, null_sys);
+        snap.corporations.entry(corp_id).or_default().ceo_id = cid;
+        snap.corporations.entry(corp_id).or_default().members.insert(cid);
+        snap.corporations.entry(corp_id).or_default().member_roles.insert(cid, eve_db::corp_roles::ROLE_DIRECTOR);
         seed_structure(snap, hub_id, corp_id, null_sys, TYPE_SOVEREIGNTY_HUB);
         snap.sov_runtime
             .sov_hubs
@@ -467,6 +470,7 @@ async fn test_sovereignty_hub_resources_and_fuel() {
                 type_id: TYPE_MAGMATIC_GAS,
                 owner_id: corp_id,
                 location_id: hub_id,
+                flag: eve_db::InventoryFlag::CorpSAG1,
                 quantity: 1_000,
                 singleton: false,
                 ..Default::default()
@@ -627,12 +631,16 @@ async fn test_mercenary_den_activities_and_notices() {
 #[tokio::test]
 async fn test_skyhook_admin() {
     let ctx = ServerContext::new();
-    let (cid, corp_id, skyhook_id, sys_id) = (90_000_050i64, 1_000_009i64, 1_070_000_001i64, 30_000_142u32);
+    let (cid, corp_id, skyhook_id, sys_id) = (90_000_050i64, 98_000_001i64, 1_070_000_001i64, 30_000_142u32);
     let mut player_sess = make_session(9, 50, cid, corp_id, false);
     let mut admin_sess = make_session(8, 50, cid, corp_id, true);
 
     ctx.db.with_mut_snapshot(|snap| {
         seed_char(snap, cid, 50, corp_id, sys_id);
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.members.insert(cid);
+            corp.member_roles.insert(cid, corp_roles::ROLE_DIRECTOR);
+        }
         seed_structure(snap, skyhook_id, corp_id, sys_id, TYPE_ORBITAL_SKYHOOK);
     });
 

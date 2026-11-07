@@ -152,7 +152,32 @@ async fn test_sp7_unobserved_system_simulation_and_background_cluster_tick() {
             type_id: 3_300, target_level: 1, start_sp: 249.9, end_sp: 250.0,
             duration_seconds: 1.0, started_at_unix: Some(now0),
         }]);
+        if let Some(crim) = snap.characters.get_mut(&90_000_002) {
+            crim.station_id = None;
+            crim.structure_id = None;
+            crim.solar_system_id = sys_id;
+            crim.active_ship_id = 100_000_002;
+        }
+        snap.items.insert(
+            100_000_002,
+            sp6_item(100_000_002, 587, 90_000_002, sys_id as i64, InventoryFlag::None, HashMap::new()),
+        );
     });
+    let _ = sys_handle
+        .spawn_ball_with_meta(
+            Ball {
+                id: 100_000_002, type_id: 587, position: DVec3::new(91_000.0, 0.0, 0.0),
+                velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 2.0,
+                mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+            SlimItemMeta {
+                group_id: 25, category_id: 6, owner_id: 90_000_002, char_id: Some(90_000_002),
+                corp_id: 1_000_009, alliance_id: -1, security_status: 0.0, is_cloaked: false, ..Default::default()
+            },
+        )
+        .await;
     ctx.crimewatch.write().unwrap().states.entry(90_000_002).or_default().pending_concord_arrival =
         Some((sys_id, now0 + 5, 100_000_002, 90_000_001));
 
@@ -253,6 +278,14 @@ async fn test_sp7_restart_reloads_structures_wrecks_jetcans_mwd_bubbles_and_dron
         }
 
         // 1. Anchor an Upwell Astrahus structure (`35832`) via `structureDeployment.Anchor`
+        let prev_station = sess.station_id;
+        let dock_st = prev_station.unwrap_or(60_003_760);
+        sess.station_id = Some(dock_st);
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+                ch.station_id = Some(dock_st);
+            }
+        });
         ctx.dispatch_rpc(
             &mut sess,
             "corpmgr",
@@ -268,6 +301,12 @@ async fn test_sp7_restart_reloads_structures_wrecks_jetcans_mwd_bubbles_and_dron
         )
         .await
         .expect("CreateCorporation");
+        sess.station_id = prev_station;
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+                ch.station_id = prev_station;
+            }
+        });
         ctx.db.with_mut_snapshot(|snap| {
             for g in snap.corp_governance.values_mut() {
                 g.created_unix = 1;
@@ -646,6 +685,8 @@ async fn test_sp7_downtime_cleans_npc_wrecks_and_respawns_accepted_mission_waves
     });
 
     // Pilot warps back to the mission pocket after downtime -> initial 4-NPC wave spawns on pocket entry
+    ctx.advance_secs(905); // Advance past 11:00–11:15 UTC downtime window before warping
+    tick_background_cluster(&ctx).await;
     let beyonce_oid = ctx.bind_object(&sess, "beyonce", sys_id as i64).expect("bind beyonce");
     ctx.dispatch_rpc(
         &mut sess,

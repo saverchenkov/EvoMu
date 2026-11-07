@@ -501,7 +501,7 @@ async fn sov_info_adm_scaling_dev_indices_and_map_data() {
     if let PyRep::List(list) = structs_info {
         assert_eq!(list.len(), 2);
         let hub_rep = list.iter().find(|s| s.dict_get("structureID").and_then(|v| v.as_i64()) == Some(hub_id)).unwrap();
-        assert_eq!(hub_rep.dict_get("corporationID").and_then(|v| v.as_i64()), Some(corp_id));
+        assert_eq!(hub_rep.dict_get("ownerID").and_then(|v| v.as_i64()), Some(corp_id));
         assert_eq!(hub_rep.dict_get("allianceID").and_then(|v| v.as_i64()), Some(alliance_id));
         assert_eq!(hub_rep.dict_get("vulnerableStartTime").and_then(|v| v.as_i64()), Some(1000));
         assert_eq!(hub_rep.dict_get("vulnerableEndTime").and_then(|v| v.as_i64()), Some(5000));
@@ -832,6 +832,7 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
             },
         );
         s.module_online_states.insert(990_300, true);
+        s.skills.entry(hacker_cid).or_default().insert(21_718, eve_db::TrainedSkillRecord { type_id: 21_718, level: 5, skill_points: 256_000.0 });
     });
     ctx.invalidate_ship_fitting(hacker_ship);
     crate::sovereignty_equinox_gameplay::lock_target_via_rpc(&ctx, &mut s_hacker, sys_id, hacker_ship, hub_id).await;
@@ -839,25 +840,16 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
     sov_call(&ctx, &mut s_hacker, "dogmaIM", "Activate", &[PyRep::Integer(990_300), PyRep::String("dataHacking".into()), PyRep::Integer(hub_id)])
         .await
         .expect("activate Data Analyzer I");
-    sov_call(&ctx, &mut s_hacker, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(hub_id)])
-        .await
-        .expect("StartNewGameInstance");
     let mut won = false;
-    for _pass in 0..8 {
-        for tile in 1..24 {
-            for _ in 0..5 {
-                if let Ok(step) = sov_call(&ctx, &mut s_hacker, "hackingMgr", "ClickedOnTile", &[PyRep::Integer(hub_id), PyRep::Integer(tile)]).await {
-                    if step.dict_get("status").and_then(|v| v.as_str()) == Some("Won") {
-                        won = true;
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-            if won { break; }
+    for _attempt in 0..2 {
+        let start_rep = sov_call(&ctx, &mut s_hacker, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(hub_id)])
+            .await
+            .expect("StartNewGameInstance");
+        let grid_size = start_rep.dict_get("gridSize").and_then(|v| v.as_i64()).unwrap_or(24) as u32;
+        if crate::sovereignty_equinox_gameplay::hack_board_to_win_with(&ctx, &mut s_hacker, hub_id, grid_size, |_| {}).await.is_some() {
+            won = true;
+            break;
         }
-        if won { break; }
     }
     assert!(won, "live hacking minigame must complete with Won");
     assert!(sov_services::is_hub_hacked(&ctx, hub_id));

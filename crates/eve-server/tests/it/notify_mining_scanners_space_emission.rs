@@ -400,7 +400,8 @@ async fn notify_mining_probes_scanners_and_space_emission() {
     assert!(undock_disc.contains(&vec![st_oid, PyRep::Integer(macho_client_b), st_ref]));
     assert!(undock_disc.contains(&vec![rp_oid, PyRep::Integer(macho_client_b), rp_ref]));
 
-    let (cr_bid, cr_oid, cr_ref) = macho_bind(&ctx, &mut sess_b, "corpRegistry", 1_000_009).await;
+    let corp_b = sess_b.corporation_id.unwrap_or(1_000_009);
+    let (cr_bid, cr_oid, cr_ref) = macho_bind(&ctx, &mut sess_b, "corpRegistry", corp_b).await;
     let _ = drain_all(&ctx, &mut sess_b, PILOT_B);
     rpc(&ctx, &mut sess_b, "corpRegistry", "UnBind", &[PyRep::Integer(cr_bid as i64)]).await.expect("UnBind");
     let _ = sess_b.drain_notifications();
@@ -522,6 +523,6 @@ async fn notify_mining_probes_scanners_and_space_emission() {
     let heal_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
     let remote_args = find_notif(&heal_notifs, "OnRemoteMessage");
     assert_eq!(remote_args.len(), 2);
-    assert_eq!(remote_args[0], PyRep::String("CustomInfo".into()));
-    assert!(remote_args[1].dict_get("info").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()));
+    assert_eq!(remote_args[0], PyRep::String("CustomNotify".into()));
+    assert!(remote_args[1].dict_get("notify").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()));
 }

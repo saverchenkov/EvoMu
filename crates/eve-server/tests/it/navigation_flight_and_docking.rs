@@ -2239,16 +2239,17 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
     let init_items = ctx.db.with_snapshot(|s| s.items.len());
 
     // 1. Daily login campaign (backed by SDE seasonalcampaignsloginrewards)
+    let sde_campaigns = eve_server::services::campaigns_and_milestones::get_sde_login_campaigns(&ctx.sde);
     let state = rpc(&ctx, &mut sess, "loginCampaignManager", "get_client_campaign_state", &[])
         .await
         .expect("get_client_campaign_state");
-    assert!(
-        state
-            .dict_get("static_data")
-            .and_then(|d| d.dict_get("campaign_id"))
-            .and_then(|v| v.as_i64())
-            .is_some()
-    );
+    let daily_cid = state
+        .dict_get("static_data")
+        .and_then(|d| d.dict_get("campaign_id"))
+        .and_then(|v| v.as_i64())
+        .expect("campaign_id in static_data");
+    let daily_camp = sde_campaigns.get(&daily_cid).expect("daily SDE campaign");
+    let clone_grade = ctx.db.with_snapshot(|s| s.characters[&char_id].clone_grade);
     assert_eq!(
         state
             .dict_get("item_progress")
@@ -2264,7 +2265,7 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
         panic!("expected Tuple from claim_reward day 1");
     };
     assert_eq!(claim1_tuple[0].dict_get("reward_index").and_then(|v| v.as_i64()), Some(1));
-    assert_eq!(claim1_tuple[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(80_937));
+    assert_eq!(claim1_tuple[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(i64::from(daily_camp.alpha_rewards[&0].type_id)));
     assert!(claim1_tuple[0].dict_get("itemID").and_then(|v| v.as_i64()).is_some());
 
     // Duplicate claim on same day raises DailyRewardAlreadyClaimedToday
@@ -2294,7 +2295,7 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
         panic!("expected Tuple from claim_reward day 2");
     };
     assert_eq!(claim2_tuple[0].dict_get("reward_index").and_then(|v| v.as_i64()), Some(2));
-    assert_eq!(claim2_tuple[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(82_052));
+    assert_eq!(claim2_tuple[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(i64::from(daily_camp.alpha_rewards[&1].type_id)));
 
     // 2. Seasonal login campaign (SDE campaign 2323 scheduled via GM /campaign)
     let mut gm_sess = SessionState::new(8099);
@@ -2339,9 +2340,20 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
     );
 
     // Verify all 6 SDE reward items (day 1 alpha+omega, day 2 alpha+omega, seasonal day 1 alpha+omega) were delivered
+    let seasonal_camp = sde_campaigns.get(&2323).expect("seasonal SDE campaign 2323");
+    let mut expected_types = vec![
+        daily_camp.alpha_rewards[&0].type_id,
+        daily_camp.alpha_rewards[&1].type_id,
+        seasonal_camp.alpha_rewards[&0].type_id,
+    ];
+    if clone_grade >= 2 {
+        expected_types.push(daily_camp.omega_rewards[&0].type_id);
+        expected_types.push(daily_camp.omega_rewards[&1].type_id);
+        expected_types.push(seasonal_camp.omega_rewards[&0].type_id);
+    }
     ctx.db.with_snapshot(|s| {
-        assert_eq!(s.items.len(), init_items + 6);
-        for expected_type in [80_937, 49_809, 82_052, 29_266, 87_900] {
+        assert_eq!(s.items.len(), init_items + expected_types.len());
+        for expected_type in expected_types {
             assert!(
                 s.items.values().any(|it| {
                     it.owner_id == char_id
@@ -2402,6 +2414,41 @@ async fn test_custom_agency_provider_content_nearby_sites() {
     sess.solar_system_id = Some(sys_id);
     sess.station_id = None;
     sess.structure_id = None;
+
+    let content0 = rpc(&ctx, &mut sess, "custom_agency_provider", "get_content_data", &[])
+        .await
+        .expect("get_content_data seed");
+    let _ = content0;
+    let ship_id = ctx.db.with_snapshot(|s| s.characters[&char_id].active_ship_id);
+    let sig_pos = ctx.db.with_snapshot(|s| {
+        eve_destiny::DVec3::from_array(
+            s.cosmic_signatures
+                .get(&sys_id)
+                .and_then(|v| v.first())
+                .expect("HEK signature")
+                .position,
+        )
+    });
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_h
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: sig_pos + eve_destiny::DVec3::new(10_000.0, 0.0, 0.0),
+                velocity: eve_destiny::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 2.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(char_id, ship_id, 587),
+        )
+        .await;
+    sess.ship_id = Some(ship_id);
+    let _ = common::probe_scan(&ctx, &mut sess, sig_pos, 0.25 * 149_597_870_700.0).await;
 
     let content = rpc(&ctx, &mut sess, "custom_agency_provider", "get_content_data", &[])
         .await

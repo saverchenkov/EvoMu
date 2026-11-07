@@ -237,19 +237,19 @@ async fn test_wormhole_mass_reduction_destabilization_and_collapse() {
 
     assert_eq!(
         derive_wormhole_buckets(&sig, ctx.now_unix(), &ctx.sde).mass_stability_description,
-        "This wormhole has not yet had its stability significantly disrupted"
+        "This wormhole has not yet had its stability significantly disrupted by ships passing through it."
     );
 
     sig.remaining_mass_kg = 40_000_000.0; // 40%
     assert_eq!(
         derive_wormhole_buckets(&sig, ctx.now_unix(), &ctx.sde).mass_stability_description,
-        "This wormhole has had its stability reduced by ships passing through it"
+        "This wormhole has had its stability reduced by ships passing through it, but not to a critical degree yet."
     );
 
     sig.remaining_mass_kg = 8_000_000.0; // 8%
     assert_eq!(
         derive_wormhole_buckets(&sig, ctx.now_unix(), &ctx.sde).mass_stability_description,
-        "This wormhole has had its stability critically disrupted"
+        "This wormhole has had its stability critically disrupted by the mass of numerous ships passing through and is on the verge of collapse."
     );
 
     // 3. Perform jumps: mass reduction by exact ship mass (16,910,000 kg) and collapse on exhaustion
@@ -281,7 +281,7 @@ async fn test_wormhole_mass_reduction_destabilization_and_collapse() {
     let jump2 = ctx.dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(wh_ext_id)], &kw, None).await.unwrap();
     let post_rem2 = jump2.dict_get("remainingMassKg").and_then(|v| v.as_f64()).unwrap();
     assert!((post_rem2 - 6_180_000.0).abs() < 1e-3);
-    assert_eq!(jump2.dict_get("massStabilityDescription").and_then(|v| v.as_str()), Some("This wormhole has had its stability critically disrupted"));
+    assert_eq!(jump2.dict_get("massStabilityDescription").and_then(|v| v.as_str()), Some("This wormhole has had its stability critically disrupted by the mass of numerous ships passing through and is on the verge of collapse."));
 
     // Reset position near entrance in sys_id:
     sess.solar_system_id = Some(sys_id);

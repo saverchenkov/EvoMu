@@ -791,6 +791,7 @@ pub(crate) async fn handle_module_cycles(
                     }
                 }
             };
+            let mut effect_name = effect_name;
             let duration_s = if duration_ms > 0.0 { duration_ms / 1000.0 } else { 1.0 };
             let mut cap_need = mod_state.get_attribute(attr_ids::CAPACITOR_NEED, &ctx.sde);
             let speed_factor = mod_state.get_attribute(attr_ids::SPEED_FACTOR, &ctx.sde);
@@ -804,6 +805,9 @@ pub(crate) async fn handle_module_cycles(
                 });
                 if is_covert_cloak && fit.ship.get_attribute(906, &ctx.sde) <= 0.0 && !matches!(ship_group_id, 830 | 833 | 898 | 963 | 1202 | 1283 | 1527 | 1972) {
                     return Some(Err(BridgeRpcError { code: "ShipCannotUseCovertCloak".into(), message: "Ship cannot activate Covert Ops Cloaking Device".into() }));
+                }
+                if !effect_name.starts_with("cloaking") {
+                    effect_name = if is_covert_cloak { "cloakingWarpSafe" } else { "cloaking" }.to_string();
                 }
                 let vel_mod = mod_state.get_attribute(306, &ctx.sde);
                 if is_covert_cloak || (vel_mod - 1.0).abs() < 1e-6 { 0.0 } else if vel_mod > 0.0 && vel_mod < 1.0 { vel_mod - 1.0 } else { 0.0 }

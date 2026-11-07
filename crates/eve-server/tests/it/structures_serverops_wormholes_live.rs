@@ -240,6 +240,12 @@ async fn test_serverops_node_balancing_and_time_dilation_live() {
     );
 
     // Movement delta in Jita (TiDi 0.50) is half of Perimeter (TiDi 1.00) at steady speed over identical wall dt
+    bind_rpc(&ctx, &mut jita_pilot, "beyonce", "CmdGotoDirection", &[PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)])
+        .await
+        .expect("CmdGotoDirection Jita");
+    bind_rpc(&ctx, &mut perim_pilot, "beyonce", "CmdGotoDirection", &[PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)])
+        .await
+        .expect("CmdGotoDirection Perimeter");
     bind_rpc(&ctx, &mut jita_pilot, "beyonce", "CmdSetSpeedFraction", &[PyRep::Real(1.0)])
         .await
         .expect("CmdSetSpeedFraction Jita");

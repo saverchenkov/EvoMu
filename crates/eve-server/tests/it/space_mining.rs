@@ -1115,6 +1115,14 @@ async fn test_r3_track1_mining_pve_fw_regressions() {
 
     // #113: Data/Relic/Ghost sites cannot be completed via EnterCombatAnomaly while containers are unhacked
     eve_server::services::pve_exploration::ensure_system_pve_sites_seeded(&ctx, 30_000_142).await;
+    let dat_pos = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system
+            .get(&30_000_142)
+            .and_then(|l| l.iter().find(|s| s.site_id == "DAT-30000142"))
+            .map(|s| eve_destiny::DVec3::from_array(s.position))
+            .unwrap()
+    });
+    assert!(ctx.systems.get_or_spawn(30_000_142).set_ball_position(ship_id, dat_pos).await);
     let unhacked_err = ctx
         .dispatch_rpc(
             &mut sess,

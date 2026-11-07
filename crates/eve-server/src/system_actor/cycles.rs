@@ -262,8 +262,9 @@ pub(crate) fn step_cycles_and_capacitor(
     let mut finished_indices = Vec::new();
     let mut burned_ship_modules: Vec<(BallId, i64)> = Vec::new();
     for (idx, cycle) in active_module_cycles.iter_mut().enumerate() {
-        // If the source ship was destroyed / removed from space mid-cycle, cancel module cycle (`feat:combat.active-armor-repair-cycle-end`).
-        if !ballpark.balls.contains_key(&cycle.ship_id) {
+        // If the source ship was destroyed / removed from space mid-cycle (or decloaked by proximity/physics), cancel module cycle (`feat:combat.active-armor-repair-cycle-end`).
+        let cloak_decloaked = cycle.effect_name.starts_with("cloaking") && ballpark.combat_states.get(&cycle.ship_id).is_some_and(|cs| !cs.is_cloaked && cs.cloak_original_max_velocity.is_none());
+        if !ballpark.balls.contains_key(&cycle.ship_id) || cloak_decloaked {
             finished_indices.push(idx);
             continue;
         }

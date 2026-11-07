@@ -188,6 +188,9 @@ async fn sovereignty_hub_startup_fuel_workforce_relay_and_planet_resources() {
             version: 1,
             system_epoch: 1,
         });
+        snap.corporations.entry(CORP_ID).or_default().ceo_id = PILOT_ID;
+        snap.corporations.entry(CORP_ID).or_default().members.insert(PILOT_ID);
+        snap.corporations.entry(CORP_ID).or_default().member_roles.insert(PILOT_ID, corp_roles::ROLE_DIRECTOR);
         snap.structures.insert(HUB_JITA, structure(HUB_JITA, CORP_ID, JITA, TYPE_SOV_HUB));
         snap.structures.insert(HUB_PERIMETER, structure(HUB_PERIMETER, CORP_ID, PERIMETER, TYPE_SOV_HUB));
         snap.structures.insert(HUB_SOBAS, structure(HUB_SOBAS, CORP_ID, SOBAS, TYPE_SOV_HUB));
@@ -361,6 +364,9 @@ async fn sovereignty_skyhook_reagent_scaling_and_mercenary_den() {
             version: 1,
             system_epoch: 1,
         });
+        snap.corporations.entry(CORP_ID).or_default().ceo_id = PILOT_ID;
+        snap.corporations.entry(CORP_ID).or_default().members.insert(PILOT_ID);
+        snap.corporations.entry(CORP_ID).or_default().member_roles.insert(PILOT_ID, corp_roles::ROLE_DIRECTOR);
         snap.structures.insert(skyhook_id, structure(skyhook_id, CORP_ID, JITA, TYPE_SKYHOOK));
         snap.sov_runtime.skyhook_planets.insert(skyhook_id, planet_a);
         snap.sov_runtime.skyhook_active.insert(skyhook_id, false);

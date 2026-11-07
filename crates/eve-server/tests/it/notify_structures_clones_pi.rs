@@ -830,6 +830,14 @@ async fn notify_batch7_cosmetics_petitions_mail_pi_and_escalations() {
         }
     }
     clear_wave(&ctx, site_id).await;
+    let gate_pos = with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system
+            .get(&SYS_JITA)
+            .and_then(|l| l.iter().find(|s| s.site_id == site_id))
+            .map(|s| DVec3::from_array(s.position))
+            .unwrap()
+    });
+    assert!(ctx.systems.get_or_spawn(SYS_JITA).set_ball_position(ship_a, gate_pos).await);
     rpc(&ctx, &mut sess_a, "scanSvc", "EnterCombatAnomaly", &[PyRep::String(site_id.into()), PyRep::Bool(true)])
         .await
         .expect("EnterCombatAnomaly wave 2");
@@ -837,6 +845,7 @@ async fn notify_batch7_cosmetics_petitions_mail_pi_and_escalations() {
     // Seed 3 gives SplitMix64 first draw 0.1135 < 0.20 (natural 20% escalation roll)
     ctx.set_mechanic_rng_seed(Some(3));
     let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    assert!(ctx.systems.get_or_spawn(SYS_JITA).set_ball_position(ship_a, gate_pos).await);
     rpc(&ctx, &mut sess_a, "scanSvc", "EnterCombatAnomaly", &[PyRep::String(site_id.into()), PyRep::Bool(true)])
         .await
         .expect("Complete anomaly with escalation");
@@ -1034,10 +1043,27 @@ async fn notify_batch7_abyssal_void_missions_fw_sov_pvp_and_tourney() {
                 victory_points_threshold: 3_000,
             },
         );
+    });
+    // Avoid straddling the 11:00–11:15 UTC daily downtime window during the 10-minute complex capture tick
+    let sec_of_day = ctx.now_unix() % 86_400;
+    if (38_400..42_000).contains(&sec_of_day) {
+        ctx.advance_secs(42_000 - sec_of_day);
+        tick_background_cluster(&ctx).await;
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.station_id = Some(JITA_STATION);
+            ch.standings.insert(500_004, 1.0);
+        }
+    });
+    sess_a.station_id = Some(JITA_STATION);
+    rpc(&ctx, &mut sess_a, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(500_004)])
+        .await
+        .expect("Enlist Gallente Militia");
+    ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
             ch.station_id = None;
             ch.solar_system_id = front_sys;
-            ch.standings.insert(500_004, 1.0);
         }
         if let Some(sh) = snap.items.get_mut(&ship_a) {
             sh.type_id = 593; // Tristan (T1 Frigate)
@@ -1047,9 +1073,6 @@ async fn notify_batch7_abyssal_void_missions_fw_sov_pvp_and_tourney() {
     });
     sess_a.station_id = None;
     sess_a.solar_system_id = Some(front_sys);
-    rpc(&ctx, &mut sess_a, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(500_004)])
-        .await
-        .expect("Enlist Gallente Militia");
     let _ = rpc(&ctx, &mut sess_a, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[])
         .await
         .expect("Spawn FW complexes");

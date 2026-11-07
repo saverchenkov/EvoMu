@@ -74,7 +74,7 @@ async fn test_npc_mining_op_and_defense_fleet_live() {
     .await;
     assert!(def_ball_id > 0, "Mining defense escort must spawn");
 
-    // 3. Player arrives in combat ship to attack the mining op
+    // 3. Player arrives in combat ship to attack the mining op (T1 Frigate so miner Venture survives shot 1 before being destroyed)
     let (mut sess, guns) = setup_space_pilot(
         &ctx,
         8101,
@@ -83,9 +83,9 @@ async fn test_npc_mining_op_and_defense_fleet_live() {
         90_000_001,
         sys_id,
         910_501,
-        54733,
-        54754,
-        54783,
+        587,
+        3074,
+        215,
         925_000,
         belt_pos + DVec3::new(10_000.0, 0.0, 0.0),
     )
@@ -284,7 +284,7 @@ async fn test_zarzakh_gate_guns_and_patrols_live() {
 
     let sys_handle = ctx.systems.get_or_spawn(zarzakh_sys);
 
-    // 2. Setup hostile pilot in Zarzakh near the gate gun
+    // 2. Setup hostile pilot in Zarzakh near the gate gun (suspect flag triggers ZarzakhGateGun ECM retaliation)
     let (mut sess_a, _guns_a) = setup_space_pilot(
         &ctx,
         8103,
@@ -295,12 +295,19 @@ async fn test_zarzakh_gate_guns_and_patrols_live() {
         910_503,
         587,
         3074,
-        12_625,
+        215,
         925_200,
         gun_pos + DVec3::new(2_000.0, 0.0, 0.0),
     )
     .await;
     let _beyonce_a = bind_beyonce(&ctx, &mut sess_a, zarzakh_sys).await;
+    ctx.crimewatch
+        .write()
+        .unwrap()
+        .states
+        .entry(90_000_001)
+        .or_default()
+        .suspect_flag_until_unix = ctx.now_unix() + 900;
 
     // Pilot initiates target lock on the Gate Gun
     rpc(&ctx, &mut sess_a, "dogmaIM", "AddTarget", &[PyRep::Integer(gate_gun_id)])

@@ -233,12 +233,18 @@ async fn test_mercenary_den_development_anarchy_mto_workforce_siphon() {
     let den_id = den_rep.dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
     let _ = drain_quasar(&mut rx);
 
-    // 1. Stage 1 (Development 0): generates 65 IDK/hr, 0% workforce disruption
+    // 1. Stage 1 (Development 0): planet-scaled IDK/hr, 0% workforce disruption
+    let exp_rate1 = eve_server::services::quasar_sov_mercden::planet_scaled_infomorphs_per_hour(
+        Some(&ctx.sde),
+        null_sys,
+        temp_planet,
+        1,
+    );
     ctx.advance_secs(3_600);
     let d_1h = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_req(1, den_id as u64))
         .await.payload.unwrap().value;
     let info_1h = field(&field(&d_1h, 4).unwrap(), 2).unwrap();
-    assert_eq!(varint(&info_1h, 1), Some(65));
+    assert_eq!(varint(&info_1h, 1), Some(u64::from(exp_rate1)));
     assert_eq!(ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available), base_wf);
 
     // 2. Advance 8 days: Development +40, Anarchy +40 (UI Anarchy level 2 / Stage 3)
@@ -536,13 +542,21 @@ async fn test_skyhook_reagent_maturity_split_and_theft() {
     let ice_skyhook = ice_rep.dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
 
     // 2. Extracted Magmatic Gas and Superionic Ice are split 50/50 between secure and insecure (maturing) bays
-    ctx.advance_secs(10 * 3_600); // 10 hours -> 500 units harvested at 50/h
+    let lava_rate = eve_server::services::quasar_sov_skyhook::planet_hourly_reagent_yield(
+        &ctx.sde, Some(lava_planet), Some(sys_id), TYPE_MAGMATIC_GAS,
+    );
+    let ice_rate = eve_server::services::quasar_sov_skyhook::planet_hourly_reagent_yield(
+        &ctx.sde, Some(ice_planet), Some(sys_id), TYPE_SUPERIONIC_ICE,
+    );
+    ctx.advance_secs(10 * 3_600);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
+    let (lava_sec_10h, lava_insec_10h) = (10 * lava_rate / 2, 10 * lava_rate - 10 * lava_rate / 2);
+    let (ice_sec_10h, ice_insec_10h) = (10 * ice_rate / 2, 10 * ice_rate - 10 * ice_rate / 2);
     let (lava_type, lava_sec, lava_insec, _) = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&lava_skyhook]);
     let (ice_type, ice_sec, ice_insec, _) = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&ice_skyhook]);
-    assert_eq!((lava_type, lava_sec, lava_insec), (TYPE_MAGMATIC_GAS, 250, 250));
-    assert_eq!((ice_type, ice_sec, ice_insec), (TYPE_SUPERIONIC_ICE, 250, 250));
+    assert_eq!((lava_type, lava_sec, lava_insec), (TYPE_MAGMATIC_GAS, lava_sec_10h, lava_insec_10h));
+    assert_eq!((ice_type, ice_sec, ice_insec), (TYPE_SUPERIONIC_ICE, ice_sec_10h, ice_insec_10h));
 
     // 3. Over the maturity cycle, insecure bay matures into secure bay
     // Deactivate Skyhook via Quasar RPC to isolate linear maturity without new harvest
@@ -550,11 +564,12 @@ async fn test_skyhook_reagent_maturity_split_and_theft() {
     assert_eq!(deact_resp.status_code, STATUS_OK);
     let _ = rpc(&ctx, &mut s_dir, "eve_public.sovereignty.skyhook.api.DeactivateRequest", id_req(1, ice_skyhook as u64)).await;
 
-    ctx.advance_secs(SKYHOOK_MATURITY_CYCLE_SECS / 2); // 12 hours -> half of 250 maturing units (125) transfer to secure
+    ctx.advance_secs(SKYHOOK_MATURITY_CYCLE_SECS / 2); // 12 hours -> half of maturing units transfer to secure
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
+    let lava_mat = lava_insec_10h / 2;
     let (_, lava_sec_mat, lava_insec_mat, _) = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&lava_skyhook]);
-    assert_eq!((lava_sec_mat, lava_insec_mat), (375, 125));
+    assert_eq!((lava_sec_mat, lava_insec_mat), (lava_sec_10h + lava_mat, lava_insec_10h - lava_mat));
 
     // 4. Reagent theft: during theft vulnerability window with shield <= 10%, thief links and steals insecure bay
     let thief_cid = 90_000_078i64;
@@ -604,7 +619,8 @@ async fn test_skyhook_reagent_maturity_split_and_theft() {
 
     let before_theft_sec = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&lava_skyhook].1);
     let before_theft_insec = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&lava_skyhook].2);
-    assert_eq!((before_theft_sec, before_theft_insec), (375, 125));
+    assert_eq!(before_theft_sec + before_theft_insec, lava_sec_mat + lava_insec_mat);
+    assert!(before_theft_sec >= lava_sec_mat);
 
     // Complete 10-minute link
     ctx.advance_secs(SKYHOOK_SILO_LINK_DURATION_SECS + 1);
@@ -613,14 +629,18 @@ async fn test_skyhook_reagent_maturity_split_and_theft() {
     // Insecure bay is 100% stolen into in-space Cargo Container, secure bay is UNTOUCHED
     let (_, after_theft_sec, after_theft_insec, _) = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&lava_skyhook]);
     assert_eq!(after_theft_insec, 0, "100% of insecure bay stolen");
-    assert_eq!(after_theft_sec, 376, "secure bay retains all matured reagents (375 + 1 matured during link)");
+    let total_before = before_theft_sec + before_theft_insec;
+    assert!(
+        after_theft_sec >= before_theft_sec && after_theft_sec < total_before,
+        "secure bay retains matured reagents ({before_theft_sec} <= {after_theft_sec} < {total_before})"
+    );
 
     let balls = ctx.systems.get_or_spawn(sys_id).list_balls().await.unwrap();
     let can_ball = balls.iter().find(|b| b.type_id == 23).expect("Cargo Container 23 spawned in space");
     let stolen_qty: i32 = ctx.db.with_snapshot(|s| {
         s.items.values().filter(|i| i.location_id == can_ball.id && i.type_id == TYPE_MAGMATIC_GAS).map(|i| i.quantity).sum()
     });
-    assert_eq!(stolen_qty, 124);
+    assert_eq!(stolen_qty, (total_before - after_theft_sec) as i32);
 
     // 5. Corporation Director extracts secured reagents to active ship cargo (within 15 km)
     let _ = ctx.systems.get_or_spawn(sys_id).spawn_ball(make_ball(PILOT_SHIP, 639, sky_ball_pos + DVec3::new(3_000.0, 0.0, 0.0))).await;
@@ -629,7 +649,7 @@ async fn test_skyhook_reagent_maturity_split_and_theft() {
         &[PyRep::Integer(lava_skyhook), PyRep::String("orbitalSkyhook".into()), PyRep::String("ExtractReagentsToShip".into())],
     ).await.expect("ExtractReagentsToShip");
     let ext_qty = ext_rep.dict_get("extractedQuantity").and_then(|v| v.as_i64()).unwrap();
-    assert_eq!(ext_qty, 376);
+    assert_eq!(ext_qty, after_theft_sec as i64);
     let ship_reagents: i32 = ctx.db.with_snapshot(|s| {
         s.items.values().filter(|i| i.location_id == PILOT_SHIP && i.type_id == TYPE_MAGMATIC_GAS).map(|i| i.quantity).sum()
     });

@@ -914,7 +914,17 @@ pub fn record_npc_threat_event(
     let sig_weight = (sig_radius / 40.0).clamp(0.5, 5.0) * 10.0;
     let role_mult = if is_ewar { 1.5 } else if is_logistics { 1.3 } else { 1.0 };
     let delta = (damage_dealt.max(if is_ewar || is_logistics { 120.0 } else { 0.0 }) + sig_weight) * role_mult;
+    let mining_sys_opt = [npc_ball_id, npc_ball_id - 1_000_000, npc_ball_id - 2_000_000].into_iter()
+        .find_map(|id| ctx.living_world.get_convoy(id))
+        .filter(|c| c.archetype == crate::living_world::NpcArchetype::MiningOp).map(|c| c.current_system_id);
     let relay_sys_opt = with_mut_combat_ephemeral(ctx, |rt| {
+        if let Some(sys_id) = mining_sys_opt {
+            for npc in rt.npc_entities.values_mut().filter(|n| n.solar_system_id == sys_id && matches!(n.archetype.as_str(), "Navy" | "CaldariNavy" | "MinmatarNavy" | "AmarrNavy" | "GallenteNavy")) {
+                let entry = npc.aggression_threat.entry(attacker_ball_id).or_insert(100.0);
+                *entry += delta;
+                npc.threat_table.insert(attacker_ball_id, *entry);
+            }
+        }
         if let Some(npc) = rt.npc_entities.get_mut(&npc_ball_id) {
             if npc.archetype == "TransmissionRelay" || npc.type_id == 41_589 {
                 return Some(npc.solar_system_id);

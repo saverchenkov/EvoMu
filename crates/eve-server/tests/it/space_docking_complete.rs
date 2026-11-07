@@ -473,6 +473,14 @@ async fn test_session_change_timer_triggers_and_coverage() {
         }
     });
 
+    let prev_station = sess.station_id;
+    let dock_st = prev_station.unwrap_or(60_003_760);
+    sess.station_id = Some(dock_st);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(dock_st);
+        }
+    });
     let add_corp_res = rpc(
         &ctx,
         &mut sess,
@@ -482,6 +490,12 @@ async fn test_session_change_timer_triggers_and_coverage() {
     )
     .await
     .expect("AddCorporation");
+    sess.station_id = prev_station;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = prev_station;
+        }
+    });
     let new_corp_id = match &add_corp_res {
         PyRep::KeyVal(kv) => kv.get("corporationID").and_then(|v| v.as_i64()).unwrap(),
         _ => panic!("Expected KeyVal from AddCorporation"),

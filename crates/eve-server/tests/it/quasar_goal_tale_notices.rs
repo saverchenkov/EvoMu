@@ -312,7 +312,8 @@ async fn incursion_tale_notices_follow_seeding_and_mothership_defeat() {
     }
     assert!(drain(&mut rx, "eve_public.tale").is_empty(), "the tale keeps running until the mothership dies");
     let ms_bid = crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys, &site_of("Mothership")).await;
-    let (_, dead, _) = hq.apply_damage_with_attacker(ms_bid, dmg, Some(90_000_001)).await.unwrap().unwrap();
+    let ms_dmg = DamageVector { em: 10_000_000.0, thermal: 10_000_000.0, kinetic: 10_000_000.0, explosive: 10_000_000.0 };
+    let (_, dead, _) = hq.apply_damage_with_attacker(ms_bid, ms_dmg, Some(90_000_001)).await.unwrap().unwrap();
     assert!(dead);
     let stopped = drain(&mut rx, "eve_public.tale");
     assert_eq!(stopped.len(), 1);

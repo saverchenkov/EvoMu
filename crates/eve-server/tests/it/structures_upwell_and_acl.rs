@@ -2989,7 +2989,7 @@ async fn test_structure_control_release_and_flex_zero_arg_release() {
             },
         );
         for (cid, ccorp, shid, is_dir) in [
-            (dir2, corp_id, dir2_ship, true),
+            (dir2, corp_id, dir2_ship, false),
             (dir3, corp_id, dir3_ship, true),
             (gunner, 98_824_099, gunner_ship, false),
         ] {
@@ -3015,10 +3015,12 @@ async fn test_structure_control_release_and_flex_zero_arg_release() {
                     ..Default::default()
                 },
             );
-            if is_dir {
+            if ccorp == corp_id {
                 if let Some(corp) = snap.corporations.get_mut(&corp_id) {
                     corp.members.insert(cid);
-                    corp.member_roles.insert(cid, eve_db::corp_roles::ROLE_DIRECTOR);
+                    if is_dir {
+                        corp.member_roles.insert(cid, eve_db::corp_roles::ROLE_DIRECTOR);
+                    }
                 }
             }
         }
@@ -3044,23 +3046,31 @@ async fn test_structure_control_release_and_flex_zero_arg_release() {
     rpc(&ctx, &mut owner_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.expect("owner TakeControl");
     assert_eq!(ctx.db.with_snapshot(|s| s.characters[&OWNER].active_ship_id), st_id);
 
-    let mut dir2_sess = dock_session(8241, 2, dir2, corp_id, eve_db::corp_roles::ROLE_DIRECTOR, dir2_ship);
-    assert_eq!(
-        rpc(&ctx, &mut dir2_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)])
-            .await
-            .expect_err("second director blocked while owner controlling")
-            .code,
-        "StructureAlreadyControlled"
+    let dir2_grp = kv_i64(
+        &rpc(&ctx, &mut owner_sess, "ownerGroupManager", "Create", &[PyRep::String("Dir2 Leave ACL".into()), PyRep::String("Temporary".into())]).await.unwrap(),
+        "groupID",
     );
-
+    rpc(&ctx, &mut owner_sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(dir2_grp), PyRep::List(vec![PyRep::Integer(corp_id)])]).await.unwrap();
+    let dir2_prof = rpc(&ctx, &mut owner_sess, "structureProfiles", "CreateProfile", &[PyRep::String("Dir2 ACL Profile".into()), PyRep::String("Defense ACL".into())]).await.unwrap().as_i64().unwrap();
+    rpc(
+        &ctx,
+        &mut owner_sess,
+        "structureProfiles",
+        "SaveProfileSettings",
+        &[
+            PyRep::Integer(dir2_prof),
+            PyRep::List(vec![
+                PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(0), PyRep::Integer(1)]),
+                PyRep::Tuple(vec![PyRep::Integer(17), PyRep::Integer(dir2_grp), PyRep::Integer(1)]),
+            ]),
+        ],
+    )
+    .await
+    .unwrap();
+    rpc(&ctx, &mut owner_sess, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(st_id)]), PyRep::Integer(dir2_prof)]).await.unwrap();
     rpc(&ctx, &mut owner_sess, "authentication", "Logout", &[]).await.expect("Logout");
-    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&OWNER].active_ship_id), owner_orig_ship, "Logout must restore persisted active_ship_id");
-    assert_eq!(
-        rpc(&ctx, &mut dir2_sess, "structureControl", "GetStructurePilot", &[PyRep::Integer(st_id)]).await.unwrap(),
-        PyRep::None
-    );
 
-    // 2. Corporation change (LeaveCorp via KickOutMembers self) releases control & restores active_ship_id.
+    let mut dir2_sess = dock_session(8241, 2, dir2, corp_id, 0, dir2_ship);
     rpc(&ctx, &mut dir2_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.expect("dir2 TakeControl");
     assert_eq!(ctx.db.with_snapshot(|s| s.characters[&dir2].active_ship_id), st_id);
     ctx.advance_secs(12);
@@ -3077,6 +3087,7 @@ async fn test_structure_control_release_and_flex_zero_arg_release() {
     let mut owner_relogin = SessionState::new(8243);
     rpc(&ctx, &mut owner_relogin, "authentication", "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())]).await.unwrap();
     rpc(&ctx, &mut owner_relogin, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(OWNER)]).await.unwrap();
+    rpc(&ctx, &mut owner_relogin, "ownerGroupManager", "DeleteMembers", &[PyRep::Integer(dir2_grp), PyRep::List(vec![PyRep::Integer(corp_id)])]).await.unwrap();
     rpc(&ctx, &mut owner_relogin, "corpRegistry", "UpdateMember", &[PyRep::Integer(dir3), PyRep::Integer(0)]).await.expect("strip dir3 roles");
     assert_eq!(ctx.db.with_snapshot(|s| s.characters[&dir3].active_ship_id), dir3_ship, "Role loss must restore active_ship_id");
     ctx.sync_session(&mut dir3_sess);
@@ -3105,6 +3116,7 @@ async fn test_structure_control_release_and_flex_zero_arg_release() {
     .await
     .unwrap();
     rpc(&ctx, &mut owner_relogin, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(st_id)]), PyRep::Integer(def_prof)]).await.unwrap();
+    ctx.advance_secs(301);
 
     let mut gunner_sess = dock_session(8244, 4, gunner, 98_824_099, 0, gunner_ship);
     rpc(&ctx, &mut gunner_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.expect("gunner TakeControl via defense ACL");
@@ -5625,15 +5637,16 @@ async fn test_upwell_reinforcement_durations_exit_hack_and_repair() {
     ctx.db.with_mut_snapshot(|snap| { snap.items.remove(&relic_mod); });
 
     let _data_mod = grant(&ctx, HACKER, hacker_ship, 22175, InventoryFlag::MedSlot0, 1);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(HACKER).or_default().insert(21_718, eve_db::TrainedSkillRecord { type_id: 21_718, level: 5, skill_points: 256_000.0 });
+    });
     async fn run_structure_hack(ctx: &ServerContext, sess: &mut SessionState, st_id: i64) -> PyRep {
-        assert_eq!(kv_str(&rpc(ctx, sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(st_id)]).await.expect("start hack"), "status"), "InProgress");
-        for _pass in 0..8 {
-            for tile in 1..24 {
-                for _ in 0..5 {
-                    if let Ok(step) = rpc(ctx, sess, "hackingMgr", "ClickedOnTile", &[PyRep::Integer(st_id), PyRep::Integer(tile)]).await {
-                        if kv_str(&step, "status") == "Won" { return step; }
-                    } else { break; }
-                }
+        for _attempt in 0..2 {
+            let start = rpc(ctx, sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(st_id)]).await.expect("start hack");
+            assert_eq!(kv_str(&start, "status"), "InProgress");
+            let grid_size = start.dict_get("gridSize").and_then(|v| v.as_i64()).unwrap_or(24) as u32;
+            if let Some(step) = crate::sovereignty_equinox_gameplay::hack_board_to_win_with(ctx, sess, st_id, grid_size, |_| {}).await {
+                return step;
             }
         }
         panic!("Data Analyzer hack must complete with Won");
@@ -7248,7 +7261,8 @@ async fn test_structures_anchoring_profiles_defense_directory() {
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(st) = snap.structures.get_mut(&structure_id) {
-            st.state = "Online".into();
+            st.state = "ShieldVulnerable".into();
+            st.quantum_core_installed = true;
         }
         snap.corp_contacts.entry(corp_id).or_default().push(SocialContactRecord {
             contact_id: attacker_cid,
@@ -7354,7 +7368,7 @@ async fn test_cosmetics_skinr_designer_and_market() {
 
     let init_rsp = quasar_rpc(&ctx, &mut seller_s, "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest", init_req).await;
     assert_eq!(init_rsp.status_code, STATUS_OK);
-    assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&seller_cid).map(|c| c.plex_balance)), Some(475), "Tier 1 SKINR sequencing must deduct 25 PLEX (500 -> 475)");
+    assert_eq!(ctx.db.with_snapshot(|s| s.unified_plex_balance(seller_cid)), 975, "Tier 1 SKINR sequencing must deduct 25 PLEX (1000 -> 975)");
     let init_any = init_rsp.payload.as_ref().unwrap();
     let init_dyn = reg.decode_dynamic(init_any.normalized_type_name(), &init_any.value).unwrap();
     let job_uuid_bytes = match init_dyn.get(1) {

@@ -238,6 +238,11 @@ async fn test_sov_adm_scaled_entosis_counter_regen_command_nodes_and_loss() {
         .min()
         .expect("SDE frigate NPC");
     for _ in 0..5 {
+        if let Some(st) = ctx.systems.get_or_spawn(null_sys).ballpark.write().unwrap().combat_states.get_mut(&def_ship) {
+            st.shield_hp = st.max_shield_hp;
+            st.armor_hp = st.max_armor_hp;
+            st.structure_hp = st.max_structure_hp;
+        }
         let npc = slash(&ctx, &mut s_def, &format!("/spawnnpc {npc_type}")).await.dict_get("npcID").and_then(|v| v.as_i64()).unwrap();
         lock_and_destroy_target(&ctx, &mut s_def, null_sys, def_ship, &def_guns, npc).await;
     }

@@ -129,19 +129,15 @@ pub(crate) fn caller(ctx: &AuthoritativeContext, snap: &WorldStateSnapshot) -> R
         _ => ctx_corp.ok_or((STATUS_FORBIDDEN, format!("Character {cid} has no corporation")))?,
     };
     let alliance = ch.and_then(|c| c.alliance_id).or_else(|| corp_alliance(snap, corp));
-    let roles = if crate::quasar_gateway::require_admin_role(ctx).is_ok() {
-        u64::MAX
-    } else {
-        let (is_ceo, eff) =
-            super::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-                snap,
-                corp,
-                cid,
-                0,
-                ctx.now_unix(),
-            );
-        if is_ceo { u64::MAX } else { eff }
-    };
+    let (is_ceo, eff) =
+        super::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+            snap,
+            corp,
+            cid,
+            0,
+            ctx.now_unix(),
+        );
+    let roles = if is_ceo { u64::MAX } else { eff };
     Ok(Caller { cid, corp, alliance, roles })
 }
 

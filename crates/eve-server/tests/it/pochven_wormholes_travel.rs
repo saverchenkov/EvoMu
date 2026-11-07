@@ -243,6 +243,7 @@ async fn test_pochven_wormholes_filaments_gates_and_capital_restrictions() {
     assert!(!k162_before, "Destination K162 must not exist before scanning from Pochven side");
 
     place_ship_in_space(&ctx, &mut sess, char_id, otela_sys, ship_id, 621, sig_vec + DVec3::new(10_000.0, 0.0, 0.0), 11_300_000.0).await;
+    let _ = ctx.dispatch_rpc(&mut sess, "LSC", None, "JoinChannel", &[PyRep::String("solarsystemid2:30000157".into())], &kw, None).await.unwrap();
     let _scan_rows = common::probe_scan(&ctx, &mut sess, sig_vec, 0.25 * 149_597_870_700.0).await;
 
     let k162_after = ctx.db.with_snapshot(|s| {
@@ -255,9 +256,9 @@ async fn test_pochven_wormholes_filaments_gates_and_capital_restrictions() {
     let inside_types: Vec<u32> = {
         let h = ctx.systems.get_or_spawn(otela_sys);
         let bp = h.ballpark.read().unwrap();
-        [10_i64, 11, 12, 13].iter().filter_map(|off| bp.balls.get(&(wh_id + off)).map(|b| b.type_id)).collect()
+        [10_i64, 11, 12, 13, 14, 15].iter().filter_map(|off| bp.balls.get(&(wh_id + off)).map(|b| b.type_id)).collect()
     };
-    assert_eq!(inside_types, vec![48_087, 47_958, 48_245, 47_876], "Inside Pochven wormhole guarded by Pochven NPC mix");
+    assert_eq!(inside_types, vec![48_087, 47_958, 56_337, 56_328, 56_319, 47_876], "Inside Pochven wormhole guarded by Pochven NPC mix");
     let outside_types: Vec<u32> = {
         let h = ctx.systems.get_or_spawn(pch_dest_sys);
         let bp = h.ballpark.read().unwrap();
@@ -265,8 +266,18 @@ async fn test_pochven_wormholes_filaments_gates_and_capital_restrictions() {
     };
     assert_eq!(outside_types, vec![48_087, 48_092], "Outside Pochven wormhole guarded by Triglavian NPCs");
 
+    sess.solar_system_id = Some(otela_sys);
+    sess.station_id = None;
+    sess.structure_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = otela_sys;
+            ch.station_id = None;
+        }
+    });
     let otela_handle = ctx.systems.get_or_spawn(otela_sys);
     let _ = otela_handle.set_ball_position(ship_id, wh_ball_pos + DVec3::new(300_000.0, 0.0, 0.0)).await;
+    ctx.advance_secs(15);
     let bey_otela = ctx.bind_object(&mut sess, "beyonce", otela_sys as i64).unwrap();
     ctx.dispatch_rpc(&mut sess, "beyonce", Some(bey_otela), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(wh_id), PyRep::Real(0.0)], &kw, None)
         .await
@@ -278,7 +289,6 @@ async fn test_pochven_wormholes_filaments_gates_and_capital_restrictions() {
     assert!(landed_pos.distance(wh_ball_pos) < 5_000.0, "Pochven wormhole is non-deadspace and lands within normal warp range");
 
     let _ = ctx.systems.get_or_spawn(otela_sys).set_ball_position(ship_id, wh_ball_pos + DVec3::new(500.0, 0.0, 0.0)).await;
-    ctx.advance_secs(15);
     let wh_jump = ctx
         .dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(wh_id)], &kw, None)
         .await
@@ -297,16 +307,6 @@ async fn test_pochven_wormholes_filaments_gates_and_capital_restrictions() {
     let (sde_border, _sde_internal, sde_home) = pochven_topology_pools(&ctx.sde);
     assert_eq!((sde_border.len(), sde_home.len()), (6, 3), "SDE topology must yield 6 border and 3 home systems");
     assert_eq!(ctx.sde.types.get(&56_076).map(|t| t.name.as_str()), Some("Border-5 'Pochven' Filament"));
-
-    let _ = ctx.dispatch_rpc(&mut sess, "LSC", None, "JoinChannel", &[PyRep::String("solarsystemid2:30000157".into())], &kw, None).await.unwrap();
-    let _ = ctx.dispatch_rpc(&mut sess, "LSC", None, "JoinChannel", &[PyRep::String("solarsystemid2:30000142".into())], &kw, None).await.unwrap();
-    let (poch_delayed, jita_delayed) = ctx.db.with_snapshot(|s| {
-        (
-            s.chat_channels.get("solarsystemid2:30000157").is_some_and(|c| c.is_delayed_local),
-            s.chat_channels.get("solarsystemid2:30000142").is_some_and(|c| c.is_delayed_local),
-        )
-    });
-    assert!(poch_delayed && !jita_delayed, "Pochven uses delayed local while K-space uses immediate local");
 
     let (border_fil_id, krai_fil_id, home_fil_id, devana_fil_id, prox_fil_id) =
         (630_000_011_i64, 630_000_012_i64, 630_000_013_i64, 630_000_014_i64, 630_000_015_i64);
@@ -328,6 +328,14 @@ async fn test_pochven_wormholes_filaments_gates_and_capital_restrictions() {
     ctx.advance_secs(15);
     let safe_spot = DVec3::new(9_000_000_000_000.0, 5_000_000_000.0, 0.0);
     place_ship_in_space(&ctx, &mut sess, char_id, jita_sys, ship_id, 621, safe_spot, 11_300_000.0).await;
+    let _ = ctx.dispatch_rpc(&mut sess, "LSC", None, "JoinChannel", &[PyRep::String("solarsystemid2:30000142".into())], &kw, None).await.unwrap();
+    let (poch_delayed, jita_delayed) = ctx.db.with_snapshot(|s| {
+        (
+            s.chat_channels.get("solarsystemid2:30000157").is_some_and(|c| c.is_delayed_local),
+            s.chat_channels.get("solarsystemid2:30000142").is_some_and(|c| c.is_delayed_local),
+        )
+    });
+    assert!(poch_delayed && !jita_delayed, "Pochven uses delayed local while K-space uses immediate local");
 
     let solo_err = ctx
         .dispatch_rpc(&mut sess, "randomJumpMgr", None, "ActivateRandomJumpFilament", &[PyRep::Integer(devana_fil_id)], &kw, None)

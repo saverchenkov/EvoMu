@@ -182,6 +182,12 @@ async fn test_shipcaster_landing_pads_and_factions_live() {
     assert_eq!(initial_caldari, PyRep::List(Vec::new()));
 
     // 3. Enlist in Caldari State militia and deploy + build a beacon in Onatoh (30002811)
+    let home_st = ctx.db.with_mut_snapshot(|s| {
+        let ch = s.characters.get_mut(&pilot.char_id).unwrap();
+        ch.station_id = Some(ch.home_station_id);
+        ch.home_station_id
+    });
+    pilot.sess.station_id = Some(home_st);
     rpc(
         &ctx,
         &mut pilot.sess,
@@ -191,6 +197,10 @@ async fn test_shipcaster_landing_pads_and_factions_live() {
     )
     .await
     .expect("CreateMyDirectEnlistment");
+    pilot.sess.station_id = None;
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&pilot.char_id).unwrap().station_id = None;
+    });
 
     let pad_id = deploy_and_build_caldari_beacon_live(&ctx, &mut pilot, 30_002_811).await;
 
@@ -409,6 +419,12 @@ async fn test_interstellar_shipcaster_war_hq_and_zarzakh_jump_live() {
     let mut pilot = common::gm_pilot_in_space(&ctx, 71_004, 92_300_001, 648, 30_000_142).await;
 
     // 1. Enlist in Caldari State militia and build a Caldari FW landing pad in Onatoh (30002811)
+    let home_st = ctx.db.with_mut_snapshot(|s| {
+        let ch = s.characters.get_mut(&pilot.char_id).unwrap();
+        ch.station_id = Some(ch.home_station_id);
+        ch.home_station_id
+    });
+    pilot.sess.station_id = Some(home_st);
     rpc(
         &ctx,
         &mut pilot.sess,
@@ -418,6 +434,10 @@ async fn test_interstellar_shipcaster_war_hq_and_zarzakh_jump_live() {
     )
     .await
     .expect("CreateMyDirectEnlistment");
+    pilot.sess.station_id = None;
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&pilot.char_id).unwrap().station_id = None;
+    });
 
     let pad_id = deploy_and_build_caldari_beacon_live(&ctx, &mut pilot, 30_002_811).await;
 
@@ -488,6 +508,14 @@ async fn test_interstellar_shipcaster_war_hq_and_zarzakh_jump_live() {
     .expect_err("Empire militia must be refused by Deathless Shipcaster");
     assert_eq!(refused.code, "EmpireMilitiaRefused");
 
+    let prev_sess_station = pilot.sess.station_id;
+    let prev_char_station = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&pilot.char_id)?;
+        let prev = ch.station_id;
+        ch.station_id = Some(60_003_760);
+        Some(prev)
+    }).flatten();
+    pilot.sess.station_id = Some(60_003_760);
     rpc(
         &ctx,
         &mut pilot.sess,
@@ -497,6 +525,12 @@ async fn test_interstellar_shipcaster_war_hq_and_zarzakh_jump_live() {
     )
     .await
     .expect("RemoveMyDirectEnlistment");
+    pilot.sess.station_id = prev_sess_station;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&pilot.char_id) {
+            ch.station_id = prev_char_station;
+        }
+    });
 
     clear_session_change_timer(&ctx, pilot.char_id);
     let zarzakh_ok = rpc(

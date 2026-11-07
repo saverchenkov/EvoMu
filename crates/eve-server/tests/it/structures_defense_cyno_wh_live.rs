@@ -558,8 +558,20 @@ async fn test_structures_mobile_cyno_inhibitor_lifecycle_live() {
 
     // 4. Standard Cyno at 130 km (> 100 km radius) succeeds
     let (mut p_outside, cyno_outside) = provision_cyno_recon(&ctx, 7805, 93_800_005, RANCER, 21_096).await;
-    common::slash_cmd(&ctx, &mut p_outside.sess, "/fit me 438").await;
-    common::fly_to(&ctx, &mut p_outside, mci_origin - DVec3::new(130_000.0, 0.0, 0.0)).await;
+    let ab_outside = common::slash_cmd(&ctx, &mut p_outside.sess, "/fit me 438")
+        .await
+        .dict_get("itemID")
+        .and_then(PyRep::as_i64);
+    if let Some(ab_id) = ab_outside {
+        let _ = rpc(&ctx, &mut p_outside.sess, "dogmaIM", "Activate", &[PyRep::Integer(ab_id)]).await;
+    }
+    let outside_dest = mci_origin - DVec3::new(130_000.0, 0.0, 0.0);
+    for _ in 0..4 {
+        let pos = common::fly_to(&ctx, &mut p_outside, outside_dest).await;
+        if pos.distance(mci_origin) > 105_000.0 {
+            break;
+        }
+    }
     rpc(&ctx, &mut p_outside.sess, "dogmaIM", "Activate", &[PyRep::Integer(cyno_outside)])
         .await
         .expect("Standard cyno outside 100 km radius must succeed");

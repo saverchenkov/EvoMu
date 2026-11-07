@@ -464,7 +464,8 @@ async fn test_structure_jumpbridge_safety_and_deliveries() {
         )
         .await;
 
-    let drop_rep = rpc(
+    // Negative: FLEX structures (Ansiblex) cannot receive cargo drop-offs
+    let flex_err = rpc(
         &ctx,
         &mut sess1,
         "structureCargoDelivery",
@@ -472,12 +473,50 @@ async fn test_structure_jumpbridge_safety_and_deliveries() {
         &[PyRep::Integer(gate_b_id), PyRep::List(vec![PyRep::Integer(drop_item)])],
     )
     .await
+    .expect_err("FLEX DropOffItems must reject with StructureNotDockable");
+    assert_eq!(flex_err.code, "StructureNotDockable");
+
+    // Positive: dockable Upwell structure (Astrahus 35832) accepts cargo drop-off into Deliveries
+    let astrahus_id = 992_000_203_i64;
+    let astrahus_pos = [25_000.0, 0.0, 0.0];
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            astrahus_id,
+            UpwellStructureRecord {
+                structure_id: astrahus_id,
+                type_id: 35832, // Astrahus
+                owner_corp_id: CORP_1,
+                solar_system_id: sys_b,
+                name: "Astrahus O-IOAI Hub".into(),
+                position: astrahus_pos,
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 10000.0,
+                armor_hp: 10000.0,
+                hull_hp: 10000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+    });
+    let _ = handle_b.set_ball_position(ship_id, DVec3::from_array(astrahus_pos)).await;
+    let drop_rep = rpc(
+        &ctx,
+        &mut sess1,
+        "structureCargoDelivery",
+        "DropOffItems",
+        &[PyRep::Integer(astrahus_id), PyRep::List(vec![PyRep::Integer(drop_item)])],
+    )
+    .await
     .expect("DropOffItems");
     assert_eq!(drop_rep, PyRep::None);
 
     ctx.db.with_snapshot(|snap| {
         let it = snap.items.get(&drop_item).expect("dropped off item");
-        assert_eq!(it.location_id, gate_b_id);
+        assert_eq!(it.location_id, astrahus_id);
         assert_eq!(it.flag, InventoryFlag::Deliveries);
     });
 }

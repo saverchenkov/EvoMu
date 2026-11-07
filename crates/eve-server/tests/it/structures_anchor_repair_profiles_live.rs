@@ -72,6 +72,12 @@ async fn test_structures_anchoring_restrictions_live() {
     ctx.advance_secs(31);
 
     // 1. Create a brand-new player corporation.
+    let dock_st = ctx.db.with_mut_snapshot(|s| {
+        let ch = s.characters.get_mut(&pilot.char_id).unwrap();
+        ch.station_id = Some(ch.home_station_id);
+        ch.home_station_id
+    });
+    pilot.sess.station_id = Some(dock_st);
     let _ = ok(
         &ctx,
         &mut pilot,
@@ -83,6 +89,10 @@ async fn test_structures_anchoring_restrictions_live() {
         ],
     )
     .await;
+    pilot.sess.station_id = None;
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&pilot.char_id).unwrap().station_id = None;
+    });
     ctx.advance_secs(31);
 
     // 2. Negative: corporation younger than 7 days is rejected.
@@ -186,6 +196,12 @@ async fn test_structures_repairshop_service_quotes_and_restoration_live() {
     ctx.advance_secs(31);
 
     // Create owner corporation and advance past 7-day age gate.
+    let dock_st = ctx.db.with_mut_snapshot(|s| {
+        let ch = s.characters.get_mut(&pilot.char_id).unwrap();
+        ch.station_id = Some(ch.home_station_id);
+        ch.home_station_id
+    });
+    pilot.sess.station_id = Some(dock_st);
     let _ = ok(
         &ctx,
         &mut pilot,
@@ -197,6 +213,10 @@ async fn test_structures_repairshop_service_quotes_and_restoration_live() {
         ],
     )
     .await;
+    pilot.sess.station_id = None;
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&pilot.char_id).unwrap().station_id = None;
+    });
     ctx.advance_secs(7 * 86_400 + 31);
 
     // Stock Astrahus in cargo and anchor it.
@@ -382,6 +402,12 @@ async fn test_structures_profiles_and_directory_live() {
     ctx.advance_secs(31);
 
     // Create corporation and advance past 7-day age gate.
+    let dock_st = ctx.db.with_mut_snapshot(|s| {
+        let ch = s.characters.get_mut(&pilot.char_id).unwrap();
+        ch.station_id = Some(ch.home_station_id);
+        ch.home_station_id
+    });
+    pilot.sess.station_id = Some(dock_st);
     let corp_rep = ok(
         &ctx,
         &mut pilot,
@@ -393,6 +419,10 @@ async fn test_structures_profiles_and_directory_live() {
         ],
     )
     .await;
+    pilot.sess.station_id = None;
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&pilot.char_id).unwrap().station_id = None;
+    });
     let corp_id = corp_rep
         .as_i64()
         .filter(|&id| id > 0)

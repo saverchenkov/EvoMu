@@ -412,24 +412,39 @@ async fn test_live_skyhook_harvest_split_and_reagent_maturity() {
         assert_eq!(insec, 0);
     });
 
-    // Advance 2 hours: yields 2 * 50 = 100 units total (50 secure, 50 insecure)
+    let rate = eve_server::services::quasar_sov_skyhook::planet_hourly_reagent_yield(
+        &ctx.sde,
+        Some(lava_planet),
+        Some(sys_id),
+        TYPE_MAGMATIC_GAS,
+    );
+    // Advance 2 hours: yields 2 * rate units split 50/50 between secure and insecure bays
     ctx.advance_secs(2 * 3600);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
+    let total_2h = 2 * rate;
+    let exp_sec_2h = total_2h / 2;
+    let exp_insec_2h = total_2h - exp_sec_2h;
     ctx.db.with_snapshot(|s| {
         let (_, sec, insec, _) = s.sov_runtime.skyhook_reagent_bays[&skyhook_id];
-        assert_eq!(sec, 50, "50% harvested directly into secure bay");
-        assert_eq!(insec, 50, "50% harvested into insecure bay");
+        assert_eq!(sec, exp_sec_2h, "50% harvested directly into secure bay");
+        assert_eq!(insec, exp_insec_2h, "50% harvested into insecure bay");
     });
 
-    // Advance 12 hours: 25 matured from earlier 50 insecure, plus 300 secure + 300 insecure from new harvest
+    // Advance 12 hours: half of insecure bay matures into secure, plus 12 * rate new harvest
     ctx.advance_secs(12 * 3600);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
+    let matured = exp_insec_2h / 2;
+    let total_12h = 12 * rate;
+    let add_sec_12h = total_12h / 2;
+    let add_insec_12h = total_12h - add_sec_12h;
+    let exp_sec_14h = exp_sec_2h + matured + add_sec_12h;
+    let exp_insec_14h = (exp_insec_2h - matured) + add_insec_12h;
     ctx.db.with_snapshot(|s| {
         let (_, sec, insec, _) = s.sov_runtime.skyhook_reagent_bays[&skyhook_id];
-        assert_eq!(sec, 375, "25 matured + 300 new secure");
-        assert_eq!(insec, 325, "25 remaining + 300 new insecure");
+        assert_eq!(sec, exp_sec_14h, "matured + new secure");
+        assert_eq!(insec, exp_insec_14h, "remaining + new insecure");
     });
 
     // Place ship within docking/linking range of the Skyhook (within 1,000m)
@@ -441,15 +456,15 @@ async fn test_live_skyhook_harvest_split_and_reagent_maturity() {
         &ctx, &sess, sys_id, PILOT_1, ship_id, skyhook_id, "orbitalSkyhook", "ExtractReagentsToShip", &[],
     ).await.expect("ExtractReagentsToShip");
 
-    assert_eq!(keyval_get(&ext_call, "extractedQuantity").and_then(|v| v.as_i64()), Some(375));
+    assert_eq!(keyval_get(&ext_call, "extractedQuantity").and_then(|v| v.as_i64()), Some(exp_sec_14h as i64));
 
     // Verify reagents now in ship cargo and secure bay is 0
     ctx.db.with_snapshot(|s| {
         let (_, sec, insec, _) = s.sov_runtime.skyhook_reagent_bays[&skyhook_id];
         assert_eq!(sec, 0, "secure bay empty after extraction");
-        assert_eq!(insec, 325);
+        assert_eq!(insec, exp_insec_14h);
         let cargo_reagent = s.items.values().find(|i| i.location_id == ship_id && i.type_id == TYPE_MAGMATIC_GAS);
         assert!(cargo_reagent.is_some(), "Magmatic Gas present in ship cargo");
-        assert_eq!(cargo_reagent.unwrap().quantity, 375);
+        assert_eq!(cargo_reagent.unwrap().quantity, exp_sec_14h as i32);
     });
 }

@@ -552,7 +552,7 @@ async fn test_esi_incursions_live_spawn_and_influence_decay() {
     let hq_sys = ctx.systems.get_or_spawn(hq_sys_id);
     hq_sys.set_ball_position(ship_id, hq_pos).await;
 
-    let nuke = DamageVector { em: 500_000.0, thermal: 500_000.0, kinetic: 500_000.0, explosive: 500_000.0 };
+    let nuke = DamageVector { em: 50_000_000.0, thermal: 50_000_000.0, kinetic: 50_000_000.0, explosive: 50_000_000.0 };
     for wave in 0..4 {
         let boss_bid = crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys_id, &hq_site_id).await;
         let (_, dead, _) = hq_sys.apply_damage_with_attacker(boss_bid, nuke, Some(PILOT_1)).await.unwrap().unwrap();

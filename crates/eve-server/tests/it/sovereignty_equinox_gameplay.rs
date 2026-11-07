@@ -308,6 +308,155 @@ pub(crate) async fn lock_target_via_rpc(
     assert!(locks.iter().any(|l| l.target_id == target_id && l.locked));
 }
 
+pub(crate) async fn hack_board_to_win_with<F>(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    target_id: i64,
+    grid_size: u32,
+    mut on_step: F,
+) -> Option<PyRep>
+where
+    F: FnMut(&PyRep),
+{
+    use eve_server::services::pve_hacking_sites::are_hacking_tiles_adjacent;
+    use std::collections::{HashMap, HashSet};
+
+    let mut revealed: HashSet<u32> = HashSet::from([0]);
+    let mut non_blocking: HashSet<u32> = HashSet::from([0]);
+    let mut tile_dist: HashMap<u32, i64> = HashMap::from([(0, 3)]);
+    let mut blockers: HashMap<u32, (String, i64)> = HashMap::new();
+    let mut core_tile: Option<(u32, i64)> = None;
+    let mut next_util_slot: i64 = 0;
+    let mut held_slots: Vec<i64> = Vec::new();
+    let mut last_eff_str: i64 = 20;
+
+    for _step in 0..(grid_size * 12) {
+        let suppressor = blockers
+            .iter()
+            .find(|(_, (k, _))| k == "VirusSuppressor")
+            .map(|(&t, _)| t);
+        let next_tile = if let Some((ct, _)) = core_tile.filter(|&(_, ccoh)| ccoh <= last_eff_str) {
+            ct
+        } else if let Some((ct, _)) = core_tile {
+            if let Some(st) = suppressor { st } else { ct }
+        } else if let Some(t) = (0..grid_size)
+            .filter(|t| {
+                !revealed.contains(t)
+                    && non_blocking.iter().any(|&adj| are_hacking_tiles_adjacent(adj, *t))
+            })
+            .min_by_key(|t| {
+                let best_adj = non_blocking
+                    .iter()
+                    .filter(|&&adj| are_hacking_tiles_adjacent(adj, *t))
+                    .filter_map(|adj| tile_dist.get(adj).copied())
+                    .min()
+                    .unwrap_or(5);
+                (best_adj, *t)
+            })
+        {
+            t
+        } else if let Some(st) = suppressor {
+            st
+        } else if let Some((&t, _)) = blockers
+            .iter()
+            .filter(|(_, (k, _))| k != "RestorationNode")
+            .min_by_key(|(&t, (_, coh))| (*coh, t))
+        {
+            t
+        } else if let Some((&t, _)) = blockers.iter().min_by_key(|(&t, (_, coh))| (*coh, t)) {
+            t
+        } else {
+            break;
+        };
+
+        if let Some((ct, ccoh)) = core_tile {
+            if ct == next_tile && ccoh > last_eff_str {
+                if let Some(slot) = held_slots.pop() {
+                    let _ = rpc_call(
+                        ctx,
+                        sess,
+                        "hackingMgr",
+                        "UsedUtilityElementOnVirus",
+                        &[
+                            PyRep::Integer(target_id),
+                            PyRep::Integer(slot),
+                            PyRep::Integer(i64::from(ct)),
+                        ],
+                    )
+                    .await;
+                }
+            }
+        } else if blockers.contains_key(&next_tile) && suppressor.is_none() {
+            if let Some(slot) = held_slots.pop() {
+                let _ = rpc_call(
+                    ctx,
+                    sess,
+                    "hackingMgr",
+                    "UsedUtilityElementOnVirus",
+                    &[
+                        PyRep::Integer(target_id),
+                        PyRep::Integer(slot),
+                        PyRep::Integer(i64::from(next_tile)),
+                    ],
+                )
+                .await;
+            }
+        }
+
+        let step = match rpc_call(
+            ctx,
+            sess,
+            "hackingMgr",
+            "ClickedOnTile",
+            &[PyRep::Integer(target_id), PyRep::Integer(i64::from(next_tile))],
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(e) if e.code == "InvalidTileIndex" => {
+                revealed.insert(next_tile);
+                continue;
+            }
+            Err(_) => break,
+        };
+        on_step(&step);
+        revealed.insert(next_tile);
+        let status = step.dict_get("status").and_then(|v| v.as_str()).unwrap_or("");
+        if status == "Won" {
+            return Some(step);
+        }
+        let kind = step.dict_get("nodeKind").and_then(|v| v.as_str()).unwrap_or("");
+        let coh = step.dict_get("nodeCoherence").and_then(|v| v.as_i64()).unwrap_or(0);
+        if status != "InProgress" {
+            return None;
+        }
+        if let Some(es) = step.dict_get("virusStrength").and_then(|v| v.as_i64()) {
+            last_eff_str = es.max(5);
+        }
+        if let Some(di) = step.dict_get("distanceIndicator").and_then(|v| v.as_i64()) {
+            tile_dist.insert(next_tile, di);
+        }
+        if kind == "SystemCore" && coh > 0 {
+            core_tile = Some((next_tile, coh));
+        }
+        let is_blocker = matches!(
+            kind,
+            "Firewall" | "Antivirus" | "RestorationNode" | "VirusSuppressor"
+        ) && coh > 0;
+        if is_blocker {
+            blockers.insert(next_tile, (kind.to_string(), coh));
+        } else {
+            blockers.remove(&next_tile);
+            non_blocking.insert(next_tile);
+        }
+        if matches!(kind, "UtilitySubsystem" | "DataCache") && next_util_slot < 3 {
+            held_slots.push(next_util_slot);
+            next_util_slot += 1;
+        }
+    }
+    None
+}
+
 pub(crate) fn fit_subcap_blasters(ctx: &ServerContext, char_id: i64, ship_id: i64, base_id: i64) {
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ship_it) = snap.items.get_mut(&ship_id) {
@@ -1248,6 +1397,12 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
         &ctx, 73_072, "blocked", "sec-2", blocked_cid, CORP, Some(ALLIANCE),
         null_sys, 100_000_072, 11_957, hub_pos + DVec3::new(40_000.0, 0.0, 0.0), 0,
     ).await;
+    let hacker_cid = 90_000_077i64;
+    let hacker_ship = 100_000_077i64;
+    let mut s_hacker = register_online_pilot(
+        &ctx, 73_010, "demo2", "demo2-secret", hacker_cid, 98_000_077, Some(99_000_077),
+        null_sys, hacker_ship, 621, hub_pos + DVec3::new(2_500.0, 0.0, 0.0), 0,
+    ).await;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             995_010,
@@ -1361,12 +1516,6 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
     );
 
     // 4. Hostile Data Analyzer (`22175`) hacking on Sov Hub emits `OnSovHubHacked` and disables upgrades!
-    let hacker_cid = 90_000_077i64;
-    let hacker_ship = 100_000_077i64;
-    let mut s_hacker = register_online_pilot(
-        &ctx, 73_010, "demo2", "demo2-secret", hacker_cid, 98_000_077, Some(99_000_077),
-        null_sys, hacker_ship, 621, hub_pos + DVec3::new(2_500.0, 0.0, 0.0), 0,
-    ).await;
     ctx.db.with_mut_snapshot(|snap| {
         let sk = snap.skills.entry(hacker_cid).or_default();
         for sid in [3_405u32, 21_718] {
@@ -1386,6 +1535,7 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
             },
         );
         snap.module_online_states.insert(995_100, true);
+        snap.skills.entry(hacker_cid).or_default().insert(21_718, TrainedSkillRecord { type_id: 21_718, level: 5, skill_points: 256_000.0 });
     });
     ctx.invalidate_ship_fitting(hacker_ship);
     lock_target_via_rpc(&ctx, &mut s_hacker, null_sys, hacker_ship, hub_a).await;
@@ -1394,30 +1544,18 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
         .await.expect("hack Sov Hub via Data Analyzer I");
     assert_eq!(hack_rep.dict_get("containerUnlocked"), Some(&PyRep::Bool(false)));
     assert!(!is_hub_hacked(&ctx, hub_a));
-    rpc_call(&ctx, &mut s_hacker, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(hub_a)])
-        .await.expect("start live hacking minigame on Sov Hub");
     let mut won = false;
-    for _pass in 0..8 {
-        for tile in 1..24 {
-            for _ in 0..5 {
-                if let Ok(step) = rpc_call(&ctx, &mut s_hacker, "hackingMgr", "ClickedOnTile", &[PyRep::Integer(hub_a), PyRep::Integer(tile)]).await {
-                    if step.dict_get("status").and_then(|v| v.as_str()) == Some("Won") {
-                        won = true;
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-            if won {
-                break;
-            }
-        }
-        if won {
+    for _attempt in 0..2 {
+        let start_rep = rpc_call(&ctx, &mut s_hacker, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(hub_a)])
+            .await.expect("start live hacking minigame on Sov Hub");
+        let grid_size = start_rep.dict_get("gridSize").and_then(|v| v.as_i64()).unwrap_or(24) as u32;
+        if hack_board_to_win_with(&ctx, &mut s_hacker, hub_a, grid_size, |_| {}).await.is_some() {
+            won = true;
             break;
         }
     }
     assert!(won, "Data Analyzer hacking minigame on Sov Hub must complete with Won");
+    let _ = ctx.systems.get_or_spawn(null_sys).set_ball_position(hacker_ship, hub_pos + DVec3::new(50_000_000.0, 0.0, 0.0)).await;
     assert!(is_hub_hacked(&ctx, hub_a));
     assert!(drain_notif_events(&ctx, PILOT).iter().any(|e| e == "OnSovHubHacked"));
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
@@ -1541,7 +1679,7 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
     });
     fit_siege_artillery(&ctx, hacker_cid, hacker_ship, 995_300);
     let t_pos = ctx.db.with_snapshot(|s| DVec3::from_array(s.structures[&tenebrex_id].position));
-    let _ = ctx.systems.get_or_spawn(null_sys).spawn_ball(make_ball(hacker_ship, 19_722, t_pos + DVec3::new(2_500.0, 0.0, 0.0))).await;
+    place_ship_ball(&ctx, null_sys, hacker_cid, hacker_ship, 19_722, t_pos + DVec3::new(2_500.0, 0.0, 0.0)).await;
     lock_target_via_rpc(&ctx, &mut s_hacker, null_sys, hacker_ship, tenebrex_id).await;
     for _ in 0..4 {
         rpc_call(&ctx, &mut s_hacker, "dogmaIM", "Activate", &[
@@ -2565,6 +2703,10 @@ async fn test_sov_workforce_reagents_and_mercenary_den() {
     } else {
         ctx.advance_secs(3_600);
     }
+    let tod = ctx.now_unix() % 86_400;
+    if (11 * 3_600..11 * 3_600 + 900).contains(&tod) {
+        ctx.advance_secs(11 * 3_600 + 960 - tod);
+    }
     life::sync_all_structures(&ctx);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
@@ -2779,6 +2921,24 @@ async fn test_abyssal_bioadaptive_cache_rewards() {
     )
     .await;
 
+    let pilot2 = 90_000_202i64;
+    let ship2 = 100_000_202i64;
+    let mut s2 = register_online_pilot(
+        &ctx,
+        88_005,
+        "demo2",
+        "demo2-secret",
+        pilot2,
+        CORP,
+        None,
+        origin_sys,
+        ship2,
+        621,
+        DVec3::new(2_000_000.0, 0.0, 0.0),
+        0,
+    )
+    .await;
+
     // Enter T1 Exotic pocket (47761) via abyssalMgr RPCs and verify Bioadaptive Cache + Extraction Sub-node + T1 HP.
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
@@ -2819,23 +2979,6 @@ async fn test_abyssal_bioadaptive_cache_rewards() {
         .max_structure_hp;
 
     // Enter T5 Exotic pocket (47891) for a second pilot and verify 25x higher hull HP.
-    let pilot2 = 90_000_202i64;
-    let ship2 = 100_000_202i64;
-    let mut s2 = register_online_pilot(
-        &ctx,
-        88_005,
-        "demo2",
-        "demo2-secret",
-        pilot2,
-        CORP,
-        None,
-        origin_sys,
-        ship2,
-        621,
-        DVec3::new(2_000_000.0, 0.0, 0.0),
-        0,
-    )
-    .await;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             988_402,
@@ -2876,6 +3019,12 @@ async fn test_abyssal_bioadaptive_cache_rewards() {
 
     // Destroy T1 Bioadaptive Cache with blasters and verify wreck container drops tier rewards.
     set_pilot_location(&ctx, &mut sess, abyss_sys_t1, None);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT) {
+            ch.active_ship_id = PILOT_SHIP;
+        }
+    });
+    sess.ship_id = Some(PILOT_SHIP);
     place_ship_ball(&ctx, abyss_sys_t1, PILOT, PILOT_SHIP, 621, DVec3::new(0.0, 0.0, 1_000.0)).await;
     let blaster_base = 988_910i64;
     fit_subcap_blasters(&ctx, PILOT, PILOT_SHIP, blaster_base);

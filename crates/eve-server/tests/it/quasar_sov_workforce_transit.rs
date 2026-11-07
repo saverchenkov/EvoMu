@@ -240,6 +240,9 @@ async fn test_sov_workforce_transit_disconnect_drops_starved_upgrades_to_low_pow
     seed_hub(&ctx, HUB_B, sys_b);
     // Seed HUB_C WITHOUT Orbital Skyhooks so HUB_C has 0 local workforce and depends entirely on imported workforce.
     ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.entry(CORP).or_default().ceo_id = PILOT;
+        snap.corporations.entry(CORP).or_default().members.insert(PILOT);
+        snap.corporations.entry(CORP).or_default().member_roles.insert(PILOT, corp_roles::ROLE_DIRECTOR);
         snap.structures.insert(HUB_C, structure(HUB_C, CORP, sys_c, TYPE_SOVEREIGNTY_HUB));
         snap.items.insert(
             UPGRADE_ITEM_ID,
@@ -248,7 +251,7 @@ async fn test_sov_workforce_transit_disconnect_drops_starved_upgrades_to_low_pow
                 type_id: MINOR_THREAT_1,
                 owner_id: CORP,
                 location_id: HUB_C,
-                flag: eve_db::InventoryFlag::Hangar,
+                flag: eve_db::InventoryFlag::CorpSAG1,
                 quantity: 1,
                 singleton: true,
                 version: 1,

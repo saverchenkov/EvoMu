@@ -1410,9 +1410,7 @@ async fn test_r_nav_01_structure_fuel_flag_172_ansiblex_and_jettison() {
     sess.ship_id = Some(ship_id);
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
     ctx.db.with_mut_snapshot(|s| {
-        if let Some(corp) = s.corporations.get_mut(&corp_id) {
-            corp.member_roles.insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER);
-        }
+        s.corporations.entry(corp_id).or_default().member_roles.insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER);
     });
 
     // 1. Verify invbroker.Add whitelist rejects restricted flags 158..=163
@@ -1450,7 +1448,7 @@ async fn test_r_nav_01_structure_fuel_flag_172_ansiblex_and_jettison() {
     });
     sess.corp_role = 0;
     ctx.db.with_mut_snapshot(|s| {
-        if let Some(corp) = s.corporations.get_mut(&corp_id) { corp.member_roles.clear(); }
+        s.corporations.entry(corp_id).or_default().member_roles.clear();
     });
     let denied = ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(fuel2_id), PyRep::Integer(ship_id), PyRep::Integer(5)], &kw, None).await;
     let err_denied = denied.expect_err("R-FUEL-01: withdrawal without role must be rejected");
@@ -1461,9 +1459,7 @@ async fn test_r_nav_01_structure_fuel_flag_172_ansiblex_and_jettison() {
 
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
     ctx.db.with_mut_snapshot(|s| {
-        if let Some(corp) = s.corporations.get_mut(&corp_id) {
-            corp.member_roles.insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
-        }
+        s.corporations.entry(corp_id).or_default().member_roles.insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
     });
     ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(fuel2_id), PyRep::Integer(ship_id), PyRep::Integer(5)], &kw, None).await.expect("withdrawal with role");
     let item_withdrawn = ctx.db.get_item(fuel2_id).unwrap();
