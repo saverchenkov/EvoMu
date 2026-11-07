@@ -75,6 +75,8 @@ pub struct FeatureFlagsConfig {
     pub free_fast_checkout_plex: bool,
     #[serde(default)]
     pub starter_plex_balance: i64,
+    #[serde(default)]
+    pub allow_local_dev_gateway_jwt: bool,
 }
 
 fn default_true() -> bool {
@@ -97,6 +99,7 @@ impl Default for FeatureFlagsConfig {
             info_gathering_interval_secs: default_info_gathering_interval_secs(),
             free_fast_checkout_plex: false,
             starter_plex_balance: 0,
+            allow_local_dev_gateway_jwt: false,
         }
     }
 }
@@ -303,6 +306,14 @@ impl ServerConfig {
                 cfg.quasar_grpc_port = trimmed.parse::<u16>().map_err(|e| {
                     format!("Invalid EVOMU_QUASAR_GRPC_PORT '{trimmed}': {e}")
                 })?;
+            }
+        }
+        if let Ok(dev_jwt_str) = std::env::var("EVOMU_ALLOW_LOCAL_DEV_JWT") {
+            let v = dev_jwt_str.trim().to_ascii_lowercase();
+            if matches!(v.as_str(), "1" | "true" | "yes" | "on") {
+                cfg.feature_flags.allow_local_dev_gateway_jwt = true;
+            } else if matches!(v.as_str(), "0" | "false" | "no" | "off") {
+                cfg.feature_flags.allow_local_dev_gateway_jwt = false;
             }
         }
         Ok(cfg)

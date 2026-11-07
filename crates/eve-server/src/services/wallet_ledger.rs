@@ -321,25 +321,91 @@ fn deposit_plex_inner(
     if qty <= 0 {
         return Err(rpc_err("InvalidArgument", "quantity must be positive"));
     }
+    let Ok(qty_i32) = i32::try_from(qty) else {
+        return Err(rpc_err("InvalidArgument", "quantity exceeds stack limit"));
+    };
     let docked = session.station_id.or(session.structure_id);
     if docked != Some(location_id) {
         return Err(rpc_err("NotDockedAtLocation", "PLEX can only be deposited from the hangar you are docked in"));
     }
+    let cs_state = crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state(ctx);
+    if cs_state.alsc_locked_items.contains(&item_id) {
+        return Err(rpc_err("ItemLocked", "PLEX item is locked in an Audit Log Secure Container"));
+    }
+    if let Some(corp_id) = ctx.db.with_snapshot(|snap| {
+        let mut cur = snap.items.get(&item_id);
+        for _ in 0..8 {
+            let Some(it) = cur else { break };
+            if snap.corporations.contains_key(&it.owner_id) {
+                return Some(it.owner_id);
+            }
+            cur = snap.items.get(&it.location_id);
+        }
+        None
+    }) {
+        crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(
+            ctx, corp_id,
+        );
+    }
     ctx.db.try_with_mut_snapshot(|snap| {
+        if let Some(persisted_dock) = snap
+            .characters
+            .get(&char_id)
+            .and_then(|c| c.station_id.or(c.structure_id))
+        {
+            if persisted_dock != location_id {
+                return Err(rpc_err(
+                    "NotDockedAtLocation",
+                    "Character is not physically docked at this location",
+                ));
+            }
+        }
         let item = snap.items.get(&item_id).cloned().ok_or_else(|| rpc_err("ItemNotFound", "item not found"))?;
-        if item.owner_id != char_id || item.location_id != location_id || item.flag != InventoryFlag::Hangar {
+        if snap.is_item_locked_in_contract_or_job(item_id) {
+            return Err(rpc_err(
+                "ItemLocked",
+                "PLEX item is escrowed in an active contract, job, direct trade, or HyperNet raffle",
+            ));
+        }
+        let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        if ext.asset_safety_wraps.values().any(|w| {
+            !w.retrieval_fee_paid
+                && (w.wrap_id == item_id
+                    || w.wrap_id == item.location_id
+                    || w.item_ids.contains(&item_id))
+        }) {
+            return Err(rpc_err("ItemLocked", "PLEX item is sealed inside an Asset Safety wrap"));
+        }
+        if item.location_id != location_id {
+            return Err(rpc_err("ItemNotFound", "PLEX item is not in your hangar at this location"));
+        }
+        let corp_id = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.corporation_id)
+            .or(session.corporation_id)
+            .unwrap_or(0);
+        if item.owner_id == char_id {
+            if item.flag != InventoryFlag::Hangar {
+                return Err(rpc_err("ItemNotFound", "PLEX item is not in your hangar at this location"));
+            }
+        } else if corp_id > 0 && item.owner_id == corp_id && (116..=122).contains(&(item.flag as i64)) {
+            crate::services::inventory_bound::validate_corp_source_item_take_access_in_snap(
+                ctx, snap, char_id, corp_id, &item,
+            )?;
+        } else {
             return Err(rpc_err("ItemNotFound", "PLEX item is not in your hangar at this location"));
         }
         if item.type_id != PLEX_TYPE_ID {
             return Err(rpc_err("NotPlex", "only PLEX can be deposited into the PLEX Vault"));
         }
-        if (item.quantity as i64) < qty {
+        if item.quantity < qty_i32 {
             return Err(rpc_err("NotEnoughQuantity", "stack has fewer units than requested"));
         }
-        if item.quantity as i64 == qty {
+        if item.quantity == qty_i32 {
             snap.items.remove(&item_id);
         } else if let Some(i) = snap.items.get_mut(&item_id) {
-            i.quantity -= qty as i32;
+            i.quantity -= qty_i32;
             i.version += 1;
         }
         let rem_plex = snap.adjust_plex_vault(char_id, qty).ok_or_else(|| rpc_err("VaultError", "vault update failed"))?;

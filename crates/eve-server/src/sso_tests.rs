@@ -242,7 +242,7 @@ fn test_sso_pkce_full_lifecycle_validation_and_revocation() {
     );
     assert_eq!(bad_creds.status_code, 401);
 
-    // Account with zero characters -> 400
+    // Account with zero characters -> 302 account-scoped USER:EVE:<uid> authorization (#472)
     let _no_char_uid = ctx.db.provision_player_account("empty_pilot", "pass1234");
     let no_char_resp = handle_http_request(
         &ctx,
@@ -254,7 +254,7 @@ fn test_sso_pkce_full_lifecycle_validation_and_revocation() {
         )
         .as_bytes(),
     );
-    assert_eq!(no_char_resp.status_code, 400);
+    assert_eq!(no_char_resp.status_code, 302);
 
     // 2. Successful PKCE S256 authorization via JSON body + Basic Auth + array scopes + state
     let mut auth_hdrs = json_hdrs.clone();

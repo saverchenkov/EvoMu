@@ -713,6 +713,7 @@ pub enum DestinyEvent {
         ball_id: BallId,
         radius: f64,
     },
+    SetMaxSpeed { ball_id: BallId, max_speed: f64 },
     SetBallPosition {
         ball_id: BallId,
         position: [f64; 3],

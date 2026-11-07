@@ -771,7 +771,8 @@ pub(crate) async fn handle_ships_and_services(
                     list.first().and_then(|v| v.as_i64())
                 }
                 _ => None,
-            };
+            }
+            .or_else(|| kwargs.get("itemID").and_then(|v| v.as_i64()));
             let Some(item_id) = first_item_id.or(session.ship_id) else {
                 return Some(Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
@@ -779,14 +780,57 @@ pub(crate) async fn handle_ships_and_services(
                         .into(),
                 }));
             };
+            let cs_state = fitting_containers_ships::read_container_ship_state(ctx);
+            if cs_state.alsc_locked_items.contains(&item_id) {
+                return Some(Err(BridgeRpcError {
+                    code: "ItemLocked".into(),
+                    message: format!("Item {item_id} is locked in an Audit Log Secure Container"),
+                }));
+            }
+            if let Some(corp_id) = ctx.db.with_snapshot(|snap| {
+                let mut cur = snap.items.get(&item_id);
+                for _ in 0..8 {
+                    let Some(it) = cur else { break };
+                    if snap.corporations.contains_key(&it.owner_id) {
+                        return Some(it.owner_id);
+                    }
+                    cur = snap.items.get(&it.location_id);
+                }
+                None
+            }) {
+                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(
+                    ctx, corp_id,
+                );
+            }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                if let Some(persisted_dock) = snap
+                    .characters
+                    .get(&char_id)
+                    .and_then(|c| c.station_id.or(c.structure_id))
+                {
+                    if persisted_dock != station_id {
+                        return Err(BridgeRpcError {
+                            code: "NotDocked".into(),
+                            message: format!(
+                                "Character {char_id} is not physically docked at {station_id}"
+                            ),
+                        });
+                    }
+                }
                 let Some(item) = snap.items.get(&item_id).cloned() else {
                     return Err(BridgeRpcError {
                         code: "ItemNotFound".into(),
                         message: format!("Ship item {item_id} not found"),
                     });
                 };
-                if item.owner_id != char_id {
+                let corp_id = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .or(session.corporation_id)
+                    .unwrap_or(0);
+                let is_corp_item = corp_id > 0 && item.owner_id == corp_id;
+                if item.owner_id != char_id && !is_corp_item {
                     return Err(BridgeRpcError {
                         code: "OwnershipOrLocationViolation".into(),
                         message: format!(
@@ -803,7 +847,7 @@ pub(crate) async fn handle_ships_and_services(
                         ),
                     });
                 }
-                if item.location_id != station_id {
+                if item.location_id != station_id || snap.items.contains_key(&station_id) {
                     return Err(BridgeRpcError {
                         code: "OwnershipOrLocationViolation".into(),
                         message: format!(
@@ -811,10 +855,46 @@ pub(crate) async fn handle_ships_and_services(
                         ),
                     });
                 }
-                if item.flag == InventoryFlag::Locked {
+                if item.flag == InventoryFlag::Locked
+                    || snap.is_item_locked_in_contract_or_job(item_id)
+                {
                     return Err(BridgeRpcError {
                         code: "ItemLocked".into(),
                         message: format!("Item {item_id} is locked"),
+                    });
+                }
+                let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+                if ext.asset_safety_wraps.values().any(|w| {
+                    !w.retrieval_fee_paid
+                        && (w.wrap_id == item_id
+                            || w.wrap_id == item.location_id
+                            || w.item_ids.contains(&item_id))
+                }) {
+                    return Err(BridgeRpcError {
+                        code: "ItemLocked".into(),
+                        message: format!("Item {item_id} is sealed inside an Asset Safety wrap"),
+                    });
+                }
+                if is_corp_item {
+                    if !(116..=122).contains(&(item.flag as i64)) {
+                        return Err(BridgeRpcError {
+                            code: "ItemLocked".into(),
+                            message: format!(
+                                "Corporation ship {item_id} cannot be assembled in flag {:?}",
+                                item.flag
+                            ),
+                        });
+                    }
+                    crate::services::inventory_bound::validate_corp_source_item_take_access_in_snap(
+                        ctx, snap, char_id, corp_id, &item,
+                    )?;
+                } else if !matches!(item.flag, InventoryFlag::Hangar | InventoryFlag::ShipHangar) {
+                    return Err(BridgeRpcError {
+                        code: "ItemLocked".into(),
+                        message: format!(
+                            "Ship {item_id} must be in Hangar or ShipHangar to assemble (flag {:?})",
+                            item.flag
+                        ),
                     });
                 }
                 let hull_or_armor_damage = item
@@ -859,7 +939,7 @@ pub(crate) async fn handle_ships_and_services(
                         eve_db::InventoryItemRecord {
                             item_id: new_ship_id,
                             type_id: item.type_id,
-                            owner_id: char_id,
+                            owner_id: item.owner_id,
                             location_id: station_id,
                             flag: item.flag,
                             quantity: 1,

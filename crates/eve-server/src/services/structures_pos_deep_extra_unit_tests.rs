@@ -580,7 +580,7 @@ async fn pos_mgr_orbital_anchoring_gantry_upgrade_and_skyhook_reagent_siphon_mat
         assert_eq!(sec_qty + insec_qty, 550);
     });
 
-    let dmg_rep = apply_skyhook_weapon_damage(&ctx, skyhook_id, 9_500.0).expect("damage inside window");
+    let dmg_rep = apply_skyhook_weapon_damage(&ctx, skyhook_id, 11_875.0).expect("damage inside window");
     assert_eq!(dmg_rep.dict_get("state"), Some(&PyRep::String("ShieldVulnerable".into())));
     assert_eq!(dmg_rep.dict_get("hackable"), Some(&PyRep::Bool(true)));
 

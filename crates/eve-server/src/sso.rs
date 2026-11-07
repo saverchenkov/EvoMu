@@ -383,7 +383,7 @@ fn handle_http_request_inner(
                         "CharacterName": claims.name,
                         "ExpiresOn": format_unix_iso8601(claims.exp),
                         "Scopes": claims.scp.join(" "),
-                        "TokenType": "Character",
+                        "TokenType": if claims.character_id > 0 { "Character" } else { "User" },
                         "CharacterOwnerHash": claims.owner,
                         "IntellectualProperty": "EVE",
                         "UserID": claims.user_id
@@ -648,20 +648,12 @@ fn handle_oauth_authorize(
 
     let character_id = match explicit_character_id {
         Some(cid) => cid,
-        None => {
-            let chars = ctx.db.get_characters_for_user(acc.user_id);
-            let Some(first) = chars.first() else {
-                return HttpResponse::json(
-                    400,
-                    "Bad Request",
-                    json!({
-                        "error": "invalid_request",
-                        "error_description": "Account has no characters to authorize"
-                    }),
-                );
-            };
-            first.character_id
-        }
+        None => ctx
+            .db
+            .get_characters_for_user(acc.user_id)
+            .first()
+            .map(|c| c.character_id)
+            .unwrap_or(0),
     };
 
     match ctx.db.authorize_pkce(

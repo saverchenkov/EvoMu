@@ -547,6 +547,11 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 now_unix,
                             ) {
                                 Ok(displaced) => {
+                                    ctx.db.set_online_session_peer_ip(
+                                        identity.user_id,
+                                        session_id,
+                                        &peer_addr,
+                                    );
                                     if let Some(d) = displaced {
                                         if d.session_id != session_id {
                                             if let Some(disp_cid) = d.character_id {

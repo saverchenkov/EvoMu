@@ -372,13 +372,9 @@ pub async fn handle(
             ctx.db
                 .clear_revocation_on_fresh_login(acc.user_id, session.session_id);
 
-            if let Ok(Some(displaced)) = ctx.db.acquire_online_lock(
-                acc.user_id,
-                session.session_id,
-                None,
-                true,
-                now_unix,
-            ) {
+            let lock_res = ctx.db.acquire_online_lock(acc.user_id, session.session_id, None, true, now_unix);
+            ctx.db.set_online_session_peer_ip(acc.user_id, session.session_id, &session.address);
+            if let Ok(Some(displaced)) = lock_res {
                 if let Some(disp_cid) = displaced.character_id {
                     let _ =
                         crate::sp6_lifecycle::handle_character_logoff_or_disconnect(ctx, disp_cid)
@@ -523,6 +519,7 @@ pub async fn handle(
                 now_unix,
             ) {
                 Ok(displaced) => {
+                    ctx.db.set_online_session_peer_ip(uid, session.session_id, &session.address);
                     if let Some(prev) = displaced {
                         if prev.session_id != session.session_id {
                             if let Some(prev_cid) = prev.character_id {

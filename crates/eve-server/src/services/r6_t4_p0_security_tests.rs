@@ -131,6 +131,7 @@ async fn r6_t4_01_quasar_grpc_rejects_dev_jwt_forgeries_gm_elevation_and_imperso
             ch.character_id = cid;
             ch.name = name.into();
             ch.user_id = uid;
+            ch.corporation_id = 1_000_009;
             snap.characters.insert(cid, ch);
         }
     });

@@ -837,6 +837,29 @@ impl PublicGatewayRouter {
                 None,
             );
         };
+        let mut owned_char_session: Option<SessionState> = None;
+        if session.character_id.is_none() && !require_character_override {
+            if let Some(claimed_cid) = request
+                .authoritative_context
+                .as_ref()
+                .and_then(|ac| ac.effective_character_id())
+            {
+                let cid_i64 = i64::from(claimed_cid);
+                let owned_corp = self.db.with_snapshot(|snap| {
+                    snap.characters
+                        .get(&cid_i64)
+                        .filter(|c| c.user_id == session_uid as u64)
+                        .map(|c| c.corporation_id)
+                });
+                if let Some(corp_id) = owned_corp {
+                    let mut upgraded = session.clone();
+                    upgraded.character_id = Some(cid_i64);
+                    upgraded.corporation_id = Some(corp_id);
+                    owned_char_session = Some(upgraded);
+                }
+            }
+        }
+        let session = owned_char_session.as_ref().unwrap_or(session);
         let session_cid = session.character_id.map(|c| c as u32);
         if require_character_override && session_cid.is_none() {
             return build_response(

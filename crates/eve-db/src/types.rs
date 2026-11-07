@@ -443,6 +443,7 @@ pub struct SsoRefreshTokenRecord {
 #[derive(Debug, Clone)]
 pub(crate) struct AuthRuntimeState {
     pub(crate) online_sessions: HashMap<u64, OnlineSessionRecord>,
+    pub(crate) online_session_ips: HashMap<u64, (u64, std::net::IpAddr)>,
     pub(crate) displaced_sessions: HashMap<u64, String>,
     pub(crate) kicked_users: HashMap<u64, (u64, String)>,
     pub(crate) pkce_codes: HashMap<String, PkceAuthCode>,
@@ -455,6 +456,7 @@ impl AuthRuntimeState {
     pub(crate) fn new(jwt_signing_secret: [u8; 32]) -> Self {
         Self {
             online_sessions: HashMap::new(),
+            online_session_ips: HashMap::new(),
             kicked_users: HashMap::new(),
             displaced_sessions: HashMap::new(),
             pkce_codes: HashMap::new(),

@@ -438,6 +438,9 @@ impl SystemRegistry {
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let _ = reply.send(Ok(ballpark.current_tick));
                             }
+                            SystemCommand::SetBallMaxVelocity { ball_id, max_velocity, reply } => {
+                                let _ = reply.send(ballpark.set_ball_max_velocity(ball_id, max_velocity));
+                            }
                             SystemCommand::SpawnBallWithCombat {
                                 ball,
                                 combat_state,

@@ -392,7 +392,7 @@ impl EsiRouter {
                         "CharacterName": claims.name,
                         "ExpiresOn": format_iso8601_utc(claims.exp),
                         "Scopes": claims.scp.join(" "),
-                        "TokenType": "Character",
+                        "TokenType": if claims.character_id > 0 { "Character" } else { "User" },
                         "CharacterOwnerHash": claims.owner,
                         "IntellectualProperty": "EVE",
                     }))
@@ -618,6 +618,17 @@ impl EsiRouter {
                     );
                 }
             };
+            if claims.character_id <= 0 {
+                return self.build_error_response(
+                    &client_key,
+                    now,
+                    req_id,
+                    compat_date,
+                    403,
+                    "token requires an active character selection",
+                    true,
+                );
+            }
             for req_scope in &op.required_scopes {
                 if !claims.scp.iter().any(|s| s == req_scope) {
                     return self.build_error_response(

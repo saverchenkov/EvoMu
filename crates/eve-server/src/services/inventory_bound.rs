@@ -529,6 +529,70 @@ pub(crate) fn get_effective_corp_roles(
     get_effective_corp_roles_at_location(ctx, corp_id, char_id, None)
 }
 
+pub(crate) fn get_effective_corp_roles_at_location_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    corp_id: i64,
+    char_id: i64,
+    location_id: Option<i64>,
+) -> (bool, u64) {
+    let char_home = snap
+        .characters
+        .get(&char_id)
+        .and_then(|ch| {
+            ch.station_id
+                .or(ch.structure_id)
+                .or(Some(ch.home_station_id))
+                .filter(|&id| id > 0)
+        })
+        .unwrap_or(0);
+    let (is_ceo, hq_station_id, mut role_mask) = snap
+        .corporations
+        .get(&corp_id)
+        .map(|c| {
+            (
+                c.ceo_id == char_id,
+                c.hq_station_id.unwrap_or(char_home),
+                c.member_roles.get(&char_id).copied().unwrap_or(0),
+            )
+        })
+        .unwrap_or((false, char_home, 0));
+    let raw_loc = location_id
+        .or_else(|| {
+            snap.characters
+                .get(&char_id)
+                .and_then(|ch| ch.station_id.or(ch.structure_id))
+        })
+        .unwrap_or(0);
+    let loc_station_id = snap
+        .items
+        .get(&raw_loc)
+        .and_then(|it| {
+            (it.location_id >= 60_000_000 || snap.structures.contains_key(&it.location_id))
+                .then_some(it.location_id)
+        })
+        .unwrap_or(raw_loc);
+    let base_id = snap
+        .corp_governance
+        .get(&corp_id)
+        .and_then(|g| g.member_bases.get(&char_id).copied())
+        .unwrap_or(0);
+    if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
+        role_mask |= ra.roles;
+        if loc_station_id > 0 {
+            if loc_station_id == hq_station_id {
+                role_mask |= ra.roles_at_hq;
+            }
+            if base_id > 0 && loc_station_id == base_id {
+                role_mask |= ra.roles_at_base;
+            }
+            if loc_station_id != hq_station_id && (base_id <= 0 || loc_station_id != base_id) {
+                role_mask |= ra.roles_at_other;
+            }
+        }
+    }
+    (is_ceo, role_mask)
+}
+
 pub(crate) fn get_effective_corp_roles_at_location(
     ctx: &ServerContext,
     corp_id: i64,
@@ -537,58 +601,14 @@ pub(crate) fn get_effective_corp_roles_at_location(
 ) -> (bool, u64) {
     crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
     ctx.db.with_snapshot(|snap| {
-        let char_home = snap
-            .characters
-            .get(&char_id)
-            .and_then(|ch| ch.station_id.or(ch.structure_id).or(Some(ch.home_station_id)).filter(|&id| id > 0))
-            .unwrap_or(0);
-        let (is_ceo, hq_station_id, mut role_mask) = snap
-            .corporations
-            .get(&corp_id)
-            .map(|c| (c.ceo_id == char_id, c.hq_station_id.unwrap_or(char_home), c.member_roles.get(&char_id).copied().unwrap_or(0)))
-            .unwrap_or((false, char_home, 0));
-        let raw_loc = location_id
-            .or_else(|| {
-                snap.characters
-                    .get(&char_id)
-                    .and_then(|ch| ch.station_id.or(ch.structure_id))
-            })
-            .unwrap_or(0);
-        let loc_station_id = snap
-            .items
-            .get(&raw_loc)
-            .and_then(|it| {
-                (it.location_id >= 60_000_000 || snap.structures.contains_key(&it.location_id))
-                    .then_some(it.location_id)
-            })
-            .unwrap_or(raw_loc);
-        let base_id = snap
-            .corp_governance
-            .get(&corp_id)
-            .and_then(|g| g.member_bases.get(&char_id).copied())
-            .unwrap_or(0);
-        if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
-            role_mask |= ra.roles;
-            if loc_station_id > 0 {
-                if loc_station_id == hq_station_id {
-                    role_mask |= ra.roles_at_hq;
-                }
-                if base_id > 0 && loc_station_id == base_id {
-                    role_mask |= ra.roles_at_base;
-                }
-                if loc_station_id != hq_station_id && (base_id <= 0 || loc_station_id != base_id) {
-                    role_mask |= ra.roles_at_other;
-                }
-            }
-        }
-        (is_ceo, role_mask)
+        get_effective_corp_roles_at_location_in_snap(snap, corp_id, char_id, location_id)
     })
 }
 
 /// Validates that `char_id` is authorized to take a corporation-owned item `src_item` out of `corp_id`
 /// ownership into a non-corporation inventory (`#385` / `R6-T3-02`).
 pub(crate) fn validate_corp_source_item_take_access_in_snap(
-    ctx: &ServerContext,
+    _ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
     char_id: i64,
     corp_id: i64,
@@ -610,7 +630,7 @@ pub(crate) fn validate_corp_source_item_take_access_in_snap(
     }
 
     let (is_ceo, role_mask) =
-        get_effective_corp_roles_at_location(ctx, corp_id, char_id, Some(root_loc));
+        get_effective_corp_roles_at_location_in_snap(snap, corp_id, char_id, Some(root_loc));
 
     if is_ceo || eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_DIRECTOR) {
         return Ok(());

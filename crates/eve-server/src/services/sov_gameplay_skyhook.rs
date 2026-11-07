@@ -470,16 +470,68 @@ pub async fn handle_anchor_skyhook_rpc(
     ]))
 }
 
-/// Applies live weapon damage (`dogmaIM.Activate`) to an Orbital Skyhook's shield/silo,
-/// emitting `OnSkyhookSiloDamageUpdated` and exposing it for ship-link theft once shield drops `<= 10%`
-/// inside an open theft vulnerability window.
+/// Returns `[em, thermal, kinetic, explosive]` shield damage resonances (`0.0..=1.0`) for
+/// `TYPE_ORBITAL_SKYHOOK` (`81080`) from SDE attributes `271, 274, 273, 272` (default `0.8`).
+pub fn skyhook_shield_resonances(sde: &eve_sde::SdeRegistry) -> [f64; 4] {
+    let attrs = sde
+        .types
+        .get(&TYPE_ORBITAL_SKYHOOK)
+        .map(|t| &t.default_attributes);
+    let get = |id: u16| -> f64 {
+        attrs
+            .and_then(|a| a.get(&id).copied())
+            .unwrap_or(0.8)
+            .clamp(0.0, 1.0)
+    };
+    [
+        get(eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE),
+        get(eve_sde::attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE),
+        get(eve_sde::attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE),
+        get(eve_sde::attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE),
+    ]
+}
+
+/// Applies omni weapon damage (`damage` split evenly across `[EM, Thermal, Kinetic, Explosive]`)
+/// against an Orbital Skyhook's shield using SDE shield damage resonances.
 pub fn apply_skyhook_weapon_damage(
     ctx: &ServerContext,
     skyhook_id: i64,
     damage: f64,
 ) -> Result<PyRep, BridgeRpcError> {
+    if !damage.is_finite() {
+        return Err(BridgeRpcError {
+            code: "InvalidDamage".into(),
+            message: "Weapon damage must be a finite number".into(),
+        });
+    }
+    let q = damage.max(0.0) * 0.25;
+    apply_skyhook_weapon_damage_typed(ctx, skyhook_id, q, q, q, q)
+}
+
+/// Applies typed live weapon damage (`[em, thermal, kinetic, explosive]`) to an Orbital Skyhook's
+/// shield/silo via SDE shield resonances, emitting `OnSkyhookSiloDamageUpdated` and exposing it for
+/// ship-link theft once shield drops `<= 10%` inside an open theft vulnerability window.
+pub fn apply_skyhook_weapon_damage_typed(
+    ctx: &ServerContext,
+    skyhook_id: i64,
+    em: f64,
+    thermal: f64,
+    kinetic: f64,
+    explosive: f64,
+) -> Result<PyRep, BridgeRpcError> {
+    if !em.is_finite() || !thermal.is_finite() || !kinetic.is_finite() || !explosive.is_finite() {
+        return Err(BridgeRpcError {
+            code: "InvalidDamage".into(),
+            message: "Weapon damage components must be finite numbers".into(),
+        });
+    }
+    let [r_em, r_th, r_ki, r_ex] = skyhook_shield_resonances(&ctx.sde);
+    let effective_damage = em.max(0.0) * r_em
+        + thermal.max(0.0) * r_th
+        + kinetic.max(0.0) * r_ki
+        + explosive.max(0.0) * r_ex;
     let now = ctx.now_unix();
-    let (sys_id, shield_hp, shield_pct, hackable_now, state_str) =
+    let (sys_id, shield_hp, shield_pct, applied_dmg, hackable_now, newly_hackable, state_str) =
         ctx.db.try_with_mut_snapshot(|snap| {
             let window = snap.sov_runtime.skyhook_theft_windows.get(&skyhook_id).copied();
             let in_window = window.is_some_and(|(s, e)| s <= now && now < e);
@@ -500,8 +552,9 @@ pub fn apply_skyhook_weapon_damage(
                 });
             }
             st.last_damage_unix = now;
+            let prev_hp = st.shield_hp;
             if st.shield_hp > 0.0 {
-                st.shield_hp = (st.shield_hp - damage.max(0.0)).max(0.0);
+                st.shield_hp = (st.shield_hp - effective_damage).max(0.0);
                 // If inside the reagent theft window, keep the Skyhook in ShieldVulnerable at >= 1 HP
                 // until a separate hull/armor siege occurs, or transition to ArmorReinforced if 0 HP outside window.
                 if st.shield_hp <= 0.0 && !in_window {
@@ -509,15 +562,26 @@ pub fn apply_skyhook_weapon_damage(
                     st.reinforced_until_unix = now + 86_400;
                 }
             }
+            let applied = (prev_hp - st.shield_hp).max(0.0);
             let sys_id = st.solar_system_id;
             let s_hp = st.shield_hp;
             let s_pct = (s_hp / SKYHOOK_BASE_SHIELD_HP).clamp(0.0, 1.0);
             let st_s = st.state.clone();
-            let hackable = in_window && s_pct <= 0.10;
-            if hackable {
-                snap.sov_runtime.skyhook_hackable.insert(skyhook_id, true);
-            }
-            Ok((sys_id, s_hp, s_pct, hackable, st_s))
+            let hackable = in_window && st_s != "Destroyed" && s_pct <= 0.10 + 1e-9;
+            let was_hackable = snap
+                .sov_runtime
+                .skyhook_hackable
+                .insert(skyhook_id, hackable)
+                .unwrap_or(false);
+            Ok((
+                sys_id,
+                s_hp,
+                s_pct,
+                applied,
+                hackable,
+                hackable && !was_hackable,
+                st_s,
+            ))
         })?;
 
     ctx.notify(
@@ -526,7 +590,7 @@ pub fn apply_skyhook_weapon_damage(
         "solarsystemid",
         vec![PyRep::Integer(skyhook_id), PyRep::Real(shield_pct)],
     );
-    if hackable_now {
+    if newly_hackable || hackable_now {
         crate::services::sov_services::emit_skyhook_can_be_hacked(ctx, sys_id, skyhook_id);
     }
     Ok(PyRep::keyval([
@@ -534,6 +598,7 @@ pub fn apply_skyhook_weapon_damage(
         ("state", PyRep::String(state_str)),
         ("shieldHP", PyRep::Real(shield_hp)),
         ("shieldPct", PyRep::Real(shield_pct)),
+        ("appliedDamage", PyRep::Real(applied_dmg)),
         ("hackable", PyRep::Bool(hackable_now)),
     ]))
 }
@@ -551,7 +616,7 @@ pub async fn handle_skyhook_component_call(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let (_, mut ship_ball) = sys_handle
+    let (_, ship_ball) = sys_handle
         .get_ball_snapshot(ship_id)
         .await
         .ok()
@@ -631,18 +696,20 @@ pub async fn handle_skyhook_component_call(
             let orig_max_vel = ship_ball.max_velocity;
             ctx.db.try_with_mut_snapshot(|snap| {
                 let _ = advance_skyhook_reagents_in_snap(snap, &ctx.sde, skyhook_id, now);
-                let window_open = snap
+                let window_open = match snap
                     .sov_runtime
                     .skyhook_theft_windows
                     .get(&skyhook_id)
                     .copied()
-                    .is_some_and(|(start, end)| start <= now && now <= end)
-                    || snap
+                {
+                    Some((start, end)) => start <= now && now <= end,
+                    None => snap
                         .sov_runtime
                         .skyhook_hackable
                         .get(&skyhook_id)
                         .copied()
-                        .unwrap_or(false);
+                        .unwrap_or(false),
+                };
                 if !window_open {
                     return Err(BridgeRpcError {
                         code: "SkyhookNotVulnerableToTheft".into(),
@@ -685,8 +752,9 @@ pub async fn handle_skyhook_component_call(
             })?;
 
             if ship_ball.max_velocity > SKYHOOK_SILO_LINK_MAX_SPEED_MS {
-                ship_ball.max_velocity = SKYHOOK_SILO_LINK_MAX_SPEED_MS;
-                let _ = sys_handle.spawn_ball(ship_ball).await;
+                let _ = sys_handle
+                    .set_ball_max_velocity(ship_id, SKYHOOK_SILO_LINK_MAX_SPEED_MS)
+                    .await;
             }
             crate::services::sov_services::emit_skyhook_can_be_hacked(ctx, sys_id, skyhook_id);
             Ok(PyRep::keyval([
@@ -836,10 +904,14 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
             }
             let (start, end) = *window;
             let open_now = start <= now_unix && now_unix < end;
+            let shield_low = snap.structures.get(&id).is_some_and(|st| {
+                st.state != "Destroyed" && st.shield_hp <= SKYHOOK_BASE_SHIELD_HP * 0.10 + 1e-9
+            });
+            let hackable_now = open_now && shield_low;
             let was_open = snap.sov_runtime.skyhook_hackable.get(&id).copied().unwrap_or(false);
-            if open_now != was_open {
-                snap.sov_runtime.skyhook_hackable.insert(id, open_now);
-                if open_now {
+            if hackable_now != was_open {
+                snap.sov_runtime.skyhook_hackable.insert(id, hackable_now);
+                if hackable_now {
                     if let Some(st) = snap.structures.get(&id) {
                         opened.push((st.solar_system_id, id));
                     }
@@ -893,20 +965,18 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
             ctx.db.with_mut_snapshot(|snap| {
                 snap.sov_runtime.skyhook_silo_links.remove(&skyhook_id);
             });
-            if let Some((_, mut sb)) = ship_opt {
-                if orig_vel > 0.0 {
-                    sb.max_velocity = orig_vel;
-                    let _ = sys_handle.spawn_ball(sb).await;
-                }
+            if ship_opt.is_some() && orig_vel > 0.0 {
+                let _ = sys_handle.set_ball_max_velocity(ship_id, orig_vel).await;
             }
             continue;
         }
 
         if now_unix < completes_at {
-            if let Some((_, mut sb)) = ship_opt {
+            if let Some((_, sb)) = ship_opt {
                 if sb.max_velocity > SKYHOOK_SILO_LINK_MAX_SPEED_MS {
-                    sb.max_velocity = SKYHOOK_SILO_LINK_MAX_SPEED_MS;
-                    let _ = sys_handle.spawn_ball(sb).await;
+                    let _ = sys_handle
+                        .set_ball_max_velocity(ship_id, SKYHOOK_SILO_LINK_MAX_SPEED_MS)
+                        .await;
                 }
             }
             continue;
@@ -964,11 +1034,8 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
             Some((container_id, c_pos, r_type, final_sec))
         });
 
-        if let Some((_, mut sb)) = ship_opt {
-            if orig_vel > 0.0 {
-                sb.max_velocity = orig_vel;
-                let _ = sys_handle.spawn_ball(sb).await;
-            }
+        if ship_opt.is_some() && orig_vel > 0.0 {
+            let _ = sys_handle.set_ball_max_velocity(ship_id, orig_vel).await;
         }
         if let Some((container_id, c_pos, r_type, final_sec)) = drop_res {
             let _ = sys_handle

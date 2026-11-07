@@ -242,6 +242,11 @@ pub enum SystemCommand {
         wormhole_size: f64,
         reply: oneshot::Sender<bool>,
     },
+    SetBallMaxVelocity {
+        ball_id: BallId,
+        max_velocity: f64,
+        reply: oneshot::Sender<bool>,
+    },
     GetBallSlimItem {
         ball_id: BallId,
         reply: oneshot::Sender<Option<eve_proto::PyRep>>,

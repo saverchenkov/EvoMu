@@ -576,3 +576,7 @@ mod r7_tc_p1_arena_tourney_abyss_tests;
 mod r7_tc_p1_insurgency_crab_fob_tests;
 #[cfg(test)]
 mod r7_tc_p1_incursion_dungeon_exp_tests;
+#[cfg(test)]
+mod quasar_sso_local_dev_jwt_security_tests;
+#[cfg(test)]
+mod plex_ship_skyhook_link_security_tests;

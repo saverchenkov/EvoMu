@@ -458,6 +458,18 @@ impl Ballpark {
         Some(removed)
     }
 
+    /// Updates `ball_id`'s `max_velocity` in-place and emits [`DestinyEvent::SetMaxSpeed`]
+    /// without removing the ball, preserving `CombatState` and all target locks (`#513`).
+    pub fn set_ball_max_velocity(&mut self, ball_id: BallId, max_velocity: f64) -> bool {
+        let Some(ball) = self.balls.get_mut(&ball_id) else {
+            return false;
+        };
+        let clamped = max_velocity.max(0.0);
+        ball.max_velocity = clamped;
+        self.emit_event(Some(ball_id), DestinyEvent::SetMaxSpeed { ball_id, max_speed: clamped });
+        true
+    }
+
     fn emit_damage_and_destruction_events(
         &mut self,
         ball_id: BallId,

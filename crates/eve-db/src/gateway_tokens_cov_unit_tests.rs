@@ -10,9 +10,7 @@ use serde_json::{json, Map, Value};
 
 fn insert_char(repo: &WorldRepository, cid: i64, uid: u64, name: &str) -> CharacterRecord {
     let mut ch = repo
-        .inner
-        .read()
-        .unwrap()
+        .read_state()
         .characters
         .values()
         .next()
@@ -21,7 +19,9 @@ fn insert_char(repo: &WorldRepository, cid: i64, uid: u64, name: &str) -> Charac
     ch.character_id = cid;
     ch.user_id = uid;
     ch.name = name.to_string();
-    repo.inner.write().unwrap().characters.insert(cid, ch.clone());
+    repo.with_mut_snapshot(|s| {
+        s.characters.insert(cid, ch.clone());
+    });
     ch
 }
 
@@ -261,24 +261,22 @@ fn verify_quasar_bearer_jwt_full_sso_vs_reassigned_or_nonpositive_character() {
     );
 
     // If the character is reassigned to Bob after SSO issuance, `verify_quasar_bearer_jwt` rejects it.
-    repo.inner
-        .write()
-        .unwrap()
-        .characters
-        .get_mut(&alice_ch.character_id)
-        .unwrap()
-        .user_id = bob_uid;
+    repo.with_mut_snapshot(|s| {
+        s.characters
+            .get_mut(&alice_ch.character_id)
+            .unwrap()
+            .user_id = bob_uid;
+    });
     assert_eq!(
         repo.verify_quasar_bearer_jwt(&bundle.access_token, now + 5),
         Err(DbError::InvalidCredentials)
     );
-    repo.inner
-        .write()
-        .unwrap()
-        .characters
-        .get_mut(&alice_ch.character_id)
-        .unwrap()
-        .user_id = alice_uid;
+    repo.with_mut_snapshot(|s| {
+        s.characters
+            .get_mut(&alice_ch.character_id)
+            .unwrap()
+            .user_id = alice_uid;
+    });
 
     // Crafted SSO claims with `character_id <= 0` (`0` and `-1`) pass `verify_sso_access_token`
     // syntax checks if signed, and must be rejected by `claims.character_id > 0` even if key `0` exists.
@@ -457,12 +455,11 @@ fn verify_quasar_bearer_jwt_malformed_segments_headers_temporal_and_sub_cross_cl
     let mut ghost_acc_char = alice_c1.clone();
     ghost_acc_char.character_id = 90_999_992;
     ghost_acc_char.user_id = 888_888;
-    {
-        let mut g = repo.inner.write().unwrap();
+    repo.with_mut_snapshot(|g| {
         g.characters.insert(orphan_char.character_id, orphan_char);
         g.characters
             .insert(ghost_acc_char.character_id, ghost_acc_char);
-    }
+    });
 
     for bad_sub in [
         "CORPORATION:EVE:98000001".to_string(),

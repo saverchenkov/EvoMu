@@ -356,8 +356,8 @@ async fn skyhook_weapon_damage_silo_link_theft_and_owner_extraction() {
     .unwrap_err();
     assert_eq!(shield_err.code, "SkyhookSiloShieldTooHigh");
 
-    // Damage shields below 10% (200 HP remaining)
-    let dmg = apply_skyhook_weapon_damage(&ctx, skyhook_id, 9_800.0).unwrap();
+    // Damage shields below 10% (12,250 raw * 0.8 SDE shield resonance = 9,800 effective -> 200 HP remaining)
+    let dmg = apply_skyhook_weapon_damage(&ctx, skyhook_id, 12_250.0).unwrap();
     assert_eq!(dmg.dict_get("shieldHP").and_then(PyRep::as_f64), Some(200.0));
     assert_eq!(dmg.dict_get("hackable").and_then(PyRep::as_bool), Some(true));
 

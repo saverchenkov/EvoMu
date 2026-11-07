@@ -202,7 +202,7 @@ impl WorldRepository {
     }
 
     /// Generates a 16-byte random per-account salt encoded as 32 lowercase hex characters from OS CSPRNG (cross-platform).
-    fn generate_random_salt_hex() -> String {
+    pub(crate) fn generate_random_salt_hex() -> String {
         let mut salt_bytes = [0u8; 16];
         getrandom::getrandom(&mut salt_bytes)
             .expect("OS CSPRNG must be available to generate password salt");
@@ -830,6 +830,7 @@ impl WorldRepository {
                         || prev.character_id.is_some())
             });
         if let Some(ref prev) = displaced {
+            rt.online_session_ips.remove(&user_id);
             rt.displaced_sessions.insert(
                 prev.session_id,
                 "Displaced by concurrent login on same account".to_string(),
@@ -911,6 +912,7 @@ impl WorldRepository {
                 if session_id == 0 || existing.session_id == session_id {
                     logged_out_char_id = existing.character_id;
                     rt.online_sessions.remove(&user_id);
+                    rt.online_session_ips.remove(&user_id);
                     true
                 } else {
                     false
@@ -1045,6 +1047,7 @@ impl WorldRepository {
             rt.revoked_jtis.insert(jti);
         }
         let removed = rt.online_sessions.remove(&user_id);
+        rt.online_session_ips.remove(&user_id);
         if let Some(ref prev) = removed {
             rt.displaced_sessions
                 .insert(prev.session_id, reason.to_string());
@@ -1064,330 +1067,29 @@ impl WorldRepository {
         rt.kicked_users.get(&user_id).map(|(_, r)| r.clone())
     }
 
-    /// Returns a deterministic key identifier (`kid`) for the deployment's SSO JWT signing secret (`ESI-1`).
-    pub fn jwt_key_id(&self) -> String {
-        let rt = self.auth_runtime.read().unwrap_or_else(|e| e.into_inner());
-        let digest = sha256_bytes(&rt.jwt_signing_secret);
-        base64url_encode_no_pad(&digest[..12])
-    }
-
-    /// Issues an OAuth2 PKCE authorization code (`S256`) for `username` and `character_id` (`D-4`, `ESI-1`).
-    #[allow(clippy::too_many_arguments)]
-    pub fn authorize_pkce(
-        &self,
-        username: &str,
-        password_token: &str,
-        character_id: i64,
-        client_id: &str,
-        redirect_uri: &str,
-        scopes: Vec<String>,
-        code_challenge: &str,
-        code_challenge_method: &str,
-        now_unix: u64,
-    ) -> Result<String, DbError> {
-        if code_challenge_method != "S256" || code_challenge.trim().is_empty() {
-            return Err(DbError::ValidationError(
-                "PKCE requires S256 code_challenge_method and non-empty code_challenge".into(),
-            ));
+    /// Binds the normalized peer IP address of an active `:26000` MachoNet session (`user_id`, `session_id`)
+    /// so local-dev Quasar gRPC connections (`#472`) can verify same-IP active-session provenance.
+    pub fn set_online_session_peer_ip(&self, user_id: u64, session_id: u64, peer_addr: &str) {
+        let trimmed = peer_addr.trim();
+        if trimmed.is_empty() {
+            return;
         }
-        let acc = self.authenticate_at(username, password_token, now_unix)?;
-        let _ch = self.select_character_for_user(acc.user_id, character_id)?;
-        let code = format!("evomu_pkce_{}", Self::generate_random_salt_hex());
+        let parsed_ip = trimmed
+            .parse::<std::net::SocketAddr>()
+            .map(|sa| sa.ip())
+            .or_else(|_| trimmed.parse::<std::net::IpAddr>());
+        let Ok(raw_ip) = parsed_ip else {
+            return;
+        };
+        let norm_ip = crate::gateway_tokens::normalize_peer_ip(raw_ip);
         let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
-        rt.pkce_codes.insert(
-            code.clone(),
-            PkceAuthCode {
-                code: code.clone(),
-                user_id: acc.user_id,
-                character_id,
-                client_id: client_id.to_string(),
-                redirect_uri: redirect_uri.to_string(),
-                scopes,
-                code_challenge: code_challenge.to_string(),
-                code_challenge_method: code_challenge_method.to_string(),
-                expires_at_unix: now_unix.saturating_add(300),
-            },
-        );
-        Ok(code)
-    }
-
-    fn mint_sso_tokens_locked(
-        &self,
-        rt: &mut AuthRuntimeState,
-        user_id: u64,
-        character_id: i64,
-        char_name: &str,
-        client_id: &str,
-        scopes: Vec<String>,
-        now_unix: u64,
-    ) -> SsoTokenBundle {
-        let header_b64 = base64url_encode_no_pad(br#"{"alg":"HS256","typ":"JWT"}"#);
-        let jti = Self::generate_random_salt_hex();
-        let owner_hash = base64url_encode_no_pad(
-            &sha256_bytes(format!("evomu-owner:{user_id}:{character_id}").as_bytes())[..16],
-        );
-        let claims = SsoTokenClaims {
-            sub: format!("CHARACTER:EVE:{character_id}"),
-            name: char_name.to_string(),
-            owner: owner_hash,
-            user_id,
-            character_id,
-            scp: scopes.clone(),
-            iss: "https://login.eveonline.com".to_string(),
-            aud: vec![client_id.to_string(), "EVE Online".to_string()],
-            iat: now_unix,
-            exp: now_unix.saturating_add(1_200),
-            jti: jti.clone(),
-        };
-        let payload_json = serde_json::to_vec(&claims).expect("serialize SsoTokenClaims");
-        let payload_b64 = base64url_encode_no_pad(&payload_json);
-        let signing_input = format!("{header_b64}.{payload_b64}");
-        let sig = hmac_sha256(&rt.jwt_signing_secret, signing_input.as_bytes());
-        let sig_b64 = base64url_encode_no_pad(&sig);
-        let access_token = format!("{signing_input}.{sig_b64}");
-
-        let refresh_token = format!("evomu_rt_{}", Self::generate_random_salt_hex());
-        rt.refresh_tokens.insert(
-            refresh_token.clone(),
-            SsoRefreshTokenRecord {
-                refresh_token: refresh_token.clone(),
-                user_id,
-                character_id,
-                client_id: client_id.to_string(),
-                scopes,
-                expires_at_unix: now_unix.saturating_add(86_400 * 30),
-                revoked: false,
-                last_access_token_jti: jti,
-            },
-        );
-        SsoTokenBundle {
-            access_token,
-            token_type: "Bearer".to_string(),
-            expires_in: 1_200,
-            refresh_token,
-        }
-    }
-
-    /// Exchanges a single-use OAuth2 PKCE authorization code and `code_verifier` for a signed HS256
-    /// JWT `access_token` and rotatable `refresh_token` (`D-4`, `ESI-1`).
-    pub fn exchange_pkce_code(
-        &self,
-        code: &str,
-        client_id: &str,
-        code_verifier: &str,
-        now_unix: u64,
-    ) -> Result<SsoTokenBundle, DbError> {
-        self.exchange_pkce_code_inner(code, client_id, code_verifier, None, false, now_unix)
-    }
-
-    /// Exchanges a single-use OAuth2 PKCE authorization code while enforcing `redirect_uri` binding.
-    pub fn exchange_pkce_code_with_redirect(
-        &self,
-        code: &str,
-        client_id: &str,
-        code_verifier: &str,
-        redirect_uri: Option<&str>,
-        now_unix: u64,
-    ) -> Result<SsoTokenBundle, DbError> {
-        self.exchange_pkce_code_inner(code, client_id, code_verifier, redirect_uri, true, now_unix)
-    }
-
-    fn exchange_pkce_code_inner(
-        &self,
-        code: &str,
-        client_id: &str,
-        code_verifier: &str,
-        redirect_uri: Option<&str>,
-        enforce_redirect: bool,
-        now_unix: u64,
-    ) -> Result<SsoTokenBundle, DbError> {
-        let pkce = {
-            let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
-            rt.pkce_codes
-                .remove(code)
-                .ok_or(DbError::InvalidCredentials)?
-        };
-        if now_unix > pkce.expires_at_unix || pkce.client_id != client_id {
-            return Err(DbError::InvalidCredentials);
-        }
-        if enforce_redirect
-            && !pkce.redirect_uri.is_empty()
-            && redirect_uri != Some(pkce.redirect_uri.as_str())
+        if rt
+            .online_sessions
+            .get(&user_id)
+            .is_some_and(|os| os.session_id == session_id)
         {
-            return Err(DbError::InvalidCredentials);
+            rt.online_session_ips.insert(user_id, (session_id, norm_ip));
         }
-        let verifier_digest = sha256_bytes(code_verifier.as_bytes());
-        let computed_challenge = base64url_encode_no_pad(&verifier_digest);
-        if !constant_time_eq(
-            computed_challenge.as_bytes(),
-            pkce.code_challenge.as_bytes(),
-        ) {
-            return Err(DbError::InvalidCredentials);
-        }
-        {
-            let guard = self.read_state();
-            let acc = guard
-                .accounts
-                .values()
-                .find(|a| a.user_id == pkce.user_id)
-                .ok_or(DbError::InvalidCredentials)?;
-            acc.check_active_restriction(now_unix)?;
-        }
-        let ch = self.select_character_for_user(pkce.user_id, pkce.character_id)?;
-        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
-        Ok(self.mint_sso_tokens_locked(
-            &mut rt,
-            pkce.user_id,
-            pkce.character_id,
-            &ch.name,
-            &pkce.client_id,
-            pkce.scopes,
-            now_unix,
-        ))
-    }
-
-    /// Rotates an active SSO `refresh_token` and issues a fresh JWT `access_token` + `refresh_token` (`D-4`, `ESI-1`).
-    pub fn refresh_sso_token(
-        &self,
-        refresh_token: &str,
-        client_id: &str,
-        now_unix: u64,
-    ) -> Result<SsoTokenBundle, DbError> {
-        let rec = {
-            let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
-            let r = rt
-                .refresh_tokens
-                .get_mut(refresh_token)
-                .ok_or(DbError::InvalidCredentials)?;
-            if r.revoked || now_unix > r.expires_at_unix || r.client_id != client_id {
-                return Err(DbError::InvalidCredentials);
-            }
-            r.revoked = true;
-            r.clone()
-        };
-        {
-            let guard = self.read_state();
-            let acc = guard
-                .accounts
-                .values()
-                .find(|a| a.user_id == rec.user_id)
-                .ok_or(DbError::InvalidCredentials)?;
-            acc.check_active_restriction(now_unix)?;
-        }
-        let ch = self.select_character_for_user(rec.user_id, rec.character_id)?;
-        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
-        Ok(self.mint_sso_tokens_locked(
-            &mut rt,
-            rec.user_id,
-            rec.character_id,
-            &ch.name,
-            &rec.client_id,
-            rec.scopes,
-            now_unix,
-        ))
-    }
-
-    /// Verifies a signed HS256 JWT `access_token`, checking header algorithm, signature integrity,
-    /// `iat <= now_unix < exp`, kick/token revocation, and account ban/suspension status (`D-4`, `ESI-1`, `R34-P0-1`).
-    pub fn verify_sso_access_token(
-        &self,
-        token: &str,
-        now_unix: u64,
-    ) -> Result<SsoTokenClaims, DbError> {
-        let mut parts = token.splitn(3, '.');
-        let (Some(header_b64), Some(payload_b64), Some(sig_b64)) =
-            (parts.next(), parts.next(), parts.next())
-        else {
-            return Err(DbError::InvalidCredentials);
-        };
-        if sig_b64.is_empty() {
-            return Err(DbError::InvalidCredentials);
-        }
-        let header_bytes =
-            base64url_decode_no_pad(header_b64).map_err(|_| DbError::InvalidCredentials)?;
-        let header_json: serde_json::Value =
-            serde_json::from_slice(&header_bytes).map_err(|_| DbError::InvalidCredentials)?;
-        if header_json.get("alg").and_then(|v| v.as_str()) != Some("HS256") {
-            return Err(DbError::InvalidCredentials);
-        }
-        let signing_input = format!("{header_b64}.{payload_b64}");
-        let claims: SsoTokenClaims = {
-            let rt = self.auth_runtime.read().unwrap_or_else(|e| e.into_inner());
-            let expected_sig = hmac_sha256(&rt.jwt_signing_secret, signing_input.as_bytes());
-            let expected_sig_b64 = base64url_encode_no_pad(&expected_sig);
-            if !constant_time_eq(sig_b64.as_bytes(), expected_sig_b64.as_bytes()) {
-                return Err(DbError::InvalidCredentials);
-            }
-            let payload_bytes =
-                base64url_decode_no_pad(payload_b64).map_err(|_| DbError::InvalidCredentials)?;
-            let payload_val: serde_json::Value =
-                serde_json::from_slice(&payload_bytes).map_err(|_| DbError::InvalidCredentials)?;
-            let payload_obj = payload_val
-                .as_object()
-                .ok_or(DbError::InvalidCredentials)?;
-            if crate::gateway_tokens::payload_contains_forbidden_privilege_claim(payload_obj, true) {
-                return Err(DbError::InvalidCredentials);
-            }
-            let parsed: SsoTokenClaims =
-                serde_json::from_slice(&payload_bytes).map_err(|_| DbError::InvalidCredentials)?;
-            if parsed.iat > now_unix
-                || now_unix >= parsed.exp
-                || parsed.iss != "https://login.eveonline.com"
-                || !parsed.aud.iter().any(|a| a == "EVE Online")
-                || parsed.sub != format!("CHARACTER:EVE:{}", parsed.character_id)
-                || rt.revoked_jtis.contains(&parsed.jti)
-            {
-                return Err(DbError::InvalidCredentials);
-            }
-            if let Some((kicked_at, _)) = rt.kicked_users.get(&parsed.user_id) {
-                if *kicked_at >= parsed.iat {
-                    return Err(DbError::InvalidCredentials);
-                }
-            }
-            parsed
-        };
-        let guard = self.read_state();
-        let acc = guard
-            .accounts
-            .values()
-            .find(|a| a.user_id == claims.user_id)
-            .ok_or(DbError::InvalidCredentials)?;
-        acc.check_active_restriction(now_unix)?;
-        Ok(claims)
-    }
-
-    /// Revokes an SSO refresh token (or access token) (`D-4`, `ESI-1`).
-    pub fn revoke_sso_refresh_token(&self, token: &str) -> bool {
-        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
-        let mut jti_to_revoke = None;
-        let mut found = false;
-        if let Some(rec) = rt.refresh_tokens.get_mut(token) {
-            rec.revoked = true;
-            if !rec.last_access_token_jti.is_empty() {
-                jti_to_revoke = Some(rec.last_access_token_jti.clone());
-            }
-            found = true;
-        }
-        if let Some(jti) = jti_to_revoke {
-            rt.revoked_jtis.insert(jti);
-        }
-        if found {
-            return true;
-        }
-        if token.matches('.').count() == 2 {
-            let mut parts = token.splitn(3, '.');
-            if let (Some(_h), Some(payload_b64), Some(_s)) =
-                (parts.next(), parts.next(), parts.next())
-            {
-                if let Ok(payload_bytes) = base64url_decode_no_pad(payload_b64) {
-                    if let Ok(parsed) = serde_json::from_slice::<SsoTokenClaims>(&payload_bytes) {
-                        rt.revoked_jtis.insert(parsed.jti);
-                        return true;
-                    }
-                }
-            }
-        }
-        false
     }
 }
 #[cfg(test)] #[path = "accounts_unit_tests.rs"] mod accounts_unit_tests;

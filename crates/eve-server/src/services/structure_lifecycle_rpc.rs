@@ -491,7 +491,7 @@ pub async fn apply_live_combat_damage_to_upwell_structure(
         return Ok(Some((dmg.total(), dest, s_r, a_r, h_r, dest)));
     }
     if st_type == Some(crate::services::sov_services::TYPE_ORBITAL_SKYHOOK) {
-        let _ = crate::services::sov_gameplay::sov_gameplay_skyhook::apply_skyhook_weapon_damage(ctx, target_ball_id, dmg.total())?;
+        let rep = crate::services::sov_gameplay::sov_gameplay_skyhook::apply_skyhook_weapon_damage_typed(ctx, target_ball_id, dmg.em, dmg.thermal, dmg.kinetic, dmg.explosive)?;
         let (dest, s_r, a_r, h_r, inv) = ctx.db.with_snapshot(|snap| {
             if let Some(st) = snap.structures.get(&target_ball_id) {
                 let dest = st.state == "Destroyed";
@@ -504,7 +504,7 @@ pub async fn apply_live_combat_damage_to_upwell_structure(
                 (true, 0.0, 0.0, 0.0, true)
             }
         });
-        return Ok(Some((dmg.total(), dest, s_r, a_r, h_r, inv)));
+        return Ok(Some((rep.dict_get("appliedDamage").and_then(eve_proto::PyRep::as_f64).unwrap_or(dmg.total()), dest, s_r, a_r, h_r, inv)));
     }
     if matches!(
         st_type,

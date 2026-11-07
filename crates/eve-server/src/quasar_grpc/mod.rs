@@ -50,6 +50,10 @@ pub async fn handle_quasar_grpc_connection(
     ctx: Arc<ServerContext>,
 ) -> anyhow::Result<()> {
     let _ = stream.set_nodelay(true);
+    let peer_ip = stream
+        .peer_addr()
+        .ok()
+        .map(|sa| eve_db::gateway_tokens::normalize_peer_ip(sa.ip()));
     let mut h2_conn = h2::server::Builder::new()
         .max_concurrent_streams(256)
         .initial_window_size(1_048_576)
@@ -71,7 +75,7 @@ pub async fn handle_quasar_grpc_connection(
         };
         let stream_ctx = Arc::clone(&ctx);
         tokio::spawn(async move {
-            if let Err(e) = handle_grpc_stream(request, respond, stream_ctx).await {
+            if let Err(e) = handle_grpc_stream(request, respond, stream_ctx, peer_ip).await {
                 tracing::warn!(error = %e, "Quasar gRPC stream closed with error");
             }
         });
@@ -90,6 +94,7 @@ async fn handle_grpc_stream(
     request: Request<RecvStream>,
     mut respond: SendResponse<Bytes>,
     ctx: Arc<ServerContext>,
+    peer_ip: Option<std::net::IpAddr>,
 ) -> anyhow::Result<()> {
     let path = request.uri().path().to_string();
     let headers = request.headers().clone();
@@ -112,7 +117,7 @@ async fn handle_grpc_stream(
             Ok(())
         }
         "/eve_public.gateway.Requests/Send" => {
-            let Some(identity) = authenticate_grpc_headers(&ctx, &headers) else {
+            let Some(identity) = authenticate_grpc_headers(&ctx, &headers, peer_ip) else {
                 return send_trailers_only(
                     &mut respond,
                     GRPC_STATUS_UNAUTHENTICATED,
@@ -178,7 +183,7 @@ async fn handle_grpc_stream(
             Ok(())
         }
         "/eve_public.gateway.Notices/Consume" => {
-            let Some(identity) = authenticate_grpc_headers(&ctx, &headers) else {
+            let Some(identity) = authenticate_grpc_headers(&ctx, &headers, peer_ip) else {
                 return send_trailers_only(
                     &mut respond,
                     GRPC_STATUS_UNAUTHENTICATED,
@@ -257,7 +262,7 @@ async fn handle_grpc_stream(
             res
         }
         "/eve_public.gateway.Events/Publish" => {
-            let Some(identity) = authenticate_grpc_headers(&ctx, &headers) else {
+            let Some(identity) = authenticate_grpc_headers(&ctx, &headers, peer_ip) else {
                 return send_trailers_only(
                     &mut respond,
                     GRPC_STATUS_UNAUTHENTICATED,
@@ -350,38 +355,40 @@ fn build_session_for_identity(
     session.user_id = Some(identity.user_id);
     session.role = identity.account_role;
 
-    let resolved_cid = ctx.db.with_snapshot(|snap| {
-        if let Some(token_cid) = identity.token_character_id {
-            return snap
-                .characters
-                .get(&token_cid)
-                .is_some_and(|c| c.user_id == identity.user_id)
-                .then_some(token_cid);
-        }
+    let resolved_char = ctx.db.with_snapshot(|snap| {
         if let Some(cid) = claimed_char_id {
-            if snap
-                .characters
-                .get(&cid)
-                .is_some_and(|c| c.user_id == identity.user_id)
-            {
-                return Some(cid);
+            if let Some(ch) = snap.characters.get(&cid) {
+                if ch.user_id == identity.user_id {
+                    return Some((cid, ch.corporation_id, ch.alliance_id));
+                }
             }
             // Do not populate `claimed_char_id` if it belongs to another user;
-            // fall through to caller's own online character (if any) so `handle_public_request`
+            // fall through to caller's own online/token character (if any) so `handle_public_request`
             // returns `403 AuthoritativeContext character mismatch`.
         }
-        snap.sessions
+        if let Some(online_cid) = snap
+            .sessions
             .get(&identity.user_id)
             .and_then(|os| os.character_id)
-            .filter(|cid| {
-                snap.characters
-                    .get(cid)
-                    .is_some_and(|c| c.user_id == identity.user_id)
-            })
+        {
+            if let Some(ch) = snap.characters.get(&online_cid) {
+                if ch.user_id == identity.user_id {
+                    return Some((online_cid, ch.corporation_id, ch.alliance_id));
+                }
+            }
+        }
+        identity.token_character_id.and_then(|cid| {
+            snap.characters
+                .get(&cid)
+                .filter(|c| c.user_id == identity.user_id)
+                .map(|c| (cid, c.corporation_id, c.alliance_id))
+        })
     });
 
-    if let Some(cid) = resolved_cid {
+    if let Some((cid, corp_id, alliance_id)) = resolved_char {
         session.character_id = Some(cid);
+        session.corporation_id = Some(corp_id);
+        session.alliance_id = alliance_id;
         ctx.sync_session(&mut session);
     }
     session
@@ -414,6 +421,7 @@ fn parse_app_instance_uuid(headers: &HeaderMap) -> Option<Vec<u8>> {
 fn authenticate_grpc_headers(
     ctx: &ServerContext,
     headers: &HeaderMap,
+    peer_ip: Option<std::net::IpAddr>,
 ) -> Option<VerifiedGatewayIdentity> {
     let raw_hdr = headers
         .get("authorization")
@@ -434,7 +442,14 @@ fn authenticate_grpc_headers(
     }
 
     let now_unix = ctx.now_unix();
-    let verified = ctx.db.verify_quasar_bearer_jwt(token, now_unix).ok()?;
+    let verified = match ctx.db.verify_quasar_bearer_jwt(token, now_unix) {
+        Ok(v) => v,
+        Err(_) if ctx.feature_flags.allow_local_dev_gateway_jwt => {
+            let ip = peer_ip?;
+            ctx.db.verify_local_dev_client_jwt(token, ip, now_unix).ok()?
+        }
+        Err(_) => return None,
+    };
     let mut account_role = lookup_active_account_role(ctx, verified.user_id, now_unix)?;
     if !verified.is_full_sso {
         account_role &= !service_roles::ROLE_GM_MASK;

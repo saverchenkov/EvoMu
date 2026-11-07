@@ -303,7 +303,7 @@ async fn anchor_skyhook_error_branches_and_weapon_damage_reinforcement_transitio
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.get_mut(&sh_id).unwrap().state = "ShieldVulnerable".into();
     });
-    let reinf = apply_skyhook_weapon_damage(&ctx, sh_id, SKYHOOK_BASE_SHIELD_HP + 500.0).unwrap();
+    let reinf = apply_skyhook_weapon_damage(&ctx, sh_id, 13_000.0).unwrap();
     assert_eq!(
         reinf.dict_get("state").and_then(PyRep::as_str),
         Some("ArmorReinforced")
