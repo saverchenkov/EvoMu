@@ -848,16 +848,16 @@ pub fn handle(
                     return Err(rpc_err("AccessDenied", "Bill does not belong to caller corporation"));
                 }
                 let amt = IskCents(bill.amount_cents);
+                crate::services::market_trading::market_orders_corp_auth::require_corp_accountant_spend_role(
+                    snap,
+                    corp_id,
+                    char_id,
+                    from_account_key,
+                    now,
+                    "CorpRoleRequired",
+                )?;
                 let corp = snap.corporations.get_mut(&corp_id)
                     .ok_or_else(|| rpc_err("CorporationNotFound", "Corporation not found"))?;
-                let roles = corp.member_roles.get(&char_id).copied().unwrap_or(0) | session.corp_role;
-                if corp.ceo_id != char_id
-                    && !eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR)
-                    && !eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_ACCOUNTANT)
-                    && !eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT)
-                {
-                    return Err(rpc_err("CorpRoleRequired", "Accountant role required to pay corporation bills"));
-                }
                 corp.ensure_wallet_divisions();
                 let div_bal = corp.wallet_divisions.iter().find(|d| d.division_id == div_id)
                     .map(|d| if div_id == 1 { d.balance.min(corp.master_wallet) } else { d.balance })
@@ -911,15 +911,8 @@ pub fn handle(
             let now = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                 let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                let corp = snap.corporations.get(&corp_id)
-                    .ok_or_else(|| rpc_err("CorporationNotFound", "Corporation not found"))?;
-                let roles = corp.member_roles.get(&char_id).copied().unwrap_or(0) | session.corp_role;
-                if corp.ceo_id != char_id
-                    && !eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR)
-                    && !eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_ACCOUNTANT)
-                    && !eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT)
-                {
-                    return Err(rpc_err("CorpRoleRequired", "Accountant or Director role required to configure automatic bill payment"));
+                if !snap.corporations.contains_key(&corp_id) {
+                    return Err(rpc_err("CorporationNotFound", "Corporation not found"));
                 }
                 let mut ap = snap.owner_notes.get(&autopay_note_id(corp_id))
                     .and_then(|n| serde_json::from_str::<CorpAutoPaySettings>(&n.note).ok())
@@ -943,6 +936,14 @@ pub fn handle(
                         }
                     }
                 }
+                crate::services::market_trading::market_orders_corp_auth::require_corp_accountant_spend_role(
+                    snap,
+                    corp_id,
+                    char_id,
+                    ap.division_id.max(1000),
+                    now,
+                    "CorpRoleRequired",
+                )?;
                 save_json_note(snap, autopay_note_id(corp_id), -72, corp_id, format!("autopay:{corp_id}"), &ap, now);
                 Ok(())
             });

@@ -14,6 +14,9 @@ use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
 use eve_sde::TypeId;
 use std::collections::HashMap;
 
+#[path = "market_orders_corp_auth.rs"]
+pub(crate) mod market_orders_corp_auth;
+
 pub fn handle_orders_escrow(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -177,26 +180,13 @@ pub fn handle_orders_escrow(
                 let caller_corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 let div_id = (account_key.saturating_sub(999)).clamp(1, 7) as u8;
                 if use_corp {
-                    if !snap.corporations.contains_key(&caller_corp_id) {
-                        return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {caller_corp_id} not found for corporate sell order") });
-                    }
-                    let (is_ceo, eff_roles) =
-                        crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-                            snap,
-                            caller_corp_id,
-                            char_id,
-                            0,
-                            now_unix,
-                        );
-                    let take_bit = 1u64 << (27 + (div_id - 1));
-                    let allowed_roles = eve_db::corp_roles::ROLE_DIRECTOR
-                        | eve_db::corp_roles::ROLE_TRADER
-                        | eve_db::corp_roles::ROLE_ACCOUNTANT
-                        | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
-                        | take_bit;
-                    if !is_ceo && (eff_roles & allowed_roles) == 0 {
-                        return Err(BridgeRpcError { code: "CorpRoleRequired".into(), message: "Character lacks corporation trader/accountant role to place corporate sell order".into() });
-                    }
+                    market_orders_corp_auth::require_corp_market_order_role(
+                        snap,
+                        caller_corp_id,
+                        char_id,
+                        account_key,
+                        now_unix,
+                    )?;
                     if let Some(corp) = snap.corporations.get_mut(&caller_corp_id) {
                         corp.ensure_wallet_divisions();
                     }
@@ -238,6 +228,7 @@ pub fn handle_orders_escrow(
                     return Err(BridgeRpcError { code: "CantRepackageDamagedItem".into(), message: damaged_count.to_string() });
                 }
 
+                let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
                 let mut order_ids = Vec::with_capacity(parsed_items.len());
                 let mut total_broker_fee = IskCents(0);
                 let mut total_sales_tax = IskCents(0);
@@ -252,13 +243,17 @@ pub fn handle_orders_escrow(
                             message: "Order total cost overflows 64-bit ISK cents".into(),
                         })?;
                     let is_sellable_item = |snap_ref: &eve_db::WorldStateSnapshot, i: &InventoryItemRecord| {
-                        !snap_ref.is_structure_controller_saved_ship(i.item_id)
-                            && (snap_ref.is_item_consumable_by(i, char_id, Some(station_id), session.ship_id)
-                                || (use_corp
-                                    && i.owner_id == caller_corp_id
-                                    && i.location_id == station_id
-                                    && i.flag != InventoryFlag::Locked
-                                    && !snap_ref.is_item_locked_in_contract_or_job(i.item_id)))
+                        market_orders_corp_auth::is_item_sellable_on_market(
+                            snap_ref,
+                            &ext,
+                            i,
+                            char_id,
+                            caller_corp_id,
+                            use_corp,
+                            station_id,
+                            session.ship_id,
+                            now_unix,
+                        )
                     };
                     let is_courier_item = |iid: i64| snap.item_custom_names.get(&iid).map_or(false, |s| s.starts_with("courier_cargo:"));
 
@@ -827,25 +822,30 @@ pub fn handle_orders_escrow(
                         message: format!("Order {order_id} does not belong to character {char_id}"),
                     });
                 }
+                let mut meta = load_market_order_meta(snap, &order, now_unix);
                 if is_corp_order {
-                    let Some(corp) = snap.corporations.get(&caller_corp_id) else {
+                    if !snap.corporations.contains_key(&caller_corp_id) {
                         return Err(BridgeRpcError {
                             code: "CorporationNotFound".into(),
                             message: "Corporation not found".into(),
                         });
-                    };
-                    let role_mask = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+                    }
                     let issued_by = snap.market_order_meta.get(&order_id).and_then(|m| m.issued_by);
-                    if issued_by != Some(char_id)
-                        && corp.ceo_id != char_id
-                        && !eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_TRADER)
-                        && !eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_ACCOUNTANT)
-                        && !eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT)
-                    {
-                        return Err(BridgeRpcError {
-                            code: "CorpRoleRequired".into(),
-                            message: "Character lacks corporation trader/accountant role to cancel corporate order".into(),
+                    if issued_by != Some(char_id) {
+                        let order_acct_key = meta.account_key.unwrap_or_else(|| {
+                            snap.market_order_meta
+                                .get(&order_id)
+                                .and_then(|m| m.wallet_division)
+                                .map(|d| (999 + d).clamp(1000, 1006) as u16)
+                                .unwrap_or(1000)
                         });
+                        market_orders_corp_auth::require_corp_market_order_role(
+                            snap,
+                            caller_corp_id,
+                            char_id,
+                            order_acct_key,
+                            now_unix,
+                        )?;
                     }
                 }
                 if order.vol_remaining <= 0 {
@@ -854,7 +854,6 @@ pub fn handle_orders_escrow(
                         message: format!("Order {order_id} is already filled or cancelled"),
                     });
                 }
-                let mut meta = load_market_order_meta(snap, &order, now_unix);
                 let remaining_qty = order.vol_remaining;
                 if order.is_bid {
                     // Buy order: refund remaining escrow to character or corporation balance

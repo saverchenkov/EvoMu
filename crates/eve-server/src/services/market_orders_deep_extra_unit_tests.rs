@@ -225,7 +225,9 @@ fn place_multi_sell_corporate_roles_insolvent_margin_bid_and_corp_bid_cover() {
     ctx.db.with_mut_snapshot(|s| {
         s.corporations.get_mut(&seller_corp_id).unwrap().member_roles.insert(
             seller_id,
-            corp_roles::ROLE_ACCOUNTANT | corp_roles::ROLE_JUNIOR_ACCOUNTANT | (1u64 << 20),
+            corp_roles::ROLE_TRADER
+                | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]
+                | corp_roles::ROLE_HANGAR_CAN_TAKE[0],
         );
     });
 
@@ -287,7 +289,10 @@ fn cancel_char_order_corporate_roles_and_deliveries_stack_merge() {
     assert_eq!(handle_orders_escrow(&ctx, &mut sess, "marketProxy", "CancelCharOrder", &[PyRep::Integer(930_102)], &kw).unwrap().unwrap(), PyRep::Bool(true));
 
     ctx.db.with_mut_snapshot(|s| {
-        s.corporations.get_mut(&corp_id).unwrap().member_roles.insert(member_id, corp_roles::ROLE_TRADER);
+        s.corporations.get_mut(&corp_id).unwrap().member_roles.insert(
+            member_id,
+            corp_roles::ROLE_TRADER | corp_roles::ROLE_ACCOUNT_CAN_TAKE[1],
+        );
     });
     assert_eq!(handle_orders_escrow(&ctx, &mut sess, "marketProxy", "CancelCharOrder", &[PyRep::Integer(930_101)], &kw).unwrap().unwrap(), PyRep::Bool(true));
 

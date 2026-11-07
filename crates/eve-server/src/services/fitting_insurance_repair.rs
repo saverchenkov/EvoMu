@@ -209,10 +209,17 @@ pub(super) fn handle_insure_ship(
         .and_then(|a| a.as_bool())
         .or_else(|| kwargs.get("voidOld").and_then(|a| a.as_bool()))
         .unwrap_or(false);
-    let caller_corp_id = session.corporation_id.unwrap_or(0);
-    let caller_corp_role = session.corp_role;
+    let caller_corp_id_hint = session.corporation_id.unwrap_or(0);
+    let corp_acct_key = session.corp_account_key.clamp(1000, 1006);
 
     let res = ctx.db.try_with_mut_snapshot(|snap| {
+        let caller_corp_id = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.corporation_id)
+            .filter(|&cid| cid != 0)
+            .unwrap_or(caller_corp_id_hint);
+        let now_unix = ctx.now_unix();
         let Some(ship) = snap.items.get(&ship_id).cloned() else {
             return Err(rpc_err("ShipNotFound", format!("Ship {ship_id} not found")));
         };
@@ -259,26 +266,14 @@ pub(super) fn handle_insure_ship(
                     format!("Ship {ship_id} is not owned by corporation {caller_corp_id}"),
                 ));
             }
-            let is_ceo = snap
-                .corporations
-                .get(&caller_corp_id)
-                .is_some_and(|c| c.ceo_id == char_id);
-            let roles = snap
-                .corporations
-                .get(&caller_corp_id)
-                .and_then(|c| c.member_roles.get(&char_id).copied())
-                .unwrap_or(0)
-                | caller_corp_role;
-            let has_corp_privs = is_ceo
-                || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR)
-                || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_ACCOUNTANT)
-                || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT);
-            if !has_corp_privs {
-                return Err(rpc_err(
-                    "CorpRoleDenied",
-                    "Director or accountant role required for corporate ship insurance",
-                ));
-            }
+            crate::services::market_trading::market_orders_corp_auth::require_corp_accountant_spend_role(
+                snap,
+                caller_corp_id,
+                char_id,
+                corp_acct_key.clamp(1000, 1006) as u16,
+                now_unix,
+                "CorpRoleDenied",
+            )?;
             caller_corp_id
         } else {
             if ship.owner_id != char_id {
@@ -289,7 +284,6 @@ pub(super) fn handle_insure_ship(
             }
             char_id
         };
-        let now_unix = ctx.now_unix();
         let existing = fitting_containers_ships::read_container_ship_state_snap(snap)
             .insurance_contracts
             .get(&ship_id)
@@ -354,15 +348,35 @@ pub(super) fn handle_insure_ship(
                     format!("Corporation {caller_corp_id} not found"),
                 )
             })?;
-            let nb = corp
-                .master_wallet
-                .checked_sub(cost_cents)
-                .ok_or_else(|| rpc_err("InsufficientFunds", "Not enough corporation ISK to insure ship"))?;
-            corp.master_wallet = nb;
-            if let Some(div) = corp.wallet_divisions.first_mut() {
+            corp.ensure_wallet_divisions();
+            let div_id = (corp_acct_key.saturating_sub(999)).clamp(1, 7) as u8;
+            if div_id == 1 {
+                let avail = corp
+                    .wallet_divisions
+                    .first()
+                    .map(|d| d.balance.min(corp.master_wallet))
+                    .unwrap_or(corp.master_wallet);
+                let nb = avail
+                    .checked_sub(cost_cents)
+                    .ok_or_else(|| rpc_err("InsufficientFunds", "Not enough corporation ISK to insure ship"))?;
+                corp.master_wallet = nb;
+                if let Some(div) = corp.wallet_divisions.first_mut() {
+                    div.balance = nb;
+                }
+                nb
+            } else {
+                let div = corp
+                    .wallet_divisions
+                    .iter_mut()
+                    .find(|d| d.division_id == div_id)
+                    .ok_or_else(|| rpc_err("InsufficientFunds", "Not enough corporation ISK to insure ship"))?;
+                let nb = div
+                    .balance
+                    .checked_sub(cost_cents)
+                    .ok_or_else(|| rpc_err("InsufficientFunds", "Not enough corporation ISK to insure ship"))?;
                 div.balance = nb;
+                nb
             }
-            nb
         } else {
             let ch = snap.characters.get_mut(&char_id).ok_or_else(|| {
                 rpc_err("CharacterNotFound", format!("Character {char_id} not found"))

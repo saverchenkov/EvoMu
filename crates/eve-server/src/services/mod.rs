@@ -580,3 +580,7 @@ mod r7_tc_p1_incursion_dungeon_exp_tests;
 mod quasar_sso_local_dev_jwt_security_tests;
 #[cfg(test)]
 mod plex_ship_skyhook_link_security_tests;
+#[cfg(test)]
+mod corp_registry_ops_extra_unit_tests;
+#[cfg(test)]
+mod r8_shard_h_security_tests;

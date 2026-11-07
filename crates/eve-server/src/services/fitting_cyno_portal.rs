@@ -84,8 +84,8 @@ pub(crate) struct ActiveJumpBridge {
 }
 
 #[derive(Default)]
-struct CynoPortalState {
-    beacons: HashMap<(usize, i64), FleetModuleBeacon>,
+pub(crate) struct CynoPortalState {
+    pub(crate) beacons: HashMap<(usize, i64), FleetModuleBeacon>,
     destroyed_beacons: HashMap<(usize, i64), FleetModuleBeacon>,
     bridges: HashMap<(usize, i64), ActiveJumpBridge>,
 }
@@ -151,7 +151,7 @@ pub fn on_cyno_ship_destroyed(ctx: &ServerContext, ship_id: i64) {
     }
 }
 
-fn cyno_state() -> &'static RwLock<CynoPortalState> {
+pub(crate) fn cyno_state() -> &'static RwLock<CynoPortalState> {
     static STATE: OnceLock<RwLock<CynoPortalState>> = OnceLock::new();
     STATE.get_or_init(|| RwLock::new(CynoPortalState::default()))
 }
@@ -275,7 +275,7 @@ fn distance_ly(ctx: &ServerContext, a: u32, b: u32) -> f64 {
     ((pa[0] - pb[0]).powi(2) + (pa[1] - pb[1]).powi(2) + (pa[2] - pb[2]).powi(2)).sqrt()
 }
 
-fn evaluated_attrs(
+pub(crate) fn evaluated_attrs(
     ctx: &ServerContext,
     char_id: i64,
     ship_id: i64,
@@ -762,6 +762,11 @@ pub async fn relocate_ship(
     );
     let cd_secs = ((cd_min * 60.0).round() as u64).max(1);
     let fat_secs = ((fat_min * 60.0).round() as u64).max(cd_secs + 1);
+    let from = ctx.systems.get_or_spawn(from_sys);
+    let prev_cs = from.get_combat_state(ship_id).await.ok().flatten();
+    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, from_sys);
+    crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
+    let old = from.remove_ball(ship_id).await;
     let dest_sys_rec = ctx.sde.solar_systems.get(&to_sys);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -798,10 +803,6 @@ pub async fn relocate_ship(
             }
         }
     }
-    let from = ctx.systems.get_or_spawn(from_sys);
-    let old = from.remove_ball(ship_id).await;
-    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, from_sys);
-    crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let type_id = old.as_ref().map(|b| b.type_id).unwrap_or_else(|| {
         ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0)
     });
@@ -861,6 +862,7 @@ pub async fn relocate_ship(
         mode: MovementMode::Stop,
     };
     let mut combat = ctx.build_ship_combat_state(char_id, ship_id, type_id);
+    crate::services::r6_t1_p1_helpers::apply_preserved_combat_state(&mut combat, prev_cs);
     combat.is_cloaked = true;
     combat.gate_cloak_remaining_ticks = 60;
     combat.undock_invulnerable_remaining_ticks = 60;
@@ -1272,36 +1274,25 @@ pub(super) async fn jump_to_fleet_beacon(
         ));
     }
     let fuel_type = type_attr(ctx, ship_type, ATTR_JUMP_DRIVE_CONSUMPTION_TYPE) as TypeId;
-    let jdo_lvl = ctx.db.with_snapshot(|s| {
-        s.skills.get(&char_id).and_then(|m| m.get(&3456)).map(|r| r.level).unwrap_or(0)
-    });
     let effective_consumption = effective_jump_drive_consumption_per_ly(ctx, char_id, ship_id, ship_type);
     let fuel_qty = (effective_consumption * dist).ceil() as i64;
-    let raw_cap_need = type_attr(ctx, ship_type, 898);
-    let base_cap_need = if vals[2] > 0.0 { vals[2] } else { raw_cap_need };
-    let cap_frac = if jdo_lvl > 0 && (vals[2] <= 0.0 || vals[2] >= raw_cap_need) {
-        (base_cap_need * (1.0 - 0.05 * (jdo_lvl.min(5) as f64))).max(0.0)
-    } else {
-        base_cap_need.max(0.0)
-    };
-    let origin_sys = ctx.systems.get_or_spawn(sys_id);
-    let mut post_jump_cap = None;
-    if let Ok(Some(cs)) = origin_sys.get_combat_state(ship_id).await {
-        let cap_needed = cs.max_capacitor * cap_frac;
-        if cs.capacitor + 1e-4 < cap_needed {
-            return Err(err(
-                "NotEnoughCapacitor",
-                format!("Jump requires {cap_needed:.1} GJ capacitor, ship has {:.1} GJ", cs.capacitor),
-            ));
-        }
-        post_jump_cap = Some((cs.capacitor - cap_needed).max(0.0));
-    }
+    let updated_cap_cs = crate::services::space_destiny::space_nav_travel::validate_and_prepare_jump_capacitor(
+        ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        ship_type_id,
+    )
+    .await?;
     if crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, ctx.now_unix(), None).is_some() {
         return Err(err("SessionChangeTimerActive", "Session change timer is active"));
     }
     consume_or_err(ctx, ship_id, fuel_type, fuel_qty, |have| {
         format!("Jump requires {fuel_qty} x type {fuel_type}, ship holds {have}")
     })?;
+    if let Some(cap_cs) = updated_cap_cs {
+        let _ = ctx.systems.get_or_spawn(sys_id).set_combat_state(ship_id, cap_cs).await;
+    }
     let pos = if landed_at_star {
         star_arrival_position(ctx, beacon.solar_system_id)
     } else {
@@ -1309,13 +1300,6 @@ pub(super) async fn jump_to_fleet_beacon(
     };
     let (cooldown_min, fatigue_min, bound) =
         relocate_caller(ctx, session, char_id, ship_id, sys_id, beacon.solar_system_id, pos, dist, vals[1]).await?;
-    if let Some(rem_cap) = post_jump_cap {
-        let dest_sys = ctx.systems.get_or_spawn(beacon.solar_system_id);
-        if let Ok(Some(mut dcs)) = dest_sys.get_combat_state(ship_id).await {
-            dcs.capacitor = rem_cap;
-            let _ = dest_sys.set_combat_state(ship_id, dcs).await;
-        }
-    }
     Ok(JumpOutcome {
         dist_ly: dist,
         fuel_type,

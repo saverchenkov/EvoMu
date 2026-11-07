@@ -493,20 +493,14 @@ pub fn handle(
                             .get(&order_id)
                             .and_then(|m| m.issued_by)
                             == Some(char_id);
-                        let (is_ceo, eff_roles) =
-                            crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+                        if !is_original_placer {
+                            crate::services::market_trading::market_orders_corp_auth::require_corp_market_order_role(
                                 snap,
                                 caller_corp_id,
                                 char_id,
-                                0,
+                                meta.account_key.unwrap_or(1000),
                                 now_unix,
-                            );
-                        let allowed_roles = eve_db::corp_roles::ROLE_DIRECTOR
-                            | eve_db::corp_roles::ROLE_TRADER
-                            | eve_db::corp_roles::ROLE_ACCOUNTANT
-                            | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT;
-                        if !is_original_placer && !is_ceo && (eff_roles & allowed_roles) == 0 {
-                            return Err(rpc_err("CorpRoleRequired", "Character lacks corporation accountant/trader role to modify corporate order"));
+                            )?;
                         }
                     }
 

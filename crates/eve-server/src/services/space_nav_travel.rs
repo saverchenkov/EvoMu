@@ -542,6 +542,60 @@ pub(crate) fn consume_jump_fuel(
     })
 }
 
+/// Evaluates `jumpDriveCapacitorNeed` (`attr 898`) with `Jump Drive Operation` (`3456`) and dogma
+/// modifiers, verifies sufficient capacitor on `ship_id` before mutating world state, and returns
+/// the pre-jump `CombatState` with post-deduction `capacitor` ready to store before departure.
+pub(crate) async fn validate_and_prepare_jump_capacitor(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    cur_sys_id: u32,
+    ship_type_id: u32,
+) -> Result<Option<eve_destiny::CombatState>, BridgeRpcError> {
+    let raw_cap_need = type_attr(ctx, ship_type_id, "jumpDriveCapacitorNeed").unwrap_or(0.0);
+    let (eval_vals, _) = crate::services::inventory_fitting::fitting_cyno_portal::evaluated_attrs(
+        ctx,
+        char_id,
+        ship_id,
+        &[898],
+        None,
+    );
+    let eval_cap_need = eval_vals.first().copied().unwrap_or(0.0);
+    let jdo_lvl = ctx.db.with_snapshot(|s| {
+        s.skills.get(&char_id).and_then(|m| m.get(&3456)).map(|r| r.level).unwrap_or(0)
+    });
+    let base_cap_need = if eval_cap_need > 0.0 { eval_cap_need } else { raw_cap_need };
+    let cap_frac = if jdo_lvl > 0 && (eval_cap_need <= 0.0 || eval_cap_need >= raw_cap_need) {
+        (base_cap_need * (1.0 - 0.05 * (jdo_lvl.min(5) as f64))).max(0.0)
+    } else {
+        base_cap_need.max(0.0)
+    };
+    let origin_handle = ctx.systems.get_or_spawn(cur_sys_id);
+    let Ok(Some(mut cs)) = origin_handle.get_combat_state(ship_id).await else {
+        return Ok(None);
+    };
+    let now_unix = ctx.now_unix();
+    let last_jump = ctx.db.with_snapshot(|s| s.character_last_jump_unix.get(&char_id).copied().unwrap_or(0));
+    if last_jump > 0 && now_unix > last_jump && cs.capacitor > 0.0 && cs.max_capacitor > 0.0 {
+        cs.capacitor = eve_destiny::combat::compute_passive_recharge(
+            cs.capacitor,
+            cs.max_capacitor,
+            cs.capacitor_recharge_time_ms,
+            now_unix.saturating_sub(last_jump).saturating_mul(1_000) as f64,
+        );
+    }
+    let max_cap = cs.max_capacitor.max(0.0);
+    let cap_needed = max_cap * cap_frac;
+    if cs.capacitor + 1e-4 < cap_needed {
+        return Err(err(
+            "NotEnoughCapacitor",
+            format!("Jump requires {cap_needed:.1} GJ capacitor, ship has {:.1} GJ", cs.capacitor),
+        ));
+    }
+    cs.capacitor = (cs.capacitor - cap_needed).clamp(0.0, max_cap);
+    Ok(Some(cs))
+}
+
 /// Returns the hull's self-jump fatigue reduction bonus (`0.75` for Black Ops, `0.90` for
 /// industrial / Industrial Command Ship / JF / Rorqual / capsule / shuttle, or `1.0 - jumpFatigueMultiplier` from SDE).
 pub fn ship_fatigue_reduction_bonus(ctx: &ServerContext, ship_type_id: u32) -> f64 {

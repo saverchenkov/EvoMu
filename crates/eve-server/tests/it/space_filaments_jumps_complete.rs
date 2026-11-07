@@ -338,6 +338,7 @@ async fn test_jump_drive_range_fuel_fatigue_and_highsec_restriction() {
     assert_eq!(err.code, "JumpDistanceOutOfRange");
     set_skill(&ctx, 21_611, 5);
     set_skill(&ctx, 21_610, 4);
+    set_skill(&ctx, 3_456, 5);
 
     // Capitals may not jump into high-sec.
     let err = beacon_jump(&ctx, &mut sess, highsec.0, b_high).await.expect_err("high-sec forbidden");
@@ -425,6 +426,12 @@ async fn test_jump_drive_range_fuel_fatigue_and_highsec_restriction() {
     ctx.advance_virtual_clock(waited - 11);
     let actual_waited = ctx.now_unix().saturating_sub(jump1_unix);
     let fat_before = fat1 - actual_waited as f64 / 60.0;
+    let ohk_h = ctx.systems.get_or_spawn(OHKUNEN);
+    if let Ok(Some(mut cs)) = ohk_h.get_combat_state(ship_id).await {
+        assert!(cs.capacitor < cs.max_capacitor * 0.5, "jump 1 must deduct capacitor");
+        cs.capacitor = cs.max_capacitor;
+        let _ = ohk_h.set_combat_state(ship_id, cs).await;
+    }
     let res = beacon_jump(&ctx, &mut sess, hop2.0, b_hop2).await.expect("second jump");
     let PyRep::KeyVal(kv) = &res else { panic!() };
     let (cd2, fat2) = (kv["jumpCooldownMinutes"].as_f64().unwrap(), kv["jumpFatigueMinutes"].as_f64().unwrap());

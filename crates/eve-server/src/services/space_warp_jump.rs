@@ -877,6 +877,8 @@ async fn handle_cmd_stargate_jump(
         )?;
     }
 
+    deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
+    let prev_combat_state = old_handle.get_combat_state(ship_id).await.ok().flatten();
     let updated_ch = ctx
         .db
         .set_character_solar_system(char_id, dest_sys_id, &ctx.sde)
@@ -913,7 +915,6 @@ async fn handle_cmd_stargate_jump(
     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
         rt.authorized_shipping_storage.retain(|&(_, c)| c != char_id);
     });
-    deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let existing_ball = old_handle.remove_ball(ship_id).await;
     ctx.sync_character_local_chat(char_id, Some(old_sys), dest_sys_id);
 
@@ -924,6 +925,7 @@ async fn handle_cmd_stargate_jump(
     new_ball.speed_fraction = 0.0;
     new_ball.mode = MovementMode::Stop;
     let mut combat_state = ctx.build_ship_combat_state(char_id, ship_id, new_ball.type_id);
+    crate::services::r6_t1_p1_helpers::apply_preserved_combat_state(&mut combat_state, prev_combat_state);
     combat_state.is_cloaked = true;
     combat_state.gate_cloak_remaining_ticks = 60;
     combat_state.undock_invulnerable_remaining_ticks = 60;

@@ -275,7 +275,7 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
     let (dest_const_id, dest_reg_id) = (dest_sys_info.constellation_id, dest_sys_info.region_id);
     let dist_ly = crate::services::space_destiny::space_nav_travel::distance_ly(ctx, sys_id, dest_sys_id).max(0.01);
     let ozone_cost = ((ship_ball.mass * dist_ly * 0.000003 + 50.0).round() as i64).max(50);
-    let updated_ch = ctx.db.try_with_mut_snapshot(|snap| {
+    ctx.db.try_with_mut_snapshot(|snap| {
         let mut stack_ids: Vec<i64> = snap
             .items
             .values()
@@ -321,6 +321,13 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
         if remaining > 0 {
             return Err(err("InsufficientLiquidOzone", format!("Ansiblex gate requires at least {ozone_cost} units of Liquid Ozone in StructureFuel bay")));
         }
+        Ok(())
+    })?;
+    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, sys_id);
+    crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
+    let prev_combat_state = old_handle.get_combat_state(ship_id).await.ok().flatten();
+    let existing_ball = old_handle.remove_ball(ship_id).await;
+    let updated_ch = ctx.db.with_mut_snapshot(|snap| {
         {
             let ch = snap.characters.get_mut(&char_id).unwrap();
             ch.solar_system_id = dest_sys_id;
@@ -336,11 +343,8 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
             ship.location_id = dest_sys_id as i64;
             ship.version += 1;
         }
-        Ok(snap.characters[&char_id].clone())
-    })?;
-    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, sys_id);
-    crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
-    let existing_ball = old_handle.remove_ball(ship_id).await;
+        snap.characters[&char_id].clone()
+    });
     ctx.sync_character_local_chat(char_id, Some(sys_id), dest_sys_id);
     let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
     let mut new_ball = existing_ball.unwrap_or(ship_ball);
@@ -349,6 +353,7 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
     new_ball.speed_fraction = 0.0;
     new_ball.mode = eve_destiny::MovementMode::Stop;
     let mut combat_state = ctx.build_ship_combat_state(char_id, ship_id, new_ball.type_id);
+    crate::services::r6_t1_p1_helpers::apply_preserved_combat_state(&mut combat_state, prev_combat_state);
     combat_state.is_cloaked = true;
     combat_state.gate_cloak_remaining_ticks = 60;
     combat_state.undock_invulnerable_remaining_ticks = 60;

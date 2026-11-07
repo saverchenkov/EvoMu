@@ -850,32 +850,13 @@ pub fn handle(
                     .unwrap_or(0);
                 let div_id = (account_key.saturating_sub(999)).clamp(1, 7) as u8;
                 if use_corp {
-                    if !snap.corporations.contains_key(&caller_corp_id) {
-                        return Err(BridgeRpcError {
-                            code: "CorporationNotFound".into(),
-                            message: format!("Corporation {caller_corp_id} not found for corporate buy order"),
-                        });
-                    }
-                    let (is_ceo, role_mask) =
-                        crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-                            snap,
-                            caller_corp_id,
-                            char_id,
-                            0,
-                            now_unix,
-                        );
-                    let take_bit = 1u64 << (27 + u32::from(div_id.saturating_sub(1)));
-                    let allowed_mask = eve_db::corp_roles::ROLE_DIRECTOR
-                        | eve_db::corp_roles::ROLE_TRADER
-                        | eve_db::corp_roles::ROLE_ACCOUNTANT
-                        | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
-                        | take_bit;
-                    if !is_ceo && (role_mask & allowed_mask) == 0 {
-                        return Err(BridgeRpcError {
-                            code: "CorpRoleRequired".into(),
-                            message: "Character lacks corporation trader/accountant/wallet-take role to place corporate buy order".into(),
-                        });
-                    }
+                    market_orders_corp_auth::require_corp_market_order_role(
+                        snap,
+                        caller_corp_id,
+                        char_id,
+                        account_key,
+                        now_unix,
+                    )?;
                     if let Some(corp) = snap.corporations.get_mut(&caller_corp_id) {
                         corp.ensure_wallet_divisions();
                     }

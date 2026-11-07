@@ -557,6 +557,10 @@ async fn handle_random_jump_filament(
         }
     }
 
+    for &(p_char, p_ship, _) in &jumpers {
+        crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, p_char, p_ship, old_sys);
+        crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, p_char, p_ship);
+    }
     ctx.db.try_with_mut_snapshot(|snap| {
         if let Some(item) = snap.items.get_mut(&fil_item_id) {
             if item.quantity > 1 { item.quantity -= 1; item.version += 1; } else { snap.items.remove(&fil_item_id); }
@@ -580,9 +584,7 @@ async fn handle_random_jump_filament(
     let pvp_until = now_unix.saturating_add(crate::sp6_lifecycle::PVP_TIMER_SECS);
     for (j_idx, (p_char, p_ship, mut b)) in jumpers.into_iter().enumerate() {
         let prev_cs = old_handle.get_combat_state(p_ship).await.ok().flatten();
-        crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, p_char, p_ship, old_sys);
         let _ = old_handle.remove_ball(p_ship).await;
-        crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, p_char, p_ship);
         ctx.sync_character_local_chat(p_char, Some(old_sys), dest_sys_id);
         crate::services::map_service::record_solar_system_jump(ctx, p_char, dest_sys_id);
 
@@ -591,12 +593,7 @@ async fn handle_random_jump_filament(
         b.speed_fraction = 0.0;
         b.mode = MovementMode::Stop;
         let mut combat_state = ctx.build_ship_combat_state(p_char, p_ship, b.type_id);
-        if let Some(pcs) = prev_cs {
-            combat_state.shield_hp = pcs.shield_hp.min(combat_state.max_shield_hp);
-            combat_state.armor_hp = pcs.armor_hp.min(combat_state.max_armor_hp);
-            combat_state.structure_hp = pcs.structure_hp.min(combat_state.max_structure_hp);
-            combat_state.capacitor = pcs.capacitor.min(combat_state.max_capacitor);
-        }
+        crate::services::r6_t1_p1_helpers::apply_preserved_combat_state(&mut combat_state, prev_cs);
         combat_state.is_cloaked = true;
         combat_state.gate_cloak_remaining_ticks = 60;
         combat_state.undock_invulnerable_remaining_ticks = 60;
@@ -821,10 +818,19 @@ async fn handle_cmd_jump_to_structure_beacon(
     }
 
     nav::check_jump_activation(ctx, char_id)?;
+    let cap_ship_type = if nav::type_attr(ctx, db_type_id, "jumpDriveCapacitorNeed").is_some() { db_type_id } else { current_ball.type_id };
+    let updated_cap_cs = nav::validate_and_prepare_jump_capacitor(ctx, char_id, ship_id, cur_sys_id, cap_ship_type).await?;
     nav::consume_jump_fuel(ctx, ship_id, &plan)?;
+    if let Some(ref cap_cs) = updated_cap_cs {
+        let _ = cur_sys_handle.set_combat_state(ship_id, cap_cs.clone()).await;
+    }
     let dist_ly = plan.distance_ly;
     let (cd_min, fat_min) =
         nav::apply_jump_fatigue(ctx, char_id, plan.distance_ly);
+    let prev_cs = cur_sys_handle.get_combat_state(ship_id).await.ok().flatten();
+    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys_id);
+    crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
+    let _ = cur_sys_handle.remove_ball(ship_id).await;
     let (dest_const_id, dest_reg_id) = ctx
         .sde
         .solar_systems
@@ -845,11 +851,6 @@ async fn handle_cmd_jump_to_structure_beacon(
             ship.location_id = target_sys_id as i64;
         }
     });
-
-    let prev_cs = cur_sys_handle.get_combat_state(ship_id).await.ok().flatten();
-    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys_id);
-    let _ = cur_sys_handle.remove_ball(ship_id).await;
-    crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let target_pos = DVec3::from_array(target_struct.position) + DVec3::new(5_000.0, 0.0, 0.0);
     let dest_handle = ctx.systems.get_or_spawn(target_sys_id);
     let ball = Ball {
@@ -865,12 +866,7 @@ async fn handle_cmd_jump_to_structure_beacon(
         mode: MovementMode::Stop,
     };
     let mut combat_state = ctx.build_ship_combat_state(char_id, ship_id, current_ball.type_id);
-    if let Some(pcs) = prev_cs {
-        combat_state.shield_hp = pcs.shield_hp.min(combat_state.max_shield_hp);
-        combat_state.armor_hp = pcs.armor_hp.min(combat_state.max_armor_hp);
-        combat_state.structure_hp = pcs.structure_hp.min(combat_state.max_structure_hp);
-        combat_state.capacitor = pcs.capacitor.min(combat_state.max_capacitor);
-    }
+    crate::services::r6_t1_p1_helpers::apply_preserved_combat_state(&mut combat_state, prev_cs);
     combat_state.is_cloaked = true;
     combat_state.gate_cloak_remaining_ticks = 60;
     combat_state.undock_invulnerable_remaining_ticks = 60;
@@ -1260,9 +1256,17 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
     }
 
     nav::check_jump_activation(ctx, char_id)?;
+    let updated_cap_cs = nav::validate_and_prepare_jump_capacitor(ctx, char_id, ship_id, cur_sys_id, db_type_id).await?;
     nav::consume_jump_fuel(ctx, ship_id, &plan)?;
+    if let Some(ref cap_cs) = updated_cap_cs {
+        let _ = cur_sys_handle.set_combat_state(ship_id, cap_cs.clone()).await;
+    }
     let dist_ly = plan.distance_ly;
     let (cd_min, fat_min) = nav::apply_jump_fatigue(ctx, char_id, plan.distance_ly);
+    let prev_cs = cur_sys_handle.get_combat_state(ship_id).await.ok().flatten();
+    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys_id);
+    crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
+    let _ = cur_sys_handle.remove_ball(ship_id).await;
     let (dest_const_id, dest_reg_id) = ctx.sde.solar_systems.get(&target_sys_id).map(|s| (s.constellation_id, s.region_id)).unwrap_or((0, 0));
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -1274,11 +1278,6 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
         }
         if let Some(sh) = snap.items.get_mut(&ship_id) { sh.location_id = target_sys_id as i64; }
     });
-
-    let prev_cs = cur_sys_handle.get_combat_state(ship_id).await.ok().flatten();
-    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys_id);
-    let _ = cur_sys_handle.remove_ball(ship_id).await;
-    crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let target_pos = beacon.position + DVec3::new(2_500.0, 0.0, 0.0);
     let dest_handle = ctx.systems.get_or_spawn(target_sys_id);
     let ball = Ball {
@@ -1287,12 +1286,7 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
         radius: current_ball.radius, speed_fraction: 0.0, mode: MovementMode::Stop,
     };
     let mut combat_state = ctx.build_ship_combat_state(char_id, ship_id, current_ball.type_id);
-    if let Some(pcs) = prev_cs {
-        combat_state.shield_hp = pcs.shield_hp.min(combat_state.max_shield_hp);
-        combat_state.armor_hp = pcs.armor_hp.min(combat_state.max_armor_hp);
-        combat_state.structure_hp = pcs.structure_hp.min(combat_state.max_structure_hp);
-        combat_state.capacitor = pcs.capacitor.min(combat_state.max_capacitor);
-    }
+    crate::services::r6_t1_p1_helpers::apply_preserved_combat_state(&mut combat_state, prev_cs);
     combat_state.is_cloaked = true;
     combat_state.gate_cloak_remaining_ticks = 60;
     combat_state.undock_invulnerable_remaining_ticks = 60;

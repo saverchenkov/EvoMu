@@ -11,6 +11,9 @@ use crate::router::{BoundObjectEntry, ServerContext};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
 
+#[path = "corp_registry_burst_fallback.rs"]
+mod corp_registry_burst_fallback;
+
 fn item_to_packed_cells(ctx: &ServerContext, i: &eve_db::InventoryItemRecord) -> Vec<PyRep> {
     let (group_id, category_id) = ctx.sde.types.get(&i.type_id).map(|t| (t.group_id as i64, t.category_id as i64)).unwrap_or((0, 0));
     let qty = if i.is_blueprint_copy { -2 } else if i.singleton { -1 } else { i.quantity as i64 };
@@ -37,108 +40,11 @@ pub async fn handle_corp_hangar_invbroker(
     if service == "corporationSvc" && method == "GetEmploymentRecord" {
         return super::fleet_social::handle(ctx, session, service, method, args, kwargs).await;
     }
-    if service == "dogmaIM" && method == "Activate" && session.fleet_id.is_some() {
-        if let Some(module_id) = args.first().and_then(|a| a.as_i64()) {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let ship_id = session.ship_id.unwrap_or(0);
-            if ctx.get_or_rebuild_ship_fitting(char_id, ship_id).is_ok() {
-                // Defer to full tactical_modules handling
-                return None;
-            }
-            let burst_info = ctx.db.with_snapshot(|snap| {
-                let mod_item = snap.items.get(&module_id)?;
-                let mod_type = ctx.sde.types.get(&mod_item.type_id)?;
-                if mod_type.group_id != 1770 {
-                    return None;
-                }
-                let ship_id = mod_item.location_id;
-                let charge_tid = snap
-                    .items
-                    .values()
-                    .find(|i| {
-                        i.location_id == ship_id
-                            && i.item_id != module_id
-                            && i.flag == mod_item.flag
-                            && i.quantity > 0
-                    })
-                    .map(|i| i.type_id);
-                let aoe_range = mod_type
-                    .default_attributes
-                    .get(&54)
-                    .copied()
-                    .unwrap_or(15_000.0)
-                    .max(15_000.0);
-                Some((ship_id, charge_tid, aoe_range))
-            });
-            if let Some((ship_id, charge_tid_opt, aoe_range)) = burst_info {
-                let fid = session.fleet_id.unwrap_or(0);
-                let sys_id = session.solar_system_id.unwrap_or(0);
-                let candidates: Vec<(i64, i64)> = ctx.db.with_snapshot(|snap| {
-                    let mut out = vec![(char_id, ship_id)];
-                    if let Some(fl) = snap.fleets.get(&fid) {
-                        for &m_id in &fl.members {
-                            if m_id != char_id
-                                && super::fleet_social::is_in_fleet_boost_scope(fl, char_id, m_id)
-                            {
-                                if let Some(ch) = snap.characters.get(&m_id) {
-                                    if ch.solar_system_id == sys_id
-                                        && ch.station_id.is_none()
-                                        && ch.active_ship_id > 0
-                                    {
-                                        out.push((m_id, ch.active_ship_id));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    out
-                });
-                let sys = ctx.systems.get_or_spawn(sys_id);
-                let booster_pos = sys
-                    .get_ball_snapshot(ship_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|(_, b)| b.position)
-                    .unwrap_or(glam::DVec3::ZERO);
-                let mut affected_members = Vec::new();
-                let mut affected_ships = Vec::new();
-                for (mcid, msid) in candidates {
-                    let in_range = if msid == ship_id {
-                        true
-                    } else if let Ok(Some((_, mb))) = sys.get_ball_snapshot(msid).await {
-                        (mb.position - booster_pos).length() <= aoe_range
-                    } else {
-                        true
-                    };
-                    if in_range {
-                        affected_members.push(PyRep::Integer(mcid));
-                        affected_ships.push(PyRep::Integer(msid));
-                    }
-                }
-                ctx.db.with_mut_snapshot(|snap| {
-                    snap.module_active_states.insert(module_id);
-                    if let Some(ctid) = charge_tid_opt {
-                        snap.module_active_charges.insert(module_id, ctid);
-                    }
-                });
-                return Some(Ok(PyRep::keyval([
-                    ("moduleID", PyRep::Integer(module_id)),
-                    ("active", PyRep::Bool(true)),
-                    (
-                        "chargeTypeID",
-                        charge_tid_opt
-                            .map(|c| PyRep::Integer(c as i64))
-                            .unwrap_or(PyRep::None),
-                    ),
-                    ("affectedMemberIDs", PyRep::List(affected_members)),
-                    ("affectedShipIDs", PyRep::List(affected_ships)),
-                ])));
-            }
-        }
+    if let Some(res) =
+        corp_registry_burst_fallback::handle_fleet_burst_fallback(ctx, session, service, method, args)
+            .await
+    {
+        return Some(res);
     }
 
     if service != "invbroker" {
@@ -1355,8 +1261,8 @@ pub(crate) fn handle_get_member_tracking_info(
     )))
 }
 
-#[cfg(test)]
 #[path = "corp_registry_ops_tests.rs"]
+#[cfg(test)]
 mod corp_registry_ops_tests;
 
 

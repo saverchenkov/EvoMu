@@ -198,6 +198,37 @@ async fn command_burst_dogma_activate_and_invbroker_hangar_branches() {
     let mut burst_sess = sess.clone();
     burst_sess.fleet_id = Some(fleet_id);
     burst_sess.ship_id = Some(0);
+    let docked_err = handle_corp_hangar_invbroker(
+        &ctx,
+        &mut burst_sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(mod_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(docked_err.code, "ShipDocked");
+
+    burst_sess.station_id = None;
+    burst_sess.structure_id = None;
+    let no_ship_err = handle_corp_hangar_invbroker(
+        &ctx,
+        &mut burst_sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(mod_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(no_ship_err.code, "NoActiveShip");
+
+    burst_sess.ship_id = Some(fake_ship_id);
     let burst_res = handle_corp_hangar_invbroker(
         &ctx,
         &mut burst_sess,
@@ -218,6 +249,39 @@ async fn command_burst_dogma_activate_and_invbroker_hangar_branches() {
             .map(|l| l.len()),
         Some(2)
     );
+
+    // Adversarial `#477` cases: offline, unfitted, contract-locked, foreign, and missing in-space ball.
+    ctx.db.with_mut_snapshot(|s| {
+        s.module_online_states.insert(mod_id, false);
+    });
+    assert_eq!(handle_corp_hangar_invbroker(&ctx, &mut burst_sess, None, "dogmaIM", "Activate", &[PyRep::Integer(mod_id)], &kw).await.unwrap().unwrap_err().code, "ModuleOffline");
+    ctx.db.with_mut_snapshot(|s| {
+        s.module_online_states.insert(mod_id, true);
+        s.items.get_mut(&mod_id).unwrap().flag = InventoryFlag::Hangar;
+    });
+    assert_eq!(handle_corp_hangar_invbroker(&ctx, &mut burst_sess, None, "dogmaIM", "Activate", &[PyRep::Integer(mod_id)], &kw).await.unwrap().unwrap_err().code, "ModuleNotFitted");
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.get_mut(&mod_id).unwrap().flag = InventoryFlag::HiSlot0;
+        s.contracts.insert(
+            77_901,
+            eve_db::ContractRecord {
+                contract_id: 77_901,
+                issuer_id: ceo_id,
+                status: "Outstanding".into(),
+                item_ids: vec![mod_id],
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(handle_corp_hangar_invbroker(&ctx, &mut burst_sess, None, "dogmaIM", "Activate", &[PyRep::Integer(mod_id)], &kw).await.unwrap().unwrap_err().code, "ModuleNotFitted");
+    ctx.db.with_mut_snapshot(|s| {
+        s.contracts.remove(&77_901);
+        s.items.get_mut(&mod_id).unwrap().owner_id = member_id;
+    });
+    assert_eq!(handle_corp_hangar_invbroker(&ctx, &mut burst_sess, None, "dogmaIM", "Activate", &[PyRep::Integer(mod_id)], &kw).await.unwrap().unwrap_err().code, "ModuleNotOwnedByShip");
+    ctx.db.with_mut_snapshot(|s| s.items.get_mut(&mod_id).unwrap().owner_id = ceo_id);
+    let _ = sys_h.remove_ball(fake_ship_id).await;
+    assert_eq!(handle_corp_hangar_invbroker(&ctx, &mut burst_sess, None, "dogmaIM", "Activate", &[PyRep::Integer(mod_id)], &kw).await.unwrap().unwrap_err().code, "ShipNotInSpace");
 
     // invbroker.List error branches: InvalidLocation and BoundObjectOwnershipViolation
     let mut no_loc_sess = sess.clone();
