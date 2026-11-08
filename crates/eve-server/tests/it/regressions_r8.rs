@@ -2309,6 +2309,26 @@ pub(crate) async fn run_planetary_industry_and_structure_regressions(
         },
     );
 
+    let _ = jita_sys.remove_ball(100_000_001).await;
+    jita_sys
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: 100_000_001,
+                type_id: 23757,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 100.0,
+                inertia: 0.5,
+                mass: 1_000_000_000.0,
+                radius: 1_500.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_type_combat_state(23757),
+        )
+        .await
+        .expect("respawn stopped carrier 100_000_001");
+
     // Unlocked target must be rejected with TargetNotLocked
     let unlocked_err = ctx
         .dispatch_rpc(

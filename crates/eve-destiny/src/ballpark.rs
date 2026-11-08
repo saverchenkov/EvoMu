@@ -80,6 +80,7 @@ impl Ballpark {
             ball_wormhole_stages: BTreeMap::new(),
             base_webbed_max_velocity: BTreeMap::new(),
             active_wubble_multipliers: BTreeMap::new(),
+            sim_unix_secs: 0,
         }
     }
 

@@ -1313,8 +1313,9 @@ async fn test_esi_corp_role_gated_mining_customs_and_orders() {
             snap.structures.insert(observer_id, ref_st);
             snap.items.insert(
                 960_001,
-                make_item(960_001, 35_894, corp_id, observer_id, InventoryFlag::ServiceSlot0, 1, true),
+                make_item(960_001, 45_009, corp_id, observer_id, InventoryFlag::ServiceSlot0, 1, true),
             );
+            snap.module_online_states.insert(960_001, true);
             Ok::<(), ()>(())
         })
         .unwrap();

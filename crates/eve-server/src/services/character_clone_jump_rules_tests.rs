@@ -351,6 +351,20 @@ fn clone_jump_rejects_wormhole_pochven_and_non_capsule() {
                 ..Default::default()
             },
         );
+        snap.items.insert(
+            99_101,
+            InventoryItemRecord {
+                item_id: 99_101,
+                type_id: 35894,
+                owner_id: corp,
+                location_id: wh_struct_id,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(99_101, true);
         let mut clones = vec![JumpCloneRecord {
             jump_clone_id: 9201,
             character_id: cid,
@@ -588,4 +602,151 @@ async fn clone_vat_bay_activation_and_in_space_ship_clone_jump() {
         .expect("vat bay jump ok");
     assert!(matches!(space_jump, PyRep::KeyVal(_)));
     assert!(jumper_sess.station_id.is_none());
+}
+
+#[test]
+fn clone_bay_rejects_empty_slots_offline_and_non_operational_structures() {
+    let ctx = test_ctx();
+    let cid = 97_600_001i64;
+    let owner_corp = 98_600_001i64;
+    let struct_dep = 1_060_000_000_001i64;
+    let struct_dest = 1_060_000_000_002i64;
+    let kw = std::collections::HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().unwrap();
+        ch.character_id = cid;
+        ch.user_id = cid as u64;
+        ch.corporation_id = owner_corp;
+        ch.clone_grade = 2;
+        ch.solar_system_id = 30_000_142;
+        ch.station_id = None;
+        ch.structure_id = Some(struct_dep);
+        ch.balance = IskCents::from_isk(10_000_000);
+        ch.last_clone_jump_unix = 0;
+        let cap_id = put_item(snap, 670, cid, struct_dep, InventoryFlag::Hangar, 1, true);
+        ch.active_ship_id = cap_id;
+        snap.characters.insert(cid, ch);
+
+        snap.skills.entry(cid).or_default().insert(
+            24242,
+            TrainedSkillRecord { type_id: 24242, level: 5, skill_points: 256_000.0 },
+        );
+
+        for (sid, sys) in [(struct_dep, 30_000_142), (struct_dest, 30_000_142)] {
+            snap.structures.insert(
+                sid,
+                UpwellStructureRecord {
+                    structure_id: sid,
+                    type_id: 35832,
+                    owner_corp_id: owner_corp,
+                    solar_system_id: sys,
+                    name: format!("Citadel {sid}"),
+                    state: "ShieldVulnerable".into(),
+                    quantum_core_installed: true,
+                    fuel_blocks: 100,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.jump_clones.insert(
+            cid,
+            vec![JumpCloneRecord {
+                jump_clone_id: 901,
+                character_id: cid,
+                location_id: struct_dest,
+                implants: Vec::new(),
+            }],
+        );
+    });
+
+    let cap_id = ctx.db.with_snapshot(|snap| snap.characters[&cid].active_ship_id);
+    let mut sess = make_session(cid as u64, cid, owner_corp, 30_000_142, None, Some(struct_dep), Some(cap_id));
+
+    // 1. Empty service slots on departure structure -> StationHasNoCloneBay + GetPriceForClone -> StationHasNoCloneBay + InstallCloneInStructure -> NoCloneBayService
+    assert_eq!(
+        handle_clone_jump(&ctx, &mut sess, &[PyRep::Integer(901)])
+            .unwrap().unwrap_err().code,
+        "StationHasNoCloneBay"
+    );
+    assert_eq!(
+        crate::services::character_skills::character_clones_implants::handle_clones_and_sheet(
+            &ctx, &mut sess, "jumpCloneSvc", "GetPriceForClone", &[], &kw
+        ).unwrap().unwrap_err().code,
+        "StationHasNoCloneBay"
+    );
+    assert_eq!(
+        crate::services::character_skills::character_clones_implants::handle_clones_and_sheet(
+            &ctx, &mut sess, "jumpCloneSvc", "InstallCloneInStructure", &[], &kw
+        ).unwrap().unwrap_err().code,
+        "NoCloneBayService"
+    );
+
+    // 2. Fit & online 35894 on departure, keep destination empty -> StructureHasNoCloneBay
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            97_600_101,
+            InventoryItemRecord {
+                item_id: 97_600_101,
+                type_id: 35894,
+                owner_id: owner_corp,
+                location_id: struct_dep,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(97_600_101, true);
+    });
+    assert_eq!(
+        crate::services::character_skills::character_clones_implants::handle_clones_and_sheet(
+            &ctx, &mut sess, "jumpCloneSvc", "GetPriceForClone", &[], &kw
+        ).unwrap().unwrap().as_f64(),
+        Some(900_000.0)
+    );
+    assert_eq!(
+        handle_clone_jump(&ctx, &mut sess, &[PyRep::Integer(901)])
+            .unwrap().unwrap_err().code,
+        "StructureHasNoCloneBay"
+    );
+
+    // 3. Fit & online 35894 on destination, test HullReinforce / Unanchored / NoCore / Anchoring rejection
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            97_600_102,
+            InventoryItemRecord {
+                item_id: 97_600_102,
+                type_id: 35894,
+                owner_id: owner_corp,
+                location_id: struct_dest,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(97_600_102, true);
+    });
+    for bad_state in ["HullReinforce", "HullReinforced", "Unanchored", "NoCore", "Anchoring"] {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.structures.get_mut(&struct_dest).unwrap().state = bad_state.into();
+        });
+        assert_eq!(
+            handle_clone_jump(&ctx, &mut sess, &[PyRep::Integer(901)])
+                .unwrap().unwrap_err().code,
+            "StructureHasNoCloneBay"
+        );
+    }
+
+    // 4. Operational both sides -> CloneJump succeeds
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.get_mut(&struct_dest).unwrap().state = "ShieldVulnerable".into();
+    });
+    let ok = handle_clone_jump(&ctx, &mut sess, &[PyRep::Integer(901)])
+        .unwrap()
+        .expect("clone jump with operational structures and online 35894 modules must succeed");
+    assert_eq!(ok.dict_get("locationID"), Some(&PyRep::Integer(struct_dest)));
 }

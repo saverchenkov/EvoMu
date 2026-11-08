@@ -952,6 +952,11 @@ async fn test_esi_b2_corp_mining_and_customs_offices_live_http_and_sqlite() {
             athanor_id,
             make_structure(athanor_id, 35835, corp_id, JITA_SYSTEM_ID, "B2 Moon Athanor"),
         );
+        snap.items.insert(
+            athanor_id + 1,
+            make_item(athanor_id + 1, 45_009, corp_id, athanor_id, InventoryFlag::ServiceSlot0, 1, true),
+        );
+        snap.module_online_states.insert(athanor_id + 1, true);
     });
 
     let mut ceo_sess = setup_pilot(&ctx, 11, "demo", "demo-secret", ceo_id).await;

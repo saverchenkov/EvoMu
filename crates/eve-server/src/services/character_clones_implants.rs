@@ -256,17 +256,10 @@ pub fn handle_clones_and_sheet(
             let mut station_owner_faction_id: Option<i64> = None;
             if is_structure {
                 let has_online_clone_bay = ctx.db.with_snapshot(|snap| {
-                    let st_powered = snap
-                        .structures
-                        .get(&station_id)
-                        .is_some_and(|st| st.quantum_core_installed && st.fuel_blocks > 0);
-                    st_powered
-                        && snap.items.values().any(|i| {
-                            i.location_id == station_id
-                                && i.type_id == 35894
-                                && i.flag.is_service_slot()
-                                && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true)
-                        })
+                    crate::services::character_clone_jump_rules::structure_has_online_clone_bay(
+                        snap,
+                        station_id,
+                    )
                 });
                 if !has_online_clone_bay {
                     return Some(Err(BridgeRpcError {
@@ -473,31 +466,20 @@ pub fn handle_clones_and_sheet(
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 crate::services::character_clone_jump_rules::check_alpha_clone_install_capacity(snap, char_id)?;
-                let Some(st) = snap.structures.get(&structure_id) else {
+                if !snap.structures.contains_key(&structure_id) {
                     return Err(BridgeRpcError {
                         code: "StructureNotFound".into(),
                         message: format!("Structure {structure_id} not found"),
                     });
-                };
-                let has_online_clone_bay = snap.items.values().any(|i| {
-                    i.location_id == structure_id
-                        && i.type_id == 35894
-                        && i.flag.is_service_slot()
-                        && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true)
-                });
-                if !has_online_clone_bay {
+                }
+                if !crate::services::character_clone_jump_rules::structure_has_online_clone_bay(
+                    snap,
+                    structure_id,
+                ) {
                     return Err(BridgeRpcError {
                         code: "NoCloneBayService".into(),
                         message: format!(
                             "Structure {structure_id} does not have an online Standup Cloning Center service module fitted in a service slot"
-                        ),
-                    });
-                }
-                if !st.quantum_core_installed || st.fuel_blocks == 0 {
-                    return Err(BridgeRpcError {
-                        code: "NoCloneBayService".into(),
-                        message: format!(
-                            "Structure {structure_id} does not have an online Standup Cloning Center service"
                         ),
                     });
                 }
@@ -720,10 +702,10 @@ pub fn handle_clones_and_sheet(
                 .flat_map(|s| s.stations.iter())
                 .any(|st| st.station_id == docked_loc_id && st.has_clone_bay)
                 || ctx.db.with_snapshot(|snap| {
-                    snap.structures
-                        .get(&docked_loc_id)
-                        .map(|st| st.quantum_core_installed && st.fuel_blocks > 0)
-                        .unwrap_or(false)
+                    crate::services::character_clone_jump_rules::structure_has_online_clone_bay(
+                        snap,
+                        docked_loc_id,
+                    )
                 });
             if !valid_facility {
                 return Some(Err(BridgeRpcError {

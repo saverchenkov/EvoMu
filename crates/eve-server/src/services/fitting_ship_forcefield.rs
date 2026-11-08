@@ -101,6 +101,150 @@ pub fn can_enter_forcefield(ctx: &ServerContext, char_id: i64, ship_id: i64, tow
         .with_snapshot(|snap| can_enter_forcefield_in_snap_at(snap, char_id, ship_id, tower_id, now))
 }
 
+pub fn is_pos_forcefield_protected_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    sde: &eve_sde::SdeRegistry,
+    ballpark: Option<&eve_destiny::Ballpark>,
+    sys_id: u32,
+    entity_id: i64,
+    pos: DVec3,
+) -> bool {
+    for item in snap.items.values() {
+        if item.item_id != entity_id
+            && item.location_id == sys_id as i64
+            && item.singleton
+            && sde.types.get(&item.type_id).is_some_and(|t| t.group_id == 365)
+            && snap.starbase_settings.contains_key(&item.item_id)
+            && snap.module_online_states.get(&item.item_id) != Some(&false)
+            && !item.dynamic_attributes.get(&2).is_some_and(|&v| v <= 0.0)
+        {
+            let has_any_bay_entry = snap.items.values().any(|f| f.location_id == item.item_id);
+            let has_fuel = !has_any_bay_entry
+                || snap.items.values().any(|f| f.location_id == item.item_id && f.quantity > 0);
+            if !has_fuel {
+                continue;
+            }
+            let rad = sde
+                .types
+                .get(&item.type_id)
+                .and_then(|t| t.default_attributes.get(&680).copied())
+                .unwrap_or(35_000.0);
+            let tpos = snap
+                .item_positions
+                .get(&item.item_id)
+                .copied()
+                .map(DVec3::from_array)
+                .or_else(|| ballpark.and_then(|bp| bp.balls.get(&item.item_id).map(|b| b.position)));
+            if let Some(tp) = tpos {
+                if pos.distance(tp) <= rad {
+                    return true;
+                }
+            }
+        }
+    }
+    for st in snap.structures.values() {
+        if st.structure_id != entity_id
+            && st.solar_system_id == sys_id
+            && st.fuel_blocks > 0
+            && !matches!(
+                st.state.as_str(),
+                "Destroyed" | "Unanchored" | "Offline" | "Anchoring" | "AnchorVulnerable" | "NoCore"
+            )
+            && snap.module_online_states.get(&st.structure_id) != Some(&false)
+            && sde.types.get(&st.type_id).is_some_and(|t| t.group_id == 365)
+            && snap.starbase_settings.contains_key(&st.structure_id)
+        {
+            let rad = sde
+                .types
+                .get(&st.type_id)
+                .and_then(|t| t.default_attributes.get(&680).copied())
+                .unwrap_or(35_000.0);
+            let tp = DVec3::from_array(st.position);
+            if pos.distance(tp) <= rad {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub async fn is_pos_forcefield_protected(
+    ctx: &ServerContext,
+    sys_id: u32,
+    entity_id: i64,
+    pos: DVec3,
+) -> bool {
+    let candidates = ctx.db.with_snapshot(|snap| {
+        let mut out: Vec<(i64, f64, Option<DVec3>)> = Vec::new();
+        for item in snap.items.values() {
+            if item.item_id != entity_id
+                && item.location_id == sys_id as i64
+                && item.singleton
+                && ctx.sde.types.get(&item.type_id).is_some_and(|t| t.group_id == 365)
+                && snap.starbase_settings.contains_key(&item.item_id)
+                && snap.module_online_states.get(&item.item_id) != Some(&false)
+                && !item.dynamic_attributes.get(&2).is_some_and(|&v| v <= 0.0)
+            {
+                let has_any_bay_entry = snap.items.values().any(|f| f.location_id == item.item_id);
+                let has_fuel = !has_any_bay_entry
+                    || snap.items.values().any(|f| f.location_id == item.item_id && f.quantity > 0);
+                if !has_fuel {
+                    continue;
+                }
+                let rad = ctx
+                    .sde
+                    .types
+                    .get(&item.type_id)
+                    .and_then(|t| t.default_attributes.get(&680).copied())
+                    .unwrap_or(35_000.0);
+                let tpos = snap.item_positions.get(&item.item_id).copied().map(DVec3::from_array);
+                out.push((item.item_id, rad, tpos));
+            }
+        }
+        for st in snap.structures.values() {
+            if st.structure_id != entity_id
+                && st.solar_system_id == sys_id
+                && st.fuel_blocks > 0
+                && !matches!(
+                    st.state.as_str(),
+                    "Destroyed" | "Unanchored" | "Offline" | "Anchoring" | "AnchorVulnerable" | "NoCore"
+                )
+                && snap.module_online_states.get(&st.structure_id) != Some(&false)
+                && ctx.sde.types.get(&st.type_id).is_some_and(|t| t.group_id == 365)
+                && snap.starbase_settings.contains_key(&st.structure_id)
+            {
+                let rad = ctx
+                    .sde
+                    .types
+                    .get(&st.type_id)
+                    .and_then(|t| t.default_attributes.get(&680).copied())
+                    .unwrap_or(35_000.0);
+                out.push((st.structure_id, rad, Some(DVec3::from_array(st.position))));
+            }
+        }
+        out
+    });
+    if candidates.is_empty() {
+        return false;
+    }
+    let mut sys_handle_opt = None;
+    for (tid, rad, pos_opt) in candidates {
+        let tp = match pos_opt {
+            Some(p) => Some(p),
+            None => {
+                let h = sys_handle_opt.get_or_insert_with(|| ctx.systems.get_or_spawn(sys_id));
+                h.get_ball_snapshot(tid).await.ok().flatten().map(|(_, b)| b.position)
+            }
+        };
+        if let Some(tp) = tp {
+            if pos.distance(tp) <= rad {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub fn is_pos_forcefield_blocked_in_snap(
     snap: &eve_db::WorldStateSnapshot,
     sde: &eve_sde::SdeRegistry,

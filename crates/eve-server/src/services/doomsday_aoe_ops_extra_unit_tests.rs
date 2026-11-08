@@ -5,7 +5,6 @@
 use std::sync::Arc;
 
 use crate::router::ServerContext;
-use crate::services::account_services::account_services_tests::PyRepTestExt;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::{
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
@@ -387,12 +386,13 @@ async fn test_neut_pulse_cone_gtfo_and_reaper_branch_coverage() {
     // Verify exact fuel stack was removed when remaining == 0
     assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&fuel_id)));
 
-    // Verify neut pulse drained subcap_id (50,000 - 35,000 = 15,000) and skipped tethered_ship_id
-    let neuted_list = cone_ok.dict_get("neutedShipIDs").and_then(|v| v.as_list()).unwrap();
-    assert!(neuted_list.contains(&PyRep::Integer(subcap_id)));
-    assert!(!neuted_list.contains(&PyRep::Integer(tethered_ship_id)));
+    // Verify neut pulse drained subcap_id (50,000 - 35,000 = 15,000) and skipped tethered_ship_id without leaking victim IDs
+    assert!(cone_ok.dict_get("neutedShipIDs").is_none());
+    assert!(cone_ok.dict_get("hitTargetIDs").is_none());
     let after_cap = sys.get_combat_state(subcap_id).await.unwrap().unwrap().capacitor;
     assert!((after_cap - 15_000.0).abs() < 1e-3);
+    let teth_cap = sys.get_combat_state(tethered_ship_id).await.unwrap().unwrap().capacitor;
+    assert!((teth_cap - 10_000.0).abs() < 1e-3);
 
     // Verify reactivation delay blocks immediate re-use of mod_id
     assert!(
@@ -451,7 +451,7 @@ async fn test_neut_pulse_cone_gtfo_and_reaper_branch_coverage() {
         .is_err()
     );
 
-    // Spatial GTFO with explicit center at (8000, 0, 0) schedules subcap_id and preserves orig_max_velocity (75.0)
+    // Spatial GTFO with explicit center at (8000, 0, 0) preserves orig_max_velocity (75.0) and avoids leaking victim IDs
     let gtfo_ok = activate_spatial_gtfo_doomsday(
         &ctx,
         char_id,
@@ -467,8 +467,9 @@ async fn test_neut_pulse_cone_gtfo_and_reaper_branch_coverage() {
     )
     .await
     .expect("GTFO with explicit center succeeds");
-    let sched = gtfo_ok.dict_get("scheduledShipIDs").and_then(|v| v.as_list()).unwrap();
-    assert!(sched.contains(&PyRep::Integer(subcap_id)));
+    assert!(gtfo_ok.dict_get("neutedShipIDs").is_none());
+    assert!(gtfo_ok.dict_get("scheduledShipIDs").is_none());
+    assert!(gtfo_ok.dict_get("teleportedShipIDs").is_none());
 
     let rt = read_superweapon_runtime(&ctx.db).expect("runtime present");
     assert!(rt.active_cycles.iter().all(|c| (c.orig_max_velocity - 75.0).abs() < 1e-6));
@@ -514,6 +515,160 @@ async fn test_neut_pulse_cone_gtfo_and_reaper_branch_coverage() {
     )
     .await
     .expect("Reaper 6-real sweep succeeds");
-    let hit_ids = reaper_ok.dict_get("hitTargetIDs").and_then(|v| v.as_list()).unwrap();
-    assert!(hit_ids.contains(&PyRep::Integer(subcap_id)));
+    assert!(reaper_ok.dict_get("neutedShipIDs").is_none());
+    assert!(reaper_ok.dict_get("hitTargetIDs").is_none());
+}
+
+#[tokio::test]
+async fn test_doomsday_r9_capacitor_pos_forcefield_and_cloak_protections() {
+    let (mut ctx, _sess, char_id, ship_id, sys_id, mod_id, _fuel_id) = build_titan_test_env();
+    {
+        let sde_mut = Arc::make_mut(&mut ctx.sde);
+        if let Some(dd_t) = sde_mut.types.get_mut(&24_550) {
+            dd_t.default_attributes.insert(6, 20_000.0); // capacitorNeed = 20,000 GJ
+        }
+        sde_mut.types.insert(
+            33_475,
+            make_fighter_type(33_475, 365, 23, 10_000_000.0, vec![(680, 15_000.0)]),
+        );
+    }
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let mut titan_cs = CombatState::new();
+    titan_cs.capacitor = 10_000.0; // Below 20,000 GJ cap need
+    titan_cs.max_capacitor = 100_000.0;
+    let _ = sys
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 11_567,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 75.0,
+                inertia: 1.0,
+                mass: 1_000_000_000.0,
+                radius: 5_000.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            titan_cs,
+        )
+        .await;
+
+    // 1. Insufficient capacitor -> NotEnoughCapacitor (and fuel is NOT consumed)
+    let cap_err = activate_cone_doomsday(
+        &ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        mod_id,
+        &[PyRep::Integer(mod_id), PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(cap_err.code, "NotEnoughCapacitor");
+
+    // 2. Titan inside online POS forcefield -> CantActivateInForcefield
+    let tower_id = 772_000_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            tower_id,
+            make_fighter_item(tower_id, 33_475, 98_999_999, sys_id as i64, InventoryFlag::None, 1),
+        );
+        snap.starbase_settings.insert(tower_id, Default::default());
+        snap.item_positions.insert(tower_id, [10_000.0, 0.0, 0.0]);
+    });
+    let _ = sys.set_capacitor(ship_id, 80_000.0).await;
+    let pos_err = activate_cone_doomsday(
+        &ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        mod_id,
+        &[PyRep::Integer(mod_id), PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(pos_err.code, "CantActivateInForcefield");
+
+    // Move POS tower to (40_000, 0, 0) so Titan at origin is outside, while a victim at (35_000, 0, 0) / (5_000) can test POS protection
+    // Place tower at (25_000, 0, 0) with 15km radius -> covers [10_000..=40_000] on +X, leaving Titan at origin outside!
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.insert(tower_id, [25_000.0, 0.0, 0.0]);
+    });
+
+    let cloaked_id = 772_000_010_i64;
+    let gate_cloaked_id = 772_000_011_i64;
+    let pos_victim_id = 772_000_012_i64;
+    let open_victim_id = 772_000_013_i64;
+
+    let spawn_v = |id: i64, pos: DVec3, cloaked: bool, gate_ticks: u32| {
+        let sys = sys.clone();
+        async move {
+            let mut vcs = CombatState::new();
+            vcs.shield_hp = 50_000.0;
+            vcs.max_shield_hp = 50_000.0;
+            vcs.capacitor = 50_000.0;
+            vcs.max_capacitor = 50_000.0;
+            vcs.is_cloaked = cloaked;
+            vcs.gate_cloak_remaining_ticks = gate_ticks;
+            let _ = sys
+                .spawn_ball_with_combat(
+                    Ball {
+                        id,
+                        type_id: 600,
+                        position: pos,
+                        velocity: DVec3::ZERO,
+                        max_velocity: 250.0,
+                        inertia: 1.0,
+                        mass: 10_000_000.0,
+                        radius: 100.0,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Stop,
+                    },
+                    vcs,
+                )
+                .await;
+        }
+    };
+    spawn_v(cloaked_id, DVec3::new(5_000.0, 0.0, 0.0), true, 0).await;
+    spawn_v(gate_cloaked_id, DVec3::new(6_000.0, 0.0, 0.0), false, 20).await;
+    spawn_v(pos_victim_id, DVec3::new(12_000.0, 0.0, 0.0), false, 0).await; // inside POS + in cone!
+    spawn_v(open_victim_id, DVec3::new(7_000.0, 0.0, 0.0), false, 0).await;
+
+    // Also place a ship at (9_500, 0, 0) inside a second POS just at 25km? No, pos_victim_id at 12km is within 15km of 25km tower!
+    // Check neut pulse + capacitor deduction + Cone tick skipping cloaked/gate-cloaked/POS targets
+    let res = activate_cone_doomsday(
+        &ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        mod_id,
+        &[PyRep::Integer(mod_id), PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)],
+    )
+    .await
+    .expect("cone activation outside POS with sufficient capacitor succeeds");
+
+    assert!(res.dict_get("neutedShipIDs").is_none());
+    assert!(res.dict_get("hitTargetIDs").is_none());
+    let titan_cap_after = sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor;
+    assert!((titan_cap_after - 60_000.0).abs() < 1e-3, "must deduct 20,000 GJ cap need");
+
+    // Neut pulse: cloaked & gate-cloaked skipped; open drained
+    assert!((sys.get_combat_state(cloaked_id).await.unwrap().unwrap().capacitor - 50_000.0).abs() < 1e-3);
+    assert!((sys.get_combat_state(gate_cloaked_id).await.unwrap().unwrap().capacitor - 50_000.0).abs() < 1e-3);
+    assert!((sys.get_combat_state(open_victim_id).await.unwrap().unwrap().capacitor - 15_000.0).abs() < 1e-3);
+
+    // Step past 10s warmup so Cone applies tick damage
+    let rt = read_superweapon_runtime(&ctx.db).unwrap();
+    let delta = rt.active_cycles[0].warmup_secs + 1;
+    crate::services::doomsday_aoe_tick::mutate_superweapon_runtime(&ctx.db, |rt_mut| {
+        rt_mut.active_cycles[0].started_at_unix =
+            rt_mut.active_cycles[0].started_at_unix.saturating_sub(delta);
+    });
+    crate::services::doomsday_aoe_tick::step_bosonic_doomsday_system(&ctx, sys_id).await;
+    assert_eq!(sys.get_combat_state(cloaked_id).await.unwrap().unwrap().shield_hp, 50_000.0);
+    assert_eq!(sys.get_combat_state(gate_cloaked_id).await.unwrap().unwrap().shield_hp, 50_000.0);
+    assert_eq!(sys.get_combat_state(pos_victim_id).await.unwrap().unwrap().shield_hp, 50_000.0);
+    assert!(sys.get_combat_state(open_victim_id).await.unwrap().unwrap().shield_hp < 50_000.0);
 }

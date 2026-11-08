@@ -314,6 +314,20 @@ async fn test_in_space_compression_and_structure_compression_and_decompression()
             },
         );
         snap.items.insert(
+            900_007,
+            InventoryItemRecord {
+                item_id: 900_007,
+                type_id: 35899,
+                owner_id: 1_000_009,
+                location_id: struct_id,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(900_007, true);
+        snap.items.insert(
             900_005,
             InventoryItemRecord {
                 item_id: 900_005,

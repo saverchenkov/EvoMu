@@ -16,6 +16,9 @@ impl Ballpark {
         }
         let dt = dt.min(60.0);
         self.current_tick += 1;
+        if self.sim_unix_secs > 0 {
+            self.sim_unix_secs = self.sim_unix_secs.saturating_add(dt.round().max(0.0) as u64);
+        }
         let current_tick = self.current_tick;
 
         let dynamic_ids: Vec<BallId> = self
@@ -474,6 +477,7 @@ impl Ballpark {
                 cs.last_step_capacitor = Some(cs.capacitor);
             }
         }
+        let now_unix_secs = self.effective_unix_secs();
         for (
             dot_id,
             flat_dps,
@@ -486,6 +490,11 @@ impl Ballpark {
             destroyed,
         ) in dot_updates
         {
+            let expiry_filetime = if remaining_ticks > 0 {
+                crate::unix_to_filetime(now_unix_secs.saturating_add(remaining_ticks as u64))
+            } else {
+                0
+            };
             self.emit_event(
                 Some(dot_id),
                 DestinyEvent::OnDotVictimUpdated {
@@ -493,6 +502,7 @@ impl Ballpark {
                     flat_dps,
                     pct_dps,
                     remaining_ticks,
+                    expiry_filetime,
                 },
             );
             if did_apply {

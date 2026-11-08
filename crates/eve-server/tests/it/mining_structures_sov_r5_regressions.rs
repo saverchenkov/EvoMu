@@ -109,6 +109,7 @@ async fn test_r5_212_222_corp_hangar_reprocess_compress_decompress_acl_and_owner
                 ..Default::default()
             },
         );
+        snap.module_online_states.insert(880_212_000, true);
         snap.items.insert(
             corp_ore_id,
             InventoryItemRecord {
@@ -512,12 +513,12 @@ async fn test_r5_218_219_220_221_223_224_mining_moon_drill_asset_safety_fw_insur
                 self_destruct_at_unix: None,
             },
         );
-        // Seed Standup Moon Drill I (35894) in ServiceSlot0 but OFFLINE
+        // Seed Standup Moon Drill I (45009) in ServiceSlot0 but OFFLINE
         snap.items.insert(
             drill_mod_id,
             InventoryItemRecord {
                 item_id: drill_mod_id,
-                type_id: 35894,
+                type_id: 45009,
                 owner_id: corp_id,
                 location_id: refinery_id,
                 flag: InventoryFlag::ServiceSlot0,

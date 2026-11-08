@@ -36,27 +36,26 @@ pub(crate) fn resolve_structure_moon_id(sde: &eve_sde::SdeRegistry, solar_system
 }
 
 fn structure_has_online_moon_drill(snap: &eve_db::WorldStateSnapshot, structure_id: i64) -> bool {
-    let Some(st) = snap.structures.get(&structure_id) else { return false; };
+    let Some(st) = snap.structures.get(&structure_id) else {
+        return false;
+    };
     if !crate::services::station_structure::structure_lifecycle::is_operational(&st.state)
+        || matches!(
+            st.state.as_str(),
+            "HullReinforce" | "HullReinforced" | "Unanchored" | "Offline"
+        )
         || !st.quantum_core_installed
         || st.fuel_blocks == 0
     {
         return false;
     }
-    let has_fitted_online_drill = snap.items.values().any(|it| {
+    snap.items.values().any(|it| {
         it.location_id == structure_id
-            && it.type_id == 35894
+            && it.type_id == 45009
             && it.flag != InventoryFlag::Hangar
             && (it.flag.is_service_slot() || matches!(it.flag as u16, 11..=34))
-            && snap.module_online_states.get(&it.item_id).copied().unwrap_or(true)
-    });
-    if has_fitted_online_drill {
-        return true;
-    }
-    let has_any_drill_or_service = snap.items.values().any(|it| {
-        it.location_id == structure_id && (it.type_id == 35894 || it.flag.is_service_slot())
-    });
-    !has_any_drill_or_service
+            && snap.module_online_states.get(&it.item_id).copied().unwrap_or(false)
+    })
 }
 
 /// Deterministically derives a 3-ore moon composition from SDE moon ore groups (`1884`, `1920..=1923`)
@@ -501,7 +500,7 @@ pub async fn handle(
                 if !structure_has_online_moon_drill(snap, structure_id) {
                     return Err(BridgeRpcError {
                         code: "StructureServiceOffline".into(),
-                        message: "Refinery must be operational with a Quantum Core, fuel blocks, and an online Standup Moon Drill I (35894)".into(),
+                        message: "Refinery must be operational with a Quantum Core, fuel blocks, and an online Standup Moon Drill I (45009)".into(),
                     });
                 }
 
@@ -753,7 +752,7 @@ pub async fn handle(
                 if !structure_has_online_moon_drill(snap, structure_id) {
                     return Err(BridgeRpcError {
                         code: "StructureServiceOffline".into(),
-                        message: "Refinery must be operational with a Quantum Core, fuel blocks, and an online Standup Moon Drill I (35894) to fracture chunk".into(),
+                        message: "Refinery must be operational with a Quantum Core, fuel blocks, and an online Standup Moon Drill I (45009) to fracture chunk".into(),
                     });
                 }
 

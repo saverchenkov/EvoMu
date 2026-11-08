@@ -343,6 +343,7 @@ fn apply_destiny_event_in_actor_handles_all_event_variants_and_unknown_ball() {
             flat_dps: 50.0,
             pct_dps: 0.01,
             remaining_ticks: 10,
+            expiry_filetime: 0,
         }
     ));
     assert!(bp.combat_states[&3001].active_breacher_dot.is_some());

@@ -177,6 +177,7 @@ async fn test_mining_scrapmetal_yield_exclusions_at_npc_and_rigged_tatara() {
             make_structure(tatara_id, 35836, corp_id, wh_sys, "W-Space Rigged Tatara"),
         );
         let svc = make_item(101_000_710, 35899, corp_id, tatara_id, InventoryFlag::ServiceSlot0, 1, true);
+        snap.module_online_states.insert(svc.item_id, true);
         snap.items.insert(svc.item_id, svc);
         let rig = make_item(101_000_711, rig_tid, corp_id, tatara_id, InventoryFlag::RigSlot0, 1, true);
         snap.items.insert(rig.item_id, rig);
@@ -425,6 +426,7 @@ async fn test_mining_prismaticite_reprocessing_and_unrefined_mineral_reactions()
     // on Tatara: Asteroid Ore rig must boost Prismaticite (group 4915) but NOT Unrefined Mineral (group 4932).
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(102_000_820, make_item(102_000_820, 35899, corp_id, tatara_id, InventoryFlag::ServiceSlot1, 1, true));
+        snap.module_online_states.insert(102_000_820, true);
         snap.items.insert(102_000_821, make_item(102_000_821, 46633, corp_id, tatara_id, InventoryFlag::RigSlot0, 1, true));
         snap.items.insert(102_000_822, make_item(102_000_822, 90041, char_id, tatara_id, InventoryFlag::Hangar, 100, false));
     });

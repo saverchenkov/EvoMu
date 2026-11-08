@@ -350,14 +350,16 @@ async fn test_mn11_compression_space_and_structure_and_gas() {
     let gas_item_id = 800_000_141i64;
     let reproc_svc_mod_id = 800_000_144i64;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.structures.insert(structure_id, make_structure(structure_id, 1000001, 35835, 30000144, "Perimeter Mining Hub", [0.0, 0.0, 0.0]));
+        let mut st = make_structure(structure_id, 1000001, 35835, 30000144, "Perimeter Mining Hub", [0.0, 0.0, 0.0]);
+        st.fuel_blocks = 5_000;
+        snap.structures.insert(structure_id, st);
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.station_id = None;
             ch.structure_id = Some(structure_id);
         }
         snap.items.insert(struct_ore_id, make_item(struct_ore_id, 1228, char_id, structure_id, InventoryFlag::Hangar, 500, false));
         snap.items.insert(gas_item_id, make_item(gas_item_id, 62399, char_id, structure_id, InventoryFlag::Hangar, 200, false));
-        snap.items.insert(reproc_svc_mod_id, make_item(reproc_svc_mod_id, 35892, 1000001, structure_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(reproc_svc_mod_id, make_item(reproc_svc_mod_id, 35899, 1000001, structure_id, InventoryFlag::Hangar, 1, true));
     });
     session.station_id = None;
     session.structure_id = Some(structure_id);
@@ -372,6 +374,7 @@ async fn test_mn11_compression_space_and_structure_and_gas() {
         if let Some(m) = snap.items.get_mut(&reproc_svc_mod_id) {
             m.flag = InventoryFlag::ServiceSlot0;
         }
+        snap.module_online_states.insert(reproc_svc_mod_id, true);
     });
 
     let comp_struct_res = ctx
@@ -623,13 +626,25 @@ async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
     let auto_structure_id = 1_000_000_001_006i64;
     let char_corp_id = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(1000170));
     ctx.db.with_mut_snapshot(|snap| {
-        for (sid, sys_id, st_type, name) in [
+        for (idx, (sid, sys_id, st_type, name)) in [
             (structure_id, 30000142u32, 35835u32, "Moon Mining Athanor (Jita High-Sec)"),
             (metenox_id, 30000012u32, 81826u32, "Automated Metenox Drill (Asabona Low-Sec)"),
             (wh_structure_id, 31000007u32, 35835u32, "Wormhole Athanor (J102512)"),
             (auto_structure_id, 30000012u32, 35835u32, "Low-Sec Auto-Fracture Athanor"),
-        ] {
-            snap.structures.insert(sid, make_structure(sid, char_corp_id, st_type, sys_id, name, [1000.0, 2000.0, 3000.0]));
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut st = make_structure(sid, char_corp_id, st_type, sys_id, name, [1000.0, 2000.0, 3000.0]);
+            if st_type == 35835 {
+                st.fuel_blocks = 10_000;
+            }
+            snap.structures.insert(sid, st);
+            if st_type == 35835 {
+                let drill_id = 800_000_390 + idx as i64;
+                snap.items.insert(drill_id, make_item(drill_id, 45009, char_corp_id, sid, InventoryFlag::ServiceSlot0, 1, true));
+                snap.module_online_states.insert(drill_id, true);
+            }
         }
         snap.items.insert(800_000_305, make_item(800_000_305, 81143, char_corp_id, metenox_id, InventoryFlag::StructureFuel, 200, false));
     });
@@ -1044,7 +1059,8 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
             snap.structures.insert(sid, make_structure(sid, 1000001, st_type, 30000142, name, [0.0, 0.0, 0.0]));
             let svc_item_id = 800_000_160 + (idx as i64) * 2;
             let ore_item_id = svc_item_id + 1;
-            snap.items.insert(svc_item_id, make_item(svc_item_id, 35892, 1000001, sid, InventoryFlag::ServiceSlot0, 1, true));
+            snap.items.insert(svc_item_id, make_item(svc_item_id, 35899, 1000001, sid, InventoryFlag::ServiceSlot0, 1, true));
+            snap.module_online_states.insert(svc_item_id, true);
             snap.items.insert(ore_item_id, make_item(ore_item_id, 1230, char_id, sid, InventoryFlag::Hangar, 1_000, false));
         }
         snap.items.insert(800_000_167, make_item(800_000_167, 1230, char_id, structure_id, InventoryFlag::Hangar, 500, false));
@@ -1074,8 +1090,9 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
     assert_eq!(unfueled_comp_err.code, "ReprocessingServiceOffline");
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(st) = snap.structures.get_mut(&structure_id) {
-            st.fuel_blocks = 500;
+            st.fuel_blocks = 5_000;
         }
+        snap.module_online_states.insert(800_000_160, true);
     });
     let comp_ore_res = ctx
         .dispatch_rpc(&mut session, "structureCompressionMgr", None, "CompressItemInStructure", &[PyRep::Integer(800_000_167)], &kw, None)

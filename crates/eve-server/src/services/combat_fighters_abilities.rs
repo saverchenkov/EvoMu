@@ -4,6 +4,108 @@
 
 use super::*;
 
+async fn check_fighter_and_parent_operational_state(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    sys_id: u32,
+    fighter_ball_id: i64,
+    fighter_ball: &eve_destiny::Ball,
+    parent_ship_id: i64,
+) -> Result<(), BridgeRpcError> {
+    if matches!(fighter_ball.mode, eve_destiny::MovementMode::Warp { .. }) {
+        return Err(BridgeRpcError {
+            code: "FighterInWarp".into(),
+            message: format!("Fighter squadron {fighter_ball_id} cannot activate abilities while warping"),
+        });
+    }
+    if let Ok(Some(mut fcs)) = sys_handle.get_combat_state(fighter_ball_id).await {
+        fcs.sync_action_breaks();
+        if fcs.is_cloaked || fcs.gate_cloak_remaining_ticks > 0 {
+            return Err(BridgeRpcError {
+                code: "FighterCloaked".into(),
+                message: format!("Fighter squadron {fighter_ball_id} cannot activate abilities while cloaked"),
+            });
+        }
+        if fcs.is_tethered {
+            return Err(BridgeRpcError {
+                code: "FighterTethered".into(),
+                message: format!("Fighter squadron {fighter_ball_id} cannot activate abilities while tethered"),
+            });
+        }
+    }
+    if crate::services::inventory_fitting::fitting_ship_forcefield::is_pos_forcefield_protected(
+        ctx,
+        sys_id,
+        fighter_ball_id,
+        fighter_ball.position,
+    )
+    .await
+    {
+        return Err(BridgeRpcError {
+            code: "CannotActivateInForcefield".into(),
+            message: format!(
+                "Fighter squadron {fighter_ball_id} cannot activate abilities while inside a POS forcefield"
+            ),
+        });
+    }
+
+    if parent_ship_id > 0 {
+        if let Ok(Some((_, parent_ball))) = sys_handle.get_ball_snapshot(parent_ship_id).await {
+            if matches!(parent_ball.mode, eve_destiny::MovementMode::Warp { .. }) {
+                return Err(BridgeRpcError {
+                    code: "ShipInWarp".into(),
+                    message: format!("Carrier {parent_ship_id} cannot command fighter abilities while warping"),
+                });
+            }
+            if crate::services::inventory_fitting::fitting_ship_forcefield::is_pos_forcefield_protected(
+                ctx,
+                sys_id,
+                parent_ship_id,
+                parent_ball.position,
+            )
+            .await
+            {
+                return Err(BridgeRpcError {
+                    code: "CannotActivateInForcefield".into(),
+                    message: format!(
+                        "Carrier {parent_ship_id} cannot command fighter abilities from inside a POS forcefield"
+                    ),
+                });
+            }
+        }
+        if let Ok(Some(mut pcs)) = sys_handle.get_combat_state(parent_ship_id).await {
+            pcs.sync_action_breaks();
+            if pcs.is_cloaked || pcs.gate_cloak_remaining_ticks > 0 {
+                return Err(BridgeRpcError {
+                    code: "CannotActivateWhileCloaked".into(),
+                    message: format!("Carrier {parent_ship_id} cannot command fighter abilities while cloaked"),
+                });
+            }
+            if pcs.is_tethered {
+                return Err(BridgeRpcError {
+                    code: "CannotActivateWhileTethered".into(),
+                    message: format!("Carrier {parent_ship_id} cannot command fighter abilities while tethered"),
+                });
+            }
+        }
+        let has_active_cloak = ctx.db.with_snapshot(|snap| {
+            snap.items.values().any(|it| {
+                it.location_id == parent_ship_id
+                    && matches!(it.flag as u16, 11..=34)
+                    && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 330)
+                    && snap.module_active_states.contains(&it.item_id)
+            })
+        });
+        if has_active_cloak {
+            return Err(BridgeRpcError {
+                code: "CannotActivateWhileCloaked".into(),
+                message: format!("Carrier {parent_ship_id} has an active cloaking device"),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Handles `fighterMgr.CmdActivateAbilitySlots`.
 pub(crate) async fn handle_activate_fighter_ability_slots(
     ctx: &ServerContext,
@@ -112,6 +214,18 @@ async fn activate_single_fighter_ability(
             message: format!("Fighter squadron {fighter_ball_id} is not in solar system {sys_id}"),
         }));
     };
+    if let Err(e) = check_fighter_and_parent_operational_state(
+        ctx,
+        &sys_handle,
+        sys_id,
+        fighter_ball_id,
+        &fighter_ball,
+        fighter.parent_ship_id,
+    )
+    .await
+    {
+        return Some(Err(e));
+    }
 
     let now_unix = ctx.now_unix();
     if let Some(&ready_at) = ctx
@@ -392,6 +506,54 @@ async fn activate_single_fighter_ability(
                     }
                 }
             }
+        }
+
+        // Check target CombatState (cloaked, tethered, invulnerable), POS forcefield coverage, and structure EWAR immunity
+        if let Ok(Some(mut target_cs)) = sys_handle.get_combat_state(tid).await {
+            target_cs.sync_action_breaks();
+            if target_cs.is_cloaked || target_cs.gate_cloak_remaining_ticks > 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotTargetCloaked".into(),
+                    message: format!("Cannot activate fighter ability on cloaked target {tid}"),
+                }));
+            }
+            if target_cs.is_tethered
+                || target_cs.is_invulnerable()
+                || target_cs.undock_invulnerable_remaining_ticks > 0
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "TargetInvulnerable".into(),
+                    message: format!("Target {tid} is tethered or invulnerable"),
+                }));
+            }
+        }
+        if crate::services::inventory_fitting::fitting_ship_forcefield::is_pos_forcefield_protected(
+            ctx,
+            sys_id,
+            tid,
+            target_ball.position,
+        )
+        .await
+        {
+            return Some(Err(BridgeRpcError {
+                code: "TargetInsideForcefield".into(),
+                message: format!("Target {tid} is protected inside an online POS forcefield"),
+            }));
+        }
+        let is_ewar_ability = matches!(ability_id, 2 | 10 | 11 | 12 | 14 | 17 | 18 | 36);
+        if is_ewar_ability
+            && (ctx.db.with_snapshot(|snap| {
+                crate::services::structure_acl_defense_rules::is_structure_immune_to_ewar(snap, tid)
+            }) || ctx
+                .sde
+                .types
+                .get(&target_ball.type_id)
+                .is_some_and(|t| t.category_id == 65))
+        {
+            return Some(Err(BridgeRpcError {
+                code: "StructureImmuneToEwar".into(),
+                message: format!("Upwell structure {tid} is immune to fighter EWAR"),
+            }));
         }
 
         // Check if target is a fighter ball (for anti-fighter missiles bonus)
@@ -1008,6 +1170,18 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
             message: format!("Fighter squadron {fighter_ball_id} is not in solar system {sys_id}"),
         }));
     };
+    if let Err(e) = check_fighter_and_parent_operational_state(
+        ctx,
+        &sys_handle,
+        sys_id,
+        fighter_ball_id,
+        &fb,
+        fighter.parent_ship_id,
+    )
+    .await
+    {
+        return Some(Err(e));
+    }
     if fb.position.distance(target_point) > 100_000.0 {
         return Some(Err(BridgeRpcError {
             code: "TargetOutOfRange".into(),
@@ -1075,6 +1249,27 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
             {
                 let d = b.position.distance(target_point);
                 if d <= aoe_radius {
+                    if let Ok(Some(mut b_cs)) = sys_handle.get_combat_state(b.id).await {
+                        b_cs.sync_action_breaks();
+                        if b_cs.is_cloaked
+                            || b_cs.gate_cloak_remaining_ticks > 0
+                            || b_cs.is_tethered
+                            || b_cs.is_invulnerable()
+                            || b_cs.undock_invulnerable_remaining_ticks > 0
+                        {
+                            continue;
+                        }
+                    }
+                    if crate::services::inventory_fitting::fitting_ship_forcefield::is_pos_forcefield_protected(
+                        ctx,
+                        sys_id,
+                        b.id,
+                        b.position,
+                    )
+                    .await
+                    {
+                        continue;
+                    }
                     let bomb_vic = ctx.db.with_snapshot(|snap| {
                         snap.characters
                             .values()

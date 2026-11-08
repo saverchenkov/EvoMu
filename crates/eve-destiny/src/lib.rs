@@ -672,6 +672,8 @@ pub enum DestinyEvent {
         flat_dps: f64,
         pct_dps: f64,
         remaining_ticks: u32,
+        #[serde(default)]
+        expiry_filetime: i64,
     },
     OnDroneStateChange {
         drone_id: BallId,
@@ -1040,6 +1042,23 @@ pub struct Ballpark {
     pub base_webbed_max_velocity: BTreeMap<BallId, f64>,
     #[serde(skip, default)]
     pub active_wubble_multipliers: BTreeMap<BallId, f64>,
+    #[serde(default)]
+    pub sim_unix_secs: u64,
+}
+
+/// Converts Unix epoch seconds to Windows FILETIME (`100ns` ticks since 1601-01-01 UTC).
+#[inline]
+pub fn unix_to_filetime(unix_secs: u64) -> i64 {
+    (unix_secs as i64 + 11_644_473_600) * 10_000_000
+}
+
+/// Returns wall-clock Unix epoch seconds, or `0` if the system clock precedes the Unix epoch.
+#[inline]
+pub fn current_system_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 impl Ballpark {
@@ -1337,6 +1356,16 @@ impl Ballpark {
         true
     }
 
+    /// Returns the ballpark simulation clock in Unix seconds, falling back to the host wall clock when unset.
+    #[inline]
+    pub fn effective_unix_secs(&self) -> u64 {
+        if self.sim_unix_secs > 0 {
+            self.sim_unix_secs
+        } else {
+            current_system_unix_secs()
+        }
+    }
+
     /// Applies or updates a Breacher Pod DoT on `ball_id` and emits [`DestinyEvent::OnDotVictimUpdated`] (`destiny:OnDotVictimUpdated`).
     pub fn apply_breacher_dot(
         &mut self,
@@ -1344,6 +1373,18 @@ impl Ballpark {
         flat_dps: f64,
         pct_dps: f64,
         duration_ticks: u32,
+    ) -> bool {
+        self.apply_breacher_dot_with_expiry(ball_id, flat_dps, pct_dps, duration_ticks, 0)
+    }
+
+    /// Applies or updates a Breacher Pod DoT on `ball_id` with an explicit FILETIME `expiry_filetime` (or `0` to derive from `effective_unix_secs`).
+    pub fn apply_breacher_dot_with_expiry(
+        &mut self,
+        ball_id: BallId,
+        flat_dps: f64,
+        pct_dps: f64,
+        duration_ticks: u32,
+        expiry_filetime: i64,
     ) -> bool {
         if !self.balls.contains_key(&ball_id) {
             return false;
@@ -1356,6 +1397,15 @@ impl Ballpark {
         } else {
             None
         };
+        let resolved_expiry = if duration_ticks > 0 {
+            if expiry_filetime > 0 {
+                expiry_filetime
+            } else {
+                unix_to_filetime(self.effective_unix_secs().saturating_add(duration_ticks as u64))
+            }
+        } else {
+            0
+        };
         self.emit_event(
             Some(ball_id),
             DestinyEvent::OnDotVictimUpdated {
@@ -1363,6 +1413,7 @@ impl Ballpark {
                 flat_dps,
                 pct_dps,
                 remaining_ticks: duration_ticks,
+                expiry_filetime: resolved_expiry,
             },
         );
         true

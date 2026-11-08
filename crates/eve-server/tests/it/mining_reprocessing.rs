@@ -434,6 +434,21 @@ async fn test_phase_5m_mn11_space_and_structure_compression() {
                 last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
+        snap.items.insert(
+            ore_item_id + 100,
+            InventoryItemRecord {
+                item_id: ore_item_id + 100,
+                type_id: 35899, // Standup Reprocessing Facility I
+                owner_id: 1000001,
+                location_id: structure_id,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(ore_item_id + 100, true);
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.station_id = None;
             ch.structure_id = Some(structure_id);

@@ -192,50 +192,34 @@ pub fn has_active_compressor_burst(
     best_range.map(|r| (c_ship_id, r))
 }
 
-/// Checks whether an Upwell structure has an online Reprocessing service module (`35899`, `35892`, `35894`,
-/// or `group_id == 1322`) fitted in a service or module slot (`it.flag != InventoryFlag::Hangar`).
-/// Unfitted service modules sitting in the hangar (`InventoryFlag::Hangar`, `flag_id == 4`) never enable
-/// structure compression or decompression (`R73 P2-1`).
+/// Checks whether an Upwell structure is operational, cored, fueled, and has an online
+/// Standup Reprocessing Facility I (`35899`) fitted in a service or module slot (`it.flag != InventoryFlag::Hangar`).
 pub fn structure_has_online_reprocessing_service(
-    sde: &SdeRegistry,
+    _sde: &SdeRegistry,
     snap: &WorldStateSnapshot,
     structure_id: i64,
-    st_type_id: TypeId,
+    _st_type_id: TypeId,
 ) -> bool {
-    if snap.structures.get(&structure_id).is_some_and(|st| {
-        !st.quantum_core_installed
-            || st.fuel_blocks == 0
-            || matches!(
-                st.state.as_str(),
-                "Destroyed" | "Anchoring" | "AnchorVulnerable" | "NoCore"
-            )
-    }) {
+    let Some(st) = snap.structures.get(&structure_id) else {
+        return false;
+    };
+    if !crate::services::station_structure::structure_lifecycle::is_operational(&st.state)
+        || matches!(
+            st.state.as_str(),
+            "HullReinforce" | "HullReinforced" | "Unanchored" | "Offline"
+        )
+        || !st.quantum_core_installed
+        || st.fuel_blocks == 0
+    {
         return false;
     }
-    let is_reproc_mod = |it: &InventoryItemRecord| -> bool {
-        matches!(it.type_id, 35899 | 35892 | 35894)
-            || sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1322)
-    };
-    let is_fitted_and_online = |it: &InventoryItemRecord| -> bool {
-        it.flag != InventoryFlag::Hangar
+    snap.items.values().any(|it| {
+        it.location_id == structure_id
+            && it.type_id == 35899
+            && it.flag != InventoryFlag::Hangar
             && (it.flag.is_service_slot() || matches!(it.flag as u16, 11..=34))
-            && snap.module_online_states.get(&it.item_id).copied().unwrap_or(true)
-    };
-    let has_fitted_reproc = snap.items.values().any(|it| {
-        it.location_id == structure_id && is_reproc_mod(it) && is_fitted_and_online(it)
-    });
-    if has_fitted_reproc {
-        return true;
-    }
-    let has_any_reproc_item = snap
-        .items
-        .values()
-        .any(|it| it.location_id == structure_id && is_reproc_mod(it));
-    let is_refinery = sde
-        .types
-        .get(&st_type_id)
-        .is_some_and(|t| t.group_id == 1406);
-    is_refinery && !has_any_reproc_item
+            && snap.module_online_states.get(&it.item_id).copied().unwrap_or(false)
+    })
 }
 
 /// Handles `inSpaceCompressionMgr.CompressItemInSpace`.

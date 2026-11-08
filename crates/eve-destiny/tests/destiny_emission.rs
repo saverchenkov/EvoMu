@@ -719,6 +719,7 @@ async fn test_sov_controller_fleet_ship_state_dbuff_dot_and_drone_state_emission
     assert_eq!(args_of(&actions, "OnShipStateUpdate").len(), 1);
     assert_eq!(args_of(&actions, "OnDbuffUpdated")[0][0], PyRep::Integer(SHIP_A));
     assert_eq!(args_of(&actions, "OnDotVictimUpdated")[0][0], PyRep::Integer(SHIP_B));
+    assert!(matches!(args_of(&actions, "OnDotVictimUpdated")[0][1], PyRep::PySet(ref s) if s.len() == 1));
     assert_eq!(
         args_of(&actions, "OnDroneStateChange")[0],
         &[PyRep::Integer(drone_id), PyRep::Integer(90_000_001), PyRep::Integer(SHIP_A), PyRep::Integer(1), PyRep::Integer(2_456), PyRep::Integer(90_000_001), PyRep::Integer(SHIP_B)]
@@ -728,4 +729,5 @@ async fn test_sov_controller_fleet_ship_state_dbuff_dot_and_drone_state_emission
     park.step(1.0);
     let step_actions = wire_for(&mut park, SHIP_A);
     assert_eq!(args_of(&step_actions, "OnDotVictimUpdated")[0][0], PyRep::Integer(SHIP_B));
+    assert!(matches!(args_of(&step_actions, "OnDotVictimUpdated")[0][1], PyRep::PySet(_)));
 }

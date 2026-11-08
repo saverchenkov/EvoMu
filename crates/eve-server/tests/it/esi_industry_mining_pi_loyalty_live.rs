@@ -284,7 +284,7 @@ async fn test_esi_live_mining_ledger_extractions_and_observers() {
     common::slash_cmd(&ctx, &mut s1, "/giveitem 483 1").await;
     ctx.advance_secs(12);
 
-    // Anchor & online Athanor (35835) with Standup Moon Drill I (35894) and start moon extraction FIRST
+    // Anchor & online Athanor (35835) with Standup Moon Drill I (45009) and start moon extraction FIRST
     // so the structure is present as a mining observer in PERIMETER_SYS when PILOT_1 mines.
     let athanor_tid = 35835_u32;
     let core_tid = ctx.sde.types[&athanor_tid].default_attributes[&life::ATTR_REQUIRES_DEED_TYPE] as u32;
@@ -294,7 +294,7 @@ async fn test_esi_live_mining_ledger_extractions_and_observers() {
         "/createitem 20185 1".into(),
         format!("/createitem {athanor_tid} 1"),
         format!("/createitem {core_tid} 1"),
-        "/createitem 35894 1".into(),
+        "/createitem 45009 1".into(),
         "/createitem 4051 3000".into(),
     ] {
         common::slash_cmd(&ctx, &mut s1, &cmd).await;
@@ -305,7 +305,7 @@ async fn test_esi_live_mining_ledger_extractions_and_observers() {
     rpc(&ctx, &mut s1, "ship", "AssembleShip", &[PyRep::Integer(charon_id)]).await.expect("AssembleShip Charon");
     ctx.advance_secs(12);
     rpc(&ctx, &mut s1, "ship", "Board", &[PyRep::Integer(charon_id)]).await.expect("Board Charon");
-    for tid in [athanor_tid, core_tid, 35894, 4051] {
+    for tid in [athanor_tid, core_tid, 45009, 4051] {
         let iid = find_hangar_items(&ctx, PILOT_1, JITA_STATION, tid)[0].0;
         let qty = if tid == 4051 { 3000 } else { 1 };
         rpc(&ctx, &mut s1, "invbroker", "Add", &[PyRep::Integer(iid), PyRep::Integer(charon_id), PyRep::Integer(5), PyRep::Integer(qty)]).await.expect("Load Charon");
@@ -331,7 +331,7 @@ async fn test_esi_live_mining_ledger_extractions_and_observers() {
     let fuel_item = find_hangar_items(&ctx, PILOT_1, charon_id, 4051)[0].0;
     rpc(&ctx, &mut s1, "invbroker", "Add", &[PyRep::Integer(fuel_item), PyRep::Integer(athanor_id), PyRep::Integer(133), PyRep::Integer(2900)]).await.expect("Fuel Bay");
     ctx.advance_virtual_clock(life::ONLINING_SECS + 15);
-    let drill_item = find_hangar_items(&ctx, PILOT_1, charon_id, 35894)[0].0;
+    let drill_item = find_hangar_items(&ctx, PILOT_1, charon_id, 45009)[0].0;
     rpc(&ctx, &mut s1, "invbroker", "Add", &[PyRep::Integer(drill_item), PyRep::Integer(athanor_id), PyRep::Integer(164)]).await.expect("Moon Drill");
 
     rpc(&ctx, &mut s1, "moonExtractions", "StartNewExtraction", &[PyRep::Integer(athanor_id), PyRep::Integer(518_400)]).await.expect("StartNewExtraction");

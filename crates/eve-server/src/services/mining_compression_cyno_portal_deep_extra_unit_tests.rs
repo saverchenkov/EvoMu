@@ -292,14 +292,26 @@ async fn deep_compression_decompression_rig_yields_and_compressor_burst() {
         crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
         snap.items.insert(rig_fitted_id, mk_item(rig_fitted_id, custom_ast_rig, corp_id, sid_athanor, InventoryFlag::RigSlot0, 1, true));
 
-        assert!(structure_has_online_reprocessing_service(&ctx.sde, snap, sid_athanor, 35835));
+        // #570: Empty service slots, wrong group-1322 modules (35894/35892), hangar modules, and reinforced/unanchored structures must return false
+        assert!(!structure_has_online_reprocessing_service(&ctx.sde, snap, sid_athanor, 35835));
         assert!(!structure_has_online_reprocessing_service(&ctx.sde, snap, sid_athanor, 35832));
+        snap.items.insert(941_100_008, mk_item(941_100_008, 35894, corp_id, sid_athanor, InventoryFlag::ServiceSlot1, 1, true));
+        snap.module_online_states.insert(941_100_008, true);
+        assert!(!structure_has_online_reprocessing_service(&ctx.sde, snap, sid_athanor, 35835));
+        snap.items.insert(941_100_009, mk_item(941_100_009, 35892, corp_id, sid_athanor, InventoryFlag::ServiceSlot2, 1, true));
+        snap.module_online_states.insert(941_100_009, true);
+        assert!(!structure_has_online_reprocessing_service(&ctx.sde, snap, sid_athanor, 35835));
         snap.items.insert(unfitted_reproc_id, mk_item(unfitted_reproc_id, 35899, corp_id, sid_athanor, InventoryFlag::Hangar, 1, false));
         assert!(!structure_has_online_reprocessing_service(&ctx.sde, snap, sid_athanor, 35835));
 
         snap.items.insert(941_100_010, mk_item(941_100_010, 35899, corp_id, sid_athanor, InventoryFlag::ServiceSlot0, 1, true));
         snap.module_online_states.insert(941_100_010, true);
         assert!(structure_has_online_reprocessing_service(&ctx.sde, snap, sid_athanor, 35835));
+        for bad_state in ["HullReinforce", "HullReinforced", "Unanchored", "Offline"] {
+            snap.structures.get_mut(&sid_athanor).unwrap().state = bad_state.into();
+            assert!(!structure_has_online_reprocessing_service(&ctx.sde, snap, sid_athanor, 35835));
+        }
+        snap.structures.get_mut(&sid_athanor).unwrap().state = "ShieldVulnerable".into();
 
         snap.items.insert(ore_hangar_id, mk_item(ore_hangar_id, raw_ore_tid, char_id, sid_athanor, InventoryFlag::Hangar, 250, false));
         snap.items.insert(gas_hangar_id, mk_item(gas_hangar_id, custom_comp_gas, char_id, sid_athanor, InventoryFlag::Hangar, 100, false));

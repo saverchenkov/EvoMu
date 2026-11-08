@@ -315,7 +315,8 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
         }
     }
 
-    for _ in 0..4 {
+    ctx.advance_secs(35);
+    for _ in 0..35 {
         let _ = jita_handle.step_manual(1.0).await.unwrap();
     }
     let cw_res = ctx

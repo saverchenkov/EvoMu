@@ -438,6 +438,7 @@ fn wire_slim_item_and_event_encoding_covers_special_entity_types() {
             flat_dps: 0.0,
             pct_dps: 0.0,
             remaining_ticks: 0,
+            expiry_filetime: 0,
         },
     ] {
         let rep = encode_destiny_event(10, &ev, None);

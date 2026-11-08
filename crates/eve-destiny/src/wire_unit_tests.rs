@@ -459,7 +459,7 @@ fn encode_destiny_events_and_hoist_set_state_in_updates() {
         DestinyEvent::OnClientControllerEvent { ball_id: 1, target_id: Some(2), event_name: "ev".into(), value: 3, delay: Some(0.5) },
         DestinyEvent::OnClientControllerEvent { ball_id: 1, target_id: None, event_name: "ev".into(), value: 0, delay: None },
         DestinyEvent::OnDbuffUpdated { ball_id: 1, dbuffs: vec![(10, 1.5, 100)] },
-        DestinyEvent::OnDotVictimUpdated { ball_id: 1, flat_dps: 50.0, pct_dps: 0.01, remaining_ticks: 10 },
+        DestinyEvent::OnDotVictimUpdated { ball_id: 1, flat_dps: 50.0, pct_dps: 0.01, remaining_ticks: 10, expiry_filetime: 0 },
         DestinyEvent::OnDroneStateChange { drone_id: 99, owner_id: 1, controller_id: 1, activity_state: 1, type_id: 2456, controller_owner_id: 1, target_id: Some(2) },
         DestinyEvent::OnDroneStateChange { drone_id: 99, owner_id: 1, controller_id: 1, activity_state: 0, type_id: 2456, controller_owner_id: 1, target_id: None },
         DestinyEvent::OnDroneStateChange2 { drone_id: 99, owner_id: 1, controller_id: 1, activity_state: 1, type_id: 2456, controller_owner_id: 1, target_id: Some(2) },

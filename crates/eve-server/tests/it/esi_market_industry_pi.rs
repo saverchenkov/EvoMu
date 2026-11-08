@@ -938,7 +938,7 @@ async fn test_esi_corp_endpoint_specific_role_gates_and_routes() {
         }
         snap.corporations.insert(corp_id, corp);
 
-        // Refinery with online Standup Moon Drill I (35894) + Gantry/POCO items in cargo
+        // Refinery with online Standup Moon Drill I (45009) + Gantry/POCO items in cargo
         snap.structures.insert(
             observer_id,
             UpwellStructureRecord {
@@ -962,8 +962,9 @@ async fn test_esi_corp_endpoint_specific_role_gates_and_routes() {
         );
         snap.items.insert(
             951_001,
-            make_item(951_001, 35_894, corp_id, observer_id, InventoryFlag::ServiceSlot0, 1, true),
+            make_item(951_001, 45_009, corp_id, observer_id, InventoryFlag::ServiceSlot0, 1, true),
         );
+        snap.module_online_states.insert(951_001, true);
     });
 
     // 1. Populate moon extraction & observer mining ledger via live RPCs
@@ -1838,10 +1839,11 @@ async fn test_esi6_industry_and_mining_routes() {
         );
         for (iid, tid, flag) in [
             (940_001, 35_878, InventoryFlag::ServiceSlot0),
-            (940_002, 35_894, InventoryFlag::ServiceSlot1),
+            (940_002, 45_009, InventoryFlag::ServiceSlot1),
         ] {
             snap.items
                 .insert(iid, make_item(iid, tid, corp_id, struct_id, flag, 1, true));
+            snap.module_online_states.insert(iid, true);
         }
         eve_server::services::industry_pi::industry_facilities_bps::save_facility_taxes(
             snap,
@@ -2729,7 +2731,7 @@ pub(crate) mod esi_market_groups_sde_descriptions {
             }
             snap.corporations.insert(corp_id, corp);
 
-            // Refinery with online Standup Moon Drill I (35894) + Gantry/POCO items in cargo
+            // Refinery with online Standup Moon Drill I (45009) + Gantry/POCO items in cargo
             snap.structures.insert(
                 observer_id,
                 UpwellStructureRecord {
@@ -2753,8 +2755,9 @@ pub(crate) mod esi_market_groups_sde_descriptions {
             );
             snap.items.insert(
                 951_001,
-                make_item(951_001, 35_894, corp_id, observer_id, InventoryFlag::ServiceSlot0, 1, true),
+                make_item(951_001, 45_009, corp_id, observer_id, InventoryFlag::ServiceSlot0, 1, true),
             );
+            snap.module_online_states.insert(951_001, true);
         });
 
         // 1. Populate moon extraction & observer mining ledger via live RPCs
@@ -3646,10 +3649,11 @@ pub(crate) mod esi6_industry_mining_routes {
             );
             for (iid, tid, flag) in [
                 (940_001, 35_878, InventoryFlag::ServiceSlot0),
-                (940_002, 35_894, InventoryFlag::ServiceSlot1),
+                (940_002, 45_009, InventoryFlag::ServiceSlot1),
             ] {
                 snap.items
                     .insert(iid, make_item(iid, tid, corp_id, struct_id, flag, 1, true));
+                snap.module_online_states.insert(iid, true);
             }
             eve_server::services::industry_pi::industry_facilities_bps::save_facility_taxes(
                 snap,
@@ -4178,8 +4182,9 @@ pub(crate) mod esi_corp_role_gated_mining {
                 snap.structures.insert(observer_id, ref_st);
                 snap.items.insert(
                     960_001,
-                    make_item(960_001, 35_894, corp_id, observer_id, InventoryFlag::ServiceSlot0, 1, true),
+                    make_item(960_001, 45_009, corp_id, observer_id, InventoryFlag::ServiceSlot0, 1, true),
                 );
+                snap.module_online_states.insert(960_001, true);
                 Ok::<(), ()>(())
             })
             .unwrap();
@@ -4879,6 +4884,11 @@ pub(crate) mod esi_corp_mining_customs_offices {
                 athanor_id,
                 make_structure(athanor_id, 35835, corp_id, JITA_SYSTEM_ID, "B2 Moon Athanor"),
             );
+            snap.items.insert(
+                athanor_id + 1,
+                make_item(athanor_id + 1, 45_009, corp_id, athanor_id, InventoryFlag::ServiceSlot0, 1, true),
+            );
+            snap.module_online_states.insert(athanor_id + 1, true);
         });
 
         let mut ceo_sess = setup_pilot(&ctx, 11, "demo", "demo-secret", ceo_id).await;

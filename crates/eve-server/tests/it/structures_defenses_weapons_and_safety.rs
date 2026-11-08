@@ -272,7 +272,7 @@ async fn test_structure_reactions_moon_drill_and_access_lists() {
     assert_eq!(ls_react_job.dict_get("activityID").and_then(|v| v.as_i64()), Some(9));
 
     // 3. Moon Drill Service: Start extraction, validation of duration, corp query, cancellation
-    let moon_drill_mod = grant(&ctx, CORP_ID, ls_tatara, 35894, InventoryFlag::ServiceSlot3, 1);
+    let moon_drill_mod = grant(&ctx, CORP_ID, ls_tatara, 45009, InventoryFlag::ServiceSlot3, 1);
     ctx.db.with_mut_snapshot(|snap| { snap.module_online_states.insert(moon_drill_mod, true); });
 
     // Duration outside [6 days..=56 days] rejected

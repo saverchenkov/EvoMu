@@ -57,8 +57,8 @@ fn make_ctx() -> ServerContext {
         make_inv_type(81826, 4744, 65, "Metenox Moon Drill", 10_000.0, 480_000.0, 1),
     );
     sde.types
-        .entry(35894)
-        .or_insert_with(|| make_inv_type(35894, 1322, 66, "Standup Moon Drill I", 100.0, 0.0, 1));
+        .entry(45009)
+        .or_insert_with(|| make_inv_type(45009, 1887, 66, "Standup Moon Drill I", 100.0, 0.0, 1));
 
     // Moon ores (45490, 45491, 45492, 45494) + improved & jackpot variants
     for (tid, gid, name) in [
@@ -158,6 +158,21 @@ async fn test_moon_extraction_lifecycle_and_tick() {
                 ..Default::default()
             },
         );
+        snap.items.insert(
+            700_010,
+            InventoryItemRecord {
+                item_id: 700_010,
+                type_id: 45009,
+                owner_id: corp_id,
+                location_id: struct_id,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(700_010, true);
     });
 
     let mut session = SessionState::default();
@@ -165,6 +180,60 @@ async fn test_moon_extraction_lifecycle_and_tick() {
     session.character_id = Some(char_id);
     session.corporation_id = Some(corp_id);
     session.structure_id = Some(struct_id);
+
+    // #570: Reject 35894 (Cloning Center), offline drill, missing drill, HullReinforce, and Unanchored
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&700_010).unwrap().type_id = 35894;
+    });
+    assert_eq!(
+        handle(&ctx, &mut session, "moonExtractions", "StartNewExtraction", &[PyRep::Integer(struct_id), PyRep::Integer(518_400)], &HashMap::new())
+            .await.unwrap().unwrap_err().code,
+        "StructureServiceOffline"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&700_010).unwrap().type_id = 45009;
+        snap.module_online_states.insert(700_010, false);
+    });
+    assert_eq!(
+        handle(&ctx, &mut session, "moonExtractions", "StartNewExtraction", &[PyRep::Integer(struct_id), PyRep::Integer(518_400)], &HashMap::new())
+            .await.unwrap().unwrap_err().code,
+        "StructureServiceOffline"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(700_010, true);
+        snap.structures.get_mut(&struct_id).unwrap().state = "HullReinforce".into();
+    });
+    assert_eq!(
+        handle(&ctx, &mut session, "moonExtractions", "StartNewExtraction", &[PyRep::Integer(struct_id), PyRep::Integer(518_400)], &HashMap::new())
+            .await.unwrap().unwrap_err().code,
+        "StructureServiceOffline"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.get_mut(&struct_id).unwrap().state = "ShieldVulnerable".into();
+        snap.items.remove(&700_010);
+    });
+    assert_eq!(
+        handle(&ctx, &mut session, "moonExtractions", "StartNewExtraction", &[PyRep::Integer(struct_id), PyRep::Integer(518_400)], &HashMap::new())
+            .await.unwrap().unwrap_err().code,
+        "StructureServiceOffline"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            700_010,
+            InventoryItemRecord {
+                item_id: 700_010,
+                type_id: 45009,
+                owner_id: corp_id,
+                location_id: struct_id,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(700_010, true);
+    });
 
     // Invalid duration (< 6 days)
     let bad_dur = handle(

@@ -437,6 +437,7 @@ async fn test_on_dbuff_updated_and_on_dot_victim_updated() {
                 flat_dps: 200.0,
                 pct_dps: 0.01,
                 remaining_ticks: 5,
+                expiry_filetime: 0,
             },
         )
         .await;
@@ -446,7 +447,7 @@ async fn test_on_dbuff_updated_and_on_dot_victim_updated() {
     let dot = find(&acts, "OnDotVictimUpdated");
     assert_eq!(dot.len(), 1, "active Breacher Pod DoT tick must emit OnDotVictimUpdated");
     assert_eq!(dot[0][0], PyRep::Integer(ship_id));
-    let PyRep::List(apps) = &dot[0][1] else { panic!("dmgAppsInfo must be a list") };
+    let PyRep::PySet(apps) = &dot[0][1] else { panic!("dmgAppsInfo must be a PySet") };
     assert_eq!(apps.len(), 1);
     let PyRep::KeyVal(app) = &apps[0] else { panic!("dmgAppsInfo entry must be a KeyVal") };
     assert_eq!(app["targetID"], PyRep::Integer(ship_id));

@@ -926,13 +926,22 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
             flat_dps,
             pct_dps,
             remaining_ticks,
+            expiry_filetime,
         } => {
             let apps = if *remaining_ticks > 0 {
+                let effective_expiry = if *expiry_filetime > 0 {
+                    *expiry_filetime
+                } else {
+                    let base_unix = park
+                        .map(|p| p.effective_unix_secs())
+                        .unwrap_or_else(crate::current_system_unix_secs);
+                    crate::unix_to_filetime(base_unix.saturating_add(*remaining_ticks as u64))
+                };
                 vec![PyRep::keyval([
                     ("attackerID", PyRep::Integer(0)),
                     ("targetID", PyRep::Integer(*ball_id)),
                     ("weaponTypeID", PyRep::Integer(84_115)),
-                    ("expiryTime", PyRep::Integer((stamp as i64 + *remaining_ticks as i64) * 10_000_000)),
+                    ("expiryTime", PyRep::Integer(effective_expiry)),
                     ("maxDamage", PyRep::Real(*flat_dps)),
                     ("maxHPNormalizedRatio", PyRep::Real(*pct_dps)),
                     ("activityState", PyRep::Integer(1)),
@@ -942,7 +951,7 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
             };
             PyRep::Tuple(vec![
                 PyRep::String("OnDotVictimUpdated".into()),
-                PyRep::Tuple(vec![PyRep::Integer(*ball_id), PyRep::List(apps)]),
+                PyRep::Tuple(vec![PyRep::Integer(*ball_id), PyRep::PySet(apps)]),
             ])
         }
         DestinyEvent::OnDroneStateChange {

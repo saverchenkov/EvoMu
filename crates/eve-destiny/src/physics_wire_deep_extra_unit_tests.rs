@@ -536,6 +536,8 @@ fn wire_slim_meta_damage_state_set_state_and_destiny_event_edge_cases() {
         }
     }
 
+    let mut park = Ballpark::new(30_000_142);
+    park.sim_unix_secs = 1_700_000_000;
     let dot_ev = encode_destiny_event(
         10,
         &DestinyEvent::OnDotVictimUpdated {
@@ -543,25 +545,19 @@ fn wire_slim_meta_damage_state_set_state_and_destiny_event_edge_cases() {
             flat_dps: 12.5,
             pct_dps: 0.02,
             remaining_ticks: 5,
+            expiry_filetime: 0,
         },
-        None,
+        Some(&park),
     );
-    if let PyRep::Tuple(top) = dot_ev {
-        if let PyRep::Tuple(call) = &top[1] {
-            if let PyRep::Tuple(args) = &call[1] {
-                if let PyRep::List(items) = &args[1] {
-                    if let PyRep::Object { args: kv, .. } = &items[0] {
-                        if let PyRep::Dict(entries) = kv.as_ref() {
-                            assert!(entries.iter().any(|(k, v)| {
-                                *k == PyRep::String("expiryTime".into())
-                                    && *v == PyRep::Integer(150_000_000)
-                            }));
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let PyRep::Tuple(top) = dot_ev else { panic!("expected DoDestinyUpdate tuple") };
+    let PyRep::Tuple(call) = &top[1] else { panic!("expected call tuple") };
+    let PyRep::Tuple(args) = &call[1] else { panic!("expected args tuple") };
+    let PyRep::PySet(items) = &args[1] else { panic!("dmgAppsInfo must be PySet, got {:?}", args[1]) };
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        items[0].dict_get("expiryTime"),
+        Some(&PyRep::Integer(crate::unix_to_filetime(1_700_000_005)))
+    );
     let dot_clear_ev = encode_destiny_event(
         10,
         &DestinyEvent::OnDotVictimUpdated {
@@ -569,14 +565,12 @@ fn wire_slim_meta_damage_state_set_state_and_destiny_event_edge_cases() {
             flat_dps: 0.0,
             pct_dps: 0.0,
             remaining_ticks: 0,
+            expiry_filetime: 0,
         },
-        None,
+        Some(&park),
     );
-    if let PyRep::Tuple(top) = dot_clear_ev {
-        if let PyRep::Tuple(call) = &top[1] {
-            if let PyRep::Tuple(args) = &call[1] {
-                assert_eq!(args[1], PyRep::List(vec![]));
-            }
-        }
-    }
+    let PyRep::Tuple(top) = dot_clear_ev else { panic!("expected DoDestinyUpdate tuple") };
+    let PyRep::Tuple(call) = &top[1] else { panic!("expected call tuple") };
+    let PyRep::Tuple(args) = &call[1] else { panic!("expected args tuple") };
+    assert_eq!(args[1], PyRep::PySet(vec![]));
 }

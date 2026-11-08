@@ -389,16 +389,19 @@ async fn test_destiny_dogma_buffs_dot_and_drone_events() {
     let PyRep::Tuple(db_action) = &db_outer[1] else { panic!("Expected action tuple") };
     assert_eq!(db_action[0].as_str(), Some("OnDbuffUpdated"));
 
-    // 2. OnDotVictimUpdated: ("OnDotVictimUpdated", (ball_id, [apps]))
+    // 2. OnDotVictimUpdated: ("OnDotVictimUpdated", (ball_id, set([apps])))
     let dot_rep = encode_destiny_event(61, &DestinyEvent::OnDotVictimUpdated {
         ball_id: 100_000_001,
         flat_dps: 150.0,
         pct_dps: 0.05,
         remaining_ticks: 10,
+        expiry_filetime: 0,
     }, Some(&park));
     let PyRep::Tuple(dot_outer) = &dot_rep else { panic!("Expected tuple") };
     let PyRep::Tuple(dot_action) = &dot_outer[1] else { panic!("Expected action tuple") };
     assert_eq!(dot_action[0].as_str(), Some("OnDotVictimUpdated"));
+    let PyRep::Tuple(dot_args) = &dot_action[1] else { panic!("Expected args tuple") };
+    assert!(matches!(dot_args[1], PyRep::PySet(_)), "dmgAppsInfo must encode as PySet");
 
     // 3. OnDroneStateChange: ("OnDroneStateChange", (drone_id, owner, controller, state, type_id, ctrl_owner, target))
     let dsc_rep = encode_destiny_event(62, &DestinyEvent::OnDroneStateChange {

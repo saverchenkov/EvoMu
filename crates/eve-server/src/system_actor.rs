@@ -941,6 +941,12 @@ impl SystemRegistry {
                                     &db_opt,
                                 );
                                 sync_player_slim_items(&mut ballpark, &db_opt);
+                                if let Some(db) = db_opt.as_ref() {
+                                    let now_unix = db.clock().now_unix_secs();
+                                    if now_unix > ballpark.sim_unix_secs {
+                                        ballpark.sim_unix_secs = now_unix;
+                                    }
+                                }
                                 let events = ballpark.step(dt_sim);
                                 persist_landed_warps_in_db(&ballpark, &events, &db_opt);
                                 if let Some(lock_hook) = target_lock_completed_hook_actor.read().unwrap_or_else(|e| e.into_inner()).as_ref() {

@@ -418,6 +418,12 @@ async fn handle_random_jump_filament(
                 message: "Cannot activate filament while ship is in 10s post-warp invulnerability window".into(),
             });
         }
+        if cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0 {
+            return Err(BridgeRpcError {
+                code: "CannotActivateFilamentWhileCloaked".into(),
+                message: "Cannot activate filament while ship is cloaked".into(),
+            });
+        }
     }
 
     let caller_ship_group = ctx.sde.types.get(&current_ball.type_id).map(|t| t.group_id).unwrap_or(0);
@@ -461,6 +467,7 @@ async fn handle_random_jump_filament(
         ctx.db.with_snapshot(|snap| {
             snap.items.values().find(|i| {
                 i.owner_id == char_id && i.location_id == ship_id && i.flag == eve_db::InventoryFlag::Cargo && i.quantity >= 1
+                    && !snap.is_item_locked_in_contract_or_job(i.item_id)
                     && matches!(ctx.sde.types.get(&i.type_id).map(|t| t.group_id).unwrap_or(0), GROUP_JUMP_FILAMENTS | GROUP_POCHVEN_FILAMENTS)
             }).map(|i| i.item_id)
         }).ok_or_else(|| BridgeRpcError {
@@ -470,6 +477,16 @@ async fn handle_random_jump_filament(
     };
 
     let (fil_type_id, max_capacity, is_signal, is_pochven_filament) = ctx.db.with_snapshot(|snap| {
+        if let Some(raw_fil) = snap.items.get(&fil_item_id) {
+            if raw_fil.flag == eve_db::InventoryFlag::Locked
+                || snap.is_item_locked_in_contract_or_job(fil_item_id)
+            {
+                return Err(BridgeRpcError {
+                    code: "ItemLocked".into(),
+                    message: format!("Filament {fil_item_id} is locked in a contract or industry job"),
+                });
+            }
+        }
         let fil = snap.items.get(&fil_item_id).filter(|i| {
             i.owner_id == char_id && i.location_id == ship_id && i.flag == eve_db::InventoryFlag::Cargo && i.quantity >= 1
         }).ok_or_else(|| BridgeRpcError {
@@ -509,6 +526,12 @@ async fn handle_random_jump_filament(
             char_id,
         )?
     } else {
+        if old_reg == 10_000_070
+            || old_sys == 30_100_000
+            || (32_000_000..=32_999_999).contains(&old_sys)
+        {
+            return Err(BridgeRpcError::user_error("NeedlejackDisallowedOrigin"));
+        }
         ctx.sde.solar_systems.iter().filter(|(&sid, s)| {
             sid != old_sys && s.security_status < 0.0 && sid < 31_000_000
                 && !matches!(s.region_id, 10000070 | 10000004 | 10000017 | 10000019 | 10001000)
@@ -553,7 +576,7 @@ async fn handle_random_jump_filament(
         });
         let Some((m_ship_id, m_type_id)) = mate_ship_info else { continue; };
         let m_grp = ctx.sde.types.get(&m_type_id).map(|t| t.group_id).unwrap_or(0);
-        if matches!(m_grp, 30 | 485 | 547 | 659 | 883 | 1538 | 4594) { continue; }
+        if matches!(m_grp, 29 | 30 | 485 | 513 | 547 | 659 | 883 | 902 | 1538 | 4594) { continue; }
         if matches!(dest_sys_id, 30_001_372 | 30_003_504 | 30_002_702) {
             let m_trig = ctx.db.with_snapshot(|snap| snap.characters.get(&mate_id).and_then(|c| c.standings.get(&500_026).copied()).unwrap_or(0.0));
             if m_trig < 6.0 { continue; }

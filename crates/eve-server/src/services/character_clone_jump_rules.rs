@@ -25,6 +25,30 @@ pub const THERA_SYSTEM_ID: u32 = 31_000_005;
 /// Canonical NPC station clone jump leave-behind fee: 900,000 ISK.
 pub const NPC_LEAVE_BEHIND_FEE_CENTS: i64 = 900_000_00;
 
+/// Checks whether an Upwell structure is operational, cored, fueled, and has an online
+/// Standup Cloning Center I (`35894`) fitted in a service slot.
+pub(crate) fn structure_has_online_clone_bay(snap: &WorldStateSnapshot, structure_id: i64) -> bool {
+    let Some(st) = snap.structures.get(&structure_id) else {
+        return false;
+    };
+    if !crate::services::station_structure::structure_lifecycle::is_operational(&st.state)
+        || matches!(
+            st.state.as_str(),
+            "HullReinforce" | "HullReinforced" | "Unanchored" | "Offline"
+        )
+        || !st.quantum_core_installed
+        || st.fuel_blocks == 0
+    {
+        return false;
+    }
+    snap.items.values().any(|i| {
+        i.location_id == structure_id
+            && i.type_id == 35894
+            && i.flag.is_service_slot()
+            && snap.module_online_states.get(&i.item_id).copied().unwrap_or(false)
+    })
+}
+
 /// Checks if an Alpha clone has capacity to install a new jump clone.
 /// Per V24 rules, Alpha characters cannot install new jump clones (Omega capacity required).
 pub fn check_alpha_clone_install_capacity(
@@ -165,26 +189,8 @@ pub fn handle_clone_jump(
     }
 
     let departure_has_clone_bay = if departure_loc_id >= 1_000_000_000_000 {
-        ctx.db.with_snapshot(|snap| {
-            let has_service_items = snap
-                .items
-                .values()
-                .any(|i| i.location_id == departure_loc_id && i.flag.is_service_slot());
-            let online_clone_bay = snap.items.values().any(|i| {
-                i.location_id == departure_loc_id
-                    && i.type_id == 35894
-                    && i.flag.is_service_slot()
-                    && snap.module_online_states.get(&i.item_id).copied().unwrap_or(false)
-            });
-            snap.structures
-                .get(&departure_loc_id)
-                .map(|st| {
-                    st.quantum_core_installed
-                        && st.fuel_blocks > 0
-                        && (!has_service_items || online_clone_bay)
-                })
-                .unwrap_or(false)
-        })
+        ctx.db
+            .with_snapshot(|snap| structure_has_online_clone_bay(snap, departure_loc_id))
     } else {
         ctx.sde
             .solar_systems
@@ -337,17 +343,7 @@ pub fn handle_clone_jump(
                     message: format!("Destination structure {dest_loc_id} no longer exists"),
                 });
             };
-            let has_service_items = snap
-                .items
-                .values()
-                .any(|i| i.location_id == dest_loc_id && i.flag.is_service_slot());
-            let online_clone_bay = snap.items.values().any(|i| {
-                i.location_id == dest_loc_id
-                    && i.type_id == 35894
-                    && i.flag.is_service_slot()
-                    && snap.module_online_states.get(&i.item_id).copied().unwrap_or(false)
-            });
-            if !st.quantum_core_installed || st.fuel_blocks == 0 || (has_service_items && !online_clone_bay) {
+            if !structure_has_online_clone_bay(snap, dest_loc_id) {
                 return Err(BridgeRpcError {
                     code: "StructureHasNoCloneBay".into(),
                     message: format!(

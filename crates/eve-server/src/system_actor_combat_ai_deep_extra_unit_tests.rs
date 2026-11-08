@@ -77,7 +77,7 @@ fn destiny_event_routing_rah_resonance_clamping_and_belt_downtime_respawn() {
         (ship_id, DestinyEvent::OnShipStateUpdate { module_states: Vec::new() }),
         (ship_id, DestinyEvent::OnDbuffUpdated { ball_id: ship_id, dbuffs: Vec::new() }),
         (ship_id, DestinyEvent::OnDotVictimUpdated {
-            ball_id: ship_id, flat_dps: 15.0, pct_dps: 0.02, remaining_ticks: 10,
+            ball_id: ship_id, flat_dps: 15.0, pct_dps: 0.02, remaining_ticks: 10, expiry_filetime: 0,
         }),
         (drone_id, DestinyEvent::OnDroneStateChange {
             drone_id, owner_id: 90_001_111, controller_id: ship_id,

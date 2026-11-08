@@ -628,7 +628,8 @@ async fn test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_rep
         corp.tax_rate = 0.15; // 15% corp member income tax (must NOT be used as structure reprocessing tax)
         corp.ceo_id = char_id;
         snap.structures.insert(comp_structure_id, make_structure(comp_structure_id, char_corp_id, 35836, 30000142, "Rigged Tatara", [0.0, 0.0, 0.0]));
-        snap.items.insert(reproc_svc_mod, make_item(reproc_svc_mod, 35892, char_corp_id, comp_structure_id, InventoryFlag::ServiceSlot0, 1, true));
+        snap.items.insert(reproc_svc_mod, make_item(reproc_svc_mod, 35899, char_corp_id, comp_structure_id, InventoryFlag::ServiceSlot0, 1, true));
+        snap.module_online_states.insert(reproc_svc_mod, true);
         snap.items.insert(rig_mod, make_item(rig_mod, 46640, char_corp_id, comp_structure_id, InventoryFlag::RigSlot0, 1, true));
         snap.items.insert(uncompressed_ore_id, make_item(uncompressed_ore_id, 1230, char_id, comp_structure_id, InventoryFlag::Hangar, 1_234, false));
         snap.items.insert(comp_gas_id, make_item(comp_gas_id, comp_c50_tid, char_id, comp_structure_id, InventoryFlag::Hangar, 100, false));

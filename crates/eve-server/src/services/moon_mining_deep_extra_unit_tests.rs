@@ -56,7 +56,7 @@ fn build_moon_test_sde() -> Arc<SdeRegistry> {
     sde.types
         .insert(35835, mk_type(35835, 1406, 65, "Athanor", 500_000.0, 100_000.0, None, &[]));
     sde.types
-        .insert(35894, mk_type(35894, 1415, 66, "Standup Moon Drill I", 4_000.0, 0.0, None, &[]));
+        .insert(45009, mk_type(45009, 1887, 66, "Standup Moon Drill I", 4_000.0, 0.0, None, &[]));
     sde.types.insert(
         37178,
         mk_type(37178, 1912, 66, "Standup L Moon Drill Stability I", 500.0, 0.0, None, &[(2707, 100.0)]),
@@ -169,6 +169,21 @@ async fn test_moon_extraction_validation_fracture_decay_and_auto_fracture() {
                 ..Default::default()
             },
         );
+        snap.items.insert(
+            struct_id + 100,
+            InventoryItemRecord {
+                item_id: struct_id + 100,
+                type_id: 45009,
+                owner_id: corp_id,
+                location_id: struct_id,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(struct_id + 100, true);
     });
 
     let mut sess = SessionState::new(5);

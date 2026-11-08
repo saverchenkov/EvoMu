@@ -817,3 +817,186 @@ async fn test_cyno_jammer_covert_bypass_abyssal_pochven_cloak_and_no_fallback() 
     );
     ab_sess.solar_system_id = Some(cur_sys);
 }
+
+#[tokio::test]
+async fn random_jump_filament_guards_cloak_lock_origins_and_fleet_groups() {
+    let mut ctx = test_ctx();
+    let needlejack_tid = 53_947_u32; // Noise-5 'Needlejack' Filament
+    clone_type_with(
+        &mut ctx.sde,
+        needlejack_tid,
+        needlejack_tid,
+        4041,
+        66,
+        1.0,
+        0.0,
+        &[(3025, 0.0), (2832, 5.0)],
+    );
+    // Ensure Capsule (29), Freighter (513), Jump Freighter (902), Frigate (25) types exist
+    clone_type_with(&mut ctx.sde, 670, 670, 29, 6, 10_000.0, 0.0, &[]);
+    clone_type_with(&mut ctx.sde, 20_185, 20_185, 513, 6, 900_000_000.0, 0.0, &[]);
+    clone_type_with(&mut ctx.sde, 28_850, 28_850, 902, 6, 900_000_000.0, 0.0, &[]);
+
+    let char_id = 90_000_001_i64;
+    let cap_mate = 90_000_011_i64;
+    let frt_mate = 90_000_012_i64;
+    let jf_mate = 90_000_013_i64;
+    let subcap_mate = 90_000_014_i64;
+    let ship_id = 100_000_001_i64;
+    let cap_ship = 100_000_011_i64;
+    let frt_ship = 100_000_012_i64;
+    let jf_ship = 100_000_013_i64;
+    let subcap_ship = 100_000_014_i64;
+    let fil_id = 930_001_i64;
+    let locked_fil_id = 930_002_i64;
+
+    let pos = DVec3::new(1.5e13, -2.1e13, 0.9e13);
+    let mut sess = make_session(char_id, 98_000_001, Some(30_000_142), Some(ship_id));
+    sess.user_id = Some(1);
+    sess.fleet_id = Some(502);
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(
+            502,
+            FleetRecord {
+                fleet_id: 502,
+                boss_id: char_id,
+                members: vec![char_id, cap_mate, frt_mate, jf_mate, subcap_mate],
+                free_move: true,
+                ..Default::default()
+            },
+        );
+        for (cid, sid, tid, sys) in [
+            (cap_mate, cap_ship, 670_u32, 31_000_001_u32),
+            (frt_mate, frt_ship, 20_185_u32, 31_000_001_u32),
+            (jf_mate, jf_ship, 28_850_u32, 31_000_001_u32),
+            (subcap_mate, subcap_ship, 587_u32, 31_000_001_u32),
+        ] {
+            let mut ch = snap.characters.get(&char_id).cloned().unwrap();
+            ch.character_id = cid;
+            ch.active_ship_id = sid;
+            ch.solar_system_id = sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            snap.characters.insert(cid, ch);
+            put_item(snap, sid, tid, cid, sys as i64, InventoryFlag::None, 1, true);
+        }
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = 31_000_001;
+            ch.active_ship_id = ship_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        put_item(snap, ship_id, 587, char_id, 31_000_001, InventoryFlag::None, 1, true);
+        put_item(snap, fil_id, needlejack_tid, char_id, ship_id, InventoryFlag::Cargo, 2, false);
+        put_item(snap, locked_fil_id, needlejack_tid, char_id, ship_id, InventoryFlag::Locked, 1, false);
+    });
+
+    // 1. Cloaked caller (non-gate cloak) rejected
+    let jita = 30_000_142_u32;
+    let jita_h = ctx.systems.get_or_spawn(jita);
+    spawn_ship(&jita_h, ship_id, 587, 25, 6, pos, DVec3::ZERO, true).await;
+    sess.solar_system_id = Some(jita);
+    assert_eq!(
+        handle(&ctx, &mut sess, None, "randomJumpMgr", "ActivateRandomJumpFilament", &[PyRep::Integer(fil_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CannotActivateFilamentWhileCloaked"
+    );
+    let _ = jita_h.remove_ball(ship_id).await;
+
+    // 2. Locked filament rejected with ItemLocked
+    spawn_ship(&jita_h, ship_id, 587, 25, 6, pos, DVec3::ZERO, false).await;
+    assert_eq!(
+        handle(&ctx, &mut sess, None, "randomJumpMgr", "ActivateRandomJumpFilament", &[PyRep::Integer(locked_fil_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "ItemLocked"
+    );
+
+    // 3. Needlejack disallowed from Zarzakh (30_100_000), Pochven (10_000_070), Abyssal (32_000_001)
+    let pochven_sys = ctx
+        .sde
+        .solar_systems
+        .iter()
+        .find(|(_, s)| s.region_id == 10_000_070)
+        .map(|(&sid, _)| sid)
+        .unwrap_or(30_001_372);
+    let abyss_sde = Arc::make_mut(&mut ctx.sde);
+    if let Some(sample) = abyss_sde.solar_systems.get(&jita).cloned() {
+        let mut ab = sample.clone();
+        ab.solar_system_id = 32_000_001;
+        abyss_sde.solar_systems.insert(32_000_001, ab);
+        let mut zk = sample;
+        zk.solar_system_id = 30_100_000;
+        abyss_sde.solar_systems.insert(30_100_000, zk);
+    }
+    for (disallowed_sys, expected_code) in [
+        (30_100_000_u32, "NeedlejackDisallowedOrigin"),
+        (pochven_sys, "NeedlejackDisallowedOrigin"),
+        (32_000_001_u32, "ShipInDungeon"),
+    ] {
+        let h = ctx.systems.get_or_spawn(disallowed_sys);
+        spawn_ship(&h, ship_id, 587, 25, 6, pos, DVec3::ZERO, false).await;
+        sess.solar_system_id = Some(disallowed_sys);
+        assert_eq!(
+            handle(&ctx, &mut sess, None, "randomJumpMgr", "ActivateRandomJumpFilament", &[PyRep::Integer(fil_id)], &kw)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .code,
+            expected_code,
+            "expected {expected_code} in {disallowed_sys}"
+        );
+    }
+
+    // 4. Allowed from W-space (31_000_001) even under gate cloak; Capsules/Freighters/JFs stay behind
+    let wh_sys = 31_000_001_u32;
+    let wh_h = ctx.systems.get_or_spawn(wh_sys);
+    let _ = wh_h
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 587,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 2.0,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                is_cloaked: true,
+                gate_cloak_remaining_ticks: 30,
+                sync_invuln_with_undock_timer: true,
+                ..Default::default()
+            },
+        )
+        .await;
+    spawn_ship(&wh_h, cap_ship, 670, 29, 6, pos + DVec3::new(500.0, 0.0, 0.0), DVec3::ZERO, false).await;
+    spawn_ship(&wh_h, frt_ship, 20_185, 513, 6, pos + DVec3::new(600.0, 0.0, 0.0), DVec3::ZERO, false).await;
+    spawn_ship(&wh_h, jf_ship, 28_850, 902, 6, pos + DVec3::new(700.0, 0.0, 0.0), DVec3::ZERO, false).await;
+    spawn_ship(&wh_h, subcap_ship, 587, 25, 6, pos + DVec3::new(800.0, 0.0, 0.0), DVec3::ZERO, false).await;
+    sess.solar_system_id = Some(wh_sys);
+    let res = handle(&ctx, &mut sess, None, "randomJumpMgr", "ActivateRandomJumpFilament", &[PyRep::Integer(fil_id)], &kw)
+        .await
+        .unwrap()
+        .expect("Needlejack from W-space with gate cloak must succeed");
+    let dest_sys = sess.solar_system_id.unwrap();
+    assert_ne!(dest_sys, wh_sys);
+    assert!(res != PyRep::None);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&char_id].solar_system_id, dest_sys);
+        assert_eq!(snap.characters[&subcap_mate].solar_system_id, dest_sys);
+        assert_eq!(snap.characters[&cap_mate].solar_system_id, wh_sys, "Capsule must NOT jump");
+        assert_eq!(snap.characters[&frt_mate].solar_system_id, wh_sys, "Freighter must NOT jump");
+        assert_eq!(snap.characters[&jf_mate].solar_system_id, wh_sys, "Jump Freighter must NOT jump");
+    });
+}

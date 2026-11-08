@@ -1054,8 +1054,15 @@ pub(super) fn apply_destiny_event_in_actor(
                 flat_dps,
                 pct_dps,
                 remaining_ticks,
+                expiry_filetime,
             } if id == ball_id => {
-                ballpark.apply_breacher_dot(id, flat_dps, pct_dps, remaining_ticks);
+                ballpark.apply_breacher_dot_with_expiry(
+                    id,
+                    flat_dps,
+                    pct_dps,
+                    remaining_ticks,
+                    expiry_filetime,
+                );
             }
             DestinyEvent::OnDroneStateChange {
                 drone_id,

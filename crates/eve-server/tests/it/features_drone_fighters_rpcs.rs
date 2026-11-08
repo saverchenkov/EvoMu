@@ -417,9 +417,11 @@ async fn test_b30_industry_pi_and_market_wallet_history_durable() {
         snap.structures.insert(athanor_id, UpwellStructureRecord {
             structure_id: athanor_id, type_id: 35835, owner_corp_id: CORP_ID, solar_system_id: JITA_SYSTEM_ID,
             name: "B30 Athanor".into(), position: [0.0, 0.0, 0.0], state: "ShieldVulnerable".into(),
-            quantum_core_installed: true, fuel_blocks: 500, shield_hp: 10000.0, armor_hp: 10000.0, hull_hp: 10000.0,
+            quantum_core_installed: true, fuel_blocks: 5_000, shield_hp: 10000.0, armor_hp: 10000.0, hull_hp: 10000.0,
             reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
         });
+        snap.items.insert(910_019, make_item(910_019, 45_009, CORP_ID, athanor_id, InventoryFlag::ServiceSlot0, 1, true));
+        snap.module_online_states.insert(910_019, true);
         snap.structures.insert(metenox_id, UpwellStructureRecord {
             structure_id: metenox_id, type_id: 81826, owner_corp_id: CORP_ID, solar_system_id: 30_004_608,
             name: "B30 Metenox".into(), position: [1000.0, 0.0, 0.0], state: "ShieldVulnerable".into(),

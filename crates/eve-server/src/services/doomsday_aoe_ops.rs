@@ -6,11 +6,10 @@
 
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::doomsday_aoe_tick::{
-    BOSONIC_CONE_COS_HALF_ANGLE, GTFO_WARP_SUPPRESSION_SECS, PersistedSuperweaponCycle,
-    SUPERWEAPON_RUNTIME_BLOB_KEY, SuperweaponCycleKind, is_subcapital_ship_for_gtfo,
+    GTFO_WARP_SUPPRESSION_SECS, PersistedSuperweaponCycle,
+    SUPERWEAPON_RUNTIME_BLOB_KEY, SuperweaponCycleKind,
     mutate_superweapon_runtime, read_superweapon_runtime,
 };
-use crate::services::tactical_modules::is_combatant_ship_or_entity_ball;
 use eve_destiny::{DVec3, DamageVector, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -87,7 +86,6 @@ pub async fn dispatch_superweapon_aoe_rpc(
 
 struct TitanDoomsdaySetup {
     sys: crate::system_actor::SystemHandle,
-    all_balls: Vec<eve_destiny::Ball>,
     ship_pos: DVec3,
     ship_type_id: u32,
     mod_type_id: u32,
@@ -100,7 +98,6 @@ struct TitanDoomsdaySetup {
     orig_max_velocity: f64,
     orig_warp_scramble_strength: i32,
     orig_disallow_assistance: bool,
-    neuted_ship_ids: Vec<i64>,
 }
 
 fn validate_doomsday_target_points(
@@ -128,11 +125,12 @@ fn validate_doomsday_target_points(
 async fn apply_superweapon_aoe_neut_pulse(
     ctx: &ServerContext,
     sys: &crate::system_actor::SystemHandle,
+    sys_id: u32,
     all_balls: &[eve_destiny::Ball],
     titan_ship_id: i64,
     titan_pos: DVec3,
     mod_type_id: u32,
-) -> Vec<i64> {
+) {
     let mod_type = ctx.sde.types.get(&mod_type_id);
     let neut_radius_m = mod_type
         .and_then(|t| t.default_attributes.get(&2259).copied())
@@ -143,7 +141,6 @@ async fn apply_superweapon_aoe_neut_pulse(
         .unwrap_or(SUPERWEAPON_NEUT_PULSE_GJ)
         .max(SUPERWEAPON_NEUT_PULSE_GJ);
 
-    let mut drained = Vec::new();
     for b in all_balls {
         if b.id == titan_ship_id || (b.position - titan_pos).length() > neut_radius_m {
             continue;
@@ -156,19 +153,30 @@ async fn apply_superweapon_aoe_neut_pulse(
         if !is_ship {
             continue;
         }
-        if let Ok(Some(cs)) = sys.get_combat_state(b.id).await {
-            if cs.is_tethered
+        if let Ok(Some(mut cs)) = sys.get_combat_state(b.id).await {
+            cs.sync_action_breaks();
+            if cs.is_cloaked
+                || cs.gate_cloak_remaining_ticks > 0
+                || cs.is_tethered
                 || cs.is_invulnerable()
                 || cs.undock_invulnerable_remaining_ticks > 0
             {
                 continue;
             }
+            if crate::services::inventory_fitting::fitting_ship_forcefield::is_pos_forcefield_protected(
+                ctx,
+                sys_id,
+                b.id,
+                b.position,
+            )
+            .await
+            {
+                continue;
+            }
             let new_cap = (cs.capacitor - neut_amount_gj).max(0.0);
             let _ = sys.set_capacitor(b.id, new_cap).await;
-            drained.push(b.id);
         }
     }
-    drained
 }
 
 async fn validate_and_consume_titan_doomsday<F>(
@@ -298,6 +306,16 @@ where
         return Err(BridgeRpcError::user_error("CantActivateInWarp"));
     }
     let ship_pos = titan_ball_initial.position;
+    if crate::services::inventory_fitting::fitting_ship_forcefield::is_pos_forcefield_protected(
+        ctx,
+        sys_id,
+        ship_id,
+        ship_pos,
+    )
+    .await
+    {
+        return Err(BridgeRpcError::user_error("CantActivateInForcefield"));
+    }
 
     let mut cs = sys
         .get_combat_state(ship_id)
@@ -305,11 +323,19 @@ where
         .ok()
         .flatten()
         .unwrap_or_else(|| ctx.build_type_combat_state(ship_type_id));
-    if cs.is_cloaked {
+    cs.sync_action_breaks();
+    if cs.is_cloaked || cs.gate_cloak_remaining_ticks > 0 {
         return Err(BridgeRpcError::user_error("CantActivateWhileCloaked"));
     }
     if cs.is_tethered {
         return Err(BridgeRpcError::user_error("CantActivateWhileTethered"));
+    }
+    let cap_need = mod_type
+        .and_then(|t| t.default_attributes.get(&6).copied())
+        .filter(|&v| v > 0.0)
+        .unwrap_or(0.0);
+    if cap_need > 0.0 && cs.capacitor < cap_need {
+        return Err(BridgeRpcError::user_error("NotEnoughCapacitor"));
     }
 
     let max_range_m = mod_type
@@ -429,6 +455,9 @@ where
     cs.warp_scramble_strength = cs.warp_scramble_strength.max(100);
     cs.disallow_assistance = true;
     cs.is_tethered = false;
+    if cap_need > 0.0 {
+        cs.capacitor = (cs.capacitor - cap_need).max(0.0);
+    }
     let orig_max_velocity =
         if let Ok(Some((_, mut titan_ball))) = sys.get_ball_snapshot(ship_id).await {
             let orig_v = existing_orig.map(|o| o.0).unwrap_or(titan_ball.max_velocity);
@@ -465,9 +494,10 @@ where
         / 1000.0;
     ctx.record_module_reactivation_delay(ship_id, module_id, reactiv_secs);
 
-    let neuted_ship_ids = apply_superweapon_aoe_neut_pulse(
+    apply_superweapon_aoe_neut_pulse(
         ctx,
         &sys,
+        sys_id,
         &all_balls,
         ship_id,
         ship_pos,
@@ -478,7 +508,6 @@ where
     Ok((
         TitanDoomsdaySetup {
             sys,
-            all_balls,
             ship_pos,
             ship_type_id,
             mod_type_id,
@@ -491,7 +520,6 @@ where
             orig_max_velocity,
             orig_warp_scramble_strength,
             orig_disallow_assistance,
-            neuted_ship_ids,
         },
         resolved_targets,
     ))
@@ -554,10 +582,12 @@ pub async fn activate_cone_doomsday(
         dir_vec
     } else if let Some(tid) = args.get(1).and_then(|a| a.as_i64()) {
         setup
-            .all_balls
-            .iter()
-            .find(|b| b.id == tid)
-            .map(|b| (b.position - setup.ship_pos).normalize_or_zero())
+            .sys
+            .get_ball_snapshot(tid)
+            .await
+            .ok()
+            .flatten()
+            .map(|(_, b)| (b.position - setup.ship_pos).normalize_or_zero())
             .filter(|v| v.length_squared() > 1e-6)
             .unwrap_or(dir_vec)
     } else {
@@ -586,29 +616,6 @@ pub async fn activate_cone_doomsday(
         .unwrap_or(1_000.0);
     let total_ticks = ((dmg_dur_ms / dmg_cycle_ms).round() as usize).max(1);
     let tick_dmg = setup.dmg_vec;
-
-    let in_cone_targets: Vec<i64> = setup
-        .all_balls
-        .iter()
-        .filter(|b| {
-            if b.id == ship_id
-                || !is_combatant_ship_or_entity_ball(
-                    Some(&ctx.sde),
-                    Some(&ctx.db),
-                    b.id,
-                    b.type_id,
-                )
-            {
-                return false;
-            }
-            let delta = b.position - setup.ship_pos;
-            let dist = delta.length();
-            dist > 0.0
-                && dist <= cone_len_m
-                && delta.normalize().dot(resolved_dir) >= BOSONIC_CONE_COS_HALF_ANGLE
-        })
-        .map(|b| b.id)
-        .collect();
 
     mutate_superweapon_runtime(&ctx.db, |rt| {
         rt.active_cycles.push(PersistedSuperweaponCycle {
@@ -665,15 +672,7 @@ pub async fn activate_cone_doomsday(
         ("jumpBlockSeconds", PyRep::Real(setup.no_jump_secs as f64)),
         ("fuelConsumed", PyRep::Integer(i64::from(setup.fuel_consumed))),
         ("neutPulseAmountGJ", PyRep::Real(SUPERWEAPON_NEUT_PULSE_GJ)),
-        (
-            "neutedShipIDs",
-            PyRep::List(setup.neuted_ship_ids.into_iter().map(PyRep::Integer).collect()),
-        ),
         ("totalDamageApplied", PyRep::Real(0.0)),
-        (
-            "hitTargetIDs",
-            PyRep::List(in_cone_targets.into_iter().map(PyRep::Integer).collect()),
-        ),
     ]))
 }
 
@@ -731,18 +730,6 @@ pub async fn activate_spatial_gtfo_doomsday(
         / 1000.0)
         .round() as u64;
 
-    let scheduled_subcap_ids: Vec<i64> = setup
-        .all_balls
-        .iter()
-        .filter(|b| {
-            b.id != ship_id
-                && b.max_velocity > 0.0
-                && is_subcapital_ship_for_gtfo(&ctx.sde, b.type_id)
-                && (b.position - center).length() <= sphere_radius_m
-        })
-        .map(|b| b.id)
-        .collect();
-
     mutate_superweapon_runtime(&ctx.db, |rt| {
         rt.active_cycles.push(PersistedSuperweaponCycle {
             sys_id,
@@ -793,15 +780,6 @@ pub async fn activate_spatial_gtfo_doomsday(
         ("tetherBlocked", PyRep::Bool(true)),
         ("fuelConsumed", PyRep::Integer(i64::from(setup.fuel_consumed))),
         ("neutPulseAmountGJ", PyRep::Real(SUPERWEAPON_NEUT_PULSE_GJ)),
-        (
-            "neutedShipIDs",
-            PyRep::List(setup.neuted_ship_ids.into_iter().map(PyRep::Integer).collect()),
-        ),
-        (
-            "scheduledShipIDs",
-            PyRep::List(scheduled_subcap_ids.into_iter().map(PyRep::Integer).collect()),
-        ),
-        ("teleportedShipIDs", PyRep::List(Vec::new())),
     ]))
 }
 
@@ -909,29 +887,6 @@ pub async fn activate_multipoint_reaper_doomsday(
         setup.dmg_vec.explosive * sweep_cycles,
     );
 
-    let seg = end_pt - start_pt;
-    let seg_len_sq = seg.length_squared().max(1.0);
-    let corridor_targets: Vec<i64> = setup
-        .all_balls
-        .iter()
-        .filter(|b| {
-            if b.id == ship_id
-                || !is_combatant_ship_or_entity_ball(
-                    Some(&ctx.sde),
-                    Some(&ctx.db),
-                    b.id,
-                    b.type_id,
-                )
-            {
-                return false;
-            }
-            let t = ((b.position - start_pt).dot(seg) / seg_len_sq).clamp(0.0, 1.0);
-            let closest = start_pt + seg * t;
-            (b.position - closest).length() <= beam_radius_m
-        })
-        .map(|b| b.id)
-        .collect();
-
     mutate_superweapon_runtime(&ctx.db, |rt| {
         rt.active_cycles.push(PersistedSuperweaponCycle {
             sys_id,
@@ -989,15 +944,7 @@ pub async fn activate_multipoint_reaper_doomsday(
         ("tetherBlocked", PyRep::Bool(true)),
         ("fuelConsumed", PyRep::Integer(i64::from(setup.fuel_consumed))),
         ("neutPulseAmountGJ", PyRep::Real(SUPERWEAPON_NEUT_PULSE_GJ)),
-        (
-            "neutedShipIDs",
-            PyRep::List(setup.neuted_ship_ids.into_iter().map(PyRep::Integer).collect()),
-        ),
         ("totalDamageApplied", PyRep::Real(0.0)),
-        (
-            "hitTargetIDs",
-            PyRep::List(corridor_targets.into_iter().map(PyRep::Integer).collect()),
-        ),
     ]))
 }
 

@@ -127,6 +127,11 @@ async fn test_mn13_moon_extraction_lifecycle_and_fracture() {
             structure_id,
             make_structure(structure_id, 35835, corp_id, system_id, "Jita IV Moon Drill", [100_000.0, 50_000.0, -200_000.0], 500),
         );
+        snap.items.insert(
+            structure_id + 100,
+            make_item(structure_id + 100, 45009, corp_id, structure_id, InventoryFlag::ServiceSlot0, 1, true),
+        );
+        snap.module_online_states.insert(structure_id + 100, true);
     });
 
     let res_ores = ctx
@@ -581,10 +586,19 @@ async fn test_action_plan_mn13_to_mn16_moons_metenox_sites_ledgers() {
             moon_structure_id,
             make_structure(moon_structure_id, char_corp_id, 35835, 30000142, "Moon Athanor", [1000.0, 2000.0, 3000.0]),
         );
-        snap.structures.insert(
-            jackpot_structure_id,
-            make_structure(jackpot_structure_id, char_corp_id, 35835, 31000007, "Wormhole Athanor", [1000.0, 2000.0, 3000.0]),
+        snap.items.insert(
+            800_000_792,
+            make_item(800_000_792, 45009, char_corp_id, moon_structure_id, InventoryFlag::ServiceSlot0, 1, true),
         );
+        snap.module_online_states.insert(800_000_792, true);
+        let mut jp = make_structure(jackpot_structure_id, char_corp_id, 35835, 31000007, "Wormhole Athanor", [1000.0, 2000.0, 3000.0]);
+        jp.fuel_blocks = 10_000;
+        snap.structures.insert(jackpot_structure_id, jp);
+        snap.items.insert(
+            800_000_793,
+            make_item(800_000_793, 45009, char_corp_id, jackpot_structure_id, InventoryFlag::ServiceSlot0, 1, true),
+        );
+        snap.module_online_states.insert(800_000_793, true);
         let mut metenox = make_structure(metenox_id, char_corp_id, 81826, 30000012, "Asabona Metenox", [200_000.0, 0.0, -100_000.0]);
         metenox.fuel_blocks = 200;
         snap.structures.insert(metenox_id, metenox);
@@ -1129,7 +1143,7 @@ async fn test_mn16_in_space_and_structure_compression_and_decompression() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
             structure_id,
-            make_structure(structure_id, 35835, corp_id, system_id, "Jita Compression Facility", [0.0, 0.0, 0.0], 500),
+            make_structure(structure_id, 35835, corp_id, system_id, "Jita Compression Facility", [0.0, 0.0, 0.0], 5_000),
         );
     });
 
@@ -1252,7 +1266,7 @@ async fn test_mn16_in_space_and_structure_compression_and_decompression() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(item_in_struct, make_item(item_in_struct, 1228, char_id, structure_id, InventoryFlag::Hangar, 500, false));
         snap.items.insert(moon_ore_in_struct, make_item(moon_ore_in_struct, 45492, char_id, structure_id, InventoryFlag::Hangar, 500, false));
-        snap.items.insert(reproc_svc_mod_id, make_item(reproc_svc_mod_id, 35892, corp_id, structure_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(reproc_svc_mod_id, make_item(reproc_svc_mod_id, 35899, corp_id, structure_id, InventoryFlag::Hangar, 1, true));
     });
     let unfitted_svc_err = ctx
         .dispatch_rpc(&mut sess, "structureCompressionMgr", None, "CompressItemInStructure", &[PyRep::Integer(structure_id), PyRep::Integer(item_in_struct)], &kw, None)
@@ -1264,6 +1278,7 @@ async fn test_mn16_in_space_and_structure_compression_and_decompression() {
         if let Some(m) = snap.items.get_mut(&reproc_svc_mod_id) {
             m.flag = InventoryFlag::ServiceSlot0;
         }
+        snap.module_online_states.insert(reproc_svc_mod_id, true);
     });
 
     let moon_comp_err = ctx

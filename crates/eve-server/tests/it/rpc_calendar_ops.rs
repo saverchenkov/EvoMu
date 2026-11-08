@@ -403,6 +403,11 @@ async fn test_calendar_manager_remediation_lifecycle() {
             quantum_core_installed: true, fuel_blocks: 1_000, shield_hp: 5_000.0, armor_hp: 5_000.0, hull_hp: 5_000.0,
             reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
         });
+        snap.items.insert(990_000_778, eve_db::InventoryItemRecord {
+            item_id: 990_000_778, type_id: 45_009, owner_id: corp_id, location_id: 990_000_777,
+            flag: eve_db::InventoryFlag::ServiceSlot0, quantity: 1, singleton: true, version: 1, ..Default::default()
+        });
+        snap.module_online_states.insert(990_000_778, true);
     });
     let _ = ctx.drain_notifications_for_char(PILOT2);
     let ext_rep = ctx.dispatch_rpc(&mut sess1, "moonExtractions", None, "StartNewExtraction", &[PyRep::Integer(990_000_777), PyRep::Integer(518_400)], &kw, None).await.expect("StartNewExtraction");

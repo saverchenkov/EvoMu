@@ -3479,6 +3479,7 @@ async fn test_upwell_market_acl_offline_filter_and_corp_div1_ledger() {
             (InventoryFlag::ServiceSlot0, 35892_u32),
             (InventoryFlag::ServiceSlot1, 35888_u32),
             (InventoryFlag::ServiceSlot2, 35894_u32),
+            (InventoryFlag::ServiceSlot3, 35899_u32),
         ].into_iter().enumerate() {
             let mid = 880_826_100 + idx as i64;
             snap.items.insert(mid, make_item(mid, srv_tid, corp_id, st_id, flag, 1, true));

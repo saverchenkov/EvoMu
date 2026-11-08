@@ -264,3 +264,331 @@ async fn fighter_point_bomb_detonation_aoe_pod_safety_charges_and_kill() {
     .unwrap_err();
     assert_eq!(err_empty.code, "OutOfCharges");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fighter_ability_r9_carrier_fighter_target_pos_and_ewar_guards() {
+    let (mut ctx, mut session, char_id, ship_id, _hs_sys) = make_ability_test_ctx();
+    let ls_sys = 30_000_200u32;
+    session.solar_system_id = Some(ls_sys);
+
+    // Ensure Control Tower type (33475, group 365) and Upwell Astrahus (35832, category 65) exist in SDE
+    {
+        let reg = Arc::make_mut(&mut ctx.sde);
+        reg.types.insert(
+            33_475,
+            crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_type(
+                33_475,
+                365,
+                23,
+                10_000_000.0,
+                vec![(680, 30_000.0)],
+            ),
+        );
+        reg.types.insert(
+            35_832,
+            crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_type(
+                35_832,
+                1657,
+                65,
+                10_000_000.0,
+                vec![],
+            ),
+        );
+    }
+
+    let support_id = 800_000_050i64;
+    let bomber_id = 800_000_051i64;
+    spawn_fighter_and_ship(&ctx, ls_sys, ship_id, support_id, 23_059, char_id).await;
+    spawn_fighter_and_ship(&ctx, ls_sys, ship_id, bomber_id, 23_063, char_id).await;
+
+    let sys_h = ctx.systems.get_or_spawn(ls_sys);
+    let target_ship = 700_000_050i64;
+    let struct_id = 700_000_051i64;
+    let tower_id = 700_000_052i64;
+    let bomb_skip_cloaked = 700_000_053i64;
+    let bomb_skip_pos = 700_000_054i64;
+    let bomb_hit_open = 700_000_055i64;
+
+    let spawn_ship = |id: i64, type_id: u32, pos: DVec3, cs: CombatState| {
+        let sys_h = sys_h.clone();
+        async move {
+            let _ = sys_h
+                .spawn_ball_with_combat(
+                    Ball {
+                        id,
+                        type_id,
+                        position: pos,
+                        velocity: DVec3::ZERO,
+                        max_velocity: 300.0,
+                        inertia: 2.0,
+                        mass: 1_000_000.0,
+                        radius: 100.0,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Stop,
+                    },
+                    cs,
+                )
+                .await;
+        }
+    };
+
+    // Spawn carrier parent ship, target ship, structure, and bomb targets
+    spawn_ship(ship_id, 587, DVec3::ZERO, CombatState::new()).await;
+    let mut normal_cs = CombatState::new();
+    normal_cs.shield_hp = 5_000.0;
+    normal_cs.max_shield_hp = 5_000.0;
+    spawn_ship(target_ship, 587, DVec3::new(3_000.0, 0.0, 0.0), normal_cs.clone()).await;
+    spawn_ship(struct_id, 35_832, DVec3::new(4_000.0, 0.0, 0.0), normal_cs.clone()).await;
+    for locked_tid in [target_ship, struct_id] {
+        let _ = sys_h
+            .add_target_lock(
+                ship_id,
+                eve_destiny::TargetLock {
+                    target_id: locked_tid,
+                    lock_time_ms: 100.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: None,
+                },
+            )
+            .await;
+    }
+
+    // 1. Target cloaked -> CannotTargetCloaked
+    let _ = sys_h
+        .set_combat_state(
+            target_ship,
+            CombatState {
+                is_cloaked: true,
+                ..normal_cs.clone()
+            },
+        )
+        .await;
+    let err = handle_activate_fighter_ability_slots(
+        &ctx,
+        &mut session,
+        &[PyRep::Integer(support_id), PyRep::Integer(0), PyRep::Integer(target_ship)],
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err.code, "CannotTargetCloaked");
+
+    // 2. Target tethered / undock invulnerable -> TargetInvulnerable
+    let _ = sys_h
+        .set_combat_state(
+            target_ship,
+            CombatState {
+                is_tethered: true,
+                ..normal_cs.clone()
+            },
+        )
+        .await;
+    let err = handle_activate_fighter_ability_slots(
+        &ctx,
+        &mut session,
+        &[PyRep::Integer(support_id), PyRep::Integer(0), PyRep::Integer(target_ship)],
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err.code, "TargetInvulnerable");
+
+    let _ = sys_h
+        .set_combat_state(
+            target_ship,
+            CombatState {
+                undock_invulnerable_remaining_ticks: 15,
+                ..normal_cs.clone()
+            },
+        )
+        .await;
+    let err = handle_activate_fighter_ability_slots(
+        &ctx,
+        &mut session,
+        &[PyRep::Integer(support_id), PyRep::Integer(0), PyRep::Integer(target_ship)],
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err.code, "TargetInvulnerable");
+    let _ = sys_h.set_combat_state(target_ship, normal_cs.clone()).await;
+
+    // 3. Support fighter EWAR vs Upwell structure -> StructureImmuneToEwar
+    let err = handle_activate_fighter_ability_slots(
+        &ctx,
+        &mut session,
+        &[PyRep::Integer(support_id), PyRep::Integer(0), PyRep::Integer(struct_id)],
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err.code, "StructureImmuneToEwar");
+
+    // 4. Online POS tower at (100_000, 0, 0) protects targets inside 30km forcefield (target & bomb skip)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            tower_id,
+            eve_db::InventoryItemRecord {
+                item_id: tower_id,
+                type_id: 33_475,
+                owner_id: 98_999_001,
+                location_id: ls_sys as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.starbase_settings.insert(tower_id, Default::default());
+        snap.item_positions.insert(tower_id, [100_000.0, 0.0, 0.0]);
+    });
+    let _ = sys_h
+        .set_ball_position(target_ship, DVec3::new(72_000.0, 0.0, 0.0))
+        .await;
+    let _ = sys_h
+        .set_ball_position(support_id, DVec3::new(68_000.0, 0.0, 0.0))
+        .await;
+    let err = handle_activate_fighter_ability_slots(
+        &ctx,
+        &mut session,
+        &[PyRep::Integer(support_id), PyRep::Integer(0), PyRep::Integer(target_ship)],
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err.code, "TargetInsideForcefield");
+
+    // 5. Fighter inside POS forcefield or carrier cloaked / tethered / in warp rejects both targeted and point bomb
+    let _ = sys_h.set_ball_position(support_id, DVec3::new(105_000.0, 0.0, 0.0)).await;
+    let err = handle_activate_fighter_ability_slots(
+        &ctx,
+        &mut session,
+        &[PyRep::Integer(support_id), PyRep::Integer(0), PyRep::Integer(target_ship)],
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err.code, "CannotActivateInForcefield");
+    let _ = sys_h.set_ball_position(support_id, DVec3::new(500.0, 0.0, 0.0)).await;
+    let _ = sys_h.set_ball_position(target_ship, DVec3::new(3_000.0, 0.0, 0.0)).await;
+
+    let _ = sys_h
+        .set_combat_state(
+            ship_id,
+            CombatState {
+                is_cloaked: true,
+                ..CombatState::new()
+            },
+        )
+        .await;
+    let err = handle_activate_fighter_ability_slots(
+        &ctx,
+        &mut session,
+        &[PyRep::Integer(support_id), PyRep::Integer(0), PyRep::Integer(target_ship)],
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err.code, "CannotActivateWhileCloaked");
+    let err_bomb = handle_activate_fighter_ability_slots_on_point(
+        &ctx,
+        &mut session,
+        &[
+            PyRep::Integer(bomber_id),
+            PyRep::Integer(2),
+            PyRep::Tuple(vec![PyRep::Real(2_000.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+        ],
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_bomb.code, "CannotActivateWhileCloaked");
+
+    let _ = sys_h
+        .set_combat_state(
+            ship_id,
+            CombatState {
+                is_tethered: true,
+                ..CombatState::new()
+            },
+        )
+        .await;
+    let err_teth = handle_activate_fighter_ability_slots_on_point(
+        &ctx,
+        &mut session,
+        &[
+            PyRep::Integer(bomber_id),
+            PyRep::Integer(2),
+            PyRep::Tuple(vec![PyRep::Real(2_000.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+        ],
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_teth.code, "CannotActivateWhileTethered");
+    let _ = sys_h.set_combat_state(ship_id, CombatState::new()).await;
+
+    // 5. AoE bomb skips cloaked and POS-protected targets while damaging unshielded open targets
+    let _ = sys_h.set_ball_position(bomber_id, DVec3::new(65_000.0, 0.0, 0.0)).await;
+    spawn_ship(
+        bomb_skip_cloaked,
+        587,
+        DVec3::new(75_000.0, 0.0, 0.0),
+        CombatState {
+            is_cloaked: true,
+            ..normal_cs.clone()
+        },
+    )
+    .await;
+    spawn_ship(bomb_skip_pos, 587, DVec3::new(82_000.0, 0.0, 0.0), normal_cs.clone()).await;
+    spawn_ship(bomb_hit_open, 587, DVec3::new(68_000.0, 0.0, 0.0), normal_cs.clone()).await;
+
+    let _ = handle_activate_fighter_ability_slots_on_point(
+        &ctx,
+        &mut session,
+        &[
+            PyRep::Integer(bomber_id),
+            PyRep::Integer(2),
+            PyRep::Tuple(vec![PyRep::Real(75_000.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+        ],
+    )
+    .await
+    .unwrap()
+    .expect("bomb point activation outside POS must succeed");
+
+    assert_eq!(sys_h.get_combat_state(bomb_skip_cloaked).await.unwrap().unwrap().shield_hp, 5_000.0);
+    assert_eq!(sys_h.get_combat_state(bomb_skip_pos).await.unwrap().unwrap().shield_hp, 5_000.0);
+    assert!(sys_h.get_combat_state(bomb_hit_open).await.unwrap().unwrap().shield_hp < 5_000.0);
+
+    // 6. Carrier in warp rejects fighter ability activation (ShipInWarp)
+    let mut warp_mode = MovementMode::new_warp(DVec3::ZERO, DVec3::new(1e9, 0.0, 0.0), 3.0);
+    if let MovementMode::Warp { phase, .. } = &mut warp_mode {
+        *phase = eve_destiny::WarpPhase::Cruising;
+    }
+    let _ = sys_h.set_movement_mode(ship_id, warp_mode).await;
+    let err_warp = handle_activate_fighter_ability_slots(
+        &ctx,
+        &mut session,
+        &[PyRep::Integer(support_id), PyRep::Integer(0), PyRep::Integer(target_ship)],
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_warp.code, "ShipInWarp");
+    ctx.fighter_cooldown_state.write().unwrap().clear();
+    let err_warp_bomb = handle_activate_fighter_ability_slots_on_point(
+        &ctx,
+        &mut session,
+        &[
+            PyRep::Integer(bomber_id),
+            PyRep::Integer(2),
+            PyRep::Tuple(vec![PyRep::Real(75_000.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+        ],
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_warp_bomb.code, "ShipInWarp");
+}

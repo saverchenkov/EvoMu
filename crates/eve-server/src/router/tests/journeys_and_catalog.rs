@@ -492,6 +492,20 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
                 last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
+        snap.items.insert(
+            100_000_099,
+            eve_db::InventoryItemRecord {
+                item_id: 100_000_099,
+                type_id: 35899,
+                owner_id: 1_000_170,
+                location_id: 1_000_000_000_001,
+                flag: eve_db::InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(100_000_099, true);
         if let Some(it) = snap.items.get_mut(&100_000_012) {
             it.location_id = 1_000_000_000_001;
         }

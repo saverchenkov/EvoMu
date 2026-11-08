@@ -374,6 +374,7 @@ async fn reprocessing_reprocess_and_get_quotes_error_and_success_paths() {
         ext.lifecycle.insert(struct_id, StructureLifecycleState { online_modules: vec![88001], ..Default::default() });
         save_ext_state(snap, &ext);
         snap.items.insert(88001, make_item(88001, 35_899, corp_id, struct_id, InventoryFlag::ServiceSlot0, 1));
+        snap.module_online_states.insert(88001, true);
         snap.items.insert(ore_item_id, make_item(ore_item_id, 995_001, char_id, struct_id, InventoryFlag::Hangar, 250));
         snap.items.insert(small_ore_id, make_item(small_ore_id, 995_001, char_id, struct_id, InventoryFlag::Hangar, 50));
         snap.items.insert(unref_id, make_item(unref_id, 995_002, char_id, struct_id, InventoryFlag::Hangar, 1));

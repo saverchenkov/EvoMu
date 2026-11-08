@@ -440,7 +440,9 @@ async fn test_destiny_dogma_buffs_dot_and_drone_events() {
             .unwrap_or_else(|| panic!("Missing {name}"))
     };
     assert_eq!(find_args("OnDbuffUpdated")[0].as_i64(), Some(ship_id as i64));
-    assert_eq!(find_args("OnDotVictimUpdated")[0].as_i64(), Some(ship_id as i64));
+    let dot_args = find_args("OnDotVictimUpdated");
+    assert_eq!(dot_args[0].as_i64(), Some(ship_id as i64));
+    assert!(matches!(dot_args[1], PyRep::PySet(ref s) if s.len() == 1));
     let drone_args = find_args("OnDroneStateChange");
     assert_eq!(drone_args[0].as_i64(), Some(drone_id as i64));
     assert_eq!(drone_args[1].as_i64(), Some(90_000_001));

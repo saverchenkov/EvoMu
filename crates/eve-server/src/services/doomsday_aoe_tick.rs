@@ -395,6 +395,9 @@ pub async fn step_bosonic_doomsday_system(ctx: &ServerContext, sys_id: u32) {
                         {
                             continue;
                         }
+                        if is_doomsday_target_protected(ctx, &sys, sys_id, &b).await {
+                            continue;
+                        }
                         let target_sig = resolve_target_signature_radius_m(ctx, &sys, &b).await;
                         let sig_scale = (target_sig / sig_radius_m.max(1.0)).clamp(0.01, 1.0);
                         let scaled_dmg = DamageVector::new(
@@ -475,6 +478,9 @@ pub async fn step_bosonic_doomsday_system(ctx: &ServerContext, sys_id: u32) {
                             seg_a
                         };
                         if (b.position - closest).length() <= beam_radius_m {
+                            if is_doomsday_target_protected(ctx, &sys, sys_id, &b).await {
+                                continue;
+                            }
                             already_hit_balls.push(b.id);
                             let target_sig = resolve_target_signature_radius_m(ctx, &sys, &b).await;
                             let sig_scale = (target_sig / sig_radius_m.max(1.0)).clamp(0.01, 1.0);
@@ -521,6 +527,32 @@ pub async fn step_bosonic_doomsday_system(ctx: &ServerContext, sys_id: u32) {
     });
 }
 
+async fn is_doomsday_target_protected(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    sys_id: u32,
+    b: &eve_destiny::Ball,
+) -> bool {
+    if let Ok(Some(mut cs)) = sys.get_combat_state(b.id).await {
+        cs.sync_action_breaks();
+        if cs.is_cloaked
+            || cs.gate_cloak_remaining_ticks > 0
+            || cs.is_tethered
+            || cs.is_invulnerable()
+            || cs.undock_invulnerable_remaining_ticks > 0
+        {
+            return true;
+        }
+    }
+    crate::services::inventory_fitting::fitting_ship_forcefield::is_pos_forcefield_protected(
+        ctx,
+        sys_id,
+        b.id,
+        b.position,
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn apply_superweapon_tick_damage(
     ctx: &ServerContext,
@@ -532,6 +564,9 @@ async fn apply_superweapon_tick_damage(
     cycle_s: f64,
     now_unix: u64,
 ) {
+    if is_doomsday_target_protected(ctx, sys, sys_id, b).await {
+        return;
+    }
     let (applied, destroyed) =
         crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
             ctx,
@@ -643,13 +678,11 @@ async fn execute_scheduled_gtfo_teleport(
         ) {
             continue;
         }
+        if is_doomsday_target_protected(ctx, sys, sys_id, b).await {
+            continue;
+        }
         if let Ok(Some(cs)) = sys.get_combat_state(b.id).await {
-            if cs.is_tethered
-                || cs.is_invulnerable()
-                || cs.undock_invulnerable_remaining_ticks > 0
-                || cs.warp_scramble_strength >= 50
-                || cs.disallow_assistance
-            {
+            if cs.warp_scramble_strength >= 50 || cs.disallow_assistance {
                 continue;
             }
         }
