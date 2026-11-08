@@ -372,16 +372,55 @@ fn handle_skin_license_admin_revoke(
     let target_cid = req_char.unwrap_or(caller);
     state.sync_redeemed_skins_if_needed();
     let key = SkinrCosmeticsState::skin_lic_key(target_cid, &skin_hex);
-    let removed = state
-        .data
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .skin_licenses
-        .remove(&key);
+    let (removed, candidate_ships) = {
+        let mut data = state.data.write().unwrap_or_else(|e| e.into_inner());
+        let removed = data.skin_licenses.remove(&key);
+        let candidates: Vec<u64> = data
+            .applied_thirdparty_skins
+            .iter()
+            .filter_map(|(&sid, hex)| (hex == &skin_hex).then_some(sid))
+            .collect();
+        (removed, candidates)
+    };
     if removed.is_none() {
         return Err((STATUS_NOT_FOUND, "3rd-party SKIN license not found".into()));
     }
+    let owned_ships: Vec<u64> = if candidate_ships.is_empty() {
+        Vec::new()
+    } else {
+        state.db.with_snapshot(|s| {
+            candidate_ships
+                .into_iter()
+                .filter(|&sid| {
+                    s.items
+                        .get(&(sid as i64))
+                        .is_some_and(|it| it.owner_id == i64::from(target_cid))
+                })
+                .collect()
+        })
+    };
+    let cleared_ships: Vec<u64> = if owned_ships.is_empty() {
+        Vec::new()
+    } else {
+        let mut data = state.data.write().unwrap_or_else(|e| e.into_inner());
+        let mut cleared = Vec::new();
+        for sid in owned_ships {
+            if data.applied_thirdparty_skins.get(&sid).is_some_and(|h| h == &skin_hex) {
+                data.applied_thirdparty_skins.remove(&sid);
+                cleared.push(sid);
+            }
+        }
+        cleared
+    };
     state.save();
+    super::quasar_cosmetics_market::purge_revoked_skin_listings(
+        &state.db,
+        target_cid,
+        &skin_hex,
+    );
+    for sid in cleared_ships {
+        queue_ship_skin_set_notice(target_cid, sid, None, ctx.now_unix());
+    }
     queue_skin_license_deleted_notice(target_cid, &skin_hex, ctx.now_unix());
     Ok(any_msg(
         "eve_public.cosmetic.ship.skin.thirdparty.license.api.admin.RevokeResponse",

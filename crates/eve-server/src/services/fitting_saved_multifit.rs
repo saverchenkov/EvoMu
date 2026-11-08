@@ -727,7 +727,10 @@ pub(crate) async fn handle_ships_and_services(
 
             match res {
                 Ok((first_normal_id, last_ver, normal_ids, broken_wraps)) => {
-                    for &(_wrap_id, cid, issuer_id, _) in &broken_wraps {
+                    for &(_wrap_id, cid, issuer_id, ref extracted) in &broken_wraps {
+                        if !extracted.is_empty() {
+                            crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, extracted);
+                        }
                         if cid > 0 {
                             crate::services::contracts_service::notify_contract(ctx, issuer_id, "OnContractFailed", cid);
                         }
@@ -736,6 +739,9 @@ pub(crate) async fn handle_ships_and_services(
                         ctx.invalidate_ship_fitting(item_id);
                         crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, item_id);
                         let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::void_ship_insurance_contract(ctx, item_id);
+                    }
+                    if !normal_ids.is_empty() {
+                        crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &normal_ids);
                     }
                     let total_count = normal_ids.len() + broken_wraps.len();
                     let (first_wrap, first_cid, first_extracted) = broken_wraps.into_iter().next()

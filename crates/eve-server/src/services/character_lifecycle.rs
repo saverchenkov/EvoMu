@@ -817,8 +817,12 @@ fn handle_delete_character(ctx: &ServerContext, session: &mut SessionState, user
                     .filter(|i| i.owner_id == char_id && !locked_contract_items.contains(&i.item_id))
                     .map(|i| i.item_id)
                     .collect();
+                let mut transferred_ids = Vec::new();
                 for item in snap.items.values_mut() {
                     if item.owner_id == char_id && !locked_contract_items.contains(&item.item_id) {
+                        if item.owner_id != old_corp_id {
+                            transferred_ids.push(item.item_id);
+                        }
                         item.owner_id = old_corp_id;
                         if char_wrap_ids.contains(&item.item_id)
                             || char_wrap_ids.contains(&item.location_id)
@@ -840,6 +844,7 @@ fn handle_delete_character(ctx: &ServerContext, session: &mut SessionState, user
                         item.version += 1;
                     }
                 }
+                snap.strip_ship_cosmetics(&transferred_ids);
             }
             if !char_wrap_ids.is_empty() {
                 crate::services::station_structure::structure_upwell_ops::save_ext_state(

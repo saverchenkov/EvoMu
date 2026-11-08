@@ -908,9 +908,13 @@ pub fn handle(
                         }
                     }
 
+                    let mut transferred_ids = Vec::new();
                     for iid in &c.item_ids {
                         snap.service_state_blobs.remove(&format!("contract_orig_flag:{cid}:{iid}"));
                         if let Some(item) = snap.items.get_mut(iid) {
+                            if item.owner_id != acceptor_entity_id {
+                                transferred_ids.push(*iid);
+                            }
                             item.owner_id = acceptor_entity_id;
                             item.location_id = c.start_station_id;
                             item.flag = acceptor_flag;
@@ -922,7 +926,7 @@ pub fn handle(
                         c_mut.acceptor_id = Some(acceptor_entity_id);
                         c_mut.status = "Completed".into();
                     }
-                    return Ok(("Completed", c.expiration_unix, None, c.issuer_id));
+                    return Ok(("Completed", c.expiration_unix, None, c.issuer_id, transferred_ids));
                 }
 
                 if let Some(dep_str) = snap.service_state_blobs.remove(&format!("contract_deposit:{cid}")) {
@@ -952,10 +956,13 @@ pub fn handle(
                     c_mut.status = "InProgress".into();
                     c_mut.expiration_unix = delivery_deadline;
                 }
-                Ok(("InProgress", delivery_deadline, Some(wrap_id), c.issuer_id))
+                Ok(("InProgress", delivery_deadline, Some(wrap_id), c.issuer_id, Vec::new()))
             });
             match res {
-                Ok((new_status, exp_unix, wrap_id_opt, issuer_id)) => {
+                Ok((new_status, exp_unix, wrap_id_opt, issuer_id, transferred_ids)) => {
+                    if !transferred_ids.is_empty() {
+                        crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &transferred_ids);
+                    }
                     notify_contract(ctx, issuer_id, "OnContractAccepted", cid);
                     if new_status == "Completed" {
                         notify_contract(ctx, issuer_id, "OnContractCompleted", cid);
@@ -1160,9 +1167,13 @@ pub fn handle(
                         snap.append_journal(c.issuer_id, "ContractAuctionSold", effective_bid, bal_after, format!("Auction contract {cid} bought out by {bidder_entity_id}"));
                     }
                     let win_flag = if bid_for_corp { InventoryFlag::CorpDeliveries } else { InventoryFlag::Hangar };
+                    let mut transferred_ids = Vec::new();
                     for iid in &c.item_ids {
                         snap.service_state_blobs.remove(&format!("contract_orig_flag:{cid}:{iid}"));
                         if let Some(item) = snap.items.get_mut(iid) {
+                            if item.owner_id != bidder_entity_id {
+                                transferred_ids.push(*iid);
+                            }
                             item.owner_id = bidder_entity_id;
                             item.location_id = c.start_station_id;
                             item.flag = win_flag;
@@ -1171,6 +1182,14 @@ pub fn handle(
                         snap.sp6_lifecycle.self_destructs.remove(iid);
                     }
                     new_status = "Completed";
+                    if let Some(c_mut) = snap.contracts.get_mut(&cid) {
+                        c_mut.current_bid = effective_bid;
+                        c_mut.current_bidder_id = Some(bidder_entity_id);
+                        c_mut.bid_history.push((bidder_entity_id, effective_bid, now_unix));
+                        c_mut.acceptor_id = Some(bidder_entity_id);
+                        c_mut.status = "Completed".into();
+                    }
+                    return Ok((new_status, effective_bid, is_buyout, prev_bidder_opt, c.issuer_id, transferred_ids));
                 }
 
                 if let Some(c_mut) = snap.contracts.get_mut(&cid) {
@@ -1179,11 +1198,14 @@ pub fn handle(
                     c_mut.bid_history.push((bidder_entity_id, effective_bid, now_unix));
                     if is_buyout { c_mut.acceptor_id = Some(bidder_entity_id); c_mut.status = "Completed".into(); }
                 }
-                Ok((new_status, effective_bid, is_buyout, prev_bidder_opt, c.issuer_id))
+                Ok((new_status, effective_bid, is_buyout, prev_bidder_opt, c.issuer_id, Vec::new()))
             });
 
             match res {
-                Ok((new_status, effective_bid, is_buyout, prev_bidder_opt, issuer_id)) => {
+                Ok((new_status, effective_bid, is_buyout, prev_bidder_opt, issuer_id, transferred_ids)) => {
+                    if !transferred_ids.is_empty() {
+                        crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &transferred_ids);
+                    }
                     if let Some(prev_bidder) = prev_bidder_opt {
                         if prev_bidder != char_id { notify_contract(ctx, prev_bidder, "OnContractOutbid", cid); }
                     }
@@ -1349,10 +1371,29 @@ pub fn handle(
                 .unwrap_or(0);
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                break_courier_plastic_wrap(snap, char_id, wrap_id, now_unix)
+                let wrap_item_ids: Vec<(i64, i64)> = snap
+                    .items
+                    .values()
+                    .filter(|it| it.location_id == wrap_id)
+                    .map(|it| (it.item_id, it.owner_id))
+                    .collect();
+                let (cid, issuer_id, extracted) = break_courier_plastic_wrap(snap, char_id, wrap_id, now_unix)?;
+                let transferred_ids: Vec<i64> = wrap_item_ids
+                    .into_iter()
+                    .filter_map(|(iid, old_owner)| {
+                        snap.items
+                            .get(&iid)
+                            .is_some_and(|it| it.owner_id != old_owner)
+                            .then_some(iid)
+                    })
+                    .collect();
+                Ok((cid, issuer_id, extracted, transferred_ids))
             });
             match res {
-                Ok((cid, issuer_id, extracted)) => {
+                Ok((cid, issuer_id, extracted, transferred_ids)) => {
+                    if !transferred_ids.is_empty() {
+                        crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &transferred_ids);
+                    }
                     notify_contract(ctx, issuer_id, "OnContractFailed", cid);
                     Some(Ok(PyRep::keyval([
                         ("contractID", PyRep::Integer(cid)),
@@ -1718,14 +1759,19 @@ pub fn break_courier_plastic_wrap(
     } else {
         InventoryFlag::Hangar
     };
+    let mut transferred_ids = Vec::new();
     for iid in &item_ids {
         if let Some(it) = snap.items.get_mut(iid) {
+            if it.owner_id != acceptor_owner_id {
+                transferred_ids.push(*iid);
+            }
             it.owner_id = acceptor_owner_id;
             it.location_id = wrap_item.location_id;
             it.flag = target_flag;
             it.version += 1;
         }
     }
+    snap.strip_ship_cosmetics(&transferred_ids);
     snap.items.remove(&wrap_id);
     Ok((cid, issuer_id, item_ids))
 }

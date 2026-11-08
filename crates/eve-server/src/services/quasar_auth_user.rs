@@ -212,6 +212,13 @@ pub fn expire_user_omega_license(
         ));
 }
 
+pub fn load_identity_store_from_snap(snap: &eve_db::WorldStateSnapshot) -> QuasarIdentityStore {
+    snap.owner_notes
+        .get(&QUASAR_IDENTITY_NOTE_ID)
+        .and_then(|n| serde_json::from_str::<QuasarIdentityStore>(&n.note).ok())
+        .unwrap_or_else(default_identity_store)
+}
+
 pub fn load_identity_store_from_db(db: &WorldRepository) -> Option<QuasarIdentityStore> {
     db.with_snapshot(|snap| {
         snap.owner_notes

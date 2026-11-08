@@ -172,8 +172,31 @@ pub fn logo_kind_to_fsd_cosmetic_type(kind: u8) -> i64 {
     }
 }
 
-/// Builds the `shipCosmeticsMgr.GetEnabledCosmetics(ship_id)` `PyRep::Dict` from persisted `ship_logos`.
+/// Builds the `shipCosmeticsMgr.GetEnabledCosmetics(ship_id)` `PyRep::Dict` from persisted `ship_logos`,
+/// verifying that the ship's current owner still holds the emblem entitlement for the hull type
+/// (and alliance membership for alliance emblems).
 pub fn enabled_cosmetics_dict_from_snapshot(snap: &WorldStateSnapshot, ship_id: u64) -> PyRep {
+    let Some(item) = snap.items.get(&(ship_id as i64)) else {
+        return PyRep::Dict(Vec::new());
+    };
+    let Some(owner_u64) = u64::try_from(item.owner_id).ok().filter(|&id| id > 0) else {
+        return PyRep::Dict(Vec::new());
+    };
+    let ship_tid = u64::from(item.type_id);
+    let id_store = super::quasar_auth_user::load_identity_store_from_snap(snap);
+    let has_corp_logo = id_store
+        .char_corp_logo_ships
+        .get(&owner_u64)
+        .is_some_and(|v| v.contains(&ship_tid));
+    let in_alliance = snap
+        .characters
+        .get(&item.owner_id)
+        .is_some_and(|c| c.alliance_id.is_some());
+    let has_alliance_logo = in_alliance
+        && id_store
+            .char_alliance_logo_ships
+            .get(&owner_u64)
+            .is_some_and(|v| v.contains(&ship_tid));
     let entries = snap
         .quasar_state_blobs
         .get(BLOB_KEY)
@@ -181,6 +204,11 @@ pub fn enabled_cosmetics_dict_from_snapshot(snap: &WorldStateSnapshot, ship_id: 
         .and_then(|d| d.ship_logos.get(&ship_id).cloned())
         .unwrap_or_default()
         .into_iter()
+        .filter(|&(_, kind)| match kind {
+            1 => has_alliance_logo,
+            2 => has_corp_logo,
+            _ => false,
+        })
         .map(|(slot, kind)| (PyRep::Integer(i64::from(slot)), PyRep::Integer(logo_kind_to_fsd_cosmetic_type(kind))))
         .collect();
     PyRep::Dict(entries)
@@ -415,15 +443,103 @@ fn char_corp(snap: &WorldStateSnapshot, cid: u32) -> Option<u32> {
     snap.characters.get(&(cid as i64)).map(|c| c.corporation_id as u32)
 }
 
+/// Removes applied first-party SKINs, third-party SKINR SKINs, and ship logos for `ship_ids` inside
+/// a DB snapshot (e.g. when a ship is repackaged, destroyed, or changes `owner_id`).
+pub fn strip_ship_cosmetics_in_snap(snap: &mut WorldStateSnapshot, ship_ids: &[i64]) {
+    if ship_ids.is_empty() {
+        return;
+    }
+    for &sid in ship_ids {
+        snap.applied_ship_skins.remove(&sid);
+    }
+    if let Some(mut skinr) = snap
+        .quasar_state_blobs
+        .get(super::quasar_cosmetics_skinr::SKINR_BLOB_KEY)
+        .and_then(|j| serde_json::from_str::<super::quasar_cosmetics_skinr::SkinrCosmeticsData>(j).ok())
+    {
+        let mut changed = false;
+        for &sid in ship_ids {
+            if let Ok(u) = u64::try_from(sid) {
+                changed |= skinr.applied_thirdparty_skins.remove(&u).is_some();
+            }
+        }
+        if changed {
+            if let Ok(json) = serde_json::to_string(&skinr) {
+                snap.quasar_state_blobs
+                    .insert(super::quasar_cosmetics_skinr::SKINR_BLOB_KEY.into(), json);
+            }
+        }
+    }
+    if let Some(mut live) = snap
+        .quasar_state_blobs
+        .get(BLOB_KEY)
+        .and_then(|j| serde_json::from_str::<CosmeticsLiveData>(j).ok())
+    {
+        let mut changed = false;
+        for &sid in ship_ids {
+            if let Ok(u) = u64::try_from(sid) {
+                changed |= live.ship_logos.remove(&u).is_some();
+            }
+        }
+        if changed {
+            if let Ok(json) = serde_json::to_string(&live) {
+                snap.quasar_state_blobs.insert(BLOB_KEY.into(), json);
+            }
+        }
+    }
+}
+
+/// Strips applied first-party/third-party SKINs and ship logos from both persistent DB state and
+/// any registered in-memory `CosmeticsLiveState` / `SkinrCosmeticsState` caches.
+/// Must be called outside any `WorldRepository` snapshot write lock.
+pub fn strip_ship_cosmetics_for_ships(db: &WorldRepository, ship_ids: &[i64]) {
+    if ship_ids.is_empty() {
+        return;
+    }
+    db.with_mut_snapshot(|snap| strip_ship_cosmetics_in_snap(snap, ship_ids));
+    let u64_ids: Vec<u64> = ship_ids
+        .iter()
+        .filter_map(|&sid| u64::try_from(sid).ok())
+        .collect();
+    if u64_ids.is_empty() {
+        return;
+    }
+    let live_states: Vec<Arc<CosmeticsLiveState>> = {
+        let mut map = db_live_cosmetics_map().lock().unwrap_or_else(|e| e.into_inner());
+        map.get_mut(&db.instance_id())
+            .map(|list| {
+                list.retain(|w| w.strong_count() > 0);
+                list.iter().filter_map(|w| w.upgrade()).collect()
+            })
+            .unwrap_or_default()
+    };
+    for st in live_states {
+        let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
+        for &u in &u64_ids {
+            data.ship_logos.remove(&u);
+        }
+    }
+    super::quasar_cosmetics_skinr::strip_applied_thirdparty_skins_in_memory(
+        db.instance_id(),
+        &u64_ids,
+    );
+}
+
 /// Encodes `eve_public.cosmetic.ship.State` for a ship item, or `None` if it isn't a ship.
-fn ship_state(snap: &WorldStateSnapshot, sde: &SdeRegistry, ship_id: u64) -> Option<Vec<u8>> {
+pub(crate) fn ship_state(snap: &WorldStateSnapshot, sde: &SdeRegistry, ship_id: u64) -> Option<Vec<u8>> {
     let item = snap.items.get(&(ship_id as i64))?;
     if sde.types.get(&item.type_id).map(|t| t.category_id) != Some(CATEGORY_SHIP) {
         return None;
     }
     let mut skin = Vec::new();
-    match snap.applied_ship_skins.get(&(ship_id as i64)) {
-        Some(&applied) => {
+    let applied_first = snap.applied_ship_skins.get(&(ship_id as i64)).copied().filter(|&applied| {
+        let skin_id = sde.skin_licenses.get(&applied).map(|l| l.skin_id).unwrap_or(applied);
+        snap.licensed_skins
+            .get(&item.owner_id)
+            .is_some_and(|list| list.contains(&applied) || list.contains(&skin_id))
+    });
+    match applied_first {
+        Some(applied) => {
             // ApplySkinToShip stores either the SKIN id or the activated license type; the
             // client's first-party identifier is the SKIN id.
             let skin_id = sde.skin_licenses.get(&applied).map(|l| l.skin_id).unwrap_or(applied);
@@ -432,11 +548,20 @@ fn ship_state(snap: &WorldStateSnapshot, sde: &SdeRegistry, ship_id: u64) -> Opt
             encode_bytes_field(1, &first, &mut skin);
         }
         None => {
+            let owner_u32 = u32::try_from(item.owner_id).ok();
             let third_hex = snap
                 .quasar_state_blobs
                 .get("quasar_cosmetics_skinr")
                 .and_then(|s| serde_json::from_str::<super::quasar_cosmetics_skinr::SkinrCosmeticsData>(s).ok())
-                .and_then(|d| d.applied_thirdparty_skins.get(&ship_id).cloned());
+                .and_then(|d| {
+                    let hex = d.applied_thirdparty_skins.get(&ship_id)?;
+                    let oid = owner_u32?;
+                    let lic_key = super::quasar_cosmetics_skinr::SkinrCosmeticsState::skin_lic_key(oid, hex);
+                    d.skin_licenses
+                        .get(&lic_key)
+                        .is_some_and(|l| l.activated)
+                        .then(|| hex.clone())
+                });
             if let Some(design_hex) = third_hex {
                 let mut third = Vec::new();
                 encode_bytes_field(1, design_hex.as_bytes(), &mut third);

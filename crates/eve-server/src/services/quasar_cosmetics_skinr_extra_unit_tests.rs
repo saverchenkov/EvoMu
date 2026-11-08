@@ -323,7 +323,7 @@ fn test_consume_item_branches_and_title_definition_versions() {
         Arc::clone(&db),
         Arc::clone(&sde),
     );
-    let mut state_inner = SkinrCosmeticsState::load(Arc::clone(&db), Arc::clone(&sde));
+    let mut state_inner = SkinrCosmeticsState::load_unregistered(Arc::clone(&db), Arc::clone(&sde));
     // Find both a finite-use item and an infinite-use item (or inject one into catalog)
     let (&finite_tid, &(finite_comp, _)) = state_inner
         .catalog

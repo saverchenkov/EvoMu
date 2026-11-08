@@ -1026,6 +1026,10 @@ async fn test_r2_track6_quasar_esi_and_protocol() {
 
     // 3. Issue #109: shipCosmeticsMgr.GetEnabledCosmetics returns persisted ship_logos from quasar_cosmetics_live
     let ship_id = sess.ship_id.unwrap_or(100_000_001);
+    let ship_tid = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id).unwrap_or(587));
+    eve_server::services::quasar_auth_user::with_identity_store(&ctx.db, |id| {
+        id.char_corp_logo_ships.entry(char_id as u64).or_default().push(u64::from(ship_tid));
+    });
     ctx.db.with_mut_snapshot(|s| {
         let mut live = eve_server::services::quasar_cosmetics_live::CosmeticsLiveData::default();
         let mut slots = std::collections::BTreeMap::new();

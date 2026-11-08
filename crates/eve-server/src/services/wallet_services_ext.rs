@@ -1073,8 +1073,13 @@ fn handle_trade_action(
                         ctx.notify_item_change(party, row.clone(), vec![(2, PyRep::Integer(old_owner))]);
                     }
                 }
+                let mut traded_ids = Vec::new();
                 for &(iid, _) in tr.items_a.iter().chain(tr.items_b.iter()) {
                     let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::void_ship_insurance_contract(ctx, iid);
+                    traded_ids.push(iid);
+                }
+                if !traded_ids.is_empty() {
+                    crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &traded_ids);
                 }
             }
             for party in [tr.char_a, tr.char_b] {

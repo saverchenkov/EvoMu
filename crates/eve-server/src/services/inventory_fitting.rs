@@ -1011,9 +1011,20 @@ pub async fn handle(
                         Err(e) => return Some(Err(BridgeRpcError { code: "SplitFailed".into(), message: e })),
                     }
                 } else {
-                    ctx.db.with_mut_snapshot(|snap| {
-                        if let Some(it) = snap.items.get_mut(&item_id) { it.owner_id = char_id; it.location_id = active_ship; it.flag = flag; it.version += 1; }
+                    let changed_owner = ctx.db.with_mut_snapshot(|snap| {
+                        if let Some(it) = snap.items.get_mut(&item_id) {
+                            let changed = it.owner_id != char_id;
+                            it.owner_id = char_id;
+                            it.location_id = active_ship;
+                            it.flag = flag;
+                            it.version += 1;
+                            return changed;
+                        }
+                        false
                     });
+                    if changed_owner {
+                        crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &[item_id]);
+                    }
                     if let Some(src) = source_item_opt.as_mut() { src.owner_id = char_id; src.location_id = active_ship; src.flag = flag; }
                 }
             } else if let Some(split_qty) = split_qty_opt {
@@ -1144,6 +1155,9 @@ pub async fn handle(
 
             let old_loc_id = source_item_opt.as_ref().map(|i| i.location_id).unwrap_or(0);
             let old_flag_id = source_item_opt.as_ref().map(|i| i.flag as i64).unwrap_or(0);
+            let old_owner_id = source_item_opt.as_ref().map(|i| i.owner_id).unwrap_or_else(|| {
+                ctx.db.with_snapshot(|s| s.items.get(&item_id).map(|i| i.owner_id).unwrap_or(0))
+            });
             let corp_id_for_owner = session.corporation_id.unwrap_or(0);
             let struct_fuel_owner = (flag_u16 == 133 || flag_u16 == 172 || flag == InventoryFlag::StructureFuel).then(|| ctx.db.with_snapshot(|s| s.structures.get(&new_loc).map(|st| st.owner_corp_id))).flatten().unwrap_or(0);
             let dst_corp_owner = if struct_fuel_owner > 0 { struct_fuel_owner } else if (116..=122).contains(&flag_u16) || flag_u16 == 180 || flag == InventoryFlag::StructureDeedBay { corp_id_for_owner } else { 0 };
@@ -1205,6 +1219,9 @@ pub async fn handle(
                         }
                         fb
                     });
+                    if updated.owner_id != old_owner_id {
+                        crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &[updated.item_id]);
+                    }
                     if dst_corp_owner > 0 || (116..=122).contains(&flag_u16) {
                         let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::void_ship_insurance_contract(ctx, updated.item_id);
                     }

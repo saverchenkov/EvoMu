@@ -473,3 +473,314 @@ async fn character_title_definitions_and_version_notices() {
     let Some(DynamicValue::Message(cp_after)) = after_msg.get(1) else { panic!("checkpoint after") };
     assert!(matches!(cp_after.get(1), Some(DynamicValue::String(u)) if u.contains("v24.2.5/en-us.json")));
 }
+
+#[tokio::test]
+async fn test_skinr_admin_revoke_and_ship_repackage_strip_cosmetics_via_rpc() {
+    use eve_proto::quasar::encode_zigzag64;
+
+    let reg = QuasarDescriptorRegistry::open_default().expect("registry");
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let mut sess = SessionState::new(50_401);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    let kw = HashMap::new();
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+    sess.role |= eve_machonet::service_roles::ROLE_GM_DEFAULT
+        | eve_machonet::service_roles::ROLE_GMH;
+    let cid = 90_000_001_u32;
+    let mut rx = subscribe(&ctx, &mut sess).await;
+
+    // 1. Grant finite coating, sequence a tier-1 Rifter SKIN, complete early, activate (1 activated + 1 unactivated)
+    let skinr_cat = eve_server::services::quasar_cosmetics_skinr::SkinrStaticCatalog::load(&ctx.sde);
+    let coat_id = skinr_cat
+        .components
+        .values()
+        .find(|c| !c.is_pattern() && !c.disallowed_slots.contains(&1))
+        .expect("coating comp")
+        .component_id;
+    let mut grant_coat = Vec::new();
+    encode_bytes_field(1, &comp_id_msg(coat_id, false), &mut grant_coat);
+    encode_varint_field(2, 5, &mut grant_coat);
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess,
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.admin.GrantRequest",
+            grant_coat
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
+
+    let mut slot_msg = Vec::new();
+    encode_bytes_field(1, &seq_msg(1), &mut slot_msg);
+    let mut coat_cfg = Vec::new();
+    encode_bytes_field(1, &seq_msg(coat_id as u64), &mut coat_cfg);
+    let mut cfg_outer = Vec::new();
+    encode_bytes_field(1, &coat_cfg, &mut cfg_outer);
+    encode_bytes_field(2, &cfg_outer, &mut slot_msg);
+
+    let mut layout = Vec::new();
+    encode_bytes_field(1, &slot_msg, &mut layout);
+    encode_bytes_field(2, &seq_msg(587), &mut layout);
+    encode_varint_field(3, 1, &mut layout);
+
+    let mut init_req = Vec::new();
+    encode_string_field(1, "LiveRevokeStrip", &mut init_req);
+    encode_string_field(2, "Minmatar", &mut init_req);
+    encode_bytes_field(3, &layout, &mut init_req);
+    encode_varint_field(5, 2, &mut init_req);
+
+    let init_rsp = rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest",
+        init_req,
+    )
+    .await;
+    assert_eq!(init_rsp.status_code, STATUS_OK);
+    let init_msg = decode(&reg, init_rsp.payload.as_ref().unwrap());
+    let Some(DynamicValue::Message(job_id_m)) = init_msg.get(1) else { panic!("job id") };
+    let Some(DynamicValue::Bytes(job_uuid)) = job_id_m.get(1) else { panic!("job uuid") };
+    let Some(DynamicValue::Message(job_attr_m)) = init_msg.get(2) else { panic!("job attrs") };
+    let Some(DynamicValue::Message(skin_id_m)) = job_attr_m.get(1) else { panic!("skin id") };
+    let Some(DynamicValue::String(skin_hex)) = skin_id_m.get(1).cloned() else { panic!("skin hex") };
+
+    let mut job_id_inner = Vec::new();
+    encode_bytes_field(1, job_uuid, &mut job_id_inner);
+    let mut job_id_outer = Vec::new();
+    encode_bytes_field(1, &job_id_inner, &mut job_id_outer);
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess,
+            "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.CompleteEarlyRequest",
+            job_id_outer
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
+
+    let mut lic_req = Vec::new();
+    encode_bytes_field(1, &skin_lic_id_msg(cid, &skin_hex), &mut lic_req);
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess,
+            "eve_public.cosmetic.ship.skin.thirdparty.license.api.ActivateRequest",
+            lic_req.clone()
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
+
+    // 2. Spawn an unboarded Rifter via /createitem, apply thirdparty SKIN, verify ship.api.GetRequest -> repackage -> cleared
+    let spare_ship_id = common::slash_cmd(&ctx, &mut sess, "/createitem 587 1")
+        .await
+        .dict_get("itemID")
+        .and_then(|v| v.as_i64())
+        .expect("spare Rifter itemID");
+    let mut apply_spare = lic_req.clone();
+    encode_bytes_field(2, &seq_msg(spare_ship_id as u64), &mut apply_spare);
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess,
+            "eve_public.cosmetic.ship.skin.thirdparty.license.api.ApplyRequest",
+            apply_spare
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
+    let mut ship_get_spare = Vec::new();
+    encode_bytes_field(1, &seq_msg(spare_ship_id as u64), &mut ship_get_spare);
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess,
+            "eve_public.cosmetic.ship.api.GetRequest",
+            ship_get_spare.clone()
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "repackagingSvc",
+        None,
+        "RepackageItems",
+        &[PyRep::List(vec![PyRep::Integer(spare_ship_id)])],
+        &kw,
+        None,
+    )
+    .await
+    .expect("RepackageItems");
+    let get_after_repack = rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.cosmetic.ship.api.GetRequest",
+        ship_get_spare,
+    )
+    .await;
+    assert_eq!(get_after_repack.status_code, STATUS_OK);
+    let repack_wm = eve_proto::quasar::WireMessage::decode(
+        &get_after_repack.payload.as_ref().expect("GetResponse payload").value,
+    )
+    .unwrap();
+    let repack_state_bytes = repack_wm
+        .fields
+        .iter()
+        .find(|f| f.field_number == 1)
+        .unwrap()
+        .value
+        .as_bytes()
+        .unwrap();
+    let repack_state_wm = eve_proto::quasar::WireMessage::decode(repack_state_bytes).unwrap();
+    let repack_skin_bytes = repack_state_wm
+        .fields
+        .iter()
+        .find(|f| f.field_number == 3)
+        .unwrap()
+        .value
+        .as_bytes()
+        .unwrap();
+    let repack_skin_wm = eve_proto::quasar::WireMessage::decode(repack_skin_bytes).unwrap();
+    assert!(!repack_skin_wm.fields.iter().any(|f| f.field_number == 1 || f.field_number == 2));
+    assert_eq!(
+        repack_skin_wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == 3)
+            .and_then(|f| f.value.as_varint()),
+        Some(1)
+    );
+
+    // 3. Apply thirdparty SKIN to active ship + list unactivated copy on Paragon Hub -> admin.RevokeRequest purges ship SKIN, emits SetNotice, and removes listing
+    let active_ship = sess.ship_id.expect("active ship") as u64;
+    let mut apply_active = lic_req.clone();
+    encode_bytes_field(2, &seq_msg(active_ship), &mut apply_active);
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess,
+            "eve_public.cosmetic.ship.skin.thirdparty.license.api.ApplyRequest",
+            apply_active
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
+    let mut isk_msg = Vec::new();
+    encode_varint_field(1, encode_zigzag64(500_000), &mut isk_msg);
+    encode_varint_field(2, 0, &mut isk_msg);
+    let mut dur_msg = Vec::new();
+    encode_varint_field(1, 86_400, &mut dur_msg);
+    let mut create_listing = Vec::new();
+    encode_bytes_field(1, &isk_msg, &mut create_listing);
+    encode_bytes_field(3, &skin_lic_id_msg(cid, &skin_hex), &mut create_listing);
+    encode_bytes_field(4, &dur_msg, &mut create_listing);
+    encode_varint_field(5, 1, &mut create_listing);
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess,
+            "eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest",
+            create_listing
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
+    let _ = drain(&mut rx);
+
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess,
+            "eve_public.cosmetic.ship.skin.thirdparty.license.api.admin.RevokeRequest",
+            lic_req
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
+    let revoke_notices = drain(&mut rx);
+    assert!(
+        revoke_notices
+            .iter()
+            .any(|n| n.normalized_type_name() == "eve_public.cosmetic.ship.api.SetNotice"),
+        "admin.RevokeRequest must emit eve_public.cosmetic.ship.api.SetNotice clearing active ship SKIN"
+    );
+    let mut ship_get_active = Vec::new();
+    encode_bytes_field(1, &seq_msg(active_ship), &mut ship_get_active);
+    let get_after_revoke = rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.cosmetic.ship.api.GetRequest",
+        ship_get_active,
+    )
+    .await;
+    assert_eq!(get_after_revoke.status_code, STATUS_OK);
+    let revoke_wm = eve_proto::quasar::WireMessage::decode(
+        &get_after_revoke.payload.as_ref().expect("GetResponse payload").value,
+    )
+    .unwrap();
+    let revoke_state_bytes = revoke_wm
+        .fields
+        .iter()
+        .find(|f| f.field_number == 1)
+        .unwrap()
+        .value
+        .as_bytes()
+        .unwrap();
+    let revoke_state_wm = eve_proto::quasar::WireMessage::decode(revoke_state_bytes).unwrap();
+    let revoke_skin_bytes = revoke_state_wm
+        .fields
+        .iter()
+        .find(|f| f.field_number == 3)
+        .unwrap()
+        .value
+        .as_bytes()
+        .unwrap();
+    let revoke_skin_wm = eve_proto::quasar::WireMessage::decode(revoke_skin_bytes).unwrap();
+    assert!(!revoke_skin_wm.fields.iter().any(|f| f.field_number == 1 || f.field_number == 2));
+    assert_eq!(
+        revoke_skin_wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == 3)
+            .and_then(|f| f.value.as_varint()),
+        Some(1)
+    );
+    let owned_listings_after = rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.cosmetic.market.skin.listing.api.GetAllOwnedRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(owned_listings_after.status_code, STATUS_OK);
+    let owned_msg = decode(&reg, owned_listings_after.payload.as_ref().unwrap());
+    assert!(
+        owned_msg.get(1).is_none()
+            || matches!(owned_msg.get(1), Some(DynamicValue::Repeated(v)) if v.is_empty()),
+        "Hub listings for revoked license must be purged"
+    );
+}

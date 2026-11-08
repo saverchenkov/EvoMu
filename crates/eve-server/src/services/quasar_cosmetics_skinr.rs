@@ -401,8 +401,35 @@ pub(super) fn register_live_skinr_state(state: &Arc<SkinrCosmeticsState>) {
     }
 }
 
+pub(crate) fn strip_applied_thirdparty_skins_in_memory(db_id: u64, ship_ids: &[u64]) {
+    if ship_ids.is_empty() {
+        return;
+    }
+    let live_states: Vec<Arc<SkinrCosmeticsState>> = {
+        let mut map = db_skinr_state_map().lock().unwrap_or_else(|e| e.into_inner());
+        map.get_mut(&db_id)
+            .map(|list| {
+                list.retain(|w| w.strong_count() > 0);
+                list.iter().filter_map(|w| w.upgrade()).collect()
+            })
+            .unwrap_or_default()
+    };
+    for st in live_states {
+        let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
+        for &sid in ship_ids {
+            data.applied_thirdparty_skins.remove(&sid);
+        }
+    }
+}
+
 impl SkinrCosmeticsState {
     pub fn load(db: Arc<WorldRepository>, sde: Arc<SdeRegistry>) -> Arc<Self> {
+        let st = Self::load_unregistered(db, sde);
+        register_live_skinr_state(&st);
+        st
+    }
+
+    pub(crate) fn load_unregistered(db: Arc<WorldRepository>, sde: Arc<SdeRegistry>) -> Arc<Self> {
         let data = db.with_snapshot(|s| {
             s.quasar_state_blobs
                 .get(SKINR_BLOB_KEY)

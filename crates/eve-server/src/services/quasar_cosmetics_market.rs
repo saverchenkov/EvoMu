@@ -49,6 +49,64 @@ pub struct CosmeticsMarketState {
     macho_notify_sink: Arc<RwLock<Option<crate::quasar_gateway::MachoNotifySink>>>,
 }
 
+fn db_cosmetics_market_map(
+) -> &'static std::sync::Mutex<std::collections::HashMap<u64, Vec<std::sync::Weak<CosmeticsMarketState>>>> {
+    static MAP: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<u64, Vec<std::sync::Weak<CosmeticsMarketState>>>>,
+    > = std::sync::OnceLock::new();
+    MAP.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn register_live_market_state(state: &Arc<CosmeticsMarketState>) {
+    let weak = Arc::downgrade(state);
+    let db_id = state.db.instance_id();
+    let mut map = db_cosmetics_market_map().lock().unwrap_or_else(|e| e.into_inner());
+    if map.len() > 256 {
+        map.retain(|_, list| {
+            list.retain(|w| w.strong_count() > 0);
+            !list.is_empty()
+        });
+    }
+    let entry = map.entry(db_id).or_default();
+    entry.retain(|w| w.strong_count() > 0);
+    if !entry.iter().any(|w| std::sync::Weak::ptr_eq(w, &weak)) {
+        entry.push(weak);
+    }
+}
+
+pub(crate) fn purge_revoked_skin_listings(db: &WorldRepository, seller_id: u32, skin_hex: &str) {
+    db.with_mut_snapshot(|s| {
+        if let Some(mut mkt) = s
+            .quasar_state_blobs
+            .get(BLOB_KEY)
+            .and_then(|j| serde_json::from_str::<CosmeticsMarketData>(j).ok())
+        {
+            let before = mkt.skin_listings.len();
+            mkt.skin_listings
+                .retain(|_, l| !(l.seller_id == seller_id && l.skin_hex == skin_hex));
+            if mkt.skin_listings.len() != before {
+                if let Ok(json) = serde_json::to_string(&mkt) {
+                    s.quasar_state_blobs.insert(BLOB_KEY.into(), json);
+                }
+            }
+        }
+    });
+    let live_states: Vec<Arc<CosmeticsMarketState>> = {
+        let mut map = db_cosmetics_market_map().lock().unwrap_or_else(|e| e.into_inner());
+        map.get_mut(&db.instance_id())
+            .map(|list| {
+                list.retain(|w| w.strong_count() > 0);
+                list.iter().filter_map(|w| w.upgrade()).collect()
+            })
+            .unwrap_or_default()
+    };
+    for st in live_states {
+        let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
+        data.skin_listings
+            .retain(|_, l| !(l.seller_id == seller_id && l.skin_hex == skin_hex));
+    }
+}
+
 impl CosmeticsMarketState {
     pub fn load(db: Arc<WorldRepository>, sde: Arc<SdeRegistry>, skinr: Arc<SkinrCosmeticsState>) -> Arc<Self> {
         Self::load_with_sink(db, sde, skinr, Arc::new(RwLock::new(None)))
@@ -70,7 +128,9 @@ impl CosmeticsMarketState {
                 });
             }
         }
-        Arc::new(Self { db, data: RwLock::new(data), skinr, macho_notify_sink })
+        let state = Arc::new(Self { db, data: RwLock::new(data), skinr, macho_notify_sink });
+        register_live_market_state(&state);
+        state
     }
 
     fn emit_account_change(&self, char_id: i64, new_bal: IskCents) {
@@ -1198,6 +1258,40 @@ fn skin_initiate_purchase(
         None => None,
     };
 
+    st.skinr.sync_redeemed_skins_if_needed();
+    let seller_escrow_reserved = {
+        let mut skinr_data = st.skinr.data.write().unwrap_or_else(|e| e.into_inner());
+        let s_key = SkinrCosmeticsState::skin_lic_key(listing.seller_id, &listing.skin_hex);
+        match skinr_data.skin_licenses.get_mut(&s_key) {
+            Some(lic) if lic.escrowed >= u64::from(quantity) => {
+                lic.escrowed -= u64::from(quantity);
+                true
+            }
+            _ => false,
+        }
+    };
+    if !seller_escrow_reserved {
+        {
+            let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
+            data.skin_listings.remove(&key);
+        }
+        st.save();
+        record_tx(
+            st,
+            tx_uuid,
+            now,
+            false,
+            Some(cid),
+            None,
+            CosmeticTransactionDetails::PurchasingSkin,
+        );
+        queue_transaction_notice(cid, &tx_uuid, false, now);
+        return Err((
+            STATUS_PRECONDITION_FAILED,
+            "Seller no longer holds escrowed 3rd-party SKIN license".to_string(),
+        ));
+    }
+
     let mut isk_balances: Option<(IskCents, i64, Option<IskCents>)> = None;
     let mut plex_notices: Vec<(u64, u64, i64, i64, &'static str)> = Vec::new();
     let settled = st.db.with_mut_snapshot(|s| {
@@ -1260,12 +1354,7 @@ fn skin_initiate_purchase(
     }
     if settled {
         {
-            st.skinr.sync_redeemed_skins_if_needed();
-        let mut skinr_data = st.skinr.data.write().unwrap_or_else(|e| e.into_inner());
-            let s_key = SkinrCosmeticsState::skin_lic_key(listing.seller_id, &listing.skin_hex);
-            if let Some(lic) = skinr_data.skin_licenses.get_mut(&s_key) {
-                lic.escrowed = lic.escrowed.saturating_sub(u64::from(quantity));
-            }
+            let mut skinr_data = st.skinr.data.write().unwrap_or_else(|e| e.into_inner());
             let b_key = SkinrCosmeticsState::skin_lic_key(cid, &listing.skin_hex);
             let b_entry = skinr_data.skin_licenses.entry(b_key).or_insert_with(|| ThirdPartySkinLicense {
                 character_id: cid,
@@ -1280,6 +1369,13 @@ fn skin_initiate_purchase(
         st.skinr.save();
         st.save();
     } else {
+        {
+            let mut skinr_data = st.skinr.data.write().unwrap_or_else(|e| e.into_inner());
+            let s_key = SkinrCosmeticsState::skin_lic_key(listing.seller_id, &listing.skin_hex);
+            if let Some(lic) = skinr_data.skin_licenses.get_mut(&s_key) {
+                lic.escrowed = lic.escrowed.saturating_add(u64::from(quantity));
+            }
+        }
         rollback_listing_qty(st, &listing, quantity);
     }
     record_tx(

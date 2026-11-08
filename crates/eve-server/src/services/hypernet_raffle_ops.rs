@@ -77,7 +77,7 @@ pub fn compute_required_hypercores(est_value_isk: f64, ticket_count: u32) -> Res
 /// and returning the escrowed item to the creator while HyperCores remain consumed (`HyperNet_Relay.md:42`).
 pub fn sweep_expired_raffles(ctx: &ServerContext) -> usize {
     let now = ctx.now_unix();
-    let expired_ids: Vec<(i64, i64)> = ctx.db.with_mut_snapshot(|snap| {
+    let (expired_ids, returned_items): (Vec<(i64, i64)>, Vec<i64>) = ctx.db.with_mut_snapshot(|snap| {
         let raffles: Vec<RaffleStateRecord> = snap
             .owner_notes
             .values()
@@ -86,6 +86,7 @@ pub fn sweep_expired_raffles(ctx: &ServerContext) -> usize {
             .filter(|r| !r.expired && r.winner_id.is_none() && now >= r.expires_unix)
             .collect();
         let mut out = Vec::new();
+        let mut returned = Vec::new();
         for mut r in raffles {
             let price = IskCents(r.ticket_price_cents);
             for (&_ticket_idx, &buyer_id) in &r.sold_tickets {
@@ -102,6 +103,9 @@ pub fn sweep_expired_raffles(ctx: &ServerContext) -> usize {
                 }
             }
             if let Some(it) = snap.items.get_mut(&r.item_id) {
+                if it.owner_id != r.creator_id {
+                    returned.push(r.item_id);
+                }
                 it.owner_id = r.creator_id;
                 it.location_id = r.station_id;
                 it.flag = InventoryFlag::Hangar;
@@ -119,8 +123,11 @@ pub fn sweep_expired_raffles(ctx: &ServerContext) -> usize {
             );
             out.push((r.raffle_id, r.creator_id));
         }
-        out
+        (out, returned)
     });
+    if !returned_items.is_empty() {
+        crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &returned_items);
+    }
     for (rid, creator_id) in &expired_ids {
         ctx.notify(
             NotificationTarget::Character(*creator_id),
@@ -782,7 +789,9 @@ pub fn handle(
                 if r.item_awarded {
                     return Err(rpc_err("AlreadyAwarded", "Raffle item already claimed"));
                 }
+                let mut owner_changed = false;
                 if let Some(it) = snap.items.get_mut(&r.item_id) {
+                    owner_changed = it.owner_id != char_id;
                     it.owner_id = char_id;
                     it.location_id = r.station_id;
                     it.flag = InventoryFlag::Hangar;
@@ -790,9 +799,12 @@ pub fn handle(
                 }
                 r.item_awarded = true;
                 save_json_note(snap, nid, -74, raffle_id, format!("raffle:{raffle_id}"), &r, now);
-                Ok(r.item_id)
+                Ok((r.item_id, owner_changed))
             });
-            Some(res.map(PyRep::Integer))
+            if let Ok((item_id, true)) = res {
+                crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &[item_id]);
+            }
+            Some(res.map(|(item_id, _)| PyRep::Integer(item_id)))
         }
         ("raffleProxy", "GetRaffle") => {
             let _ = sweep_expired_raffles(ctx);

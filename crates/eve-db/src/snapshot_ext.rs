@@ -1124,9 +1124,13 @@ impl WorldStateSnapshot {
                         } else {
                             InventoryFlag::Hangar
                         };
+                        let mut transferred_ids = Vec::new();
                         for iid in &c.item_ids {
                             self.service_state_blobs.remove(&format!("contract_orig_flag:{contract_id}:{iid}"));
                             if let Some(item) = self.items.get_mut(iid) {
+                                if item.owner_id != winner_id {
+                                    transferred_ids.push(*iid);
+                                }
                                 item.owner_id = winner_id;
                                 item.location_id = c.start_station_id;
                                 item.flag = winner_flag;
@@ -1143,12 +1147,16 @@ impl WorldStateSnapshot {
                         for iid in extra_ids {
                             self.service_state_blobs.remove(&format!("contract_orig_flag:{contract_id}:{iid}"));
                             if let Some(item) = self.items.get_mut(&iid) {
+                                if item.owner_id != winner_id {
+                                    transferred_ids.push(iid);
+                                }
                                 item.owner_id = winner_id;
                                 item.location_id = c.start_station_id;
                                 item.flag = winner_flag;
                                 item.version += 1;
                             }
                         }
+                        self.strip_ship_cosmetics(&transferred_ids);
                         if let Some(c_mut) = self.contracts.get_mut(&contract_id) {
                             c_mut.acceptor_id = Some(winner_id);
                             c_mut.status = "Completed".into();
@@ -1259,10 +1267,18 @@ impl WorldStateSnapshot {
                 }
             }
             let in_ship_container = self.items.get(iid).is_some_and(|item| self.items.contains_key(&item.location_id));
+            let mut transferred_ids = Vec::new();
             if let Some(item) = self.items.get_mut(iid) {
-                item.owner_id = c.acceptor_id.unwrap_or(issuer_entity_id);
+                let target_owner = c.acceptor_id.unwrap_or(issuer_entity_id);
+                if item.owner_id != target_owner {
+                    transferred_ids.push(*iid);
+                }
+                item.owner_id = target_owner;
                 item.flag = if in_ship_container { InventoryFlag::Cargo } else { InventoryFlag::Hangar };
                 item.version += 1;
+            }
+            if !transferred_ids.is_empty() {
+                self.strip_ship_cosmetics(&transferred_ids);
             }
         }
         for wid in wraps_to_remove {
@@ -1403,6 +1419,61 @@ impl WorldStateSnapshot {
             .max()
         {
             self.next_report_id = self.next_report_id.max(700_000).max(max_rid);
+        }
+    }
+    /// Removes any applied 1st-party SKINs, 3rd-party SKINs, and ship logos for `ship_ids`
+    /// stored in this snapshot (used on ship repackage, destruction, or ownership change).
+    pub fn strip_ship_cosmetics(&mut self, ship_ids: &[i64]) {
+        if ship_ids.is_empty() {
+            return;
+        }
+        for id in ship_ids {
+            self.applied_ship_skins.remove(id);
+        }
+        let ship_u64s: Vec<String> = ship_ids
+            .iter()
+            .filter_map(|&id| u64::try_from(id).ok().map(|u| u.to_string()))
+            .collect();
+        if ship_u64s.is_empty() {
+            return;
+        }
+        if let Some(raw) = self.quasar_state_blobs.get("quasar_cosmetics_skinr").cloned() {
+            if let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&raw) {
+                let mut changed = false;
+                if let Some(map) = root
+                    .get_mut("applied_thirdparty_skins")
+                    .and_then(|v| v.as_object_mut())
+                {
+                    for key in &ship_u64s {
+                        changed |= map.remove(key).is_some();
+                    }
+                }
+                if changed {
+                    if let Ok(json) = serde_json::to_string(&root) {
+                        self.quasar_state_blobs
+                            .insert("quasar_cosmetics_skinr".into(), json);
+                    }
+                }
+            }
+        }
+        if let Some(raw) = self.quasar_state_blobs.get("quasar_cosmetics_live").cloned() {
+            if let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&raw) {
+                let mut changed = false;
+                if let Some(map) = root
+                    .get_mut("ship_logos")
+                    .and_then(|v| v.as_object_mut())
+                {
+                    for key in &ship_u64s {
+                        changed |= map.remove(key).is_some();
+                    }
+                }
+                if changed {
+                    if let Ok(json) = serde_json::to_string(&root) {
+                        self.quasar_state_blobs
+                            .insert("quasar_cosmetics_live".into(), json);
+                    }
+                }
+            }
         }
     }
 }

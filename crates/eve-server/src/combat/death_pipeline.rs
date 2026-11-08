@@ -1050,6 +1050,7 @@ pub fn execute_death_pipeline_sync_inner(
         }
     });
 
+    crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &[victim_ship_id]);
     crate::services::notify_emitters_seasons_tactical::on_deployable_deactivated(ctx, None, victim_ship_id);
     sys_handle.try_remove_ball(victim_ship_id);
     let (wreck_grp, wreck_cat) = if is_pod {

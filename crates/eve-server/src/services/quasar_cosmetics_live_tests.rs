@@ -85,6 +85,16 @@ fn logo_kind_mapping_catalogue_pricing_and_pruning() {
         );
     });
 
+    super::super::quasar_auth_user::with_identity_store(&db, |id| {
+        id.char_alliance_logo_ships.entry(cid as u64).or_default().push(587);
+        id.char_corp_logo_ships.entry(cid as u64).or_default().push(587);
+    });
+    db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&cid) {
+            ch.alliance_id = Some(99_000_001);
+        }
+    });
+
     let dict = db.with_snapshot(|s| enabled_cosmetics_dict_from_snapshot(s, ship_id as u64));
     assert_eq!(
         dict,
@@ -325,4 +335,90 @@ fn structure_paintwork_catalogue_issue_query_and_revoke() {
         call(&router, &director, "eve_public.cosmetic.structure.paintwork.license.api.RevokeRequest", lic_req, now).status_code,
         STATUS_OK
     );
+}
+
+#[test]
+fn ship_cosmetics_stripping_clears_first_third_party_skins_and_logos_across_caches() {
+    use crate::services::quasar_auth_user::with_identity_store;
+    use crate::services::quasar_cosmetics_skinr::{
+        register as register_skinr, SkinDesignRecord, SkinrCosmeticsState, ThirdPartySkinLicense,
+    };
+
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let sde = shared_sde();
+    let router = PublicGatewayRouter::new(
+        QuasarDescriptorRegistry::open_default_or_empty(),
+        Arc::clone(&db),
+        Arc::clone(&sde),
+    );
+    let live_state = CosmeticsLiveState::load(Arc::clone(&db), Arc::clone(&sde));
+    let skinr_state = SkinrCosmeticsState::load(Arc::clone(&db), Arc::clone(&sde));
+    register_skinr(&router, Arc::clone(&skinr_state));
+    register(&router, Arc::clone(&live_state), Arc::clone(&skinr_state));
+
+    let owner = 90_000_001_u32;
+    let ship_id = 100_000_001_u64;
+    let ship_tid = db.with_snapshot(|s| s.items[&(ship_id as i64)].type_id);
+    with_identity_store(&db, |id| {
+        id.char_corp_logo_ships.entry(u64::from(owner)).or_default().push(u64::from(ship_tid));
+    });
+    db.with_mut_snapshot(|s| {
+        s.licensed_skins.entry(i64::from(owner)).or_default().push(1001);
+        s.applied_ship_skins.insert(ship_id as i64, 1001);
+    });
+    {
+        let mut ld = live_state.data.write().unwrap();
+        ld.ship_logos.entry(ship_id).or_default().insert(0, 2);
+    }
+    live_state.save();
+    {
+        let mut sd = skinr_state.data.write().unwrap();
+        sd.skins.insert(
+            "cafebabe".into(),
+            SkinDesignRecord {
+                skin_hex: "cafebabe".into(),
+                name: "TestStrip".into(),
+                line_name: "Line".into(),
+                creator_id: owner,
+                ship_type_id: ship_tid,
+                pattern_blend_mode: 0,
+                slots: Vec::new(),
+                tier_level: 1,
+                first_sequenced_unix: None,
+            },
+        );
+        sd.skin_licenses.insert(
+            SkinrCosmeticsState::skin_lic_key(owner, "cafebabe"),
+            ThirdPartySkinLicense {
+                character_id: owner,
+                skin_hex: "cafebabe".into(),
+                activated: true,
+                unactivated: 0,
+                escrowed: 0,
+                first_acquired_unix: 1_700_000_000,
+            },
+        );
+        sd.applied_thirdparty_skins.insert(ship_id, "cafebabe".into());
+    }
+    skinr_state.save();
+
+    db.with_snapshot(|s| {
+        assert!(matches!(enabled_cosmetics_dict_from_snapshot(s, ship_id), PyRep::Dict(ref d) if !d.is_empty()));
+        assert!(ship_state(s, &sde, ship_id).is_some());
+    });
+
+    strip_ship_cosmetics_for_ships(&db, &[ship_id as i64]);
+
+    db.with_snapshot(|s| {
+        assert_eq!(enabled_cosmetics_dict_from_snapshot(s, ship_id), PyRep::Dict(Vec::new()));
+        let raw_state = ship_state(s, &sde, ship_id).expect("ship_state encodes no_skin for valid ship");
+        let wm = eve_proto::quasar::WireMessage::decode(&raw_state).unwrap();
+        let skin_bytes = wm.fields.iter().find(|f| f.field_number == 3).unwrap().value.as_bytes().unwrap();
+        let skin_wm = eve_proto::quasar::WireMessage::decode(skin_bytes).unwrap();
+        assert!(!skin_wm.fields.iter().any(|f| f.field_number == 1 || f.field_number == 2));
+        assert_eq!(skin_wm.fields.iter().find(|f| f.field_number == 3).and_then(|f| f.value.as_varint()), Some(1));
+        assert!(!s.applied_ship_skins.contains_key(&(ship_id as i64)));
+    });
+    assert!(!live_state.data.read().unwrap().ship_logos.contains_key(&ship_id));
+    assert!(!skinr_state.data.read().unwrap().applied_thirdparty_skins.contains_key(&ship_id));
 }

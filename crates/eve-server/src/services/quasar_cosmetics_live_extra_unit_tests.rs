@@ -174,6 +174,7 @@ fn macho_notify_sink_alliance_logos_and_ship_skin_state_branches() {
     // ship.api.GetRequest & GetAllInBubbleRequest with first-party skin and third-party SKINR skin
     let ship_get_ep = "eve_public.cosmetic.ship.api.GetRequest";
     db.with_mut_snapshot(|s| {
+        s.licensed_skins.entry(cid).or_default().push(1001);
         s.applied_ship_skins.insert(ship_id as i64, 1001);
     });
     let mut get_ship_req = Vec::new();
@@ -191,6 +192,17 @@ fn macho_notify_sink_alliance_logos_and_ship_skin_state_branches() {
     db.with_mut_snapshot(|s| {
         s.applied_ship_skins.remove(&(ship_id as i64));
         let mut skinr_data = super::quasar_cosmetics_skinr::SkinrCosmeticsData::default();
+        skinr_data.skin_licenses.insert(
+            super::quasar_cosmetics_skinr::SkinrCosmeticsState::skin_lic_key(cid as u32, "custom_hex_123"),
+            super::quasar_cosmetics_skinr::ThirdPartySkinLicense {
+                character_id: cid as u32,
+                skin_hex: "custom_hex_123".into(),
+                activated: true,
+                unactivated: 0,
+                escrowed: 0,
+                first_acquired_unix: now,
+            },
+        );
         skinr_data.applied_thirdparty_skins.insert(ship_id, "custom_hex_123".into());
         s.quasar_state_blobs.insert(
             super::quasar_cosmetics_skinr::SKINR_BLOB_KEY.into(),
