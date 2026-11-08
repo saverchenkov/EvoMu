@@ -1114,7 +1114,11 @@ pub(crate) fn handle_get_member(
     session: &mut SessionState,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    if args.first().and_then(|a| a.as_i64()).is_some_and(|id| id >= 98_000_000) {
+    if args
+        .first()
+        .and_then(|a| a.as_i64())
+        .is_some_and(|id| id >= 98_000_000 || (1_000_000..2_000_000).contains(&id))
+    {
         return None;
     }
     let (corp_id, viewer_id, _) =
@@ -1125,69 +1129,105 @@ pub(crate) fn handle_get_member(
             Err(e) => return Some(Err(e)),
         };
     let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(viewer_id);
-    crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
+    if !ctx.sde.npc_corporations.contains_key(&corp_id) {
+        crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(
+            ctx, corp_id,
+        );
+    }
     let now_unix = ctx.now_unix();
     let res = ctx.db.with_snapshot(|snap| {
-        let Some(corp) = snap.corporations.get(&corp_id) else {
+        if let Some(corp) = snap.corporations.get(&corp_id) {
+            if !corp.members.contains(&target_char_id) {
+                return Err(BridgeRpcError {
+                    code: "NotCorpMember".into(),
+                    message: format!("Character {target_char_id} is not a member of corporation {corp_id}"),
+                });
+            }
+            let ch = snap.characters.get(&target_char_id);
+            let name = ch.map(|c| c.name.clone()).unwrap_or_else(|| format!("Pilot {target_char_id}"));
+            let gov = snap.corp_governance.get(&corp_id);
+            let mut roles = corp.member_roles.get(&target_char_id).copied().unwrap_or(0);
+            if let Some(g) = gov {
+                if let Some(&(p_mask, eff)) = g.pending_role_grants.get(&target_char_id) {
+                    if now_unix >= eff {
+                        roles |= p_mask;
+                    }
+                }
+            }
+            let ra = snap.corp_role_assignments.get(&(corp_id, target_char_id)).cloned().unwrap_or_default();
+            let tmask = gov.and_then(|g| g.member_titles.get(&target_char_id).copied()).unwrap_or(0);
+            let title_str = gov
+                .and_then(|g| {
+                    let mut names = Vec::new();
+                    for idx in 1..=16i64 {
+                        if (tmask & (1u64 << (idx - 1))) != 0 || tmask == idx as u64 {
+                            if let Some((n, _)) = g.titles.get(&idx) {
+                                names.push(n.clone());
+                            }
+                        }
+                    }
+                    (!names.is_empty()).then(|| names.join(", "))
+                })
+                .unwrap_or_else(|| if target_char_id == corp.ceo_id { "CEO".into() } else { String::new() });
+            let acct_key = gov.and_then(|g| g.member_account_keys.get(&target_char_id).copied()).unwrap_or(1000);
+            let start_dt = snap
+                .employment_history
+                .get(&target_char_id)
+                .and_then(|h| h.iter().rev().find(|e| e.0 == corp_id).map(|e| e.1))
+                .or_else(|| ch.map(|c| c.create_date_unix))
+                .unwrap_or(0);
+            let base_id = gov
+                .and_then(|g| g.member_bases.get(&target_char_id).copied())
+                .or(corp.hq_station_id)
+                .or_else(|| ch.map(|c| c.home_station_id));
+            let (div_id, sq_id) = gov.and_then(|g| g.member_divisions.get(&target_char_id).copied()).unwrap_or((0, 0));
+            return Ok(PyRep::keyval([
+                ("characterID", PyRep::Integer(target_char_id)), ("corporationID", PyRep::Integer(corp_id)),
+                ("name", PyRep::String(name)), ("roles", PyRep::Integer(roles as i64)), ("role", PyRep::Integer(roles as i64)),
+                ("grantableRoles", PyRep::Integer(ra.grantable_roles as i64)), ("rolesAtHQ", PyRep::Integer(ra.roles_at_hq as i64)),
+                ("grantableRolesAtHQ", PyRep::Integer(ra.grantable_roles_at_hq as i64)), ("rolesAtBase", PyRep::Integer(ra.roles_at_base as i64)),
+                ("grantableRolesAtBase", PyRep::Integer(ra.grantable_roles_at_base as i64)), ("rolesAtOther", PyRep::Integer(ra.roles_at_other as i64)),
+                ("grantableRolesAtOther", PyRep::Integer(ra.grantable_roles_at_other as i64)), ("titleMask", PyRep::Integer(tmask as i64)),
+                ("title", PyRep::String(title_str)), ("baseID", base_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("startDateTime", PyRep::Integer(start_dt as i64)), ("accountKey", PyRep::Integer(acct_key)),
+                ("divisionID", PyRep::Integer(div_id)), ("squadronID", PyRep::Integer(sq_id)),
+            ]));
+        }
+
+        // DERIVED: Starter/NPC corporations live in `ctx.sde.npc_corporations` rather than `snap.corporations`.
+        let Some(npc) = ctx.sde.npc_corporations.get(&corp_id) else {
             return Err(BridgeRpcError {
                 code: "CorporationNotFound".into(),
                 message: format!("Corporation {corp_id} not found"),
             });
         };
-        if !corp.members.contains(&target_char_id) {
+        let ch = snap.characters.get(&target_char_id);
+        let is_npc_member = ch.is_some_and(|c| c.corporation_id == corp_id)
+            || (ch.is_none() && target_char_id == viewer_id && session.corporation_id == Some(corp_id));
+        if !is_npc_member {
             return Err(BridgeRpcError {
                 code: "NotCorpMember".into(),
                 message: format!("Character {target_char_id} is not a member of corporation {corp_id}"),
             });
         }
-        let ch = snap.characters.get(&target_char_id);
         let name = ch.map(|c| c.name.clone()).unwrap_or_else(|| format!("Pilot {target_char_id}"));
-        let gov = snap.corp_governance.get(&corp_id);
-        let mut roles = corp.member_roles.get(&target_char_id).copied().unwrap_or(0);
-        if let Some(g) = gov {
-            if let Some(&(p_mask, eff)) = g.pending_role_grants.get(&target_char_id) {
-                if now_unix >= eff {
-                    roles |= p_mask;
-                }
-            }
-        }
-        let ra = snap.corp_role_assignments.get(&(corp_id, target_char_id)).cloned().unwrap_or_default();
-        let tmask = gov.and_then(|g| g.member_titles.get(&target_char_id).copied()).unwrap_or(0);
-        let title_str = gov
-            .and_then(|g| {
-                let mut names = Vec::new();
-                for idx in 1..=16i64 {
-                    if (tmask & (1u64 << (idx - 1))) != 0 || tmask == idx as u64 {
-                        if let Some((n, _)) = g.titles.get(&idx) {
-                            names.push(n.clone());
-                        }
-                    }
-                }
-                (!names.is_empty()).then(|| names.join(", "))
-            })
-            .unwrap_or_else(|| if target_char_id == corp.ceo_id { "CEO".into() } else { String::new() });
-        let acct_key = gov.and_then(|g| g.member_account_keys.get(&target_char_id).copied()).unwrap_or(1000);
         let start_dt = snap
             .employment_history
             .get(&target_char_id)
             .and_then(|h| h.iter().rev().find(|e| e.0 == corp_id).map(|e| e.1))
             .or_else(|| ch.map(|c| c.create_date_unix))
             .unwrap_or(0);
-        let base_id = gov
-            .and_then(|g| g.member_bases.get(&target_char_id).copied())
-            .or(corp.hq_station_id)
-            .or_else(|| ch.map(|c| c.home_station_id));
-        let (div_id, sq_id) = gov.and_then(|g| g.member_divisions.get(&target_char_id).copied()).unwrap_or((0, 0));
+        let base_id = ch.map(|c| c.home_station_id).or(npc.station_id);
         Ok(PyRep::keyval([
             ("characterID", PyRep::Integer(target_char_id)), ("corporationID", PyRep::Integer(corp_id)),
-            ("name", PyRep::String(name)), ("roles", PyRep::Integer(roles as i64)), ("role", PyRep::Integer(roles as i64)),
-            ("grantableRoles", PyRep::Integer(ra.grantable_roles as i64)), ("rolesAtHQ", PyRep::Integer(ra.roles_at_hq as i64)),
-            ("grantableRolesAtHQ", PyRep::Integer(ra.grantable_roles_at_hq as i64)), ("rolesAtBase", PyRep::Integer(ra.roles_at_base as i64)),
-            ("grantableRolesAtBase", PyRep::Integer(ra.grantable_roles_at_base as i64)), ("rolesAtOther", PyRep::Integer(ra.roles_at_other as i64)),
-            ("grantableRolesAtOther", PyRep::Integer(ra.grantable_roles_at_other as i64)), ("titleMask", PyRep::Integer(tmask as i64)),
-            ("title", PyRep::String(title_str)), ("baseID", base_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-            ("startDateTime", PyRep::Integer(start_dt as i64)), ("accountKey", PyRep::Integer(acct_key)),
-            ("divisionID", PyRep::Integer(div_id)), ("squadronID", PyRep::Integer(sq_id)),
+            ("name", PyRep::String(name)), ("roles", PyRep::Integer(0)), ("role", PyRep::Integer(0)),
+            ("grantableRoles", PyRep::Integer(0)), ("rolesAtHQ", PyRep::Integer(0)),
+            ("grantableRolesAtHQ", PyRep::Integer(0)), ("rolesAtBase", PyRep::Integer(0)),
+            ("grantableRolesAtBase", PyRep::Integer(0)), ("rolesAtOther", PyRep::Integer(0)),
+            ("grantableRolesAtOther", PyRep::Integer(0)), ("titleMask", PyRep::Integer(0)),
+            ("title", PyRep::String(String::new())), ("baseID", base_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+            ("startDateTime", PyRep::Integer(start_dt as i64)), ("accountKey", PyRep::Integer(1000)),
+            ("divisionID", PyRep::Integer(0)), ("squadronID", PyRep::Integer(0)),
         ]))
     });
     Some(res)

@@ -903,9 +903,15 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         }
 
                         let mut sess_change_sent = false;
-                        if let Some(sess_change_payload) = prev_session
+                        if let Some(mut sess_change_payload) = prev_session
                             .to_session_change_pyrep(&session, vec![MACHO_PROXY_NODE_ID as i64])
                         {
+                            enrich_session_change_scoped_roles(
+                                &ctx,
+                                &prev_session,
+                                &session,
+                                &mut sess_change_payload,
+                            );
                             sess_change_sent = true;
                             let mut named_payload = HashMap::new();
                             named_payload
@@ -1134,6 +1140,84 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
     }
 
     Ok(())
+}
+
+pub(crate) fn enrich_session_change_scoped_roles(
+    ctx: &ServerContext,
+    prev_session: &SessionState,
+    session: &SessionState,
+    sess_change_payload: &mut PyRep,
+) {
+    let should_enrich = prev_session.character_id != session.character_id
+        || prev_session.corporation_id != session.corporation_id
+        || prev_session.corp_role != session.corp_role;
+    if !should_enrich {
+        return;
+    }
+    let (Some(char_id), Some(corp_id)) = (session.character_id, session.corporation_id) else {
+        return;
+    };
+    let now_unix = ctx.now_unix();
+    let (is_ceo, roles_all, roles_hq, roles_base, roles_other) = ctx.db.with_snapshot(|snap| {
+        if !snap.corporations.contains_key(&corp_id) {
+            return (false, 0u64, 0u64, 0u64, 0u64);
+        }
+        let (is_ceo, eff_roles) =
+            crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+                snap, corp_id, char_id, 0, now_unix,
+            );
+        if is_ceo {
+            return (true, u64::MAX, u64::MAX, u64::MAX, u64::MAX);
+        }
+        let ra = snap
+            .corp_role_assignments
+            .get(&(corp_id, char_id))
+            .cloned()
+            .unwrap_or_default();
+        let (pend_hq, pend_base, pend_other) = snap
+            .corp_governance
+            .get(&corp_id)
+            .and_then(|g| g.pending_scoped_role_grants.get(&char_id))
+            .filter(|&&(_, _, _, eff)| now_unix >= eff)
+            .map_or((0, 0, 0), |&(hq, base, other, _)| (hq, base, other));
+        (
+            false,
+            eff_roles,
+            ra.roles_at_hq | pend_hq,
+            ra.roles_at_base | pend_base,
+            ra.roles_at_other | pend_other,
+        )
+    });
+    if !is_ceo && roles_all == 0 && roles_hq == 0 && roles_base == 0 && roles_other == 0 {
+        return;
+    }
+    let PyRep::Tuple(ref mut outer) = sess_change_payload else {
+        return;
+    };
+    let Some(PyRep::Tuple(ref mut inner)) = outer.get_mut(1) else {
+        return;
+    };
+    let Some(PyRep::Dict(ref mut entries)) = inner.get_mut(1) else {
+        return;
+    };
+    let mut upsert = |key: &str, val: u64| {
+        if val == 0 {
+            return;
+        }
+        let already = entries
+            .iter()
+            .any(|(k, _)| k.as_str() == Some(key));
+        if !already {
+            entries.push((
+                PyRep::ascii_bytes(key),
+                PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(val as i64)]),
+            ));
+        }
+    };
+    upsert("rolesAtAll", roles_all);
+    upsert("rolesAtHQ", roles_hq);
+    upsert("rolesAtBase", roles_base);
+    upsert("rolesAtOther", roles_other);
 }
 
 pub use eve_machonet::extract_macho_call_req;

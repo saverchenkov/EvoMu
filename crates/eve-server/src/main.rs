@@ -439,6 +439,7 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
                                 ("solarsystemid2", session.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None)),
                                 ("solarsystemid", if in_space { session.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None) } else { PyRep::None }),
                                 ("shipid", session.ship_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                                ("corprole", PyRep::Integer(session.corp_role as i64)),
                             ]);
                             let session_event = BridgeEnvelope::ServerEvent {
                                 tick: 0,

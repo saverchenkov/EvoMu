@@ -911,6 +911,13 @@ impl SessionState {
                     PyRep::Integer(next.corp_role as i64),
                 ),
             );
+            changes.insert(
+                "rolesAtAll".into(),
+                (
+                    PyRep::Integer(self.corp_role as i64),
+                    PyRep::Integer(next.corp_role as i64),
+                ),
+            );
         }
         if self.fleet_id != next.fleet_id {
             changes.insert(

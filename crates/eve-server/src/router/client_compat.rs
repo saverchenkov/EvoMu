@@ -357,6 +357,28 @@ pub fn normalize_macho_rpc_reply(
             return Ok(PyRep::Dict(out));
         }
     }
+    if matches!(service, "corpRegistry" | "machoNet") && method == "GetTitles" {
+        if let Ok(PyRep::Rowset { columns, rows }) = rpc_res {
+            let key_idx = columns.iter().position(|c| c == "titleID").unwrap_or(0);
+            let header: Vec<PyRep> = columns.into_iter().map(PyRep::String).collect();
+            let mut dict = Vec::with_capacity(rows.len());
+            for row in rows {
+                let row_key = row
+                    .get(key_idx)
+                    .cloned()
+                    .unwrap_or(PyRep::Integer(dict.len() as i64 + 1));
+                let row_obj = PyRep::Object {
+                    type_name: "util.Row".into(),
+                    args: Box::new(PyRep::Tuple(vec![
+                        PyRep::List(header.clone()),
+                        PyRep::List(row),
+                    ])),
+                };
+                dict.push((row_key, row_obj));
+            }
+            return Ok(PyRep::Dict(dict));
+        }
+    }
     if (matches!(service, "corpRegistry" | "machoNet") && method == "GetCorporation")
         || (service == "corpmgr" && matches!(method, "GetCorporations" | "GetPublicInfo"))
     {
@@ -1177,5 +1199,79 @@ mod client_compat_tests {
             .collect();
         assert_eq!(by_sys.get(&30_000_142), Some(&3));
         assert_eq!(by_sys.get(&30_002_187), Some(&0));
+    }
+
+    #[test]
+    fn get_titles_rowset_normalizes_to_dict_of_util_rows_and_empty_dict() {
+        let cols = vec![
+            "titleID",
+            "titleName",
+            "roles",
+            "grantableRoles",
+            "rolesAtHQ",
+            "grantableRolesAtHQ",
+            "rolesAtBase",
+            "grantableRolesAtBase",
+            "rolesAtOther",
+            "grantableRolesAtOther",
+        ];
+        let rowset = PyRep::rowset(
+            cols.clone(),
+            vec![
+                vec![
+                    PyRep::Integer(1),
+                    PyRep::String("Commander".into()),
+                    PyRep::Integer(256),
+                    PyRep::Integer(0),
+                    PyRep::Integer(0),
+                    PyRep::Integer(0),
+                    PyRep::Integer(0),
+                    PyRep::Integer(0),
+                    PyRep::Integer(0),
+                    PyRep::Integer(0),
+                ],
+                vec![
+                    PyRep::Integer(2),
+                    PyRep::String("Quartermaster".into()),
+                    PyRep::Integer(8192),
+                    PyRep::Integer(128),
+                    PyRep::Integer(0),
+                    PyRep::Integer(0),
+                    PyRep::Integer(0),
+                    PyRep::Integer(0),
+                    PyRep::Integer(0),
+                    PyRep::Integer(0),
+                ],
+            ],
+        );
+
+        for svc in ["corpRegistry", "machoNet"] {
+            let res = normalize_macho_rpc_reply(svc, "GetTitles", Ok(rowset.clone())).unwrap();
+            let PyRep::Dict(entries) = res else {
+                panic!("expected Dict for {svc}.GetTitles");
+            };
+            assert_eq!(entries.len(), 2);
+            assert_eq!(entries[0].0, PyRep::Integer(1));
+            assert_eq!(entries[1].0, PyRep::Integer(2));
+
+            let PyRep::Object { type_name, args } = &entries[0].1 else {
+                panic!("expected util.Row object");
+            };
+            assert_eq!(type_name, "util.Row");
+            let PyRep::Tuple(parts) = args.as_ref() else {
+                panic!("expected (header, line) tuple");
+            };
+            let (PyRep::List(hdr), PyRep::List(line)) = (&parts[0], &parts[1]) else {
+                panic!("expected header & line lists");
+            };
+            assert_eq!(hdr.len(), 10);
+            assert_eq!(line.len(), 10);
+            assert_eq!(line[1], PyRep::String("Commander".into()));
+            assert_eq!(line[2], PyRep::Integer(256));
+        }
+
+        let empty_rs = PyRep::rowset(cols, vec![]);
+        let empty_res = normalize_macho_rpc_reply("corpRegistry", "GetTitles", Ok(empty_rs)).unwrap();
+        assert_eq!(empty_res, PyRep::Dict(vec![]));
     }
 }

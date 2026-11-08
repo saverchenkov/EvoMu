@@ -436,3 +436,90 @@ async fn test_macho_ping_rpc_errors_bound_oid_and_displacement() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert!(ctx.db.get_online_session(user_id).is_none());
 }
+
+#[tokio::test]
+async fn select_character_restores_ceo_corprole_and_scoped_roles_over_machonet() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let corp_id = 98_100_001;
+    let ceo_id = 90_000_001;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&ceo_id) {
+            ch.corporation_id = corp_id;
+        }
+        let mut corp = eve_db::CorporationRecord {
+            corporation_id: corp_id,
+            name: "Playtest Corp".into(),
+            ticker: "PLAY".into(),
+            ceo_id,
+            alliance_id: None,
+            tax_rate: 0.05,
+            master_wallet: eve_db::IskCents(0),
+            members: std::collections::HashSet::from([ceo_id]),
+            member_roles: HashMap::from([(ceo_id, u64::MAX)]),
+            applications: HashMap::new(),
+            wallet_divisions: vec![],
+            description: String::new(),
+            url: String::new(),
+            hq_station_id: Some(60_003_760),
+        };
+        corp.members.insert(ceo_id);
+        snap.corporations.insert(corp_id, corp);
+    });
+
+    let addr = spawn_macho_test_server(Arc::clone(&ctx)).await;
+    let (mut s, client_id, user_id) = connect_and_authenticate(addr, "demo", "demo-secret").await;
+    let sel_req = make_call_req(
+        client_id,
+        user_id,
+        1,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        vec![PyRep::Integer(ceo_id)],
+    );
+    write_framed_pyrep(&mut s, &sel_req.to_pyrep()).await.unwrap();
+
+    let mut sess_changes: Option<PyRep> = None;
+    let mut got_rsp = false;
+    for _ in 0..8 {
+        let pkt = MachoPacket::from_pyrep(
+            &tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                read_framed_pyrep(&mut s),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        )
+        .unwrap();
+        if pkt.packet_type == MachoPacketType::CallRsp {
+            got_rsp = true;
+        } else if pkt.packet_type == MachoPacketType::SessionChangeNotification {
+            sess_changes = Some(pkt.payload);
+        }
+        if got_rsp && sess_changes.is_some() {
+            break;
+        }
+    }
+    assert!(got_rsp, "SelectCharacterID CallRsp missing");
+    let payload = sess_changes.expect("SessionChangeNotification missing");
+    let PyRep::Tuple(outer) = payload else { panic!("expected Tuple payload") };
+    let PyRep::Tuple(inner) = &outer[1] else { panic!("expected inner tuple") };
+    let PyRep::Dict(entries) = &inner[1] else { panic!("expected Dict changes") };
+    let lookup = |k: &str| {
+        entries
+            .iter()
+            .find(|(ek, _)| ek.as_str() == Some(k))
+            .map(|(_, v)| v.clone())
+    };
+    let expected = PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(-1)]);
+    assert_eq!(lookup("corprole"), Some(expected.clone()));
+    assert_eq!(lookup("rolesAtAll"), Some(expected.clone()));
+    assert_eq!(lookup("rolesAtHQ"), Some(expected.clone()));
+    assert_eq!(lookup("rolesAtBase"), Some(expected.clone()));
+    assert_eq!(lookup("rolesAtOther"), Some(expected));
+    drop(s);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+}

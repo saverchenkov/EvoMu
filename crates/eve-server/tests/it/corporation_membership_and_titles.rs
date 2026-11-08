@@ -35,9 +35,15 @@ async fn rpc(
 
 fn setup_pilot(ctx: &ServerContext, char_id: i64, name: &str, corp_id: i64, balance_isk: i64, corp_mgmt_level: u8) {
     ctx.db.with_mut_snapshot(|snap| {
-        let base_char = snap.characters.values().next().cloned().unwrap();
+        let base_char = snap
+            .characters
+            .get(&char_id)
+            .or_else(|| snap.characters.values().min_by_key(|c| c.character_id))
+            .cloned()
+            .unwrap();
         let ch = CharacterRecord {
             character_id: char_id,
+            user_id: 1,
             name: name.into(),
             corporation_id: corp_id,
             balance: IskCents::from_isk(balance_isk),
@@ -658,4 +664,195 @@ async fn test_corp_titles_and_role_bundling() {
         .expect("GetTitles after delete");
     let PyRep::Rowset { rows: rows_after, .. } = titles_after else { panic!("expected Rowset") };
     assert_eq!(rows_after.len(), 1);
+}
+
+#[tokio::test]
+async fn npc_corporation_get_member_resolves_member_and_rejects_non_members() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let npc_corp_id = 1_000_006; // SDE NPC corp (School of Applied Knowledge)
+    let pilot_id = 90_000_001;
+    let outsider_id = 90_000_002;
+    setup_pilot(&ctx, pilot_id, "NPC Pilot", npc_corp_id, 1_000_000, 0);
+    setup_pilot(&ctx, outsider_id, "Caldari Pilot", NPC_CORP_CALDARI, 1_000_000, 0);
+
+    let mut sess = make_session(62_001, 1, pilot_id, npc_corp_id, 0);
+    let member_rep = rpc(&ctx, &mut sess, "corpRegistry", "GetMember", &[PyRep::Integer(pilot_id)])
+        .await
+        .expect("GetMember for NPC corp member must succeed");
+    assert_eq!(member_rep.dict_get("characterID"), Some(&PyRep::Integer(pilot_id)));
+    assert_eq!(member_rep.dict_get("corporationID"), Some(&PyRep::Integer(npc_corp_id)));
+    assert_eq!(member_rep.dict_get("roles"), Some(&PyRep::Integer(0)));
+    assert_eq!(member_rep.dict_get("accountKey"), Some(&PyRep::Integer(1000)));
+
+    // Calling GetMember with no args resolves session viewer
+    let self_rep = rpc(&ctx, &mut sess, "corpRegistry", "GetMember", &[])
+        .await
+        .expect("GetMember() with no args for NPC corp member must succeed");
+    assert_eq!(self_rep.dict_get("characterID"), Some(&PyRep::Integer(pilot_id)));
+
+    // Negative: querying pilot from a different corporation returns NotCorpMember
+    let not_mem_err = rpc(&ctx, &mut sess, "corpRegistry", "GetMember", &[PyRep::Integer(outsider_id)])
+        .await
+        .expect_err("pilot in another corp must fail with NotCorpMember");
+    assert_eq!(not_mem_err.code, "NotCorpMember");
+
+    // Negative: nonexistent corp ID (neither player nor SDE NPC) still returns CorporationNotFound
+    let mut bad_sess = make_session(62_002, 1, pilot_id, 98_999_999, 0);
+    let bad_corp_err = rpc(&ctx, &mut bad_sess, "corpRegistry", "GetMember", &[PyRep::Integer(pilot_id)])
+        .await
+        .expect_err("unknown corp must return CorporationNotFound");
+    assert_eq!(bad_corp_err.code, "CorporationNotFound");
+}
+
+#[tokio::test]
+async fn select_character_restores_ceo_and_member_corp_roles_without_mutating_snapshot() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let ceo_id = 90_000_001;
+    let officer_id = 90_000_002;
+    let npc_pilot_id = 90_000_003;
+    let corp_id = 98_100_001;
+    setup_pilot(&ctx, ceo_id, "CEO Pilot", NPC_CORP_CALDARI, 50_000_000, 5);
+    setup_pilot(&ctx, officer_id, "Officer Pilot", NPC_CORP_CALDARI, 10_000_000, 0);
+    setup_pilot(&ctx, npc_pilot_id, "Starter Pilot", 1_000_006, 1_000_000, 0);
+    setup_test_corp(&ctx, corp_id, "SKINR Test Corp", "SKNR", ceo_id, &[ceo_id, officer_id]);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&ceo_id) {
+            c.corporation_id = corp_id;
+        }
+        if let Some(c) = snap.characters.get_mut(&officer_id) {
+            c.corporation_id = corp_id;
+        }
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(ceo_id, u64::MAX);
+            corp.member_roles.insert(officer_id, corp_roles::ROLE_BRAND_MANAGER);
+        }
+    });
+
+    // Fresh login session for CEO restores u64::MAX and computes corprole + rolesAtAll diff
+    let mut ceo_login = SessionState::new(62_010);
+    ceo_login.user_id = Some(1);
+    ceo_login.role = eve_machonet::service_roles::ROLE_PLAYER;
+    let prev_ceo = ceo_login.clone();
+    rpc(&ctx, &mut ceo_login, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(ceo_id)])
+        .await
+        .expect("CEO SelectCharacterID");
+    assert_eq!(ceo_login.corporation_id, Some(corp_id));
+    assert_eq!(ceo_login.corp_role, u64::MAX);
+    let ceo_diff = prev_ceo.compute_diff(&ceo_login);
+    assert_eq!(ceo_diff.get("corprole"), Some(&(PyRep::Integer(0), PyRep::Integer(-1))));
+    assert_eq!(ceo_diff.get("rolesAtAll"), Some(&(PyRep::Integer(0), PyRep::Integer(-1))));
+
+    // Fresh login session for non-CEO officer restores exact role bitmask
+    let mut officer_login = SessionState::new(62_011);
+    officer_login.user_id = Some(1);
+    officer_login.role = eve_machonet::service_roles::ROLE_PLAYER;
+    rpc(&ctx, &mut officer_login, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(officer_id)])
+        .await
+        .expect("Officer SelectCharacterID");
+    assert_eq!(officer_login.corp_role, corp_roles::ROLE_BRAND_MANAGER);
+
+    // Negative / baseline: NPC corp pilot keeps corp_role = 0
+    let mut npc_login = SessionState::new(62_012);
+    npc_login.user_id = Some(1);
+    npc_login.role = eve_machonet::service_roles::ROLE_PLAYER;
+    npc_login.corp_role = corp_roles::ROLE_DIRECTOR;
+    rpc(&ctx, &mut npc_login, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(npc_pilot_id)])
+        .await
+        .expect("NPC Pilot SelectCharacterID");
+    assert_eq!(npc_login.corp_role, 0);
+}
+
+#[tokio::test]
+async fn get_titles_returns_deterministic_10col_rowset_and_live_client_dict_of_util_rows() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let corp_id = 98_090_002;
+    let ceo_id = 90_000_030;
+    setup_pilot(&ctx, ceo_id, "Title CEO", NPC_CORP_CALDARI, 10_000_000, 5);
+    setup_test_corp(&ctx, corp_id, "Title Shape Corp", "TSHP", ceo_id, &[ceo_id]);
+    let mut sess = make_session(62_020, 30, ceo_id, corp_id, u64::MAX);
+
+    // Empty titles under live client trace returns empty Dict (safe for .itervalues()/.iteritems())
+    let empty_live = ctx
+        .dispatch_rpc(&mut sess, "corpRegistry", None, "GetTitles", &[], &HashMap::new(), Some("machoNet:26000"))
+        .await
+        .expect("live GetTitles empty");
+    assert_eq!(empty_live, PyRep::Dict(vec![]));
+
+    // Insert titles out of order (title 3 then title 1) with scoped & grantable roles
+    rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "UpdateTitle",
+        &[
+            PyRep::Integer(3),
+            PyRep::String("Brand Lead".into()),
+            PyRep::Integer(corp_roles::ROLE_BRAND_MANAGER as i64),
+            PyRep::Integer(corp_roles::ROLE_BRAND_MANAGER as i64),
+            PyRep::Integer(corp_roles::ROLE_HANGAR_CAN_TAKE[0] as i64),
+            PyRep::Integer(0),
+            PyRep::Integer(corp_roles::ROLE_HANGAR_CAN_QUERY[0] as i64),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .expect("UpdateTitle 3");
+    rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "UpdateTitle",
+        &[
+            PyRep::Integer(1),
+            PyRep::String("Treasurer".into()),
+            PyRep::Integer(corp_roles::ROLE_ACCOUNTANT as i64),
+        ],
+    )
+    .await
+    .expect("UpdateTitle 1");
+
+    // Internal caller receives sorted 10-column Rowset
+    let internal_rs = rpc(&ctx, &mut sess, "corpRegistry", "GetTitles", &[])
+        .await
+        .expect("internal GetTitles");
+    let PyRep::Rowset { columns, rows } = internal_rs else {
+        panic!("expected Rowset for internal GetTitles");
+    };
+    assert_eq!(columns.len(), 10);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0][0], PyRep::Integer(1));
+    assert_eq!(rows[1][0], PyRep::Integer(3));
+
+    // Live V24 client (machoNet:26000) receives Dict<titleID, util.Row>
+    let live_rep = ctx
+        .dispatch_rpc(&mut sess, "corpRegistry", None, "GetTitles", &[], &HashMap::new(), Some("machoNet:26000"))
+        .await
+        .expect("live GetTitles");
+    let PyRep::Dict(entries) = live_rep else {
+        panic!("expected Dict for live V24 GetTitles");
+    };
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].0, PyRep::Integer(1));
+    assert_eq!(entries[1].0, PyRep::Integer(3));
+
+    let PyRep::Object { type_name, args } = &entries[1].1 else {
+        panic!("expected util.Row entry");
+    };
+    assert_eq!(type_name, "util.Row");
+    let PyRep::Tuple(state) = args.as_ref() else { panic!("expected (header, line)") };
+    let (PyRep::List(hdr), PyRep::List(line)) = (&state[0], &state[1]) else {
+        panic!("expected header & line lists");
+    };
+    let map: HashMap<&str, &PyRep> = hdr.iter().zip(line.iter()).map(|(h, v)| (h.as_str().unwrap(), v)).collect();
+    assert_eq!(map["titleID"], &PyRep::Integer(3));
+    assert_eq!(map["titleName"], &PyRep::String("Brand Lead".into()));
+    assert_eq!(map["roles"], &PyRep::Integer(corp_roles::ROLE_BRAND_MANAGER as i64));
+    assert_eq!(map["grantableRoles"], &PyRep::Integer(corp_roles::ROLE_BRAND_MANAGER as i64));
+    assert_eq!(map["rolesAtHQ"], &PyRep::Integer(corp_roles::ROLE_HANGAR_CAN_TAKE[0] as i64));
+    assert_eq!(map["rolesAtBase"], &PyRep::Integer(corp_roles::ROLE_HANGAR_CAN_QUERY[0] as i64));
 }

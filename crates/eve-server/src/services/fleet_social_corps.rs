@@ -191,7 +191,12 @@ pub(crate) fn require_corp_caller(
 ) -> Result<(i64, i64, bool), BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     if session.corporation_id.is_none() || session.corporation_id == Some(0) {
-        if let Some(cid) = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id).filter(|id| s.corporations.contains_key(id))) {
+        if let Some(cid) = ctx.db.with_snapshot(|s| {
+            s.characters
+                .get(&char_id)
+                .map(|c| c.corporation_id)
+                .filter(|id| s.corporations.contains_key(id) || ctx.sde.npc_corporations.contains_key(id))
+        }) {
             session.corporation_id = Some(cid);
         }
     }
@@ -849,7 +854,7 @@ pub(super) fn handle_corps(
             }
         }
 
-        ("corpRegistry", "GetMember") if !args.first().and_then(|a| a.as_i64()).is_some_and(|id| id >= 98_000_000) => {
+        ("corpRegistry", "GetMember") if !args.first().and_then(|a| a.as_i64()).is_some_and(|id| id >= 98_000_000 || (1_000_000..2_000_000).contains(&id)) => {
             crate::services::corp_registry_ops::handle_get_member(ctx, session, args)
         }
         ("corpRegistry", "GetMemberTrackingInfo")

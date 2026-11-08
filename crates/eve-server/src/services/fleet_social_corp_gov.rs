@@ -724,8 +724,17 @@ pub(super) fn handle_corp_gov(
             if !has_director { return deny_role("Updating corporation titles requires CEO or Director role"); }
             let title_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1).clamp(1, 16);
             let title_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Squad Leader");
-            let roles_mask = (args.get(2).and_then(|a| a.as_i64()).unwrap_or(0) as u64) & !corp_roles::ROLE_DIRECTOR;
-            let grantable_mask = (args.get(3).and_then(|a| a.as_i64()).unwrap_or(0) as u64) & !corp_roles::ROLE_DIRECTOR;
+            let role_arg = |idx: usize| -> u64 {
+                (args.get(idx).and_then(|a| a.as_i64()).unwrap_or(0) as u64) & !corp_roles::ROLE_DIRECTOR
+            };
+            let roles_mask = role_arg(2);
+            let grantable_mask = role_arg(3);
+            let roles_hq_mask = role_arg(4);
+            let grantable_hq_mask = role_arg(5);
+            let roles_base_mask = role_arg(6);
+            let grantable_base_mask = role_arg(7);
+            let roles_other_mask = role_arg(8);
+            let grantable_other_mask = role_arg(9);
             let prev = match ctx.db.try_with_mut_snapshot(|snap| {
                 let state = snap.corp_governance.entry(corp_id).or_default();
                 let prev = state.titles.insert(title_id, (title_name.to_string(), roles_mask));
@@ -757,8 +766,14 @@ pub(super) fn handle_corp_gov(
                     name: title_name.to_string(),
                     roles: dec(roles_mask),
                     grantable_roles: dec(grantable_mask),
-                    ..Default::default()
+                    roles_at_hq: dec(roles_hq_mask),
+                    grantable_roles_at_hq: dec(grantable_hq_mask),
+                    roles_at_base: dec(roles_base_mask),
+                    grantable_roles_at_base: dec(grantable_base_mask),
+                    roles_at_other: dec(roles_other_mask),
+                    grantable_roles_at_other: dec(grantable_other_mask),
                 });
+                titles.sort_by_key(|t| t.title_id);
                 Ok::<_, BridgeRpcError>(prev)
             }) {
                 Ok(v) => v,
@@ -1501,28 +1516,87 @@ fn handle_get_shares_by_shareholder(
     )))
 }
 
+fn encode_corp_roles(names: &[String]) -> u64 {
+    let mut mask = 0u64;
+    for name in names {
+        for &(bit, client_name, esi_name) in crate::esi::corp_governance_routes::CORP_ROLE_DEFINITIONS {
+            if name == esi_name || name == client_name {
+                mask |= bit;
+            }
+        }
+    }
+    mask
+}
+
 fn handle_get_titles(
     ctx: &ServerContext,
     corp_id: i64,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let rows: Vec<Vec<PyRep>> = read_corp_gov(ctx, |g| {
-        g.get(&corp_id)
-            .map(|g| {
-                g.titles
-                    .iter()
-                    .map(|(&tid, (tname, rmask))| {
-                        vec![
-                            PyRep::Integer(tid),
-                            PyRep::String(tname.clone()),
-                            PyRep::Integer(*rmask as i64),
-                        ]
+    let mut by_id: std::collections::BTreeMap<i64, (String, [u64; 8])> =
+        std::collections::BTreeMap::new();
+    ctx.db.with_snapshot(|snap| {
+        if let Some(entries) = snap.corp_titles.get(&corp_id) {
+            for t in entries {
+                by_id.insert(
+                    t.title_id,
+                    (
+                        t.name.clone(),
+                        [
+                            encode_corp_roles(&t.roles),
+                            encode_corp_roles(&t.grantable_roles),
+                            encode_corp_roles(&t.roles_at_hq),
+                            encode_corp_roles(&t.grantable_roles_at_hq),
+                            encode_corp_roles(&t.roles_at_base),
+                            encode_corp_roles(&t.grantable_roles_at_base),
+                            encode_corp_roles(&t.roles_at_other),
+                            encode_corp_roles(&t.grantable_roles_at_other),
+                        ],
+                    ),
+                );
+            }
+        }
+        if let Some(gov) = snap.corp_governance.get(&corp_id) {
+            for (&tid, (tname, rmask)) in &gov.titles {
+                by_id
+                    .entry(tid)
+                    .and_modify(|(n, masks)| {
+                        *n = tname.clone();
+                        masks[0] |= *rmask;
                     })
-                    .collect()
-            })
-            .unwrap_or_default()
+                    .or_insert_with(|| (tname.clone(), [*rmask, 0, 0, 0, 0, 0, 0, 0]));
+            }
+        }
     });
+    let rows: Vec<Vec<PyRep>> = by_id
+        .into_iter()
+        .map(|(tid, (tname, masks))| {
+            vec![
+                PyRep::Integer(tid),
+                PyRep::String(tname),
+                PyRep::Integer(masks[0] as i64),
+                PyRep::Integer(masks[1] as i64),
+                PyRep::Integer(masks[2] as i64),
+                PyRep::Integer(masks[3] as i64),
+                PyRep::Integer(masks[4] as i64),
+                PyRep::Integer(masks[5] as i64),
+                PyRep::Integer(masks[6] as i64),
+                PyRep::Integer(masks[7] as i64),
+            ]
+        })
+        .collect();
     Some(Ok(PyRep::rowset(
-        vec!["titleID", "titleName", "roles"],
+        vec![
+            "titleID",
+            "titleName",
+            "roles",
+            "grantableRoles",
+            "rolesAtHQ",
+            "grantableRolesAtHQ",
+            "rolesAtBase",
+            "grantableRolesAtBase",
+            "rolesAtOther",
+            "grantableRolesAtOther",
+        ],
         rows,
     )))
 }
