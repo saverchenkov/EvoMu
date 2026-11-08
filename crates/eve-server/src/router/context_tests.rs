@@ -463,3 +463,83 @@ fn ship_fitting_cache_rebuild_and_has_fleet_extras_branches() {
     ctx.fleet_extras.lock().unwrap().invite_timestamps.clear();
     assert!(!ctx.has_fleet_extras_for(fid));
 }
+
+#[test]
+fn advance_skill_queues_emits_server_skills_changed_and_queue_saved_and_advance_secs_syncs_structures() {
+    let ctx = test_ctx();
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let char_id = 90_000_001_i64;
+    let skill_tid = 3402_u32;
+    let now = ctx.now_unix_secs();
+
+    ctx.db.acquire_online_lock(1, 501, Some(char_id), true, now).unwrap();
+
+    // Seed Science I in skill queue + an Onlining Upwell structure whose timer expires in +300s
+    let struct_id = 1_000_000_902_001_i64;
+    let corp_id = ctx.db.with_snapshot(|s| s.characters[&char_id].corporation_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2;
+            ch.skill_points = 0.0;
+        }
+        snap.skill_queues.insert(
+            char_id,
+            vec![eve_db::SkillQueueEntry {
+                type_id: skill_tid,
+                target_level: 1,
+                start_sp: 0.0,
+                end_sp: 250.0,
+                duration_seconds: 500.0,
+                started_at_unix: Some(now),
+            }],
+        );
+        snap.structures.insert(
+            struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                name: "Test Astrahus".into(),
+                position: [1_000_000.0, 0.0, 0.0],
+                state: "Onlining".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 10_000.0,
+                armor_hp: 10_000.0,
+                hull_hp: 10_000.0,
+                reinforced_until_unix: now + 300,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Partial advance (5s): does NOT finish skill level, so OnServerSkillsChanged/OnSkillTrained are not emitted
+    ctx.advance_skill_queues(5.0);
+    let notifs_partial = ctx.drain_notifications_for_char(char_id);
+    assert!(!notifs_partial.iter().any(|n| n.event == "OnSkillTrained"));
+    assert!(!notifs_partial.iter().any(|n| n.event == "OnServerSkillsChanged"));
+    assert!(!notifs_partial.iter().any(|n| n.event == "OnNewSkillQueueSaved"));
+
+    // Advance via advance_secs(3_600): completes Science I AND transitions Onlining structure to ShieldVulnerable
+    ctx.advance_secs(3_600);
+    let notifs_done = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs_done.iter().any(|n| n.event == "OnSkillTrained"));
+    let skills_changed = notifs_done
+        .iter()
+        .find(|n| n.event == "OnServerSkillsChanged")
+        .expect("OnServerSkillsChanged emitted when skill completes");
+    assert_eq!(
+        skills_changed.args.get(1),
+        Some(&PyRep::String("SkillTrained".into()))
+    );
+    assert!(notifs_done.iter().any(|n| n.event == "OnNewSkillQueueSaved"));
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&struct_id].state, "ShieldVulnerable");
+        assert_eq!(snap.skills[&char_id][&skill_tid].level, 1);
+    });
+}

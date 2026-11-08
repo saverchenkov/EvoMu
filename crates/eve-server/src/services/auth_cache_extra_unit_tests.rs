@@ -56,9 +56,54 @@ fn required_slash_role_and_gm_audit_cap_cover_all_branches() {
     assert!(spawn_cmds.contains(&"spawn") && spawn_cmds.contains(&"unspawn"));
     assert!(!spawn_cmds.contains(&"giveisk"));
     let gm_cmds = remote_slash_commands_for_role(service_roles::ROLE_GM_MASK);
-    for expected in ["giveisk", "heal", "tr", "setomega", "ban", "spawn", "whoami"] {
+    for expected in [
+        "giveisk",
+        "heal",
+        "tr",
+        "setomega",
+        "ban",
+        "spawn",
+        "whoami",
+        "advancetime",
+        "fastforward",
+        "ff",
+        "completeskills",
+        "trainskills",
+        "finishskills",
+        "upwelltimer",
+        "structuretimer",
+        "finishstructure",
+        "completeindustry",
+        "finishjobs",
+        "industrytimer",
+        "cleartimers",
+    ] {
         assert!(gm_cmds.contains(&expected), "missing {expected}");
     }
+    for timer_cmd in [
+        "/advancetime 60",
+        "/fastforward 60",
+        "/ff 60",
+        "/completeskills all",
+        "/trainskills",
+        "/finishskills 10",
+        "/upwelltimer",
+        "/structuretimer 1001",
+        "/finishstructure",
+        "/completeindustry",
+        "/finishjobs 10",
+        "/industrytimer",
+        "/cleartimers",
+    ] {
+        assert_eq!(
+            required_slash_role(timer_cmd),
+            service_roles::ROLE_GM_MASK,
+            "timer cmd {timer_cmd}"
+        );
+    }
+    assert!(!qa_cmds.contains(&"advancetime"));
+    assert!(!qa_cmds.contains(&"cleartimers"));
+    assert!(!spawn_cmds.contains(&"completeskills"));
     let reason = format_remote_command_list_reason(service_roles::ROLE_GM_MASK);
     assert!(reason.starts_with("Commands: ['"), "unexpected reason: {reason}");
     assert!(reason.ends_with("']"));

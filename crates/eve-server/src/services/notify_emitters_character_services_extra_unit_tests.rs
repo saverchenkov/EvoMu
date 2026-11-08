@@ -493,3 +493,400 @@ fn batch3_gm_slash_commands_all_validation_and_schedule_branches_kill_mutations(
     );
     assert_eq!(ctx.drain_notifications_for_char(char_id).len(), 1);
 }
+
+#[test]
+fn gm_timer_acceleration_slash_commands_cover_all_aliases_branches_and_notifications() {
+    static FULL_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
+    let sde = Arc::clone(FULL_SDE.get_or_init(|| Arc::clone(&ServerContext::new().sde)));
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let char_id = 90_000_001_i64;
+    db.acquire_online_lock(1, 501, Some(char_id), true, 1_800_000_000)
+        .expect("online lock");
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let sys_id = 30_000_142_u32;
+
+    // 1. /advancetime, /fastforward, /ff + default 3600s + session change timer cleared
+    let base_now = ctx.now_unix();
+    crate::services::space_destiny::record_session_change_timer(&ctx, char_id, base_now, sys_id, 0, "test_jump");
+    assert!(
+        crate::services::space_destiny::get_session_change_timer(&ctx, char_id).is_some(),
+        "session change timer should be active before /advancetime"
+    );
+    let adv_default = handle_batch3_gm_slash_cmd(&ctx, char_id, Some(sys_id), "/advancetime")
+        .unwrap()
+        .unwrap();
+    assert_eq!(adv_default.dict_get("advancedSeconds"), Some(&PyRep::Integer(3600)));
+    assert_eq!(
+        adv_default.dict_get("nowUnix"),
+        Some(&PyRep::Integer((base_now + 3600) as i64))
+    );
+    assert!(crate::services::space_destiny::get_session_change_timer(&ctx, char_id).is_none());
+
+    crate::services::space_destiny::record_session_change_timer(&ctx, char_id, ctx.now_unix(), sys_id, 0, "test_jump");
+    let ff_alias = handle_batch3_gm_slash_cmd(&ctx, char_id, Some(sys_id), "/fastforward 120")
+        .unwrap()
+        .unwrap();
+    assert_eq!(ff_alias.dict_get("advancedSeconds"), Some(&PyRep::Integer(120)));
+    assert!(crate::services::space_destiny::get_session_change_timer(&ctx, char_id).is_none());
+
+    let ff_short = handle_batch3_gm_slash_cmd(&ctx, char_id, Some(sys_id), "/ff 45")
+        .unwrap()
+        .unwrap();
+    assert_eq!(ff_short.dict_get("advancedSeconds"), Some(&PyRep::Integer(45)));
+    assert_eq!(ctx.now_unix(), base_now + 3600 + 120 + 45);
+
+    // 2. /completeskills [all|seconds] + /trainskills + /finishskills
+    let skill_tid = 3402_u32; // Science (rank 1)
+    let rank = ctx
+        .sde
+        .types
+        .get(&skill_tid)
+        .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::SKILL_TIME_CONSTANT))
+        .copied()
+        .unwrap_or(1.0);
+    let lvl1_sp = crate::formulas::sp_for_skill_level(rank, 1);
+    let lvl5_sp = crate::formulas::sp_for_skill_level(rank, 5);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2;
+            ch.skill_points = 0.0;
+        }
+        snap.paused_skill_queues.insert(char_id);
+        snap.skill_queues.insert(
+            char_id,
+            vec![eve_db::SkillQueueEntry {
+                type_id: skill_tid,
+                target_level: 5,
+                start_sp: 0.0,
+                end_sp: lvl5_sp,
+                duration_seconds: 100_000.0,
+                started_at_unix: Some(ctx.now_unix()),
+            }],
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    // Partial advance (10s): unpauses queue, advances SP without completing level 1 (<250 SP),
+    // and emits OnServerSkillsChanged + OnNewSkillQueueSaved.
+    let partial_res = handle_batch3_gm_slash_cmd(&ctx, char_id, Some(sys_id), "/completeskills 10")
+        .unwrap()
+        .unwrap();
+    assert_eq!(partial_res.dict_get("remainingQueueLen"), Some(&PyRep::Integer(1)));
+    let partial_sp = match partial_res.dict_get("totalSkillPoints") {
+        Some(PyRep::Real(v)) => *v,
+        other => panic!("expected Real totalSkillPoints, got {other:?}"),
+    };
+    assert!(partial_sp > 0.0 && partial_sp < lvl1_sp);
+    assert!(ctx
+        .db
+        .with_snapshot(|s| !s.paused_skill_queues.contains(&char_id)));
+    let partial_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        partial_notifs.iter().any(|n| n.event == "OnServerSkillsChanged"),
+        "expected OnServerSkillsChanged on partial /completeskills"
+    );
+    assert!(
+        partial_notifs.iter().any(|n| n.event == "OnNewSkillQueueSaved"),
+        "expected OnNewSkillQueueSaved on partial /completeskills"
+    );
+
+    // Complete remaining queue with /trainskills (default "all")
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let complete_res = handle_batch3_gm_slash_cmd(&ctx, char_id, Some(sys_id), "/trainskills")
+        .unwrap()
+        .unwrap();
+    assert_eq!(complete_res.dict_get("remainingQueueLen"), Some(&PyRep::Integer(0)));
+    ctx.db.with_snapshot(|snap| {
+        let trained = snap.skills[&char_id].get(&skill_tid).expect("trained skill");
+        assert_eq!(trained.level, 5);
+        assert!((trained.skill_points - lvl5_sp).abs() < 1e-3);
+    });
+    let complete_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(complete_notifs.iter().any(|n| n.event == "OnSkillTrained"));
+    assert!(complete_notifs.iter().any(|n| n.event == "OnServerSkillsChanged"));
+    assert!(complete_notifs.iter().any(|n| n.event == "OnNewSkillQueueSaved"));
+
+    // Invalid arg fallback to "all" via /finishskills
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.paused_skill_queues.insert(char_id);
+        snap.skill_queues.insert(
+            char_id,
+            vec![eve_db::SkillQueueEntry {
+                type_id: 3403_u32,
+                target_level: 1,
+                start_sp: 0.0,
+                end_sp: 250.0,
+                duration_seconds: 500.0,
+                started_at_unix: Some(ctx.now_unix()),
+            }],
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let alias_res = handle_batch3_gm_slash_cmd(&ctx, char_id, Some(sys_id), "/finishskills all")
+        .unwrap()
+        .unwrap();
+    assert_eq!(alias_res.dict_get("remainingQueueLen"), Some(&PyRep::Integer(0)));
+    let alias_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(alias_notifs.iter().any(|n| n.event == "OnServerSkillsChanged"));
+    assert!(alias_notifs.iter().any(|n| n.event == "OnNewSkillQueueSaved"));
+
+    let fallback_res = handle_batch3_gm_slash_cmd(&ctx, char_id, Some(sys_id), "/completeskills bogus")
+        .unwrap()
+        .unwrap();
+    assert_eq!(fallback_res.dict_get("remainingQueueLen"), Some(&PyRep::Integer(0)));
+
+    // 3. /upwelltimer [structure_id], /structuretimer, /finishstructure
+    let now = ctx.now_unix();
+    let sid_reinf = 1_000_000_901_001_i64;
+    let sid_unanchor = 1_000_000_901_002_i64;
+    let sid_destruct = 1_000_000_901_003_i64;
+    let sid_other_sys = 1_000_000_901_004_i64;
+    let astrahus_tid = 35_832_u32;
+    let corp_id = ctx
+        .db
+        .with_snapshot(|s| s.characters[&char_id].corporation_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+        }
+        snap.structures.insert(
+            sid_reinf,
+            UpwellStructureRecord {
+                structure_id: sid_reinf,
+                type_id: astrahus_tid,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Reinforced Citadel".into(),
+                position: [1_000_000.0, 0.0, 0.0],
+                state: "ArmorReinforced".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 0.0,
+                armor_hp: 10_000.0,
+                hull_hp: 10_000.0,
+                reinforced_until_unix: now + 86_400,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.structures.insert(
+            sid_unanchor,
+            UpwellStructureRecord {
+                structure_id: sid_unanchor,
+                type_id: astrahus_tid,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Unanchoring Citadel".into(),
+                position: [2_000_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 10_000.0,
+                armor_hp: 10_000.0,
+                hull_hp: 10_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.structures.insert(
+            sid_destruct,
+            UpwellStructureRecord {
+                structure_id: sid_destruct,
+                type_id: astrahus_tid,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "SelfDestruct Citadel".into(),
+                position: [3_000_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: false,
+                fuel_blocks: 100,
+                shield_hp: 10_000.0,
+                armor_hp: 10_000.0,
+                hull_hp: 10_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: Some(now + 1_200),
+            },
+        );
+        snap.structures.insert(
+            sid_other_sys,
+            UpwellStructureRecord {
+                structure_id: sid_other_sys,
+                type_id: astrahus_tid,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_002_187,
+                name: "Remote Citadel".into(),
+                position: [4_000_000.0, 0.0, 0.0],
+                state: "ArmorReinforced".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 0.0,
+                armor_hp: 10_000.0,
+                hull_hp: 10_000.0,
+                reinforced_until_unix: now + 86_400,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        let mut ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        ext.unanchoring_until_unix.insert(sid_unanchor, now + 604_800);
+        ext.lifecycle.insert(
+            sid_reinf,
+            crate::services::station_structure::structure_upwell_ops::StructureLifecycleState {
+                repair_until_unix: Some(now + 900),
+                ..Default::default()
+            },
+        );
+        crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+    });
+
+    // Target a single structure_id via /upwelltimer <id>
+    let upwell_one =
+        handle_batch3_gm_slash_cmd(&ctx, char_id, Some(sys_id), &format!("/upwelltimer {sid_reinf}"))
+            .unwrap()
+            .unwrap();
+    assert_eq!(upwell_one.dict_get("updatedCount"), Some(&PyRep::Integer(1)));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&sid_reinf].state, "ArmorVulnerable");
+        assert_eq!(snap.structures[&sid_other_sys].state, "ArmorReinforced");
+    });
+
+    // Fast-forward repair timer left over from exiting ArmorReinforced via /structuretimer <id>
+    let repair_res = handle_batch3_gm_slash_cmd(
+        &ctx,
+        char_id,
+        None,
+        &format!("/structuretimer {sid_reinf}"),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(repair_res.dict_get("updatedCount"), Some(&PyRep::Integer(1)));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&sid_reinf].state, "ShieldVulnerable");
+    });
+
+    // Target all structures in caller's solar system (caller_sys = None falls back to char.solar_system_id)
+    let finish_all = handle_batch3_gm_slash_cmd(&ctx, char_id, None, "/finishstructure")
+        .unwrap()
+        .unwrap();
+    assert_eq!(finish_all.dict_get("updatedCount"), Some(&PyRep::Integer(3)));
+    ctx.db.with_snapshot(|snap| {
+        // sid_unanchor was packaged & removed from structures; sid_destruct was destroyed
+        assert!(!snap.structures.contains_key(&sid_unanchor));
+        assert!(snap
+            .structures
+            .get(&sid_destruct)
+            .is_none_or(|s| s.state == "Destroyed"));
+        // Remote system structure remains untouched
+        assert_eq!(snap.structures[&sid_other_sys].state, "ArmorReinforced");
+    });
+
+    // 4. /completeindustry [job_id], /finishjobs, /industrytimer
+    let job_char = 800_001_i64;
+    let job_corp = 800_002_i64;
+    let job_other = 800_003_i64;
+    let job_delivered = 800_004_i64;
+    let make_job = |job_id: i64, installer_id: i64, status: &str, dur: u64| eve_db::IndustryJobRecord {
+        job_id,
+        installer_id,
+        facility_id: 60_003_760,
+        blueprint_item_id: 700_000 + job_id,
+        blueprint_type_id: 587,
+        activity_id: 1,
+        runs: 1,
+        product_type_id: 587,
+        status: status.into(),
+        duration_seconds: dur,
+        start_unix: now,
+        blueprint_location_id: 60_003_760,
+        output_location_id: 60_003_760,
+        cost: Some(1_000.0),
+        licensed_runs: None,
+        probability: None,
+        completed_unix: None,
+        completed_character_id: None,
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.industry_jobs.insert(job_char, make_job(job_char, char_id, "Active", 3_600));
+        snap.industry_jobs.insert(job_corp, make_job(job_corp, corp_id, "Active", 7_200));
+        snap.industry_jobs.insert(job_other, make_job(job_other, char_id + 99, "Active", 1_800));
+        snap.industry_jobs.insert(job_delivered, make_job(job_delivered, char_id, "Delivered", 600));
+    });
+
+    let ind_one =
+        handle_batch3_gm_slash_cmd(&ctx, char_id, Some(sys_id), &format!("/completeindustry {job_char}"))
+            .unwrap()
+            .unwrap();
+    assert_eq!(ind_one.dict_get("readyJobCount"), Some(&PyRep::Integer(1)));
+    assert_eq!(
+        ind_one.dict_get("jobIDs"),
+        Some(&PyRep::List(vec![PyRep::Integer(job_char)]))
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.industry_jobs[&job_char].start_unix, now.saturating_sub(3_600));
+        assert_eq!(snap.industry_jobs[&job_corp].start_unix, now);
+    });
+
+    // Reset job_char and test /finishjobs & /industrytimer matching caller + corp active jobs only
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.industry_jobs.get_mut(&job_char).unwrap().start_unix = now;
+    });
+    let ind_all = handle_batch3_gm_slash_cmd(&ctx, char_id, Some(sys_id), "/finishjobs")
+        .unwrap()
+        .unwrap();
+    assert_eq!(ind_all.dict_get("readyJobCount"), Some(&PyRep::Integer(2)));
+    assert_eq!(
+        ind_all.dict_get("jobIDs"),
+        Some(&PyRep::List(vec![PyRep::Integer(job_char), PyRep::Integer(job_corp)]))
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.industry_jobs[&job_other].start_unix, now);
+        assert_eq!(snap.industry_jobs[&job_delivered].start_unix, now);
+    });
+    let ind_alias =
+        handle_batch3_gm_slash_cmd(&ctx, char_id, Some(sys_id), &format!("/industrytimer {job_other}"))
+            .unwrap()
+            .unwrap();
+    assert_eq!(ind_alias.dict_get("readyJobCount"), Some(&PyRep::Integer(1)));
+
+    // 5. /cleartimers
+    crate::services::space_destiny::record_session_change_timer(&ctx, char_id, now, sys_id, 0, "test_dock");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.last_clone_jump_unix = now;
+            ch.jump_fatigue_minutes = 125.0;
+            ch.jump_cooldown_until_unix = now + 600;
+            ch.jump_fatigue_until_unix = now + 7_200;
+        }
+    });
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.npc_timers.insert(char_id, now + 300);
+        rt.crimewatch_timer_states.insert(char_id, (1, 1, 1, 0, 0));
+        rt.crimewatch_timer_triggered_at.insert(char_id, [now; 5]);
+        rt.limited_engagements.entry(char_id).or_default().insert(90_000_002, now + 300);
+    });
+
+    let clear_res = handle_batch3_gm_slash_cmd(&ctx, char_id, Some(sys_id), "/cleartimers")
+        .unwrap()
+        .unwrap();
+    assert_eq!(clear_res.dict_get("cleared"), Some(&PyRep::Bool(true)));
+    assert!(crate::services::space_destiny::get_session_change_timer(&ctx, char_id).is_none());
+    ctx.db.with_snapshot(|snap| {
+        let ch = &snap.characters[&char_id];
+        assert_eq!(ch.last_clone_jump_unix, 0);
+        assert_eq!(ch.jump_fatigue_minutes, 0.0);
+        assert_eq!(ch.jump_cooldown_until_unix, 0);
+        assert_eq!(ch.jump_fatigue_until_unix, 0);
+    });
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        assert!(!rt.npc_timers.contains_key(&char_id));
+        assert!(!rt.crimewatch_timer_states.contains_key(&char_id));
+        assert!(!rt.crimewatch_timer_triggered_at.contains_key(&char_id));
+        assert!(!rt.limited_engagements.contains_key(&char_id));
+    });
+}

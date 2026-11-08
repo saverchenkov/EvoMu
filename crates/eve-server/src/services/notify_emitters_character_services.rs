@@ -713,7 +713,9 @@ pub fn emit_milestone_timer_started(ctx: &ServerContext, char_id: i64, time_left
 }
 
 /// Handles Batch 3 GM/QA slash commands (`/achievements reset`, `/chatban`, `/chatunban`,
-/// `/campaign enroll`, `/shutdown cancel`, `/fastcheckout`, `/fwcapture`, `/spawnanomaly`).
+/// `/campaign enroll`, `/shutdown cancel`, `/fastcheckout`, `/fwcapture`, `/spawnanomaly`,
+/// and timer acceleration commands `/advancetime`, `/completeskills`, `/upwelltimer`,
+/// `/completeindustry`, `/cleartimers` plus their aliases).
 pub fn handle_batch3_gm_slash_cmd(
     ctx: &ServerContext,
     caller_cid: i64,
@@ -1025,6 +1027,226 @@ pub fn handle_batch3_gm_slash_cmd(
                 ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
                 ("victoryPoints", PyRep::Integer(new_vp)),
                 ("contestedPercentage", PyRep::Real(contested)),
+            ])))
+        }
+        "/advancetime" | "/fastforward" | "/ff" => {
+            let secs = parts
+                .get(1)
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(3600);
+            ctx.advance_secs(secs);
+            crate::services::space_destiny::clear_session_change_timer(ctx, caller_cid);
+            Some(Ok(PyRep::keyval([
+                ("command", PyRep::String(cmd.to_string())),
+                ("advancedSeconds", PyRep::Integer(secs as i64)),
+                ("nowUnix", PyRep::Integer(ctx.now_unix() as i64)),
+            ])))
+        }
+        "/completeskills" | "/trainskills" | "/finishskills" => {
+            let arg = parts.get(1).copied().unwrap_or("all");
+            let advance_s: f64 = if arg.eq_ignore_ascii_case("all") {
+                31_536_000.0 * 5.0
+            } else if let Ok(secs) = arg.parse::<u64>() {
+                secs as f64
+            } else {
+                31_536_000.0 * 5.0
+            };
+            let (pre_queue_len, pre_skill_state): (usize, Vec<(u32, u8, f64)>) =
+                ctx.db.with_mut_snapshot(|snap| {
+                    snap.paused_skill_queues.remove(&caller_cid);
+                    let mut tids = Vec::new();
+                    let qlen = snap
+                        .skill_queues
+                        .get(&caller_cid)
+                        .map(|q| {
+                            for e in q {
+                                if !tids.contains(&e.type_id) {
+                                    tids.push(e.type_id);
+                                }
+                            }
+                            q.len()
+                        })
+                        .unwrap_or(0);
+                    let skills = snap.skills.get(&caller_cid);
+                    let state = tids
+                        .into_iter()
+                        .map(|tid| {
+                            let (lvl, sp) = skills
+                                .and_then(|m| m.get(&tid))
+                                .map(|r| (r.level, r.skill_points))
+                                .unwrap_or((0, 0.0));
+                            (tid, lvl, sp)
+                        })
+                        .collect();
+                    (qlen, state)
+                });
+            ctx.advance_skill_queues(advance_s);
+            let (rem_q, total_sp, completed_any, partial_tids) = ctx.db.with_snapshot(|snap| {
+                let qlen = snap
+                    .skill_queues
+                    .get(&caller_cid)
+                    .map(|q| q.len())
+                    .unwrap_or(0);
+                let sp = snap
+                    .characters
+                    .get(&caller_cid)
+                    .map(|c| c.skill_points)
+                    .unwrap_or(0.0);
+                let skills = snap.skills.get(&caller_cid);
+                let mut completed_any = qlen < pre_queue_len;
+                let mut partial_tids = Vec::new();
+                for (tid, prev_lvl, prev_sp) in &pre_skill_state {
+                    let (cur_lvl, cur_sp) = skills
+                        .and_then(|m| m.get(tid))
+                        .map(|r| (r.level, r.skill_points))
+                        .unwrap_or((0, 0.0));
+                    if cur_lvl > *prev_lvl {
+                        completed_any = true;
+                    } else if cur_sp > *prev_sp {
+                        partial_tids.push(*tid);
+                    }
+                }
+                (qlen, sp, completed_any, partial_tids)
+            });
+            if !completed_any {
+                if !partial_tids.is_empty() {
+                    crate::services::jump_clone_names::emit_server_skills_changed(
+                        ctx,
+                        caller_cid,
+                        &partial_tids,
+                        Some("SkillTrained"),
+                    );
+                }
+                let _ = ctx.notify_new_skill_queue_saved(
+                    caller_cid,
+                    crate::services::jump_clone_names::skill_queue_rowset(ctx, caller_cid),
+                );
+            }
+            Some(Ok(PyRep::keyval([
+                ("command", PyRep::String(cmd.to_string())),
+                ("remainingQueueLen", PyRep::Integer(rem_q as i64)),
+                ("totalSkillPoints", PyRep::Real(total_sp)),
+            ])))
+        }
+        "/upwelltimer" | "/structuretimer" | "/finishstructure" => {
+            let target_sid_opt = parts.get(1).and_then(|s| s.parse::<i64>().ok());
+            let now = ctx.now_unix();
+            let sys_id = caller_sys
+                .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&caller_cid).map(|c| c.solar_system_id)))
+                .unwrap_or(0);
+            let matched_ids: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {
+                let mut sids: Vec<i64> = snap
+                    .structures
+                    .values()
+                    .filter(|st| match target_sid_opt {
+                        Some(sid) => st.structure_id == sid,
+                        None => st.solar_system_id == sys_id,
+                    })
+                    .map(|st| st.structure_id)
+                    .collect();
+                sids.sort_unstable();
+                let mut ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+                for &sid in &sids {
+                    if let Some(st) = snap.structures.get_mut(&sid) {
+                        if st.reinforced_until_unix > now {
+                            st.reinforced_until_unix = now;
+                        }
+                        if let Some(sd) = st.self_destruct_at_unix {
+                            if sd > now {
+                                st.self_destruct_at_unix = Some(now);
+                            }
+                        }
+                    }
+                    if let Some(u) = ext.unanchoring_until_unix.get_mut(&sid) {
+                        if *u > now {
+                            *u = now;
+                        }
+                    }
+                    if let Some(life) = ext.lifecycle.get_mut(&sid) {
+                        if life.repair_until_unix.is_some_and(|t| t > now) {
+                            life.repair_until_unix = Some(now);
+                        }
+                    }
+                }
+                crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+                sids
+            });
+            let _ = crate::services::station_structure::structure_lifecycle::sync_all_structures(ctx);
+            let transitions: Vec<PyRep> = ctx.db.with_snapshot(|snap| {
+                matched_ids
+                    .iter()
+                    .map(|&sid| {
+                        let st_state = snap
+                            .structures
+                            .get(&sid)
+                            .map(|s| s.state.clone())
+                            .unwrap_or_else(|| "PackagedOrRemoved".into());
+                        PyRep::keyval([
+                            ("structureID", PyRep::Integer(sid)),
+                            ("newState", PyRep::String(st_state)),
+                        ])
+                    })
+                    .collect()
+            });
+            Some(Ok(PyRep::keyval([
+                ("command", PyRep::String(cmd.to_string())),
+                ("updatedCount", PyRep::Integer(transitions.len() as i64)),
+                ("structures", PyRep::List(transitions)),
+            ])))
+        }
+        "/completeindustry" | "/finishjobs" | "/industrytimer" => {
+            let target_job = parts.get(1).and_then(|s| s.parse::<i64>().ok());
+            let now = ctx.now_unix();
+            let corp_id = ctx
+                .db
+                .with_snapshot(|s| s.characters.get(&caller_cid).map(|c| c.corporation_id))
+                .unwrap_or(0);
+            let completed_ids: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {
+                let mut out = Vec::new();
+                for job in snap.industry_jobs.values_mut() {
+                    if job.status != "Active" {
+                        continue;
+                    }
+                    let matches = match target_job {
+                        Some(jid) => job.job_id == jid,
+                        None => job.installer_id == caller_cid || job.installer_id == corp_id,
+                    };
+                    if matches {
+                        job.start_unix = now.saturating_sub(job.duration_seconds.max(1));
+                        out.push(job.job_id);
+                    }
+                }
+                out.sort_unstable();
+                out
+            });
+            Some(Ok(PyRep::keyval([
+                ("command", PyRep::String(cmd.to_string())),
+                ("readyJobCount", PyRep::Integer(completed_ids.len() as i64)),
+                (
+                    "jobIDs",
+                    PyRep::List(completed_ids.into_iter().map(PyRep::Integer).collect()),
+                ),
+            ])))
+        }
+        "/cleartimers" => {
+            crate::services::space_destiny::clear_session_change_timer(ctx, caller_cid);
+            ctx.db.with_mut_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get_mut(&caller_cid) {
+                    ch.last_clone_jump_unix = 0;
+                    ch.jump_fatigue_minutes = 0.0;
+                    ch.jump_cooldown_until_unix = 0;
+                    ch.jump_fatigue_until_unix = 0;
+                }
+            });
+            crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                rt.npc_timers.remove(&caller_cid);
+                rt.crimewatch_timer_states.remove(&caller_cid);
+                rt.crimewatch_timer_triggered_at.remove(&caller_cid);
+                rt.limited_engagements.remove(&caller_cid);
+            });
+            Some(Ok(PyRep::keyval([
+                ("command", PyRep::String(cmd.to_string())),
+                ("cleared", PyRep::Bool(true)),
             ])))
         }
         _ => None,

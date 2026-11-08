@@ -32,11 +32,15 @@ pub fn get_init_vals(ctx: &ServerContext) -> PyRep {
 
 const ALL_REMOTE_SLASH_COMMANDS: &[&str] = &[
     "achievements",
+    "advancetime",
     "autotidi",
     "ban",
     "campaign",
     "chatban",
     "chatunban",
+    "cleartimers",
+    "completeindustry",
+    "completeskills",
     "contact",
     "createccpevent",
     "createitem",
@@ -44,6 +48,11 @@ const ALL_REMOTE_SLASH_COMMANDS: &[&str] = &[
     "downtime",
     "energy",
     "fastcheckout",
+    "fastforward",
+    "ff",
+    "finishjobs",
+    "finishskills",
+    "finishstructure",
     "fit",
     "fwcapture",
     "getattr",
@@ -51,6 +60,7 @@ const ALL_REMOTE_SLASH_COMMANDS: &[&str] = &[
     "giveitem",
     "giveskill",
     "heal",
+    "industrytimer",
     "kick",
     "kill",
     "location",
@@ -70,14 +80,17 @@ const ALL_REMOTE_SLASH_COMMANDS: &[&str] = &[
     "spawnanomaly",
     "spawnnpc",
     "standing",
+    "structuretimer",
     "survey",
     "suspend",
     "teleport",
     "tidi",
     "tr",
+    "trainskills",
     "unban",
     "unspawn",
     "unsuspend",
+    "upwelltimer",
     "whoami",
 ];
 
@@ -115,6 +128,9 @@ pub fn required_slash_role(cmd: &str) -> u64 {
         }
         "/spawn" | "/unspawn" | "/despawn" | "/spawnnpc" => ROLE_SPAWN | ROLE_GM_MASK,
         "/createccpevent" | "/role" => ROLE_GMH | ROLE_GMS | ROLE_ADMIN | ROLE_ROLEADMIN,
+        "/advancetime" | "/fastforward" | "/ff" | "/completeskills" | "/trainskills"
+        | "/finishskills" | "/upwelltimer" | "/structuretimer" | "/finishstructure"
+        | "/completeindustry" | "/finishjobs" | "/industrytimer" | "/cleartimers" => ROLE_GM_MASK,
         _ => ROLE_GM_MASK,
     }
 }

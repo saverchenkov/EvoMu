@@ -889,6 +889,7 @@ impl ServerContext {
                 );
             }
             crate::services::social_corp_fleet::sync_all_alliance_timers(self);
+            let _ = crate::services::station_structure::structure_lifecycle::sync_all_structures(self);
         }
     }
 
@@ -1104,8 +1105,26 @@ impl ServerContext {
         for cid in paused_chars {
             let _ = self.notify_skill_queue_paused_server(cid);
         }
+        let mut trained_by_char: std::collections::BTreeMap<i64, Vec<u32>> =
+            std::collections::BTreeMap::new();
         for (cid, skill_type_id, lvl) in completed_events {
             let _ = self.notify_skill_trained(cid, 0, skill_type_id, lvl);
+            let entry = trained_by_char.entry(cid).or_default();
+            if !entry.contains(&skill_type_id) {
+                entry.push(skill_type_id);
+            }
+        }
+        for (cid, skill_ids) in trained_by_char {
+            crate::services::jump_clone_names::emit_server_skills_changed(
+                self,
+                cid,
+                &skill_ids,
+                Some("SkillTrained"),
+            );
+            let _ = self.notify_new_skill_queue_saved(
+                cid,
+                crate::services::jump_clone_names::skill_queue_rowset(self, cid),
+            );
         }
         for ship_id in invalidated_ships {
             self.invalidate_ship_fitting(ship_id);
