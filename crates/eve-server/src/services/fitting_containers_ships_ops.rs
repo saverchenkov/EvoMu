@@ -199,24 +199,291 @@ pub(crate) async fn handle_ext_tail(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("invbroker", "FitFitting") => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let mut failed: Vec<PyRep> = Vec::new();
-            if let Some(PyRep::List(items) | PyRep::Tuple(items)) = args.get(1) {
-                for entry in items {
-                    if let PyRep::Tuple(t) | PyRep::List(t) = entry {
-                        if t.len() >= 2 {
-                            failed.push(PyRep::Tuple(vec![t[0].clone(), t[1].clone()]));
+            let Some(station_id) = session.station_id.or(session.structure_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "NotDocked".into(),
+                    message: "Fitting requires being docked".into(),
+                }));
+            };
+            if station_id < 1_000_000_000_000
+                && !crate::services::station_structure::npc_station_offers_service(
+                    &ctx.sde,
+                    station_id,
+                    17,
+                )
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "StationServiceUnavailable".into(),
+                    message: format!("Station {station_id} does not offer fitting facilities"),
+                }));
+            }
+            let Some(ship_id) = kwargs
+                .get("shipID")
+                .and_then(|v| v.as_i64())
+                .filter(|&id| id > 0)
+                .or_else(|| args.first().and_then(|v| v.as_i64()).filter(|&id| id > 0))
+                .or(session.ship_id)
+            else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidFittingTarget".into(),
+                    message: "FitFitting requires a valid shipID".into(),
+                }));
+            };
+
+            let mut desired_items: Vec<(eve_sde::TypeId, InventoryFlag, i32)> = Vec::new();
+            let mut expected_ship_type_id: Option<u32> = None;
+
+            if let Some(fid) = kwargs
+                .get("fittingID")
+                .and_then(|v| v.as_i64())
+                .or_else(|| args.get(1).and_then(|v| v.as_i64()))
+            {
+                let Some(saved) = ctx.db.with_snapshot(|s| s.saved_fittings.get(&fid).cloned())
+                else {
+                    return Some(Err(BridgeRpcError {
+                        code: "FittingNotFound".into(),
+                        message: format!("Fitting {fid} not found"),
+                    }));
+                };
+                let authorized = saved.owner_id == char_id
+                    || session
+                        .corporation_id
+                        .is_some_and(|cid| cid > 0 && saved.owner_id == cid)
+                    || session
+                        .alliance_id
+                        .is_some_and(|aid| aid > 0 && saved.owner_id == aid)
+                    || crate::services::inventory_fitting::fitting_mgr_service::is_community_fitting_owner(
+                        saved.owner_id,
+                    );
+                if !authorized {
+                    return Some(Err(BridgeRpcError {
+                        code: "AccessDenied".into(),
+                        message: format!("Not authorized to access fitting {fid}"),
+                    }));
+                }
+                desired_items = saved.items;
+                if saved.ship_type_id > 0 {
+                    expected_ship_type_id = Some(saved.ship_type_id);
+                }
+            } else if let Some(PyRep::List(entries) | PyRep::Tuple(entries)) =
+                kwargs.get("fitData").or_else(|| args.get(1))
+            {
+                let (mut occupied_slots, low_cap, med_cap, hi_cap, rig_cap, sub_cap) =
+                    ctx.db.with_snapshot(|snap| {
+                        let mut occ = std::collections::HashSet::<u16>::new();
+                        let ship_type_id = snap
+                            .items
+                            .get(&ship_id)
+                            .map(|s| s.type_id)
+                            .unwrap_or(0);
+                        for it in snap.items.values() {
+                            if it.location_id == ship_id
+                                && matches!(it.flag as u16, 11..=34 | 92..=94 | 125..=132)
+                                && ctx
+                                    .sde
+                                    .types
+                                    .get(&it.type_id)
+                                    .map(|t| t.category_id)
+                                    != Some(8)
+                            {
+                                occ.insert(it.flag as u16);
+                            }
+                        }
+                        let mut engine =
+                            eve_dogma::ShipFittingEngine::from_sde(ship_id, ship_type_id, &ctx.sde);
+                        for it in snap.items.values() {
+                            if it.location_id == ship_id && matches!(it.flag as u16, 125..=132) {
+                                let _ = engine.fit_module_with_state(
+                                    it.item_id,
+                                    it.type_id,
+                                    it.flag as u16,
+                                    true,
+                                    &ctx.sde,
+                                );
+                            }
+                        }
+                        let low = engine
+                            .ship
+                            .get_attribute(eve_sde::attr_ids::LOW_SLOTS, &ctx.sde)
+                            .max(0.0) as u16;
+                        let med = engine
+                            .ship
+                            .get_attribute(eve_sde::attr_ids::MED_SLOTS, &ctx.sde)
+                            .max(0.0) as u16;
+                        let hi = engine
+                            .ship
+                            .get_attribute(eve_sde::attr_ids::HI_SLOTS, &ctx.sde)
+                            .max(0.0) as u16;
+                        let rig = engine
+                            .ship
+                            .get_attribute(eve_sde::attr_ids::RIG_SLOTS, &ctx.sde)
+                            .max(0.0) as u16;
+                        let sub = if ctx
+                            .sde
+                            .types
+                            .get(&ship_type_id)
+                            .is_some_and(|t| t.group_id == 963)
+                        {
+                            4_u16
+                        } else {
+                            0_u16
+                        };
+                        (occ, low, med, hi, rig, sub)
+                    });
+
+                for entry in entries {
+                    let (PyRep::Tuple(seq) | PyRep::List(seq)) = entry else {
+                        continue;
+                    };
+                    if seq.len() >= 3 {
+                        let (Some(tid), Some(flg)) = (
+                            seq.first().and_then(|v| v.as_i64()),
+                            seq.get(1).and_then(|v| v.as_i64()),
+                        ) else {
+                            continue;
+                        };
+                        let Ok(tid_u32) = u32::try_from(tid) else {
+                            return Some(Err(BridgeRpcError {
+                                code: "ItemNotFound".into(),
+                                message: format!("Invalid typeID {tid}"),
+                            }));
+                        };
+                        let Ok(u16_flg) = u16::try_from(flg) else {
+                            return Some(Err(BridgeRpcError {
+                                code: "InvalidFittingFlag".into(),
+                                message: format!("Invalid flag {flg}"),
+                            }));
+                        };
+                        let is_allowed_flag = matches!(
+                            u16_flg,
+                            5 | 87
+                                | 11..=34
+                                | 92..=94
+                                | 125..=132
+                                | 158
+                                | 133..=151
+                                | 177
+                                | 179
+                                | 181
+                                | 182
+                                | 185
+                        );
+                        if !is_allowed_flag {
+                            return Some(Err(BridgeRpcError {
+                                code: "InvalidFittingFlag".into(),
+                                message: format!("Flag {flg} is not a valid fitting destination"),
+                            }));
+                        }
+                        let qty_i64 = seq.get(2).and_then(|v| v.as_i64()).unwrap_or(1);
+                        let Some(qty) = i32::try_from(qty_i64).ok().filter(|&q| q > 0) else {
+                            return Some(Err(BridgeRpcError {
+                                code: "InvalidQuantity".into(),
+                                message: format!("Invalid quantity {qty_i64}"),
+                            }));
+                        };
+                        if matches!(u16_flg, 11..=34 | 92..=94 | 125..=132)
+                            && ctx.sde.types.get(&tid_u32).map(|t| t.category_id) != Some(8)
+                        {
+                            occupied_slots.insert(u16_flg);
+                        }
+                        desired_items.push((tid_u32, InventoryFlag::from_u16(u16_flg), qty));
+                    } else if seq.len() == 2 {
+                        let (Some(tid), Some(qty_i64)) = (
+                            seq.first().and_then(|v| v.as_i64()),
+                            seq.get(1).and_then(|v| v.as_i64()),
+                        ) else {
+                            continue;
+                        };
+                        let Ok(tid_u32) = u32::try_from(tid) else {
+                            return Some(Err(BridgeRpcError {
+                                code: "ItemNotFound".into(),
+                                message: format!("Invalid typeID {tid}"),
+                            }));
+                        };
+                        let Some(qty) = i32::try_from(qty_i64).ok().filter(|&q| q > 0) else {
+                            return Some(Err(BridgeRpcError {
+                                code: "InvalidQuantity".into(),
+                                message: format!("Invalid quantity {qty_i64}"),
+                            }));
+                        };
+                        let Some(item_type) = ctx.sde.types.get(&tid_u32) else {
+                            return Some(Err(BridgeRpcError {
+                                code: "ItemNotFound".into(),
+                                message: format!("Type {tid_u32} not found in SDE"),
+                            }));
+                        };
+                        if item_type.category_id == 18 {
+                            desired_items.push((tid_u32, InventoryFlag::DroneBay, qty));
+                            continue;
+                        }
+                        if item_type.category_id == 8 {
+                            desired_items.push((tid_u32, InventoryFlag::Cargo, qty));
+                            continue;
+                        }
+                        let effs = &item_type.effect_ids;
+                        let slot_range = if effs.contains(&11) {
+                            Some(11..(11 + low_cap.min(8)))
+                        } else if effs.contains(&13) {
+                            Some(19..(19 + med_cap.min(8)))
+                        } else if effs.contains(&12) {
+                            Some(27..(27 + hi_cap.min(8)))
+                        } else if effs.contains(&2663) {
+                            Some(92..(92 + rig_cap.min(3)))
+                        } else if effs.contains(&3772) {
+                            Some(125..(125 + sub_cap.min(4)))
+                        } else {
+                            None
+                        };
+                        if let Some(range) = slot_range {
+                            for _ in 0..qty {
+                                let Some(free_flag) =
+                                    range.clone().find(|f| !occupied_slots.contains(f))
+                                else {
+                                    return Some(Err(BridgeRpcError {
+                                        code: "UserError".into(),
+                                        message: "SlotIndexExceedsHullSlots".into(),
+                                    }));
+                                };
+                                occupied_slots.insert(free_flag);
+                                desired_items.push((tid_u32, InventoryFlag::from_u16(free_flag), 1));
+                            }
+                        } else {
+                            desired_items.push((tid_u32, InventoryFlag::Cargo, qty));
                         }
                     }
                 }
             }
-            if failed.is_empty() {
-                failed.push(PyRep::Tuple(vec![PyRep::Integer(440), PyRep::Integer(1)]));
-            }
-            Some(Ok(PyRep::List(failed)))
+
+            let (_fitted_count, missing, _moved) =
+                match crate::services::fitting_saved_apply::validate_and_apply_fitting(
+                    ctx,
+                    char_id,
+                    station_id,
+                    &[ship_id],
+                    expected_ship_type_id,
+                    &desired_items,
+                    true,
+                ) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+            let mut missing_rows: Vec<(eve_sde::TypeId, i64)> = missing.into_iter().collect();
+            missing_rows.sort_by_key(|&(tid, _)| tid);
+            Some(Ok(PyRep::List(
+                missing_rows
+                    .into_iter()
+                    .map(|(tid, qty)| {
+                        PyRep::Tuple(vec![
+                            PyRep::Integer(tid as i64),
+                            PyRep::Integer(qty),
+                        ])
+                    })
+                    .collect(),
+            )))
         }
 
         ("invbroker", "GetAssetWorth") => {
@@ -308,7 +575,7 @@ pub(crate) async fn handle_ext_tail(
                 .or_else(|| bound_entry.map(|b| b.object_id))
                 .filter(|&id| id >= 60_000_000);
             let items = ctx.db.get_items_for_character(char_id);
-            let mut rows: Vec<Vec<PyRep>> = items
+            let rows: Vec<Vec<PyRep>> = items
                 .iter()
                 .filter(|it| match st_filter {
                     Some(st_id) => {
@@ -321,12 +588,6 @@ pub(crate) async fn handle_ext_tail(
                 })
                 .map(|it| item_to_packed_cells(ctx, it))
                 .collect();
-            if rows.is_empty() {
-                rows = items
-                    .iter()
-                    .map(|it| item_to_packed_cells(ctx, it))
-                    .collect();
-            }
             Some(Ok(DBRowDescriptor::inv_item_header().build_crowset(rows)))
         }
 
@@ -403,12 +664,33 @@ pub(crate) async fn handle_ext_tail(
         }
 
         ("invbroker", "Reprocess") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
+            let (_, _) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let _ = ctx.db.get_items_for_character(char_id);
-            Some(Ok(PyRep::List(Vec::new())))
+            if session.station_id.or(session.structure_id).is_none() {
+                return Some(Err(BridgeRpcError {
+                    code: "NotDocked".into(),
+                    message: "Reprocessing requires being docked at a station or structure".into(),
+                }));
+            }
+            let has_items = match args.first() {
+                Some(PyRep::List(list)) => list.iter().any(|a| a.as_i64().is_some()),
+                Some(first) => first.as_i64().is_some(),
+                None => false,
+            };
+            if !has_items {
+                return Some(Ok(PyRep::List(Vec::new())));
+            }
+            crate::services::space_entity_mining::handle(
+                ctx,
+                session,
+                "reprocessingSvc",
+                "Reprocess",
+                args,
+                bound_entry,
+            )
+            .await
         }
 
         ("invbroker", "RetrievePassword") => {

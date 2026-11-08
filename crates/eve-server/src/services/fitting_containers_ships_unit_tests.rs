@@ -552,3 +552,200 @@ async fn invbroker_misc_and_encoded_items_decode_item() {
         assert!(res.is_ok(), "{svc}.{method} failed: {:?}", res);
     }
 }
+
+#[tokio::test]
+async fn invbroker_empty_station_hangar_no_fallback_and_fit_reprocess_real() {
+    let (ctx, mut sess) = make_ctx_and_session();
+    let kw = HashMap::new();
+    let char_id = sess.character_id.unwrap();
+    let _ = ctx.db.acquire_online_lock(1, sess.session_id, Some(char_id), true, ctx.now_unix());
+    let ship_id = sess.ship_id.unwrap();
+    let station_id = sess.station_id.unwrap();
+    let empty_station_id = 60_003_761_i64;
+
+    // #537: Querying an empty station must return 0 rows, not fallback to universe items
+    for method in ["ListStationItems", "ListIncludingContainers"] {
+        let rep = handle_containers_ships_and_fitting(
+            &ctx,
+            &mut sess,
+            None,
+            "invbroker",
+            method,
+            &[PyRep::Integer(empty_station_id)],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("empty station list ok");
+        let rows = match rep {
+            PyRep::ObjectEx { ref list, .. } => list.len(),
+            _ => panic!("expected CRowset ObjectEx, got {rep:?}"),
+        };
+        assert_eq!(rows, 0, "{method} leaked universe items into empty station");
+    }
+
+    // #582: invbroker.FitFitting fits real items, emits OnItemChange, and only reports truly missing items
+    let mut lo_mods = ctx
+        .sde
+        .types
+        .values()
+        .filter(|t| {
+            t.published
+                && t.category_id == 7
+                && t.effect_ids.contains(&11)
+                && !t.default_attributes.contains_key(&182)
+                && !t.default_attributes.contains_key(&1544)
+                && !t.default_attributes.contains_key(&1548)
+                && !t.default_attributes.contains_key(&2431)
+                && t.volume <= 10.0
+        })
+        .map(|t| t.type_id)
+        .collect::<Vec<_>>();
+    lo_mods.sort_unstable();
+    let hi_mod_tid = lo_mods[0];
+    let missing_mod_tid = lo_mods[1];
+    let mod_item_id = 880_901_i64;
+    let ore_item_id = 880_902_i64;
+    let mod_item_id_2 = 880_903_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.location_id = station_id;
+        }
+        snap.items.insert(
+            mod_item_id,
+            InventoryItemRecord {
+                item_id: mod_item_id,
+                type_id: hi_mod_tid,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_item_id_2,
+            InventoryItemRecord {
+                item_id: mod_item_id_2,
+                type_id: hi_mod_tid,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            ore_item_id,
+            InventoryItemRecord {
+                item_id: ore_item_id,
+                type_id: 1230, // Veldspar
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1_000,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let fit_partial = handle_containers_ships_and_fitting(
+        &ctx,
+        &mut sess,
+        None,
+        "invbroker",
+        "FitFitting",
+        &[
+            PyRep::Integer(ship_id),
+            PyRep::List(vec![
+                PyRep::Tuple(vec![PyRep::Integer(hi_mod_tid as i64), PyRep::Integer(1)]),
+                PyRep::Tuple(vec![PyRep::Integer(missing_mod_tid as i64), PyRep::Integer(1)]),
+            ]),
+        ],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("FitFitting ok");
+    assert_eq!(
+        fit_partial,
+        PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(missing_mod_tid as i64),
+            PyRep::Integer(1),
+        ])]),
+        "FitFitting must return only genuinely missing items"
+    );
+    let notifs_after = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs_after
+            .iter()
+            .any(|n| n.event == "OnItemChange"),
+        "FitFitting must emit OnItemChange when items move onto ship"
+    );
+    ctx.db.with_snapshot(|snap| {
+        let on_ship_count = [mod_item_id, mod_item_id_2]
+            .into_iter()
+            .filter(|id| snap.items[id].location_id == ship_id)
+            .count();
+        assert_eq!(on_ship_count, 1, "one module must have moved onto the ship");
+    });
+
+    let fit_full = handle_containers_ships_and_fitting(
+        &ctx,
+        &mut sess,
+        None,
+        "invbroker",
+        "FitFitting",
+        &[
+            PyRep::Integer(ship_id),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(hi_mod_tid as i64),
+                PyRep::Integer(1),
+            ])]),
+        ],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("full FitFitting ok");
+    assert_eq!(fit_full, PyRep::List(Vec::new()));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&mod_item_id].location_id, ship_id);
+        assert_eq!(snap.items[&mod_item_id_2].location_id, ship_id);
+    });
+
+    // #582: invbroker.Reprocess delegates to real reprocessing instead of no-op
+    let reproc = handle_containers_ships_and_fitting(
+        &ctx,
+        &mut sess,
+        None,
+        "invbroker",
+        "Reprocess",
+        &[PyRep::List(vec![PyRep::Integer(ore_item_id)])],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("invbroker.Reprocess real ok");
+    assert_ne!(reproc, PyRep::List(Vec::new()));
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            !snap.items.contains_key(&ore_item_id),
+            "Veldspar stack should be consumed by invbroker.Reprocess"
+        );
+        let tritanium_qty: i64 = snap
+            .items
+            .values()
+            .filter(|it| it.owner_id == char_id && it.location_id == station_id && it.type_id == 34)
+            .map(|it| i64::from(it.quantity))
+            .sum();
+        assert!(tritanium_qty > 0, "Tritanium minerals must be yielded in hangar");
+    });
+}

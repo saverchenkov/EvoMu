@@ -131,11 +131,46 @@ pub async fn handle_fit_ships(
         }
     }
 
+    let (fitted_count, missing, _moved_items) = match validate_and_apply_fitting(
+        ctx,
+        char_id,
+        station_id,
+        &target_ship_ids,
+        expected_ship_type_id,
+        &desired_items,
+        false,
+    ) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let first_ship = target_ship_ids.first().copied().unwrap_or(0);
+    let missing_entries: Vec<(PyRep, PyRep)> = missing
+        .into_iter()
+        .map(|(t, q)| (PyRep::Integer(t as i64), PyRep::Integer(q)))
+        .collect();
+    Some(Ok(PyRep::keyval([
+        ("shipID", PyRep::Integer(first_ship)),
+        ("fittedCount", PyRep::Integer(fitted_count)),
+        ("missingItems", PyRep::Dict(missing_entries)),
+    ])))
+}
+
+/// Validates and fits `desired_items` from `char_id`'s Hangar at `station_id` onto `target_ship_ids`.
+/// Returns `(fitted_count, missing_by_type, moved_items)`.
+pub(crate) fn validate_and_apply_fitting(
+    ctx: &ServerContext,
+    char_id: i64,
+    station_id: i64,
+    target_ship_ids: &[i64],
+    expected_ship_type_id: Option<u32>,
+    desired_items: &[(TypeId, InventoryFlag, i32)],
+    emit_single_item_change: bool,
+) -> Result<(i64, HashMap<TypeId, i64>, Vec<eve_db::InventoryItemRecord>), BridgeRpcError> {
     let ship_check = ctx.db.with_snapshot(|snap| {
         crate::services::structure_acl_defense_rules::validate_docked_ship_fitting_facility_in_snap(
             ctx, snap, station_id,
         )?;
-        for &ship_id in &target_ship_ids {
+        for &ship_id in target_ship_ids {
             let Some(sh) = snap.items.get(&ship_id) else {
                 return Err(BridgeRpcError {
                     code: "ShipNotFound".into(),
@@ -222,7 +257,7 @@ pub async fn handle_fit_ships(
 
             let mut planned_mod_slots = HashSet::new();
             let mut planned_charge_slots = HashSet::new();
-            for &(tid, flag, _) in &desired_items {
+            for &(tid, flag, _) in desired_items {
                 let flag_u16 = flag as u16;
                 if matches!(flag_u16, 11..=34 | 92..=94 | 125..=132) {
                     let is_charge = ctx.sde.types.get(&tid).map(|t| t.category_id) == Some(8);
@@ -264,7 +299,7 @@ pub async fn handle_fit_ships(
                 }
             }
             // SDE slot effects and rig size validation
-            for &(tid, flag, req_qty) in &desired_items {
+            for &(tid, flag, req_qty) in desired_items {
                 if req_qty <= 0 {
                     return Err(BridgeRpcError {
                         code: "InvalidQuantity".into(),
@@ -472,7 +507,7 @@ pub async fn handle_fit_ships(
             }
 
             // maxGroupFitted (1544 / 1548) and maxTypeFitted (2431 or 1548->1544)
-            for &(tid, flag, _) in &desired_items {
+            for &(tid, flag, _) in desired_items {
                 let flag_u16 = flag as u16;
                 if matches!(flag_u16, 11..=34 | 92..=94 | 125..=132) {
                     let Some(m_type) = ctx.sde.types.get(&tid) else { continue; };
@@ -553,7 +588,7 @@ pub async fn handle_fit_ships(
                 .copied()
                 .unwrap_or(0.0);
             let mut new_drone_vol: f64 = 0.0;
-            for &(tid, flag, req_qty) in &desired_items {
+            for &(tid, flag, req_qty) in desired_items {
                 if flag == eve_db::InventoryFlag::DroneBay {
                     let Some(d_type) = ctx.sde.types.get(&tid) else {
                         return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Type {tid} not found") });
@@ -584,7 +619,7 @@ pub async fn handle_fit_ships(
                 .copied()
                 .unwrap_or(0.0);
             let mut new_fighter_vol: f64 = 0.0;
-            for &(tid, flag, req_qty) in &desired_items {
+            for &(tid, flag, req_qty) in desired_items {
                 if flag as u16 == 158 {
                     if ship_fighter_cap <= 0.0 {
                         return Err(BridgeRpcError {
@@ -617,7 +652,7 @@ pub async fn handle_fit_ships(
                 }
             }
 
-            for &(tid, flag, _) in &desired_items {
+            for &(tid, flag, _) in desired_items {
                 let flag_u16 = flag as u16;
                 let is_specialized_hold = matches!(flag_u16, 133..=151 | 177 | 179 | 181 | 182 | 185);
                 if is_specialized_hold {
@@ -698,7 +733,7 @@ pub async fn handle_fit_ships(
         }
         let mut seen_mod_slots = std::collections::HashSet::new();
         let mut seen_charge_slots = std::collections::HashSet::new();
-        for &(tid, flag, req_qty) in &desired_items {
+        for &(tid, flag, req_qty) in desired_items {
             if req_qty <= 0 {
                 return Err(BridgeRpcError {
                     code: "InvalidQuantity".into(),
@@ -740,10 +775,10 @@ pub async fn handle_fit_ships(
         Ok(())
     });
     if let Err(e) = ship_check {
-        return Some(Err(e));
+        return Err(e);
     }
 
-    let mut sorted_desired = desired_items.clone();
+    let mut sorted_desired = desired_items.to_vec();
     sorted_desired.sort_by_key(|&(tid, flag, _)| {
         let cat = ctx.sde.types.get(&tid).map(|t| t.category_id).unwrap_or(0);
         if cat == 8 {
@@ -765,7 +800,7 @@ pub async fn handle_fit_ships(
     let char_skills = ctx.character_skill_levels(char_id);
     let alsc_locked = crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state(ctx).alsc_locked_items;
     ctx.db.with_mut_snapshot(|snap| {
-        for &ship_id in &target_ship_ids {
+        for &ship_id in target_ship_ids {
             let ship_type_id = snap.items.get(&ship_id).map(|s| s.type_id).unwrap_or(0);
             let mut engine = eve_dogma::ShipFittingEngine::from_sde(ship_id, ship_type_id, &ctx.sde)
                 .with_character_skills(char_skills.clone());
@@ -898,46 +933,68 @@ pub async fn handle_fit_ships(
         }
     });
 
-    for &ship_id in &target_ship_ids {
+    for &ship_id in target_ship_ids {
         ctx.invalidate_ship_fitting(ship_id);
     }
     if fitted_count > 0 && !moved_items.is_empty() {
-        let items_py: Vec<PyRep> = moved_items
-            .iter()
-            .map(|item| {
-                PyRep::keyval([
-                    ("itemID", PyRep::Integer(item.item_id)),
-                    ("typeID", PyRep::Integer(item.type_id as i64)),
-                    ("ownerID", PyRep::Integer(char_id)),
-                    ("locationID", PyRep::Integer(item.location_id)),
-                    ("flagID", PyRep::Integer(item.flag as i64)),
-                    ("quantity", PyRep::Integer(item.quantity as i64)),
-                ])
-            })
-            .collect();
-        ctx.notify(
-            crate::router::NotificationTarget::Character(char_id),
-            "OnMultipleItemChange",
-            "charid",
-            vec![
-                PyRep::List(items_py),
-                PyRep::Dict(vec![
-                    (PyRep::Integer(3), PyRep::Integer(station_id)),
-                    (PyRep::Integer(4), PyRep::Integer(eve_db::InventoryFlag::Hangar as i64)),
-                ]),
-            ],
-        );
+        if emit_single_item_change {
+            for item in &moved_items {
+                ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnItemChange",
+                    "charid",
+                    vec![
+                        PyRep::keyval([
+                            ("itemID", PyRep::Integer(item.item_id)),
+                            ("typeID", PyRep::Integer(item.type_id as i64)),
+                            ("ownerID", PyRep::Integer(char_id)),
+                            ("locationID", PyRep::Integer(item.location_id)),
+                            ("flagID", PyRep::Integer(item.flag as i64)),
+                            ("quantity", PyRep::Integer(item.quantity as i64)),
+                            ("singleton", PyRep::Bool(item.singleton)),
+                        ]),
+                        PyRep::Dict(vec![
+                            (PyRep::Integer(3), PyRep::Integer(station_id)),
+                            (
+                                PyRep::Integer(4),
+                                PyRep::Integer(eve_db::InventoryFlag::Hangar as i64),
+                            ),
+                        ]),
+                    ],
+                );
+            }
+        } else {
+            let items_py: Vec<PyRep> = moved_items
+                .iter()
+                .map(|item| {
+                    PyRep::keyval([
+                        ("itemID", PyRep::Integer(item.item_id)),
+                        ("typeID", PyRep::Integer(item.type_id as i64)),
+                        ("ownerID", PyRep::Integer(char_id)),
+                        ("locationID", PyRep::Integer(item.location_id)),
+                        ("flagID", PyRep::Integer(item.flag as i64)),
+                        ("quantity", PyRep::Integer(item.quantity as i64)),
+                    ])
+                })
+                .collect();
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnMultipleItemChange",
+                "charid",
+                vec![
+                    PyRep::List(items_py),
+                    PyRep::Dict(vec![
+                        (PyRep::Integer(3), PyRep::Integer(station_id)),
+                        (
+                            PyRep::Integer(4),
+                            PyRep::Integer(eve_db::InventoryFlag::Hangar as i64),
+                        ),
+                    ]),
+                ],
+            );
+        }
     }
-    let first_ship = target_ship_ids.first().copied().unwrap_or(0);
-    let missing_entries: Vec<(PyRep, PyRep)> = missing
-        .into_iter()
-        .map(|(t, q)| (PyRep::Integer(t as i64), PyRep::Integer(q)))
-        .collect();
-    Some(Ok(PyRep::keyval([
-        ("shipID", PyRep::Integer(first_ship)),
-        ("fittedCount", PyRep::Integer(fitted_count)),
-        ("missingItems", PyRep::Dict(missing_entries)),
-    ])))
+    Ok((fitted_count, missing, moved_items))
 }
 
 pub(crate) fn is_item_allowed_in_ship_hold(
