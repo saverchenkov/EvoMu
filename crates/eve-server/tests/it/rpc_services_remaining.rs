@@ -2581,10 +2581,16 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
 
-async fn setup_pilot(ctx: &ServerContext, sid: u64, char_id: i64) -> SessionState {
+async fn setup_pilot_creds(
+    ctx: &ServerContext,
+    sid: u64,
+    user: &str,
+    pass: &str,
+    char_id: i64,
+) -> SessionState {
     let kw = HashMap::new();
     let mut sess = SessionState::new(sid);
-    common::login_pilot(ctx, &mut sess, "demo", "demo-secret").await;
+    common::login_pilot(ctx, &mut sess, user, pass).await;
     ctx.dispatch_rpc(
         &mut sess,
         "charUnboundMgr",
@@ -2597,6 +2603,10 @@ async fn setup_pilot(ctx: &ServerContext, sid: u64, char_id: i64) -> SessionStat
     .await
     .expect("SelectCharacterID");
     sess
+}
+
+async fn setup_pilot(ctx: &ServerContext, sid: u64, char_id: i64) -> SessionState {
+    setup_pilot_creds(ctx, sid, "demo", "demo-secret", char_id).await
 }
 
 async fn rpc(
@@ -2754,6 +2764,89 @@ async fn test_rpc_solid_charmgr_settings_persistence() {
         .expect("GetCharacterSettings restored on login");
     assert_eq!(login_settings.dict_get("audio_mute"), Some(&PyRep::Bool(false)));
     assert_eq!(login_settings.dict_get("overview_tab"), None);
+}
+
+#[tokio::test]
+async fn test_collect_my_page_info_dynamic_contracts_and_no_jita_dummy() {
+    let ctx = ServerContext::new();
+    let mut s1 = setup_pilot(&ctx, 41_201, 90_000_001).await;
+    let mut s2 = setup_pilot_creds(&ctx, 41_202, "other", "other-secret", 90_000_002).await;
+    s1.role |= eve_machonet::service_roles::ROLE_GMH;
+    let st_id = s1.station_id.unwrap_or(60_003_760);
+    let p1_corp = s1.corporation_id.unwrap_or(1_000_009);
+
+    // 1. Clean P2 session has zero contracts and empty outstandingContracts (no 60003760 dummy)
+    let p2_empty = rpc(&ctx, &mut s2, "contractProxy", "CollectMyPageInfo", &[])
+        .await
+        .expect("CollectMyPageInfo empty");
+    assert_eq!(
+        p2_empty.dict_get("numOutstandingContractsNonCorp"),
+        Some(&PyRep::Integer(0))
+    );
+    assert_eq!(
+        p2_empty.dict_get("outstandingContracts"),
+        Some(&PyRep::List(Vec::new()))
+    );
+
+    // 2. P1 creates an item via slash and assigns a personal ItemExchange contract to P2
+    let item_id = rpc(&ctx, &mut s1, "slash", "SlashCmd", &[PyRep::String("/createitem 34 10".into())])
+        .await
+        .expect("/createitem")
+        .dict_get("itemID")
+        .and_then(|v| v.as_i64())
+        .expect("itemID");
+    let created = rpc(
+        &ctx,
+        &mut s1,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("contractType", PyRep::Integer(1)),
+            ("availability", PyRep::Integer(1)),
+            ("assigneeID", PyRep::Integer(90_000_002)),
+            ("expireTime", PyRep::Integer(1440)),
+            ("numDays", PyRep::Integer(1)),
+            ("startStationID", PyRep::Integer(st_id)),
+            ("endStationID", PyRep::Integer(st_id)),
+            ("price", PyRep::Real(0.0)),
+            ("reward", PyRep::Real(0.0)),
+            ("collateral", PyRep::Real(0.0)),
+            ("title", PyRep::String("PageInfoTest".into())),
+            ("itemList", PyRep::List(vec![PyRep::Integer(item_id)])),
+        ])],
+    )
+    .await
+    .expect("CreateContract");
+    assert!(created.as_i64().or_else(|| created.dict_get("contractID").and_then(|v| v.as_i64())).is_some());
+
+    // 3. P1 sees numOutstandingContractsNonCorp == 1; P2 sees exact assigned 4-tuple and requires-attention == 1
+    let p1_info = rpc(&ctx, &mut s1, "contractProxy", "CollectMyPageInfo", &[])
+        .await
+        .expect("CollectMyPageInfo P1");
+    assert_eq!(
+        p1_info.dict_get("numOutstandingContractsNonCorp"),
+        Some(&PyRep::Integer(1))
+    );
+    let p2_info = rpc(&ctx, &mut s2, "contractProxy", "CollectMyPageInfo", &[])
+        .await
+        .expect("CollectMyPageInfo P2");
+    assert_eq!(
+        p2_info.dict_get("numRequiresAttention"),
+        Some(&PyRep::Integer(1))
+    );
+    let Some(PyRep::List(outstanding)) = p2_info.dict_get("outstandingContracts") else {
+        panic!("expected outstandingContracts List");
+    };
+    let expected = PyRep::Tuple(vec![
+        PyRep::Integer(90_000_001),
+        PyRep::Integer(p1_corp),
+        PyRep::Integer(90_000_002),
+        PyRep::Integer(1),
+    ]);
+    assert!(
+        outstanding.contains(&expected),
+        "expected {expected:?} in {outstanding:?}"
+    );
 }
 
 }

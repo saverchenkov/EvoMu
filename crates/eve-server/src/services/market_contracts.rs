@@ -1140,34 +1140,130 @@ pub fn handle(
         ("contractProxy", "CollectMyPageInfo") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let corp_id = session.corporation_id.unwrap_or(0);
-            let (non_corp, for_corp) = ctx.db.with_snapshot(|snap| {
-                let nc = snap.contracts.values().filter(|c| c.issuer_id == char_id && c.status == "Outstanding").count() as i64;
-                let fc = snap.contracts.values().filter(|c| c.issuer_id == corp_id && corp_id != 0 && c.status == "Outstanding").count() as i64;
-                (nc, fc)
+            let (
+                non_corp,
+                for_corp,
+                num_bidding_on,
+                num_bidding_on_corp,
+                num_in_progress,
+                num_in_progress_corp,
+                num_requires_attention,
+                num_requires_attention_corp,
+                outstanding_contracts,
+            ) = ctx.db.with_snapshot(|snap| {
+                let mut nc: i64 = 0;
+                let mut fc: i64 = 0;
+                let mut bid: i64 = 0;
+                let mut bid_corp: i64 = 0;
+                let mut in_prog: i64 = 0;
+                let mut in_prog_corp: i64 = 0;
+                let mut req_attn: i64 = 0;
+                let mut req_attn_corp: i64 = 0;
+                let mut assigned: Vec<(i64, PyRep)> = Vec::new();
+
+                for c in snap.contracts.values() {
+                    let is_personal_issuer = c.issuer_id == char_id && !c.for_corp;
+                    let is_corp_issuer = corp_id != 0
+                        && ((c.for_corp
+                            && (c.issuer_corp_id == corp_id || c.issuer_id == corp_id))
+                            || (!c.for_corp && c.issuer_id == corp_id));
+                    let is_outstanding = c.status == "Outstanding";
+                    let is_in_progress = c.status == "InProgress";
+                    let needs_resolution = matches!(c.status.as_str(), "Expired" | "Failed");
+
+                    if is_outstanding {
+                        if is_personal_issuer {
+                            nc += 1;
+                        }
+                        if is_corp_issuer {
+                            fc += 1;
+                        }
+                        if c.contract_type == "Auction" {
+                            if c.current_bidder_id == Some(char_id)
+                                || c.bid_history.iter().any(|&(b, _, _)| b == char_id)
+                            {
+                                bid += 1;
+                            }
+                            if corp_id != 0
+                                && (c.current_bidder_id == Some(corp_id)
+                                    || c.bid_history.iter().any(|&(b, _, _)| b == corp_id))
+                            {
+                                bid_corp += 1;
+                            }
+                        }
+                        if c.assignee_id != 0 {
+                            let assigned_to_char = c.assignee_id == char_id;
+                            let assigned_to_corp = corp_id != 0 && c.assignee_id == corp_id;
+                            if assigned_to_char {
+                                req_attn += 1;
+                            }
+                            if assigned_to_corp {
+                                req_attn_corp += 1;
+                            }
+                            if assigned_to_char || assigned_to_corp {
+                                let contract_type_id = match c.contract_type.as_str() {
+                                    "ItemExchange" => 1,
+                                    "Auction" => 2,
+                                    "Courier" => 3,
+                                    _ => 0,
+                                };
+                                assigned.push((
+                                    c.contract_id,
+                                    PyRep::Tuple(vec![
+                                        PyRep::Integer(c.issuer_id),
+                                        PyRep::Integer(c.issuer_corp_id),
+                                        PyRep::Integer(c.assignee_id),
+                                        PyRep::Integer(contract_type_id),
+                                    ]),
+                                ));
+                            }
+                        }
+                    } else if is_in_progress {
+                        if is_personal_issuer || c.acceptor_id == Some(char_id) {
+                            in_prog += 1;
+                        }
+                        if is_corp_issuer || (corp_id != 0 && c.acceptor_id == Some(corp_id)) {
+                            in_prog_corp += 1;
+                        }
+                    } else if needs_resolution {
+                        if is_personal_issuer {
+                            req_attn += 1;
+                        }
+                        if is_corp_issuer {
+                            req_attn_corp += 1;
+                        }
+                    }
+                }
+
+                assigned.sort_by_key(|(cid, _)| *cid);
+                let assigned_rows = assigned.into_iter().map(|(_, row)| row).collect();
+                (
+                    nc,
+                    fc,
+                    bid,
+                    bid_corp,
+                    in_prog,
+                    in_prog_corp,
+                    req_attn,
+                    req_attn_corp,
+                    assigned_rows,
+                )
             });
             Some(Ok(PyRep::keyval([
                 ("numOutstandingContracts", PyRep::Integer(non_corp + for_corp)),
                 ("numOutstandingContractsForCorp", PyRep::Integer(for_corp)),
                 ("numOutstandingContractsNonCorp", PyRep::Integer(non_corp)),
-                ("numBiddingOn", PyRep::Integer(0)),
-                ("numBiddingOnCorp", PyRep::Integer(0)),
+                ("numBiddingOn", PyRep::Integer(num_bidding_on)),
+                ("numBiddingOnCorp", PyRep::Integer(num_bidding_on_corp)),
                 ("numContractsLeft", PyRep::Integer((21 - non_corp).max(0))),
                 ("numContractsLeftForCorp", PyRep::Integer((21 - for_corp).max(0))),
                 ("numContractsLeftInCorp", PyRep::Integer((500 - for_corp).max(0))),
                 ("numContractsTotal", PyRep::Integer(21)),
-                ("numInProgress", PyRep::Integer(0)),
-                ("numInProgressCorp", PyRep::Integer(0)),
-                ("numRequiresAttention", PyRep::Integer(0)),
-                ("numRequiresAttentionCorp", PyRep::Integer(0)),
-                (
-                    "outstandingContracts",
-                    PyRep::List(vec![PyRep::Tuple(vec![
-                        PyRep::Integer(char_id),
-                        PyRep::Integer(char_id),
-                        PyRep::Integer(60_003_760),
-                        PyRep::Integer(ctx.now_blueos_filetime_ticks() + 86_400 * 10_000_000),
-                    ])]),
-                ),
+                ("numInProgress", PyRep::Integer(num_in_progress)),
+                ("numInProgressCorp", PyRep::Integer(num_in_progress_corp)),
+                ("numRequiresAttention", PyRep::Integer(num_requires_attention)),
+                ("numRequiresAttentionCorp", PyRep::Integer(num_requires_attention_corp)),
+                ("outstandingContracts", PyRep::List(outstanding_contracts)),
                 ("timeout", PyRep::Integer(ctx.now_blueos_filetime_ticks() + 300 * 10_000_000)),
             ])))
         }
@@ -1209,8 +1305,12 @@ pub fn handle(
                 } else {
                     InventoryFlag::Hangar
                 };
+                let mut transferred_ids = Vec::new();
                 for iid in &c.item_ids {
                     if let Some(it) = snap.items.get_mut(iid) {
+                        if it.owner_id != winner {
+                            transferred_ids.push(*iid);
+                        }
                         it.owner_id = winner; it.location_id = c.start_station_id; it.flag = target_flag; it.version += 1;
                     }
                 }
@@ -1230,9 +1330,14 @@ pub fn handle(
                     }
                 }
                 if let Some(cm) = snap.contracts.get_mut(&cid) { cm.acceptor_id = Some(winner); cm.status = "Finished".to_string(); }
-                Ok(true)
+                Ok(transferred_ids)
             });
-            Some(res.map(PyRep::Bool))
+            if let Ok(ref transferred_ids) = res {
+                if !transferred_ids.is_empty() {
+                    crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, transferred_ids);
+                }
+            }
+            Some(res.map(|_| PyRep::Bool(true)))
         }
         ("contractProxy", "GetCourierContractFromItemID") => {
             let (_, _char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };

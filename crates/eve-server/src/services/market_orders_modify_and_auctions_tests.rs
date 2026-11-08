@@ -357,3 +357,142 @@ fn plex_orders_history_and_contract_auction_finish_lifecycle() {
     let order_hist = handle(&ctx, &mut sess, "marketProxy", "GetMarketOrderHistory", &[PyRep::Bool(true)], &kw).unwrap().unwrap();
     assert_eq!(order_hist.row_count(), Some(0));
 }
+
+#[test]
+fn collect_my_page_info_computes_counts_and_outstanding_contracts_dynamically() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let peer_id = 90_000_002_i64;
+    let corp_id = ctx.db.with_snapshot(|s| s.characters[&char_id].corporation_id);
+    let peer_corp_id = 98_000_777_i64;
+    let mut sess = jita_session(char_id, corp_id);
+    let kw = HashMap::new();
+
+    // 1. Fresh character with no contracts must return empty outstandingContracts (no hardcoded station dummy) and 0 counts.
+    let empty_info = handle(&ctx, &mut sess, "contractProxy", "CollectMyPageInfo", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        empty_info.dict_get("numOutstandingContractsNonCorp").and_then(PyRep::as_i64),
+        Some(0)
+    );
+    assert_eq!(
+        empty_info.dict_get("numOutstandingContractsForCorp").and_then(PyRep::as_i64),
+        Some(0)
+    );
+    assert_eq!(
+        empty_info.dict_get("outstandingContracts"),
+        Some(&PyRep::List(Vec::new()))
+    );
+
+    // 2. Seed diverse personal/corp contracts across Outstanding, InProgress, Rejected/Expired attention, and Auction bids.
+    ctx.db.with_mut_snapshot(|s| {
+        s.contracts.insert(
+            701,
+            ContractRecord {
+                contract_id: 701,
+                issuer_id: char_id,
+                issuer_corp_id: corp_id,
+                assignee_id: peer_id,
+                contract_type: "Courier".to_string(),
+                status: "Outstanding".to_string(),
+                for_corp: false,
+                start_station_id: JITA_STATION_ID,
+                end_station_id: JITA_STATION_ID,
+                ..Default::default()
+            },
+        );
+        s.contracts.insert(
+            702,
+            ContractRecord {
+                contract_id: 702,
+                issuer_id: char_id,
+                issuer_corp_id: corp_id,
+                acceptor_id: Some(peer_id),
+                assignee_id: 0,
+                contract_type: "Courier".to_string(),
+                status: "InProgress".to_string(),
+                for_corp: true,
+                start_station_id: JITA_STATION_ID,
+                end_station_id: JITA_STATION_ID,
+                ..Default::default()
+            },
+        );
+        s.contracts.insert(
+            703,
+            ContractRecord {
+                contract_id: 703,
+                issuer_id: peer_id,
+                issuer_corp_id: peer_corp_id,
+                assignee_id: char_id,
+                contract_type: "ItemExchange".to_string(),
+                status: "Outstanding".to_string(),
+                for_corp: false,
+                start_station_id: JITA_STATION_ID,
+                end_station_id: JITA_STATION_ID,
+                ..Default::default()
+            },
+        );
+        s.contracts.insert(
+            704,
+            ContractRecord {
+                contract_id: 704,
+                issuer_id: peer_id,
+                issuer_corp_id: peer_corp_id,
+                assignee_id: 0,
+                contract_type: "Auction".to_string(),
+                status: "Outstanding".to_string(),
+                for_corp: false,
+                current_bidder_id: Some(char_id),
+                start_station_id: JITA_STATION_ID,
+                end_station_id: JITA_STATION_ID,
+                ..Default::default()
+            },
+        );
+    });
+
+    let info = handle(&ctx, &mut sess, "contractProxy", "CollectMyPageInfo", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        info.dict_get("numOutstandingContractsNonCorp").and_then(PyRep::as_i64),
+        Some(1)
+    );
+    assert_eq!(
+        info.dict_get("numOutstandingContractsForCorp").and_then(PyRep::as_i64),
+        Some(0)
+    );
+    assert_eq!(
+        info.dict_get("numInProgress").and_then(PyRep::as_i64),
+        Some(0)
+    );
+    assert_eq!(
+        info.dict_get("numInProgressCorp").and_then(PyRep::as_i64),
+        Some(1)
+    );
+    assert_eq!(
+        info.dict_get("numRequiresAttention").and_then(PyRep::as_i64),
+        Some(1)
+    );
+    assert_eq!(
+        info.dict_get("numBiddingOn").and_then(PyRep::as_i64),
+        Some(1)
+    );
+    let Some(PyRep::List(entries)) = info.dict_get("outstandingContracts") else {
+        panic!("expected outstandingContracts List");
+    };
+    let expected = PyRep::Tuple(vec![
+        PyRep::Integer(peer_id),
+        PyRep::Integer(peer_corp_id),
+        PyRep::Integer(char_id),
+        PyRep::Integer(1),
+    ]);
+    assert!(
+        entries.contains(&expected),
+        "expected assigned ItemExchange tuple {expected:?} in {entries:?}"
+    );
+    assert!(
+        !entries.iter().any(|e| format!("{e:?}").contains("60003760")),
+        "hardcoded Jita dummy must not appear in {entries:?}"
+    );
+}
