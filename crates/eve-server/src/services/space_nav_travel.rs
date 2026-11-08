@@ -1289,15 +1289,9 @@ pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
                 cloaking_skill as u8,
             );
         if !cs.is_cloaked {
-            let orig_v = cs.cloak_original_max_velocity.unwrap_or_else(|| {
-                if vel_mult > 1e-6 && vel_mult < 1.0 {
-                    ball.max_velocity / vel_mult
-                } else {
-                    ball.max_velocity
-                }
-            });
-            cs.cloak_original_max_velocity = Some(orig_v);
-            ball.max_velocity = orig_v * vel_mult;
+            cs.capture_missing_baselines(&ball);
+            cs.cloak_velocity_multiplier = Some(vel_mult);
+            cs.recompute_attributes(&mut ball);
             cs.is_cloaked = true;
             cs.is_covert_cloak = is_covert;
             cs.cloak_stabilization_remaining_s = 900.0;
@@ -1317,18 +1311,18 @@ pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
         cs.decloak_targeting_delay_remaining_s = cs
             .decloak_targeting_delay_remaining_s
             .max(cs.cloak_configured_targeting_delay_s);
-        if let Some(orig_v) = cs.cloak_original_max_velocity.take() {
-            ball.max_velocity = orig_v;
+        if cs.cloak_velocity_multiplier.take().is_some() {
+            cs.recompute_attributes(&mut ball);
             ball_changed = true;
         }
         cs_changed = true;
     }
 
-    if active_cap_mjfg && cs.mjfg_spool_remaining_s <= 0.0 && cs.mjfg_original_sig_radius.is_none() {
+    if active_cap_mjfg && cs.mjfg_spool_remaining_s <= 0.0 && cs.mjfg_sig_multiplier.is_none() {
+        cs.capture_missing_baselines(&ball);
         cs.mjfg_spool_remaining_s = 9.0;
-        let orig_sig = cs.mjfg_original_sig_radius.unwrap_or(cs.signature_radius);
-        cs.mjfg_original_sig_radius = Some(orig_sig);
-        cs.signature_radius = orig_sig * 2.5;
+        cs.mjfg_sig_multiplier = Some(2.5);
+        cs.recompute_attributes(&mut ball);
         cs_changed = true;
     }
 

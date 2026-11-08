@@ -180,7 +180,6 @@ async fn random_offset_and_coop_vs_solo_pocket_collapse_branches() {
                     ],
                     started_at_sec: 1_778_999_000,
                     collapse_at_sec: 1_779_000_000,
-                    saved_ship_attrs: HashMap::new(),
                     completed: false,
                     collapsed_destroyed: false,
                     trace_ball_id: trace_id,
@@ -337,7 +336,6 @@ async fn downtime_evacuation_drones_cleanup_and_highsec_tier_suspect_flag() {
                 ],
                 started_at_sec: 1_778_999_500,
                 collapse_at_sec: 1_779_000_500,
-                saved_ship_attrs: HashMap::from([(37, 250.0)]),
                 completed: false,
                 collapsed_destroyed: false,
                 trace_ball_id: 1_970_001,
@@ -353,13 +351,10 @@ async fn downtime_evacuation_drones_cleanup_and_highsec_tier_suspect_flag() {
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&active_drone_item));
         assert!(!snap.items.contains_key(&orphan_drone_item));
-        assert_eq!(
-            snap.items
-                .get(&ship_id)
-                .and_then(|s| s.dynamic_attributes.get(&37))
-                .copied(),
-            Some(250.0)
-        );
+        assert!(snap
+            .items
+            .get(&ship_id)
+            .is_some_and(|s| s.dynamic_attributes.get(&37).is_none()));
     });
     let is_suspect = ctx
         .crimewatch
@@ -423,7 +418,6 @@ async fn void_space_and_reconcile_abyssal_login_sp6_and_completed_branches() {
                 ],
                 started_at_sec: 1_778_999_000,
                 collapse_at_sec: 1_779_001_000,
-                saved_ship_attrs: HashMap::from([(263, 1_500.0)]),
                 completed: true,
                 collapsed_destroyed: false,
                 trace_ball_id: 0,
@@ -440,10 +434,7 @@ async fn void_space_and_reconcile_abyssal_login_sp6_and_completed_branches() {
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.characters[&char_id].solar_system_id, origin_sys);
         assert_eq!(snap.items[&ship_id].location_id, origin_sys as i64);
-        assert_eq!(
-            snap.items[&ship_id].dynamic_attributes.get(&263).copied(),
-            Some(1_500.0)
-        );
+        assert!(snap.items[&ship_id].dynamic_attributes.get(&263).is_none());
     });
 
     // 3. Expired pocket on login triggers CollapsedDestroy

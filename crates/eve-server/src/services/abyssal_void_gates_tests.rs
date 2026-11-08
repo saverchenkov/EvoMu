@@ -140,7 +140,6 @@ async fn test_abyssal_gate_and_end_gate_activation_and_void_space() {
                 ],
                 started_at_sec: now,
                 collapse_at_sec: now + 1_200,
-                saved_ship_attrs: HashMap::new(),
                 completed: false,
                 collapsed_destroyed: false,
                 trace_ball_id: 0,

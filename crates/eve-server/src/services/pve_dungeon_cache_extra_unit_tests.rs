@@ -300,7 +300,6 @@ async fn keeper_and_agency_warp_to_content_branches() {
                 rooms: [room_rec.clone(), room_rec.clone(), room_rec],
                 started_at_sec: 1_000,
                 collapse_at_sec: 2_200,
-                saved_ship_attrs: HashMap::new(),
                 completed: false,
                 collapsed_destroyed: false,
                 trace_ball_id: 0,

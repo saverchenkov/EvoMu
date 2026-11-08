@@ -314,11 +314,11 @@ pub async fn handle_weapons(
                     );
                     if let Some(vcid) = victim_char_opt {
                         let _ = evaluate_effective_signature_radius(ctx, vcid, tid, sys_id).await;
-                    } else if let Ok(Some(mut t_cs)) = sys_handle.get_combat_state(tid).await {
-                        let unpainted_base = t_cs.base_signature_radius.unwrap_or(t_cs.signature_radius);
-                        t_cs.signature_radius =
-                            ctx.effective_target_signature_radius(tid, unpainted_base);
-                        let _ = sys_handle.set_combat_state(tid, t_cs).await;
+                    } else {
+                        let tp_mult = ctx.effective_target_painter_multiplier(tid);
+                        sys_handle.try_recompute_combat_attributes(tid, |t_cs| {
+                            t_cs.tp_sig_multiplier = (tp_mult > 1.0 + 1e-6).then_some(tp_mult);
+                        });
                     }
                 }
                 if let Some(vcid) = victim_char_opt {

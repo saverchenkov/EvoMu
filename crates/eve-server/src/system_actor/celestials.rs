@@ -381,7 +381,7 @@ impl SystemHandle {
                     for (removed, _) in &removed_cycles {
                         snap.module_active_states.remove(&removed.module_id);
                         snap.module_active_charges.remove(&removed.module_id);
-                        if removed.adc_saved_resists.is_some() {
+                        if removed.is_adc || removed.ehe_hull_resists.is_some() {
                             if let Some(tr) = snap.transient_item_attributes.get_mut(&removed.ship_id) {
                                 for aid in [267, 268, 269, 270, 271, 272, 273, 274, 109, 110, 111, 112, 113] {
                                     tr.remove(&aid);
@@ -595,6 +595,22 @@ impl SystemHandle {
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
         bp.add_mobile_warp_disruptor(id, position, radius);
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+    }
+
+    /// Atomically mutates declarative modifiers on `ball_id`'s [`CombatState`] and recomputes
+    /// its derived `Ball` and `CombatState` attributes from immutable baselines (`#584`).
+    pub fn try_recompute_combat_attributes(
+        &self,
+        ball_id: BallId,
+        f: impl FnOnce(&mut CombatState),
+    ) -> bool {
+        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        let Some(cs) = bp.combat_states.get_mut(&ball_id) else {
+            return false;
+        };
+        f(cs);
+        bp.recompute_ball_attributes(ball_id);
+        true
     }
 
     pub fn try_remove_warp_bubble(&self, id: BallId) {

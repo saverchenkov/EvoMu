@@ -11,7 +11,6 @@ use crate::services::abyssal_void_mgr::{
 };
 use crate::services::pve_special_sites_abyssal::{
     collapse_abyssal_pocket_and_pod_pilot_at, pocket_grid_offset,
-    restore_abyssal_weather_dogma_modifiers,
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -322,7 +321,7 @@ pub(crate) async fn handle_abyssal_gate_activation(
 enum EndGateInspect {
     Expired { ship_id: i64, abyss_sys: u32, now: u64 },
     Err(BridgeRpcError),
-    Ok((u32, [f64; 3], HashMap<u16, f64>, Vec<i64>, bool, i64, u8)),
+    Ok((u32, [f64; 3], Vec<i64>, bool, i64, u8)),
 }
 
 pub(crate) async fn handle_abyssal_end_gate_activation(
@@ -339,7 +338,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         return Err(err_ship_docked("Cannot activate Abyssal end gate while docked"));
     }
 
-    let (origin_sys, origin_pos, saved_attrs, r3_npcs, r3_cleared, pid, tier) = {
+    let (origin_sys, origin_pos, r3_npcs, r3_cleared, pid, tier) = {
         let now = ctx.now_unix();
         let inspect = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
             let p = reg.abyssal_pockets.get(&char_id)?;
@@ -367,7 +366,6 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
             Some(EndGateInspect::Ok((
                 p.origin_solar_system_id,
                 p.origin_position,
-                p.saved_ship_attrs.clone(),
                 r3_npcs,
                 r3_cleared,
                 p.pocket_id,
@@ -540,7 +538,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         }
     }
 
-    restore_abyssal_weather_dogma_modifiers(ctx, ship_id, &saved_attrs);
+    ctx.invalidate_ship_fitting(ship_id);
 
     let exit_pos = [
         origin_pos[0] + 1_000.0,

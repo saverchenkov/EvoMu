@@ -122,6 +122,33 @@ pub(crate) fn spawn_ball_with_combat_in_actor(
     base_scramble_strengths.insert(ball_id, (combat_state.warp_scramble_strength - scram_delta).max(0));
     base_core_strengths.insert(ball_id, combat_state.warp_core_strength - core_delta);
     let mut cs = combat_state;
+    // If a caller mutated HP/cap/sig stats after `build_ship_combat_state` / `build_type_combat_state`
+    // (before spawning with no active runtime multipliers), align baselines to those values (`#584`).
+    if cs.env_max_shield_multiplier.is_none()
+        && cs.base_max_shield_hp.is_some_and(|b| (cs.max_shield_hp - b).abs() > 1e-6)
+    {
+        cs.base_max_shield_hp = Some(cs.max_shield_hp);
+    }
+    if cs.env_max_armor_multiplier.is_none()
+        && cs.base_max_armor_hp.is_some_and(|b| (cs.max_armor_hp - b).abs() > 1e-6)
+    {
+        cs.base_max_armor_hp = Some(cs.max_armor_hp);
+    }
+    if cs.base_max_structure_hp.is_some_and(|b| (cs.max_structure_hp - b).abs() > 1e-6) {
+        cs.base_max_structure_hp = Some(cs.max_structure_hp);
+    }
+    if cs.env_max_cap_multiplier.is_none()
+        && cs.base_max_capacitor.is_some_and(|b| (cs.max_capacitor - b).abs() > 1e-6)
+    {
+        cs.base_max_capacitor = Some(cs.max_capacitor);
+    }
+    if cs.cloud_cap_recharge_multiplier.is_none()
+        && cs
+            .base_capacitor_recharge_time_ms
+            .is_some_and(|b| (cs.capacitor_recharge_time_ms - b).abs() > 1e-6)
+    {
+        cs.base_capacitor_recharge_time_ms = Some(cs.capacitor_recharge_time_ms);
+    }
     if cs.base_signature_radius.is_none() {
         let base = if cs.signature_radius > 0.0 {
             cs.signature_radius
@@ -133,6 +160,7 @@ pub(crate) fn spawn_ball_with_combat_in_actor(
         };
         cs.base_signature_radius = Some(base);
     }
+    cs.capture_missing_baselines(&ball);
     if sde_opt
         .as_ref()
         .and_then(|s| s.types.get(&ball.type_id)?.default_attributes.get(&1538).copied())
@@ -209,10 +237,58 @@ pub(crate) fn set_combat_state_in_actor(
             }
         }
     }
-    if let Some(db) = db_opt {
-        crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, &combat_state);
+    let mut cs = combat_state;
+    if let Some(prev_cs) = ballpark.combat_states.get(&ball_id) {
+        if (cs.max_shield_hp - prev_cs.max_shield_hp).abs() > 1e-6
+            && cs.base_max_shield_hp == prev_cs.base_max_shield_hp
+        {
+            let m = cs.env_max_shield_multiplier.unwrap_or(1.0).max(1e-6);
+            cs.base_max_shield_hp = Some((cs.max_shield_hp / m).max(0.0));
+        }
+        if (cs.max_armor_hp - prev_cs.max_armor_hp).abs() > 1e-6
+            && cs.base_max_armor_hp == prev_cs.base_max_armor_hp
+        {
+            let m = cs.env_max_armor_multiplier.unwrap_or(1.0).max(1e-6);
+            cs.base_max_armor_hp = Some((cs.max_armor_hp / m).max(0.0));
+        }
+        if (cs.max_structure_hp - prev_cs.max_structure_hp).abs() > 1e-6
+            && cs.base_max_structure_hp == prev_cs.base_max_structure_hp
+        {
+            cs.base_max_structure_hp = Some(cs.max_structure_hp.max(0.0));
+        }
+        if (cs.max_capacitor - prev_cs.max_capacitor).abs() > 1e-6
+            && cs.base_max_capacitor == prev_cs.base_max_capacitor
+        {
+            let m = cs.env_max_cap_multiplier.unwrap_or(1.0).max(1e-6);
+            cs.base_max_capacitor = Some((cs.max_capacitor / m).max(0.0));
+        }
+        if (cs.capacitor_recharge_time_ms - prev_cs.capacitor_recharge_time_ms).abs() > 1e-6
+            && cs.base_capacitor_recharge_time_ms == prev_cs.base_capacitor_recharge_time_ms
+        {
+            let m = cs.cloud_cap_recharge_multiplier.unwrap_or(1.0).max(1e-6);
+            cs.base_capacitor_recharge_time_ms = Some((cs.capacitor_recharge_time_ms / m).max(1.0));
+        }
+        if (cs.signature_radius - prev_cs.signature_radius).abs() > 1e-6
+            && cs.base_signature_radius == prev_cs.base_signature_radius
+        {
+            let sig_m = (cs.module_sig_multiplier
+                * cs.mjfg_sig_multiplier.unwrap_or(1.0)
+                * cs.tp_sig_multiplier.unwrap_or(1.0)
+                * cs.external_sig_multiplier.unwrap_or(1.0)
+                * cs.cloud_sig_multiplier.unwrap_or(1.0)
+                * cs.env_sig_multiplier.unwrap_or(1.0))
+            .max(1e-6);
+            cs.base_signature_radius = Some((cs.signature_radius / sig_m).max(1.0));
+        }
     }
-    ballpark.combat_states.insert(ball_id, combat_state);
+    if let Some(ball) = ballpark.balls.get(&ball_id) {
+        cs.capture_missing_baselines(ball);
+    }
+    if let Some(db) = db_opt {
+        crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, &cs);
+    }
+    ballpark.combat_states.insert(ball_id, cs);
+    ballpark.recompute_ball_attributes(ball_id);
     reconcile_tackle_and_bubbles(
         ballpark,
         active_module_cycles,
@@ -379,68 +455,108 @@ pub(crate) fn reconcile_tackle_and_bubbles(
         let _ = ballpark.set_mode(id, MovementMode::Stop);
     }
 
-    // 5. Recompute deterministic ship max_velocity from unboosted base velocity,
-    //    active self propulsion / HIC WDFG / cloak / immobilizer multipliers,
-    //    and stacking-penalized Stasis Webifier / Grappler / Web Probe factors (#438).
+    // 5. Declaratively recompute ship velocity, mass, signature radius, and resistances from
+    //    immutable baselines and active module / EWAR / wubble modifiers (`#584`, `#438`).
     let wubble_mults =
         crate::services::tactical_modules::active_wubble_multipliers_for_ballpark(ballpark);
-    let mut vel_ships: std::collections::BTreeSet<BallId> =
-        ballpark.base_webbed_max_velocity.keys().copied().collect();
+    let mut dirty_ships: std::collections::BTreeSet<BallId> = ballpark
+        .combat_states
+        .iter()
+        .filter(|(_, cs)| {
+            cs.module_immobilized
+                || (cs.prop_velocity_multiplier - 1.0).abs() > 1e-9
+                || (cs.hic_velocity_multiplier - 1.0).abs() > 1e-9
+                || (cs.web_velocity_multiplier - 1.0).abs() > 1e-9
+                || (cs.module_mass_multiplier - 1.0).abs() > 1e-9
+                || cs.module_mass_addition.abs() > 1e-9
+                || (cs.module_sig_multiplier - 1.0).abs() > 1e-9
+                || cs.adc_active
+                || cs.ehe_hull_resists.is_some()
+        })
+        .map(|(&bid, _)| bid)
+        .collect();
     for &tid in wubble_mults.keys() {
-        vel_ships.insert(tid);
+        dirty_ships.insert(tid);
     }
     for c in active_module_cycles.iter() {
         if c.immobilize_self
             || c.hic_velocity_multiplier.is_some()
             || c.speed_boost_factor.abs() > 1e-9
+            || c.self_mass_multiplier.is_some()
+            || c.hic_mass_addition.is_some()
+            || c.hic_sig_multiplier.is_some()
+            || c.is_adc
+            || c.ehe_hull_resists.is_some()
+            || c.is_rah
         {
-            vel_ships.insert(c.ship_id);
+            dirty_ships.insert(c.ship_id);
         }
         if c.target_velocity_multiplier.is_some() {
             if let Some(tid) = c.target_id {
-                vel_ships.insert(tid);
+                dirty_ships.insert(tid);
             }
         }
     }
-    for sid in vel_ships {
+    for sid in dirty_ships {
         reconcile_velocity_for_ship(ballpark, sid, active_module_cycles, &wubble_mults);
     }
 }
 
-/// Computes a ship's deterministic `max_velocity` from its unboosted `base_v` and all active
-/// self/targeted velocity modifiers (`#438`).
-pub(crate) fn compute_deterministic_max_velocity(
-    base_v: f64,
+/// Declaratively recomputes and applies all active module/EWAR modifiers (`max_velocity`, `mass`,
+/// `signature_radius`, `adc_active`, `ehe_hull_resists`, etc.) on `ship_id` from its immutable
+/// baselines (`#584`, `#438`).
+pub(crate) fn reconcile_velocity_for_ship(
+    ballpark: &mut Ballpark,
     ship_id: BallId,
     active_module_cycles: &[ActiveModuleCycle],
     wubble_mults: &HashMap<BallId, f64>,
-) -> (f64, bool) {
-    let mut has_any_modifier = false;
+) {
+    if !ballpark.balls.contains_key(&ship_id) {
+        return;
+    }
+
     let mut immobilized = false;
     let mut prop_mult = 1.0_f64;
     let mut hic_mult = 1.0_f64;
     let mut cloak_mult: Option<f64> = None;
+    let mut mass_mult = 1.0_f64;
+    let mut mass_add = 0.0_f64;
+    let mut sig_mult = 1.0_f64;
+    let mut adc_active = false;
+    let mut ehe_resists = None;
 
     for c in active_module_cycles {
         if c.ship_id != ship_id {
             continue;
         }
         if c.immobilize_self {
-            has_any_modifier = true;
             immobilized = true;
         }
         if let Some(hm) = c.hic_velocity_multiplier {
-            has_any_modifier = true;
             hic_mult *= hm.max(0.0);
         }
-        if c.speed_boost_factor.abs() > 1e-9 {
-            has_any_modifier = true;
+        if c.speed_boost_factor.abs() > 1e-9 || c.effect_name.starts_with("cloaking") {
             let factor = (1.0 + c.speed_boost_factor).max(0.0);
             if c.effect_name.starts_with("cloaking") {
                 cloak_mult = Some(cloak_mult.unwrap_or(1.0) * factor);
             } else {
                 prop_mult *= factor;
             }
+        }
+        if let Some(mm) = c.self_mass_multiplier {
+            mass_mult *= mm;
+        }
+        if let Some(ma) = c.hic_mass_addition {
+            mass_add += ma;
+        }
+        if let Some(sm) = c.hic_sig_multiplier {
+            sig_mult *= sm;
+        }
+        if c.is_adc {
+            adc_active = true;
+        }
+        if c.ehe_hull_resists.is_some() {
+            ehe_resists = c.ehe_hull_resists;
         }
     }
 
@@ -465,11 +581,9 @@ pub(crate) fn compute_deterministic_max_velocity(
         }
         p_vec
     };
-
     let web_mult = if penalties.is_empty() {
         1.0
     } else {
-        has_any_modifier = true;
         penalties.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
         let mut combined = 1.0_f64;
         for (rank, p) in penalties.into_iter().enumerate() {
@@ -479,63 +593,22 @@ pub(crate) fn compute_deterministic_max_velocity(
         combined
     };
 
-    let self_mult = if immobilized {
-        0.0
-    } else if let Some(cm) = cloak_mult {
-        cm * hic_mult
-    } else {
-        prop_mult * hic_mult
-    };
-
-    ((base_v * self_mult * web_mult).max(0.0), has_any_modifier)
-}
-
-/// Recomputes and applies `ball.max_velocity` for `ship_id` from its true unboosted base velocity
-/// stored in `ballpark.base_webbed_max_velocity` (`#438`).
-pub(crate) fn reconcile_velocity_for_ship(
-    ballpark: &mut Ballpark,
-    ship_id: BallId,
-    active_module_cycles: &[ActiveModuleCycle],
-    wubble_mults: &HashMap<BallId, f64>,
-) {
-    let Some(current_v) = ballpark.balls.get(&ship_id).map(|b| b.max_velocity) else {
-        ballpark.base_webbed_max_velocity.remove(&ship_id);
-        return;
-    };
-    let cloak_orig = ballpark
-        .combat_states
-        .get(&ship_id)
-        .and_then(|cs| cs.cloak_original_max_velocity)
-        .filter(|&v| v > 0.0);
-    let cycle_orig = active_module_cycles
-        .iter()
-        .filter(|c| c.ship_id == ship_id)
-        .filter_map(|c| c.original_max_velocity)
-        .find(|&v| v > 0.0);
-    let base_v = *ballpark
-        .base_webbed_max_velocity
-        .entry(ship_id)
-        .and_modify(|v| {
-            if *v <= 0.0 {
-                if let Some(valid) = cloak_orig
-                    .or(cycle_orig)
-                    .or((current_v > 0.0).then_some(current_v))
-                {
-                    *v = valid;
-                }
-            }
-        })
-        .or_insert_with(|| cloak_orig.or(cycle_orig).unwrap_or(current_v));
-
-    let (target_v, has_any_modifier) =
-        compute_deterministic_max_velocity(base_v, ship_id, active_module_cycles, wubble_mults);
-
-    if let Some(ball) = ballpark.balls.get_mut(&ship_id) {
-        ball.max_velocity = target_v;
+    if let Some(cs) = ballpark.combat_states.get_mut(&ship_id) {
+        cs.module_immobilized = immobilized;
+        cs.prop_velocity_multiplier = prop_mult;
+        cs.hic_velocity_multiplier = hic_mult;
+        cs.web_velocity_multiplier = web_mult;
+        if let Some(cm) = cloak_mult {
+            cs.is_cloaked = true;
+            cs.cloak_velocity_multiplier = Some(cm);
+        }
+        cs.module_mass_multiplier = mass_mult;
+        cs.module_mass_addition = mass_add;
+        cs.module_sig_multiplier = sig_mult;
+        cs.adc_active = adc_active;
+        cs.ehe_hull_resists = ehe_resists;
     }
-    if !has_any_modifier {
-        ballpark.base_webbed_max_velocity.remove(&ship_id);
-    }
+    ballpark.recompute_ball_attributes(ship_id);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -680,80 +753,26 @@ pub(crate) fn handle_add_module_cycle(
             }
         }
     }
-    let has_vel_mod = cycle.immobilize_self
-        || cycle.hic_velocity_multiplier.is_some()
-        || cycle.speed_boost_factor.abs() > 1e-9;
-    if has_vel_mod {
-        let cloak_orig = ballpark
-            .combat_states
-            .get(&cycle.ship_id)
-            .and_then(|cs| cs.cloak_original_max_velocity)
-            .filter(|&v| v > 0.0);
-        let existing_cycle_orig = active_module_cycles
-            .iter()
-            .filter(|c| c.ship_id == cycle.ship_id)
-            .filter_map(|c| c.original_max_velocity)
-            .find(|&v| v > 0.0);
-        let ball_v_opt = ballpark
-            .balls
-            .get(&cycle.ship_id)
-            .map(|b| b.max_velocity)
-            .filter(|&v| v > 0.0);
-        if let Some(resolved_v) = cloak_orig.or(existing_cycle_orig).or(ball_v_opt) {
-            let base_v = *ballpark
-                .base_webbed_max_velocity
-                .entry(cycle.ship_id)
-                .and_modify(|v| {
-                    if *v <= 0.0 {
-                        *v = resolved_v;
-                    }
-                })
-                .or_insert(resolved_v);
-            if cycle.original_max_velocity.is_none_or(|v| v <= 0.0) {
-                cycle.original_max_velocity = Some(base_v);
-            }
-            if cycle.effect_name.starts_with("cloaking") {
-                ballpark
-                    .combat_states
-                    .entry(cycle.ship_id)
-                    .or_default()
-                    .cloak_original_max_velocity = Some(base_v);
-            }
-        }
-        if cycle.immobilize_self {
-            if let Some(ball) = ballpark.balls.get_mut(&cycle.ship_id) {
-                ball.max_velocity = 0.0;
-                ball.velocity = DVec3::ZERO;
-                ball.speed_fraction = 0.0;
-                ball.mode = MovementMode::Stop;
-            }
-        }
+    if let (Some(ball), Some(cs)) = (
+        ballpark.balls.get(&cycle.ship_id),
+        ballpark.combat_states.get_mut(&cycle.ship_id),
+    ) {
+        cs.capture_missing_baselines(ball);
     }
-    if let Some(mass_mult) = cycle.self_mass_multiplier {
-        if let Some(ball) = ballpark.balls.get_mut(&cycle.ship_id) {
-            cycle.original_mass = Some(ball.mass);
-            ball.mass *= mass_mult;
-        }
-    } else if let Some(mass_add) = cycle.hic_mass_addition {
-        if let Some(ball) = ballpark.balls.get_mut(&cycle.ship_id) {
-            cycle.original_mass = Some(ball.mass);
-            ball.mass += mass_add;
-        }
+    if cycle.effect_name.starts_with("cloaking") {
+        let cs = ballpark.combat_states.entry(cycle.ship_id).or_default();
+        cs.is_cloaked = true;
+        cs.cloak_velocity_multiplier = Some((1.0 + cycle.speed_boost_factor).max(0.0));
     }
-    if let Some(sig_mult) = cycle.hic_sig_multiplier {
-        if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
-            cycle.original_signature_radius = Some(cs.signature_radius);
-            cs.signature_radius *= sig_mult;
+    if cycle.immobilize_self {
+        if let Some(ball) = ballpark.balls.get_mut(&cycle.ship_id) {
+            ball.max_velocity = 0.0;
+            ball.velocity = DVec3::ZERO;
+            ball.speed_fraction = 0.0;
+            ball.mode = MovementMode::Stop;
         }
     }
     if cycle.is_adc {
-        if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
-            cycle.adc_saved_resists =
-                Some((cs.shield_resonance, cs.armor_resonance, cs.structure_resonance));
-            cs.shield_resonance = [0.25; 4];
-            cs.armor_resonance = [0.25; 4];
-            cs.structure_resonance = [0.25; 4];
-        }
         if let Some(db_ref) = db_opt {
             db_ref.with_mut_snapshot(|snap| {
                 let entry = snap.transient_item_attributes.entry(cycle.ship_id).or_default();
@@ -763,11 +782,6 @@ pub(crate) fn handle_add_module_cycle(
             });
         }
     } else if let Some(ehe_res) = cycle.ehe_hull_resists {
-        if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
-            cycle.adc_saved_resists =
-                Some((cs.shield_resonance, cs.armor_resonance, cs.structure_resonance));
-            cs.structure_resonance = ehe_res;
-        }
         if let Some(db_ref) = db_opt {
             db_ref.with_mut_snapshot(|snap| {
                 let entry = snap.transient_item_attributes.entry(cycle.ship_id).or_default();
@@ -780,7 +794,7 @@ pub(crate) fn handle_add_module_cycle(
     }
     if cycle.is_rah {
         if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
-            cs.armor_resonance = [0.85; 4];
+            cs.rah_armor_resonance = Some([0.85; 4]);
         }
         if let Some(db_ref) = db_opt {
             db_ref.with_mut_snapshot(|snap| {
@@ -887,13 +901,15 @@ pub(crate) fn apply_overload_transition_to_cycle(
                     .and_then(|t| t.default_attributes.get(&1223).copied())
                     .map(|pct| (1.0 + pct / 100.0).max(0.1))
                     .unwrap_or(1.50);
+                let old_factor = (1.0 + c.speed_boost_factor).max(1e-6);
                 apply_scale(&mut c.speed_boost_factor, ovl_speed);
-                if !ballpark.base_webbed_max_velocity.contains_key(&ship_id) {
-                    if let Some(orig_v) = c.original_max_velocity {
-                        if let Some(ball) = ballpark.balls.get_mut(&ship_id) {
-                            ball.max_velocity = orig_v * (1.0 + c.speed_boost_factor);
-                        }
+                let new_factor = (1.0 + c.speed_boost_factor).max(0.0);
+                if !c.effect_name.starts_with("cloaking") {
+                    if let Some(cs) = ballpark.combat_states.get_mut(&ship_id) {
+                        cs.prop_velocity_multiplier =
+                            (cs.prop_velocity_multiplier / old_factor) * new_factor;
                     }
+                    ballpark.recompute_ball_attributes(ship_id);
                 }
             }
 

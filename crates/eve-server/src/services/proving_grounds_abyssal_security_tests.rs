@@ -296,7 +296,6 @@ fn r7_tc_02_abyssal_boundary_tick_preserves_pg_pods_and_concluded_winners() {
                 rooms: [make_room(0), make_room(1), make_room(2)],
                 started_at_sec: 1_000,
                 collapse_at_sec: 2_200,
-                saved_ship_attrs: HashMap::new(),
                 completed: false,
                 collapsed_destroyed: false,
                 trace_ball_id: 0,

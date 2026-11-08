@@ -263,7 +263,7 @@ pub(crate) fn step_cycles_and_capacitor(
     let mut burned_ship_modules: Vec<(BallId, i64)> = Vec::new();
     for (idx, cycle) in active_module_cycles.iter_mut().enumerate() {
         // If the source ship was destroyed / removed from space mid-cycle (or decloaked by proximity/physics), cancel module cycle (`feat:combat.active-armor-repair-cycle-end`).
-        let cloak_decloaked = cycle.effect_name.starts_with("cloaking") && ballpark.combat_states.get(&cycle.ship_id).is_some_and(|cs| !cs.is_cloaked && cs.cloak_original_max_velocity.is_none());
+        let cloak_decloaked = cycle.effect_name.starts_with("cloaking") && ballpark.combat_states.get(&cycle.ship_id).is_some_and(|cs| !cs.is_cloaked && cs.cloak_velocity_multiplier.is_none());
         if !ballpark.balls.contains_key(&cycle.ship_id) || cloak_decloaked {
             finished_indices.push(idx);
             continue;
@@ -367,13 +367,14 @@ pub(crate) fn step_cycles_and_capacitor(
                         s_entry.insert(270, new_resonances[3]);
                     });
                     if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
-                        cs.armor_resonance = [
+                        cs.rah_armor_resonance = Some([
                             new_resonances[0].clamp(0.01, 1.0),
                             new_resonances[3].clamp(0.01, 1.0),
                             new_resonances[2].clamp(0.01, 1.0),
                             new_resonances[1].clamp(0.01, 1.0),
-                        ];
+                        ]);
                     }
+                    ballpark.recompute_ball_attributes(cycle.ship_id);
                 }
             }
 
@@ -1046,36 +1047,27 @@ pub(crate) fn step_cycles_and_capacitor(
 }
 
 pub(crate) fn cleanup_removed_module_cycle(ballpark: &mut Ballpark, removed: &ActiveModuleCycle, db_opt: &Option<Arc<eve_db::WorldRepository>>) {
-    if let Some(orig_v) = removed.original_max_velocity.filter(|&v| v > 0.0) {
-        if removed.effect_name.starts_with("cloaking") {
-            if let Some(cs) = ballpark.combat_states.get_mut(&removed.ship_id) {
-                cs.cloak_original_max_velocity = None;
-            }
-            if let Some(ball) = ballpark.balls.get_mut(&removed.ship_id) {
-                ball.max_velocity = orig_v;
-            }
-        } else if !ballpark.base_webbed_max_velocity.contains_key(&removed.ship_id) {
-            if let Some(ball) = ballpark.balls.get_mut(&removed.ship_id) {
-                ball.max_velocity = orig_v;
-            }
-        }
-    }
-    if let Some(orig_m) = removed.original_mass {
-        if let Some(ball) = ballpark.balls.get_mut(&removed.ship_id) {
-            ball.mass = orig_m;
-        }
-    }
-    if let Some(orig_sig) = removed.original_signature_radius {
+    let mut needs_recompute = false;
+    if removed.effect_name.starts_with("cloaking") {
         if let Some(cs) = ballpark.combat_states.get_mut(&removed.ship_id) {
-            cs.signature_radius = orig_sig;
+            cs.is_cloaked = false;
+            cs.cloak_velocity_multiplier = None;
         }
+        needs_recompute = true;
     }
-    if let Some((sr, ar, hr)) = removed.adc_saved_resists {
+    if removed.is_adc {
         if let Some(cs) = ballpark.combat_states.get_mut(&removed.ship_id) {
-            cs.shield_resonance = sr;
-            cs.armor_resonance = ar;
-            cs.structure_resonance = hr;
+            cs.adc_active = false;
         }
+        needs_recompute = true;
+    }
+    if removed.ehe_hull_resists.is_some() {
+        if let Some(cs) = ballpark.combat_states.get_mut(&removed.ship_id) {
+            cs.ehe_hull_resists = None;
+        }
+        needs_recompute = true;
+    }
+    if removed.is_adc || removed.ehe_hull_resists.is_some() {
         if let Some(db_ref) = db_opt {
             db_ref.with_mut_snapshot(|snap| {
                 if let Some(tr) = snap.transient_item_attributes.get_mut(&removed.ship_id) {
@@ -1096,6 +1088,10 @@ pub(crate) fn cleanup_removed_module_cycle(ballpark: &mut Ballpark, removed: &Ac
         }
     }
     if removed.is_rah {
+        if let Some(cs) = ballpark.combat_states.get_mut(&removed.ship_id) {
+            cs.rah_armor_resonance = None;
+        }
+        needs_recompute = true;
         if let Some(db_ref) = db_opt {
             db_ref.with_mut_snapshot(|snap| {
                 if let Some(tr) = snap.transient_item_attributes.get_mut(&removed.module_id) {
@@ -1106,6 +1102,15 @@ pub(crate) fn cleanup_removed_module_cycle(ballpark: &mut Ballpark, removed: &Ac
                 }
             });
         }
+    }
+    if removed.immobilize_self {
+        if let Some(cs) = ballpark.combat_states.get_mut(&removed.ship_id) {
+            cs.module_immobilized = false;
+        }
+        needs_recompute = true;
+    }
+    if needs_recompute {
+        ballpark.recompute_ball_attributes(removed.ship_id);
     }
     if removed.hic_bubble_radius_m.is_some() { ballpark.remove_warp_bubble(removed.module_id); }
     if removed.grants_interdiction_nullification { ballpark.set_interdiction_nullified(removed.ship_id, false); }
@@ -1167,6 +1172,7 @@ pub(crate) fn remove_non_warp_ship_module_cycles(
             db_opt,
             deactivation_hook,
         );
+        ballpark.recompute_ball_attributes(ship_id);
         for removed in &removed_cycles {
             emit_cycle_deactivation(removed, ballpark, db_opt, deactivation_hook);
         }

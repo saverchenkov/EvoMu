@@ -302,15 +302,17 @@ async fn sync_tether_disallow_conditions_and_decloak_velocity_restoration() {
         .spawn_ball(ship_ball(ship_id, DVec3::new(2_000.0, 0.0, 0.0)))
         .await;
 
-    // 1. Activate non-covert cloak: cloak_original_max_velocity = 300 / 0.25 = 1200.0 and ship is tethered
+    // 1. Activate non-covert cloak: base_max_velocity = 300.0, cloak_velocity_multiplier = 0.25 -> 75.0 m/s and ship is tethered
     sync_ship_cloak_and_mjfg_from_fitting(&ctx, char_id, sys_id, ship_id).await;
+    let (_, b_cloaked) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     let cs_cloaked = sys_h.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!(cs_cloaked.is_cloaked);
     assert!(!cs_cloaked.is_covert_cloak);
     assert!(cs_cloaked.is_tethered);
-    assert_eq!(cs_cloaked.cloak_original_max_velocity, Some(1200.0));
+    assert_eq!(cs_cloaked.cloak_velocity_multiplier, Some(0.25));
+    assert!((b_cloaked.max_velocity - 75.0).abs() < 1e-6);
 
-    // 2. Deactivate cloak: original max_velocity (1200.0) is restored
+    // 2. Deactivate cloak: baseline max_velocity (300.0) is declaratively restored
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.remove(&cloak_item_id);
     });
@@ -318,7 +320,7 @@ async fn sync_tether_disallow_conditions_and_decloak_velocity_restoration() {
     let (_, b_uncloaked) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     let cs_uncloaked = sys_h.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!(!cs_uncloaked.is_cloaked);
-    assert!((b_uncloaked.max_velocity - 1200.0).abs() < 1e-6);
+    assert!((b_uncloaked.max_velocity - 300.0).abs() < 1e-6);
 
     // 3. Lance disruption breaks tether
     let mut cs_lance = cs_uncloaked;

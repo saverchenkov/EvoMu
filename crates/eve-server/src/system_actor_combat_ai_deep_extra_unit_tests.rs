@@ -270,8 +270,8 @@ fn overload_cloak_web_shuttle_nullification_hic_and_lance_spool_cycles() {
         &mut bp, &mut cycles, &scramble_map, &core_map, &sde_opt, &db_opt, None, cloak,
     ).unwrap();
     assert_eq!(
-        bp.combat_states.get(&ship_a).and_then(|cs| cs.cloak_original_max_velocity),
-        Some(400.0)
+        bp.combat_states.get(&ship_a).and_then(|cs| cs.cloak_velocity_multiplier),
+        Some(0.25)
     );
     assert!((bp.balls[&ship_a].max_velocity - 100.0).abs() < 1e-6);
 
@@ -289,11 +289,11 @@ fn overload_cloak_web_shuttle_nullification_hic_and_lance_spool_cycles() {
     cycles_tackle::handle_add_module_cycle(
         &mut bp, &mut cycles, &scramble_map, &core_map, &sde_opt, &db_opt, None, mwd.clone(),
     ).unwrap();
-    // Cloaked speed remains 100 m/s while MWD stored original_max_velocity = 400.0!
+    // Cloaked speed remains 100 m/s while base_max_velocity = 400.0 and MWD multiplier is stored declaratively.
     assert!((bp.balls[&ship_a].max_velocity - 100.0).abs() < 1e-6);
-    assert_eq!(cycles.last().unwrap().original_max_velocity, Some(400.0));
+    assert_eq!(bp.combat_states[&ship_a].base_max_velocity, Some(400.0));
 
-    // Remove cloak -> restores 400.0 base velocity
+    // Remove cloak -> active MWD declaratively takes effect (400 * 6.0 = 2400 m/s) until scrammed
     let mut state = SystemActorState {
         active_module_cycles: cycles,
         sde_opt: sde_opt.clone(),
@@ -302,7 +302,7 @@ fn overload_cloak_web_shuttle_nullification_hic_and_lance_spool_cycles() {
     };
     let cloak_removed = state.active_module_cycles.remove(0);
     cycles::cleanup_removed_module_cycle(&mut bp, &cloak_removed, &db_opt);
-    assert!((bp.balls[&ship_a].max_velocity - 400.0).abs() < 1e-6);
+    assert!((bp.balls[&ship_a].max_velocity - 2400.0).abs() < 1e-6);
 
     // Now scram ship_a from ship_b -> reconcile_tackle_and_bubbles immediately kills ship_a's active MWD!
     let scram = ActiveModuleCycle {
@@ -322,6 +322,7 @@ fn overload_cloak_web_shuttle_nullification_hic_and_lance_spool_cycles() {
     ).unwrap();
     assert!(bp.combat_states[&ship_a].is_mwd_mjd_disabled);
     assert!(!state.active_module_cycles.iter().any(|c| c.module_id == 9102));
+    assert!((bp.balls[&ship_a].max_velocity - 400.0).abs() < 1e-6);
 
     // Attempting to re-add MWD while scrambled returns WarpScrambled error
     assert!(cycles_tackle::handle_add_module_cycle(
@@ -351,7 +352,6 @@ fn overload_cloak_web_shuttle_nullification_hic_and_lance_spool_cycles() {
         duration_s: 5.0,
         repeat: 2,
         speed_boost_factor: 1.0,
-        original_max_velocity: Some(400.0),
         remote_armor_amount: 100.0,
         remote_shield_amount: 100.0,
         armor_repair_amount: 100.0,

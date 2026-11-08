@@ -154,26 +154,10 @@ pub(crate) async fn handle_mining_and_deactivate(
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
                 for tid in affected_ewar_ships {
-                    if let Ok(Some(mut t_cs)) = sys.get_combat_state(tid).await {
-                        let base_sig = match t_cs.base_signature_radius {
-                            Some(b) => b,
-                            None => sys.get_ball_snapshot(tid)
-                                .await
-                                .ok()
-                                .flatten()
-                                .and_then(|(_, b)| {
-                                    ctx.sde
-                                        .types
-                                        .get(&b.type_id)
-                                        .and_then(|t| t.default_attributes.get(&552).copied())
-                                        .or(Some(b.radius.max(35.0)))
-                                })
-                                .unwrap_or(t_cs.signature_radius),
-                        };
-                        t_cs.signature_radius =
-                            ctx.effective_target_signature_radius(tid, base_sig);
-                        let _ = sys.set_combat_state(tid, t_cs).await;
-                    }
+                    let tp_mult = ctx.effective_target_painter_multiplier(tid);
+                    sys.try_recompute_combat_attributes(tid, |t_cs| {
+                        t_cs.tp_sig_multiplier = (tp_mult > 1.0 + 1e-6).then_some(tp_mult);
+                    });
                 }
             }
             crate::services::tactical_modules::remove_projected_remote_assistance(ctx, ship_id, module_id);

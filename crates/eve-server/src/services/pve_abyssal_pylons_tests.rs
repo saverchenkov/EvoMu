@@ -132,7 +132,6 @@ async fn abyssal_automated_pylons_pulse_probe_prune_and_ballpark_step() {
                 rooms: [make_room(0), make_room(1), make_room(2)],
                 started_at_sec: 1_775_660_000,
                 collapse_at_sec: 1_775_661_200,
-                saved_ship_attrs: HashMap::new(),
                 completed: false,
                 collapsed_destroyed: false,
                 trace_ball_id: 0,

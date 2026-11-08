@@ -1227,6 +1227,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             new_ball.mode = MovementMode::Stop;
 
             let mut combat_state = ctx.build_ship_combat_state(char_id, ship_id, new_ball.type_id);
+            combat_state.capture_missing_baselines(&new_ball);
             combat_state.is_cloaked = true;
             combat_state.gate_cloak_remaining_ticks = 60;
             combat_state.undock_invulnerable_remaining_ticks = 60;
@@ -1236,9 +1237,11 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             {
                 // `combat_state` already includes SDE system phenomena via `build_ship_combat_state` ->
                 // `apply_active_dbuffs_and_system_effects_to_ship_attrs`; apply phenomenon only to ball kinematics here.
+                let base_v = combat_state.base_max_velocity.unwrap_or(new_ball.max_velocity).max(1e-6);
+                let base_in = combat_state.base_inertia.unwrap_or(new_ball.inertia).max(1e-6);
                 let mut eff_attrs = std::collections::HashMap::from([
-                    (eve_sde::attr_ids::MAX_VELOCITY, new_ball.max_velocity),
-                    (eve_sde::attr_ids::AGILITY, new_ball.inertia),
+                    (eve_sde::attr_ids::MAX_VELOCITY, base_v),
+                    (eve_sde::attr_ids::AGILITY, base_in),
                 ]);
                 if eve_dogma::apply_wormhole_phenomenon_to_attributes(
                     &ctx.sde,
@@ -1247,34 +1250,35 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
                     false,
                     &mut eff_attrs,
                 ) {
-                    new_ball.max_velocity =
-                        *eff_attrs.get(&eve_sde::attr_ids::MAX_VELOCITY).unwrap_or(&new_ball.max_velocity);
-                    new_ball.inertia =
-                        *eff_attrs.get(&eve_sde::attr_ids::AGILITY).unwrap_or(&new_ball.inertia);
+                    let v_mult = *eff_attrs.get(&eve_sde::attr_ids::MAX_VELOCITY).unwrap_or(&base_v) / base_v;
+                    let in_mult = *eff_attrs.get(&eve_sde::attr_ids::AGILITY).unwrap_or(&base_in) / base_in;
+                    combat_state.external_velocity_multiplier = ((v_mult - 1.0).abs() > 1e-9).then_some(v_mult);
+                    combat_state.external_inertia_multiplier = ((in_mult - 1.0).abs() > 1e-9).then_some(in_mult);
                 }
             } else {
                 match env_effect {
                     "Pulsar" => {
-                        combat_state.max_shield_hp *= 1.30;
-                        combat_state.shield_hp = combat_state.max_shield_hp;
-                        combat_state.signature_radius *= 1.30;
+                        combat_state.env_max_shield_multiplier = Some(1.30);
+                        combat_state.env_sig_multiplier = Some(1.30);
                     }
                     "Wolf-Rayet" => {
-                        combat_state.max_armor_hp *= 1.30;
-                        combat_state.armor_hp = combat_state.max_armor_hp;
-                        combat_state.signature_radius *= 0.85;
+                        combat_state.env_max_armor_multiplier = Some(1.30);
+                        combat_state.env_sig_multiplier = Some(0.85);
                     }
                     "Black Hole" => {
-                        new_ball.max_velocity *= 1.30;
-                        new_ball.inertia *= 1.15;
+                        combat_state.external_velocity_multiplier = Some(1.30);
+                        combat_state.external_inertia_multiplier = Some(1.15);
                     }
                     "Cataclysmic Variable" => {
-                        combat_state.max_capacitor *= 1.30;
-                        combat_state.capacitor = combat_state.max_capacitor;
+                        combat_state.env_max_cap_multiplier = Some(1.30);
                     }
                     _ => {}
                 }
             }
+            combat_state.recompute_attributes(&mut new_ball);
+            combat_state.shield_hp = combat_state.max_shield_hp;
+            combat_state.armor_hp = combat_state.max_armor_hp;
+            combat_state.capacitor = combat_state.max_capacitor;
             if let Some(pcs) = prev_cs {
                 let s_frac = (pcs.shield_hp / pcs.max_shield_hp.max(1.0)).clamp(0.0, 1.0);
                 let a_frac = (pcs.armor_hp / pcs.max_armor_hp.max(1.0)).clamp(0.0, 1.0);

@@ -328,12 +328,16 @@ pub fn apply_counter_insurgency_sentry_ewar(
     let ecm_dur_s = attr(2822, 5_000.0) / 1_000.0;
     if dist <= tp_range {
         if let Some(t_cs) = bp.combat_states.get_mut(&target_id) {
-            let base_sig = t_cs.base_signature_radius.unwrap_or_else(|| {
-                if t_cs.signature_radius > 0.0 { t_cs.signature_radius } else { target_radius.max(35.0) }
-            });
-            t_cs.base_signature_radius = Some(base_sig);
-            t_cs.signature_radius = base_sig * (1.0 + tp_sig_pct / 100.0);
+            if t_cs.base_signature_radius.is_none() {
+                t_cs.base_signature_radius = Some(if t_cs.signature_radius > 0.0 {
+                    t_cs.signature_radius
+                } else {
+                    target_radius.max(35.0)
+                });
+            }
+            t_cs.tp_sig_multiplier = Some(1.0 + tp_sig_pct / 100.0);
         }
+        bp.recompute_ball_attributes(target_id);
     }
     if dist <= ecm_range && ecm_dur_s > 0.0 {
         bp.apply_ecm_jam(target_id, ecm_dur_s);

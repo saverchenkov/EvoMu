@@ -532,7 +532,11 @@ fn grid_axes_cloak_errors_warp_locks_and_mjd_filters() {
 
     // Non-covert cloak blocks warp; deactivate_cloak restores speed & sets targeting delay; gate cloak deactivates cleanly.
     assert!(park.activate_cloak(10, false, 4.0, 10.0).is_ok());
-    park.combat_states.get_mut(&10).unwrap().cloak_original_max_velocity = Some(410.0);
+    {
+        let cs = park.combat_states.get_mut(&10).unwrap();
+        cs.base_max_velocity = Some(410.0);
+        cs.cloak_velocity_multiplier = Some(0.25);
+    }
     assert!(park
         .set_mode(
             10,

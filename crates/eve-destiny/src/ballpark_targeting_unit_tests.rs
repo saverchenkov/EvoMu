@@ -372,7 +372,8 @@ fn coverage_and_mutants_targeting_gate_decloak_and_collision_branches() {
         CombatState {
             gate_cloak_remaining_ticks: 20,
             is_cloaked: true,
-            cloak_original_max_velocity: Some(400.0),
+            base_max_velocity: Some(400.0),
+            cloak_velocity_multiplier: Some(0.0),
             ..Default::default()
         },
     );

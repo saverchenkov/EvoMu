@@ -25,7 +25,7 @@ pub(crate) async fn is_ship_actively_cloaked(
 ) -> bool {
     if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
         if (cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0)
-            || cs.cloak_original_max_velocity.is_some()
+            || cs.cloak_velocity_multiplier.is_some()
         {
             return true;
         }

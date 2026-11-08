@@ -611,7 +611,7 @@ pub async fn evaluate_effective_signature_radius(
     ship_id: i64,
     solar_system_id: u32,
 ) -> f64 {
-    let mut base_sig = if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
+    let base_sig = if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
         let eval_ctx = fit.evaluated_context(&ctx.sde);
         let sig = eval_ctx.ship.get_attribute(eve_sde::attr_ids::SIGNATURE_RADIUS, &ctx.sde);
         if sig > 0.0 {
@@ -652,20 +652,26 @@ pub async fn evaluate_effective_signature_radius(
         }
         mult
     });
-    if mwd_bloom_mult > 1.0 && base_sig < 150.0 {
-        base_sig *= mwd_bloom_mult;
-    }
+    let unbloomed_sig = base_sig;
+    let bloom_mult = if mwd_bloom_mult > 1.0 && base_sig < 150.0 {
+        mwd_bloom_mult
+    } else {
+        1.0
+    };
+    let effective_sig = unbloomed_sig * bloom_mult;
 
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
     if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ship_id).await {
-        if (ball.radius - base_sig).abs() > 1e-3 {
+        if (ball.radius - effective_sig).abs() > 1e-3 {
             if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
-                cs.signature_radius = base_sig;
+                cs.base_signature_radius = Some(unbloomed_sig);
+                cs.external_sig_multiplier = (bloom_mult > 1.0).then_some(bloom_mult);
+                cs.signature_radius = effective_sig;
                 let _ = sys_handle.set_combat_state(ship_id, cs).await;
             }
         }
     }
-    base_sig
+    effective_sig
 }
 
 /// Computes combat probe scan signal strength (`0.0..=1.0`) as a function of target signature radius,

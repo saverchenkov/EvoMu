@@ -1156,7 +1156,6 @@ pub(crate) async fn handle_module_cycles(
                 cap_need_per_cycle: cap_need,
                 speed_boost_factor,
                 pending_overloaded: None,
-                original_max_velocity: None,
                 linked_turrets: linked_turrets.clone(),
                 ammo_type_id: active_burst_charge_tid,
                 damage_vector: if matches!(
@@ -1214,7 +1213,6 @@ pub(crate) async fn handle_module_cycles(
                 is_rah,
                 rah_shift_amount,
                 is_adc,
-                adc_saved_resists: None,
                 ehe_hull_resists,
                 is_overloaded,
                 rack_idx,
@@ -1228,8 +1226,6 @@ pub(crate) async fn handle_module_cycles(
                 hic_velocity_multiplier,
                 hic_sig_multiplier,
                 hic_mass_addition,
-                original_signature_radius: None,
-                original_mass: None,
                 mjd_jump_distance_m,
                 mjfg_field_params,
                 grants_interdiction_nullification,
@@ -1239,7 +1235,6 @@ pub(crate) async fn handle_module_cycles(
                 grappler_falloff_m,
                 grappler_speed_factor_pct,
                 target_velocity_multiplier,
-                target_original_max_velocity: None,
                 immobilize_self,
                 self_disallow_assistance,
                 self_ewar_immune,
@@ -1258,7 +1253,19 @@ pub(crate) async fn handle_module_cycles(
                             ctx, char_id, sys_id,
                         );
                     }
-                    let falloff = eve_dogma::get_module_falloff(&mod_state, &ctx.sde);
+                    let mut falloff = eve_dogma::get_module_falloff(&mod_state, &ctx.sde);
+                    let dark_mult = crate::services::pve_abyssal_hazards::dark_weather_midpocket_turret_mult(
+                        ctx,
+                        char_id,
+                        sys_id,
+                        false,
+                        module_id,
+                        &mod_type,
+                    );
+                    if (dark_mult - 1.0).abs() > 1e-9 {
+                        opt_range *= dark_mult;
+                        falloff *= dark_mult;
+                    }
                     let eff = if opt_range > 0.0 {
                         opt_range + 3.0 * falloff.max(0.0)
                     } else {

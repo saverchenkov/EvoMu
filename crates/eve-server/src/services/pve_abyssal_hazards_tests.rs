@@ -108,9 +108,15 @@ fn test_abyssal_policy_hull_capacity_weather_math_and_dogma() {
         let mut max_v = 200.0;
         let mut opt_r = 10_000.0;
         apply_abyssal_weather_to_combat_and_nav(weather, 50.0, 50.0, &mut cs, &mut max_v, &mut opt_r);
-        let saved = apply_abyssal_weather_dogma_modifiers_to_ship(&ctx, 103, weather, 50.0, 50.0);
-        assert!(!saved.is_empty());
-        restore_abyssal_weather_dogma_modifiers(&ctx, 103, &saved);
+        let mut attrs = HashMap::from([
+            (271, 1.0), (267, 0.5), (113, 0.67), (55, 250_000.0),
+            (37, 250.0), (54, 15_000.0), (158, 10_000.0),
+            (273, 0.6), (269, 0.65), (109, 0.67), (564, 250.0),
+            (265, 1_500.0), (274, 0.8), (270, 0.65), (110, 0.67),
+            (263, 1_500.0), (272, 0.5), (268, 0.9), (111, 0.67),
+        ]);
+        apply_abyssal_weather_to_ship_attrs(weather, 50.0, 50.0, &mut attrs);
+        assert!(attrs.values().any(|&v| v > 0.0));
     }
 
     // RPC restriction & local channel checks

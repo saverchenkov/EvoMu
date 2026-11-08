@@ -431,7 +431,8 @@ fn orbit_negative_z_pole_follow_zero_and_post_align_bubble_intercept() {
 
     park.combat_states.get_mut(&1).unwrap().gate_cloak_remaining_ticks = 1;
     park.combat_states.get_mut(&1).unwrap().is_cloaked = true;
-    park.combat_states.get_mut(&1).unwrap().cloak_original_max_velocity = Some(399.0);
+    park.combat_states.get_mut(&1).unwrap().base_max_velocity = Some(399.0);
+    park.combat_states.get_mut(&1).unwrap().cloak_velocity_multiplier = Some(0.0);
 
     assert!(park.set_ball_position(7, DVec3::new(-5_000.0, 0.0, 0.0)));
     assert!(park.set_ball_position(8, DVec3::new(5_000.0, 0.0, 0.0)));

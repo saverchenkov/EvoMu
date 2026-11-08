@@ -642,26 +642,10 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         },
                     );
                     if mod_type.group_id == 379 {
-                        if let Ok(Some(mut t_cs)) = sys.get_combat_state(target_id).await {
-                            let base_sig = match t_cs.base_signature_radius {
-                                Some(b) => b,
-                                None => sys.get_ball_snapshot(target_id)
-                                    .await
-                                    .ok()
-                                    .flatten()
-                                    .and_then(|(_, b)| {
-                                        ctx.sde
-                                            .types
-                                            .get(&b.type_id)
-                                            .and_then(|t| t.default_attributes.get(&552).copied())
-                                            .or(Some(b.radius.max(35.0)))
-                                    })
-                                    .unwrap_or(t_cs.signature_radius),
-                            };
-                            t_cs.signature_radius =
-                                ctx.effective_target_signature_radius(target_id, base_sig);
-                            let _ = sys.set_combat_state(target_id, t_cs).await;
-                        }
+                        let tp_mult = ctx.effective_target_painter_multiplier(target_id);
+                        sys.try_recompute_combat_attributes(target_id, |t_cs| {
+                            t_cs.tp_sig_multiplier = (tp_mult > 1.0 + 1e-6).then_some(tp_mult);
+                        });
                     }
                 }
 

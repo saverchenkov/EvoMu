@@ -78,7 +78,6 @@ impl Ballpark {
             formation_states: BTreeMap::new(),
             ball_harmonics: BTreeMap::new(),
             ball_wormhole_stages: BTreeMap::new(),
-            base_webbed_max_velocity: BTreeMap::new(),
             active_wubble_multipliers: BTreeMap::new(),
             sim_unix_secs: 0,
         }
@@ -436,7 +435,6 @@ impl Ballpark {
         self.miniball_states.remove(&ball_id);
         self.formation_states.remove(&ball_id);
         self.ball_harmonics.remove(&ball_id);
-        self.base_webbed_max_velocity.remove(&ball_id);
         self.active_wubble_multipliers.remove(&ball_id);
         self.target_locks.remove(&ball_id);
         for locks in self.target_locks.values_mut() {
@@ -457,6 +455,17 @@ impl Ballpark {
             self.contract_or_delete_grid(gid);
         }
         Some(removed)
+    }
+
+    /// Declaratively recomputes a ball's effective kinematics and combat attributes
+    /// from its immutable baselines and currently active modifiers (`#584`).
+    pub fn recompute_ball_attributes(&mut self, ball_id: BallId) {
+        if let (Some(ball), Some(cs)) = (
+            self.balls.get_mut(&ball_id),
+            self.combat_states.get_mut(&ball_id),
+        ) {
+            cs.recompute_attributes(ball);
+        }
     }
 
     /// Updates `ball_id`'s `max_velocity` in-place and emits [`DestinyEvent::SetMaxSpeed`]
@@ -879,7 +888,11 @@ impl Ballpark {
             }
         }
         self.clear_target_locks(ball_id);
+        let ball_snapshot = self.balls.get(&ball_id).cloned();
         let cs = self.combat_states.entry(ball_id).or_default();
+        if let Some(ref b) = ball_snapshot {
+            cs.capture_missing_baselines(b);
+        }
         cs.is_cloaked = true;
         cs.is_covert_cloak = is_covert;
         cs.cloak_configured_targeting_delay_s = targeting_delay_s.max(0.0);
@@ -906,7 +919,6 @@ impl Ballpark {
     pub fn deactivate_cloak(&mut self, ball_id: BallId) -> bool {
         let mut was_cloaked = false;
         let mut was_gate_cloak = false;
-        let mut restored_max_vel = None;
         if let Some(cs) = self.combat_states.get_mut(&ball_id) {
             if cs.is_cloaked || cs.gate_cloak_remaining_ticks > 0 {
                 was_cloaked = true;
@@ -915,20 +927,14 @@ impl Ballpark {
                 cs.is_covert_cloak = false;
                 cs.gate_cloak_remaining_ticks = 0;
                 cs.cloak_stabilization_remaining_s = 0.0;
-                restored_max_vel = cs.cloak_original_max_velocity.take();
+                cs.cloak_velocity_multiplier = None;
                 if !was_gate_cloak && cs.cloak_configured_targeting_delay_s > 0.0 {
                     cs.decloak_targeting_delay_remaining_s = cs.cloak_configured_targeting_delay_s;
                 }
             }
         }
-        if let Some(orig_v) = restored_max_vel {
-            if let Some(ball) = self.balls.get_mut(&ball_id) {
-                if orig_v > 0.0 {
-                    ball.max_velocity = orig_v;
-                }
-            }
-        }
         if was_cloaked {
+            self.recompute_ball_attributes(ball_id);
             self.emit_event(Some(ball_id), DestinyEvent::CloakBall { ball_id, cloaked: 0 });
             if was_gate_cloak {
                 self.emit_event(

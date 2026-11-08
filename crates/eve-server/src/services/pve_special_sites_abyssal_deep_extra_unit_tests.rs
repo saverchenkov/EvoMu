@@ -4,12 +4,12 @@
 use crate::router::ServerContext;
 use crate::services::abyssal_void_mgr::VOID_SPACE_SYSTEM_ID;
 use crate::services::pve_abyssal_hazards::{
-    apply_abyssal_weather_dogma_modifiers_to_ship, apply_abyssal_weather_to_combat_and_nav, dark_weather_midpocket_turret_mult,
-    evaluate_abyssal_spatial_clouds_for_ship, evaluate_highsec_abyssal_tier_policy, restore_abyssal_weather_dogma_modifiers,
-    roll_abyssal_weather_penalty_pct, spatial_cloud_radius_m, BIOLUMINESCENT_CLOUD_LARGE_TYPE_ID,
-    BIOLUMINESCENT_CLOUD_SMALL_TYPE_ID, BIOLUMINESCENT_CLOUD_TYPE_ID, FILAMENT_CLOUD_LARGE_TYPE_ID,
-    FILAMENT_CLOUD_SMALL_TYPE_ID, FILAMENT_CLOUD_TYPE_ID, PROVING_TACHYON_CLOUD_TYPE_ID,
-    TACHYON_CLOUD_TYPE_ID,
+    apply_abyssal_weather_to_combat_and_nav, apply_abyssal_weather_to_ship_attrs,
+    evaluate_abyssal_spatial_clouds_for_ship,
+    evaluate_highsec_abyssal_tier_policy, roll_abyssal_weather_penalty_pct, spatial_cloud_radius_m,
+    BIOLUMINESCENT_CLOUD_LARGE_TYPE_ID, BIOLUMINESCENT_CLOUD_SMALL_TYPE_ID,
+    BIOLUMINESCENT_CLOUD_TYPE_ID, FILAMENT_CLOUD_LARGE_TYPE_ID, FILAMENT_CLOUD_SMALL_TYPE_ID,
+    FILAMENT_CLOUD_TYPE_ID, PROVING_TACHYON_CLOUD_TYPE_ID, TACHYON_CLOUD_TYPE_ID,
 };
 use crate::services::pve_special_sites::AbyssalWeatherKind;
 use crate::services::pve_special_sites_abyssal::{
@@ -233,25 +233,19 @@ fn deep_weather_combat_nav_and_ship_dogma_modifiers_and_restore_all_weathers() {
         AbyssalWeatherKind::Gamma,
         AbyssalWeatherKind::Dark,
     ] {
-        let saved = apply_abyssal_weather_dogma_modifiers_to_ship(&ctx, ship_id, weather, 50.0, 50.0);
-        assert!(!saved.is_empty());
+        let mut attrs = HashMap::from([
+            (37, 240.0), (54, 20_000.0), (158, 10_000.0),
+            (271, 1.0), (267, 0.5), (113, 0.67), (55, 250_000.0),
+            (273, 0.6), (269, 0.65), (109, 0.67), (564, 250.0),
+            (265, 1_500.0), (274, 0.8), (270, 0.65), (110, 0.67),
+            (263, 1_500.0), (272, 0.5), (268, 0.9), (111, 0.67),
+        ]);
+        apply_abyssal_weather_to_ship_attrs(weather, 50.0, 50.0, &mut attrs);
         if weather == AbyssalWeatherKind::Dark {
-            ctx.db.with_snapshot(|snap| {
-                let sh = &snap.items[&ship_id];
-                assert!((sh.dynamic_attributes[&37] - 360.0).abs() < 1e-6);
-                assert!((sh.dynamic_attributes[&54] - 10_000.0).abs() < 1e-6);
-                let tur = &snap.items[&turret_id];
-                assert!((tur.dynamic_attributes[&54] - 6_000.0).abs() < 1e-6);
-                assert!((tur.dynamic_attributes[&158] - 4_000.0).abs() < 1e-6);
-                assert!(tur.dynamic_attributes.contains_key(&9954));
-            });
-            let t_type = ctx.sde.types.get(&turret_tid).unwrap();
-            assert_eq!(
-                dark_weather_midpocket_turret_mult(&ctx, char_id, 32_000_010, false, turret_id, t_type),
-                1.0
-            );
+            assert!((attrs[&37] - 360.0).abs() < 1e-6);
+            assert!((attrs[&54] - 10_000.0).abs() < 1e-6);
+            assert!((attrs[&158] - 5_000.0).abs() < 1e-6);
         }
-        restore_abyssal_weather_dogma_modifiers(&ctx, ship_id, &saved);
     }
 
     ctx.db.with_snapshot(|snap| {

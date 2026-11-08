@@ -205,7 +205,6 @@ async fn disconnect_emergency_warp_blocked_for_nav_locks_immobilizers_and_struct
                 self_destruct_at_sec: 0,
                 waves_spawned: 0,
                 wave_npc_ball_ids: vec![],
-                orig_resonances: None,
                 open_container_id: None,
             },
         );

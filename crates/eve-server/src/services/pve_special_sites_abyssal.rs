@@ -13,7 +13,7 @@ use crate::services::pve_special_sites::{
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use eve_sde::{AttributeId, SolarSystemId, TypeId};
+use eve_sde::{SolarSystemId, TypeId};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -86,7 +86,6 @@ pub struct AbyssalPocketSession {
     pub rooms: [AbyssalRoomRecord; 3],
     pub started_at_sec: u64,
     pub collapse_at_sec: u64,
-    pub saved_ship_attrs: HashMap<AttributeId, f64>,
     pub completed: bool,
     pub collapsed_destroyed: bool,
     #[serde(default)]
@@ -737,29 +736,6 @@ pub async fn enter_abyssal_pocket_with_trace(
     let penalty_pct = existing_penalty.unwrap_or_else(|| roll_abyssal_weather_penalty_pct(ctx, tier));
     let bonus_pct = 50.0;
     let diff_mult = 1.0 + (tier as f64) * 1.25;
-    let prior_saved = with_pve_special_reg(ctx, |reg| {
-        let mut merged: HashMap<AttributeId, f64> = HashMap::new();
-        for p in reg.abyssal_pockets.values_mut() {
-            if (p.ship_id == ship_id || p.character_id == char_id)
-                && !p.saved_ship_attrs.is_empty()
-            {
-                for (attr_id, base_val) in std::mem::take(&mut p.saved_ship_attrs) {
-                    merged.entry(attr_id).or_insert(base_val);
-                }
-            }
-        }
-        (!merged.is_empty()).then_some(merged)
-    });
-    if let Some(prev_attrs) = prior_saved {
-        restore_abyssal_weather_dogma_modifiers(ctx, ship_id, &prev_attrs);
-    }
-    let saved_attrs = apply_abyssal_weather_dogma_modifiers_to_ship(
-        ctx,
-        ship_id,
-        weather,
-        penalty_pct,
-        bonus_pct,
-    );
     let origin_pos = ctx.db.with_snapshot(|snap| {
         snap.item_positions
             .get(&ship_id)
@@ -792,7 +768,6 @@ pub async fn enter_abyssal_pocket_with_trace(
                 joined.ship_id = ship_id;
                 joined.current_room = 1;
                 joined.origin_position = origin_pos;
-                joined.saved_ship_attrs = saved_attrs.clone();
                 if let Some(tid) = valid_trace_id {
                     joined.trace_ball_id = tid;
                 }
@@ -877,7 +852,6 @@ pub async fn enter_abyssal_pocket_with_trace(
                     rooms,
                     started_at_sec: now,
                     collapse_at_sec: collapse,
-                    saved_ship_attrs: saved_attrs,
                     completed: false,
                     collapsed_destroyed: false,
                     trace_ball_id: trace_id,
@@ -888,6 +862,7 @@ pub async fn enter_abyssal_pocket_with_trace(
             );
             (pid, r1_npcs, r1_cache, false, false, now, collapse, goffset)
         });
+    ctx.invalidate_ship_fitting(ship_id);
     crate::sp6_lifecycle::register_abyssal_session(
         ctx, char_id, ship_id, abyssal_sys_id, origin_sys, started_at, collapse_at,
     );

@@ -150,7 +150,6 @@ fn reconcile_tackle_handles_scram_mwd_shutdown_hic_bubble_and_bastion_immunity()
             module_id: 8002,
             is_mwd_or_mjd: true,
             speed_boost_factor: 5.0,
-            original_max_velocity: Some(400.0),
             duration_s: 10.0,
             ..ActiveModuleCycle::default()
         },
@@ -388,4 +387,220 @@ fn apply_destiny_event_in_actor_handles_all_event_variants_and_unknown_ball() {
             is_free: false,
         }
     ));
+}
+
+#[test]
+fn arch_584_overlapping_and_out_of_order_modifier_expiration_preserves_baselines() {
+    let sde = make_tackle_sde();
+    let sde_opt = Some(sde);
+    let mut bp = Ballpark::new(30_000_142);
+    let attacker_id = 4001_i64;
+    let ship_id = 4002_i64;
+
+    let base_sr = [0.5, 0.4, 0.3, 0.2];
+    let base_ar = [0.5, 0.5, 0.6, 0.7];
+    let base_hr = [0.67, 0.67, 0.67, 0.67];
+    bp.add_ball(make_tackle_ball(attacker_id, 587, DVec3::ZERO));
+    bp.combat_states.insert(attacker_id, CombatState::default());
+    bp.add_ball(make_tackle_ball(ship_id, 587, DVec3::new(1_000.0, 0.0, 0.0)));
+    bp.combat_states.insert(
+        ship_id,
+        CombatState {
+            signature_radius: 40.0,
+            shield_resonance: base_sr,
+            armor_resonance: base_ar,
+            structure_resonance: base_hr,
+            ..CombatState::default()
+        },
+    );
+    if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+        let b = &bp.balls[&ship_id];
+        cs.capture_missing_baselines(b);
+    }
+
+    let mut cycles: Vec<ActiveModuleCycle> = Vec::new();
+    let scramble_map = HashMap::new();
+    let core_map = HashMap::new();
+
+    // 1. Activate MWD (5x velocity, 1.5x mass, 5x sig), Stasis Web (0.4x), Cloak (0.25x), ADC, RAH
+    handle_add_module_cycle(
+        &mut bp,
+        &mut cycles,
+        &scramble_map,
+        &core_map,
+        &sde_opt,
+        &None,
+        None,
+        ActiveModuleCycle {
+            ship_id,
+            module_id: 90_001,
+            effect_name: "moduleBonusMicrowarpdrive".into(),
+            duration_s: 10.0,
+            is_mwd_or_mjd: true,
+            speed_boost_factor: 4.0,
+            self_mass_multiplier: Some(1.5),
+            hic_sig_multiplier: Some(5.0),
+            ..ActiveModuleCycle::default()
+        },
+    )
+    .unwrap();
+    handle_add_module_cycle(
+        &mut bp,
+        &mut cycles,
+        &scramble_map,
+        &core_map,
+        &sde_opt,
+        &None,
+        None,
+        ActiveModuleCycle {
+            ship_id: attacker_id,
+            target_id: Some(ship_id),
+            module_id: 90_002,
+            effect_name: "decreaseTargetSpeed".into(),
+            duration_s: 5.0,
+            target_velocity_multiplier: Some(0.4),
+            ..ActiveModuleCycle::default()
+        },
+    )
+    .unwrap();
+    handle_add_module_cycle(
+        &mut bp,
+        &mut cycles,
+        &scramble_map,
+        &core_map,
+        &sde_opt,
+        &None,
+        None,
+        ActiveModuleCycle {
+            ship_id,
+            module_id: 90_003,
+            effect_name: "cloaking".into(),
+            duration_s: 60.0,
+            speed_boost_factor: -0.75,
+            ..ActiveModuleCycle::default()
+        },
+    )
+    .unwrap();
+    handle_add_module_cycle(
+        &mut bp,
+        &mut cycles,
+        &scramble_map,
+        &core_map,
+        &sde_opt,
+        &None,
+        None,
+        ActiveModuleCycle {
+            ship_id,
+            module_id: 90_004,
+            duration_s: 12.0,
+            is_adc: true,
+            ..ActiveModuleCycle::default()
+        },
+    )
+    .unwrap();
+    handle_add_module_cycle(
+        &mut bp,
+        &mut cycles,
+        &scramble_map,
+        &core_map,
+        &sde_opt,
+        &None,
+        None,
+        ActiveModuleCycle {
+            ship_id,
+            module_id: 90_005,
+            duration_s: 10.0,
+            is_rah: true,
+            ..ActiveModuleCycle::default()
+        },
+    )
+    .unwrap();
+
+    // Overlap HIC WDFG (0.25x), Abyssal cloud, MJFG spool, Target Painter, and CRAB interference
+    handle_add_module_cycle(
+        &mut bp,
+        &mut cycles,
+        &scramble_map,
+        &core_map,
+        &sde_opt,
+        &None,
+        None,
+        ActiveModuleCycle {
+            ship_id,
+            module_id: 90_006,
+            effect_name: "warpDisruptSphere".into(),
+            duration_s: 30.0,
+            hic_velocity_multiplier: Some(0.25),
+            ..ActiveModuleCycle::default()
+        },
+    )
+    .unwrap();
+    if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+        cs.cloud_velocity_multiplier = Some(2.0);
+        cs.cloud_sig_multiplier = Some(1.25);
+        cs.mjfg_sig_multiplier = Some(2.5);
+        cs.tp_sig_multiplier = Some(1.3);
+        cs.crab_resonance_multiplier = Some(0.90);
+    }
+    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &scramble_map, &core_map, &None, None);
+
+    // Cloak overrides MWD self_v (0.25); cloud (2.0); HIC WDFG (0.25); Web (0.4)
+    let v_cloaked_stacked = 400.0 * 2.0 * (0.25 * 0.25) * 0.40;
+    assert!((bp.balls[&ship_id].max_velocity - v_cloaked_stacked).abs() < 1e-6);
+    assert!((bp.balls[&ship_id].mass - 2_250_000.0).abs() < 1e-3);
+    assert!((bp.combat_states[&ship_id].signature_radius - 40.0 * 5.0 * 1.25 * 2.5 * 1.3).abs() < 1e-6);
+    assert_eq!(bp.combat_states[&ship_id].shield_resonance, [0.25; 4]);
+    assert_eq!(bp.combat_states[&ship_id].armor_resonance, [0.25; 4]);
+
+    // Out-of-order expiration 1: Cloak expires FIRST while MWD is still running -> MWD 5x activates without lost web/WDFG/cloud!
+    let cloak_idx = cycles.iter().position(|c| c.module_id == 90_003).unwrap();
+    let cloak_rem = cycles.remove(cloak_idx);
+    crate::system_actor::cycles::cleanup_removed_module_cycle(&mut bp, &cloak_rem, &None);
+    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &scramble_map, &core_map, &None, None);
+    let v_uncloaked_mwd = 400.0 * 2.0 * (5.0 * 0.25) * 0.40;
+    assert!((bp.balls[&ship_id].max_velocity - v_uncloaked_mwd).abs() < 1e-6);
+
+    // Out-of-order expiration 2: Web expires while HIC WDFG, MWD, and cloud remain active
+    let web_idx = cycles.iter().position(|c| c.module_id == 90_002).unwrap();
+    let web_rem = cycles.remove(web_idx);
+    crate::system_actor::cycles::cleanup_removed_module_cycle(&mut bp, &web_rem, &None);
+    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &scramble_map, &core_map, &None, None);
+    assert!((bp.balls[&ship_id].max_velocity - 400.0 * 2.0 * 5.0 * 0.25).abs() < 1e-6);
+
+    // Out-of-order expiration 3: ADC expires BEFORE CRAB & RAH -> CRAB 0.90x now applies to baseline shield/hull & RAH armor!
+    let adc_idx = cycles.iter().position(|c| c.module_id == 90_004).unwrap();
+    let adc_rem = cycles.remove(adc_idx);
+    crate::system_actor::cycles::cleanup_removed_module_cycle(&mut bp, &adc_rem, &None);
+    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &scramble_map, &core_map, &None, None);
+    assert_eq!(bp.combat_states[&ship_id].shield_resonance, base_sr.map(|r| r * 0.90));
+    assert_eq!(bp.combat_states[&ship_id].structure_resonance, base_hr.map(|r| r * 0.90));
+    assert_eq!(bp.combat_states[&ship_id].armor_resonance, [0.85 * 0.90; 4]);
+
+    // Out-of-order expiration 4: CRAB expires while RAH remains active -> baseline shield/hull, RAH 0.85 armor
+    if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+        cs.crab_resonance_multiplier = None;
+    }
+    bp.recompute_ball_attributes(ship_id);
+    assert_eq!(bp.combat_states[&ship_id].shield_resonance, base_sr);
+    assert_eq!(bp.combat_states[&ship_id].structure_resonance, base_hr);
+    assert_eq!(bp.combat_states[&ship_id].armor_resonance, [0.85; 4]);
+
+    // Expire remaining MWD, RAH, WDFG, cloud, MJFG, TP in mixed order -> exact baselines restored
+    while let Some(rem) = cycles.pop() {
+        crate::system_actor::cycles::cleanup_removed_module_cycle(&mut bp, &rem, &None);
+    }
+    if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+        cs.cloud_velocity_multiplier = None;
+        cs.cloud_sig_multiplier = None;
+        cs.mjfg_sig_multiplier = None;
+        cs.tp_sig_multiplier = None;
+    }
+    reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &scramble_map, &core_map, &None, None);
+
+    assert!((bp.balls[&ship_id].max_velocity - 400.0).abs() < 1e-9);
+    assert!((bp.balls[&ship_id].mass - 1_500_000.0).abs() < 1e-6);
+    assert!((bp.combat_states[&ship_id].signature_radius - 40.0).abs() < 1e-9);
+    assert_eq!(bp.combat_states[&ship_id].shield_resonance, base_sr);
+    assert_eq!(bp.combat_states[&ship_id].armor_resonance, base_ar);
+    assert_eq!(bp.combat_states[&ship_id].structure_resonance, base_hr);
 }

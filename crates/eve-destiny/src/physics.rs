@@ -321,6 +321,7 @@ impl Ballpark {
         };
         let combat_ball_ids: Vec<BallId> = self.combat_states.keys().copied().collect();
         let mut proximity_decloaked = Vec::new();
+        let mut mjfg_recompute_ids = Vec::new();
         let mut mjfg_completed_ids = Vec::new();
         let mut dot_updates = Vec::new();
         for id_a in combat_ball_ids {
@@ -365,24 +366,27 @@ impl Ballpark {
                         && !cs.is_mwd_mjd_disabled
                     {
                         cs.mjfg_spool_remaining_s = 9.0;
-                        if cs.mjfg_original_sig_radius.is_none() {
-                            cs.mjfg_original_sig_radius = Some(cs.signature_radius);
-                            cs.signature_radius *= 2.5;
+                        if cs.base_signature_radius.is_none() {
+                            cs.base_signature_radius = Some(cs.signature_radius);
+                        }
+                        if cs.mjfg_sig_multiplier.is_none() {
+                            cs.mjfg_sig_multiplier = Some(2.5);
+                            mjfg_recompute_ids.push(id_a);
                         }
                     }
                     if cs.mjfg_spool_remaining_s > 0.0 {
                         if is_scrambled || cs.is_mwd_mjd_disabled {
                             cs.mjfg_spool_remaining_s = 0.0;
-                            if let Some(orig_sig) = cs.mjfg_original_sig_radius.take() {
-                                cs.signature_radius = orig_sig;
+                            if cs.mjfg_sig_multiplier.take().is_some() {
+                                mjfg_recompute_ids.push(id_a);
                             }
                         } else {
                             cs.mjfg_spool_remaining_s =
                                 (cs.mjfg_spool_remaining_s - dt).max(0.0);
                             if cs.mjfg_spool_remaining_s <= 1e-6 {
                                 cs.mjfg_spool_remaining_s = 0.0;
-                                if let Some(orig_sig) = cs.mjfg_original_sig_radius.take() {
-                                    cs.signature_radius = orig_sig;
+                                if cs.mjfg_sig_multiplier.take().is_some() {
+                                    mjfg_recompute_ids.push(id_a);
                                 }
                                 mjfg_completed_ids.push(id_a);
                             }
@@ -527,6 +531,9 @@ impl Ballpark {
                 let _ = self.remove_ball_preserving_observer_events(dot_id);
             }
         }
+        for rid in mjfg_recompute_ids {
+            self.recompute_ball_attributes(rid);
+        }
         for mjfg_id in mjfg_completed_ids {
             let _ = self.micro_jump_field(mjfg_id, 100_000.0, 6_000.0, 25);
         }
@@ -550,15 +557,10 @@ impl Ballpark {
                     is_active: false,
                 },
             );
-            if let Some(orig_v) = self
-                .combat_states
-                .get_mut(&decloaked_id)
-                .and_then(|c| c.cloak_original_max_velocity.take())
-            {
-                if let Some(b) = self.balls.get_mut(&decloaked_id) {
-                    b.max_velocity = orig_v;
-                }
+            if let Some(c) = self.combat_states.get_mut(&decloaked_id) {
+                c.cloak_velocity_multiplier = None;
             }
+            self.recompute_ball_attributes(decloaked_id);
             if let Some(meta) = self.ball_slim_meta.get_mut(&decloaked_id) {
                 meta.is_cloaked = false;
             }
@@ -1350,15 +1352,10 @@ impl Ballpark {
                 is_active: false,
             },
         );
-        if let Some(orig_v) = self
-            .combat_states
-            .get_mut(&ball_id)
-            .and_then(|c| c.cloak_original_max_velocity.take())
-        {
-            if let Some(b) = self.balls.get_mut(&ball_id) {
-                b.max_velocity = orig_v;
-            }
+        if let Some(c) = self.combat_states.get_mut(&ball_id) {
+            c.cloak_velocity_multiplier = None;
         }
+        self.recompute_ball_attributes(ball_id);
         if let Some(meta) = self.ball_slim_meta.get_mut(&ball_id) {
             meta.is_cloaked = false;
         }

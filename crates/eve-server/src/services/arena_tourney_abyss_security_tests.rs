@@ -376,25 +376,22 @@ async fn r7_tc_p1_447_abyssal_reentry_restores_saved_attrs_and_collapse_pods_all
     };
 
     enter_abyssal_pocket_with_trace(&ctx, &mut sess1, c1, filament_tid, 1, origin_sys, None).await;
-    let first_saved = read_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets.get(&c1).map(|p| p.saved_ship_attrs.clone())
-    })
-    .unwrap_or_default();
+    let first_dyn = ctx.db.with_snapshot(|s| s.items[&s1].dynamic_attributes.clone());
 
     sess1.solar_system_id = Some(origin_sys);
     sess1.ship_id = Some(s1);
     enter_abyssal_pocket_with_trace(&ctx, &mut sess1, c1, filament_tid, 1, origin_sys, None).await;
-    let (pid, abyss_sys, second_saved) = read_pve_special_reg(&ctx, |reg| {
+    let (pid, abyss_sys) = read_pve_special_reg(&ctx, |reg| {
         let p = reg.abyssal_pockets.get(&c1).unwrap();
-        (p.pocket_id, p.abyssal_solar_system_id, p.saved_ship_attrs.clone())
+        (p.pocket_id, p.abyssal_solar_system_id)
     });
-    assert_eq!(first_saved, second_saved, "re-entry must restore baseline attributes before re-applying weather");
+    let second_dyn = ctx.db.with_snapshot(|s| s.items[&s1].dynamic_attributes.clone());
+    assert_eq!(first_dyn, second_dyn, "re-entry must not mutate baseline ship dynamic_attributes");
 
     with_pve_special_reg(&ctx, |reg| {
         let mut c2_session = reg.abyssal_pockets[&c1].clone();
         c2_session.character_id = c2;
         c2_session.ship_id = s2;
-        c2_session.saved_ship_attrs = HashMap::new();
         reg.abyssal_pockets.insert(c2, c2_session);
     });
     let _ = pid;

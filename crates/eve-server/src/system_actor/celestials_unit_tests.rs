@@ -223,7 +223,7 @@ async fn module_cycle_queries_nanite_repairs_and_try_remove_ball_cleanup_work() 
             module_type_id: 2048,
             duration_s: 10.0,
             repeat: 0,
-            adc_saved_resists: Some(([0.0; 4], [0.0; 4], [0.0; 4])),
+            is_adc: true,
             is_overloaded: true,
             ..Default::default()
         };

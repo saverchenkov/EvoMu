@@ -29,38 +29,59 @@ pub fn build_fitted_ship_space_ball(
 ) -> eve_destiny::Ball {
     let sde_type = ctx.sde.types.get(&ship_type_id);
     let fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
-    let max_velocity = fit_opt
-        .as_ref()
-        .map(|f| f.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde))
-        .filter(|&v| v > 0.0)
-        .or_else(|| {
-            sde_type
-                .and_then(|t| t.default_attributes.get(&attr_ids::MAX_VELOCITY).copied())
+    let mut eff_attrs: HashMap<u16, f64> = [
+        (
+            attr_ids::MAX_VELOCITY,
+            fit_opt
+                .as_ref()
+                .map(|f| f.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde))
                 .filter(|&v| v > 0.0)
-        })
-        .unwrap_or(250.0);
-    let inertia = fit_opt
-        .as_ref()
-        .map(|f| f.ship.get_attribute(attr_ids::AGILITY, &ctx.sde))
-        .filter(|&v| v > 0.0)
-        .or_else(|| {
-            sde_type
-                .and_then(|t| t.default_attributes.get(&attr_ids::AGILITY).copied())
+                .or_else(|| {
+                    sde_type
+                        .and_then(|t| t.default_attributes.get(&attr_ids::MAX_VELOCITY).copied())
+                        .filter(|&v| v > 0.0)
+                })
+                .unwrap_or(250.0),
+        ),
+        (
+            attr_ids::AGILITY,
+            fit_opt
+                .as_ref()
+                .map(|f| f.ship.get_attribute(attr_ids::AGILITY, &ctx.sde))
                 .filter(|&v| v > 0.0)
-        })
-        .unwrap_or(0.5);
-    let mass = fit_opt
-        .as_ref()
-        .map(|f| f.ship.get_attribute(attr_ids::MASS, &ctx.sde))
-        .filter(|&v| v > 0.0)
-        .or_else(|| sde_type.map(|t| t.mass).filter(|&m| m > 0.0))
-        .unwrap_or(1_000_000.0);
-    let radius = fit_opt
-        .as_ref()
-        .map(|f| f.ship.get_attribute(162, &ctx.sde))
-        .filter(|&v| v > 0.0)
-        .or_else(|| sde_type.map(|t| t.radius).filter(|&r| r > 0.0))
-        .unwrap_or(50.0);
+                .or_else(|| {
+                    sde_type
+                        .and_then(|t| t.default_attributes.get(&attr_ids::AGILITY).copied())
+                        .filter(|&v| v > 0.0)
+                })
+                .unwrap_or(0.5),
+        ),
+        (
+            attr_ids::MASS,
+            fit_opt
+                .as_ref()
+                .map(|f| f.ship.get_attribute(attr_ids::MASS, &ctx.sde))
+                .filter(|&v| v > 0.0)
+                .or_else(|| sde_type.map(|t| t.mass).filter(|&m| m > 0.0))
+                .unwrap_or(1_000_000.0),
+        ),
+        (
+            162,
+            fit_opt
+                .as_ref()
+                .map(|f| f.ship.get_attribute(162, &ctx.sde))
+                .filter(|&v| v > 0.0)
+                .or_else(|| sde_type.map(|t| t.radius).filter(|&r| r > 0.0))
+                .unwrap_or(50.0),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    crate::services::inventory_fitting::fitting_scanners_superweapons::apply_active_dbuffs_and_system_effects_to_ship_attrs(ctx, ship_id, &mut eff_attrs);
+    let max_velocity = eff_attrs[&attr_ids::MAX_VELOCITY];
+    let inertia = eff_attrs[&attr_ids::AGILITY];
+    let mass = eff_attrs[&attr_ids::MASS];
+    let radius = eff_attrs[&162];
     eve_destiny::Ball {
         id: ship_id,
         type_id: ship_type_id,
@@ -1127,8 +1148,9 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
     active_clouds.retain(|bid, _| ballpark.balls.contains_key(bid));
 
     for sid in ship_ids {
-        let Some(b) = ballpark.balls.get_mut(&sid) else { continue };
-        let pos = b.position;
+        let Some(pos) = ballpark.balls.get(&sid).map(|b| b.position) else {
+            continue;
+        };
         let s_pocket = pocket_by_ship
             .get(&sid)
             .copied()
@@ -1141,31 +1163,25 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
             .map(|(_, tid, _, _)| *tid);
 
         let prev_cloud = active_clouds.get(&sid).copied();
+        let (cur_v, cur_sig, cur_in, cur_b, cur_cap, _) = cloud_modifiers_for_type(current_cloud);
         if prev_cloud == current_cloud {
             if let Some(cs) = ballpark.combat_states.get_mut(&sid) {
-                let (_, _, _, cur_b, _, _) = cloud_modifiers_for_type(current_cloud);
                 cs.shield_boost_multiplier = cur_b;
             }
             continue;
         }
 
-        let (prev_v, prev_sig, prev_in, _prev_b, prev_cap, _) = cloud_modifiers_for_type(prev_cloud);
-        b.max_velocity /= prev_v;
-        b.inertia /= prev_in;
         if let Some(cs) = ballpark.combat_states.get_mut(&sid) {
-            cs.signature_radius /= prev_sig;
-            cs.shield_boost_multiplier = 1.0;
-            cs.capacitor_recharge_time_ms = (cs.capacitor_recharge_time_ms / prev_cap).max(1_000.0);
-        }
-
-        let (cur_v, cur_sig, cur_in, cur_b, cur_cap, _) = cloud_modifiers_for_type(current_cloud);
-        b.max_velocity *= cur_v;
-        b.inertia *= cur_in;
-        if let Some(cs) = ballpark.combat_states.get_mut(&sid) {
-            cs.signature_radius *= cur_sig;
+            if let Some(b) = ballpark.balls.get(&sid) {
+                cs.capture_missing_baselines(b);
+            }
+            cs.cloud_velocity_multiplier = (cur_v != 1.0).then_some(cur_v);
+            cs.cloud_sig_multiplier = (cur_sig != 1.0).then_some(cur_sig);
+            cs.cloud_inertia_multiplier = (cur_in != 1.0).then_some(cur_in);
             cs.shield_boost_multiplier = cur_b;
-            cs.capacitor_recharge_time_ms = (cs.capacitor_recharge_time_ms * cur_cap).max(1_000.0);
+            cs.cloud_cap_recharge_multiplier = (cur_cap != 1.0).then_some(cur_cap);
         }
+        ballpark.recompute_ball_attributes(sid);
         if let Some(cid) = current_cloud {
             active_clouds.insert(sid, cid);
         } else {

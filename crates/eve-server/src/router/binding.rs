@@ -455,6 +455,7 @@ impl ServerContext {
             let mut eff_attrs: std::collections::HashMap<u16, f64> = [
                 a::SHIELD_CAPACITY, a::ARMOR_HP, a::HP_STRUCT, a::CAPACITOR_CAPACITY,
                 a::SIGNATURE_RADIUS, a::SHIELD_RECHARGE_RATE, a::RECHARGE_RATE,
+                a::MAX_VELOCITY, a::MASS, a::AGILITY,
                 a::SHIELD_EM_DAMAGE_RESONANCE, a::SHIELD_THERMAL_DAMAGE_RESONANCE,
                 a::SHIELD_KINETIC_DAMAGE_RESONANCE, a::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE,
                 a::ARMOR_EM_DAMAGE_RESONANCE, a::ARMOR_THERMAL_DAMAGE_RESONANCE,
@@ -478,8 +479,31 @@ impl ServerContext {
             let raw_cap = get_attr(eve_sde::attr_ids::CAPACITOR_CAPACITY, 250.0);
             let cap = if raw_cap <= 0.0 { if type_id == 670 { 100.0 } else { 250.0 } } else { raw_cap };
             let sig = get_attr(eve_sde::attr_ids::SIGNATURE_RADIUS, 35.0);
+            let tp_mult = self.effective_target_painter_multiplier(ship_id);
+            let base_sig = if tp_mult > 1.0 + 1e-6 { sig / tp_mult } else { sig };
+            let max_vel_opt = eff_attrs.get(&a::MAX_VELOCITY).copied().filter(|&v| v > 0.0);
+            let mass_opt = eff_attrs.get(&a::MASS).copied().filter(|&v| v > 0.0);
+            let inertia_opt = eff_attrs.get(&a::AGILITY).copied().filter(|&v| v > 0.0);
             let shield_rech = get_attr(eve_sde::attr_ids::SHIELD_RECHARGE_RATE, 120_000.0);
             let cap_rech = get_attr(eve_sde::attr_ids::RECHARGE_RATE, 120_000.0);
+            let shield_res = [
+                get_attr(eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE, 1.0),
+                get_attr(eve_sde::attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE, 0.8),
+                get_attr(eve_sde::attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE, 0.6),
+                get_attr(eve_sde::attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE, 0.5),
+            ];
+            let armor_res = [
+                get_attr(eve_sde::attr_ids::ARMOR_EM_DAMAGE_RESONANCE, 0.5),
+                get_attr(eve_sde::attr_ids::ARMOR_THERMAL_DAMAGE_RESONANCE, 0.65),
+                get_attr(eve_sde::attr_ids::ARMOR_KINETIC_DAMAGE_RESONANCE, 0.75),
+                get_attr(eve_sde::attr_ids::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE, 0.9),
+            ];
+            let struct_res = [
+                get_attr(eve_sde::attr_ids::EM_DAMAGE_RESONANCE, 0.67),
+                get_attr(eve_sde::attr_ids::THERMAL_DAMAGE_RESONANCE, 0.67),
+                get_attr(eve_sde::attr_ids::KINETIC_DAMAGE_RESONANCE, 0.67),
+                get_attr(eve_sde::attr_ids::EXPLOSIVE_DAMAGE_RESONANCE, 0.67),
+            ];
             let mut cs = eve_destiny::CombatState {
                 shield_hp: shield,
                 max_shield_hp: shield,
@@ -490,26 +514,24 @@ impl ServerContext {
                 capacitor: cap,
                 max_capacitor: cap,
                 signature_radius: sig,
+                base_signature_radius: Some(base_sig),
+                tp_sig_multiplier: (tp_mult > 1.0 + 1e-6).then_some(tp_mult),
                 shield_recharge_time_ms: shield_rech,
                 capacitor_recharge_time_ms: cap_rech,
-                shield_resonance: [
-                    get_attr(eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE, 1.0),
-                    get_attr(eve_sde::attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE, 0.8),
-                    get_attr(eve_sde::attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE, 0.6),
-                    get_attr(eve_sde::attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE, 0.5),
-                ],
-                armor_resonance: [
-                    get_attr(eve_sde::attr_ids::ARMOR_EM_DAMAGE_RESONANCE, 0.5),
-                    get_attr(eve_sde::attr_ids::ARMOR_THERMAL_DAMAGE_RESONANCE, 0.65),
-                    get_attr(eve_sde::attr_ids::ARMOR_KINETIC_DAMAGE_RESONANCE, 0.75),
-                    get_attr(eve_sde::attr_ids::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE, 0.9),
-                ],
-                structure_resonance: [
-                    get_attr(eve_sde::attr_ids::EM_DAMAGE_RESONANCE, 0.67),
-                    get_attr(eve_sde::attr_ids::THERMAL_DAMAGE_RESONANCE, 0.67),
-                    get_attr(eve_sde::attr_ids::KINETIC_DAMAGE_RESONANCE, 0.67),
-                    get_attr(eve_sde::attr_ids::EXPLOSIVE_DAMAGE_RESONANCE, 0.67),
-                ],
+                shield_resonance: shield_res,
+                armor_resonance: armor_res,
+                structure_resonance: struct_res,
+                base_max_velocity: max_vel_opt,
+                base_mass: mass_opt,
+                base_inertia: inertia_opt,
+                base_shield_resonance: Some(shield_res),
+                base_armor_resonance: Some(armor_res),
+                base_structure_resonance: Some(struct_res),
+                base_max_shield_hp: Some(shield),
+                base_max_armor_hp: Some(armor),
+                base_max_structure_hp: Some(hull),
+                base_max_capacitor: Some(cap),
+                base_capacitor_recharge_time_ms: Some(cap_rech),
                 rng_state: eve_destiny::CombatState::seed_rng_from_u64(
                     (ship_id as u64)
                         ^ (char_id as u64).rotate_left(17)
@@ -553,6 +575,15 @@ impl ServerContext {
             cs.shield_resonance = [eff_attrs[&a::SHIELD_EM_DAMAGE_RESONANCE], eff_attrs[&a::SHIELD_THERMAL_DAMAGE_RESONANCE], eff_attrs[&a::SHIELD_KINETIC_DAMAGE_RESONANCE], eff_attrs[&a::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE]];
             cs.armor_resonance = [eff_attrs[&a::ARMOR_EM_DAMAGE_RESONANCE], eff_attrs[&a::ARMOR_THERMAL_DAMAGE_RESONANCE], eff_attrs[&a::ARMOR_KINETIC_DAMAGE_RESONANCE], eff_attrs[&a::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE]];
             cs.structure_resonance = [eff_attrs[&a::EM_DAMAGE_RESONANCE], eff_attrs[&a::THERMAL_DAMAGE_RESONANCE], eff_attrs[&a::KINETIC_DAMAGE_RESONANCE], eff_attrs[&a::EXPLOSIVE_DAMAGE_RESONANCE]];
+            cs.base_max_shield_hp = Some(cs.max_shield_hp);
+            cs.base_max_armor_hp = Some(cs.max_armor_hp);
+            cs.base_max_structure_hp = Some(cs.max_structure_hp);
+            cs.base_max_capacitor = Some(cs.max_capacitor);
+            cs.base_capacitor_recharge_time_ms = Some(cs.capacitor_recharge_time_ms);
+            cs.base_signature_radius = Some(cs.signature_radius);
+            cs.base_shield_resonance = Some(cs.shield_resonance);
+            cs.base_armor_resonance = Some(cs.armor_resonance);
+            cs.base_structure_resonance = Some(cs.structure_resonance);
         }
         cs.rng_state = eve_destiny::CombatState::seed_rng_from_u64(
             (ship_id as u64) ^ (char_id as u64).rotate_left(17) ^ (u64::from(type_id) << 32),
@@ -595,6 +626,48 @@ impl ServerContext {
                 .get(&eve_sde::attr_ids::RECHARGE_RATE)
                 .copied()
                 .unwrap_or(120_000.0);
+            let shield_res = [
+                a.get(&eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE)
+                    .copied()
+                    .unwrap_or(1.0),
+                a.get(&eve_sde::attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE)
+                    .copied()
+                    .unwrap_or(1.0),
+                a.get(&eve_sde::attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE)
+                    .copied()
+                    .unwrap_or(1.0),
+                a.get(&eve_sde::attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE)
+                    .copied()
+                    .unwrap_or(1.0),
+            ];
+            let armor_res = [
+                a.get(&eve_sde::attr_ids::ARMOR_EM_DAMAGE_RESONANCE)
+                    .copied()
+                    .unwrap_or(1.0),
+                a.get(&eve_sde::attr_ids::ARMOR_THERMAL_DAMAGE_RESONANCE)
+                    .copied()
+                    .unwrap_or(1.0),
+                a.get(&eve_sde::attr_ids::ARMOR_KINETIC_DAMAGE_RESONANCE)
+                    .copied()
+                    .unwrap_or(1.0),
+                a.get(&eve_sde::attr_ids::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE)
+                    .copied()
+                    .unwrap_or(1.0),
+            ];
+            let struct_res = [
+                a.get(&eve_sde::attr_ids::EM_DAMAGE_RESONANCE)
+                    .copied()
+                    .unwrap_or(1.0),
+                a.get(&eve_sde::attr_ids::THERMAL_DAMAGE_RESONANCE)
+                    .copied()
+                    .unwrap_or(1.0),
+                a.get(&eve_sde::attr_ids::KINETIC_DAMAGE_RESONANCE)
+                    .copied()
+                    .unwrap_or(1.0),
+                a.get(&eve_sde::attr_ids::EXPLOSIVE_DAMAGE_RESONANCE)
+                    .copied()
+                    .unwrap_or(1.0),
+            ];
             return eve_destiny::CombatState {
                 shield_hp: shield,
                 max_shield_hp: shield,
@@ -605,50 +678,23 @@ impl ServerContext {
                 capacitor: cap,
                 max_capacitor: cap,
                 signature_radius: sig,
+                base_signature_radius: Some(sig),
                 shield_recharge_time_ms: shield_rech,
                 capacitor_recharge_time_ms: cap_rech,
-                shield_resonance: [
-                    a.get(&eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                    a.get(&eve_sde::attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                    a.get(&eve_sde::attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                    a.get(&eve_sde::attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                ],
-                armor_resonance: [
-                    a.get(&eve_sde::attr_ids::ARMOR_EM_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                    a.get(&eve_sde::attr_ids::ARMOR_THERMAL_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                    a.get(&eve_sde::attr_ids::ARMOR_KINETIC_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                    a.get(&eve_sde::attr_ids::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                ],
-                structure_resonance: [
-                    a.get(&eve_sde::attr_ids::EM_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                    a.get(&eve_sde::attr_ids::THERMAL_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                    a.get(&eve_sde::attr_ids::KINETIC_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                    a.get(&eve_sde::attr_ids::EXPLOSIVE_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                ],
+                shield_resonance: shield_res,
+                armor_resonance: armor_res,
+                structure_resonance: struct_res,
+                base_max_velocity: a.get(&eve_sde::attr_ids::MAX_VELOCITY).copied().filter(|&v| v > 0.0),
+                base_mass: a.get(&eve_sde::attr_ids::MASS).copied().filter(|&v| v > 0.0),
+                base_inertia: a.get(&eve_sde::attr_ids::AGILITY).copied().filter(|&v| v > 0.0),
+                base_shield_resonance: Some(shield_res),
+                base_armor_resonance: Some(armor_res),
+                base_structure_resonance: Some(struct_res),
+                base_max_shield_hp: Some(shield),
+                base_max_armor_hp: Some(armor),
+                base_max_structure_hp: Some(hull),
+                base_max_capacitor: Some(cap),
+                base_capacitor_recharge_time_ms: Some(cap_rech),
                 rng_state,
                 ..eve_destiny::CombatState::default()
             };
@@ -1221,6 +1267,48 @@ impl ServerContext {
             })
             .unwrap_or_default();
         eve_dogma::eval_target_painters_sig_radius(base_sig, &bonuses)
+    }
+
+    /// Computes ONLY the stacking-penalized Target Painter signature radius multiplier (`>= 1.0`)
+    /// from active projected EWAR on `target_ball_id` (`#584`).
+    pub fn effective_target_painter_multiplier(&self, target_ball_id: i64) -> f64 {
+        let tp_resist = self.db.with_snapshot(|snap| {
+            snap.items
+                .get(&target_ball_id)
+                .and_then(|i| self.sde.types.get(&i.type_id))
+                .and_then(|t| t.default_attributes.get(&2114).copied())
+        }).unwrap_or(1.0).clamp(0.0, 1.0);
+        let bonuses: Vec<f64> = self
+            .projected_ewar
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&target_ball_id)
+            .map(|list| {
+                list.iter()
+                    .filter(|proj| {
+                        self.sde
+                            .types
+                            .get(&proj.source_module_type_id)
+                            .is_some_and(|t| t.group_id == 379)
+                            || proj.effective_module.base_attributes.contains_key(&554)
+                    })
+                    .map(|proj| {
+                        let opt = proj
+                            .effective_module
+                            .get_attribute(eve_sde::attr_ids::MAX_RANGE, &self.sde);
+                        let fall = eve_dogma::get_module_falloff(&proj.effective_module, &self.sde);
+                        let att =
+                            eve_dogma::compute_falloff_attenuation(proj.distance, opt, fall);
+                        proj.effective_module.get_attribute(554, &self.sde) * att * tp_resist
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if bonuses.is_empty() {
+            1.0
+        } else {
+            eve_dogma::eval_target_painters_sig_radius(1.0, &bonuses)
+        }
     }
 
     // Covers: ship boarding skill and clone checks (`feat:ships.board-ship-skill-and-clone-check`)

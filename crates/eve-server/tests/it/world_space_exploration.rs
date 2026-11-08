@@ -887,8 +887,8 @@ use eve_server::router::ServerContext;
 use eve_server::services::pve_exploration::{advance_site_wave_or_complete, with_pve_exploration_reg, PveSiteInstance};
 use eve_server::services::pve_incursion_lifecycle::{register_world_event_tale, WorldEventTaleRecord};
 use eve_server::services::pve_special_sites_abyssal::{
-    apply_abyssal_weather_dogma_modifiers_to_ship, apply_abyssal_weather_to_combat_and_nav,
-    pulse_abyssal_automated_pylons, restore_abyssal_weather_dogma_modifiers, AbyssalWeatherKind,
+    apply_abyssal_weather_to_combat_and_nav, apply_abyssal_weather_to_ship_attrs,
+    pulse_abyssal_automated_pylons, AbyssalWeatherKind,
     AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID, MULTIBODY_TRACKING_PYLON_TYPE_ID,
 };
 use eve_server::services::quasar_progression_extra::CommunityTrackState;
@@ -958,41 +958,31 @@ async fn test_abyssal_automated_pylons_and_weather_effects_penalties() {
                 &mut max_vel,
                 &mut opt_range,
             );
-            let saved = apply_abyssal_weather_dogma_modifiers_to_ship(
-                &ctx,
-                ship_id,
-                weather,
-                penalty_pct,
-                bonus_pct,
-            );
-            assert!(!saved.is_empty());
-            let dyn_attrs = ctx
-                .db
-                .with_snapshot(|s| s.items.get(&ship_id).unwrap().dynamic_attributes.clone());
             let base_ty = ctx.sde.types.get(&587).unwrap();
+            let mut eval_attrs = base_ty.default_attributes.clone();
+            apply_abyssal_weather_to_ship_attrs(weather, penalty_pct, bonus_pct, &mut eval_attrs);
             match weather {
                 AbyssalWeatherKind::Electrical => {
                     assert!(cs.shield_resonance[0] > 0.5 && cs.armor_resonance[0] > 0.5);
-                    assert!(dyn_attrs[&55] < base_ty.default_attributes[&55]);
+                    assert!(eval_attrs[&55] < base_ty.default_attributes[&55]);
                 }
                 AbyssalWeatherKind::Dark => {
                     assert!(max_vel > 365.0 && opt_range < 15_000.0);
-                    assert!(dyn_attrs[&37] > base_ty.default_attributes[&37]);
+                    assert!(eval_attrs[&37] > base_ty.default_attributes[&37]);
                 }
                 AbyssalWeatherKind::Exotic => {
                     assert!(cs.shield_resonance[2] > 0.6 && cs.armor_resonance[2] > 0.75);
-                    assert!(dyn_attrs[&564] > base_ty.default_attributes[&564]);
+                    assert!(eval_attrs[&564] > base_ty.default_attributes[&564]);
                 }
                 AbyssalWeatherKind::Firestorm => {
                     assert!(cs.max_armor_hp > 300.0 && cs.shield_resonance[1] > 0.8);
-                    assert!(dyn_attrs[&265] > base_ty.default_attributes[&265]);
+                    assert!(eval_attrs[&265] > base_ty.default_attributes[&265]);
                 }
                 AbyssalWeatherKind::Gamma => {
                     assert!(cs.max_shield_hp > 300.0 && cs.shield_resonance[3] > 0.5);
-                    assert!(dyn_attrs[&263] > base_ty.default_attributes[&263]);
+                    assert!(eval_attrs[&263] > base_ty.default_attributes[&263]);
                 }
             }
-            restore_abyssal_weather_dogma_modifiers(&ctx, ship_id, &saved);
             assert!(ctx
                 .db
                 .with_snapshot(|s| s.items.get(&ship_id).unwrap().dynamic_attributes.is_empty()));

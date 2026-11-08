@@ -759,12 +759,9 @@ async fn activate_single_fighter_ability(
                         effective_module: synth,
                     },
                 );
-                if let Ok(Some(mut cs)) = sys_handle.get_combat_state(tid).await {
-                    let base_sig = cs.base_signature_radius.unwrap_or_else(|| cs.signature_radius.max(35.0));
-                    cs.base_signature_radius = Some(base_sig);
-                    cs.signature_radius = base_sig * paint_mult;
-                    let _ = sys_handle.set_combat_state(tid, cs).await;
-                }
+                sys_handle.try_recompute_combat_attributes(tid, |cs| {
+                    cs.tp_sig_multiplier = Some(paint_mult);
+                });
                 DamageVector::default()
             }
             17 => {
@@ -950,19 +947,21 @@ async fn activate_single_fighter_ability(
                     } else {
                         attr(2151).or_else(|| attr(2124)).unwrap_or(400.0)
                     };
-                    let mut b = fighter_ball.clone();
-                    b.max_velocity *= 1.0 + speed_bonus_pct / 100.0;
-                    b.speed_fraction = 1.0;
                     if let Ok(Some(mut cs)) = sys_handle.get_combat_state(fighter_ball_id).await {
+                        cs.capture_missing_baselines(&fighter_ball);
+                        cs.external_velocity_multiplier = Some(1.0 + speed_bonus_pct / 100.0);
                         if ability_id == 13 {
-                            if cs.base_signature_radius.is_none() {
-                                cs.base_signature_radius = Some(cs.signature_radius);
-                            }
                             let sig_mult = (1.0 + attr(2225).unwrap_or(-80.0) / 100.0).clamp(0.10, 0.90);
-                            cs.signature_radius *= sig_mult;
+                            cs.external_sig_multiplier = Some(sig_mult);
                         }
+                        let mut b = fighter_ball.clone();
+                        cs.recompute_attributes(&mut b);
+                        b.speed_fraction = 1.0;
                         let _ = sys_handle.spawn_ball_with_combat(b, cs).await;
                     } else {
+                        let mut b = fighter_ball.clone();
+                        b.max_velocity *= 1.0 + speed_bonus_pct / 100.0;
+                        b.speed_fraction = 1.0;
                         let _ = sys_handle.spawn_ball(b).await;
                     }
                 }
@@ -1509,16 +1508,14 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
                     }
                 })
                 .unwrap_or(if ability_id == 13 { 200.0 } else { 400.0 });
-            if let Ok(Some((_, mut b))) = sys_handle.get_ball_snapshot(fighter_ball_id).await {
-                b.max_velocity /= 1.0 + speed_bonus_pct / 100.0;
-                if let Ok(Some(mut cs)) = sys_handle.get_combat_state(fighter_ball_id).await {
-                    if ability_id == 13 {
-                        if let Some(base_sig) = cs.base_signature_radius.take() {
-                            cs.signature_radius = base_sig;
-                        }
-                    }
-                    let _ = sys_handle.spawn_ball_with_combat(b, cs).await;
-                } else {
+            if !sys_handle.try_recompute_combat_attributes(fighter_ball_id, |cs| {
+                cs.external_velocity_multiplier = None;
+                if ability_id == 13 {
+                    cs.external_sig_multiplier = None;
+                }
+            }) {
+                if let Ok(Some((_, mut b))) = sys_handle.get_ball_snapshot(fighter_ball_id).await {
+                    b.max_velocity /= 1.0 + speed_bonus_pct / 100.0;
                     let _ = sys_handle.spawn_ball(b).await;
                 }
             }

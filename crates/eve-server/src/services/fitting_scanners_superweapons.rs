@@ -270,29 +270,22 @@ pub fn apply_active_dbuffs_and_system_effects_to_ship_attrs(
             let pocket_weather = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
                 reg.abyssal_pockets
                     .values()
-                    .find(|p| p.abyssal_solar_system_id == sys_id || p.ship_id == ship_id)
-                    .map(|p| (p.weather, p.weather_penalty_pct, p.weather_bonus_pct, p.saved_ship_attrs.clone()))
+                    .find(|p| {
+                        !p.completed
+                            && !p.collapsed_destroyed
+                            && (p.ship_id == ship_id || p.fleet_ship_ids.contains(&ship_id))
+                    })
+                    .or_else(|| {
+                        reg.abyssal_pockets
+                            .values()
+                            .find(|p| !p.completed && !p.collapsed_destroyed && p.abyssal_solar_system_id == sys_id)
+                    })
+                    .map(|p| (p.weather, p.weather_penalty_pct, p.weather_bonus_pct))
             });
-            if let Some((w, pen, bon, saved)) = pocket_weather {
-                use crate::services::pve_special_sites::AbyssalWeatherKind;
-                let (pen_attr, bon_attr, bon_mult) = match w {
-                    AbyssalWeatherKind::Firestorm => (Some(110), 265, 1.0 + bon / 100.0),
-                    AbyssalWeatherKind::Gamma => (Some(272), 263, 1.0 + bon / 100.0),
-                    AbyssalWeatherKind::Electrical => (Some(271), 55, 1.0 - bon / 100.0),
-                    AbyssalWeatherKind::Exotic => (Some(273), 564, 1.0 + bon / 100.0),
-                    AbyssalWeatherKind::Dark => (None, 37, 1.0 + bon / 100.0),
-                };
-                for (aid, factor) in pen_attr
-                    .into_iter()
-                    .map(|id| (id, 1.0 + pen / 100.0))
-                    .chain(std::iter::once((bon_attr, bon_mult)))
-                {
-                    if !saved.contains_key(&aid) {
-                        if let Some(v) = attrs.get_mut(&aid) {
-                            *v *= factor;
-                        }
-                    }
-                }
+            if let Some((w, pen, bon)) = pocket_weather {
+                crate::services::pve_abyssal_hazards::apply_abyssal_weather_to_ship_attrs(
+                    w, pen, bon, attrs,
+                );
             }
         }
         if let Some(inc_eff) = crate::services::pve_special_sites::get_incursion_effects_for_system(ctx, sys_id) {

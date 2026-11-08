@@ -10,13 +10,11 @@ use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::pve_special_sites_abyssal::{
-    apply_abyssal_weather_dogma_modifiers_to_ship, apply_abyssal_weather_to_combat_and_nav,
+    apply_abyssal_weather_to_combat_and_nav, apply_abyssal_weather_to_ship_attrs,
     evaluate_abyssal_spatial_clouds_for_ship, pulse_abyssal_automated_pylons,
-    restore_abyssal_weather_dogma_modifiers, step_abyssal_hazards_and_pylons_in_ballpark,
-    AbyssalWeatherKind, AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID,
-    BIOLUMINESCENT_CLOUD_TYPE_ID, FILAMENT_CLOUD_TYPE_ID,
-    MULTIBODY_TRACKING_PYLON_TYPE_ID, SPATIAL_CLOUD_RADIUS_M,
-    TACHYON_CLOUD_TYPE_ID,
+    step_abyssal_hazards_and_pylons_in_ballpark, AbyssalWeatherKind,
+    AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID, BIOLUMINESCENT_CLOUD_TYPE_ID, FILAMENT_CLOUD_TYPE_ID,
+    MULTIBODY_TRACKING_PYLON_TYPE_ID, SPATIAL_CLOUD_RADIUS_M, TACHYON_CLOUD_TYPE_ID,
 };
 use crate::common;
 
@@ -90,22 +88,22 @@ async fn test_abyssal_weather_all_types_and_tier_scaling() {
                     assert!(cs.max_shield_hp > 1000.0 && cs.shield_resonance[3] > 0.5, "Gamma boosts shield HP and penalizes Explosive resonance");
                 }
             }
-            let saved = apply_abyssal_weather_dogma_modifiers_to_ship(&ctx, ship_id, weather, penalty_pct, bonus_pct);
-            assert!(!saved.is_empty(), "Saved pre-weather attributes");
-            let dyn_attrs = ctx.db.with_snapshot(|s| s.items.get(&ship_id).unwrap().dynamic_attributes.clone());
             let base_ty = ctx.sde.types.get(&621).unwrap();
+            let mut attrs = base_ty.default_attributes.clone();
+            apply_abyssal_weather_to_ship_attrs(weather, penalty_pct, bonus_pct, &mut attrs);
             match weather {
-                AbyssalWeatherKind::Electrical => assert!(dyn_attrs[&55] < base_ty.default_attributes[&55], "Electrical lowers cap recharge time (attr 55)"),
+                AbyssalWeatherKind::Electrical => assert!(attrs[&55] < base_ty.default_attributes[&55], "Electrical lowers cap recharge time (attr 55)"),
                 AbyssalWeatherKind::Dark => {
-                    assert!(dyn_attrs[&37] > base_ty.default_attributes[&37], "Dark boosts max velocity (attr 37)");
-                    assert!(dyn_attrs.contains_key(&54), "Dark penalizes optimal range (attr 54)");
+                    assert!(attrs[&37] > base_ty.default_attributes[&37], "Dark boosts max velocity (attr 37)");
+                    if let Some(&orig_54) = base_ty.default_attributes.get(&54) {
+                        assert!(attrs[&54] < orig_54, "Dark penalizes optimal range (attr 54)");
+                    }
                 }
-                AbyssalWeatherKind::Exotic => assert!(dyn_attrs[&564] > base_ty.default_attributes[&564], "Exotic boosts scan resolution (attr 564)"),
-                AbyssalWeatherKind::Firestorm => assert!(dyn_attrs[&265] > base_ty.default_attributes[&265], "Firestorm boosts armor HP (attr 265)"),
-                AbyssalWeatherKind::Gamma => assert!(dyn_attrs[&263] > base_ty.default_attributes[&263], "Gamma boosts shield capacity (attr 263)"),
+                AbyssalWeatherKind::Exotic => assert!(attrs[&564] > base_ty.default_attributes[&564], "Exotic boosts scan resolution (attr 564)"),
+                AbyssalWeatherKind::Firestorm => assert!(attrs[&265] > base_ty.default_attributes[&265], "Firestorm boosts armor HP (attr 265)"),
+                AbyssalWeatherKind::Gamma => assert!(attrs[&263] > base_ty.default_attributes[&263], "Gamma boosts shield capacity (attr 263)"),
             }
-            restore_abyssal_weather_dogma_modifiers(&ctx, ship_id, &saved);
-            assert!(ctx.db.with_snapshot(|s| s.items.get(&ship_id).unwrap().dynamic_attributes.is_empty()), "Pre-weather dynamic_attributes cleanly restored");
+            assert!(ctx.db.with_snapshot(|s| s.items.get(&ship_id).unwrap().dynamic_attributes.is_empty()), "Pre-weather dynamic_attributes stay untouched");
         }
     }
 }

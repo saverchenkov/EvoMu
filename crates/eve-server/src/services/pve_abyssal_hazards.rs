@@ -526,18 +526,10 @@ pub(crate) fn dark_weather_midpocket_turret_mult(
     char_id: CharacterId,
     sys_id: SolarSystemId,
     is_missile_launcher: bool,
-    module_id: ItemId,
+    _module_id: ItemId,
     mod_type: &eve_sde::InvType,
 ) -> f64 {
     if is_missile_launcher || !is_abyssal_system(sys_id) || !is_gunnery_turret_type(mod_type) {
-        return 1.0;
-    }
-    let already_applied = ctx.db.with_snapshot(|s| {
-        s.items
-            .get(&module_id)
-            .is_some_and(|it| it.dynamic_attributes.contains_key(&9954))
-    });
-    if already_applied {
         return 1.0;
     }
     with_pve_special_reg(ctx, |reg| {
@@ -549,174 +541,57 @@ pub(crate) fn dark_weather_midpocket_turret_mult(
     .unwrap_or(1.0)
 }
 
-/// Applies V24 SDE Abyssal weather dogma modifiers (`dbuffCollections` `90..=100`) to `ship_id` (and fitted Gunnery
-/// turrets under Dark weather `dbuff 97`), invalidating cached ship fittings and returning saved pre-weather ship attrs.
-pub fn apply_abyssal_weather_dogma_modifiers_to_ship(
-    ctx: &ServerContext,
-    ship_id: ItemId,
+/// Declaratively applies Abyssal weather modifiers to an evaluated ship attribute map without mutating persisted
+/// item snapshots.
+pub fn apply_abyssal_weather_to_ship_attrs(
     weather: AbyssalWeatherKind,
     penalty_pct: f64,
     bonus_pct: f64,
-) -> HashMap<AttributeId, f64> {
+    attrs: &mut HashMap<AttributeId, f64>,
+) {
     let pen = penalty_pct / 100.0;
     let bon = bonus_pct / 100.0;
     let range_mult = (1.0 - pen).max(0.1);
-    let saved = ctx.db.with_mut_snapshot(|snap| {
-        let mut saved = HashMap::new();
-        let Some(ship_type_id) = snap.items.get(&ship_id).map(|s| s.type_id) else {
-            return saved;
-        };
-        let sde_defaults = ctx
-            .sde
-            .types
-            .get(&ship_type_id)
-            .map(|t| t.default_attributes.clone())
-            .unwrap_or_default();
-        if let Some(ship) = snap.items.get_mut(&ship_id) {
-            let mut modify_attr = |aid: AttributeId, fallback: f64, mult: f64, is_res_pen: bool| {
-                let dyn_prev = ship.dynamic_attributes.get(&aid).copied();
-                let orig = dyn_prev
-                    .or_else(|| sde_defaults.get(&aid).copied())
-                    .unwrap_or(fallback);
-                saved.entry(aid).or_insert(dyn_prev.unwrap_or(-1.0e300));
-                let new_val = if is_res_pen {
-                    (orig * (1.0 + pen)).clamp(0.0, 1.0)
-                } else {
-                    orig * mult
-                };
-                ship.dynamic_attributes.insert(aid, new_val);
+    let mut modify_attr = |aid: AttributeId, mult: f64, is_res_pen: bool| {
+        if let Some(val) = attrs.get_mut(&aid) {
+            *val = if is_res_pen {
+                (*val * (1.0 + pen)).clamp(0.0, 1.0)
+            } else {
+                *val * mult
             };
-            match weather {
-                AbyssalWeatherKind::Electrical => {
-                    modify_attr(271, 1.0, 1.0, true); // shieldEmDamageResonance (-50% EM shield resist)
-                    modify_attr(267, 0.5, 1.0, true); // armorEmDamageResonance (penalized per V24 SDE dbuff 90)
-                    modify_attr(113, 0.67, 1.0, true); // emDamageResonance
-                    modify_attr(55, 250_000.0, (1.0 - bon).max(0.1), false); // rechargeRate
-                }
-                AbyssalWeatherKind::Dark => {
-                    modify_attr(37, 250.0, 1.0 + bon, false); // maxVelocity
-                    modify_attr(54, 15_000.0, range_mult, false); // maxRange
-                    modify_attr(158, 10_000.0, range_mult, false); // falloff
-                }
-                AbyssalWeatherKind::Exotic => {
-                    modify_attr(273, 0.6, 1.0, true); // shieldKineticDamageResonance (-50% Kinetic shield resist)
-                    modify_attr(269, 0.65, 1.0, true); // armorKineticDamageResonance (penalized per V24 SDE dbuff 99)
-                    modify_attr(109, 0.67, 1.0, true); // kineticDamageResonance
-                    modify_attr(564, 250.0, 1.0 + bon, false); // scanResolution
-                }
-                AbyssalWeatherKind::Firestorm => {
-                    modify_attr(265, 1_500.0, 1.0 + bon, false); // armorHP
-                    modify_attr(274, 0.8, 1.0, true); // shieldThermalDamageResonance
-                    modify_attr(270, 0.65, 1.0, true); // armorThermalDamageResonance
-                    modify_attr(110, 0.67, 1.0, true); // thermalDamageResonance
-                }
-                AbyssalWeatherKind::Gamma => {
-                    modify_attr(263, 1_500.0, 1.0 + bon, false); // shieldCapacity
-                    modify_attr(272, 0.5, 1.0, true); // shieldExplosiveDamageResonance
-                    modify_attr(268, 0.9, 1.0, true); // armorExplosiveDamageResonance
-                    modify_attr(111, 0.67, 1.0, true); // explosiveDamageResonance
-                }
-            }
         }
-        if weather == AbyssalWeatherKind::Dark {
-            let mod_ids: Vec<(ItemId, TypeId)> = snap
-                .items
-                .values()
-                .filter(|it| {
-                    it.location_id == ship_id
-                        && (11..=34).contains(&(it.flag as u16))
-                        && ctx.sde.types.get(&it.type_id).is_some_and(is_gunnery_turret_type)
-                })
-                .map(|it| (it.item_id, it.type_id))
-                .collect();
-            for (mid, mtid) in mod_ids {
-                let m_defs = ctx
-                    .sde
-                    .types
-                    .get(&mtid)
-                    .map(|t| t.default_attributes.clone())
-                    .unwrap_or_default();
-                if let Some(m_item) = snap.items.get_mut(&mid) {
-                    for (aid, backup_key, def_v) in [(54_u16, 9954_u16, 5_000.0), (158_u16, 9958_u16, 5_000.0)] {
-                        let prev_dyn = m_item.dynamic_attributes.get(&aid).copied();
-                        let base_v = if let Some(&saved_v) = m_item.dynamic_attributes.get(&backup_key) {
-                            if saved_v <= -1.0e299 {
-                                m_defs.get(&aid).copied().unwrap_or(def_v)
-                            } else {
-                                saved_v
-                            }
-                        } else {
-                            m_item.dynamic_attributes.insert(backup_key, prev_dyn.unwrap_or(-1.0e300));
-                            prev_dyn.or_else(|| m_defs.get(&aid).copied()).unwrap_or(def_v)
-                        };
-                        m_item.dynamic_attributes.insert(aid, base_v * range_mult);
-                    }
-                }
-            }
+    };
+    match weather {
+        AbyssalWeatherKind::Electrical => {
+            modify_attr(271, 1.0, true);
+            modify_attr(267, 1.0, true);
+            modify_attr(113, 1.0, true);
+            modify_attr(55, (1.0 - bon).max(0.1), false);
         }
-        saved
-    });
-    ctx.invalidate_ship_fitting(ship_id);
-    saved
-}
-
-pub fn restore_abyssal_weather_dogma_modifiers(
-    ctx: &ServerContext,
-    ship_id: ItemId,
-    saved_attrs: &HashMap<AttributeId, f64>,
-) {
-    ctx.db.with_mut_snapshot(|snap| {
-        if !saved_attrs.is_empty() {
-            if let Some(ship) = snap.items.get_mut(&ship_id) {
-                let sde_defaults = ctx
-                    .sde
-                    .types
-                    .get(&ship.type_id)
-                    .map(|t| t.default_attributes.clone())
-                    .unwrap_or_default();
-                for (&attr_id, &val) in saved_attrs {
-                    if val <= -1.0e299 || sde_defaults.get(&attr_id).is_some_and(|&def| (def - val).abs() < 1e-9) {
-                        ship.dynamic_attributes.remove(&attr_id);
-                    } else {
-                        ship.dynamic_attributes.insert(attr_id, val);
-                    }
-                }
-                for temp_key in [9937_u16, 9952, 9960, 9961, 9962] {
-                    ship.dynamic_attributes.remove(&temp_key);
-                }
-            }
+        AbyssalWeatherKind::Dark => {
+            modify_attr(37, 1.0 + bon, false);
+            modify_attr(54, range_mult, false);
+            modify_attr(158, range_mult, false);
         }
-        let mod_ids: Vec<(ItemId, TypeId)> = snap
-            .items
-            .values()
-            .filter(|it| {
-                it.location_id == ship_id
-                    && (it.dynamic_attributes.contains_key(&9954)
-                        || it.dynamic_attributes.contains_key(&9958))
-            })
-            .map(|it| (it.item_id, it.type_id))
-            .collect();
-        for (mid, mtid) in mod_ids {
-            let m_defs = ctx
-                .sde
-                .types
-                .get(&mtid)
-                .map(|t| t.default_attributes.clone())
-                .unwrap_or_default();
-            if let Some(m_item) = snap.items.get_mut(&mid) {
-                for (aid, backup_key) in [(54_u16, 9954_u16), (158_u16, 9958_u16)] {
-                    if let Some(prev) = m_item.dynamic_attributes.remove(&backup_key) {
-                        if prev <= -1.0e299 || m_defs.get(&aid).is_some_and(|&def| (def - prev).abs() < 1e-9) {
-                            m_item.dynamic_attributes.remove(&aid);
-                        } else {
-                            m_item.dynamic_attributes.insert(aid, prev);
-                        }
-                    }
-                }
-            }
+        AbyssalWeatherKind::Exotic => {
+            modify_attr(273, 1.0, true);
+            modify_attr(269, 1.0, true);
+            modify_attr(109, 1.0, true);
+            modify_attr(564, 1.0 + bon, false);
         }
-    });
-    ctx.invalidate_ship_fitting(ship_id);
+        AbyssalWeatherKind::Firestorm => {
+            modify_attr(265, 1.0 + bon, false);
+            modify_attr(274, 1.0, true);
+            modify_attr(270, 1.0, true);
+            modify_attr(110, 1.0, true);
+        }
+        AbyssalWeatherKind::Gamma => {
+            modify_attr(263, 1.0 + bon, false);
+            modify_attr(272, 1.0, true);
+            modify_attr(268, 1.0, true);
+            modify_attr(111, 1.0, true);
+        }
+    }
 }
 
 pub(crate) fn is_spatial_hazard_cloud_type(tid: TypeId) -> bool {
@@ -807,32 +682,15 @@ pub async fn evaluate_abyssal_spatial_clouds_for_ship(
     if is_excluded_ship {
         return None;
     }
-    let (ship_pocket, weather_vel_mult, weather_cap_mult) = with_pve_special_reg(ctx, |reg| {
-        let p = reg.abyssal_pockets.values().find(|p| {
-            !p.completed
-                && !p.collapsed_destroyed
-                && (p.fleet_ship_ids.contains(&ship_id) || p.ship_id == ship_id)
-        });
-        let pid = p.map(|p| p.pocket_id);
-        let v_mult = p
-            .map(|p| {
-                if p.weather == AbyssalWeatherKind::Dark {
-                    1.0 + (p.weather_bonus_pct / 100.0)
-                } else {
-                    1.0
-                }
+    let ship_pocket = with_pve_special_reg(ctx, |reg| {
+        reg.abyssal_pockets
+            .values()
+            .find(|p| {
+                !p.completed
+                    && !p.collapsed_destroyed
+                    && (p.fleet_ship_ids.contains(&ship_id) || p.ship_id == ship_id)
             })
-            .unwrap_or(1.0);
-        let c_mult = p
-            .map(|p| {
-                if p.weather == AbyssalWeatherKind::Electrical {
-                    (1.0 - p.weather_bonus_pct / 100.0).max(0.1)
-                } else {
-                    1.0
-                }
-            })
-            .unwrap_or(1.0);
-        (pid, v_mult, c_mult)
+            .map(|p| p.pocket_id)
     });
     let balls = sys_handle.list_balls().await.unwrap_or_default();
     let mut active_cloud: Option<TypeId> = None;
@@ -850,7 +708,7 @@ pub async fn evaluate_abyssal_spatial_clouds_for_ship(
 
     let (vel_mult, sig_mult, inertia_mult, boost_mult, cap_rech_mult, label) =
         cloud_modifiers_for_type(active_cloud);
-    let (char_id, ship_type, has_dyn_vel, has_dyn_cap) = ctx.db.with_snapshot(|snap| {
+    let (char_id, ship_type) = ctx.db.with_snapshot(|snap| {
         let ship_item = snap.items.get(&ship_id);
         let stype = ship_item.map(|i| i.type_id).unwrap_or(ship_ball.type_id);
         let cid = ship_item
@@ -863,9 +721,7 @@ pub async fn evaluate_abyssal_spatial_clouds_for_ship(
                     .map(|c| c.character_id)
             })
             .unwrap_or(0);
-        let dyn_v = ship_item.is_some_and(|i| i.dynamic_attributes.contains_key(&37));
-        let dyn_c = ship_item.is_some_and(|i| i.dynamic_attributes.contains_key(&55));
-        (cid, stype, dyn_v, dyn_c)
+        (cid, stype)
     });
     let fitted_ball = crate::services::pve_abyssal_pylons::build_fitted_ship_space_ball(
         ctx,
@@ -879,22 +735,31 @@ pub async fn evaluate_abyssal_spatial_clouds_for_ship(
     } else {
         ctx.build_type_combat_state(ship_type)
     };
-    let eff_weather_vel = if has_dyn_vel { 1.0 } else { weather_vel_mult };
-    let eff_weather_cap = if has_dyn_cap { 1.0 } else { weather_cap_mult };
 
     {
         let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(b) = bp.balls.get_mut(&ship_id) {
-            b.max_velocity = fitted_ball.max_velocity * eff_weather_vel * vel_mult;
-            b.inertia = fitted_ball.inertia * inertia_mult;
-        }
-        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
-            cs.signature_radius = fitted_cs.signature_radius * sig_mult;
+        let ball_opt = bp.balls.get(&ship_id).cloned();
+        if let (Some(b), Some(cs)) = (ball_opt, bp.combat_states.get_mut(&ship_id)) {
+            if cs.base_max_velocity.is_none() {
+                cs.base_max_velocity = Some(fitted_ball.max_velocity);
+            }
+            if cs.base_inertia.is_none() {
+                cs.base_inertia = Some(fitted_ball.inertia);
+            }
+            if cs.base_signature_radius.is_none() {
+                cs.base_signature_radius = Some(fitted_cs.signature_radius);
+            }
+            if cs.base_capacitor_recharge_time_ms.is_none() {
+                cs.base_capacitor_recharge_time_ms = Some(fitted_cs.capacitor_recharge_time_ms);
+            }
+            cs.capture_missing_baselines(&b);
+            cs.cloud_velocity_multiplier = (vel_mult != 1.0).then_some(vel_mult);
+            cs.cloud_inertia_multiplier = (inertia_mult != 1.0).then_some(inertia_mult);
+            cs.cloud_sig_multiplier = (sig_mult != 1.0).then_some(sig_mult);
             cs.shield_boost_multiplier = boost_mult;
-            cs.capacitor_recharge_time_ms =
-                (fitted_cs.capacitor_recharge_time_ms * eff_weather_cap * cap_rech_mult)
-                    .max(1_000.0);
+            cs.cloud_cap_recharge_multiplier = (cap_rech_mult != 1.0).then_some(cap_rech_mult);
         }
+        bp.recompute_ball_attributes(ship_id);
     }
     ctx.db.with_mut_snapshot(|snap| {
         let mut active_clouds: HashMap<i64, TypeId> = snap

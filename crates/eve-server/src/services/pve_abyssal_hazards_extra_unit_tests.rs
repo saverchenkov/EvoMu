@@ -258,7 +258,6 @@ fn turret_detection_dark_weather_midpocket_mult_and_cloud_radius_modifiers() {
                 rooms: [empty_room(), empty_room(), empty_room()],
                 started_at_sec: 1_776_500_000,
                 collapse_at_sec: 1_776_501_200,
-                saved_ship_attrs: HashMap::new(),
                 completed: false,
                 collapsed_destroyed: false,
                 trace_ball_id: 1,
@@ -275,27 +274,11 @@ fn turret_detection_dark_weather_midpocket_mult_and_cloud_radius_modifiers() {
             .abs()
             < 1e-6
     );
-
-    let saved = apply_abyssal_weather_dogma_modifiers_to_ship(
-        &ctx,
-        ship_id,
-        AbyssalWeatherKind::Dark,
-        50.0,
-        50.0,
-    );
-    // Second application uses backup_key 9954/9958 without compounding
-    let _ = apply_abyssal_weather_dogma_modifiers_to_ship(
-        &ctx,
-        ship_id,
-        AbyssalWeatherKind::Dark,
-        50.0,
-        50.0,
-    );
-    assert_eq!(
-        dark_weather_midpocket_turret_mult(&ctx, char_id, ab_sys, false, turret_id, &turret_sde),
-        1.0
-    );
-    restore_abyssal_weather_dogma_modifiers(&ctx, ship_id, &saved);
+    // Declarative ship attribute evaluation applies Dark weather without mutating persisted dynamic_attributes
+    let mut eval_attrs = HashMap::from([(37, 250.0), (54, 15_000.0), (158, 10_000.0)]);
+    ctx.apply_active_dbuffs_and_system_effects_to_ship_attrs(ship_id, &mut eval_attrs);
+    assert!((eval_attrs[&37] - 375.0).abs() < 1e-6);
+    assert!((eval_attrs[&54] - 7_500.0).abs() < 1e-6);
     ctx.db.with_snapshot(|snap| {
         let t = &snap.items[&turret_id];
         assert!(!t.dynamic_attributes.contains_key(&9954));

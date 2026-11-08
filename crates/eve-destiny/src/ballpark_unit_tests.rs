@@ -340,7 +340,8 @@ fn test_issue_421_breaking_gate_cloak_restores_velocity_and_emits_ego_and_observ
             crate::CombatState {
                 gate_cloak_remaining_ticks: 30,
                 is_cloaked: true,
-                cloak_original_max_velocity: Some(350.0),
+                base_max_velocity: Some(350.0),
+                cloak_velocity_multiplier: Some(0.0),
                 ..Default::default()
             },
         );
@@ -502,7 +503,7 @@ fn coverage_and_mutants_ballpark_grids_damage_cloak_and_navigation() {
     let mut v1 = make_ship(101, DVec3::ZERO);
     v1.max_velocity = 40.0;
     dmg_park.add_ball(v1);
-    dmg_park.combat_states.insert(101, crate::CombatState { shield_hp: 200.0, max_shield_hp: 200.0, armor_hp: 400.0, max_armor_hp: 400.0, structure_hp: 500.0, max_structure_hp: 500.0, cloak_original_max_velocity: Some(320.0), is_cloaked: true, ..Default::default() });
+    dmg_park.combat_states.insert(101, crate::CombatState { shield_hp: 200.0, max_shield_hp: 200.0, armor_hp: 400.0, max_armor_hp: 400.0, structure_hp: 500.0, max_structure_hp: 500.0, base_max_velocity: Some(320.0), cloak_velocity_multiplier: Some(0.125), is_cloaked: true, ..Default::default() });
     dmg_park.ball_slim_meta.insert(101, SlimItemMeta { is_cloaked: true, ..Default::default() });
     assert!(dmg_park.deactivate_cloak(101));
     assert_eq!(dmg_park.balls[&101].max_velocity, 320.0);

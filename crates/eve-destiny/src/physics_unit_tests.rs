@@ -235,7 +235,8 @@ fn coverage_and_mutants_proximity_decloak_restores_velocity_and_mjfg_lifecycle()
         crate::CombatState {
             is_cloaked: true,
             is_covert_cloak: true,
-            cloak_original_max_velocity: Some(380.0),
+            base_max_velocity: Some(380.0),
+            cloak_velocity_multiplier: Some(1.0),
             cloak_configured_targeting_delay_s: 5.0,
             cloak_stabilization_remaining_s: 120.0,
             ..Default::default()

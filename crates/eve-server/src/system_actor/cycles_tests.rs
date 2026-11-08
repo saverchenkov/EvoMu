@@ -272,7 +272,18 @@ async fn cleanup_and_ship_cycle_removal_restore_ship_attributes_and_handle_warp(
     // Add both a nullified cycle and a normal cycle, then verify remove_non_warp_ship_module_cycles keeps nullifier
     {
         let mut bp = handle.ballpark.write().unwrap();
-        bp.combat_states.insert(2001, CombatState::default());
+        bp.combat_states.insert(
+            2001,
+            CombatState {
+                base_max_velocity: Some(350.0),
+                base_mass: Some(1_200_000.0),
+                base_signature_radius: Some(39.0),
+                base_shield_resonance: Some([0.9; 4]),
+                base_armor_resonance: Some([0.8; 4]),
+                base_structure_resonance: Some([0.7; 4]),
+                ..CombatState::default()
+            },
+        );
         if let Some(b) = bp.balls.get_mut(&2001) {
             b.max_velocity = 1_200.0;
             b.mass = 50_000_000.0;
@@ -283,10 +294,10 @@ async fn cleanup_and_ship_cycle_removal_restore_ship_attributes_and_handle_warp(
             ship_id: 2001,
             owner_char_id: Some(90_000_001),
             module_id: 7001,
-            original_max_velocity: Some(350.0),
-            original_mass: Some(1_200_000.0),
-            original_signature_radius: Some(39.0),
-            adc_saved_resists: Some(([0.9, 0.9, 0.9, 0.9], [0.8, 0.8, 0.8, 0.8], [0.7, 0.7, 0.7, 0.7])),
+            is_mwd_or_mjd: true,
+            speed_boost_factor: 2.5,
+            self_mass_multiplier: Some(1.5),
+            is_adc: true,
             duration_s: 10.0,
             ..ActiveModuleCycle::default()
         });

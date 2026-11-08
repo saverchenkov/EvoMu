@@ -947,11 +947,11 @@ pub async fn handle_npcs_drones(
                             }
                             if d.tp_sig_bonus_pct > 0.0 {
                                 if let Ok(Some(mut tcs)) = sys_handle.get_combat_state(target_id).await {
-                                    let base_sig = *tcs.base_signature_radius.get_or_insert_with(|| {
-                                        if tcs.signature_radius > 0.0 { tcs.signature_radius } else { target_ball.radius.max(35.0) }
-                                    });
+                                    tcs.capture_missing_baselines(&target_ball);
                                     let tp_mult = 1.0 + (d.tp_sig_bonus_pct.min(100.0) / 100.0);
-                                    tcs.signature_radius = (base_sig * tp_mult).max(base_sig);
+                                    tcs.tp_sig_multiplier = Some(
+                                        tcs.tp_sig_multiplier.map_or(tp_mult, |prev| prev.max(tp_mult)),
+                                    );
                                     let _ = sys_handle.set_combat_state(target_id, tcs).await;
                                     this_drone_ewar = true;
                                 }

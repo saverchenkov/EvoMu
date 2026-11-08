@@ -265,7 +265,6 @@ async fn probe_pruning_cloud_transitions_and_pocket_trace_cleanup_in_ballpark() 
                 rooms: [make_room(0), make_room(1), make_room(2)],
                 started_at_sec: 1_000,
                 collapse_at_sec: 2_200,
-                saved_ship_attrs: HashMap::new(),
                 completed: false,
                 collapsed_destroyed: false,
                 trace_ball_id: 1_897_000_007,

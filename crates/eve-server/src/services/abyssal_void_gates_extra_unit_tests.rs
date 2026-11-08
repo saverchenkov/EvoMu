@@ -76,7 +76,6 @@ pub(super) fn make_pocket(
         ],
         started_at_sec: 1_000,
         collapse_at_sec,
-        saved_ship_attrs: HashMap::new(),
         completed: false,
         collapsed_destroyed: false,
         trace_ball_id: 888_999,

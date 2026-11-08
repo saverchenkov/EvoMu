@@ -1269,6 +1269,8 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
         let n_base_vel = ctx.sde.types.get(&n_ball.type_id).and_then(|t| t.default_attributes.get(&37).copied()).filter(|&v| v > 0.0).unwrap_or(380.0);
         let pen = exp_pen / 100.0;
         let dyn_attrs = ctx.db.with_snapshot(|s| s.items[&c_ship].dynamic_attributes.clone());
+        let mut eval_attrs = std::collections::HashMap::from([(54_u16, base_opt), (564_u16, base_scan)]);
+        eve_server::services::inventory_fitting::fitting_scanners_superweapons::apply_active_dbuffs_and_system_effects_to_ship_attrs(&ctx, c_ship, &mut eval_attrs);
         let pen_res = |r: f64| (r * (1.0 + pen)).clamp(0.0, 1.0);
         match weather {
             AbyssalWeatherKind::Electrical => {
@@ -1280,14 +1282,16 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
             }
             AbyssalWeatherKind::Dark => {
                 assert!((s_ball.max_velocity - fitted_base_vel * 1.5).abs() < 1e-3);
-                assert!((dyn_attrs[&54] - base_opt * (1.0 - pen)).abs() < 1.0);
+                assert!((eval_attrs[&54] - base_opt * (1.0 - pen)).abs() < 1.0);
+                assert!(!dyn_attrs.contains_key(&54), "Declarative weather must not write opticalRange to dynamic_attributes (#584)");
                 assert!((n_ball.max_velocity - n_base_vel * 1.5).abs() < 1e-3);
             }
             AbyssalWeatherKind::Exotic => {
                 assert!((s_cs.shield_resonance[2] - pen_res(base_ship_cs.shield_resonance[2])).abs() < 1e-4);
                 assert!((s_cs.armor_resonance[2] - pen_res(base_ship_cs.armor_resonance[2])).abs() < 1e-4);
                 assert!((s_cs.structure_resonance[2] - pen_res(base_ship_cs.structure_resonance[2])).abs() < 1e-4);
-                assert!((dyn_attrs[&564] - base_scan * 1.5).abs() < 1e-3);
+                assert!((eval_attrs[&564] - base_scan * 1.5).abs() < 1e-3);
+                assert!(!dyn_attrs.contains_key(&564), "Declarative weather must not write scanResolution to dynamic_attributes (#584)");
                 assert!((n_cs.armor_resonance[2] - pen_res(n_base_cs.armor_resonance[2])).abs() < 1e-4);
             }
             AbyssalWeatherKind::Firestorm => {
@@ -2006,6 +2010,8 @@ async fn test_parity_abyssal_weather_effects_and_penalties_all_five() {
         let n_base_vel = ctx.sde.types.get(&n_ball.type_id).and_then(|t| t.default_attributes.get(&37).copied()).filter(|&v| v > 0.0).unwrap_or(380.0);
         let pen = exp_pen / 100.0;
         let dyn_attrs = ctx.db.with_snapshot(|s| s.items[&c_ship].dynamic_attributes.clone());
+        let mut eval_attrs = std::collections::HashMap::from([(54_u16, base_opt), (564_u16, base_scan)]);
+        eve_server::services::inventory_fitting::fitting_scanners_superweapons::apply_active_dbuffs_and_system_effects_to_ship_attrs(&ctx, c_ship, &mut eval_attrs);
         let pen_res = |r: f64| (r * (1.0 + pen)).clamp(0.0, 1.0);
         match weather {
             AbyssalWeatherKind::Electrical => {
@@ -2017,14 +2023,16 @@ async fn test_parity_abyssal_weather_effects_and_penalties_all_five() {
             }
             AbyssalWeatherKind::Dark => {
                 assert!((s_ball.max_velocity - fitted_base_vel * 1.5).abs() < 1e-3);
-                assert!((dyn_attrs[&54] - base_opt * (1.0 - pen)).abs() < 1.0);
+                assert!((eval_attrs[&54] - base_opt * (1.0 - pen)).abs() < 1.0);
+                assert!(!dyn_attrs.contains_key(&54), "Declarative weather must not write opticalRange to dynamic_attributes (#584)");
                 assert!((n_ball.max_velocity - n_base_vel * 1.5).abs() < 1e-3);
             }
             AbyssalWeatherKind::Exotic => {
                 assert!((s_cs.shield_resonance[2] - pen_res(base_ship_cs.shield_resonance[2])).abs() < 1e-4);
                 assert!((s_cs.armor_resonance[2] - pen_res(base_ship_cs.armor_resonance[2])).abs() < 1e-4);
                 assert!((s_cs.structure_resonance[2] - pen_res(base_ship_cs.structure_resonance[2])).abs() < 1e-4);
-                assert!((dyn_attrs[&564] - base_scan * 1.5).abs() < 1e-3);
+                assert!((eval_attrs[&564] - base_scan * 1.5).abs() < 1e-3);
+                assert!(!dyn_attrs.contains_key(&564), "Declarative weather must not write scanResolution to dynamic_attributes (#584)");
                 assert!((n_cs.armor_resonance[2] - pen_res(n_base_cs.armor_resonance[2])).abs() < 1e-4);
             }
             AbyssalWeatherKind::Firestorm => {

@@ -328,7 +328,8 @@ fn micro_jump_capitals_marauders_heading_and_cloak_edge_branches() {
 
     {
         let cs = cp.combat_states.get_mut(&1).unwrap();
-        cs.cloak_original_max_velocity = Some(0.0);
+        cs.base_max_velocity = Some(300.0);
+        cs.cloak_velocity_multiplier = Some(1.0);
         cs.cloak_configured_targeting_delay_s = 0.0;
     }
     cp.balls.get_mut(&1).unwrap().max_velocity = 300.0;

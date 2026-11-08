@@ -5,9 +5,7 @@
 
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::abyssal_void_mgr::VOID_SPACE_SYSTEM_ID;
-use crate::services::pve_abyssal_hazards::{
-    resolve_character_home_station_and_system, restore_abyssal_weather_dogma_modifiers,
-};
+use crate::services::pve_abyssal_hazards::resolve_character_home_station_and_system;
 use crate::services::pve_abyssal_pylons::{
     build_fitted_ship_space_ball, destroy_pod_and_respawn_faction_corvette_in_snap,
 };
@@ -15,7 +13,7 @@ use crate::services::pve_special_sites::{
     spec_now_sec, with_pve_special_reg, VoidSpaceSessionRecord,
 };
 use eve_proto::PyRep;
-use eve_sde::{AttributeId, SolarSystemId};
+use eve_sde::SolarSystemId;
 use glam::DVec3;
 use std::collections::{HashMap, HashSet};
 
@@ -298,7 +296,6 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
             SolarSystemId,
             SolarSystemId,
             [f64; 3],
-            HashMap<AttributeId, f64>,
             u8,
         )>,
         Vec<(i64, SolarSystemId, Vec<i64>)>,
@@ -318,7 +315,6 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
                     p.abyssal_solar_system_id,
                     p.origin_solar_system_id,
                     p.origin_position,
-                    p.saved_ship_attrs.clone(),
                     p.tier,
                 ));
                 if p.trace_ball_id > 0 {
@@ -359,7 +355,7 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
 
     let closed_abyss_systems: HashSet<SolarSystemId> = evacuated
         .iter()
-        .map(|(_, _, abyss_sys, _, _, _, _)| *abyss_sys)
+        .map(|(_, _, abyss_sys, _, _, _)| *abyss_sys)
         .chain(pocket_cleanups.iter().map(|(_, abyss_sys, _)| *abyss_sys))
         .collect();
 
@@ -397,8 +393,8 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
         }
     }
 
-    for (cid, sid, abyss_sys, origin_sys, origin_pos, saved_attrs, tier) in &evacuated {
-        restore_abyssal_weather_dogma_modifiers(ctx, *sid, saved_attrs);
+    for (cid, sid, abyss_sys, origin_sys, origin_pos, tier) in &evacuated {
+        ctx.invalidate_ship_fitting(*sid);
         crate::sp6_lifecycle::clear_abyssal_session(ctx, *cid);
         let evacuated_pos = random_offset_around_trace_origin(ctx, *origin_pos);
         let abyss_handle = ctx.systems.get_or_spawn(*abyss_sys);
@@ -688,7 +684,6 @@ pub enum AbyssalLoginAction {
     Evacuated {
         origin_sys: SolarSystemId,
         origin_pos: [f64; 3],
-        saved_attrs: HashMap<AttributeId, f64>,
     },
 }
 
@@ -736,13 +731,11 @@ pub fn reconcile_abyssal_login(
             return AbyssalLoginAction::Evacuated {
                 origin_sys: p.origin_solar_system_id,
                 origin_pos: p.origin_position,
-                saved_attrs: p.saved_ship_attrs.clone(),
             };
         }
         AbyssalLoginAction::Evacuated {
             origin_sys: fallback_sys,
             origin_pos: [145_000.0, -75_000.0, 42_000.0],
-            saved_attrs: HashMap::new(),
         }
     });
     match action {
@@ -757,11 +750,8 @@ pub fn reconcile_abyssal_login(
         AbyssalLoginAction::Evacuated {
             origin_sys,
             origin_pos,
-            saved_attrs,
         } => {
-            if !saved_attrs.is_empty() {
-                restore_abyssal_weather_dogma_modifiers(ctx, ship_id, &saved_attrs);
-            }
+            ctx.invalidate_ship_fitting(ship_id);
             let rand_pos = random_offset_around_trace_origin(ctx, origin_pos);
             ctx.db.with_mut_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get_mut(&char_id) {

@@ -237,7 +237,10 @@ fn r7_tb_11_overlapping_propulsion_wdfg_overload_and_webs_preserve_exact_base_ve
     reconcile_tackle_and_bubbles(&mut bp, &mut cycles, &scram, &core, &None, None);
     let _ = &mut mwd;
     assert!((bp.balls[&ship_a].max_velocity - 400.0).abs() < 1e-6);
-    assert!(!bp.base_webbed_max_velocity.contains_key(&ship_a));
+    assert!(bp
+        .combat_states
+        .get(&ship_a)
+        .is_some_and(|cs| (cs.web_velocity_multiplier - 1.0).abs() < 1e-9));
 }
 
 #[tokio::test]

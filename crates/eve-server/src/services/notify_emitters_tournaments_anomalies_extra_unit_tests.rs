@@ -482,7 +482,6 @@ async fn deathzone_room_offset_and_system_bounds_kill_mutations() {
                 rooms: [dummy_room.clone(), dummy_room.clone(), dummy_room],
                 started_at_sec: 1_775_400_000,
                 collapse_at_sec: 1_775_401_200,
-                saved_ship_attrs: HashMap::new(),
                 completed: false,
                 collapsed_destroyed: false,
                 trace_ball_id: 0,

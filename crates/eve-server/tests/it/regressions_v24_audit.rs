@@ -576,12 +576,24 @@ async fn test_abyssal_deployment_and_weather_audit() {
         "Entered pocket solar system {pocket_sys_id}"
     );
 
-    // 3. Dynamic abyssal weather application in pocket (feat:pve.abyssal-weather)
+    // 3. Dynamic abyssal weather application in pocket (feat:pve.abyssal-weather) without polluting item dynamic_attributes (#584)
     let base_armor = ctx.sde.types.get(&621).and_then(|t| t.default_attributes.get(&265)).copied().unwrap_or(0.0);
-    let boosted_armor = ctx.db.with_snapshot(|s| s.items.get(&ship_id).and_then(|it| it.dynamic_attributes.get(&265)).copied()).unwrap_or(0.0);
+    let boosted_armor = ctx
+        .systems
+        .get_or_spawn(pocket_sys_id as u32)
+        .get_combat_state(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|cs| cs.max_armor_hp)
+        .unwrap_or(0.0);
     assert!(
         boosted_armor > base_armor,
         "Weather must boost armor HP dynamically in abyssal pocket ({boosted_armor} > {base_armor})"
+    );
+    assert!(
+        ctx.db.with_snapshot(|s| s.items.get(&ship_id).and_then(|it| it.dynamic_attributes.get(&265)).is_none()),
+        "Declarative abyssal weather must not mutate item dynamic_attributes[ARMOR_HP] (#584)"
     );
 }
 

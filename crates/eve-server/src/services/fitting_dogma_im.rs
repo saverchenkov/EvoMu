@@ -654,11 +654,10 @@ pub(crate) async fn handle_dogma_im(
                 if let Some(sys_id) = session.solar_system_id {
                     let sys = ctx.systems.get_or_spawn(sys_id);
                     for tid in affected_ewar {
-                        if let Ok(Some(mut t_cs)) = sys.get_combat_state(tid).await {
-                            let base_sig = t_cs.base_signature_radius.unwrap_or(t_cs.signature_radius);
-                            t_cs.signature_radius = ctx.effective_target_signature_radius(tid, base_sig);
-                            let _ = sys.set_combat_state(tid, t_cs).await;
-                        }
+                        let tp_mult = ctx.effective_target_painter_multiplier(tid);
+                        sys.try_recompute_combat_attributes(tid, |t_cs| {
+                            t_cs.tp_sig_multiplier = (tp_mult > 1.0 + 1e-6).then_some(tp_mult);
+                        });
                     }
                 }
                 crate::services::tactical_modules::remove_projected_remote_assistance(ctx, loc, item_id);

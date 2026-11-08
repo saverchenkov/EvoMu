@@ -2009,9 +2009,7 @@ use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
-use eve_server::services::pve_abyssal_hazards::{
-    apply_abyssal_weather_dogma_modifiers_to_ship, restore_abyssal_weather_dogma_modifiers,
-};
+use eve_server::services::pve_abyssal_hazards::apply_abyssal_weather_to_ship_attrs;
 use eve_server::services::pve_incursion_sites::make_site_npc_ball;
 use eve_server::services::pve_special_sites_abyssal::AbyssalWeatherKind;
 use eve_server::sp6_lifecycle::tick_background_cluster;
@@ -2364,36 +2362,39 @@ async fn test_abyssal_weather_dogma_modifiers_all_five_storms() {
             t.default_attributes.get(&267).copied().unwrap_or(0.5),
             t.default_attributes.get(&269).copied().unwrap_or(0.65),
         )).unwrap_or((0.5, 0.65));
-        let saved = apply_abyssal_weather_dogma_modifiers_to_ship(&ctx, ship_id, weather, 50.0, 50.0);
-        assert!(!saved.is_empty());
-        ctx.db.with_snapshot(|snap| {
-            let ship = snap.items.get(&ship_id).unwrap();
-            match weather {
-                AbyssalWeatherKind::Electrical => {
-                    assert!(ship.dynamic_attributes[&271] > 0.5);
-                    assert!(ship.dynamic_attributes[&267] > orig_267);
-                    assert!(ship.dynamic_attributes[&55] < 250_000.0);
-                }
-                AbyssalWeatherKind::Dark => {
-                    assert!(ship.dynamic_attributes[&37] > 250.0);
-                    assert!((ship.dynamic_attributes[&54] - 7_500.0).abs() < 1e-6);
-                }
-                AbyssalWeatherKind::Exotic => {
-                    assert!(ship.dynamic_attributes[&273] > 0.5);
-                    assert!(ship.dynamic_attributes[&269] > orig_269);
-                    assert!(ship.dynamic_attributes[&564] > 250.0);
-                }
-                AbyssalWeatherKind::Firestorm => {
-                    assert!(ship.dynamic_attributes[&265] > 500.0);
-                    assert!(ship.dynamic_attributes[&274] > 0.5);
-                }
-                AbyssalWeatherKind::Gamma => {
-                    assert!(ship.dynamic_attributes[&263] > 500.0);
-                    assert!(ship.dynamic_attributes[&272] > 0.5);
-                }
+        let mut attrs = HashMap::from([
+            (271, 0.5), (267, orig_267), (113, 0.67), (55, 250_000.0),
+            (37, 250.0), (54, 15_000.0), (158, 10_000.0),
+            (273, 0.5), (269, orig_269), (109, 0.67), (564, 250.0),
+            (265, 500.0), (274, 0.5), (270, 0.65), (110, 0.67),
+            (263, 500.0), (272, 0.5), (268, 0.9), (111, 0.67),
+        ]);
+        apply_abyssal_weather_to_ship_attrs(weather, 50.0, 50.0, &mut attrs);
+        match weather {
+            AbyssalWeatherKind::Electrical => {
+                assert!(attrs[&271] > 0.5);
+                assert!(attrs[&267] > orig_267);
+                assert!(attrs[&55] < 250_000.0);
             }
-        });
-        restore_abyssal_weather_dogma_modifiers(&ctx, ship_id, &saved);
+            AbyssalWeatherKind::Dark => {
+                assert!(attrs[&37] > 250.0);
+                assert!((attrs[&54] - 7_500.0).abs() < 1e-6);
+            }
+            AbyssalWeatherKind::Exotic => {
+                assert!(attrs[&273] > 0.5);
+                assert!(attrs[&269] > orig_269);
+                assert!(attrs[&564] > 250.0);
+            }
+            AbyssalWeatherKind::Firestorm => {
+                assert!(attrs[&265] > 500.0);
+                assert!(attrs[&274] > 0.5);
+            }
+            AbyssalWeatherKind::Gamma => {
+                assert!(attrs[&263] > 500.0);
+                assert!(attrs[&272] > 0.5);
+            }
+        }
+        assert!(ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).unwrap().dynamic_attributes.is_empty()));
     }
 
     // Enter an Abyssal pocket (Electrical T1 filament 47765) and verify V24 SDE Electrical weather modifiers on NPC

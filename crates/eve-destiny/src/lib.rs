@@ -263,15 +263,107 @@ pub struct CombatState {
     /// Configured sensor recalibration targeting delay in seconds for the currently active cloak (`560`).
     #[serde(default)]
     pub cloak_configured_targeting_delay_s: f64,
-    /// Original `max_velocity` before cloak speed penalty was applied.
+    /// Original uncloaked / unboosted / unpenalized baselines populated when entering space or updating fitting/skills (`#584`).
     #[serde(default)]
-    pub cloak_original_max_velocity: Option<f64>,
+    pub base_max_velocity: Option<f64>,
+    #[serde(default)]
+    pub base_mass: Option<f64>,
+    #[serde(default)]
+    pub base_inertia: Option<f64>,
+    #[serde(default)]
+    pub base_shield_resonance: Option<[f64; 4]>,
+    #[serde(default)]
+    pub base_armor_resonance: Option<[f64; 4]>,
+    #[serde(default)]
+    pub base_structure_resonance: Option<[f64; 4]>,
+    #[serde(default)]
+    pub base_max_shield_hp: Option<f64>,
+    #[serde(default)]
+    pub base_max_armor_hp: Option<f64>,
+    #[serde(default)]
+    pub base_max_structure_hp: Option<f64>,
+    #[serde(default)]
+    pub base_max_capacitor: Option<f64>,
+    #[serde(default)]
+    pub base_capacitor_recharge_time_ms: Option<f64>,
+    /// Declarative active cloak velocity multiplier (e.g. `0.25` for `-75%`, `0.0` for gate cloak, `None` when uncloaked).
+    #[serde(default)]
+    pub cloak_velocity_multiplier: Option<f64>,
     /// Remaining seconds of Micro Jump Field Generator (`37479`) spool-up (`feat:modules.micro-jump-field-generator`).
     #[serde(default)]
     pub mjfg_spool_remaining_s: f64,
-    /// Original `signature_radius` before MJFG `+150%` signature bloom was applied.
+    /// Declarative active MJFG `+150%` (`2.5`) signature bloom multiplier (`None` when not spooling).
     #[serde(default)]
-    pub mjfg_original_sig_radius: Option<f64>,
+    pub mjfg_sig_multiplier: Option<f64>,
+    /// Declarative Target Painter / projected signature bloom multiplier (`None` -> `1.0`).
+    #[serde(default)]
+    pub tp_sig_multiplier: Option<f64>,
+    /// Declarative external ability/phenomena velocity multiplier (`None` -> `1.0`).
+    #[serde(default)]
+    pub external_velocity_multiplier: Option<f64>,
+    /// Declarative external ability/phenomena signature multiplier (`None` -> `1.0`).
+    #[serde(default)]
+    pub external_sig_multiplier: Option<f64>,
+    /// Declarative external phenomena inertia multiplier (`None` -> `1.0`).
+    #[serde(default)]
+    pub external_inertia_multiplier: Option<f64>,
+    /// Declarative Abyssal spatial cloud velocity multiplier (`None` -> `1.0`).
+    #[serde(default)]
+    pub cloud_velocity_multiplier: Option<f64>,
+    /// Declarative Abyssal spatial cloud signature radius multiplier (`None` -> `1.0`).
+    #[serde(default)]
+    pub cloud_sig_multiplier: Option<f64>,
+    /// Declarative Abyssal spatial cloud inertia multiplier (`None` -> `1.0`).
+    #[serde(default)]
+    pub cloud_inertia_multiplier: Option<f64>,
+    /// Declarative Abyssal spatial cloud capacitor recharge multiplier (`None` -> `1.0`).
+    #[serde(default)]
+    pub cloud_cap_recharge_multiplier: Option<f64>,
+    /// Declarative CRAB Beacon interference resonance multiplier (`None` -> `1.0`, `0.90` when linked).
+    #[serde(default)]
+    pub crab_resonance_multiplier: Option<f64>,
+    /// Declarative fallback Wormhole Pulsar max shield multiplier.
+    #[serde(default)]
+    pub env_max_shield_multiplier: Option<f64>,
+    /// Declarative fallback Wormhole Wolf-Rayet max armor multiplier.
+    #[serde(default)]
+    pub env_max_armor_multiplier: Option<f64>,
+    /// Declarative fallback Wormhole Cataclysmic Variable max capacitor multiplier.
+    #[serde(default)]
+    pub env_max_cap_multiplier: Option<f64>,
+    /// Declarative fallback Wormhole Pulsar / Wolf-Rayet signature multiplier.
+    #[serde(default)]
+    pub env_sig_multiplier: Option<f64>,
+    /// True when an active self module (e.g. Bastion / Siege / Triage / Indy Core) immobilizes the hull.
+    #[serde(default)]
+    pub module_immobilized: bool,
+    /// Aggregate self propulsion multiplier (`MWD` / `AB`), default `1.0`.
+    #[serde(default = "default_one_f64")]
+    pub prop_velocity_multiplier: f64,
+    /// Aggregate self HIC WDFG velocity multiplier, default `1.0`.
+    #[serde(default = "default_one_f64")]
+    pub hic_velocity_multiplier: f64,
+    /// Aggregate stacking-penalized web / grappler / wubble velocity multiplier, default `1.0`.
+    #[serde(default = "default_one_f64")]
+    pub web_velocity_multiplier: f64,
+    /// Aggregate active module mass multiplier (e.g. HIC infopoint / plate toggle), default `1.0`.
+    #[serde(default = "default_one_f64")]
+    pub module_mass_multiplier: f64,
+    /// Aggregate active module flat mass addition (e.g. HIC heavy bubble mass addition), default `0.0`.
+    #[serde(default)]
+    pub module_mass_addition: f64,
+    /// Aggregate active self module signature multiplier (e.g. HIC sig bloom), default `1.0`.
+    #[serde(default = "default_one_f64")]
+    pub module_sig_multiplier: f64,
+    /// True while Assault Damage Control (`ADC`) is cycling (`0.25` all resonances).
+    #[serde(default)]
+    pub adc_active: bool,
+    /// Active Emergency Hull Energizer (`CEHE`) structure resonance override while cycling.
+    #[serde(default)]
+    pub ehe_hull_resists: Option<[f64; 4]>,
+    /// Active Reactive Armor Hardener (`RAH`) shifted armor resonance profile while cycling.
+    #[serde(default)]
+    pub rah_armor_resonance: Option<[f64; 4]>,
     /// Capacitor recorded on the previous 1 Hz step to detect MJFG activation on Command Destroyers.
     #[serde(default)]
     pub last_step_capacitor: Option<f64>,
@@ -336,9 +428,43 @@ impl Default for CombatState {
             cloak_stabilization_remaining_s: 0.0,
             decloak_targeting_delay_remaining_s: 0.0,
             cloak_configured_targeting_delay_s: 0.0,
-            cloak_original_max_velocity: None,
+            base_max_velocity: None,
+            base_mass: None,
+            base_inertia: None,
+            base_shield_resonance: None,
+            base_armor_resonance: None,
+            base_structure_resonance: None,
+            base_max_shield_hp: None,
+            base_max_armor_hp: None,
+            base_max_structure_hp: None,
+            base_max_capacitor: None,
+            base_capacitor_recharge_time_ms: None,
+            cloak_velocity_multiplier: None,
             mjfg_spool_remaining_s: 0.0,
-            mjfg_original_sig_radius: None,
+            mjfg_sig_multiplier: None,
+            tp_sig_multiplier: None,
+            external_velocity_multiplier: None,
+            external_sig_multiplier: None,
+            external_inertia_multiplier: None,
+            cloud_velocity_multiplier: None,
+            cloud_sig_multiplier: None,
+            cloud_inertia_multiplier: None,
+            cloud_cap_recharge_multiplier: None,
+            crab_resonance_multiplier: None,
+            env_max_shield_multiplier: None,
+            env_max_armor_multiplier: None,
+            env_max_cap_multiplier: None,
+            env_sig_multiplier: None,
+            module_immobilized: false,
+            prop_velocity_multiplier: 1.0,
+            hic_velocity_multiplier: 1.0,
+            web_velocity_multiplier: 1.0,
+            module_mass_multiplier: 1.0,
+            module_mass_addition: 0.0,
+            module_sig_multiplier: 1.0,
+            adc_active: false,
+            ehe_hull_resists: None,
+            rah_armor_resonance: None,
             last_step_capacitor: None,
             is_capital_mjfg: false,
             is_emergency_warping: false,
@@ -353,6 +479,137 @@ impl Default for CombatState {
 impl CombatState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Captures any unset (`None`) immutable baselines from the current `ball` + `self` attributes (`#584`).
+    pub fn capture_missing_baselines(&mut self, ball: &Ball) {
+        if self.base_max_velocity.is_none()
+            && (!self.is_cloaked || ball.max_velocity > 0.0)
+            && !self.module_immobilized
+        {
+            self.base_max_velocity = Some(ball.max_velocity);
+        }
+        if self.base_mass.is_none() && ball.mass > 0.0 {
+            self.base_mass = Some(ball.mass);
+        }
+        if self.base_inertia.is_none() && ball.inertia > 0.0 {
+            self.base_inertia = Some(ball.inertia);
+        }
+        if self.base_signature_radius.is_none() && self.signature_radius > 0.0 {
+            self.base_signature_radius = Some(self.signature_radius);
+        }
+        if self.base_shield_resonance.is_none() {
+            self.base_shield_resonance = Some(self.shield_resonance);
+        }
+        if self.base_armor_resonance.is_none() {
+            self.base_armor_resonance = Some(self.armor_resonance);
+        }
+        if self.base_structure_resonance.is_none() {
+            self.base_structure_resonance = Some(self.structure_resonance);
+        }
+        if self.base_max_shield_hp.is_none() {
+            self.base_max_shield_hp = Some(self.max_shield_hp);
+        }
+        if self.base_max_armor_hp.is_none() {
+            self.base_max_armor_hp = Some(self.max_armor_hp);
+        }
+        if self.base_max_structure_hp.is_none() {
+            self.base_max_structure_hp = Some(self.max_structure_hp);
+        }
+        if self.base_max_capacitor.is_none() {
+            self.base_max_capacitor = Some(self.max_capacitor);
+        }
+        if self.base_capacitor_recharge_time_ms.is_none() {
+            self.base_capacitor_recharge_time_ms = Some(self.capacitor_recharge_time_ms);
+        }
+    }
+
+    /// Declaratively recomputes effective kinematics and combat attributes on `ball` and `self`
+    /// from immutable baselines and currently active modifiers (`#584`).
+    pub fn recompute_attributes(&mut self, ball: &mut Ball) {
+        self.capture_missing_baselines(ball);
+
+        let base_v = self.base_max_velocity.unwrap_or(ball.max_velocity);
+        let env_v = self.external_velocity_multiplier.unwrap_or(1.0)
+            * self.cloud_velocity_multiplier.unwrap_or(1.0);
+        let self_v = if self.module_immobilized {
+            0.0
+        } else if self.is_cloaked {
+            if let Some(cm) = self.cloak_velocity_multiplier {
+                cm.max(0.0) * self.hic_velocity_multiplier
+            } else {
+                self.prop_velocity_multiplier * self.hic_velocity_multiplier
+            }
+        } else {
+            self.prop_velocity_multiplier * self.hic_velocity_multiplier
+        };
+        ball.max_velocity = (base_v * env_v * self_v * self.web_velocity_multiplier).max(0.0);
+
+        let base_m = self.base_mass.unwrap_or(ball.mass);
+        ball.mass = (base_m * self.module_mass_multiplier + self.module_mass_addition).max(1.0);
+
+        let base_i = self.base_inertia.unwrap_or(ball.inertia);
+        ball.inertia = (base_i
+            * self.external_inertia_multiplier.unwrap_or(1.0)
+            * self.cloud_inertia_multiplier.unwrap_or(1.0))
+        .max(0.001);
+
+        let base_sig = self.base_signature_radius.unwrap_or(self.signature_radius);
+        self.signature_radius = (base_sig
+            * self.module_sig_multiplier
+            * self.mjfg_sig_multiplier.unwrap_or(1.0)
+            * self.tp_sig_multiplier.unwrap_or(1.0)
+            * self.external_sig_multiplier.unwrap_or(1.0)
+            * self.cloud_sig_multiplier.unwrap_or(1.0)
+            * self.env_sig_multiplier.unwrap_or(1.0))
+        .max(1.0);
+
+        let base_cap_ms = self
+            .base_capacitor_recharge_time_ms
+            .unwrap_or(self.capacitor_recharge_time_ms);
+        self.capacitor_recharge_time_ms =
+            (base_cap_ms * self.cloud_cap_recharge_multiplier.unwrap_or(1.0)).max(1_000.0);
+
+        if let Some(base_ms) = self.base_max_shield_hp {
+            self.max_shield_hp = (base_ms * self.env_max_shield_multiplier.unwrap_or(1.0)).max(0.0);
+            self.shield_hp = self.shield_hp.min(self.max_shield_hp);
+        }
+        if let Some(base_ma) = self.base_max_armor_hp {
+            self.max_armor_hp = (base_ma * self.env_max_armor_multiplier.unwrap_or(1.0)).max(0.0);
+            self.armor_hp = self.armor_hp.min(self.max_armor_hp);
+        }
+        if let Some(base_mh) = self.base_max_structure_hp {
+            self.max_structure_hp = base_mh.max(0.0);
+            self.structure_hp = self.structure_hp.min(self.max_structure_hp);
+        }
+        if let Some(base_mc) = self.base_max_capacitor {
+            self.max_capacitor = (base_mc * self.env_max_cap_multiplier.unwrap_or(1.0)).max(0.0);
+            self.capacitor = self.capacitor.min(self.max_capacitor);
+        }
+
+        let mut sr = self.base_shield_resonance.unwrap_or(self.shield_resonance);
+        let mut ar = self.base_armor_resonance.unwrap_or(self.armor_resonance);
+        let mut hr = self.base_structure_resonance.unwrap_or(self.structure_resonance);
+
+        if let Some(rah) = self.rah_armor_resonance {
+            ar = rah;
+        }
+        if let Some(crab_m) = self.crab_resonance_multiplier {
+            sr = sr.map(|r| (r * crab_m).clamp(0.01, 1.0));
+            ar = ar.map(|r| (r * crab_m).clamp(0.01, 1.0));
+            hr = hr.map(|r| (r * crab_m).clamp(0.01, 1.0));
+        }
+        if let Some(ehe) = self.ehe_hull_resists {
+            hr = ehe;
+        }
+        if self.adc_active {
+            sr = [0.25; 4];
+            ar = [0.25; 4];
+            hr = [0.25; 4];
+        }
+        self.shield_resonance = sr;
+        self.armor_resonance = ar;
+        self.structure_resonance = hr;
     }
 
     /// Mixes an entity/type seed with `0x9E37_79B9_7F4A_7C15` via SplitMix64, guaranteeing a non-zero `rng_state`.
@@ -1043,7 +1300,6 @@ pub struct Ballpark {
     pub ball_harmonics: BTreeMap<BallId, i32>,
     #[serde(default)]
     pub ball_wormhole_stages: BTreeMap<BallId, (i64, f64)>,
-    pub base_webbed_max_velocity: BTreeMap<BallId, f64>,
     #[serde(skip, default)]
     pub active_wubble_multipliers: BTreeMap<BallId, f64>,
     #[serde(default)]
