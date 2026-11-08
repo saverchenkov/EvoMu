@@ -84,8 +84,7 @@ fn season_state_activity_counters_and_challenge_helpers() {
                 ..Default::default()
             },
         );
-        snap.service_state_blobs
-            .insert(format!("hacking_wins:{cid}"), "3".to_string());
+        snap.seasons_and_campaigns.hacking_wins.insert(cid, 3);
         snap.industry_jobs.insert(
             88_001,
             IndustryJobRecord {

@@ -359,6 +359,6 @@ fn tourney_match_lifecycle_bans_locks_and_arena_restrictions() {
 
     // Verify match state persisted cleanly in WorldRepository
     ctx.db.with_snapshot(|snap| {
-        assert!(!snap.owner_notes.is_empty());
+        assert!(!snap.tourney_state.matches.is_empty());
     });
 }

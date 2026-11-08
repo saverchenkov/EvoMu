@@ -11,18 +11,9 @@
 use crate::router::{NotificationTarget, ServerContext};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
-/// Record for a character's active or expired Expert System subscription.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExpertSystemRecord {
-    pub type_id: i64,
-    pub inserted_at_ft: i64,
-    pub expires_at_ft: i64,
-    #[serde(default)]
-    pub skills_granted: BTreeMap<i32, i32>,
-}
+pub use eve_db::ExpertSystemRecord;
 
 /// SDE path to Expert Systems binary definitions.
 const SDE_EXPERT_SYSTEMS_PATH: &str = "res:/staticdata/expertsystems.fsdbinary";
@@ -30,21 +21,14 @@ const SDE_EXPERT_SYSTEMS_PATH: &str = "res:/staticdata/expertsystems.fsdbinary";
 /// 1 day in 100ns BlueOS FileTime ticks: 24 * 3600 * 10_000_000.
 const TICKS_PER_DAY: i64 = 864_000_000_000;
 
-fn expert_system_blob_key(char_id: i64) -> String {
-    format!("expert_systems:{}", char_id)
-}
-
-fn node_graph_bb_blob_key(char_id: i64, graph_id: i64) -> String {
-    format!("node_graph_bb:{}:{}", char_id, graph_id)
-}
-
 fn load_expert_systems(
     snap: &eve_db::WorldStateSnapshot,
     char_id: i64,
 ) -> BTreeMap<i64, ExpertSystemRecord> {
-    snap.service_state_blobs
-        .get(&expert_system_blob_key(char_id))
-        .and_then(|json| serde_json::from_str(json).ok())
+    snap.node_graph_state
+        .expert_systems
+        .get(&char_id)
+        .cloned()
         .unwrap_or_default()
 }
 
@@ -53,9 +37,12 @@ fn save_expert_systems(
     char_id: i64,
     records: &BTreeMap<i64, ExpertSystemRecord>,
 ) {
-    if let Ok(json) = serde_json::to_string(records) {
-        snap.service_state_blobs
-            .insert(expert_system_blob_key(char_id), json);
+    if records.is_empty() {
+        snap.node_graph_state.expert_systems.remove(&char_id);
+    } else {
+        snap.node_graph_state
+            .expert_systems
+            .insert(char_id, records.clone());
     }
 }
 
@@ -332,14 +319,13 @@ pub fn handle(
                     }
                 }
 
-                let blob_key = node_graph_bb_blob_key(char_id, graph_id);
-                let bb: HashMap<String, String> = snap
-                    .service_state_blobs
-                    .get(&blob_key)
-                    .and_then(|json| serde_json::from_str(json).ok())
-                    .unwrap_or_default();
+                let val_str = snap
+                    .node_graph_state
+                    .node_graph_blackboards
+                    .get(&(char_id, graph_id))
+                    .and_then(|bb| bb.get(bb_key));
 
-                if let Some(val_str) = bb.get(bb_key) {
+                if let Some(val_str) = val_str {
                     if let Ok(num) = val_str.parse::<i64>() {
                         PyRep::Integer(num)
                     } else if val_str == "true" {
@@ -460,12 +446,11 @@ pub fn handle(
             let update_res = ctx
                 .db
                 .try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                    let blob_key = node_graph_bb_blob_key(char_id, graph_id);
-                    let mut bb: HashMap<String, String> = snap
-                        .service_state_blobs
-                        .get(&blob_key)
-                        .and_then(|json| serde_json::from_str(json).ok())
-                        .unwrap_or_default();
+                    let bb = snap
+                        .node_graph_state
+                        .node_graph_blackboards
+                        .entry((char_id, graph_id))
+                        .or_default();
 
                     if !bb.contains_key(msg_name) && bb.len() >= MAX_NODE_GRAPH_BB_KEYS {
                         return Err(BridgeRpcError {
@@ -482,11 +467,9 @@ pub fn handle(
                         bb.insert(node_msg_key, msg_name.to_string());
                     }
 
-                    let json = serde_json::to_string(&bb).map_err(|_| BridgeRpcError {
-                        code: "InternalError".into(),
-                        message: "Failed to serialize node graph blackboard".into(),
-                    })?;
-                    if json.len() > MAX_NODE_GRAPH_BB_BLOB_BYTES {
+                    let total_bb_bytes: usize =
+                        bb.iter().map(|(k, v)| k.len() + v.len()).sum();
+                    if total_bb_bytes > MAX_NODE_GRAPH_BB_BLOB_BYTES {
                         return Err(BridgeRpcError {
                             code: "InvalidArgument".into(),
                             message: "Node graph blackboard size limit exceeded".into(),
@@ -519,7 +502,6 @@ pub fn handle(
                         }
                     }
 
-                    snap.service_state_blobs.insert(blob_key, json);
                     Ok(())
                 });
             if let Err(err) = update_res {
@@ -572,7 +554,7 @@ pub fn stop_active_operation_node_graph(ctx: &ServerContext, char_id: i64, cat_i
 }
 
 /// Marks AIR NPE completed for `char_id`, stops any active AIR NPE client graphs and pocket,
-/// and removes any active NPE node-graph blackboard from `service_state_blobs`.
+/// and removes any active NPE node-graph blackboard from `node_graph_state`.
 pub fn skip_air_npe_and_stop_graph(
     ctx: &ServerContext,
     char_id: i64,
@@ -582,8 +564,9 @@ pub fn skip_air_npe_and_stop_graph(
         crate::services::air_npe_nodegraph_runner::on_skip_air_npe(ctx, None, char_id, now_unix)?;
     if graph_id > 0 {
         ctx.db.with_mut_snapshot(|snap| {
-            snap.service_state_blobs
-                .remove(&node_graph_bb_blob_key(char_id, i64::from(graph_id)));
+            snap.node_graph_state
+                .node_graph_blackboards
+                .remove(&(char_id, i64::from(graph_id)));
         });
     }
     Ok((graph_id, curr_node, completed))

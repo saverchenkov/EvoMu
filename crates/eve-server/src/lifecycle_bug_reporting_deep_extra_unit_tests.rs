@@ -10,7 +10,7 @@ use crate::bug_reporting::{
 use crate::router::{ActiveFighterSquadron, ActiveMoonSurveyProbe, ActiveScannerProbe, ServerContext};
 use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, DroneSpaceState};
 use crate::services::mobile_deployables::{write_deployable_state_snap, MobileDeployableRecord};
-use crate::services::pve_special_sites::{with_pve_special_reg, AbyssalTraceRecord};
+use crate::services::pve_special_sites::{with_abyssal_state, AbyssalTraceRecord};
 use crate::sp6_lifecycle::*;
 use eve_db::{
     CosmicAnomalyRecord, CosmicSignatureRecord, InventoryFlag, InventoryItemRecord,
@@ -398,8 +398,8 @@ async fn cluster_tick_expiry_sweeps_bounties_and_concord_arrival() {
     let sec_cont_type_id = ctx.sde.types.values().find(|t| t.group_id == 340).map(|t| t.type_id).unwrap_or(17_363);
 
     register_abyssal_session(&ctx, 90_000_002, 100_000_002, 32_000_001, sys_id, base, base + 10);
-    with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_traces.insert(880_001, AbyssalTraceRecord {
+    with_abyssal_state(&ctx, |st| {
+        st.traces.insert(880_001, AbyssalTraceRecord {
             trace_ball_id: 880_001, char_id, filament_type_id: 47762, origin_solar_system_id: sys_id,
             position: [1e5, 0.0, 0.0], created_unix: base, expires_at_sec: base + 10, max_ships: 1,
             entered_char_ids: Vec::new(), pocket_id: None, fleet_id: None,

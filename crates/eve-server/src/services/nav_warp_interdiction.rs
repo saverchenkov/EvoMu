@@ -692,19 +692,14 @@ fn rollback_warp_vector_reservation(
 ) {
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(target_id, prev_item);
-        let mut cd_map: HashMap<i64, u64> = snap
-            .service_state_blobs
-            .get("warp_vector_cooldown_until")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
         if let Some(old_cd) = prev_cd_until {
-            cd_map.insert(char_id, old_cd);
+            snap.cluster_and_runtime
+                .warp_vector_cooldown_until
+                .insert(char_id, old_cd);
         } else {
-            cd_map.remove(&char_id);
-        }
-        if let Ok(json) = serde_json::to_string(&cd_map) {
-            snap.service_state_blobs
-                .insert("warp_vector_cooldown_until".into(), json);
+            snap.cluster_and_runtime
+                .warp_vector_cooldown_until
+                .remove(&char_id);
         }
     });
 }
@@ -843,12 +838,11 @@ pub async fn handle_use_warp_vector(
             });
         }
 
-        let mut cd_map: HashMap<i64, u64> = snap
-            .service_state_blobs
-            .get("warp_vector_cooldown_until")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
-        let prev_cd = cd_map.get(&char_id).copied();
+        let prev_cd = snap
+            .cluster_and_runtime
+            .warp_vector_cooldown_until
+            .get(&char_id)
+            .copied();
         if prev_cd.unwrap_or(0) > now_unix {
             return Err(BridgeRpcError {
                 code: "WarpVectorCooldown".into(),
@@ -921,11 +915,9 @@ pub async fn handle_use_warp_vector(
             });
         }
 
-        cd_map.insert(char_id, now_unix.saturating_add(WARP_VECTOR_COOLDOWN_SECS));
-        if let Ok(json) = serde_json::to_string(&cd_map) {
-            snap.service_state_blobs
-                .insert("warp_vector_cooldown_until".into(), json);
-        }
+        snap.cluster_and_runtime
+            .warp_vector_cooldown_until
+            .insert(char_id, now_unix.saturating_add(WARP_VECTOR_COOLDOWN_SECS));
         let mut rem = 0;
         if let Some(it) = snap.items.get_mut(&target_id) {
             it.quantity = (it.quantity - 1).max(0);

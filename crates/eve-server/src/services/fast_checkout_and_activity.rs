@@ -20,16 +20,11 @@
 #![forbid(unsafe_code)]
 
 use crate::router::context::ServerContext;
-use crate::services::project_discovery::PlayerProjectState;
 use eve_db::InventoryFlag;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-const ACTIVITY_MGR_PREFIX: &str = "activity_mgr:";
-const PROJECT_DISCOVERY_KEY_PREFIX: &str = "project_discovery:";
-const FAST_CHECKOUT_PREFIX: &str = "fast_checkout:";
 const MAX_SEEN_ACTIVITIES: usize = 128;
 
 static SDE_NEW_ACTIVITY_IDS: std::sync::OnceLock<std::collections::BTreeSet<i64>> =
@@ -39,46 +34,10 @@ fn sde_new_activity_ids(sde: &eve_sde::SdeRegistry) -> &'static std::collections
     SDE_NEW_ACTIVITY_IDS.get_or_init(|| sde.load_new_activity_ids().unwrap_or_default())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FastCheckoutProductRecord {
-    pub type_id: u32,
-    pub quantity: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FastCheckoutOfferRecord {
-    pub offer_id: i64,
-    pub plex_amount: i64,
-    pub price_usd: f64,
-    #[serde(default)]
-    pub price_plex: i64,
-    pub name: String,
-    pub description: String,
-    pub tags: Vec<String>,
-    #[serde(default)]
-    pub products: Vec<FastCheckoutProductRecord>,
-    #[serde(default)]
-    pub category_id: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UserFastCheckoutState {
-    pub enabled: bool,
-    #[serde(default)]
-    pub cached_session_token: Option<String>,
-    #[serde(default)]
-    pub cached_offers: Option<Vec<FastCheckoutOfferRecord>>,
-}
-
-impl Default for UserFastCheckoutState {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            cached_session_token: None,
-            cached_offers: None,
-        }
-    }
-}
+pub use eve_db::{
+    CharacterActivityState, FastCheckoutOfferRecord, FastCheckoutProductRecord,
+    UserFastCheckoutState,
+};
 
 fn load_catalog_plex_offers(snap: &eve_db::WorldStateSnapshot) -> Vec<FastCheckoutOfferRecord> {
     let catalog = crate::services::quasar_payment_store_types::read_store_catalog(snap);
@@ -189,11 +148,11 @@ fn load_fast_checkout_offers_for_ctx(
 }
 
 pub fn get_user_fast_checkout_state(ctx: &ServerContext, user_id: u64) -> UserFastCheckoutState {
-    let key = format!("{FAST_CHECKOUT_PREFIX}{user_id}");
     ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get(&key)
-            .and_then(|j| serde_json::from_str::<UserFastCheckoutState>(j).ok())
+        snap.seasons_and_campaigns
+            .fast_checkout_states
+            .get(&user_id)
+            .cloned()
             .unwrap_or_default()
     })
 }
@@ -203,26 +162,22 @@ pub fn save_user_fast_checkout_state(
     user_id: u64,
     state: &UserFastCheckoutState,
 ) {
-    let key = format!("{FAST_CHECKOUT_PREFIX}{user_id}");
-    if let Ok(js) = serde_json::to_string(state) {
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.service_state_blobs.insert(key, js);
-        });
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.seasons_and_campaigns
+            .fast_checkout_states
+            .insert(user_id, state.clone());
+    });
 }
 
 pub fn set_user_fast_checkout_enabled(ctx: &ServerContext, user_id: u64, enabled: bool) {
-    let mut st = get_user_fast_checkout_state(ctx, user_id);
-    st.enabled = enabled;
-    save_user_fast_checkout_state(ctx, user_id, &st);
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct CharacterActivityState {
-    #[serde(default)]
-    pub seen_activities: Vec<i64>,
-    #[serde(default)]
-    pub pop_state: Vec<(PyRep, PyRep)>,
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap
+            .seasons_and_campaigns
+            .fast_checkout_states
+            .entry(user_id)
+            .or_default();
+        st.enabled = enabled;
+    });
 }
 
 pub fn handle(
@@ -602,11 +557,10 @@ fn handle_get_tutorial_completion_status(
     session: &SessionState,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let key = format!("{PROJECT_DISCOVERY_KEY_PREFIX}{char_id}");
     let completed = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get(&key)
-            .and_then(|j| serde_json::from_str::<PlayerProjectState>(j).ok())
+        snap.seasons_and_campaigns
+            .project_discovery_players
+            .get(&char_id)
             .map(|st| st.tutorial_complete || st.tutorial_skipped)
             .unwrap_or(false)
     });
@@ -618,22 +572,12 @@ fn handle_initialize_tutorial_status(
     session: &SessionState,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let key = format!("{PROJECT_DISCOVERY_KEY_PREFIX}{char_id}");
     let completed = ctx.db.with_mut_snapshot(|snap| {
-        let (state, newly_created) = if let Some(json) = snap.service_state_blobs.get(&key) {
-            if let Ok(st) = serde_json::from_str::<PlayerProjectState>(json) {
-                (st, false)
-            } else {
-                (PlayerProjectState::default(), true)
-            }
-        } else {
-            (PlayerProjectState::default(), true)
-        };
-        if newly_created {
-            if let Ok(json) = serde_json::to_string(&state) {
-                snap.service_state_blobs.insert(key, json);
-            }
-        }
+        let state = snap
+            .seasons_and_campaigns
+            .project_discovery_players
+            .entry(char_id)
+            .or_default();
         state.tutorial_complete || state.tutorial_skipped
     });
     Ok(PyRep::Bool(completed))
@@ -644,19 +588,15 @@ fn handle_reset_tutorial(
     session: &SessionState,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let key = format!("{PROJECT_DISCOVERY_KEY_PREFIX}{char_id}");
     ctx.db.with_mut_snapshot(|snap| {
-        let mut state = snap
-            .service_state_blobs
-            .get(&key)
-            .and_then(|j| serde_json::from_str::<PlayerProjectState>(j).ok())
-            .unwrap_or_default();
+        let state = snap
+            .seasons_and_campaigns
+            .project_discovery_players
+            .entry(char_id)
+            .or_default();
         state.tutorial_level = 1;
         state.tutorial_skipped = false;
         state.tutorial_complete = false;
-        if let Ok(json) = serde_json::to_string(&state) {
-            snap.service_state_blobs.insert(key, json);
-        }
     });
     Ok(PyRep::Bool(true))
 }
@@ -666,19 +606,15 @@ fn handle_skip_tutorial(
     session: &SessionState,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let key = format!("{PROJECT_DISCOVERY_KEY_PREFIX}{char_id}");
     ctx.db.with_mut_snapshot(|snap| {
-        let mut state = snap
-            .service_state_blobs
-            .get(&key)
-            .and_then(|j| serde_json::from_str::<PlayerProjectState>(j).ok())
-            .unwrap_or_default();
+        let state = snap
+            .seasons_and_campaigns
+            .project_discovery_players
+            .entry(char_id)
+            .or_default();
         state.tutorial_level = 5;
         state.tutorial_skipped = true;
         state.tutorial_complete = false;
-        if let Ok(json) = serde_json::to_string(&state) {
-            snap.service_state_blobs.insert(key, json);
-        }
     });
     Ok(PyRep::Bool(true))
 }
@@ -712,22 +648,18 @@ fn handle_activity_seen(
         });
     }
 
-    let key = format!("{ACTIVITY_MGR_PREFIX}{char_id}");
     ctx.db.with_mut_snapshot(|snap| {
-        let mut state = snap
-            .service_state_blobs
-            .get(&key)
-            .and_then(|j| serde_json::from_str::<CharacterActivityState>(j).ok())
-            .unwrap_or_default();
+        let state = snap
+            .seasons_and_campaigns
+            .character_activities
+            .entry(char_id)
+            .or_default();
         if !state.seen_activities.contains(&activity_id) {
             if state.seen_activities.len() >= MAX_SEEN_ACTIVITIES {
                 let overflow = state.seen_activities.len() + 1 - MAX_SEEN_ACTIVITIES;
                 state.seen_activities.drain(0..overflow);
             }
             state.seen_activities.push(activity_id);
-        }
-        if let Ok(js) = serde_json::to_string(&state) {
-            snap.service_state_blobs.insert(key, js);
         }
     });
     Ok(PyRep::Bool(true))
@@ -738,12 +670,11 @@ fn handle_get_activities_pop_state(
     session: &SessionState,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let key = format!("{ACTIVITY_MGR_PREFIX}{char_id}");
     let pop_state = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get(&key)
-            .and_then(|j| serde_json::from_str::<CharacterActivityState>(j).ok())
-            .map(|st| st.pop_state)
+        snap.seasons_and_campaigns
+            .character_activities
+            .get(&char_id)
+            .map(|st| st.pop_state.clone())
             .unwrap_or_default()
     });
     Ok(PyRep::Dict(pop_state))
@@ -754,12 +685,11 @@ fn handle_get_activity_badge_statuses(
     session: &SessionState,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let key = format!("{ACTIVITY_MGR_PREFIX}{char_id}");
     let seen_activities = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get(&key)
-            .and_then(|j| serde_json::from_str::<CharacterActivityState>(j).ok())
-            .map(|st| st.seen_activities)
+        snap.seasons_and_campaigns
+            .character_activities
+            .get(&char_id)
+            .map(|st| st.seen_activities.clone())
             .unwrap_or_default()
     });
     let list = seen_activities.into_iter().map(PyRep::Integer).collect();
@@ -792,17 +722,13 @@ fn handle_set_activities_pop_state(
         pop_dict.truncate(100);
     }
 
-    let key = format!("{ACTIVITY_MGR_PREFIX}{char_id}");
     ctx.db.with_mut_snapshot(|snap| {
-        let mut state = snap
-            .service_state_blobs
-            .get(&key)
-            .and_then(|j| serde_json::from_str::<CharacterActivityState>(j).ok())
-            .unwrap_or_default();
+        let state = snap
+            .seasons_and_campaigns
+            .character_activities
+            .entry(char_id)
+            .or_default();
         state.pop_state = pop_dict;
-        if let Ok(js) = serde_json::to_string(&state) {
-            snap.service_state_blobs.insert(key, js);
-        }
     });
     Ok(PyRep::Bool(true))
 }
@@ -1120,12 +1046,9 @@ fn handle_buy_offer(
 
     let (tx_id, rem_plex, delivered_items_count, omega_notice) = ctx.db.try_with_mut_snapshot(|snap| {
         if amount_in_cents > 0 {
-            let mut tokens: Vec<crate::services::quasar_payment_store_types::PaymentTokenRecord> = snap
-                .service_state_blobs
-                .get("payment_tokens")
-                .and_then(|json| serde_json::from_str(json).ok())
-                .unwrap_or_default();
-            let Some(token) = tokens
+            let Some(token) = snap
+                .quasar_commerce
+                .payment_tokens
                 .iter_mut()
                 .find(|t| t.user_id == user_id && t.is_quick_pay && !t.consumed)
             else {
@@ -1135,10 +1058,6 @@ fn handle_buy_offer(
                 });
             };
             token.consumed = true;
-            if let Ok(serialized_tokens) = serde_json::to_string(&tokens) {
-                snap.service_state_blobs
-                    .insert("payment_tokens".to_string(), serialized_tokens);
-            }
         }
 
         let vault_uid = active_char_id
@@ -1252,12 +1171,7 @@ fn handle_buy_offer(
         };
 
         if amount_in_cents > 0 {
-            let mut receipts: Vec<crate::services::quasar_payment_store_types::PaymentReceiptRecord> =
-                snap.service_state_blobs
-                    .get("payment_receipts")
-                    .and_then(|json| serde_json::from_str(json).ok())
-                    .unwrap_or_default();
-            receipts.push(
+            snap.quasar_commerce.payment_receipts.push(
                 crate::services::quasar_payment_store_types::PaymentReceiptRecord {
                     receipt_id: tid,
                     user_id,
@@ -1267,10 +1181,6 @@ fn handle_buy_offer(
                     timestamp_unix: now_unix,
                 },
             );
-            if let Ok(serialized) = serde_json::to_string(&receipts) {
-                snap.service_state_blobs
-                    .insert("payment_receipts".to_string(), serialized);
-            }
         }
 
         Ok::<_, BridgeRpcError>((tid, cur_rem, delivered_count, omega_notice))

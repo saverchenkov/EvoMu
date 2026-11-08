@@ -308,7 +308,7 @@ impl ServerContext {
         let crimewatch = crate::combat::crimewatch::CrimeWatchLock::new(Arc::clone(&db));
         let _cluster_misc = crate::services::cluster_macho_misc_services::ClusterMiscRuntimeState::from_db(&db);
         let persisted_global_config: HashMap<String, eve_proto::PyRep> = db.with_snapshot(|snap| {
-            snap.service_state_blobs.get("macho_global_config").and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default()
+            snap.cluster_and_runtime.macho_global_config.clone()
         });
         let persisted_probes: HashMap<i64, ActiveScannerProbe> = db.with_snapshot(|snap| {
             crate::sp6_lifecycle::load_sp6_state_from_snap(snap)

@@ -710,9 +710,12 @@ pub async fn handle_pve_hacking(
             }
             if status == "Won" && !already_hacked {
                 ctx.db.with_mut_snapshot(|s| {
-                    let k = format!("hacking_wins:{char_id}");
-                    let count: i64 = s.service_state_blobs.get(&k).and_then(|v| v.parse().ok()).unwrap_or(0);
-                    s.service_state_blobs.insert(k, (count + 1).to_string());
+                    let entry = s
+                        .seasons_and_campaigns
+                        .hacking_wins
+                        .entry(char_id)
+                        .or_insert(0);
+                    *entry = entry.saturating_add(1);
                 });
                 crate::services::pve_exploration_sites::materialize_spewed_cans_core(
                     &ctx.db, &ctx.systems, char_id, &spewed_cans,

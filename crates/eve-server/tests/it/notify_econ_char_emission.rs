@@ -437,10 +437,7 @@ async fn notify_batch8_seasons_lifecycle_and_challenges() {
                 ..Default::default()
             },
         ];
-        snap.service_state_blobs.insert(
-            SEASONAL_CHALLENGES_CONFIG_KEY.into(),
-            serde_json::to_string(&defs).expect("serialize defs"),
-        );
+        snap.seasons_and_campaigns.challenge_definitions = defs;
     });
 
     // 1. Baseline get_season_data_for_character & get_season_end_time
@@ -715,21 +712,14 @@ async fn notify_batch8_seasons_lifecycle_and_challenges() {
     let future_start_ft = now_ft + 100 * 10_000_000;
     let future_end_ft = now_ft + 200 * 10_000_000;
     ctx.db.with_mut_snapshot(|snap| {
-        let mut catalog: std::collections::BTreeMap<i64, eve_server::services::season_manager::SeasonConfig> =
-            snap.service_state_blobs
-                .get(eve_server::services::season_manager::SEASONS_CATALOG_KEY)
-                .and_then(|j| serde_json::from_str(j).ok())
-                .unwrap_or_default();
+        let mut catalog = snap.seasons_and_campaigns.seasons_catalog.clone();
         if let Some(mut cfg) = catalog.values().next().cloned() {
             cfg.season_id = 99;
             cfg.season_name = "Timed Season 99".into();
             cfg.start_time_ft = future_start_ft;
             cfg.end_time_ft = future_end_ft;
             catalog.insert(99, cfg);
-            snap.service_state_blobs.insert(
-                eve_server::services::season_manager::SEASONS_CATALOG_KEY.into(),
-                serde_json::to_string(&catalog).unwrap(),
-            );
+            snap.seasons_and_campaigns.seasons_catalog = catalog;
         }
     });
     // Initialize announced season state snapshot while season 99 is still upcoming

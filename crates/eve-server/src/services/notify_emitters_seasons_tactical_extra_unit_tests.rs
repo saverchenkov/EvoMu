@@ -122,9 +122,8 @@ fn season_transition_state_machine_and_slash_command_edge_cases() {
         ..SeasonConfig::default()
     };
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.remove(SEASONS_CATALOG_KEY);
-        snap.service_state_blobs
-            .insert(SEASON_CONFIG_KEY.into(), serde_json::to_string(&cfg).unwrap());
+        snap.seasons_and_campaigns.seasons_catalog.clear();
+        snap.seasons_and_campaigns.season_configuration = Some(cfg);
         let mut st = load_season_state_from_blobs(snap, char_id);
         st.selected_season_id = 777;
         save_season_state_to_blobs(snap, char_id, &st);

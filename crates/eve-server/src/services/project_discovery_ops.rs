@@ -7,7 +7,6 @@ use crate::services::project_discovery::{
 };
 use eve_db::WorldStateSnapshot;
 use eve_proto::PyRep;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Authentic V24 tutorial sample UUIDs from `projectdiscovery/client/projects/covid/gameplaymodes/tutorial/{twogates,tryuntilpass}.pyj`.
@@ -19,27 +18,14 @@ const V24_TRAINING_SAMPLE_UUIDS: [&str; 5] = [
     "ff9f9a21-954b-4c1c-9a54-16b21cf17670",
 ];
 
-/// Persistent per-task multi-player consensus and vote log key in `service_state_blobs`.
-const PROJECT_DISCOVERY_VOTES_KEY: &str = "project_discovery_votes";
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TaskVoteBucket {
-    pub submissions: Vec<(i64, [f64; 2], bool)>,
-    pub consensus_centroid: Option<[f64; 2]>,
-}
+pub use eve_db::TaskVoteBucket;
 
 fn load_vote_map(snap: &WorldStateSnapshot) -> HashMap<i64, TaskVoteBucket> {
-    snap.service_state_blobs
-        .get(PROJECT_DISCOVERY_VOTES_KEY)
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default()
+    snap.seasons_and_campaigns.project_discovery_votes.clone()
 }
 
 fn save_vote_map(snap: &mut WorldStateSnapshot, votes: &HashMap<i64, TaskVoteBucket>) {
-    if let Ok(json) = serde_json::to_string(votes) {
-        snap.service_state_blobs
-            .insert(PROJECT_DISCOVERY_VOTES_KEY.to_string(), json);
-    }
+    snap.seasons_and_campaigns.project_discovery_votes = votes.clone();
 }
 
 /// Deterministic UUID-v4 style identifier for flow cytometry sample indices.

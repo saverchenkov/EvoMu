@@ -122,12 +122,10 @@ async fn test_character_medals_display_visibility() {
     let set_kv = keyval(&set_res);
     assert_eq!(set_kv.get("status").and_then(|v| v.as_i64()), Some(3));
 
-    // 6. Verify snap.char_medals and snap.service_state_blobs reflect public status
+    // 6. Verify snap.char_medals reflects public status
     ctx.db.with_snapshot(|snap| {
         let medals = snap.char_medals.get(&90_000_002).expect("char_medals entry");
         assert!(medals.iter().any(|m| m.medal_id == medal_id && m.status == "public"));
-        let blob = snap.service_state_blobs.get("character_medals:90000002").expect("service_state_blobs");
-        assert!(blob.contains("public"));
     });
 
     // 7. Query GetMedalsReceived as third party: now returns 1 row (public medal visible)

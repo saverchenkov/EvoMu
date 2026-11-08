@@ -304,7 +304,7 @@ fn ore_mined_sim_clock_rebase_incursion_and_expedition_edge_cases_kill_mutations
                     completed_count: 0,
                     boss_npc_ball_id: 999_001,
                     boss_type_id: 2933,
-                    position: DVec3::ZERO,
+                    position: [0.0, 0.0, 0.0],
                     escort_spawns: vec![],
                     boss_destroyed: true,
                     killer_char_id: Some(char_id),
@@ -461,8 +461,8 @@ async fn deathzone_room_offset_and_system_bounds_kill_mutations() {
         cleared: false,
         gate_unlocked_at_sec: None,
     };
-    crate::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets.insert(
+    crate::services::pve_special_sites::with_abyssal_state(&ctx, |st| {
+        st.pockets.insert(
             1,
             AbyssalPocketSession {
                 pocket_id: 1,

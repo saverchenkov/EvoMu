@@ -195,8 +195,8 @@ fn handle_request_meta_endpoints_cdn_portrait_auth_and_conditional_etag() {
 
     // Portrait binary image route: hex-encoded JPEG bytes vs 404 when unset
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(
-            format!("portrait:{char_id}:64"),
+        snap.cluster_and_runtime.portraits.insert(
+            format!("{char_id}:64"),
             "ffd8ffe000104a464946".to_string(),
         );
     });

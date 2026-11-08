@@ -267,16 +267,18 @@ fn calendar_esi_response_mailing_lists_and_full_db_hydration_kill_mutations() {
         );
         snap.read_mails.insert((cid, 4001));
         snap.mail_assigned_labels.insert((cid, 4001), vec![1, 64]);
-        snap.service_state_blobs.insert(
-            "fleet_join_requests".into(),
-            r#"{"500":[90000002]}"#.into(),
-        );
-        snap.service_state_blobs
-            .insert("fleet_watchlist".into(), r#"{"90000001":[90000002]}"#.into());
-        snap.service_state_blobs.insert(
-            "fleet_options".into(),
-            r#"[{"500":false},{"500":true}]"#.into(),
-        );
+        snap.fleet_and_social_ops
+            .fleet_join_requests
+            .insert(500, std::collections::HashSet::from([90_000_002]));
+        snap.fleet_and_social_ops
+            .fleet_watchlist
+            .insert(90_000_001, std::collections::HashSet::from([90_000_002]));
+        snap.fleet_and_social_ops
+            .fleet_voice_enabled
+            .insert(500, false);
+        snap.fleet_and_social_ops
+            .fleet_loot_logging
+            .insert(500, true);
     });
 
     // update_calendar_response_from_esi loads uncached event 850_001 from DB, updates response, and rejects deleted 850_002

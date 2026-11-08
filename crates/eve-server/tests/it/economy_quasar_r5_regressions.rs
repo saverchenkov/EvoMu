@@ -139,13 +139,13 @@ async fn test_r5_238_243_244_245_contracts_fingerprint_deposit_corp_accept_and_t
         .dispatch_rpc(&mut s_issuer, "contractProxy", None, "CreateContract", &courier_args, &HashMap::new(), None)
         .await.expect("CreateContract Courier");
     let courier_cid = kv_i64(&courier_rep, "contractID");
-    assert!(ctx.db.with_snapshot(|s| s.service_state_blobs.contains_key(&format!("contract_deposit:{courier_cid}"))));
+    assert!(ctx.db.with_snapshot(|s| s.fleet_and_social_ops.contract_deposits.contains_key(&courier_cid)));
     let issuer_before_accept = ctx.db.with_snapshot(|s| s.characters.get(&90_000_001).unwrap().balance.0);
     ctx.dispatch_rpc(&mut s_acceptor, "contractProxy", None, "AcceptContract", &[PyRep::Integer(courier_cid)], &HashMap::new(), None)
         .await.expect("AcceptContract Courier");
     let issuer_after_accept = ctx.db.with_snapshot(|s| s.characters.get(&90_000_001).unwrap().balance.0);
     assert!(issuer_after_accept > issuer_before_accept, "Courier deposit must be refunded on acceptance");
-    assert!(ctx.db.with_snapshot(|s| !s.service_state_blobs.contains_key(&format!("contract_deposit:{courier_cid}"))));
+    assert!(ctx.db.with_snapshot(|s| !s.fleet_and_social_ops.contract_deposits.contains_key(&courier_cid)));
 
     // #244 & #245: Corporate contract acceptance role/wallet/delivery & trade-in item state guards
     let corp_id = 98_244_001_i64;

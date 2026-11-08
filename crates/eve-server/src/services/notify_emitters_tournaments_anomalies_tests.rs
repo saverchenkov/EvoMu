@@ -258,7 +258,7 @@ async fn tales_incursions_system_effects_deathzone_and_expedition_notifications(
                     completed_count: 0,
                     boss_npc_ball_id: 999_001,
                     boss_type_id: 2933,
-                    position: DVec3::ZERO,
+                    position: [0.0, 0.0, 0.0],
                     escort_spawns: vec![],
                     boss_destroyed: true,
                     killer_char_id: Some(char_id),

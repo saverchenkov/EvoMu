@@ -3745,8 +3745,7 @@ async fn test_parity_remediation_quasar_payment_schedules_tokens_and_store() {
                 consumed: false,
             },
         ];
-        snap.service_state_blobs
-            .insert("payment_tokens".into(), serde_json::to_string(&tokens).unwrap());
+        snap.quasar_commerce.payment_tokens = tokens;
     });
 
     let mut s = sess(70_205, 90_000_001, 98_000_001, 30_000_142, 0);
@@ -3796,10 +3795,10 @@ async fn test_parity_remediation_quasar_payment_schedules_tokens_and_store() {
 
     // 4. Advance clock past 30-day billing cycle with quick-pay token -> GetActiveByType is pure read, tick renews & records receipt
     let sched_due: u64 = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("payment_schedules")
-            .and_then(|j| serde_json::from_str::<Vec<PaymentScheduleRecord>>(j).ok())
-            .and_then(|v| v.first().map(|s| s.next_payment_unix))
+        snap.quasar_commerce
+            .payment_schedules
+            .first()
+            .map(|s| s.next_payment_unix)
             .unwrap()
     });
     let advance = sched_due.saturating_add(60).saturating_sub(ctx.now_unix() as u64);
@@ -3813,27 +3812,19 @@ async fn test_parity_remediation_quasar_payment_schedules_tokens_and_store() {
         STATUS_OK
     );
     let receipts_before_tick: usize = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("payment_receipts")
-            .and_then(|j| serde_json::from_str::<Vec<eve_server::services::quasar_payment_store_types::PaymentReceiptRecord>>(j).ok())
-            .map(|v| v.len())
-            .unwrap_or(0)
+        snap.quasar_commerce.payment_receipts.len()
     });
     assert_eq!(receipts_before_tick, 1);
 
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let (renewed_due, receipts_after_tick) = ctx.db.with_snapshot(|snap| {
         let due = snap
-            .service_state_blobs
-            .get("payment_schedules")
-            .and_then(|j| serde_json::from_str::<Vec<PaymentScheduleRecord>>(j).ok())
-            .and_then(|v| v.first().map(|s| s.next_payment_unix))
+            .quasar_commerce
+            .payment_schedules
+            .first()
+            .map(|s| s.next_payment_unix)
             .unwrap();
-        let rcpts = snap
-            .service_state_blobs
-            .get("payment_receipts")
-            .and_then(|j| serde_json::from_str::<Vec<eve_server::services::quasar_payment_store_types::PaymentReceiptRecord>>(j).ok())
-            .unwrap_or_default();
+        let rcpts = snap.quasar_commerce.payment_receipts.clone();
         (due, rcpts)
     });
     assert!(renewed_due > sched_due);

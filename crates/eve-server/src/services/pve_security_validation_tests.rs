@@ -336,9 +336,10 @@ async fn r7_465_login_reward_packaging_expiry_item_change_and_campaign_scoped_cl
         let it = &snap.items[&del_id];
         assert!(!it.singleton, "1-unit stackable login reward must spawn packaged (singleton=false)");
         assert_eq!(
-            snap.service_state_blobs
-                .get(&format!("login_reward_expiry:{del_id}"))
-                .and_then(|s| s.parse::<i64>().ok()),
+            snap.seasons_and_campaigns
+                .login_reward_expiry
+                .get(&del_id)
+                .copied(),
             Some(expected_ft),
             "docked expiring login reward must preserve expireDateTime"
         );
@@ -566,9 +567,9 @@ fn r7_458_node_graph_client_message_bounds_blackboard_and_rejects_arbitrary_node
     assert!(rejected, "flooding beyond 64 keys must return an error");
 
     ctx.db.with_snapshot(|snap| {
-        let raw = &snap.service_state_blobs[&format!("node_graph_bb:{cid}:{graph_id}")];
+        let parsed = &snap.node_graph_state.node_graph_blackboards[&(cid, graph_id)];
+        let raw = serde_json::to_string(parsed).unwrap();
         assert!(raw.len() <= 8192, "blackboard JSON size must stay <= 8192 bytes");
-        let parsed: HashMap<String, String> = serde_json::from_str(raw).unwrap();
         assert!(parsed.len() <= 64, "blackboard key count must stay <= 64");
         assert!(parsed["client_step"].len() <= 1024, "blackboard value length must stay <= 1024");
     });

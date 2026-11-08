@@ -8,114 +8,53 @@ pub use crate::services::pve_abyssal_lifecycle::*;
 
 use crate::router::ServerContext;
 use crate::services::pve_incursion_sites::make_site_npc_ball;
-use crate::services::pve_special_sites::{
-    next_spec_seq, with_pve_special_reg, with_pve_special_reg_db,
-};
+use eve_db::WorldRepository;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{SolarSystemId, TypeId};
 use glam::DVec3;
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+pub use eve_db::{
+    AbyssalPocketSession, AbyssalRoomRecord, AbyssalRuntimeStore, AbyssalTraceRecord,
+    AbyssalWeatherKind,
+};
 
 type CharacterId = i64;
 type ItemId = i64;
+
+pub fn read_abyssal_state<R>(
+    ctx: &ServerContext,
+    f: impl FnOnce(&AbyssalRuntimeStore) -> R,
+) -> R {
+    ctx.db.with_snapshot(|snap| f(&snap.abyssal_state))
+}
+
+pub fn with_abyssal_state<R>(
+    ctx: &ServerContext,
+    f: impl FnOnce(&mut AbyssalRuntimeStore) -> R,
+) -> R {
+    ctx.db.with_mut_snapshot(|snap| f(&mut snap.abyssal_state))
+}
+
+pub fn with_abyssal_state_db<R>(
+    db: &Arc<WorldRepository>,
+    f: impl FnOnce(&mut AbyssalRuntimeStore) -> R,
+) -> R {
+    db.with_mut_snapshot(|snap| f(&mut snap.abyssal_state))
+}
+
+pub(crate) fn next_abyssal_seq(st: &mut AbyssalRuntimeStore) -> i64 {
+    st.next_seq += 1;
+    st.next_seq
+}
 
 fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
         code: code.into(),
         message: message.into(),
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AbyssalWeatherKind {
-    Electrical,
-    Dark,
-    Exotic,
-    Firestorm,
-    Gamma,
-}
-
-impl AbyssalWeatherKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Electrical => "Electrical",
-            Self::Dark => "Dark",
-            Self::Exotic => "Exotic",
-            Self::Firestorm => "Firestorm",
-            Self::Gamma => "Gamma",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AbyssalRoomRecord {
-    pub room_index: u8,
-    pub dungeon_id: u32,
-    pub dungeon_name: String,
-    pub npc_ball_ids: Vec<i64>,
-    pub cache_item_id: ItemId,
-    pub cleared: bool,
-    #[serde(default)]
-    pub gate_unlocked_at_sec: Option<u64>,
-}
-
-fn default_one() -> u8 {
-    1
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AbyssalPocketSession {
-    pub pocket_id: i64,
-    pub character_id: CharacterId,
-    pub ship_id: ItemId,
-    pub origin_solar_system_id: SolarSystemId,
-    pub abyssal_solar_system_id: SolarSystemId,
-    #[serde(default)]
-    pub origin_position: [f64; 3],
-    #[serde(default)]
-    pub grid_offset: [f64; 3],
-    pub filament_type_id: TypeId,
-    pub tier: u8,
-    pub weather: AbyssalWeatherKind,
-    pub weather_penalty_pct: f64,
-    pub weather_bonus_pct: f64,
-    pub npc_difficulty_mult: f64,
-    pub current_room: u8,
-    pub rooms: [AbyssalRoomRecord; 3],
-    pub started_at_sec: u64,
-    pub collapse_at_sec: u64,
-    pub completed: bool,
-    pub collapsed_destroyed: bool,
-    #[serde(default)]
-    pub trace_ball_id: i64,
-    #[serde(default)]
-    pub fleet_ship_ids: Vec<ItemId>,
-    #[serde(default)]
-    pub ship_room: HashMap<ItemId, u8>,
-    #[serde(default = "default_one")]
-    pub max_ships: u8,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AbyssalTraceRecord {
-    pub trace_ball_id: i64,
-    pub char_id: CharacterId,
-    pub filament_type_id: TypeId,
-    pub origin_solar_system_id: SolarSystemId,
-    pub position: [f64; 3],
-    pub created_unix: u64,
-    #[serde(default)]
-    pub expires_at_sec: u64,
-    #[serde(default)]
-    pub max_ships: u8,
-    #[serde(default)]
-    pub entered_char_ids: Vec<CharacterId>,
-    #[serde(default)]
-    pub pocket_id: Option<i64>,
-    #[serde(default)]
-    pub fleet_id: Option<i64>,
 }
 
 pub fn classify_abyssal_filament(type_id: TypeId) -> Option<(u8, AbyssalWeatherKind)> {
@@ -160,8 +99,8 @@ pub fn classify_abyssal_filament(type_id: TypeId) -> Option<(u8, AbyssalWeatherK
 }
 
 pub fn pocket_grid_offset(ctx: &ServerContext, pocket_id: i64) -> [f64; 3] {
-    with_pve_special_reg(ctx, |reg| {
-        reg.abyssal_pockets
+    read_abyssal_state(ctx, |st| {
+        st.pockets
             .values()
             .find(|p| p.pocket_id == pocket_id)
             .map(|p| p.grid_offset)
@@ -170,8 +109,8 @@ pub fn pocket_grid_offset(ctx: &ServerContext, pocket_id: i64) -> [f64; 3] {
 }
 
 pub async fn ensure_abyssal_room_balls_for_ctx(ctx: &ServerContext, char_id: CharacterId) {
-    let info = with_pve_special_reg(ctx, |reg| {
-        let p = reg.abyssal_pockets.get(&char_id)?;
+    let info = read_abyssal_state(ctx, |st| {
+        let p = st.pockets.get(&char_id)?;
         if p.completed || p.collapsed_destroyed {
             return None;
         }
@@ -283,8 +222,8 @@ pub async fn spawn_abyssal_room_contents(
     let weather = classify_abyssal_filament(filament_type_id)
         .map(|(_, w)| w)
         .unwrap_or(AbyssalWeatherKind::Electrical);
-    let penalty_pct = with_pve_special_reg(ctx, |reg| {
-        reg.abyssal_pockets
+    let penalty_pct = read_abyssal_state(ctx, |st| {
+        st.pockets
             .values()
             .find(|p| p.pocket_id == pocket_id)
             .map(|p| p.weather_penalty_pct)
@@ -534,9 +473,9 @@ pub fn on_abyssal_room_npc_destroyed_in_ballpark(
         return false;
     }
     let now_sec = db.clock().now_unix_secs();
-    let unlocked = with_pve_special_reg_db(db, now_sec, |reg| {
+    let unlocked = with_abyssal_state_db(db, |st| {
         let mut target: Option<(i64, usize)> = None;
-        for p in reg.abyssal_pockets.values().filter(|p| !p.completed && !p.collapsed_destroyed) {
+        for p in st.pockets.values().filter(|p| !p.completed && !p.collapsed_destroyed) {
             for (r_idx, r) in p.rooms.iter().enumerate() {
                 if !r.cleared && r.npc_ball_ids.contains(&npc_ball_id) {
                     let all_gone = r
@@ -556,7 +495,7 @@ pub fn on_abyssal_room_npc_destroyed_in_ballpark(
         let Some((pid, r_idx)) = target else {
             return None;
         };
-        for p in reg.abyssal_pockets.values_mut().filter(|p| p.pocket_id == pid) {
+        for p in st.pockets.values_mut().filter(|p| p.pocket_id == pid) {
             p.rooms[r_idx].cleared = true;
             p.rooms[r_idx].gate_unlocked_at_sec = Some(now_sec);
         }
@@ -581,8 +520,8 @@ pub async fn on_abyssal_room_npc_destroyed_core(
         return false;
     }
     let now_sec = db.clock().now_unix_secs();
-    let cand = with_pve_special_reg_db(db, now_sec, |reg| {
-        for p in reg.abyssal_pockets.values().filter(|p| !p.completed && !p.collapsed_destroyed) {
+    let cand = with_abyssal_state_db(db, |st| {
+        for p in st.pockets.values().filter(|p| !p.completed && !p.collapsed_destroyed) {
             for (r_idx, r) in p.rooms.iter().enumerate() {
                 if !r.cleared && r.npc_ball_ids.contains(&npc_ball_id) {
                     return Some((p.pocket_id, r_idx, r.npc_ball_ids.clone()));
@@ -600,9 +539,9 @@ pub async fn on_abyssal_room_npc_destroyed_core(
             return false;
         }
     }
-    let newly_unlocked = with_pve_special_reg_db(db, now_sec, |reg| {
+    let newly_unlocked = with_abyssal_state_db(db, |st| {
         let mut changed = false;
-        for p in reg.abyssal_pockets.values_mut().filter(|p| p.pocket_id == pid) {
+        for p in st.pockets.values_mut().filter(|p| p.pocket_id == pid) {
             if !p.rooms[r_idx].cleared {
                 p.rooms[r_idx].cleared = true;
                 p.rooms[r_idx].gate_unlocked_at_sec = Some(now_sec);
@@ -719,12 +658,12 @@ pub async fn enter_abyssal_pocket_with_trace(
         .map(|(_, w)| w)
         .unwrap_or(AbyssalWeatherKind::Electrical);
     let valid_trace_id = trace_ball_id.filter(|&tid| tid > 0);
-    let (existing_penalty, trace_max_ships) = with_pve_special_reg(ctx, |reg| {
-        let trace_opt = valid_trace_id.and_then(|tid| reg.abyssal_traces.get(&tid));
+    let (existing_penalty, trace_max_ships) = read_abyssal_state(ctx, |st| {
+        let trace_opt = valid_trace_id.and_then(|tid| st.traces.get(&tid));
         let pen = trace_opt
             .and_then(|t| t.pocket_id)
             .and_then(|pid| {
-                reg.abyssal_pockets
+                st.pockets
                     .values()
                     .find(|p| p.pocket_id == pid && !p.completed && !p.collapsed_destroyed)
                     .map(|p| p.weather_penalty_pct)
@@ -745,12 +684,12 @@ pub async fn enter_abyssal_pocket_with_trace(
     let abyssal_sys_id: SolarSystemId = 32_000_001;
     let sys_handle = ctx.systems.get_or_spawn(abyssal_sys_id);
     let (pocket_id, room1_npcs, r1_cache, already_spawned, r1_cleared, started_at, collapse_at, grid_offset) =
-        with_pve_special_reg(ctx, |reg| {
+        with_abyssal_state(ctx, |st| {
             let target_pid = valid_trace_id
-                .and_then(|tid| reg.abyssal_traces.get(&tid))
+                .and_then(|tid| st.traces.get(&tid))
                 .and_then(|t| t.pocket_id);
             if let Some(existing) = target_pid.and_then(|pid| {
-                reg.abyssal_pockets
+                st.pockets
                     .values()
                     .find(|p| p.pocket_id == pid && !p.completed && !p.collapsed_destroyed)
                     .cloned()
@@ -775,19 +714,19 @@ pub async fn enter_abyssal_pocket_with_trace(
                     joined.fleet_ship_ids.push(ship_id);
                 }
                 joined.ship_room.insert(ship_id, 1);
-                for p in reg.abyssal_pockets.values_mut().filter(|p| p.pocket_id == pid) {
+                for p in st.pockets.values_mut().filter(|p| p.pocket_id == pid) {
                     if !p.fleet_ship_ids.contains(&ship_id) {
                         p.fleet_ship_ids.push(ship_id);
                     }
                     p.ship_room.insert(ship_id, 1);
                 }
-                reg.abyssal_pockets.insert(char_id, joined);
+                st.pockets.insert(char_id, joined);
                 return (pid, r1_npcs, r1_cache, true, r1_done, started, collapse, goffset);
             }
 
             let mut used_slots: HashSet<i64> = HashSet::new();
-            for active_p in reg
-                .abyssal_pockets
+            for active_p in st
+                .pockets
                 .values()
                 .filter(|p| !p.completed && !p.collapsed_destroyed)
             {
@@ -797,7 +736,7 @@ pub async fn enter_abyssal_pocket_with_trace(
             let slot = (0_i64..10_000).find(|s| !used_slots.contains(s)).unwrap_or(0);
             let goffset = [0.0, (slot as f64) * 10_000_000.0, 0.0];
 
-            let pid = 600_000 + next_spec_seq(reg);
+            let pid = 600_000 + next_abyssal_seq(st);
             let now = ctx.now_unix();
             let collapse = now + 1_200;
             let mut rooms_vec = Vec::with_capacity(3);
@@ -824,7 +763,7 @@ pub async fn enter_abyssal_pocket_with_trace(
             let r1_npcs = rooms[0].npc_ball_ids.clone();
             let r1_cache = rooms[0].cache_item_id;
             let trace_id = if let Some(tid) = valid_trace_id {
-                if let Some(t) = reg.abyssal_traces.get_mut(&tid) {
+                if let Some(t) = st.traces.get_mut(&tid) {
                     t.pocket_id = Some(pid);
                     t.expires_at_sec = collapse;
                 }
@@ -832,7 +771,7 @@ pub async fn enter_abyssal_pocket_with_trace(
             } else {
                 0
             };
-            reg.abyssal_pockets.insert(
+            st.pockets.insert(
                 char_id,
                 AbyssalPocketSession {
                     pocket_id: pid,
@@ -931,9 +870,9 @@ pub async fn handle_abyssal_entrance_deployment(
 
     let now_unix = ctx.now_unix();
     let trace_pos = ship_pos + DVec3::new(500.0, 0.0, 0.0);
-    let trace_ball_id = with_pve_special_reg(ctx, |reg| {
-        let tid = 1_897_000_000 + next_spec_seq(reg);
-        reg.abyssal_traces.insert(
+    let trace_ball_id = with_abyssal_state(ctx, |st| {
+        let tid = 1_897_000_000 + next_abyssal_seq(st);
+        st.traces.insert(
             tid,
             AbyssalTraceRecord {
                 trace_ball_id: tid,

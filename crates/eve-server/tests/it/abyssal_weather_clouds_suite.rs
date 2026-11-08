@@ -506,8 +506,8 @@ async fn test_abyssal_trace_scanning_and_fleet_entry() {
 
     let abyss_handle = ctx.systems.get_or_spawn(abyssal_sys);
     let lethal = DamageVector { em: 1e7, thermal: 1e7, kinetic: 1e7, explosive: 1e7 };
-    let r1_npcs = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets.get(&char1).unwrap().rooms[0].npc_ball_ids.clone()
+    let r1_npcs = eve_server::services::pve_special_sites::with_abyssal_state(&ctx, |st| {
+        st.pockets.get(&char1).unwrap().rooms[0].npc_ball_ids.clone()
     });
     for npc_id in r1_npcs {
         let _ = abyss_handle.apply_damage_with_attacker(npc_id, lethal, Some(char1)).await;
@@ -524,8 +524,8 @@ async fn test_abyssal_trace_scanning_and_fleet_entry() {
     // 4. R-ABY-FLEET-01: Both fleet Frigates clear Rooms 1, 2, and 3 and both transit conduits and exit
     for room in 1..=3_i64 {
         if room > 1 {
-            let room_npcs = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
-                reg.abyssal_pockets.get(&char1).unwrap().rooms[(room - 1) as usize].npc_ball_ids.clone()
+            let room_npcs = eve_server::services::pve_special_sites::with_abyssal_state(&ctx, |st| {
+                st.pockets.get(&char1).unwrap().rooms[(room - 1) as usize].npc_ball_ids.clone()
             });
             for npc_id in room_npcs {
                 let _ = abyss_handle.apply_damage_with_attacker(npc_id, lethal, Some(char1)).await;
@@ -633,8 +633,8 @@ async fn test_abyssal_timer_collapse_and_pod_death() {
     let abyssal_sys = ent1.dict_get("solarSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
     let abyss_handle = ctx.systems.get_or_spawn(abyssal_sys);
     let lethal = DamageVector { em: 1e7, thermal: 1e7, kinetic: 1e7, explosive: 1e7 };
-    let r1_npcs = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets.get(&char_id).unwrap().rooms[0].npc_ball_ids.clone()
+    let r1_npcs = eve_server::services::pve_special_sites::with_abyssal_state(&ctx, |st| {
+        st.pockets.get(&char_id).unwrap().rooms[0].npc_ball_ids.clone()
     });
     for npc_id in r1_npcs {
         let _ = abyss_handle.apply_damage_with_attacker(npc_id, lethal, Some(char_id)).await;

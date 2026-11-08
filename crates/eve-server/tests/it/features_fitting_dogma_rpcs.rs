@@ -188,9 +188,11 @@ async fn test_zarzakh_deathless_shipcaster_entry_beacons() {
         assert_eq!(bp.ball_slim_meta.get(&item_id).map(|m| m.category_id), Some(65));
     }
     ctx.db.with_mut_snapshot(|s| {
-        s.service_state_blobs.insert(
-            "cluster_misc_state".into(),
-            r#"{"landing_pads":[{"item_id":104000001,"type_id":75929,"solar_system_id":30002811,"faction_id":500001,"is_built":true,"link_timestamp":1700000000,"is_disrupted":false,"position":[100000.0,0.0,0.0]}],"launchers":[{"item_id":105000001,"type_id":76466,"solar_system_id":30045324,"faction_id":500001,"linked_pad_ids":[104000001],"position":[200000.0,0.0,0.0]}]}"#.into(),
+        s.cluster_and_runtime.cluster_misc_state = Some(
+            serde_json::from_str(
+                r#"{"landing_pads":[{"item_id":104000001,"type_id":75929,"solar_system_id":30002811,"faction_id":500001,"is_built":true,"link_timestamp":1700000000,"is_disrupted":false,"position":[100000.0,0.0,0.0]}],"launchers":[{"item_id":105000001,"type_id":76466,"solar_system_id":30045324,"faction_id":500001,"linked_pad_ids":[104000001],"position":[200000.0,0.0,0.0]}]}"#,
+            )
+            .unwrap(),
         );
     });
     let merged = ClusterMiscRuntimeState::from_db(&ctx.db);

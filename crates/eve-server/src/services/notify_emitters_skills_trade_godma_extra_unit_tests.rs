@@ -463,20 +463,22 @@ fn browser_lockdown_legacy_entries_hash_and_localization_qa_wrap_eviction() {
     sess.character_id = Some(char_id);
     sess.role = service_roles::ROLE_PROGRAMMER;
 
-    // Seed legacy string URL alongside structured entry in browser_lockdown_policy
+    // Seed structured browser_lockdown_policy directly in typed ClusterAndRuntimeStore
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(
-            "browser_lockdown_policy".into(),
-            serde_json::json!({
-                "lockdown": false,
-                "default_home_page": "https://eve.example/",
-                "flagged_sites": [
-                    "https://legacy-phish.example",
-                    {"site_url": "https://malware.example", "site_flag": 5}
-                ]
-            })
-            .to_string(),
-        );
+        snap.cluster_and_runtime.browser_lockdown_policy = Some(eve_db::BrowserLockdownPolicyState {
+            lockdown: false,
+            default_home_page: "https://eve.example/".into(),
+            flagged_sites: vec![
+                eve_db::FlaggedSiteEntry {
+                    site_url: "https://legacy-phish.example".into(),
+                    site_flag: 2,
+                },
+                eve_db::FlaggedSiteEntry {
+                    site_url: "https://malware.example".into(),
+                    site_flag: 5,
+                },
+            ],
+        });
     });
     let list_rep = call_browser_lockdown(&ctx, &sess, "GetFlaggedSitesList")
         .unwrap()
@@ -512,10 +514,7 @@ fn browser_lockdown_legacy_entries_hash_and_localization_qa_wrap_eviction() {
         for uid in 100..356_i64 {
             full_map.insert(uid, true);
         }
-        snap.service_state_blobs.insert(
-            "localization:qa_wrap_users".into(),
-            serde_json::to_string(&full_map).unwrap(),
-        );
+        snap.cluster_and_runtime.localization_qa_wrap_users = full_map;
     });
     assert_eq!(
         handle_update_localization_qa_wrap(&ctx, &sess, &[PyRep::Integer(1)]).unwrap(),

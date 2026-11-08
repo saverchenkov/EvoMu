@@ -65,9 +65,7 @@ fn semver_orchestrator_and_commerce_admin_handlers() {
     save_orch_state(db, &init_orch);
 
     db.with_mut_snapshot(|snap| {
-        let mut ff = BTreeMap::new();
-        ff.insert(
-            1u32,
+        snap.quasar_commerce.failed_fulfillments.push(
             FailedFulfillmentRecord {
                 id: 1,
                 user_id: 1,
@@ -76,8 +74,7 @@ fn semver_orchestrator_and_commerce_admin_handlers() {
                 fulfilled: false,
             },
         );
-        ff.insert(
-            2u32,
+        snap.quasar_commerce.failed_fulfillments.push(
             FailedFulfillmentRecord {
                 id: 2,
                 user_id: 1,
@@ -85,10 +82,6 @@ fn semver_orchestrator_and_commerce_admin_handlers() {
                 retries: 0,
                 fulfilled: false,
             },
-        );
-        snap.service_state_blobs.insert(
-            BLOB_FAILED_FULFILLMENTS.to_string(),
-            serde_json::to_string(&ff).unwrap(),
         );
     });
 

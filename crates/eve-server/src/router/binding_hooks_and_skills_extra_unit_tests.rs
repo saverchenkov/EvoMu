@@ -69,10 +69,9 @@ fn module_deactivation_and_target_lock_hooks_cloak_cooldown_and_auto_reload() {
         );
         snap.module_active_states.insert(mod_id);
         snap.module_active_charges.insert(mod_id, 200);
-        snap.service_state_blobs.insert(
-            format!("auto_reloaded_event:{mod_id}"),
-            serde_json::to_string(&(vec![mod_id], 200u32, 5_000.0f64)).unwrap(),
-        );
+        snap.cluster_and_runtime
+            .auto_reloaded_event
+            .insert(mod_id, (vec![mod_id], 200u32, 5_000.0f64));
     });
 
     let deact_hook = ctx
@@ -106,8 +105,9 @@ fn module_deactivation_and_target_lock_hooks_cloak_cooldown_and_auto_reload() {
         assert!(!snap.module_active_states.contains(&mod_id));
         assert!(!snap.module_active_charges.contains_key(&mod_id));
         assert!(!snap
-            .service_state_blobs
-            .contains_key(&format!("auto_reloaded_event:{mod_id}")));
+            .cluster_and_runtime
+            .auto_reloaded_event
+            .contains_key(&mod_id));
     });
     let events: Vec<String> = ctx.pending_notifications.read().unwrap()[&char1]
         .iter()

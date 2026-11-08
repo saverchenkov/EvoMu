@@ -6,7 +6,7 @@ use crate::router::ServerContext;
 use crate::services::pve_abyssal_hazards::*;
 use crate::services::pve_exploration::{with_pve_exploration_reg, PveSiteInstance};
 use crate::services::pve_special_sites::{
-    with_pve_special_reg, AbyssalPocketSession, AbyssalRoomRecord, VoidSpaceSessionRecord,
+    with_abyssal_state, AbyssalPocketSession, AbyssalRoomRecord, VoidSpaceSessionRecord,
 };
 use crate::services::pve_special_sites_abyssal::AbyssalWeatherKind;
 use eve_db::clock::VirtualServerClock;
@@ -228,7 +228,7 @@ fn turret_detection_dark_weather_midpocket_mult_and_cloud_radius_modifiers() {
     );
 
     // Seed active Dark pocket with 50% penalty -> midpocket mult == 0.5 before dogma apply, 1.0 after dogma apply
-    with_pve_special_reg(&ctx, |reg| {
+    with_abyssal_state(&ctx, |st| {
         let empty_room = || AbyssalRoomRecord {
             room_index: 1,
             dungeon_id: 0,
@@ -238,7 +238,7 @@ fn turret_detection_dark_weather_midpocket_mult_and_cloud_radius_modifiers() {
             cleared: false,
             gate_unlocked_at_sec: None,
         };
-        reg.abyssal_pockets.insert(
+        st.pockets.insert(
             char_id,
             AbyssalPocketSession {
                 pocket_id: 7,
@@ -556,8 +556,8 @@ async fn deadspace_gate_proximity_station_structure_checks_and_filament_error_br
     });
 
     // Excluded void-space session ship returns None in evaluate_abyssal_spatial_clouds_for_ship
-    with_pve_special_reg(&ctx, |reg| {
-        reg.void_space_sessions.insert(
+    with_abyssal_state(&ctx, |st| {
+        st.void_space_sessions.insert(
             char_id,
             VoidSpaceSessionRecord {
                 char_id,

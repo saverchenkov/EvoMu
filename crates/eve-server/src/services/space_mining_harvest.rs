@@ -1056,72 +1056,7 @@ pub async fn spawn_seeded_site_entities(
     spawn_wormhole_ore_guards(ctx, sys_id, guard_waves).await;
 }
 
-/// Phased Asteroid Field site lifecycle (`feat:mining.phased-asteroid-field-lifecycle`, `feat:mining.mobile-phase-anchor`).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PhasedAsteroidFieldState {
-    pub signature_id: String,
-    pub solar_system_id: u32,
-    pub progress: f64,
-    pub beacon_spawned: bool,
-    pub collapsed: bool,
-    pub phased_in: bool,
-    pub mobile_phase_anchor_energy: u32,
-    #[serde(default)]
-    pub connected_ship_ids: Vec<i64>,
-    #[serde(default)]
-    pub asteroid_ids: Vec<i64>,
-}
-
-impl PhasedAsteroidFieldState {
-    pub fn new(signature_id: String, solar_system_id: u32) -> Self {
-        Self {
-            signature_id,
-            solar_system_id,
-            progress: 0.1,
-            beacon_spawned: false,
-            collapsed: false,
-            phased_in: false,
-            mobile_phase_anchor_energy: 0,
-            connected_ship_ids: Vec::new(),
-            asteroid_ids: Vec::new(),
-        }
-    }
-
-    pub fn advance_fracture(&mut self, delta_progress: f64) {
-        self.progress = (self.progress + delta_progress).min(1.0);
-        if self.progress >= 0.5 {
-            self.beacon_spawned = true;
-        }
-        if self.progress >= 1.0 {
-            self.collapsed = true;
-            self.phased_in = false;
-        }
-    }
-
-    pub fn connect_industrial_command_ship(&mut self, ship_id: i64, energy: u32) -> bool {
-        if self.connected_ship_ids.contains(&ship_id) {
-            return self.phased_in;
-        }
-        if energy > 0 {
-            self.connected_ship_ids.push(ship_id);
-            self.mobile_phase_anchor_energy += energy;
-            if self.mobile_phase_anchor_energy >= 100 && !self.collapsed {
-                self.phased_in = true;
-            }
-        }
-        self.phased_in
-    }
-
-    pub fn mining_efficiency(&self) -> f64 {
-        if self.collapsed {
-            0.0
-        } else if self.phased_in {
-            1.0
-        } else {
-            0.10
-        }
-    }
-}
+pub use eve_db::PhasedAsteroidFieldState;
 
 #[cfg(test)]
 #[path = "space_mining_harvest_tests.rs"]

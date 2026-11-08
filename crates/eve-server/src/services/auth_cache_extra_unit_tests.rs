@@ -115,9 +115,8 @@ fn required_slash_role_and_gm_audit_cap_cover_all_branches() {
     for i in 0..270 {
         record_gm_audit(&ctx, cid, &format!("cmd_{i}"), true);
     }
-    let logs: Vec<serde_json::Value> = ctx.db.with_snapshot(|s| {
-        serde_json::from_str(s.service_state_blobs.get("gm_audit_log").unwrap()).unwrap()
-    });
+    let logs: Vec<serde_json::Value> =
+        ctx.db.with_snapshot(|s| s.cluster_and_runtime.gm_audit_log.clone());
     assert_eq!(logs.len(), 256);
     assert_eq!(logs.first().unwrap()["cmd"].as_str(), Some("cmd_14"));
     assert_eq!(logs.last().unwrap()["cmd"].as_str(), Some("cmd_269"));

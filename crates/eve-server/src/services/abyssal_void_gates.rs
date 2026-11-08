@@ -31,9 +31,9 @@ fn is_valid_void_entrance_gate(ctx: &ServerContext, target_id: i64, ball_type_id
     if matches!(ball_type_id, 60_770 | 82_139) {
         return true;
     }
-    crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-        !reg.abyssal_traces.contains_key(&target_id)
-            && reg.void_space_sessions.values().any(|s| s.target_id == target_id)
+    crate::services::pve_special_sites_abyssal::read_abyssal_state(ctx, |st| {
+        !st.traces.contains_key(&target_id)
+            && st.void_space_sessions.values().any(|s| s.target_id == target_id)
     })
 }
 
@@ -69,8 +69,8 @@ pub(crate) async fn handle_abyssal_gate_activation(
         (tier, filament, next_cache, difficulty, max_ships),
     ) = {
         let now = ctx.now_unix();
-        let inspect = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-            let p = reg.abyssal_pockets.get(&char_id)?;
+        let inspect = crate::services::pve_special_sites_abyssal::read_abyssal_state(ctx, |st| {
+            let p = st.pockets.get(&char_id)?;
             if p.completed || p.collapsed_destroyed {
                 return None;
             }
@@ -203,33 +203,33 @@ pub(crate) async fn handle_abyssal_gate_activation(
     }
 
     let now_u = ctx.now_unix();
-    let advance_res = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+    let advance_res = crate::services::pve_special_sites_abyssal::with_abyssal_state(ctx, |st| {
         let curr_idx = (curr_room - 1) as usize;
-        let already_spawned_next = reg.abyssal_pockets.values().any(|other| {
+        let already_spawned_next = st.pockets.values().any(|other| {
             other.pocket_id == pid
                 && !other.completed
                 && !other.collapsed_destroyed
                 && other.current_room >= next_room
         });
-        for other in reg.abyssal_pockets.values_mut() {
+        for other in st.pockets.values_mut() {
             if other.pocket_id == pid {
                 other.rooms[curr_idx].cleared = true;
                 other.rooms[curr_idx].gate_unlocked_at_sec.get_or_insert(now_u);
                 other.ship_room.insert(ship_id, next_room);
             }
         }
-        let p = reg.abyssal_pockets.get_mut(&char_id)?;
+        let p = st.pockets.get_mut(&char_id)?;
         p.current_room = next_room;
         p.ship_room.insert(ship_id, next_room);
         let bound_tid = p.trace_ball_id;
         let eff_max = (p.max_ships.max(1)) as usize;
-        let any_pilot_at_or_before_curr = reg.abyssal_pockets.values().any(|other| {
+        let any_pilot_at_or_before_curr = st.pockets.values().any(|other| {
             other.pocket_id == pid
                 && !other.completed
                 && !other.collapsed_destroyed
                 && other.current_room <= curr_room
         });
-        let has_unentered_coop_slots = reg.abyssal_traces.values().any(|t| {
+        let has_unentered_coop_slots = st.traces.values().any(|t| {
             (t.pocket_id == Some(pid) || (bound_tid > 0 && t.trace_ball_id == bound_tid))
                 && (t.expires_at_sec == 0 || now_u < t.expires_at_sec)
                 && t.entered_char_ids.len() < (t.max_ships.max(1) as usize).max(eff_max)
@@ -340,8 +340,8 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
 
     let (origin_sys, origin_pos, r3_npcs, r3_cleared, pid, tier) = {
         let now = ctx.now_unix();
-        let inspect = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-            let p = reg.abyssal_pockets.get(&char_id)?;
+        let inspect = crate::services::pve_special_sites_abyssal::read_abyssal_state(ctx, |st| {
+            let p = st.pockets.get(&char_id)?;
             if p.completed || p.collapsed_destroyed {
                 return None;
             }
@@ -462,14 +462,14 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
 
     let now_u = ctx.now_unix();
     let (exited_pid, removed_pid, despawned_trace_ids) =
-        crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+        crate::services::pve_special_sites_abyssal::with_abyssal_state(ctx, |st| {
             let mut traces = Vec::new();
-            if let Some(mut p) = reg.abyssal_pockets.remove(&char_id) {
+            if let Some(mut p) = st.pockets.remove(&char_id) {
                 p.completed = true;
                 p.rooms[2].cleared = true;
                 let pid = p.pocket_id;
                 let bound_tid = p.trace_ball_id;
-                for other in reg.abyssal_pockets.values_mut() {
+                for other in st.pockets.values_mut() {
                     if other.pocket_id == pid {
                         other.rooms[2].cleared = true;
                         other.rooms[2].gate_unlocked_at_sec.get_or_insert(now_u);
@@ -477,14 +477,14 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
                         other.fleet_ship_ids.retain(|&sid| sid != ship_id);
                     }
                 }
-                let any_remaining = reg.abyssal_pockets.values().any(|other| {
+                let any_remaining = st.pockets.values().any(|other| {
                     other.pocket_id == pid && !other.completed && !other.collapsed_destroyed
                 });
                 if !any_remaining {
                     if bound_tid > 0 {
                         traces.push(bound_tid);
                     }
-                    reg.abyssal_traces.retain(|&tid, t| {
+                    st.traces.retain(|&tid, t| {
                         if t.pocket_id == Some(pid) || (bound_tid > 0 && tid == bound_tid) {
                             if !traces.contains(&tid) {
                                 traces.push(tid);
@@ -769,8 +769,8 @@ pub(crate) async fn handle_void_space_player_jump(
         entered_unix: now_unix,
         expires_at_sec: now_unix.saturating_add(1_200),
     };
-    crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-        reg.void_space_sessions.insert(char_id, void_session);
+    crate::services::pve_special_sites_abyssal::with_abyssal_state(ctx, |st| {
+        st.void_space_sessions.insert(char_id, void_session);
     });
     crate::sp6_lifecycle::register_abyssal_session(
         ctx,
@@ -802,8 +802,9 @@ pub(crate) async fn handle_void_space_player_jump(
         }
         snap.chat_channels
             .remove(&format!("solarsystemid2:{VOID_SPACE_SYSTEM_ID}"));
-        snap.service_state_blobs
-            .insert(format!("void_space_content:{char_id}"), effective_content_id.to_string());
+        snap.abyssal_state
+            .void_space_content
+            .insert(char_id, effective_content_id);
         Ok::<(), BridgeRpcError>(())
     });
     let _ = crate::services::quasar_social_chat::on_character_leave_local_chat(
@@ -912,8 +913,8 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         });
     }
 
-    let void_session = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-        reg.void_space_sessions.get(&char_id).cloned()
+    let void_session = crate::services::pve_special_sites_abyssal::read_abyssal_state(ctx, |st| {
+        st.void_space_sessions.get(&char_id).cloned()
     });
     let Some(vs) = void_session else {
         ctx.sync_session(session);
@@ -981,8 +982,8 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         }
     }
 
-    crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-        reg.void_space_sessions.remove(&char_id);
+    crate::services::pve_special_sites_abyssal::with_abyssal_state(ctx, |st| {
+        st.void_space_sessions.remove(&char_id);
     });
     crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
     void_handle.try_remove_ball(ship_id);
@@ -1004,9 +1005,9 @@ pub(crate) async fn handle_void_space_end_gate_activation(
             }
             snap.item_positions.insert(ship_id, exit_pos);
             let cid = snap
-                .service_state_blobs
-                .remove(&format!("void_space_content:{char_id}"))
-                .and_then(|s| s.parse::<i64>().ok())
+                .abyssal_state
+                .void_space_content
+                .remove(&char_id)
                 .unwrap_or(vs.target_id);
             Ok::<i64, BridgeRpcError>(cid)
         })

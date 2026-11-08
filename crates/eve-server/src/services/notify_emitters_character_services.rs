@@ -194,17 +194,10 @@ pub fn emit_allow_war_updated_for_alliance(
         corps
     });
     ctx.db.with_mut_snapshot(|snap| {
-        let mut map: HashMap<i64, bool> = snap
-            .service_state_blobs
-            .get("corp_allow_war")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
         for &cid in &member_corps {
-            map.insert(cid, allow_war);
-        }
-        if let Ok(json) = serde_json::to_string(&map) {
-            snap.service_state_blobs
-                .insert("corp_allow_war".into(), json);
+            snap.fleet_and_social_ops
+                .corp_allow_war
+                .insert(cid, allow_war);
         }
     });
     for corp_id in member_corps {
@@ -842,15 +835,9 @@ pub fn handle_batch3_gm_slash_cmd(
                 }));
             }
             ctx.db.with_mut_snapshot(|snap| {
-                let mut enrollments: HashMap<i64, i64> = snap
-                    .service_state_blobs
-                    .get("login_campaign_enrollments")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
-                enrollments.insert(target_cid, campaign_id);
-                if let Ok(json) = serde_json::to_string(&enrollments) {
-                    snap.service_state_blobs.insert("login_campaign_enrollments".into(), json);
-                }
+                snap.seasons_and_campaigns
+                    .login_campaign_enrollments
+                    .insert(target_cid, campaign_id);
             });
             emit_campaign_enrollment_changed(ctx, target_cid);
             Some(Ok(PyRep::keyval([

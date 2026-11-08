@@ -186,8 +186,8 @@ async fn test_abyssal_deadspace_lifecycle_and_gate_progression() {
     sess.station_id = None;
 
     // Verify trace still exists in registry after rejected activation
-    let trace_persists = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_traces.contains_key(&trace_ball_id)
+    let trace_persists = eve_server::services::pve_special_sites::with_abyssal_state(&ctx, |st| {
+        st.traces.contains_key(&trace_ball_id)
     });
     assert!(trace_persists, "Trace preserved after rejected validation");
 

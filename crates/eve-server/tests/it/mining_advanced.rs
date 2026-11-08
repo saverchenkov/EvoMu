@@ -832,7 +832,7 @@ async fn test_action_plan_mn13_to_mn16_moons_metenox_sites_ledgers() {
         snap.items.retain(|_, i| !(i.location_id == metenox_id && i.flag == InventoryFlag::SpecializedMineralHold));
         snap.items.insert(800_000_701, make_item(800_000_701, 81143, char_corp_id, metenox_id, InventoryFlag::StructureFuel, 500, false));
         snap.auto_moon_miners.remove(&metenox_id);
-        snap.service_state_blobs.insert("metenox_last_tick_unix".into(), ctx.now_unix().to_string());
+        snap.mining_and_ess_state.metenox_last_tick_unix = ctx.now_unix();
     });
 
     // Independently compute expected hourly 40% moon material yield from SDE type_materials for the Metenox moon's 3 ores (727 units/h)

@@ -10,7 +10,7 @@ use crate::services::pve_abyssal_hazards::{
     AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID, AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID,
     MULTIBODY_TRACKING_PYLON_MEDIUM_TYPE_ID, MULTIBODY_TRACKING_PYLON_TYPE_ID,
 };
-use crate::services::pve_special_sites::with_pve_special_reg;
+use crate::services::pve_special_sites::read_abyssal_state;
 use eve_sde::{attr_ids, SolarSystemId, TypeId};
 use glam::DVec3;
 use std::collections::{HashMap, HashSet};
@@ -412,9 +412,9 @@ pub async fn pulse_abyssal_automated_pylons(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
 ) -> (usize, usize) {
-    let pocket_by_ship: HashMap<i64, i64> = with_pve_special_reg(ctx, |reg| {
+    let pocket_by_ship: HashMap<i64, i64> = read_abyssal_state(ctx, |st| {
         let mut map = HashMap::new();
-        for p in reg.abyssal_pockets.values().filter(|p| !p.completed && !p.collapsed_destroyed) {
+        for p in st.pockets.values().filter(|p| !p.completed && !p.collapsed_destroyed) {
             map.insert(p.ship_id, p.pocket_id);
             for &sid in &p.fleet_ship_ids {
                 map.insert(sid, p.pocket_id);
@@ -530,8 +530,8 @@ pub fn prune_out_of_bounds_abyssal_probes(ctx: &ServerContext, sys_id: SolarSyst
     if !(32_000_001..=32_999_999).contains(&sys_id) {
         return;
     }
-    let room_centers: HashMap<CharacterId, DVec3> = with_pve_special_reg(ctx, |reg| {
-        reg.abyssal_pockets
+    let room_centers: HashMap<CharacterId, DVec3> = read_abyssal_state(ctx, |st| {
+        st.pockets
             .values()
             .filter(|p| !p.completed && !p.collapsed_destroyed)
             .map(|p| {
@@ -617,43 +617,40 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
     let mut boundary_ticks: HashMap<i64, u32> = HashMap::new();
     if let Some(db) = db_opt {
         db.with_snapshot(|snap| {
-            if let Some(blob) = snap.service_state_blobs.get("incursions_state") {
-                if let Ok(reg) = serde_json::from_str::<crate::services::pve_special_sites::PveSpecialSitesRegistry>(blob) {
-                    for vs in reg.void_space_sessions.values() {
-                        arena_ships.insert(vs.ship_id);
-                        if let Some(ch) = snap.characters.get(&vs.char_id) {
-                            arena_ships.insert(ch.active_ship_id);
-                        }
-                    }
-                    let active_pockets: Vec<_> = reg
-                        .abyssal_pockets
-                        .values()
-                        .filter(|p| !p.completed && !p.collapsed_destroyed)
-                        .collect();
-                    // First pass: bind each active pilot's own ship & character to their authoritative `current_room`
-                    for p in &active_pockets {
-                        let z = (p.current_room.saturating_sub(1) as f64) * 50_000.0;
-                        let center = DVec3::from_array(p.grid_offset) + DVec3::new(0.0, 0.0, z);
-                        pocket_by_ship.insert(p.ship_id, p.pocket_id);
-                        room_center_by_ship.insert(p.ship_id, center);
-                        room_center_by_char.insert(p.character_id, center);
-                    }
-                    // Second pass: fill fallback fleet ships via per-ship `ship_room` without overwriting any pilot's own room
-                    for p in &active_pockets {
-                        for &sid in &p.fleet_ship_ids {
-                            pocket_by_ship.entry(sid).or_insert(p.pocket_id);
-                            room_center_by_ship.entry(sid).or_insert_with(|| {
-                                let sr = p.ship_room.get(&sid).copied().unwrap_or(p.current_room);
-                                let z = (sr.saturating_sub(1) as f64) * 50_000.0;
-                                DVec3::from_array(p.grid_offset) + DVec3::new(0.0, 0.0, z)
-                            });
-                        }
-                        for r in &p.rooms {
-                            for &nid in &r.npc_ball_ids {
-                                pocket_npc_ids.insert(nid);
-                                pocket_by_ship.entry(nid).or_insert(p.pocket_id);
-                            }
-                        }
+            for vs in snap.abyssal_state.void_space_sessions.values() {
+                arena_ships.insert(vs.ship_id);
+                if let Some(ch) = snap.characters.get(&vs.char_id) {
+                    arena_ships.insert(ch.active_ship_id);
+                }
+            }
+            let active_pockets: Vec<_> = snap
+                .abyssal_state
+                .pockets
+                .values()
+                .filter(|p| !p.completed && !p.collapsed_destroyed)
+                .collect();
+            // First pass: bind each active pilot's own ship & character to their authoritative `current_room`
+            for p in &active_pockets {
+                let z = (p.current_room.saturating_sub(1) as f64) * 50_000.0;
+                let center = DVec3::from_array(p.grid_offset) + DVec3::new(0.0, 0.0, z);
+                pocket_by_ship.insert(p.ship_id, p.pocket_id);
+                room_center_by_ship.insert(p.ship_id, center);
+                room_center_by_char.insert(p.character_id, center);
+            }
+            // Second pass: fill fallback fleet ships via per-ship `ship_room` without overwriting any pilot's own room
+            for p in &active_pockets {
+                for &sid in &p.fleet_ship_ids {
+                    pocket_by_ship.entry(sid).or_insert(p.pocket_id);
+                    room_center_by_ship.entry(sid).or_insert_with(|| {
+                        let sr = p.ship_room.get(&sid).copied().unwrap_or(p.current_room);
+                        let z = (sr.saturating_sub(1) as f64) * 50_000.0;
+                        DVec3::from_array(p.grid_offset) + DVec3::new(0.0, 0.0, z)
+                    });
+                }
+                for r in &p.rooms {
+                    for &nid in &r.npc_ball_ids {
+                        pocket_npc_ids.insert(nid);
+                        pocket_by_ship.entry(nid).or_insert(p.pocket_id);
                     }
                 }
             }
@@ -684,12 +681,8 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
                     }
                 }
             }
-            if let Some(cblob) = snap.service_state_blobs.get("abyssal_active_clouds") {
-                active_clouds = serde_json::from_str(cblob).unwrap_or_default();
-            }
-            if let Some(bblob) = snap.service_state_blobs.get("abyssal_boundary_ticks") {
-                boundary_ticks = serde_json::from_str(bblob).unwrap_or_default();
-            }
+            active_clouds = snap.abyssal_state.active_clouds.clone();
+            boundary_ticks = snap.abyssal_state.boundary_ticks.clone();
         });
     }
     let prev_boundary_ticks = boundary_ticks.clone();
@@ -922,57 +915,50 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
                     if cid > 0 {
                         st.abyssal_sessions.remove(&cid);
                         let mut caches_to_purge: Vec<i64> = Vec::new();
-                        if let Some(blob) = snap.service_state_blobs.get("incursions_state").cloned() {
-                            if let Ok(mut reg) = serde_json::from_str::<crate::services::pve_special_sites::PveSpecialSitesRegistry>(&blob) {
-                                let p_info = reg.abyssal_pockets.get_mut(&cid).map(|p| {
-                                    p.collapsed_destroyed = true;
-                                    p.completed = true;
-                                    let npcs: Vec<i64> = p
-                                        .rooms
-                                        .iter()
-                                        .flat_map(|r| r.npc_ball_ids.iter().copied())
-                                        .collect();
-                                    (p.pocket_id, p.origin_solar_system_id, p.trace_ball_id, npcs)
+                        let p_info = snap.abyssal_state.pockets.get_mut(&cid).map(|p| {
+                            p.collapsed_destroyed = true;
+                            p.completed = true;
+                            let npcs: Vec<i64> = p
+                                .rooms
+                                .iter()
+                                .flat_map(|r| r.npc_ball_ids.iter().copied())
+                                .collect();
+                            (p.pocket_id, p.origin_solar_system_id, p.trace_ball_id, npcs)
+                        });
+                        if let Some((pid, origin_sys, bound_tid, npcs)) = p_info {
+                            let any_other_alive = snap.abyssal_state.pockets.values().any(|other| {
+                                other.pocket_id == pid && !other.completed && !other.collapsed_destroyed
+                            });
+                            if !any_other_alive {
+                                let mut trace_ids = Vec::new();
+                                if bound_tid > 0 {
+                                    trace_ids.push(bound_tid);
+                                }
+                                snap.abyssal_state.traces.retain(|&tid, t| {
+                                    if t.pocket_id == Some(pid) || (bound_tid > 0 && tid == bound_tid) {
+                                        if !trace_ids.contains(&tid) {
+                                            trace_ids.push(tid);
+                                        }
+                                        false
+                                    } else {
+                                        true
+                                    }
                                 });
-                                if let Some((pid, origin_sys, bound_tid, npcs)) = p_info {
-                                    let any_other_alive = reg.abyssal_pockets.values().any(|other| {
-                                        other.pocket_id == pid && !other.completed && !other.collapsed_destroyed
-                                    });
-                                    if !any_other_alive {
-                                        let mut trace_ids = Vec::new();
-                                        if bound_tid > 0 {
-                                            trace_ids.push(bound_tid);
-                                        }
-                                        reg.abyssal_traces.retain(|&tid, t| {
-                                            if t.pocket_id == Some(pid) || (bound_tid > 0 && tid == bound_tid) {
-                                                if !trace_ids.contains(&tid) {
-                                                    trace_ids.push(tid);
-                                                }
-                                                false
-                                            } else {
-                                                true
-                                            }
-                                        });
-                                        let mut room_balls = npcs;
-                                        for r in 1..=3_i64 {
-                                            let mid = 1_895_000_000 + pid * 10 + r;
-                                            let cid_b = 1_896_000_000 + pid * 10 + r;
-                                            let sid_b = cid_b + 500_000;
-                                            room_balls.extend([mid, cid_b, sid_b]);
-                                            caches_to_purge.extend([cid_b, sid_b]);
-                                            for c in 1..=3_i64 {
-                                                room_balls.push(1_898_000_000 + pid * 100 + r * 10 + c);
-                                            }
-                                            for py in 1..=5_i64 {
-                                                room_balls.push(1_899_000_000 + pid * 100 + r * 10 + py);
-                                            }
-                                        }
-                                        final_cleanup = Some((origin_sys, trace_ids, room_balls));
+                                let mut room_balls = npcs;
+                                for r in 1..=3_i64 {
+                                    let mid = 1_895_000_000 + pid * 10 + r;
+                                    let cid_b = 1_896_000_000 + pid * 10 + r;
+                                    let sid_b = cid_b + 500_000;
+                                    room_balls.extend([mid, cid_b, sid_b]);
+                                    caches_to_purge.extend([cid_b, sid_b]);
+                                    for c in 1..=3_i64 {
+                                        room_balls.push(1_898_000_000 + pid * 100 + r * 10 + c);
+                                    }
+                                    for py in 1..=5_i64 {
+                                        room_balls.push(1_899_000_000 + pid * 100 + r * 10 + py);
                                     }
                                 }
-                                if let Ok(js) = serde_json::to_string(&reg) {
-                                    snap.service_state_blobs.insert("incursions_state".into(), js);
-                                }
+                                final_cleanup = Some((origin_sys, trace_ids, room_balls));
                             }
                         }
                         if !caches_to_purge.is_empty() {
@@ -1084,24 +1070,17 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
                         ch.version += 1;
                         ch.system_epoch += 1;
                     }
-                    if let Some(blob) = snap.service_state_blobs.get("incursions_state").cloned() {
-                        if let Ok(mut reg) = serde_json::from_str::<crate::services::pve_special_sites::PveSpecialSitesRegistry>(&blob) {
-                            let room_opt = reg.abyssal_pockets.get(&cid).map(|p| (p.pocket_id, p.current_room));
-                            if let Some(p) = reg.abyssal_pockets.get_mut(&cid) {
-                                p.ship_id = cap_id;
-                                if !p.fleet_ship_ids.contains(&cap_id) {
-                                    p.fleet_ship_ids.push(cap_id);
-                                }
-                            }
-                            if let Some((pid, rnum)) = room_opt {
-                                for other in reg.abyssal_pockets.values_mut().filter(|o| o.pocket_id == pid) {
-                                    other.ship_room.remove(&bid);
-                                    other.ship_room.insert(cap_id, rnum);
-                                }
-                            }
-                            if let Ok(js) = serde_json::to_string(&reg) {
-                                snap.service_state_blobs.insert("incursions_state".into(), js);
-                            }
+                    let room_opt = snap.abyssal_state.pockets.get(&cid).map(|p| (p.pocket_id, p.current_room));
+                    if let Some(p) = snap.abyssal_state.pockets.get_mut(&cid) {
+                        p.ship_id = cap_id;
+                        if !p.fleet_ship_ids.contains(&cap_id) {
+                            p.fleet_ship_ids.push(cap_id);
+                        }
+                    }
+                    if let Some((pid, rnum)) = room_opt {
+                        for other in snap.abyssal_state.pockets.values_mut().filter(|o| o.pocket_id == pid) {
+                            other.ship_room.remove(&bid);
+                            other.ship_room.insert(cap_id, rnum);
                         }
                     }
                     snap.next_entity_id += 1;
@@ -1169,12 +1148,10 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
     boundary_ticks.retain(|bid, _| *bid < 0 || ballpark.balls.contains_key(bid));
     if boundary_ticks != prev_boundary_ticks {
         if let Some(db) = db_opt {
-            if let Ok(json) = serde_json::to_string(&boundary_ticks) {
-                let _ = db.try_with_mut_snapshot(|snap| -> Result<(), ()> {
-                    snap.service_state_blobs.insert("abyssal_boundary_ticks".into(), json);
-                    Ok(())
-                });
-            }
+            let _ = db.try_with_mut_snapshot(|snap| -> Result<(), ()> {
+                snap.abyssal_state.boundary_ticks = boundary_ticks;
+                Ok(())
+            });
         }
     }
 
@@ -1237,12 +1214,10 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
 
     if active_clouds != prev_active_clouds {
         if let Some(db) = db_opt {
-            if let Ok(json) = serde_json::to_string(&active_clouds) {
-                let _ = db.try_with_mut_snapshot(|snap| -> Result<(), ()> {
-                    snap.service_state_blobs.insert("abyssal_active_clouds".into(), json);
-                    Ok(())
-                });
-            }
+            let _ = db.try_with_mut_snapshot(|snap| -> Result<(), ()> {
+                snap.abyssal_state.active_clouds = active_clouds;
+                Ok(())
+            });
         }
     }
     suppressor_destroyed
@@ -1260,35 +1235,14 @@ pub(crate) fn on_abyssal_boundary_death_hook(
     }
     let mut final_cleanup: Option<(SolarSystemId, Vec<i64>, Vec<i64>)> = None;
     crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, snap| {
-        let mut ticks: HashMap<i64, u32> = snap
-            .service_state_blobs
-            .get("abyssal_boundary_ticks")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
-        let carried_tick = ticks.remove(&-destroyed_ship_id);
-        let ticks_changed = if let (Some(t_count), Some(cap_id)) = (carried_tick, ejected_capsule_id) {
-            ticks.insert(cap_id, t_count);
-            true
-        } else {
-            carried_tick.is_some()
-        };
-        if ticks_changed {
-            if let Ok(json) = serde_json::to_string(&ticks) {
-                snap.service_state_blobs
-                    .insert("abyssal_boundary_ticks".into(), json);
-            }
+        let carried_tick = snap.abyssal_state.boundary_ticks.remove(&-destroyed_ship_id);
+        if let (Some(t_count), Some(cap_id)) = (carried_tick, ejected_capsule_id) {
+            snap.abyssal_state.boundary_ticks.insert(cap_id, t_count);
         }
 
-        let Some(blob) = snap.service_state_blobs.get("incursions_state").cloned() else {
-            return;
-        };
-        let Ok(mut reg) =
-            serde_json::from_str::<crate::services::pve_special_sites::PveSpecialSitesRegistry>(&blob)
-        else {
-            return;
-        };
-        let Some(existing_room) = reg
-            .abyssal_pockets
+        let Some(existing_room) = snap
+            .abyssal_state
+            .pockets
             .get(&victim_char_id)
             .filter(|p| !p.completed && !p.collapsed_destroyed && p.abyssal_solar_system_id == solar_system_id)
             .map(|p| (p.pocket_id, p.current_room))
@@ -1298,19 +1252,19 @@ pub(crate) fn on_abyssal_boundary_death_hook(
 
         if let Some(cap_id) = ejected_capsule_id {
             let (pid, rnum) = existing_room;
-            if let Some(p) = reg.abyssal_pockets.get_mut(&victim_char_id) {
+            if let Some(p) = snap.abyssal_state.pockets.get_mut(&victim_char_id) {
                 p.ship_id = cap_id;
                 if !p.fleet_ship_ids.contains(&cap_id) {
                     p.fleet_ship_ids.push(cap_id);
                 }
             }
-            for other in reg.abyssal_pockets.values_mut().filter(|o| o.pocket_id == pid) {
+            for other in snap.abyssal_state.pockets.values_mut().filter(|o| o.pocket_id == pid) {
                 other.ship_room.remove(&destroyed_ship_id);
                 other.ship_room.insert(cap_id, rnum);
             }
         } else {
             st.abyssal_sessions.remove(&victim_char_id);
-            let p_info = reg.abyssal_pockets.get_mut(&victim_char_id).map(|p| {
+            let p_info = snap.abyssal_state.pockets.get_mut(&victim_char_id).map(|p| {
                 p.collapsed_destroyed = true;
                 p.completed = true;
                 let npcs: Vec<i64> = p
@@ -1322,7 +1276,7 @@ pub(crate) fn on_abyssal_boundary_death_hook(
             });
             let mut caches_to_purge: Vec<i64> = Vec::new();
             if let Some((pid, origin_sys, bound_tid, npcs)) = p_info {
-                let any_other_alive = reg.abyssal_pockets.values().any(|other| {
+                let any_other_alive = snap.abyssal_state.pockets.values().any(|other| {
                     other.pocket_id == pid && !other.completed && !other.collapsed_destroyed
                 });
                 if !any_other_alive {
@@ -1330,7 +1284,7 @@ pub(crate) fn on_abyssal_boundary_death_hook(
                     if bound_tid > 0 {
                         trace_ids.push(bound_tid);
                     }
-                    reg.abyssal_traces.retain(|&tid, t| {
+                    snap.abyssal_state.traces.retain(|&tid, t| {
                         if t.pocket_id == Some(pid) || (bound_tid > 0 && tid == bound_tid) {
                             if !trace_ids.contains(&tid) {
                                 trace_ids.push(tid);
@@ -1364,9 +1318,6 @@ pub(crate) fn on_abyssal_boundary_death_hook(
                 }
                 snap.items.retain(|_, it| !caches_to_purge.contains(&it.location_id));
             }
-        }
-        if let Ok(js) = serde_json::to_string(&reg) {
-            snap.service_state_blobs.insert("incursions_state".into(), js);
         }
     });
 

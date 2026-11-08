@@ -761,7 +761,7 @@ async fn test_q3_payment_purchase_and_schedules() {
             interval_days: 30,
             created_unix: ctx.now_unix(),
         }];
-        snap.service_state_blobs.insert("payment_schedules".to_string(), serde_json::to_string(&schedules).unwrap());
+        snap.quasar_commerce.payment_schedules = schedules;
     });
     let mut sched_inner = Vec::new();
     encode_varint_field(1, 101, &mut sched_inner);

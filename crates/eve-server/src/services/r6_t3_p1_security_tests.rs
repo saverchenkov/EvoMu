@@ -1,5 +1,5 @@
 use crate::router::ServerContext;
-use crate::services::lp_store_catalog::{LPOffer, LP_STORE_OFFERS_KEY};
+use crate::services::lp_store_catalog::LPOffer;
 use eve_db::corp_roles::{
     ROLE_ACCOUNTANT, ROLE_ACCOUNT_CAN_TAKE, ROLE_BRAND_MANAGER, ROLE_DELIVERIES_HANGAR_TAKE,
     ROLE_DIRECTOR, ROLE_HANGAR_CAN_TAKE,
@@ -153,7 +153,7 @@ fn r6_t3_07_corp_lp_store_enforces_roles_24h_delay_wallet_and_division_access() 
             ak_cost: 0,
             min_standing: None,
         }];
-        snap.service_state_blobs.insert(LP_STORE_OFFERS_KEY.into(), serde_json::to_string(&offers).unwrap());
+        snap.fleet_and_social_ops.lp_store_offers = Some(offers);
     });
 
     let kw = HashMap::new();
@@ -335,7 +335,7 @@ fn r6_t3_14_and_15_select_character_kwargs_lock_and_bloodline_race_token_guards(
         ch.race_id = 1;
         ch.bloodline_id = 1;
         snap.characters.insert(cid, ch);
-        snap.service_state_blobs.insert(format!("character_lock:{cid}"), "banned".into());
+        snap.cluster_and_runtime.character_locks.insert(cid, "banned".into());
     });
 
     let mut s = SessionState::default();
@@ -352,7 +352,7 @@ fn r6_t3_14_and_15_select_character_kwargs_lock_and_bloodline_race_token_guards(
         "CharacterLocked"
     );
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.remove(&format!("character_lock:{cid}"));
+        snap.cluster_and_runtime.character_locks.remove(&cid);
     });
     let kw = HashMap::new();
     super::character_lifecycle::handle(&ctx, &mut s, "charUnboundMgr", "PrepareCharacterForDelete", &[PyRep::Integer(cid)], &kw)
@@ -371,14 +371,14 @@ fn r6_t3_14_and_15_select_character_kwargs_lock_and_bloodline_race_token_guards(
     let minmatar_race = ctx.sde.bloodlines[&minmatar_bl].race_id;
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.remove(&cid);
-        snap.service_state_blobs.insert(format!("account_resculpt_tokens:{uid}"), "1".into());
+        snap.cluster_and_runtime.account_resculpt_tokens.insert(uid.to_string(), 1);
     });
     super::character_lifecycle::handle(
         &ctx, &mut s, "charUnboundMgr", "UpdateCharacterBloodline",
         &[PyRep::Integer(cid), PyRep::Integer(minmatar_bl as i64)], &kw,
     ).unwrap().unwrap();
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.service_state_blobs.get(&format!("account_resculpt_tokens:{uid}")).map(String::as_str), Some("0"));
+        assert_eq!(snap.cluster_and_runtime.account_resculpt_tokens.get(&uid.to_string()).copied(), Some(0));
         assert_eq!(snap.characters[&cid].race_id, minmatar_race);
     });
     assert_eq!(
@@ -390,7 +390,7 @@ fn r6_t3_14_and_15_select_character_kwargs_lock_and_bloodline_race_token_guards(
     );
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(format!("account_resculpt_tokens:{uid}"), "3".into());
+        snap.cluster_and_runtime.account_resculpt_tokens.insert(uid.to_string(), 3);
         snap.skills.entry(cid).or_default().insert(3327, TrainedSkillRecord {
             type_id: 3327,
             level: 3,

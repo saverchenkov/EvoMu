@@ -3,12 +3,11 @@
 #![forbid(unsafe_code)]
 
 use crate::services::season_fsd::{
-    fsd_challenge_definitions, SeasonalChallengeDef,
+    fsd_challenge_definitions, SeasonalChallengeDef, SeasonalChallengeDefExt,
 };
 use crate::services::season_manager::{
     ensure_character_challenges_with_limit, get_current_activity_count, CharacterChallenge,
-    CharacterSeasonState, SeasonConfig, SEASONAL_CHALLENGES_CONFIG_KEY, SEASONS_CATALOG_KEY,
-    SEASON_CONFIG_KEY,
+    CharacterSeasonState, SeasonConfig,
 };
 use eve_db::WorldStateSnapshot;
 use eve_sde::SdeRegistry;
@@ -94,15 +93,12 @@ pub fn load_localized_challenge_definitions(
     snap: &WorldStateSnapshot,
     sde: &SdeRegistry,
 ) -> Vec<SeasonalChallengeDef> {
-    if let Some(json) = snap.service_state_blobs.get(SEASONAL_CHALLENGES_CONFIG_KEY) {
-        if let Ok(mut defs) = serde_json::from_str::<Vec<SeasonalChallengeDef>>(json) {
-            if !defs.is_empty() {
-                for def in &mut defs {
-                    localize_challenge_def(def, sde);
-                }
-                return defs;
-            }
+    if !snap.seasons_and_campaigns.challenge_definitions.is_empty() {
+        let mut defs = snap.seasons_and_campaigns.challenge_definitions.clone();
+        for def in &mut defs {
+            localize_challenge_def(def, sde);
         }
+        return defs;
     }
     let mut defs = fsd_challenge_definitions(sde).to_vec();
     for def in &mut defs {
@@ -127,15 +123,12 @@ pub fn load_fsd_seasons_catalog_clean(
     sde: &SdeRegistry,
     anchor_ft: i64,
 ) -> BTreeMap<i64, SeasonConfig> {
-    if let Some(json) = snap.service_state_blobs.get(SEASONS_CATALOG_KEY) {
-        if let Ok(mut parsed) = serde_json::from_str::<BTreeMap<i64, SeasonConfig>>(json) {
-            if let Some(cfg_json) = snap.service_state_blobs.get(SEASON_CONFIG_KEY) {
-                if let Ok(cfg) = serde_json::from_str::<SeasonConfig>(cfg_json) {
-                    apply_season_override(&mut parsed, &cfg);
-                }
-            }
-            return parsed;
+    if !snap.seasons_and_campaigns.seasons_catalog.is_empty() {
+        let mut parsed = snap.seasons_and_campaigns.seasons_catalog.clone();
+        if let Some(cfg) = &snap.seasons_and_campaigns.season_configuration {
+            apply_season_override(&mut parsed, cfg);
         }
+        return parsed;
     }
 
     let sel = sde
@@ -250,10 +243,8 @@ pub fn load_fsd_seasons_catalog_clean(
         }
     }
 
-    if let Some(cfg_json) = snap.service_state_blobs.get(SEASON_CONFIG_KEY) {
-        if let Ok(cfg) = serde_json::from_str::<SeasonConfig>(cfg_json) {
-            apply_season_override(&mut out, &cfg);
-        }
+    if let Some(cfg) = &snap.seasons_and_campaigns.season_configuration {
+        apply_season_override(&mut out, cfg);
     }
     out
 }
@@ -290,13 +281,9 @@ pub fn resolve_season_end_time_readonly(
     selected_season_id: i64,
     now_ft: i64,
 ) -> Option<i64> {
-    if let Some(json) = snap.service_state_blobs.get(SEASON_CONFIG_KEY) {
-        if let Ok(raw) = serde_json::from_str::<serde_json::Value>(json) {
-            if let Some(explicit_end_ft) = raw.get("end_time_ft").and_then(|v| v.as_i64()) {
-                if explicit_end_ft > 0 {
-                    return (explicit_end_ft > now_ft).then_some(explicit_end_ft);
-                }
-            }
+    if let Some(cfg) = &snap.seasons_and_campaigns.season_configuration {
+        if cfg.end_time_ft > 0 {
+            return (cfg.end_time_ft > now_ft).then_some(cfg.end_time_ft);
         }
     }
     let catalog = load_fsd_seasons_catalog_clean(snap, sde, now_ft);
@@ -316,9 +303,9 @@ pub fn resolve_season_bounds_clean(
     now_ft: i64,
 ) -> (i64, usize) {
     let max_override = snap
-        .service_state_blobs
-        .get(SEASON_CONFIG_KEY)
-        .and_then(|json| serde_json::from_str::<SeasonConfig>(json).ok())
+        .seasons_and_campaigns
+        .season_configuration
+        .as_ref()
         .map(|cfg| cfg.max_active_challenges.max(1));
     let catalog = load_fsd_seasons_catalog_clean(snap, sde, now_ft);
     let cfg = catalog

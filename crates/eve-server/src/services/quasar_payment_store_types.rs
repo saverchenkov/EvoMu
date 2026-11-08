@@ -9,7 +9,6 @@ use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, encode_zigzag64, DynamicValue,
     GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
 };
-use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 
 pub(crate) fn encode_plex_balance_changed_notice(
@@ -86,20 +85,13 @@ pub fn cancel_user_payment_schedule(
     sched_id: u64,
 ) -> bool {
     let removed_type = db.with_mut_snapshot(|snap| {
-        let mut scheds: Vec<PaymentScheduleRecord> = snap
-            .service_state_blobs
-            .get("payment_schedules")
-            .and_then(|json| serde_json::from_str(json).ok())
-            .unwrap_or_default();
+        let scheds = &mut snap.quasar_commerce.payment_schedules;
         let stype = scheds
             .iter()
             .find(|s| s.id == sched_id && s.user_id == uid)
             .map(|s| s.schedule_type);
         if stype.is_some() {
             scheds.retain(|s| !(s.id == sched_id && s.user_id == uid));
-            if let Ok(serialized) = serde_json::to_string(&scheds) {
-                snap.service_state_blobs.insert("payment_schedules".to_string(), serialized);
-            }
         }
         stype
     });
@@ -145,26 +137,20 @@ pub fn process_due_payment_schedules(
         return;
     }
     let failed_scheds: Vec<(u64, u64, u32)> = db.with_mut_snapshot(|snap| {
-        let mut scheds: Vec<PaymentScheduleRecord> = snap
-            .service_state_blobs
-            .get("payment_schedules")
-            .and_then(|json| serde_json::from_str(json).ok())
-            .unwrap_or_default();
-        if !scheds.iter().any(|s| s.next_payment_unix > 0 && s.next_payment_unix <= now_unix) {
+        if !snap
+            .quasar_commerce
+            .payment_schedules
+            .iter()
+            .any(|s| s.next_payment_unix > 0 && s.next_payment_unix <= now_unix)
+        {
             return Vec::new();
         }
-        let tokens: Vec<PaymentTokenRecord> = snap
-            .service_state_blobs
-            .get("payment_tokens")
-            .and_then(|json| serde_json::from_str(json).ok())
-            .unwrap_or_default();
         let catalog = read_store_catalog(snap);
-        let mut receipts: Vec<PaymentReceiptRecord> = snap
-            .service_state_blobs
-            .get("payment_receipts")
-            .and_then(|json| serde_json::from_str(json).ok())
-            .unwrap_or_default();
-        let mut receipts_changed = false;
+        let tokens = snap.quasar_commerce.payment_tokens.clone();
+        let next_entity_id = &mut snap.next_entity_id;
+        let commerce = &mut snap.quasar_commerce;
+        let scheds = &mut commerce.payment_schedules;
+        let receipts = &mut commerce.payment_receipts;
         let mut omega_renewals: Vec<(u64, u64)> = Vec::new();
         let mut failed = Vec::new();
         scheds.retain_mut(|s| {
@@ -189,8 +175,8 @@ pub fn process_due_payment_schedules(
                 let currency = offer
                     .and_then(|o| o.currency.clone())
                     .unwrap_or_else(|| "USD".to_string());
-                snap.next_entity_id += 1;
-                let rid = snap.next_entity_id as u64;
+                *next_entity_id += 1;
+                let rid = *next_entity_id as u64;
                 receipts.push(PaymentReceiptRecord {
                     receipt_id: rid,
                     user_id: s.user_id,
@@ -199,7 +185,6 @@ pub fn process_due_payment_schedules(
                     currency,
                     timestamp_unix: now_unix,
                 });
-                receipts_changed = true;
                 if s.schedule_type == 1 {
                     omega_renewals.push((s.user_id, interval_secs));
                 }
@@ -216,16 +201,6 @@ pub fn process_due_payment_schedules(
                 interval_secs,
                 now_unix,
             );
-        }
-        if receipts_changed {
-            if let Ok(serialized) = serde_json::to_string(&receipts) {
-                snap.service_state_blobs
-                    .insert("payment_receipts".to_string(), serialized);
-            }
-        }
-        if let Ok(serialized) = serde_json::to_string(&scheds) {
-            snap.service_state_blobs
-                .insert("payment_schedules".to_string(), serialized);
         }
         failed
     });
@@ -294,38 +269,35 @@ pub fn upsert_user_payment_schedule_in_snapshot(
     interval_days: u32,
     now_unix: u64,
 ) -> u64 {
-    let mut scheds: Vec<PaymentScheduleRecord> = snap
-        .service_state_blobs
-        .get("payment_schedules")
-        .and_then(|json| serde_json::from_str(json).ok())
-        .unwrap_or_default();
-    let sched_id = if let Some(existing) = scheds
+    let existing_id = snap
+        .quasar_commerce
+        .payment_schedules
         .iter_mut()
         .find(|s| s.user_id == uid && s.schedule_type == schedule_type)
-    {
-        existing.next_payment_unix = next_payment_unix;
-        existing.offer_id = offer_id.to_string();
-        existing.interval_days = interval_days;
-        existing.id
+        .map(|existing| {
+            existing.next_payment_unix = next_payment_unix;
+            existing.offer_id = offer_id.to_string();
+            existing.interval_days = interval_days;
+            existing.id
+        });
+    if let Some(id) = existing_id {
+        id
     } else {
         snap.next_entity_id += 1;
         let id = snap.next_entity_id as u64;
-        scheds.push(PaymentScheduleRecord {
-            id,
-            user_id: uid,
-            schedule_type,
-            next_payment_unix,
-            offer_id: offer_id.to_string(),
-            interval_days,
-            created_unix: now_unix,
-        });
+        snap.quasar_commerce
+            .payment_schedules
+            .push(PaymentScheduleRecord {
+                id,
+                user_id: uid,
+                schedule_type,
+                next_payment_unix,
+                offer_id: offer_id.to_string(),
+                interval_days,
+                created_unix: now_unix,
+            });
         id
-    };
-    if let Ok(serialized) = serde_json::to_string(&scheds) {
-        snap.service_state_blobs
-            .insert("payment_schedules".to_string(), serialized);
     }
-    sched_id
 }
 
 pub fn publish_schedule_set_notice(
@@ -434,16 +406,9 @@ pub fn add_user_quick_pay_token(
     token: PaymentTokenRecord,
 ) {
     db.with_mut_snapshot(|snap| {
-        let mut tokens: Vec<PaymentTokenRecord> = snap
-            .service_state_blobs
-            .get("payment_tokens")
-            .and_then(|json| serde_json::from_str(json).ok())
-            .unwrap_or_default();
+        let tokens = &mut snap.quasar_commerce.payment_tokens;
         tokens.retain(|t| !(t.id == token.id && t.user_id == uid));
         tokens.push(token.clone());
-        if let Ok(serialized) = serde_json::to_string(&tokens) {
-            snap.service_state_blobs.insert("payment_tokens".to_string(), serialized);
-        }
     });
     if token.is_quick_pay {
         publish_quick_pay_added_notice(pending_notices, uid, token.id);
@@ -458,17 +423,9 @@ pub fn register_user_payment_token(
     let token_id = token.id;
     let is_qp = token.is_quick_pay;
     ctx.db.with_mut_snapshot(|snap| {
-        let mut tokens: Vec<PaymentTokenRecord> = snap
-            .service_state_blobs
-            .get("payment_tokens")
-            .and_then(|json| serde_json::from_str(json).ok())
-            .unwrap_or_default();
+        let tokens = &mut snap.quasar_commerce.payment_tokens;
         tokens.retain(|t| !(t.id == token_id && t.user_id == uid));
         tokens.push(token);
-        if let Ok(serialized) = serde_json::to_string(&tokens) {
-            snap.service_state_blobs
-                .insert("payment_tokens".to_string(), serialized);
-        }
     });
     if is_qp {
         let mut notice_bytes = Vec::new();
@@ -488,21 +445,13 @@ pub fn register_user_payment_token(
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlexTransactionRecord {
-    pub id: u64,
-    pub user_id: u64,
-    pub amount: i64,
-    pub balance_after: i64,
-    pub timestamp_unix: u64,
-    pub description: String,
-}
+pub use eve_db::{
+    PaymentReceiptRecord, PaymentScheduleRecord, PaymentTokenRecord, PlexTransactionRecord,
+    StoreCatalog, StoreCategory, StoreOffer, StoreProduct,
+};
 
 pub fn get_plex_transactions(snap: &eve_db::WorldStateSnapshot) -> Vec<PlexTransactionRecord> {
-    snap.service_state_blobs
-        .get("plex_tx_logs")
-        .and_then(|json| serde_json::from_str(json).ok())
-        .unwrap_or_default()
+    snap.quasar_commerce.plex_tx_logs.clone()
 }
 
 pub fn record_plex_transaction(
@@ -514,7 +463,7 @@ pub fn record_plex_transaction(
     description: &str,
     now_unix: u64,
 ) {
-    let mut logs = get_plex_transactions(snap);
+    let logs = &mut snap.quasar_commerce.plex_tx_logs;
     if logs.len() >= 1000 {
         logs.remove(0);
     }
@@ -526,60 +475,17 @@ pub fn record_plex_transaction(
         timestamp_unix: now_unix,
         description: description.to_string(),
     });
-    if let Ok(serialized) = serde_json::to_string(&logs) {
-        snap.service_state_blobs.insert("plex_tx_logs".to_string(), serialized);
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoreCategory {
-    pub id: u32,
-    pub name: String,
-    pub description: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoreProduct {
-    pub id: u32,
-    pub name: String,
-    pub description: String,
-    pub type_id: u32,
-    pub quantity: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoreOffer {
-    pub id: u32,
-    pub name: String,
-    pub description: String,
-    pub category_id: u32,
-    pub price_plex: i64,
-    pub product_ids: Vec<u32>,
-    pub targeted: bool,
-    #[serde(default)]
-    pub price_cents: Option<u64>,
-    #[serde(default)]
-    pub currency: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct StoreCatalog {
-    pub categories: Vec<StoreCategory>,
-    pub products: Vec<StoreProduct>,
-    pub offers: Vec<StoreOffer>,
 }
 
 pub fn save_store_catalog(snap: &mut eve_db::WorldStateSnapshot, catalog: &StoreCatalog) {
-    if let Ok(serialized) = serde_json::to_string(catalog) {
-        snap.service_state_blobs.insert("nes_store_catalog".to_string(), serialized);
-    }
+    snap.quasar_commerce.nes_store_catalog = Some(catalog.clone());
 }
 
 pub(crate) fn seed_default_store_catalog_if_empty(
     snap: &mut eve_db::WorldStateSnapshot,
     sde: &eve_sde::SdeRegistry,
 ) {
-    if snap.service_state_blobs.contains_key("nes_store_catalog") {
+    if snap.quasar_commerce.nes_store_catalog.is_some() {
         return;
     }
     let type_name = |tid: u32| sde.types.get(&tid).map(|t| t.name.clone()).unwrap_or_default();
@@ -610,62 +516,25 @@ pub(crate) fn seed_default_store_catalog_if_empty(
 }
 
 /// DATA GAP: NES store catalog (categories, products, offers) is live Quasar backend data not present in V24 client FSD.
-/// Read persisted New Eden Store catalog from `WorldStateSnapshot.service_state_blobs["nes_store_catalog"]`.
+/// Read persisted New Eden Store catalog from `WorldStateSnapshot.quasar_commerce.nes_store_catalog`.
 pub fn read_store_catalog(snap: &eve_db::WorldStateSnapshot) -> StoreCatalog {
-    snap.service_state_blobs
-        .get("nes_store_catalog")
-        .and_then(|json| serde_json::from_str(json).ok())
+    snap.quasar_commerce
+        .nes_store_catalog
+        .clone()
         .unwrap_or_default()
 }
 
 pub fn read_store_offer_tags(
     snap: &eve_db::WorldStateSnapshot,
 ) -> std::collections::HashMap<u32, Vec<String>> {
-    snap.service_state_blobs
-        .get("nes_store_offer_tags")
-        .and_then(|json| serde_json::from_str(json).ok())
-        .unwrap_or_default()
+    snap.quasar_commerce.nes_store_offer_tags.clone()
 }
 
 pub fn save_store_offer_tags(
     snap: &mut eve_db::WorldStateSnapshot,
     tags: &std::collections::HashMap<u32, Vec<String>>,
 ) {
-    if let Ok(serialized) = serde_json::to_string(tags) {
-        snap.service_state_blobs
-            .insert("nes_store_offer_tags".to_string(), serialized);
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PaymentScheduleRecord {
-    pub id: u64,
-    pub user_id: u64,
-    pub schedule_type: u32,
-    pub next_payment_unix: u64,
-    pub offer_id: String,
-    pub interval_days: u32,
-    pub created_unix: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PaymentTokenRecord {
-    pub id: u32,
-    pub user_id: u64,
-    pub token_str: String,
-    pub is_quick_pay: bool,
-    #[serde(default)]
-    pub consumed: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PaymentReceiptRecord {
-    pub receipt_id: u64,
-    pub user_id: u64,
-    pub offer_id: String,
-    pub amount_in_cents: u32,
-    pub currency: String,
-    pub timestamp_unix: u64,
+    snap.quasar_commerce.nes_store_offer_tags = tags.clone();
 }
 
 pub fn register_plex_vault_extra_handlers(
@@ -923,19 +792,12 @@ pub fn register_plex_vault_extra_handlers(
             .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing invoice Identifier.uuid".to_string()))?;
             let hex: String = inv_uuid.iter().map(|b| format!("{b:02x}")).collect();
             db_inv.with_mut_snapshot(|snap| {
-                let mut list: Vec<String> = snap
-                    .service_state_blobs
-                    .get("plex_invoices")
-                    .and_then(|j| serde_json::from_str(j).ok())
-                    .unwrap_or_default();
+                let list = &mut snap.quasar_commerce.plex_invoices;
                 if !list.contains(&hex) {
                     if list.len() >= 1000 {
                         list.remove(0);
                     }
                     list.push(hex);
-                }
-                if let Ok(s) = serde_json::to_string(&list) {
-                    snap.service_state_blobs.insert("plex_invoices".into(), s);
                 }
             });
             Ok(GoogleAny {

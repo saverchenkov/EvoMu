@@ -91,21 +91,12 @@ pub fn mark_hacking_container_unlocked(ctx: &ServerContext, char_id: i64, target
     }
 }
 
-const SHIP_CLONE_OFFERS_KEY: &str = "jumpCloneSvc:ship_clone_offers";
-
 fn load_ship_clone_offers(snap: &eve_db::WorldStateSnapshot) -> HashMap<i64, (i64, i64)> {
-    snap.service_state_blobs
-        .get(SHIP_CLONE_OFFERS_KEY)
-        .and_then(|json| serde_json::from_str(json).ok())
-        .unwrap_or_default()
+    snap.cluster_and_runtime.ship_clone_offers.clone()
 }
 
 fn save_ship_clone_offers(snap: &mut eve_db::WorldStateSnapshot, offers: &HashMap<i64, (i64, i64)>) {
-    if offers.is_empty() {
-        snap.service_state_blobs.remove(SHIP_CLONE_OFFERS_KEY);
-    } else if let Ok(json) = serde_json::to_string(offers) {
-        snap.service_state_blobs.insert(SHIP_CLONE_OFFERS_KEY.to_string(), json);
-    }
+    snap.cluster_and_runtime.ship_clone_offers = offers.clone();
 }
 
 pub(crate) fn scanners_superweapons_state() -> &'static RwLock<ScannersSuperweaponsState> {
@@ -267,8 +258,8 @@ pub fn apply_active_dbuffs_and_system_effects_to_ship_attrs(
     });
     if let Some(sys_id) = sys_id_opt {
         if (32_000_000..=32_999_999).contains(&sys_id) {
-            let pocket_weather = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-                reg.abyssal_pockets
+            let pocket_weather = crate::services::pve_special_sites_abyssal::read_abyssal_state(ctx, |st| {
+                st.pockets
                     .values()
                     .find(|p| {
                         !p.completed
@@ -276,7 +267,7 @@ pub fn apply_active_dbuffs_and_system_effects_to_ship_attrs(
                             && (p.ship_id == ship_id || p.fleet_ship_ids.contains(&ship_id))
                     })
                     .or_else(|| {
-                        reg.abyssal_pockets
+                        st.pockets
                             .values()
                             .find(|p| !p.completed && !p.collapsed_destroyed && p.abyssal_solar_system_id == sys_id)
                     })

@@ -69,17 +69,10 @@ pub(crate) fn set_modules_reload_until(
     reload_until_unix: u64,
 ) {
     ctx.db.with_mut_snapshot(|snap| {
-        let mut map: HashMap<i64, u64> = snap
-            .service_state_blobs
-            .get("module_reload_until_unix")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
         for &mid in module_ids {
-            map.insert(mid, reload_until_unix);
-        }
-        if let Ok(json) = serde_json::to_string(&map) {
-            snap.service_state_blobs
-                .insert("module_reload_until_unix".into(), json);
+            snap.cluster_and_runtime
+                .module_reload_until_unix
+                .insert(mid, reload_until_unix);
         }
     });
 }
@@ -91,11 +84,7 @@ pub(crate) fn check_module_reloading(
 ) -> Result<(), BridgeRpcError> {
     let now_unix = ctx.now_unix_secs();
     let reloading_until = ctx.db.with_snapshot(|snap| {
-        let map: HashMap<i64, u64> = snap
-            .service_state_blobs
-            .get("module_reload_until_unix")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
+        let map = &snap.cluster_and_runtime.module_reload_until_unix;
         if let Some(&until) = map.get(&module_id) {
             if now_unix < until {
                 return Some(until);

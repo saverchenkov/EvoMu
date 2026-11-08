@@ -6,85 +6,24 @@
 use crate::router::{NotificationTarget, ServerContext};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub const SEASON_STATE_KEY_PREFIX: &str = "season_state:";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CharacterChallenge {
-    pub challenge_id: i64,
-    pub season_id: i64,
-    pub title: String,
-    pub description: String,
-    pub points: i64,
-    pub progress: i64,
-    pub max_progress: i64,
-    pub completed: bool,
-    pub claimed: bool,
-    pub is_dormant: bool,
-    pub expiration_date: i64,
-    #[serde(default)]
-    pub client_event_driven: bool,
-    #[serde(default)]
-    pub reward_type_id: u32,
-    #[serde(default)]
-    pub reward_quantity: i32,
-    #[serde(default)]
-    pub baseline_progress: i64,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CharacterSeasonState {
-    #[serde(default)]
-    pub selected_season_id: i64,
-    #[serde(default)]
-    pub season_points: i64,
-    #[serde(default)]
-    pub challenges: HashMap<i64, CharacterChallenge>,
-    #[serde(default)]
-    pub claimed_challenges: HashMap<i64, CharacterChallenge>,
-    #[serde(default)]
-    pub completed_once_per_season_ids: std::collections::HashSet<i64>,
-}
+pub use eve_db::{CharacterChallenge, CharacterSeasonState};
 
 pub fn load_season_state_from_blobs(snap: &eve_db::WorldStateSnapshot, char_id: i64) -> CharacterSeasonState {
-    let key = format!("{SEASON_STATE_KEY_PREFIX}{char_id}");
-    if let Some(json) = snap.service_state_blobs.get(&key) {
-        if let Ok(st) = serde_json::from_str::<CharacterSeasonState>(json) {
-            return st;
-        }
-    }
-    let alt_key = format!("season_manager:{char_id}");
-    if let Some(json) = snap.service_state_blobs.get(&alt_key) {
-        if let Ok(st) = serde_json::from_str::<CharacterSeasonState>(json) {
-            return st;
-        }
-    }
-    if let Some(json) = snap.service_state_blobs.get("season_manager") {
-        if let Ok(map) = serde_json::from_str::<HashMap<i64, CharacterSeasonState>>(json) {
-            if let Some(st) = map.get(&char_id) {
-                return st.clone();
-            }
-        }
-    }
-    CharacterSeasonState::default()
+    snap.seasons_and_campaigns
+        .season_states
+        .get(&char_id)
+        .cloned()
+        .unwrap_or_default()
 }
 
 pub fn save_season_state_to_blobs(snap: &mut eve_db::WorldStateSnapshot, char_id: i64, state: &CharacterSeasonState) {
-    let key = format!("{SEASON_STATE_KEY_PREFIX}{char_id}");
-    if let Ok(json) = serde_json::to_string(state) {
-        snap.service_state_blobs.insert(key, json);
-    }
-    let mut map: HashMap<i64, CharacterSeasonState> = snap
-        .service_state_blobs
-        .get("season_manager")
-        .and_then(|j| serde_json::from_str(j).ok())
-        .unwrap_or_default();
-    map.insert(char_id, state.clone());
-    if let Ok(json) = serde_json::to_string(&map) {
-        snap.service_state_blobs.insert("season_manager".into(), json);
-    }
+    snap.seasons_and_campaigns
+        .season_states
+        .insert(char_id, state.clone());
 }
 
 pub use super::season_fsd::*;
@@ -229,13 +168,12 @@ pub fn get_current_activity_count(
                     && !snap.corporations.contains_key(&k.victim_character_id)
             })
             .count() as i64,
-        "hackingMiniGameWon" => {
-            let key = format!("hacking_wins:{char_id}");
-            snap.service_state_blobs
-                .get(&key)
-                .and_then(|v| v.parse::<i64>().ok())
-                .unwrap_or(0)
-        }
+        "hackingMiniGameWon" => snap
+            .seasons_and_campaigns
+            .hacking_wins
+            .get(&char_id)
+            .copied()
+            .unwrap_or(0) as i64,
         "industryJobsCompleted" | "typeManufacturedCount" => snap
             .industry_jobs
             .values()
@@ -479,10 +417,8 @@ pub fn handle_season_manager(
                 Err(e) => return Some(Err(e)),
             };
             let max_ch = ctx.db.with_snapshot(|snap| {
-                if let Some(json) = snap.service_state_blobs.get(SEASON_CONFIG_KEY) {
-                    if let Ok(cfg) = serde_json::from_str::<SeasonConfig>(json) {
-                        return cfg.max_active_challenges.max(1);
-                    }
+                if let Some(cfg) = &snap.seasons_and_campaigns.season_configuration {
+                    return cfg.max_active_challenges.max(1);
                 }
                 let st = load_season_state_from_blobs(snap, char_id);
                 let catalog = load_seasons_catalog(snap, &ctx.sde, ctx.now_blueos_filetime_ticks());
@@ -546,8 +482,9 @@ pub fn handle_season_manager(
                 for ch in st.challenges.values_mut().chain(st.claimed_challenges.values_mut()) {
                     ch.season_id = season_id;
                 }
-                snap.service_state_blobs
-                    .insert(format!("active_season:{char_id}"), season_id.to_string());
+                snap.seasons_and_campaigns
+                    .active_seasons
+                    .insert(char_id, season_id);
 
                 let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
                 let season_data_kv = season_config_to_keyval(&active_cfg, &defs);
@@ -589,12 +526,10 @@ pub fn handle_season_manager(
             let rep = ctx.db.with_mut_snapshot(|snap| {
                 let st = load_season_state_from_blobs(snap, char_id);
                 let now_ft = ctx.now_blueos_filetime_ticks();
-                let unseeded = !snap.service_state_blobs.contains_key(SEASONS_CATALOG_KEY);
+                let unseeded = snap.seasons_and_campaigns.seasons_catalog.is_empty();
                 let catalog = load_seasons_catalog(snap, &ctx.sde, now_ft);
                 if unseeded {
-                    if let Ok(json) = serde_json::to_string(&catalog) {
-                        snap.service_state_blobs.insert(SEASONS_CATALOG_KEY.into(), json);
-                    }
+                    snap.seasons_and_campaigns.seasons_catalog = catalog.clone();
                 }
                 let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
                 let active: Vec<&SeasonConfig> = catalog
@@ -1099,10 +1034,10 @@ pub fn handle_season_manager(
                 }));
             };
             let custom_loot: Option<Vec<(u32, i64, f64)>> = ctx.db.with_snapshot(|snap| {
-                snap.service_state_blobs
-                    .get(SEASON_LOOT_TABLES_KEY)
-                    .and_then(|s| serde_json::from_str::<HashMap<u32, Vec<(u32, i64, f64)>>>(s).ok())
-                    .and_then(|m| m.get(&type_id).cloned())
+                snap.seasons_and_campaigns
+                    .season_loot_tables
+                    .get(&type_id)
+                    .cloned()
             });
             let entries = custom_loot.unwrap_or_else(|| {
                 fsd_crate_loot_tables(&ctx.sde)
@@ -1321,9 +1256,7 @@ pub fn handle_season_manager(
                 for def in &mut defs {
                     ops::localize_challenge_def(def, &ctx.sde);
                 }
-                if let Ok(json) = serde_json::to_string(&defs) {
-                    snap.service_state_blobs.insert(SEASONAL_CHALLENGES_CONFIG_KEY.into(), json);
-                }
+                snap.seasons_and_campaigns.challenge_definitions = defs.clone();
                 let empty_snap = eve_db::WorldStateSnapshot::default();
                 let seasons = ops::load_fsd_seasons_catalog_clean(&empty_snap, &ctx.sde, now_ft);
                 let cfg = seasons.get(&st.selected_season_id).or_else(|| seasons.values().next());
@@ -1332,9 +1265,7 @@ pub fn handle_season_manager(
                 let max_active = cfg
                     .map(|c| usize::try_from(c.max_active_challenges.max(1)).unwrap_or(4))
                     .unwrap_or(4);
-                if let Ok(json) = serde_json::to_string(&seasons) {
-                    snap.service_state_blobs.insert(SEASONS_CATALOG_KEY.into(), json);
-                }
+                snap.seasons_and_campaigns.seasons_catalog = seasons;
                 let expired = ops::fill_and_normalize_character_challenges(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
                 Ok((st.season_points, expired))
             });

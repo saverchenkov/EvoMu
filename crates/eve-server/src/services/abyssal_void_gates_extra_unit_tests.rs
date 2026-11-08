@@ -8,7 +8,7 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
     make_fighter_ctx_and_session, make_fighter_item, make_fighter_type,
 };
 use crate::services::pve_special_sites::{
-    with_pve_special_reg, AbyssalPocketSession, AbyssalRoomRecord, AbyssalTraceRecord,
+    with_abyssal_state, AbyssalPocketSession, AbyssalRoomRecord, AbyssalTraceRecord,
     AbyssalWeatherKind, VoidSpaceSessionRecord,
 };
 use eve_destiny::{Ball, CombatState, MovementMode};
@@ -126,8 +126,8 @@ async fn abyssal_gate_activation_error_branches_coop_retention_and_collapse() {
 
     // 3. Already in final room (room 3) -> AlreadyInFinalRoom
     let now = ctx.now_unix();
-    with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets.insert(
+    with_abyssal_state(&ctx, |st| {
+        st.pockets.insert(
             char_id,
             make_pocket(pid, char_id, ship_id, origin_sys, abyss_sys, 3, now + 600, 1),
         );
@@ -141,8 +141,8 @@ async fn abyssal_gate_activation_error_branches_coop_retention_and_collapse() {
     );
 
     // 4. Invalid gate ID -> InvalidGate
-    with_pve_special_reg(&ctx, |reg| {
-        let p = reg.abyssal_pockets.get_mut(&char_id).unwrap();
+    with_abyssal_state(&ctx, |st| {
+        let p = st.pockets.get_mut(&char_id).unwrap();
         p.current_room = 1;
         p.rooms[0].npc_ball_ids = vec![npc_id];
     });
@@ -242,8 +242,8 @@ async fn abyssal_gate_activation_error_branches_coop_retention_and_collapse() {
     let _ = abyss_handle
         .set_ball_position(alt_r1_gate, DVec3::new(2_600.0, 0.0, 0.0))
         .await;
-    with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_traces.insert(
+    with_abyssal_state(&ctx, |st| {
+        st.traces.insert(
             888_999,
             AbyssalTraceRecord {
                 trace_ball_id: 888_999,
@@ -272,8 +272,8 @@ async fn abyssal_gate_activation_error_branches_coop_retention_and_collapse() {
     assert_eq!(ok_res.dict_get("room").and_then(|v| v.as_i64()), Some(2));
 
     // 9. Expire pocket -> PocketCollapsed
-    with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets.get_mut(&char_id).unwrap().collapse_at_sec = now.saturating_sub(1);
+    with_abyssal_state(&ctx, |st| {
+        st.pockets.get_mut(&char_id).unwrap().collapse_at_sec = now.saturating_sub(1);
     });
     assert_eq!(
         handle_abyssal_gate_activation(

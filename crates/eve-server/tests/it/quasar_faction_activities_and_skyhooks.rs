@@ -29,11 +29,7 @@ fn create_user_payment_schedule(
     now_unix: u64,
 ) -> PaymentScheduleRecord {
     db.with_mut_snapshot(|snap| {
-        let mut schedules: Vec<PaymentScheduleRecord> = snap
-            .service_state_blobs
-            .get("payment_schedules")
-            .and_then(|json| serde_json::from_str(json).ok())
-            .unwrap_or_default();
+        let schedules = &mut snap.quasar_commerce.payment_schedules;
         let next_id = schedules.iter().map(|s| s.id).max().unwrap_or(1000) + 1;
         let rec = PaymentScheduleRecord {
             id: next_id,
@@ -45,9 +41,6 @@ fn create_user_payment_schedule(
             created_unix: now_unix,
         };
         schedules.push(rec.clone());
-        if let Ok(json) = serde_json::to_string(&schedules) {
-            snap.service_state_blobs.insert("payment_schedules".to_string(), json);
-        }
         rec
     })
 }

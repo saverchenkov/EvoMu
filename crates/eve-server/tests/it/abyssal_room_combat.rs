@@ -10,7 +10,7 @@ use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{combat_npc_ai::step_extended_npc_ai_sync, with_combat_runtime};
 use eve_server::services::pve_special_sites::{
-    with_pve_special_reg, ABYSSAL_ROOM_NPC_TYPES, BIOADAPTIVE_CACHE_TYPE_ID,
+    with_abyssal_state, ABYSSAL_ROOM_NPC_TYPES, BIOADAPTIVE_CACHE_TYPE_ID,
     BIOADAPTIVE_CACHE_WRECK_TYPE_ID, TRIGLAVIAN_SURVEY_DATABASE_TYPE_ID,
 };
 use crate::common;
@@ -18,8 +18,8 @@ use crate::common;
 /// Ticks Abyssal room NPC AI (verifying Triglavian room NPCs target and damage the pilot's ship and have
 /// difficulty-scaled HP), then destroys every NPC of `room_idx` (0-based) through the damage pipeline.
 pub async fn destroy_room_npcs_via_damage(ctx: &ServerContext, char_id: i64, room_idx: usize) {
-    let (sys, ship_id, diff_mult, npcs) = with_pve_special_reg(ctx, |reg| {
-        let p = reg.abyssal_pockets.get(&char_id).expect("pocket");
+    let (sys, ship_id, diff_mult, npcs) = with_abyssal_state(ctx, |st| {
+        let p = st.pockets.get(&char_id).expect("pocket");
         (p.abyssal_solar_system_id, p.ship_id, p.npc_difficulty_mult, p.rooms[room_idx].npc_ball_ids.clone())
     });
     assert!(!npcs.is_empty(), "room {} must have NPCs", room_idx + 1);
@@ -52,14 +52,14 @@ pub async fn destroy_room_npcs_via_damage(ctx: &ServerContext, char_id: i64, roo
         assert!(h.get_ball_snapshot(bid).await.unwrap().is_none(), "destroyed NPC {bid} removed from ballpark");
     }
     // RF-04: Verify conduit proactively unlocked immediately on final NPC death BEFORE any AbyssalGateActivation RPC
-    let (cleared, unlocked) = with_pve_special_reg(ctx, |reg| {
-        let r = &reg.abyssal_pockets.get(&char_id).expect("pocket").rooms[room_idx];
+    let (cleared, unlocked) = with_abyssal_state(ctx, |st| {
+        let r = &st.pockets.get(&char_id).expect("pocket").rooms[room_idx];
         (r.cleared, r.gate_unlocked_at_sec.is_some())
     });
     assert!(cleared && unlocked, "room {} conduit proactively unlocked on final NPC death", room_idx + 1);
     // Approach room transfer/exit gate within proximity (<= 2500m)
-    let (pid, curr_room) = with_pve_special_reg(ctx, |reg| {
-        let p = reg.abyssal_pockets.get(&char_id).expect("pocket");
+    let (pid, curr_room) = with_abyssal_state(ctx, |st| {
+        let p = st.pockets.get(&char_id).expect("pocket");
         (p.pocket_id, p.current_room)
     });
     let gate_id = 1_895_000_000 + pid * 10 + (curr_room as i64);
@@ -70,8 +70,8 @@ pub async fn destroy_room_npcs_via_damage(ctx: &ServerContext, char_id: i64, roo
 
 /// Verifies the room's Bioadaptive Cache in space, destroys it via combat damage, and verifies its loot transfers to the wreck.
 pub async fn assert_room_cache_loot(ctx: &ServerContext, char_id: i64, room_idx: usize, survey_qty: i32, filament_type: u32) {
-    let (sys, cache_id) = with_pve_special_reg(ctx, |reg| {
-        let p = reg.abyssal_pockets.get(&char_id).expect("pocket");
+    let (sys, cache_id) = with_abyssal_state(ctx, |st| {
+        let p = st.pockets.get(&char_id).expect("pocket");
         (p.abyssal_solar_system_id, p.rooms[room_idx].cache_item_id)
     });
     let h = ctx.systems.get_or_spawn(sys);
@@ -275,9 +275,9 @@ async fn test_abyssal_deadspace_mechanics_and_collapse_lifecycle() {
     let dep2 = ctx.dispatch_rpc(&mut sess2, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(fil2)], &kw, None).await.expect("Deploy 2");
     let tr2 = dep2.dict_get("traceBallID").and_then(|v| v.as_i64()).unwrap();
     ctx.dispatch_rpc(&mut sess2, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(tr2)], &kw, None).await.expect("Enter 2");
-    let sep_m = with_pve_special_reg(&ctx, |reg| {
-        glam::DVec3::from_array(reg.abyssal_pockets[&char2].grid_offset)
-            .distance(glam::DVec3::from_array(reg.abyssal_pockets[&char_id].grid_offset))
+    let sep_m = with_abyssal_state(&ctx, |st| {
+        glam::DVec3::from_array(st.pockets[&char2].grid_offset)
+            .distance(glam::DVec3::from_array(st.pockets[&char_id].grid_offset))
     });
     assert!(sep_m >= 10_000_000.0, "Concurrent Abyssal pockets must be separated by >= 10,000 km (got {sep_m})");
     let abyss_handle = ctx.systems.get_or_spawn(abyssal_sys);
@@ -646,8 +646,8 @@ async fn test_abyssal_hull_rules_and_timer_collapse() {
     // during `advance_secs(1100)` before the 1200s pocket collapse deadline is tested.
     let abyss_handle = ctx.systems.get_or_spawn(abyssal_sys);
     let lethal = DamageVector { em: 1e7, thermal: 1e7, kinetic: 1e7, explosive: 1e7 };
-    let r1_npcs = with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets.get(&char_id).unwrap().rooms[0].npc_ball_ids.clone()
+    let r1_npcs = with_abyssal_state(&ctx, |st| {
+        st.pockets.get(&char_id).unwrap().rooms[0].npc_ball_ids.clone()
     });
     for npc_id in r1_npcs {
         let _ = abyss_handle.apply_damage_with_attacker(npc_id, lethal, Some(char_id)).await;

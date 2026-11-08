@@ -104,7 +104,7 @@ async fn notify_batch8_session_localization_and_load_rpcs() {
     .expect("ProcessEVESessionCreated");
     assert_eq!(created_rep, PyRep::None);
     let recorded_sessions = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs.get("user_sessions").cloned().unwrap_or_default()
+        serde_json::to_string(&snap.cluster_and_runtime.user_sessions).unwrap_or_default()
     });
     assert!(recorded_sessions.contains("\"session_id\":9501"));
 
@@ -156,10 +156,7 @@ async fn notify_batch8_session_localization_and_load_rpcs() {
     ctx.register_session_closer(9_502, tx_b);
     ctx.register_session_closer(9_503, tx_c);
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(
-            "active_sessions".into(),
-            serde_json::to_string(&vec![9_501_i64, 9_502_i64, 9_503_i64]).unwrap(),
-        );
+        snap.cluster_and_runtime.active_sessions = vec![9_501, 9_502, 9_503];
     });
     let rem_rep = rpc(
         &ctx,
@@ -179,10 +176,7 @@ async fn notify_batch8_session_localization_and_load_rpcs() {
     assert!(ctx.session_closers.read().unwrap().contains_key(&9_501));
     assert!(ctx.session_closers.read().unwrap().contains_key(&9_503));
     let active_after_rem: Vec<i64> = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("active_sessions")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default()
+        snap.cluster_and_runtime.active_sessions.clone()
     });
     assert_eq!(active_after_rem, vec![9_501, 9_503]);
 
@@ -201,10 +195,7 @@ async fn notify_batch8_session_localization_and_load_rpcs() {
         "caller session must survive EndAllGameSessions"
     );
     let active_after_end_all: Vec<i64> = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("active_sessions")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default()
+        snap.cluster_and_runtime.active_sessions.clone()
     });
     assert_eq!(active_after_end_all, vec![9_501]);
 

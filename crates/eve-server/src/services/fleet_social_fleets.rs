@@ -25,15 +25,7 @@ pub(crate) struct FleetAdvertState {
     pub(crate) _created_unix: u64,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct FleetSetupRecord {
-    pub(crate) setup_name: String,
-    pub(crate) motd: String,
-    pub(crate) is_free_move: bool,
-    pub(crate) max_size: u16,
-    pub(crate) default_squad_id: Option<i64>,
-    pub(crate) wings: Vec<(String, Vec<String>)>,
-}
+pub(crate) use eve_db::FleetSetupRecord;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FleetExtrasState {

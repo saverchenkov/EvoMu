@@ -1251,9 +1251,14 @@ async fn handle_request_scans(
     let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnSystemScanStarted", "charid", vec![PyRep::Integer(max_warp_end_ft), PyRep::Integer(scan_ms), PyRep::List(scan_probe_ids.clone())]);
     let p_ids: Vec<i64> = active_probes.iter().map(|p| p.probe_id).collect();
     ctx.db.with_mut_snapshot(|snap| {
-        let mut pending: Vec<(i64, Vec<i64>, Vec<PyRep>, Vec<PyRep>, Vec<PyRep>, i64)> = snap.service_state_blobs.get("pending_probe_scans").and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
-        pending.push((char_id, p_ids, scan_probe_ids, rows.clone(), idle_probes, scan_end_ft));
-        if let Ok(js) = serde_json::to_string(&pending) { snap.service_state_blobs.insert("pending_probe_scans".into(), js); }
+        snap.fleet_and_social_ops.pending_probe_scans.push((
+            char_id,
+            p_ids,
+            scan_probe_ids,
+            rows.clone(),
+            idle_probes,
+            scan_end_ft,
+        ));
     });
     Some(Ok(PyRep::List(rows)))
 }
@@ -1479,12 +1484,12 @@ pub fn tick_probe_warp_end(ctx: &ServerContext) {
         let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(PROBE_STATE_SCANNING as i64)]);
     }
     let has_due_scans = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs.get("pending_probe_scans").and_then(|s| serde_json::from_str::<Vec<(i64, Vec<i64>, Vec<PyRep>, Vec<PyRep>, Vec<PyRep>, i64)>>(s).ok()).is_some_and(|all| all.iter().any(|(_, _, _, _, _, end_ft)| now_ft >= *end_ft))
+        snap.fleet_and_social_ops.pending_probe_scans.iter().any(|(_, _, _, _, _, end_ft)| now_ft >= *end_ft)
     });
     let due_scans = if has_due_scans { ctx.db.with_mut_snapshot(|snap| {
-        let all: Vec<(i64, Vec<i64>, Vec<PyRep>, Vec<PyRep>, Vec<PyRep>, i64)> = snap.service_state_blobs.get("pending_probe_scans").and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
+        let all = std::mem::take(&mut snap.fleet_and_social_ops.pending_probe_scans);
         let (done, rem): (Vec<_>, Vec<_>) = all.into_iter().partition(|(_, _, _, _, _, end_ft)| now_ft >= *end_ft);
-        if let Ok(js) = serde_json::to_string(&rem) { snap.service_state_blobs.insert("pending_probe_scans".into(), js); }
+        snap.fleet_and_social_ops.pending_probe_scans = rem;
         done
     }) } else { Vec::new() };
     let had_due_scans = !due_scans.is_empty();

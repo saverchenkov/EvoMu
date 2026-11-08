@@ -464,7 +464,7 @@ async fn notify_batch2_void_exit_seasons_expert_systems_and_node_graphs() {
             title: "Onboarding".into(), description: "Complete two client onboarding steps".into(),
             points: 20, max_progress: 2, client_event_driven: true, reward_type_id: 0, reward_quantity: 0, is_dormant: false, ..Default::default()
         });
-        snap.service_state_blobs.insert(SEASONAL_CHALLENGES_CONFIG_KEY.into(), serde_json::to_string(&defs).expect("defs"));
+        snap.seasons_and_campaigns.challenge_definitions = defs;
         snap.npe_progress.insert(PILOT_A, eve_db::NpeProgressRecord {
             character_id: PILOT_A, node_graph_id: 473, current_node_id: 1, completed: false,
             career_goal_progress: Default::default(), claimed_goals: Default::default(),

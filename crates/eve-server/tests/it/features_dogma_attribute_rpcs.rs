@@ -134,8 +134,7 @@ async fn test_session_mgr_remove_and_end_all_sessions() {
     let ctx = new_ctx();
     let mut gm_sess = setup_pilot(&ctx, PILOT_1, ROLE_ADMIN).await;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs
-            .insert("active_sessions".into(), "[101, 102, 103]".into());
+        snap.cluster_and_runtime.active_sessions = vec![101, 102, 103];
     });
 
     let rem_res = rpc(
@@ -150,12 +149,9 @@ async fn test_session_mgr_remove_and_end_all_sessions() {
     assert_eq!(rem_res, PyRep::None);
 
     let remaining = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("active_sessions")
-            .cloned()
-            .unwrap_or_default()
+        snap.cluster_and_runtime.active_sessions.clone()
     });
-    assert_eq!(remaining, "[101,103]");
+    assert_eq!(remaining, vec![101, 103]);
 
     let end_res = rpc(&ctx, &mut gm_sess, "sessionMgr", "EndAllGameSessions", &[])
         .await
@@ -163,12 +159,9 @@ async fn test_session_mgr_remove_and_end_all_sessions() {
     assert_eq!(end_res, PyRep::None);
 
     let after_end = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("active_sessions")
-            .cloned()
-            .unwrap_or_default()
+        snap.cluster_and_runtime.active_sessions.clone()
     });
-    assert_eq!(after_end, "[]");
+    assert!(after_end.is_empty());
 }
 
 #[tokio::test]

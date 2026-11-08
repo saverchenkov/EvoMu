@@ -766,15 +766,10 @@ impl WorldRepository {
                 timestamp_unix,
             });
             if wasted_quantity > 0 {
-                let mut waste_map: std::collections::BTreeMap<usize, i64> = guard
-                    .service_state_blobs
-                    .get("mining_ledger_waste")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
-                waste_map.insert(idx, wasted_quantity);
-                if let Ok(json) = serde_json::to_string(&waste_map) {
-                    guard.service_state_blobs.insert("mining_ledger_waste".into(), json);
-                }
+                guard
+                    .mining_and_ess_state
+                    .mining_ledger_waste
+                    .insert(idx, wasted_quantity);
             }
 
             Ok(())
@@ -829,17 +824,20 @@ impl WorldRepository {
     /// Returns all mining ledger entries with their wasted/residue quantities for a character (`MN-16`).
     pub fn get_mining_ledger_with_waste(&self, character_id: i64) -> Vec<(MiningLedgerRecord, i64)> {
         let guard = self.read_state();
-        let waste_map: std::collections::BTreeMap<usize, i64> = guard
-            .service_state_blobs
-            .get("mining_ledger_waste")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
         guard
             .mining_ledger
             .iter()
             .enumerate()
             .filter(|(_, r)| r.character_id == character_id)
-            .map(|(idx, r)| (r.clone(), waste_map.get(&idx).copied().unwrap_or(0)))
+            .map(|(idx, r)| {
+                let waste = guard
+                    .mining_and_ess_state
+                    .mining_ledger_waste
+                    .get(&idx)
+                    .copied()
+                    .unwrap_or(0);
+                (r.clone(), waste)
+            })
             .collect()
     }
 

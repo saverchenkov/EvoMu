@@ -55,10 +55,6 @@ fn is_winning_side_faction(war_faction_id: Option<i64>, pirate_side: bool) -> bo
     }
 }
 
-fn respawn_key(sys_id: u32) -> String {
-    format!("ice_heist_respawn_until:{sys_id}")
-}
-
 fn thunderchild_guard_dps_vector(ctx: &ServerContext) -> DamageVector {
     if let Some(t) = ctx.sde.types.get(&THUNDERCHILD_GUARD_TYPE_ID) {
         let mult = t
@@ -151,9 +147,10 @@ pub async fn spawn_ice_heist_checked(
 
     let now_unix = ctx.now_unix_secs();
     let respawn_until = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get(&respawn_key(sys_id))
-            .and_then(|s| s.parse::<u64>().ok())
+        snap.insurgency_complex_ops
+            .ice_heist_respawn_until
+            .get(&sys_id)
+            .copied()
             .unwrap_or(0)
     });
     if now_unix < respawn_until {
@@ -256,10 +253,9 @@ pub async fn escort_ice_heist_tanker(
             .map(|b| b.id)
             .collect();
         ctx.db.with_mut_snapshot(|snap| {
-            snap.service_state_blobs.insert(
-                respawn_key(sys_id),
-                (now_unix + ICE_HEIST_RESPAWN_COOLDOWN_SECS).to_string(),
-            );
+            snap.insurgency_complex_ops
+                .ice_heist_respawn_until
+                .insert(sys_id, now_unix + ICE_HEIST_RESPAWN_COOLDOWN_SECS);
             let eligible_pids: Vec<i64> = snap
                 .characters
                 .values()

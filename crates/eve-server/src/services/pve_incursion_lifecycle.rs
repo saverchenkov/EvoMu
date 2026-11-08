@@ -18,7 +18,6 @@ use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{SdeRegistry, SolarSystemId};
 use glam::DVec3;
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -37,34 +36,7 @@ pub const TARGET_ACTIVE_INCURSIONS: usize = 3;
 // DERIVED: World-event tale template ID for roaming Metaliminal Storms.
 pub const STORM_TALE_TEMPLATE_ID: i64 = 5203;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct IncursionLifecycleMeta {
-    #[serde(default)]
-    pub spawned_at_sec: u64,
-    #[serde(default)]
-    pub last_site_completed_sec: u64,
-    #[serde(default)]
-    pub last_regen_sec: u64,
-    #[serde(default)]
-    pub withdraw_until_sec: Option<u64>,
-    #[serde(default)]
-    pub ended_at_sec: Option<u64>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct IncursionSiteWaveMeta {
-    #[serde(default = "default_one_u8")]
-    pub current_wave: u8,
-    #[serde(default = "default_three_u8")]
-    pub total_waves: u8,
-}
-
-fn default_one_u8() -> u8 {
-    1
-}
-fn default_three_u8() -> u8 {
-    3
-}
+pub use eve_db::{IncursionLifecycleMeta, IncursionSiteWaveMeta};
 
 pub(crate) fn build_incursion_npc_combat_state(
     sde: &eve_sde::SdeRegistry,
@@ -82,19 +54,7 @@ pub(crate) fn build_incursion_npc_combat_state(
     cs
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorldEventTaleRecord {
-    pub tale_id: i64,
-    pub template_id: i64,
-    pub template_class_id: String,
-    pub solar_system_id: SolarSystemId,
-    pub constellation_id: ConstellationId,
-    pub aggressor_faction_id: i64,
-    pub state: String,
-    pub influence: f64,
-    pub start_unix: u64,
-    pub end_unix: u64,
-}
+pub use eve_db::WorldEventTaleRecord;
 
 fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
@@ -430,10 +390,10 @@ pub async fn advance_incursion_wave_on_escort_kill(
                 );
                 let mut to_spawn = Vec::with_capacity(reinforcements.len() + 1);
                 if wave_meta.current_wave >= wave_meta.total_waves {
-                    to_spawn.push((site.boss_npc_ball_id, site.boss_type_id, site.position));
+                    to_spawn.push((site.boss_npc_ball_id, site.boss_type_id, DVec3::from_array(site.position)));
                 }
                 for r in reinforcements {
-                    to_spawn.push((r.npc_ball_id, r.type_id, site.position + DVec3::new(r.offset[0], r.offset[1], r.offset[2])));
+                    to_spawn.push((r.npc_ball_id, r.type_id, DVec3::from_array(site.position) + DVec3::new(r.offset[0], r.offset[1], r.offset[2])));
                     site.escort_spawns.push(r);
                 }
                 return Some(to_spawn);
@@ -468,20 +428,7 @@ pub(crate) fn compute_incursion_system_effects_in_snap(
         .solar_systems
         .get(&solar_system_id)
         .map(|s| s.constellation_id)?;
-    let raw_json = snap
-        .service_state_blobs
-        .get("incursions_state")
-        .map(|s| s.as_str())
-        .or_else(|| {
-            snap.owner_notes
-                .get(&-8_300_000_000_000)
-                .map(|n| n.note.as_str())
-        })?;
-    let reg = serde_json::from_str::<crate::services::pve_special_sites::PveSpecialSitesRegistry>(
-        raw_json,
-    )
-    .ok()?;
-    let inc = reg.incursions.get(&const_id)?;
+    let inc = snap.pve_special_sites.incursions.get(&const_id)?;
     if inc.influence <= 0.0
         || inc.mothership_defeated
         || inc.state == "Ended"
@@ -786,11 +733,11 @@ pub fn advance_incursion_lifecycles(ctx: &ServerContext) {
                             .get(&s.site_id)
                             .is_none_or(|w| w.current_wave >= w.total_waves);
                         if on_final_wave {
-                            spawn_balls.push((s.solar_system_id, s.boss_npc_ball_id, s.boss_type_id, s.position));
+                            spawn_balls.push((s.solar_system_id, s.boss_npc_ball_id, s.boss_type_id, DVec3::from_array(s.position)));
                         }
                         for esc in &s.escort_spawns {
                             if !esc.destroyed {
-                                let esc_pos = s.position + DVec3::new(esc.offset[0], esc.offset[1], esc.offset[2]);
+                                let esc_pos = DVec3::from_array(s.position) + DVec3::new(esc.offset[0], esc.offset[1], esc.offset[2]);
                                 spawn_balls.push((s.solar_system_id, esc.npc_ball_id, esc.type_id, esc_pos));
                             }
                         }

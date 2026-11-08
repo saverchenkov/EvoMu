@@ -61,19 +61,20 @@ fn state_corrupt_json_and_all_deployment_proximity_restrictions() {
     let ctx = test_ctx();
     let sde = &ctx.sde;
 
-    // 1. Corrupt owner_note JSON returns default state cleanly
+    // 1. Corrupt legacy owner_note JSON leaves typed state default cleanly during migration
     ctx.db.with_mut_snapshot(|snap| {
         snap.owner_notes.insert(
-            MOBILE_DEPLOYABLE_NOTE_ID,
+            -8_650_000_000_000,
             OwnerNoteRecord {
-                note_id: MOBILE_DEPLOYABLE_NOTE_ID,
-                character_id: MOBILE_DEPLOYABLE_NOTE_OWNER,
+                note_id: -8_650_000_000_000,
+                character_id: -86,
                 item_id: 0,
                 label: "S:MOBILE_DEPLOYABLE_RUNTIME_STATE".into(),
                 note: "{not-valid-json".into(),
                 timestamp_unix: 100,
             },
         );
+        snap.migrate_legacy_service_state();
     });
     assert!(read_deployable_state(&ctx).deployables.is_empty());
 

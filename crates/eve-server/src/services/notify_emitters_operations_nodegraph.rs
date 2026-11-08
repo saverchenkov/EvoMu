@@ -18,10 +18,8 @@ use crate::services::operations_manager_helpers::{
 };
 use eve_machonet::{service_roles, SessionState};
 use eve_proto::{BridgeRpcError, PyRep};
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-const CLIENT_NODE_GRAPH_SEQ_KEY: &str = "client_node_graphs:seq";
 const MAX_ACTIVE_CLIENT_GRAPHS: usize = 16;
 const MAX_BLACKBOARD_KEYS: usize = 64;
 
@@ -32,26 +30,16 @@ fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActiveClientNodeGraph {
-    pub instance_id: i64,
-    pub node_graph_id: i64,
-    pub category_id: i64,
-    pub operation_id: i64,
-    pub blackboard: BTreeMap<String, String>,
-}
-
-fn client_node_graphs_blob_key(char_id: i64) -> String {
-    format!("client_node_graphs:{char_id}")
-}
+pub use eve_db::ActiveClientNodeGraph;
 
 fn load_active_client_graphs(
     snap: &eve_db::WorldStateSnapshot,
     char_id: i64,
 ) -> BTreeMap<i64, ActiveClientNodeGraph> {
-    snap.service_state_blobs
-        .get(&client_node_graphs_blob_key(char_id))
-        .and_then(|j| serde_json::from_str(j).ok())
+    snap.node_graph_state
+        .client_node_graphs
+        .get(&char_id)
+        .cloned()
         .unwrap_or_default()
 }
 
@@ -60,9 +48,12 @@ fn save_active_client_graphs(
     char_id: i64,
     graphs: &BTreeMap<i64, ActiveClientNodeGraph>,
 ) {
-    if let Ok(json) = serde_json::to_string(graphs) {
-        snap.service_state_blobs
-            .insert(client_node_graphs_blob_key(char_id), json);
+    if graphs.is_empty() {
+        snap.node_graph_state.client_node_graphs.remove(&char_id);
+    } else {
+        snap.node_graph_state
+            .client_node_graphs
+            .insert(char_id, graphs.clone());
     }
 }
 
@@ -126,14 +117,13 @@ pub fn start_client_node_graph_instance(
                 "Maximum active client node graph instances reached",
             ));
         }
-        let seq = snap
-            .service_state_blobs
-            .get(CLIENT_NODE_GRAPH_SEQ_KEY)
-            .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(100_000)
+        let next_seq = snap
+            .node_graph_state
+            .client_node_graph_seq
+            .max(100_000)
             + 1;
-        snap.service_state_blobs
-            .insert(CLIENT_NODE_GRAPH_SEQ_KEY.into(), seq.to_string());
+        snap.node_graph_state.client_node_graph_seq = next_seq;
+        let seq = next_seq;
         let mut bounded_bb = BTreeMap::new();
         for (k, v) in initial_bb.into_iter().take(MAX_BLACKBOARD_KEYS) {
             bounded_bb.insert(k, v);

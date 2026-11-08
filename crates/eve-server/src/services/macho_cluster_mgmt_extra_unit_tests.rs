@@ -150,7 +150,7 @@ fn load_service_set_config_start_stop_and_total_stats_branches() {
 
     let mut gm_no_sys = gm_sess(90_000_001, None, None);
     ctx.db.with_mut_snapshot(|s| {
-        s.service_state_blobs.remove("load_service_state");
+        s.cluster_and_runtime.load_service_state = Default::default();
     });
     assert_eq!(
         handle(&ctx, &mut gm_no_sys, "loadService", "StartLoad", &[PyRep::Integer(2)], &kw)
@@ -201,19 +201,12 @@ fn session_mgr_raffle_seeding_db2_callproc_and_debug_exec() {
 
     // 1. sessionMgr.EndAllGameSessions & RemoveSessionsFromServer & PerformHorridSessionAttributeUpdate
     ctx.db.with_mut_snapshot(|s| {
-        s.service_state_blobs.insert(
-            "active_sessions".into(),
-            serde_json::to_string(&vec![77_001_i64, 88_001, 88_002]).unwrap(),
-        );
-        s.service_state_blobs.insert(
-            "session_registry".into(),
-            serde_json::to_string(&HashMap::from([
-                ("77001".to_string(), serde_json::json!({"ok": true})),
-                ("88001".to_string(), serde_json::json!({"ok": true})),
-                ("88002".to_string(), serde_json::json!({"ok": true})),
-            ]))
-            .unwrap(),
-        );
+        s.cluster_and_runtime.active_sessions = vec![77_001_i64, 88_001, 88_002];
+        s.cluster_and_runtime.session_registry = HashMap::from([
+            ("77001".to_string(), serde_json::json!({"ok": true})),
+            ("88001".to_string(), serde_json::json!({"ok": true})),
+            ("88002".to_string(), serde_json::json!({"ok": true})),
+        ]);
     });
     // RemoveSessionsFromServer for foreign node_id (e.g. 99) is a no-op
     handle(
@@ -242,9 +235,7 @@ fn session_mgr_raffle_seeding_db2_callproc_and_debug_exec() {
         .unwrap()
         .expect("EndAllGameSessions");
     ctx.db.with_snapshot(|s| {
-        let active: Vec<i64> =
-            serde_json::from_str(s.service_state_blobs.get("active_sessions").unwrap()).unwrap();
-        assert_eq!(active, vec![77_001]);
+        assert_eq!(s.cluster_and_runtime.active_sessions, vec![77_001]);
     });
     assert_eq!(
         handle(&ctx, &mut gm, "sessionMgr", "PerformHorridSessionAttributeUpdate", &[], &kw)
@@ -315,8 +306,7 @@ fn session_mgr_raffle_seeding_db2_callproc_and_debug_exec() {
             .any(|(ev, _)| ev == "OnSessionChanged")
     );
     ctx.db.with_snapshot(|s| {
-        let reg: HashMap<String, serde_json::Value> =
-            serde_json::from_str(s.service_state_blobs.get("session_registry").unwrap()).unwrap();
+        let reg = &s.cluster_and_runtime.session_registry;
         let entry = reg.get(&gm.session_id.to_string()).unwrap();
         assert_eq!(entry.get("corporation_id").and_then(|v| v.as_i64()), Some(98_000_777));
         assert_eq!(entry.get("corp_role").and_then(|v| v.as_u64()), Some(1));

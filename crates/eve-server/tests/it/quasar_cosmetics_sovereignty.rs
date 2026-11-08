@@ -167,7 +167,7 @@ async fn q_final_entitlements_faction_freelance_payment_stargate() {
             is_quick_pay: true,
             consumed: false,
         }];
-        s.service_state_blobs.insert("payment_tokens".to_string(), serde_json::to_string(&tokens).unwrap());
+        s.quasar_commerce.payment_tokens = tokens;
     });
     let mut sess = build_sess(40_003, 90_000_001, 98_000_001);
 

@@ -19,9 +19,12 @@ pub mod inventory;
 pub mod ledger;
 pub mod persistence;
 pub mod seed;
+pub mod service_domains;
 pub mod snapshot_ext;
 pub mod sqlite_store;
 pub mod types;
+
+pub use service_domains::*;
 
 #[cfg(test)]
 mod tests;

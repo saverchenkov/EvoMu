@@ -639,10 +639,10 @@ async fn test_alert_stat_logger_queue_and_tunneling_rpcs() {
         other => panic!("Unexpected GetLogModeForError shape: {other:?}"),
     }
     let persisted_modes = ctx.db.with_snapshot(|s| {
-        s.service_state_blobs.get("alert_log_modes").cloned()
+        s.cluster_and_runtime.alert_log_modes.clone()
     });
-    assert!(persisted_modes.is_some(), "alert_log_modes must be persisted");
-    assert!(persisted_modes.unwrap().contains("201"));
+    assert!(!persisted_modes.is_empty(), "alert_log_modes must be persisted");
+    assert!(persisted_modes.contains_key("201"));
 
     // 2. rpc:alert.SendProxyStackTraceAlert
     let proxy_alert_res = ctx
@@ -669,7 +669,7 @@ async fn test_alert_stat_logger_queue_and_tunneling_rpcs() {
         other => panic!("Unexpected SendProxyStackTraceAlert shape: {other:?}"),
     }
     let proxy_traces = ctx.db.with_snapshot(|s| {
-        s.service_state_blobs.get("alert_proxy_traces").cloned()
+        s.cluster_and_runtime.alert_proxy_traces.as_ref().map(|v| v.to_string())
     });
     assert!(proxy_traces.is_some(), "alert_proxy_traces must be persisted");
     assert!(proxy_traces.unwrap().contains("777888"));
@@ -766,10 +766,9 @@ async fn test_alert_stat_logger_queue_and_tunneling_rpcs() {
         .expect("clientStatLogger.LogString");
     assert_eq!(log_str_res, PyRep::None);
     let logged_strings = ctx.db.with_snapshot(|s| {
-        s.service_state_blobs.get("client_stat_logger:strings").cloned()
+        s.cluster_and_runtime.client_stat_logger_strings.clone()
     });
-    assert!(logged_strings.is_some());
-    assert!(logged_strings.unwrap().contains("jump_monitor:jump_done:30000142"));
+    assert!(logged_strings.iter().any(|s| s.contains("jump_monitor:jump_done:30000142")));
 
     // 6. rpc:externalQueueMgr.PublishProxyEvent (7 args)
     let queue_res = ctx
@@ -794,9 +793,9 @@ async fn test_alert_stat_logger_queue_and_tunneling_rpcs() {
         .expect("externalQueueMgr.PublishProxyEvent");
     assert_eq!(queue_res, PyRep::None);
     let queue_blob = ctx.db.with_snapshot(|s| {
-        s.service_state_blobs.get("external_queue_events").cloned()
+        serde_json::to_string(&s.cluster_and_runtime.external_queue_events).ok()
     });
-    assert!(queue_blob.is_some());
+    assert!(ctx.db.with_snapshot(|s| !s.cluster_and_runtime.external_queue_events.is_empty()));
     assert!(queue_blob.unwrap().contains("proxy_session_init"));
 
     // 7. rpc:machoNet.ReloadClientCodeHash (0 args)
@@ -816,16 +815,16 @@ async fn test_alert_stat_logger_queue_and_tunneling_rpcs() {
         PyRep::String(s) => assert!(!s.is_empty()),
         other => panic!("Unexpected ReloadClientCodeHash shape: {other:?}"),
     }
-    let hash_blob = ctx.db.with_snapshot(|s| {
-        s.service_state_blobs.get("macho_client_code_hash").cloned()
+    let has_hash = ctx.db.with_snapshot(|s| {
+        s.cluster_and_runtime.macho_client_code_hash.is_some()
     });
-    assert!(hash_blob.is_some());
+    assert!(has_hash);
 
     // 8. rpc:tcpRawProxyService.GetESPTunnelingAddressByNodeID (0 args -> (default_addr, node_map))
     ctx.db.with_mut_snapshot(|s| {
-        let mut table = HashMap::new();
+        let mut table = std::collections::BTreeMap::new();
         table.insert("42".to_string(), "10.0.0.42:28042".to_string());
-        s.service_state_blobs.insert("cluster_node_table".into(), serde_json::to_string(&table).unwrap());
+        s.cluster_and_runtime.cluster_node_table = Some(table);
     });
     let tunnel_res = ctx
         .dispatch_rpc(
@@ -878,13 +877,9 @@ async fn test_alert_stat_logger_queue_and_tunneling_rpcs() {
         elapsed_after >= elapsed_before + 4.0,
         "StartLoad must step target system (before={elapsed_before}, after={elapsed_after})"
     );
-    let load_blob = ctx.db.with_snapshot(|s| {
-        s.service_state_blobs.get("load_service_state").cloned()
-    });
-    assert!(load_blob.is_some());
-    let load_blob_str = load_blob.unwrap();
-    assert!(load_blob_str.contains("\"active\":true"));
-    assert!(load_blob_str.contains("\"ticks_executed\":4"));
+    let load_state = ctx.db.with_snapshot(|s| s.cluster_and_runtime.load_service_state.clone());
+    assert!(load_state.active);
+    assert_eq!(load_state.ticks_executed, 4);
 
     // 10. rpc:loadService.StopLoad
     let stop_load_res = ctx
@@ -892,10 +887,8 @@ async fn test_alert_stat_logger_queue_and_tunneling_rpcs() {
         .await
         .expect("loadService.StopLoad");
     assert_eq!(stop_load_res, PyRep::None);
-    let load_blob2 = ctx.db.with_snapshot(|s| {
-        s.service_state_blobs.get("load_service_state").cloned()
-    });
-    assert!(load_blob2.unwrap().contains("\"active\":false"));
+    let load_active2 = ctx.db.with_snapshot(|s| s.cluster_and_runtime.load_service_state.active);
+    assert!(!load_active2);
 }
 
 #[tokio::test]
@@ -983,8 +976,8 @@ async fn test_session_mgr_user_svc_and_db2_rpcs() {
         ("EndAllGameSessions".into(), "All game sessions ended by administrator".into())
     );
     assert!(!ctx.session_closers.read().unwrap().contains_key(&2002));
-    let active_blob = ctx.db.with_snapshot(|s| s.service_state_blobs.get("active_sessions").cloned());
-    assert_eq!(active_blob.as_deref(), Some("[]"));
+    let active_empty = ctx.db.with_snapshot(|s| s.cluster_and_runtime.active_sessions.is_empty());
+    assert!(active_empty);
 
     // 14. rpc:sessionMgr.RemoveSessionsFromServer
     let unpriv_rm_err = ctx
@@ -997,7 +990,7 @@ async fn test_session_mgr_user_svc_and_db2_rpcs() {
     ctx.register_session_closer(1002, tx_1002);
     ctx.register_session_closer(1003, tx_1003);
     ctx.db.with_mut_snapshot(|s| {
-        s.service_state_blobs.insert("active_sessions".into(), "[1001, 1002, 1003]".into());
+        s.cluster_and_runtime.active_sessions = vec![1001, 1002, 1003];
     });
     let rm_sessions_res = ctx
         .dispatch_rpc(&mut sess1, "sessionMgr", None, "RemoveSessionsFromServer", &[PyRep::Integer(1), PyRep::List(vec![PyRep::Integer(1002), PyRep::Integer(1003)])], &kw, None)
@@ -1008,9 +1001,9 @@ async fn test_session_mgr_user_svc_and_db2_rpcs() {
     assert_eq!(rx_1003.try_recv().expect("1003 closed").0, "RemoveSession");
     assert!(!ctx.session_closers.read().unwrap().contains_key(&1002));
     assert!(!ctx.session_closers.read().unwrap().contains_key(&1003));
-    let remaining_sessions = ctx.db.with_snapshot(|s| s.service_state_blobs.get("active_sessions").cloned().unwrap());
-    assert!(remaining_sessions.contains("1001"));
-    assert!(!remaining_sessions.contains("1002"));
+    let remaining_sessions = ctx.db.with_snapshot(|s| s.cluster_and_runtime.active_sessions.clone());
+    assert!(remaining_sessions.contains(&1001));
+    assert!(!remaining_sessions.contains(&1002));
 
     // 15. rpc:userSvc.ProcessEVESessionCreated
     let wrong_char_err = ctx
@@ -1024,8 +1017,7 @@ async fn test_session_mgr_user_svc_and_db2_rpcs() {
         .await
         .expect("userSvc.ProcessEVESessionCreated");
     assert_eq!(process_sess_res, PyRep::None);
-    let user_sess_blob = ctx.db.with_snapshot(|s| s.service_state_blobs.get("user_sessions").cloned().unwrap());
-    let entries: Vec<serde_json::Value> = serde_json::from_str(&user_sess_blob).expect("valid user_sessions json");
+    let entries = ctx.db.with_snapshot(|s| s.cluster_and_runtime.user_sessions.clone());
     assert!(entries.iter().any(|e| {
         e["user_id"].as_u64() == sess1.user_id
             && e["session_id"].as_u64() == Some(1001)

@@ -46,12 +46,10 @@ fn unix_to_filetime_and_character_selection_branches() {
     // Populate MCT slots (one expired, one active), skill queue, unread/read/deleted mails, resculpt, active/inactive wars
     let now = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(
-            format!("mct_slots:{uid}"),
-            serde_json::to_string(&vec![now.saturating_sub(50), now + 3_600]).unwrap(),
-        );
-        snap.service_state_blobs
-            .insert(format!("resculpt_pending:{cid}"), "1".into());
+        snap.cluster_and_runtime
+            .mct_slots
+            .insert(uid as u64, vec![now.saturating_sub(50), now + 3_600]);
+        snap.cluster_and_runtime.resculpt_pending.insert(cid);
         snap.skill_queues.insert(
             cid,
             vec![SkillQueueEntry {

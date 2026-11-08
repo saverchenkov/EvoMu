@@ -198,7 +198,7 @@ async fn test_pve_incursion_payout_fleet_and_influence_scaling() {
     let (boss_bid, site_id, site_pos) = with_pve_special_reg(&ctx, |reg| {
         let inc = &reg.incursions[&target_cid];
         let site = inc.sites.iter().find(|s| s.tier == "Vanguard").unwrap();
-        (site.boss_npc_ball_id, site.site_id.clone(), site.position)
+        (site.boss_npc_ball_id, site.site_id.clone(), DVec3::from_array(site.position))
     });
 
     let vg_sys = ctx.systems.get_or_spawn(vg_sys_id);
@@ -369,7 +369,7 @@ async fn test_pve_incursion_mothership_multiwave_and_conclusion() {
     // Complete HQ site waves to bring influence from 1.0 down to 0.0
     let (hq_site_id, hq_pos) = with_pve_special_reg(&ctx, |reg| {
         let s = reg.incursions[&target_cid].sites.iter().find(|s| s.tier == "Headquarters").unwrap();
-        (s.site_id.clone(), s.position)
+        (s.site_id.clone(), DVec3::from_array(s.position))
     });
     hq_sys.set_ball_position(710_001_005, hq_pos).await;
 
@@ -412,7 +412,7 @@ async fn test_pve_incursion_mothership_multiwave_and_conclusion() {
 
     // Move player ship to Mothership site grid, clear escorts, and kill The Kundalini Manifest
     crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys_id, &ms_site_id).await;
-    hq_sys.set_ball_position(710_001_005, ms_pos).await;
+    hq_sys.set_ball_position(710_001_005, DVec3::from_array(ms_pos)).await;
     let pre_ms_bal = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance.0);
     let pre_ms_lp = ctx.db.with_snapshot(|s| s.characters[&90_000_001].loyalty_points.get(&1_000_125).copied().unwrap_or(0));
 
@@ -463,7 +463,7 @@ async fn test_pve_incursion_concurrency_and_aoe_progression() {
 
     let (boss_bid, site_id, site_pos) = with_pve_special_reg(&ctx, |reg| {
         let site = reg.incursions[&target_cid].sites.iter().find(|s| s.tier == "Vanguard").unwrap();
-        (site.boss_npc_ball_id, site.site_id.clone(), site.position)
+        (site.boss_npc_ball_id, site.site_id.clone(), DVec3::from_array(site.position))
     });
 
     let vg_sys = ctx.systems.get_or_spawn(vg_sys_id);

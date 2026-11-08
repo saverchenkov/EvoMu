@@ -35,7 +35,6 @@ use crate::services::operations_manager::{
 use eve_db::{InventoryFlag, WorldStateSnapshot};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// V24 client root AIR NPE node graph (`[AIR] 0.0 - Client Master`).
@@ -318,37 +317,7 @@ pub const AIR_NPE_CHECKPOINTS: &[AirNpeCheckpointSpec] = &[
     },
 ];
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AirNpeRunnerState {
-    pub char_id: i64,
-    pub state_id: i64,
-    pub active_server_graph_id: u32,
-    pub executed_server_graphs: Vec<u32>,
-    pub active_act: u8,
-    pub scene_index: u8,
-    pub checkpoint_id: u32,
-    pub completed_checkpoints: Vec<u32>,
-    pub master_client_graph_id: i64,
-    pub master_client_instance_id: Option<i64>,
-    pub act_client_graph_id: Option<i64>,
-    pub act_client_instance_id: Option<i64>,
-    pub scene_client_graph_id: Option<i64>,
-    pub scene_client_instance_id: Option<i64>,
-    pub pocket_instance_id: Option<i64>,
-    pub pocket_dungeon_id: Option<u32>,
-    pub pocket_solar_system_id: Option<u32>,
-    pub origin_station_id: Option<i64>,
-    pub origin_solar_system_id: Option<u32>,
-    pub intro_cinematic_completed: bool,
-    pub moved_into_pocket: bool,
-    pub completed: bool,
-    pub skipped: bool,
-    pub blackboard: BTreeMap<String, String>,
-}
-
-fn runner_blob_key(char_id: i64) -> String {
-    format!("air_npe_runner:{char_id}")
-}
+pub use eve_db::AirNpeRunnerState;
 
 /// Returns `true` if `graph_id` belongs to the AIR NPE client or server node-graph family.
 pub fn is_air_npe_graph_id(graph_id: i64) -> bool {
@@ -371,16 +340,13 @@ pub fn load_runner_state(
     snap: &WorldStateSnapshot,
     char_id: i64,
 ) -> Option<AirNpeRunnerState> {
-    snap.service_state_blobs
-        .get(&runner_blob_key(char_id))
-        .and_then(|json| serde_json::from_str(json).ok())
+    snap.node_graph_state.air_npe_runners.get(&char_id).cloned()
 }
 
 pub(crate) fn save_runner_state(snap: &mut WorldStateSnapshot, state: &AirNpeRunnerState) {
-    if let Ok(json) = serde_json::to_string(state) {
-        snap.service_state_blobs
-            .insert(runner_blob_key(state.char_id), json);
-    }
+    snap.node_graph_state
+        .air_npe_runners
+        .insert(state.char_id, state.clone());
 }
 
 fn bb_to_py_dict(bb: &BTreeMap<String, String>) -> PyRep {

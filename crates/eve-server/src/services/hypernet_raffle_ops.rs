@@ -282,11 +282,7 @@ fn handle_raffle_subscription(
     let key = format!("{}:{}", sub_type, target_id);
 
     ctx.db.with_mut_snapshot(|snap| {
-        let mut subs: BTreeMap<String, Vec<i64>> = snap
-            .service_state_blobs
-            .get("hypernet_subs")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
+        let subs = &mut snap.fleet_and_social_ops.hypernet_subs;
 
         if is_subscribe {
             if subs.len() >= 256 && !subs.contains_key(&key) {
@@ -303,10 +299,6 @@ fn handle_raffle_subscription(
             if entry.is_empty() {
                 subs.remove(&key);
             }
-        }
-
-        if let Ok(js) = serde_json::to_string(&subs) {
-            snap.service_state_blobs.insert("hypernet_subs".into(), js);
         }
     });
     Some(Ok(PyRep::None))
@@ -591,12 +583,8 @@ pub fn handle(
                     let kv = raffle_to_keyval(&rec);
                     let mut targets = vec![char_id];
                     ctx.db.with_snapshot(|snap| {
-                        if let Some(s) = snap.service_state_blobs.get("hypernet_subs") {
-                            if let Ok(subs) = serde_json::from_str::<HashMap<String, Vec<i64>>>(s) {
-                                if let Some(viewers) = subs.get("raffle:0") {
-                                    targets.extend(viewers);
-                                }
-                            }
+                        if let Some(viewers) = snap.fleet_and_social_ops.hypernet_subs.get("raffle:0") {
+                            targets.extend(viewers);
                         }
                     });
                     targets.sort_unstable();
@@ -748,18 +736,15 @@ pub fn handle(
                     let mut raffle_targets = vec![char_id, r.creator_id];
                     let mut ticket_targets = vec![char_id, r.creator_id];
                     ctx.db.with_snapshot(|snap| {
-                        if let Some(s) = snap.service_state_blobs.get("hypernet_subs") {
-                            if let Ok(subs) = serde_json::from_str::<BTreeMap<String, Vec<i64>>>(s) {
-                                for k in ["raffle:0".to_string(), format!("raffle:{}", r.raffle_id)] {
-                                    if let Some(viewers) = subs.get(&k) {
-                                        raffle_targets.extend(viewers);
-                                    }
-                                }
-                                for k in ["tickets:0".to_string(), format!("tickets:{}", r.raffle_id)] {
-                                    if let Some(viewers) = subs.get(&k) {
-                                        ticket_targets.extend(viewers);
-                                    }
-                                }
+                        let subs = &snap.fleet_and_social_ops.hypernet_subs;
+                        for k in ["raffle:0".to_string(), format!("raffle:{}", r.raffle_id)] {
+                            if let Some(viewers) = subs.get(&k) {
+                                raffle_targets.extend(viewers);
+                            }
+                        }
+                        for k in ["tickets:0".to_string(), format!("tickets:{}", r.raffle_id)] {
+                            if let Some(viewers) = subs.get(&k) {
+                                ticket_targets.extend(viewers);
                             }
                         }
                     });
@@ -1290,12 +1275,8 @@ pub fn handle_character_seeding(
 
         let mut targets = vec![target_char_id];
         ctx.db.with_snapshot(|snap| {
-            if let Some(s) = snap.service_state_blobs.get("hypernet_subs") {
-                if let Ok(subs) = serde_json::from_str::<HashMap<String, Vec<i64>>>(s) {
-                    if let Some(viewers) = subs.get("raffle:0") {
-                        targets.extend(viewers);
-                    }
-                }
+            if let Some(viewers) = snap.fleet_and_social_ops.hypernet_subs.get("raffle:0") {
+                targets.extend(viewers);
             }
         });
         targets.sort_unstable();

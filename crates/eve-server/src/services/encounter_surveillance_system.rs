@@ -359,10 +359,7 @@ pub async fn handle_ess_link(
         let is_reserve = method == "AttemptLinkToReserveBank";
         let mut unlocked_until_new: Option<u64> = None;
         let mut clear_unlock = false;
-        let mut pulse_st = crate::services::space_destiny::get_ess_reserve_pulses_from_blobs(
-            &snap.service_state_blobs,
-            sys_id,
-        );
+        let mut pulse_st = crate::services::space_destiny::get_ess_reserve_pulses(snap, sys_id);
         let eff_unlocked_until = pulse_st.unlocked_until_unix.max(unlocked_until);
         let is_unlocked = eff_unlocked_until > now_unix
             || (pulse_st.unlocked_until_unix == 0 && pulse_st.pulses_remaining > 0);
@@ -457,11 +454,7 @@ pub async fn handle_ess_link(
                 pulse_st.reserve_linked_character_id = Some(char_id);
                 pulse_st.reserve_link_started_tick = Some(current_tick);
                 pulse_st.link_started_unix = Some(now_unix);
-                crate::services::space_destiny::set_ess_reserve_pulses_in_blobs(
-                    &mut snap.service_state_blobs,
-                    sys_id,
-                    &pulse_st,
-                );
+                crate::services::space_destiny::set_ess_reserve_pulses(snap, sys_id, &pulse_st);
             } else {
                 st.ess_linked_character_id = Some(char_id);
                 st.ess_link_started_tick = Some(current_tick);
@@ -514,11 +507,7 @@ pub async fn handle_ess_link(
                     clear_unlock = true;
                 }
             }
-            crate::services::space_destiny::set_ess_reserve_pulses_in_blobs(
-                &mut snap.service_state_blobs,
-                sys_id,
-                &pulse_st,
-            );
+            crate::services::space_destiny::set_ess_reserve_pulses(snap, sys_id, &pulse_st);
             IskCents(p)
         } else {
             st.ess_linked_character_id = None;

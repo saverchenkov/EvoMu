@@ -16,11 +16,9 @@ const MAX_WATCHLIST_SIZE: usize = 15;
 
 pub(crate) fn sync_fleet_setups_to_db(ctx: &ServerContext) {
     let map = ctx.fleet_extras.lock().unwrap().saved_setups.clone();
-    if let Ok(json) = serde_json::to_string(&map) {
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.service_state_blobs.insert("fleet_saved_setups".into(), json);
-        });
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleet_and_social_ops.fleet_saved_setups = map;
+    });
 }
 
 pub(crate) fn ensure_fleet_setups_loaded(ctx: &ServerContext) {
@@ -28,9 +26,8 @@ pub(crate) fn ensure_fleet_setups_loaded(ctx: &ServerContext) {
         return;
     }
     let persisted = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs.get("fleet_saved_setups").and_then(|j| {
-            serde_json::from_str::<HashMap<i64, HashMap<String, FleetSetupRecord>>>(j).ok()
-        })
+        (!snap.fleet_and_social_ops.fleet_saved_setups.is_empty())
+            .then(|| snap.fleet_and_social_ops.fleet_saved_setups.clone())
     });
     if let Some(map) = persisted {
         let mut ex = ctx.fleet_extras.lock().unwrap();
@@ -42,11 +39,9 @@ pub(crate) fn ensure_fleet_setups_loaded(ctx: &ServerContext) {
 
 pub(crate) fn sync_fleet_formations_to_db(ctx: &ServerContext) {
     let map = ctx.fleet_extras.lock().unwrap().stored_formations.clone();
-    if let Ok(json) = serde_json::to_string(&map) {
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.service_state_blobs.insert("fleet_stored_formations".into(), json);
-        });
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleet_and_social_ops.fleet_stored_formations = map;
+    });
 }
 
 pub(crate) fn ensure_fleet_formations_loaded(ctx: &ServerContext) {
@@ -54,9 +49,8 @@ pub(crate) fn ensure_fleet_formations_loaded(ctx: &ServerContext) {
         return;
     }
     let persisted = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("fleet_stored_formations")
-            .and_then(|j| serde_json::from_str::<HashMap<i64, (i64, f64, f64)>>(j).ok())
+        (!snap.fleet_and_social_ops.fleet_stored_formations.is_empty())
+            .then(|| snap.fleet_and_social_ops.fleet_stored_formations.clone())
     });
     if let Some(map) = persisted {
         let mut ex = ctx.fleet_extras.lock().unwrap();
@@ -380,34 +374,26 @@ fn require_fleet_advert_auth(ctx: &ServerContext, session: &SessionState) -> Res
 fn sync_fleet_advert_snapshot_to_db(ctx: &ServerContext, fleet_id: i64) {
     let ad_opt = ctx.fleet_extras.lock().unwrap().adverts.get(&fleet_id).cloned();
     ctx.db.with_mut_snapshot(|snap| {
-        let mut adverts: HashMap<String, serde_json::Value> = snap
-            .service_state_blobs
-            .get("fleet_adverts")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
         if let Some(ad) = ad_opt {
             let mut allowed: Vec<i64> = ad.allowed_entities.into_iter().collect();
             allowed.sort_unstable();
-            adverts.insert(
-                fleet_id.to_string(),
-                serde_json::json!({
-                    "fleet_id": ad.fleet_id,
-                    "leader_id": ad.leader_id,
-                    "fleet_name": ad.fleet_name,
-                    "description": ad.description,
-                    "solar_system_id": ad.solar_system_id,
-                    "invite_scope": ad.invite_scope,
-                    "auto_join": ad.auto_join,
-                    "min_standing": ad.min_standing,
-                    "min_security": ad.min_security,
-                    "allowed_entities": allowed,
-                }),
+            snap.fleet_and_social_ops.fleet_adverts.insert(
+                fleet_id,
+                eve_db::FleetAdvertRecord {
+                    fleet_id: ad.fleet_id,
+                    leader_id: ad.leader_id,
+                    fleet_name: ad.fleet_name,
+                    description: ad.description,
+                    solar_system_id: ad.solar_system_id,
+                    invite_scope: ad.invite_scope,
+                    auto_join: ad.auto_join,
+                    min_standing: ad.min_standing,
+                    min_security: ad.min_security,
+                    allowed_entities: allowed,
+                },
             );
         } else {
-            adverts.remove(&fleet_id.to_string());
-        }
-        if let Ok(json) = serde_json::to_string(&adverts) {
-            snap.service_state_blobs.insert("fleet_adverts".into(), json);
+            snap.fleet_and_social_ops.fleet_adverts.remove(&fleet_id);
         }
     });
 }

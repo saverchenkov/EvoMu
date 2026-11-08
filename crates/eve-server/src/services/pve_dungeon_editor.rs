@@ -7,67 +7,11 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::SolarSystemId;
 use glam::DVec3;
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
-const DUNGEON_EDITOR_BLOB_KEY: &str = "dungeon_editor_store";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DungeonRoomObject {
-    pub object_id: i64,
-    pub room_id: i64,
-    pub type_id: u32,
-    pub quantity: i64,
-    pub radius: f64,
-    pub x: f64,
-    pub y: f64,
-    pub z: f64,
-    pub yaw: f64,
-    pub pitch: f64,
-    pub roll: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DungeonEditorRoom {
-    pub room_id: i64,
-    pub room_name: String,
-    pub dungeon_id: i64,
-    pub objects: Vec<DungeonRoomObject>,
-    #[serde(default)]
-    pub disallow_mwd: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct GmActiveEditorState {
-    pub dungeon_id: Option<i64>,
-    pub room_id: Option<i64>,
-    pub godmode: bool,
-    pub selected_object_ids: Vec<i64>,
-    pub spawned_ball_ids: Vec<i64>,
-    pub solar_system_id: Option<u32>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DungeonEditorStore {
-    pub rooms_by_dungeon: BTreeMap<i64, Vec<DungeonEditorRoom>>,
-    #[serde(default)]
-    pub dungeon_disallow_mwd: BTreeMap<i64, bool>,
-    pub active_editors: BTreeMap<i64, GmActiveEditorState>,
-    pub next_custom_room_id: i64,
-    pub next_custom_object_id: i64,
-}
-
-impl Default for DungeonEditorStore {
-    fn default() -> Self {
-        Self {
-            rooms_by_dungeon: BTreeMap::new(),
-            dungeon_disallow_mwd: BTreeMap::new(),
-            active_editors: BTreeMap::new(),
-            next_custom_room_id: 9_000_001,
-            next_custom_object_id: 1_965_000_001,
-        }
-    }
-}
+pub use eve_db::{
+    DungeonEditorRoom, DungeonEditorStore, DungeonRoomObject, GmActiveEditorState,
+};
 
 pub fn set_dungeon_disallow_mwd(ctx: &ServerContext, dungeon_id: i64, disallow: bool) {
     with_dungeon_editor_store(ctx, |store| {
@@ -206,19 +150,8 @@ pub fn with_dungeon_editor_store<R>(
     ctx: &ServerContext,
     f: impl FnOnce(&mut DungeonEditorStore) -> R,
 ) -> R {
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut store: DungeonEditorStore = snap
-            .service_state_blobs
-            .get(DUNGEON_EDITOR_BLOB_KEY)
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
-        let out = f(&mut store);
-        if let Ok(json) = serde_json::to_string(&store) {
-            snap.service_state_blobs
-                .insert(DUNGEON_EDITOR_BLOB_KEY.to_string(), json);
-        }
-        out
-    })
+    ctx.db
+        .with_mut_snapshot(|snap| f(&mut snap.dungeon_editor))
 }
 
 pub fn ensure_dungeon_rooms_seeded(

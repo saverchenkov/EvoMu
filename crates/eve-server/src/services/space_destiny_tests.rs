@@ -154,12 +154,6 @@ fn dict_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 #[test]
 fn ess_reserve_pulse_blob_and_snapshot_roundtrip() {
     let ctx = test_ctx();
-    let mut blobs = HashMap::new();
-    let def = get_ess_reserve_pulses_from_blobs(&blobs, 30000142);
-    assert_eq!(def.pulses_total, 0);
-    assert_eq!(def.pulses_remaining, 0);
-    assert!(def.reserve_linked_character_id.is_none());
-
     let state = EssReservePulseState {
         last_pulse_sec: Some(1_700_000_123),
         pulses_remaining: 31,
@@ -168,18 +162,19 @@ fn ess_reserve_pulse_blob_and_snapshot_roundtrip() {
         reserve_linked_character_id: Some(9001),
         ..Default::default()
     };
-    set_ess_reserve_pulses_in_blobs(&mut blobs, 30001234, &state);
-    let parsed = get_ess_reserve_pulses_from_blobs(&blobs, 30001234);
-    assert_eq!(parsed.last_pulse_sec, Some(1_700_000_123));
-    assert_eq!(parsed.pulses_remaining, 31);
-    assert_eq!(parsed.pulses_total, 45);
-    assert_eq!(parsed.unlocked_until_unix, 1_700_002_823);
-    assert_eq!(parsed.reserve_linked_character_id, Some(9001));
 
     ctx.db.with_mut_snapshot(|snap| {
+        let def = get_ess_reserve_pulses(snap, 30000142);
+        assert_eq!(def.pulses_total, 0);
+        assert_eq!(def.pulses_remaining, 0);
+        assert!(def.reserve_linked_character_id.is_none());
+
         set_ess_reserve_pulses(snap, 30001234, &state);
         let snap_read = get_ess_reserve_pulses(snap, 30001234);
+        assert_eq!(snap_read.last_pulse_sec, Some(1_700_000_123));
         assert_eq!(snap_read.pulses_remaining, 31);
+        assert_eq!(snap_read.pulses_total, 45);
+        assert_eq!(snap_read.unlocked_until_unix, 1_700_002_823);
         assert_eq!(snap_read.reserve_linked_character_id, Some(9001));
     });
 }

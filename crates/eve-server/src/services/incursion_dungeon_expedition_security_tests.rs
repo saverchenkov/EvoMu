@@ -84,7 +84,7 @@ async fn r7_tc_p1_454_incursion_mothership_despawn_rotates_ball_ids_and_rejects_
                     killer_fleet_id: None,
                     completed_count: 0,
                     locked_until_low_influence: true,
-                    position: DVec3::new(1_000_000.0, 0.0, 0.0),
+                    position: [1_000_000.0, 0.0, 0.0],
                 }],
             },
         );

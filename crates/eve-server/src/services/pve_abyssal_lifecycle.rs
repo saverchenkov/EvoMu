@@ -9,9 +9,8 @@ use crate::services::pve_abyssal_hazards::resolve_character_home_station_and_sys
 use crate::services::pve_abyssal_pylons::{
     build_fitted_ship_space_ball, destroy_pod_and_respawn_faction_corvette_in_snap,
 };
-use crate::services::pve_special_sites::{
-    spec_now_sec, with_pve_special_reg, VoidSpaceSessionRecord,
-};
+pub use eve_db::VoidSpaceSessionRecord;
+use crate::services::pve_special_sites_abyssal::{read_abyssal_state, with_abyssal_state};
 use eve_proto::PyRep;
 use eve_sde::SolarSystemId;
 use glam::DVec3;
@@ -52,8 +51,8 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
     abyssal_sys: SolarSystemId,
     now_unix: u64,
 ) -> SolarSystemId {
-    let already_origin = with_pve_special_reg(ctx, |reg| {
-        reg.abyssal_pockets
+    let already_origin = read_abyssal_state(ctx, |st| {
+        st.pockets
             .get(&char_id)
             .filter(|p| p.collapsed_destroyed)
             .map(|p| p.origin_solar_system_id)
@@ -61,9 +60,9 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
     if let Some(origin_sys) = already_origin {
         return origin_sys;
     }
-    let pocket_cleanup = with_pve_special_reg(ctx, |reg| {
+    let pocket_cleanup = with_abyssal_state(ctx, |st| {
         let (pid, pocket_sys, origin_sys, bound_tid, npcs) = {
-            let p = reg.abyssal_pockets.get_mut(&char_id)?;
+            let p = st.pockets.get_mut(&char_id)?;
             p.collapsed_destroyed = true;
             p.completed = true;
             let npcs: Vec<i64> = p
@@ -80,7 +79,7 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
             )
         };
         let mut coop_pilots: Vec<(CharacterId, ItemId)> = vec![(char_id, ship_id)];
-        for other in reg.abyssal_pockets.values_mut() {
+        for other in st.pockets.values_mut() {
             if other.pocket_id == pid
                 && other.character_id != char_id
                 && !other.collapsed_destroyed
@@ -91,8 +90,8 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
                 coop_pilots.push((other.character_id, other.ship_id));
             }
         }
-        let any_other_alive = reg
-            .abyssal_pockets
+        let any_other_alive = st
+            .pockets
             .values()
             .any(|other| other.pocket_id == pid && !other.completed && !other.collapsed_destroyed);
         let mut trace_ids = Vec::new();
@@ -100,7 +99,7 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
             if bound_tid > 0 {
                 trace_ids.push(bound_tid);
             }
-            reg.abyssal_traces.retain(|&tid, t| {
+            st.traces.retain(|&tid, t| {
                 if t.pocket_id == Some(pid) || (bound_tid > 0 && tid == bound_tid) {
                     if !trace_ids.contains(&tid) {
                         trace_ids.push(tid);
@@ -300,13 +299,13 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
         )>,
         Vec<(i64, SolarSystemId, Vec<i64>)>,
         Vec<(SolarSystemId, i64)>,
-    ) = with_pve_special_reg(ctx, |reg| {
+    ) = with_abyssal_state(ctx, |st| {
         let mut out = Vec::new();
         let mut seen_pids = HashSet::new();
         let mut cleanups = Vec::new();
         let mut traces = Vec::new();
         let mut bound_by_pid: HashMap<i64, (SolarSystemId, i64)> = HashMap::new();
-        for p in reg.abyssal_pockets.values_mut() {
+        for p in st.pockets.values_mut() {
             if !p.completed && !p.collapsed_destroyed {
                 p.completed = true;
                 out.push((
@@ -332,7 +331,7 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
             }
         }
         if !seen_pids.is_empty() {
-            reg.abyssal_traces.retain(|&tid, t| {
+            st.traces.retain(|&tid, t| {
                 let matches_evac = t.pocket_id.is_some_and(|pid| seen_pids.contains(&pid))
                     || bound_by_pid.values().any(|&(_, btid)| btid == tid);
                 if matches_evac {
@@ -490,8 +489,8 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
         }
     }
     for abyss_sys in closed_abyss_systems {
-        let any_active_in_sys = with_pve_special_reg(ctx, |reg| {
-            reg.abyssal_pockets.values().any(|p| {
+        let any_active_in_sys = read_abyssal_state(ctx, |st| {
+            st.pockets.values().any(|p| {
                 p.abyssal_solar_system_id == abyss_sys && !p.completed && !p.collapsed_destroyed
             })
         });
@@ -549,8 +548,8 @@ pub fn evacuate_void_space_session_sync(
     vs: &VoidSpaceSessionRecord,
     _now_unix: u64,
 ) -> SolarSystemId {
-    with_pve_special_reg(ctx, |reg| {
-        reg.void_space_sessions.remove(&char_id);
+    with_abyssal_state(ctx, |st| {
+        st.void_space_sessions.remove(&char_id);
     });
     crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
 
@@ -563,9 +562,9 @@ pub fn evacuate_void_space_session_sync(
     let (was_in_void, eff_ship_id, ship_type, finished_content_id) =
         ctx.db.with_mut_snapshot(|snap| {
             let cid = snap
-                .service_state_blobs
-                .remove(&format!("void_space_content:{char_id}"))
-                .and_then(|s| s.parse::<i64>().ok())
+                .abyssal_state
+                .void_space_content
+                .remove(&char_id)
                 .unwrap_or(vs.target_id);
             let Some(ch) = snap.characters.get_mut(&char_id) else {
                 return (false, vs.ship_id, 621_u32, cid);
@@ -652,13 +651,13 @@ pub fn evacuate_void_space_session_sync(
 
 /// Sweeps any expired `void_space_sessions` during cluster time progression.
 pub fn sweep_expired_void_space_sessions_sync(ctx: &ServerContext, now_unix: u64) {
-    if !crate::services::pve_special_sites::read_pve_special_reg(ctx, |reg| {
-        reg.void_space_sessions.values().any(|vs| vs.expires_at_sec > 0 && now_unix >= vs.expires_at_sec)
+    if !read_abyssal_state(ctx, |st| {
+        st.void_space_sessions.values().any(|vs| vs.expires_at_sec > 0 && now_unix >= vs.expires_at_sec)
     }) {
         return;
     }
-    let expired: Vec<VoidSpaceSessionRecord> = with_pve_special_reg(ctx, |reg| {
-        let due_cids: Vec<CharacterId> = reg
+    let expired: Vec<VoidSpaceSessionRecord> = with_abyssal_state(ctx, |st| {
+        let due_cids: Vec<CharacterId> = st
             .void_space_sessions
             .iter()
             .filter(|(_, vs)| vs.expires_at_sec > 0 && now_unix >= vs.expires_at_sec)
@@ -666,7 +665,7 @@ pub fn sweep_expired_void_space_sessions_sync(ctx: &ServerContext, now_unix: u64
             .collect();
         due_cids
             .into_iter()
-            .filter_map(|cid| reg.void_space_sessions.remove(&cid))
+            .filter_map(|cid| st.void_space_sessions.remove(&cid))
             .collect()
     });
     for vs in expired {
@@ -696,9 +695,9 @@ pub fn reconcile_abyssal_login(
     if !(32_000_000..33_000_000).contains(&cur_sys) {
         return cur_sys;
     }
-    let has_sp6_only = with_pve_special_reg(ctx, |reg| {
-        !reg.abyssal_pockets.contains_key(&char_id)
-            && !reg.void_space_sessions.contains_key(&char_id)
+    let has_sp6_only = read_abyssal_state(ctx, |st| {
+        !st.pockets.contains_key(&char_id)
+            && !st.void_space_sessions.contains_key(&char_id)
     }) && crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| {
         st.abyssal_sessions.contains_key(&char_id)
     });
@@ -708,17 +707,20 @@ pub fn reconcile_abyssal_login(
     let fallback_sys = ctx.db.with_snapshot(|snap| {
         resolve_character_home_station_and_system(snap, &ctx.sde, char_id).1
     });
-    let action = with_pve_special_reg(ctx, |reg| {
-        let now = spec_now_sec(reg);
+    let now = {
+        let u = ctx.now_unix();
+        if u > 0 { u } else { 1_775_000_000 }
+    };
+    let action = read_abyssal_state(ctx, |st| {
         if cur_sys == VOID_SPACE_SYSTEM_ID {
-            if let Some(vs) = reg.void_space_sessions.get(&char_id).cloned() {
+            if let Some(vs) = st.void_space_sessions.get(&char_id).cloned() {
                 if vs.expires_at_sec == 0 || now < vs.expires_at_sec {
                     return AbyssalLoginAction::Active(VOID_SPACE_SYSTEM_ID);
                 }
                 return AbyssalLoginAction::EvacuatedVoid(vs);
             }
         }
-        if let Some(p) = reg.abyssal_pockets.get_mut(&char_id) {
+        if let Some(p) = st.pockets.get(&char_id) {
             if !p.completed && !p.collapsed_destroyed && now < p.collapse_at_sec {
                 return AbyssalLoginAction::Active(p.abyssal_solar_system_id);
             }

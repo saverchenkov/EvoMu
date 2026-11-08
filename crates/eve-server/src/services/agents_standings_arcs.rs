@@ -1403,20 +1403,19 @@ fn handle_get_disabled_missions(
     };
     let disabled_ids = ctx.db.with_snapshot(|snap| {
         let mut ids: Vec<i64> = snap
-            .service_state_blobs
-            .get("agentMgr:disabled_missions")
-            .and_then(|s| serde_json::from_str::<Vec<u32>>(s).ok())
-            .unwrap_or_default()
-            .into_iter()
+            .fleet_and_social_ops
+            .agent_global_disabled_missions
+            .iter()
+            .copied()
             .filter(|mid| ctx.sde.missions.contains_key(mid))
             .map(i64::from)
             .collect();
-        if let Some(char_blob) = snap
-            .service_state_blobs
-            .get(&format!("agentMgr:disabled_missions:{char_id}"))
-            .and_then(|s| serde_json::from_str::<Vec<u32>>(s).ok())
+        if let Some(char_set) = snap
+            .fleet_and_social_ops
+            .agent_char_disabled_missions
+            .get(&char_id)
         {
-            for mid in char_blob {
+            for &mid in char_set {
                 if ctx.sde.missions.contains_key(&mid) {
                     ids.push(i64::from(mid));
                 }
@@ -1453,11 +1452,11 @@ fn handle_get_replay_timestamp(
     let now_unix = ctx.now_unix();
     let replay_unix = ctx.db.with_snapshot(|snap| {
         if let Some(aid) = bound_agent_id {
-            if let Some(ts) = snap
-                .service_state_blobs
-                .get(&format!("agentMgr:replay_ts:{target_char_id}:{aid}"))
-                .and_then(|s| s.parse::<u64>().ok())
-                .filter(|&ts| ts > now_unix)
+            if let Some(&ts) = snap
+                .fleet_and_social_ops
+                .agent_replay_ts
+                .get(&(target_char_id, aid))
+                .filter(|&&ts| ts > now_unix)
             {
                 return Some(ts);
             }

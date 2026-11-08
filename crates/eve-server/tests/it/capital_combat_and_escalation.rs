@@ -2225,7 +2225,7 @@ async fn test_pochven_observatory_flashpoint_and_world_ark() {
     }
     tick_background_cluster(&ctx).await;
 
-    let active_obs = ctx.db.with_snapshot(|s| s.service_state_blobs.keys().filter(|k| k.starts_with("observatory_site:")).count());
+    let active_obs = ctx.db.with_snapshot(|s| s.fob_observatory_state.observatory_sites.len());
     assert_eq!(active_obs, 3, "Pochven region must cap active Observatory Flashpoints at 3");
 
     let obs = eve_server::services::pve_fob_observatory::get_observatory_site_state(&ctx, pochven_sys_id)
@@ -2332,7 +2332,7 @@ async fn test_pochven_observatory_flashpoint_and_world_ark() {
             c15.balance.to_wire_f64(),
             c15.loyalty_points.get(&1_000_137).copied().unwrap_or(0),
             c16.balance.to_wire_f64(),
-            snap.service_state_blobs.contains_key(&format!("observatory_site:{site_id}")),
+            snap.fob_observatory_state.observatory_sites.contains_key(&site_id),
         )
     });
     assert_eq!(off_isk, 0.0, "Off-grid fleet member must not consume an Observatory payout slot");

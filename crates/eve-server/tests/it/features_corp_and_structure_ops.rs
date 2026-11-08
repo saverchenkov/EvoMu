@@ -67,10 +67,8 @@ async fn test_cluster_session_localization_qa_rpcs_e2e() {
         .expect("ProcessEVESessionCreated");
     assert_eq!(created, PyRep::None);
     ctx.db.with_snapshot(|snap| {
-        let sessions_json = snap
-            .service_state_blobs
-            .get("user_sessions")
-            .expect("user_sessions blob");
+        let sessions_json = serde_json::to_string(&snap.cluster_and_runtime.user_sessions).unwrap_or_default();
+        assert!(!snap.cluster_and_runtime.user_sessions.is_empty(), "user_sessions must exist");
         assert!(sessions_json.contains("50002"), "Session 50002 must be recorded in user_sessions");
     });
 

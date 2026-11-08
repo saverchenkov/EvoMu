@@ -277,7 +277,7 @@ async fn test_incursion_site_completion_scaling_and_mothership_finale() {
             92_000_001 + i,
             vg_site.solar_system_id,
             Some(fleet_id),
-            vg_site.position + DVec3::new(1_000.0 * (i as f64), 0.0, 0.0),
+            DVec3::from_array(vg_site.position) + DVec3::new(1_000.0 * (i as f64), 0.0, 0.0),
             0.0,
         );
     }
@@ -287,7 +287,7 @@ async fn test_incursion_site_completion_scaling_and_mothership_finale() {
         92_000_050,
         vg_site.solar_system_id,
         Some(fleet_id),
-        vg_site.position + DVec3::new(900_000.0, 0.0, 0.0),
+        DVec3::from_array(vg_site.position) + DVec3::new(900_000.0, 0.0, 0.0),
         0.0,
     );
     // Non-fleet pilot on-grid
@@ -296,7 +296,7 @@ async fn test_incursion_site_completion_scaling_and_mothership_finale() {
         92_000_051,
         vg_site.solar_system_id,
         None,
-        vg_site.position,
+        DVec3::from_array(vg_site.position),
         0.0,
     );
 
@@ -333,7 +333,7 @@ async fn test_incursion_site_completion_scaling_and_mothership_finale() {
             92_000_001 + i,
             vg_site.solar_system_id,
             Some(fleet_id),
-            vg_site.position,
+            DVec3::from_array(vg_site.position),
             0.0,
         );
     }

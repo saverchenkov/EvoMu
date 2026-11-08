@@ -418,8 +418,8 @@ impl EsiRouter {
                     let size = query_params.get("size").and_then(|s| s.parse::<u32>().ok()).unwrap_or(64);
                     let found = self.ctx.db.with_snapshot(|snap| {
                         let ch = snap.characters.get(&char_id)?;
-                        let blob = snap.service_state_blobs.get(&format!("portrait:{char_id}:{size}"))
-                            .or_else(|| snap.service_state_blobs.get(&format!("portrait:{char_id}")))
+                        let blob = snap.cluster_and_runtime.portraits.get(&format!("{char_id}:{size}"))
+                            .or_else(|| snap.cluster_and_runtime.portraits.get(&char_id.to_string()))
                             .cloned();
                         Some((ch.bloodline_id, blob))
                     });

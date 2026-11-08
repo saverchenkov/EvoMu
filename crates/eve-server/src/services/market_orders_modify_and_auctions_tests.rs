@@ -324,7 +324,7 @@ fn plex_orders_history_and_contract_auction_finish_lifecycle() {
             buyout: IskCents::from_isk(10_000_000), current_bid: IskCents::from_isk(2_500_000),
             current_bidder_id: Some(bidder_id), ..Default::default()
         });
-        s.service_state_blobs.insert(format!("contract_deposit:{cid}"), "1000000".to_string());
+        s.fleet_and_social_ops.contract_deposits.insert(cid, 1_000_000);
         (cid, item_id, cont_id)
     });
 

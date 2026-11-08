@@ -655,9 +655,12 @@ pub(super) fn handle_corps(
             };
             let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(0);
             let corp_info = ctx.db.with_snapshot(|snap| {
-                let allow_war = snap.service_state_blobs.get("corp_allow_war")
-                    .and_then(|s| serde_json::from_str::<HashMap<i64, bool>>(s).ok())
-                    .and_then(|m| m.get(&corp_id).copied()).unwrap_or(true);
+                let allow_war = snap
+                    .fleet_and_social_ops
+                    .corp_allow_war
+                    .get(&corp_id)
+                    .copied()
+                    .unwrap_or(true);
                 snap.corporations.get(&corp_id).map(|c| {
                     let h_divs = snap.corp_hangar_divisions.get(&corp_id).cloned().unwrap_or_default();
                     let w_divs: Vec<(u8, String)> = c.wallet_divisions.iter().map(|d| (d.division_id, d.name.clone())).collect();
@@ -771,9 +774,12 @@ pub(super) fn handle_corps(
             };
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let mut allow_war_map: HashMap<i64, bool> = snap.service_state_blobs.get("corp_allow_war")
-                    .and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
-                let old_allow_war = allow_war_map.get(&corp_id).copied().unwrap_or(true);
+                let old_allow_war = snap
+                    .fleet_and_social_ops
+                    .corp_allow_war
+                    .get(&corp_id)
+                    .copied()
+                    .unwrap_or(true);
                 let Some(corp) = snap.corporations.get_mut(&corp_id) else {
                     return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
                 };
@@ -787,10 +793,9 @@ pub(super) fn handle_corps(
                 if let Some(t) = tax_rate_opt { corp.tax_rate = t.clamp(0.0, 1.0); }
                 let (updated_desc, updated_url, updated_tax) = (corp.description.clone(), corp.url.clone(), corp.tax_rate);
                 let allow_war_changed = allow_war_opt.and_then(|new_aw| {
-                    allow_war_map.insert(corp_id, new_aw);
-                    if let Ok(json) = serde_json::to_string(&allow_war_map) {
-                        snap.service_state_blobs.insert("corp_allow_war".into(), json);
-                    }
+                    snap.fleet_and_social_ops
+                        .corp_allow_war
+                        .insert(corp_id, new_aw);
                     (new_aw != old_allow_war).then_some((old_allow_war, new_aw))
                 });
                 Ok((old_desc, old_url, old_tax, updated_desc, updated_url, updated_tax, allow_war_changed))

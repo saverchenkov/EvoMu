@@ -915,57 +915,15 @@ pub fn emit_structure_cfg_data_changed(
     );
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct FlaggedSiteEntry {
-    pub site_url: String,
-    pub site_flag: i64,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(untagged)]
-enum StoredFlaggedSite {
-    Structured(FlaggedSiteEntry),
-    LegacyUrl(String),
-}
-
-impl From<StoredFlaggedSite> for FlaggedSiteEntry {
-    fn from(v: StoredFlaggedSite) -> Self {
-        match v {
-            StoredFlaggedSite::Structured(e) => e,
-            StoredFlaggedSite::LegacyUrl(site_url) => Self {
-                site_url,
-                site_flag: 2,
-            },
-        }
-    }
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct BrowserLockdownPolicy {
-    lockdown: bool,
-    default_home_page: String,
-    #[serde(default)]
-    flagged_sites: Vec<StoredFlaggedSite>,
-}
-
-impl Default for BrowserLockdownPolicy {
-    fn default() -> Self {
-        Self {
-            lockdown: false,
-            default_home_page: "https://www.eveonline.com/".to_string(),
-            flagged_sites: Vec::new(),
-        }
-    }
-}
+pub use eve_db::{BrowserLockdownPolicyState, FlaggedSiteEntry};
 
 fn load_browser_lockdown_policy(snap: &eve_db::WorldStateSnapshot) -> (bool, String, Vec<FlaggedSiteEntry>) {
     let raw = snap
-        .service_state_blobs
-        .get("browser_lockdown_policy")
-        .and_then(|s| serde_json::from_str::<BrowserLockdownPolicy>(s).ok())
+        .cluster_and_runtime
+        .browser_lockdown_policy
+        .clone()
         .unwrap_or_default();
-    let entries = raw.flagged_sites.into_iter().map(FlaggedSiteEntry::from).collect();
-    (raw.lockdown, raw.default_home_page, entries)
+    (raw.lockdown, raw.default_home_page, raw.flagged_sites)
 }
 
 fn compute_flagged_sites_hash(sites: &[FlaggedSiteEntry]) -> String {
@@ -991,23 +949,17 @@ pub fn set_browser_lockdown_policy(
     default_home_page: &str,
     flagged_sites: Vec<(String, i64)>,
 ) {
-    let policy = BrowserLockdownPolicy {
+    snap.cluster_and_runtime.browser_lockdown_policy = Some(BrowserLockdownPolicyState {
         lockdown,
         default_home_page: default_home_page.to_string(),
         flagged_sites: flagged_sites
             .into_iter()
-            .map(|(site_url, site_flag)| {
-                StoredFlaggedSite::Structured(FlaggedSiteEntry { site_url, site_flag })
-            })
+            .map(|(site_url, site_flag)| FlaggedSiteEntry { site_url, site_flag })
             .collect(),
-    };
-    if let Ok(json) = serde_json::to_string(&policy) {
-        snap.service_state_blobs
-            .insert("browser_lockdown_policy".to_string(), json);
-    }
+    });
 }
 
-/// Dispatches `browserLockdownSvc` queries backed by `service_state_blobs["browser_lockdown_policy"]`.
+/// Dispatches `browserLockdownSvc` queries backed by `WorldStateSnapshot.cluster_and_runtime.browser_lockdown_policy`.
 pub fn handle_misc_cluster_localization(
     ctx: &ServerContext,
     session: &SessionState,
@@ -1097,10 +1049,10 @@ pub fn handle_get_all_text_changes(
     let key_id = user_id as i64;
     ctx.db.with_snapshot(|snap| {
         let qa_wrap = snap
-            .service_state_blobs
-            .get("localization:qa_wrap_users")
-            .and_then(|s| serde_json::from_str::<BTreeMap<i64, bool>>(s).ok())
-            .and_then(|m| m.get(&key_id).copied())
+            .cluster_and_runtime
+            .localization_qa_wrap_users
+            .get(&key_id)
+            .copied()
             .unwrap_or(false);
         let overrides: BTreeMap<i64, String> = snap
             .owner_notes
@@ -1160,11 +1112,7 @@ pub fn handle_update_localization_qa_wrap(
     };
     let key_id = user_id as i64;
     ctx.db.with_mut_snapshot(|snap| {
-        let mut map: BTreeMap<i64, bool> = snap
-            .service_state_blobs
-            .get("localization:qa_wrap_users")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
+        let map = &mut snap.cluster_and_runtime.localization_qa_wrap_users;
         if enabled {
             if map.len() >= 256 && !map.contains_key(&key_id) {
                 if let Some(first_k) = map.keys().next().copied() {
@@ -1174,10 +1122,6 @@ pub fn handle_update_localization_qa_wrap(
             map.insert(key_id, true);
         } else {
             map.remove(&key_id);
-        }
-        if let Ok(json) = serde_json::to_string(&map) {
-            snap.service_state_blobs
-                .insert("localization:qa_wrap_users".into(), json);
         }
     });
     Ok(PyRep::Bool(enabled))

@@ -463,10 +463,7 @@ fn schedules_tokens_fulfillment_cost_and_token_purchase() {
     assert_eq!(call(&router, &player, "eve_public.payment.schedule.api.GetActiveByTypeRequest", active_sched_req.clone(), now).status_code, STATUS_OK);
     assert_eq!(call(&router, &other_player, "eve_public.payment.schedule.api.GetActiveByTypeRequest", active_sched_req, now).status_code, STATUS_NOT_FOUND);
 
-    let sched_id = router.db.with_snapshot(|s| {
-        let list: Vec<PaymentScheduleRecord> = serde_json::from_str(&s.service_state_blobs["payment_schedules"]).unwrap();
-        list[0].id
-    });
+    let sched_id = router.db.with_snapshot(|s| s.quasar_commerce.payment_schedules[0].id);
     assert_eq!(call(&router, &player, "eve_public.payment.schedule.api.GetRequest", Vec::new(), now).status_code, STATUS_BAD_REQUEST);
     let mut sched_id_msg = Vec::new();
     encode_varint_field(1, sched_id, &mut sched_id_msg);
@@ -483,8 +480,10 @@ fn schedules_tokens_fulfillment_cost_and_token_purchase() {
     );
     assert_eq!(call(&router, &player, "eve_public.payment.token.api.DisableAllRequest", Vec::new(), now).status_code, STATUS_OK);
     let any_qp = router.db.with_snapshot(|s| {
-        let list: Vec<PaymentTokenRecord> = serde_json::from_str(&s.service_state_blobs["payment_tokens"]).unwrap();
-        list.into_iter().any(|t| t.user_id == uid && t.is_quick_pay)
+        s.quasar_commerce
+            .payment_tokens
+            .iter()
+            .any(|t| t.user_id == uid && t.is_quick_pay)
     });
     assert!(!any_qp);
 

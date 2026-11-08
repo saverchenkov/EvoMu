@@ -655,8 +655,8 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let abyssal_dungeon =
-                crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-                    let p = reg.abyssal_pockets.get(&char_id)?;
+                crate::services::pve_special_sites_abyssal::read_abyssal_state(ctx, |st| {
+                    let p = st.pockets.get(&char_id)?;
                     if p.completed || p.collapsed_destroyed {
                         return None;
                     }

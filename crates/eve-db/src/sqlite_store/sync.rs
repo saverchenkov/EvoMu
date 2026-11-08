@@ -1217,6 +1217,7 @@ pub fn sync_dirty_to_sqlite(
     cold_changed |= super::social_store::sync_d6_social(tx, snap, fp)?;
     cold_changed |= super::corp_crimewatch_store::sync_d6_corp_crimewatch(tx, snap, fp)?;
     cold_changed |= super::industry_market_pve_store::sync_d6_batch4(tx, snap, fp)?;
+    cold_changed |= super::service_domains_store::sync_service_domains(tx, snap, fp)?;
 
     if need_wal_delta && cold_changed {
         delta.full_snapshot = Some(snap.clone());
@@ -1301,7 +1302,8 @@ pub fn replace_sqlite_from_snapshot(
          DELETE FROM alliance_contact_labels;
          DELETE FROM char_notes;
          DELETE FROM d6_corp_crimewatch_kv;
-         DELETE FROM world_kv_blobs;",
+         DELETE FROM world_kv_blobs;
+         DELETE FROM service_domain_state;",
     )
     .map_err(|e| e.to_string())?;
     let mut fp = TableFingerprints::default();

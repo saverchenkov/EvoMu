@@ -267,8 +267,11 @@ fn admin_store_creation_invoices_tag_lookup_and_credit_card_disabled() {
         PaymentTokenRecord { id: 808, user_id: 10, token_str: "qp-808".into(), is_quick_pay: true, consumed: false },
     );
     router.db.with_snapshot(|s| {
-        let list: Vec<PaymentTokenRecord> = serde_json::from_str(&s.service_state_blobs["payment_tokens"]).unwrap();
-        assert!(list.iter().any(|t| t.id == 808 && t.user_id == 10 && t.is_quick_pay));
+        assert!(s
+            .quasar_commerce
+            .payment_tokens
+            .iter()
+            .any(|t| t.id == 808 && t.user_id == 10 && t.is_quick_pay));
     });
 
     // GetAllByTagRequest: empty tag -> 400; "FLASH" (case-insensitive) -> 200
@@ -346,7 +349,7 @@ fn due_payment_schedules_renew_with_quick_pay_or_cancel_without_token() {
     process_due_payment_schedules(&router.db, &router.pending_notices, now);
 
     router.db.with_snapshot(|snap| {
-        let scheds: Vec<PaymentScheduleRecord> = serde_json::from_str(&snap.service_state_blobs["payment_schedules"]).unwrap();
+        let scheds = &snap.quasar_commerce.payment_schedules;
         assert_eq!(scheds.len(), 2);
         let s1 = scheds.iter().find(|s| s.user_id == 1).unwrap();
         assert_eq!(s1.next_payment_unix, now + 30 * 86_400);
@@ -354,7 +357,7 @@ fn due_payment_schedules_renew_with_quick_pay_or_cancel_without_token() {
         let s3 = scheds.iter().find(|s| s.user_id == 3).unwrap();
         assert_eq!(s3.next_payment_unix, now + 500);
 
-        let receipts: Vec<PaymentReceiptRecord> = serde_json::from_str(&snap.service_state_blobs["payment_receipts"]).unwrap();
+        let receipts = &snap.quasar_commerce.payment_receipts;
         assert_eq!(receipts.len(), 1);
         assert_eq!(receipts[0].user_id, 1);
         assert_eq!(receipts[0].amount_in_cents, 1_999);
@@ -362,8 +365,12 @@ fn due_payment_schedules_renew_with_quick_pay_or_cancel_without_token() {
 
     // cancel_user_payment_schedule returns true for user 1 and false for non-owner.
     let s1_id = router.db.with_snapshot(|snap| {
-        let scheds: Vec<PaymentScheduleRecord> = serde_json::from_str(&snap.service_state_blobs["payment_schedules"]).unwrap();
-        scheds.iter().find(|s| s.user_id == 1).unwrap().id
+        snap.quasar_commerce
+            .payment_schedules
+            .iter()
+            .find(|s| s.user_id == 1)
+            .unwrap()
+            .id
     });
     assert!(!cancel_user_payment_schedule(&router.db, &router.pending_notices, 999, s1_id));
     assert!(cancel_user_payment_schedule(&router.db, &router.pending_notices, 1, s1_id));

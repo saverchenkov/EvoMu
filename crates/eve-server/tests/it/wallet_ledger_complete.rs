@@ -680,7 +680,7 @@ async fn test_new_eden_store_and_aurum_removal() {
     eve_testkit::attest(&["feat:removed.aurum-currency"]);
     let ctx = ServerContext::new();
     ctx.db.with_mut_snapshot(|s| {
-        s.service_state_blobs.remove("nes_store_catalog");
+        s.quasar_commerce.nes_store_catalog = None;
     });
     crate::common::seed_test_nes_store_catalog(&ctx);
     let mut s1 = setup_pilot(&ctx, 882, "demo", "demo-secret", P1).await;

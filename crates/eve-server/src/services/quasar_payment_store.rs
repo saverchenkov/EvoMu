@@ -89,7 +89,7 @@ fn hydrate_store_catalog_from_sde(db: &WorldRepository, sde: &eve_sde::SdeRegist
         return;
     }
     db.with_mut_snapshot(|snap| {
-        if snap.service_state_blobs.contains_key("nes_store_catalog") {
+        if snap.quasar_commerce.nes_store_catalog.is_some() {
             return;
         }
         let type_name = |tid: u32, fallback: &str| {
@@ -596,10 +596,11 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             })?;
 
             let sched_opt: Option<PaymentScheduleRecord> = db_sched_get.with_snapshot(|snap| {
-                snap.service_state_blobs
-                    .get("payment_schedules")
-                    .and_then(|json| serde_json::from_str::<Vec<PaymentScheduleRecord>>(json).ok())
-                    .and_then(|list| list.into_iter().find(|s| s.id == sched_id && s.user_id == uid))
+                snap.quasar_commerce
+                    .payment_schedules
+                    .iter()
+                    .find(|s| s.id == sched_id && s.user_id == uid)
+                    .cloned()
             });
             let sched = sched_opt.ok_or_else(|| {
                 (STATUS_NOT_FOUND, "Payment schedule not found".to_string())
@@ -644,10 +645,11 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 .unwrap_or(1);
 
             let sched_opt: Option<PaymentScheduleRecord> = db_sched_type.with_snapshot(|snap| {
-                snap.service_state_blobs
-                    .get("payment_schedules")
-                    .and_then(|json| serde_json::from_str::<Vec<PaymentScheduleRecord>>(json).ok())
-                    .and_then(|list| list.into_iter().find(|s| s.user_id == uid && s.schedule_type == stype))
+                snap.quasar_commerce
+                    .payment_schedules
+                    .iter()
+                    .find(|s| s.user_id == uid && s.schedule_type == stype)
+                    .cloned()
             });
 
             let sched = match sched_opt {
@@ -684,11 +686,12 @@ fn register_payment_token_and_purchase_handlers(
         Arc::new(move |ctx, _any, _dyn_msg| {
             let uid = ctx.effective_user_id().filter(|&u| u > 0).ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))? as u64;
             let tokens: Vec<PaymentTokenRecord> = db_quick_pay.with_snapshot(|snap| {
-                snap.service_state_blobs
-                    .get("payment_tokens")
-                    .and_then(|json| serde_json::from_str::<Vec<PaymentTokenRecord>>(json).ok())
-                    .map(|list| list.into_iter().filter(|t| t.user_id == uid && t.is_quick_pay).collect())
-                    .unwrap_or_default()
+                snap.quasar_commerce
+                    .payment_tokens
+                    .iter()
+                    .filter(|t| t.user_id == uid && t.is_quick_pay)
+                    .cloned()
+                    .collect()
             });
 
             let mut out = Vec::new();
@@ -733,10 +736,11 @@ fn register_payment_token_and_purchase_handlers(
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing token ID".to_string()))?;
 
             let token_opt: Option<PaymentTokenRecord> = db_token_get.with_snapshot(|snap| {
-                snap.service_state_blobs
-                    .get("payment_tokens")
-                    .and_then(|json| serde_json::from_str::<Vec<PaymentTokenRecord>>(json).ok())
-                    .and_then(|list| list.into_iter().find(|t| t.id == tok_id && t.user_id == uid))
+                snap.quasar_commerce
+                    .payment_tokens
+                    .iter()
+                    .find(|t| t.id == tok_id && t.user_id == uid)
+                    .cloned()
             });
 
             let token = match token_opt {
@@ -771,18 +775,15 @@ fn register_payment_token_and_purchase_handlers(
         Arc::new(move |ctx, _any, _dyn_msg| {
             let uid = ctx.effective_user_id().filter(|&u| u > 0).ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))? as u64;
             let disabled_ids = db_token_disable.with_mut_snapshot(|snap| {
-                let mut tokens: Vec<PaymentTokenRecord> = snap
-                    .service_state_blobs
-                    .get("payment_tokens")
-                    .and_then(|json| serde_json::from_str(json).ok())
-                    .unwrap_or_default();
                 let mut ids = Vec::new();
-                for t in tokens.iter_mut().filter(|t| t.user_id == uid && t.is_quick_pay) {
+                for t in snap
+                    .quasar_commerce
+                    .payment_tokens
+                    .iter_mut()
+                    .filter(|t| t.user_id == uid && t.is_quick_pay)
+                {
                     t.is_quick_pay = false;
                     ids.push(t.id);
-                }
-                if let Ok(serialized) = serde_json::to_string(&tokens) {
-                    snap.service_state_blobs.insert("payment_tokens".to_string(), serialized);
                 }
                 ids
             });
@@ -1072,31 +1073,29 @@ fn register_payment_token_and_purchase_handlers(
                         .saturating_mul(qty);
                     let currency = offer.currency.unwrap_or_else(|| "USD".to_string());
 
-                    let mut tokens: Vec<PaymentTokenRecord> = snap
-                        .service_state_blobs
-                        .get("payment_tokens")
-                        .and_then(|json| serde_json::from_str(json).ok())
-                        .unwrap_or_default();
-
-                    let tok = tokens
-                        .iter_mut()
-                        .find(|t| t.id == tok_id)
+                    let tok_idx = snap
+                        .quasar_commerce
+                        .payment_tokens
+                        .iter()
+                        .position(|t| t.id == tok_id)
                         .ok_or_else(|| format!("{STATUS_NOT_FOUND}:Payment token {tok_id} not found"))?;
-
-                    if tok.user_id != uid {
-                        return Err(format!(
-                            "{STATUS_FORBIDDEN}:Forbidden: token belongs to another user"
-                        ));
-                    }
-                    if !tok.is_quick_pay {
-                        return Err(format!(
-                            "{STATUS_BAD_REQUEST}:Payment token is not quick-pay enabled"
-                        ));
-                    }
-                    if tok.consumed {
-                        return Err(format!(
-                            "{STATUS_BAD_REQUEST}:Payment token already consumed"
-                        ));
+                    {
+                        let tok = &snap.quasar_commerce.payment_tokens[tok_idx];
+                        if tok.user_id != uid {
+                            return Err(format!(
+                                "{STATUS_FORBIDDEN}:Forbidden: token belongs to another user"
+                            ));
+                        }
+                        if !tok.is_quick_pay {
+                            return Err(format!(
+                                "{STATUS_BAD_REQUEST}:Payment token is not quick-pay enabled"
+                            ));
+                        }
+                        if tok.consumed {
+                            return Err(format!(
+                                "{STATUS_BAD_REQUEST}:Payment token already consumed"
+                            ));
+                        }
                     }
 
                     let mut user_chars: Vec<_> = snap
@@ -1147,10 +1146,7 @@ fn register_payment_token_and_purchase_handlers(
                         None
                     };
 
-                    tok.consumed = true;
-                    if let Ok(serialized) = serde_json::to_string(&tokens) {
-                        snap.service_state_blobs.insert("payment_tokens".to_string(), serialized);
-                    }
+                    snap.quasar_commerce.payment_tokens[tok_idx].consumed = true;
 
                     if let Some((cid, target_station, items_to_deliver)) = delivery_target {
                         for (type_id, deliver_qty) in items_to_deliver {
@@ -1201,12 +1197,7 @@ fn register_payment_token_and_purchase_handlers(
 
                     snap.next_entity_id += 1;
                     let rid = snap.next_entity_id as u64;
-                    let mut receipts: Vec<PaymentReceiptRecord> = snap
-                        .service_state_blobs
-                        .get("payment_receipts")
-                        .and_then(|json| serde_json::from_str(json).ok())
-                        .unwrap_or_default();
-                    receipts.push(PaymentReceiptRecord {
+                    snap.quasar_commerce.payment_receipts.push(PaymentReceiptRecord {
                         receipt_id: rid,
                         user_id: uid,
                         offer_id: offer.id.to_string(),
@@ -1214,9 +1205,6 @@ fn register_payment_token_and_purchase_handlers(
                         currency,
                         timestamp_unix: now_unix,
                     });
-                    if let Ok(serialized) = serde_json::to_string(&receipts) {
-                        snap.service_state_blobs.insert("payment_receipts".to_string(), serialized);
-                    }
 
                     Ok((rid, omega_notice, sched_id_opt))
                 })

@@ -49,13 +49,11 @@ fn load_season_state_fallbacks_activity_count_filters_and_challenge_limit_evicti
     ctx.db.with_mut_snapshot(|snap| {
         let mut st_alt = CharacterSeasonState::default();
         st_alt.season_points = 42;
-        snap.service_state_blobs.insert(format!("season_manager:{c_alt}"), serde_json::to_string(&st_alt).unwrap());
+        snap.seasons_and_campaigns.season_states.insert(c_alt, st_alt);
 
         let mut st_map = CharacterSeasonState::default();
         st_map.season_points = 84;
-        let mut map = HashMap::new();
-        map.insert(c_map, st_map);
-        snap.service_state_blobs.insert("season_manager".into(), serde_json::to_string(&map).unwrap());
+        snap.seasons_and_campaigns.season_states.insert(c_map, st_map);
 
         assert_eq!(load_season_state_from_blobs(snap, c_alt).season_points, 42);
         assert_eq!(load_season_state_from_blobs(snap, c_map).season_points, 84);
@@ -142,7 +140,7 @@ fn select_season_get_season_data_and_process_client_event_edge_cases() {
     ctx.db.with_mut_snapshot(|snap| {
         let mut cfg = SeasonConfig::default();
         cfg.max_active_challenges = 6;
-        snap.service_state_blobs.insert(SEASON_CONFIG_KEY.into(), serde_json::to_string(&cfg).unwrap());
+        snap.seasons_and_campaigns.season_configuration = Some(cfg);
     });
     assert_eq!(
         call_sm(&ctx, &mut sess, "get_max_active_challenges", &[]).unwrap(),
@@ -157,7 +155,7 @@ fn select_season_get_season_data_and_process_client_event_edge_cases() {
             s.end_time_ft = end_ft;
             cat.insert(sid, s);
         }
-        snap.service_state_blobs.insert(SEASONS_CATALOG_KEY.into(), serde_json::to_string(&cat).unwrap());
+        snap.seasons_and_campaigns.seasons_catalog = cat;
     });
 
     let multi_data = call_sm(&ctx, &mut sess, "get_season_data_for_character", &[]).unwrap();
@@ -196,7 +194,7 @@ fn select_season_get_season_data_and_process_client_event_edge_cases() {
         },
     ];
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(SEASONAL_CHALLENGES_CONFIG_KEY.into(), serde_json::to_string(&custom_defs).unwrap());
+        snap.seasons_and_campaigns.challenge_definitions = custom_defs.clone();
         let mut st = CharacterSeasonState::default();
         st.selected_season_id = 1;
         for d in &custom_defs {
@@ -249,7 +247,7 @@ fn claim_challenge_rewards_isk_next_challenge_item_delivery_omega_goals_and_care
         ch.clone_grade = 2;
         ch.station_id = Some(60_003_760);
 
-        snap.service_state_blobs.insert(SEASONAL_CHALLENGES_CONFIG_KEY.into(), serde_json::to_string(&defs).unwrap());
+        snap.seasons_and_campaigns.challenge_definitions = defs.clone();
         let mut st = CharacterSeasonState::default();
         st.selected_season_id = 1;
         let mut c1 = defs[0].to_character_challenge(1, now_ft);
@@ -297,7 +295,7 @@ fn claim_challenge_rewards_isk_next_challenge_item_delivery_omega_goals_and_care
     ctx.db.with_mut_snapshot(|snap| {
         let mut loot_map: HashMap<u32, Vec<(u32, i64, f64)>> = HashMap::new();
         loot_map.insert(valid_tid, vec![(34, 100, 0.75)]);
-        snap.service_state_blobs.insert(SEASON_LOOT_TABLES_KEY.into(), serde_json::to_string(&loot_map).unwrap());
+        snap.seasons_and_campaigns.season_loot_tables = loot_map;
     });
     let loot_rep = call_sm(&ctx, &mut space_sess, "get_loot_table_by_typeID", &[PyRep::Integer(valid_tid as i64)]).unwrap();
     assert!(matches!(loot_rep, PyRep::List(ref l) if l.len() == 1));

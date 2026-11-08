@@ -34,13 +34,10 @@ async fn test_char_mgr_cohorts_homestation_and_corp_roles() {
     assert!(cohort_strs.iter().any(|c| c.starts_with("cohort_created_")), "Must have creation year cohort");
     assert!(cohort_strs.iter().any(|c| c.starts_with("cohort_corp_")), "Must have corp cohort");
 
-    // 2. GetCohortsForCharacter: persisted in service_state_blobs
+    // 2. GetCohortsForCharacter: persisted in cluster_and_runtime.char_cohorts
     let custom_cohorts = vec!["cohort_alpha_tester".to_string(), "cohort_winter_2026".to_string()];
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(
-            "char_cohorts:90000001".to_string(),
-            serde_json::to_string(&custom_cohorts).unwrap(),
-        );
+        snap.cluster_and_runtime.char_cohorts.insert(90_000_001, custom_cohorts.clone());
     });
     let custom_rep = ctx
         .dispatch_rpc(&mut sess, "charMgr", None, "GetCohortsForCharacter", &[PyRep::Integer(90_000_001)], &kw, None)

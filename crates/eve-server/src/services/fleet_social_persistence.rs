@@ -559,7 +559,7 @@ pub fn hydrate_social_state_from_db(ctx: &ServerContext) {
         }
     }
 
-    let (join_reqs_blob, watchlist_blob, options_blob) = ctx.db.with_snapshot(|snap| {
+    let (join_reqs, watchlist, voice_enabled, loot_logging) = ctx.db.with_snapshot(|snap| {
         let to_esi = |list: &[eve_db::SocialContactRecord]| -> Vec<EsiContactEntry> {
             list.iter()
                 .map(|c| EsiContactEntry {
@@ -646,42 +646,19 @@ pub fn hydrate_social_state_from_db(ctx: &ServerContext) {
             ctx.esi_state.set_mail_meta(char_id, mail_id, meta);
         }
         (
-            snap.service_state_blobs.get("fleet_join_requests").cloned(),
-            snap.service_state_blobs.get("fleet_watchlist").cloned(),
-            snap.service_state_blobs.get("fleet_options").cloned(),
+            snap.fleet_and_social_ops.fleet_join_requests.clone(),
+            snap.fleet_and_social_ops.fleet_watchlist.clone(),
+            snap.fleet_and_social_ops.fleet_voice_enabled.clone(),
+            snap.fleet_and_social_ops.fleet_loot_logging.clone(),
         )
     });
     {
         let mut ex = ctx.fleet_extras.lock().unwrap();
-        ex.join_requests.clear();
-        if let Some(blob) = join_reqs_blob {
-            if let Ok(map) = serde_json::from_str::<std::collections::HashMap<i64, Vec<i64>>>(&blob) {
-                for (fid, members) in map {
-                    ex.join_requests.insert(fid, members.into_iter().collect());
-                }
-            }
-        }
-        ex.watchlist.clear();
+        ex.join_requests = join_reqs;
+        ex.watchlist = watchlist;
         ex.watchlist_loaded = true;
-        if let Some(blob) = watchlist_blob {
-            if let Ok(map) = serde_json::from_str::<std::collections::HashMap<i64, Vec<i64>>>(&blob) {
-                for (wid, targets) in map {
-                    ex.watchlist.insert(wid, targets.into_iter().collect());
-                }
-            }
-        }
-        ex.voice_enabled.clear();
-        ex.loot_logging.clear();
-        if let Some(blob) = options_blob {
-            if let Ok((voice, loot)) = serde_json::from_str::<(
-                std::collections::HashMap<i64, bool>,
-                std::collections::HashMap<i64, bool>,
-            )>(&blob)
-            {
-                ex.voice_enabled = voice;
-                ex.loot_logging = loot;
-            }
-        }
+        ex.voice_enabled = voice_enabled;
+        ex.loot_logging = loot_logging;
     }
     super::fleet_social_notify::prune_offline_fleets_and_channels(ctx);
 }

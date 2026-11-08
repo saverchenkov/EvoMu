@@ -234,10 +234,7 @@ async fn test_ess_concurrent_main_and_reserve_links() {
 
     // Verify CRITICAL invariant: Pilot B's reserve link did NOT overwrite Pilot A's main bank link!
     let (main_linked_char_after, reserve_linked_char) = ctx.db.with_snapshot(|s| {
-        let pulse_st = eve_server::services::space_destiny::get_ess_reserve_pulses_from_blobs(
-            &s.service_state_blobs,
-            NULLSEC_SYS_ID,
-        );
+        let pulse_st = eve_server::services::space_destiny::get_ess_reserve_pulses(s, NULLSEC_SYS_ID);
         let st_opt = s.system_states.get(&NULLSEC_SYS_ID);
         (st_opt.and_then(|st| st.ess_linked_character_id), pulse_st.reserve_linked_character_id)
     });

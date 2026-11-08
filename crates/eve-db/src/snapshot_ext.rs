@@ -837,6 +837,40 @@ pub struct WorldStateSnapshot {
     pub structure_docking_acl_denied: HashMap<i64, HashSet<i64>>,
     #[serde(default)]
     pub sp6_lifecycle: Sp6PersistedState,
+    #[serde(default)]
+    pub pve_special_sites: crate::service_domains::PveSpecialSitesState,
+    #[serde(default)]
+    pub crab_beacons: crate::service_domains::CrabBeaconStore,
+    #[serde(default)]
+    pub abyssal_state: crate::service_domains::AbyssalRuntimeStore,
+    #[serde(default)]
+    pub dungeon_runtime: crate::service_domains::DungeonRuntimeStore,
+    #[serde(default)]
+    pub dungeon_editor: crate::service_domains::DungeonEditorStore,
+    #[serde(default)]
+    pub fob_observatory_state: crate::service_domains::FobObservatoryStore,
+    #[serde(default)]
+    pub mining_and_ess_state: crate::service_domains::MiningAndEssRuntimeStore,
+    #[serde(default)]
+    pub pvp_filament_state: crate::service_domains::PvpFilamentStore,
+    #[serde(default)]
+    pub tourney_state: crate::service_domains::TourneyStore,
+    #[serde(default)]
+    pub deployable_state: crate::service_domains::MobileDeployableRuntimeState,
+    #[serde(default)]
+    pub superweapon_runtime: crate::service_domains::PersistedSuperweaponRuntime,
+    #[serde(default)]
+    pub insurgency_complex_ops: crate::service_domains::InsurgencyComplexOpsState,
+    #[serde(default)]
+    pub node_graph_state: crate::service_domains::NodeGraphAndProgressionStore,
+    #[serde(default)]
+    pub seasons_and_campaigns: crate::service_domains::SeasonsAndCampaignsStore,
+    #[serde(default)]
+    pub quasar_commerce: crate::service_domains::QuasarCommerceStore,
+    #[serde(default)]
+    pub fleet_and_social_ops: crate::service_domains::FleetAndSocialOpsStore,
+    #[serde(default)]
+    pub cluster_and_runtime: crate::service_domains::ClusterAndRuntimeStore,
 }
 
 pub use crate::{
@@ -1123,10 +1157,17 @@ impl WorldStateSnapshot {
                         .filter(|&id| id > 0 && c.current_bid.0 > 0)
                     {
                         self.credit_contract_issuer(&c, c.current_bid);
-                        if let Some(dep_str) = self.service_state_blobs.remove(&format!("contract_deposit:{contract_id}")) {
-                            if let Ok(dep_raw) = dep_str.parse::<i64>() {
-                                self.credit_contract_issuer(&c, IskCents(dep_raw));
-                            }
+                        if let Some(dep_raw) = self
+                            .fleet_and_social_ops
+                            .contract_deposits
+                            .remove(&contract_id)
+                            .or_else(|| {
+                                self.service_state_blobs
+                                    .remove(&format!("contract_deposit:{contract_id}"))
+                                    .and_then(|s| s.parse::<i64>().ok())
+                            })
+                        {
+                            self.credit_contract_issuer(&c, IskCents(dep_raw));
                         }
                         let winner_flag = if self.corporations.contains_key(&winner_id) {
                             InventoryFlag::CorpDeliveries
@@ -1174,10 +1215,17 @@ impl WorldStateSnapshot {
                     }
                 }
                 self.credit_contract_issuer(&c, c.reward);
-                if let Some(dep_str) = self.service_state_blobs.remove(&format!("contract_deposit:{contract_id}")) {
-                    if let Ok(dep_raw) = dep_str.parse::<i64>() {
-                        self.credit_contract_issuer(&c, IskCents(dep_raw));
-                    }
+                if let Some(dep_raw) = self
+                    .fleet_and_social_ops
+                    .contract_deposits
+                    .remove(&contract_id)
+                    .or_else(|| {
+                        self.service_state_blobs
+                            .remove(&format!("contract_deposit:{contract_id}"))
+                            .and_then(|s| s.parse::<i64>().ok())
+                    })
+                {
+                    self.credit_contract_issuer(&c, IskCents(dep_raw));
                 }
                 for iid in &c.item_ids {
                     let orig_flag = self
@@ -1261,10 +1309,17 @@ impl WorldStateSnapshot {
         let issuer_entity_id = if c.for_corp && c.issuer_corp_id != 0 { c.issuer_corp_id } else { c.issuer_id };
         let refund_and_collateral = c.collateral.checked_add(c.reward).unwrap_or(c.collateral);
         self.credit_contract_issuer(&c, refund_and_collateral);
-        if let Some(dep_str) = self.service_state_blobs.remove(&format!("contract_deposit:{contract_id}")) {
-            if let Ok(dep_raw) = dep_str.parse::<i64>() {
-                self.credit_contract_issuer(&c, IskCents(dep_raw));
-            }
+        if let Some(dep_raw) = self
+            .fleet_and_social_ops
+            .contract_deposits
+            .remove(&contract_id)
+            .or_else(|| {
+                self.service_state_blobs
+                    .remove(&format!("contract_deposit:{contract_id}"))
+                    .and_then(|s| s.parse::<i64>().ok())
+            })
+        {
+            self.credit_contract_issuer(&c, IskCents(dep_raw));
         }
         let mut wraps_to_remove = Vec::new();
         for iid in &c.item_ids {
@@ -1484,6 +1539,27 @@ impl WorldStateSnapshot {
                 }
             }
         }
+    }
+
+    /// Validates that `service_state_blobs` strictly holds bounded small opaque metadata.
+    pub fn validate_service_state_blobs(&self) -> Result<(), String> {
+        crate::service_domains::validate_service_state_blobs(&self.service_state_blobs)
+    }
+
+    /// Inserts an opaque metadata key-value entry into `service_state_blobs`, enforcing configured
+    /// key-count and payload-size limits.
+    pub fn set_service_state_blob(&mut self, key: String, value: String) -> Result<(), String> {
+        let mut simulated = self.service_state_blobs.clone();
+        simulated.insert(key.clone(), value.clone());
+        crate::service_domains::validate_service_state_blobs(&simulated)?;
+        self.service_state_blobs.insert(key, value);
+        Ok(())
+    }
+
+    /// Migrates legacy JSON-encoded `service_state_blobs` and sentinel `owner_notes` entries onto
+    /// the typed domain fields on `WorldStateSnapshot`.
+    pub fn migrate_legacy_service_state(&mut self) {
+        crate::service_domains::migrate_legacy_service_state(self);
     }
 }
 

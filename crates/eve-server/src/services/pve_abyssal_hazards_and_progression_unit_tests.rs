@@ -15,7 +15,7 @@ use crate::services::pve_abyssal_lifecycle::{
     reconcile_abyssal_login, sweep_expired_void_space_sessions_sync,
 };
 use crate::services::pve_special_sites::{
-    with_pve_special_reg, AbyssalTraceRecord, VoidSpaceSessionRecord,
+    with_abyssal_state, AbyssalTraceRecord, VoidSpaceSessionRecord,
 };
 use crate::services::pve_special_sites_abyssal::{
     enter_abyssal_pocket_for_character, on_abyssal_room_npc_destroyed_core, pocket_grid_offset,
@@ -107,8 +107,8 @@ async fn deep_hull_capacity_filament_validation_and_in_pocket_rpc_restrictions()
     assert_eq!((consumed_tid, tier, max_ships, fleet_opt), (56131, 0, 3, Some(8801)));
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&fil_item_id].quantity), 1);
 
-    with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_traces.insert(
+    with_abyssal_state(&ctx, |st| {
+        st.traces.insert(
             1_897_000_999,
             AbyssalTraceRecord {
                 trace_ball_id: 1_897_000_999,
@@ -205,8 +205,8 @@ async fn deep_room_1_2_3_conduit_progression_pocket_collapse_and_downtime_evacua
     );
 
     for r_idx in 1..=3_i64 {
-        let npcs = with_pve_special_reg(&ctx, |reg| {
-            reg.abyssal_pockets[&char_id].rooms[(r_idx - 1) as usize].npc_ball_ids.clone()
+        let npcs = with_abyssal_state(&ctx, |st| {
+            st.pockets[&char_id].rooms[(r_idx - 1) as usize].npc_ball_ids.clone()
         });
         for &nid in &npcs {
             let _ = ab_handle.remove_ball(nid).await;
@@ -252,8 +252,8 @@ async fn deep_room_1_2_3_conduit_progression_pocket_collapse_and_downtime_evacua
         origin_sys
     );
 
-    with_pve_special_reg(&ctx, |reg| {
-        reg.void_space_sessions.insert(
+    with_abyssal_state(&ctx, |st| {
+        st.void_space_sessions.insert(
             char_id,
             VoidSpaceSessionRecord {
                 char_id,
@@ -267,7 +267,7 @@ async fn deep_room_1_2_3_conduit_progression_pocket_collapse_and_downtime_evacua
         );
     });
     sweep_expired_void_space_sessions_sync(&ctx, 250);
-    assert!(with_pve_special_reg(&ctx, |reg| reg.void_space_sessions.is_empty()));
+    assert!(with_abyssal_state(&ctx, |st| st.void_space_sessions.is_empty()));
 
     let home_sys = collapse_abyssal_pocket_and_pod_pilot_at(&ctx, char_id, ship_id, ab_sys2, ctx.now_unix());
     assert!(home_sys > 0);

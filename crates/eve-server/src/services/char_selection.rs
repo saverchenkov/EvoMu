@@ -54,9 +54,10 @@ pub fn get_character_selection_data(
     let (training_details, rows, wars) = ctx.db.with_snapshot(|snap| {
         let store = super::account_services::load_store(snap);
         let mct_slots: Vec<u64> = snap
-            .service_state_blobs
-            .get(&format!("mct_slots:{user_id}"))
-            .and_then(|b| serde_json::from_str(b).ok())
+            .cluster_and_runtime
+            .mct_slots
+            .get(&user_id)
+            .cloned()
             .or_else(|| store.mct_slots.get(&user_id).cloned())
             .unwrap_or_default();
         let active_mct: Vec<u64> = mct_slots.into_iter().filter(|&exp| exp > now_unix).collect();
@@ -123,10 +124,9 @@ pub fn get_character_selection_data(
                 .count();
             let is_resculpt_pending = store.resculpt_pending.contains(&c.character_id)
                 || snap
-                    .service_state_blobs
-                    .get(&format!("resculpt_pending:{}", c.character_id))
-                    .map(|s| s == "1" || s == "true")
-                    .unwrap_or(false);
+                    .cluster_and_runtime
+                    .resculpt_pending
+                    .contains(&c.character_id);
             let paperdoll_state = if is_resculpt_pending { 1 } else { 0 };
             rows.push(PyRep::keyval([
                 ("characterID", PyRep::Integer(c.character_id)),

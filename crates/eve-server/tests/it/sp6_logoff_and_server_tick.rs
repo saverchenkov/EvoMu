@@ -666,8 +666,8 @@ async fn test_sp7_abyssal_disconnect_20m_collapse_destroys_ship_and_pod() {
     assert_eq!(sess_reconnect.solar_system_id, Some(32_000_001));
     assert_eq!(sess_reconnect.ship_id, Some(ship_id));
 
-    let (pid, goffset) = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |r| {
-        let p = r.abyssal_pockets.get_mut(&90_000_001).unwrap();
+    let (pid, goffset) = eve_server::services::pve_special_sites::with_abyssal_state(&ctx, |st| {
+        let p = st.pockets.get_mut(&90_000_001).unwrap();
         p.current_room = 3;
         p.rooms[2].cleared = true;
         (p.pocket_id, p.grid_offset)

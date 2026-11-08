@@ -198,7 +198,7 @@ async fn deep_on_incursion_boss_destroyed_sec_status_gain_and_incursion_tale_rpc
                 s.solar_system_id,
                 s.boss_npc_ball_id,
                 s.escort_spawns[0].npc_ball_id,
-                s.position.to_array(),
+                s.position,
             )
         });
 

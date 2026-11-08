@@ -22,7 +22,6 @@ pub const TYPE_MOBILE_PHASE_ANCHOR: TypeId = 90_037;
 /// SDE Prismaticite ore type IDs (Prismaticite, Bright, Gleaming, Shimmering).
 pub const PRISMATICITE_ORE_TYPES: [TypeId; 4] = [90_041, 90_042, 90_445, 90_446];
 
-const BLOB_KEY_PHASED_FIELDS: &str = "phased_asteroid_fields";
 const ANCHOR_TETHER_RANGE_M: f64 = 50_000.0;
 
 /// Returns `true` if `type_id` is a Prismaticite ore variant in `sde`.
@@ -64,20 +63,14 @@ pub fn is_low_or_null_kspace(ctx: &ServerContext, solar_system_id: u32) -> bool 
 }
 
 fn load_phased_fields(snap: &WorldStateSnapshot) -> HashMap<u32, PhasedAsteroidFieldState> {
-    snap.service_state_blobs
-        .get(BLOB_KEY_PHASED_FIELDS)
-        .and_then(|json| serde_json::from_str(json).ok())
-        .unwrap_or_default()
+    snap.mining_and_ess_state.phased_asteroid_fields.clone()
 }
 
 fn persist_phased_fields(
     snap: &mut WorldStateSnapshot,
     fields: &HashMap<u32, PhasedAsteroidFieldState>,
 ) {
-    if let Ok(json) = serde_json::to_string(fields) {
-        snap.service_state_blobs
-            .insert(BLOB_KEY_PHASED_FIELDS.to_string(), json);
-    }
+    snap.mining_and_ess_state.phased_asteroid_fields = fields.clone();
 }
 
 fn sync_ctx_phased_fields(ctx: &ServerContext, fields: HashMap<u32, PhasedAsteroidFieldState>) {
@@ -106,8 +99,7 @@ pub fn spawn_phased_asteroid_field(
     let snapshot_clone = ctx.db.with_mut_snapshot(|snap| {
         let mut fields = load_phased_fields(snap);
         if fields.is_empty() {
-            snap.service_state_blobs
-                .insert("phased_field_last_tick_unix".into(), now.to_string());
+            snap.mining_and_ess_state.phased_field_last_tick_unix = now;
         }
         fields.insert(solar_system_id, state.clone());
         persist_phased_fields(snap, &fields);
@@ -528,15 +520,18 @@ pub async fn tick_phased_asteroid_fields(ctx: &ServerContext, now_unix: u64) {
         return;
     }
     let (elapsed_secs, sys_ids) = ctx.db.with_mut_snapshot(|snap| {
-        let fields = load_phased_fields(snap);
-        let prev = snap
-            .service_state_blobs
-            .get("phased_field_last_tick_unix")
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(now_unix);
-        snap.service_state_blobs
-            .insert("phased_field_last_tick_unix".into(), now_unix.to_string());
-        let ids: Vec<u32> = fields.keys().copied().collect();
+        let prev = if snap.mining_and_ess_state.phased_field_last_tick_unix > 0 {
+            snap.mining_and_ess_state.phased_field_last_tick_unix
+        } else {
+            now_unix
+        };
+        snap.mining_and_ess_state.phased_field_last_tick_unix = now_unix;
+        let ids: Vec<u32> = snap
+            .mining_and_ess_state
+            .phased_asteroid_fields
+            .keys()
+            .copied()
+            .collect();
         (now_unix.saturating_sub(prev), ids)
     });
     for &sys_id in &sys_ids {

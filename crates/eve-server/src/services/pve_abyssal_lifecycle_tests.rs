@@ -4,8 +4,8 @@ use super::*;
 use crate::router::ServerContext;
 use crate::services::abyssal_void_mgr::VOID_SPACE_SYSTEM_ID;
 use crate::services::pve_special_sites::{
-    AbyssalPocketSession, AbyssalRoomRecord, AbyssalTraceRecord, AbyssalWeatherKind,
-    VoidSpaceSessionRecord,
+    with_abyssal_state, AbyssalPocketSession, AbyssalRoomRecord, AbyssalTraceRecord,
+    AbyssalWeatherKind, VoidSpaceSessionRecord,
 };
 use eve_db::clock::VirtualServerClock;
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
@@ -83,8 +83,8 @@ async fn test_abyssal_pocket_collapse_podding_and_downtime_evacuation() {
 
     let trace1 = 1_920_001_i64;
     let trace2 = 1_920_002_i64;
-    with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_traces.insert(
+    with_abyssal_state(&ctx, |st| {
+        st.traces.insert(
             trace1,
             AbyssalTraceRecord {
                 trace_ball_id: trace1,
@@ -100,7 +100,7 @@ async fn test_abyssal_pocket_collapse_podding_and_downtime_evacuation() {
                 fleet_id: None,
             },
         );
-        reg.abyssal_pockets.insert(
+        st.pockets.insert(
             char1,
             AbyssalPocketSession {
                 pocket_id: 7001,
@@ -132,7 +132,7 @@ async fn test_abyssal_pocket_collapse_podding_and_downtime_evacuation() {
                 max_ships: 1,
             },
         );
-        reg.abyssal_pockets.insert(
+        st.pockets.insert(
             char2,
             AbyssalPocketSession {
                 pocket_id: 7002,
@@ -169,9 +169,9 @@ async fn test_abyssal_pocket_collapse_podding_and_downtime_evacuation() {
     // 1. Collapse char1 pocket on 20-minute expiry -> pods pilot back to home station system
     let dest1 = collapse_abyssal_pocket_and_pod_pilot(&ctx, char1, ship1, abyss_sys1);
     assert!(dest1 > 0);
-    with_pve_special_reg(&ctx, |reg| {
-        assert!(reg.abyssal_pockets[&char1].collapsed_destroyed);
-        assert!(!reg.abyssal_traces.contains_key(&trace1));
+    with_abyssal_state(&ctx, |st| {
+        assert!(st.pockets[&char1].collapsed_destroyed);
+        assert!(!st.traces.contains_key(&trace1));
     });
 
     // 2. Evacuate char2 safely at 11:00 UTC downtime -> keeps ship intact & moves to origin system
@@ -198,8 +198,8 @@ fn test_void_space_evacuation_and_reconcile_abyssal_login_paths() {
     );
 
     // Void Space active session stays in VOID_SPACE_SYSTEM_ID until expiry
-    with_pve_special_reg(&ctx, |reg| {
-        reg.void_space_sessions.insert(
+    with_abyssal_state(&ctx, |st| {
+        st.void_space_sessions.insert(
             char_id,
             VoidSpaceSessionRecord {
                 char_id,
@@ -218,8 +218,8 @@ fn test_void_space_evacuation_and_reconcile_abyssal_login_paths() {
     );
 
     // Expired Void Space session evacuates back to origin_sys on login
-    with_pve_special_reg(&ctx, |reg| {
-        if let Some(vs) = reg.void_space_sessions.get_mut(&char_id) {
+    with_abyssal_state(&ctx, |st| {
+        if let Some(vs) = st.void_space_sessions.get_mut(&char_id) {
             vs.expires_at_sec = 1_776_299_999;
         }
     });
@@ -229,8 +229,8 @@ fn test_void_space_evacuation_and_reconcile_abyssal_login_paths() {
     );
 
     // Sweep expired Void Space sessions batch helper
-    with_pve_special_reg(&ctx, |reg| {
-        reg.void_space_sessions.insert(
+    with_abyssal_state(&ctx, |st| {
+        st.void_space_sessions.insert(
             char_id,
             VoidSpaceSessionRecord {
                 char_id,
@@ -244,8 +244,8 @@ fn test_void_space_evacuation_and_reconcile_abyssal_login_paths() {
         );
     });
     sweep_expired_void_space_sessions_sync(&ctx, 1_776_300_000);
-    with_pve_special_reg(&ctx, |reg| {
-        assert!(!reg.void_space_sessions.contains_key(&char_id));
+    with_abyssal_state(&ctx, |st| {
+        assert!(!st.void_space_sessions.contains_key(&char_id));
     });
 
     // Missing pocket record fallback in 32_000_055 evacuates safely to fallback home system

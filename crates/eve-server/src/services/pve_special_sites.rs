@@ -11,14 +11,11 @@ use crate::router::ServerContext;
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldRepository};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use eve_sde::{SolarSystemId, TypeId};
+use eve_sde::SolarSystemId;
 use glam::DVec3;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-type CharacterId = i64;
-type ItemId = i64;
 pub use crate::services::pve_incursion_sites::*;
 pub use crate::services::pve_homefront_sites::*;
 pub use crate::services::pve_metaliminal_storms::*;
@@ -26,152 +23,12 @@ pub use crate::services::pve_special_sites_abyssal::*;
 pub use crate::services::pve_special_sites_combat::*;
 pub use crate::services::pve_crab_beacons::*;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HomefrontSiteRecord {
-    pub instance_id: i64, pub dungeon_id: u32, pub dungeon_name: String, pub solar_system_id: SolarSystemId,
-    pub optimal_fleet_size: usize, pub base_pilot_isk: i64, pub completed: bool,
-    pub reward_paid_isk: i64, pub boss_npc_ball_id: i64,
-    #[serde(default)]
-    pub boss_type_id: u32,
-}
+pub use eve_db::{
+    DrifterHiveRecord, DrifterHiveRoom, HomefrontSiteRecord, PveSpecialSitesState,
+    SeasonalEventSiteRecord, SystemInterferenceRecord, TriglavianSiteRecord,
+};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DrifterHiveRoom {
-    pub room_index: u8,
-    pub room_name: String,
-    pub npc_ball_ids: Vec<i64>,
-    pub npc_type_ids: Vec<u32>,
-    pub beacon_ball_id: i64,
-    pub cleared: bool,
-    #[serde(default)]
-    pub destroyed_npc_ball_ids: Vec<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DrifterHiveRecord {
-    pub site_id: String,
-    pub dungeon_id: u32,
-    pub dungeon_name: String,
-    pub solar_system_id: SolarSystemId,
-    pub element_type_id: TypeId,
-    pub element_name: String,
-    pub current_room: u8,
-    pub total_rooms: u8,
-    pub warden_npc_ball_id: i64,
-    pub cleared: bool,
-    #[serde(default)]
-    pub rooms: Vec<DrifterHiveRoom>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TriglavianSiteRecord {
-    pub instance_id: i64,
-    pub dungeon_id: u32,
-    pub dungeon_name: String,
-    pub solar_system_id: SolarSystemId,
-    pub faction_owner_id: u32,
-    pub base_isk: i64,
-    pub survey_db_drop: i64,
-    pub completed: bool,
-    pub boss_npc_ball_id: i64,
-    #[serde(default)]
-    pub boss_type_id: u32,
-    #[serde(default)]
-    pub escort_ball_ids: Vec<i64>,
-    #[serde(default)]
-    pub escort_type_ids: Vec<u32>,
-    #[serde(default)]
-    pub beacon_ball_id: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SystemInterferenceRecord {
-    pub solar_system_id: SolarSystemId,
-    pub interference_level: f64,
-    pub band: u8,
-    #[serde(default)]
-    pub last_updated_sec: u64,
-}
-
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SeasonalEventSiteRecord {
-    pub instance_id: i64,
-    pub season_id: i64,
-    pub dungeon_id: u32,
-    pub dungeon_name: String,
-    pub solar_system_id: SolarSystemId,
-    pub window_start_ft: i64,
-    pub window_end_ft: i64,
-    pub boss_npc_ball_id: i64,
-    pub boss_type_id: u32,
-    pub escort_ball_ids: Vec<i64>,
-    pub reward_isk: i64,
-    pub reward_points: i64,
-    pub loot_type_id: u32,
-    pub completed: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VoidSpaceSessionRecord {
-    pub char_id: CharacterId,
-    pub ship_id: ItemId,
-    pub origin_solar_system_id: SolarSystemId,
-    pub origin_position: [f64; 3],
-    pub target_id: i64,
-    pub entered_unix: u64,
-    pub expires_at_sec: u64,
-}
-
-#[derive(Default, Serialize, Deserialize)]
-pub struct PveSpecialSitesRegistry {
-    #[serde(skip)] pub db_weak: std::sync::Weak<eve_db::WorldRepository>,
-    #[serde(skip)] pub current_now_sec: u64,
-    pub initialized: bool,
-    #[serde(skip)] pub balls_spawned: bool,
-    pub incursions: HashMap<ConstellationId, IncursionTaleRecord>,
-    #[serde(default)]
-    pub incursion_lifecycle: HashMap<ConstellationId, crate::services::pve_incursion_lifecycle::IncursionLifecycleMeta>,
-    #[serde(default)]
-    pub incursion_site_waves: HashMap<String, crate::services::pve_incursion_lifecycle::IncursionSiteWaveMeta>,
-    #[serde(default)]
-    pub world_event_tales: HashMap<i64, crate::services::pve_incursion_lifecycle::WorldEventTaleRecord>,
-    #[serde(default)]
-    pub incursion_lp_logs: HashMap<CharacterId, Vec<IncursionLPLogEntry>>,
-    #[serde(default)]
-    pub abyssal_pockets: HashMap<CharacterId, AbyssalPocketSession>,
-    #[serde(default)]
-    pub abyssal_traces: HashMap<i64, AbyssalTraceRecord>,
-    #[serde(default)]
-    pub void_space_sessions: HashMap<CharacterId, VoidSpaceSessionRecord>,
-    #[serde(default)]
-    pub homefront_sites: HashMap<SolarSystemId, Vec<HomefrontSiteRecord>>,
-    #[serde(default)]
-    pub roaming_storms: Vec<RoamingStormRecord>,
-    #[serde(default)]
-    pub drifter_hives: HashMap<SolarSystemId, DrifterHiveRecord>,
-    #[serde(default)]
-    pub triglavian_sites: HashMap<SolarSystemId, Vec<TriglavianSiteRecord>>,
-    #[serde(default)]
-    pub edencom_fortress_systems: Vec<SolarSystemId>,
-    #[serde(default)]
-    pub edencom_minor_victory_systems: Vec<SolarSystemId>,
-    #[serde(default)]
-    pub triglavian_minor_victory_systems: Vec<SolarSystemId>,
-    #[serde(default)]
-    pub interference_by_system: HashMap<SolarSystemId, SystemInterferenceRecord>,
-    #[serde(default)]
-    pub crab_beacons: HashMap<i64, crate::services::pve_crab_beacons::CrabBeaconRecord>,
-    #[serde(default)]
-    pub seasonal_event_sites: HashMap<SolarSystemId, Vec<SeasonalEventSiteRecord>>,
-    #[serde(default)]
-    pub sim_clock_sec: u64,
-    #[serde(default)]
-    pub next_seq: i64,
-}
-
-const PVE_SPECIAL_NOTE_ID: i64 = -8_300_000_000_000;
-const INCURSIONS_BLOB_KEY: &str = "incursions_state";
+pub type PveSpecialSitesRegistry = PveSpecialSitesState;
 
 pub fn with_pve_special_reg_db<R>(
     db: &Arc<WorldRepository>,
@@ -179,71 +36,39 @@ pub fn with_pve_special_reg_db<R>(
     f: impl FnOnce(&mut PveSpecialSitesRegistry) -> R,
 ) -> R {
     db.with_mut_snapshot(|snap| {
-        let (mut reg, orig_json) = {
-            if let Some(blob) = snap.service_state_blobs.get(INCURSIONS_BLOB_KEY) {
-                if let Ok(parsed) = serde_json::from_str::<PveSpecialSitesRegistry>(blob) {
-                    (parsed, blob.clone())
-                } else {
-                    (PveSpecialSitesRegistry::default(), String::new())
-                }
-            } else if let Some(note) = snap.owner_notes.get(&PVE_SPECIAL_NOTE_ID) {
-                if let Ok(parsed) = serde_json::from_str::<PveSpecialSitesRegistry>(&note.note) {
-                    (parsed, note.note.clone())
-                } else {
-                    (PveSpecialSitesRegistry::default(), String::new())
-                }
+        if snap.pve_special_sites.sim_clock_sec < now_sec {
+            snap.pve_special_sites.sim_clock_sec = now_sec;
+        }
+        let out = f(&mut snap.pve_special_sites);
+        for (&cid, inc) in &snap.pve_special_sites.incursions {
+            if inc.state == "Ended" {
+                snap.incursions.remove(&cid);
             } else {
-                (PveSpecialSitesRegistry::default(), String::new())
-            }
-        };
-        reg.db_weak = std::sync::Arc::downgrade(db);
-        reg.current_now_sec = now_sec;
-        let out = f(&mut reg);
-        if let Ok(new_json) = serde_json::to_string(&reg) {
-            if new_json != orig_json {
-                snap.service_state_blobs.insert(INCURSIONS_BLOB_KEY.to_string(), new_json.clone());
-                for (&cid, inc) in &reg.incursions {
-                    if inc.state == "Ended" {
-                        snap.incursions.remove(&cid);
-                    } else {
-                        let mut infested = vec![inc.staging_solar_system_id];
-                        for &s in &inc.vanguard_solar_system_ids {
-                            if !infested.contains(&s) {
-                                infested.push(s);
-                            }
-                        }
-                        for &s in &inc.assault_solar_system_ids {
-                            if !infested.contains(&s) {
-                                infested.push(s);
-                            }
-                        }
-                        if !infested.contains(&inc.hq_solar_system_id) {
-                            infested.push(inc.hq_solar_system_id);
-                        }
-                        snap.incursions.insert(
-                            cid,
-                            eve_db::IncursionRecord {
-                                constellation_id: cid,
-                                faction_id: 500_019,
-                                has_boss: inc.mothership_spawned && !inc.mothership_defeated,
-                                infested_solar_systems: infested,
-                                influence: inc.influence,
-                                staging_solar_system_id: inc.staging_solar_system_id,
-                                state: inc.state.to_lowercase(),
-                                incursion_type: "Incursion".to_string(),
-                            },
-                        );
+                let mut infested = vec![inc.staging_solar_system_id];
+                for &s in &inc.vanguard_solar_system_ids {
+                    if !infested.contains(&s) {
+                        infested.push(s);
                     }
                 }
-                snap.owner_notes.insert(
-                    PVE_SPECIAL_NOTE_ID,
-                    eve_db::OwnerNoteRecord {
-                        note_id: PVE_SPECIAL_NOTE_ID,
-                        character_id: -83,
-                        item_id: 0,
-                        label: "pve_special_sites_registry".into(),
-                        note: new_json,
-                        timestamp_unix: reg.current_now_sec.max(reg.sim_clock_sec),
+                for &s in &inc.assault_solar_system_ids {
+                    if !infested.contains(&s) {
+                        infested.push(s);
+                    }
+                }
+                if !infested.contains(&inc.hq_solar_system_id) {
+                    infested.push(inc.hq_solar_system_id);
+                }
+                snap.incursions.insert(
+                    cid,
+                    eve_db::IncursionRecord {
+                        constellation_id: cid,
+                        faction_id: 500_019,
+                        has_boss: inc.mothership_spawned && !inc.mothership_defeated,
+                        infested_solar_systems: infested,
+                        influence: inc.influence,
+                        staging_solar_system_id: inc.staging_solar_system_id,
+                        state: inc.state.to_lowercase(),
+                        incursion_type: "Incursion".to_string(),
                     },
                 );
             }
@@ -256,18 +81,7 @@ pub fn read_pve_special_reg<R>(
     ctx: &ServerContext,
     f: impl FnOnce(&PveSpecialSitesRegistry) -> R,
 ) -> R {
-    ctx.db.with_snapshot(|snap| {
-        let mut reg = if let Some(blob) = snap.service_state_blobs.get(INCURSIONS_BLOB_KEY) {
-            serde_json::from_str::<PveSpecialSitesRegistry>(blob).unwrap_or_default()
-        } else if let Some(note) = snap.owner_notes.get(&PVE_SPECIAL_NOTE_ID) {
-            serde_json::from_str::<PveSpecialSitesRegistry>(&note.note).unwrap_or_default()
-        } else {
-            PveSpecialSitesRegistry::default()
-        };
-        reg.db_weak = std::sync::Arc::downgrade(&ctx.db);
-        reg.current_now_sec = ctx.now_unix();
-        f(&reg)
-    })
+    ctx.db.with_snapshot(|snap| f(&snap.pve_special_sites))
 }
 
 pub fn with_pve_special_reg<R>(
@@ -287,15 +101,14 @@ pub(crate) fn next_spec_seq(reg: &mut PveSpecialSitesRegistry) -> i64 {
 }
 
 pub(crate) fn spec_now_sec(reg: &PveSpecialSitesRegistry) -> u64 {
-    let now = reg.current_now_sec.max(reg.sim_clock_sec);
-    if now > 0 { now } else { 1_775_000_000 }
+    if reg.sim_clock_sec > 0 { reg.sim_clock_sec } else { 1_775_000_000 }
 }
 
 pub fn advance_pve_special_clock(ctx: &ServerContext, delta_sec: u64) {
     ensure_special_sites_initialized(ctx);
     with_pve_special_reg(ctx, |reg| {
-        if reg.sim_clock_sec < reg.current_now_sec {
-            reg.sim_clock_sec = reg.current_now_sec.max(1_775_000_000);
+        if reg.sim_clock_sec == 0 {
+            reg.sim_clock_sec = 1_775_000_000;
         }
         reg.sim_clock_sec += delta_sec;
         if delta_sec >= 3_600 {
@@ -629,11 +442,17 @@ pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
                     .get(&s.site_id)
                     .is_none_or(|w| w.current_wave >= w.total_waves);
                 if on_final_wave {
-                    g_list.push((s.solar_system_id, s.boss_npc_ball_id, s.boss_type_id, s.position));
+                    g_list.push((
+                        s.solar_system_id,
+                        s.boss_npc_ball_id,
+                        s.boss_type_id,
+                        DVec3::from_array(s.position),
+                    ));
                 }
                 for esc in &s.escort_spawns {
                     if !esc.destroyed {
-                        let esc_pos = s.position + DVec3::new(esc.offset[0], esc.offset[1], esc.offset[2]);
+                        let esc_pos =
+                            DVec3::from_array(s.position) + DVec3::new(esc.offset[0], esc.offset[1], esc.offset[2]);
                         g_list.push((s.solar_system_id, esc.npc_ball_id, esc.type_id, esc_pos));
                     }
                 }

@@ -10,6 +10,7 @@ pub mod ledger_store;
 pub mod load;
 pub mod rollback;
 pub mod schema;
+pub mod service_domains_store;
 pub mod sync;
 pub mod sync_ext;
 
@@ -44,4 +45,6 @@ mod sync_ext_cov_unit_tests;
 mod ledger_store_cov_unit_tests;
 #[cfg(test)]
 mod social_store_r8b_unit_tests;
+#[cfg(test)]
+mod service_domains_store_tests;
 

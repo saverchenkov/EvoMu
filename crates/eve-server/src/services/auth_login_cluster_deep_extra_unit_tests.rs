@@ -398,7 +398,7 @@ async fn client_login_alerts_market_cohorts_and_load_slot() {
         for ch in snap.characters.values_mut().filter(|c| c.user_id == 1) {
             ch.create_date_unix = 1_800_000_000 - (5 * 86_400);
         }
-        snap.service_state_blobs.remove("user_cohorts:1");
+        snap.cluster_and_runtime.user_cohorts.remove(&1);
     });
     assert!(format!("{:?}", call_login(&ctx, &mut sess, "charUnboundMgr", "GetCohortsForUser", &[], &kw).await.unwrap()).contains("cohort_new_player"));
 
@@ -414,7 +414,7 @@ async fn client_login_alerts_market_cohorts_and_load_slot() {
     assert!(list_len(&call_login(&ctx, &mut sess, "populationCap", "GetCharacterLoadSlot", &[PyRep::Integer(90_000_001)], &kw).await.unwrap()) >= 1);
     assert!(call_login(&ctx, &mut sess, "populationCap", "MoveCharacterToNewSystem", &[PyRep::Integer(90_000_001), PyRep::Integer(30_000_142), PyRep::String("bad".into())], &kw).await.is_err());
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert("character_lock:90000001".into(), "transfer".into());
+        snap.cluster_and_runtime.character_locks.insert(90_000_001, "transfer".into());
     });
     assert_eq!(call_login(&ctx, &mut sess, "charUnboundMgr", "GetCharacterLockType", &[PyRep::Integer(90_000_001)], &kw).await.unwrap(), PyRep::Integer(1));
 }

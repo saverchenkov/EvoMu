@@ -19,10 +19,7 @@ use eve_proto::quasar::{
     encode_bytes_field, encode_varint_field, DynamicQuasarMessage, DynamicValue,
     GoogleAny, GoogleTimestamp, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
-use std::collections::HashSet;
 use std::sync::Arc;
-
-const LP_OPS_BLOB_KEY: &str = "b34_lp_assetholding_ops";
 
 // ============================================================================
 // Wire Encoding & Decoding Helpers
@@ -736,12 +733,10 @@ pub fn register_handlers(
 
             let (new_balance, already_done): (u64, bool) = db_dep
                 .try_with_mut_snapshot(|snap| -> Result<(u64, bool), (u32, String)> {
-                    let mut ops: HashSet<String> = snap
-                        .service_state_blobs
-                        .get(LP_OPS_BLOB_KEY)
-                        .and_then(|s| serde_json::from_str(s).ok())
-                        .unwrap_or_default();
-                    let already_done = ops.contains(&format!("dep:{hex}"));
+                    let already_done = snap
+                        .quasar_commerce
+                        .lp_asset_ops_completed
+                        .contains(&format!("dep:{hex}"));
 
                     let bal = match op.owner {
                         LpWalletOwner::Character(cid) => {
@@ -785,10 +780,9 @@ pub fn register_handlers(
                     };
 
                     if !already_done {
-                        ops.insert(format!("dep:{hex}"));
-                        if let Ok(json) = serde_json::to_string(&ops) {
-                            snap.service_state_blobs.insert(LP_OPS_BLOB_KEY.into(), json);
-                        }
+                        snap.quasar_commerce
+                            .lp_asset_ops_completed
+                            .insert(format!("dep:{hex}"));
                     }
                     Ok((bal, already_done))
                 })?;
@@ -859,12 +853,10 @@ pub fn register_handlers(
 
             let (new_balance, already_done): (u64, bool) = db_wd
                 .try_with_mut_snapshot(|snap| -> Result<(u64, bool), (u32, String)> {
-                    let mut ops: HashSet<String> = snap
-                        .service_state_blobs
-                        .get(LP_OPS_BLOB_KEY)
-                        .and_then(|s| serde_json::from_str(s).ok())
-                        .unwrap_or_default();
-                    let already_done = ops.contains(&format!("wd:{hex}"));
+                    let already_done = snap
+                        .quasar_commerce
+                        .lp_asset_ops_completed
+                        .contains(&format!("wd:{hex}"));
 
                     let bal = match op.owner {
                         LpWalletOwner::Character(cid) => {
@@ -912,10 +904,9 @@ pub fn register_handlers(
                     };
 
                     if !already_done {
-                        ops.insert(format!("wd:{hex}"));
-                        if let Ok(json) = serde_json::to_string(&ops) {
-                            snap.service_state_blobs.insert(LP_OPS_BLOB_KEY.into(), json);
-                        }
+                        snap.quasar_commerce
+                            .lp_asset_ops_completed
+                            .insert(format!("wd:{hex}"));
                     }
                     Ok((bal, already_done))
                 })?;

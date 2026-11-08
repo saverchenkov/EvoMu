@@ -391,9 +391,9 @@ async fn test_corp_recruitment_ads_expiry_and_search_filters() {
     let ad_id = ad_rep.dict_get("adID").and_then(|v| v.as_i64()).unwrap();
 
     let persisted = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs.contains_key("corp_recruitment_ads")
+        !snap.fleet_and_social_ops.corp_recruitment_ads.is_empty()
     });
-    assert!(persisted, "Recruitment ads must persist in service_state_blobs");
+    assert!(persisted, "Recruitment ads must persist in fleet_and_social_ops");
 
     let res = ctx.dispatch_rpc(&mut sess, "corpRecProxy", None, "SearchCorpAds", &[PyRep::Integer(4)], &kw, None).await.unwrap();
     let PyRep::Rowset { rows, .. } = res else { panic!("expected Rowset") };

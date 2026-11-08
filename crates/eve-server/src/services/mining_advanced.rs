@@ -223,15 +223,6 @@ async fn spawn_moon_asteroid_balls(
     ore_tids
 }
 
-const FRACTURED_FIELDS_BLOB_KEY: &str = "moon_fractured_fields";
-
-fn load_fractured_moon_fields(snap: &eve_db::WorldStateSnapshot) -> Vec<(i64, u32, u64, Vec<i64>)> {
-    snap.service_state_blobs
-        .get(FRACTURED_FIELDS_BLOB_KEY)
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default()
-}
-
 fn record_fractured_moon_field(
     snap: &mut eve_db::WorldStateSnapshot,
     structure_id: i64,
@@ -242,12 +233,9 @@ fn record_fractured_moon_field(
     if asteroid_ids.is_empty() {
         return;
     }
-    let mut fields = load_fractured_moon_fields(snap);
+    let fields = &mut snap.mining_and_ess_state.moon_fractured_fields;
     if !fields.iter().any(|(_, _, d, ids)| *d == decay_unix && *ids == asteroid_ids) {
         fields.push((structure_id, sys_id, decay_unix, asteroid_ids));
-        if let Ok(json) = serde_json::to_string(&fields) {
-            snap.service_state_blobs.insert(FRACTURED_FIELDS_BLOB_KEY.into(), json);
-        }
     }
 }
 
@@ -284,9 +272,10 @@ fn resolve_moon_structure_id(
 pub async fn tick_all_moon_extractions(ctx: &ServerContext) {
     let now = ctx.now_unix();
     let has_work = ctx.db.with_snapshot(|snap| {
-        load_fractured_moon_fields(snap)
-            .into_iter()
-            .any(|(_, _, decay_unix, _)| now >= decay_unix)
+        snap.mining_and_ess_state
+            .moon_fractured_fields
+            .iter()
+            .any(|(_, _, decay_unix, _)| now >= *decay_unix)
             || !snap.moon_extractions.is_empty()
     });
     if !has_work {
@@ -295,7 +284,7 @@ pub async fn tick_all_moon_extractions(ctx: &ServerContext) {
     let (decayed_balls, auto_fractures) = ctx.db.with_mut_snapshot(|snap| {
         let mut decayed: Vec<(u32, Vec<i64>)> = Vec::new();
         let mut active_fields = Vec::new();
-        for (sid, sys_id, decay_unix, ids) in load_fractured_moon_fields(snap) {
+        for (sid, sys_id, decay_unix, ids) in std::mem::take(&mut snap.mining_and_ess_state.moon_fractured_fields) {
             if now >= decay_unix {
                 for &aid in &ids {
                     snap.asteroids.remove(&aid);
@@ -305,9 +294,7 @@ pub async fn tick_all_moon_extractions(ctx: &ServerContext) {
                 active_fields.push((sid, sys_id, decay_unix, ids));
             }
         }
-        if let Ok(json) = serde_json::to_string(&active_fields) {
-            snap.service_state_blobs.insert(FRACTURED_FIELDS_BLOB_KEY.into(), json);
-        }
+        snap.mining_and_ess_state.moon_fractured_fields = active_fields;
 
         let struct_ids: Vec<i64> = snap.moon_extractions.keys().copied().collect();
         let mut auto_list = Vec::new();
@@ -1255,7 +1242,7 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
     let gas_per_cycle: u32 = METENOX_MAGMATIC_GAS_PER_CYCLE;
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert("metenox_last_tick_unix".into(), now_unix.to_string());
+        snap.mining_and_ess_state.metenox_last_tick_unix = now_unix;
         // SDE group 4744 (Upwell Moon Drill, type 81826 Metenox Moon Drill); requires Quantum Core and online/anchored state.
         let metenox_ids: Vec<(i64, u32, i64, [f64; 3])> = snap.structures.values()
             .filter(|st| {

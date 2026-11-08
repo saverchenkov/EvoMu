@@ -107,9 +107,9 @@ fn registry_blob_and_legacy_note_persistence_roundtrip() {
     let legacy_json = serde_json::to_string(&legacy).expect("serialize legacy registry");
     ctx.db.with_mut_snapshot(|snap| {
         snap.owner_notes.insert(
-            PVE_SPECIAL_NOTE_ID,
+            -8_300_000_000_000,
             eve_db::OwnerNoteRecord {
-                note_id: PVE_SPECIAL_NOTE_ID,
+                note_id: -8_300_000_000_000,
                 character_id: -83,
                 item_id: 0,
                 label: "pve_special_sites_registry".into(),
@@ -117,6 +117,7 @@ fn registry_blob_and_legacy_note_persistence_roundtrip() {
                 timestamp_unix: 1_775_123_456,
             },
         );
+        snap.migrate_legacy_service_state();
     });
 
     let loaded_seq = read_pve_special_reg(&ctx, |reg| (reg.next_seq, spec_now_sec(reg)));
@@ -125,7 +126,9 @@ fn registry_blob_and_legacy_note_persistence_roundtrip() {
     let updated = with_pve_special_reg(&ctx, |reg| next_spec_seq(reg));
     assert_eq!(updated, 43);
     ctx.db.with_snapshot(|snap| {
-        assert!(snap.service_state_blobs.contains_key(INCURSIONS_BLOB_KEY));
+        assert_eq!(snap.pve_special_sites.next_seq, 43);
+        assert!(!snap.service_state_blobs.contains_key("incursions_state"));
+        assert!(!snap.owner_notes.contains_key(&-8_300_000_000_000));
     });
     assert_eq!(read_pve_special_reg(&ctx, |reg| reg.next_seq), 43);
 }

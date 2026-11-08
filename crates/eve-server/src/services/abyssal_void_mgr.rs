@@ -13,7 +13,9 @@ use crate::services::abyssal_void_gates::{
     handle_void_space_end_gate_activation, handle_void_space_player_jump,
 };
 use crate::services::pve_incursion_sites::make_site_npc_ball;
-use crate::services::pve_special_sites::{next_spec_seq, with_pve_special_reg};
+use crate::services::pve_special_sites_abyssal::{
+    next_abyssal_seq, read_abyssal_state, with_abyssal_state,
+};
 use crate::services::pve_special_sites_abyssal::{
     pocket_grid_offset, validate_abyssal_hull_and_capacity, validate_and_consume_abyssal_filaments,
     AbyssalTraceRecord, ABYSSAL_TRACE_TYPE_ID,
@@ -132,7 +134,7 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let trace_opt = with_pve_special_reg(ctx, |reg| reg.abyssal_traces.get(&trace_id).cloned());
+            let trace_opt = read_abyssal_state(ctx, |st| st.traces.get(&trace_id).cloned());
             if let Some(trace) = trace_opt {
                 return Some(activate_trace(ctx, session, char_id, trace).await);
             }
@@ -207,12 +209,13 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             if session.solar_system_id == Some(VOID_SPACE_SYSTEM_ID) {
-                let vs_opt = with_pve_special_reg(ctx, |reg| reg.void_space_sessions.get(&char_id).cloned());
+                let vs_opt = read_abyssal_state(ctx, |st| st.void_space_sessions.get(&char_id).cloned());
                 if let Some(vs) = vs_opt {
                     let persisted_cid = ctx.db.with_snapshot(|snap| {
-                        snap.service_state_blobs
-                            .get(&format!("void_space_content:{char_id}"))
-                            .and_then(|s| s.parse::<i64>().ok())
+                        snap.abyssal_state
+                            .void_space_content
+                            .get(&char_id)
+                            .copied()
                             .unwrap_or(vs.target_id)
                     });
                     let rem_sec = vs.expires_at_sec.saturating_sub(ctx.now_unix()) as i64;
@@ -299,8 +302,8 @@ async fn activate_trace(
             && trace.created_unix > 0
             && now_u >= trace.created_unix + fallback_ttl)
     {
-        with_pve_special_reg(ctx, |reg| {
-            reg.abyssal_traces.remove(&trace.trace_ball_id);
+        with_abyssal_state(ctx, |st| {
+            st.traces.remove(&trace.trace_ball_id);
         });
         ctx.systems.get_or_spawn(cur_sys).try_remove_ball(trace.trace_ball_id);
         return Err(BridgeRpcError {
@@ -399,8 +402,8 @@ async fn activate_trace(
             origin_sec, tier,
         )?;
 
-    let entry_check = with_pve_special_reg(ctx, |reg| {
-        if let Some(t) = reg.abyssal_traces.get_mut(&trace.trace_ball_id) {
+    let entry_check = with_abyssal_state(ctx, |st| {
+        if let Some(t) = st.traces.get_mut(&trace.trace_ball_id) {
             if t.entered_char_ids.contains(&char_id) {
                 return Err(BridgeRpcError {
                     code: "TraceAlreadyEntered".into(),
@@ -440,8 +443,8 @@ async fn activate_trace(
             Some(trace.trace_ball_id),
         )
         .await;
-    let remaining_sec = with_pve_special_reg(ctx, |reg| {
-        reg.abyssal_pockets
+    let remaining_sec = read_abyssal_state(ctx, |st| {
+        st.pockets
             .get(&char_id)
             .map(|p| {
                 if p.fleet_ship_ids.len() <= 1 {
@@ -474,8 +477,8 @@ async fn activate_trace(
     let slim_meta = ctx.build_ship_slim_meta(char_id, ship_type);
     let _ = abyss_handle.spawn_ball_with_meta(ball, cs, slim_meta).await;
     let _ = abyss_handle.push_set_state(ship_id).await;
-    if with_pve_special_reg(ctx, |reg| {
-        reg.abyssal_pockets
+    if read_abyssal_state(ctx, |st| {
+        st.pockets
             .get(&char_id)
             .is_some_and(|p| p.rooms[0].cleared)
     }) {
@@ -557,9 +560,9 @@ async fn activate_inventory_filament(
 
     // Spawn scannable Abyssal Trace in the origin system so direct filament entry also leaves a real trace
     let trace_pos = ship_pos + DVec3::new(500.0, 0.0, 0.0);
-    let trace_ball_id = with_pve_special_reg(ctx, |reg| {
-        let tid = 1_897_000_000 + next_spec_seq(reg);
-        reg.abyssal_traces.insert(
+    let trace_ball_id = with_abyssal_state(ctx, |st| {
+        let tid = 1_897_000_000 + next_abyssal_seq(st);
+        st.traces.insert(
             tid,
             AbyssalTraceRecord {
                 trace_ball_id: tid,
@@ -618,8 +621,8 @@ async fn activate_inventory_filament(
     let slim_meta = ctx.build_ship_slim_meta(char_id, ship_type);
     let _ = abyss_handle.spawn_ball_with_meta(ball, cs, slim_meta).await;
     let _ = abyss_handle.push_set_state(ship_id).await;
-    if with_pve_special_reg(ctx, |reg| {
-        reg.abyssal_pockets
+    if read_abyssal_state(ctx, |st| {
+        st.pockets
             .get(&char_id)
             .is_some_and(|p| p.rooms[0].cleared)
     }) {

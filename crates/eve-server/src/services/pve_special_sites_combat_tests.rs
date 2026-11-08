@@ -151,10 +151,7 @@ async fn special_site_npc_destruction_and_seasonal_sites() {
         let mut cfg = crate::services::season_fsd::load_season_config(snap);
         cfg.start_time_ft = now_ft - 1_000_000;
         cfg.end_time_ft = now_ft + 10_000_000_000;
-        snap.service_state_blobs.insert(
-            crate::services::season_fsd::SEASON_CONFIG_KEY.to_string(),
-            serde_json::to_string(&cfg).unwrap(),
-        );
+        snap.seasons_and_campaigns.season_configuration = Some(cfg);
     });
     let seasonal = ensure_seasonal_event_sites_for_system(&ctx, sys_id).await;
     assert_eq!(seasonal.len(), 1);

@@ -44,7 +44,7 @@ pub(super) fn prepare_site_ready_for_completion(
         site.boss_destroyed = true;
         site.killer_char_id = None;
         site.killer_fleet_id = None;
-        (site.solar_system_id, site.position.to_array())
+        (site.solar_system_id, site.position)
     })
 }
 

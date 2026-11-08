@@ -13,7 +13,7 @@ use eve_server::services::pve_crab_beacons::{
 };
 use eve_server::services::pve_incursion_lifecycle::sync_incursion_system_effect_beacons;
 use eve_server::services::pve_incursion_sites::seed_incursion_for_constellation;
-use eve_server::services::pve_special_sites::{read_pve_special_reg, with_pve_special_reg};
+use eve_server::services::pve_special_sites::with_pve_special_reg;
 use eve_server::services::pve_exploration::{
     ensure_system_pve_sites_seeded, with_pve_exploration_reg, HackingNodeKind,
 };
@@ -494,15 +494,15 @@ async fn test_crab_beacon_activation_ceq_interference_notify_e2e() {
             tick_crab_beacons_in_system(&ctx, crab_sys).await;
             if idx == 2 {
                 for _w in 0..4 {
-                    let drones = read_pve_special_reg(&ctx, |reg| reg.crab_beacons.get(&bid).map(|r| r.wave_npc_ball_ids.clone()).unwrap_or_default());
+                    let drones = ctx.db.with_snapshot(|snap| snap.crab_beacons.beacons.get(&bid).map(|r| r.wave_npc_ball_ids.clone()).unwrap_or_default());
                     for did in drones {
                         warp_and_engage_ball(&ctx, &mut escort_sess, crab_sys, escort_ship, &escort_guns, did, "item", PyRep::Integer(bid)).await;
                     }
                     ctx.advance_secs(210);
                     tick_crab_beacons_in_system(&ctx, crab_sys).await;
-                    if read_pve_special_reg(&ctx, |reg| reg.crab_beacons.get(&bid).map(|r| r.phase)) == Some(CrabBeaconPhase::LootRestricted) { break; }
+                    if ctx.db.with_snapshot(|snap| snap.crab_beacons.beacons.get(&bid).map(|r| r.phase)) == Some(CrabBeaconPhase::LootRestricted) { break; }
                 }
-                let phase = read_pve_special_reg(&ctx, |reg| reg.crab_beacons.get(&bid).map(|r| r.phase));
+                let phase = ctx.db.with_snapshot(|snap| snap.crab_beacons.beacons.get(&bid).map(|r| r.phase));
                 assert_eq!(phase, Some(CrabBeaconPhase::LootRestricted), "clearing Rogue Drone waves + 10m scan must enter LootRestricted");
                 let loot_id = ctx.db.with_snapshot(|s| s.items.values().find(|i| i.location_id == bid).map(|i| i.item_id)).expect("CRAB SDE loot items");
                 let non_owner_err = rpc_err(&ctx, &mut escort_sess, "invbroker", "Add", &[PyRep::Integer(loot_id), PyRep::Integer(escort_ship), PyRep::Integer(5)]).await;

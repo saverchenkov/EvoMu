@@ -7,7 +7,6 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{HashMap, HashSet};
-use serde::{Deserialize, Serialize};
 
 use crate::router::ServerContext;
 use crate::services::pve_abyssal_hazards::{
@@ -22,95 +21,12 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 
-pub const PVP_FILAMENT_STORE_KEY: i64 = -990_050;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PvpQueueCharacterEntry {
-    pub item_id: i64,
-    pub type_id: u32,
-    pub location_id: i64,
-    pub flag: u16,
-    #[serde(default)]
-    pub solar_system_id: u32,
-    pub joined_unix: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PvpEventSchedule {
-    pub event_id: i64,
-    pub schedule_id: i64,
-    pub event_name: String,
-    pub description: String,
-    pub match_type_id: i64,
-    pub start_unix: i64,
-    pub end_unix: i64,
-    pub type_ids: Vec<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PvpArenaMatchInstance {
-    pub match_id: i64,
-    pub event_id: i64,
-    pub arena_solar_system_id: u32,
-    pub team_a: Vec<i64>,
-    pub team_b: Vec<i64>,
-    #[serde(default)]
-    pub origin_systems: HashMap<i64, u32>,
-    pub started_unix: u64,
-    pub active: bool,
-    pub winner_char_id: Option<i64>,
-    #[serde(default)]
-    pub exited_pilots: HashSet<i64>,
-    #[serde(default)]
-    pub end_gate_id: i64,
-}
+pub use eve_db::{
+    PvpArenaMatchInstance, PvpEventSchedule, PvpFilamentStore, PvpQueueCharacterEntry,
+};
 
 pub const PROVING_ARENA_MIN_X_M: f64 = 50_000_000.0;
 pub const PROVING_ARENA_SLOT_STRIDE_M: f64 = 5_000_000.0;
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PvpFilamentStore {
-    pub queue: HashMap<i64, PvpQueueCharacterEntry>,
-    pub stats: HashMap<i64, (i64, i64, i64, i64, f64)>,
-    #[serde(default)]
-    pub event_stats: HashMap<i64, HashMap<i64, (i64, i64, i64, i64, f64)>>,
-    #[serde(default)]
-    pub events: Vec<PvpEventSchedule>,
-    #[serde(default)]
-    pub seeded_default_events: bool,
-    #[serde(default)]
-    pub active_matches: HashMap<i64, PvpArenaMatchInstance>,
-    #[serde(default)]
-    pub match_teams: HashMap<i64, Vec<Vec<i64>>>,
-    #[serde(default)]
-    pub match_eliminated: HashMap<i64, HashSet<i64>>,
-    #[serde(default)]
-    pub match_arena_offsets: HashMap<i64, [f64; 3]>,
-    #[serde(default)]
-    pub match_filament_types: HashMap<i64, u32>,
-    #[serde(default)]
-    pub hazard_ticks: HashMap<i64, u32>,
-    #[serde(default)]
-    pub queue_refund_targets: HashMap<i64, (i64, i64)>,
-    #[serde(default)]
-    pub queue_tickets: HashMap<i64, i64>,
-    #[serde(default)]
-    pub next_ticket_id: i64,
-    #[serde(default)]
-    pub origin_positions: HashMap<i64, [f64; 3]>,
-    #[serde(default)]
-    pub next_match_id: i64,
-}
-
-impl PvpFilamentStore {
-    pub fn ticket_id_for_entry(&self, char_id: i64, entry: &PvpQueueCharacterEntry) -> i64 {
-        self.queue_tickets
-            .get(&char_id)
-            .copied()
-            .filter(|&tid| tid > 0)
-            .unwrap_or(entry.item_id)
-    }
-}
 
 #[inline]
 fn unix_to_filetime(ts: i64) -> i64 {
@@ -508,20 +424,11 @@ where
 }
 
 pub fn load_pvp_store(snap: &eve_db::WorldStateSnapshot) -> PvpFilamentStore {
-    snap.service_state_blobs
-        .get("pvp_filament_store")
-        .or_else(|| snap.service_state_blobs.get("pvp_filament:global"))
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default()
+    snap.pvp_filament_state.clone()
 }
 
 pub fn save_pvp_store(snap: &mut eve_db::WorldStateSnapshot, store: &PvpFilamentStore) {
-    if let Ok(json) = serde_json::to_string(store) {
-        snap.service_state_blobs
-            .insert("pvp_filament_store".into(), json.clone());
-        snap.service_state_blobs
-            .insert("pvp_filament:global".into(), json);
-    }
+    snap.pvp_filament_state = store.clone();
 }
 
 fn get_stats_source(

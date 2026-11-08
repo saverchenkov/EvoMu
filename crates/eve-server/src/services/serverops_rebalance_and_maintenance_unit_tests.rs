@@ -228,9 +228,14 @@ fn daily_maintenance_jobs_asteroids_market_ohlcv_contracts_sov_ess_and_declines(
                 ..Default::default()
             },
         );
-        snap.service_state_blobs.insert(
-            "ess_reserve_pulses:30004760".into(),
-            serde_json::json!({"pulses_remaining": 3, "pulses_total": 5, "unlocked_until_unix": dt_base + 600}).to_string(),
+        snap.mining_and_ess_state.ess_reserve_pulses.insert(
+            30_004_760,
+            eve_db::EssReservePulseState {
+                pulses_total: 5,
+                pulses_remaining: 3,
+                unlocked_until_unix: dt_base + 600,
+                ..Default::default()
+            },
         );
 
         // 5. Mission decline cooldowns (1 stale >= 4h, 1 fresh < 4h) & >500 LP log entries
@@ -280,8 +285,9 @@ fn daily_maintenance_jobs_asteroids_market_ohlcv_contracts_sov_ess_and_declines(
         assert_eq!(snap.system_states[&30_004_760].military_index, 0);
         assert_eq!(snap.system_states[&30_004_760].industrial_index, 0);
         assert!(!snap
-            .service_state_blobs
-            .contains_key("ess_reserve_pulses:30004760"));
+            .mining_and_ess_state
+            .ess_reserve_pulses
+            .contains_key(&30_004_760));
         assert!(!snap.last_mission_decline_times.contains_key(&90_000_001));
         assert!(snap.last_mission_decline_times.contains_key(&90_000_002));
         assert_eq!(snap.char_lp_logs[&90_000_001].len(), 500);

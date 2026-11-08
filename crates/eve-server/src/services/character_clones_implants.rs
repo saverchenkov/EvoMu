@@ -1071,9 +1071,15 @@ pub fn handle_clones_and_sheet(
                 if method == "UpdateExistingCharacterFull" {
                     let mut store = crate::services::account_services::load_store(snap);
                     let uid = session.user_id.unwrap_or(0);
-                    let account_tokens = snap.service_state_blobs.get(&format!("account_resculpt_tokens:{uid}")).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+                    let uid_key = uid.to_string();
+                    let account_tokens = snap
+                        .cluster_and_runtime
+                        .account_resculpt_tokens
+                        .get(&uid_key)
+                        .copied()
+                        .unwrap_or(0);
                     let is_pending = store.resculpt_pending.contains(&char_id)
-                        || snap.service_state_blobs.get(&format!("resculpt_pending:{char_id}")).map(|s| s == "1" || s == "true").unwrap_or(false)
+                        || snap.cluster_and_runtime.resculpt_pending.contains(&char_id)
                         || account_tokens > 0
                         || session.has_gm_role();
                     if !is_pending {
@@ -1086,9 +1092,11 @@ pub fn handle_clones_and_sheet(
                     if let Ok(j) = serde_json::to_string(&store) {
                         snap.item_custom_names.insert(crate::services::account_services::ACCOUNT_SERVICES_STORE_KEY, j);
                     }
-                    snap.service_state_blobs.remove(&format!("resculpt_pending:{char_id}"));
+                    snap.cluster_and_runtime.resculpt_pending.remove(&char_id);
                     if account_tokens > 0 {
-                        snap.service_state_blobs.insert(format!("account_resculpt_tokens:{uid}"), (account_tokens - 1).to_string());
+                        snap.cluster_and_runtime
+                            .account_resculpt_tokens
+                            .insert(uid_key, account_tokens - 1);
                     }
                 }
                 let mut worn_types = Vec::new();

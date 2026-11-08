@@ -3,47 +3,16 @@
 //! `community_track_templates.fsdbinary`, `seasonalcampaignsloginrewards.fsdbinary`, `crates.fsdbinary`).
 #![forbid(unsafe_code)]
 
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::OnceLock;
 
 use super::season_manager::CharacterChallenge;
+pub use eve_db::{SeasonConfig, SeasonalChallengeDef};
 
 pub const SEASON_CONFIG_KEY: &str = "season_manager:season_configuration";
 pub const SEASONS_CATALOG_KEY: &str = "season_manager:seasons";
 pub const SEASON_LOOT_TABLES_KEY: &str = "season_manager:loot_tables";
 pub const SEASONAL_CHALLENGES_CONFIG_KEY: &str = "season_manager:challenge_definitions";
-
-/// Structured definition of a seasonal challenge template from `res:/staticdata/challenges.fsdbinary`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SeasonalChallengeDef {
-    pub challenge_id: i64,
-    pub season_id: i64,
-    pub event_type: String,
-    pub title: String,
-    pub description: String,
-    pub points: i64,
-    pub max_progress: i64,
-    pub client_event_driven: bool,
-    pub reward_type_id: u32,
-    pub reward_quantity: i32,
-    #[serde(default)]
-    pub is_dormant: bool,
-    #[serde(default)]
-    pub expiration_time_minutes: i64,
-    #[serde(default)]
-    pub isk_awarded: i64,
-    #[serde(default)]
-    pub next_challenge: Option<i64>,
-    #[serde(default)]
-    pub should_be_active_on_season_start: bool,
-    #[serde(default)]
-    pub should_not_expire_at_downtime: bool,
-    #[serde(default)]
-    pub should_only_appear_once_per_season: bool,
-    #[serde(default)]
-    pub event_conditions: BTreeMap<String, Vec<i64>>,
-}
 
 /// Computes the next daily 11:00:00 UTC downtime in BlueOS FILETIME (100ns ticks since 1601-01-01).
 pub fn next_downtime_filetime_ticks(now_ft: i64) -> i64 {
@@ -63,8 +32,13 @@ pub fn next_downtime_filetime_ticks(now_ft: i64) -> i64 {
     }
 }
 
-impl SeasonalChallengeDef {
-    pub fn to_character_challenge_with_end(&self, season_id: i64, now_ft: i64, season_end_ft: i64) -> CharacterChallenge {
+pub trait SeasonalChallengeDefExt {
+    fn to_character_challenge_with_end(&self, season_id: i64, now_ft: i64, season_end_ft: i64) -> CharacterChallenge;
+    fn to_character_challenge(&self, season_id: i64, now_ft: i64) -> CharacterChallenge;
+}
+
+impl SeasonalChallengeDefExt for SeasonalChallengeDef {
+    fn to_character_challenge_with_end(&self, season_id: i64, now_ft: i64, season_end_ft: i64) -> CharacterChallenge {
         let expiration_date = if self.expiration_time_minutes > 0 {
             now_ft + self.expiration_time_minutes * 60 * 10_000_000
         } else if self.should_not_expire_at_downtime {
@@ -100,56 +74,12 @@ impl SeasonalChallengeDef {
         }
     }
 
-    pub fn to_character_challenge(&self, season_id: i64, now_ft: i64) -> CharacterChallenge {
+    fn to_character_challenge(&self, season_id: i64, now_ft: i64) -> CharacterChallenge {
         self.to_character_challenge_with_end(season_id, now_ft, now_ft + 30 * 86_400 * 10_000_000)
     }
 }
 
-/// Season definition loaded from `res:/staticdata/seasonselection.fsdbinary`,
-/// `res:/staticdata/community_track_templates.fsdbinary`, and
-/// `res:/staticdata/seasonalcampaignsloginrewards.fsdbinary` (or persisted operator configuration).
-///
-/// DATA GAP: Live season schedule (start/end timestamps) and `max_active_challenges` cap are
-/// server-only and not present in V24 client FSD.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SeasonConfig {
-    pub season_id: i64,
-    pub template_id: i64,
-    pub max_active_challenges: i64,
-    pub max_season_points: i64,
-    pub season_name: String,
-    pub title_message_id: i64,
-    pub description_message_id: i64,
-    pub hint_message_id: i64,
-    pub large_selection_title_id: i64,
-    pub navigation_card_picture_path: String,
-    pub background_no_logo: String,
-    pub start_time_ft: i64,
-    pub end_time_ft: i64,
-    pub multiple_season_running: bool,
-}
-
-impl Default for SeasonConfig {
-    fn default() -> Self {
-        Self {
-            season_id: 1,
-            template_id: 1,
-            max_active_challenges: 4,
-            max_season_points: 100,
-            season_name: "Crimson Harvest".into(),
-            title_message_id: 583_333,
-            description_message_id: 583_334,
-            hint_message_id: 583_335,
-            large_selection_title_id: 583_380,
-            navigation_card_picture_path: "res:/UI/Texture/classes/agency/navigationCards/CrimsonHarvest2026_Agency_Navicons_400x666.png".into(),
-            background_no_logo: "res:/UI/Texture/classes/NewFeatureNotify/triglavianInvasion.png".into(),
-            start_time_ft: 133_700_000_000_000_000,
-            end_time_ft: 133_730_240_000_000_000,
-            multiple_season_running: false,
-        }
-    }
-}
+/// Default catalog builder using FSD data (`eve_db::SeasonConfig` is the persisted record).
 
 /// Builds the default season catalog from `res:/staticdata/seasonselection.fsdbinary`,
 /// `res:/staticdata/community_track_templates.fsdbinary`, and
@@ -258,41 +188,36 @@ pub fn load_seasons_catalog(
     sde: &eve_sde::SdeRegistry,
     init_start_ft: i64,
 ) -> BTreeMap<i64, SeasonConfig> {
-    let mut catalog = if let Some(json) = snap.service_state_blobs.get(SEASONS_CATALOG_KEY) {
-        serde_json::from_str::<BTreeMap<i64, SeasonConfig>>(json)
-            .unwrap_or_else(|_| default_fsd_seasons(sde, init_start_ft))
+    let mut catalog = if !snap.seasons_and_campaigns.seasons_catalog.is_empty() {
+        snap.seasons_and_campaigns.seasons_catalog.clone()
     } else {
         default_fsd_seasons(sde, init_start_ft)
     };
-    if let Some(json) = snap.service_state_blobs.get(SEASON_CONFIG_KEY) {
-        if let Ok(cfg) = serde_json::from_str::<SeasonConfig>(json) {
-            let mut merged = catalog.get(&cfg.season_id).cloned().unwrap_or_default();
-            merged.season_id = cfg.season_id;
-            merged.max_active_challenges = cfg.max_active_challenges;
-            if cfg.max_season_points > 0 {
-                merged.max_season_points = cfg.max_season_points;
-            }
-            if !cfg.season_name.is_empty() {
-                merged.season_name = cfg.season_name;
-            }
-            if cfg.end_time_ft > merged.end_time_ft {
-                merged.start_time_ft = cfg.start_time_ft;
-                merged.end_time_ft = cfg.end_time_ft;
-            }
-            catalog.insert(merged.season_id, merged.clone());
-            catalog.insert(1, merged);
+    if let Some(cfg) = snap.seasons_and_campaigns.season_configuration.clone() {
+        let mut merged = catalog.get(&cfg.season_id).cloned().unwrap_or_default();
+        merged.season_id = cfg.season_id;
+        merged.max_active_challenges = cfg.max_active_challenges;
+        if cfg.max_season_points > 0 {
+            merged.max_season_points = cfg.max_season_points;
         }
+        if !cfg.season_name.is_empty() {
+            merged.season_name = cfg.season_name;
+        }
+        if cfg.end_time_ft > merged.end_time_ft {
+            merged.start_time_ft = cfg.start_time_ft;
+            merged.end_time_ft = cfg.end_time_ft;
+        }
+        catalog.insert(merged.season_id, merged.clone());
+        catalog.insert(1, merged);
     }
     catalog
 }
 
 pub fn load_season_config(snap: &eve_db::WorldStateSnapshot) -> SeasonConfig {
-    if let Some(json) = snap.service_state_blobs.get(SEASON_CONFIG_KEY) {
-        if let Ok(cfg) = serde_json::from_str::<SeasonConfig>(json) {
-            return cfg;
-        }
-    }
-    SeasonConfig::default()
+    snap.seasons_and_campaigns
+        .season_configuration
+        .clone()
+        .unwrap_or_default()
 }
 
 fn json_bool_flag(v: Option<&serde_json::Value>) -> bool {
@@ -546,12 +471,8 @@ pub fn load_challenge_definitions_with_sde(
     snap: &eve_db::WorldStateSnapshot,
     sde: &eve_sde::SdeRegistry,
 ) -> Vec<SeasonalChallengeDef> {
-    if let Some(json) = snap.service_state_blobs.get(SEASONAL_CHALLENGES_CONFIG_KEY) {
-        if let Ok(defs) = serde_json::from_str::<Vec<SeasonalChallengeDef>>(json) {
-            if !defs.is_empty() {
-                return defs;
-            }
-        }
+    if !snap.seasons_and_campaigns.challenge_definitions.is_empty() {
+        return snap.seasons_and_campaigns.challenge_definitions.clone();
     }
     let fsd = fsd_challenge_definitions(sde);
     if !fsd.is_empty() {
@@ -561,12 +482,8 @@ pub fn load_challenge_definitions_with_sde(
 }
 
 pub fn load_challenge_definitions(snap: &eve_db::WorldStateSnapshot) -> Vec<SeasonalChallengeDef> {
-    if let Some(json) = snap.service_state_blobs.get(SEASONAL_CHALLENGES_CONFIG_KEY) {
-        if let Ok(defs) = serde_json::from_str::<Vec<SeasonalChallengeDef>>(json) {
-            if !defs.is_empty() {
-                return defs;
-            }
-        }
+    if !snap.seasons_and_campaigns.challenge_definitions.is_empty() {
+        return snap.seasons_and_campaigns.challenge_definitions.clone();
     }
     default_seasonal_challenge_definitions()
 }

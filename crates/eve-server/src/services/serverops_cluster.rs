@@ -11,8 +11,7 @@ use eve_db::{MarketHistoryDayRecord, WorldStateSnapshot};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::SolarSystemId;
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 
 /// Countdown warning thresholds in seconds prior to `downtime_utc_secs_of_day` (`60m`, `15m`, `5m`).
 pub const DOWNTIME_WARNING_THRESHOLDS_SECS: [u64; 3] = [3_600, 900, 300];
@@ -20,28 +19,14 @@ pub const DOWNTIME_WARNING_THRESHOLDS_SECS: [u64; 3] = [3_600, 900, 300];
 /// Standard EVE daily downtime maintenance window duration in minutes (`15` minutes).
 pub const DOWNTIME_DURATION_MINUTES: i64 = 15;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct PersistedDowntimeState {
-    pub emitted_warnings_by_day: BTreeMap<u64, Vec<u64>>,
-    pub last_shutdown_epoch_day: Option<u64>,
-    pub cluster_restart_epoch: u64,
-    pub last_maintenance_unix: u64,
-    #[serde(default)]
-    pub downtime_until_unix: Option<u64>,
-}
+use eve_db::PersistedDowntimeState;
 
 fn load_downtime_state(snap: &WorldStateSnapshot) -> PersistedDowntimeState {
-    snap.service_state_blobs
-        .get("cluster_downtime_state")
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default()
+    snap.cluster_and_runtime.cluster_downtime_state.clone()
 }
 
 fn save_downtime_state(snap: &mut WorldStateSnapshot, st: &PersistedDowntimeState) {
-    if let Ok(json) = serde_json::to_string(st) {
-        snap.service_state_blobs
-            .insert("cluster_downtime_state".into(), json);
-    }
+    snap.cluster_and_runtime.cluster_downtime_state = st.clone();
 }
 
 fn unix_to_filetime(unix_secs: u64) -> i64 {
@@ -1058,17 +1043,7 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
             }
         }
 
-        let ess_pulse_keys: Vec<(String, u32)> = snap
-            .service_state_blobs
-            .keys()
-            .filter_map(|k| {
-                k.strip_prefix("ess_reserve_pulses:")
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .map(|sid| (k.clone(), sid))
-            })
-            .collect();
-        for (blob_key, sys_id) in ess_pulse_keys {
-            let st = super::space_destiny::get_ess_reserve_pulses_from_blobs(&snap.service_state_blobs, sys_id);
+        for (sys_id, st) in std::mem::take(&mut snap.mining_and_ess_state.ess_reserve_pulses) {
             if st.reserve_linked_character_id.is_some()
                 || st.reserve_link_started_tick.is_some()
                 || st.link_started_unix.is_some()
@@ -1076,7 +1051,6 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
                 || st.pulses_remaining > 0
                 || st.pulses_total > 0
             {
-                snap.service_state_blobs.remove(&blob_key);
                 ess_reset_systems.insert(sys_id);
             }
         }
@@ -1264,15 +1238,11 @@ pub fn handle_admin_cluster_rpc(
             state.node_addresses.insert(addr.clone(), node_id);
             drop(state);
             ctx.db.with_mut_snapshot(|snap| {
-                let mut table: std::collections::BTreeMap<String, String> = snap
-                    .service_state_blobs
-                    .get("cluster_node_table")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
+                let table = snap
+                    .cluster_and_runtime
+                    .cluster_node_table
+                    .get_or_insert_with(std::collections::BTreeMap::new);
                 table.insert(node_id.to_string(), addr);
-                if let Ok(json) = serde_json::to_string(&table) {
-                    snap.service_state_blobs.insert("cluster_node_table".into(), json);
-                }
             });
             Ok(PyRep::Integer(node_id))
         }
@@ -1293,13 +1263,8 @@ pub fn handle_admin_cluster_rpc(
                 state.shutdown_complete_nodes.retain(|&nid| nid != node_id);
             }
             ctx.db.with_mut_snapshot(|snap| {
-                if let Some(blob) = snap.service_state_blobs.get("cluster_node_table").cloned() {
-                    if let Ok(mut table) = serde_json::from_str::<std::collections::BTreeMap<String, String>>(&blob) {
-                        table.remove(&node_id.to_string());
-                        if let Ok(json) = serde_json::to_string(&table) {
-                            snap.service_state_blobs.insert("cluster_node_table".into(), json);
-                        }
-                    }
+                if let Some(table) = snap.cluster_and_runtime.cluster_node_table.as_mut() {
+                    table.remove(&node_id.to_string());
                 }
             });
             let _ = recompute_cluster_node_tidi(ctx);
@@ -1321,18 +1286,11 @@ pub fn handle_admin_cluster_rpc(
             crate::services::notify_emitters_skills_trade_godma::emit_server_message_broadcast(ctx, msg);
             let now = ctx.now_unix();
             ctx.db.with_mut_snapshot(|snap| {
-                let mut log: Vec<serde_json::Value> = snap
-                    .service_state_blobs
-                    .get("cluster_admin_broadcasts")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
+                let log = &mut snap.cluster_and_runtime.cluster_admin_broadcasts;
                 if log.len() >= 100 {
                     log.drain(0..log.len().saturating_sub(99));
                 }
                 log.push(serde_json::json!({ "message": msg, "timestamp_unix": now }));
-                if let Ok(json) = serde_json::to_string(&log) {
-                    snap.service_state_blobs.insert("cluster_admin_broadcasts".into(), json);
-                }
             });
             Ok(PyRep::Bool(true))
         }
@@ -1363,15 +1321,9 @@ pub fn handle_admin_cluster_rpc(
                 _ => true,
             };
             ctx.db.with_mut_snapshot(|snap| {
-                let mut states: std::collections::BTreeMap<String, bool> = snap
-                    .service_state_blobs
-                    .get("cluster_service_states")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
-                states.insert(svc_name.to_string(), enabled);
-                if let Ok(json) = serde_json::to_string(&states) {
-                    snap.service_state_blobs.insert("cluster_service_states".into(), json);
-                }
+                snap.cluster_and_runtime
+                    .cluster_service_states
+                    .insert(svc_name.to_string(), enabled);
             });
             Ok(PyRep::Bool(true))
         }

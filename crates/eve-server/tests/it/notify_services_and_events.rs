@@ -13,7 +13,7 @@ use eve_destiny::{Ball, MovementMode, TargetLock};
 use eve_machonet::{service_roles::ROLE_GM_DEFAULT, SessionState};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
-use eve_server::services::season_manager::{SeasonalChallengeDef, SEASONAL_CHALLENGES_CONFIG_KEY};
+use eve_server::services::season_manager::SeasonalChallengeDef;
 use glam::DVec3;
 use std::collections::HashMap;
 

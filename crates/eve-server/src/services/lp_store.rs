@@ -59,14 +59,14 @@ pub fn record_lp_reward_log(
                         e.entry_type.as_str(),
                         "agent_mission_reward" | "agent_mission_time_bonus_reward"
                     ) && !snap
-                            .service_state_blobs
-                            .contains_key(&format!("mission_taxed_journal:{}", e.entry_id))
+                            .fleet_and_social_ops
+                            .mission_taxed_journal
+                            .contains(&e.entry_id)
                 })
                 .map(|e| (e.entry_id, e.entry_type.clone(), e.amount, e.reason.clone()))
                 .collect();
             for (eid, etype, gross_amt, ereason) in recent_rewards.into_iter().rev() {
-                snap.service_state_blobs
-                    .insert(format!("mission_taxed_journal:{eid}"), "1".to_string());
+                snap.fleet_and_social_ops.mission_taxed_journal.insert(eid);
                 if !is_player_corp && gross_amt < IskCents::from_isk(100_000) {
                     continue;
                 }
@@ -1313,11 +1313,11 @@ pub fn handle(
             };
             let (lp_logs, blob_rewards) = ctx.db.with_snapshot(|snap| {
                 let logs: Vec<LpRewardLogEntry> = snap.char_lp_logs.get(&char_id).cloned().unwrap_or_default();
-                let key = format!("delayed_rewards:{char_id}");
-                let blobs: std::collections::HashMap<String, Vec<serde_json::Value>> = snap
-                    .service_state_blobs
-                    .get(&key)
-                    .and_then(|s| serde_json::from_str(s).ok())
+                let blobs = snap
+                    .fleet_and_social_ops
+                    .delayed_rewards
+                    .get(&char_id)
+                    .cloned()
                     .unwrap_or_default();
                 (logs, blobs)
             });

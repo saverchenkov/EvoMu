@@ -1549,48 +1549,12 @@ fn handle_update_alliance(
     ]))
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct AllianceSovConfig {
-    #[serde(default)]
-    capital_system_id: Option<i64>,
-    #[serde(default)]
-    pending_capital_system_id: Option<i64>,
-    #[serde(default)]
-    capital_valid_after_unix: u64,
-    #[serde(default = "default_alliance_prime_hour")]
-    current_prime_hour: i64,
-    #[serde(default = "default_alliance_prime_hour")]
-    new_prime_hour: i64,
-    #[serde(default)]
-    prime_valid_after_unix: u64,
-}
-
-fn default_alliance_prime_hour() -> i64 {
-    18
-}
-
-impl Default for AllianceSovConfig {
-    fn default() -> Self {
-        Self {
-            capital_system_id: None,
-            pending_capital_system_id: None,
-            capital_valid_after_unix: 0,
-            current_prime_hour: 18,
-            new_prime_hour: 18,
-            prime_valid_after_unix: 0,
-        }
-    }
-}
-
-fn alliance_sov_cfg_key(aid: i64) -> String {
-    format!("alliance_sov_cfg:{aid}")
-}
-
-fn read_alliance_sov_cfg(snap: &eve_db::WorldStateSnapshot, aid: i64, now_unix: u64) -> AllianceSovConfig {
-    let mut cfg: AllianceSovConfig = snap
-        .service_state_blobs
-        .get(&alliance_sov_cfg_key(aid))
-        .and_then(|raw| serde_json::from_str(raw).ok())
+fn read_alliance_sov_cfg(snap: &eve_db::WorldStateSnapshot, aid: i64, now_unix: u64) -> eve_db::AllianceSovConfig {
+    let mut cfg = snap
+        .cluster_and_runtime
+        .alliance_sov_cfg
+        .get(&aid)
+        .cloned()
         .unwrap_or_default();
     if cfg.capital_valid_after_unix > 0 && now_unix >= cfg.capital_valid_after_unix {
         if let Some(pending) = cfg.pending_capital_system_id.take() {
@@ -1605,10 +1569,10 @@ fn read_alliance_sov_cfg(snap: &eve_db::WorldStateSnapshot, aid: i64, now_unix: 
     cfg
 }
 
-fn write_alliance_sov_cfg(snap: &mut eve_db::WorldStateSnapshot, aid: i64, cfg: &AllianceSovConfig) {
-    if let Ok(json) = serde_json::to_string(cfg) {
-        snap.service_state_blobs.insert(alliance_sov_cfg_key(aid), json);
-    }
+fn write_alliance_sov_cfg(snap: &mut eve_db::WorldStateSnapshot, aid: i64, cfg: &eve_db::AllianceSovConfig) {
+    snap.cluster_and_runtime
+        .alliance_sov_cfg
+        .insert(aid, cfg.clone());
 }
 
 fn resolve_alliance_id(session: &SessionState, bound_obj_id: Option<i64>) -> Result<i64, BridgeRpcError> {

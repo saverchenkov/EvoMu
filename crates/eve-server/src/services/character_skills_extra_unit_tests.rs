@@ -297,8 +297,7 @@ fn save_skill_queue_mct_prereqs_alpha_caps_and_input_shapes() {
 
     // 2. Grant active MCT slot -> SaveNewQueue succeeds
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs
-            .insert("mct_slots:1".into(), serde_json::to_string(&vec![now + 86_400]).unwrap());
+        snap.cluster_and_runtime.mct_slots.insert(1, vec![now + 86_400]);
     });
 
     // 3. Queueing adv_sk without base_sk at level 2 fails with SkillPrerequisiteNotMet

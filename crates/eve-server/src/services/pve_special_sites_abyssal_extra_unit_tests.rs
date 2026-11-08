@@ -5,7 +5,7 @@
 use std::sync::{Arc, OnceLock};
 
 use crate::router::ServerContext;
-use crate::services::pve_special_sites::with_pve_special_reg;
+use crate::services::pve_special_sites::with_abyssal_state;
 use crate::services::pve_special_sites_abyssal::{
     abyssal_mutaplasmid_for_tier, abyssal_room_gate_type, classify_abyssal_filament,
     ensure_abyssal_room_balls_for_ctx, enter_abyssal_pocket_for_character,
@@ -313,14 +313,14 @@ async fn test_abyssal_deployment_errors_trace_fleet_join_ballpark_unlock_and_cac
     ensure_abyssal_room_balls_for_ctx(&ctx, char1).await;
 
     // Test on_abyssal_room_npc_destroyed_core when another NPC is still alive in pid3
-    let pid3_npcs = with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets[&90_150_003].rooms[0].npc_ball_ids.clone()
+    let pid3_npcs = with_abyssal_state(&ctx, |st| {
+        st.pockets[&90_150_003].rooms[0].npc_ball_ids.clone()
     });
     assert!(!on_abyssal_room_npc_destroyed_core(&ctx.systems, &ctx.db, ab_sys, pid3_npcs[0]).await);
 
     // Test spawn_abyssal_room_contents idempotence when cache_item_id already exists
-    let r1_cache_id = with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets[&char1].rooms[0].cache_item_id
+    let r1_cache_id = with_abyssal_state(&ctx, |st| {
+        st.pockets[&char1].rooms[0].cache_item_id
     });
     let ab_handle = ctx.systems.get_or_spawn(ab_sys);
     spawn_abyssal_room_contents(

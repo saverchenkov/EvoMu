@@ -8,7 +8,7 @@ use eve_proto::{BridgeRpcError, PyRep};
 
 use super::tourney_common::{
     check_referee_auth, extract_id, load_store, resolve_valid_home_station, save_store,
-    TourneyPilot,
+    TourneyPilot, TourneyStoreExt,
 };
 
 pub(super) async fn handle_return_players(

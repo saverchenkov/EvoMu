@@ -8,40 +8,22 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::attr_ids;
 use glam::DVec3;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct EssReservePulseState {
-    pub pulses_total: u32,
-    pub pulses_remaining: u32,
-    pub last_pulse_sec: Option<u64>,
-    #[serde(default)]
-    pub reserve_linked_character_id: Option<i64>,
-    #[serde(default)]
-    pub reserve_link_started_tick: Option<u64>,
-    #[serde(default)]
-    pub link_started_unix: Option<u64>,
-    #[serde(default)]
-    pub unlocked_until_unix: u64,
-}
-
-pub fn get_ess_reserve_pulses_from_blobs(blobs: &HashMap<String, String>, sys_id: u32) -> EssReservePulseState {
-    blobs.get(&format!("ess_reserve_pulses:{sys_id}")).and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default()
-}
-
-pub fn set_ess_reserve_pulses_in_blobs(blobs: &mut HashMap<String, String>, sys_id: u32, st: &EssReservePulseState) {
-    if let Ok(j) = serde_json::to_string(st) {
-        blobs.insert(format!("ess_reserve_pulses:{sys_id}"), j);
-    }
-}
+pub use eve_db::EssReservePulseState;
 
 pub fn get_ess_reserve_pulses(snap: &eve_db::WorldStateSnapshot, sys_id: u32) -> EssReservePulseState {
-    get_ess_reserve_pulses_from_blobs(&snap.service_state_blobs, sys_id)
+    snap.mining_and_ess_state
+        .ess_reserve_pulses
+        .get(&sys_id)
+        .cloned()
+        .unwrap_or_default()
 }
 
 pub fn set_ess_reserve_pulses(snap: &mut eve_db::WorldStateSnapshot, sys_id: u32, st: &EssReservePulseState) {
-    set_ess_reserve_pulses_in_blobs(&mut snap.service_state_blobs, sys_id, st);
+    snap.mining_and_ess_state
+        .ess_reserve_pulses
+        .insert(sys_id, st.clone());
 }
 
 #[path = "space_warp_jump.rs"]
@@ -559,8 +541,7 @@ pub async fn handle(
             };
             let is_reserve = method == "RequestReserveBankUnlink";
             let unlinked = ctx.db.with_mut_snapshot(|snap| {
-                let mut pulse_st =
-                    get_ess_reserve_pulses_from_blobs(&snap.service_state_blobs, sys_id);
+                let mut pulse_st = get_ess_reserve_pulses(snap, sys_id);
                 if is_reserve {
                     let was_reserve_linked =
                         pulse_st.reserve_linked_character_id == Some(char_id);
@@ -568,11 +549,7 @@ pub async fn handle(
                         pulse_st.reserve_linked_character_id = None;
                         pulse_st.reserve_link_started_tick = None;
                         pulse_st.link_started_unix = None;
-                        set_ess_reserve_pulses_in_blobs(
-                            &mut snap.service_state_blobs,
-                            sys_id,
-                            &pulse_st,
-                        );
+                        set_ess_reserve_pulses(snap, sys_id, &pulse_st);
                     }
                     if let Some(st) = snap.system_states.get_mut(&sys_id) {
                         if st.ess_linked_character_id == Some(char_id) {
@@ -930,7 +907,7 @@ pub(crate) async fn handle_update_state_request(
         // stop the ship at its current coordinates before pushing `SetState` on reconnect.
         let _ = handle.force_stop_warp(ship_id);
     }
-    if ctx.db.with_snapshot(|s| s.service_state_blobs.contains_key("dungeon_runtime_store")) {
+    if !ctx.db.with_snapshot(|s| s.dungeon_runtime.instances.is_empty()) {
         let _ = crate::services::pve_dungeon_runtime::check_dungeon_triggers(ctx, char_id, sys_id, ship_id).await;
     }
     crate::services::mobile_deployables_ext::sync_system_deployables(ctx, sys_id).await;

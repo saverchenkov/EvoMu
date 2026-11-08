@@ -108,7 +108,7 @@ fn raw_varint_parser_id_extractor_and_sde_catalog_hydration_boundaries() {
     }
     let db_20 = WorldRepository::new_empty();
     hydrate_store_catalog_from_sde(&db_20, &sde_20);
-    assert!(db_20.with_snapshot(|s| !s.service_state_blobs.contains_key("nes_store_catalog")));
+    assert!(db_20.with_snapshot(|s| s.quasar_commerce.nes_store_catalog.is_none()));
 
     let mut sde_25 = sde_20;
     for &tid in &valid_tids[20..25] {
@@ -179,30 +179,22 @@ fn vault_deposit_withdraw_variants_and_store_catalog_token_schedule_getters() {
                 }],
             },
         );
-        snap.service_state_blobs.insert(
-            "payment_schedules".into(),
-            serde_json::to_string(&vec![PaymentScheduleRecord {
-                id: 77,
-                user_id: 1,
-                schedule_type: 2,
-                next_payment_unix: 2_000_000,
-                offer_id: "VEVC-1001".into(),
-                interval_days: 30,
-                created_unix: 1_700_000_000,
-            }])
-            .unwrap(),
-        );
-        snap.service_state_blobs.insert(
-            "payment_tokens".into(),
-            serde_json::to_string(&vec![PaymentTokenRecord {
-                id: 55,
-                user_id: 1,
-                token_str: "4111-XXXX".into(),
-                is_quick_pay: true,
-                consumed: false,
-            }])
-            .unwrap(),
-        );
+        snap.quasar_commerce.payment_schedules = vec![PaymentScheduleRecord {
+            id: 77,
+            user_id: 1,
+            schedule_type: 2,
+            next_payment_unix: 2_000_000,
+            offer_id: "VEVC-1001".into(),
+            interval_days: 30,
+            created_unix: 1_700_000_000,
+        }];
+        snap.quasar_commerce.payment_tokens = vec![PaymentTokenRecord {
+            id: 55,
+            user_id: 1,
+            token_str: "4111-XXXX".into(),
+            is_quick_pay: true,
+            consumed: false,
+        }];
     });
 
     let handlers = router.handlers.read().unwrap();
@@ -436,40 +428,36 @@ fn fulfillment_and_token_purchase_station_fallbacks_stacking_and_error_guards() 
                 ],
             },
         );
-        snap.service_state_blobs.insert(
-            "payment_tokens".into(),
-            serde_json::to_string(&vec![
-                PaymentTokenRecord {
-                    id: 1,
-                    user_id: 1,
-                    token_str: "T1".into(),
-                    is_quick_pay: true,
-                    consumed: false,
-                },
-                PaymentTokenRecord {
-                    id: 2,
-                    user_id: 1,
-                    token_str: "T2".into(),
-                    is_quick_pay: true,
-                    consumed: true, // already consumed while quick_pay == true!
-                },
-                PaymentTokenRecord {
-                    id: 3,
-                    user_id: 1,
-                    token_str: "T3".into(),
-                    is_quick_pay: true,
-                    consumed: false,
-                },
-                PaymentTokenRecord {
-                    id: 4,
-                    user_id: 99,
-                    token_str: "T4".into(),
-                    is_quick_pay: true,
-                    consumed: false,
-                },
-            ])
-            .unwrap(),
-        );
+        snap.quasar_commerce.payment_tokens = vec![
+            PaymentTokenRecord {
+                id: 1,
+                user_id: 1,
+                token_str: "T1".into(),
+                is_quick_pay: true,
+                consumed: false,
+            },
+            PaymentTokenRecord {
+                id: 2,
+                user_id: 1,
+                token_str: "T2".into(),
+                is_quick_pay: true,
+                consumed: true, // already consumed while quick_pay == true!
+            },
+            PaymentTokenRecord {
+                id: 3,
+                user_id: 1,
+                token_str: "T3".into(),
+                is_quick_pay: true,
+                consumed: false,
+            },
+            PaymentTokenRecord {
+                id: 4,
+                user_id: 99,
+                token_str: "T4".into(),
+                is_quick_pay: true,
+                consumed: false,
+            },
+        ];
     });
 
     let handlers = router.handlers.read().unwrap();

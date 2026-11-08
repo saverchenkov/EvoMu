@@ -283,7 +283,10 @@ async fn test_fleet_object_and_manager_lifecycle() {
     let snap_reloaded = repo_reloaded.with_snapshot(|s| s.clone());
     let _ = std::fs::remove_file(&json_path);
     let _ = std::fs::remove_file(&sqlite_path);
-    ctx.db.with_mut_snapshot(|s| s.service_state_blobs = snap_reloaded.service_state_blobs);
+    ctx.db.with_mut_snapshot(|s| {
+        s.fleet_and_social_ops = snap_reloaded.fleet_and_social_ops;
+        s.service_state_blobs = snap_reloaded.service_state_blobs;
+    });
     eve_server::services::fleet_social::hydrate_social_state_from_db(&ctx);
     let reqs_after_reload = ctx.dispatch_rpc(&mut sess1, "fleetObjectHandler", None, "GetJoinRequests", &[], &kw, None).await.expect("GetJoinRequests after SQLite reload");
     let PyRep::Dict(reqs_reloaded_dict) = reqs_after_reload else { panic!("expected dict") };
@@ -356,7 +359,10 @@ async fn test_fleet_object_and_manager_lifecycle() {
     let snap_wl = repo_wl.with_snapshot(|s| s.clone());
     let _ = std::fs::remove_file(&json_path);
     let _ = std::fs::remove_file(&sqlite_path);
-    ctx.db.with_mut_snapshot(|s| s.service_state_blobs = snap_wl.service_state_blobs);
+    ctx.db.with_mut_snapshot(|s| {
+        s.fleet_and_social_ops = snap_wl.fleet_and_social_ops;
+        s.service_state_blobs = snap_wl.service_state_blobs;
+    });
     eve_server::services::fleet_social::hydrate_social_state_from_db(&ctx);
     let init_reloaded = ctx.dispatch_rpc(&mut sess2, "fleetObjectHandler", None, "GetInitState", &[], &kw, None).await.expect("GetInitState after SQLite reload");
     let opts_reloaded = init_reloaded.dict_get("options").expect("options after reload");

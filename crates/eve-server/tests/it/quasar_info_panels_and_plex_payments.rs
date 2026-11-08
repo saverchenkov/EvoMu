@@ -368,10 +368,7 @@ async fn test_quasar_payment_and_plex_domains_e2e() {
             is_quick_pay: true,
             consumed: false,
         }];
-        snap.service_state_blobs.insert(
-            "payment_tokens".into(),
-            serde_json::to_string(&tokens).expect("ser tok"),
-        );
+        snap.quasar_commerce.payment_tokens = tokens;
         let scheds = vec![PaymentScheduleRecord {
             id: 601,
             user_id: 1,
@@ -381,10 +378,7 @@ async fn test_quasar_payment_and_plex_domains_e2e() {
             interval_days: 30,
             created_unix: now,
         }];
-        snap.service_state_blobs.insert(
-            "payment_schedules".into(),
-            serde_json::to_string(&scheds).expect("ser sched"),
-        );
+        snap.quasar_commerce.payment_schedules = scheds;
     });
 
     // Payment: CostRequest, TokenRequest, GetQuickPayRequest, GetRequest, DisableAllRequest, Schedule, CreditCardRequest

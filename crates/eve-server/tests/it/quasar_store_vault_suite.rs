@@ -173,7 +173,7 @@ async fn test_unified_plex_vault_and_transactions() {
 
     // 4. NES Purchase via eve_public.plex.vault.api.PurchaseRequest: seed catalog, buy offer 2001 (450 PLEX -> 350 PLEX)
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.remove("nes_store_catalog");
+        snap.quasar_commerce.nes_store_catalog = None;
     });
     common::seed_test_nes_store_catalog(&ctx);
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.PurchaseRequest", make_str_id_request("9999")).await.status_code, STATUS_NOT_FOUND);
@@ -246,7 +246,7 @@ async fn test_quasar_store_catalog_products_and_offers() {
 
     // 0. Unseeded catalog returns empty list and 404 Not Found
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.remove("nes_store_catalog");
+        snap.quasar_commerce.nes_store_catalog = None;
     });
     let empty_cats = quasar_rpc(&ctx, &mut sess, "eve_public.store.category.api.GetAllRequest", vec![]).await;
     assert_eq!(empty_cats.status_code, STATUS_OK);
@@ -424,7 +424,7 @@ async fn test_payment_schedules_tokens_and_user_license() {
             interval_days: 30,
             created_unix: now,
         }];
-        snap.service_state_blobs.insert("payment_schedules".to_string(), serde_json::to_string(&schedules).unwrap());
+        snap.quasar_commerce.payment_schedules = schedules;
     });
     let sched_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.payment.schedule.api.GetRequest", make_varint_id_request(101)).await;
     assert_eq!(sched_rsp.status_code, STATUS_OK, "payment.schedule.api.GetRequest failed: {}", sched_rsp.status_message);
@@ -452,7 +452,7 @@ async fn test_payment_schedules_tokens_and_user_license() {
             PaymentTokenRecord { id: 1, user_id: uid, token_str: "tok_visa_4242".into(), is_quick_pay: true, consumed: false },
             PaymentTokenRecord { id: 2, user_id: uid, token_str: "tok_visa_skin".into(), is_quick_pay: true, consumed: false },
         ];
-        snap.service_state_blobs.insert("payment_tokens".to_string(), serde_json::to_string(&tokens).unwrap());
+        snap.quasar_commerce.payment_tokens = tokens;
     });
 
     let mut cost_payload = Vec::new();
@@ -485,11 +485,7 @@ async fn test_payment_schedules_tokens_and_user_license() {
     assert_eq!(reused_rsp.status_code, STATUS_BAD_REQUEST, "Reusing consumed token must return STATUS_BAD_REQUEST");
 
     let (has_receipt, is_omega) = ctx.db.with_snapshot(|snap| {
-        let receipts: Vec<eve_server::services::quasar_payment_store::PaymentReceiptRecord> = snap
-            .service_state_blobs
-            .get("payment_receipts")
-            .and_then(|j| serde_json::from_str(j).ok())
-            .unwrap_or_default();
+        let receipts = &snap.quasar_commerce.payment_receipts;
         let omega = eve_server::services::quasar_auth_user::read_identity_store(&ctx.db, |st| st.omega_subscriptions.get(&uid).copied().unwrap_or(0));
         (receipts.iter().any(|r| r.user_id == uid && r.offer_id == "1001"), omega > now)
     });

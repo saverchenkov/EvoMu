@@ -19,19 +19,7 @@ pub const STORM_MOVE_MIN_SECS: u64 = 24 * 3_600;
 /// Maximum storm center movement cadence: 48 hours (`172,800s`).
 pub const STORM_MOVE_MAX_SECS: u64 = 48 * 3_600;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct RoamingStormRecord {
-    pub storm_id: u32,
-    pub weather: AbyssalWeatherKind,
-    pub center_solar_system_id: SolarSystemId,
-    pub strong_core_systems: Vec<SolarSystemId>,
-    pub weak_periphery_systems: Vec<SolarSystemId>,
-    pub step_count: u32,
-    #[serde(default)]
-    pub next_move_at_sec: u64,
-    #[serde(default)]
-    pub recent_centers: Vec<SolarSystemId>,
-}
+pub use eve_db::RoamingStormRecord;
 
 pub fn storm_weather_beacons(weather: AbyssalWeatherKind) -> (TypeId, TypeId) {
     match weather {

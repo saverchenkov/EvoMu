@@ -668,10 +668,9 @@ pub fn handle(
 
                 let deposit_cents = IskCents::from_f64_isk(deposit_isk);
                 if deposit_cents.0 > 0 {
-                    snap.service_state_blobs.insert(
-                        format!("contract_deposit:{id}"),
-                        deposit_cents.0.to_string(),
-                    );
+                    snap.fleet_and_social_ops
+                        .contract_deposits
+                        .insert(id, deposit_cents.0);
                 }
 
                 let exp_unix = now_unix.saturating_add(duration_secs);
@@ -876,9 +875,9 @@ pub fn handle(
 
                 if c.contract_type == "ItemExchange" {
                     if let Some(dep_raw) = snap
-                        .service_state_blobs
-                        .remove(&format!("contract_deposit:{cid}"))
-                        .and_then(|s| s.parse::<i64>().ok())
+                        .fleet_and_social_ops
+                        .contract_deposits
+                        .remove(&cid)
                         .filter(|&d| d > 0)
                     {
                         snap.credit_contract_issuer(&c, IskCents(dep_raw));
@@ -937,10 +936,8 @@ pub fn handle(
                     return Ok(("Completed", c.expiration_unix, None, c.issuer_id, transferred_ids));
                 }
 
-                if let Some(dep_str) = snap.service_state_blobs.remove(&format!("contract_deposit:{cid}")) {
-                    if let Ok(dep_raw) = dep_str.parse::<i64>() {
-                        snap.credit_contract_issuer(&c, IskCents(dep_raw));
-                    }
+                if let Some(dep_raw) = snap.fleet_and_social_ops.contract_deposits.remove(&cid) {
+                    snap.credit_contract_issuer(&c, IskCents(dep_raw));
                 }
                 let courier_owner_id = if is_corp_accept { effective_caller_corp } else { char_id };
                 snap.next_entity_id += 1;
@@ -1162,10 +1159,8 @@ pub fn handle(
                 let mut new_status = "Outstanding";
                 if is_buyout {
                     snap.credit_contract_issuer(&c, effective_bid);
-                    if let Some(dep_str) = snap.service_state_blobs.remove(&format!("contract_deposit:{cid}")) {
-                        if let Ok(dep_raw) = dep_str.parse::<i64>() {
-                            snap.credit_contract_issuer(&c, IskCents(dep_raw));
-                        }
+                    if let Some(dep_raw) = snap.fleet_and_social_ops.contract_deposits.remove(&cid) {
+                        snap.credit_contract_issuer(&c, IskCents(dep_raw));
                     }
                     if c.for_corp {
                         let bal_after = snap.corporations.get(&c.issuer_corp_id).map(|corp| corp.master_wallet).unwrap_or(IskCents(0));
@@ -1319,7 +1314,7 @@ pub fn handle(
                 }
                 for wid in wraps_to_remove { snap.remove_system_cleanup_item(wid); }
                 if let Some(c_mut) = snap.contracts.get_mut(&cid) { c_mut.status = "Completed".into(); }
-                if let Some(dep_raw) = snap.service_state_blobs.remove(&format!("contract_deposit:{cid}")).and_then(|s| s.parse::<i64>().ok()) {
+                if let Some(dep_raw) = snap.fleet_and_social_ops.contract_deposits.remove(&cid) {
                     snap.credit_contract_issuer(&c, IskCents(dep_raw));
                 }
                 let total_return = c.collateral.checked_add(c.reward).unwrap_or(c.collateral);
@@ -1456,10 +1451,8 @@ pub fn handle(
                         return Err(rpc_err("CrpAccessDenied", "Corporate Contract Manager or Director role required to reject a corporate contract"));
                     }
                     snap.credit_contract_issuer(&c, c.reward);
-                    if let Some(dep_str) = snap.service_state_blobs.remove(&format!("contract_deposit:{cid}")) {
-                        if let Ok(dep_raw) = dep_str.parse::<i64>() {
-                            snap.credit_contract_issuer(&c, IskCents(dep_raw));
-                        }
+                    if let Some(dep_raw) = snap.fleet_and_social_ops.contract_deposits.remove(&cid) {
+                        snap.credit_contract_issuer(&c, IskCents(dep_raw));
                     }
                     for iid in &c.item_ids {
                         let orig_flag = pop_escrowed_item_orig_flag(snap, cid, *iid);
@@ -1489,7 +1482,7 @@ pub fn handle(
                     }
                     if c.status == "Outstanding" {
                         snap.credit_contract_issuer(&c, c.reward);
-                        if let Some(dep_raw) = snap.service_state_blobs.remove(&format!("contract_deposit:{cid}")).and_then(|s| s.parse::<i64>().ok()) {
+                        if let Some(dep_raw) = snap.fleet_and_social_ops.contract_deposits.remove(&cid) {
                             snap.credit_contract_issuer(&c, IskCents(dep_raw));
                         }
                         for iid in &c.item_ids {

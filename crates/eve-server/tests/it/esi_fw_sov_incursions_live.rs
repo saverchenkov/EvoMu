@@ -550,7 +550,7 @@ async fn test_esi_incursions_live_spawn_and_influence_decay() {
     slash(&ctx, &mut sess, &format!("/tr {hq_sys_id}")).await;
     let ship_id = ctx.db.with_snapshot(|s| s.characters[&PILOT_1].active_ship_id);
     let hq_sys = ctx.systems.get_or_spawn(hq_sys_id);
-    hq_sys.set_ball_position(ship_id, hq_pos).await;
+    hq_sys.set_ball_position(ship_id, DVec3::from_array(hq_pos)).await;
 
     let nuke = DamageVector { em: 50_000_000.0, thermal: 50_000_000.0, kinetic: 50_000_000.0, explosive: 50_000_000.0 };
     for wave in 0..4 {
@@ -572,7 +572,7 @@ async fn test_esi_incursions_live_spawn_and_influence_decay() {
     assert_eq!(inc_mob["has_boss"], true);
 
     let ms_boss_bid = crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys_id, &ms_site_id).await;
-    hq_sys.set_ball_position(ship_id, ms_pos).await;
+    hq_sys.set_ball_position(ship_id, DVec3::from_array(ms_pos)).await;
     let mut ms_nuke = nuke;
     ms_nuke.em = 20_000_000.0;
     ms_nuke.thermal = 20_000_000.0;

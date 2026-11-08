@@ -9,7 +9,6 @@ use crate::services::quasar_cosmetics_market_types::{
     CosmeticsMarketData, ListingTargetRecord, SkinListingRecord,
 };
 use eve_proto::quasar::{AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny};
-use std::collections::BTreeMap;
 
 fn make_tag_msg(tag: &str) -> DynamicValue {
     let mut m = DynamicQuasarMessage::new("Tag");
@@ -249,10 +248,7 @@ fn orchestrator_deployments_instances_and_commerce_admin_error_and_retry_paths_k
         created_unix: 1_700_000_000,
     });
     db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(
-            "content_orchestrator_state".into(),
-            serde_json::to_string(&orch).unwrap(),
-        );
+        snap.quasar_commerce.orchestrator = orch;
     });
     let list_inst_fn = &handlers["eve.content.orchestrator.deployment.instance.api.ListRequest"];
     let all_inst = list_inst_fn(&admin_ctx, &dummy_any, &empty_msg).unwrap();
@@ -320,21 +316,13 @@ fn orchestrator_deployments_instances_and_commerce_admin_error_and_retry_paths_k
     let test_uid = 777_u64;
     db.with_mut_snapshot(|snap| {
         snap.account_plex_vault.insert(test_uid, 100);
-        let mut ff = BTreeMap::new();
-        ff.insert(
-            5u32,
-            FailedFulfillmentRecord {
-                id: 5,
-                user_id: test_uid,
-                plex_units: 300,
-                retries: 0,
-                fulfilled: false,
-            },
-        );
-        snap.service_state_blobs.insert(
-            "store_failed_fulfillments".into(),
-            serde_json::to_string(&ff).unwrap(),
-        );
+        snap.quasar_commerce.failed_fulfillments = vec![FailedFulfillmentRecord {
+            id: 5,
+            user_id: test_uid,
+            plex_units: 300,
+            retries: 0,
+            fulfilled: false,
+        }];
     });
     let mut fid5 = DynamicQuasarMessage::new("Fid5");
     fid5.fields.insert(1, DynamicValue::Uint64(5));
@@ -343,10 +331,14 @@ fn orchestrator_deployments_instances_and_commerce_admin_error_and_retry_paths_k
     assert!(retry_fn(&admin_ctx, &dummy_any, &fid5).is_ok());
     db.with_snapshot(|snap| {
         assert_eq!(snap.account_plex_vault[&test_uid], 400);
-        let ff: BTreeMap<u32, FailedFulfillmentRecord> =
-            serde_json::from_str(&snap.service_state_blobs["store_failed_fulfillments"]).unwrap();
-        assert_eq!(ff[&5].retries, 2);
-        assert!(ff[&5].fulfilled);
+        let ff5 = snap
+            .quasar_commerce
+            .failed_fulfillments
+            .iter()
+            .find(|f| f.id == 5)
+            .unwrap();
+        assert_eq!(ff5.retries, 2);
+        assert!(ff5.fulfilled);
     });
 
     // 4. PromoteRequest, RetractRequest, BackfillPartnerCodeRequest validation & state checks

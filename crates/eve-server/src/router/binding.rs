@@ -969,9 +969,9 @@ impl ServerContext {
             }
 
             let auto_reload_ev: Option<(Vec<i64>, u32, f64)> = db.with_mut_snapshot(|snap| {
-                snap.service_state_blobs
-                    .remove(&format!("auto_reloaded_event:{}", cycle.module_id))
-                    .and_then(|s| serde_json::from_str(&s).ok())
+                snap.cluster_and_runtime
+                    .auto_reloaded_event
+                    .remove(&cycle.module_id)
             });
             if let Some((mod_ids, charge_tid, reload_ms)) = auto_reload_ev {
                 let reload_args = vec![

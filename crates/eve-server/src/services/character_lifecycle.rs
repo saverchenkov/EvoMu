@@ -164,7 +164,7 @@ pub fn handle(
                 .and_then(|a| a.as_i64())
                 .or_else(|| kwargs.get("charID").and_then(|v| v.as_i64()))?;
             let lock = ctx.db.with_snapshot(|s| {
-                if let Some(blob) = s.service_state_blobs.get(&format!("character_lock:{char_id}")) {
+                if let Some(blob) = s.cluster_and_runtime.character_locks.get(&char_id) {
                     return Some(format!("Character {char_id} is locked ({blob})"));
                 }
                 if load_store(s).delete_prepared_unix.contains_key(&char_id) {
@@ -217,19 +217,16 @@ pub fn handle(
                 return Some(Err(err("InvalidBloodline", format!("Bloodline {bloodline_id} is invalid"))));
             };
             let is_gm = session.has_gm_role();
-            let pending_key = format!("resculpt_pending:{char_id}");
-            let token_key = format!("account_resculpt_tokens:{user_id}");
+            let token_key = user_id.to_string();
             let updated = ctx.db.try_with_mut_snapshot(|snap| {
                 let current_race = snap.characters.get(&char_id).map(|c| c.race_id).unwrap_or(0);
                 let has_trained_skills = snap.skills.get(&char_id).is_some_and(|m| !m.is_empty());
-                let is_pending = snap
-                    .service_state_blobs
-                    .get(&pending_key)
-                    .is_some_and(|v| v == "true");
+                let is_pending = snap.cluster_and_runtime.resculpt_pending.contains(&char_id);
                 let token_count = snap
-                    .service_state_blobs
+                    .cluster_and_runtime
+                    .account_resculpt_tokens
                     .get(&token_key)
-                    .and_then(|v| v.parse::<u32>().ok())
+                    .copied()
                     .unwrap_or(0);
                 let resculpt_allowed =
                     is_pending || token_count > 0 || current_race == binfo.race_id || is_gm;
@@ -250,9 +247,11 @@ pub fn handle(
                 ch.version += 1;
                 if !is_gm {
                     if is_pending {
-                        snap.service_state_blobs.remove(&pending_key);
+                        snap.cluster_and_runtime.resculpt_pending.remove(&char_id);
                     } else if token_count > 0 {
-                        snap.service_state_blobs.insert(token_key, (token_count - 1).to_string());
+                        snap.cluster_and_runtime
+                            .account_resculpt_tokens
+                            .insert(token_key, token_count - 1);
                     }
                 }
                 Ok(true)
@@ -1234,11 +1233,8 @@ fn handle_char_mgr(
                 )));
             }
             let cohorts = ctx.db.with_snapshot(|snap| {
-                let blob_key = format!("char_cohorts:{char_id}");
-                if let Some(json_str) = snap.service_state_blobs.get(&blob_key) {
-                    if let Ok(list) = serde_json::from_str::<Vec<String>>(json_str) {
-                        return list.into_iter().map(PyRep::String).collect();
-                    }
+                if let Some(list) = snap.cluster_and_runtime.char_cohorts.get(&char_id) {
+                    return list.iter().cloned().map(PyRep::String).collect();
                 }
                 let mut derived = Vec::new();
                 if let Some(ch) = snap.characters.get(&char_id) {

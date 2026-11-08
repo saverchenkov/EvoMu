@@ -905,39 +905,24 @@ async fn ensure_system_signatures(ctx: &ServerContext, sys_id: u32) -> Vec<Cosmi
     crate::services::space_destiny::ensure_system_signatures_and_anomalies(ctx, sys_id).await.0
 }
 
-const SIGNAL_TRACKER_SUB_PREFIX: &str = "signal_tracker_sub:";
-
 pub(crate) fn register_signal_tracker_subscriber(ctx: &ServerContext, sys_id: u32, char_id: i64) {
-    let target_key = format!("{SIGNAL_TRACKER_SUB_PREFIX}{sys_id}");
     ctx.db.with_mut_snapshot(|snap| {
-        let existing_keys: Vec<String> = snap
-            .service_state_blobs
-            .keys()
-            .filter(|k| k.starts_with(SIGNAL_TRACKER_SUB_PREFIX) && k.as_str() != target_key)
-            .cloned()
-            .collect();
-        for key in existing_keys {
-            if let Some(raw) = snap.service_state_blobs.get(&key) {
-                let mut subs: Vec<i64> = serde_json::from_str(raw).unwrap_or_default();
+        for (&other_sys, subs) in snap.fleet_and_social_ops.signal_tracker_subs.iter_mut() {
+            if other_sys != sys_id {
                 subs.retain(|&c| c != char_id);
-                if subs.is_empty() {
-                    snap.service_state_blobs.remove(&key);
-                } else if let Ok(json) = serde_json::to_string(&subs) {
-                    snap.service_state_blobs.insert(key, json);
-                }
             }
         }
-        let mut subs: Vec<i64> = snap
-            .service_state_blobs
-            .get(&target_key)
-            .and_then(|raw| serde_json::from_str(raw).ok())
-            .unwrap_or_default();
+        snap.fleet_and_social_ops
+            .signal_tracker_subs
+            .retain(|_, subs| !subs.is_empty());
+        let subs = snap
+            .fleet_and_social_ops
+            .signal_tracker_subs
+            .entry(sys_id)
+            .or_default();
         if !subs.contains(&char_id) {
             subs.push(char_id);
             subs.sort_unstable();
-        }
-        if let Ok(json) = serde_json::to_string(&subs) {
-            snap.service_state_blobs.insert(target_key, json);
         }
     });
 }
@@ -946,11 +931,14 @@ pub(crate) fn signal_tracker_subscribers_in_snap(
     snap: &eve_db::WorldStateSnapshot,
     sys_id: u32,
 ) -> Vec<i64> {
-    let key = format!("{SIGNAL_TRACKER_SUB_PREFIX}{sys_id}");
-    let Some(raw) = snap.service_state_blobs.get(&key) else {
+    let Some(mut subs) = snap
+        .fleet_and_social_ops
+        .signal_tracker_subs
+        .get(&sys_id)
+        .cloned()
+    else {
         return Vec::new();
     };
-    let mut subs: Vec<i64> = serde_json::from_str(raw).unwrap_or_default();
     subs.retain(|cid| {
         snap.characters.get(cid).is_some_and(|c| {
             c.solar_system_id == sys_id

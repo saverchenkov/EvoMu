@@ -13,13 +13,7 @@ use crate::router::ServerContext;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, DBRowDescriptor, DbColumnType, PyRep};
 
-/// Persistent record of a character's visits to a specific solar system.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
-pub struct SolarSystemVisitRecord {
-    pub visits: i64,
-    #[serde(default)]
-    pub last_visited_ticks: i64,
-}
+pub use eve_db::SolarSystemVisitRecord;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(untagged)]
@@ -46,19 +40,14 @@ pub fn record_solar_system_visit(ctx: &ServerContext, char_id: i64, solar_system
     }
     let now_ticks = ctx.now_blueos_filetime_ticks();
     ctx.db.with_mut_snapshot(|snap| {
-        let key = format!("char_system_visits:{}", char_id);
-        let mut map: HashMap<u32, SolarSystemVisitRecord> = snap
-            .service_state_blobs
-            .get(&key)
-            .and_then(|s| serde_json::from_str::<HashMap<u32, StoredVisitRecord>>(s).ok())
-            .map(|raw| raw.into_iter().map(|(k, v)| (k, v.into())).collect())
-            .unwrap_or_default();
+        let map = snap
+            .cluster_and_runtime
+            .char_system_visits
+            .entry(char_id)
+            .or_default();
         let entry = map.entry(solar_system_id).or_default();
         entry.visits += 1;
         entry.last_visited_ticks = now_ticks;
-        if let Ok(js) = serde_json::to_string(&map) {
-            snap.service_state_blobs.insert(key, js);
-        }
     });
 }
 
@@ -505,15 +494,14 @@ pub fn handle(
             };
             let now_ticks = ctx.now_blueos_filetime_ticks();
             let visits: Vec<PyRep> = ctx.db.with_snapshot(|snap| {
-                let key = format!("char_system_visits:{}", char_id);
-                let map: HashMap<u32, SolarSystemVisitRecord> = snap
-                    .service_state_blobs
-                    .get(&key)
-                    .and_then(|s| serde_json::from_str::<HashMap<u32, StoredVisitRecord>>(s).ok())
-                    .map(|raw| raw.into_iter().map(|(k, v)| (k, v.into())).collect())
-                    .unwrap_or_default();
-                map.into_iter()
-                    .map(|(sys_id, rec)| {
+                let empty = HashMap::new();
+                let map = snap
+                    .cluster_and_runtime
+                    .char_system_visits
+                    .get(&char_id)
+                    .unwrap_or(&empty);
+                map.iter()
+                    .map(|(&sys_id, rec)| {
                         let ticks = if rec.last_visited_ticks > 0 {
                             rec.last_visited_ticks
                         } else {

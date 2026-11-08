@@ -3,7 +3,7 @@
 use super::*;
 use crate::router::ServerContext;
 use crate::services::abyssal_void_mgr::VOID_SPACE_SYSTEM_ID;
-use crate::services::pve_special_sites::{AbyssalTraceRecord, AbyssalWeatherKind};
+use crate::services::pve_special_sites::{with_abyssal_state, AbyssalTraceRecord, AbyssalWeatherKind};
 use eve_db::clock::VirtualServerClock;
 use eve_db::{
     FleetRecord, InventoryFlag, InventoryItemRecord, WorldRepository,
@@ -197,8 +197,8 @@ async fn test_abyssal_proximity_filament_consumption_and_spatial_clouds() {
     );
 
     // Near existing Abyssal trace rejected
-    with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_traces.insert(
+    with_abyssal_state(&ctx, |st| {
+        st.traces.insert(
             800_001,
             AbyssalTraceRecord {
                 trace_ball_id: 800_001,

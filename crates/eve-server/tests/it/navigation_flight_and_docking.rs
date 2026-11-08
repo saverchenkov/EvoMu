@@ -3049,7 +3049,7 @@ async fn test_pve_incursion_payout_and_homefront_ops() {
     let (inc_sys, site_id, boss_bid, site_pos) = with_pve_special_reg(&ctx, |reg| {
         let inc = reg.incursions.values().next().expect("active incursion");
         let site = inc.sites.iter().find(|s| !s.locked_until_low_influence).expect("unlocked incursion site");
-        (site.solar_system_id, site.site_id.clone(), site.boss_npc_ball_id, site.position)
+        (site.solar_system_id, site.site_id.clone(), site.boss_npc_ball_id, DVec3::from_array(site.position))
     });
 
     spawn_ship_in_space(&ctx, &mut sess1, p1, 840_011, 587, inc_sys, site_pos, 1_000_000.0).await;

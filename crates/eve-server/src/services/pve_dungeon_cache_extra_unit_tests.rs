@@ -3,9 +3,8 @@
 use super::pve_dungeon_cache::*;
 use crate::router::ServerContext;
 use crate::services::pve_exploration::{PveSiteInstance, with_pve_exploration_reg};
-use crate::services::pve_special_sites::with_pve_special_reg;
 use crate::services::pve_special_sites_abyssal::{
-    AbyssalPocketSession, AbyssalRoomRecord, AbyssalWeatherKind,
+    with_abyssal_state, AbyssalPocketSession, AbyssalRoomRecord, AbyssalWeatherKind,
 };
 use eve_db::clock::VirtualServerClock;
 use eve_db::durable_domain_types::PersistedBattlefieldRecord;
@@ -279,8 +278,8 @@ async fn keeper_and_agency_warp_to_content_branches() {
         cleared: false,
         gate_unlocked_at_sec: None,
     };
-    with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets.insert(
+    with_abyssal_state(&ctx, |st| {
+        st.pockets.insert(
             char_id,
             AbyssalPocketSession {
                 pocket_id: 777_001,

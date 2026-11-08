@@ -63,7 +63,7 @@ async fn test_feat_account_queue_pop_cap_and_character_locks() {
 
     // Apply transfer lock.
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(format!("character_lock:{char_id}"), "transfer".into());
+        snap.cluster_and_runtime.character_locks.insert(char_id, "transfer".into());
     });
     let lock_type = ctx
         .dispatch_rpc(&mut sess, "charUnboundMgr", None, "GetCharacterLockType", &[PyRep::Integer(char_id)], &kw, None)
@@ -80,7 +80,7 @@ async fn test_feat_account_queue_pop_cap_and_character_locks() {
 
     // Clear transfer lock and test delete pending lock.
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.remove(&format!("character_lock:{char_id}"));
+        snap.cluster_and_runtime.character_locks.remove(&char_id);
         for corp in snap.corporations.values_mut() {
             if corp.ceo_id == char_id {
                 corp.ceo_id = 99_999_999;
@@ -109,7 +109,7 @@ async fn test_feat_account_queue_pop_cap_and_character_locks() {
         .expect("CancelCharacterDeletePrepare");
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(format!("character_lock:{char_id}"), "gm".into());
+        snap.cluster_and_runtime.character_locks.insert(char_id, "gm".into());
     });
     let lock_type = ctx
         .dispatch_rpc(&mut sess, "charUnboundMgr", None, "GetCharacterLockType", &[PyRep::Integer(char_id)], &kw, None)
@@ -119,7 +119,7 @@ async fn test_feat_account_queue_pop_cap_and_character_locks() {
 
     // Clear GM lock so character can be selected.
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.remove(&format!("character_lock:{char_id}"));
+        snap.cluster_and_runtime.character_locks.remove(&char_id);
     });
     let lock_type = ctx
         .dispatch_rpc(&mut sess, "charUnboundMgr", None, "GetCharacterLockType", &[PyRep::Integer(char_id)], &kw, None)
@@ -208,7 +208,7 @@ async fn test_feat_account_queue_pop_cap_and_character_locks() {
         .map(|(&id, _)| id)
         .unwrap_or_else(|| ctx.sde.bloodlines.iter().find(|(_, b)| b.race_id == ch_race).map(|(&id, _)| id).unwrap());
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(format!("account_resculpt_tokens:{}", sess.user_id.unwrap()), "1".into());
+        snap.cluster_and_runtime.account_resculpt_tokens.insert(sess.user_id.unwrap().to_string(), 1);
     });
     let cross_race_err = ctx
         .dispatch_rpc(&mut sess, "charUnboundMgr", None, "UpdateCharacterBloodline", &[PyRep::Integer(char_id), PyRep::Integer(cross_race_bl as i64)], &kw, None)
@@ -249,11 +249,11 @@ async fn test_feat_account_queue_pop_cap_and_character_locks() {
     .await
     .expect("photoUploadSvc.Upload");
 
-    // Verify snapshot storage (only canonical `portrait:{char_id}` key is retained; per-size keys are cleared).
+    // Verify snapshot storage (only canonical `{char_id}` portrait key is retained; per-size keys are cleared).
     ctx.db.with_snapshot(|snap| {
-        assert!(snap.service_state_blobs.contains_key(&format!("portrait:{char_id}")));
+        assert!(snap.cluster_and_runtime.portraits.contains_key(&char_id.to_string()));
         for sz in [32, 64, 128, 256, 512, 1024] {
-            assert!(!snap.service_state_blobs.contains_key(&format!("portrait:{char_id}:{sz}")));
+            assert!(!snap.cluster_and_runtime.portraits.contains_key(&format!("{char_id}:{sz}")));
         }
     });
 
@@ -334,7 +334,7 @@ async fn test_feat_character_paperdoll_titles_emergency_warp_and_energy() {
     // Grant resculpt token.
     let user_id = sess.user_id.unwrap();
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(format!("account_resculpt_tokens:{user_id}"), "1".into());
+        snap.cluster_and_runtime.account_resculpt_tokens.insert(user_id.to_string(), 1);
     });
 
     let full_res = ctx
@@ -353,7 +353,7 @@ async fn test_feat_character_paperdoll_titles_emergency_warp_and_energy() {
 
     // Token must be consumed.
     ctx.db.with_snapshot(|snap| {
-        let tok = snap.service_state_blobs.get(&format!("account_resculpt_tokens:{user_id}")).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+        let tok = snap.cluster_and_runtime.account_resculpt_tokens.get(&user_id.to_string()).copied().unwrap_or(0);
         assert_eq!(tok, 0, "token consumed on successful full resculpt");
     });
 

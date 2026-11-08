@@ -6,16 +6,12 @@
 use crate::router::context::ServerContext;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[path = "project_discovery_ops.rs"]
 mod ops;
 #[path = "project_discovery_rewards.rs"]
 mod rewards;
-
-const PROJECT_DISCOVERY_KEY_PREFIX: &str = "project_discovery:";
-const PROJECT_DISCOVERY_STORE_KEY: &str = "project_discovery";
 
 /// V24 `projectdiscovery/common/const.pyj` constants.
 pub const ACTIVE_PROJECT_ID: &str = "mcgill-polyseg";
@@ -26,55 +22,7 @@ pub const SUPERIOR_LOOT_CRATE_TYPE_ID: u32 = 55359;
 pub const NEEDED_LEVEL_FOR_SUPERIOR_CRATES: i64 = 25;
 pub const MIN_SUBMISSION_INTERVAL_SECS: u64 = 1;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectDiscoveryTaskData {
-    pub task_id: String,
-    pub task_number: i64,
-    pub project_id: String,
-    pub url: String,
-    pub samples: i64,
-    #[serde(default)]
-    pub fetch_count: u64,
-    #[serde(default)]
-    pub task_type: Option<String>,
-    #[serde(default)]
-    pub payload_json: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ProjectDiscoveryStore {
-    #[serde(default)]
-    pub tasks: HashMap<i64, ProjectDiscoveryTaskData>,
-    #[serde(default)]
-    pub char_tasks: HashMap<String, ProjectDiscoveryTaskData>,
-    /// Persisted MMOS rank -> cumulative XP threshold overrides (`get_total_needed_xp`).
-    #[serde(default)]
-    pub xp_curve_by_rank: HashMap<i64, f64>,
-    /// Persisted MMOS per-rank XP step when `xp_curve_by_rank` does not specify an override.
-    #[serde(default)]
-    pub xp_per_rank: f64,
-    /// Persisted MMOS tutorial completion XP reward (`get_tutorial_xp_reward`, `give_tutorial_rewards`).
-    #[serde(default)]
-    pub tutorial_xp_reward: f64,
-    /// Persisted MMOS per-task consensus classification (`task_number -> accurate`).
-    #[serde(default)]
-    pub task_consensus_by_index: HashMap<i64, bool>,
-    /// Persisted MMOS base XP reward for accurate classification (`post_classification`).
-    #[serde(default)]
-    pub classification_xp_accurate: f64,
-    /// Persisted MMOS base XP reward for inaccurate classification (`post_classification`).
-    #[serde(default)]
-    pub classification_xp_inaccurate: f64,
-    /// Persisted MMOS Analysis Kredits reward per accurate classification (`post_classification`).
-    #[serde(default)]
-    pub classification_ak_reward: i64,
-    /// Persisted MMOS maximum daily bonus samples configuration override.
-    #[serde(default)]
-    pub max_bonus_samples: Option<i64>,
-    /// Whether MMOS grading/reward parameters were explicitly configured.
-    #[serde(default)]
-    pub mmos_configured: bool,
-}
+pub use eve_db::{ProjectDiscoveryStore, ProjectDiscoveryTaskData};
 
 fn char_task_key(char_id: i64, task_idx: i64) -> String {
     format!("{char_id}:{task_idx}")
@@ -118,12 +66,11 @@ pub fn spend_analysis_kredits_in_snap(
             message: "Analysis Kredits spend amount must be positive".into(),
         });
     }
-    let key = format!("{PROJECT_DISCOVERY_KEY_PREFIX}{char_id}");
-    let mut state = snap
-        .service_state_blobs
-        .get(&key)
-        .and_then(|json| serde_json::from_str::<PlayerProjectState>(json).ok())
-        .unwrap_or_default();
+    let state = snap
+        .seasons_and_campaigns
+        .project_discovery_players
+        .entry(char_id)
+        .or_default();
     if state.analysis_kredits < amount {
         return Err(BridgeRpcError {
             code: "InsufficientAnalysisKredits".into(),
@@ -134,9 +81,6 @@ pub fn spend_analysis_kredits_in_snap(
         });
     }
     state.analysis_kredits -= amount;
-    if let Ok(json) = serde_json::to_string(&state) {
-        snap.service_state_blobs.insert(key, json);
-    }
     Ok(state.analysis_kredits)
 }
 
@@ -156,17 +100,11 @@ pub fn spend_analysis_kredits(
 }
 
 fn load_discovery_store(snap: &eve_db::WorldStateSnapshot) -> ProjectDiscoveryStore {
-    snap.service_state_blobs
-        .get(PROJECT_DISCOVERY_STORE_KEY)
-        .and_then(|json| serde_json::from_str::<ProjectDiscoveryStore>(json).ok())
-        .unwrap_or_default()
+    snap.seasons_and_campaigns.project_discovery_store.clone()
 }
 
 fn save_discovery_store(snap: &mut eve_db::WorldStateSnapshot, store: &ProjectDiscoveryStore) {
-    if let Ok(json) = serde_json::to_string(store) {
-        snap.service_state_blobs
-            .insert(PROJECT_DISCOVERY_STORE_KEY.to_string(), json);
-    }
+    snap.seasons_and_campaigns.project_discovery_store = store.clone();
 }
 
 /// Configure persisted MMOS rank XP curve, tutorial XP reward, and classification rewards in `ProjectDiscoveryStore`.
@@ -242,65 +180,7 @@ pub fn rank_for_xp(store: &ProjectDiscoveryStore, experience: f64, current_rank:
     rewards::compute_rank_for_xp(store, experience, current_rank)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlayerProjectState {
-    pub rank: i64,
-    pub experience: f64,
-    pub accuracy: f64,
-    pub score: f64,
-    pub tasks_submitted: i64,
-    pub analysis_kredits: i64,
-    pub tutorial_level: i64,
-    pub tutorial_complete: bool,
-    pub current_task_index: i64,
-    pub bonus_samples_left: i64,
-    #[serde(default)]
-    pub tutorial_reward_claimed: bool,
-    #[serde(default)]
-    pub tutorial_skipped: bool,
-    #[serde(default = "default_max_bonus_samples")]
-    pub max_bonus_samples: i64,
-    #[serde(default = "default_project_id")]
-    pub project_id: String,
-    #[serde(default)]
-    pub last_submitted_task_index: i64,
-    #[serde(default)]
-    pub last_bonus_refill_unix: u64,
-    #[serde(default)]
-    pub last_submission_unix: u64,
-}
-
-fn default_max_bonus_samples() -> i64 {
-    10
-}
-
-fn default_project_id() -> String {
-    ACTIVE_PROJECT_ID.into()
-}
-
-impl Default for PlayerProjectState {
-    fn default() -> Self {
-        Self {
-            rank: 1,
-            experience: 0.0,
-            accuracy: INITIAL_PLAYER_SCORE,
-            score: INITIAL_PLAYER_SCORE,
-            tasks_submitted: 0,
-            analysis_kredits: 0,
-            tutorial_level: 1,
-            tutorial_complete: false,
-            tutorial_skipped: false,
-            current_task_index: 0,
-            bonus_samples_left: 10,
-            tutorial_reward_claimed: false,
-            max_bonus_samples: 10,
-            project_id: ACTIVE_PROJECT_ID.into(),
-            last_submitted_task_index: 0,
-            last_bonus_refill_unix: 0,
-            last_submission_unix: 0,
-        }
-    }
-}
+pub use eve_db::PlayerProjectState;
 
 fn json_has_non_empty_classification_content(val: &serde_json::Value) -> bool {
     match val {
@@ -426,12 +306,12 @@ fn read_player_state<F, R>(ctx: &ServerContext, char_id: i64, f: F) -> R
 where
     F: FnOnce(&PlayerProjectState) -> R,
 {
-    let key = format!("{PROJECT_DISCOVERY_KEY_PREFIX}{char_id}");
     ctx.db.with_snapshot(|snap| {
         let state = snap
-            .service_state_blobs
-            .get(&key)
-            .and_then(|json| serde_json::from_str::<PlayerProjectState>(json).ok())
+            .seasons_and_campaigns
+            .project_discovery_players
+            .get(&char_id)
+            .cloned()
             .unwrap_or_default();
         f(&state)
     })
@@ -441,17 +321,17 @@ fn with_player_state<F, R>(ctx: &ServerContext, char_id: i64, f: F) -> R
 where
     F: FnOnce(&mut PlayerProjectState, &mut eve_db::WorldStateSnapshot) -> R,
 {
-    let key = format!("{PROJECT_DISCOVERY_KEY_PREFIX}{char_id}");
     ctx.db.with_mut_snapshot(|snap| {
         let mut state = snap
-            .service_state_blobs
-            .get(&key)
-            .and_then(|json| serde_json::from_str::<PlayerProjectState>(json).ok())
+            .seasons_and_campaigns
+            .project_discovery_players
+            .get(&char_id)
+            .cloned()
             .unwrap_or_default();
         let out = f(&mut state, snap);
-        if let Ok(json) = serde_json::to_string(&state) {
-            snap.service_state_blobs.insert(key, json);
-        }
+        snap.seasons_and_campaigns
+            .project_discovery_players
+            .insert(char_id, state);
         out
     })
 }
@@ -460,17 +340,17 @@ fn try_with_player_state<F, R>(ctx: &ServerContext, char_id: i64, f: F) -> Resul
 where
     F: FnOnce(&mut PlayerProjectState, &mut eve_db::WorldStateSnapshot) -> Result<R, BridgeRpcError>,
 {
-    let key = format!("{PROJECT_DISCOVERY_KEY_PREFIX}{char_id}");
     ctx.db.try_with_mut_snapshot(|snap| {
         let mut state = snap
-            .service_state_blobs
-            .get(&key)
-            .and_then(|json| serde_json::from_str::<PlayerProjectState>(json).ok())
+            .seasons_and_campaigns
+            .project_discovery_players
+            .get(&char_id)
+            .cloned()
             .unwrap_or_default();
         let out = f(&mut state, snap)?;
-        if let Ok(json) = serde_json::to_string(&state) {
-            snap.service_state_blobs.insert(key, json);
-        }
+        snap.seasons_and_campaigns
+            .project_discovery_players
+            .insert(char_id, state);
         Ok(out)
     })
 }

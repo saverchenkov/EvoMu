@@ -9,7 +9,7 @@ use crate::router::ServerContext;
 use crate::services::abyssal_void_mgr::{
     handle, ABYSSAL_SPACE_SYSTEM_ID, ABYSSAL_SYSTEM_RANGE, VOID_SPACE_SYSTEM_ID,
 };
-use crate::services::pve_special_sites::with_pve_special_reg;
+use crate::services::pve_special_sites::with_abyssal_state;
 use crate::services::pve_special_sites_abyssal::{
     check_abyssal_in_pocket_rpc_restrictions, evaluate_highsec_abyssal_tier_policy,
     is_abyssal_local_channel_disabled, is_abyssal_system, AbyssalTraceRecord,
@@ -180,13 +180,13 @@ async fn trace_lifetime_expiration_explicit_and_unentered_1800s_vs_entered_1200s
     // - trace 701: explicit expires_at_sec = base_now + 500
     // - trace 702: expires_at_sec = 0, unentered (pocket_id == None) -> 1800s fallback TTL
     // - trace 703: expires_at_sec = 0, entered (pocket_id == Some(99)) -> 1200s fallback TTL
-    with_pve_special_reg(&ctx, |reg| {
+    with_abyssal_state(&ctx, |st| {
         for (tid, exp, pid) in [
             (701i64, base_now + 500, None),
             (702i64, 0, None),
             (703i64, 0, Some(99i64)),
         ] {
-            reg.abyssal_traces.insert(
+            st.traces.insert(
                 tid,
                 AbyssalTraceRecord {
                     trace_ball_id: tid,
@@ -222,7 +222,7 @@ async fn trace_lifetime_expiration_explicit_and_unentered_1800s_vs_entered_1200s
         .code,
         "TraceExpired"
     );
-    assert!(!with_pve_special_reg(&ctx, |reg| reg.abyssal_traces.contains_key(&701)));
+    assert!(!with_abyssal_state(&ctx, |st| st.traces.contains_key(&701)));
 
     // At base_now + 1200, entered trace 703 with expires_at_sec == 0 expires!
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(base_now + 1_200)));

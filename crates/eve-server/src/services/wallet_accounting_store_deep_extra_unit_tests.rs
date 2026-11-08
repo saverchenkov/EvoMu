@@ -440,7 +440,7 @@ async fn fast_checkout_activity_mgr_and_bounties_taxes_kill_mutations() {
 
     ctx.db.with_mut_snapshot(|snap| {
         let tok = PaymentTokenRecord { id: 1, user_id: paid_uid, token_str: "tok".into(), is_quick_pay: true, consumed: false };
-        snap.service_state_blobs.insert("payment_tokens".into(), serde_json::to_string(&vec![tok]).unwrap());
+        snap.quasar_commerce.payment_tokens = vec![tok];
     });
     let fc_paid = handle_fc_act(&ctx, &paid_sess, "FastCheckoutService", "BuyOffer", &[PyRep::Integer(fc_offer_id), PyRep::Integer(1), PyRep::String("secret123".into())], &kw).unwrap().unwrap();
     assert_eq!(fc_paid.dict_get("status"), Some(&PyRep::String("CONFIRMED".into())));

@@ -11,8 +11,6 @@ use eve_machonet::SessionState;
 use eve_proto::BridgeRpcError;
 use eve_sde::SdeRegistry;
 use glam::DVec3;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 // parity: feat:structures.mobile-cyno-beacon, feat:structures.mobile-micro-jump-unit, feat:structures.mobile-observatory-decloak-ping
 // Well-known Mobile Deployable Groups
@@ -71,157 +69,20 @@ pub const OBSERVATORY_DECLOAK_CHANCE: f64 = 0.40; // 40% per ping
 pub const CYNO_INHIBITOR_ACTIVATION_DELAY_SECS: u64 = 120; // 2 minutes (120 s)
 pub const CYNO_INHIBITOR_LIFETIME_SECS: u64 = 3_600; // 1 hour (3,600 s)
 
-pub const MOBILE_DEPLOYABLE_NOTE_ID: i64 = -8_650_000_000_000;
-pub const MOBILE_DEPLOYABLE_NOTE_OWNER: i64 = 1;
-
-/// Persisted runtime state for mobile deployable structures.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct MobileDeployableRuntimeState {
-    pub deployables: HashMap<i64, MobileDeployableRecord>,
-    pub damaged_items: HashMap<i64, PersistedDamageRecord>,
-    #[serde(default)]
-    pub observatory_pings_done: HashMap<i64, u32>,
-    #[serde(default)]
-    pub cloak_activated_unix: HashMap<i64, u64>,
-    #[serde(default, deserialize_with = "deserialize_mmju_spools")]
-    pub mmju_spools: HashMap<i64, MmjuSpoolEntry>,
-    #[serde(default)]
-    pub siphon_last_cycle_unix: HashMap<i64, u64>,
-    #[serde(default)]
-    pub pending_decloak_notifications: Vec<PendingDecloakNotice>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MmjuSpoolEntry {
-    pub ship_id: i64,
-    pub char_id: i64,
-    pub unit_id: i64,
-    pub solar_system_id: u32,
-    pub started_unix: u64,
-    pub complete_at_unix: u64,
-    pub direction: [f64; 3],
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PendingDecloakNotice {
-    pub char_id: i64,
-    pub ship_id: i64,
-    pub module_id: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MobileDeployableRecord {
-    pub item_id: i64,
-    pub type_id: u32,
-    pub group_id: u32,
-    pub owner_id: i64,
-    pub solar_system_id: u32,
-    pub anchor_start_unix: u64,
-    pub anchor_duration_secs: u64,
-    pub anchor_completed: bool,
-    #[serde(default)]
-    pub is_unanchored: bool,
-    pub expires_at_unix: u64,
-    pub last_interaction_unix: u64,
-    pub reinforced_until_unix: Option<u64>,
-    #[serde(default)]
-    pub last_ping_unix: Option<u64>,
-    pub position: [f64; 3],
-    #[serde(default)]
-    pub deployed_fleet_id: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PersistedDamageRecord {
-    pub shield_hp: f64,
-    pub max_shield_hp: f64,
-    pub armor_hp: f64,
-    pub max_armor_hp: f64,
-    pub structure_hp: f64,
-    pub max_structure_hp: f64,
-}
-
-fn deserialize_mmju_spools<'de, D>(deserializer: D) -> Result<HashMap<i64, MmjuSpoolEntry>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    struct MmjuSpoolsVisitor;
-
-    impl<'de> serde::de::Visitor<'de> for MmjuSpoolsVisitor {
-        type Value = HashMap<i64, MmjuSpoolEntry>;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-            formatter.write_str("a map or sequence of MmjuSpoolEntry")
-        }
-
-        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-        where
-            A: serde::de::MapAccess<'de>,
-        {
-            let mut out = HashMap::with_capacity(map.size_hint().unwrap_or(0));
-            while let Some((k, v)) = map.next_entry::<i64, MmjuSpoolEntry>()? {
-                out.insert(k, v);
-            }
-            Ok(out)
-        }
-
-        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-        where
-            A: serde::de::SeqAccess<'de>,
-        {
-            let mut out = HashMap::with_capacity(seq.size_hint().unwrap_or(0));
-            while let Some(entry) = seq.next_element::<MmjuSpoolEntry>()? {
-                out.insert(entry.ship_id, entry);
-            }
-            Ok(out)
-        }
-    }
-
-    deserializer.deserialize_any(MmjuSpoolsVisitor)
-}
+pub use eve_db::{
+    MmjuSpoolEntry, MobileDeployableRecord, MobileDeployableRuntimeState, PendingDecloakNotice,
+    PersistedDamageRecord,
+};
 
 pub fn read_deployable_state_snap(snap: &eve_db::WorldStateSnapshot) -> MobileDeployableRuntimeState {
-    match snap.owner_notes.get(&MOBILE_DEPLOYABLE_NOTE_ID) {
-        Some(n) => match serde_json::from_str::<MobileDeployableRuntimeState>(&n.note) {
-            Ok(state) => state,
-            Err(e) => {
-                tracing::error!(
-                    note_id = MOBILE_DEPLOYABLE_NOTE_ID,
-                    error = %e,
-                    "Failed to deserialize MobileDeployableRuntimeState; returning default"
-                );
-                MobileDeployableRuntimeState::default()
-            }
-        },
-        None => MobileDeployableRuntimeState::default(),
-    }
+    snap.deployable_state.clone()
 }
 
 pub fn write_deployable_state_snap<R>(
     snap: &mut eve_db::WorldStateSnapshot,
     f: impl FnOnce(&mut MobileDeployableRuntimeState) -> R,
 ) -> R {
-    let mut state = read_deployable_state_snap(snap);
-    let out = f(&mut state);
-    if let Ok(json) = serde_json::to_string(&state) {
-        let ts = snap
-            .owner_notes
-            .get(&MOBILE_DEPLOYABLE_NOTE_ID)
-            .map(|n| n.timestamp_unix)
-            .unwrap_or(0);
-        snap.owner_notes.insert(
-            MOBILE_DEPLOYABLE_NOTE_ID,
-            eve_db::OwnerNoteRecord {
-                note_id: MOBILE_DEPLOYABLE_NOTE_ID,
-                character_id: MOBILE_DEPLOYABLE_NOTE_OWNER,
-                item_id: 0,
-                label: "S:MOBILE_DEPLOYABLE_RUNTIME_STATE".to_string(),
-                note: json,
-                timestamp_unix: ts,
-            },
-        );
-    }
-    out
+    f(&mut snap.deployable_state)
 }
 
 pub fn read_deployable_state(ctx: &ServerContext) -> MobileDeployableRuntimeState {
@@ -232,14 +93,7 @@ pub fn write_deployable_state<R>(
     ctx: &ServerContext,
     f: impl FnOnce(&mut MobileDeployableRuntimeState) -> R,
 ) -> R {
-    let now_unix = ctx.now_unix();
-    ctx.db.with_mut_snapshot(|snap| {
-        let out = write_deployable_state_snap(snap, f);
-        if let Some(note) = snap.owner_notes.get_mut(&MOBILE_DEPLOYABLE_NOTE_ID) {
-            note.timestamp_unix = now_unix;
-        }
-        out
-    })
+    ctx.db.with_mut_snapshot(|snap| f(&mut snap.deployable_state))
 }
 
 /// Checks whether a given type ID represents a mobile structure (`feat:structures.mobile-deploy-restrictions`).
@@ -611,10 +465,7 @@ pub fn step_mobile_deployables_in_actor(
                     .anchor_start_unix
                     .is_some_and(|start| now_unix >= start.saturating_add(meta.anchoring_delay_secs as u64))
         });
-        let Some(note) = snap.owner_notes.get(&MOBILE_DEPLOYABLE_NOTE_ID) else {
-            return (false, Vec::new(), meta_due, Vec::new());
-        };
-        let st: MobileDeployableRuntimeState = serde_json::from_str(&note.note).unwrap_or_default();
+        let st = &snap.deployable_state;
         if st.deployables.is_empty() && st.mmju_spools.is_empty() {
             return (false, Vec::new(), meta_due, Vec::new());
         }
@@ -720,7 +571,7 @@ pub fn step_mobile_deployables_in_actor(
     // 2. Clear expired reinforcement timers and mark completed anchoring transitions
     if has_timer_transition {
         db.with_mut_snapshot(|snap| {
-            if snap.owner_notes.contains_key(&MOBILE_DEPLOYABLE_NOTE_ID) {
+            if !snap.deployable_state.deployables.is_empty() {
                 write_deployable_state_snap(snap, |st| {
                     for rec in st.deployables.values_mut() {
                         if rec.solar_system_id == solar_system_id {

@@ -225,8 +225,9 @@ pub(crate) fn seed_full_esi_context() -> (Arc<ServerContext>, String, i64, i64, 
                 last_extracted_unix: now,
             },
         );
-        snap.service_state_blobs
-            .insert(format!("portrait:{char_id}:64"), "ffd8ffe0".into());
+        snap.cluster_and_runtime
+            .portraits
+            .insert(format!("{char_id}:64"), "ffd8ffe0".into());
         snap.wallet_journal.push(WalletJournalEntry {
             entry_id: 99_001,
             character_id: char_id,

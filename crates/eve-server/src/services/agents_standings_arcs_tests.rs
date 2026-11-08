@@ -545,14 +545,12 @@ async fn get_disabled_missions_and_replay_timestamp_read_persisted_state() {
     let sample_mission_id = *ctx.sde.missions.keys().next().expect("SDE mission");
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(
-            "agentMgr:disabled_missions".into(),
-            serde_json::to_string(&vec![sample_mission_id]).unwrap(),
-        );
-        snap.service_state_blobs.insert(
-            "agentMgr:replay_ts:90000001:3018921".into(),
-            (ctx.now_unix() + 600).to_string(),
-        );
+        snap.fleet_and_social_ops
+            .agent_global_disabled_missions
+            .insert(sample_mission_id);
+        snap.fleet_and_social_ops
+            .agent_replay_ts
+            .insert((90_000_001, 3_018_921), ctx.now_unix() + 600);
     });
 
     let disabled = handle_extended(&ctx, &mut session, "agentMgr", "GetDisabledMissions", &[], &kw)

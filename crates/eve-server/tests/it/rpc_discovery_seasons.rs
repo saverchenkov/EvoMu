@@ -5,6 +5,7 @@ use crate::common;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
+use eve_server::services::season_fsd::SeasonalChallengeDefExt;
 use std::collections::HashMap;
 
 const P1: i64 = 90_000_001;
@@ -275,12 +276,30 @@ async fn test_season_manager_rpc_suite() {
     let err_comp = rpc(&ctx, &mut p1, "seasonManager", "complete_challenge_for_character_id", &[PyRep::Integer(1003)]).await;
     assert!(err_comp.is_err());
 
-    // 1. get_max_active_challenges (SYNTHETIC default config, overridable via the state blob; negative clamped to 1)
+    // 1. get_max_active_challenges (SYNTHETIC default config, overridable via season_configuration; negative clamped to 1)
     let max_ch = rpc(&ctx, &mut p1, "seasonManager", "get_max_active_challenges", &[]).await.expect("get_max_active_challenges");
     assert_eq!(max_ch, PyRep::Integer(4));
-    ctx.db.with_mut_snapshot(|s| s.service_state_blobs.insert("season_manager:season_configuration".into(), r#"{"season_id":2,"max_active_challenges":-5,"max_season_points":1000}"#.into()));
+    ctx.db.with_mut_snapshot(|s| {
+        s.seasons_and_campaigns.season_configuration = Some(eve_db::SeasonConfig {
+            season_id: 2,
+            max_active_challenges: -5,
+            max_season_points: 1000,
+            start_time_ft: 0,
+            end_time_ft: 0,
+            ..Default::default()
+        });
+    });
     assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "get_max_active_challenges", &[]).await.unwrap(), PyRep::Integer(1));
-    ctx.db.with_mut_snapshot(|s| s.service_state_blobs.insert("season_manager:season_configuration".into(), r#"{"season_id":2,"max_active_challenges":6,"max_season_points":1000}"#.into()));
+    ctx.db.with_mut_snapshot(|s| {
+        s.seasons_and_campaigns.season_configuration = Some(eve_db::SeasonConfig {
+            season_id: 2,
+            max_active_challenges: 6,
+            max_season_points: 1000,
+            start_time_ft: 0,
+            end_time_ft: 0,
+            ..Default::default()
+        });
+    });
     assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "get_max_active_challenges", &[]).await.unwrap(), PyRep::Integer(6));
 
     // 2. get_season_end_time (persisted fixed end_time_ft that does not slide forward on clock advance)
@@ -369,7 +388,7 @@ async fn test_season_manager_rpc_suite() {
     // Unit-level shortcut: seed completed chain predecessor 2724 and existing dormant 2743 in state to exercise item-reward OnItemChange and baseline_progress snapshot on chain unlock 2724 -> 2743.
     ctx.db.with_mut_snapshot(|s| {
         s.mining_ledger.push(eve_db::MiningLedgerRecord { character_id: P1, solar_system_id: 30000142, type_id: 1230, quantity: 500, date: "2026-01-01".into(), timestamp_unix: 1_704_067_200 });
-        s.service_state_blobs.insert(format!("hacking_wins:{P1}"), "3".into());
+        s.seasons_and_campaigns.hacking_wins.insert(P1, 3);
         let mut st = eve_server::services::season_manager::load_season_state_from_blobs(s, P1);
         let defs = eve_server::services::season_manager::fsd_challenge_definitions(&ctx.sde);
         let def2724 = defs.iter().find(|d| d.challenge_id == 2724).unwrap().clone();
@@ -400,7 +419,7 @@ async fn test_season_manager_rpc_suite() {
     let err_client_239 = rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(239), PyRep::Integer(1)]).await;
     assert_eq!(err_client_239.unwrap_err().code, "InvalidChallengeEvent"); // rpc-lint: allow error code assertion
     ctx.db.with_mut_snapshot(|s| {
-        s.service_state_blobs.insert(format!("hacking_wins:{P1}"), "1".into());
+        s.seasons_and_campaigns.hacking_wins.insert(P1, 1);
     });
 
     // 10. get_loot_table_by_typeID (backed by res:/staticdata/crates.fsdbinary fixedLootItems)
@@ -423,7 +442,7 @@ async fn test_season_manager_rpc_suite() {
     p1.role |= eve_machonet::service_roles::ROLE_GM_DEFAULT;
     let reload = rpc(&ctx, &mut p1, "seasonManager", "reload_fsd_data", &[]).await.expect("reload_fsd_data");
     assert_eq!(reload, PyRep::Bool(true));
-    assert!(ctx.db.with_snapshot(|s| s.service_state_blobs.contains_key("season_manager:challenge_definitions")));
+    assert!(!ctx.db.with_snapshot(|s| s.seasons_and_campaigns.challenge_definitions.is_empty()));
 
     // 12. process_client_event on real V24 client_lookAtObject challenge 274 (max_progress=4, points=40)
     assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[]).await.unwrap_err().code, "ChallengeNotFound"); // rpc-lint: allow error code assertion
@@ -452,7 +471,7 @@ async fn test_season_manager_rpc_suite() {
     assert!(rpc(&ctx, &mut p2, "seasonManager", "challenge_is_dormant", &[PyRep::Integer(999_999)]).await.is_err());
     assert!(rpc(&ctx, &mut p2, "seasonManager", "get_challenge_expiration_date", &[PyRep::Integer(999_999)]).await.is_err());
     assert!(rpc(&ctx, &mut p2, "seasonManager", "process_client_event", &[PyRep::Integer(999_999), PyRep::Integer(1)]).await.is_err());
-    assert!(!ctx.db.with_snapshot(|s| s.service_state_blobs.contains_key("season_state:90000002")));
+    assert!(!ctx.db.with_snapshot(|s| s.seasons_and_campaigns.season_states.contains_key(&90000002)));
 
     let tmp_db = std::env::temp_dir().join(format!("evomu_seasons_roundtrip_{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&tmp_db);

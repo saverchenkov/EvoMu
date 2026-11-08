@@ -449,9 +449,10 @@ fn step_cycles_covers_tether_nanite_disruptors_rah_ehe_asb_aar_cap_booster_and_r
         assert_eq!(snap.module_online_states.get(&mod_ehe), Some(&false));
         // Projectile gun auto-reloaded from cargo
         assert!(snap
-            .service_state_blobs
-            .contains_key(&format!("auto_reloaded_event:{mod_proj_gun}")));
-        assert!(snap.service_state_blobs.contains_key("module_reload_until_unix"));
+            .cluster_and_runtime
+            .auto_reloaded_event
+            .contains_key(&mod_proj_gun));
+        assert!(!snap.cluster_and_runtime.module_reload_until_unix.is_empty());
         // Mutadaptive spool updated transient attr 84
         assert!(snap
             .transient_item_attributes

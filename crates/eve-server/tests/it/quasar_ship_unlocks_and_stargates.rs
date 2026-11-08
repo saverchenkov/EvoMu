@@ -266,7 +266,18 @@ async fn test_quasar_b2_ship_unlock_and_starterspace_caster() {
             item_id: 1_010_000_001, type_id: 606, owner_id: 2_112_000_001,
             location_id: 30_000_142, quantity: 1, singleton: true, ..Default::default()
         });
-        snap.service_state_blobs.insert("cluster_misc_state".to_string(), r#"{"starter_launchers":[1]}"#.to_string());
+        snap.cluster_and_runtime.cluster_misc_state = Some(eve_db::PersistedClusterMiscState {
+            starter_launchers: vec![eve_db::PersistedStarterLauncherRecord {
+                item_id: 1,
+                type_id: 79_018,
+                solar_system_id: 30_000_142,
+                faction_id: 500_001,
+                staging_system_id: 30_000_142,
+                staging_station_id: 60_003_760,
+                position: [0.0, 0.0, 0.0],
+            }],
+            ..Default::default()
+        });
     });
     let mut caster_req = Vec::new();
     encode_id_field(1, 2_112_000_001, &mut caster_req);
@@ -289,7 +300,7 @@ async fn test_quasar_b2_ship_unlock_and_starterspace_caster() {
 
     // Emptying starter_launchers in cluster_misc_state disables CanJumpStarterSpaceShipCasterRequest
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert("cluster_misc_state".to_string(), r#"{"starter_launchers":[]}"#.to_string());
+        snap.cluster_and_runtime.cluster_misc_state = Some(eve_db::PersistedClusterMiscState::default());
     });
     let r3 = quasar_rpc(&ctx, &mut sess, "eve.ship.api.CanJumpStarterSpaceShipCasterRequest", caster_req).await;
     assert_eq!(r3.status_code, STATUS_OK);

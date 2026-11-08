@@ -12,7 +12,7 @@ use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::
 };
 use crate::services::pve_abyssal_hazards::ABYSSAL_TRACE_TYPE_ID;
 use crate::services::pve_special_sites::{
-    with_pve_special_reg, AbyssalPocketSession, AbyssalRoomRecord, AbyssalTraceRecord,
+    with_abyssal_state, AbyssalPocketSession, AbyssalRoomRecord, AbyssalTraceRecord,
     AbyssalWeatherKind, VoidSpaceSessionRecord,
 };
 use eve_destiny::{Ball, CombatState, MovementMode};
@@ -51,8 +51,8 @@ async fn abyssal_end_gate_validation_suspect_flag_and_void_space_error_branches(
     );
 
     // NotInFinalRoom when in room 2
-    with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets.insert(
+    with_abyssal_state(&ctx, |st| {
+        st.pockets.insert(
             char_id,
             make_pocket(pid, char_id, ship_id, origin_sys, abyss_sys, 2, now + 600, 5),
         );
@@ -66,8 +66,8 @@ async fn abyssal_end_gate_validation_suspect_flag_and_void_space_error_branches(
     );
 
     // Move to room 3, test InvalidGate, GateLocked, GateOutOfRange, and high-sec tier 5 suspect flag
-    with_pve_special_reg(&ctx, |reg| {
-        let p = reg.abyssal_pockets.get_mut(&char_id).unwrap();
+    with_abyssal_state(&ctx, |st| {
+        let p = st.pockets.get_mut(&char_id).unwrap();
         p.current_room = 3;
         p.rooms[2].npc_ball_ids = vec![npc_id];
     });
@@ -323,8 +323,8 @@ async fn abyssal_end_gate_validation_suspect_flag_and_void_space_error_branches(
     );
 
     // Expire void session -> PocketCollapsed
-    with_pve_special_reg(&ctx, |reg| {
-        if let Some(vs) = reg.void_space_sessions.get_mut(&char_id) {
+    with_abyssal_state(&ctx, |st| {
+        if let Some(vs) = st.void_space_sessions.get_mut(&char_id) {
             vs.expires_at_sec = now.saturating_sub(1);
         }
     });

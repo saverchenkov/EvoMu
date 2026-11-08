@@ -1,7 +1,7 @@
 use super::*;
 use crate::services::combat_crimewatch::combat_fighters::combat_fighters_tests::make_fighter_ctx_and_session;
 use crate::services::pve_special_sites::{
-    with_pve_special_reg, AbyssalPocketSession, AbyssalRoomRecord, AbyssalWeatherKind,
+    with_abyssal_state, AbyssalPocketSession, AbyssalRoomRecord, AbyssalWeatherKind,
 };
 use eve_destiny::{Ball, MovementMode};
 
@@ -91,8 +91,8 @@ async fn test_abyssal_gate_and_end_gate_activation_and_void_space() {
     let r1_gate = 1_895_000_000 + pid * 10 + 1;
     let r3_gate = 1_895_000_000 + pid * 10 + 3;
 
-    with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets.insert(
+    with_abyssal_state(&ctx, |st| {
+        st.pockets.insert(
             char_id,
             AbyssalPocketSession {
                 pocket_id: pid,
@@ -180,8 +180,8 @@ async fn test_abyssal_gate_and_end_gate_activation_and_void_space() {
     assert_eq!(g1.dict_get("room").and_then(|v| v.as_i64()), Some(2));
 
     // Move pocket to room 3 and ship/gate to matching position, then activate end gate
-    with_pve_special_reg(&ctx, |reg| {
-        if let Some(p) = reg.abyssal_pockets.get_mut(&char_id) {
+    with_abyssal_state(&ctx, |st| {
+        if let Some(p) = st.pockets.get_mut(&char_id) {
             p.current_room = 3;
             p.rooms[2].cleared = true;
             p.rooms[2].npc_ball_ids.clear();

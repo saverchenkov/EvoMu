@@ -487,25 +487,13 @@ async fn observatory_flashpoint_caps_gate_errors_standings_and_payout_caps() {
             .code,
         "ObservatorySiteNotFound"
     );
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs
-            .insert("observatory_site:777".into(), "{corrupt_json".into());
-    });
-    assert_eq!(
-        complete_observatory_flashpoint(&ctx, 777, &[p1, p2, p3])
-            .unwrap_err()
-            .code,
-        "ObservatoryStateCorrupt"
-    );
-
     // Record all 18 as pocket entrants and trigger on_world_ark_boss_killed -> caps at 15 paid pilots
     let mut updated_obs = get_observatory_site_state(&ctx, sys_id).unwrap();
     updated_obs.pocket_entrants.extend(member_ids.iter().copied());
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(
-            format!("observatory_site:{}", updated_obs.site_id),
-            serde_json::to_string(&updated_obs).unwrap(),
-        );
+        snap.fob_observatory_state
+            .observatory_sites
+            .insert(updated_obs.site_id, updated_obs);
     });
     on_world_ark_boss_killed(&ctx, sys_id, 0).await; // no-op for killer <= 0
     on_world_ark_boss_killed(&ctx, sys_id, p1).await;

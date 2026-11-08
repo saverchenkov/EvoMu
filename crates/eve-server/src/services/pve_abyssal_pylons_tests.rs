@@ -6,7 +6,7 @@ use crate::services::pve_abyssal_hazards::{
     AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID, MULTIBODY_TRACKING_PYLON_TYPE_ID,
 };
 use crate::services::pve_special_sites_abyssal::{
-    AbyssalPocketSession, AbyssalRoomRecord, AbyssalWeatherKind,
+    with_abyssal_state, AbyssalPocketSession, AbyssalRoomRecord, AbyssalWeatherKind,
 };
 use eve_db::clock::VirtualServerClock;
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
@@ -111,8 +111,8 @@ async fn abyssal_automated_pylons_pulse_probe_prune_and_ballpark_step() {
         cleared: false,
         gate_unlocked_at_sec: None,
     };
-    with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets.insert(
+    with_abyssal_state(&ctx, |st| {
+        st.pockets.insert(
             char_id,
             AbyssalPocketSession {
                 pocket_id: 1,
@@ -430,8 +430,8 @@ async fn arch_585_abyssal_boundary_enforces_invuln_preserves_events_and_step_hoo
         cleared: true,
         gate_unlocked_at_sec: Some(1_775_660_000),
     };
-    with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets.insert(
+    with_abyssal_state(&ctx, |st| {
+        st.pockets.insert(
             char_id,
             AbyssalPocketSession {
                 pocket_id: 585,
@@ -590,11 +590,9 @@ async fn arch_585_abyssal_boundary_enforces_invuln_preserves_events_and_step_hoo
         assert_eq!(snap.items[&cap_id].type_id, 670);
         assert!(ch.balance.to_wire_f64() > start_isk);
         assert!(snap.killmails.values().any(|k| k.victim_character_id == char_id));
-        let ticks: HashMap<i64, u32> = snap
-            .service_state_blobs
-            .get("abyssal_boundary_ticks")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
-        assert!(ticks.contains_key(&cap_id), "escalated tick must carry over to ejected capsule");
+        assert!(
+            snap.abyssal_state.boundary_ticks.contains_key(&cap_id),
+            "escalated tick must carry over to ejected capsule"
+        );
     });
 }

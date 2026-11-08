@@ -424,16 +424,14 @@ async fn test_epic_arc_status_and_delayed_rewards() {
     assert_eq!(groups_dict[0].1, PyRep::List(vec![]));
     assert_eq!(groups_dict[1].1, PyRep::List(vec![]));
 
-    // Seed delayed rewards in service_state_blobs
+    // Seed delayed rewards in fleet_and_social_ops.delayed_rewards
     ctx.db.with_mut_snapshot(|snap| {
-        let key = format!("delayed_rewards:{char_id}");
-        let val = json!({
-            "101": [{
-                "isk": 5_000_000,
-                "lp": 2_500
-            }]
-        });
-        snap.service_state_blobs.insert(key, val.to_string());
+        let mut by_group: std::collections::HashMap<String, Vec<serde_json::Value>> = std::collections::HashMap::new();
+        by_group.insert("101".to_string(), vec![json!({
+            "isk": 5_000_000,
+            "lp": 2_500
+        })]);
+        snap.fleet_and_social_ops.delayed_rewards.insert(char_id, by_group);
     });
 
     let seeded_groups = ctx
@@ -553,8 +551,7 @@ async fn test_season_manager_rpc_suite() {
         .expect("select_season 2");
     assert_eq!(sel, PyRep::Bool(true));
     ctx.db.with_snapshot(|snap| {
-        let key = format!("active_season:{char_id}");
-        assert_eq!(snap.service_state_blobs.get(&key), Some(&"2".to_string()));
+        assert_eq!(snap.seasons_and_campaigns.active_seasons.get(&char_id).copied(), Some(2));
     });
 
     // 3. get_season_data_for_character returns season keyval

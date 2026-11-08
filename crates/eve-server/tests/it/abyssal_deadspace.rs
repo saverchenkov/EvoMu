@@ -568,7 +568,7 @@ async fn test_abyssal_coop_staggered_rooms_reentry_kinematics_and_pod_corpse() {
     assert_eq!(re_err.code, "TraceAlreadyEntered", "Exited pilot cannot re-enter same trace without filaments");
 
     // Pilot 3 strays > 75 km in Room 1 -> ship & capsule destroyed -> implant destroyed, Corpse (25) spawned, DetailedKillmail & Amarr Impairor (596)
-    let r1_center = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| DVec3::from_array(reg.abyssal_pockets[&char3].grid_offset));
+    let r1_center = eve_server::services::pve_special_sites::with_abyssal_state(&ctx, |st| DVec3::from_array(st.pockets[&char3].grid_offset));
     let _ = p_h.set_ball_position(ship3, r1_center + DVec3::new(85_000.0, 0.0, 0.0)).await;
     if let Ok(Some(mut cs)) = p_h.get_combat_state(ship3).await { cs.structure_hp = 200.0; let _ = p_h.set_combat_state(ship3, cs).await; }
     for _ in 0..30 {
@@ -677,7 +677,7 @@ use eve_proto::quasar::{
 use eve_proto::PyRep;
 use eve_server::quasar_gateway::STATUS_FORBIDDEN;
 use eve_server::router::ServerContext;
-use eve_server::services::pve_special_sites::with_pve_special_reg;
+use eve_server::services::pve_special_sites::with_abyssal_state;
 use eve_server::services::pve_special_sites_abyssal::{
     evacuate_abyssal_pockets_for_downtime, evaluate_abyssal_spatial_clouds_for_ship,
     pulse_abyssal_automated_pylons, roll_abyssal_weather_penalty_pct, spatial_cloud_radius_m,
@@ -826,8 +826,8 @@ async fn test_abyssal_in_pocket_restrictions_boundary_damage_and_clearing() {
     assert!((35_000.0..=70_000.0).contains(&r2_ship_pos.distance(r2_gate_pos)), "Room 2 arrival ~50km from gate");
 
     // 3. Spherical 75 km room boundary damage: escalates, resets inside <= 75km, destroys probe, ejects pod & kills pod
-    let room2_center = with_pve_special_reg(&ctx, |reg| {
-        DVec3::from_array(reg.abyssal_pockets[&char1].grid_offset) + DVec3::new(0.0, 0.0, 50_000.0)
+    let room2_center = with_abyssal_state(&ctx, |st| {
+        DVec3::from_array(st.pockets[&char1].grid_offset) + DVec3::new(0.0, 0.0, 50_000.0)
     });
     let probe_id = 730_400_001_i64;
     let probe_ball = Ball {
@@ -901,7 +901,7 @@ async fn test_abyssal_in_pocket_restrictions_boundary_damage_and_clearing() {
     assert!(ctx.db.with_snapshot(|s| s.characters[&char1].station_id.is_some()), "Pilot respawned at home station after pod boundary death");
     let origin_h = ctx.systems.get_or_spawn(sys_id);
     assert!(origin_h.get_ball_snapshot(tr1).await.unwrap().is_none(), "Origin trace ball despawned after boundary pod death");
-    assert!(with_pve_special_reg(&ctx, |reg| !reg.abyssal_traces.contains_key(&tr1)), "abyssal_traces entry removed after boundary pod death");
+    assert!(with_abyssal_state(&ctx, |st| !st.traces.contains_key(&tr1)), "abyssal_traces entry removed after boundary pod death");
 
     // 4. Downtime evacuation: preserves DroneBay drones, destroys deployed drones in space, spawns ship in origin ballpark, despawns trace, restores Local chat
     let sec_init = ctx.now_unix() % 86_400;
@@ -946,7 +946,7 @@ async fn test_abyssal_in_pocket_restrictions_boundary_damage_and_clearing() {
     assert!(dt_window.get("evacuatedAbyssalPilots").copied().unwrap_or(0) >= 1, "11:00 UTC downtime rescues active pocket");
     assert!(origin_h.get_ball_snapshot(ship2).await.unwrap().is_some(), "Evacuated ship ball spawned in origin solar system ballpark");
     assert!(origin_h.get_ball_snapshot(tr2).await.unwrap().is_none(), "Origin trace ball despawned on downtime evacuation");
-    assert!(with_pve_special_reg(&ctx, |reg| !reg.abyssal_traces.contains_key(&tr2)), "abyssal_traces entry removed on downtime evacuation");
+    assert!(with_abyssal_state(&ctx, |st| !st.traces.contains_key(&tr2)), "abyssal_traces entry removed on downtime evacuation");
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.characters[&char2].solar_system_id, sys_id, "Pilot returned to origin system");
         assert!(snap.items.contains_key(&bay_drone), "Drone in DroneBay preserved");
@@ -1144,7 +1144,7 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
             + (1..=5_i64).filter(|py| bp.balls.contains_key(&(1_899_000_000 + pid3 * 100 + 10 + py))).count()
     };
     assert!((2..=4).contains(&r1_haz_cnt), "Room spawns a varied subset of clouds+pylons ({r1_haz_cnt}), not all 8");
-    let r1_npcs = with_pve_special_reg(&ctx, |reg| reg.abyssal_pockets[&char1].rooms[0].npc_ball_ids.clone());
+    let r1_npcs = with_abyssal_state(&ctx, |st| st.pockets[&char1].rooms[0].npc_ball_ids.clone());
     for &nid in &r1_npcs[1..] {
         let _ = p3_h.apply_damage_with_attacker(nid, DamageVector { em: 1e7, thermal: 1e7, kinetic: 1e7, explosive: 1e7 }, Some(char1)).await;
     }
@@ -1156,7 +1156,7 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
         if let Some(cs) = bp.combat_states.get_mut(&last_npc) { cs.shield_hp = 0.0; cs.armor_hp = 0.0; cs.structure_hp = 10.0; }
     }
     let _ = pulse_abyssal_automated_pylons(&ctx, p3_sys).await;
-    assert!(with_pve_special_reg(&ctx, |reg| reg.abyssal_pockets[&char1].rooms[0].cleared), "Suppressor kill unlocks room conduit");
+    assert!(with_abyssal_state(&ctx, |st| st.pockets[&char1].rooms[0].cleared), "Suppressor kill unlocks room conduit");
     assert!(!eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| rt.npc_entities.contains_key(&last_npc)), "Suppressor kill cleans npc_entities");
 
     eve_server::services::pve_special_sites_abyssal::on_abyssal_cache_destroyed_core(&ctx.systems, &ctx.db, p3_sys, cache3_id, Some(char1)).await;
@@ -1255,8 +1255,8 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
         let e_w = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(t_w)], &kw, None).await.expect("ent w");
         let w_sys = e_w.dict_get("solarSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
         let w_h = ctx.systems.get_or_spawn(w_sys);
-        let npc_id = with_pve_special_reg(&ctx, |reg| {
-            let p = &reg.abyssal_pockets[&char1];
+        let npc_id = with_abyssal_state(&ctx, |st| {
+            let p = &st.pockets[&char1];
             assert_eq!(p.weather, weather);
             assert_eq!(p.weather_penalty_pct, exp_pen);
             p.rooms[0].npc_ball_ids[0]
@@ -1368,7 +1368,7 @@ use eve_destiny::{Ball, MovementMode};
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
-use eve_server::services::pve_special_sites::with_pve_special_reg;
+use eve_server::services::pve_special_sites::with_abyssal_state;
 use eve_server::system_actor::try_remove_ball_for_db;
 use glam::DVec3;
 use std::collections::HashMap;
@@ -1449,7 +1449,7 @@ async fn test_abyssal_frigate_destroyer_fleet_only_and_bound_fleet_id() {
         .expect("Fleet member Frigate deploy");
     let tr_id = dep_fg.dict_get("traceBallID").and_then(|v| v.as_i64()).unwrap();
     assert_eq!(
-        with_pve_special_reg(&ctx, |reg| reg.abyssal_traces.get(&tr_id).and_then(|t| t.fleet_id)),
+        with_abyssal_state(&ctx, |st| st.traces.get(&tr_id).and_then(|t| t.fleet_id)),
         Some(99_301)
     );
 
@@ -1633,7 +1633,7 @@ use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, DamageVector, MovementMode};
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::pve_special_sites::with_pve_special_reg;
+use eve_server::services::pve_special_sites::with_abyssal_state;
 use eve_server::services::pve_special_sites_abyssal::{
     abyssal_mutaplasmid_for_tier, evaluate_abyssal_spatial_clouds_for_ship,
     evacuate_abyssal_pockets_for_downtime, on_abyssal_cache_destroyed_core,
@@ -1819,7 +1819,7 @@ async fn test_parity_abyssal_automated_pylons_tick_and_conduit() {
     let p3_sys = e3.dict_get("solarSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
     let p3_h = ctx.systems.get_or_spawn(p3_sys);
 
-    let r1_npcs = with_pve_special_reg(&ctx, |reg| reg.abyssal_pockets[&char1].rooms[0].npc_ball_ids.clone());
+    let r1_npcs = with_abyssal_state(&ctx, |st| st.pockets[&char1].rooms[0].npc_ball_ids.clone());
     for &nid in &r1_npcs[1..] {
         let _ = p3_h
             .apply_damage_with_attacker(
@@ -1844,7 +1844,7 @@ async fn test_parity_abyssal_automated_pylons_tick_and_conduit() {
         }
     }
     let _ = p3_h.try_step_full_tick(1.0);
-    assert!(with_pve_special_reg(&ctx, |reg| reg.abyssal_pockets[&char1].rooms[0].cleared));
+    assert!(with_abyssal_state(&ctx, |st| st.pockets[&char1].rooms[0].cleared));
     let _ = evacuate_abyssal_pockets_for_downtime(&ctx);
 }
 
@@ -1996,8 +1996,8 @@ async fn test_parity_abyssal_weather_effects_and_penalties_all_five() {
         let e_w = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(t_w)], &kw, None).await.expect("ent w");
         let w_sys = e_w.dict_get("solarSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
         let w_h = ctx.systems.get_or_spawn(w_sys);
-        let npc_id = with_pve_special_reg(&ctx, |reg| {
-            let p = &reg.abyssal_pockets[&char1];
+        let npc_id = with_abyssal_state(&ctx, |st| {
+            let p = &st.pockets[&char1];
             assert_eq!(p.weather, weather);
             assert_eq!(p.weather_penalty_pct, exp_pen);
             p.rooms[0].npc_ball_ids[0]

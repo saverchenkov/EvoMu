@@ -18,8 +18,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-const MISC_STATE_BLOB_KEY: &str = "cluster_misc_state";
-
 /// Per-character limits to prevent memory and storage exhaustion.
 const MAX_SETTINGS_PER_CHAR: usize = 500;
 const MAX_SETTING_KEY_LEN: usize = 128;
@@ -88,24 +86,9 @@ pub struct StarterLauncherRecord {
     pub position: glam::DVec3,
 }
 
-/// Server-offered alternative load slot when a solar system is under population cap restrictions.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct OfferedLoadSlot {
-    pub slot_key: String,
-    pub original_system_id: u32,
-    pub offered_system_ids: Vec<u32>,
-    pub expires_unix: u64,
-}
-
-/// Pending two-step Zarzakh stargate transit toll confirmation quote (`feat:navigation.zarzakh-gate-toll`).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PendingZarzakhTollQuote {
-    pub from_gate_id: i64,
-    pub to_gate_id: i64,
-    pub ship_id: i64,
-    pub quoted_toll_cents: eve_db::IskCents,
-    pub expires_unix: u64,
-}
+pub use eve_db::{
+    HorizonSiegePhase, OfferedLoadSlot, PendingZarzakhTollQuote, ZarzakhHorizonSiegeState,
+};
 
 /// DERIVED: Zarzakh Horizon Siege state machine timing constants (`feat:navigation.zarzakh-local-horizon-siege`,
 /// `Zarzakh.md:39`, `auditor_rows.json:6968-6974`).
@@ -113,66 +96,90 @@ pub const HORIZON_SIEGE_WARNING_SECS: u64 = 300;
 pub const HORIZON_SIEGE_ACTIVE_SECS: u64 = 3_600;
 pub const HORIZON_SIEGE_COOLDOWN_SECS: u64 = 7_200;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum HorizonSiegePhase {
-    #[default]
-    Normal,
-    Warning,
-    Active,
-    Stabilizing,
+fn dvec3_from_arr(a: [f64; 3]) -> glam::DVec3 {
+    glam::DVec3::new(a[0], a[1], a[2])
 }
 
-impl HorizonSiegePhase {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Normal => "Normal",
-            Self::Warning => "Warning",
-            Self::Active => "Active",
-            Self::Stabilizing => "Stabilizing",
-        }
+fn arr_from_dvec3(v: glam::DVec3) -> [f64; 3] {
+    [v.x, v.y, v.z]
+}
+
+fn pad_from_db(p: eve_db::PersistedLandingPadRecord) -> LandingPadRecord {
+    LandingPadRecord {
+        item_id: p.item_id,
+        type_id: p.type_id,
+        built_type_id: p.built_type_id,
+        solar_system_id: p.solar_system_id,
+        faction_id: p.faction_id,
+        is_built: p.is_built,
+        link_timestamp: p.link_timestamp,
+        is_disrupted: p.is_disrupted,
+        position: dvec3_from_arr(p.position),
+        required_materials: p.required_materials,
+        contributed_materials: p.contributed_materials,
     }
 }
 
-/// Persisted Zarzakh Horizon Siege state machine (`feat:navigation.zarzakh-local-horizon-siege`,
-/// `feat:navigation.deathless-shipcaster-zarzakh`).
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct ZarzakhHorizonSiegeState {
-    pub phase: HorizonSiegePhase,
-    pub phase_started_unix: u64,
-    pub active_start_unix: u64,
-    pub active_until_unix: u64,
-    pub cooldown_until_unix: u64,
-    pub instability_points: u32,
-    pub triggered_by_campaign_id: Option<i64>,
-    pub fulcrum_restricted_to_pirates: bool,
+fn pad_to_db(p: &LandingPadRecord) -> eve_db::PersistedLandingPadRecord {
+    eve_db::PersistedLandingPadRecord {
+        item_id: p.item_id,
+        type_id: p.type_id,
+        built_type_id: p.built_type_id,
+        solar_system_id: p.solar_system_id,
+        faction_id: p.faction_id,
+        is_built: p.is_built,
+        link_timestamp: p.link_timestamp,
+        is_disrupted: p.is_disrupted,
+        position: arr_from_dvec3(p.position),
+        required_materials: p.required_materials.clone(),
+        contributed_materials: p.contributed_materials.clone(),
+    }
 }
 
-#[derive(Default, Clone, Serialize, Deserialize)]
-struct PersistedClusterMiscState {
-    #[serde(default)]
-    persisted_shipcaster_state: bool,
-    #[serde(default)]
-    char_settings: HashMap<i64, BTreeMap<String, PyRep>>,
-    #[serde(default)]
-    landing_pads: Vec<LandingPadRecord>,
-    #[serde(default)]
-    launchers: Vec<LauncherRecord>,
-    #[serde(default)]
-    starter_launchers: Vec<StarterLauncherRecord>,
-    #[serde(default)]
-    used_starter_shipcaster_chars: BTreeSet<i64>,
-    #[serde(default)]
-    offered_load_slots: HashMap<i64, OfferedLoadSlot>,
-    #[serde(default)]
-    char_energy: HashMap<i64, crate::services::character_energy::CharacterEnergyState>,
-    #[serde(default)]
-    target_cooldowns: HashMap<i64, u64>,
-    #[serde(default)]
-    target_charges: HashMap<i64, u32>,
-    #[serde(default)]
-    zarzakh_toll_quotes: HashMap<i64, PendingZarzakhTollQuote>,
-    #[serde(default)]
-    zarzakh_horizon_siege: ZarzakhHorizonSiegeState,
+fn launcher_from_db(l: eve_db::PersistedLauncherRecord) -> LauncherRecord {
+    LauncherRecord {
+        item_id: l.item_id,
+        type_id: l.type_id,
+        solar_system_id: l.solar_system_id,
+        faction_id: l.faction_id,
+        linked_pad_ids: l.linked_pad_ids,
+        position: dvec3_from_arr(l.position),
+    }
+}
+
+fn launcher_to_db(l: &LauncherRecord) -> eve_db::PersistedLauncherRecord {
+    eve_db::PersistedLauncherRecord {
+        item_id: l.item_id,
+        type_id: l.type_id,
+        solar_system_id: l.solar_system_id,
+        faction_id: l.faction_id,
+        linked_pad_ids: l.linked_pad_ids.clone(),
+        position: arr_from_dvec3(l.position),
+    }
+}
+
+fn starter_launcher_from_db(l: eve_db::PersistedStarterLauncherRecord) -> StarterLauncherRecord {
+    StarterLauncherRecord {
+        item_id: l.item_id,
+        type_id: l.type_id,
+        solar_system_id: l.solar_system_id,
+        faction_id: l.faction_id,
+        staging_system_id: l.staging_system_id,
+        staging_station_id: l.staging_station_id,
+        position: dvec3_from_arr(l.position),
+    }
+}
+
+fn starter_launcher_to_db(l: &StarterLauncherRecord) -> eve_db::PersistedStarterLauncherRecord {
+    eve_db::PersistedStarterLauncherRecord {
+        item_id: l.item_id,
+        type_id: l.type_id,
+        solar_system_id: l.solar_system_id,
+        faction_id: l.faction_id,
+        staging_system_id: l.staging_system_id,
+        staging_station_id: l.staging_station_id,
+        position: arr_from_dvec3(l.position),
+    }
 }
 
 #[derive(Default)]
@@ -365,24 +372,39 @@ impl ClusterMiscRuntimeState {
             zarzakh_toll_quotes: HashMap::new(),
             zarzakh_horizon_siege: ZarzakhHorizonSiegeState::default(),
         };
-        let persisted: Option<PersistedClusterMiscState> = db.with_snapshot(|snap| {
-            snap.service_state_blobs
-                .get(MISC_STATE_BLOB_KEY)
-                .and_then(|json| serde_json::from_str(json).ok())
-        });
+        let persisted = db.with_snapshot(|snap| snap.cluster_and_runtime.cluster_misc_state.clone());
         if let Some(p) = persisted {
             st.char_settings = p.char_settings;
             st.used_starter_shipcaster_chars = p.used_starter_shipcaster_chars;
             st.offered_load_slots = p.offered_load_slots;
-            st.char_energy = p.char_energy;
+            st.char_energy = p
+                .char_energy
+                .into_iter()
+                .map(|(k, e)| {
+                    (
+                        k,
+                        crate::services::character_energy::CharacterEnergyState {
+                            current_energy: e.current_energy,
+                            max_energy: e.max_energy,
+                            last_update_time: e.last_update_time,
+                            recharge_rate: e.recharge_rate,
+                            energy_rem: e.energy_rem,
+                        },
+                    )
+                })
+                .collect();
             st.target_cooldowns = p.target_cooldowns;
             st.target_charges = p.target_charges;
             st.zarzakh_toll_quotes = p.zarzakh_toll_quotes;
             st.zarzakh_horizon_siege = p.zarzakh_horizon_siege;
             if p.persisted_shipcaster_state {
-                st.landing_pads = p.landing_pads;
-                st.launchers = p.launchers;
-                st.starter_launchers = p.starter_launchers;
+                st.landing_pads = p.landing_pads.into_iter().map(pad_from_db).collect();
+                st.launchers = p.launchers.into_iter().map(launcher_from_db).collect();
+                st.starter_launchers = p
+                    .starter_launchers
+                    .into_iter()
+                    .map(starter_launcher_from_db)
+                    .collect();
                 st.sde_initialized = !st.launchers.is_empty() && !st.starter_launchers.is_empty();
             }
         }
@@ -459,27 +481,43 @@ pub(crate) fn persist_misc_state_arc(
     sde: &SdeRegistry,
     db: &WorldRepository,
 ) {
-    let p = with_misc_state_arc(misc, sde, |st| PersistedClusterMiscState {
+    let p = with_misc_state_arc(misc, sde, |st| eve_db::PersistedClusterMiscState {
         persisted_shipcaster_state: st.sde_initialized,
         char_settings: st.char_settings.clone(),
-        landing_pads: st.landing_pads.clone(),
-        launchers: st.launchers.clone(),
-        starter_launchers: st.starter_launchers.clone(),
+        landing_pads: st.landing_pads.iter().map(pad_to_db).collect(),
+        launchers: st.launchers.iter().map(launcher_to_db).collect(),
+        starter_launchers: st
+            .starter_launchers
+            .iter()
+            .map(starter_launcher_to_db)
+            .collect(),
         used_starter_shipcaster_chars: st.used_starter_shipcaster_chars.clone(),
         offered_load_slots: st.offered_load_slots.clone(),
-        char_energy: st.char_energy.clone(),
+        char_energy: st
+            .char_energy
+            .iter()
+            .map(|(&k, e)| {
+                (
+                    k,
+                    eve_db::CharacterEnergyState {
+                        current_energy: e.current_energy,
+                        max_energy: e.max_energy,
+                        last_update_time: e.last_update_time,
+                        recharge_rate: e.recharge_rate,
+                        energy_rem: e.energy_rem,
+                    },
+                )
+            })
+            .collect(),
         target_cooldowns: st.target_cooldowns.clone(),
         target_charges: st.target_charges.clone(),
         zarzakh_toll_quotes: st.zarzakh_toll_quotes.clone(),
         zarzakh_horizon_siege: st.zarzakh_horizon_siege.clone(),
     });
-    if let Ok(json) = serde_json::to_string(&p) {
-        let _ = db.try_with_mut_snapshot(|snap| {
-            snap.service_state_blobs
-                .insert(MISC_STATE_BLOB_KEY.to_string(), json);
-            Ok::<(), String>(())
-        });
-    }
+    let _ = db.try_with_mut_snapshot(|snap| {
+        snap.cluster_and_runtime.cluster_misc_state = Some(p);
+        Ok::<(), String>(())
+    });
 }
 
 /// Returns the dictionary of saved character UI settings for consumption by `charMgr.GetCharacterSettings`.
@@ -514,28 +552,30 @@ pub fn populate_shipcaster_balls_with_sde(
     db: Option<&Arc<WorldRepository>>,
 ) {
     let persisted = db.and_then(|repo| {
-        repo.with_snapshot(|snap| {
-            snap.service_state_blobs
-                .get(MISC_STATE_BLOB_KEY)
-                .and_then(|json| serde_json::from_str::<PersistedClusterMiscState>(json).ok())
-        })
+        repo.with_snapshot(|snap| snap.cluster_and_runtime.cluster_misc_state.clone())
     });
     let launchers = persisted
         .as_ref()
         .filter(|p| p.persisted_shipcaster_state && !p.launchers.is_empty())
-        .map(|p| p.launchers.clone())
+        .map(|p| p.launchers.iter().cloned().map(launcher_from_db).collect())
         .or_else(|| sde.map(sde_launchers))
         .unwrap_or_default();
     let starter_launchers = persisted
         .as_ref()
         .filter(|p| p.persisted_shipcaster_state && !p.starter_launchers.is_empty())
-        .map(|p| p.starter_launchers.clone())
+        .map(|p| {
+            p.starter_launchers
+                .iter()
+                .cloned()
+                .map(starter_launcher_from_db)
+                .collect()
+        })
         .or_else(|| sde.map(sde_starter_launchers))
         .unwrap_or_default();
     let now_unix = db.map(|d| d.clock().now_unix_secs()).unwrap_or(0);
     let pads = persisted
         .filter(|p| p.persisted_shipcaster_state)
-        .map(|p| p.landing_pads)
+        .map(|p| p.landing_pads.into_iter().map(pad_from_db).collect())
         .unwrap_or_else(|| default_pirate_fob_pads(now_unix));
     for l in launchers {
         if l.solar_system_id == solar_system_id {

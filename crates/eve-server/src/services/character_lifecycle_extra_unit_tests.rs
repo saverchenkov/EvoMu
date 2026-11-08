@@ -97,17 +97,17 @@ fn unbound_mgr_slots_locks_starter_systems_and_resculpt_branches_kill_mutations(
         }
     });
 
-    // SelectCharacterID: missing arg -> None, unlocked -> None, character_lock blob -> CharacterLocked
+    // SelectCharacterID: missing arg -> None, unlocked -> None, character_lock -> CharacterLocked
     assert!(call_unbound(&ctx, &mut sess, "SelectCharacterID", &[], &kw).is_none());
     assert!(call_unbound(&ctx, &mut sess, "SelectCharacterID", &[PyRep::Integer(cid)], &kw).is_none());
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(format!("character_lock:{cid}"), "banned_test".into());
+        snap.cluster_and_runtime.character_locks.insert(cid, "banned_test".into());
     });
     let lock_err = call_unbound(&ctx, &mut sess, "SelectCharacterID", &[PyRep::Integer(cid)], &kw).unwrap().unwrap_err();
     assert_eq!(lock_err.code, "CharacterLocked");
     assert!(lock_err.message.contains("banned_test"));
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.remove(&format!("character_lock:{cid}"));
+        snap.cluster_and_runtime.character_locks.remove(&cid);
     });
 
     // GetQAStarterSystemIDs across all 4 fallback branches
@@ -141,19 +141,19 @@ fn unbound_mgr_slots_locks_starter_systems_and_resculpt_branches_kill_mutations(
             ch.bloodline_id = bl_a;
         }
         snap.skills.remove(&cid);
-        snap.service_state_blobs.remove(&format!("resculpt_pending:{cid}"));
-        snap.service_state_blobs.remove(&format!("account_resculpt_tokens:{uid}"));
+        snap.cluster_and_runtime.resculpt_pending.remove(&cid);
+        snap.cluster_and_runtime.account_resculpt_tokens.remove(&uid.to_string());
     });
     assert_eq!(call_unbound(&ctx, &mut sess, "UpdateCharacterBloodline", &[PyRep::Integer(cid), PyRep::Integer(bl_diff_race as i64)], &kw).unwrap().unwrap_err().code, "ResculptRequired");
     assert_eq!(call_unbound(&ctx, &mut sess, "UpdateCharacterBloodline", &[PyRep::Integer(cid), PyRep::Integer(bl_a as i64)], &kw).unwrap().unwrap(), PyRep::Bool(true));
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(format!("account_resculpt_tokens:{uid}"), "1".into());
+        snap.cluster_and_runtime.account_resculpt_tokens.insert(uid.to_string(), 1);
     });
     assert_eq!(call_unbound(&ctx, &mut sess, "UpdateCharacterBloodline", &[PyRep::Integer(cid), PyRep::Integer(bl_diff_race as i64)], &kw).unwrap().unwrap(), PyRep::Bool(true));
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(format!("account_resculpt_tokens:{uid}"), "0".into());
+        snap.cluster_and_runtime.account_resculpt_tokens.insert(uid.to_string(), 0);
     });
     sess.role = service_roles::ROLE_GML;
     assert_eq!(call_unbound(&ctx, &mut sess, "UpdateCharacterBloodline", &[PyRep::Integer(cid), PyRep::Integer(bl_a as i64)], &kw).unwrap().unwrap(), PyRep::Bool(true));
@@ -351,7 +351,7 @@ fn char_mgr_home_station_scoped_roles_public_info_and_cohorts_kill_mutations() {
     assert!(new_cohorts.as_list().unwrap().contains(&PyRep::String("cohort_new_player".into())));
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(format!("char_cohorts:{cid}"), r#"["alpha","beta"]"#.into());
+        snap.cluster_and_runtime.char_cohorts.insert(cid, vec!["alpha".into(), "beta".into()]);
     });
     let blob_cohorts = call_char_mgr(&ctx, &mut sess, "GetCohortsForCharacter", &[], &kw).unwrap().unwrap();
     assert_eq!(blob_cohorts, PyRep::List(vec![PyRep::String("alpha".into()), PyRep::String("beta".into())]));

@@ -133,8 +133,8 @@ async fn abyssal_pocket_entry_conduit_unlock_cache_wreck_and_filament_deploy() {
     let offset = pocket_grid_offset(&ctx, pocket_id);
     assert_eq!(offset.len(), 3);
 
-    let ab_sys = with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets[&char_id].abyssal_solar_system_id
+    let ab_sys = with_abyssal_state(&ctx, |st| {
+        st.pockets[&char_id].abyssal_solar_system_id
     });
 
     // Clear all NPCs in room 0 and unlock conduit via core hook

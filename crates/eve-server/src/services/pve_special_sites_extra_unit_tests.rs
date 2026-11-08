@@ -97,18 +97,21 @@ fn with_pve_special_reg_db_handles_corrupt_json_and_syncs_incursions_state() {
     let sys_id = find_highsec_system(&sde);
     let (ctx, _, _, _) = make_ctx_and_pilot(sys_id, false);
 
-    // 1. Corrupt blob JSON falls back to default
+    // 1. Corrupt legacy blob JSON migrates as default
     ctx.db.with_mut_snapshot(|snap| {
+        snap.pve_special_sites = Default::default();
         snap.service_state_blobs
             .insert("incursions_state".to_string(), "{invalid json".to_string());
+        snap.migrate_legacy_service_state();
     });
     with_pve_special_reg_db(&ctx.db, 1_775_000_010, |reg| {
         assert_eq!(reg.next_seq, 0);
         reg.next_seq = 5;
     });
 
-    // 2. Corrupt legacy owner note JSON falls back to default when blob removed
+    // 2. Corrupt legacy owner note JSON migrates as default when typed state is empty
     ctx.db.with_mut_snapshot(|snap| {
+        snap.pve_special_sites = Default::default();
         snap.service_state_blobs.remove("incursions_state");
         snap.owner_notes.insert(
             -8_300_000_000_000,
@@ -121,6 +124,7 @@ fn with_pve_special_reg_db_handles_corrupt_json_and_syncs_incursions_state() {
                 timestamp_unix: 100,
             },
         );
+        snap.migrate_legacy_service_state();
     });
     with_pve_special_reg_db(&ctx.db, 1_775_000_020, |reg| {
         assert_eq!(reg.next_seq, 0);

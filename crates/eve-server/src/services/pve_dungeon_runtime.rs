@@ -17,185 +17,20 @@ use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::SolarSystemId;
 use glam::DVec3;
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
-const DUNGEON_RUNTIME_BLOB_KEY: &str = "dungeon_runtime_store";
 const POCKET_RADIUS_M: f64 = 200_000.0;
 pub(crate) const GATE_ACTIVATION_RANGE_M: f64 = 2_500.0;
 const ACCELERATION_GATE_TYPE_ID: u32 = 17831;
 pub(crate) const DEFAULT_CONTAINER_TYPE_ID: u32 = 23;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum DungeonTriggerKind {
-    OnKill {
-        target_npc_group: Option<u8>,
-        target_ball_id: Option<i64>,
-    },
-    OnApproach {
-        target_ball_id: Option<i64>,
-        target_object_index: Option<usize>,
-        anchor_pos: [f64; 3],
-        radius_m: f64,
-    },
-    OnLoot {
-        container_ball_id: Option<i64>,
-        target_object_index: Option<usize>,
-        item_type_id: Option<u32>,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum DungeonTriggerAction {
-    UnlockGate,
-    SpawnNpcGroup(u8),
-    CompleteDungeon,
-    CameraInterest {
-        item_id: i64,
-        speed_bits: u64,
-        duration_bits: u64,
-    },
-    TriggerAmbientSound {
-        sound_id: i64,
-        entity_item_id: i64,
-        emitter_id: i64,
-    },
-    TriggerAudio {
-        audio_url: String,
-    },
-    TriggerMessage {
-        message_type: i64,
-        message_id: i64,
-    },
-    TriggerMusic {
-        music_trigger_id: i64,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DungeonTrigger {
-    pub trigger_id: u32,
-    pub kind: DungeonTriggerKind,
-    pub action: DungeonTriggerAction,
-    #[serde(default)]
-    pub fired: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DungeonRuntimeObject {
-    #[serde(default)]
-    pub ball_id: i64,
-    pub type_id: u32,
-    pub name: String,
-    pub position: [f64; 3],
-    pub radius: f64,
-    #[serde(default)]
-    pub is_container: bool,
-    #[serde(default)]
-    pub loot_items: Vec<(u32, i32)>,
-    #[serde(default)]
-    pub spawned: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DungeonNpcGroup {
-    pub group_id: u8,
-    pub wave: u8,
-    pub npc_specs: Vec<(u32, usize)>,
-    #[serde(default)]
-    pub npc_ball_ids: Vec<i64>,
-    #[serde(default)]
-    pub spawn_immediately: bool,
-    #[serde(default)]
-    pub spawned: bool,
-    #[serde(default)]
-    pub cleared: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DungeonRuntimeRoom {
-    pub room_index: usize,
-    pub room_id: i64,
-    pub room_name: String,
-    pub position: [f64; 3],
-    pub gate_destination_pos: [f64; 3],
-    pub gated: bool,
-    #[serde(default)]
-    pub disallow_mwd: Option<bool>,
-    #[serde(default)]
-    pub gate_ball_id: Option<i64>,
-    #[serde(default)]
-    pub gate_locked: bool,
-    #[serde(default)]
-    pub objects: Vec<DungeonRuntimeObject>,
-    #[serde(default)]
-    pub npc_groups: Vec<DungeonNpcGroup>,
-    #[serde(default)]
-    pub triggers: Vec<DungeonTrigger>,
-    #[serde(default)]
-    pub spawned: bool,
-    #[serde(default)]
-    pub cleared: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DungeonRuntimeInstance {
-    pub instance_id: i64,
-    pub dungeon_id: u32,
-    pub dungeon_name: String,
-    pub category: String,
-    pub archetype: String,
-    pub solar_system_id: SolarSystemId,
-    pub owner_char_id: i64,
-    pub base_position: [f64; 3],
-    #[serde(default)]
-    pub disallow_mwd: bool,
-    #[serde(default)]
-    pub entry_gate_ball_id: Option<i64>,
-    #[serde(default)]
-    pub entry_gate_pos: Option<[f64; 3]>,
-    #[serde(default)]
-    pub entry_gate_locked: bool,
-    #[serde(default)]
-    pub current_room_index: usize,
-    #[serde(default)]
-    pub rooms: Vec<DungeonRuntimeRoom>,
-    #[serde(default)]
-    pub completed: bool,
-    #[serde(default)]
-    pub despawned: bool,
-    #[serde(default)]
-    pub active_objective_id: i64,
-    #[serde(default)]
-    pub last_completed_task_id: Option<i64>,
-    #[serde(default)]
-    pub completed_task_ids: Vec<i64>,
-    pub created_unix: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DungeonRuntimeStore {
-    #[serde(default)]
-    pub instances: BTreeMap<i64, DungeonRuntimeInstance>,
-    #[serde(default = "default_next_instance_id")]
-    pub next_instance_id: i64,
-}
-
-fn default_next_instance_id() -> i64 {
-    950_001
-}
-
-impl Default for DungeonRuntimeStore {
-    fn default() -> Self {
-        Self {
-            instances: BTreeMap::new(),
-            next_instance_id: default_next_instance_id(),
-        }
-    }
-}
+pub use eve_db::{
+    DungeonNpcGroup, DungeonRuntimeInstance, DungeonRuntimeObject, DungeonRuntimeRoom,
+    DungeonRuntimeStore, DungeonTrigger, DungeonTriggerAction, DungeonTriggerKind,
+};
 
 pub(crate) fn has_dungeon_runtime_store_db(db: &eve_db::WorldRepository) -> bool {
-    db.with_snapshot(|snap| snap.service_state_blobs.contains_key(DUNGEON_RUNTIME_BLOB_KEY))
+    db.with_snapshot(|snap| !snap.dungeon_runtime.instances.is_empty())
 }
 
 pub(crate) fn has_dungeon_runtime_store(ctx: &ServerContext) -> bool {
@@ -206,23 +41,7 @@ pub fn with_dungeon_runtime_store_db<R>(
     db: &eve_db::WorldRepository,
     f: impl FnOnce(&mut DungeonRuntimeStore) -> R,
 ) -> R {
-    db.with_mut_snapshot(|snap| {
-        let orig_opt = snap.service_state_blobs.get(DUNGEON_RUNTIME_BLOB_KEY).cloned();
-        let mut store: DungeonRuntimeStore = orig_opt
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
-        let out = f(&mut store);
-        if (!store.instances.is_empty() || orig_opt.is_some())
-            && serde_json::to_string(&store)
-                .is_ok_and(|json| orig_opt.as_deref() != Some(json.as_str()) && {
-                    snap.service_state_blobs
-                        .insert(DUNGEON_RUNTIME_BLOB_KEY.to_string(), json);
-                    true
-                })
-        {}
-        out
-    })
+    db.with_mut_snapshot(|snap| f(&mut snap.dungeon_runtime))
 }
 
 pub fn with_dungeon_runtime_store<R>(
@@ -708,15 +527,12 @@ pub(crate) async fn materialize_dungeon_room_entities(
     }
 
     let (plans, obj_ids, npc_ids, gate_id_opt) = ctx.db.try_with_mut_snapshot(|snap| {
-        let mut store: DungeonRuntimeStore = snap
-            .service_state_blobs
-            .get(DUNGEON_RUNTIME_BLOB_KEY)
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
-
-        let Some(inst) = store.instances.get_mut(&instance_id) else {
-            return Err(BridgeRpcError::user_error("DungeonInstanceNotFound"));
-        };
+        let mut next_id = snap.next_entity_id;
+        let inst = snap
+            .dungeon_runtime
+            .instances
+            .get_mut(&instance_id)
+            .ok_or_else(|| BridgeRpcError::user_error("DungeonInstanceNotFound"))?;
         if inst.completed || inst.despawned {
             return Err(BridgeRpcError::user_error("DungeonAlreadyCompleted"));
         }
@@ -732,8 +548,8 @@ pub(crate) async fn materialize_dungeon_room_entities(
         if room_vec_idx == 0 {
             if let Some(ep) = entry_gate_pos_opt {
                 let eg_id = existing_entry_gate.unwrap_or_else(|| {
-                    snap.next_entity_id += 1;
-                    snap.next_entity_id
+                    next_id += 1;
+                    next_id
                 });
                 inst.entry_gate_ball_id = Some(eg_id);
                 plans.push(SpawnPlan::Gate {
@@ -749,8 +565,8 @@ pub(crate) async fn materialize_dungeon_room_entities(
 
         for obj in &mut room.objects {
             if obj.ball_id <= 0 {
-                snap.next_entity_id += 1;
-                obj.ball_id = snap.next_entity_id;
+                next_id += 1;
+                obj.ball_id = next_id;
             }
             obj_ids.push(obj.ball_id);
             if !obj.spawned {
@@ -782,8 +598,8 @@ pub(crate) async fn materialize_dungeon_room_entities(
                         },
                     );
                     for &(loot_tid, loot_qty) in &obj.loot_items {
-                        snap.next_entity_id += 1;
-                        let lid = snap.next_entity_id;
+                        next_id += 1;
+                        let lid = next_id;
                         snap.items.insert(
                             lid,
                             InventoryItemRecord {
@@ -809,8 +625,8 @@ pub(crate) async fn materialize_dungeon_room_entities(
 
         if room_vec_idx + 1 < total_rooms {
             let gid = room.gate_ball_id.unwrap_or_else(|| {
-                snap.next_entity_id += 1;
-                snap.next_entity_id
+                next_id += 1;
+                next_id
             });
             let first_spawn = room.gate_ball_id.is_none() || !room.spawned;
             room.gate_ball_id = Some(gid);
@@ -833,8 +649,8 @@ pub(crate) async fn materialize_dungeon_room_entities(
                 let mut offset_idx = 0usize;
                 for &(npc_tid, count) in &grp.npc_specs {
                     for _ in 0..count {
-                        snap.next_entity_id += 1;
-                        let nid = snap.next_entity_id;
+                        next_id += 1;
+                        let nid = next_id;
                         let angle = (offset_idx as f64) * 0.85;
                         let npc_pos = [
                             room.position[0] + angle.cos() * 8_000.0,
@@ -856,11 +672,8 @@ pub(crate) async fn materialize_dungeon_room_entities(
 
         room.spawned = true;
         let gate_id_opt = room.gate_ball_id;
+        snap.next_entity_id = next_id;
 
-        if let Ok(json) = serde_json::to_string(&store) {
-            snap.service_state_blobs
-                .insert(DUNGEON_RUNTIME_BLOB_KEY.to_string(), json);
-        }
         Ok((plans, obj_ids, npc_ids, gate_id_opt))
     })?;
 
@@ -1102,9 +915,9 @@ async fn apply_dungeon_trigger_actions_core(
 
     if !groups_to_spawn.is_empty() {
         let spawn_list = db.with_mut_snapshot(|snap| {
-            let mut store: DungeonRuntimeStore = snap.service_state_blobs.get(DUNGEON_RUNTIME_BLOB_KEY).and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
             let mut to_spawn = Vec::new();
-            if let Some(inst) = store.instances.get_mut(&instance_id) {
+            let mut allocated = 0i64;
+            if let Some(inst) = snap.dungeon_runtime.instances.get_mut(&instance_id) {
                 if let Some(room) = inst.rooms.get_mut(room_vec_idx) {
                     for grp_id in &groups_to_spawn {
                         if let Some(grp) = room.npc_groups.iter_mut().find(|g| g.group_id == *grp_id && !g.spawned) {
@@ -1112,8 +925,8 @@ async fn apply_dungeon_trigger_actions_core(
                             let mut offset_idx = 0usize;
                             for &(npc_tid, count) in &grp.npc_specs {
                                 for _ in 0..count {
-                                    snap.next_entity_id += 1;
-                                    let nid = snap.next_entity_id;
+                                    allocated += 1;
+                                    let nid = snap.next_entity_id + allocated;
                                     let angle = (offset_idx as f64) * 0.9 + 0.4;
                                     let npc_pos = [room.position[0] + angle.cos() * 9_500.0, room.position[1], room.position[2] + angle.sin() * 9_500.0];
                                     offset_idx += 1;
@@ -1125,7 +938,7 @@ async fn apply_dungeon_trigger_actions_core(
                     }
                 }
             }
-            if let Ok(json) = serde_json::to_string(&store) { snap.service_state_blobs.insert(DUNGEON_RUNTIME_BLOB_KEY.to_string(), json); }
+            snap.next_entity_id += allocated;
             to_spawn
         });
 

@@ -31,21 +31,14 @@ pub(crate) fn prune_delayed_local_speakers_on_leave(
         return;
     };
     speakers.retain(|&spk| {
-        let wit_key = format!("wh_local_witnesses:{chan_id}:{spk}");
-        let mut wit: HashSet<i64> = snap
-            .service_state_blobs
-            .get(&wit_key)
-            .and_then(|j| serde_json::from_str(j).ok())
-            .unwrap_or_default();
-        wit.remove(&leaving_char_id);
-        let keep = remaining_members.contains(&spk)
-            || wit.iter().any(|m| remaining_members.contains(m));
-        if keep {
-            if let Ok(j) = serde_json::to_string(&wit) {
-                snap.service_state_blobs.insert(wit_key, j);
-            }
-        } else {
-            snap.service_state_blobs.remove(&wit_key);
+        let wit_key = format!("{chan_id}:{spk}");
+        let mut keep = remaining_members.contains(&spk);
+        if let Some(wit) = snap.fleet_and_social_ops.wh_local_witnesses.get_mut(&wit_key) {
+            wit.remove(&leaving_char_id);
+            keep = keep || wit.iter().any(|m| remaining_members.contains(m));
+        }
+        if !keep {
+            snap.fleet_and_social_ops.wh_local_witnesses.remove(&wit_key);
         }
         keep
     });
@@ -781,12 +774,13 @@ fn handle_chat_rpc(
                     s.delayed_local_speakers.entry(chan_key.clone()).or_default().insert(char_id);
                     ctx.db.with_mut_snapshot(|snap| {
                         let cur_members = snap.chat_channels.get(&chan_key).map(|c| c.members.clone()).unwrap_or_default();
-                        let wit_key = format!("wh_local_witnesses:{chan_key}:{char_id}");
-                        let mut wit: HashSet<i64> = snap.service_state_blobs.get(&wit_key).and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default();
+                        let wit_key = format!("{chan_key}:{char_id}");
+                        let wit = snap
+                            .fleet_and_social_ops
+                            .wh_local_witnesses
+                            .entry(wit_key)
+                            .or_default();
                         wit.extend(cur_members.into_iter().filter(|&m| m != char_id));
-                        if let Ok(j) = serde_json::to_string(&wit) {
-                            snap.service_state_blobs.insert(wit_key, j);
-                        }
                     });
                 }
             }

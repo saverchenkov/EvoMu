@@ -246,12 +246,10 @@ async fn fleet_proxy_update_advert_v2401_and_persistence() {
     .unwrap();
 
     // Check DB snapshot persistence and allowed entities
-    let persisted = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("fleet_adverts")
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-    });
-    assert!(persisted.is_some());
+    let persisted = ctx
+        .db
+        .with_snapshot(|snap| snap.fleet_and_social_ops.fleet_adverts.contains_key(&fleet_id));
+    assert!(persisted);
     {
         let ex = ctx.fleet_extras.lock().unwrap();
         let adv = ex.adverts.get(&fleet_id).unwrap();

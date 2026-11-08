@@ -221,7 +221,7 @@ async fn test_store_manager_categories_and_products_live() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     ctx.db.with_mut_snapshot(|s| {
-        s.service_state_blobs.remove("nes_store_catalog");
+        s.quasar_commerce.nes_store_catalog = None;
     });
 
     let mut unauth = SessionState::new(96_101);
@@ -300,7 +300,7 @@ async fn test_fast_checkout_offers_and_buy_live() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     ctx.db.with_mut_snapshot(|s| {
-        s.service_state_blobs.remove("nes_store_catalog");
+        s.quasar_commerce.nes_store_catalog = None;
     });
 
     let mut unauth = SessionState::new(96_201);
@@ -485,7 +485,7 @@ async fn test_seasonal_login_campaign_lifecycle_live() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     ctx.db.with_mut_snapshot(|s| {
-        s.service_state_blobs.remove("nes_store_catalog");
+        s.quasar_commerce.nes_store_catalog = None;
     });
 
     let mut sess = SessionState::new(96_301);

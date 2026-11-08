@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
+use eve_server::services::season_fsd::SeasonalChallengeDefExt;
 use eve_server::services::season_manager::{
     load_season_state_from_blobs, save_season_state_to_blobs,
 };
@@ -608,12 +609,8 @@ async fn test_season_challenge_isk_award_trust_and_claim_guards() {
     } else {
         all_defs.push(client_def.clone());
     }
-    let defs_json = serde_json::to_string(&all_defs).unwrap();
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(
-            eve_server::services::season_manager::SEASONAL_CHALLENGES_CONFIG_KEY.into(),
-            defs_json,
-        );
+        snap.seasons_and_campaigns.challenge_definitions = all_defs;
         let mut st = load_season_state_from_blobs(snap, PILOT_1);
         let mut ch = client_def.to_character_challenge_with_end(st.selected_season_id, now_ft, end_ft);
         ch.is_dormant = false;
@@ -640,7 +637,7 @@ async fn test_season_challenge_isk_award_trust_and_claim_guards() {
     let ch_season = c2.to_character_challenge_with_end(1, now_ft, end_ft);
     assert!(ch_daily.expiration_date < ch_season.expiration_date && ch_season.expiration_date == end_ft);
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(eve_server::services::season_manager::SEASONAL_CHALLENGES_CONFIG_KEY.into(), serde_json::to_string(&vec![c1.clone(), c2.clone()]).unwrap());
+        snap.seasons_and_campaigns.challenge_definitions = vec![c1.clone(), c2.clone()];
         let mut st = load_season_state_from_blobs(snap, PILOT_1);
         st.challenges.clear();
         st.challenges.insert(990_001, ch_daily);

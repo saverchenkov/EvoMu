@@ -342,8 +342,8 @@ async fn test_void_space_player_jump_and_gate_activation() {
     let jump_rep2 = ctx.dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(void_fil_iid), PyRep::Integer(5002)], &kw, None).await.expect("VoidSpacePlayerJump 62448");
     assert_eq!(jump_rep2.dict_get("solarSystemID"), Some(&PyRep::Integer(VOID_SPACE_SYS_ID as i64)));
     assert_eq!(sess.solar_system_id, Some(VOID_SPACE_SYS_ID));
-    eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
-        if let Some(vs) = reg.void_space_sessions.get_mut(&char_id) {
+    eve_server::services::pve_special_sites::with_abyssal_state(&ctx, |st| {
+        if let Some(vs) = st.void_space_sessions.get_mut(&char_id) {
             vs.expires_at_sec = ctx.now_unix().saturating_sub(1);
         }
     });

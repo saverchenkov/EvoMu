@@ -105,10 +105,7 @@ async fn test_parity_notifies_seasons_campaigns_and_skills() {
             def.event_conditions.clear();
             def.max_progress = 2;
             def.points = 20;
-            snap.service_state_blobs.insert(
-                eve_server::services::season_fsd::SEASONAL_CHALLENGES_CONFIG_KEY.into(),
-                serde_json::to_string(&vec![def]).unwrap(),
-            );
+            snap.seasons_and_campaigns.challenge_definitions = vec![def];
         }
     });
     let _ = rpc(&ctx, &mut sess, "seasonManager", "fill_up_and_return_challenges_for_character", &[])

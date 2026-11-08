@@ -572,7 +572,7 @@ async fn test_rpc_char_unbound_mgr_batch() {
     assert!(unauth_res.is_err());
 
     ctx.db.with_mut_snapshot(|s| {
-        s.service_state_blobs.insert("resculpt_pending:90000001".into(), "true".into());
+        s.cluster_and_runtime.resculpt_pending.insert(90_000_001);
     });
     // Cross-race bloodline change is rejected (#race-lock); same-race Brutor (4, Minmatar) succeeds
     let cross_race_err = ctx
@@ -621,7 +621,7 @@ async fn test_rpc_char_unbound_mgr_batch() {
     assert!(unauth_res.is_err());
 
     ctx.db.with_mut_snapshot(|s| {
-        s.service_state_blobs.insert("resculpt_pending:90000001".into(), "true".into());
+        s.cluster_and_runtime.resculpt_pending.insert(90_000_001);
     });
     let res = ctx
         .dispatch_rpc(
@@ -1944,8 +1944,8 @@ async fn test_map_visited_systems_system_entry_tracking() {
     let dt2 = jita.dict_get("lastDateTime").and_then(|v| v.as_i64()).expect("Jita lastDateTime updated");
     assert!(dt2 > dt1);
 
-    // 4. Persistence across service blobs and fresh session reload
-    assert!(ctx.db.with_snapshot(|s| s.service_state_blobs.contains_key("char_system_visits:90000001")));
+    // 4. Persistence across typed snapshot storage and fresh session reload
+    assert!(ctx.db.with_snapshot(|s| s.cluster_and_runtime.char_system_visits.contains_key(&90_000_001)));
     let mut fresh_sess = SessionState::new(103);
     common::login_pilot(&ctx, &mut fresh_sess, "demo", "demo-secret").await;
     ctx.dispatch_rpc(&mut fresh_sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(90_000_001)], &kw, None).await.unwrap();
@@ -2726,11 +2726,7 @@ async fn test_parity_fast_checkout_offers_buy_and_mining_output() {
 
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.account_plex_vault.get(&user_id).copied().unwrap_or(0), vault_before + 480);
-        let receipts: Vec<eve_server::services::quasar_payment_store_types::PaymentReceiptRecord> =
-            snap.service_state_blobs
-                .get("payment_receipts")
-                .and_then(|j| serde_json::from_str(j).ok())
-                .unwrap_or_default();
+        let receipts = &snap.quasar_commerce.payment_receipts;
         assert_eq!(receipts.len(), 1);
         assert_eq!(receipts[0].amount_in_cents, 1998);
         assert_eq!(receipts[0].offer_id, "2001");
@@ -4140,10 +4136,7 @@ async fn batch3_season_manager_events_claim_reload_and_npc_standings() {
     custom_def.event_conditions.clear();
     let ev_type = custom_def.event_type.clone();
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(
-            eve_server::services::season_manager::SEASONAL_CHALLENGES_CONFIG_KEY.into(),
-            serde_json::to_string(&vec![custom_def]).unwrap(),
-        );
+        snap.seasons_and_campaigns.challenge_definitions = vec![custom_def];
     });
 
     let filled = rpc(

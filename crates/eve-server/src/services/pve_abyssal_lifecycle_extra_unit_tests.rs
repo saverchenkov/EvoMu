@@ -10,7 +10,7 @@ use crate::services::pve_abyssal_lifecycle::{
     sweep_expired_void_space_sessions_sync,
 };
 use crate::services::pve_special_sites::{
-    with_pve_special_reg, AbyssalPocketSession, AbyssalRoomRecord, AbyssalTraceRecord,
+    with_abyssal_state, AbyssalPocketSession, AbyssalRoomRecord, AbyssalTraceRecord,
     AbyssalWeatherKind, VoidSpaceSessionRecord,
 };
 use crate::sp6_lifecycle::{register_abyssal_session, with_mut_sp6_state};
@@ -138,8 +138,8 @@ async fn random_offset_and_coop_vs_solo_pocket_collapse_branches() {
         );
     });
 
-    with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_traces.insert(
+    with_abyssal_state(&ctx, |st| {
+        st.traces.insert(
             trace_id,
             AbyssalTraceRecord {
                 trace_ball_id: trace_id,
@@ -156,7 +156,7 @@ async fn random_offset_and_coop_vs_solo_pocket_collapse_branches() {
             },
         );
         for (cid, sid) in [(char1, ship1), (char2, ship2)] {
-            reg.abyssal_pockets.insert(
+            st.pockets.insert(
                 cid,
                 AbyssalPocketSession {
                     pocket_id: pid,
@@ -195,8 +195,8 @@ async fn random_offset_and_coop_vs_solo_pocket_collapse_branches() {
     // trace and cache items are preserved for char2, zarzakh gate lock is cleared for char1
     let home1 = collapse_abyssal_pocket_and_pod_pilot_at(&ctx, char1, ship1, abyss_sys, 1_779_000_000);
     assert!(home1 > 0);
-    with_pve_special_reg(&ctx, |reg| {
-        assert!(reg.abyssal_traces.contains_key(&trace_id));
+    with_abyssal_state(&ctx, |st| {
+        assert!(st.traces.contains_key(&trace_id));
     });
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.zarzakh_gate_locks.contains_key(&char1));
@@ -207,8 +207,8 @@ async fn random_offset_and_coop_vs_solo_pocket_collapse_branches() {
     // 2. Collapse char2 (last pilot in pocket -> any_other_alive == false):
     // trace and cache + cache loot are now purged!
     let _ = collapse_abyssal_pocket_and_pod_pilot_at(&ctx, char2, ship2, abyss_sys, 1_779_000_000);
-    with_pve_special_reg(&ctx, |reg| {
-        assert!(!reg.abyssal_traces.contains_key(&trace_id));
+    with_abyssal_state(&ctx, |st| {
+        assert!(!st.traces.contains_key(&trace_id));
     });
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&cache1_id));
@@ -311,8 +311,8 @@ async fn downtime_evacuation_drones_cleanup_and_highsec_tier_suspect_flag() {
     });
 
     // Tier 5 pocket originating in highsec -> triggers suspect flag on downtime evacuation
-    with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets.insert(
+    with_abyssal_state(&ctx, |st| {
+        st.pockets.insert(
             char_id,
             AbyssalPocketSession {
                 pocket_id: 901,
@@ -392,9 +392,9 @@ async fn void_space_and_reconcile_abyssal_login_sp6_and_completed_branches() {
         st.abyssal_sessions.remove(&char_id);
     });
 
-    // 2. Already completed pocket in reg.abyssal_pockets reconciles via Evacuated branch & restores attrs
-    with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets.insert(
+    // 2. Already completed pocket in abyssal state reconciles via Evacuated branch & restores attrs
+    with_abyssal_state(&ctx, |st| {
+        st.pockets.insert(
             char_id,
             AbyssalPocketSession {
                 pocket_id: 902,
@@ -439,8 +439,8 @@ async fn void_space_and_reconcile_abyssal_login_sp6_and_completed_branches() {
 
     // 3. Expired pocket on login triggers CollapsedDestroy
     seed_pilot(&ctx, char_id, ship_id, 24690, abyss_sys);
-    with_pve_special_reg(&ctx, |reg| {
-        let p = reg.abyssal_pockets.get_mut(&char_id).unwrap();
+    with_abyssal_state(&ctx, |st| {
+        let p = st.pockets.get_mut(&char_id).unwrap();
         p.completed = false;
         p.collapsed_destroyed = false;
         p.collapse_at_sec = 1_779_000_000; // exact boundary now >= collapse_at_sec
@@ -467,8 +467,8 @@ async fn void_space_and_reconcile_abyssal_login_sp6_and_completed_branches() {
     );
 
     // 5. sweep_expired_void_space_sessions_sync ignores expires_at_sec == 0
-    with_pve_special_reg(&ctx, |reg| {
-        reg.void_space_sessions.insert(
+    with_abyssal_state(&ctx, |st| {
+        st.void_space_sessions.insert(
             char_id,
             VoidSpaceSessionRecord {
                 expires_at_sec: 0,
@@ -477,7 +477,7 @@ async fn void_space_and_reconcile_abyssal_login_sp6_and_completed_branches() {
         );
     });
     sweep_expired_void_space_sessions_sync(&ctx, 1_779_000_000);
-    with_pve_special_reg(&ctx, |reg| {
-        assert!(reg.void_space_sessions.contains_key(&char_id));
+    with_abyssal_state(&ctx, |st| {
+        assert!(st.void_space_sessions.contains_key(&char_id));
     });
 }

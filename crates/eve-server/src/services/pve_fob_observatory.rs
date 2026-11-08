@@ -16,7 +16,6 @@ use eve_db::{
 use eve_destiny::{CombatState, DVec3, MovementMode as BallMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub const FACTION_GURISTAS: i64 = 500_010;
@@ -39,20 +38,7 @@ pub const MAX_ACTIVE_POCHVEN_OBSERVATORIES: usize = 3;
 pub const MAX_ACTIVE_PIRATE_FOBS: usize = 3;
 pub const GATE_ACTIVATION_RANGE_M: f64 = 2_500.0;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ObservatorySiteState {
-    pub site_id: i64,
-    pub solar_system_id: u32,
-    pub site_pos: [f64; 3],
-    pub gate_pos: [f64; 3],
-    pub gate_id: i64,
-    pub world_ark_id: i64,
-    pub defense_wave_ids: Vec<i64>,
-    pub dungeon_instance_id: i64,
-    #[serde(default)]
-    pub pocket_entrants: BTreeSet<i64>,
-    pub created_unix: u64,
-}
+pub use eve_db::ObservatorySiteState;
 
 fn is_capital_or_disallowed_observatory_hull(ctx: &ServerContext, ship_type_id: u32) -> bool {
     if matches!(ship_type_id, 0 | 670 | 33_328) {
@@ -82,9 +68,10 @@ fn sample_celestial_offset_pos(ctx: &ServerContext, sys_id: u32, base_dist_m: f6
 pub fn get_observatory_site_state(ctx: &ServerContext, sys_id: u32) -> Option<ObservatorySiteState> {
     let site_id = 1_899_000_000 + i64::from(sys_id);
     ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get(&format!("observatory_site:{site_id}"))
-            .and_then(|raw| serde_json::from_str::<ObservatorySiteState>(raw).ok())
+        snap.fob_observatory_state
+            .observatory_sites
+            .get(&site_id)
+            .cloned()
     })
 }
 
@@ -93,17 +80,11 @@ pub fn record_fob_combat_participant(ctx: &ServerContext, fob_id: i64, attacker_
         return;
     }
     ctx.db.with_mut_snapshot(|snap| {
-        let key = format!("fob_combatants:{fob_id}");
-        let mut set: BTreeSet<i64> = snap
-            .service_state_blobs
-            .get(&key)
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
-        if set.insert(attacker_char_id) {
-            if let Ok(json) = serde_json::to_string(&set) {
-                snap.service_state_blobs.insert(key, json);
-            }
-        }
+        snap.fob_observatory_state
+            .fob_combatants
+            .entry(fob_id)
+            .or_default()
+            .insert(attacker_char_id);
     });
 }
 
@@ -169,14 +150,13 @@ pub async fn spawn_pirate_fob(
                 self_destruct_at_unix: None,
             },
         );
-        snap.service_state_blobs.insert(
-            format!("fob_faction:{fob_id}"),
-            pirate_faction_id.to_string(),
-        );
-        snap.service_state_blobs
-            .remove(&format!("fob_combatants:{fob_id}"));
-        snap.service_state_blobs
-            .remove(&format!("fob_defense_triggered:{fob_id}"));
+        snap.fob_observatory_state
+            .fob_factions
+            .insert(fob_id, pirate_faction_id);
+        snap.fob_observatory_state.fob_combatants.remove(&fob_id);
+        snap.fob_observatory_state
+            .fob_defense_triggered
+            .remove(&fob_id);
     });
 
     let sys = ctx.systems.get_or_spawn(sys_id);
@@ -330,14 +310,13 @@ pub async fn destroy_pirate_fob_and_payout(
         let f_pos = DVec3::from_array(st.position);
         let fac_id = st.owner_corp_id;
         let combatants: BTreeSet<i64> = snap
-            .service_state_blobs
-            .remove(&format!("fob_combatants:{fob_id}"))
-            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .fob_observatory_state
+            .fob_combatants
+            .remove(&fob_id)
             .unwrap_or_default();
-        snap.service_state_blobs.insert(
-            format!("fob_respawn_until:{s_id}"),
-            now_unix.saturating_add(86_400).to_string(),
-        );
+        snap.fob_observatory_state
+            .fob_respawn_until
+            .insert(s_id, now_unix.saturating_add(86_400));
         Ok((s_id, f_pos, fac_id, combatants))
     })?;
 
@@ -504,12 +483,9 @@ pub async fn spawn_observatory_flashpoint(
     }
 
     let site_id = 1_899_000_000 + i64::from(sys_id);
-    let active_in_pochven = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .keys()
-            .filter(|k| k.starts_with("observatory_site:"))
-            .count()
-    });
+    let active_in_pochven = ctx
+        .db
+        .with_snapshot(|snap| snap.fob_observatory_state.observatory_sites.len());
     if active_in_pochven >= MAX_ACTIVE_POCHVEN_OBSERVATORIES
         && get_observatory_site_state(ctx, sys_id).is_none()
     {
@@ -658,12 +634,11 @@ pub async fn spawn_observatory_flashpoint(
         pocket_entrants: BTreeSet::new(),
         created_unix: now_unix,
     };
-    if let Ok(raw) = serde_json::to_string(&obs_state) {
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.service_state_blobs
-                .insert(format!("observatory_site:{site_id}"), raw);
-        });
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fob_observatory_state
+            .observatory_sites
+            .insert(site_id, obs_state);
+    });
 
     Ok(PyRep::keyval([
         ("siteID", PyRep::Integer(site_id)),
@@ -734,24 +709,19 @@ pub fn complete_observatory_flashpoint(
     let now_unix = ctx.now_unix_secs();
 
     let obs_state = ctx.db.try_with_mut_snapshot(|snap| {
-        let Some(raw) = snap
-            .service_state_blobs
-            .remove(&format!("observatory_site:{site_id}"))
+        let Some(parsed) = snap
+            .fob_observatory_state
+            .observatory_sites
+            .remove(&site_id)
         else {
             return Err(BridgeRpcError {
                 code: "ObservatorySiteNotFound".into(),
                 message: format!("Observatory Flashpoint site {site_id} does not exist"),
             });
         };
-        let parsed: ObservatorySiteState =
-            serde_json::from_str(&raw).map_err(|e| BridgeRpcError {
-                code: "ObservatoryStateCorrupt".into(),
-                message: e.to_string(),
-            })?;
-        snap.service_state_blobs.insert(
-            format!("observatory_respawn_until:{}", parsed.solar_system_id),
-            now_unix.saturating_add(14_400).to_string(),
-        );
+        snap.fob_observatory_state
+            .observatory_respawn_until
+            .insert(parsed.solar_system_id, now_unix.saturating_add(14_400));
         for &cid in &eligible {
             if let Some(ch) = snap.characters.get_mut(&cid) {
                 ch.balance = ch
@@ -913,12 +883,11 @@ pub async fn try_activate_observatory_gate(
 
     let mut updated = obs_state;
     updated.pocket_entrants.insert(char_id);
-    if let Ok(raw) = serde_json::to_string(&updated) {
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.service_state_blobs
-                .insert(format!("observatory_site:{site_id}"), raw);
-        });
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fob_observatory_state
+            .observatory_sites
+            .insert(site_id, updated);
+    });
 
     Some(Ok(PyRep::keyval([
         ("siteID", PyRep::Integer(site_id)),
@@ -1007,12 +976,12 @@ pub async fn on_world_ark_boss_killed(ctx: &ServerContext, sys_id: u32, killer_c
             let now_unix = ctx.now_unix_secs();
             let site_id = obs_state.site_id;
             ctx.db.with_mut_snapshot(|snap| {
-                snap.service_state_blobs
-                    .remove(&format!("observatory_site:{site_id}"));
-                snap.service_state_blobs.insert(
-                    format!("observatory_respawn_until:{sys_id}"),
-                    now_unix.saturating_add(14_400).to_string(),
-                );
+                snap.fob_observatory_state
+                    .observatory_sites
+                    .remove(&site_id);
+                snap.fob_observatory_state
+                    .observatory_respawn_until
+                    .insert(sys_id, now_unix.saturating_add(14_400));
             });
             with_dungeon_runtime_store(ctx, |store| {
                 store.instances.remove(&obs_state.dungeon_instance_id);
@@ -1038,11 +1007,7 @@ pub async fn step_living_world_fob_and_observatory_spawns(ctx: &ServerContext) {
                     && matches!(s.type_id, FOB_GURISTAS_TYPE_ID | FOB_BLOOD_RAIDER_TYPE_ID)
             })
             .count();
-        let obs = snap
-            .service_state_blobs
-            .keys()
-            .filter(|k| k.starts_with("observatory_site:"))
-            .count();
+        let obs = snap.fob_observatory_state.observatory_sites.len();
         (fobs, obs)
     });
 
@@ -1074,10 +1039,10 @@ pub async fn step_living_world_fob_and_observatory_spawns(ctx: &ServerContext) {
                         && matches!(s.type_id, FOB_GURISTAS_TYPE_ID | FOB_BLOOD_RAIDER_TYPE_ID)
                 });
                 let on_cd = snap
-                    .service_state_blobs
-                    .get(&format!("fob_respawn_until:{sys_id}"))
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .is_some_and(|until| now_unix < until);
+                    .fob_observatory_state
+                    .fob_respawn_until
+                    .get(&sys_id)
+                    .is_some_and(|&until| now_unix < until);
                 !has_fob && !on_cd
             });
             if can_spawn_fob {
@@ -1097,13 +1062,14 @@ pub async fn step_living_world_fob_and_observatory_spawns(ctx: &ServerContext) {
             let site_id = 1_899_000_000 + i64::from(sys_id);
             let can_spawn_obs = ctx.db.with_snapshot(|snap| {
                 let exists = snap
-                    .service_state_blobs
-                    .contains_key(&format!("observatory_site:{site_id}"));
+                    .fob_observatory_state
+                    .observatory_sites
+                    .contains_key(&site_id);
                 let on_cd = snap
-                    .service_state_blobs
-                    .get(&format!("observatory_respawn_until:{sys_id}"))
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .is_some_and(|until| now_unix < until);
+                    .fob_observatory_state
+                    .observatory_respawn_until
+                    .get(&sys_id)
+                    .is_some_and(|&until| now_unix < until);
                 !exists && !on_cd
             });
             if can_spawn_obs && spawn_observatory_flashpoint(ctx, sys_id).await.is_ok() {
@@ -1168,9 +1134,11 @@ pub async fn apply_live_combat_damage_to_pirate_fob(
                     let take = rem.min(st.hull_hp);
                     st.hull_hp -= take;
                 }
-                let def_key = format!("fob_defense_triggered:{target_ball_id}");
-                if !snap.service_state_blobs.contains_key(&def_key) {
-                    snap.service_state_blobs.insert(def_key, "1".into());
+                if snap
+                    .fob_observatory_state
+                    .fob_defense_triggered
+                    .insert(target_ball_id)
+                {
                     trig = true;
                 }
                 let dest = st.hull_hp <= 0.0;

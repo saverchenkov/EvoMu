@@ -662,8 +662,8 @@ fn execute_due_abyssal_collapse_sync(
     now_unix: u64,
 ) {
     if sess.pocket_system_id == crate::services::abyssal_void_mgr::VOID_SPACE_SYSTEM_ID {
-        let vs = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-            reg.void_space_sessions.remove(&sess.char_id)
+        let vs = crate::services::pve_special_sites_abyssal::with_abyssal_state(ctx, |st| {
+            st.void_space_sessions.remove(&sess.char_id)
         })
         .unwrap_or(crate::services::pve_special_sites::VoidSpaceSessionRecord {
             char_id: sess.char_id,
@@ -1048,13 +1048,13 @@ pub fn on_advance_secs_with_sim_clock_rebase(
 
     // 6b. Sweep expired Void Space sessions, despawn expired un-entered Abyssal trace balls, and clear expired Zarzakh gate locks.
     crate::services::pve_abyssal_lifecycle::sweep_expired_void_space_sessions_sync(ctx, now_unix);
-    let expired_traces: Vec<(u32, i64)> = if crate::services::pve_special_sites::read_pve_special_reg(
+    let expired_traces: Vec<(u32, i64)> = if crate::services::pve_special_sites_abyssal::read_abyssal_state(
         ctx,
-        |reg| reg.abyssal_traces.values().any(|t| t.expires_at_sec > 0 && now_unix >= t.expires_at_sec),
+        |st| st.traces.values().any(|t| t.expires_at_sec > 0 && now_unix >= t.expires_at_sec),
     ) {
-        crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+        crate::services::pve_special_sites_abyssal::with_abyssal_state(ctx, |st| {
             let mut out = Vec::new();
-            reg.abyssal_traces.retain(|&tid, t| {
+            st.traces.retain(|&tid, t| {
                 if t.expires_at_sec > 0 && now_unix >= t.expires_at_sec {
                     out.push((t.origin_solar_system_id, tid));
                     false
@@ -1320,10 +1320,11 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     }
     crate::services::pve_crab_beacons::on_server_clock_advanced(ctx, elapsed_secs);
     let prev_metenox_tick = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("metenox_last_tick_unix")
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(now_unix)
+        if snap.mining_and_ess_state.metenox_last_tick_unix > 0 {
+            snap.mining_and_ess_state.metenox_last_tick_unix
+        } else {
+            now_unix
+        }
     });
     crate::services::mining_advanced::tick_all_metenox_moon_drills(ctx, prev_metenox_tick, now_unix);
     crate::services::mining_advanced::tick_all_moon_extractions(ctx).await;

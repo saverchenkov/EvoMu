@@ -6,12 +6,12 @@ use crate::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
 use crate::services::encounter_surveillance_system::{handle_ess_link, tick_ess_main_bank_links};
 use crate::services::insurgency_complex_ops::{
     activate_outpost_raid_gate_in_space, load_ops_state, save_ops_state,
-    tick_insurgency_complex_ops, OutpostRaidInstance, OutpostRaidSize,
+    tick_insurgency_complex_ops, OutpostRaidInstance, OutpostRaidSize, OutpostRaidSizeExt,
 };
 use crate::services::insurgency_services::{InsurgencyCampaign, FACTION_GURISTAS};
 use crate::services::pve_ess_reserve_banks::tick_ess_reserve_bank_links;
 use crate::services::space_destiny::{
-    get_ess_reserve_pulses_from_blobs, set_ess_reserve_pulses_in_blobs, EssReservePulseState,
+    get_ess_reserve_pulses, set_ess_reserve_pulses, EssReservePulseState,
 };
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, SystemDynamicState};
 use eve_destiny::{Ball, CombatState, DVec3, MovementMode};
@@ -292,7 +292,7 @@ async fn r7_tc_11_ess_bank_isolation_hull_cloak_warp_and_1hz_range() {
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.system_states[&null_sys_id].ess_linked_character_id, None);
         assert_eq!(
-            get_ess_reserve_pulses_from_blobs(&snap.service_state_blobs, null_sys_id)
+            get_ess_reserve_pulses(&snap, null_sys_id)
                 .reserve_linked_character_id,
             Some(char_id)
         );
@@ -308,8 +308,8 @@ async fn r7_tc_11_ess_bank_isolation_hull_cloak_warp_and_1hz_range() {
     .unwrap();
     assert_eq!(main_start.dict_get("linkStartedOnly"), Some(&PyRep::Bool(true)));
     ctx.db.with_mut_snapshot(|snap| {
-        set_ess_reserve_pulses_in_blobs(
-            &mut snap.service_state_blobs,
+        set_ess_reserve_pulses(
+            snap,
             null_sys_id,
             &EssReservePulseState {
                 pulses_total: 1,
@@ -329,7 +329,7 @@ async fn r7_tc_11_ess_bank_isolation_hull_cloak_warp_and_1hz_range() {
             Some(char_id)
         );
         assert_eq!(
-            get_ess_reserve_pulses_from_blobs(&snap.service_state_blobs, null_sys_id)
+            get_ess_reserve_pulses(&snap, null_sys_id)
                 .reserve_linked_character_id,
             None
         );

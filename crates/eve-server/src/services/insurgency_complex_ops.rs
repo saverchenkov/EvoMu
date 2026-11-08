@@ -22,8 +22,6 @@ use eve_db::{InventoryFlag, InventoryItemRecord, WorldStateSnapshot};
 use eve_destiny::{Ball, MovementMode};
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 pub const INSURGENCY_OPS_BLOB_KEY: &str = "insurgency_complex_ops";
 pub const TYPE_GURISTAS_LAUNDERING_FACILITY: u32 = 78_868;
@@ -64,176 +62,23 @@ pub const OUTPOST_RAID_POCKET_RADIUS_M: f64 = 75_000.0;
 pub const MODERATE_OUTPOST_BC_SKILL_DBUFF_ID: u32 = 2_544;
 pub const MODERATE_OUTPOST_BC_SKILL_BONUS_PCT: f64 = 20.0;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum OutpostRaidSize {
-    Small,
-    Medium,
-    Moderate,
-    LargeAdv,
+pub use eve_db::{
+    InsurgencyComplexOpsState, MiningAmbushInstance, OutpostRaidInstance, OutpostRaidSize,
+};
+
+pub trait OutpostRaidSizeExt {
+    fn gate_position(self) -> DVec3;
+    fn pocket_position(self) -> DVec3;
 }
 
-impl OutpostRaidSize {
-    pub const ALL: [Self; 4] = [Self::Small, Self::Medium, Self::Moderate, Self::LargeAdv];
-
-    pub fn slot_index(self) -> i64 {
-        match self {
-            Self::Small => 1,
-            Self::Medium => 2,
-            Self::Moderate => 3,
-            Self::LargeAdv => 4,
-        }
-    }
-
-    pub fn beacon_type_id(self) -> u32 {
-        match self {
-            Self::Small => TYPE_OUTPOST_BEACON_SMALL,
-            Self::Medium => TYPE_OUTPOST_BEACON_MEDIUM,
-            Self::Moderate => TYPE_OUTPOST_BEACON_MODERATE,
-            Self::LargeAdv => TYPE_OUTPOST_BEACON_LARGE_ADV,
-        }
-    }
-
-    pub fn base_capture_duration_secs(self) -> u64 {
-        match self {
-            Self::Small => 600,
-            Self::Medium | Self::Moderate | Self::LargeAdv => 900,
-        }
-    }
-
-    pub fn contribution_percent(self) -> f64 {
-        match self {
-            Self::Small => 0.25,
-            Self::Medium => 0.5,
-            Self::Moderate => 1.5,
-            Self::LargeAdv => 1.0,
-        }
-    }
-
-    /// Returns hundredths of an insurgency point (`denominator = 1000` = `100%`, so `1%` = `10` pts = `1,000` subpoints).
-    pub fn contribution_subpoints(self) -> i64 {
-        match self {
-            Self::Small => 250,
-            Self::Medium => 500,
-            Self::Moderate => 1_500,
-            Self::LargeAdv => 1_000,
-        }
-    }
-
-    pub fn base_lp_reward(self) -> i64 {
-        match self {
-            Self::Small => 29_000,
-            Self::Medium => 41_500,
-            Self::Moderate | Self::LargeAdv => 52_500,
-        }
-    }
-
-    pub fn respawn_delay_secs(self) -> u64 {
-        if self == Self::LargeAdv {
-            LARGE_ADV_OUTPOST_RESPAWN_SECS
-        } else {
-            STANDARD_OUTPOST_RESPAWN_SECS
-        }
-    }
-
-    pub fn allows_ship_group(self, group_id: u32) -> bool {
-        let frig_dessie = matches!(
-            group_id,
-            25 | 324 | 830 | 831 | 834 | 893 | 1283 | 1527 | 420 | 541 | 1534
-        );
-        let t3_dessie = group_id == 1305;
-        let cruiser = matches!(group_id, 26 | 358 | 832 | 833 | 894 | 906 | 1972);
-        let t3_cruiser = group_id == 963;
-        let bc = matches!(group_id, 419 | 540 | 1201);
-        let bs = matches!(group_id, 27 | 898 | 900);
-        match self {
-            Self::Small => frig_dessie,
-            Self::Medium => frig_dessie || t3_dessie || cruiser,
-            Self::Moderate => frig_dessie || t3_dessie || cruiser || bc,
-            Self::LargeAdv => frig_dessie || t3_dessie || cruiser || t3_cruiser || bc || bs,
-        }
-    }
-
-    pub fn gate_position(self) -> DVec3 {
+impl OutpostRaidSizeExt for OutpostRaidSize {
+    fn gate_position(self) -> DVec3 {
         DVec3::new(1_400_000.0 + (self.slot_index() as f64) * 100_000.0, 0.0, 0.0)
     }
 
-    pub fn pocket_position(self) -> DVec3 {
+    fn pocket_position(self) -> DVec3 {
         DVec3::new(self.gate_position().x, 0.0, 2_500_000.0)
     }
-
-    pub fn mordus_defender_type_id(self) -> u32 {
-        match self {
-            Self::Small => 79_545,
-            Self::Medium => 79_549,
-            Self::Moderate => 79_553,
-            Self::LargeAdv => 79_557,
-        }
-    }
-
-    pub fn pirate_defender_type_id(self, pirate_faction_id: i64) -> u32 {
-        if pirate_faction_id == FACTION_ANGEL_CARTEL {
-            match self {
-                Self::Small => 79_515,
-                Self::Medium => 79_520,
-                Self::Moderate => 79_523,
-                Self::LargeAdv => 79_526,
-            }
-        } else {
-            match self {
-                Self::Small => 79_529,
-                Self::Medium => 79_533,
-                Self::Moderate => 79_537,
-                Self::LargeAdv => 79_541,
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OutpostRaidInstance {
-    pub gate_id: i64,
-    pub beacon_id: i64,
-    pub campaign_id: i64,
-    pub solar_system_id: u32,
-    pub pirate_faction_id: i64,
-    pub target_faction_id: i64,
-    pub size: OutpostRaidSize,
-    pub is_static: bool,
-    pub occupants: Vec<(i64, i64)>,
-    pub mordus_defender_ball_id: Option<i64>,
-    pub pirate_defender_ball_id: Option<i64>,
-    pub mordus_defender_cleared: bool,
-    pub pirate_defender_cleared: bool,
-    pub weighted_elapsed_secs: f64,
-    pub last_step_unix: u64,
-    pub completed_on_cooldown: bool,
-    pub respawn_at_unix: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MiningAmbushInstance {
-    pub campaign_id: i64,
-    pub solar_system_id: u32,
-    pub pirate_faction_id: i64,
-    pub target_faction_id: i64,
-    pub beacon_id: i64,
-    pub rorqual_ball_id: i64,
-    pub pirate_tackler_ids: Vec<i64>,
-    pub ore_defender_ids: Vec<i64>,
-    pub ransom_elapsed_secs: u64,
-    pub last_step_unix: u64,
-    pub resolved: bool,
-    pub rorqual_warping_off_until: Option<u64>,
-    pub cooldown_until_unix: u64,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct InsurgencyComplexOpsState {
-    pub outpost_raids: HashMap<i64, OutpostRaidInstance>,
-    pub mining_ambushes: HashMap<u32, MiningAmbushInstance>,
-    pub subpoint_remainders: HashMap<String, i64>,
-    #[serde(default)]
-    pub named_roamer_rolls: HashMap<String, bool>,
 }
 
 pub fn is_warzone_opposing_empire(pirate_fac: i64, war_fac: i64) -> bool {
@@ -255,10 +100,7 @@ pub fn is_warp_into_outpost_raid_pocket_blocked(
     let ap = DVec3::from_array(anchor_pos);
     let dp = DVec3::from_array(dest_pos);
     ctx.db.with_snapshot(|snap| {
-        if !snap.service_state_blobs.contains_key(INSURGENCY_OPS_BLOB_KEY) {
-            return false;
-        }
-        load_ops_state(snap).outpost_raids.values().any(|r| {
+        snap.insurgency_complex_ops.outpost_raids.values().any(|r| {
             if r.completed_on_cooldown || r.solar_system_id != sys_id {
                 return false;
             }
@@ -280,11 +122,8 @@ pub fn active_insurgency_pocket_dbuffs(
         return Vec::new();
     }
     let raid_opt = ctx.db.with_snapshot(|snap| {
-        if !snap.service_state_blobs.contains_key(INSURGENCY_OPS_BLOB_KEY) {
-            return None;
-        }
         let fallback_pos = snap.item_positions.get(&ship_id).copied();
-        load_ops_state(snap)
+        snap.insurgency_complex_ops
             .outpost_raids
             .values()
             .find(|r| {
@@ -315,16 +154,11 @@ pub fn active_insurgency_pocket_dbuffs(
 }
 
 pub fn load_ops_state(snap: &WorldStateSnapshot) -> InsurgencyComplexOpsState {
-    snap.service_state_blobs
-        .get(INSURGENCY_OPS_BLOB_KEY)
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default()
+    snap.insurgency_complex_ops.clone()
 }
 
 pub fn save_ops_state(snap: &mut WorldStateSnapshot, state: &InsurgencyComplexOpsState) {
-    if let Ok(json) = serde_json::to_string(state) {
-        snap.service_state_blobs.insert(INSURGENCY_OPS_BLOB_KEY.into(), json);
-    }
+    snap.insurgency_complex_ops = state.clone();
 }
 
 pub fn is_battlecruiser_group(group_id: u32) -> bool {
@@ -390,32 +224,23 @@ fn roll_or_read_named_roamer_latch(ctx: &ServerContext, sys_id: u32, group_id: u
     let key = format!("{sys_id}:{group_id}");
     if !active {
         let has_key = ctx.db.with_snapshot(|snap| {
-            snap.service_state_blobs.contains_key(INSURGENCY_OPS_BLOB_KEY)
-                && load_ops_state(snap).named_roamer_rolls.contains_key(&key)
+            snap.insurgency_complex_ops.named_roamer_rolls.contains_key(&key)
         });
         if has_key {
             ctx.db.with_mut_snapshot(|snap| {
-                let mut ops = load_ops_state(snap);
-                if ops.named_roamer_rolls.remove(&key).is_some() {
-                    save_ops_state(snap, &ops);
-                }
+                snap.insurgency_complex_ops.named_roamer_rolls.remove(&key);
             });
         }
         return false;
     }
     if let Some(cached) = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .contains_key(INSURGENCY_OPS_BLOB_KEY)
-            .then(|| load_ops_state(snap).named_roamer_rolls.get(&key).copied())
-            .flatten()
+        snap.insurgency_complex_ops.named_roamer_rolls.get(&key).copied()
     }) {
         return cached;
     }
     let promoted = ctx.mechanic_rng.roll(NAMED_ROAMER_PROMOTION_PROB);
     ctx.db.with_mut_snapshot(|snap| {
-        let mut ops = load_ops_state(snap);
-        ops.named_roamer_rolls.insert(key, promoted);
-        save_ops_state(snap, &ops);
+        snap.insurgency_complex_ops.named_roamer_rolls.insert(key, promoted);
     });
     promoted
 }
@@ -1039,14 +864,11 @@ async fn remove_npc_balls(ctx: &ServerContext, sys_id: u32, ball_ids: &[i64]) {
 }
 
 pub async fn despawn_mining_ambush_in_system(ctx: &ServerContext, sys_id: u32) {
-    if !ctx.db.with_snapshot(|snap| snap.service_state_blobs.contains_key(INSURGENCY_OPS_BLOB_KEY) && load_ops_state(snap).mining_ambushes.contains_key(&sys_id)) {
+    if !ctx.db.with_snapshot(|snap| snap.insurgency_complex_ops.mining_ambushes.contains_key(&sys_id)) {
         return;
     }
     let removed = ctx.db.with_mut_snapshot(|snap| {
-        let mut ops = load_ops_state(snap);
-        let amb = ops.mining_ambushes.remove(&sys_id);
-        save_ops_state(snap, &ops);
-        amb
+        snap.insurgency_complex_ops.mining_ambushes.remove(&sys_id)
     });
     if let Some(amb) = removed {
         remove_space_object(ctx, sys_id, amb.beacon_id).await;

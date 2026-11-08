@@ -7,7 +7,6 @@ use eve_db::{
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use super::fleet_social_corps::{handle_insert_vote_case, read_corp_gov, with_corp_gov};
 use super::fleet_social_notify::handle_corp_contacts_and_labels;
@@ -16,27 +15,12 @@ use super::fleet_social_persistence::{
     eval_vote_case_winner, handle_vote_queries, label_mask_from_ids,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CorpRecruitmentAd {
-    pub ad_id: i64,
-    pub corp_id: i64,
-    pub title: String,
-    pub description: String,
-    pub type_mask: u64,
-    pub recruiter_id: i64,
-    pub created_unix: u64,
-    pub expiry_unix: u64,
-    pub days: u32,
-    pub lang_mask: u64,
-}
+pub use eve_db::CorpRecruitmentAd;
 
 fn load_corp_rec_ads(ctx: &ServerContext) -> Vec<CorpRecruitmentAd> {
-    let mut ads: Vec<CorpRecruitmentAd> = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("corp_recruitment_ads")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default()
-    });
+    let mut ads: Vec<CorpRecruitmentAd> = ctx
+        .db
+        .with_snapshot(|snap| snap.fleet_and_social_ops.corp_recruitment_ads.clone());
     if ads.is_empty() {
         read_corp_gov(ctx, |g| {
             for (&cid, state) in g.iter() {
@@ -54,11 +38,9 @@ fn load_corp_rec_ads(ctx: &ServerContext) -> Vec<CorpRecruitmentAd> {
 }
 
 fn save_corp_rec_ads(ctx: &ServerContext, ads: &[CorpRecruitmentAd]) {
-    if let Ok(serialized) = serde_json::to_string(ads) {
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.service_state_blobs.insert("corp_recruitment_ads".to_string(), serialized);
-        });
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleet_and_social_ops.corp_recruitment_ads = ads.to_vec();
+    });
 }
 
 fn handle_corp_rec_queries(

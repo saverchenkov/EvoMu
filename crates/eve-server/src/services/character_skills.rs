@@ -596,8 +596,8 @@ pub fn handle(
                             && snap.skill_queues.get(&o.character_id).is_some_and(|q| q.first().and_then(|e| e.started_at_unix).is_some())
                             && !snap.paused_skill_queues.contains(&o.character_id)
                     }).count();
-                    let mct_slots: Vec<u64> = snap.service_state_blobs.get(&format!("mct_slots:{}", ch.user_id))
-                        .and_then(|b| serde_json::from_str(b).ok())
+                    let mct_slots: Vec<u64> = snap.cluster_and_runtime.mct_slots.get(&ch.user_id)
+                        .cloned()
                         .or_else(|| crate::services::account_services::load_store(snap).mct_slots.get(&ch.user_id).cloned())
                         .unwrap_or_default();
                     let active_mct_count = mct_slots.into_iter().filter(|&exp| exp > now).count();

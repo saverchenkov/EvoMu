@@ -457,10 +457,7 @@ pub async fn ensure_seasonal_event_sites_for_system(
     let now_ft = ctx.now_blueos_filetime_ticks();
     let now_sec = ctx.now_unix();
     let season = ctx.db.with_snapshot(|snap| {
-        if snap
-            .service_state_blobs
-            .contains_key(crate::services::season_fsd::SEASON_CONFIG_KEY)
-        {
+        if snap.seasons_and_campaigns.season_configuration.is_some() {
             crate::services::season_fsd::load_season_config(snap)
         } else {
             crate::services::season_fsd::load_seasons_catalog(snap, &ctx.sde, now_ft)

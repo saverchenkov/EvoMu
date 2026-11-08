@@ -6,7 +6,7 @@
 pub use crate::services::pve_abyssal_pylons::*;
 
 use crate::router::ServerContext;
-use crate::services::pve_special_sites::with_pve_special_reg;
+use crate::services::pve_special_sites::read_abyssal_state;
 use crate::services::pve_special_sites_abyssal::AbyssalWeatherKind;
 use eve_proto::BridgeRpcError;
 use eve_sde::{AttributeId, SolarSystemId, TypeId};
@@ -305,8 +305,8 @@ pub async fn check_filament_1000km_proximity(
             format!("Cannot activate filament within 1,000 km of structure {sid} ({d:.0} m)"),
         ));
     }
-    let too_close_trace = with_pve_special_reg(ctx, |reg| {
-        reg.abyssal_traces
+    let too_close_trace = read_abyssal_state(ctx, |st| {
+        st.traces
             .values()
             .filter(|t| t.origin_solar_system_id == cur_sys)
             .find_map(|t| {
@@ -580,8 +580,8 @@ pub(crate) fn dark_weather_midpocket_turret_mult(
     if is_missile_launcher || !is_abyssal_system(sys_id) || !is_gunnery_turret_type(mod_type) {
         return 1.0;
     }
-    with_pve_special_reg(ctx, |reg| {
-        reg.abyssal_pockets
+    read_abyssal_state(ctx, |st| {
+        st.pockets
             .get(&char_id)
             .filter(|p| !p.completed && !p.collapsed_destroyed && p.weather == AbyssalWeatherKind::Dark)
             .map(|p| (1.0 - p.weather_penalty_pct / 100.0).max(0.1))
@@ -722,16 +722,16 @@ pub async fn evaluate_abyssal_spatial_clouds_for_ship(
                 })
         });
         in_pvp
-    }) || with_pve_special_reg(ctx, |reg| {
-        reg.void_space_sessions
+    }) || read_abyssal_state(ctx, |st| {
+        st.void_space_sessions
             .values()
             .any(|vs| vs.ship_id == ship_id)
     });
     if is_excluded_ship {
         return None;
     }
-    let ship_pocket = with_pve_special_reg(ctx, |reg| {
-        reg.abyssal_pockets
+    let ship_pocket = read_abyssal_state(ctx, |st| {
+        st.pockets
             .values()
             .find(|p| {
                 !p.completed
@@ -810,19 +810,10 @@ pub async fn evaluate_abyssal_spatial_clouds_for_ship(
         bp.recompute_ball_attributes(ship_id);
     }
     ctx.db.with_mut_snapshot(|snap| {
-        let mut active_clouds: HashMap<i64, TypeId> = snap
-            .service_state_blobs
-            .get("abyssal_active_clouds")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
         if let Some(cid) = active_cloud {
-            active_clouds.insert(ship_id, cid);
+            snap.abyssal_state.active_clouds.insert(ship_id, cid);
         } else {
-            active_clouds.remove(&ship_id);
-        }
-        if let Ok(json) = serde_json::to_string(&active_clouds) {
-            snap.service_state_blobs
-                .insert("abyssal_active_clouds".into(), json);
+            snap.abyssal_state.active_clouds.remove(&ship_id);
         }
     });
     label

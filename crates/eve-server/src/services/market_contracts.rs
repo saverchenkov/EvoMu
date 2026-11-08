@@ -1381,10 +1381,8 @@ pub fn handle(
                         it.owner_id = winner; it.location_id = c.start_station_id; it.flag = target_flag; it.version += 1;
                     }
                 }
-                if let Some(dep_str) = snap.service_state_blobs.remove(&format!("contract_deposit:{cid}")) {
-                    if let Ok(dep_raw) = dep_str.parse::<i64>() {
-                        snap.credit_contract_issuer(&c, IskCents(dep_raw));
-                    }
+                if let Some(dep_raw) = snap.fleet_and_social_ops.contract_deposits.remove(&cid) {
+                    snap.credit_contract_issuer(&c, IskCents(dep_raw));
                 }
                 if has_winner && winner != c.issuer_id {
                     snap.credit_contract_issuer(&c, c.current_bid);

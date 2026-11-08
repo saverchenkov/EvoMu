@@ -14,13 +14,13 @@ use eve_server::quasar_gateway::{
 use eve_server::router::ServerContext;
 use eve_server::services::quasar_corp_structure_services::{
     ContentGroupRecord, ContentTypeRecord, DeploymentInstanceRecord, DeploymentRecord,
-    FailedFulfillmentRecord, OrchestratorState, TargetedOfferAdminRecord,
+    FailedFulfillmentRecord, OrchestratorState,
 };
 use eve_server::services::quasar_cosmetics_market_types::{
     CosmeticsMarketData, ListingTargetRecord, SkinListingRecord,
 };
 use eve_server::services::quasar_payment_store_types::get_plex_transactions;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static CORR_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -143,9 +143,8 @@ fn seed_test_orchestrator(ctx: &ServerContext) {
         constellation_id: 20_000_020,
         created_unix: 1_700_000_000,
     });
-    let json = serde_json::to_string(&st).unwrap();
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert("content_orchestrator_state".to_string(), json);
+        snap.quasar_commerce.orchestrator = st;
     });
 }
 
@@ -249,8 +248,7 @@ async fn test_b29_orchestrator_version_and_deployment() {
         panic!("expected deployment attributes message");
     }
     ctx.db.with_snapshot(|s| {
-        let st: OrchestratorState = serde_json::from_str(&s.service_state_blobs["content_orchestrator_state"]).unwrap();
-        assert!(!st.deployments[&101].enabled);
+        assert!(!s.quasar_commerce.orchestrator.deployments[&101].enabled);
     });
 
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.content.orchestrator.deployment.api.EnableRequest", dep_id.clone()).await.status_code, STATUS_OK);
@@ -259,8 +257,7 @@ async fn test_b29_orchestrator_version_and_deployment() {
     let dyn_en = decode_dyn(&ctx, "eve.content.orchestrator.deployment.api.GetResponse", &dget_en.payload.unwrap().value);
     assert!(matches!(dyn_en.get(1), Some(DynamicValue::Message(_))));
     ctx.db.with_snapshot(|s| {
-        let st: OrchestratorState = serde_json::from_str(&s.service_state_blobs["content_orchestrator_state"]).unwrap();
-        assert!(st.deployments[&101].enabled);
+        assert!(s.quasar_commerce.orchestrator.deployments[&101].enabled);
     });
 
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.content.orchestrator.deployment.api.GetRequest", seq_bytes(9999)).await.status_code, STATUS_NOT_FOUND);
@@ -403,10 +400,10 @@ async fn test_b29_cosmetic_market_and_payment_admin() {
 async fn test_b29_store_sale_and_targeted_offer_admin() {
     let ctx = ServerContext::new();
     ctx.db.with_mut_snapshot(|snap| {
-        let mut ff = BTreeMap::new();
-        ff.insert(5001u32, FailedFulfillmentRecord { id: 5001, user_id: 1004, plex_units: 250, retries: 0, fulfilled: false });
-        ff.insert(5002u32, FailedFulfillmentRecord { id: 5002, user_id: 1004, plex_units: 100, retries: 0, fulfilled: false });
-        snap.service_state_blobs.insert("store_failed_fulfillments".into(), serde_json::to_string(&ff).unwrap());
+        snap.quasar_commerce.failed_fulfillments = vec![
+            FailedFulfillmentRecord { id: 5001, user_id: 1004, plex_units: 250, retries: 0, fulfilled: false },
+            FailedFulfillmentRecord { id: 5002, user_id: 1004, plex_units: 100, retries: 0, fulfilled: false },
+        ];
     });
     let mut sess = make_session(4, 1004, 2112000004, eve_machonet::service_roles::ROLE_GM_DEFAULT);
 
@@ -443,8 +440,7 @@ async fn test_b29_store_sale_and_targeted_offer_admin() {
     encode_string_field(4, "PARTNER-B29", &mut bf_req);
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.store.targetaudience.offer.api.admin.BackfillPartnerCodeRequest", bf_req).await.status_code, STATUS_OK);
     ctx.db.with_snapshot(|s| {
-        let offers: BTreeMap<String, TargetedOfferAdminRecord> = s.service_state_blobs.get("store_targeted_offers").and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default();
-        let rec = offers.get("1004:cat-entry-7001").expect("targeted offer persisted");
+        let rec = s.quasar_commerce.targeted_offers.get("1004:cat-entry-7001").expect("targeted offer persisted");
         assert!(rec.promoted && rec.retracted && rec.partner_code == "PARTNER-B29");
     });
 

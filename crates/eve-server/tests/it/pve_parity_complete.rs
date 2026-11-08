@@ -21,7 +21,7 @@ use eve_server::services::pve_exploration::{
     ensure_system_pve_sites_seeded, with_pve_exploration_reg,
 };
 use eve_server::services::pve_special_sites::{
-    classify_abyssal_filament, with_pve_special_reg,
+    classify_abyssal_filament, read_abyssal_state,
 };
 
 const SYS_JITA: u32 = 30_000_142;
@@ -345,7 +345,7 @@ async fn test_pve_abyssal_gates_and_tiers_complete() {
     assert_eq!(enter_rep.dict_get("timerSeconds"), Some(&PyRep::Integer(1200)));
 
     // Verify T1 pocket difficulty mult (1.0 + 1 * 1.25 = 2.25)
-    let t1_diff = with_pve_special_reg(&ctx, |reg| reg.abyssal_pockets.get(&PILOT_ABYSS).unwrap().npc_difficulty_mult);
+    let t1_diff = read_abyssal_state(&ctx, |st| st.pockets.get(&PILOT_ABYSS).unwrap().npc_difficulty_mult);
     assert!((t1_diff - 2.25).abs() < 1e-3);
 
     // ClientIsReady handshake
@@ -430,7 +430,7 @@ async fn test_pve_abyssal_gates_and_tiers_complete() {
     assert_eq!(sess.solar_system_id, Some(sys_08));
 
     // Verify pocket is cleaned up from active registry on exit
-    assert!(!with_pve_special_reg(&ctx, |reg| reg.abyssal_pockets.contains_key(&PILOT_ABYSS)));
+    assert!(!read_abyssal_state(&ctx, |st| st.pockets.contains_key(&PILOT_ABYSS)));
 
     // 8. Deploy T3 Fierce Electrical filament (allowed in highsec, tier 3 difficulty mult 4.75 > 2.25)
     let deploy3_rep = ctx
@@ -449,7 +449,7 @@ async fn test_pve_abyssal_gates_and_tiers_complete() {
     assert_eq!(enter3_rep.dict_get("timerSeconds"), Some(&PyRep::Integer(1200)));
 
     // Verify T3 pocket difficulty mult is 4.75 (1.0 + 3 * 1.25), higher than T1 (2.25)
-    let t3_diff = with_pve_special_reg(&ctx, |reg| reg.abyssal_pockets.get(&PILOT_ABYSS).unwrap().npc_difficulty_mult);
+    let t3_diff = read_abyssal_state(&ctx, |st| st.pockets.get(&PILOT_ABYSS).unwrap().npc_difficulty_mult);
     assert!((t3_diff - 4.75).abs() < 1e-3);
     assert!(t3_diff > t1_diff, "T3 difficulty mult ({t3_diff}) must exceed T1 difficulty mult ({t1_diff})");
 
@@ -470,7 +470,7 @@ async fn test_pve_abyssal_gates_and_tiers_complete() {
 
     let exit3_rep = ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEndGateActivation", &[PyRep::Integer(1_895_000_000 + t3_pid * 10 + 3)], &kw, None).await.expect("T3 AbyssalEndGateActivation");
     assert_eq!(exit3_rep.dict_get("solarSystemID"), Some(&PyRep::Integer(sys_08 as i64)));
-    assert!(!with_pve_special_reg(&ctx, |reg| reg.abyssal_pockets.contains_key(&PILOT_ABYSS)));
+    assert!(!read_abyssal_state(&ctx, |st| st.pockets.contains_key(&PILOT_ABYSS)));
 }
 
 // ============================================================================
@@ -1450,8 +1450,8 @@ async fn test_crab_deployment_capital_link_drone_waves_loot_and_self_destruct() 
         (post_link_cs.shield_resonance[0] - orig_sh_res[0]).abs() < 1e-6,
         "Resistance bonus cleared after 4m link completes"
     );
-    let (phase_w1, waves_w1, drones_w1) = with_pve_special_reg(&ctx, |reg| {
-        let b = &reg.crab_beacons[&beacon_id];
+    let (phase_w1, waves_w1, drones_w1) = ctx.db.with_snapshot(|snap| {
+        let b = &snap.crab_beacons.beacons[&beacon_id];
         (b.phase, b.waves_spawned, b.wave_npc_ball_ids.len())
     });
     assert_eq!(phase_w1, CrabBeaconPhase::Scanning);
@@ -1460,16 +1460,16 @@ async fn test_crab_deployment_capital_link_drone_waves_loot_and_self_destruct() 
 
     // Advance through Wave 2 (+200s), Wave 3 (+200s), and scan completion (+200s = 600s total)
     ctx.advance_secs(200);
-    assert_eq!(with_pve_special_reg(&ctx, |reg| reg.crab_beacons[&beacon_id].waves_spawned), 2);
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.crab_beacons.beacons[&beacon_id].waves_spawned), 2);
     ctx.advance_secs(200);
-    assert_eq!(with_pve_special_reg(&ctx, |reg| reg.crab_beacons[&beacon_id].waves_spawned), 3);
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.crab_beacons.beacons[&beacon_id].waves_spawned), 3);
     ctx.advance_secs(CRAB_SCAN_DURATION_SECS - 400);
-    assert_eq!(with_pve_special_reg(&ctx, |reg| reg.crab_beacons[&beacon_id].phase), CrabBeaconPhase::Scanning, "Live Rogue Drones jam CRAB completion");
-    for bid in with_pve_special_reg(&ctx, |reg| reg.crab_beacons[&beacon_id].wave_npc_ball_ids.clone()) {
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.crab_beacons.beacons[&beacon_id].phase), CrabBeaconPhase::Scanning, "Live Rogue Drones jam CRAB completion");
+    for bid in ctx.db.with_snapshot(|snap| snap.crab_beacons.beacons[&beacon_id].wave_npc_ball_ids.clone()) {
         let _ = lowsec_handle.remove_ball(bid).await;
     }
     eve_server::services::pve_crab_beacons::tick_all_crab_beacons(&ctx);
-    assert_eq!(with_pve_special_reg(&ctx, |reg| reg.crab_beacons[&beacon_id].phase), CrabBeaconPhase::LootRestricted);
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.crab_beacons.beacons[&beacon_id].phase), CrabBeaconPhase::LootRestricted);
 
     // 5. During 2-minute exclusive loot window: only deployer can open; non-deployer is refused
     let non_deployer_open = validate_single_item_can_be_opened(&ctx, PILOT_2, beacon_id).await;
@@ -1478,8 +1478,8 @@ async fn test_crab_deployment_capital_link_drone_waves_loot_and_self_destruct() 
 
     // 6. After 2 minutes (120s), beacon self-destructs and drops open-to-all loot container
     ctx.advance_secs(CRAB_LOOT_EXCLUSIVE_SECS);
-    let (phase_end, open_can_opt) = with_pve_special_reg(&ctx, |reg| {
-        let b = &reg.crab_beacons[&beacon_id];
+    let (phase_end, open_can_opt) = ctx.db.with_snapshot(|snap| {
+        let b = &snap.crab_beacons.beacons[&beacon_id];
         (b.phase, b.open_container_id)
     });
     assert_eq!(phase_end, CrabBeaconPhase::SelfDestructed);
@@ -2290,7 +2290,7 @@ async fn test_incursion_payout_on_grid_only_and_world_event_tales() {
         .expect("create p4")
         .character_id;
 
-    let mut sess1 = create_in_space_pilot(&ctx, 8211, "demo", "demo-secret", p1, vg_sys_id, 720_010_001, 587, site_pos).await;
+    let mut sess1 = create_in_space_pilot(&ctx, 8211, "demo", "demo-secret", p1, vg_sys_id, 720_010_001, 587, DVec3::from_array(site_pos)).await;
     let _sess2 = create_in_space_pilot(
         &ctx,
         8212,
@@ -2300,7 +2300,7 @@ async fn test_incursion_payout_on_grid_only_and_world_event_tales() {
         vg_sys_id,
         720_010_002,
         587,
-        site_pos + DVec3::new(2_500.0, 0.0, 0.0),
+        DVec3::from_array(site_pos) + DVec3::new(2_500.0, 0.0, 0.0),
     )
     .await;
     let _sess3 = create_in_space_pilot(
@@ -2312,7 +2312,7 @@ async fn test_incursion_payout_on_grid_only_and_world_event_tales() {
         vg_sys_id,
         720_010_003,
         587,
-        site_pos + DVec3::new(800_000.0, 0.0, 0.0),
+        DVec3::from_array(site_pos) + DVec3::new(800_000.0, 0.0, 0.0),
     )
     .await;
     let _sess4 = create_in_space_pilot(&ctx, 8214, "incp4", "incp4-secret", p4_other_sys, hq_sys_id, 720_010_004, 587, DVec3::ZERO).await;
@@ -2704,7 +2704,7 @@ async fn test_incursion_fleet_payout_optimal_overcap_and_hard_cap_cutoff() {
                 inc.sites
                     .iter()
                     .filter(|s| s.tier == "Vanguard")
-                    .map(move |s| (cid, s.solar_system_id, s.site_id.clone(), s.boss_npc_ball_id, s.position))
+                    .map(move |s| (cid, s.solar_system_id, s.site_id.clone(), s.boss_npc_ball_id, DVec3::from_array(s.position)))
             })
             .take(3)
             .collect()
@@ -2859,7 +2859,7 @@ async fn test_incursion_boss_killed_before_final_wave_escorts_completes_on_last_
     let (cid, sys_id, site_id, boss_bid, pos) = with_pve_special_reg(&ctx, |reg| {
         let inc = reg.incursions.values().next().expect("seeded incursion");
         let site = inc.sites.iter().find(|s| s.tier == "Vanguard").expect("Vanguard site");
-        (inc.constellation_id, site.solar_system_id, site.site_id.clone(), site.boss_npc_ball_id, site.position)
+        (inc.constellation_id, site.solar_system_id, site.site_id.clone(), site.boss_npc_ball_id, DVec3::from_array(site.position))
     });
     let (pilot_id, _) = spawn_fleet_pilot_on_grid(&ctx, 80, sys_id, pos).await;
 
@@ -2944,7 +2944,7 @@ async fn test_incursion_hq_sites_5171_and_5175_have_disjoint_npc_ball_ids() {
             s5171.solar_system_id,
             s5171.site_id.clone(),
             s5175.site_id.clone(),
-            s5171.position,
+            DVec3::from_array(s5171.position),
         )
     });
 
@@ -3263,8 +3263,8 @@ async fn test_crab_negative_exploits_subcap_11019_double_link_resonance_and_dron
     //    CRAB beacon stays in Scanning phase (`CrabScanInProgress`), and ONLY transitions to
     //    LootRestricted with a full 120s deployer window once all 3 Rogue Drone waves are killed!
     ctx.advance_secs(CRAB_SCAN_DURATION_SECS + 300);
-    let (phase_jammed, waves_jammed, live_drones) = with_pve_special_reg(&ctx, |reg| {
-        let b = &reg.crab_beacons[&b1];
+    let (phase_jammed, waves_jammed, live_drones) = ctx.db.with_snapshot(|snap| {
+        let b = &snap.crab_beacons.beacons[&b1];
         (b.phase, b.waves_spawned, b.wave_npc_ball_ids.clone())
     });
     assert_eq!(waves_jammed, 3);
@@ -3294,8 +3294,8 @@ async fn test_crab_negative_exploits_subcap_11019_double_link_resonance_and_dron
             .await;
     }
     tick_all_crab_beacons(&ctx);
-    let (phase_cleared, sd_at) = with_pve_special_reg(&ctx, |reg| {
-        let b = &reg.crab_beacons[&b1];
+    let (phase_cleared, sd_at) = ctx.db.with_snapshot(|snap| {
+        let b = &snap.crab_beacons.beacons[&b1];
         (b.phase, b.self_destruct_at_sec)
     });
     assert_eq!(phase_cleared, CrabBeaconPhase::LootRestricted);
@@ -4253,7 +4253,7 @@ async fn test_pve_incursion_multiwave_fleet_payout_and_influence() {
     let (boss_bid, site_id, site_pos) = with_pve_special_reg(&ctx, |reg| {
         let inc = &reg.incursions[&target_cid];
         let site = inc.sites.iter().find(|s| s.tier == "Vanguard").unwrap();
-        (site.boss_npc_ball_id, site.site_id.clone(), site.position)
+        (site.boss_npc_ball_id, site.site_id.clone(), DVec3::from_array(site.position))
     });
 
     let vg_sys = ctx.systems.get_or_spawn(vg_sys_id);
@@ -4379,7 +4379,7 @@ async fn test_pve_incursion_mothership_hq_unlock_and_conclusion() {
     // Complete HQ site waves to bring influence from 1.0 down to 0.0
     let (hq_site_id, hq_pos) = with_pve_special_reg(&ctx, |reg| {
         let s = reg.incursions[&target_cid].sites.iter().find(|s| s.tier == "Headquarters").unwrap();
-        (s.site_id.clone(), s.position)
+        (s.site_id.clone(), DVec3::from_array(s.position))
     });
     hq_sys.set_ball_position(710_002_003, hq_pos).await;
 
@@ -4398,7 +4398,7 @@ async fn test_pve_incursion_mothership_hq_unlock_and_conclusion() {
     let (inf_after_hq, ms_spawned, ms_site_id, ms_boss_bid, ms_pos) = with_pve_special_reg(&ctx, |reg| {
         let inc = &reg.incursions[&target_cid];
         let ms = inc.sites.iter().find(|s| s.tier == "Mothership").unwrap();
-        (inc.influence, inc.mothership_spawned, ms.site_id.clone(), ms.boss_npc_ball_id, ms.position)
+        (inc.influence, inc.mothership_spawned, ms.site_id.clone(), ms.boss_npc_ball_id, DVec3::from_array(ms.position))
     });
     assert_eq!(inf_after_hq, 0.0);
     assert!(ms_spawned);
@@ -5040,11 +5040,7 @@ async fn test_pve_dungeon_system_authentic_lifecycle() {
     // 2. Verify Room 1 object, gate, and initial NPC spawning
     let sys_handle = ctx.systems.get_or_spawn(JITA);
     let (room1_gate_id, cont_ball_id, wave1_npc_ids) = ctx.db.with_snapshot(|snap| {
-        let store: eve_server::services::pve_dungeon_runtime::DungeonRuntimeStore = snap
-            .service_state_blobs
-            .get("dungeon_runtime_store")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .expect("dungeon store");
+        let store = &snap.dungeon_runtime;
         let inst = &store.instances[&inst_id];
         let r1 = &inst.rooms[0];
         (
@@ -5105,12 +5101,7 @@ async fn test_pve_dungeon_system_authentic_lifecycle() {
     // 4. Test OnLoot trigger on container: looting spawns Wave 2 NPCs
     on_dungeon_item_looted(&ctx, PILOT_A, Some(JITA), cont_ball_id, 34).await;
     let wave2_npc_ids = ctx.db.with_snapshot(|snap| {
-        let store: eve_server::services::pve_dungeon_runtime::DungeonRuntimeStore = snap
-            .service_state_blobs
-            .get("dungeon_runtime_store")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .expect("dungeon store");
-        store.instances[&inst_id].rooms[0].npc_groups[1].npc_ball_ids.clone()
+        snap.dungeon_runtime.instances[&inst_id].rooms[0].npc_groups[1].npc_ball_ids.clone()
     });
     assert_eq!(wave2_npc_ids.len(), 1, "Wave 2 NPC must spawn from loot trigger");
     assert!(sys_handle.get_ball_snapshot(wave2_npc_ids[0]).await.ok().flatten().is_some());
@@ -5122,12 +5113,7 @@ async fn test_pve_dungeon_system_authentic_lifecycle() {
     on_dungeon_npc_killed(&ctx, JITA, wave2_npc_ids[0], PILOT_A).await;
 
     let is_unlocked = ctx.db.with_snapshot(|snap| {
-        let store: eve_server::services::pve_dungeon_runtime::DungeonRuntimeStore = snap
-            .service_state_blobs
-            .get("dungeon_runtime_store")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .expect("dungeon store");
-        !store.instances[&inst_id].rooms[0].gate_locked
+        !snap.dungeon_runtime.instances[&inst_id].rooms[0].gate_locked
     });
     assert!(is_unlocked, "Room 1 acceleration gate must unlock when NPCs are killed");
 
@@ -5167,12 +5153,7 @@ async fn test_pve_dungeon_system_authentic_lifecycle() {
 
     // Verify Room 2 objects & boss NPC spawned in ballpark
     let (room2_obj_id, room2_boss_id) = ctx.db.with_snapshot(|snap| {
-        let store: eve_server::services::pve_dungeon_runtime::DungeonRuntimeStore = snap
-            .service_state_blobs
-            .get("dungeon_runtime_store")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .expect("dungeon store");
-        let r2 = &store.instances[&inst_id].rooms[1];
+        let r2 = &snap.dungeon_runtime.instances[&inst_id].rooms[1];
         (r2.objects[0].ball_id, r2.npc_groups[0].npc_ball_ids[0])
     });
     assert!(sys_handle.get_ball_snapshot(room2_obj_id).await.ok().flatten().is_some());
@@ -5221,12 +5202,7 @@ async fn test_pve_seasonal_event_sites_and_loot_tables() {
         let mut cfg = load_season_config(snap);
         cfg.start_time_ft = now_ft - 3_600 * 10_000_000;
         cfg.end_time_ft = now_ft + 3_600 * 10_000_000;
-        if let Ok(json) = serde_json::to_string(&cfg) {
-            snap.service_state_blobs.insert(
-                eve_server::services::season_fsd::SEASON_CONFIG_KEY.to_string(),
-                json,
-            );
-        }
+        snap.seasons_and_campaigns.season_configuration = Some(cfg.clone());
         cfg
     });
 

@@ -83,15 +83,13 @@ async fn fast_checkout_default_paid_vs_free_one_click_behavior() {
 
     // Seed quick-pay token and confirm paid purchase works
     ctx_paid.db.with_mut_snapshot(|snap| {
-        let tok_json = serde_json::to_string(&vec![PaymentTokenRecord {
+        snap.quasar_commerce.payment_tokens = vec![PaymentTokenRecord {
             id: 1,
             user_id: uid_paid,
             token_str: "tok_4242".into(),
             is_quick_pay: true,
             consumed: false,
-        }])
-        .expect("serialize token");
-        snap.service_state_blobs.insert("payment_tokens".into(), tok_json);
+        }];
     });
     let paid_res = ctx_paid
         .dispatch_rpc(
@@ -208,12 +206,9 @@ async fn fast_checkout_default_paid_vs_free_one_click_behavior() {
     assert_eq!(wrong_pw.code, "InvalidPassword");
 
     // Verify no paid USD receipt was recorded for free purchase
-    let free_receipts: Vec<PaymentReceiptRecord> = ctx_free.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("payment_receipts")
-            .and_then(|j| serde_json::from_str(j).ok())
-            .unwrap_or_default()
-    });
+    let free_receipts: Vec<PaymentReceiptRecord> = ctx_free
+        .db
+        .with_snapshot(|snap| snap.quasar_commerce.payment_receipts.clone());
     assert!(free_receipts.is_empty());
 
     // Spend PLEX in NES storeManager and verify non-zero PLEX prices & vault deduction
@@ -288,21 +283,14 @@ async fn fast_checkout_consumes_tokens_blocks_negative_vault_and_rejects_unprice
             price_cents: None,
             currency: None,
         });
-        snap.service_state_blobs.insert(
-            "nes_store_catalog".into(),
-            serde_json::to_string(&cat).expect("json"),
-        );
-        let tokens = vec![PaymentTokenRecord {
+        snap.quasar_commerce.nes_store_catalog = Some(cat);
+        snap.quasar_commerce.payment_tokens = vec![PaymentTokenRecord {
             id: 77_001,
             user_id: uid,
             token_str: "tok_quick_4242".into(),
             is_quick_pay: true,
             consumed: false,
         }];
-        snap.service_state_blobs.insert(
-            "payment_tokens".into(),
-            serde_json::to_string(&tokens).expect("tokens"),
-        );
     });
 
     // Enable FastCheckout for user
@@ -336,12 +324,8 @@ async fn fast_checkout_consumes_tokens_blocks_negative_vault_and_rejects_unprice
         )
         .await;
     assert!(dual_res.is_ok(), "dual_res failed: {dual_res:?}");
-    let receipts_after_dual: Vec<PaymentReceiptRecord> = ctx.db.with_snapshot(|s| {
-        s.service_state_blobs
-            .get("payment_receipts")
-            .and_then(|j| serde_json::from_str(j).ok())
-            .unwrap_or_default()
-    });
+    let receipts_after_dual: Vec<PaymentReceiptRecord> =
+        ctx.db.with_snapshot(|s| s.quasar_commerce.payment_receipts.clone());
     assert!(receipts_after_dual.is_empty());
 
     // 3. USD offer consumes quick-pay token once; replay with same token fails

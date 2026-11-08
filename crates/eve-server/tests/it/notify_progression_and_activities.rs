@@ -160,8 +160,8 @@ async fn batch10_abyssal_void_whiteout_and_deathzone_notifications() {
     rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceDeployment", &[PyRep::Integer(700_010)])
         .await
         .unwrap();
-    let gate_id = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
-        *reg.abyssal_traces.keys().next().unwrap()
+    let gate_id = eve_server::services::pve_special_sites::with_abyssal_state(&ctx, |st| {
+        *st.traces.keys().next().unwrap()
     });
 
     // Negative: invalid gate does not emit OnAbyssalLocationEntered
@@ -192,16 +192,16 @@ async fn batch10_abyssal_void_whiteout_and_deathzone_notifications() {
     );
     assert!(!has_notif(&drain_all(&ctx, &mut sess, PILOT_A), "OnAbyssalContentFinished"));
 
-    eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
-        if let Some(p) = reg.abyssal_pockets.get_mut(&PILOT_A) {
+    eve_server::services::pve_special_sites::with_abyssal_state(&ctx, |st| {
+        if let Some(p) = st.pockets.get_mut(&PILOT_A) {
             p.current_room = 3;
             p.rooms[2].npc_ball_ids.clear();
             p.rooms[2].cleared = true;
         }
     });
     rpc(&ctx, &mut sess, "abyssalMgr", "ClientIsReady", &[]).await.unwrap();
-    let end_gate_id = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets.get(&PILOT_A).map(|p| 1_895_000_000 + p.pocket_id * 10 + 3).unwrap()
+    let end_gate_id = eve_server::services::pve_special_sites::with_abyssal_state(&ctx, |st| {
+        st.pockets.get(&PILOT_A).map(|p| 1_895_000_000 + p.pocket_id * 10 + 3).unwrap()
     });
     if let Some(pocket_sys) = sess.solar_system_id {
         let abyss_sys = ctx.systems.get_or_spawn(pocket_sys);
@@ -228,8 +228,8 @@ async fn batch10_abyssal_void_whiteout_and_deathzone_notifications() {
     rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceDeployment", &[PyRep::Integer(700_012)])
         .await
         .unwrap();
-    let gate2 = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
-        *reg.abyssal_traces.keys().max().unwrap()
+    let gate2 = eve_server::services::pve_special_sites::with_abyssal_state(&ctx, |st| {
+        *st.traces.keys().max().unwrap()
     });
     rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceGateActivation", &[PyRep::Integer(gate2)])
         .await
@@ -243,8 +243,8 @@ async fn batch10_abyssal_void_whiteout_and_deathzone_notifications() {
     assert!(!has_notif(&drain_all(&ctx, &mut sess, PILOT_A), "OnDeathzoneStateUpdate"));
 
     // Positive: move outside 75km room boundary relative to grid_offset (80km) -> emits danger trackingData
-    let pocket_center = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets
+    let pocket_center = eve_server::services::pve_special_sites::with_abyssal_state(&ctx, |st| {
+        st.pockets
             .get(&PILOT_A)
             .map(|p| DVec3::from_array(p.grid_offset))
             .unwrap()
@@ -2468,8 +2468,8 @@ async fn batch10_destiny_clock_esi_map_industry_energy_and_discovery() {
     ));
 
     // Positive: advance 25 hours so CEQ regenerates to 100, then InitiateLink deducts 30 -> 70 CEQ
-    eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
-        if let Some(b) = reg.crab_beacons.get_mut(&crab_id) {
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(b) = snap.crab_beacons.beacons.get_mut(&crab_id) {
             b.deployed_at_sec = 0;
         }
     });

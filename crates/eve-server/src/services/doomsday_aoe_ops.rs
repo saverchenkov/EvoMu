@@ -6,8 +6,7 @@
 
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::doomsday_aoe_tick::{
-    GTFO_WARP_SUPPRESSION_SECS, PersistedSuperweaponCycle,
-    SUPERWEAPON_RUNTIME_BLOB_KEY, SuperweaponCycleKind,
+    GTFO_WARP_SUPPRESSION_SECS, PersistedSuperweaponCycle, SuperweaponCycleKind,
     mutate_superweapon_runtime, read_superweapon_runtime,
 };
 use eve_destiny::{DVec3, DamageVector, MovementMode};
@@ -36,10 +35,10 @@ const SUPERWEAPON_NEUT_PULSE_GJ: f64 = 35_000.0;
 /// Cancels any scheduled or firing AoE Titan superweapon cycles (`Cone`, `SpatialGtfo`, `ReaperSweep`)
 /// belonging to `ship_id` when the caster dies or leaves space (`#499`).
 pub fn cancel_aoe_superweapon_cycles_for_ship(ctx: &ServerContext, ship_id: i64) {
-    let has_blob = ctx
+    let has_cycles = ctx
         .db
-        .with_snapshot(|s| s.service_state_blobs.contains_key(SUPERWEAPON_RUNTIME_BLOB_KEY));
-    if !has_blob {
+        .with_snapshot(|s| !s.superweapon_runtime.active_cycles.is_empty());
+    if !has_cycles {
         return;
     }
     mutate_superweapon_runtime(&ctx.db, |rt| {

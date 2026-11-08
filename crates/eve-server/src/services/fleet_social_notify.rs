@@ -737,35 +737,27 @@ pub fn prune_offline_fleets_and_channels(ctx: &ServerContext) {
 
 pub fn sync_fleet_join_requests_to_db(ctx: &ServerContext) {
     let map = ctx.fleet_extras.lock().unwrap().join_requests.clone();
-    if let Ok(json) = serde_json::to_string(&map) {
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.service_state_blobs
-                .insert("fleet_join_requests".into(), json);
-        });
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleet_and_social_ops.fleet_join_requests = map;
+    });
 }
 
 pub fn sync_fleet_watchlist_to_db(ctx: &ServerContext) {
     let map = ctx.fleet_extras.lock().unwrap().watchlist.clone();
-    if let Ok(json) = serde_json::to_string(&map) {
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.service_state_blobs
-                .insert("fleet_watchlist".into(), json);
-        });
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleet_and_social_ops.fleet_watchlist = map;
+    });
 }
 
 pub fn sync_fleet_options_to_db(ctx: &ServerContext) {
-    let pair = {
+    let (voice, loot) = {
         let ex = ctx.fleet_extras.lock().unwrap();
         (ex.voice_enabled.clone(), ex.loot_logging.clone())
     };
-    if let Ok(json) = serde_json::to_string(&pair) {
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.service_state_blobs
-                .insert("fleet_options".into(), json);
-        });
-    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleet_and_social_ops.fleet_voice_enabled = voice;
+        snap.fleet_and_social_ops.fleet_loot_logging = loot;
+    });
 }
 
 pub fn get_fleet_options(ctx: &ServerContext, fleet_id: i64) -> (bool, bool) {
@@ -776,13 +768,16 @@ pub fn get_fleet_options(ctx: &ServerContext, fleet_id: i64) -> (bool, bool) {
         }
     }
     let persisted = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs.get("fleet_options").and_then(|j| {
-            serde_json::from_str::<(
-                std::collections::HashMap<i64, bool>,
-                std::collections::HashMap<i64, bool>,
-            )>(j)
-            .ok()
-        })
+        if snap.fleet_and_social_ops.fleet_voice_enabled.is_empty()
+            && snap.fleet_and_social_ops.fleet_loot_logging.is_empty()
+        {
+            None
+        } else {
+            Some((
+                snap.fleet_and_social_ops.fleet_voice_enabled.clone(),
+                snap.fleet_and_social_ops.fleet_loot_logging.clone(),
+            ))
+        }
     });
     if let Some((v_map, l_map)) = persisted {
         let v_out = v_map.get(&fleet_id).copied().unwrap_or(false);
@@ -812,14 +807,8 @@ pub fn ensure_fleet_watchlist_loaded(ctx: &ServerContext) {
         ex.watchlist_loaded = true;
     }
     let persisted = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("fleet_watchlist")
-            .and_then(|j| {
-                serde_json::from_str::<
-                    std::collections::HashMap<i64, std::collections::HashSet<i64>>,
-                >(j)
-                .ok()
-            })
+        (!snap.fleet_and_social_ops.fleet_watchlist.is_empty())
+            .then(|| snap.fleet_and_social_ops.fleet_watchlist.clone())
     });
     if let Some(map) = persisted {
         let mut ex = ctx.fleet_extras.lock().unwrap();
@@ -840,14 +829,8 @@ pub fn get_fleet_join_requests(ctx: &ServerContext, fleet_id: i64) -> std::colle
         }
     }
     let persisted = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("fleet_join_requests")
-            .and_then(|j| {
-                serde_json::from_str::<
-                    std::collections::HashMap<i64, std::collections::HashSet<i64>>,
-                >(j)
-                .ok()
-            })
+        (!snap.fleet_and_social_ops.fleet_join_requests.is_empty())
+            .then(|| snap.fleet_and_social_ops.fleet_join_requests.clone())
     });
     if let Some(map) = persisted {
         let out = map.get(&fleet_id).cloned().unwrap_or_default();

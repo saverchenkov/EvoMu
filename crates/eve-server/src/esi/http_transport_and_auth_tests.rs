@@ -45,8 +45,9 @@ fn test_ctx() -> Arc<ServerContext> {
                 );
             }
         }
-        snap.service_state_blobs
-            .insert("portrait:90000001:64".into(), "ffd8ffe0".into());
+        snap.cluster_and_runtime
+            .portraits
+            .insert("90000001:64".into(), "ffd8ffe0".into());
     });
     Arc::new(ctx)
 }

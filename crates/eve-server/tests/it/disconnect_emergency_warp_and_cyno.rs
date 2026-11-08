@@ -14,7 +14,6 @@ use eve_server::services::inventory_fitting::fitting_cyno_portal::is_ship_cyno_a
 use eve_server::services::pve_crab_beacons::{
     CrabBeaconPhase, CrabBeaconRecord, TYPE_CRAB_BEACON,
 };
-use eve_server::services::pve_special_sites::with_pve_special_reg;
 use eve_server::services::tactical_modules::ActiveEntosisLinkState;
 use eve_server::sp6_lifecycle::{
     handle_character_logoff_or_disconnect, reconnect_character_in_space_sync,
@@ -186,8 +185,8 @@ async fn disconnect_emergency_warp_blocked_for_nav_locks_immobilizers_and_struct
 
     // 2. CRAB beacon link, Entosis link, Lance victim debuff, Clone Vat Bay, Immobilizer, Upwell Structure
     let db_key = Arc::as_ptr(&ctx.db) as usize;
-    with_pve_special_reg(&ctx, |reg| {
-        reg.crab_beacons.insert(
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.crab_beacons.beacons.insert(
             99_002,
             CrabBeaconRecord {
                 beacon_id: 99_002,
@@ -213,7 +212,7 @@ async fn disconnect_emergency_warp_blocked_for_nav_locks_immobilizers_and_struct
         .await
         .expect("crab blocked entry");
     assert!(crab_entry.emergency_warp_dest.is_none());
-    with_pve_special_reg(&ctx, |reg| reg.crab_beacons.clear());
+    ctx.db.with_mut_snapshot(|snap| snap.crab_beacons.beacons.clear());
 
     {
         let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());

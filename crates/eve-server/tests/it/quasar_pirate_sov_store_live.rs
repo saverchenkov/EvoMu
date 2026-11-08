@@ -233,7 +233,7 @@ async fn test_quasar_payment_and_store_catalog_live() {
 
     let mut sess = docked_pilot(&ctx, 72_001, PILOT_1).await;
     ctx.db.with_mut_snapshot(|s| {
-        s.service_state_blobs.remove("nes_store_catalog");
+        s.quasar_commerce.nes_store_catalog = None;
     });
     let uid = sess.user_id.unwrap_or(1) as u64;
     let mut rx = subscribe_notices(&ctx, &mut sess).await;

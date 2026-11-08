@@ -9,78 +9,24 @@ use crate::rng::splitmix64_next;
 use crate::router::ServerContext;
 use crate::services::tactical_modules::is_combatant_ship_or_entity_ball;
 use eve_destiny::{BallId, DVec3, DamageVector};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-pub(crate) const SUPERWEAPON_RUNTIME_BLOB_KEY: &str = "aoe_superweapon_runtime";
+pub use eve_db::{
+    PersistedSuperweaponCycle, PersistedSuperweaponRuntime, PersistedWarpSuppression,
+    SuperweaponCycleKind,
+};
+
 pub(crate) const BOSONIC_CONE_COS_HALF_ANGLE: f64 = 0.9659258262890683; // cos(15 deg)
 pub(crate) const GTFO_WARP_SUPPRESSION_SECS: u64 = 60;
 pub(crate) const GTFO_WARP_SUPPRESSION_STRENGTH: i32 = 25;
 pub(crate) const MAX_GTFO_TARGETS: usize = 25;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum SuperweaponCycleKind {
-    Cone {
-        origin_pos: [f64; 3],
-        dir_vec: [f64; 3],
-        cone_len_m: f64,
-        tick_dmg: [f64; 4],
-        sig_radius_m: f64,
-    },
-    SpatialGtfo {
-        center: [f64; 3],
-        sphere_radius_m: f64,
-    },
-    ReaperSweep {
-        start_pt: [f64; 3],
-        end_pt: [f64; 3],
-        beam_radius_m: f64,
-        sweep_dmg: [f64; 4],
-        sig_radius_m: f64,
-        already_hit_balls: Vec<i64>,
-    },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PersistedSuperweaponCycle {
-    pub sys_id: u32,
-    pub char_id: i64,
-    pub ship_id: i64,
-    pub ship_type_id: u32,
-    pub mod_type_id: u32,
-    pub kind: SuperweaponCycleKind,
-    pub started_at_unix: u64,
-    pub warmup_secs: u64,
-    pub total_ticks: usize,
-    pub ticks_applied: usize,
-    pub immobilize_until_unix: u64,
-    pub orig_max_velocity: f64,
-    pub orig_warp_scramble_strength: i32,
-    pub orig_disallow_assistance: bool,
-    pub mobility_restored: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PersistedWarpSuppression {
-    pub sys_id: u32,
-    pub ship_id: i64,
-    pub suppressed_until_unix: u64,
-    pub orig_warp_scramble_strength: i32,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct PersistedSuperweaponRuntime {
-    pub active_cycles: Vec<PersistedSuperweaponCycle>,
-    pub warp_suppressions: Vec<PersistedWarpSuppression>,
-}
-
 pub fn read_superweapon_runtime(
     db: &eve_db::WorldRepository,
 ) -> Option<PersistedSuperweaponRuntime> {
     db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get(SUPERWEAPON_RUNTIME_BLOB_KEY)
-            .and_then(|raw| serde_json::from_str(raw).ok())
+        let rt = &snap.superweapon_runtime;
+        (!rt.active_cycles.is_empty() || !rt.warp_suppressions.is_empty()).then(|| rt.clone())
     })
 }
 
@@ -88,21 +34,7 @@ pub fn mutate_superweapon_runtime<R>(
     db: &eve_db::WorldRepository,
     f: impl FnOnce(&mut PersistedSuperweaponRuntime) -> R,
 ) -> R {
-    db.with_mut_snapshot(|snap| {
-        let mut rt: PersistedSuperweaponRuntime = snap
-            .service_state_blobs
-            .get(SUPERWEAPON_RUNTIME_BLOB_KEY)
-            .and_then(|raw| serde_json::from_str(raw).ok())
-            .unwrap_or_default();
-        let out = f(&mut rt);
-        if rt.active_cycles.is_empty() && rt.warp_suppressions.is_empty() {
-            snap.service_state_blobs.remove(SUPERWEAPON_RUNTIME_BLOB_KEY);
-        } else if let Ok(encoded) = serde_json::to_string(&rt) {
-            snap.service_state_blobs
-                .insert(SUPERWEAPON_RUNTIME_BLOB_KEY.to_string(), encoded);
-        }
-        out
-    })
+    db.with_mut_snapshot(|snap| f(&mut snap.superweapon_runtime))
 }
 
 /// Returns `true` strictly for subcapital combat/industrial hulls eligible for GTFO teleportation
@@ -252,8 +184,11 @@ pub fn step_bosonic_doomsday_in_ballpark(
     let Some(db) = db_opt else {
         return;
     };
-    let has_blob = db.with_snapshot(|s| s.service_state_blobs.contains_key(SUPERWEAPON_RUNTIME_BLOB_KEY));
-    if !has_blob {
+    let has_runtime = db.with_snapshot(|s| {
+        !s.superweapon_runtime.active_cycles.is_empty()
+            || !s.superweapon_runtime.warp_suppressions.is_empty()
+    });
+    if !has_runtime {
         return;
     }
     mutate_superweapon_runtime(db, |rt| {
@@ -313,10 +248,11 @@ pub fn step_bosonic_doomsday_in_ballpark(
 /// Advances all persisted AoE superweapon cycles (`Cone`, `SpatialGtfo`, `ReaperSweep`) on the
 /// 1 Hz system step after their SDE warmup delay (`attr 2262`).
 pub async fn step_bosonic_doomsday_system(ctx: &ServerContext, sys_id: u32) {
-    let has_blob = ctx
-        .db
-        .with_snapshot(|s| s.service_state_blobs.contains_key(SUPERWEAPON_RUNTIME_BLOB_KEY));
-    if !has_blob {
+    let has_runtime = ctx.db.with_snapshot(|s| {
+        !s.superweapon_runtime.active_cycles.is_empty()
+            || !s.superweapon_runtime.warp_suppressions.is_empty()
+    });
+    if !has_runtime {
         return;
     }
     let now_unix = ctx.now_unix_secs();

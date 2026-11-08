@@ -17,13 +17,16 @@ fn certificate_state_derivation_mastery_and_rpc_dispatch() {
     let other_cid = 90_000_002_i64;
     let kw = HashMap::new();
 
-    // Legacy fallback in load_certificate_state
+    // Typed persistence in load_certificate_state / save_certificate_state
     ctx.db.with_mut_snapshot(|snap| {
-        let mut legacy = HashMap::new();
-        legacy.insert(50_u32, 3_u8);
-        snap.service_state_blobs.insert(
-            format!("char_certs:{cid}"),
-            serde_json::to_string(&legacy).unwrap(),
+        let mut certs = HashMap::new();
+        certs.insert(50_u32, 3_u8);
+        snap.node_graph_state.certificates.insert(
+            cid,
+            eve_db::CharacterCertificateState {
+                certificates: certs,
+                flags: HashMap::new(),
+            },
         );
         let loaded = load_certificate_state(snap, cid);
         assert_eq!(loaded.certificates.get(&50), Some(&3));

@@ -11,32 +11,18 @@ use std::collections::HashMap;
 
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use serde::{Deserialize, Serialize};
 
 use crate::router::context::ServerContext;
 
-/// In-game report incident record.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InGameReportRecord {
-    pub report_id: i64,
-    pub reporter_char_id: i64,
-    pub reporter_corp_id: i64,
-    pub reported_entity_id: i64,
-    pub category: String,
-    pub reason: String,
-    pub details: String,
-    pub created_at: u64,
-}
+pub use eve_db::InGameReportRecord;
 
-/// Returns all persisted in-game reports from `ctx.db` (`owner_notes` under character `-78`),
-/// sorted by `report_id`.
+/// Returns all persisted in-game reports from `ctx.db`, sorted by `report_id`.
 pub fn get_persisted_reports(ctx: &ServerContext) -> Vec<InGameReportRecord> {
     ctx.db.with_snapshot(|snap| {
-        if let Some(blob) = snap.service_state_blobs.get("ingamereport_tickets") {
-            if let Ok(mut list) = serde_json::from_str::<Vec<InGameReportRecord>>(blob) {
-                list.sort_by_key(|r| r.report_id);
-                return list;
-            }
+        if !snap.fleet_and_social_ops.ingamereport_tickets.is_empty() {
+            let mut list = snap.fleet_and_social_ops.ingamereport_tickets.clone();
+            list.sort_by_key(|r| r.report_id);
+            return list;
         }
         let mut list: Vec<InGameReportRecord> = snap
             .owner_notes
@@ -169,15 +155,7 @@ fn handle_submit_report(
             );
         }
 
-        let mut tickets: Vec<InGameReportRecord> = snap
-            .service_state_blobs
-            .get("ingamereport_tickets")
-            .and_then(|v| serde_json::from_str(v).ok())
-            .unwrap_or_default();
-        tickets.push(rec);
-        if let Ok(blob) = serde_json::to_string(&tickets) {
-            snap.service_state_blobs.insert("ingamereport_tickets".to_string(), blob);
-        }
+        snap.fleet_and_social_ops.ingamereport_tickets.push(rec);
     });
 
     Ok(PyRep::None)

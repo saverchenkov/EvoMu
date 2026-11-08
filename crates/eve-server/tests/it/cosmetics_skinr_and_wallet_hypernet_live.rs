@@ -569,7 +569,7 @@ async fn test_live_wallet_evermarks_gameplay_accrual_and_nes_store() {
 
     // 2. New Eden Store: create category, product, and offer via Quasar admin RPCs (no snapshot helper!)
     ctx.db.with_mut_snapshot(|s| {
-        s.service_state_blobs.remove("nes_store_catalog");
+        s.quasar_commerce.nes_store_catalog = None;
     });
     dock_station(&ctx, &mut s1, JITA_STATION).await;
     s1.role = service_roles::ROLE_GM_DEFAULT;

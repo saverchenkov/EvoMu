@@ -720,8 +720,9 @@ async fn test_r4_193_contract_deposit_refunds_and_unbid_corp_auction_item_return
                 ..Default::default()
             },
         );
-        snap.service_state_blobs
-            .insert(format!("contract_deposit:{reject_cid}"), "1000000".into()); // 10,000.00 ISK
+        snap.fleet_and_social_ops
+            .contract_deposits
+            .insert(reject_cid, 1_000_000); // 10,000.00 ISK
 
         // 2. Expired unbid corporate auction with item corp_item_id
         snap.items.insert(
@@ -849,10 +850,7 @@ async fn test_r4_194_take_offer_for_corporation_deducts_analysis_kredits() {
             ak_cost: 500, // Requires 500 Analysis Kredits
             min_standing: None,
         }];
-        snap.service_state_blobs.insert(
-            "lp_store_offers".into(),
-            serde_json::to_string(&offers).unwrap(),
-        );
+        snap.fleet_and_social_ops.lp_store_offers = Some(offers);
     });
 
     // Pilot has 0 Analysis Kredits -> TakeOfferForCorporation must fail

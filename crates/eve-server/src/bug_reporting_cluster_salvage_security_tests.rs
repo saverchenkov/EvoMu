@@ -185,13 +185,14 @@ async fn photo_upload_requires_auth_caps_size_and_avoids_duplication_436() {
 
     ctx.db.with_snapshot(|snap| {
         assert_eq!(
-            snap.service_state_blobs.get(&format!("portrait:{cid}")),
+            snap.cluster_and_runtime.portraits.get(&cid.to_string()),
             Some(&"ffd8ffe0".to_string())
         );
         for sz in [32, 64, 128, 256, 512, 1024] {
             assert!(!snap
-                .service_state_blobs
-                .contains_key(&format!("portrait:{cid}:{sz}")));
+                .cluster_and_runtime
+                .portraits
+                .contains_key(&format!("{cid}:{sz}")));
         }
     });
 }

@@ -18,34 +18,23 @@ use eve_proto::quasar::{
     DynamicQuasarMessage, DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 const BLOB_COSMETICS_MARKET: &str = "quasar_cosmetics_market";
-const BLOB_ORCHESTRATOR: &str = "content_orchestrator_state";
-const BLOB_FAILED_FULFILLMENTS: &str = "store_failed_fulfillments";
-const BLOB_TARGETED_OFFERS: &str = "store_targeted_offers";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SemVerSpec {
-    pub major: u32,
-    pub minor: u32,
-    pub patch: u32,
+pub use eve_db::{
+    ContentGroupRecord, ContentTypeRecord, DeploymentInstanceRecord, DeploymentRecord,
+    FailedFulfillmentRecord, OrchestratorState, SemVerSpec, TargetedOfferAdminRecord,
+};
+
+pub(crate) trait SemVerSpecExt {
+    fn encode(&self) -> Vec<u8>;
+    fn from_dyn(msg: &DynamicQuasarMessage) -> Self;
 }
 
-impl Default for SemVerSpec {
-    fn default() -> Self {
-        Self {
-            major: 1,
-            minor: 0,
-            patch: 0,
-        }
-    }
-}
-
-impl SemVerSpec {
-    pub fn encode(&self) -> Vec<u8> {
+impl SemVerSpecExt for SemVerSpec {
+    fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         if self.major > 0 {
             encode_varint_field(1, self.major as u64, &mut out);
@@ -59,7 +48,7 @@ impl SemVerSpec {
         out
     }
 
-    pub fn from_dyn(msg: &DynamicQuasarMessage) -> Self {
+    fn from_dyn(msg: &DynamicQuasarMessage) -> Self {
         Self {
             major: get_u64(msg, 1) as u32,
             minor: get_u64(msg, 2) as u32,
@@ -68,93 +57,14 @@ impl SemVerSpec {
     }
 }
 
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeploymentRecord {
-    pub id: u64,
-    pub name: String,
-    pub short_description: String,
-    pub content_group_id: u64,
-    pub enabled: bool,
-    pub current_content_count: u32,
-    #[serde(default = "default_true")]
-    pub no_region_limit: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContentGroupRecord {
-    pub id: u64,
-    pub name: String,
-    pub content_type_id: u64,
-    pub weight: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContentTypeRecord {
-    pub id: u64,
-    pub name: String,
-    pub short_description: String,
-    pub dungeon_id: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeploymentInstanceRecord {
-    pub uuid: Vec<u8>,
-    pub deployment_id: u64,
-    pub content_type_id: u64,
-    pub solar_system_id: u32,
-    pub constellation_id: u32,
-    pub created_unix: i64,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct OrchestratorState {
-    pub default_tenant_version: SemVerSpec,
-    pub tenant_version: Option<SemVerSpec>,
-    pub deployments: BTreeMap<u64, DeploymentRecord>,
-    pub content_groups: BTreeMap<u64, ContentGroupRecord>,
-    pub content_types: BTreeMap<u64, ContentTypeRecord>,
-    pub instances: Vec<DeploymentInstanceRecord>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FailedFulfillmentRecord {
-    pub id: u32,
-    pub user_id: u64,
-    pub plex_units: i64,
-    pub retries: u32,
-    pub fulfilled: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TargetedOfferAdminRecord {
-    pub user_id: u64,
-    pub catalogue_entry_name: String,
-    pub promoted: bool,
-    pub retracted: bool,
-    pub earliest_reissue_unix: i64,
-    pub partner_code: String,
-}
-
 fn load_orch_state(db: &WorldRepository) -> OrchestratorState {
-    db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get(BLOB_ORCHESTRATOR)
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default()
-    })
+    db.with_snapshot(|snap| snap.quasar_commerce.orchestrator.clone())
 }
 
 fn save_orch_state(db: &WorldRepository, state: &OrchestratorState) {
-    if let Ok(json) = serde_json::to_string(state) {
-        db.with_mut_snapshot(|snap| {
-            snap.service_state_blobs
-                .insert(BLOB_ORCHESTRATOR.to_string(), json);
-        });
-    }
+    db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.orchestrator = state.clone();
+    });
 }
 
 fn any_resp(type_name: &str, value: Vec<u8>) -> GoogleAny {
@@ -778,24 +688,29 @@ fn register_commerce_admin_handlers(
                 let fid = get_u64(dyn_msg, 1) as u32;
                 let now_unix = ctx.now_unix();
                 let found = db1.with_mut_snapshot(|snap| {
-                    let mut map: BTreeMap<u32, FailedFulfillmentRecord> = snap
-                        .service_state_blobs
-                        .get(BLOB_FAILED_FULFILLMENTS)
-                        .and_then(|j| serde_json::from_str(j).ok())
-                        .unwrap_or_default();
-                    let Some(rec) = map.get_mut(&fid) else {
+                    let credit_info = snap
+                        .quasar_commerce
+                        .failed_fulfillments
+                        .iter_mut()
+                        .find(|r| r.id == fid)
+                        .map(|rec| {
+                            rec.retries += 1;
+                            if !rec.fulfilled && rec.plex_units > 0 {
+                                rec.fulfilled = true;
+                                Some((rec.user_id, rec.plex_units))
+                            } else {
+                                None
+                            }
+                        });
+                    let Some(maybe_credit) = credit_info else {
                         return false;
                     };
-                    rec.retries += 1;
-                    if !rec.fulfilled && rec.plex_units > 0 {
-                        rec.fulfilled = true;
-                        let bal = snap.account_plex_vault.entry(rec.user_id).or_insert(0);
-                        *bal += rec.plex_units;
+                    if let Some((uid, amt)) = maybe_credit {
+                        let bal = snap.account_plex_vault.entry(uid).or_insert(0);
+                        *bal += amt;
                         let new_bal = *bal;
                         snap.next_entity_id += 1;
                         let tx_id = snap.next_entity_id as u64;
-                        let uid = rec.user_id;
-                        let amt = rec.plex_units;
                         record_plex_transaction(
                             snap,
                             tx_id,
@@ -805,10 +720,6 @@ fn register_commerce_admin_handlers(
                             &format!("Admin retry fulfillment #{fid}"),
                             now_unix,
                         );
-                    }
-                    if let Ok(s) = serde_json::to_string(&map) {
-                        snap.service_state_blobs
-                            .insert(BLOB_FAILED_FULFILLMENTS.to_string(), s);
                     }
                     true
                 });
@@ -828,12 +739,8 @@ fn register_commerce_admin_handlers(
             Arc::new(move |ctx, _any, _dyn_msg| {
                 let now_unix = ctx.now_unix();
                 db2.with_mut_snapshot(|snap| {
-                    let mut map: BTreeMap<u32, FailedFulfillmentRecord> = snap
-                        .service_state_blobs
-                        .get(BLOB_FAILED_FULFILLMENTS)
-                        .and_then(|j| serde_json::from_str(j).ok())
-                        .unwrap_or_default();
-                    for rec in map.values_mut() {
+                    let mut credits: Vec<(u64, u64, i64, i64, u32)> = Vec::new();
+                    for rec in &mut snap.quasar_commerce.failed_fulfillments {
                         rec.retries += 1;
                         if !rec.fulfilled && rec.plex_units > 0 {
                             rec.fulfilled = true;
@@ -842,20 +749,19 @@ fn register_commerce_admin_handlers(
                             let new_bal = *bal;
                             snap.next_entity_id += 1;
                             let tx_id = snap.next_entity_id as u64;
-                            record_plex_transaction(
-                                snap,
-                                tx_id,
-                                rec.user_id,
-                                rec.plex_units,
-                                new_bal,
-                                &format!("Admin retry-all fulfillment #{}", rec.id),
-                                now_unix,
-                            );
+                            credits.push((tx_id, rec.user_id, rec.plex_units, new_bal, rec.id));
                         }
                     }
-                    if let Ok(s) = serde_json::to_string(&map) {
-                        snap.service_state_blobs
-                            .insert(BLOB_FAILED_FULFILLMENTS.to_string(), s);
+                    for (tx_id, uid, amt, new_bal, rec_id) in credits {
+                        record_plex_transaction(
+                            snap,
+                            tx_id,
+                            uid,
+                            amt,
+                            new_bal,
+                            &format!("Admin retry-all fulfillment #{rec_id}"),
+                            now_unix,
+                        );
                     }
                 });
                 Ok(any_resp(
@@ -871,19 +777,11 @@ fn register_commerce_admin_handlers(
             Arc::new(move |_ctx, _any, dyn_msg| {
                 let fid = get_u64(dyn_msg, 1) as u32;
                 let removed = db3.with_mut_snapshot(|snap| {
-                    let mut map: BTreeMap<u32, FailedFulfillmentRecord> = snap
-                        .service_state_blobs
-                        .get(BLOB_FAILED_FULFILLMENTS)
-                        .and_then(|j| serde_json::from_str(j).ok())
-                        .unwrap_or_default();
-                    let was_present = map.remove(&fid).is_some();
-                    if was_present {
-                        if let Ok(s) = serde_json::to_string(&map) {
-                            snap.service_state_blobs
-                                .insert(BLOB_FAILED_FULFILLMENTS.to_string(), s);
-                        }
-                    }
-                    was_present
+                    let before = snap.quasar_commerce.failed_fulfillments.len();
+                    snap.quasar_commerce
+                        .failed_fulfillments
+                        .retain(|r| r.id != fid);
+                    snap.quasar_commerce.failed_fulfillments.len() != before
                 });
                 if !removed {
                     return Err((STATUS_NOT_FOUND, "Failed fulfillment not found".into()));
@@ -914,25 +812,20 @@ fn register_commerce_admin_handlers(
                 }
                 let key = format!("{uid}:{cat_name}");
                 db1.with_mut_snapshot(|snap| {
-                    let mut map: BTreeMap<String, TargetedOfferAdminRecord> = snap
-                        .service_state_blobs
-                        .get(BLOB_TARGETED_OFFERS)
-                        .and_then(|j| serde_json::from_str(j).ok())
-                        .unwrap_or_default();
-                    let rec = map.entry(key).or_insert(TargetedOfferAdminRecord {
-                        user_id: uid,
-                        catalogue_entry_name: cat_name,
-                        promoted: false,
-                        retracted: false,
-                        earliest_reissue_unix: 0,
-                        partner_code: String::new(),
-                    });
+                    let rec = snap
+                        .quasar_commerce
+                        .targeted_offers
+                        .entry(key)
+                        .or_insert(TargetedOfferAdminRecord {
+                            user_id: uid,
+                            catalogue_entry_name: cat_name,
+                            promoted: false,
+                            retracted: false,
+                            earliest_reissue_unix: 0,
+                            partner_code: String::new(),
+                        });
                     rec.promoted = true;
                     rec.retracted = false;
-                    if let Ok(s) = serde_json::to_string(&map) {
-                        snap.service_state_blobs
-                            .insert(BLOB_TARGETED_OFFERS.to_string(), s);
-                    }
                 });
                 Ok(any_resp(
                     "eve.store.targetaudience.offer.api.admin.PromoteResponse",
@@ -951,19 +844,10 @@ fn register_commerce_admin_handlers(
                 };
                 let key = format!("{uid}:{cat_name}");
                 let found = db2.with_mut_snapshot(|snap| {
-                    let mut map: BTreeMap<String, TargetedOfferAdminRecord> = snap
-                        .service_state_blobs
-                        .get(BLOB_TARGETED_OFFERS)
-                        .and_then(|j| serde_json::from_str(j).ok())
-                        .unwrap_or_default();
-                    let Some(rec) = map.get_mut(&key) else {
+                    let Some(rec) = snap.quasar_commerce.targeted_offers.get_mut(&key) else {
                         return false;
                     };
                     rec.retracted = true;
-                    if let Ok(s) = serde_json::to_string(&map) {
-                        snap.service_state_blobs
-                            .insert(BLOB_TARGETED_OFFERS.to_string(), s);
-                    }
                     true
                 });
                 if !found {
@@ -994,24 +878,19 @@ fn register_commerce_admin_handlers(
                 }
                 let key = format!("{uid}:{cat_name}");
                 db3.with_mut_snapshot(|snap| {
-                    let mut map: BTreeMap<String, TargetedOfferAdminRecord> = snap
-                        .service_state_blobs
-                        .get(BLOB_TARGETED_OFFERS)
-                        .and_then(|j| serde_json::from_str(j).ok())
-                        .unwrap_or_default();
-                    let rec = map.entry(key).or_insert(TargetedOfferAdminRecord {
-                        user_id: uid,
-                        catalogue_entry_name: cat_name,
-                        promoted: true,
-                        retracted: false,
-                        earliest_reissue_unix: 0,
-                        partner_code: String::new(),
-                    });
+                    let rec = snap
+                        .quasar_commerce
+                        .targeted_offers
+                        .entry(key)
+                        .or_insert(TargetedOfferAdminRecord {
+                            user_id: uid,
+                            catalogue_entry_name: cat_name,
+                            promoted: true,
+                            retracted: false,
+                            earliest_reissue_unix: 0,
+                            partner_code: String::new(),
+                        });
                     rec.partner_code = partner_code;
-                    if let Ok(s) = serde_json::to_string(&map) {
-                        snap.service_state_blobs
-                            .insert(BLOB_TARGETED_OFFERS.to_string(), s);
-                    }
                 });
                 Ok(any_resp(
                     "eve.store.targetaudience.offer.api.admin.BackfillPartnerCodeResponse",

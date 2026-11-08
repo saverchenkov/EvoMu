@@ -529,10 +529,8 @@ async fn request_scans_dict_move_warp_invalid_coords_and_tick_probe_warp_end() {
     assert!(get_active_probes_for_char(&ctx, char_id).iter().all(|p| p.state == PROBE_STATE_SCANNING));
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(raw) = snap.service_state_blobs.get_mut("pending_probe_scans") {
-            let mut entries: Vec<(i64, Vec<i64>, Vec<PyRep>, Vec<PyRep>, Vec<PyRep>, i64)> = serde_json::from_str(raw).unwrap_or_default();
-            for e in &mut entries { e.5 = past_ft; }
-            *raw = serde_json::to_string(&entries).unwrap();
+        for e in &mut snap.fleet_and_social_ops.pending_probe_scans {
+            e.5 = past_ft;
         }
     });
     tick_probe_warp_end(&ctx);

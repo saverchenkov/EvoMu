@@ -206,7 +206,8 @@ async fn test_ch5_gm_command_dispatcher() {
     gm_sess.role = saved_role;
 
     // Verify structured GM command audit log (char_id, cmd, ts, ok)
-    let audit_log = ctx.db.with_snapshot(|s| s.service_state_blobs.get("gm_audit_log").cloned()).expect("gm_audit_log must exist");
+    let audit_log = ctx.db.with_snapshot(|s| serde_json::to_string(&s.cluster_and_runtime.gm_audit_log).unwrap());
+    assert!(!ctx.db.with_snapshot(|s| s.cluster_and_runtime.gm_audit_log.is_empty()), "gm_audit_log must exist");
     let entries: Vec<serde_json::Value> = serde_json::from_str(&audit_log).expect("valid audit JSON");
     assert!(entries.iter().all(|e| e.get("ts").and_then(|v| v.as_u64()).unwrap_or(0) > 0 && e.get("char_id").is_some() && e.get("ok").is_some()));
     for expected in ["/giveisk", "/giveskill", "/createitem", "/tr", "/heal", "/location"] {
@@ -231,7 +232,7 @@ async fn test_ch3_ch4_paperdoll_contacts_blocklist_labels_and_watchlist() {
         buddy.user_id = 2;
         buddy.name = "Buddy Pilot".into();
         snap.characters.insert(buddy_id, buddy);
-        snap.service_state_blobs.insert(format!("resculpt_pending:{char_id}"), "true".into());
+        snap.cluster_and_runtime.resculpt_pending.insert(char_id);
     });
 
     ctx.dispatch_rpc(
@@ -252,7 +253,7 @@ async fn test_ch3_ch4_paperdoll_contacts_blocklist_labels_and_watchlist() {
         ("hair", PyRep::String("short_dark".into())),
     ]);
     let new_portrait = PyRep::keyval([("camera", PyRep::String("closeup_v2".into()))]);
-    ctx.db.with_mut_snapshot(|s| { s.service_state_blobs.insert(format!("resculpt_pending:{char_id}"), "true".into()); });
+    ctx.db.with_mut_snapshot(|s| { s.cluster_and_runtime.resculpt_pending.insert(char_id); });
     ctx.dispatch_rpc(
         &mut sess,
         "paperDollServer",
@@ -665,7 +666,8 @@ async fn test_ch5_gm_spawn_attr_fit_kill_location_online_and_qa_tools() {
 
     // Verify structured GM command audit log for /spawn, /unspawn, /setattr, /getattr, /fit, /kill, /location, /online, and failed command
     let _ = ctx.dispatch_rpc(&mut gm_sess, "slash", None, "SlashCmd", &[PyRep::String("/giveisk -5".into())], &kw, None).await.expect_err("negative /giveisk fails");
-    let audit_log = ctx.db.with_snapshot(|s| s.service_state_blobs.get("gm_audit_log").cloned()).expect("gm_audit_log must exist");
+    let audit_log = ctx.db.with_snapshot(|s| serde_json::to_string(&s.cluster_and_runtime.gm_audit_log).unwrap());
+    assert!(!ctx.db.with_snapshot(|s| s.cluster_and_runtime.gm_audit_log.is_empty()), "gm_audit_log must exist");
     let entries: Vec<serde_json::Value> = serde_json::from_str(&audit_log).expect("valid audit JSON");
     assert!(entries.iter().any(|e| e.get("cmd").and_then(|v| v.as_str()) == Some("/giveisk -5") && e.get("ok") == Some(&serde_json::Value::Bool(false))));
     assert!(entries.iter().filter(|e| e.get("cmd").and_then(|v| v.as_str()) != Some("/giveisk -5")).all(|e| e.get("ts").and_then(|v| v.as_u64()).unwrap_or(0) > 0 && e.get("ok") == Some(&serde_json::Value::Bool(true))));

@@ -273,9 +273,10 @@ fn countdown_warnings_history_bound_and_gm_preserving_downtime_shutdown() {
         let _ = step_downtime_countdown_warnings(&ctx, day_dt - 3_600);
     }
     let stored_days: usize = ctx.db.with_snapshot(|snap| {
-        let raw = snap.service_state_blobs.get("cluster_downtime_state").unwrap();
-        let v: serde_json::Value = serde_json::from_str(raw).unwrap();
-        v["emitted_warnings_by_day"].as_object().unwrap().len()
+        snap.cluster_and_runtime
+            .cluster_downtime_state
+            .emitted_warnings_by_day
+            .len()
     });
     assert!(stored_days <= 9);
 

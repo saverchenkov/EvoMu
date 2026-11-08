@@ -18,30 +18,14 @@ use eve_proto::quasar::{
     TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-const MISC_STATE_BLOB_KEY: &str = "cluster_misc_state";
-const ACL_REGISTRY_BLOB_KEY: &str = "quasar_acl_registry";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QuasarAclRecord {
-    pub acl_id: u32,
-    pub name: String,
-    pub description: String,
-    pub version: u32,
-    pub characters: Vec<(u64, i32)>,
-    pub corporations: Vec<(u64, i32)>,
-    pub alliances: Vec<(u64, i32)>,
-    pub everyone: bool,
-}
+pub use eve_db::QuasarAclRecord;
 
 fn load_or_seed_acls(db: &WorldRepository) -> Vec<QuasarAclRecord> {
     db.with_mut_snapshot(|snap| {
-        if let Some(json) = snap.service_state_blobs.get(ACL_REGISTRY_BLOB_KEY) {
-            if let Ok(records) = serde_json::from_str::<Vec<QuasarAclRecord>>(json) {
-                return records;
-            }
+        if let Some(records) = snap.quasar_commerce.acl_registry.as_ref() {
+            return records.clone();
         }
         let defaults = vec![
             QuasarAclRecord {
@@ -65,9 +49,7 @@ fn load_or_seed_acls(db: &WorldRepository) -> Vec<QuasarAclRecord> {
                 everyone: true,
             },
         ];
-        if let Ok(json) = serde_json::to_string(&defaults) {
-            snap.service_state_blobs.insert(ACL_REGISTRY_BLOB_KEY.to_string(), json);
-        }
+        snap.quasar_commerce.acl_registry = Some(defaults.clone());
         defaults
     })
 }
@@ -173,11 +155,8 @@ fn can_jump_shipcaster(
     };
     let now = ctx.now_unix();
     let eligible = db.with_snapshot(|snap| {
-        let has_caster = if let Some(json) = snap.service_state_blobs.get(MISC_STATE_BLOB_KEY) {
-            serde_json::from_str::<serde_json::Value>(json)
-                .ok()
-                .and_then(|val| val.get("starter_launchers")?.as_array().map(|a| !a.is_empty()))
-                .unwrap_or(false)
+        let has_caster = if let Some(misc) = snap.cluster_and_runtime.cluster_misc_state.as_ref() {
+            !misc.starter_launchers.is_empty()
         } else {
             snap.structures.values().any(|st| {
                 st.state != "Destroyed"

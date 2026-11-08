@@ -10,7 +10,6 @@ use crate::services::pve_fob_observatory::{
     get_observatory_site_state, on_world_ark_boss_killed, spawn_observatory_flashpoint,
     spawn_pirate_fob,
 };
-use crate::services::pve_special_sites::read_pve_special_reg;
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, SystemDynamicState};
 use eve_destiny::{Ball, CombatState, DVec3, MovementMode};
 use eve_machonet::SessionState;
@@ -251,12 +250,12 @@ async fn r7_tc_p1_450_crab_link_clean_relink_and_range_disconnect() {
     .await;
     assert!(link_res.is_ok(), "linking within 10km must succeed");
 
-    let phase = read_pve_special_reg(&ctx, |reg| reg.crab_beacons[&beacon_id].phase);
+    let phase = ctx.db.with_snapshot(|snap| snap.crab_beacons.beacons[&beacon_id].phase);
     assert_eq!(phase, CrabBeaconPhase::Linking);
 
     let _ = sys_h.set_ball_position(ship_id, DVec3::new(100_000.0, 0.0, 0.0)).await;
     tick_all_crab_beacons(&ctx);
-    let after_phase = read_pve_special_reg(&ctx, |reg| reg.crab_beacons[&beacon_id].phase);
+    let after_phase = ctx.db.with_snapshot(|snap| snap.crab_beacons.beacons[&beacon_id].phase);
     assert_eq!(after_phase, CrabBeaconPhase::Idle, "leaving link range must drop CRAB link");
 }
 
@@ -315,8 +314,11 @@ async fn r7_tc_p1_451_observatory_site_despawns_on_boss_kill_with_under_3_fleet(
         "Observatory site must despawn even when fewer than 3 fleet members kill the boss"
     );
     ctx.db.with_snapshot(|snap| {
-        assert!(!snap.service_state_blobs.contains_key(&format!("observatory_site:{site_id}")));
-        assert!(snap.service_state_blobs.contains_key(&format!("observatory_respawn_until:{pochven_sys}")));
+        assert!(!snap.fob_observatory_state.observatory_sites.contains_key(&site_id));
+        assert!(snap
+            .fob_observatory_state
+            .observatory_respawn_until
+            .contains_key(&pochven_sys));
     });
 }
 

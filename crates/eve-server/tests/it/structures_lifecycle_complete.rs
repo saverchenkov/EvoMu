@@ -969,7 +969,7 @@ async fn test_r4_172_incursion_wave_respawn_attaches_combat_state_and_site_claim
                     dungeon_name: "Sansha Vanguard".into(),
                     tier: "Vanguard".into(),
                     solar_system_id: sys_id,
-                    position: glam::DVec3::new(100_000.0, 0.0, 0.0),
+                    position: [100_000.0, 0.0, 0.0],
                     min_pilots: 1,
                     max_optimal_pilots: 10,
                     base_isk: 10_000_000,

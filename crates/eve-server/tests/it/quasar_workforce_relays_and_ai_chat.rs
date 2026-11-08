@@ -383,8 +383,7 @@ async fn test_payment_schedule_omega_purchase_and_faction_activity_admin() {
                 consumed: false,
             },
         ];
-        snap.service_state_blobs
-            .insert("payment_tokens".to_string(), serde_json::to_string(&tokens).unwrap());
+        snap.quasar_commerce.payment_tokens = tokens;
     });
     let mut s = sess(92_005, PILOT, CORP, JITA, 0);
 

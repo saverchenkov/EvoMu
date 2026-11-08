@@ -68,8 +68,9 @@ fn build_test_ctx() -> Arc<ServerContext> {
             });
             alliance.member_corp_ids.insert(corp_id);
         }
-        snap.service_state_blobs
-            .insert("portrait:90000001:64".into(), "ffd8ffe0".into());
+        snap.cluster_and_runtime
+            .portraits
+            .insert("90000001:64".into(), "ffd8ffe0".into());
     });
     Arc::new(ctx)
 }
@@ -302,10 +303,11 @@ fn esi_router_meta_cdn_verify_compat_date_datasource_and_error_limit() {
 
     // 3. Portrait endpoint branches (hex blob, fallback blob, missing char, missing blob, raw non-hex)
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert("portrait:90000001".into(), "aabbccdd".into());
+        snap.cluster_and_runtime.portraits.insert("90000001".into(), "aabbccdd".into());
         if let Some(ch2) = snap.characters.get_mut(&90_000_002) {
-            snap.service_state_blobs
-                .insert(format!("portrait:{}:64", ch2.character_id), "RAW_BYTES".into());
+            snap.cluster_and_runtime
+                .portraits
+                .insert(format!("{}:64", ch2.character_id), "RAW_BYTES".into());
         }
     });
     let port_ok =

@@ -145,12 +145,6 @@ pub(crate) fn handle_corp_medals(
                     snap.char_medals.entry(recipient_id).or_default().push(eve_db::snapshot_ext::CharacterMedalRecord {
                         medal_id, title: m_title.clone(), description: m_desc.clone(), corporation_id: corp_id, issuer_id: char_id, date_unix: now_unix, reason: reason.to_string(), status: "private".into(), graphics: gfx_layers.clone(),
                     });
-                    if let Some(list) = snap.char_medals.get(&recipient_id) {
-                        if let Ok(json_str) = serde_json::to_string(list) {
-                            snap.service_state_blobs.insert(format!("character_medals:{recipient_id}"), json_str.clone());
-                            snap.service_state_blobs.insert(format!("char_medals:{recipient_id}"), json_str);
-                        }
-                    }
                 }
                 Ok(())
             });
@@ -270,12 +264,6 @@ pub(crate) fn handle_corp_medals(
                                 }
                             }
                         }
-                    }
-                }
-                if let Some(list) = snap.char_medals.get(&char_id) {
-                    if let Ok(json_str) = serde_json::to_string(list) {
-                        snap.service_state_blobs.insert(format!("character_medals:{char_id}"), json_str.clone());
-                        snap.service_state_blobs.insert(format!("char_medals:{char_id}"), json_str);
                     }
                 }
             });

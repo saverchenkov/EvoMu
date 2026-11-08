@@ -6,7 +6,7 @@ use super::abyssal_void_mgr_deep_extra_unit_tests::*;
 use crate::services::abyssal_void_mgr::{
     handle, ABYSSAL_SPACE_SYSTEM_ID, VOID_SPACE_SYSTEM_ID,
 };
-use crate::services::pve_special_sites::with_pve_special_reg;
+use crate::services::pve_special_sites::with_abyssal_state;
 use crate::services::pve_special_sites_abyssal::AbyssalTraceRecord;
 use eve_db::clock::VirtualServerClock;
 use eve_db::{InventoryFlag, InventoryItemRecord};
@@ -37,8 +37,8 @@ async fn fleet_ship_capacity_validation_and_room_gate_progression_with_suspect_e
     let kw = HashMap::new();
 
     let trace_id = 750i64;
-    with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_traces.insert(
+    with_abyssal_state(&ctx, |st| {
+        st.traces.insert(
             trace_id,
             AbyssalTraceRecord {
                 trace_ball_id: trace_id,
@@ -207,8 +207,8 @@ async fn fleet_ship_capacity_validation_and_room_gate_progression_with_suspect_e
 
     let ab_h = ctx.systems.get_or_spawn(ABYSSAL_SPACE_SYSTEM_ID);
     for (r_idx, gate_id, expected_next_room) in [(0usize, gate_r1, 2i64), (1usize, gate_r2, 3i64)] {
-        let npcs = with_pve_special_reg(&ctx, |reg| {
-            let p = reg.abyssal_pockets.get_mut(&p1).unwrap();
+        let npcs = with_abyssal_state(&ctx, |st| {
+            let p = st.pockets.get_mut(&p1).unwrap();
             p.rooms[r_idx].cleared = true;
             p.rooms[r_idx].npc_ball_ids.clone()
         });
@@ -235,8 +235,8 @@ async fn fleet_ship_capacity_validation_and_room_gate_progression_with_suspect_e
     );
 
     // Clear Room 3 and call AbyssalEndGateActivation -> exits to sys_id and triggers suspect flag (0.7 sec, Tier 5)
-    let r3_npcs = with_pve_special_reg(&ctx, |reg| {
-        let p = reg.abyssal_pockets.get_mut(&p1).unwrap();
+    let r3_npcs = with_abyssal_state(&ctx, |st| {
+        let p = st.pockets.get_mut(&p1).unwrap();
         p.rooms[2].cleared = true;
         p.rooms[2].npc_ball_ids.clone()
     });
@@ -308,7 +308,7 @@ async fn pocket_collapse_expiration_and_void_space_jump_relog_and_end_gate() {
     .expect("VoidSpacePlayerJump");
     assert_eq!(sess.solar_system_id, Some(VOID_SPACE_SYSTEM_ID));
 
-    // 2) voidSpaceMgr.ClientIsReady restores content_id from service_state_blobs and emits OnVoidSpaceRelog
+    // 2) voidSpaceMgr.ClientIsReady restores content_id from typed state and emits OnVoidSpaceRelog
     let ready_rep = handle(&ctx, &mut sess, "voidSpaceMgr", "ClientIsReady", &[], &kw)
         .await
         .unwrap()
@@ -316,10 +316,8 @@ async fn pocket_collapse_expiration_and_void_space_jump_relog_and_end_gate() {
     assert_eq!(ready_rep.dict_get("ready"), Some(&PyRep::Bool(true)));
     ctx.db.with_snapshot(|snap| {
         assert_eq!(
-            snap.service_state_blobs
-                .get(&format!("void_space_content:{char_id}"))
-                .map(String::as_str),
-            Some("892250")
+            snap.abyssal_state.void_space_content.get(&char_id).copied(),
+            Some(892_250)
         );
     });
 
@@ -346,7 +344,8 @@ async fn pocket_collapse_expiration_and_void_space_jump_relog_and_end_gate() {
     );
     ctx.db.with_snapshot(|snap| {
         assert!(!snap
-            .service_state_blobs
-            .contains_key(&format!("void_space_content:{char_id}")));
+            .abyssal_state
+            .void_space_content
+            .contains_key(&char_id));
     });
 }

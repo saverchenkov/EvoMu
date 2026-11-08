@@ -14,16 +14,13 @@ use crate::router::{NotificationTarget, ServerContext};
 use crate::services::season_manager::{
     default_fsd_seasons, ensure_character_challenges, load_challenge_definitions,
     load_season_state_from_blobs, load_seasons_catalog, save_season_state_to_blobs,
-    sync_character_challenges, with_season_state, SeasonConfig, SEASONS_CATALOG_KEY,
-    SEASON_CONFIG_KEY,
+    sync_character_challenges, with_season_state, SeasonConfig,
 };
 use crate::system_actor::SystemHandle;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::BTreeMap;
 
-const ANNOUNCED_SEASON_STATES_KEY: &str = "season_manager:announced_states";
-const ANNOUNCED_SEASON_INIT_KEY: &str = "season_manager:announced_initialized";
 const TICKS_PER_DAY_FT: i64 = 86_400 * 10_000_000;
 
 fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
@@ -62,22 +59,16 @@ fn season_phase_label(cfg: &SeasonConfig, now_ft: i64) -> &'static str {
 pub fn check_and_emit_season_transitions(ctx: &ServerContext) {
     let now_ft = ctx.now_blueos_filetime_ticks();
     let needs_mut = ctx.db.with_snapshot(|snap| {
-        if !snap.service_state_blobs.contains_key(SEASONS_CATALOG_KEY)
-            || !snap.service_state_blobs.contains_key(ANNOUNCED_SEASON_INIT_KEY)
+        if snap.seasons_and_campaigns.seasons_catalog.is_empty()
+            || !snap.seasons_and_campaigns.announced_season_init
         {
             return true;
         }
         let mut catalog = load_seasons_catalog(snap, &ctx.sde, now_ft);
-        if let Some(cfg_json) = snap.service_state_blobs.get(SEASON_CONFIG_KEY) {
-            if let Ok(cfg) = serde_json::from_str::<SeasonConfig>(cfg_json) {
-                catalog.entry(cfg.season_id).or_insert(cfg);
-            }
+        if let Some(cfg) = &snap.seasons_and_campaigns.season_configuration {
+            catalog.entry(cfg.season_id).or_insert_with(|| cfg.clone());
         }
-        let announced: BTreeMap<i64, String> = snap
-            .service_state_blobs
-            .get(ANNOUNCED_SEASON_STATES_KEY)
-            .and_then(|j| serde_json::from_str(j).ok())
-            .unwrap_or_default();
+        let announced = &snap.seasons_and_campaigns.announced_season_states;
         catalog
             .iter()
             .any(|(sid, cfg)| announced.get(sid).map(String::as_str) != Some(season_phase_label(cfg, now_ft)))
@@ -86,39 +77,27 @@ pub fn check_and_emit_season_transitions(ctx: &ServerContext) {
         return;
     }
     let (newly_started, newly_ended, cleared_chars) = ctx.db.with_mut_snapshot(|snap| {
-        let unseeded = !snap.service_state_blobs.contains_key(SEASONS_CATALOG_KEY);
+        let unseeded = snap.seasons_and_campaigns.seasons_catalog.is_empty();
         let mut catalog = load_seasons_catalog(snap, &ctx.sde, now_ft);
-        if let Some(cfg_json) = snap.service_state_blobs.get(SEASON_CONFIG_KEY) {
-            if let Ok(cfg) = serde_json::from_str::<SeasonConfig>(cfg_json) {
-                catalog.entry(cfg.season_id).or_insert(cfg);
-            }
+        if let Some(cfg) = &snap.seasons_and_campaigns.season_configuration {
+            catalog.entry(cfg.season_id).or_insert_with(|| cfg.clone());
         }
         if unseeded {
-            if let Ok(json) = serde_json::to_string(&catalog) {
-                snap.service_state_blobs
-                    .insert(SEASONS_CATALOG_KEY.into(), json);
-            }
+            snap.seasons_and_campaigns.seasons_catalog = catalog.clone();
         }
 
-        let initialized = snap
-            .service_state_blobs
-            .contains_key(ANNOUNCED_SEASON_INIT_KEY);
+        let initialized = snap.seasons_and_campaigns.announced_season_init;
         let mut announced: BTreeMap<i64, String> = snap
-            .service_state_blobs
-            .get(ANNOUNCED_SEASON_STATES_KEY)
-            .and_then(|j| serde_json::from_str(j).ok())
-            .unwrap_or_default();
+            .seasons_and_campaigns
+            .announced_season_states
+            .clone();
 
         if !initialized {
             for (&sid, cfg) in &catalog {
                 announced.insert(sid, season_phase_label(cfg, now_ft).to_string());
             }
-            snap.service_state_blobs
-                .insert(ANNOUNCED_SEASON_INIT_KEY.into(), "1".into());
-            if let Ok(json) = serde_json::to_string(&announced) {
-                snap.service_state_blobs
-                    .insert(ANNOUNCED_SEASON_STATES_KEY.into(), json);
-            }
+            snap.seasons_and_campaigns.announced_season_init = true;
+            snap.seasons_and_campaigns.announced_season_states = announced;
             return (Vec::new(), Vec::new(), Vec::new());
         }
 
@@ -147,17 +126,13 @@ pub fn check_and_emit_season_transitions(ctx: &ServerContext) {
                 if st.selected_season_id > 0 && ended.contains(&st.selected_season_id) {
                     st.selected_season_id = 0;
                     save_season_state_to_blobs(snap, cid, &st);
-                    snap.service_state_blobs
-                        .remove(&format!("active_season:{cid}"));
+                    snap.seasons_and_campaigns.active_seasons.remove(&cid);
                     cleared.push(cid);
                 }
             }
         }
 
-        if let Ok(json) = serde_json::to_string(&announced) {
-            snap.service_state_blobs
-                .insert(ANNOUNCED_SEASON_STATES_KEY.into(), json);
-        }
+        snap.seasons_and_campaigns.announced_season_states = announced;
         (started, ended, cleared)
     });
 
@@ -200,8 +175,7 @@ pub fn handle_select_season_clear_if_none_or_zero(
     }
     let res = with_season_state(ctx, char_id, |st, snap| {
         st.selected_season_id = 0;
-        snap.service_state_blobs
-            .remove(&format!("active_season:{char_id}"));
+        snap.seasons_and_campaigns.active_seasons.remove(&char_id);
         Ok(())
     });
     match res {
@@ -247,26 +221,12 @@ fn start_season_impl(
         cfg.start_time_ft = now_ft;
         cfg.end_time_ft = end_ft;
         catalog.insert(season_id, cfg.clone());
-        if let Ok(json) = serde_json::to_string(&catalog) {
-            snap.service_state_blobs
-                .insert(SEASONS_CATALOG_KEY.into(), json);
-        }
-        if let Ok(json) = serde_json::to_string(&cfg) {
-            snap.service_state_blobs
-                .insert(SEASON_CONFIG_KEY.into(), json);
-        }
-        let mut announced: BTreeMap<i64, String> = snap
-            .service_state_blobs
-            .get(ANNOUNCED_SEASON_STATES_KEY)
-            .and_then(|j| serde_json::from_str(j).ok())
-            .unwrap_or_default();
-        announced.insert(season_id, "active".into());
-        snap.service_state_blobs
-            .insert(ANNOUNCED_SEASON_INIT_KEY.into(), "1".into());
-        if let Ok(json) = serde_json::to_string(&announced) {
-            snap.service_state_blobs
-                .insert(ANNOUNCED_SEASON_STATES_KEY.into(), json);
-        }
+        snap.seasons_and_campaigns.seasons_catalog = catalog;
+        snap.seasons_and_campaigns.season_configuration = Some(cfg);
+        snap.seasons_and_campaigns.announced_season_init = true;
+        snap.seasons_and_campaigns
+            .announced_season_states
+            .insert(season_id, "active".into());
     });
     broadcast_char_event(ctx, "OnSeasonStarted", vec![], Some(caller_char_id));
     Ok(PyRep::keyval([
@@ -294,22 +254,11 @@ fn end_season_impl(
             ));
         };
         cfg.end_time_ft = now_ft;
-        if let Ok(json) = serde_json::to_string(&catalog) {
-            snap.service_state_blobs
-                .insert(SEASONS_CATALOG_KEY.into(), json);
-        }
-        let mut announced: BTreeMap<i64, String> = snap
-            .service_state_blobs
-            .get(ANNOUNCED_SEASON_STATES_KEY)
-            .and_then(|j| serde_json::from_str(j).ok())
-            .unwrap_or_default();
-        announced.insert(season_id, "ended".into());
-        snap.service_state_blobs
-            .insert(ANNOUNCED_SEASON_INIT_KEY.into(), "1".into());
-        if let Ok(json) = serde_json::to_string(&announced) {
-            snap.service_state_blobs
-                .insert(ANNOUNCED_SEASON_STATES_KEY.into(), json);
-        }
+        snap.seasons_and_campaigns.seasons_catalog = catalog;
+        snap.seasons_and_campaigns.announced_season_init = true;
+        snap.seasons_and_campaigns
+            .announced_season_states
+            .insert(season_id, "ended".into());
 
         let mut cleared = Vec::new();
         let mut char_ids: Vec<i64> = snap.characters.keys().copied().collect();
@@ -319,8 +268,7 @@ fn end_season_impl(
             if st.selected_season_id == season_id {
                 st.selected_season_id = 0;
                 save_season_state_to_blobs(snap, cid, &st);
-                snap.service_state_blobs
-                    .remove(&format!("active_season:{cid}"));
+                snap.seasons_and_campaigns.active_seasons.remove(&cid);
                 cleared.push(cid);
             }
         }

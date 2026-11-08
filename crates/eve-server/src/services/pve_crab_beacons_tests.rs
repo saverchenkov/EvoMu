@@ -350,8 +350,8 @@ async fn test_crab_full_lifecycle_waves_loot_and_self_destruct() {
 
     ctx.advance_secs(CRAB_LINK_DURATION_SECS - 100);
     assert!(!is_ship_crab_linked(&ctx, ship_id, ctx.now_unix()));
-    let w1_balls = read_pve_special_reg(&ctx, |reg| {
-        let b = reg.crab_beacons.get(&b1).unwrap();
+    let w1_balls = read_crab_beacons(&ctx, |beacons| {
+        let b = beacons.get(&b1).unwrap();
         assert_eq!(b.phase, CrabBeaconPhase::Scanning);
         assert_eq!(b.waves_spawned, 1);
         b.wave_npc_ball_ids.clone()
@@ -362,16 +362,16 @@ async fn test_crab_full_lifecycle_waves_loot_and_self_destruct() {
         let _ = sys_handle.remove_ball(bid).await;
         on_crab_wave_npc_destroyed(&ctx.systems, &ctx.db, &ctx.sde, nullsec, bid).await;
     }
-    let w2_balls = read_pve_special_reg(&ctx, |reg| {
-        let b = reg.crab_beacons.get(&b1).unwrap();
+    let w2_balls = read_crab_beacons(&ctx, |beacons| {
+        let b = beacons.get(&b1).unwrap();
         assert_eq!(b.waves_spawned, 2);
         b.wave_npc_ball_ids.clone()
     });
     assert_eq!(w2_balls.len(), WAVE_2_DRONES.len());
 
     ctx.advance_secs(400);
-    let all_balls = read_pve_special_reg(&ctx, |reg| {
-        let b = reg.crab_beacons.get(&b1).unwrap();
+    let all_balls = read_crab_beacons(&ctx, |beacons| {
+        let b = beacons.get(&b1).unwrap();
         assert_eq!(b.waves_spawned, 3);
         b.wave_npc_ball_ids.clone()
     });
@@ -380,7 +380,7 @@ async fn test_crab_full_lifecycle_waves_loot_and_self_destruct() {
     }
 
     ctx.advance_secs(200);
-    let b1_rec = read_pve_special_reg(&ctx, |reg| reg.crab_beacons.get(&b1).cloned().unwrap());
+    let b1_rec = read_crab_beacons(&ctx, |beacons| beacons.get(&b1).cloned().unwrap());
     assert_eq!(b1_rec.phase, CrabBeaconPhase::LootRestricted);
 
     assert_eq!(check_crab_loot_access(&ctx, b1, 91_000_040, false).unwrap(), Some(true));
@@ -402,7 +402,7 @@ async fn test_crab_full_lifecycle_waves_loot_and_self_destruct() {
     );
 
     ctx.advance_secs(CRAB_LOOT_EXCLUSIVE_SECS);
-    let b1_after = read_pve_special_reg(&ctx, |reg| reg.crab_beacons.get(&b1).cloned().unwrap());
+    let b1_after = read_crab_beacons(&ctx, |beacons| beacons.get(&b1).cloned().unwrap());
     assert_eq!(b1_after.phase, CrabBeaconPhase::SelfDestructed);
     let can_id = b1_after.open_container_id.expect("open container spawned");
     ctx.db.with_snapshot(|snap| {
@@ -417,12 +417,12 @@ async fn test_crab_full_lifecycle_waves_loot_and_self_destruct() {
 
     handle_crab_component_call(&ctx, &sess, nullsec, 91_000_040, ship_id, b2, "linkWithShip", "InitiateLink", &[]).await.unwrap();
     ctx.advance_secs(CRAB_LINK_DURATION_SECS + CRAB_SCAN_DURATION_SECS);
-    let b2_drones = read_pve_special_reg(&ctx, |reg| reg.crab_beacons.get(&b2).unwrap().wave_npc_ball_ids.clone());
+    let b2_drones = read_crab_beacons(&ctx, |beacons| beacons.get(&b2).unwrap().wave_npc_ball_ids.clone());
     for bid in b2_drones {
         sys_handle.try_update_combat_state(bid, |cs| cs.structure_hp = 0.0);
     }
     tick_crab_beacons_in_system(&ctx, nullsec).await;
-    let b2_rec = read_pve_special_reg(&ctx, |reg| reg.crab_beacons.get(&b2).cloned().unwrap());
+    let b2_rec = read_crab_beacons(&ctx, |beacons| beacons.get(&b2).cloned().unwrap());
     assert_eq!(b2_rec.phase, CrabBeaconPhase::LootRestricted);
     ctx.db.with_mut_snapshot(|snap| {
         let data_qty = snap.items.values().find(|i| i.location_id == b2 && i.type_id == TYPE_ROGUE_DRONE_INFESTATION_DATA).map(|i| i.quantity);
@@ -430,13 +430,13 @@ async fn test_crab_full_lifecycle_waves_loot_and_self_destruct() {
         snap.items.retain(|_, i| i.location_id != b2);
     });
     ctx.advance_secs(CRAB_LOOT_EXCLUSIVE_SECS);
-    let b2_after = read_pve_special_reg(&ctx, |reg| reg.crab_beacons.get(&b2).cloned().unwrap());
+    let b2_after = read_crab_beacons(&ctx, |beacons| beacons.get(&b2).cloned().unwrap());
     assert_eq!(b2_after.phase, CrabBeaconPhase::SelfDestructed);
     assert_eq!(b2_after.open_container_id, None);
 
     ensure_beacon_registered_from_item(&ctx, nullsec, b_idle).unwrap();
     ctx.advance_secs(CRAB_BEACON_IDLE_LIFETIME_SECS);
-    let idle_after = read_pve_special_reg(&ctx, |reg| reg.crab_beacons.get(&b_idle).cloned().unwrap());
+    let idle_after = read_crab_beacons(&ctx, |beacons| beacons.get(&b_idle).cloned().unwrap());
     assert_eq!(idle_after.phase, CrabBeaconPhase::SelfDestructed);
 }
 

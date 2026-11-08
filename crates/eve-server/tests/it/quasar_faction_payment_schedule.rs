@@ -205,10 +205,7 @@ async fn test_payment_schedule_lifecycle_from_omega_purchase_and_auth() {
             is_quick_pay: true,
             consumed: false,
         }];
-        snap.service_state_blobs.insert(
-            "payment_tokens".to_string(),
-            serde_json::to_string(&tokens).unwrap(),
-        );
+        snap.quasar_commerce.payment_tokens = tokens;
     });
 
     let mut player_sess = sess(20, PILOT, CORP, NON_FW_SYS, 0);
@@ -232,12 +229,9 @@ async fn test_payment_schedule_lifecycle_from_omega_purchase_and_auth() {
     .await;
     assert_eq!(rsp_buy.status_code, STATUS_OK);
 
-    // Verify payment_schedules blob was populated by live purchase
+    // Verify payment_schedules was populated by live purchase
     let persisted_scheds: Vec<PaymentScheduleRecord> = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("payment_schedules")
-            .and_then(|j| serde_json::from_str(j).ok())
-            .unwrap_or_default()
+        snap.quasar_commerce.payment_schedules.clone()
     });
     assert_eq!(persisted_scheds.len(), 1);
     assert_eq!(persisted_scheds[0].user_id, USER_ID);
@@ -312,10 +306,7 @@ async fn test_payment_schedule_lifecycle_from_omega_purchase_and_auth() {
             is_quick_pay: true,
             consumed: false,
         }];
-        snap.service_state_blobs.insert(
-            "payment_tokens".to_string(),
-            serde_json::to_string(&tokens).unwrap(),
-        );
+        snap.quasar_commerce.payment_tokens = tokens;
     });
     let mut renew_req = Vec::new();
     let mut order2 = Vec::new();
@@ -337,10 +328,7 @@ async fn test_payment_schedule_lifecycle_from_omega_purchase_and_auth() {
         STATUS_OK
     );
     let stacked_scheds: Vec<PaymentScheduleRecord> = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("payment_schedules")
-            .and_then(|j| serde_json::from_str(j).ok())
-            .unwrap_or_default()
+        snap.quasar_commerce.payment_schedules.clone()
     });
     assert_eq!(stacked_scheds[0].next_payment_unix, first_next + 30 * 86_400);
 

@@ -43,84 +43,9 @@ pub fn make_site_npc_ball(id: i64, type_id: u32, position: DVec3) -> Ball {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IncursionNpcSpawn {
-    pub npc_ball_id: i64,
-    pub type_id: u32,
-    pub offset: [f64; 3],
-    #[serde(default)]
-    pub destroyed: bool,
-}
-
-fn default_boss_type_id() -> u32 {
-    2933
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IncursionSiteEntry {
-    pub site_id: String,
-    pub dungeon_id: u32,
-    pub dungeon_name: String,
-    pub solar_system_id: SolarSystemId,
-    pub tier: String,
-    pub min_pilots: usize,
-    pub max_optimal_pilots: usize,
-    pub base_isk: i64,
-    pub base_concord_lp: i64,
-    pub influence_delta: f64,
-    pub locked_until_low_influence: bool,
-    pub completed_count: u32,
-    pub boss_npc_ball_id: i64,
-    #[serde(default = "default_boss_type_id")]
-    pub boss_type_id: u32,
-    #[serde(default)]
-    pub position: DVec3,
-    #[serde(default)]
-    pub escort_spawns: Vec<IncursionNpcSpawn>,
-    #[serde(default)]
-    pub boss_destroyed: bool,
-    #[serde(default)]
-    pub killer_char_id: Option<CharacterId>,
-    #[serde(default)]
-    pub killer_fleet_id: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IncursionTaleRecord {
-    pub tale_id: i64,
-    pub constellation_id: ConstellationId,
-    pub constellation_name: String,
-    pub staging_solar_system_id: SolarSystemId,
-    pub vanguard_solar_system_ids: Vec<SolarSystemId>,
-    pub assault_solar_system_ids: Vec<SolarSystemId>,
-    pub hq_solar_system_id: SolarSystemId,
-    pub influence: f64,
-    pub state: String,
-    pub mothership_spawned: bool,
-    pub mothership_defeated: bool,
-    pub sites: Vec<IncursionSiteEntry>,
-    #[serde(default)]
-    pub lockout_until_filetime: Option<i64>,
-    /// Set once the tale `StoppedNotice` for this incursion's end has been published, so the
-    /// NPC death hook and the ctx-level completion wrappers can never announce the stop twice.
-    #[serde(default)]
-    pub tale_stop_published: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IncursionLPLogEntry {
-    pub log_id: i64,
-    pub character_id: CharacterId,
-    pub site_id: String,
-    pub tier: String,
-    pub constellation_id: ConstellationId,
-    pub solar_system_id: SolarSystemId,
-    pub isk_earned: i64,
-    pub concord_lp_earned: i64,
-    pub fleet_size: usize,
-    pub fleet_scale_factor: f64,
-    pub timestamp_filetime: i64,
-}
+pub use eve_db::{
+    IncursionLPLogEntry, IncursionNpcSpawn, IncursionSiteEntry, IncursionTaleRecord,
+};
 
 pub use crate::services::pve_incursion_lifecycle::*;
 
@@ -264,7 +189,7 @@ pub fn make_incursion_site(
         completed_count: 0,
         boss_npc_ball_id,
         boss_type_id,
-        position,
+        position: position.to_array(),
         escort_spawns,
         boss_destroyed: false,
         killer_char_id: None,
@@ -565,7 +490,7 @@ pub async fn process_incursion_site_completion_and_payout_core(
                         site.solar_system_id,
                         site.boss_npc_ball_id,
                         site.site_id.clone(),
-                        site.position,
+                        DVec3::from_array(site.position),
                     ));
                 }
             }
@@ -746,7 +671,7 @@ pub async fn process_incursion_site_completion_and_payout_core(
                 inc.lockout_until_filetime = Some(now_ft + 864_000_000_000);
                 inc.sites.iter().find(|s| s.tier == "Mothership").map(|s| {
                     let escorts = s.escort_spawns.iter().map(|e| (e.npc_ball_id, e.type_id, e.offset)).collect::<Vec<_>>();
-                    (s.solar_system_id, s.boss_npc_ball_id, s.boss_type_id, s.position, escorts)
+                    (s.solar_system_id, s.boss_npc_ball_id, s.boss_type_id, DVec3::from_array(s.position), escorts)
                 })
             } else {
                 None

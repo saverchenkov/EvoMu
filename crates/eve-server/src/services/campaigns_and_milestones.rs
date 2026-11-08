@@ -304,16 +304,11 @@ pub(crate) fn deliver_login_reward(
         ((exp_unix as i64) + 11_644_473_600) * 10_000_000
     });
     if rw.is_auto_injected_booster_or_skin {
-        let key = format!("auto_injected_rewards:{char_id}");
-        let mut list: Vec<u32> = snap
-            .service_state_blobs
-            .get(&key)
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
-        list.push(rw.type_id);
-        if let Ok(json) = serde_json::to_string(&list) {
-            snap.service_state_blobs.insert(key, json);
-        }
+        snap.seasons_and_campaigns
+            .auto_injected_rewards
+            .entry(char_id)
+            .or_default()
+            .push(rw.type_id);
     }
     if let Some(station_id) = docked_station_id {
         snap.next_entity_id += 1;
@@ -334,8 +329,9 @@ pub(crate) fn deliver_login_reward(
             blueprint_runs_remaining: rw.blueprint_runs.map(|r| r as i32),
         };
         if let Some(exp_ft) = expire_date_time {
-            snap.service_state_blobs
-                .insert(format!("login_reward_expiry:{item_id}"), exp_ft.to_string());
+            snap.seasons_and_campaigns
+                .login_reward_expiry
+                .insert(item_id, exp_ft);
         }
         snap.items.insert(item_id, record.clone());
         DeliveredLoginReward {

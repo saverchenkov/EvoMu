@@ -898,10 +898,8 @@ fn handle_inner(
         ("userSvc", "GetMultiCharactersTrainingSlots") => {
             let uid = ServerContext::require_auth(session)?;
             let slots = ctx.db.with_snapshot(|snap| {
-                if let Some(blob) = snap.service_state_blobs.get(&format!("mct_slots:{uid}")) {
-                    if let Ok(parsed) = serde_json::from_str::<Vec<u64>>(blob) {
-                        return parsed;
-                    }
+                if let Some(slots) = snap.cluster_and_runtime.mct_slots.get(&uid) {
+                    return slots.clone();
                 }
                 load_store(snap).mct_slots.get(&uid).cloned().unwrap_or_default()
             });
@@ -1034,17 +1032,9 @@ fn handle_inner(
                         code: "UserError".into(),
                         message: "NoMultiTrainingCertificateFound".into(),
                     })?;
-                    let key = format!("mct_slots:{uid}");
-                    let mut slots: Vec<u64> = snap
-                        .service_state_blobs
-                        .get(&key)
-                        .and_then(|raw| serde_json::from_str(raw).ok())
-                        .unwrap_or_default();
+                    let slots = snap.cluster_and_runtime.mct_slots.entry(uid).or_default();
                     slots.push(expiry);
-                    if let Ok(json) = serde_json::to_string(&slots) {
-                        snap.service_state_blobs.insert(key, json);
-                    }
-                    Ok(slots)
+                    Ok(slots.clone())
                 });
             let slots = updated_slots?;
             with_store(ctx, |_, store| {
@@ -1062,10 +1052,8 @@ fn handle_inner(
         ("userSvc", "GetUpdatedMultiCharacterTraining") | ("userSvc", "InvalidateMultiCharacterTrainingCache") => {
             let uid = ServerContext::require_auth(session)?;
             let slots = ctx.db.with_snapshot(|snap| {
-                if let Some(blob) = snap.service_state_blobs.get(&format!("mct_slots:{uid}")) {
-                    if let Ok(parsed) = serde_json::from_str::<Vec<u64>>(blob) {
-                        return parsed;
-                    }
+                if let Some(slots) = snap.cluster_and_runtime.mct_slots.get(&uid) {
+                    return slots.clone();
                 }
                 load_store(snap).mct_slots.get(&uid).cloned().unwrap_or_default()
             });
@@ -1124,28 +1112,17 @@ fn handle_inner(
                     code: "UserError".into(),
                     message: "NoResculptCertificateFound".into(),
                 })?;
-                let cur: u32 = snap
-                    .service_state_blobs
-                    .get(&format!("account_resculpt_tokens:{uid}"))
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0);
-                snap.service_state_blobs.insert(
-                    format!("account_resculpt_tokens:{uid}"),
-                    (cur + 1).to_string(),
-                );
-                snap.service_state_blobs
-                    .insert(format!("resculpt_pending:{char_id}"), "true".to_string());
-                let mut map: HashMap<String, u32> = snap
-                    .service_state_blobs
-                    .get("account_resculpt_tokens")
-                    .and_then(|v| serde_json::from_str(v).ok())
-                    .unwrap_or_default();
-                *map.entry(uid.to_string()).or_default() += 1;
-                *map.entry(char_id.to_string()).or_default() += 1;
-                if let Ok(j) = serde_json::to_string(&map) {
-                    snap.service_state_blobs
-                        .insert("account_resculpt_tokens".to_string(), j);
-                }
+                *snap
+                    .cluster_and_runtime
+                    .account_resculpt_tokens
+                    .entry(uid.to_string())
+                    .or_default() += 1;
+                snap.cluster_and_runtime.resculpt_pending.insert(char_id);
+                *snap
+                    .cluster_and_runtime
+                    .account_resculpt_tokens
+                    .entry(char_id.to_string())
+                    .or_default() += 1;
                 Ok(())
             });
             res?;
@@ -1180,11 +1157,7 @@ fn handle_inner(
             }
             let now = ctx.now_unix();
             ctx.db.with_mut_snapshot(|snap| {
-                let mut sessions: Vec<serde_json::Value> = snap
-                    .service_state_blobs
-                    .get("user_sessions")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
+                let sessions = &mut snap.cluster_and_runtime.user_sessions;
                 sessions.push(serde_json::json!({
                     "user_id": uid,
                     "session_id": sess_id,
@@ -1194,9 +1167,6 @@ fn handle_inner(
                 if sessions.len() > 256 {
                     let trim = sessions.len() - 256;
                     sessions.drain(0..trim);
-                }
-                if let Ok(json) = serde_json::to_string(&sessions) {
-                    snap.service_state_blobs.insert("user_sessions".into(), json);
                 }
             });
             Ok(Some(PyRep::None))

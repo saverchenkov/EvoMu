@@ -169,7 +169,7 @@ async fn test_payment_purchase_and_store_catalog() {
 
     // 1. Unseeded store catalog returns empty lists (no hardcoded default fixture)
     ctx.db.with_mut_snapshot(|s| {
-        s.service_state_blobs.remove("nes_store_catalog");
+        s.quasar_commerce.nes_store_catalog = None;
     });
     let cats_empty = quasar_rpc(
         &ctx,
@@ -232,10 +232,7 @@ async fn test_payment_purchase_and_store_catalog() {
             is_quick_pay: true,
             consumed: false,
         }];
-        snap.service_state_blobs.insert(
-            "payment_tokens".to_string(),
-            serde_json::to_string(&tokens).unwrap(),
-        );
+        snap.quasar_commerce.payment_tokens = tokens;
     });
 
     // 2b. Verify store.category.api, store.product.api, store.offer.api, and store.targetaudience.offer.api
@@ -371,10 +368,7 @@ async fn test_payment_purchase_and_store_catalog() {
     .await;
     assert_eq!(tok_unpriced.status_code, STATUS_NOT_IMPLEMENTED);
     ctx.db.with_snapshot(|snap| {
-        let tokens: Vec<PaymentTokenRecord> = serde_json::from_str(
-            snap.service_state_blobs.get("payment_tokens").unwrap(),
-        )
-        .unwrap();
+        let tokens = &snap.quasar_commerce.payment_tokens;
         assert!(!tokens[0].consumed, "Token must not be consumed on fail-closed TokenRequest");
     });
 

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
-use eve_server::services::ingamereport_ops::{self, InGameReportRecord};
+use eve_server::services::ingamereport_ops;
 
 use crate::common;
 
@@ -127,13 +127,13 @@ async fn test_feat_account_multi_char_training() {
         assert_eq!(it.quantity, 1, "Stack must be decremented to 1");
     });
 
-    // Verify active slot persisted in service_state_blobs["mct_slots:<uid>"]
+    // Verify active slot persisted in cluster_and_runtime.mct_slots
     ctx.db.with_snapshot(|snap| {
-        let blob = snap
-            .service_state_blobs
-            .get(&format!("mct_slots:{uid}"))
-            .expect("mct_slots blob recorded");
-        let parsed: Vec<u64> = serde_json::from_str(blob).expect("valid json slots");
+        let parsed = snap
+            .cluster_and_runtime
+            .mct_slots
+            .get(&uid)
+            .expect("mct_slots recorded");
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0], expected_expiry_1);
     });
@@ -204,7 +204,7 @@ async fn test_feat_account_multi_char_training() {
     // 10. Inactive/expired slot reflects active == false
     ctx.db.with_mut_snapshot(|snap| {
         let expired_slots = vec![base_now - 100];
-        snap.service_state_blobs.insert(format!("mct_slots:{uid}"), serde_json::to_string(&expired_slots).unwrap());
+        snap.cluster_and_runtime.mct_slots.insert(uid, expired_slots);
     });
     let slots_expired = rpc(&ctx, &mut sess, "userSvc", "GetMultiCharactersTrainingSlots", &[])
         .await
@@ -309,18 +309,19 @@ async fn test_feat_account_character_resculpt() {
         assert_eq!(it.quantity, 1, "Stack must be decremented to 1");
     });
 
-    // Verify resculpt token persisted across state queries in service_state_blobs
+    // Verify resculpt token persisted in cluster_and_runtime
     ctx.db.with_snapshot(|snap| {
         let token_count = snap
-            .service_state_blobs
-            .get(&format!("account_resculpt_tokens:{uid}"))
-            .expect("account_resculpt_tokens blob present");
-        assert_eq!(token_count, "1");
-        let pending = snap
-            .service_state_blobs
-            .get(&format!("resculpt_pending:{PILOT_1}"))
-            .expect("resculpt_pending blob present");
-        assert_eq!(pending, "true");
+            .cluster_and_runtime
+            .account_resculpt_tokens
+            .get(&uid.to_string())
+            .copied()
+            .expect("account_resculpt_tokens present");
+        assert_eq!(token_count, 1);
+        assert!(
+            snap.cluster_and_runtime.resculpt_pending.contains(&PILOT_1),
+            "resculpt_pending present"
+        );
     });
 
     // Full recustomization succeeds and consumes the pending resculpt
@@ -365,10 +366,12 @@ async fn test_feat_account_character_resculpt() {
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&resculpt_item_id), "Token item must be removed");
         let token_count = snap
-            .service_state_blobs
-            .get(&format!("account_resculpt_tokens:{uid}"))
-            .expect("account_resculpt_tokens blob present");
-        assert_eq!(token_count, "1");
+            .cluster_and_runtime
+            .account_resculpt_tokens
+            .get(&uid.to_string())
+            .copied()
+            .expect("account_resculpt_tokens present");
+        assert_eq!(token_count, 1);
     });
 
     // 5. Third activation without token fails
@@ -521,14 +524,9 @@ async fn test_feat_account_in_game_reports() {
         assert_eq!(rep, PyRep::None, "{method} must return PyRep::None");
     }
 
-    // 4. Verify all 8 structured tickets are recorded in snap.service_state_blobs["ingamereport_tickets"]
+    // 4. Verify all 8 structured tickets are recorded in snap.fleet_and_social_ops.ingamereport_tickets
     ctx.db.with_snapshot(|snap| {
-        let blob = snap
-            .service_state_blobs
-            .get("ingamereport_tickets")
-            .expect("ingamereport_tickets blob must exist");
-        let tickets: Vec<InGameReportRecord> =
-            serde_json::from_str(blob).expect("valid InGameReportRecord JSON array");
+        let tickets = &snap.fleet_and_social_ops.ingamereport_tickets;
         assert_eq!(tickets.len(), 8, "Must contain exactly 8 recorded tickets");
 
         for (idx, (_, expected_cat, expected_target, expected_reason, expected_details)) in

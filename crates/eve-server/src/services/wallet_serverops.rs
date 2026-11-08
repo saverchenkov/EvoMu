@@ -973,18 +973,11 @@ pub fn handle(
             }
             let log_msg: String = args.first().and_then(|a| a.as_str()).unwrap_or("").chars().take(500).collect();
             ctx.db.with_mut_snapshot(|snap| {
-                let mut list: Vec<String> = snap
-                    .service_state_blobs
-                    .get("client_stat_logger:strings")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
+                let list = &mut snap.cluster_and_runtime.client_stat_logger_strings;
                 list.push(log_msg);
                 if list.len() > 256 {
                     let trim = list.len() - 256;
                     list.drain(0..trim);
-                }
-                if let Ok(json) = serde_json::to_string(&list) {
-                    snap.service_state_blobs.insert("client_stat_logger:strings".into(), json);
                 }
             });
             Some(Ok(PyRep::None))

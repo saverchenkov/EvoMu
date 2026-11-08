@@ -820,6 +820,7 @@ pub fn rollback_dirty_from_sqlite(
     super::social_store::rollback_d6_social(conn, snap, fp);
     super::corp_crimewatch_store::rollback_d6_corp_crimewatch(conn, snap, fp);
     super::industry_market_pve_store::rollback_d6_batch4(conn, snap, fp);
+    super::service_domains_store::rollback_service_domains(conn, snap, fp);
     Ok(())
 }
 #[cfg(test)] #[path = "rollback_unit_tests.rs"] mod rollback_unit_tests;

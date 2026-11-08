@@ -287,7 +287,7 @@ fn tuesday_downtime_boundaries_omega_catalog_override_abort_and_respec() {
     // Remove catalog entry -> falls through to weekly Omega SP handler; test `exp == now` vs `now + 1`
     let now = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.remove("nes_store_catalog");
+        snap.quasar_commerce.nes_store_catalog = None;
         snap.service_state_blobs.remove(&format!("omega_weekly_sp_claim:{uid}"));
         snap.characters.get_mut(&cid).unwrap().clone_grade = 2;
     });

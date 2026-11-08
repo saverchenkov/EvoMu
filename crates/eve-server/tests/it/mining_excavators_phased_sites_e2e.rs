@@ -19,7 +19,7 @@ use eve_server::services::mining_sites::{
     displayed_security, OreSelector, SiteBand, COSMIC_ORE_SITES,
 };
 use eve_server::services::space_entity_mining;
-use eve_server::services::space_mining_harvest::{PhasedAsteroidFieldState, WORMHOLE_ORE_SITES};
+use eve_server::services::space_mining_harvest::WORMHOLE_ORE_SITES;
 use glam::DVec3;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -549,10 +549,10 @@ async fn parity_shard_5_phased_fields_anchors_goals_and_mining_market() {
     let deployed = ctx
         .db
         .with_snapshot(|s| {
-            s.service_state_blobs
-                .get("phased_asteroid_fields")
-                .and_then(|json| serde_json::from_str::<HashMap<u32, PhasedAsteroidFieldState>>(json).ok())
-                .and_then(|m| m.get(&LOWSEC_SYS).cloned())
+            s.mining_and_ess_state
+                .phased_asteroid_fields
+                .get(&LOWSEC_SYS)
+                .cloned()
         })
         .expect("persisted PhasedAsteroidFieldState");
     assert_eq!(deployed.mobile_phase_anchor_energy, 35); // Porpoise 35 ICS energy/tick

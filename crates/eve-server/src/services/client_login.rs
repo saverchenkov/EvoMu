@@ -51,10 +51,10 @@ pub fn delivered_bean_count(ctx: &ServerContext, error_id: i64) -> i64 {
         return mem;
     }
     ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("alert_bean_counts")
-            .and_then(|s| serde_json::from_str::<HashMap<String, i64>>(s).ok())
-            .and_then(|m| m.get(&error_id.to_string()).copied())
+        snap.cluster_and_runtime
+            .alert_bean_counts
+            .get(&error_id.to_string())
+            .copied()
             .unwrap_or(0)
     })
 }
@@ -70,10 +70,10 @@ fn log_mode_tuple(entry: Option<(i64, &'static str)>) -> PyRep {
 
 fn log_mode_override(ctx: &ServerContext, error_id: i64) -> Option<String> {
     ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("alert_log_modes")
-            .and_then(|s| serde_json::from_str::<HashMap<String, String>>(s).ok())
-            .and_then(|m| m.get(&error_id.to_string()).cloned())
+        snap.cluster_and_runtime
+            .alert_log_modes
+            .get(&error_id.to_string())
+            .cloned()
     })
 }
 
@@ -82,11 +82,7 @@ fn persist_bean_counts(ctx: &ServerContext, beans: &[(i64, i64)]) {
         return;
     }
     ctx.db.with_mut_snapshot(|snap| {
-        let mut persisted: HashMap<String, i64> = snap
-            .service_state_blobs
-            .get("alert_bean_counts")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
+        let persisted = &mut snap.cluster_and_runtime.alert_bean_counts;
         for &(error_id, n) in beans {
             let key = error_id.to_string();
             if persisted.len() >= ALERT_REGISTRY_CAP && !persisted.contains_key(&key) {
@@ -96,10 +92,6 @@ fn persist_bean_counts(ctx: &ServerContext, beans: &[(i64, i64)]) {
             }
             let c = persisted.entry(key).or_insert(0);
             *c = c.saturating_add(n);
-        }
-        if let Ok(json) = serde_json::to_string(&persisted) {
-            snap.service_state_blobs
-                .insert("alert_bean_counts".into(), json);
         }
     });
 }
@@ -188,9 +180,10 @@ pub async fn handle(
                 .unwrap_or_else(|| entry.1.to_string());
             ctx.db.with_mut_snapshot(|snap| {
                 let mut traces: Vec<serde_json::Value> = snap
-                    .service_state_blobs
-                    .get("alert_client_traces")
-                    .and_then(|s| serde_json::from_str(s).ok())
+                    .cluster_and_runtime
+                    .alert_client_traces
+                    .as_ref()
+                    .and_then(|v| v.as_array().cloned())
                     .unwrap_or_default();
                 traces.push(serde_json::json!({
                     "stack_id": hash,
@@ -205,10 +198,8 @@ pub async fn handle(
                     let trim = traces.len() - 256;
                     traces.drain(0..trim);
                 }
-                if let Ok(json) = serde_json::to_string(&traces) {
-                    snap.service_state_blobs
-                        .insert("alert_client_traces".into(), json);
-                }
+                snap.cluster_and_runtime.alert_client_traces =
+                    Some(serde_json::Value::Array(traces));
             });
             if let Some((eid, _)) = newly_primed {
                 crate::services::notify_emitters_missing::emit_bean_prime(
@@ -264,10 +255,10 @@ pub async fn handle(
             }
             let err_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             if let Some(mode) = ctx.db.with_snapshot(|snap| {
-                snap.service_state_blobs
-                    .get("alert_log_modes")
-                    .and_then(|s| serde_json::from_str::<HashMap<String, String>>(s).ok())
-                    .and_then(|m| m.get(&err_id.to_string()).cloned())
+                snap.cluster_and_runtime
+                    .alert_log_modes
+                    .get(&err_id.to_string())
+                    .cloned()
             }) {
                 return Some(Ok(PyRep::Tuple(vec![PyRep::Integer(err_id), PyRep::ascii_bytes(&mode)])));
             }
@@ -310,20 +301,13 @@ pub async fn handle(
                 }));
             }
             ctx.db.with_mut_snapshot(|snap| {
-                let mut modes: HashMap<String, String> = snap
-                    .service_state_blobs
-                    .get("alert_log_modes")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
+                let modes = &mut snap.cluster_and_runtime.alert_log_modes;
                 if modes.len() >= ALERT_REGISTRY_CAP && !modes.contains_key(&error_id.to_string()) {
                     if let Some(oldest) = modes.keys().next().cloned() {
                         modes.remove(&oldest);
                     }
                 }
                 modes.insert(error_id.to_string(), log_mode);
-                if let Ok(json) = serde_json::to_string(&modes) {
-                    snap.service_state_blobs.insert("alert_log_modes".into(), json);
-                }
             });
             Some(Ok(PyRep::None))
         }
@@ -368,9 +352,10 @@ pub async fn handle(
 
             ctx.db.with_mut_snapshot(|snap| {
                 let mut traces: Vec<serde_json::Value> = snap
-                    .service_state_blobs
-                    .get("alert_proxy_traces")
-                    .and_then(|s| serde_json::from_str(s).ok())
+                    .cluster_and_runtime
+                    .alert_proxy_traces
+                    .as_ref()
+                    .and_then(|v| v.as_array().cloned())
                     .unwrap_or_default();
                 traces.push(serde_json::json!({
                     "stack_id": hash,
@@ -385,9 +370,8 @@ pub async fn handle(
                     let trim = traces.len() - 256;
                     traces.drain(0..trim);
                 }
-                if let Ok(json) = serde_json::to_string(&traces) {
-                    snap.service_state_blobs.insert("alert_proxy_traces".into(), json);
-                }
+                snap.cluster_and_runtime.alert_proxy_traces =
+                    Some(serde_json::Value::Array(traces));
             });
 
             info!(
@@ -415,14 +399,13 @@ pub async fn handle(
                 Some(PyRep::Bytes(raw)) => {
                     ctx.db.with_mut_snapshot(|snap| {
                         let prev: i64 = snap
-                            .service_state_blobs
-                            .get("alert_group_bean_bytes")
-                            .and_then(|s| s.parse::<i64>().ok())
+                            .cluster_and_runtime
+                            .alert_group_bean_bytes
+                            .as_ref()
+                            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok())))
                             .unwrap_or(0);
-                        snap.service_state_blobs.insert(
-                            "alert_group_bean_bytes".into(),
-                            prev.saturating_add(raw.len() as i64).to_string(),
-                        );
+                        snap.cluster_and_runtime.alert_group_bean_bytes =
+                            Some(serde_json::json!(prev.saturating_add(raw.len() as i64)));
                     });
                 }
                 _ => {}
@@ -445,10 +428,9 @@ pub async fn handle(
         }
         ("config", "GetBlackListedPlanets") => {
             let mut planet_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
-                snap.service_state_blobs
-                    .get("blacklisted_planets")
-                    .or_else(|| snap.service_state_blobs.get("planet_blacklist"))
-                    .and_then(|s| serde_json::from_str::<Vec<i64>>(s).ok())
+                snap.cluster_and_runtime
+                    .blacklisted_planets
+                    .clone()
                     .unwrap_or_default()
             });
             planet_ids.sort_unstable();
@@ -513,11 +495,8 @@ pub async fn handle(
             };
             let now_unix = ctx.now_unix();
             let cohorts = ctx.db.with_snapshot(|snap| {
-                let blob_key = format!("user_cohorts:{uid}");
-                if let Some(json_str) = snap.service_state_blobs.get(&blob_key) {
-                    if let Ok(list) = serde_json::from_str::<Vec<String>>(json_str) {
-                        return list.into_iter().map(PyRep::String).collect();
-                    }
+                if let Some(list) = snap.cluster_and_runtime.user_cohorts.get(&uid) {
+                    return list.iter().cloned().map(PyRep::String).collect();
                 }
                 let user_chars: Vec<&eve_db::CharacterRecord> = snap
                     .characters
@@ -549,8 +528,8 @@ pub async fn handle(
             };
             let now_unix = ctx.now_unix();
             let downgraded = ctx.db.with_snapshot(|snap| {
-                if let Some(flag) = snap.service_state_blobs.get(&format!("omega_downgraded:{uid}")) {
-                    return matches!(flag.trim().to_ascii_lowercase().as_str(), "1" | "true");
+                if snap.cluster_and_runtime.omega_downgraded.contains(&uid) {
+                    return true;
                 }
                 if let Some(expiry) =
                     crate::services::account_services::subscription_expiry_for_user(snap, uid)
@@ -729,7 +708,7 @@ pub async fn handle(
                 }));
             }
             let lock_type = ctx.db.with_snapshot(|s| {
-                if let Some(blob) = s.service_state_blobs.get(&format!("character_lock:{char_id}")) {
+                if let Some(blob) = s.cluster_and_runtime.character_locks.get(&char_id) {
                     if let Ok(v) = blob.parse::<i64>() {
                         return Some(v);
                     }
@@ -816,9 +795,9 @@ pub async fn handle(
             let hex_str = portrait_data.iter().map(|b| format!("{b:02x}")).collect::<String>();
             ctx.db.with_mut_snapshot(|snap| {
                 for sz in [32, 64, 128, 256, 512, 1024] {
-                    snap.service_state_blobs.remove(&format!("portrait:{char_id}:{sz}"));
+                    snap.cluster_and_runtime.portraits.remove(&format!("{char_id}:{sz}"));
                 }
-                snap.service_state_blobs.insert(format!("portrait:{char_id}"), hex_str);
+                snap.cluster_and_runtime.portraits.insert(char_id.to_string(), hex_str);
                 snap.character_doll_info.entry(char_id).or_default().1 = format!("portrait:{char_id}");
             });
             Some(Ok(PyRep::Bool(true)))
@@ -838,10 +817,7 @@ pub async fn handle(
             // `paperdoll.State`: 0 = no_recustomization, 1 = resculpting,
             // 2 = no_existing_customization, 3 = full_recustomizing, 4 = force_recustomize.
             let state = ctx.db.with_snapshot(|snap| {
-                if let Some(raw) = snap
-                    .service_state_blobs
-                    .get(&format!("paperdoll_state:{char_id}"))
-                {
+                if let Some(raw) = snap.cluster_and_runtime.paperdoll_states.get(&char_id) {
                     if let Ok(v) = raw.trim().parse::<i64>() {
                         return v.clamp(0, 4);
                     }
@@ -849,10 +825,7 @@ pub async fn handle(
                 let is_resculpt_pending = crate::services::account_services::load_store(snap)
                     .resculpt_pending
                     .contains(&char_id)
-                    || snap
-                        .service_state_blobs
-                        .get(&format!("resculpt_pending:{char_id}"))
-                        .is_some_and(|s| matches!(s.trim(), "1" | "true"));
+                    || snap.cluster_and_runtime.resculpt_pending.contains(&char_id);
                 if is_resculpt_pending { 1 } else { 0 }
             });
             Some(Ok(PyRep::Integer(state)))

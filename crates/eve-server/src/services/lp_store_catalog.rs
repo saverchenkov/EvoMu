@@ -13,7 +13,7 @@
 use eve_db::IskCents;
 use eve_proto::PyRep;
 use eve_sde::TypeId;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -23,20 +23,7 @@ pub const LP_STORE_OFFERS_KEY: &str = "lp_store_offers";
 
 const RAW_ESI_LP_OFFERS_JSON: &str = include_str!("../../../../data/esi_lp_store_offers.json");
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LPOffer {
-    pub offer_id: i64,
-    pub corp_id: i64,
-    pub type_id: TypeId,
-    pub quantity: i32,
-    pub lp_cost: i64,
-    pub isk_cost: IskCents,
-    pub req_items: Vec<(TypeId, i32)>,
-    #[serde(default)]
-    pub ak_cost: i64,
-    #[serde(default)]
-    pub min_standing: Option<f64>,
-}
+pub use eve_db::LPOffer;
 
 #[derive(Deserialize)]
 struct RawEsiLpCatalog {
@@ -121,11 +108,11 @@ pub fn esi_all_lp_offers(sde: &eve_sde::SdeRegistry) -> Vec<LPOffer> {
     out
 }
 
-/// Load persisted dynamic LP store offers from `WorldStateSnapshot.service_state_blobs["lp_store_offers"]`.
+/// Load persisted dynamic LP store offers from `WorldStateSnapshot.fleet_and_social_ops.lp_store_offers`.
 pub fn load_lp_store_offers(snap: &eve_db::WorldStateSnapshot) -> Vec<LPOffer> {
-    snap.service_state_blobs
-        .get(LP_STORE_OFFERS_KEY)
-        .and_then(|json| serde_json::from_str::<Vec<LPOffer>>(json).ok())
+    snap.fleet_and_social_ops
+        .lp_store_offers
+        .clone()
         .unwrap_or_default()
 }
 
@@ -317,10 +304,7 @@ pub fn get_corp_lp_offers(snap: &eve_db::WorldStateSnapshot, corp_id: i64) -> Ve
 }
 
 pub fn save_lp_store_offers(snap: &mut eve_db::WorldStateSnapshot, offers: &[LPOffer]) {
-    if let Ok(json) = serde_json::to_string(offers) {
-        snap.service_state_blobs
-            .insert(LP_STORE_OFFERS_KEY.to_string(), json);
-    }
+    snap.fleet_and_social_ops.lp_store_offers = Some(offers.to_vec());
 }
 
 pub fn register_lp_store_offer(snap: &mut eve_db::WorldStateSnapshot, offer: LPOffer) {

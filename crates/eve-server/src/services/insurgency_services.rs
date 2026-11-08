@@ -392,9 +392,10 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
     if (3..=4).contains(&stage) {
         let now_u = ctx.now_unix_secs();
         let on_cd = ctx.db.with_snapshot(|snap| {
-            snap.service_state_blobs
-                .get(&format!("ice_heist_respawn_until:{sys_id}"))
-                .and_then(|s| s.parse::<u64>().ok())
+            snap.insurgency_complex_ops
+                .ice_heist_respawn_until
+                .get(&sys_id)
+                .copied()
                 .is_some_and(|u| now_u < u)
         });
         if !on_cd {

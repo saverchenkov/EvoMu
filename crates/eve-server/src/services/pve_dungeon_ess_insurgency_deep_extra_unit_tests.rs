@@ -11,7 +11,8 @@ use crate::services::insurgency_complex_ops::{
     is_named_pirate_commander_roamer, is_outpost_raid_gate,
     is_warp_into_outpost_raid_pocket_blocked, is_warzone_opposing_empire, load_ops_state,
     named_insurgency_roamer_loot_drop, on_insurgency_laundering_trade_completed, save_ops_state,
-    share_site_lp_up_to_5, OutpostRaidInstance, OutpostRaidSize, TYPE_ANGEL_INSURGENCY_DATA_SEQ,
+    share_site_lp_up_to_5, OutpostRaidInstance, OutpostRaidSize, OutpostRaidSizeExt,
+    TYPE_ANGEL_INSURGENCY_DATA_SEQ,
     TYPE_FEDERATION_CI_OUTPOST_HUB, TYPE_GURISTAS_INSURGENCY_DATA_SEQ,
     TYPE_GURISTAS_LAUNDERING_FACILITY, TYPE_STATE_CI_OUTPOST_HUB, TYPE_UPWELL_CONSORTIUM_DATA_CACHE,
 };

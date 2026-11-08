@@ -9,8 +9,8 @@ mod ops;
 
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::pve_special_sites::{
-    advance_roaming_storms, next_spec_seq, read_pve_special_reg, spec_now_sec,
-    sync_metaliminal_storm_effects_and_sites, with_pve_special_reg, with_pve_special_reg_db,
+    advance_roaming_storms, read_pve_special_reg, sync_metaliminal_storm_effects_and_sites,
+    with_pve_special_reg,
 };
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
 use eve_destiny::{Ball, CombatState, MovementMode};
@@ -18,7 +18,7 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{SdeRegistry, SolarSystemId, TypeId};
 use glam::DVec3;
-use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub const GROUP_CRAB_BEACON: u32 = 4137;
@@ -50,45 +50,21 @@ pub const CRAB_CEQ_COST: i64 = 30;
 /// Per-CRAB Signal Interference increase (`1/12` -> refused at 12 CRABs).
 pub const CRAB_INTERFERENCE_DELTA: f64 = 1.0 / 12.0;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CrabBeaconPhase {
-    Idle,
-    Linking,
-    Scanning,
-    LootRestricted,
-    SelfDestructed,
+pub use eve_db::{CrabBeaconPhase, CrabBeaconRecord};
+
+pub(crate) fn read_crab_beacons<R>(
+    ctx: &ServerContext,
+    f: impl FnOnce(&HashMap<i64, CrabBeaconRecord>) -> R,
+) -> R {
+    ctx.db.with_snapshot(|snap| f(&snap.crab_beacons.beacons))
 }
 
-impl CrabBeaconPhase {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::Linking => "linking",
-            Self::Scanning => "scanning",
-            Self::LootRestricted => "loot_restricted",
-            Self::SelfDestructed => "self_destructed",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CrabBeaconRecord {
-    pub beacon_id: i64,
-    pub type_id: TypeId,
-    pub deployer_char_id: i64,
-    pub solar_system_id: SolarSystemId,
-    pub position: [f64; 3],
-    pub deployed_at_sec: u64,
-    pub phase: CrabBeaconPhase,
-    pub linked_char_id: Option<i64>,
-    pub linked_ship_id: Option<i64>,
-    pub link_started_at_sec: u64,
-    pub link_completes_at_sec: u64,
-    pub scan_completes_at_sec: u64,
-    pub self_destruct_at_sec: u64,
-    pub waves_spawned: u8,
-    pub wave_npc_ball_ids: Vec<i64>,
-    pub open_container_id: Option<i64>,
+pub(crate) fn with_crab_beacons<R>(
+    ctx: &ServerContext,
+    f: impl FnOnce(&mut HashMap<i64, CrabBeaconRecord>) -> R,
+) -> R {
+    ctx.db
+        .with_mut_snapshot(|snap| f(&mut snap.crab_beacons.beacons))
 }
 
 pub fn is_crab_beacon_type(sde: &SdeRegistry, type_id: TypeId) -> bool {
@@ -108,7 +84,7 @@ pub fn is_crab_beacon_item(ctx: &ServerContext, item_id: i64) -> bool {
     if in_snap {
         return true;
     }
-    read_pve_special_reg(ctx, |reg| reg.crab_beacons.contains_key(&item_id))
+    read_crab_beacons(ctx, |beacons| beacons.contains_key(&item_id))
 }
 
 /// Validates that `sys_id` is a known-space Low-Sec (`0.0 < sec < 0.45`) or Null-Sec (`sec <= 0.0`) system.
@@ -158,7 +134,7 @@ pub fn is_eligible_crab_ship(sde: &SdeRegistry, beacon_type_id: TypeId, ship_typ
     )
 }
 
-/// Registers a newly deployed CRAB beacon in `PveSpecialSitesRegistry`.
+/// Registers a newly deployed CRAB beacon in `snap.crab_beacons`.
 pub fn register_crab_beacon(
     ctx: &ServerContext,
     beacon_id: i64,
@@ -168,8 +144,8 @@ pub fn register_crab_beacon(
     position: DVec3,
 ) {
     let now = ctx.now_unix();
-    with_pve_special_reg(ctx, |reg| {
-        reg.crab_beacons.insert(
+    with_crab_beacons(ctx, |beacons| {
+        beacons.insert(
             beacon_id,
             CrabBeaconRecord {
                 beacon_id,
@@ -195,13 +171,13 @@ pub fn register_crab_beacon(
 
 /// Returns `true` while `ship_id` has an active 4-minute CRAB beacon link (disallowing warp, cloak, and tether).
 pub fn is_ship_crab_linked(ctx: &ServerContext, ship_id: i64, now_unix: u64) -> bool {
-    if !has_special_sites_state(ctx) {
+    if !has_any_crab_beacons(ctx) {
         return false;
     }
     let effective_now = now_unix.max(ctx.now_unix());
-    read_pve_special_reg(ctx, |reg| {
-        let now = effective_now.max(spec_now_sec(reg));
-        reg.crab_beacons.values().any(|b| {
+    ctx.db.with_snapshot(|snap| {
+        let now = effective_now.max(snap.pve_special_sites.sim_clock_sec).max(1_775_000_000);
+        snap.crab_beacons.beacons.values().any(|b| {
             b.phase == CrabBeaconPhase::Linking
                 && b.linked_ship_id == Some(ship_id)
                 && now < b.link_completes_at_sec
@@ -211,11 +187,11 @@ pub fn is_ship_crab_linked(ctx: &ServerContext, ship_id: i64, now_unix: u64) -> 
 
 /// Returns the latest Unix completion timestamp of any active CRAB beacon link tied to `ship_id`.
 pub fn ship_crab_link_expiry_unix(ctx: &ServerContext, ship_id: i64) -> u64 {
-    if !has_special_sites_state(ctx) {
+    if !has_any_crab_beacons(ctx) {
         return 0;
     }
-    read_pve_special_reg(ctx, |reg| {
-        reg.crab_beacons
+    read_crab_beacons(ctx, |beacons| {
+        beacons
             .values()
             .filter(|b| b.phase == CrabBeaconPhase::Linking && b.linked_ship_id == Some(ship_id))
             .map(|b| b.link_completes_at_sec)
@@ -238,7 +214,7 @@ pub fn check_crab_loot_access(
     }
     tick_all_crab_beacons(ctx);
     let now = ctx.now_unix();
-    let rec_opt = read_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&container_id).cloned());
+    let rec_opt = read_crab_beacons(ctx, |beacons| beacons.get(&container_id).cloned());
     let Some(rec) = rec_opt else {
         return Err(BridgeRpcError::user_error("CrabScanInProgress"));
     };
@@ -404,19 +380,20 @@ fn build_rogue_drone_combat(sde: &SdeRegistry, type_id: TypeId) -> CombatState {
 }
 
 fn spawn_crab_rogue_drone_wave(ctx: &ServerContext, beacon_id: i64, wave_num: u8) {
-    let spawned_info = with_pve_special_reg(ctx, |reg| {
-        let beacon_tid = reg
+    let spawned_info = ctx.db.with_mut_snapshot(|snap| {
+        let beacon_tid = snap
             .crab_beacons
+            .beacons
             .get(&beacon_id)
             .map(|r| r.type_id)
             .unwrap_or(TYPE_CRAB_BEACON);
         let drone_types = ops::resolve_crab_wave_drone_types(&ctx.sde, beacon_tid, wave_num);
         let mut allocated = Vec::with_capacity(drone_types.len());
         for tid in drone_types {
-            let seq = next_spec_seq(reg);
-            allocated.push((1_897_000_000 + seq, tid));
+            snap.next_entity_id += 1;
+            allocated.push((snap.next_entity_id, tid));
         }
-        let Some(rec) = reg.crab_beacons.get_mut(&beacon_id) else {
+        let Some(rec) = snap.crab_beacons.beacons.get_mut(&beacon_id) else {
             return None;
         };
         if rec.phase != CrabBeaconPhase::Scanning || rec.waves_spawned >= wave_num {
@@ -468,8 +445,8 @@ fn spawn_crab_rogue_drone_wave(ctx: &ServerContext, beacon_id: i64, wave_num: u8
 }
 
 fn prune_dead_crab_wave_drones(ctx: &ServerContext, beacon_id: i64) -> (u8, usize) {
-    let info = read_pve_special_reg(ctx, |reg| {
-        let rec = reg.crab_beacons.get(&beacon_id)?;
+    let info = read_crab_beacons(ctx, |beacons| {
+        let rec = beacons.get(&beacon_id)?;
         Some((rec.solar_system_id, rec.waves_spawned, rec.wave_npc_ball_ids.clone()))
     });
     let Some((sys_id, waves_spawned, ball_ids)) = info else {
@@ -493,8 +470,8 @@ fn prune_dead_crab_wave_drones(ctx: &ServerContext, beacon_id: i64) -> (u8, usiz
     if alive_ids.len() == orig_len {
         return (waves_spawned, orig_len);
     }
-    with_pve_special_reg(ctx, |reg| {
-        if let Some(rec) = reg.crab_beacons.get_mut(&beacon_id) {
+    with_crab_beacons(ctx, |beacons| {
+        if let Some(rec) = beacons.get_mut(&beacon_id) {
             rec.wave_npc_ball_ids = alive_ids;
             (rec.waves_spawned, rec.wave_npc_ball_ids.len())
         } else {
@@ -504,19 +481,20 @@ fn prune_dead_crab_wave_drones(ctx: &ServerContext, beacon_id: i64) -> (u8, usiz
 }
 
 fn finalize_crab_scan_success(ctx: &ServerContext, beacon_id: i64, now: u64) {
-    let info = with_pve_special_reg(ctx, |reg| {
-        let beacon_tid = reg
+    let info = ctx.db.with_mut_snapshot(|snap| {
+        let beacon_tid = snap
             .crab_beacons
+            .beacons
             .get(&beacon_id)
             .map(|r| r.type_id)
             .unwrap_or(TYPE_CRAB_BEACON);
         let reward_specs = ops::resolve_crab_completion_rewards(&ctx.sde, beacon_tid);
         let mut loot_entries = Vec::with_capacity(reward_specs.len());
         for (tid, qty) in reward_specs {
-            let seq = next_spec_seq(reg);
-            loot_entries.push((1_897_500_000 + seq, tid, qty));
+            snap.next_entity_id += 1;
+            loot_entries.push((snap.next_entity_id, tid, qty));
         }
-        let rec = reg.crab_beacons.get_mut(&beacon_id)?;
+        let rec = snap.crab_beacons.beacons.get_mut(&beacon_id)?;
         if rec.phase != CrabBeaconPhase::Scanning {
             return None;
         }
@@ -585,8 +563,8 @@ fn finalize_crab_scan_success(ctx: &ServerContext, beacon_id: i64, now: u64) {
 
 fn self_destruct_crab_beacon(ctx: &ServerContext, beacon_id: i64) {
     let now = ctx.now_unix();
-    let info = with_pve_special_reg(ctx, |reg| {
-        let rec = reg.crab_beacons.get_mut(&beacon_id)?;
+    let info = with_crab_beacons(ctx, |beacons| {
+        let rec = beacons.get_mut(&beacon_id)?;
         if rec.phase == CrabBeaconPhase::SelfDestructed {
             return None;
         }
@@ -681,8 +659,8 @@ fn self_destruct_crab_beacon(ctx: &ServerContext, beacon_id: i64) {
     });
 
     if let Some(can_id) = spawned_can_id {
-        with_pve_special_reg(ctx, |reg| {
-            if let Some(rec) = reg.crab_beacons.get_mut(&beacon_id) {
+        with_crab_beacons(ctx, |beacons| {
+            if let Some(rec) = beacons.get_mut(&beacon_id) {
                 rec.open_container_id = Some(can_id);
             }
         });
@@ -750,7 +728,7 @@ fn is_crab_linked_ship_valid(ctx: &ServerContext, rec: &CrabBeaconRecord, requir
 }
 
 fn advance_single_crab_beacon(ctx: &ServerContext, beacon_id: i64, now: u64) {
-    let Some(mut cur) = read_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&beacon_id).cloned()) else { return };
+    let Some(mut cur) = read_crab_beacons(ctx, |beacons| beacons.get(&beacon_id).cloned()) else { return };
     if cur.phase == CrabBeaconPhase::SelfDestructed {
         return;
     }
@@ -763,8 +741,8 @@ fn advance_single_crab_beacon(ctx: &ServerContext, beacon_id: i64, now: u64) {
     }
     if cur.phase == CrabBeaconPhase::Linking && !is_crab_linked_ship_valid(ctx, &cur, true) {
         clear_crab_link_ship_effects(ctx, cur.solar_system_id, beacon_id, cur.linked_char_id, cur.linked_ship_id);
-        with_pve_special_reg(ctx, |reg| {
-            if let Some(b) = reg.crab_beacons.get_mut(&beacon_id) {
+        with_crab_beacons(ctx, |beacons| {
+            if let Some(b) = beacons.get_mut(&beacon_id) {
                 b.phase = CrabBeaconPhase::Idle;
                 b.linked_char_id = None;
                 b.linked_ship_id = None;
@@ -781,13 +759,13 @@ fn advance_single_crab_beacon(ctx: &ServerContext, beacon_id: i64, now: u64) {
             cur.linked_char_id,
             cur.linked_ship_id,
         );
-        with_pve_special_reg(ctx, |reg| {
-            if let Some(b) = reg.crab_beacons.get_mut(&beacon_id) {
+        with_crab_beacons(ctx, |beacons| {
+            if let Some(b) = beacons.get_mut(&beacon_id) {
                 b.phase = CrabBeaconPhase::Scanning;
             }
         });
         spawn_crab_rogue_drone_wave(ctx, beacon_id, 1);
-        let Some(updated) = read_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&beacon_id).cloned()) else {
+        let Some(updated) = read_crab_beacons(ctx, |beacons| beacons.get(&beacon_id).cloned()) else {
             return;
         };
         cur = updated;
@@ -812,7 +790,7 @@ fn advance_single_crab_beacon(ctx: &ServerContext, beacon_id: i64, now: u64) {
         let scan_ship_ok = is_crab_linked_ship_valid(ctx, &cur, false);
         if scan_ship_ok && now >= cur.scan_completes_at_sec && waves_after >= 3 && alive_after == 0 {
             finalize_crab_scan_success(ctx, beacon_id, now);
-            if let Some(updated) = read_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&beacon_id).cloned()) {
+            if let Some(updated) = read_crab_beacons(ctx, |beacons| beacons.get(&beacon_id).cloned()) {
                 cur = updated;
             }
         }
@@ -824,17 +802,12 @@ fn advance_single_crab_beacon(ctx: &ServerContext, beacon_id: i64, now: u64) {
 }
 
 fn has_any_crab_beacons(ctx: &ServerContext) -> bool {
-    ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("incursions_state")
-            .is_some_and(|b| !b.contains("\"crab_beacons\":{}"))
-    })
+    ctx.db.with_snapshot(|snap| !snap.crab_beacons.beacons.is_empty())
 }
 
 fn has_special_sites_state(ctx: &ServerContext) -> bool {
     ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs.contains_key("incursions_state")
-            || snap.owner_notes.contains_key(&-8_300_000_000_000)
+        snap.pve_special_sites != eve_db::PveSpecialSitesState::default()
     })
 }
 
@@ -844,8 +817,8 @@ pub fn tick_all_crab_beacons(ctx: &ServerContext) {
         return;
     }
     let now = ctx.now_unix();
-    let ids: Vec<i64> = read_pve_special_reg(ctx, |reg| {
-        reg.crab_beacons
+    let ids: Vec<i64> = read_crab_beacons(ctx, |beacons| {
+        beacons
             .values()
             .filter(|b| b.phase != CrabBeaconPhase::SelfDestructed)
             .map(|b| b.beacon_id)
@@ -862,8 +835,8 @@ pub async fn tick_crab_beacons_in_system(ctx: &ServerContext, sys_id: SolarSyste
         return;
     }
     let now = ctx.now_unix();
-    let ids: Vec<i64> = read_pve_special_reg(ctx, |reg| {
-        reg.crab_beacons
+    let ids: Vec<i64> = read_crab_beacons(ctx, |beacons| {
+        beacons
             .values()
             .filter(|b| {
                 b.solar_system_id == sys_id && b.phase != CrabBeaconPhase::SelfDestructed
@@ -884,10 +857,10 @@ pub async fn on_crab_wave_npc_destroyed(
     solar_system_id: SolarSystemId,
     npc_ball_id: i64,
 ) {
-    let now_sec = db.clock().now_unix_secs();
-    let next_wave_info = with_pve_special_reg_db(db, now_sec, |reg| {
+    let next_wave_info = db.with_mut_snapshot(|snap| {
         let mut to_spawn = None;
-        for b in reg.crab_beacons.values_mut() {
+        let mut next_id = snap.next_entity_id;
+        for b in snap.crab_beacons.beacons.values_mut() {
             if b.solar_system_id == solar_system_id && b.wave_npc_ball_ids.contains(&npc_ball_id) {
                 b.wave_npc_ball_ids.retain(|&id| id != npc_ball_id);
                 if b.phase == CrabBeaconPhase::Scanning
@@ -899,8 +872,8 @@ pub async fn on_crab_wave_npc_destroyed(
                     let drone_types = ops::resolve_crab_wave_drone_types(sde, b.type_id, next_w);
                     let mut allocated = Vec::with_capacity(drone_types.len());
                     for tid in drone_types {
-                        reg.next_seq += 1;
-                        let bid = 1_897_000_000 + reg.next_seq;
+                        next_id += 1;
+                        let bid = next_id;
                         b.wave_npc_ball_ids.push(bid);
                         allocated.push((bid, tid));
                     }
@@ -909,6 +882,7 @@ pub async fn on_crab_wave_npc_destroyed(
                 break;
             }
         }
+        snap.next_entity_id = next_id;
         to_spawn
     });
 
@@ -948,7 +922,7 @@ fn ensure_beacon_registered_from_item(
     sys_id: SolarSystemId,
     beacon_id: i64,
 ) -> Option<CrabBeaconRecord> {
-    if let Some(rec) = read_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&beacon_id).cloned()) {
+    if let Some(rec) = read_crab_beacons(ctx, |beacons| beacons.get(&beacon_id).cloned()) {
         return Some(rec);
     }
     let item_info = ctx.db.with_snapshot(|snap| {
@@ -964,7 +938,7 @@ fn ensure_beacon_registered_from_item(
     });
     let (type_id, owner_id, pos) = item_info?;
     register_crab_beacon(ctx, beacon_id, type_id, owner_id, sys_id, pos);
-    read_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&beacon_id).cloned())
+    read_crab_beacons(ctx, |beacons| beacons.get(&beacon_id).cloned())
 }
 
 fn beacon_state_keyval(rec: &CrabBeaconRecord, now: u64) -> PyRep {
@@ -1031,7 +1005,7 @@ pub async fn handle_crab_component_call(
 
     match (comp_name, comp_method) {
         ("linkWithShip" | "crabBeacon", "GetLinkState" | "GetState") => {
-            let rec = read_pve_special_reg(ctx, |reg| reg.crab_beacons.get(&beacon_id).cloned())
+            let rec = read_crab_beacons(ctx, |beacons| beacons.get(&beacon_id).cloned())
                 .unwrap_or(initial_rec);
             Ok(beacon_state_keyval(&rec, now))
         }
@@ -1084,8 +1058,8 @@ pub async fn handle_crab_component_call(
                 return Err(BridgeRpcError::user_error("ExcessInterference"));
             }
 
-            let already_active = read_pve_special_reg(ctx, |reg| {
-                reg.crab_beacons
+            let already_active = read_crab_beacons(ctx, |beacons| {
+                beacons
                     .get(&beacon_id)
                     .is_none_or(|b| b.phase != CrabBeaconPhase::Idle)
             });
@@ -1127,8 +1101,8 @@ pub async fn handle_crab_component_call(
                 link_completes,
             );
 
-            with_pve_special_reg(ctx, |reg| {
-                if let Some(b) = reg.crab_beacons.get_mut(&beacon_id) {
+            with_crab_beacons(ctx, |beacons| {
+                if let Some(b) = beacons.get_mut(&beacon_id) {
                     b.phase = CrabBeaconPhase::Linking;
                     b.linked_char_id = Some(char_id);
                     b.linked_ship_id = Some(ship_id);

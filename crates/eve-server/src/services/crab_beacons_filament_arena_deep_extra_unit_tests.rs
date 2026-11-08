@@ -263,16 +263,10 @@ async fn crab_beacon_validation_linking_waves_loot_restriction_and_decay() {
     tick_all_crab_beacons(&ctx);
     tokio::task::yield_now().await;
     let drone_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("incursions_state")
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-            .and_then(|v| {
-                v.get("crab_beacons")?
-                    .get(&beacon_id.to_string())?
-                    .get("wave_npc_ball_ids")?
-                    .as_array()
-                    .map(|arr| arr.iter().filter_map(|x| x.as_i64()).collect())
-            })
+        snap.crab_beacons
+            .beacons
+            .get(&beacon_id)
+            .map(|b| b.wave_npc_ball_ids.clone())
             .unwrap_or_default()
     });
     for did in drone_ids {

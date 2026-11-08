@@ -63,7 +63,7 @@ async fn test_store_manager_categories_offers_and_purchases() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     ctx.db.with_mut_snapshot(|s| {
-        s.service_state_blobs.remove("nes_store_catalog");
+        s.quasar_commerce.nes_store_catalog = None;
     });
     common::seed_test_nes_store_catalog(&ctx);
     let mut sess = setup_pilot_session(&ctx).await;
@@ -234,11 +234,7 @@ async fn test_store_manager_categories_offers_and_purchases() {
         assert_eq!(sde_type.category_id, 91);
 
         // Verify transaction log
-        let logs: Vec<eve_server::services::quasar_payment_store::PlexTransactionRecord> = snap
-            .service_state_blobs
-            .get("plex_tx_logs")
-            .and_then(|j| serde_json::from_str(j).ok())
-            .expect("plex_tx_logs present");
+        let logs = &snap.quasar_commerce.plex_tx_logs;
         assert!(logs.iter().any(|l| l.amount == -110 && l.balance_after == vault_before - 110));
     });
 
@@ -282,7 +278,7 @@ async fn test_ship_cosmetics_manager_licenses_and_first_party() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     ctx.db.with_mut_snapshot(|s| {
-        s.service_state_blobs.remove("nes_store_catalog");
+        s.quasar_commerce.nes_store_catalog = None;
     });
     common::seed_test_nes_store_catalog(&ctx);
     let mut sess = setup_pilot_session(&ctx).await;

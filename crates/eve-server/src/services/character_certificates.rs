@@ -8,7 +8,6 @@ use crate::router::ServerContext;
 use eve_db::WorldStateSnapshot;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Authorizes mutating certificate operations: requires GM role (`ROLE_GM_MASK` or `has_gm_role()`).
@@ -38,36 +37,15 @@ fn check_flags_auth(
     Err(BridgeRpcError::user_error("AccessDenied"))
 }
 
-/// Persistent certificate state for a character stored in `snap.service_state_blobs`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CharacterCertificateState {
-    #[serde(default)]
-    pub certificates: HashMap<u32, u8>,
-    #[serde(default)]
-    pub flags: HashMap<u32, u32>,
-}
-
-fn cert_blob_key(char_id: i64) -> String {
-    format!("character_certificates:{char_id}")
-}
+/// Persistent certificate state for a character stored in `snap.node_graph_state.certificates`.
+pub use eve_db::CharacterCertificateState;
 
 pub fn load_certificate_state(snap: &WorldStateSnapshot, char_id: i64) -> CharacterCertificateState {
-    let key = cert_blob_key(char_id);
-    if let Some(blob) = snap.service_state_blobs.get(&key) {
-        if let Ok(st) = serde_json::from_str::<CharacterCertificateState>(blob) {
-            return st;
-        }
-    }
-    let legacy_key = format!("char_certs:{char_id}");
-    if let Some(blob) = snap.service_state_blobs.get(&legacy_key) {
-        if let Ok(certs) = serde_json::from_str::<HashMap<u32, u8>>(blob) {
-            return CharacterCertificateState {
-                certificates: certs,
-                flags: HashMap::new(),
-            };
-        }
-    }
-    CharacterCertificateState::default()
+    snap.node_graph_state
+        .certificates
+        .get(&char_id)
+        .cloned()
+        .unwrap_or_default()
 }
 
 pub fn save_certificate_state(
@@ -75,10 +53,9 @@ pub fn save_certificate_state(
     char_id: i64,
     state: &CharacterCertificateState,
 ) {
-    let key = cert_blob_key(char_id);
-    if let Ok(blob) = serde_json::to_string(state) {
-        snap.service_state_blobs.insert(key, blob);
-    }
+    snap.node_graph_state
+        .certificates
+        .insert(char_id, state.clone());
 }
 
 /// Derives certificate levels (0..=5) for a character based on their trained skill levels.

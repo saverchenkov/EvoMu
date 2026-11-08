@@ -16,7 +16,7 @@ use crate::services::pve_abyssal_pylons::{
     sample_abyssal_room_hazards, step_abyssal_hazards_and_pylons_in_ballpark,
     suppressor_pulse_damage, suppressor_radius_m, tracking_pylon_radius_and_mult,
 };
-use crate::services::pve_special_sites::with_pve_special_reg;
+use crate::services::pve_special_sites::with_abyssal_state;
 use crate::services::pve_special_sites_abyssal::{
     AbyssalPocketSession, AbyssalRoomRecord, AbyssalTraceRecord, AbyssalWeatherKind,
 };
@@ -244,8 +244,8 @@ async fn probe_pruning_cloud_transitions_and_pocket_trace_cleanup_in_ballpark() 
         cleared: false,
         gate_unlocked_at_sec: None,
     };
-    with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets.insert(
+    with_abyssal_state(&ctx, |st| {
+        st.pockets.insert(
             cid,
             AbyssalPocketSession {
                 pocket_id: 7,
@@ -273,7 +273,7 @@ async fn probe_pruning_cloud_transitions_and_pocket_trace_cleanup_in_ballpark() 
                 max_ships: 1,
             },
         );
-        reg.abyssal_traces.insert(
+        st.traces.insert(
             1_897_000_007,
             AbyssalTraceRecord {
                 trace_ball_id: 1_897_000_007,

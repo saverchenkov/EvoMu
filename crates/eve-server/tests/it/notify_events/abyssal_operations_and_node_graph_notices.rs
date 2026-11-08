@@ -179,8 +179,8 @@ async fn test_parity_notifies_abyssal_and_void_space() {
     rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceDeployment", &[PyRep::Integer(710_010)])
         .await
         .expect("AbyssalEntranceDeployment");
-    let gate_id = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
-        *reg.abyssal_traces.keys().next().expect("trace gate")
+    let gate_id = eve_server::services::pve_special_sites::with_abyssal_state(&ctx, |st| {
+        *st.traces.keys().next().expect("trace gate")
     });
     rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceGateActivation", &[PyRep::Integer(gate_id)])
         .await
@@ -193,16 +193,16 @@ async fn test_parity_notifies_abyssal_and_void_space() {
         .expect("content_id");
     assert!(content_id > 0);
 
-    eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
-        if let Some(p) = reg.abyssal_pockets.get_mut(&PILOT_A) {
+    eve_server::services::pve_special_sites::with_abyssal_state(&ctx, |st| {
+        if let Some(p) = st.pockets.get_mut(&PILOT_A) {
             p.current_room = 3;
             p.rooms[2].npc_ball_ids.clear();
             p.rooms[2].cleared = true;
         }
     });
     rpc(&ctx, &mut sess, "abyssalMgr", "ClientIsReady", &[]).await.expect("ClientIsReady");
-    let end_gate_id = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets
+    let end_gate_id = eve_server::services::pve_special_sites::with_abyssal_state(&ctx, |st| {
+        st.pockets
             .get(&PILOT_A)
             .map(|p| 1_895_000_000 + p.pocket_id * 10 + 3)
             .expect("end gate")

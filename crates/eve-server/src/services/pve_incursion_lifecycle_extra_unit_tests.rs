@@ -17,7 +17,7 @@ use crate::services::pve_special_sites::{
     with_pve_special_reg, AbyssalWeatherKind, PveSpecialSitesRegistry, TriglavianSiteRecord,
 };
 use eve_db::clock::VirtualServerClock;
-use eve_db::{InventoryFlag, InventoryItemRecord, OwnerNoteRecord, WorldRepository};
+use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
 use eve_proto::PyRep;
 use eve_sde::{
     attr_ids, BloodlineInfo, ConstellationInfo, SchoolInfo, SdeRegistry, SolarSystem,
@@ -297,16 +297,7 @@ fn system_effects_owner_note_fallback_influence_clamping_and_stale_beacon_cleanu
         reg.incursions[&cid].clone()
     });
 
-    ctx.db.with_mut_snapshot(|snap| {
-        let raw = snap.service_state_blobs.remove("incursions_state").unwrap();
-        snap.owner_notes.insert(
-            -8_300_000_000_000,
-            OwnerNoteRecord {
-                note_id: -8_300_000_000_000, character_id: -1, item_id: 0,
-                label: "incursions_state".into(), note: raw, timestamp_unix: 0,
-            },
-        );
-    });
+    // Typed pve_special_sites.incursions directly drives compute_incursion_system_effects & clamps influence > 1.0
 
     let hq_eff = compute_incursion_system_effects(&ctx, inc.hq_solar_system_id).unwrap();
     assert_eq!((hq_eff.influence, hq_eff.effect_type_id), (1.0, INCURSION_EFFECT_BEACON_HQ));

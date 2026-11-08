@@ -147,7 +147,7 @@ async fn test_live_pve_incursion_fleet_payout_scaling_and_on_grid() {
             .iter()
             .find(|s| s.solar_system_id == sys_id && s.tier == "Vanguard" && s.completed_count == 0)
             .expect("Vanguard site");
-        (sys_id, site.site_id.clone(), site.position)
+        (sys_id, site.site_id.clone(), DVec3::from_array(site.position))
     });
 
     // 1. Solo / under-sized (1 pilot on-grid): pays 1/5 share (fleetScaleFactor == 0.2)
@@ -214,7 +214,7 @@ async fn test_live_pve_incursion_fleet_payout_scaling_and_on_grid() {
             .flat_map(|inc| &inc.sites)
             .find(|s| s.tier == "Vanguard" && s.completed_count == 0)
             .expect("second Vanguard site");
-        (site.solar_system_id, site.site_id.clone(), site.position)
+        (site.solar_system_id, site.site_id.clone(), DVec3::from_array(site.position))
     });
     for p in std::iter::once(&mut *boss_p).chain(rest.iter_mut()) {
         if p.sess.solar_system_id != Some(site2_sys) {
@@ -276,7 +276,7 @@ async fn test_live_pve_incursion_fleet_payout_scaling_and_on_grid() {
             .flat_map(|inc| &inc.sites)
             .find(|s| s.tier == "Vanguard" && s.completed_count == 0)
             .expect("third Vanguard site");
-        (site.solar_system_id, site.site_id.clone(), site.position)
+        (site.solar_system_id, site.site_id.clone(), DVec3::from_array(site.position))
     });
     for p in std::iter::once(&mut *boss_p).chain(rest.iter_mut()) {
         if p.sess.solar_system_id != Some(site3_sys) {
@@ -321,7 +321,7 @@ async fn test_live_pve_incursion_fleet_payout_scaling_and_on_grid() {
             .flat_map(|inc| &inc.sites)
             .find(|s| s.tier == "Vanguard" && s.completed_count == 0)
             .expect("fourth Vanguard site");
-        (site.solar_system_id, site.site_id.clone(), site.position)
+        (site.solar_system_id, site.site_id.clone(), DVec3::from_array(site.position))
     });
     for p in std::iter::once(&mut *boss_p).chain(rest.iter_mut()) {
         if p.sess.solar_system_id != Some(site4_sys) {

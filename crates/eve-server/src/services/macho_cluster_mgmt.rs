@@ -20,27 +20,9 @@
 use crate::router::context::ServerContext;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
-/// Cluster load service state persisted in `WorldStateSnapshot::service_state_blobs`.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct LoadServiceState {
-    pub active: bool,
-    pub config: BTreeMap<String, PyRep>,
-    pub runs_started: u64,
-    pub total_requests: u64,
-    pub systems_stepped: u64,
-    pub ticks_executed: u64,
-    pub sde_types_sampled: u64,
-    pub sde_solar_systems_sampled: u64,
-    pub world_items_sampled: u64,
-    pub world_characters_sampled: u64,
-    pub active_sessions_sampled: u64,
-    pub last_started_unix: u64,
-    pub last_stopped_unix: u64,
-}
+pub use eve_db::LoadServiceState;
 
 /// Cluster management and shutdown state tracked on `ServerContext`.
 #[derive(Debug, Clone)]
@@ -212,11 +194,7 @@ pub fn handle(
                 .map(|a| serde_json::Value::String(format!("{a:?}")))
                 .collect();
             ctx.db.with_mut_snapshot(|snap| {
-                let mut events: Vec<serde_json::Value> = snap
-                    .service_state_blobs
-                    .get("external_queue_events")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
+                let events = &mut snap.cluster_and_runtime.external_queue_events;
                 if events.len() >= 256 {
                     events.drain(0..events.len().saturating_sub(255));
                 }
@@ -225,9 +203,6 @@ pub fn handle(
                     "arguments": args_json,
                     "timestamp_unix": ctx.now_unix(),
                 }));
-                if let Ok(json) = serde_json::to_string(&events) {
-                    snap.service_state_blobs.insert("external_queue_events".into(), json);
-                }
             });
             Some(Ok(PyRep::None))
         }
@@ -235,13 +210,11 @@ pub fn handle(
         ("tcpRawProxyService", "GetESPTunnelingAddressByNodeID") => {
             let default_addr = "127.0.0.1:26000".to_string();
             let node_map: Vec<(PyRep, PyRep)> = ctx.db.with_snapshot(|snap| {
-                if let Some(blob) = snap.service_state_blobs.get("cluster_node_table") {
-                    if let Ok(table) = serde_json::from_str::<HashMap<String, String>>(blob) {
-                        return table
-                            .into_iter()
-                            .filter_map(|(k, v)| k.parse::<i64>().ok().map(|nid| (PyRep::Integer(nid), PyRep::String(v))))
-                            .collect();
-                    }
+                if let Some(table) = snap.cluster_and_runtime.cluster_node_table.as_ref() {
+                    return table
+                        .iter()
+                        .filter_map(|(k, v)| k.parse::<i64>().ok().map(|nid| (PyRep::Integer(nid), PyRep::String(v.clone()))))
+                        .collect();
                 }
                 vec![
                     (PyRep::Integer(1), PyRep::String("127.0.0.1:26001".into())),
@@ -268,11 +241,7 @@ pub fn handle(
             let mut target_sys = session.solar_system_id;
             let mut ticks: u64 = 5;
             let saved_config = ctx.db.with_snapshot(|snap| {
-                snap.service_state_blobs
-                    .get("load_service_state")
-                    .and_then(|s| serde_json::from_str::<LoadServiceState>(s).ok())
-                    .map(|st| st.config)
-                    .unwrap_or_default()
+                snap.cluster_and_runtime.load_service_state.config.clone()
             });
             for (k, v) in &saved_config {
                 let _ = apply_load_setting(k, v, Some(&mut ticks), Some(&mut target_sys), false);
@@ -339,11 +308,7 @@ pub fn handle(
             ctx.db.with_mut_snapshot(|snap| {
                 let items_len = snap.items.len() as u64;
                 let chars_len = snap.characters.len() as u64;
-                let mut state: LoadServiceState = snap
-                    .service_state_blobs
-                    .get("load_service_state")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
+                let state = &mut snap.cluster_and_runtime.load_service_state;
                 state.active = true;
                 state.runs_started += 1;
                 state.total_requests += 1;
@@ -360,9 +325,6 @@ pub fn handle(
                     "target_solar_system_id".into(),
                     PyRep::Integer(i64::from(target_sys)),
                 );
-                if let Ok(json) = serde_json::to_string(&state) {
-                    snap.service_state_blobs.insert("load_service_state".into(), json);
-                }
             });
             Some(Ok(PyRep::None))
         }
@@ -379,17 +341,10 @@ pub fn handle(
             }
             let now = ctx.now_unix();
             ctx.db.with_mut_snapshot(|snap| {
-                let mut state: LoadServiceState = snap
-                    .service_state_blobs
-                    .get("load_service_state")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
+                let state = &mut snap.cluster_and_runtime.load_service_state;
                 state.active = false;
                 state.total_requests += 1;
                 state.last_stopped_unix = now;
-                if let Ok(json) = serde_json::to_string(&state) {
-                    snap.service_state_blobs.insert("load_service_state".into(), json);
-                }
             });
             Some(Ok(PyRep::None))
         }
@@ -442,18 +397,11 @@ pub fn handle(
             }
             if updates.is_empty() { return Some(Err(invalid_cfg())); }
             ctx.db.with_mut_snapshot(|snap| {
-                let mut state: LoadServiceState = snap
-                    .service_state_blobs
-                    .get("load_service_state")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
+                let state = &mut snap.cluster_and_runtime.load_service_state;
                 for (k, v) in updates {
                     state.config.insert(k, v);
                 }
                 state.total_requests += 1;
-                if let Ok(json) = serde_json::to_string(&state) {
-                    snap.service_state_blobs.insert("load_service_state".into(), json);
-                }
             });
             Some(Ok(PyRep::None))
         }
@@ -477,11 +425,7 @@ pub fn handle(
                 .map(|g| g.len() as i64)
                 .unwrap_or(0);
             let stats = ctx.db.with_snapshot(|snap| {
-                let state: LoadServiceState = snap
-                    .service_state_blobs
-                    .get("load_service_state")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
+                let state = &snap.cluster_and_runtime.load_service_state;
                 let config_entries: Vec<(PyRep, PyRep)> = state
                     .config
                     .iter()
@@ -529,25 +473,13 @@ pub fn handle(
                 }
             }
             ctx.db.with_mut_snapshot(|snap| {
-                let mut active: Vec<i64> = snap
-                    .service_state_blobs
-                    .get("active_sessions")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
-                active.retain(|&s| s == session.session_id as i64);
-                if let Ok(json) = serde_json::to_string(&active) {
-                    snap.service_state_blobs.insert("active_sessions".into(), json);
-                }
-                
-                let mut registry: std::collections::HashMap<String, serde_json::Value> = snap
-                    .service_state_blobs
-                    .get("session_registry")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
-                registry.retain(|k, _| k == &session.session_id.to_string());
-                if let Ok(json) = serde_json::to_string(&registry) {
-                    snap.service_state_blobs.insert("session_registry".into(), json);
-                }
+                snap.cluster_and_runtime
+                    .active_sessions
+                    .retain(|&s| s == session.session_id as i64);
+                let sid_str = session.session_id.to_string();
+                snap.cluster_and_runtime
+                    .session_registry
+                    .retain(|k, _| k == &sid_str);
             });
             Some(Ok(PyRep::None))
         }
@@ -583,29 +515,14 @@ pub fn handle(
                 }
             }
             ctx.db.with_mut_snapshot(|snap| {
-                let mut active: Vec<i64> = snap
-                    .service_state_blobs
-                    .get("active_sessions")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
-                active.retain(|s| !session_ids.contains(s));
-                if let Ok(json) = serde_json::to_string(&active) {
-                    snap.service_state_blobs.insert("active_sessions".into(), json);
-                }
-                
-                let mut registry: std::collections::HashMap<String, serde_json::Value> = snap
-                    .service_state_blobs
-                    .get("session_registry")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
+                snap.cluster_and_runtime
+                    .active_sessions
+                    .retain(|s| !session_ids.contains(s));
                 for sid in &session_ids {
-                    registry.remove(&sid.to_string());
+                    snap.cluster_and_runtime
+                        .session_registry
+                        .remove(&sid.to_string());
                 }
-                if let Ok(json) = serde_json::to_string(&registry) {
-                    snap.service_state_blobs.insert("session_registry".into(), json);
-                }
-                
-
             });
             Some(Ok(PyRep::None))
         }
@@ -683,11 +600,7 @@ pub fn handle(
                     let now_u = ctx.now_unix();
                     let uid = session.user_id;
                     let rate_limited = ctx.db.with_mut_snapshot(|snap| {
-                        let mut attacks: Vec<serde_json::Value> = snap
-                            .service_state_blobs
-                            .get("cluster_attacks")
-                            .and_then(|s| serde_json::from_str(s).ok())
-                            .unwrap_or_default();
+                        let attacks = &mut snap.cluster_and_runtime.cluster_attacks;
                         let recent_for_user = attacks
                             .iter()
                             .filter(|e| {
@@ -708,9 +621,6 @@ pub fn handle(
                             "args": bounded_args,
                             "timestamp_unix": now_u,
                         }));
-                        if let Ok(json) = serde_json::to_string(&attacks) {
-                            snap.service_state_blobs.insert("cluster_attacks".into(), json);
-                        }
                         false
                     });
                     if rate_limited {
@@ -1143,10 +1053,12 @@ fn handle_macho_net(
                 }));
             }
             let active_hash = ctx.db.with_mut_snapshot(|snap| {
-                let mut data: BTreeMap<String, serde_json::Value> = snap
-                    .service_state_blobs
-                    .get("macho_client_code_hash")
-                    .and_then(|s| serde_json::from_str(s).ok())
+                let mut data = snap
+                    .cluster_and_runtime
+                    .macho_client_code_hash
+                    .as_ref()
+                    .and_then(|v| v.as_object())
+                    .cloned()
                     .unwrap_or_default();
                 let hash = args
                     .first()
@@ -1157,9 +1069,8 @@ fn handle_macho_net(
                 data.insert("hash".into(), serde_json::json!(hash));
                 data.insert("reload_count".into(), serde_json::json!(reloads));
                 data.insert("timestamp_unix".into(), serde_json::json!(ctx.now_unix()));
-                if let Ok(json) = serde_json::to_string(&data) {
-                    snap.service_state_blobs.insert("macho_client_code_hash".into(), json);
-                }
+                snap.cluster_and_runtime.macho_client_code_hash =
+                    Some(serde_json::Value::Object(data));
                 hash
             });
             Some(Ok(PyRep::String(active_hash)))
@@ -1579,22 +1490,11 @@ fn handle_session_attribute_update(
         Vec<(&'static str, PyRep, PyRep)>,
         Option<(i64, i64, Option<i64>, u64)>,
     ) = ctx.db.try_with_mut_snapshot(|snap| {
-        let mut registry: HashMap<String, serde_json::Value> = snap
-            .service_state_blobs
-            .get("session_registry")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
-        let active_sessions: Vec<i64> = snap
-            .service_state_blobs
-            .get("active_sessions")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
-
         let sid_key = target_sid.to_string();
         let exists = is_caller
             || online_match.is_some()
-            || registry.contains_key(&sid_key)
-            || active_sessions.contains(&(target_sid as i64));
+            || snap.cluster_and_runtime.session_registry.contains_key(&sid_key)
+            || snap.cluster_and_runtime.active_sessions.contains(&(target_sid as i64));
         if !exists {
             return Err(session_attr_err(
                 "SessionNotFound",
@@ -1610,7 +1510,9 @@ fn handle_session_attribute_update(
                 st.user_id = Some(online.user_id);
                 st.character_id = online.character_id;
             }
-            if let Some(serde_json::Value::Object(map)) = registry.get(&sid_key) {
+            if let Some(serde_json::Value::Object(map)) =
+                snap.cluster_and_runtime.session_registry.get(&sid_key)
+            {
                 populate_session_from_registry_json(&mut st, map);
             }
             if let Some(cid) = st.character_id {
@@ -1634,7 +1536,7 @@ fn handle_session_attribute_update(
         };
 
         let before = target_state.clone();
-        let mut reg_map = match registry.get(&sid_key) {
+        let mut reg_map = match snap.cluster_and_runtime.session_registry.get(&sid_key) {
             Some(serde_json::Value::Object(map)) => map.clone(),
             _ => serde_json::Map::new(),
         };
@@ -1678,10 +1580,9 @@ fn handle_session_attribute_update(
         reg_map.insert("role".into(), serde_json::json!(target_state.role));
         reg_map.insert("language_id".into(), serde_json::json!(target_state.language_id));
         reg_map.insert("updated_at".into(), serde_json::json!(now_unix));
-        registry.insert(sid_key, serde_json::Value::Object(reg_map));
-        if let Ok(json) = serde_json::to_string(&registry) {
-            snap.service_state_blobs.insert("session_registry".into(), json);
-        }
+        snap.cluster_and_runtime
+            .session_registry
+            .insert(sid_key, serde_json::Value::Object(reg_map));
 
         // Sync persisted character & account fields for explicitly updated attributes.
         if let Some(cid) = target_state.character_id {

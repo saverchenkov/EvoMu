@@ -4,7 +4,7 @@ use crate::services::pve_abyssal_pylons::step_abyssal_hazards_and_pylons_in_ball
 use crate::services::pve_special_sites_abyssal::{
     AbyssalPocketSession, AbyssalRoomRecord, AbyssalWeatherKind,
 };
-use crate::services::pve_special_sites::with_pve_special_reg;
+use crate::services::pve_special_sites::with_abyssal_state;
 use crate::services::pvp_filament_arena::handle_pvp_end_gate_activation;
 use crate::services::pvp_filament_mgr::{
     load_pvp_store, save_pvp_store, PvpArenaMatchInstance, PROVING_ARENA_MIN_X_M,
@@ -275,8 +275,8 @@ fn r7_tc_02_abyssal_boundary_tick_preserves_pg_pods_and_concluded_winners() {
         cleared: false,
         gate_unlocked_at_sec: None,
     };
-    with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets.insert(
+    with_abyssal_state(&ctx, |st| {
+        st.pockets.insert(
             abyss_char,
             AbyssalPocketSession {
                 pocket_id: 1,

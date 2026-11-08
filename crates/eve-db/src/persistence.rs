@@ -179,6 +179,23 @@ impl WorldStateWalDelta {
             && old.zarzakh_gate_locks == new.zarzakh_gate_locks
             && old.structure_docking_acl_denied == new.structure_docking_acl_denied
             && old.sp6_lifecycle == new.sp6_lifecycle
+            && old.pve_special_sites == new.pve_special_sites
+            && old.crab_beacons == new.crab_beacons
+            && old.abyssal_state == new.abyssal_state
+            && old.dungeon_runtime == new.dungeon_runtime
+            && old.dungeon_editor == new.dungeon_editor
+            && old.fob_observatory_state == new.fob_observatory_state
+            && old.mining_and_ess_state == new.mining_and_ess_state
+            && old.pvp_filament_state == new.pvp_filament_state
+            && old.tourney_state == new.tourney_state
+            && old.deployable_state == new.deployable_state
+            && old.superweapon_runtime == new.superweapon_runtime
+            && old.insurgency_complex_ops == new.insurgency_complex_ops
+            && old.node_graph_state == new.node_graph_state
+            && old.seasons_and_campaigns == new.seasons_and_campaigns
+            && old.quasar_commerce == new.quasar_commerce
+            && old.fleet_and_social_ops == new.fleet_and_social_ops
+            && old.cluster_and_runtime == new.cluster_and_runtime
             && old.bookmark_subfolder_parents == new.bookmark_subfolder_parents
             && new.wallet_journal.len() >= old.wallet_journal.len()
             && new.wallet_journal[..old.wallet_journal.len()] == old.wallet_journal[..]
@@ -1025,9 +1042,14 @@ mod r4_persistence_tests {
         let old = WorldStateSnapshot::default();
 
         let mut new_svc = old.clone();
-        new_svc.service_state_blobs.insert("contract_deposit:1".into(), "10000".into());
+        new_svc.service_state_blobs.insert("cache_setting:test:k".into(), "10000".into());
         let delta_svc = WorldStateWalDelta::from_diff(&old, &new_svc);
         assert!(delta_svc.full_snapshot.is_some(), "service_state_blobs change must trigger full_snapshot");
+
+        let mut new_domain = old.clone();
+        new_domain.fleet_and_social_ops.contract_deposits.insert(1, 10_000);
+        let delta_domain = WorldStateWalDelta::from_diff(&old, &new_domain);
+        assert!(delta_domain.full_snapshot.is_some(), "typed domain field change must trigger full_snapshot");
 
         let mut new_quasar = old.clone();
         new_quasar.quasar_state_blobs.insert("entitlement_ledger".into(), "{}".into());

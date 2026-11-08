@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::tourney_service::{
-    check_referee_auth, extract_id, load_store, resolve_valid_home_station,
+    check_referee_auth, extract_id, load_store, resolve_valid_home_station, TourneyStoreExt,
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};

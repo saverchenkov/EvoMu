@@ -9,7 +9,6 @@ use eve_db::WorldStateSnapshot;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::station_structure::structure_lifecycle as life;
@@ -428,77 +427,17 @@ pub fn verify_structure_docking_acl(
 // ============================================================================
 
 /// Active aggressor retention window (`15 minutes = 900 s`) for Upwell structure auto-defense.
-pub const STRUCTURE_ATTACKER_TTL_SECS: u64 = 900;
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StructureDefenseSettings {
-    pub structure_id: i64,
-    pub auto_defense_enabled: bool,
-    pub auto_target_attackers: bool,
-    pub auto_target_war_targets: bool,
-    pub standing_threshold: f64,
-    pub target_blocked_acl: bool,
-    #[serde(default)]
-    pub known_attackers: Vec<i64>,
-    #[serde(default)]
-    pub known_attacker_timestamps: HashMap<i64, u64>,
-}
-
-impl Default for StructureDefenseSettings {
-    fn default() -> Self {
-        Self {
-            structure_id: 0,
-            auto_defense_enabled: false,
-            auto_target_attackers: true,
-            auto_target_war_targets: true,
-            standing_threshold: 0.0,
-            target_blocked_acl: false,
-            known_attackers: Vec::new(),
-            known_attacker_timestamps: HashMap::new(),
-        }
-    }
-}
-
-impl StructureDefenseSettings {
-    /// Records `attacker_char_id` as an active aggressor at `now_unix`, pruning expired entries.
-    pub fn record_attacker(&mut self, attacker_char_id: i64, now_unix: u64) {
-        self.prune_expired_attackers(now_unix);
-        if attacker_char_id > 0 {
-            if !self.known_attackers.contains(&attacker_char_id) {
-                self.known_attackers.push(attacker_char_id);
-            }
-            self.known_attacker_timestamps.insert(attacker_char_id, now_unix);
-        }
-    }
-
-    /// Removes attacker entries whose recorded timestamp has exceeded `STRUCTURE_ATTACKER_TTL_SECS`.
-    pub fn prune_expired_attackers(&mut self, now_unix: u64) {
-        let cutoff = now_unix.saturating_sub(STRUCTURE_ATTACKER_TTL_SECS);
-        self.known_attacker_timestamps.retain(|_, &mut ts| ts > cutoff);
-        let timestamps = &self.known_attacker_timestamps;
-        self.known_attackers
-            .retain(|cid| timestamps.contains_key(cid));
-    }
-
-    /// Returns `true` if `pilot_id` has an active, non-expired attacker record at `now_unix`.
-    pub fn is_active_attacker(&self, pilot_id: i64, now_unix: u64) -> bool {
-        let cutoff = now_unix.saturating_sub(STRUCTURE_ATTACKER_TTL_SECS);
-        self.known_attacker_timestamps
-            .get(&pilot_id)
-            .copied()
-            .is_some_and(|ts| ts > cutoff)
-    }
-}
+pub use eve_db::{StructureDefenseSettings, STRUCTURE_ATTACKER_TTL_SECS};
 
 pub fn defense_blob_key(structure_id: i64) -> String {
     format!("structure_defense:{structure_id}")
 }
 
 pub fn load_defense_settings(snap: &WorldStateSnapshot, structure_id: i64) -> StructureDefenseSettings {
-    let key = defense_blob_key(structure_id);
-    snap.service_state_blobs
-        .get(&key)
-        .and_then(|json| serde_json::from_str(json).ok())
+    snap.cluster_and_runtime
+        .structure_defense
+        .get(&structure_id)
+        .cloned()
         .unwrap_or_else(|| StructureDefenseSettings {
             structure_id,
             ..Default::default()
@@ -510,10 +449,9 @@ pub fn save_defense_settings(snap: &mut WorldStateSnapshot, settings: &Structure
     if !sanitized.standing_threshold.is_finite() {
         sanitized.standing_threshold = 0.0;
     }
-    let key = defense_blob_key(sanitized.structure_id);
-    if let Ok(json) = serde_json::to_string(&sanitized) {
-        snap.service_state_blobs.insert(key, json);
-    }
+    snap.cluster_and_runtime
+        .structure_defense
+        .insert(sanitized.structure_id, sanitized);
 }
 
 fn resolve_owner_standing_toward_pilot(

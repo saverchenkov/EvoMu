@@ -734,28 +734,19 @@ pub(crate) fn step_cycles_and_capacitor(
                                         let now_unix = db_ref.clock().now_unix_secs();
                                         let reload_until =
                                             now_unix + (reload_time_ms / 1000.0).ceil() as u64;
-                                        let mut map: HashMap<i64, u64> = snap
-                                            .service_state_blobs
-                                            .get("module_reload_until_unix")
-                                            .and_then(|s| serde_json::from_str(s).ok())
-                                            .unwrap_or_default();
                                         for &tid in &cycle.linked_turrets {
-                                            map.insert(tid, reload_until);
+                                            snap.cluster_and_runtime
+                                                .module_reload_until_unix
+                                                .insert(tid, reload_until);
                                         }
-                                        if let Ok(json) = serde_json::to_string(&map) {
-                                            snap.service_state_blobs
-                                                .insert("module_reload_until_unix".into(), json);
-                                        }
-                                        if let Ok(ev_json) = serde_json::to_string(&(
-                                            cycle.linked_turrets.clone(),
-                                            ammo_tid,
-                                            reload_time_ms,
-                                        )) {
-                                            snap.service_state_blobs.insert(
-                                                format!("auto_reloaded_event:{}", cycle.module_id),
-                                                ev_json,
-                                            );
-                                        }
+                                        snap.cluster_and_runtime.auto_reloaded_event.insert(
+                                            cycle.module_id,
+                                            (
+                                                cycle.linked_turrets.clone(),
+                                                ammo_tid,
+                                                reload_time_ms,
+                                            ),
+                                        );
                                     }
                                 }
                             }

@@ -142,11 +142,7 @@ pub fn record_gm_audit(ctx: &ServerContext, char_id: i64, cmd: &str, ok: bool) {
     let ts = ctx.now_unix();
     tracing::info!(char_id, cmd, ts, ok, "GM slash command audit");
     ctx.db.with_mut_snapshot(|snap| {
-        let mut logs: Vec<serde_json::Value> = snap
-            .service_state_blobs
-            .get("gm_audit_log")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
+        let logs = &mut snap.cluster_and_runtime.gm_audit_log;
         logs.push(serde_json::json!({
             "char_id": char_id,
             "cmd": cmd,
@@ -156,9 +152,6 @@ pub fn record_gm_audit(ctx: &ServerContext, char_id: i64, cmd: &str, ok: bool) {
         if logs.len() > 256 {
             let drain_n = logs.len() - 256;
             logs.drain(0..drain_n);
-        }
-        if let Ok(serialized) = serde_json::to_string(&logs) {
-            snap.service_state_blobs.insert("gm_audit_log".into(), serialized);
         }
     });
 }
@@ -275,20 +268,17 @@ pub async fn handle(
                 .or_else(|| kwargs.get("value").cloned())
                 .or_else(|| kwargs.get("val").cloned())
                 .unwrap_or(PyRep::None);
-            let serialized = {
+            let config_map = {
                 let mut guard = ctx
                     .global_config_values
                     .write()
                     .unwrap_or_else(|e| e.into_inner());
                 guard.insert(key.clone(), val.clone());
-                serde_json::to_string(&*guard).ok()
+                guard.clone()
             };
-            if let Some(json) = serialized {
-                ctx.db.with_mut_snapshot(|snap| {
-                    snap.service_state_blobs
-                        .insert("macho_global_config".into(), json);
-                });
-            }
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.cluster_and_runtime.macho_global_config = config_map;
+            });
             crate::services::notify_emitters_character_services::emit_global_config_updated(ctx, &key, &val);
             Some(Ok(PyRep::Bool(true)))
         }

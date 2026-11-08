@@ -275,8 +275,9 @@ async fn login_config_cohorts_population_cap_portrait_and_skills() {
         PyRep::None
     );
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs
-            .insert(format!("character_lock:{cid}"), "transfer".into());
+        snap.cluster_and_runtime
+            .character_locks
+            .insert(cid, "transfer".into());
     });
     assert_eq!(
         handle(
@@ -348,7 +349,7 @@ async fn login_config_cohorts_population_cap_portrait_and_skills() {
         PyRep::Bool(true)
     );
     assert_eq!(
-        ctx.db.with_snapshot(|s| s.service_state_blobs.get(&format!("portrait:{cid}")).cloned()),
+        ctx.db.with_snapshot(|s| s.cluster_and_runtime.portraits.get(&cid.to_string()).cloned()),
         Some("deadbeef".into())
     );
 
@@ -449,17 +450,16 @@ async fn client_login_state_backed_hollow_arm_remediations() {
         other => panic!("expected tuple from SendClientStackTraceAlert, got {other:?}"),
     };
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(
-            "alert_log_modes".into(),
-            serde_json::json!({ eid.to_string(): "db" }).to_string(),
-        );
+        snap.cluster_and_runtime
+            .alert_log_modes
+            .insert(eid.to_string(), "db".into());
     });
     let bc = handle(&ctx, &mut sess, "alert", "BeanCount", &[PyRep::Integer(555_111)], &kw, None)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(bc, PyRep::Tuple(vec![PyRep::Integer(eid), PyRep::ascii_bytes("db")]));
-    assert!(ctx.db.with_snapshot(|s| s.service_state_blobs.contains_key("alert_client_traces")));
+    assert!(ctx.db.with_snapshot(|s| s.cluster_and_runtime.alert_client_traces.is_some()));
 
     let _ = handle(
         &ctx,
@@ -477,12 +477,13 @@ async fn client_login_state_backed_hollow_arm_remediations() {
     .unwrap()
     .unwrap();
     assert!(ctx.db.with_snapshot(|s| {
-        s.service_state_blobs
-            .get("alert_bean_counts")
-            .is_some_and(|raw| raw.contains(&eid.to_string()))
+        s.cluster_and_runtime
+            .alert_bean_counts
+            .keys()
+            .any(|k| k.contains(&eid.to_string()))
     }));
 
-    // 2. config.GetBlackListedPlanets reads sorted, deduped blacklisted_planets blob
+    // 2. config.GetBlackListedPlanets reads sorted, deduped blacklisted_planets
     assert_eq!(
         handle(&ctx, &mut sess, "config", "GetBlackListedPlanets", &[], &kw, None)
             .await
@@ -491,8 +492,7 @@ async fn client_login_state_backed_hollow_arm_remediations() {
         PyRep::List(vec![])
     );
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs
-            .insert("blacklisted_planets".into(), "[40009080, 40009077, 40009080]".into());
+        snap.cluster_and_runtime.blacklisted_planets = Some(vec![40_009_080, 40_009_077, 40_009_080]);
     });
     assert_eq!(
         handle(&ctx, &mut sess, "config", "GetBlackListedPlanets", &[], &kw, None)
@@ -576,8 +576,9 @@ async fn client_login_state_backed_hollow_arm_remediations() {
         PyRep::Integer(1)
     );
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs
-            .insert("paperdoll_state:90000001".into(), "4".into());
+        snap.cluster_and_runtime
+            .paperdoll_states
+            .insert(90_000_001, "4".into());
     });
     assert_eq!(
         handle(&ctx, &mut sess, "charMgr", "GetPaperdollState", &[], &kw, None)

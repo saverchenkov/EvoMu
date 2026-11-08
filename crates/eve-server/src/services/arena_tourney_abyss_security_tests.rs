@@ -1,6 +1,6 @@
 use crate::router::ServerContext;
 use crate::services::pve_abyssal_lifecycle::collapse_abyssal_pocket_and_pod_pilot_at;
-use crate::services::pve_special_sites::{read_pve_special_reg, with_pve_special_reg};
+use crate::services::pve_special_sites::{read_abyssal_state, with_abyssal_state};
 use crate::services::pve_special_sites_abyssal::enter_abyssal_pocket_with_trace;
 use crate::services::pvp_filament_mgr::{
     handle as handle_pvp_filament_mgr, load_pvp_store, PvpEventSchedule,
@@ -381,18 +381,18 @@ async fn r7_tc_p1_447_abyssal_reentry_restores_saved_attrs_and_collapse_pods_all
     sess1.solar_system_id = Some(origin_sys);
     sess1.ship_id = Some(s1);
     enter_abyssal_pocket_with_trace(&ctx, &mut sess1, c1, filament_tid, 1, origin_sys, None).await;
-    let (pid, abyss_sys) = read_pve_special_reg(&ctx, |reg| {
-        let p = reg.abyssal_pockets.get(&c1).unwrap();
+    let (pid, abyss_sys) = read_abyssal_state(&ctx, |st| {
+        let p = st.pockets.get(&c1).unwrap();
         (p.pocket_id, p.abyssal_solar_system_id)
     });
     let second_dyn = ctx.db.with_snapshot(|s| s.items[&s1].dynamic_attributes.clone());
     assert_eq!(first_dyn, second_dyn, "re-entry must not mutate baseline ship dynamic_attributes");
 
-    with_pve_special_reg(&ctx, |reg| {
-        let mut c2_session = reg.abyssal_pockets[&c1].clone();
+    with_abyssal_state(&ctx, |st| {
+        let mut c2_session = st.pockets[&c1].clone();
         c2_session.character_id = c2;
         c2_session.ship_id = s2;
-        reg.abyssal_pockets.insert(c2, c2_session);
+        st.pockets.insert(c2, c2_session);
     });
     let _ = pid;
     let sys_h = ctx.systems.get_or_spawn(abyss_sys);
@@ -401,9 +401,9 @@ async fn r7_tc_p1_447_abyssal_reentry_restores_saved_attrs_and_collapse_pods_all
 
     collapse_abyssal_pocket_and_pod_pilot_at(&ctx, c1, s1, abyss_sys, 2_300);
 
-    read_pve_special_reg(&ctx, |reg| {
-        assert!(reg.abyssal_pockets[&c1].collapsed_destroyed);
-        assert!(reg.abyssal_pockets[&c2].collapsed_destroyed, "co-op pilot must also be collapsed");
+    read_abyssal_state(&ctx, |st| {
+        assert!(st.pockets[&c1].collapsed_destroyed);
+        assert!(st.pockets[&c2].collapsed_destroyed, "co-op pilot must also be collapsed");
     });
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&s1));

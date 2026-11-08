@@ -743,9 +743,10 @@ fn handle_char_start_training_skill(
         snap.paused_skill_queues.remove(&char_id);
 
         let mct_slots: Vec<u64> = snap
-            .service_state_blobs
-            .get(&format!("mct_slots:{}", ch.user_id))
-            .and_then(|b| serde_json::from_str(b).ok())
+            .cluster_and_runtime
+            .mct_slots
+            .get(&ch.user_id)
+            .cloned()
             .or_else(|| {
                 crate::services::account_services::load_store(snap)
                     .mct_slots

@@ -27,7 +27,7 @@ fn char_session(char_id: i64, corp_id: i64) -> SessionState {
 fn store_manager_catalog_and_offer_purchase_lifecycle() {
     let ctx = make_test_context();
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.remove("nes_store_catalog");
+        snap.quasar_commerce.nes_store_catalog = None;
     });
     let char_id = 90_000_001;
     let station_id = 60_003_760;

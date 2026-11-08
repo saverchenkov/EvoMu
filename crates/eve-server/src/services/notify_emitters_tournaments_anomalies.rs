@@ -831,7 +831,6 @@ pub fn emit_space_white_out_start(ctx: &ServerContext, char_id: i64, solar_syste
 }
 
 pub fn sync_deathzone_state_notifications(ctx: &ServerContext, sys_id: u32) {
-    const BLOB_KEY: &str = "deathzone_active_ships";
     let boundary_r = crate::services::pve_abyssal_hazards::ABYSSAL_ROOM_BOUNDARY_RADIUS_M;
     if !(32_000_000..=32_999_999).contains(&sys_id) {
         return;
@@ -848,8 +847,8 @@ pub fn sync_deathzone_state_notifications(ctx: &ServerContext, sys_id: u32) {
         .collect();
 
     let center_by_char: HashMap<i64, DVec3> =
-        crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-            reg.abyssal_pockets
+        crate::services::pve_special_sites::read_abyssal_state(ctx, |st| {
+            st.pockets
                 .values()
                 .filter(|p| p.abyssal_solar_system_id == sys_id && !p.completed && !p.collapsed_destroyed)
                 .map(|p| {
@@ -864,11 +863,6 @@ pub fn sync_deathzone_state_notifications(ctx: &ServerContext, sys_id: u32) {
 
     let now_ft = ctx.now_blueos_filetime_ticks();
     let transitions: Vec<(i64, i64, bool)> = ctx.db.with_mut_snapshot(|snap| {
-        let mut active_set: HashSet<i64> = snap
-            .service_state_blobs
-            .get(BLOB_KEY)
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
         let mut out = Vec::new();
         for ch in snap.characters.values() {
             if ch.solar_system_id != sys_id
@@ -884,17 +878,14 @@ pub fn sync_deathzone_state_notifications(ctx: &ServerContext, sys_id: u32) {
             };
             let center = center_by_char.get(&ch.character_id).copied().unwrap_or(DVec3::ZERO);
             let outside = pos.distance(center) > boundary_r;
-            let was_outside = active_set.contains(&sid);
+            let was_outside = snap.abyssal_state.deathzone_active_ships.contains(&sid);
             if outside && !was_outside {
-                active_set.insert(sid);
+                snap.abyssal_state.deathzone_active_ships.insert(sid);
                 out.push((ch.character_id, sid, true));
             } else if !outside && was_outside {
-                active_set.remove(&sid);
+                snap.abyssal_state.deathzone_active_ships.remove(&sid);
                 out.push((ch.character_id, sid, false));
             }
-        }
-        if let Ok(json) = serde_json::to_string(&active_set) {
-            snap.service_state_blobs.insert(BLOB_KEY.to_string(), json);
         }
         out
     });

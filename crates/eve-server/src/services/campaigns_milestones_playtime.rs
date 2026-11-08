@@ -7,7 +7,6 @@ use std::collections::{BTreeMap, HashMap};
 
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use serde::{Deserialize, Serialize};
 
 use crate::router::ServerContext;
 use crate::services::campaigns_and_milestones::{get_sde_login_campaigns, SdeLoginCampaign};
@@ -28,38 +27,7 @@ pub const MILESTONE_REWARD_NUMBER_OF_MINUTES_SECS: u64 = 120 * 60;
 pub const MILESTONE_HUNDRED_AND_TWENTY_MINUTES_REWARD_ISK: i64 = 500_000;
 
 /// Persistent per-character accumulated play-time tracking for login milestones.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CharacterMilestoneState {
-    pub first_logon_unix: u64,
-    pub last_activity_unix: u64,
-    pub accumulated_playtime_secs: u64,
-    #[serde(default)]
-    pub active_session: bool,
-}
-
-impl CharacterMilestoneState {
-    /// Total accumulated play time in seconds as of `now_unix`, including elapsed time
-    /// only when the character currently has an active online session.
-    pub fn accumulated_playtime_now(&self, now_unix: u64) -> u64 {
-        if self.active_session && self.last_activity_unix > 0 {
-            self.accumulated_playtime_secs
-                .saturating_add(now_unix.saturating_sub(self.last_activity_unix))
-        } else {
-            self.accumulated_playtime_secs
-        }
-    }
-}
-
-/// Optional persisted daily login campaign window stored under `daily_login_campaign_schedule`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScheduledDailyCampaign {
-    pub campaign_id: i64,
-    pub start_unix: u64,
-    #[serde(default)]
-    pub end_unix: Option<u64>,
-    #[serde(default)]
-    pub is_rookie: Option<bool>,
-}
+pub use eve_db::{CharacterMilestoneState, ScheduledDailyCampaign};
 
 fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
@@ -68,17 +36,14 @@ fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     }
 }
 
-pub fn milestone_state_key(char_id: i64) -> String {
-    format!("milestone_playtime:{char_id}")
-}
-
 pub fn load_milestone_state(
     snap: &eve_db::WorldStateSnapshot,
     char_id: i64,
 ) -> Option<CharacterMilestoneState> {
-    snap.service_state_blobs
-        .get(&milestone_state_key(char_id))
-        .and_then(|raw| serde_json::from_str(raw).ok())
+    snap.seasons_and_campaigns
+        .milestone_playtime
+        .get(&char_id)
+        .cloned()
 }
 
 pub fn save_milestone_state(
@@ -86,10 +51,9 @@ pub fn save_milestone_state(
     char_id: i64,
     state: &CharacterMilestoneState,
 ) {
-    if let Ok(json) = serde_json::to_string(state) {
-        snap.service_state_blobs
-            .insert(milestone_state_key(char_id), json);
-    }
+    snap.seasons_and_campaigns
+        .milestone_playtime
+        .insert(char_id, state.clone());
 }
 
 /// Updates persistent accumulated play time on character logon.
@@ -174,15 +138,15 @@ pub fn resolve_daily_campaign<'a>(
 
     let ext = load_cosmetics_ui_state(snap);
     let per_char_cid = snap
-        .service_state_blobs
-        .get("login_campaign_enrollments")
-        .and_then(|s| serde_json::from_str::<HashMap<i64, i64>>(s).ok())
-        .and_then(|m| m.get(&char_id).copied());
+        .seasons_and_campaigns
+        .login_campaign_enrollments
+        .get(&char_id)
+        .copied();
 
     let scheduled = snap
-        .service_state_blobs
-        .get("daily_login_campaign_schedule")
-        .and_then(|s| serde_json::from_str::<ScheduledDailyCampaign>(s).ok())
+        .seasons_and_campaigns
+        .daily_login_campaign_schedule
+        .as_ref()
         .filter(|s| {
             now_unix >= s.start_unix && s.end_unix.map_or(true, |end| now_unix < end)
         });
@@ -253,16 +217,9 @@ pub(crate) fn handle_login_campaign_enroll(
     }
 
     ctx.db.with_mut_snapshot(|snap| {
-        let mut enrollments: HashMap<i64, i64> = snap
-            .service_state_blobs
-            .get("login_campaign_enrollments")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
-        enrollments.insert(char_id, campaign_id);
-        if let Ok(json) = serde_json::to_string(&enrollments) {
-            snap.service_state_blobs
-                .insert("login_campaign_enrollments".to_string(), json);
-        }
+        snap.seasons_and_campaigns
+            .login_campaign_enrollments
+            .insert(char_id, campaign_id);
     });
 
     crate::services::notify_emitters_character_services::emit_campaign_enrollment_changed(
@@ -283,10 +240,16 @@ pub fn active_seasonal_schedule_from_snapshot(
         .filter(|s| now_unix >= s.start_unix && now_unix < s.end_unix)
         .cloned()
         .or_else(|| {
-            snap.service_state_blobs
-                .get("seasonal_login_schedule")
-                .and_then(|raw| serde_json::from_str::<SeasonalCampaignSchedule>(raw).ok())
+            snap.seasons_and_campaigns
+                .seasonal_login_schedule
+                .as_ref()
                 .filter(|s| now_unix >= s.start_unix && now_unix < s.end_unix)
+                .map(|s| SeasonalCampaignSchedule {
+                    campaign_id: s.campaign_id,
+                    start_unix: s.start_unix,
+                    end_unix: s.end_unix,
+                    turnover_secs: s.turnover_secs,
+                })
         })
 }
 

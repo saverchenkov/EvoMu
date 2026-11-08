@@ -15,7 +15,7 @@ pub fn seed_test_nes_store_catalog(ctx: &ServerContext) {
         save_store_catalog, StoreCatalog, StoreCategory, StoreOffer, StoreProduct,
     };
     ctx.db.with_mut_snapshot(|snap| {
-        if snap.service_state_blobs.contains_key("nes_store_catalog") {
+        if snap.quasar_commerce.nes_store_catalog.is_some() {
             return;
         }
         let type_name = |tid: u32| -> String {
@@ -169,7 +169,7 @@ pub fn seed_test_lp_store_offers(ctx: &ServerContext) {
     use eve_db::IskCents;
     use eve_server::services::lp_store::{register_lp_store_offer, LPOffer, PARAGON_CORP_ID};
     ctx.db.with_mut_snapshot(|snap| {
-        if snap.service_state_blobs.contains_key("lp_store_offers") {
+        if snap.fleet_and_social_ops.lp_store_offers.is_some() {
             return;
         }
         let rows = [

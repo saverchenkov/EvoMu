@@ -1185,11 +1185,7 @@ fn check_tourney_restriction(
 ) -> Result<(), BridgeRpcError> {
     maybe_sync_expired_countdowns(ctx, ctx.now_unix());
     ctx.db.with_snapshot(|snap| {
-        if !snap.owner_notes.get(&TOURNEY_STORE_KEY).is_some_and(|n| n.character_id != 0) {
-            return Ok(());
-        }
-        let store = load_store(snap);
-        for m in store.matches.values() {
+        for m in snap.tourney_state.matches.values() {
             if m.solar_system_id == solarsystem_id as i64
                 && matches!(m.state, TourneyMatchState::Countdown | TourneyMatchState::InProgress)
             {

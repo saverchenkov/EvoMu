@@ -239,12 +239,7 @@ async fn test_pve_seasons_events_and_project_discovery() {
         let mut cfg = load_season_config(snap);
         cfg.start_time_ft = now_ft - 3_600 * 10_000_000;
         cfg.end_time_ft = now_ft + 3_600 * 10_000_000;
-        if let Ok(json) = serde_json::to_string(&cfg) {
-            snap.service_state_blobs.insert(
-                eve_server::services::season_fsd::SEASON_CONFIG_KEY.to_string(),
-                json,
-            );
-        }
+        snap.seasons_and_campaigns.season_configuration = Some(cfg.clone());
         cfg
     });
     let active_sites = ensure_seasonal_event_sites_for_system(&ctx, JITA).await;
@@ -274,12 +269,7 @@ async fn test_pve_seasons_events_and_project_discovery() {
         let mut cfg = load_season_config(snap);
         cfg.start_time_ft = now_ft2 - 3_600 * 10_000_000;
         cfg.end_time_ft = now_ft2 + 3_600 * 10_000_000;
-        if let Ok(json) = serde_json::to_string(&cfg) {
-            snap.service_state_blobs.insert(
-                eve_server::services::season_fsd::SEASON_CONFIG_KEY.to_string(),
-                json,
-            );
-        }
+        snap.seasons_and_campaigns.season_configuration = Some(cfg.clone());
     });
     let spawned = ensure_seasonal_event_sites_for_system(&ctx2, 30_000_144).await;
     assert_eq!(spawned.len(), 1);

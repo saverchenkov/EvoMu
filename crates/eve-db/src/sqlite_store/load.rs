@@ -759,9 +759,12 @@ pub fn load_snapshot_from_sqlite(
     super::social_store::load_d6_social_into_snapshot(conn, &mut snap)?;
     super::corp_crimewatch_store::load_d6_corp_crimewatch(conn, &mut snap);
     super::industry_market_pve_store::load_d6_batch4(conn, &mut snap);
+    super::service_domains_store::load_service_domains(conn, &mut snap);
     let fp = compute_fingerprints(&snap);
-    // Migration after fingerprinting so the folded vault/characters are persisted on next sync.
+    // Migration after fingerprinting so the folded vault/characters and migrated service domains
+    // are persisted on next sync.
     snap.fold_legacy_plex_balances();
+    snap.migrate_legacy_service_state();
     snap.reconcile_id_counters();
     snap.backfill_fw_system_occupations();
     Ok((snap, fp))

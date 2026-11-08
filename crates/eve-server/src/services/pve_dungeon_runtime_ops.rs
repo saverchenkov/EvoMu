@@ -65,7 +65,7 @@ pub(super) fn resolve_fw_or_special_warp_target(
                     && (target_str_opt == Some(s.site_id.as_str())
                         || i64::from(s.dungeon_id) == target_id)
             }) {
-                return Some(s.position);
+                return Some(DVec3::from_array(s.position));
             }
         }
         if reg.drifter_hives.get(&sys_id).is_some_and(|h| !h.cleared) {

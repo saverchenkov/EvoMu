@@ -1090,14 +1090,10 @@ pub fn compute_ess_reserve_pulse_payout_cents(
 pub async fn tick_ess_reserve_bank_links(ctx: &ServerContext, now_unix: u64) -> usize {
     let _ = super::encounter_surveillance_system::tick_ess_main_bank_links(ctx).await;
     let active_systems: Vec<(SolarSystemId, CharacterId)> = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
+        snap.mining_and_ess_state
+            .ess_reserve_pulses
             .iter()
-            .filter_map(|(k, v)| {
-                let sid_str = k.strip_prefix("ess_reserve_pulses:")?;
-                let sid: SolarSystemId = sid_str.parse().ok()?;
-                let st: super::space_destiny::EssReservePulseState = serde_json::from_str(v).ok()?;
-                st.reserve_linked_character_id.map(|cid| (sid, cid))
-            })
+            .filter_map(|(&sid, st)| st.reserve_linked_character_id.map(|cid| (sid, cid)))
             .collect()
     });
     let mut processed = 0usize;

@@ -812,25 +812,14 @@ pub fn handle_clone_jump(
     }
 }
 
-const CLONE_VAT_BAY_STATE_KEY: &str = "clone_vat_bay_state";
-
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
-pub struct CloneVatBayState {
-    pub active_by_ship: std::collections::HashMap<i64, (i64, u64)>,
-}
+pub use eve_db::CloneVatBayState;
 
 pub fn load_clone_vat_bay_state(snap: &eve_db::WorldStateSnapshot) -> CloneVatBayState {
-    snap.service_state_blobs
-        .get(CLONE_VAT_BAY_STATE_KEY)
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default()
+    snap.cluster_and_runtime.clone_vat_bay_state.clone()
 }
 
 pub fn save_clone_vat_bay_state(snap: &mut eve_db::WorldStateSnapshot, st: &CloneVatBayState) {
-    if let Ok(raw) = serde_json::to_string(st) {
-        snap.service_state_blobs.insert(CLONE_VAT_BAY_STATE_KEY.to_string(), raw);
-    }
+    snap.cluster_and_runtime.clone_vat_bay_state = st.clone();
 }
 
 /// Returns `true` iff `host_ship_id` is a Titan (`30`) or Rorqual (`883`) with a currently active Clone Vat Bay cycle.
