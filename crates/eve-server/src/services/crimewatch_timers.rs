@@ -986,7 +986,20 @@ pub async fn handle_crimewatch(
             let _ = ctx
                 .db
                 .with_snapshot(|s| s.characters.get(&challenger_id).map(|c| c.character_id));
-            let accept = args.get(1).and_then(|a| a.as_bool()).unwrap_or(true);
+            // V24.01 `RespondToDuelChallenge(fromCharID, expiryTime, accept)` passes 3 positional
+            // args where `args[1]` is a non-zero FILETIME integer; fail closed (`false`) if
+            // `accept` is missing or not a valid boolean/3rd-arg value.
+            let accept = if args.len() >= 3 {
+                match args.get(2) {
+                    Some(PyRep::Bool(b)) => *b,
+                    Some(PyRep::Integer(v)) => *v != 0,
+                    _ => false,
+                }
+            } else if let Some(PyRep::Bool(b)) = args.get(1) {
+                *b
+            } else {
+                false
+            };
             let now_unix = ctx.now_unix();
             let valid_challenge = with_mut_combat_runtime(ctx, |rt| {
                 let Some(expires_at) = rt.duel_challenges.remove(&(challenger_id, char_id)) else {

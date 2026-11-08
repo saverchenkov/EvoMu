@@ -7,6 +7,8 @@ use eve_sde::SdeRegistry;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+const ERR_INVALID_PLANET_ID: &str = "InvalidPlanetID";
+
 fn make_ctx() -> ServerContext {
     let sde = SdeRegistry::with_canonical_seed();
     let db = Arc::new(WorldRepository::with_demo_seed());
@@ -293,7 +295,7 @@ async fn test_pi_orbitals_flush_launch_import_and_program_rpcs() {
     )
     .unwrap()
     .unwrap_err();
-    assert_eq!(forged_err.code, "InvalidPlanetID");
+    assert_eq!(forged_err.code, ERR_INVALID_PLANET_ID);
     assert_eq!(
         handle_pi_orbitals(&ctx, &mut session, "planetMgr", "append", &[], &HashMap::new(), None)
             .unwrap()

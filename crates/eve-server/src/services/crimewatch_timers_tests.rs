@@ -317,6 +317,107 @@ async fn test_handle_crimewatch_rpcs_and_duel_lifecycle() {
     }));
 }
 
+#[tokio::test]
+async fn test_respond_to_duel_challenge_three_arg_and_fail_closed() {
+    let (ctx, mut sess, char_id, _ship_id, _sys_id) = make_fighter_ctx_and_session();
+    let other_id = 90_000_002;
+    let kw = HashMap::new();
+    let now = ctx.now_unix();
+    let expiry_ft = ctx.now_blueos_filetime_ticks() + 600_000_000;
+
+    // 1. V24.01 3-arg decline: (fromCharID, expiryTime, false) must decline with zero LE created
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.duel_challenges.insert((other_id, char_id), now + 60);
+    });
+    let decline_3arg = handle_crimewatch(
+        &ctx,
+        &mut sess,
+        "crimewatch",
+        "RespondToDuelChallenge",
+        &[
+            PyRep::Integer(other_id),
+            PyRep::Integer(expiry_ft),
+            PyRep::Bool(false),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(decline_3arg.dict_get("accepted").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(
+        decline_3arg
+            .dict_get("limitedEngagementSeconds")
+            .and_then(|v| v.as_i64()),
+        Some(0)
+    );
+    assert!(!with_combat_runtime(&ctx, |rt| {
+        rt.has_limited_engagement_with(char_id, other_id, now)
+            || rt.has_limited_engagement_with(other_id, char_id, now)
+    }));
+
+    // 2. Fail-closed on 2-arg non-bool `(fromCharID, expiryTime)` and 1-arg `(fromCharID,)` and non-bool 3rd arg
+    for bad_args in [
+        vec![PyRep::Integer(other_id), PyRep::Integer(expiry_ft)],
+        vec![PyRep::Integer(other_id)],
+        vec![
+            PyRep::Integer(other_id),
+            PyRep::Integer(expiry_ft),
+            PyRep::None,
+        ],
+    ] {
+        with_mut_combat_runtime(&ctx, |rt| {
+            rt.duel_challenges.insert((other_id, char_id), now + 60);
+        });
+        let resp = handle_crimewatch(
+            &ctx,
+            &mut sess,
+            "crimewatch",
+            "RespondToDuelChallenge",
+            &bad_args,
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(resp.dict_get("accepted").and_then(|v| v.as_bool()), Some(false));
+        assert!(!with_combat_runtime(&ctx, |rt| {
+            rt.has_limited_engagement_with(char_id, other_id, now)
+        }));
+    }
+
+    // 3. V24.01 3-arg accept: (fromCharID, expiryTime, true) creates mutual LE
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.duel_challenges.insert((other_id, char_id), now + 60);
+    });
+    let accept_3arg = handle_crimewatch(
+        &ctx,
+        &mut sess,
+        "crimewatch",
+        "RespondToDuelChallenge",
+        &[
+            PyRep::Integer(other_id),
+            PyRep::Integer(expiry_ft),
+            PyRep::Bool(true),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(accept_3arg.dict_get("accepted").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        accept_3arg
+            .dict_get("limitedEngagementSeconds")
+            .and_then(|v| v.as_i64()),
+        Some(300)
+    );
+    assert!(with_combat_runtime(&ctx, |rt| {
+        rt.has_limited_engagement_with(char_id, other_id, now)
+            && rt.has_limited_engagement_with(other_id, char_id, now)
+    }));
+}
+
 #[test]
 fn test_evaluate_and_record_pvp_aggression_and_remote_assistance() {
     let (ctx, _sess, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();

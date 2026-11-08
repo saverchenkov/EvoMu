@@ -1107,12 +1107,54 @@ async fn test_crimewatch_duel_limited_engagement_and_suspect_looting_ess() {
     let _ = ctx.drain_notifications_for_char(c1);
     let _ = ctx.drain_notifications_for_char(c2);
     rpc(&ctx, &mut sess1, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(c2)]).await.unwrap();
+    let duel_notifs = ctx.drain_notifications_for_char(c2);
+    let duel_note = duel_notifs
+        .iter()
+        .find(|n| n.event == "OnDuelChallenge")
+        .expect("OnDuelChallenge");
+    let expiry_ft = duel_note
+        .args
+        .get(3)
+        .and_then(|v| v.as_i64())
+        .unwrap_or_else(|| ctx.now_blueos_filetime_ticks() + 600_000_000);
+    // V24.01 3-arg decline: (fromCharID, expiryTime, false) must NOT interpret expiryTime as accept=true
+    let dec_3arg = rpc(
+        &ctx,
+        &mut sess2,
+        "crimewatch",
+        None,
+        "RespondToDuelChallenge",
+        &[PyRep::Integer(c1), PyRep::Integer(expiry_ft), PyRep::Bool(false)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(dec_3arg.dict_get("accepted").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(dec_3arg.dict_get("limitedEngagementSeconds").and_then(|v| v.as_i64()), Some(0));
+    assert!(!with_combat_runtime(&ctx, |rt| {
+        rt.has_limited_engagement_with(c1, c2, ctx.now_unix())
+            || rt.has_limited_engagement_with(c2, c1, ctx.now_unix())
+    }));
+
+    // 2-arg decline still works
+    rpc(&ctx, &mut sess1, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(c2)]).await.unwrap();
     assert!(ctx.drain_notifications_for_char(c2).iter().any(|n| n.event == "OnDuelChallenge"));
     rpc(&ctx, &mut sess2, "crimewatch", None, "RespondToDuelChallenge", &[PyRep::Integer(c1), PyRep::Bool(false)]).await.unwrap();
     assert!(!with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(c1, c2, ctx.now_unix())));
 
+    // V24.01 3-arg accept: (fromCharID, expiryTime, true) creates bidirectional 300s Limited Engagement
     rpc(&ctx, &mut sess1, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(c2)]).await.unwrap();
-    let acc = rpc(&ctx, &mut sess2, "crimewatch", None, "RespondToDuelChallenge", &[PyRep::Integer(c1), PyRep::Bool(true)]).await.unwrap();
+    assert!(ctx.drain_notifications_for_char(c2).iter().any(|n| n.event == "OnDuelChallenge"));
+    let acc = rpc(
+        &ctx,
+        &mut sess2,
+        "crimewatch",
+        None,
+        "RespondToDuelChallenge",
+        &[PyRep::Integer(c1), PyRep::Integer(expiry_ft), PyRep::Bool(true)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(acc.dict_get("accepted").and_then(|v| v.as_bool()), Some(true));
     assert_eq!(acc.dict_get("limitedEngagementSeconds").and_then(|v| v.as_i64()), Some(300));
     assert!(ctx.drain_notifications_for_char(c1).iter().any(|n| n.event == "OnCrimewatchEngagementCreated"));
 
