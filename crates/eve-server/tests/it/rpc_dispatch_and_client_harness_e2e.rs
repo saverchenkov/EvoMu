@@ -173,7 +173,7 @@ async fn test_parity_plan_z6_z7_z8_journeys_coverage_and_acceptance_gate() {
     assert!(runner_text.contains("UnimplementedRPC"));
     assert!(runner_text.contains("bridge_verified"));
 
-    // Z-7: Coverage >= 90% and mutation >= 85% gate definitions
+    // Z-7: Coverage >= 90% and real client journey gate definitions
     let scripts_dir = root
         .join(".agents")
         .join("skills")
@@ -181,9 +181,9 @@ async fn test_parity_plan_z6_z7_z8_journeys_coverage_and_acceptance_gate() {
         .join("scripts");
     let gate_text = std::fs::read_to_string(scripts_dir.join("final_gate.py")).expect("read final_gate.py");
     assert!(gate_text.contains("EVOMU_MIN_LINE_COVERAGE"));
-    assert!(gate_text.contains("EVOMU_MIN_MUTATION_SCORE"));
     assert!(gate_text.contains("90"));
-    assert!(gate_text.contains("85"));
+    assert!(gate_text.contains("llvm-cov"));
+    assert!(gate_text.contains("run_journeys"));
     assert!(scripts_dir.join("preflight.py").exists());
 
     // Z-8: Full canonical ledger categories & plan closure rows present

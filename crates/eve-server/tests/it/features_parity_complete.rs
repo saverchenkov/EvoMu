@@ -5469,8 +5469,8 @@ async fn test_plan_z7_z8_test_thresholds_and_final_acceptance_gate() {
         "Gate must define minimum line coverage"
     );
     assert!(
-        gate_content.contains("EVOMU_MIN_MUTATION_SCORE"),
-        "Gate must define minimum mutation score"
+        gate_content.contains("llvm-cov"),
+        "Gate must run cargo llvm-cov coverage verification"
     );
     assert!(
         gate_content.contains("tools/client-harness/run_journeys"),

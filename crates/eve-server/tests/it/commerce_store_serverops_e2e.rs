@@ -261,13 +261,17 @@ async fn payment_purchase_schedules_tokens_and_fast_checkout() {
     let cid = 2_115_400_011i64;
     let uid = 6411u64;
     seed_pilot(&ctx.db, cid, uid, "PaymentPilot", 98_000_001, 2_000_000_00, 1_000);
-    let lowsec_sys = ctx
-        .sde
-        .solar_systems
-        .values()
-        .find(|s| s.security_status < 0.45 && s.solar_system_id < 31_000_000)
-        .map(|s| s.solar_system_id)
-        .unwrap_or(30_002_537);
+    let lowsec_sys = if ctx.sde.solar_systems.contains_key(&30_000_012) {
+        30_000_012
+    } else {
+        ctx.sde
+            .solar_systems
+            .values()
+            .filter(|s| s.security_status < 0.45 && s.solar_system_id < 31_000_000)
+            .min_by_key(|s| s.solar_system_id)
+            .map(|s| s.solar_system_id)
+            .unwrap_or(30_002_537)
+    };
     let metenox_id = 1_000_750_001i64;
     ctx.db.with_mut_snapshot(|snap| {
         let corp = snap.corporations.entry(98_000_001).or_insert_with(|| eve_db::CorporationRecord {
