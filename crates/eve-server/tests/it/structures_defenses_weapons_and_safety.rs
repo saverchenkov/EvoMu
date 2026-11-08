@@ -497,12 +497,20 @@ async fn test_structure_control_weapons_killmail_and_asset_safety() {
     ]).await.expect_err("unlocked target");
     assert_eq!(unlock_err.code, "TargetNotLocked");
 
+    let sys_h = ctx.systems.get_or_spawn(LOWSEC_SYS);
     rpc(&ctx, &mut sess, "dogmaIM", "AddTarget", &[PyRep::Integer(primary_cruiser)]).await.expect("AddTarget cruiser");
+    let mut cruiser_locked = false;
+    for _ in 0..240 {
+        sys_h.step_manual(1.0).await.unwrap();
+        if sys_h.get_target_locks(fort_id).await.is_ok_and(|l| l.iter().any(|t| t.target_id == primary_cruiser && t.locked)) {
+            cruiser_locked = true;
+            break;
+        }
+    }
+    assert!(cruiser_locked, "Fortizar failed to lock primary_cruiser within 240s");
     rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[
         PyRep::Integer(gbl_mod), PyRep::String("defaultEffect".into()), PyRep::Integer(primary_cruiser)
     ]).await.expect("Fire Light Guided Bomb");
-
-    let sys_h = ctx.systems.get_or_spawn(LOWSEC_SYS);
     for _ in 0..30 {
         sys_h.step_manual(1.0).await.unwrap();
     }

@@ -417,16 +417,34 @@ async fn test_standup_guided_bomb_launcher_missiles_and_burst_projectors() {
         "TargetNotLocked"
     );
 
-    // Lock targets via real dogmaIM.AddTarget while piloting structure
+    // Lock targets via real dogmaIM.AddTarget while piloting structure (takes real lock time, not instant)
     rpc(&ctx, &mut sess, "dogmaIM", "AddTarget", &[PyRep::Integer(primary_cruiser)]).await.expect("Structure AddTarget cruiser");
     rpc(&ctx, &mut sess, "dogmaIM", "AddTarget", &[PyRep::Integer(dread_target)]).await.expect("Structure AddTarget dread");
-    assert!(sess.drain_notifications().iter().any(|(n, _)| n == "OnStructureTargetAdded"));
+    let init_notifs = sess.drain_notifications();
+    assert!(init_notifs.iter().any(|(n, _)| n == "OnStructureTargetAdded"));
+    assert!(init_notifs.iter().any(|(n, args)| n == "OnTarget" && args.get(1) == Some(&PyRep::String("locking".into()))));
+    assert_eq!(
+        rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(gbl_mod), PyRep::String("defaultEffect".into()), PyRep::Integer(primary_cruiser)])
+            .await
+            .unwrap_err()
+            .code,
+        "TargetNotLocked"
+    );
+    let sys_h = ctx.systems.get_or_spawn(LOWSEC_SYS);
+    for _ in 0..60 {
+        let locks = sys_h.get_target_locks(st_id).await.unwrap_or_default();
+        if locks.iter().any(|l| l.target_id == primary_cruiser && l.locked)
+            && locks.iter().any(|l| l.target_id == dread_target && l.locked)
+        {
+            break;
+        }
+        sys_h.step_manual(1.0).await.unwrap();
+    }
 
     // 1. Fire Standup Light Guided Bomb (37850): hits primary_cruiser (0km) + nearby_frigate (12km <= 20km), spares far_battleship (35km > 20km)
     let _gbl_res = rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(gbl_mod), PyRep::String("defaultEffect".into()), PyRep::Integer(primary_cruiser)])
         .await
         .expect("Fire Light Guided Bomb");
-    let sys_h = ctx.systems.get_or_spawn(LOWSEC_SYS);
     for _ in 0..20 {
         sys_h.step_manual(1.0).await.unwrap();
     }
@@ -529,13 +547,25 @@ async fn test_keepstar_standup_arcing_vorton_projector_chain_and_immobilization(
     spawn_grid_entity(&ctx, LOWSEC_SYS, 971_099, 19720, DVec3::new(80_000.0, -45_000.0, 0.0), 5_000_000.0, 5_000_000.0, 5_000_000.0, 10_000.0, 50_000.0, Some(90_000_199), hostile_corp).await;
 
     rpc(&ctx, &mut sess, "dogmaIM", "AddTarget", &[PyRep::Integer(971_000)]).await.expect("Keepstar lock primary");
+    assert_eq!(
+        rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(vorton_mod), PyRep::String("superWeaponVorton".into()), PyRep::Integer(971_000)])
+            .await
+            .unwrap_err()
+            .code,
+        "TargetNotLocked"
+    );
+    let sys_h = ctx.systems.get_or_spawn(LOWSEC_SYS);
+    for _ in 0..30 {
+        sys_h.step_manual(1.0).await.unwrap();
+        if sys_h.get_target_locks(ks_id).await.unwrap().iter().any(|t| t.target_id == 971_000 && t.locked) {
+            break;
+        }
+    }
 
     let fire_rep = rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(vorton_mod), PyRep::String("superWeaponVorton".into()), PyRep::Integer(971_000)])
         .await
         .expect("Fire Standup Arcing Vorton Projector I");
     assert_eq!(kv_entry(&fire_rep, "targetsHit"), Some(&PyRep::Integer(5)), "Arcing Vorton must cap chain at max 5 targets");
-
-    let sys_h = ctx.systems.get_or_spawn(LOWSEC_SYS);
     // Targets 0..=4 took massive omni damage; 6th hostile (971_005), friendly (971_090), and isolated (>20km, 971_099) took ZERO damage!
     for hit_id in 971_000..=971_004 {
         let cs = sys_h.get_combat_state(hit_id).await.unwrap().unwrap();
@@ -609,6 +639,20 @@ async fn standup_missile_and_burst_projector_rof_crimewatch_and_ecm_roll() {
     rpc(&ctx, &mut sess, "dogmaIM", "AddTarget", &[PyRep::Integer(target_ship)])
         .await
         .expect("Lock hostile player ship");
+    assert_eq!(
+        rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(missile_mod), PyRep::String("useMissiles".into()), PyRep::Integer(target_ship)])
+            .await
+            .unwrap_err()
+            .code,
+        "TargetNotLocked"
+    );
+    let sys_h = ctx.systems.get_or_spawn(LOWSEC_SYS);
+    for _ in 0..30 {
+        sys_h.step_manual(1.0).await.unwrap();
+        if sys_h.get_target_locks(fort_id).await.unwrap().iter().any(|t| t.target_id == target_ship && t.locked) {
+            break;
+        }
+    }
 
     // 1. First missile activation deals damage, records crimewatch aggression, and starts per-module cycle lock.
     let m1 = rpc(
@@ -683,4 +727,182 @@ async fn standup_missile_and_burst_projector_rof_crimewatch_and_ecm_roll() {
     .await
     .expect("Standup missile launcher fires again after cycle completes");
     assert!(kv_entry(&m2, "damageDealt").and_then(PyRep::as_f64).unwrap_or(0.0) > 0.0);
+}
+
+#[tokio::test]
+async fn it_structure_auto_defense_respects_disabled_flag_on_live_damage() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let corp_a = 98_555_001_i64;
+    let corp_b = 98_555_002_i64;
+    let gunner = 90_555_001_i64;
+    let attacker = 90_555_002_i64;
+    let st_id = 1_055_555_001_i64;
+    let mod_id = 1_055_555_010_i64;
+    let charge_id = 1_055_555_011_i64;
+    let att_ship = 1_055_555_101_i64;
+
+    let (launcher_tid, req_charge_grp) = ctx
+        .sde
+        .types
+        .values()
+        .find_map(|t| {
+            matches!(t.group_id, 1327 | 1562)
+                .then(|| (t.type_id, t.default_attributes.get(&604).copied().unwrap_or(0.0) as u32))
+        })
+        .unwrap();
+    let charge_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.category_id == 8 && t.group_id == req_charge_grp)
+        .map(|t| t.type_id)
+        .unwrap();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, owner) in [(corp_a, gunner), (corp_b, attacker)] {
+            snap.corporations.insert(
+                cid,
+                eve_db::CorporationRecord { corporation_id: cid, ceo_id: owner, ..Default::default() },
+            );
+        }
+        let template = snap.characters[&90_000_001].clone();
+        let mut ch_gunner = template.clone();
+        ch_gunner.character_id = gunner;
+        ch_gunner.name = "Gunner".into();
+        ch_gunner.corporation_id = corp_a;
+        snap.characters.insert(gunner, ch_gunner);
+
+        let mut ch_attacker = template;
+        ch_attacker.character_id = attacker;
+        ch_attacker.name = "Attacker".into();
+        ch_attacker.corporation_id = corp_b;
+        ch_attacker.solar_system_id = LOWSEC_SYS;
+        ch_attacker.active_ship_id = att_ship;
+        snap.characters.insert(attacker, ch_attacker);
+        snap.structures.insert(
+            st_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: st_id,
+                type_id: 35832,
+                owner_corp_id: corp_a,
+                solar_system_id: LOWSEC_SYS,
+                name: "AutoDef Guard Citadel".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 100_000.0,
+                armor_hp: 100_000.0,
+                hull_hp: 100_000.0,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            st_id,
+            InventoryItemRecord {
+                item_id: st_id,
+                type_id: 35832,
+                owner_id: corp_a,
+                location_id: LOWSEC_SYS as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: launcher_tid,
+                owner_id: corp_a,
+                location_id: st_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(mod_id, true);
+        snap.items.insert(
+            charge_id,
+            InventoryItemRecord {
+                item_id: charge_id,
+                type_id: charge_tid,
+                owner_id: corp_a,
+                location_id: st_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 10,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            att_ship,
+            InventoryItemRecord {
+                item_id: att_ship,
+                type_id: 587,
+                owner_id: attacker,
+                location_id: LOWSEC_SYS as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let mut ext = eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        ext.access_profiles.insert(
+            st_id,
+            eve_server::services::station_structure::structure_upwell_ops::StructureAccessProfile {
+                profile_id: 555,
+                owner_corp_id: corp_a,
+                name: "AutoDef Off".into(),
+                has_defense_config: true,
+                auto_defense_enabled: false,
+                ..Default::default()
+            },
+        );
+        eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+    });
+
+    spawn_grid_entity(
+        &ctx,
+        LOWSEC_SYS,
+        att_ship,
+        587,
+        DVec3::new(15_000.0, 0.0, 0.0),
+        10_000.0,
+        10_000.0,
+        10_000.0,
+        35.0,
+        400.0,
+        Some(attacker),
+        corp_b,
+    )
+    .await;
+
+    let sys_h = ctx.systems.get_or_spawn(LOWSEC_SYS);
+    eve_server::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
+        &ctx,
+        &sys_h,
+        LOWSEC_SYS,
+        attacker,
+        st_id,
+        eve_destiny::DamageVector { em: 1_000.0, thermal: 0.0, kinetic: 0.0, explosive: 0.0 },
+        1.0,
+        ctx.now_unix(),
+    )
+    .await
+    .expect("damage to structure succeeds");
+
+    // Structure with auto_defense_enabled = false must not retaliate, lock, or spend ammo
+    let att_shield = sys_h.get_combat_state(att_ship).await.unwrap().unwrap().shield_hp;
+    assert!((att_shield - 10_000.0).abs() < 1e-6);
+    assert!(sys_h.get_target_locks(st_id).await.unwrap().is_empty());
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&charge_id].quantity), 10);
 }

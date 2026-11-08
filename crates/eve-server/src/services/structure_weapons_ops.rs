@@ -135,6 +135,26 @@ pub(crate) async fn read_unified_structure_capacitor(
     (cur_cap, max_cap)
 }
 
+fn is_structure_auto_defense_enabled(
+    ctx: &ServerContext,
+    ext: &ops::StructureExtendedState,
+    structure_id: i64,
+) -> bool {
+    let eff_prof = crate::services::structure_profile_services::effective_profile_for_structure(
+        ext,
+        structure_id,
+        Some(ctx.now_unix()),
+    )
+    .or_else(|| ext.access_profiles.get(&structure_id));
+    if let Some(ds) = eff_prof.and_then(|p| p.defense_settings.as_ref()) {
+        return ds.auto_defense_enabled;
+    }
+    if let Some(prof) = eff_prof.filter(|p| p.has_defense_config) {
+        return prof.auto_defense_enabled;
+    }
+    true
+}
+
 pub async fn trigger_structure_auto_defense_on_grid(
     ctx: &ServerContext,
     sys_handle: &crate::system_actor::SystemHandle,
@@ -157,6 +177,9 @@ pub async fn trigger_structure_auto_defense_on_grid(
             return None;
         }
         let ext = load_ext_state(snap);
+        if !is_structure_auto_defense_enabled(ctx, &ext, structure_id) {
+            return None;
+        }
         let pilot_opt = ext.active_pilot_by_structure.get(&structure_id).copied();
         let ceo_id = snap
             .corporations
@@ -384,7 +407,11 @@ pub async fn trigger_system_structures_auto_defense(ctx: &ServerContext, sys_id:
             .filter(|st| {
                 st.solar_system_id == sys_id
                     && crate::services::structure_control_ops::is_structure_combat_operational(Some(ctx), st)
-                    && (ext.access_profiles.get(&st.structure_id).is_some_and(|p| p.has_defense_config)
+                    && is_structure_auto_defense_enabled(ctx, &ext, st.structure_id)
+                    && (ext
+                        .access_profiles
+                        .get(&st.structure_id)
+                        .is_some_and(|p| p.has_defense_config || p.defense_settings.is_some())
                         || !load_defense_settings(snap, st.structure_id).known_attackers.is_empty()
                         || structure_online_defense_volley_omni(ctx, snap, st.structure_id) > 0.0)
             })
@@ -461,26 +488,46 @@ pub async fn handle_structure_add_target(
             format!("Target distance ({dist:.0} m) exceeds structure maxTargetRange ({max_range:.0} m)"),
         ));
     }
-    let cur_locks = if let Ok(bp) = sys_handle.ballpark.read() {
-        bp.target_locks.get(&structure_id).map(|v| v.len()).unwrap_or(0)
-    } else {
-        0
-    };
-    if cur_locks >= max_locks {
+    let existing_locks = sys_handle.get_target_locks(structure_id).await.unwrap_or_default();
+    if let Some(existing) = existing_locks.iter().find(|l| l.target_id == target_id) {
+        return Ok(PyRep::Tuple(vec![
+            PyRep::Integer(i64::from(existing.locked)),
+            PyRep::List(vec![PyRep::Integer(target_id)]),
+        ]));
+    }
+    if existing_locks.len() >= max_locks {
         return Err(err("MaxLockedTargets", "Structure maximum locked targets reached"));
     }
-    let _ = sys_handle
+    let scan_res = st_sde
+        .and_then(|t| t.default_attributes.get(&564).copied())
+        .unwrap_or(40.0)
+        .max(1.0);
+    let raw_sig = sys_handle
+        .get_combat_state(target_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|cs| cs.base_signature_radius.unwrap_or(cs.signature_radius))
+        .filter(|&s| s > 0.0)
+        .unwrap_or(0.0)
+        .max(target_ball.radius)
+        .max(35.0);
+    let target_sig = ctx.effective_target_signature_radius(target_id, raw_sig);
+    let lock_sec = eve_destiny::combat::compute_lock_time_seconds(scan_res, target_sig);
+    let lock_time_ms = (lock_sec * 1_000.0).max(1.0);
+    sys_handle
         .add_target_lock(
             structure_id,
             TargetLock {
                 target_id,
-                lock_time_ms: 0.0,
-                remaining_lock_ms: 0.0,
-                locked: true,
+                lock_time_ms,
+                remaining_lock_ms: lock_time_ms,
+                locked: false,
                 max_range_m: Some(max_range),
             },
         )
-        .await;
+        .await
+        .map_err(|e| err("TargetingFailed", e))?;
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
         "OnStructureTargetAdded",
@@ -491,7 +538,7 @@ pub async fn handle_structure_add_target(
         crate::router::NotificationTarget::Character(char_id),
         "OnTarget",
         "charid",
-        vec![PyRep::String("add".into()), PyRep::Integer(target_id)],
+        vec![PyRep::Integer(target_id), PyRep::String("locking".into())],
     );
     if let Some(t_char) = ctx.db.with_snapshot(|s| {
         s.characters
@@ -503,10 +550,10 @@ pub async fn handle_structure_add_target(
             crate::router::NotificationTarget::Character(t_char),
             "OnTarget",
             "charid",
-            vec![PyRep::String("otheradd".into()), PyRep::Integer(structure_id)],
+            vec![PyRep::Integer(structure_id), PyRep::String("targetedBy".into())],
         );
     }
-    Ok(PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(vec![PyRep::Integer(target_id)])]))
+    Ok(PyRep::Tuple(vec![PyRep::Integer(0), PyRep::List(vec![PyRep::Integer(target_id)])]))
 }
 
 fn consume_structure_charge_in_snap(

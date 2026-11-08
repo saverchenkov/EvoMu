@@ -1265,7 +1265,18 @@ impl SystemHandle {
                 if let eve_destiny::DestinyEvent::OnTarget { mode, source_id, target_id } = ev {
                     if mode == "locked" {
                         let char_id_opt = bp.ball_slim_meta.get(source_id).and_then(|m| m.char_id).or_else(|| {
-                            db_opt.as_ref().and_then(|db| db.with_snapshot(|s| s.characters.values().find(|c| c.active_ship_id == *source_id).map(|c| c.character_id)))
+                            db_opt.as_ref().and_then(|db| db.with_snapshot(|s| {
+                                s.characters
+                                    .values()
+                                    .find(|c| c.active_ship_id == *source_id)
+                                    .map(|c| c.character_id)
+                                    .or_else(|| {
+                                        crate::services::station_structure::structure_upwell_ops::load_ext_state(s)
+                                            .active_pilot_by_structure
+                                            .get(source_id)
+                                            .copied()
+                                    })
+                            }))
                         });
                         if let Some(cid) = char_id_opt.filter(|&c| c > 0) { lock_hook(cid, *target_id); }
                     }

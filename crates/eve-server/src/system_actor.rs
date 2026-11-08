@@ -958,6 +958,12 @@ impl SystemRegistry {
                                                                     .values()
                                                                     .find(|c| c.active_ship_id == *source_id)
                                                                     .map(|c| c.character_id)
+                                                                    .or_else(|| {
+                                                                        crate::services::station_structure::structure_upwell_ops::load_ext_state(s)
+                                                                            .active_pilot_by_structure
+                                                                            .get(source_id)
+                                                                            .copied()
+                                                                    })
                                                             })
                                                         })
                                                     });

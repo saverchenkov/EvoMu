@@ -419,6 +419,18 @@ async fn standup_weapon_highsec_superweapon_charge_capacitor_and_burst_projector
     handle_structure_add_target(&ctx, &sess, gunner_id, st_id, ship_id)
         .await
         .unwrap();
+    for _ in 0..60 {
+        if sys_handle
+            .get_target_locks(st_id)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|l| l.target_id == ship_id && l.locked)
+        {
+            break;
+        }
+        sys_handle.step_manual(1.0).await.unwrap();
+    }
 
     // 5. OutOfRange check
     if let Ok(mut bp) = sys_handle.ballpark.write() {

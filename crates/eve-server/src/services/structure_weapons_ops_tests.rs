@@ -179,14 +179,44 @@ async fn structure_defense_volley_target_locking_weapon_activation_and_auto_defe
         save_ext_state(snap, &ext);
     });
 
-    // Lock hostile_ship on structure
+    // Lock hostile_ship on structure -> starts locking with realistic lock_time_ms > 0 (not instant)
     let lock_rep = handle_structure_add_target(&ctx, &session, gunner_id, st_id, hostile_ship)
         .await
         .expect("lock target on structure");
     assert_eq!(
         lock_rep,
-        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::List(vec![PyRep::Integer(hostile_ship)])])
+        PyRep::Tuple(vec![PyRep::Integer(0), PyRep::List(vec![PyRep::Integer(hostile_ship)])])
     );
+    let locks_pending = sys_handle.get_target_locks(st_id).await.unwrap();
+    assert_eq!(locks_pending.len(), 1);
+    assert!(!locks_pending[0].locked);
+    assert!(locks_pending[0].lock_time_ms > 0.0);
+
+    // Activate while still locking -> TargetNotLocked
+    assert_eq!(
+        handle_structure_module_activate(
+            &ctx,
+            &mut session,
+            gunner_id,
+            st_id,
+            mod_id,
+            "launcher",
+            Some(hostile_ship),
+            false,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "TargetNotLocked"
+    );
+
+    // Advance simulation past lock completion
+    let wait_secs = (locks_pending[0].lock_time_ms / 1_000.0).ceil() as usize + 1;
+    for _ in 0..wait_secs {
+        sys_handle.step_manual(1.0).await.unwrap();
+    }
+    let locks_done = sys_handle.get_target_locks(st_id).await.unwrap();
+    assert!(locks_done[0].locked, "lock should complete after lock_time_ms elapses");
 
     // Overload rejected
     assert_eq!(
@@ -261,4 +291,39 @@ async fn structure_defense_volley_target_locking_weapon_activation_and_auto_defe
         let def = load_defense_settings(snap, st_id);
         assert!(def.known_attackers.contains(&hostile_id));
     });
+
+    // When access_profiles marks auto_defense_enabled = false, grid defense must NOT fire or lock
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        ext.standup_module_cycle_until_unix.clear();
+        ext.access_profiles.insert(
+            st_id,
+            crate::services::station_structure::structure_upwell_ops::StructureAccessProfile {
+                profile_id: 901,
+                owner_corp_id: corp_id,
+                name: "No AutoDefense".into(),
+                has_defense_config: true,
+                auto_defense_enabled: false,
+                ..Default::default()
+            },
+        );
+        save_ext_state(snap, &ext);
+        let mut def = load_defense_settings(snap, st_id);
+        def.auto_defense_enabled = true;
+        def.auto_target_attackers = true;
+        save_defense_settings(snap, &def);
+    });
+    let _ = sys_handle.clear_target_locks(st_id).await;
+    let charge_before = ctx.db.with_snapshot(|s| s.items[&charge_id].quantity);
+    trigger_structure_auto_defense_on_grid(
+        &ctx,
+        &sys_handle,
+        null_sys,
+        st_id,
+        Some(hostile_id),
+        1_800_002_000,
+    )
+    .await;
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&charge_id].quantity), charge_before);
+    assert!(sys_handle.get_target_locks(st_id).await.unwrap().is_empty());
 }

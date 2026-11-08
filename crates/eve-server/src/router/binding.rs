@@ -997,7 +997,12 @@ impl ServerContext {
                         if target.station_id.is_some() || locker.solar_system_id != target.solar_system_id {
                             return None;
                         }
-                        let locker_ship = if locker.active_ship_id > 0 { locker.active_ship_id } else { char_id };
+                        let locker_ship = crate::services::station_structure::structure_upwell_ops::load_ext_state(s)
+                            .active_pilot_by_structure
+                            .iter()
+                            .find_map(|(&sid, &pid)| (pid == char_id).then_some(sid))
+                            .or_else(|| (locker.active_ship_id > 0).then_some(locker.active_ship_id))
+                            .unwrap_or(char_id);
                         Some((target_char, Some(target.user_id), locker_ship))
                     });
                 Some((Some(locker.user_id), target_info))
