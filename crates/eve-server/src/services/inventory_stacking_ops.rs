@@ -294,38 +294,24 @@ pub(in crate::services) fn handle_stack_ops(
             };
             match ctx.db.split_stack(owner_id, item_id, split_quantity) {
                 Ok((orig, new_i)) => {
-                    ctx.notify(
-                        crate::router::NotificationTarget::Character(char_id),
-                        "OnItemChange",
-                        "charid",
+                    let _ = ctx.notify_item_record_change(
+                        char_id,
+                        &orig,
                         vec![
-                            PyRep::keyval([
-                                ("itemID", PyRep::Integer(orig.item_id)),
-                                ("typeID", PyRep::Integer(orig.type_id as i64)),
-                                ("locationID", PyRep::Integer(orig.location_id)),
-                                ("flagID", PyRep::Integer(orig.flag as i64)),
-                                ("quantity", PyRep::Integer(orig.quantity as i64)),
-                            ]),
-                            PyRep::Dict(vec![(
-                                PyRep::Integer(5),
+                            (
+                                5,
                                 PyRep::Integer((orig.quantity + new_i.quantity) as i64),
-                            )]),
+                            ),
+                            (
+                                9,
+                                PyRep::Integer((orig.quantity + new_i.quantity) as i64),
+                            ),
                         ],
                     );
-                    ctx.notify(
-                        crate::router::NotificationTarget::Character(char_id),
-                        "OnItemChange",
-                        "charid",
-                        vec![
-                            PyRep::keyval([
-                                ("itemID", PyRep::Integer(new_i.item_id)),
-                                ("typeID", PyRep::Integer(new_i.type_id as i64)),
-                                ("locationID", PyRep::Integer(new_i.location_id)),
-                                ("flagID", PyRep::Integer(new_i.flag as i64)),
-                                ("quantity", PyRep::Integer(new_i.quantity as i64)),
-                            ]),
-                            PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))]),
-                        ],
+                    let _ = ctx.notify_item_record_change(
+                        char_id,
+                        &new_i,
+                        vec![(3, PyRep::Integer(0))],
                     );
                     Some(Ok(PyRep::keyval([
                         ("originalItemID", PyRep::Integer(orig.item_id)),

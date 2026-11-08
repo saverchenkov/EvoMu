@@ -43,6 +43,26 @@ pub(crate) async fn handle_module_cycles(
             }) {
                 return Some(crate::services::structure_weapons_ops::handle_structure_module_activate(ctx, session, char_id, st_id, raw_module_id, &effect_name, target_id_opt, method == "Overload").await);
             }
+            if method == "Activate" && effect_name == "online" {
+                let module_id = raw_module_id;
+                if let Some(sys_id) = session.solar_system_id {
+                    let sys = ctx.systems.get_or_spawn(sys_id);
+                    if sys.has_active_nanite_repair_sync(ship_id, module_id) {
+                        return Some(Err(BridgeRpcError {
+                            code: "ModuleBeingRepaired".into(),
+                            message: format!("Module {module_id} cannot be onlined while undergoing nanite repair"),
+                        }));
+                    }
+                }
+                return Some(
+                    crate::services::notify_emitters_skills_trade_godma::handle_dogma_set_module_online(
+                        ctx,
+                        session,
+                        &[PyRep::Integer(ship_id), PyRep::Integer(module_id)],
+                    )
+                    .await,
+                );
+            }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Cannot activate modules outside of space".into() }));
             };

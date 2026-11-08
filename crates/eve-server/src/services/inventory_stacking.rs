@@ -454,6 +454,21 @@ pub(crate) async fn handle_multi_add(
             *entry = entry.max(delay_s);
         }
     }
+    let mut old_ship_loads: std::collections::HashMap<i64, (f64, f64)> =
+        std::collections::HashMap::new();
+    for &(old_loc, _, _) in &fitted_unfit_ids {
+        if !old_ship_loads.contains_key(&old_loc) {
+            if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(char_id, old_loc) {
+                old_ship_loads.insert(
+                    old_loc,
+                    (
+                        fit.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde),
+                        fit.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde),
+                    ),
+                );
+            }
+        }
+    }
     let (moved, old_containers) = ctx.db.try_with_mut_snapshot(|snap| {
         let mut moved = Vec::with_capacity(item_ids.len());
         let mut old_containers = HashSet::new();
@@ -469,6 +484,7 @@ pub(crate) async fn handle_multi_add(
             let old_flag = it.flag;
             let old_flag_u16 = old_flag as u16;
             let old_loc = it.location_id;
+            let old_owner = it.owner_id;
             let it_tid = it.type_id;
             let it_qty = it.quantity;
             if old_loc != new_loc {
@@ -489,13 +505,15 @@ pub(crate) async fn handle_multi_add(
                 it.owner_id = char_id;
             }
             it.version += 1;
+            let moved_rec = it.clone();
             snap.module_online_states.remove(&item_id);
             snap.module_active_states.remove(&item_id);
             snap.module_active_charges.remove(&item_id);
             let (fin_opt, _) = crate::services::structure_acl_defense_rules::finalize_fuel_bay_move_in_snap(
                 ctx, snap, item_id, old_loc, old_flag, new_loc, flag, char_id, caller_corp_id,
             );
-            moved.push((fin_opt.map(|r| r.item_id).unwrap_or(item_id), it_tid, it_qty));
+            let final_rec = fin_opt.unwrap_or(moved_rec);
+            moved.push((final_rec, old_loc, old_flag_u16 as i64, old_owner));
         }
         Ok((moved, old_containers))
     })?;
@@ -512,13 +530,28 @@ pub(crate) async fn handle_multi_add(
         .await;
         despawn_set.insert(old_cont);
     }
-    for &(item_id, it_tid, it_qty) in &moved {
-        fitting_containers_ships::record_container_add_log(ctx, char_id, item_id, it_tid, it_qty, new_loc);
+    for (rec, old_loc, old_flag_i64, old_owner) in &moved {
+        fitting_containers_ships::record_container_add_log(
+            ctx,
+            char_id,
+            rec.item_id,
+            rec.type_id,
+            rec.quantity,
+            new_loc,
+        );
+        let mut item_changes = vec![
+            (3, PyRep::Integer(*old_loc)),
+            (4, PyRep::Integer(*old_flag_i64)),
+        ];
+        if rec.owner_id != *old_owner {
+            item_changes.push((2, PyRep::Integer(*old_owner)));
+        }
+        let _ = ctx.notify_item_record_change(char_id, rec, item_changes);
     }
     for old_cont in despawn_set {
         let _ = despawn_empty_jetcan_if_needed(ctx, session.solar_system_id, old_cont).await;
     }
-    let moved: Vec<i64> = moved.into_iter().map(|(id, _, _)| id).collect();
+    let moved: Vec<i64> = moved.into_iter().map(|(rec, _, _, _)| rec.item_id).collect();
     let mut source_ships = HashSet::new();
     for &(old_loc, item_id, _) in &fitted_unfit_ids {
         let _ = crate::services::notify_emitters_space_dungeons::flush_module_profile_and_ewar_end(
@@ -536,7 +569,15 @@ pub(crate) async fn handle_multi_add(
     }
     for old_ship in source_ships {
         ctx.invalidate_ship_fitting(old_ship);
-        let _ = ctx.get_or_rebuild_ship_fitting(char_id, old_ship);
+        if let Ok(new_fit) = ctx.get_or_rebuild_ship_fitting(char_id, old_ship) {
+            if let Some(&(old_cpu, old_pg)) = old_ship_loads.get(&old_ship) {
+                let new_cpu = new_fit.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde);
+                let new_pg = new_fit.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde);
+                let _ = ctx.notify_ship_fitting_load_changes(
+                    char_id, old_ship, old_cpu, new_cpu, old_pg, new_pg,
+                );
+            }
+        }
         if session.station_id.is_none() && session.structure_id.is_none() {
             if let Some(sys_id) = session.solar_system_id {
                 if let Some(&delay_s) = precomputed_cloak_delays.get(&old_ship) {

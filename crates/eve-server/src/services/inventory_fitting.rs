@@ -1054,7 +1054,7 @@ pub async fn handle(
 
             if dest_is_ship_hold {
                 // Stack merging if matching unstacked item exists at destination
-                let merged_opt: Result<Option<eve_db::InventoryItemRecord>, eve_db::DbError> = ctx.db.try_with_mut_snapshot(|snap| {
+                let merged_opt: Result<Option<(eve_db::InventoryItemRecord, i32)>, eve_db::DbError> = ctx.db.try_with_mut_snapshot(|snap| {
                     let Some(moving) = snap.items.get(&item_id).cloned() else {
                         return Ok(None);
                     };
@@ -1088,8 +1088,8 @@ pub async fn handle(
                         let target_qty = snap
                             .items
                             .get(&target_iid)
-                            .and_then(|t| t.quantity.checked_add(moving.quantity));
-                        if let Some(new_qty) = target_qty {
+                            .and_then(|t| t.quantity.checked_add(moving.quantity).map(|nq| (t.quantity, nq)));
+                        if let Some((prev_qty, new_qty)) = target_qty {
                             snap.items.remove(&item_id);
                             snap.module_online_states.remove(&item_id);
                             snap.module_active_states.remove(&item_id);
@@ -1097,7 +1097,7 @@ pub async fn handle(
                             let target_item = snap.items.get_mut(&target_iid).unwrap();
                             target_item.quantity = new_qty;
                             target_item.version += 1;
-                            Ok(Some(target_item.clone()))
+                            Ok(Some((target_item.clone(), prev_qty)))
                         } else {
                             Ok(None)
                         }
@@ -1105,7 +1105,7 @@ pub async fn handle(
                         Ok(None)
                     }
                 });
-                if let Ok(Some(merged_item)) = merged_opt {
+                if let Ok(Some((merged_item, prev_qty))) = merged_opt {
                     let moved_tid = source_item_opt.as_ref().map(|i| i.type_id).unwrap_or(merged_item.type_id);
                     let moved_qty = source_item_opt.as_ref().map(|i| i.quantity).unwrap_or(1);
                     if looted_from_space {
@@ -1130,17 +1130,25 @@ pub async fn handle(
                     }
                     crate::services::operations_manager_helpers::record_invbroker_add_operation_event(ctx, char_id, orig_source_loc_id, new_loc, flag, moved_tid, moved_qty);
                     ctx.invalidate_ship_fitting(new_loc);
-                    ctx.notify(
-                        crate::router::NotificationTarget::Character(char_id),
-                        "OnItemChange",
-                        "charid",
+                    if let Some((orig_id, sq)) = did_split {
+                        if let Some(orig_item) = ctx.db.with_snapshot(|s| s.items.get(&orig_id).cloned()) {
+                            let orig_prev = (orig_item.quantity + sq) as i64;
+                            let _ = ctx.notify_item_record_change(
+                                char_id,
+                                &orig_item,
+                                vec![
+                                    (5, PyRep::Integer(orig_prev)),
+                                    (9, PyRep::Integer(orig_prev)),
+                                ],
+                            );
+                        }
+                    }
+                    let _ = ctx.notify_item_record_change(
+                        char_id,
+                        &merged_item,
                         vec![
-                            PyRep::keyval([
-                                ("itemID", PyRep::Integer(merged_item.item_id)), ("typeID", PyRep::Integer(merged_item.type_id as i64)),
-                                ("locationID", PyRep::Integer(merged_item.location_id)), ("flagID", PyRep::Integer(merged_item.flag as i64)),
-                                ("quantity", PyRep::Integer(merged_item.quantity as i64)),
-                            ]),
-                            PyRep::Dict(vec![(PyRep::Integer(5), PyRep::Integer(merged_item.quantity as i64))]),
+                            (5, PyRep::Integer(prev_qty as i64)),
+                            (9, PyRep::Integer(prev_qty as i64)),
                         ],
                     );
                     ctx.notify(crate::router::NotificationTarget::Character(char_id), "ProcessInventoryChange", "charid", vec![
@@ -1156,6 +1164,27 @@ pub async fn handle(
 
             let old_loc_id = source_item_opt.as_ref().map(|i| i.location_id).unwrap_or(0);
             let old_flag_id = source_item_opt.as_ref().map(|i| i.flag as i64).unwrap_or(0);
+            let unfit_ship_id = source_item_opt
+                .as_ref()
+                .filter(|src| matches!(src.flag as u16, 11..=34 | 92..=94 | 125..=132))
+                .map(|src| src.location_id);
+            let old_fit_loads = if is_fitting_slot {
+                ctx.get_or_rebuild_ship_fitting(char_id, new_loc).ok().map(|f| {
+                    (
+                        f.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde),
+                        f.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde),
+                    )
+                })
+            } else if let Some(src_ship_id) = unfit_ship_id {
+                ctx.get_or_rebuild_ship_fitting(char_id, src_ship_id).ok().map(|f| {
+                    (
+                        f.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde),
+                        f.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde),
+                    )
+                })
+            } else {
+                None
+            };
             let old_owner_id = source_item_opt.as_ref().map(|i| i.owner_id).unwrap_or_else(|| {
                 ctx.db.with_snapshot(|s| s.items.get(&item_id).map(|i| i.owner_id).unwrap_or(0))
             });
@@ -1300,21 +1329,19 @@ pub async fn handle(
                     }
                     crate::services::operations_manager_helpers::record_invbroker_add_operation_event(ctx, char_id, orig_source_loc_id, new_loc, flag, updated.type_id, updated.quantity);
                     ctx.invalidate_ship_fitting(new_loc);
-                    if let Some((orig_id, split_qty)) = did_split {
-                        if let Some(orig_after) = ctx.db.with_snapshot(|snap| snap.items.get(&orig_id).cloned()) {
-                            let orig_row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(
-                                crate::services::inventory_bound::item_to_packed_cells(ctx, &orig_after),
-                            );
-                            ctx.notify_item_change(
+                    if let Some((orig_id, sq)) = did_split {
+                        if let Some(orig_item) = ctx.db.with_snapshot(|s| s.items.get(&orig_id).cloned()) {
+                            let orig_prev = (orig_item.quantity + sq) as i64;
+                            let _ = ctx.notify_item_record_change(
                                 char_id,
-                                orig_row,
-                                vec![(9, PyRep::Integer((orig_after.quantity + split_qty) as i64))],
+                                &orig_item,
+                                vec![
+                                    (5, PyRep::Integer(orig_prev)),
+                                    (9, PyRep::Integer(orig_prev)),
+                                ],
                             );
                         }
                     }
-                    let item_row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(
-                        crate::services::inventory_bound::item_to_packed_cells(ctx, &updated),
-                    );
                     let mut item_changes = vec![
                         (3, PyRep::Integer(old_loc_id)),
                         (4, PyRep::Integer(old_flag_id)),
@@ -1323,7 +1350,10 @@ pub async fn handle(
                         // ixSingleton (10): prior unpackaged item had quantity=1, singleton=False.
                         item_changes.push((10, PyRep::Integer(1)));
                     }
-                    ctx.notify_item_change(char_id, item_row, item_changes);
+                    if updated.owner_id != old_owner_id {
+                        item_changes.push((2, PyRep::Integer(old_owner_id)));
+                    }
+                    let _ = ctx.notify_item_record_change(char_id, &updated, item_changes);
                     ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),
                         "ProcessInventoryChange",
@@ -1333,18 +1363,46 @@ pub async fn handle(
 
                     if is_fitting_slot {
                         ctx.db.with_mut_snapshot(|snap| { snap.module_online_states.insert(item_id, online); });
+                        ctx.invalidate_ship_fitting(new_loc);
+                        let new_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, new_loc).ok();
                         ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnModuleFitted", "charid", vec![PyRep::Integer(item_id), PyRep::Integer(flag as i64)]);
-                        ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnModuleAttributeChanges", "charid", vec![PyRep::Integer(item_id)]);
-                    } else if let Some(src_item) = &source_item_opt {
-                        if matches!(src_item.flag as u16, 11..=34 | 92..=94 | 125..=132) {
-                            ctx.db.with_mut_snapshot(|snap| {
-                                snap.module_online_states.remove(&item_id);
-                                snap.module_active_states.remove(&item_id);
-                                snap.module_active_charges.remove(&item_id);
-                            });
-                            ctx.invalidate_ship_fitting(old_loc_id);
-                            let _ = ctx.get_or_rebuild_ship_fitting(char_id, old_loc_id);
+                        let _ = ctx.notify_module_online_state(char_id, item_id, online);
+                        if let (Some((old_cpu, old_pg)), Some(new_fit)) = (old_fit_loads, new_fit_opt) {
+                            let new_cpu = new_fit.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde);
+                            let new_pg = new_fit.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde);
+                            let _ = ctx.notify_ship_fitting_load_changes(
+                                char_id, new_loc, old_cpu, new_cpu, old_pg, new_pg,
+                            );
                         }
+                    } else if let Some(src_ship_id) = unfit_ship_id {
+                        ctx.db.with_mut_snapshot(|snap| {
+                            snap.module_online_states.remove(&item_id);
+                            snap.module_active_states.remove(&item_id);
+                            snap.module_active_charges.remove(&item_id);
+                        });
+                        ctx.invalidate_ship_fitting(src_ship_id);
+                        let new_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, src_ship_id).ok();
+                        let _ = ctx.notify_module_online_state(char_id, item_id, false);
+                        let eff_id = ctx
+                            .effect_id_for_module(updated.type_id, Some("online"))
+                            .unwrap_or(16) as i32;
+                        let _ = ctx.notify_godma_ship_effect(
+                            crate::router::NotificationTarget::Character(char_id),
+                            item_id,
+                            eff_id,
+                            false,
+                            0,
+                            0,
+                        );
+                        if let (Some((old_cpu, old_pg)), Some(new_fit)) = (old_fit_loads, new_fit_opt) {
+                            let new_cpu = new_fit.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde);
+                            let new_pg = new_fit.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde);
+                            let _ = ctx.notify_ship_fitting_load_changes(
+                                char_id, src_ship_id, old_cpu, new_cpu, old_pg, new_pg,
+                            );
+                        }
+                    } else {
+                        ctx.invalidate_ship_fitting(new_loc);
                     }
 
                     Some(Ok(PyRep::keyval([

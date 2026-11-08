@@ -327,17 +327,25 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
     // The server sends `OnItemChange(item, {ixLocationID: oldLoc, ixFlag: oldFlag})`; the V24
     // client's `InventorySvc.OnItemChange` derives `OnModuleUnfitted` when ixFlag left a fitting
     // flag. The client-local name itself must never come from the server.
+    let field_val = |rep: &PyRep, col: &str| -> Option<PyRep> {
+        match rep {
+            PyRep::DBRow { columns, .. } => {
+                columns.iter().find(|(k, _)| k == col).map(|(_, v)| v.clone())
+            }
+            PyRep::KeyVal(kv) => kv.get(col).cloned(),
+            _ => None,
+        }
+    };
     let unfit_change = notes
         .iter()
         .find(|(n, a)| {
             n == "OnItemChange"
-                && matches!(a.first(), Some(PyRep::KeyVal(kv))
-                    if kv.get("itemID") == Some(&PyRep::Integer(100_000_003)))
+                && a.first().and_then(|r| field_val(r, "itemID")) == Some(PyRep::Integer(100_000_003))
         })
         .expect("OnItemChange for the unfitted module");
-    let PyRep::KeyVal(row) = &unfit_change.1[0] else { unreachable!() };
-    assert_eq!(row.get("locationID"), Some(&PyRep::Integer(station_id)));
-    assert_eq!(row.get("flagID"), Some(&PyRep::Integer(InventoryFlag::Hangar as i64)));
+    let row_rep = &unfit_change.1[0];
+    assert_eq!(field_val(row_rep, "locationID"), Some(PyRep::Integer(station_id)));
+    assert_eq!(field_val(row_rep, "flagID"), Some(PyRep::Integer(InventoryFlag::Hangar as i64)));
     let Some(PyRep::Dict(change)) = unfit_change.1.get(1) else {
         panic!("OnItemChange change dict expected");
     };
@@ -1767,3 +1775,278 @@ async fn test_batch_d_surface_targeting_and_online_cpu_pg_undock_effects() {
     );
 }
 
+#[tokio::test]
+async fn test_batch_h_inventory_item_change_cpu_pg_and_online_in_space() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(4199);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    let char_id = 90_000_001i64;
+    let ship_id = 100_000_001i64;
+    let station_id = 60_003_760i64;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    // Seed a 1MN Afterburner (type 438, fits easily on default ship) in station hangar
+    let ab_id = 100_990_201i64;
+    seed_item(&ctx, ab_id, 438, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = sess.drain_notifications();
+
+    // #643 + #644: Fit module via invbroker.Add -> canonical DBRow OnItemChange (ownerID == char_id) + cpuLoad/powerLoad
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        None,
+        "Add",
+        &[
+            PyRep::Integer(ab_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(InventoryFlag::MedSlot1 as i64),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("fit AB via invbroker.Add");
+
+    let fit_notes = ctx.drain_notifications_for_char(char_id);
+    let item_change = fit_notes
+        .iter()
+        .find(|n| n.event == "OnItemChange")
+        .expect("OnItemChange on invbroker.Add");
+    let PyRep::DBRow { columns, .. } = &item_change.args[0] else {
+        panic!("OnItemChange arg[0] must be canonical DBRow, got {:?}", item_change.args[0]);
+    };
+    let owner_val = columns
+        .iter()
+        .find(|(name, _)| name == "ownerID")
+        .map(|(_, v)| v.clone());
+    let group_val = columns
+        .iter()
+        .find(|(name, _)| name == "groupID")
+        .and_then(|(_, v)| v.as_i64())
+        .unwrap_or(0);
+    assert_eq!(owner_val, Some(PyRep::Integer(char_id)), "ownerID must match character");
+    assert!(group_val > 0, "groupID must be populated");
+
+    let has_attr_change = |notes: &[eve_server::router::PendingMachoNotification], key: i64, attr: i64| -> bool {
+        notes.iter().any(|n| {
+            n.event == "OnModuleAttributeChanges"
+                && matches!(n.args.first(), Some(PyRep::List(entries)) if entries.iter().any(|e| {
+                    matches!(e, PyRep::Tuple(t) if t.len() >= 7 && t.get(2).and_then(PyRep::as_i64) == Some(key) && t.get(3).and_then(PyRep::as_i64) == Some(attr))
+                }))
+        })
+    };
+    assert!(has_attr_change(&fit_notes, ship_id, i64::from(attr_ids::CPU_LOAD)), "fit must emit cpuLoad (49)");
+    assert!(has_attr_change(&fit_notes, ship_id, i64::from(attr_ids::POWER_LOAD)), "fit must emit powerLoad (15)");
+
+    // #644: TakeModuleOffline emits OnModuleAttributeChanges for cpuLoad (49) and powerLoad (15)
+    let _ = ctx.drain_notifications_for_char(char_id);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "TakeModuleOffline",
+        &[PyRep::Integer(ship_id), PyRep::Integer(ab_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("TakeModuleOffline");
+    let offline_notes = ctx.drain_notifications_for_char(char_id);
+    assert!(has_attr_change(&offline_notes, ship_id, i64::from(attr_ids::CPU_LOAD)), "offline must emit cpuLoad (49)");
+    assert!(has_attr_change(&offline_notes, ship_id, i64::from(attr_ids::POWER_LOAD)), "offline must emit powerLoad (15)");
+
+    // #643 + #644: Unfit module back to station hangar while docked -> canonical DBRow OnItemChange + cpuLoad/powerLoad
+    let _ = ctx.drain_notifications_for_char(char_id);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        None,
+        "Add",
+        &[
+            PyRep::Integer(ab_id),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::Hangar as i64),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("unfit AB back to hangar");
+    let unfit_notes = ctx.drain_notifications_for_char(char_id);
+    let unfit_ic = unfit_notes
+        .iter()
+        .find(|n| n.event == "OnItemChange")
+        .expect("OnItemChange on unfit");
+    assert!(matches!(unfit_ic.args[0], PyRep::DBRow { .. }));
+    assert!(has_attr_change(&unfit_notes, ship_id, i64::from(attr_ids::CPU_LOAD)));
+    assert!(has_attr_change(&unfit_notes, ship_id, i64::from(attr_ids::POWER_LOAD)));
+
+    // #643: Stack merge in invbroker.Add emits canonical DBRow OnItemChange with real ownerID
+    let ammo_a = 100_990_202i64;
+    let ammo_b = 100_990_203i64;
+    seed_item(&ctx, ammo_a, 34, char_id, ship_id, InventoryFlag::Cargo, 5, false);
+    seed_item(&ctx, ammo_b, 34, char_id, station_id, InventoryFlag::Hangar, 7, false);
+    let _ = ctx.drain_notifications_for_char(char_id);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        None,
+        "Add",
+        &[
+            PyRep::Integer(ammo_b),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("merge stack into ship cargo");
+    let merge_notes = ctx.drain_notifications_for_char(char_id);
+    let merge_ic = merge_notes
+        .iter()
+        .find(|n| n.event == "OnItemChange")
+        .expect("OnItemChange on merge");
+    let PyRep::DBRow { columns: merge_cols, .. } = &merge_ic.args[0] else {
+        panic!("OnItemChange arg[0] on merge must be canonical DBRow, got {:?}", merge_ic.args[0]);
+    };
+    let merge_owner = merge_cols.iter().find(|(k, _)| k == "ownerID").map(|(_, v)| v.clone());
+    assert_eq!(merge_owner, Some(PyRep::Integer(char_id)));
+
+    // Re-fit offline AB and undock into space to verify #645 (`dogmaIM.Activate(itemID, "online")`)
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        None,
+        "Add",
+        &[
+            PyRep::Integer(ab_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(InventoryFlag::MedSlot1 as i64),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("re-fit AB");
+    // Explicitly mark module offline before undocking via TakeModuleOffline
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "TakeModuleOffline",
+        &[PyRep::Integer(ship_id), PyRep::Integer(ab_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("TakeModuleOffline before undock");
+
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock");
+    let sys_id = sess.solar_system_id.expect("undocked solar system");
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys
+        .set_combat_state(
+            ship_id,
+            CombatState {
+                capacitor: 500.0,
+                max_capacitor: 500.0,
+                ..Default::default()
+            },
+        )
+        .await;
+
+    // Negative check: normal Activate without "online" still rejects an offline module
+    let act_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[PyRep::Integer(ab_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("default Activate while offline must fail");
+    assert_eq!(act_err.code, "ModuleOffline");
+
+    // #645: Activate(itemID, "online") in space succeeds and emits OnGodmaShipEffect + cpuLoad/powerLoad
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let online_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[PyRep::Integer(ab_id), PyRep::String("online".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Activate(..., 'online') in space");
+    assert_eq!(online_rep.dict_get("online"), Some(&PyRep::Bool(true)));
+    let online_notes = ctx.drain_notifications_for_char(char_id);
+    assert!(has_attr_change(&online_notes, ship_id, i64::from(attr_ids::CPU_LOAD)));
+    assert!(has_attr_change(&online_notes, ship_id, i64::from(attr_ids::POWER_LOAD)));
+    assert!(online_notes.iter().any(|n| n.event == "OnGodmaShipEffect"));
+
+    // #645: Deactivate(itemID, "online") offlines cleanly + emits cpuLoad/powerLoad
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let off_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Deactivate",
+            &[PyRep::Integer(ab_id), PyRep::String("online".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Deactivate(..., 'online')");
+    assert_eq!(off_rep.dict_get("online"), Some(&PyRep::Bool(false)));
+    let deact_notes = ctx.drain_notifications_for_char(char_id);
+    assert!(has_attr_change(&deact_notes, ship_id, i64::from(attr_ids::CPU_LOAD)));
+    assert!(has_attr_change(&deact_notes, ship_id, i64::from(attr_ids::POWER_LOAD)));
+
+    // Negative check: Activate(..., "online") below 75% capacitor fails with NotEnoughCapacitorToOnline
+    let _ = sys
+        .set_combat_state(
+            ship_id,
+            CombatState {
+                capacitor: 100.0,
+                max_capacitor: 500.0,
+                ..Default::default()
+            },
+        )
+        .await;
+    let low_cap_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[PyRep::Integer(ab_id), PyRep::String("online".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("onlining below 75% cap must fail");
+    assert_eq!(low_cap_err.code, "NotEnoughCapacitorToOnline");
+}

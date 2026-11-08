@@ -535,7 +535,7 @@ fn standing_mgr_and_paper_doll_server_handle_queries_and_apparel() {
     .expect("GetMyPaperDollData ok");
     assert_eq!(kv_get(&my_doll, "characterID").and_then(PyRep::as_i64), Some(char_id));
 
-    let doll_pair = handle_clones_and_sheet(
+    let doll_data = handle_clones_and_sheet(
         &ctx,
         &mut sess,
         "paperDollServer",
@@ -545,7 +545,24 @@ fn standing_mgr_and_paper_doll_server_handle_queries_and_apparel() {
     )
     .expect("handled")
     .expect("GetPaperDollData ok");
-    assert_eq!(rep_list_len(&doll_pair), Some(2));
+    assert!(matches!(doll_data, PyRep::KeyVal(_)), "GetPaperDollData must return KeyVal for ApplyDBRowToDoll");
+    assert_eq!(kv_get(&doll_data, "characterID").and_then(PyRep::as_i64), Some(char_id));
+    assert!(kv_get(&doll_data, "sculpts").is_some_and(|v| matches!(v, PyRep::List(_))));
+    assert!(kv_get(&doll_data, "colors").is_some_and(|v| matches!(v, PyRep::List(_))));
+    assert!(kv_get(&doll_data, "modifiers").is_some_and(|v| matches!(v, PyRep::List(_))));
+    assert!(kv_get(&doll_data, "appearance").is_some_and(|a| kv_get(a, "hairDarkness").is_some()));
+
+    let missing_doll = handle_clones_and_sheet(
+        &ctx,
+        &mut sess,
+        "paperDollServer",
+        "GetPaperDollData",
+        &[PyRep::Integer(999_999_999)],
+        &empty_kw,
+    )
+    .expect("handled")
+    .expect_err("unknown charID must return CharacterNotFound");
+    assert_eq!(missing_doll.code, "CharacterNotFound");
 
     let batch = handle_clones_and_sheet(
         &ctx,

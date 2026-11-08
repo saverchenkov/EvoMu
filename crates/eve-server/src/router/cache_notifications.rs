@@ -1311,6 +1311,59 @@ impl ServerContext {
         )
     }
 
+    /// Emits `OnModuleAttributeChanges` for ship `cpuLoad` (49) and `powerLoad` (15) changes.
+    pub fn notify_ship_fitting_load_changes(
+        &self,
+        char_id: i64,
+        ship_id: i64,
+        old_cpu: f64,
+        new_cpu: f64,
+        old_pg: f64,
+        new_pg: f64,
+    ) -> Vec<PendingMachoNotification> {
+        let now = self.now_blueos_filetime_ticks();
+        let changes = vec![
+            PyRep::Tuple(vec![
+                PyRep::String("OnModuleAttributeChange".into()),
+                PyRep::Integer(char_id),
+                PyRep::Integer(ship_id),
+                PyRep::Integer(i64::from(eve_sde::attr_ids::CPU_LOAD)),
+                PyRep::Integer(now),
+                PyRep::Real(new_cpu),
+                PyRep::Real(old_cpu),
+                PyRep::None,
+            ]),
+            PyRep::Tuple(vec![
+                PyRep::String("OnModuleAttributeChange".into()),
+                PyRep::Integer(char_id),
+                PyRep::Integer(ship_id),
+                PyRep::Integer(i64::from(eve_sde::attr_ids::POWER_LOAD)),
+                PyRep::Integer(now),
+                PyRep::Real(new_pg),
+                PyRep::Real(old_pg),
+                PyRep::None,
+            ]),
+        ];
+        self.notify(
+            NotificationTarget::Character(char_id),
+            "OnModuleAttributeChanges",
+            "charid",
+            vec![PyRep::List(changes)],
+        )
+    }
+
+    /// Emits a canonical `OnItemChange(row, changes)` notification using `DBRowDescriptor::inv_item_header`.
+    pub fn notify_item_record_change(
+        &self,
+        char_id: i64,
+        item: &eve_db::InventoryItemRecord,
+        changes: Vec<(i32, PyRep)>,
+    ) -> Vec<PendingMachoNotification> {
+        let cells = crate::services::inventory_bound::item_to_packed_cells(self, item);
+        let row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(cells);
+        self.notify_item_change(char_id, row, changes)
+    }
+
     pub fn notify_target_events(
         &self,
         char_id: i64,

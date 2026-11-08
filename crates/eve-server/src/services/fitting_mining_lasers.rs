@@ -20,6 +20,24 @@ pub(crate) async fn handle_mining_and_deactivate(
                 Err(e) => return Some(Err(e)),
             };
             let module_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let effect_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("defaultEffect").to_string();
+            if effect_name == "online" {
+                let Some(ship_id) = session.ship_id else {
+                    return Some(Err(BridgeRpcError {
+                        code: "NoActiveShip".into(),
+                        message: "No active ship in session".into(),
+                    }));
+                };
+                let _ = crate::services::mining_cycle::deactivate(ctx, char_id, Some(ship_id), module_id).await;
+                return Some(
+                    crate::services::notify_emitters_skills_trade_godma::handle_dogma_take_module_offline(
+                        ctx,
+                        session,
+                        &[PyRep::Integer(ship_id), PyRep::Integer(module_id)],
+                    )
+                    .await,
+                );
+            }
             // Mining modules stop their MN-04 cycle (delivering a short cycle's share of ore); only
             // the pilot whose active ship runs the cycle may stop it.
             match crate::services::mining_cycle::deactivate(ctx, char_id, session.ship_id, module_id).await {
@@ -32,7 +50,6 @@ pub(crate) async fn handle_mining_and_deactivate(
                 Some(Err(e)) => return Some(Err(e)),
                 None => {}
             }
-            let effect_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("defaultEffect").to_string();
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),

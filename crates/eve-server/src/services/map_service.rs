@@ -629,6 +629,12 @@ fn handle_get_incursion_global_report(ctx: &ServerContext) -> Result<PyRep, Brid
                     .and_then(|m| m.withdraw_until_sec)
                     .map(|wu| (wu.saturating_sub(now_sec) as i64) * 10_000_000)
                     .unwrap_or_else(|| withdraw_ft.saturating_sub(now_ft).max(0));
+                let state_code = match inc.state.as_str() {
+                    "Withdrawing" => 0,
+                    "Mobilizing" => 1,
+                    _ => 2,
+                };
+                let has_final = inc.mothership_spawned && !inc.mothership_defeated;
                 PyRep::keyval([
                     ("taleID", PyRep::Integer(inc.tale_id)),
                     ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
@@ -636,9 +642,9 @@ fn handle_get_incursion_global_report(ctx: &ServerContext) -> Result<PyRep, Brid
                     ("stagingSolarSystemID", PyRep::Integer(i64::from(inc.staging_solar_system_id))),
                     ("hqSolarSystemID", PyRep::Integer(i64::from(inc.hq_solar_system_id))),
                     ("influence", PyRep::Real(inc.influence)),
-                    ("state", PyRep::String(inc.state.clone())),
-                    ("hasBoss", PyRep::Bool(inc.mothership_spawned && !inc.mothership_defeated)),
-                    ("hasFinalEncounter", PyRep::Bool(inc.mothership_spawned && !inc.mothership_defeated)),
+                    ("state", PyRep::Integer(state_code)),
+                    ("hasBoss", PyRep::Bool(has_final)),
+                    ("hasFinalEncounter", PyRep::Bool(has_final)),
                     ("factionID", PyRep::Integer(500_019)),
                     ("aggressorFactionID", PyRep::Integer(500_019)),
                     ("effects", PyRep::List(Vec::new())),

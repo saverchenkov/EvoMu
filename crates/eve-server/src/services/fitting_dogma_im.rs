@@ -613,6 +613,17 @@ pub(crate) async fn handle_dogma_im(
                     }
                 }
             }
+            let old_fit_loads = ctx
+                .db
+                .with_snapshot(|s| s.items.get(&item_id).map(|i| i.location_id))
+                .and_then(|loc| {
+                    ctx.get_or_rebuild_ship_fitting(char_id, loc).ok().map(|f| {
+                        (
+                            f.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde),
+                            f.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde),
+                        )
+                    })
+                });
             let destroy_res = ctx.db.try_with_mut_snapshot(|snap| {
                 if let Some(item) = snap.items.get(&item_id) {
                     let loc = item.location_id;
@@ -678,7 +689,15 @@ pub(crate) async fn handle_dogma_im(
                 }
                 crate::services::tactical_modules::remove_projected_remote_assistance(ctx, loc, item_id);
                 ctx.invalidate_ship_fitting(loc);
-                let _ = ctx.get_or_rebuild_ship_fitting(char_id, loc);
+                if let Ok(new_fit) = ctx.get_or_rebuild_ship_fitting(char_id, loc) {
+                    if let Some((old_cpu, old_pg)) = old_fit_loads {
+                        let new_cpu = new_fit.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde);
+                        let new_pg = new_fit.ship.get_attribute(eve_sde::attr_ids::POWER_LOAD, &ctx.sde);
+                        let _ = ctx.notify_ship_fitting_load_changes(
+                            char_id, loc, old_cpu, new_cpu, old_pg, new_pg,
+                        );
+                    }
+                }
                 // V24 client derives `OnModuleUnfitted` from this `OnItemChange` (`ixFlag` change).
                 let _ = ctx.notify_fitted_item_trashed(char_id, item_id, type_id, qty, loc, flag);
             }

@@ -412,11 +412,16 @@ fn sheet_omega_custom_ship_clone_state_rowset_paperdoll_resculpt_and_apparel_une
         .unwrap()
         .is_err());
 
-    // 5. PaperDoll gender label ("male") and empty-args batch fallback
+    // 5. PaperDoll DB KeyVal (ApplyDBRowToDoll schema) and empty-args batch fallback
     let pd = handle_clones_and_sheet(&ctx, &mut sess, "paperDollServer", "GetPaperDollData", &[], &kw)
         .unwrap()
         .unwrap();
-    assert!(matches!(&pd, PyRep::List(v) if v[0].as_str() == Some("male")));
+    assert!(matches!(&pd, PyRep::KeyVal(_)));
+    assert_eq!(pd.dict_get("genderLabel").and_then(PyRep::as_str), Some("Male"));
+    assert!(pd.dict_get("sculpts").is_some());
+    assert!(pd.dict_get("colors").is_some());
+    assert!(pd.dict_get("modifiers").is_some());
+    assert!(pd.dict_get("appearance").and_then(|a| a.dict_get("hairDarkness")).is_some());
     let batch = handle_clones_and_sheet(&ctx, &mut sess, "paperDollServer", "GetPaperDollDataBatch", &[], &kw)
         .unwrap()
         .unwrap();

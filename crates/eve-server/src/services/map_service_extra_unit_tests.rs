@@ -460,6 +460,7 @@ fn deadspace_maps_incursions_extra_info_and_history_stat_types_cover_all_branche
         .find(|r| r.dict_get("constellationName").and_then(|v| v.as_str()) == Some("Kimotoro"))
         .expect("Kimotoro report row");
     assert_eq!(kimo.dict_get("aggressorFactionID"), Some(&PyRep::Integer(500_019)));
+    assert_eq!(kimo.dict_get("state").and_then(|v| v.as_i64()), Some(1)); // Mobilizing -> 1
     assert_eq!(kimo.dict_get("hasFinalEncounter"), Some(&PyRep::Bool(true)));
     assert_eq!(kimo.dict_get("effects"), Some(&PyRep::List(Vec::new())));
 

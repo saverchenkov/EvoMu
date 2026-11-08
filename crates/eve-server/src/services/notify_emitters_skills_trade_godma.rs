@@ -675,6 +675,17 @@ pub async fn handle_dogma_set_module_online(
     let _ = ctx.notify_module_online_state(char_id, module_id, true);
     emit_ship_fitting_attr_changes(ctx, char_id, ship_id, &before_ship_attrs, &after_ship_attrs);
     if mod_type_id > 0 {
+        let eff_id = ctx
+            .effect_id_for_module(mod_type_id, Some("online"))
+            .unwrap_or(16) as i32;
+        let _ = ctx.notify_godma_ship_effect(
+            NotificationTarget::Character(char_id),
+            module_id,
+            eff_id,
+            true,
+            0,
+            0,
+        );
         emit_module_activation_godma_notifications(
             ctx,
             char_id,
@@ -749,6 +760,7 @@ pub async fn handle_dogma_take_module_offline(
 
     let mut fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id)?;
     let before_ship_attrs = snapshot_ship_fitting_attrs(ctx, &fit);
+    let mod_type_id = fit.modules.get(&module_id).map(|m| m.type_id).unwrap_or(0);
     let was_active_type = fit
         .modules
         .get(&module_id)
@@ -832,6 +844,19 @@ pub async fn handle_dogma_take_module_offline(
 
     let _ = ctx.notify_module_online_state(char_id, module_id, false);
     emit_ship_fitting_attr_changes(ctx, char_id, ship_id, &before_ship_attrs, &after_ship_attrs);
+    if mod_type_id > 0 {
+        let eff_id = ctx
+            .effect_id_for_module(mod_type_id, Some("online"))
+            .unwrap_or(16) as i32;
+        let _ = ctx.notify_godma_ship_effect(
+            NotificationTarget::Character(char_id),
+            module_id,
+            eff_id,
+            false,
+            0,
+            0,
+        );
+    }
 
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)),

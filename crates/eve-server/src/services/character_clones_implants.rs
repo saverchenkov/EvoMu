@@ -897,7 +897,7 @@ pub fn handle_clones_and_sheet(
                     message: format!("Character {target_cid} not found"),
                 }));
             };
-            let gender_label = if gender == 0 { "female" } else { "male" };
+            let gender_label = if gender == 0 { "Female" } else { "Male" };
             let details = PyRep::keyval([
                 ("characterID", PyRep::Integer(target_cid)),
                 ("dollDNA", PyRep::String(doll_dna.clone())),
@@ -905,13 +905,21 @@ pub fn handle_clones_and_sheet(
                 ("paperdollState", PyRep::String(doll_dna)),
                 ("portraitInfo", PyRep::String(portrait_info)),
                 ("gender", PyRep::Integer(gender as i64)),
+                ("genderLabel", PyRep::String(gender_label.into())),
                 ("bloodlineID", PyRep::Integer(bloodline_id as i64)),
                 ("wornApparel", PyRep::List(worn_apparel.into_iter().map(|t| PyRep::Integer(i64::from(t))).collect())),
+                (
+                    "appearance",
+                    PyRep::keyval([
+                        ("hairDarkness", PyRep::Real(0.0)),
+                        ("lastUpdate", PyRep::Integer(0)),
+                    ]),
+                ),
+                ("sculpts", PyRep::List(Vec::new())),
+                ("colors", PyRep::List(Vec::new())),
+                ("modifiers", PyRep::List(Vec::new())),
             ]);
-            Some(Ok(PyRep::List(vec![
-                PyRep::String(gender_label.into()),
-                details,
-            ])))
+            Some(Ok(details))
         }
 
         ("paperDollServer", "GetPaperDollDataBatch") => {
