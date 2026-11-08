@@ -563,15 +563,7 @@ pub(super) fn handle_wars(
                 .map(|rows| PyRep::rowset(NEG_COLUMNS.to_vec(), rows)))
         }
         ("warRegistry", "GetNegotiations") => {
-            let wid = arg_i64(0).or(bound_obj_id).unwrap_or(1);
-            let mut rows = match neg_rows_for_caller(ctx, wid, NegKind::Surrender, my_corp) {
-                Ok(r) => r,
-                Err(e) => return Some(Err(e)),
-            };
-            if let Ok(ally_rows) = neg_rows_for_caller(ctx, wid, NegKind::Ally, my_corp) {
-                rows.extend(ally_rows);
-            }
-            Some(Ok(PyRep::rowset(NEG_COLUMNS.to_vec(), rows)))
+            handle_get_negotiations(ctx, bound_obj_id, my_corp, args)
         }
         ("warRegistry", "GetWarNegotiation") => {
             let neg_id = arg_i64(0).unwrap_or(1);
@@ -1185,59 +1177,7 @@ pub(super) fn handle_wars(
         }
 
         ("warStatisticMgr", "GetKills") | ("warStatisticMgr", "GetKillsByGroup") => {
-            let war_id = resolve_war_stat_id(ctx, session, arg_i64(0), bound_obj_id, my_corp);
-            let Some((_, _, _, kills)) = war_kills(ctx, war_id) else {
-                return err("WarNotFound", format!("War {war_id} not found"));
-            };
-            if method == "GetKillsByGroup" {
-                let mut by_grp: BTreeMap<u32, (i64, f64)> = BTreeMap::new();
-                for k in &kills {
-                    let e = by_grp.entry(k.group_id).or_default();
-                    e.0 += 1;
-                    e.1 += k.isk;
-                }
-                let rows = by_grp.into_iter().map(|(g, (n, isk))| vec![PyRep::Integer(g as i64), PyRep::Integer(n), PyRep::Real(isk)]).collect();
-                return Some(Ok(PyRep::rowset(vec!["groupID", "kills", "iskDestroyed"], rows)));
-            }
-            let rows = kills.into_iter().map(|k| {
-                vec![
-                    PyRep::Integer(k.kill_id),
-                    PyRep::Integer(war_id),
-                    PyRep::Integer(k.attacker_corp),
-                    PyRep::Integer(k.victim_corp),
-                    PyRep::Integer(k.group_id as i64),
-                    PyRep::Real(k.isk),
-                    PyRep::Integer(k.attacker_char),
-                    PyRep::Integer(k.attacker_corp),
-                    k.attacker_alliance.map(PyRep::Integer).unwrap_or(PyRep::None),
-                    PyRep::Integer(k.attacker_ship_type_id as i64),
-                    PyRep::Integer(k.victim_char),
-                    PyRep::Integer(k.victim_corp),
-                    k.victim_alliance.map(PyRep::Integer).unwrap_or(PyRep::None),
-                    PyRep::Integer(k.victim_ship_type_id as i64),
-                    PyRep::Integer(k.kill_time_unix as i64),
-                ]
-            }).collect();
-            Some(Ok(PyRep::rowset(
-                vec![
-                    "killID",
-                    "warID",
-                    "attackerCorpID",
-                    "victimCorpID",
-                    "groupID",
-                    "iskLost",
-                    "finalCharacterID",
-                    "finalCorporationID",
-                    "finalAllianceID",
-                    "finalShipTypeID",
-                    "victimCharacterID",
-                    "victimCorporationID",
-                    "victimAllianceID",
-                    "victimShipTypeID",
-                    "killTime",
-                ],
-                rows,
-            )))
+            handle_war_statistic_kills(ctx, session, method, bound_obj_id, my_corp, args)
         }
 
         ("warStatisticMgr", "GetKillMail") => {
@@ -1257,6 +1197,104 @@ pub(super) fn handle_wars(
 
         _ => None,
     }
+}
+
+fn handle_get_negotiations(
+    ctx: &ServerContext,
+    bound_obj_id: Option<i64>,
+    my_corp: i64,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let wid = args.first().and_then(|a| a.as_i64()).or(bound_obj_id).unwrap_or(1);
+    let mut rows = match neg_rows_for_caller(ctx, wid, NegKind::Surrender, my_corp) {
+        Ok(r) => r,
+        Err(e) => return Some(Err(e)),
+    };
+    if let Ok(ally_rows) = neg_rows_for_caller(ctx, wid, NegKind::Ally, my_corp) {
+        rows.extend(ally_rows);
+    }
+    Some(Ok(PyRep::rowset(NEG_COLUMNS.to_vec(), rows)))
+}
+
+fn handle_war_statistic_kills(
+    ctx: &ServerContext,
+    session: &SessionState,
+    method: &str,
+    bound_obj_id: Option<i64>,
+    my_corp: i64,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let war_id = resolve_war_stat_id(
+        ctx,
+        session,
+        args.first().and_then(|a| a.as_i64()),
+        bound_obj_id,
+        my_corp,
+    );
+    let Some((_, _, _, kills)) = war_kills(ctx, war_id) else {
+        return Some(Err(BridgeRpcError {
+            code: "WarNotFound".into(),
+            message: format!("War {war_id} not found"),
+        }));
+    };
+    if method == "GetKillsByGroup" {
+        let mut by_grp: BTreeMap<u32, (i64, f64)> = BTreeMap::new();
+        for k in &kills {
+            let e = by_grp.entry(k.group_id).or_default();
+            e.0 += 1;
+            e.1 += k.isk;
+        }
+        let rows = by_grp
+            .into_iter()
+            .map(|(g, (n, isk))| vec![PyRep::Integer(g as i64), PyRep::Integer(n), PyRep::Real(isk)])
+            .collect();
+        return Some(Ok(PyRep::rowset(
+            vec!["groupID", "kills", "iskDestroyed"],
+            rows,
+        )));
+    }
+    let rows = kills
+        .into_iter()
+        .map(|k| {
+            vec![
+                PyRep::Integer(k.kill_id),
+                PyRep::Integer(war_id),
+                PyRep::Integer(k.attacker_corp),
+                PyRep::Integer(k.victim_corp),
+                PyRep::Integer(k.group_id as i64),
+                PyRep::Real(k.isk),
+                PyRep::Integer(k.attacker_char),
+                PyRep::Integer(k.attacker_corp),
+                k.attacker_alliance.map(PyRep::Integer).unwrap_or(PyRep::None),
+                PyRep::Integer(k.attacker_ship_type_id as i64),
+                PyRep::Integer(k.victim_char),
+                PyRep::Integer(k.victim_corp),
+                k.victim_alliance.map(PyRep::Integer).unwrap_or(PyRep::None),
+                PyRep::Integer(k.victim_ship_type_id as i64),
+                PyRep::Integer(k.kill_time_unix as i64),
+            ]
+        })
+        .collect();
+    Some(Ok(PyRep::rowset(
+        vec![
+            "killID",
+            "warID",
+            "attackerCorpID",
+            "victimCorpID",
+            "groupID",
+            "iskLost",
+            "finalCharacterID",
+            "finalCorporationID",
+            "finalAllianceID",
+            "finalShipTypeID",
+            "victimCharacterID",
+            "victimCorporationID",
+            "victimAllianceID",
+            "victimShipTypeID",
+            "killTime",
+        ],
+        rows,
+    )))
 }
 
 #[cfg(test)]

@@ -899,9 +899,11 @@ pub(super) async fn handle_extended_with_bound(
         }
 
         // parity: rpc:agentMgr.GetDisabledMissions
-        ("agentMgr", "GetDisabledMissions") => handle_get_disabled_missions(session),
+        ("agentMgr", "GetDisabledMissions") => handle_get_disabled_missions(ctx, session),
 
-        ("agentMgr", "GetReplayTimestamp") => handle_get_replay_timestamp(session, args),
+        ("agentMgr", "GetReplayTimestamp") => {
+            handle_get_replay_timestamp(ctx, session, bound_entry, args)
+        }
 
         ("agentMgr", "GetPlausibleMissionIDs") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
@@ -1247,18 +1249,7 @@ pub(super) async fn handle_extended_with_bound(
             }
         }
 
-        ("air_npe", "skip_air_npe") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let now = ctx.now_unix();
-            match crate::services::character_expert_systems::skip_air_npe_and_stop_graph(ctx, char_id, now) {
-                Ok((graph_id, curr_node, completed)) => Some(Ok(PyRep::keyval([
-                    ("nodeGraphID", PyRep::Integer(i64::from(graph_id))),
-                    ("currentNodeID", PyRep::Integer(i64::from(curr_node))),
-                    ("completed", PyRep::Bool(completed)),
-                ]))),
-                Err(e) => Some(Err(e)),
-            }
-        }
+        ("air_npe", "skip_air_npe") => handle_skip_air_npe(ctx, session),
 
         ("air_npe", "get_air_npe_state") | ("air_npe", "is_air_npe_enabled") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
@@ -1338,18 +1329,104 @@ fn handle_agent_mgr_attr(
     Some(Ok(val))
 }
 
-fn handle_get_disabled_missions(session: &SessionState) -> Option<Result<PyRep, BridgeRpcError>> {
-    // const-ok: no mission IDs are disabled in EvoMu's SDE mission pool
-    let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-    Some(Ok(PyRep::List(vec![])))
+fn handle_skip_air_npe(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let now = ctx.now_unix();
+    match crate::services::character_expert_systems::skip_air_npe_and_stop_graph(ctx, char_id, now) {
+        Ok((graph_id, curr_node, completed)) => Some(Ok(PyRep::keyval([
+            ("nodeGraphID", PyRep::Integer(i64::from(graph_id))),
+            ("currentNodeID", PyRep::Integer(i64::from(curr_node))),
+            ("completed", PyRep::Bool(completed)),
+        ]))),
+        Err(e) => Some(Err(e)),
+    }
 }
 
-fn handle_get_replay_timestamp(session: &SessionState, _args: &[PyRep]) -> Option<Result<PyRep, BridgeRpcError>> {
+fn handle_get_disabled_missions(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let disabled_ids = ctx.db.with_snapshot(|snap| {
+        let mut ids: Vec<i64> = snap
+            .service_state_blobs
+            .get("agentMgr:disabled_missions")
+            .and_then(|s| serde_json::from_str::<Vec<u32>>(s).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|mid| ctx.sde.missions.contains_key(mid))
+            .map(i64::from)
+            .collect();
+        if let Some(char_blob) = snap
+            .service_state_blobs
+            .get(&format!("agentMgr:disabled_missions:{char_id}"))
+            .and_then(|s| serde_json::from_str::<Vec<u32>>(s).ok())
+        {
+            for mid in char_blob {
+                if ctx.sde.missions.contains_key(&mid) {
+                    ids.push(i64::from(mid));
+                }
+            }
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        ids.into_iter().map(PyRep::Integer).collect::<Vec<_>>()
+    });
+    Some(Ok(PyRep::List(disabled_ids)))
+}
+
+fn handle_get_replay_timestamp(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&crate::router::BoundObjectEntry>,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
     // `eve/client/script/ui/station/agents/agents.pyj:485-491` (`GetAgentTimers`):
     // calls `self.GetAgentMoniker(agentID).GetReplayTimestamp(session.charid)` and stores
     // the returned timestamp (or `None` when the career agent is not on a replay timer).
-    let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-    Some(Ok(PyRep::None))
+    let (_, caller_char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let target_char_id = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .filter(|&id| id > 0)
+        .unwrap_or(caller_char_id);
+    let bound_agent_id = bound_entry
+        .filter(|b| b.service == "agentMgr" && b.object_id > 0)
+        .map(|b| b.object_id);
+    let now_unix = ctx.now_unix();
+    let replay_unix = ctx.db.with_snapshot(|snap| {
+        if let Some(aid) = bound_agent_id {
+            if let Some(ts) = snap
+                .service_state_blobs
+                .get(&format!("agentMgr:replay_ts:{target_char_id}:{aid}"))
+                .and_then(|s| s.parse::<u64>().ok())
+                .filter(|&ts| ts > now_unix)
+            {
+                return Some(ts);
+            }
+        }
+        load_epic_arc_states(snap, target_char_id)
+            .into_iter()
+            .filter(|a| bound_agent_id.is_none_or(|aid| a.agent_id == aid))
+            .filter_map(|a| a.cooldown_until_unix)
+            .filter(|&until| until > now_unix)
+            .max()
+    });
+    Some(Ok(replay_unix
+        .map(|ts| PyRep::Integer((ts as i64) * 10_000_000 + 116_444_736_000_000_000))
+        .unwrap_or(PyRep::None)))
 }
 
 #[cfg(test)]

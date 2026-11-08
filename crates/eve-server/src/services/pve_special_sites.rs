@@ -1154,44 +1154,17 @@ pub async fn handle_pve_special_sites(
         }
 
         ("dungeonInstanceCacheMgr", "GetSignatureInstances") => {
-            if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
-            let sys_id = match args.first().and_then(|a| a.as_i64()).map(|v| v as SolarSystemId).map(Ok).unwrap_or_else(|| resolve_session_system_id(ctx, session)) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            if (31_000_001..=31_000_005).contains(&sys_id) {
-                let sig_py = with_pve_special_reg(ctx, |reg| {
-                    if let Some(hive) = reg.drifter_hives.get(&sys_id) {
-                        let mut by_dng: Vec<(PyRep, PyRep)> = Vec::new();
-                        by_dng.push((
-                            PyRep::Integer(hive.dungeon_id as i64),
-                            PyRep::List(vec![PyRep::Integer(sys_id as i64)]),
-                        ));
-                        let mut by_sys: Vec<(PyRep, PyRep)> = Vec::new();
-                        by_sys.push((PyRep::Integer(sys_id as i64), PyRep::Dict(by_dng)));
-                        PyRep::Dict(by_sys)
-                    } else {
-                        PyRep::Dict(Vec::new())
-                    }
-                });
-                return Some(Ok(sig_py));
-            }
-            None
+            handle_get_signature_instances(ctx, session, args)
         }
 
         // Permanent Triglavian Minor Victory systems won in Chapter 3
         ("dungeonInstanceCacheMgr", "GetTriglavianMinorVictorySystems") => {
-            if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
-            ensure_special_sites_initialized(ctx);
-            let systems = with_pve_special_reg(ctx, |reg| reg.triglavian_minor_victory_systems.clone());
-            Some(Ok(PyRep::List(systems.into_iter().map(|s| PyRep::Integer(s as i64)).collect())))
+            handle_get_triglavian_minor_victory_systems(ctx, session)
         }
 
         // parity: feat:pve.metaliminal-storms, rpc:map.GetAllRoamingWeatherSystems
         ("map", "GetAllRoamingWeatherSystems") => {
-            if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
-            let list = get_all_roaming_weather_systems(ctx);
-            Some(Ok(PyRep::List(list)))
+            handle_get_all_roaming_weather_systems(ctx, session)
         }
 
         // parity: feat:pve.interference
@@ -1310,6 +1283,69 @@ pub fn check_drifter_hive_gate_access(
         }
         Ok(())
     })
+}
+
+fn handle_get_signature_instances(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if let Err(e) = ServerContext::require_character(session) {
+        return Some(Err(e));
+    }
+    let sys_id = match args
+        .first()
+        .and_then(|a| a.as_i64())
+        .map(|v| v as SolarSystemId)
+        .map(Ok)
+        .unwrap_or_else(|| resolve_session_system_id(ctx, session))
+    {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    if (31_000_001..=31_000_005).contains(&sys_id) {
+        let sig_py = with_pve_special_reg(ctx, |reg| {
+            if let Some(hive) = reg.drifter_hives.get(&sys_id) {
+                let mut by_dng: Vec<(PyRep, PyRep)> = Vec::new();
+                by_dng.push((
+                    PyRep::Integer(hive.dungeon_id as i64),
+                    PyRep::List(vec![PyRep::Integer(sys_id as i64)]),
+                ));
+                let mut by_sys: Vec<(PyRep, PyRep)> = Vec::new();
+                by_sys.push((PyRep::Integer(sys_id as i64), PyRep::Dict(by_dng)));
+                PyRep::Dict(by_sys)
+            } else {
+                PyRep::Dict(Vec::new())
+            }
+        });
+        return Some(Ok(sig_py));
+    }
+    None
+}
+
+fn handle_get_triglavian_minor_victory_systems(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if let Err(e) = ServerContext::require_character(session) {
+        return Some(Err(e));
+    }
+    ensure_special_sites_initialized(ctx);
+    let systems = with_pve_special_reg(ctx, |reg| reg.triglavian_minor_victory_systems.clone());
+    Some(Ok(PyRep::List(
+        systems.into_iter().map(|s| PyRep::Integer(s as i64)).collect(),
+    )))
+}
+
+fn handle_get_all_roaming_weather_systems(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if let Err(e) = ServerContext::require_character(session) {
+        return Some(Err(e));
+    }
+    let list = get_all_roaming_weather_systems(ctx);
+    Some(Ok(PyRep::List(list)))
 }
 
 #[cfg(test)]

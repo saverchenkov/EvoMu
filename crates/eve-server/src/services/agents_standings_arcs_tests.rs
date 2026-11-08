@@ -528,3 +528,53 @@ async fn handle_extended_rpcs_cover_agent_mgr_epic_arc_tracker_standings_keeper_
         Some(true)
     );
 }
+
+#[tokio::test]
+async fn get_disabled_missions_and_replay_timestamp_read_persisted_state() {
+    let ctx = make_test_context();
+    let mut session = char_session(90_000_001, 98_000_001);
+    let kw = HashMap::new();
+    let sample_mission_id = *ctx.sde.missions.keys().next().expect("SDE mission");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs.insert(
+            "agentMgr:disabled_missions".into(),
+            serde_json::to_string(&vec![sample_mission_id]).unwrap(),
+        );
+        snap.service_state_blobs.insert(
+            "agentMgr:replay_ts:90000001:3018921".into(),
+            (ctx.now_unix() + 600).to_string(),
+        );
+    });
+
+    let disabled = handle_extended(&ctx, &mut session, "agentMgr", "GetDisabledMissions", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(disabled, PyRep::List(vec![PyRep::Integer(i64::from(sample_mission_id))]));
+
+    let bound = crate::router::BoundObjectEntry {
+        bound_id: 42,
+        session_id: session.session_id,
+        user_id: 1,
+        character_id: 90_000_001,
+        service: "agentMgr".into(),
+        object_id: 3_018_921,
+        oid_str: "N=1:42".into(),
+        ref_id: 42,
+    };
+    let expected_ft = ((ctx.now_unix() + 600) as i64) * 10_000_000 + 116_444_736_000_000_000;
+    let replay = handle_extended_with_bound(
+        &ctx,
+        &mut session,
+        Some(&bound),
+        "agentMgr",
+        "GetReplayTimestamp",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(replay, PyRep::Integer(expected_ft));
+}

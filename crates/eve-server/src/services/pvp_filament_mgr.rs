@@ -1308,33 +1308,10 @@ pub async fn handle(
             });
             match res { Ok(()) => Some(Ok(PyRep::None)), Err(e) => Some(Err(e)) }
         }
-        ("pvpFilamentMgr", "GetAllEvents") => {
-            let events_rep = with_pvp_store_events(ctx, |store| {
-                PyRep::Dict(store.events.iter().map(|e| (PyRep::Integer(e.event_id), event_to_keyval(e))).collect())
-            });
-            Some(Ok(events_rep))
-        }
-
-        ("pvpFilamentMgr", "GetActiveEvents") => {
-            let now_i64 = now_unix as i64;
-            let active_rep = with_pvp_store_events(ctx, |store| {
-                PyRep::Dict(store.events.iter().filter(|e| e.start_unix <= now_i64 && now_i64 <= e.end_unix).map(|e| (PyRep::Integer(e.event_id), event_to_keyval(e))).collect())
-            });
-            Some(Ok(active_rep))
-        }
-        ("pvpFilamentMgr", "GetMostRecentEvent") => {
-            let now_i64 = now_unix as i64;
-            let recent_rep = with_pvp_store_events(ctx, |store| {
-                store.events.iter().filter(|e| e.start_unix <= now_i64).max_by_key(|e| (e.end_unix, e.start_unix, e.event_id))
-                    .or_else(|| store.events.iter().max_by_key(|e| (e.end_unix, e.event_id))).map(event_to_keyval).unwrap_or(PyRep::None)
-            });
-            Some(Ok(recent_rep))
-        }
-        ("pvpFilamentMgr", "GetNextEventDate") => {
-            let now_i64 = now_unix as i64;
-            let next_date = with_pvp_store_events(ctx, |store| store.events.iter().filter(|e| e.start_unix > now_i64).map(|e| e.start_unix).min());
-            Some(Ok(next_date.map(|ts| PyRep::Integer(unix_to_filetime(ts))).unwrap_or(PyRep::None)))
-        }
+        ("pvpFilamentMgr", "GetAllEvents") => handle_get_all_events(ctx),
+        ("pvpFilamentMgr", "GetActiveEvents") => handle_get_active_events(ctx, now_unix),
+        ("pvpFilamentMgr", "GetMostRecentEvent") => handle_get_most_recent_event(ctx, now_unix),
+        ("pvpFilamentMgr", "GetNextEventDate") => handle_get_next_event_date(ctx, now_unix),
         ("pvpFilamentMgr", "GetLeaderboard") => {
             let event_id = args.first().and_then(|a| a.as_i64()).filter(|&e| e > 0).unwrap_or(171);
             let entries = ctx.db.with_snapshot(|snap| build_leaderboard_rows_for_event(&load_pvp_store(snap), event_id));
@@ -1351,6 +1328,64 @@ pub async fn handle(
         }
         _ => None,
     }
+}
+
+fn handle_get_all_events(ctx: &ServerContext) -> Option<Result<PyRep, BridgeRpcError>> {
+    let events_rep = with_pvp_store_events(ctx, |store| {
+        PyRep::Dict(
+            store
+                .events
+                .iter()
+                .map(|e| (PyRep::Integer(e.event_id), event_to_keyval(e)))
+                .collect(),
+        )
+    });
+    Some(Ok(events_rep))
+}
+
+fn handle_get_active_events(ctx: &ServerContext, now_unix: u64) -> Option<Result<PyRep, BridgeRpcError>> {
+    let now_i64 = now_unix as i64;
+    let active_rep = with_pvp_store_events(ctx, |store| {
+        PyRep::Dict(
+            store
+                .events
+                .iter()
+                .filter(|e| e.start_unix <= now_i64 && now_i64 <= e.end_unix)
+                .map(|e| (PyRep::Integer(e.event_id), event_to_keyval(e)))
+                .collect(),
+        )
+    });
+    Some(Ok(active_rep))
+}
+
+fn handle_get_most_recent_event(ctx: &ServerContext, now_unix: u64) -> Option<Result<PyRep, BridgeRpcError>> {
+    let now_i64 = now_unix as i64;
+    let recent_rep = with_pvp_store_events(ctx, |store| {
+        store
+            .events
+            .iter()
+            .filter(|e| e.start_unix <= now_i64)
+            .max_by_key(|e| (e.end_unix, e.start_unix, e.event_id))
+            .or_else(|| store.events.iter().max_by_key(|e| (e.end_unix, e.event_id)))
+            .map(event_to_keyval)
+            .unwrap_or(PyRep::None)
+    });
+    Some(Ok(recent_rep))
+}
+
+fn handle_get_next_event_date(ctx: &ServerContext, now_unix: u64) -> Option<Result<PyRep, BridgeRpcError>> {
+    let now_i64 = now_unix as i64;
+    let next_date = with_pvp_store_events(ctx, |store| {
+        store
+            .events
+            .iter()
+            .filter(|e| e.start_unix > now_i64)
+            .map(|e| e.start_unix)
+            .min()
+    });
+    Some(Ok(next_date
+        .map(|ts| PyRep::Integer(unix_to_filetime(ts)))
+        .unwrap_or(PyRep::None)))
 }
 
 #[cfg(test)] #[path = "pvp_filament_mgr_tests.rs"]

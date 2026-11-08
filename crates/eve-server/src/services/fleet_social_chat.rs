@@ -87,8 +87,7 @@ fn handle_chat_rpc(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("chatAuthenticationService", "GetAuthenticationToken") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            Some(Ok(PyRep::String(format!("evomu-xmpp-token-{char_id}"))))
+            handle_get_chat_authentication_token(ctx, session)
         }
 
         ("XmppChatMgr", "AddCharacterToChannel") => {
@@ -441,15 +440,7 @@ fn handle_chat_rpc(
             Some(Ok(PyRep::Bool(true)))
         }
 
-        ("XmppChatMgr", "GetHelpChannel") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let lang = args.first().and_then(|a| a.as_str()).filter(|s| !s.is_empty()).unwrap_or(&session.language_id).trim().to_ascii_lowercase();
-            let chan = match lang.as_str() {
-                "de" => "help_de", "fr" => "help_fr", "ru" => "help_ru", "ja" => "help_ja",
-                "zh" => "help_zh", "ko" => "help_ko", "es" => "help_es", _ => "help_en",
-            };
-            Some(Ok(PyRep::String(chan.into())))
-        }
+        ("XmppChatMgr", "GetHelpChannel") => handle_get_help_channel(ctx, session, args),
 
         ("XmppChatMgr", "GetRookieChannel") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
@@ -463,9 +454,7 @@ fn handle_chat_rpc(
             Some(Ok(if is_rookie { PyRep::String("rookie_help".into()) } else { PyRep::None }))
         }
 
-        ("XmppChatMgr", "Hostname") => {
-            Some(Ok(PyRep::String("chat.evomu.local".into())))
-        }
+        ("XmppChatMgr", "Hostname") => handle_xmpp_hostname(ctx),
 
         // parity: rpc:XmppChatMgr.GetDeprecatedPrefsFallback
         ("XmppChatMgr", "GetDeprecatedPrefsFallback") => {
@@ -1209,6 +1198,68 @@ pub(super) fn extract_id_list(arg: Option<&PyRep>) -> Vec<i64> {
         None => {}
     }
     ids
+}
+
+fn handle_get_chat_authentication_token(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let token = ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
+            .get(&format!("xmpp:token:{char_id}"))
+            .cloned()
+            .unwrap_or_else(|| format!("evomu-xmpp-token-{char_id}"))
+    });
+    Some(Ok(PyRep::String(token)))
+}
+
+fn handle_get_help_channel(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let _ = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let lang = args
+        .first()
+        .and_then(|a| a.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&session.language_id)
+        .trim()
+        .to_ascii_lowercase();
+    let default_chan = match lang.as_str() {
+        "de" => "help_de",
+        "fr" => "help_fr",
+        "ru" => "help_ru",
+        "ja" => "help_ja",
+        "zh" => "help_zh",
+        "ko" => "help_ko",
+        "es" => "help_es",
+        _ => "help_en",
+    };
+    let chan = ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
+            .get(&format!("xmpp:help_channel:{lang}"))
+            .cloned()
+            .unwrap_or_else(|| default_chan.to_string())
+    });
+    Some(Ok(PyRep::String(chan)))
+}
+
+fn handle_xmpp_hostname(ctx: &ServerContext) -> Option<Result<PyRep, BridgeRpcError>> {
+    let host = ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
+            .get("xmpp:hostname")
+            .cloned()
+            .unwrap_or_else(|| "chat.evomu.local".to_string())
+    });
+    Some(Ok(PyRep::String(host)))
 }
 
 #[cfg(test)]

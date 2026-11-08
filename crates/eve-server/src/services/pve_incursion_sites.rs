@@ -1271,71 +1271,94 @@ pub async fn handle_incursion_rpc(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         // parity: feat:pve.incursion-payout
-        ("incursion", "GetIncursionLPLog") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let logs_py = with_pve_special_reg(ctx, |reg| {
-                reg.incursion_lp_logs
-                    .get(&char_id)
-                    .map(|entries| {
-                        entries
-                            .iter()
-                            .map(crate::services::pve_incursion_sites_ops::encode_incursion_lp_log_row)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default()
-            });
-            Some(Ok(PyRep::List(logs_py)))
-        }
+        ("incursion", "GetIncursionLPLog") => handle_get_incursion_lp_log(ctx, session),
 
         // parity: feat:pve.incursion-system, rpc:incursion.UpdateIncursionLPLog
-        ("incursion", "UpdateIncursionLPLog") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let now_ft = ctx.now_blueos_filetime_ticks();
-            let synced_rows = with_pve_special_reg(ctx, |reg| {
-                crate::services::pve_incursion_sites_ops::sync_incursion_lp_log_rows(
-                    reg, char_id, args, now_ft,
-                )
-            });
-            if synced_rows.is_empty() {
-                Some(Ok(PyRep::None))
-            } else {
-                Some(Ok(PyRep::List(synced_rows)))
-            }
-        }
+        ("incursion", "UpdateIncursionLPLog") => handle_update_incursion_lp_log(ctx, session, args),
 
         // parity: feat:pve.incursion-system, feat:pve.tales, rpc:taleMgr.GetGlobalWorldEventTales
-        ("taleMgr", "GetGlobalWorldEventTales") => {
-            if let Err(e) = ServerContext::require_character(session) {
-                return Some(Err(e));
-            }
-            crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
-            let list =
-                crate::services::pve_incursion_lifecycle::collect_all_world_event_tales(ctx, None);
-            Some(Ok(PyRep::List(list)))
-        }
+        ("taleMgr", "GetGlobalWorldEventTales") => handle_get_global_world_event_tales(ctx, session),
 
         // parity: feat:pve.incursion-system, feat:pve.tales, rpc:taleMgr.get_active_tales_by_template
         ("taleMgr", "get_active_tales_by_template") => {
-            if let Err(e) = ServerContext::require_character(session) {
-                return Some(Err(e));
-            }
-            crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
-            let template_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let list = crate::services::pve_incursion_lifecycle::collect_all_world_event_tales(
-                ctx,
-                Some(template_id),
-            );
-            Some(Ok(PyRep::List(list)))
+            handle_get_active_tales_by_template(ctx, session, args)
         }
 
         _ => None,
     }
+}
+
+fn handle_get_incursion_lp_log(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let logs_py = with_pve_special_reg(ctx, |reg| {
+        reg.incursion_lp_logs
+            .get(&char_id)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(crate::services::pve_incursion_sites_ops::encode_incursion_lp_log_row)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+    Some(Ok(PyRep::List(logs_py)))
+}
+
+fn handle_update_incursion_lp_log(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let synced_rows = with_pve_special_reg(ctx, |reg| {
+        crate::services::pve_incursion_sites_ops::sync_incursion_lp_log_rows(
+            reg, char_id, args, now_ft,
+        )
+    });
+    if synced_rows.is_empty() {
+        Some(Ok(PyRep::None))
+    } else {
+        Some(Ok(PyRep::List(synced_rows)))
+    }
+}
+
+fn handle_get_global_world_event_tales(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if let Err(e) = ServerContext::require_character(session) {
+        return Some(Err(e));
+    }
+    crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
+    let list = crate::services::pve_incursion_lifecycle::collect_all_world_event_tales(ctx, None);
+    Some(Ok(PyRep::List(list)))
+}
+
+fn handle_get_active_tales_by_template(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if let Err(e) = ServerContext::require_character(session) {
+        return Some(Err(e));
+    }
+    crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
+    let template_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+    let list = crate::services::pve_incursion_lifecycle::collect_all_world_event_tales(
+        ctx,
+        Some(template_id),
+    );
+    Some(Ok(PyRep::List(list)))
 }
 
 #[cfg(test)]

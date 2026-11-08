@@ -609,14 +609,14 @@ pub fn handle_clones_and_sheet(
         }
 
         ("jumpCloneSvc", "SetJumpCloneName") => {
-            Some(crate::services::jump_clone_names::set_jump_clone_name(ctx, session, args))
+            handle_set_jump_clone_name(ctx, session, args)
         }
 
         ("jumpCloneSvc", "ValidateInstallJumpClone") => {
-            Some(crate::services::jump_clone_names::validate_install_jump_clone(ctx, session, args))
+            handle_validate_install_jump_clone(ctx, session, args)
         }
         ("jumpCloneSvc", "GetShipCloneState") => {
-            Some(crate::services::jump_clone_names::get_ship_clone_state(ctx, session, args))
+            handle_get_ship_clone_state(ctx, session, args)
         }
 
         ("jumpCloneSvc", "ResetLastCloneJumpTime") => {
@@ -1355,6 +1355,36 @@ pub fn handle_clones_and_sheet(
         // =========================================================================
         _ => super::character_contacts::handle_contacts(ctx, session, service, method, args, _kwargs),
     }
+}
+
+fn handle_set_jump_clone_name(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    Some(crate::services::jump_clone_names::set_jump_clone_name(
+        ctx, session, args,
+    ))
+}
+
+fn handle_validate_install_jump_clone(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    Some(crate::services::jump_clone_names::validate_install_jump_clone(
+        ctx, session, args,
+    ))
+}
+
+fn handle_get_ship_clone_state(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    Some(crate::services::jump_clone_names::get_ship_clone_state(
+        ctx, session, args,
+    ))
 }
 
 #[cfg(test)]

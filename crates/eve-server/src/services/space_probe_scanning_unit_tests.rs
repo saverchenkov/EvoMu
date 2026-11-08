@@ -470,3 +470,75 @@ async fn activate_scan_probe_launcher_and_scan_mgr_rpcs_end_to_end() {
     );
     let _ = DVec3::ZERO;
 }
+
+#[tokio::test]
+async fn set_activity_state_updates_probe_state_and_rejects_invalid_state() {
+    let (ctx, mut sess) = make_scan_ctx_and_session();
+    let sys_id = 30_000_142;
+    let char_id = 90_000_001;
+    let kw = HashMap::new();
+    let bound = BoundObjectEntry {
+        bound_id: 11,
+        session_id: sess.session_id,
+        user_id: sess.user_id.unwrap_or(1),
+        character_id: char_id,
+        service: "scanMgr".into(),
+        object_id: sys_id as i64,
+        oid_str: "N=1:11".into(),
+        ref_id: 11,
+    };
+    ctx.active_scanner_probes.write().unwrap().insert(
+        700_901,
+        ActiveScannerProbe {
+            probe_id: 700_901,
+            probe_type_id: 30_013,
+            owner_char_id: char_id,
+            ship_id: 100_000_001,
+            launcher_module_id: 0,
+            solar_system_id: sys_id,
+            position: [0.0; 3],
+            destination: [0.0; 3],
+            range_step: 4,
+            scan_range_m: 1_000_000.0,
+            base_sensor_strength: 40.0,
+            max_flight_time_s: 3600.0,
+            launched_at_unix: 1_700_000_000,
+            state: PROBE_STATE_IDLE,
+            warp_end_ft: None,
+        },
+    );
+
+    let ok = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "SetActivityState",
+        &[
+            PyRep::List(vec![PyRep::Integer(700_901)]),
+            PyRep::Integer(i64::from(PROBE_STATE_INACTIVE)),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ok, Ok(PyRep::None));
+    assert_eq!(
+        ctx.active_scanner_probes.read().unwrap().get(&700_901).unwrap().state,
+        PROBE_STATE_INACTIVE
+    );
+
+    let err = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "scanMgr",
+        "SetActivityState",
+        &[PyRep::Integer(99)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err.code, "InvalidProbeState");
+}

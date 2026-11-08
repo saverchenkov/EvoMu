@@ -743,31 +743,9 @@ pub async fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("fwWarzoneSolarsystem", "GetHQSystemIDs") => {
-            let hqs = vec![
-                PyRep::Integer(i64::from(HQ_SYSTEM_MEHATOOR)),
-                PyRep::Integer(i64::from(HQ_SYSTEM_ONNAMON)),
-                PyRep::Integer(i64::from(HQ_SYSTEM_INTAKI)),
-                PyRep::Integer(i64::from(HQ_SYSTEM_AMO)),
-            ];
-            Some(Ok(PyRep::List(hqs)))
-        }
+        ("fwWarzoneSolarsystem", "GetHQSystemIDs") => handle_get_hq_system_ids(ctx),
 
-        ("fwWarzoneSolarsystem", "GetAllWarzones") => {
-            let wz1 = PyRep::keyval([
-                ("warzoneID", PyRep::Integer(1)),
-                ("name", PyRep::String("Caldari - Gallente Warzone".into())),
-                ("factionOneID", PyRep::Integer(FACTION_CALDARI)),
-                ("factionTwoID", PyRep::Integer(FACTION_GALLENTE)),
-            ]);
-            let wz2 = PyRep::keyval([
-                ("warzoneID", PyRep::Integer(2)),
-                ("name", PyRep::String("Amarr - Minmatar Warzone".into())),
-                ("factionOneID", PyRep::Integer(FACTION_AMARR)),
-                ("factionTwoID", PyRep::Integer(FACTION_MINMATAR)),
-            ]);
-            Some(Ok(PyRep::List(vec![wz1, wz2])))
-        }
+        ("fwWarzoneSolarsystem", "GetAllWarzones") => handle_get_all_warzones(ctx),
 
         ("fwWarzoneSolarsystem", "GetAllWarzonesOccupationStates")
         | ("fwWarzoneSolarsystem", "GetAllWarzonesOccupationStatesUncached") => {
@@ -948,28 +926,73 @@ pub async fn handle(
         }
 
         ("dungeonInstanceCacheMgr", "GetFactionWarfareBattlefieldInstances") => {
-            let sys_id = args.first().and_then(|a| a.as_i64()).and_then(|v| u32::try_from(v).ok()).or(session.solar_system_id);
-            let instances = read_fw_runtime(ctx, |rt| {
-                rt.battlefield_instances
-                    .iter()
-                    .filter(|b| !b.completed && sys_id.map(|s| b.solar_system_id == s).unwrap_or(true))
-                    .map(|b| {
-                        PyRep::keyval([
-                            ("instanceID", PyRep::Integer(b.instance_id)),
-                            ("solarSystemID", PyRep::Integer(i64::from(b.solar_system_id))),
-                            ("factionID", PyRep::Integer(b.faction_id)),
-                            ("name", PyRep::String(b.name.clone())),
-                            ("captureProgress", PyRep::Real(b.capture_progress)),
-                            ("completed", PyRep::Bool(b.completed)),
-                        ])
-                    })
-                    .collect::<Vec<PyRep>>()
-            });
-            Some(Ok(PyRep::List(instances)))
+            handle_get_fw_battlefield_instances(ctx, session, args)
         }
 
         _ => None,
     }
+}
+
+fn handle_get_hq_system_ids(ctx: &ServerContext) -> Option<Result<PyRep, BridgeRpcError>> {
+    let hqs = [
+        HQ_SYSTEM_MEHATOOR,
+        HQ_SYSTEM_ONNAMON,
+        HQ_SYSTEM_INTAKI,
+        HQ_SYSTEM_AMO,
+    ]
+    .into_iter()
+    .filter(|sys_id| {
+        ctx.sde.solar_systems.is_empty() || ctx.sde.solar_systems.contains_key(sys_id)
+    })
+    .map(|sys_id| PyRep::Integer(i64::from(sys_id)))
+    .collect();
+    Some(Ok(PyRep::List(hqs)))
+}
+
+fn handle_get_all_warzones(ctx: &ServerContext) -> Option<Result<PyRep, BridgeRpcError>> {
+    let wz1 = PyRep::keyval([
+        ("warzoneID", PyRep::Integer(1)),
+        ("name", PyRep::String("Caldari - Gallente Warzone".into())),
+        ("factionOneID", PyRep::Integer(FACTION_CALDARI)),
+        ("factionTwoID", PyRep::Integer(FACTION_GALLENTE)),
+    ]);
+    let wz2 = PyRep::keyval([
+        ("warzoneID", PyRep::Integer(2)),
+        ("name", PyRep::String("Amarr - Minmatar Warzone".into())),
+        ("factionOneID", PyRep::Integer(FACTION_AMARR)),
+        ("factionTwoID", PyRep::Integer(FACTION_MINMATAR)),
+    ]);
+    let _ = ctx.db.with_snapshot(|snap| snap.fw_system_occupations.len());
+    Some(Ok(PyRep::List(vec![wz1, wz2])))
+}
+
+fn handle_get_fw_battlefield_instances(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let sys_id = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .and_then(|v| u32::try_from(v).ok())
+        .or(session.solar_system_id);
+    let instances = read_fw_runtime(ctx, |rt| {
+        rt.battlefield_instances
+            .iter()
+            .filter(|b| !b.completed && sys_id.map(|s| b.solar_system_id == s).unwrap_or(true))
+            .map(|b| {
+                PyRep::keyval([
+                    ("instanceID", PyRep::Integer(b.instance_id)),
+                    ("solarSystemID", PyRep::Integer(i64::from(b.solar_system_id))),
+                    ("factionID", PyRep::Integer(b.faction_id)),
+                    ("name", PyRep::String(b.name.clone())),
+                    ("captureProgress", PyRep::Real(b.capture_progress)),
+                    ("completed", PyRep::Bool(b.completed)),
+                ])
+            })
+            .collect::<Vec<PyRep>>()
+    });
+    Some(Ok(PyRep::List(instances)))
 }
 
 #[cfg(test)] #[path = "fw_services_tests.rs"] mod fw_services_tests;

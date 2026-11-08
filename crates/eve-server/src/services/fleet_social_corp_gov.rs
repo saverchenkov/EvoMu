@@ -583,25 +583,7 @@ pub(super) fn handle_corp_gov(
         }
 
         ("corpRegistry", "GetSharesByShareholder") => {
-            let target_sh_id = match args {
-                [PyRep::Bool(true) | PyRep::Integer(1)] => corp_id,
-                [PyRep::Bool(false) | PyRep::Integer(0)] => char_id,
-                [PyRep::Integer(n)] => *n,
-                [_, second, ..] => second.as_i64().unwrap_or(char_id),
-                _ => char_id,
-            };
-            let rows: Vec<Vec<PyRep>> = with_corp_gov(ctx, |g| {
-                let mut out = Vec::new();
-                for (&cid, cgov) in g.iter() {
-                    if let Some(&cnt) = cgov.shares.get(&target_sh_id) {
-                        if cnt > 0 {
-                            out.push(vec![PyRep::Integer(target_sh_id), PyRep::Integer(cid), PyRep::Integer(cnt)]);
-                        }
-                    }
-                }
-                out
-            });
-            Some(Ok(PyRep::rowset(vec!["shareholderID", "corporationID", "shares"], rows)))
+            handle_get_shares_by_shareholder(ctx, char_id, corp_id, args)
         }
 
         ("corpRegistry", "GetShareholders")
@@ -795,19 +777,7 @@ pub(super) fn handle_corp_gov(
             ])))
         }
 
-        ("corpRegistry", "GetTitles") => {
-            let rows: Vec<Vec<PyRep>> = read_corp_gov(ctx, |g| {
-                g.get(&corp_id)
-                    .map(|g| {
-                        g.titles
-                            .iter()
-                            .map(|(&tid, (tname, rmask))| vec![PyRep::Integer(tid), PyRep::String(tname.clone()), PyRep::Integer(*rmask as i64)])
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            });
-            Some(Ok(PyRep::rowset(vec!["titleID", "titleName", "roles"], rows)))
-        }
+        ("corpRegistry", "GetTitles") => handle_get_titles(ctx, corp_id),
 
         ("corpRegistry", "DeleteTitle") => {
             if !has_director { return deny_role("Deleting corporation titles requires CEO or Director role"); }
@@ -1226,16 +1196,7 @@ pub(super) fn handle_corp_gov(
             ])))
         }
 
-        ("corpRecProxy", "GetRecruiters") => {
-            let target_corp = args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id);
-            let target_ad = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
-            let ads = load_corp_rec_ads(ctx);
-            let recruiters: Vec<PyRep> = ads.iter()
-                .filter(|a| a.corp_id == target_corp && a.ad_id == target_ad)
-                .map(|a| PyRep::Integer(a.recruiter_id))
-                .collect();
-            Some(Ok(PyRep::List(recruiters)))
-        }
+        ("corpRecProxy", "GetRecruiters") => handle_get_recruiters(ctx, corp_id, args),
 
         // parity: rpc:corpRecProxy.GetRecruitmentAdsForCorporation
         ("corpRecProxy", "GetRecruitmentAdsForCorporation") => handle_corp_rec_queries(ctx, corp_id, now_unix, method, args, kwargs),
@@ -1382,6 +1343,82 @@ pub(super) fn handle_corp_gov(
 
         _ => super::fleet_social_corp_tail_dispatch::handle_corp_gov_tail(ctx, session, service, method, args, corp_id, char_id, now_unix),
     }
+}
+
+fn handle_get_shares_by_shareholder(
+    ctx: &ServerContext,
+    char_id: i64,
+    corp_id: i64,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let target_sh_id = match args {
+        [PyRep::Bool(true) | PyRep::Integer(1)] => corp_id,
+        [PyRep::Bool(false) | PyRep::Integer(0)] => char_id,
+        [PyRep::Integer(n)] => *n,
+        [_, second, ..] => second.as_i64().unwrap_or(char_id),
+        _ => char_id,
+    };
+    let rows: Vec<Vec<PyRep>> = with_corp_gov(ctx, |g| {
+        let mut out = Vec::new();
+        for (&cid, cgov) in g.iter() {
+            if let Some(&cnt) = cgov.shares.get(&target_sh_id) {
+                if cnt > 0 {
+                    out.push(vec![
+                        PyRep::Integer(target_sh_id),
+                        PyRep::Integer(cid),
+                        PyRep::Integer(cnt),
+                    ]);
+                }
+            }
+        }
+        out
+    });
+    Some(Ok(PyRep::rowset(
+        vec!["shareholderID", "corporationID", "shares"],
+        rows,
+    )))
+}
+
+fn handle_get_titles(
+    ctx: &ServerContext,
+    corp_id: i64,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let rows: Vec<Vec<PyRep>> = read_corp_gov(ctx, |g| {
+        g.get(&corp_id)
+            .map(|g| {
+                g.titles
+                    .iter()
+                    .map(|(&tid, (tname, rmask))| {
+                        vec![
+                            PyRep::Integer(tid),
+                            PyRep::String(tname.clone()),
+                            PyRep::Integer(*rmask as i64),
+                        ]
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    Some(Ok(PyRep::rowset(
+        vec!["titleID", "titleName", "roles"],
+        rows,
+    )))
+}
+
+fn handle_get_recruiters(
+    ctx: &ServerContext,
+    corp_id: i64,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let target_corp = args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id);
+    let target_ad = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+    let ads = load_corp_rec_ads(ctx);
+    let recruiters: Vec<PyRep> = ads
+        .iter()
+        .filter(|a| a.corp_id == target_corp && a.ad_id == target_ad)
+        .map(|a| PyRep::Integer(a.recruiter_id))
+        .collect();
+    Some(Ok(PyRep::List(recruiters)))
 }
 
 #[cfg(test)]

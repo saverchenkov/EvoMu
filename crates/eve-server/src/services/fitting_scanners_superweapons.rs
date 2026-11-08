@@ -841,119 +841,7 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
         ("dogmaIM", "GetDbuffStateForClient")
         | ("dogmaIM", "GetMappedDbuffsForItem")
         | ("dogmaIM", "ApplyBuffsToItems") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let ship_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or(session.ship_id)
-                .unwrap_or(0);
-            let now_unix = ctx.now_unix_secs();
-
-            if method == "ApplyBuffsToItems" {
-                if !session.has_gm_role() {
-                    return Some(Err(BridgeRpcError {
-                        code: "GMRoleRequired".into(),
-                        message: "ApplyBuffsToItems requires GM/Admin authority".into(),
-                    }));
-                }
-                let mut target_ships = Vec::new();
-                if let Some(PyRep::List(list) | PyRep::Tuple(list)) = args.first() {
-                    for el in list {
-                        if let Some(sid) = el.as_i64() {
-                            target_ships.push(sid);
-                        }
-                    }
-                }
-                if target_ships.is_empty() {
-                    target_ships.push(ship_id);
-                }
-                let mut buff_pairs: Vec<(u32, f64)> = Vec::new();
-                if let Some(PyRep::List(list) | PyRep::Tuple(list)) = args.get(1) {
-                    for el in list {
-                        if let PyRep::Tuple(seq) | PyRep::List(seq) = el {
-                            if let (Some(did), Some(v)) = (
-                                seq.first().and_then(|x| x.as_i64()),
-                                seq.get(1).and_then(|x| x.as_f64()),
-                            ) {
-                                buff_pairs.push((did as u32, v));
-                            }
-                        }
-                    }
-                }
-                if buff_pairs.is_empty() {
-                    let dbuff_id = args
-                        .get(1)
-                        .and_then(|a| a.as_i64())
-                        .unwrap_or(12) as u32;
-                    let value = args
-                        .get(2)
-                        .and_then(|a| a.as_f64())
-                        .unwrap_or(10.0);
-                    buff_pairs.push((dbuff_id, value));
-                }
-                let duration_s = args
-                    .get(2)
-                    .and_then(|a| a.as_f64())
-                    .unwrap_or(60.0);
-                let exp = now_unix + (duration_s.round() as u64);
-                {
-                    let mut st = scanners_superweapons_state()
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner());
-                    for (idx, &(dbuff_id, value)) in buff_pairs.iter().enumerate() {
-                        for &tsid in &target_ships {
-                            st.ship_dbuffs
-                                .entry((ctx.instance_id, tsid))
-                                .or_default()
-                                .push(ActiveDbuffEntry {
-                                    dbuff_id,
-                                    value,
-                                    expires_at_unix: exp,
-                                    source_module_id: (idx as i64) + 1,
-                                });
-                        }
-                    }
-                }
-                for &tsid in &target_ships {
-                    ctx.invalidate_ship_fitting(tsid);
-                    ctx.notify(
-                        crate::router::NotificationTarget::Character(char_id),
-                        "OnDbuffUpdated",
-                        "charid",
-                        vec![PyRep::Integer(tsid)],
-                    );
-                }
-            }
-
-            let agg = get_aggregated_ship_dbuffs(ctx, ship_id, now_unix);
-            if agg.is_empty() && ship_id > 0 {
-                ctx.notify(
-                    crate::router::NotificationTarget::Character(char_id),
-                    "OnGodmaFlushLocation",
-                    "charid",
-                    vec![PyRep::Integer(ship_id)],
-                );
-            }
-            let entries: Vec<(PyRep, PyRep)> = agg
-                .into_iter()
-                .map(|(id, (val, exp))| {
-                    (
-                        PyRep::Integer(id as i64),
-                        PyRep::Tuple(vec![
-                            PyRep::Real(val),
-                            PyRep::Integer(exp.saturating_sub(now_unix) as i64),
-                        ]),
-                    )
-                })
-                .collect();
-            Some(Ok(PyRep::keyval([
-                ("shipID", PyRep::Integer(ship_id)),
-                ("activeCount", PyRep::Integer(entries.len() as i64)),
-                ("dbuffs", PyRep::Dict(entries)),
-            ])))
+            handle_dogma_dbuff_rpc(ctx, session, method, args)
         }
 
         ("dogmaIM", "GetSystemWideEffectsOnShip") => {
@@ -1387,6 +1275,118 @@ fn handle_ship_clone_installation(
             // GetShipCloneState
             Some(crate::services::jump_clone_names::get_ship_clone_state(ctx, session, args))
         }
+
+fn handle_dogma_dbuff_rpc(
+    ctx: &ServerContext,
+    session: &SessionState,
+    method: &str,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let ship_id = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .or(session.ship_id)
+        .unwrap_or(0);
+    let now_unix = ctx.now_unix_secs();
+
+    if method == "ApplyBuffsToItems" {
+        if !session.has_gm_role() {
+            return Some(Err(BridgeRpcError {
+                code: "GMRoleRequired".into(),
+                message: "ApplyBuffsToItems requires GM/Admin authority".into(),
+            }));
+        }
+        let mut target_ships = Vec::new();
+        if let Some(PyRep::List(list) | PyRep::Tuple(list)) = args.first() {
+            for el in list {
+                if let Some(sid) = el.as_i64() {
+                    target_ships.push(sid);
+                }
+            }
+        }
+        if target_ships.is_empty() {
+            target_ships.push(ship_id);
+        }
+        let mut buff_pairs: Vec<(u32, f64)> = Vec::new();
+        if let Some(PyRep::List(list) | PyRep::Tuple(list)) = args.get(1) {
+            for el in list {
+                if let PyRep::Tuple(seq) | PyRep::List(seq) = el {
+                    if let (Some(did), Some(v)) = (
+                        seq.first().and_then(|x| x.as_i64()),
+                        seq.get(1).and_then(|x| x.as_f64()),
+                    ) {
+                        buff_pairs.push((did as u32, v));
+                    }
+                }
+            }
+        }
+        if buff_pairs.is_empty() {
+            let dbuff_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(12) as u32;
+            let value = args.get(2).and_then(|a| a.as_f64()).unwrap_or(10.0);
+            buff_pairs.push((dbuff_id, value));
+        }
+        let duration_s = args.get(2).and_then(|a| a.as_f64()).unwrap_or(60.0);
+        let exp = now_unix + (duration_s.round() as u64);
+        {
+            let mut st = scanners_superweapons_state()
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            for (idx, &(dbuff_id, value)) in buff_pairs.iter().enumerate() {
+                for &tsid in &target_ships {
+                    st.ship_dbuffs
+                        .entry((ctx.instance_id, tsid))
+                        .or_default()
+                        .push(ActiveDbuffEntry {
+                            dbuff_id,
+                            value,
+                            expires_at_unix: exp,
+                            source_module_id: (idx as i64) + 1,
+                        });
+                }
+            }
+        }
+        for &tsid in &target_ships {
+            ctx.invalidate_ship_fitting(tsid);
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnDbuffUpdated",
+                "charid",
+                vec![PyRep::Integer(tsid)],
+            );
+        }
+    }
+
+    let agg = get_aggregated_ship_dbuffs(ctx, ship_id, now_unix);
+    if agg.is_empty() && ship_id > 0 {
+        ctx.notify(
+            crate::router::NotificationTarget::Character(char_id),
+            "OnGodmaFlushLocation",
+            "charid",
+            vec![PyRep::Integer(ship_id)],
+        );
+    }
+    let entries: Vec<(PyRep, PyRep)> = agg
+        .into_iter()
+        .map(|(id, (val, exp))| {
+            (
+                PyRep::Integer(id as i64),
+                PyRep::Tuple(vec![
+                    PyRep::Real(val),
+                    PyRep::Integer(exp.saturating_sub(now_unix) as i64),
+                ]),
+            )
+        })
+        .collect();
+    Some(Ok(PyRep::keyval([
+        ("shipID", PyRep::Integer(ship_id)),
+        ("activeCount", PyRep::Integer(entries.len() as i64)),
+        ("dbuffs", PyRep::Dict(entries)),
+    ])))
+}
 
 #[cfg(test)]
 #[path = "fitting_scanners_superweapons_tests.rs"]

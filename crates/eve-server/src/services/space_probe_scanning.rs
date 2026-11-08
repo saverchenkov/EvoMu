@@ -325,149 +325,271 @@ pub(crate) async fn handle_scan_and_wormhole_extras(
         ("scanMgr", "RecoverProbes") => handle_recover_probes(ctx, session, bound_entry, args).await,
         ("scanMgr", "ReconnectToLostProbes") => handle_reconnect_probes(ctx, session, bound_entry).await,
         ("scanMgr", "DestroyProbe") => handle_destroy_probe(ctx, session, bound_entry, args).await,
-        ("scanMgr", "GetFullState") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let caller_sys = resolve_caller_solar_system(ctx, session, char_id);
-            let is_gm = session.has_gm_role();
-            if let Some(b) = bound_entry {
-                let req_sys = b.object_id as u32;
-                if req_sys > 0 && req_sys != caller_sys && !is_gm {
-                    return Some(Err(BridgeRpcError {
-                        code: "CrossSystemScanDenied".into(),
-                        message: format!("Cannot query GetFullState for remote solar system {req_sys}"),
-                    }));
-                }
-            }
-            let sys_id = if is_gm {
-                bound_entry
-                    .map(|b| b.object_id as u32)
-                    .filter(|&id| id > 0)
-                    .unwrap_or(caller_sys)
-            } else {
-                caller_sys
-            };
-            let (sigs, anomalies) = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
-            let anom_entries: Vec<(PyRep, PyRep)> = anomalies
-                .into_iter()
-                .enumerate()
-                .map(|(idx, a)| {
-                    let pos = PyRep::Tuple(vec![
-                        PyRep::Real(a.position[0]),
-                        PyRep::Real(a.position[1]),
-                        PyRep::Real(a.position[2]),
-                    ]);
-                    let val = PyRep::Tuple(vec![
-                        PyRep::Integer((idx as i64) + 1),
-                        PyRep::String(a.anomaly_id.clone()),
-                        pos,
-                        PyRep::Integer(1),
-                        PyRep::Integer(1),
-                        PyRep::Integer(885),
-                    ]);
-                    (PyRep::String(a.anomaly_id), val)
-                })
-                .collect();
-            let sig_entries: Vec<(PyRep, PyRep)> = sigs
-                .into_iter()
-                .enumerate()
-                .map(|(idx, s)| {
-                    let eff_strength = if is_gm {
-                        1.0
-                    } else {
-                        ctx.effective_signature_signal_strength(char_id, sys_id, &s)
-                    };
-                    let coords = if eff_strength >= 1.0 { s.position } else { [0.0, 0.0, 0.0] };
-                    let pos = PyRep::Tuple(vec![
-                        PyRep::Real(coords[0]),
-                        PyRep::Real(coords[1]),
-                        PyRep::Real(coords[2]),
-                    ]);
-                    let val = PyRep::Tuple(vec![
-                        PyRep::Integer((idx as i64) + 1),
-                        PyRep::String(s.signature_id.clone()),
-                        pos,
-                        PyRep::Integer(if eff_strength >= 1.0 { 1 } else { 0 }),
-                        PyRep::Integer(if eff_strength >= 0.25 { 502 } else { 0 }),
-                    ]);
-                    (PyRep::String(s.signature_id), val)
-                })
-                .collect();
-            Some(Ok(PyRep::Tuple(vec![
-                PyRep::Dict(anom_entries),
-                PyRep::Dict(sig_entries),
-                PyRep::Dict(Vec::new()),
-                PyRep::Dict(Vec::new()),
-            ])))
-        }
+        ("scanMgr", "GetFullState") => handle_get_full_state(ctx, session, bound_entry).await,
         ("scanMgr", "QAOverrideProbeExpiry") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "GMRoleRequired".into(),
-                    message: "scanMgr.QAOverrideProbeExpiry requires GM/QA role".into(),
-                }));
-            }
-            let secs = args.first().and_then(|a| a.as_f64()).unwrap_or(60.0).max(1.0);
-            if let Ok(mut map) = ctx.active_scanner_probes.write() {
-                for p in map.values_mut() {
-                    if p.owner_char_id == char_id {
-                        p.max_flight_time_s = secs;
-                    }
-                }
-            }
-            Some(Ok(PyRep::None))
+            handle_qa_override_probe_expiry(ctx, session, args)
         }
-        ("scanMgr", "QAScanSites") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "GMRoleRequired".into(),
-                    message: "scanMgr.QAScanSites requires GM/QA role".into(),
-                }));
-            }
-            let sys_id = bound_entry
-                .map(|b| b.object_id as u32)
-                .or(session.solar_system_id)
-                .unwrap_or(30_000_142);
-            let (sigs, anomalies) = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
-            let now_unix = ctx.now_unix();
-            let mut results = format_anomalies(anomalies, now_unix);
-            for s in sigs {
-                results.push(PyRep::keyval([
-                    ("id", PyRep::String(s.signature_id.clone())),
-                    ("signatureID", PyRep::String(s.signature_id)),
-                    ("signalStrength", PyRep::Real(1.0)),
-                    ("resolved", PyRep::Bool(true)),
-                ]));
-            }
-            if results.is_empty() {
-                results.push(PyRep::keyval([
-                    ("id", PyRep::String("ABC-123".into())),
-                    ("signatureID", PyRep::String("ABC-123".into())),
-                    ("signalStrength", PyRep::Real(1.0)),
-                    ("resolved", PyRep::Bool(true)),
-                ]));
-            }
-            Some(Ok(PyRep::List(results)))
-        }
+        ("scanMgr", "QAScanSites") => handle_qa_scan_sites(ctx, session, bound_entry).await,
         ("scanMgr", "SetActivityState") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            Some(Ok(PyRep::None))
+            handle_set_activity_state(ctx, session, bound_entry, args)
         }
         _ => None,
     }
+}
+
+async fn handle_get_full_state(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let caller_sys = resolve_caller_solar_system(ctx, session, char_id);
+    let is_gm = session.has_gm_role();
+    if let Some(b) = bound_entry {
+        let req_sys = b.object_id as u32;
+        if req_sys > 0 && req_sys != caller_sys && !is_gm {
+            return Some(Err(BridgeRpcError {
+                code: "CrossSystemScanDenied".into(),
+                message: format!("Cannot query GetFullState for remote solar system {req_sys}"),
+            }));
+        }
+    }
+    let sys_id = if is_gm {
+        bound_entry
+            .map(|b| b.object_id as u32)
+            .filter(|&id| id > 0)
+            .unwrap_or(caller_sys)
+    } else {
+        caller_sys
+    };
+    let (sigs, anomalies) = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
+    let anom_entries: Vec<(PyRep, PyRep)> = anomalies
+        .into_iter()
+        .enumerate()
+        .map(|(idx, a)| {
+            let pos = PyRep::Tuple(vec![
+                PyRep::Real(a.position[0]),
+                PyRep::Real(a.position[1]),
+                PyRep::Real(a.position[2]),
+            ]);
+            let val = PyRep::Tuple(vec![
+                PyRep::Integer((idx as i64) + 1),
+                PyRep::String(a.anomaly_id.clone()),
+                pos,
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+                PyRep::Integer(885),
+            ]);
+            (PyRep::String(a.anomaly_id), val)
+        })
+        .collect();
+    let sig_entries: Vec<(PyRep, PyRep)> = sigs
+        .into_iter()
+        .enumerate()
+        .map(|(idx, s)| {
+            let eff_strength = if is_gm {
+                1.0
+            } else {
+                ctx.effective_signature_signal_strength(char_id, sys_id, &s)
+            };
+            let coords = if eff_strength >= 1.0 { s.position } else { [0.0, 0.0, 0.0] };
+            let pos = PyRep::Tuple(vec![
+                PyRep::Real(coords[0]),
+                PyRep::Real(coords[1]),
+                PyRep::Real(coords[2]),
+            ]);
+            let val = PyRep::Tuple(vec![
+                PyRep::Integer((idx as i64) + 1),
+                PyRep::String(s.signature_id.clone()),
+                pos,
+                PyRep::Integer(if eff_strength >= 1.0 { 1 } else { 0 }),
+                PyRep::Integer(if eff_strength >= 0.25 { 502 } else { 0 }),
+            ]);
+            (PyRep::String(s.signature_id), val)
+        })
+        .collect();
+    Some(Ok(PyRep::Tuple(vec![
+        PyRep::Dict(anom_entries),
+        PyRep::Dict(sig_entries),
+        PyRep::Dict(Vec::new()),
+        PyRep::Dict(Vec::new()),
+    ])))
+}
+
+fn handle_qa_override_probe_expiry(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    if !session.has_gm_role() {
+        return Some(Err(BridgeRpcError {
+            code: "GMRoleRequired".into(),
+            message: "scanMgr.QAOverrideProbeExpiry requires GM/QA role".into(),
+        }));
+    }
+    let secs = args.first().and_then(|a| a.as_f64()).unwrap_or(60.0).max(1.0);
+    if let Ok(mut map) = ctx.active_scanner_probes.write() {
+        for p in map.values_mut() {
+            if p.owner_char_id == char_id {
+                p.max_flight_time_s = secs;
+            }
+        }
+    }
+    Some(Ok(PyRep::None))
+}
+
+async fn handle_qa_scan_sites(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let _ = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    if !session.has_gm_role() {
+        return Some(Err(BridgeRpcError {
+            code: "GMRoleRequired".into(),
+            message: "scanMgr.QAScanSites requires GM/QA role".into(),
+        }));
+    }
+    let sys_id = bound_entry
+        .map(|b| b.object_id as u32)
+        .or(session.solar_system_id)
+        .unwrap_or(30_000_142);
+    let (sigs, anomalies) = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
+    let now_unix = ctx.now_unix();
+    let mut results = format_anomalies(anomalies, now_unix);
+    for s in sigs {
+        results.push(PyRep::keyval([
+            ("id", PyRep::String(s.signature_id.clone())),
+            ("signatureID", PyRep::String(s.signature_id)),
+            ("signalStrength", PyRep::Real(1.0)),
+            ("resolved", PyRep::Bool(true)),
+        ]));
+    }
+    if results.is_empty() {
+        results.push(PyRep::keyval([
+            ("id", PyRep::String("ABC-123".into())),
+            ("signatureID", PyRep::String("ABC-123".into())),
+            ("signalStrength", PyRep::Real(1.0)),
+            ("resolved", PyRep::Bool(true)),
+        ]));
+    }
+    Some(Ok(PyRep::List(results)))
+}
+
+fn handle_set_activity_state(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let caller_sys = resolve_caller_solar_system(ctx, session, char_id);
+    let sys_id = bound_entry
+        .map(|b| b.object_id as u32)
+        .filter(|&id| id > 0)
+        .unwrap_or(caller_sys);
+
+    let mut per_probe_states: HashMap<i64, i32> = HashMap::new();
+    let mut bulk_state: Option<i32> = None;
+
+    match args {
+        [PyRep::Dict(entries)] => {
+            for (k, v) in entries {
+                if let (Some(pid), Some(st)) = (k.as_i64(), v.as_i64()) {
+                    per_probe_states.insert(pid, st as i32);
+                }
+            }
+        }
+        [first, second, ..] => {
+            if let Some(st) = second.as_i64() {
+                let st_i32 = st as i32;
+                match first {
+                    PyRep::List(ids) | PyRep::Tuple(ids) => {
+                        for id in ids {
+                            if let Some(pid) = id.as_i64() {
+                                per_probe_states.insert(pid, st_i32);
+                            }
+                        }
+                    }
+                    _ => {
+                        if let Some(pid) = first.as_i64() {
+                            per_probe_states.insert(pid, st_i32);
+                        } else {
+                            bulk_state = Some(st_i32);
+                        }
+                    }
+                }
+            }
+        }
+        [first] => {
+            if let Some(st) = first.as_i64() {
+                bulk_state = Some(st as i32);
+            }
+        }
+        [] => {}
+    }
+
+    let valid_state = |st: i32| {
+        (PROBE_STATE_INACTIVE..=PROBE_STATE_RETURNING).contains(&st)
+    };
+    if let Some(st) = bulk_state {
+        if !valid_state(st) {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidProbeState".into(),
+                message: format!("Invalid scanner probe state {st}"),
+            }));
+        }
+    }
+    for &st in per_probe_states.values() {
+        if !valid_state(st) {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidProbeState".into(),
+                message: format!("Invalid scanner probe state {st}"),
+            }));
+        }
+    }
+
+    let mut changed: Vec<(i64, i32)> = Vec::new();
+    if let Ok(mut map) = ctx.active_scanner_probes.write() {
+        for p in map.values_mut() {
+            if p.owner_char_id != char_id || (sys_id > 0 && p.solar_system_id != sys_id) {
+                continue;
+            }
+            let target_state = if !per_probe_states.is_empty() {
+                per_probe_states.get(&p.probe_id).copied()
+            } else {
+                bulk_state
+            };
+            if let Some(st) = target_state {
+                if p.state != st {
+                    p.state = st;
+                    changed.push((p.probe_id, st));
+                }
+            }
+        }
+    }
+    for (pid, st) in changed {
+        let _ = ctx.notify(
+            crate::router::NotificationTarget::Character(char_id),
+            "OnProbeStateChanged",
+            "charid",
+            vec![PyRep::Integer(pid), PyRep::Integer(i64::from(st))],
+        );
+    }
+    Some(Ok(PyRep::None))
 }
 
 fn format_anomalies(anomalies: Vec<CosmicAnomalyRecord>, now_unix: u64) -> Vec<PyRep> {
