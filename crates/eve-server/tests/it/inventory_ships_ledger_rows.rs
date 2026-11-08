@@ -219,8 +219,10 @@ async fn test_board_in_space_transfers_capsule() {
     assert_eq!(s.ship_id, Some(620_001));
 
     let rep = call(&ctx, &mut s, "ship", "Board", vec![PyRep::Integer(620_002)]).await.expect("board");
-    assert_eq!(int(&rep, "shipID"), 620_002);
-    assert_eq!(int(&rep, "oldShipID"), 620_001);
+    let PyRep::Tuple(ship_state) = rep else {
+        panic!("Expected 4-tuple shipState from ship.Board, got {rep:?}");
+    };
+    assert_eq!(ship_state.len(), 4);
     assert_eq!(s.ship_id, Some(620_002));
     assert_eq!(ctx.db.with_snapshot(|sn| sn.characters[&C1].active_ship_id), 620_002);
     // The capsule is absorbed into the boarded hull: item and ball are gone.

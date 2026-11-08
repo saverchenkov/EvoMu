@@ -472,14 +472,8 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         );
                     }
                     crate::sp6_lifecycle::clear_safe_logoff(&ctx.db, char_id);
-                    Some(Ok(PyRep::keyval([
-                        ("characterID", PyRep::Integer(char_id)),
-                        ("shipID", PyRep::Integer(sid)),
-                        (
-                            "oldShipID",
-                            prev_ship_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                        ),
-                    ])))
+                    let ship_state = prime_ship_on_board(ctx, session, char_id, sid);
+                    Some(Ok(ship_state))
                 }
                 Err(e) => Some(Err(e)),
             }

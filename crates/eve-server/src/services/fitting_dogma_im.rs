@@ -435,83 +435,23 @@ pub(crate) async fn handle_dogma_im(
                 return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "No active ship in session".into() }));
             };
 
-            let fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
-                Ok(f) => f,
-                Err(e) => return Some(Err(e)),
-            };
-
-            let eval_ctx = fit.evaluated_context(&ctx.sde);
-            let mut ship_attr_ids: std::collections::BTreeSet<u16> = eval_ctx
-                .ship
-                .base_attributes
-                .keys()
-                .copied()
-                .chain(eval_ctx.ship.modifiers.iter().map(|m| m.target_attribute_id))
-                .collect();
-            ship_attr_ids.insert(attr_ids::CPU_LOAD);
-            ship_attr_ids.insert(attr_ids::POWER_LOAD);
-            let mut ship_attrs_map: HashMap<u16, f64> = HashMap::with_capacity(ship_attr_ids.len());
-            for attr_id in ship_attr_ids {
+            let (ship_type_id, active_stance, mut entries, module_entries) =
+                match evaluate_ship_dogma_attributes(ctx, char_id, ship_id) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+            if method == "GetAllInfo" {
                 // V24 clientDogmaLocation primes shipDogmaItem baseValue from GetAllInfo shipInfo.attributes
                 // and then applies online effect modifiers; send 0.0 load here to prevent double-counting.
-                let val = if method == "GetAllInfo"
-                    && (attr_id == attr_ids::CPU_LOAD || attr_id == attr_ids::POWER_LOAD)
-                {
-                    0.0
-                } else {
-                    eval_ctx.ship.get_attribute(attr_id, &ctx.sde)
-                };
-                ship_attrs_map.insert(attr_id, val);
+                for (k, v) in &mut entries {
+                    if matches!(
+                        k.as_i64(),
+                        Some(id) if id == i64::from(attr_ids::CPU_LOAD) || id == i64::from(attr_ids::POWER_LOAD)
+                    ) {
+                        *v = PyRep::Real(0.0);
+                    }
+                }
             }
-            let dyn_attrs = ctx
-                .db
-                .with_snapshot(|s| s.items.get(&ship_id).map(|it| it.dynamic_attributes.clone()))
-                .unwrap_or_default();
-            for (attr_id, val) in dyn_attrs {
-                ship_attrs_map.insert(attr_id, val);
-            }
-            apply_active_dbuffs_and_system_effects_to_ship_attrs(ctx, ship_id, &mut ship_attrs_map);
-            let mut entries: Vec<(PyRep, PyRep)> = ship_attrs_map
-                .into_iter()
-                .map(|(k, v)| (PyRep::Integer(k as i64), PyRep::Real(v)))
-                .collect();
-            entries.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
-
-            let mut module_entries = Vec::with_capacity(fit.modules.len());
-            for m_state in &eval_ctx.ship_located_items {
-                let attr_ids_set: std::collections::BTreeSet<u16> = m_state
-                    .base_attributes
-                    .keys()
-                    .copied()
-                    .chain(m_state.modifiers.iter().map(|m| m.target_attribute_id))
-                    .collect();
-                let mut m_map: HashMap<u16, f64> = attr_ids_set
-                    .into_iter()
-                    .map(|aid| (aid, m_state.get_attribute(aid, &ctx.sde)))
-                    .collect();
-                let is_mod_online = fit.modules.get(&m_state.item_id).map(|m| m.state != eve_dogma::ModuleState::Offline).unwrap_or(true);
-                m_map.insert(2, if is_mod_online { 1.0 } else { 0.0 });
-                crate::services::tactical_modules::apply_projected_rtc_to_module_attrs(ctx, ship_id, &mut m_map);
-                let mut m_attrs: Vec<(PyRep, PyRep)> = m_map.into_iter().map(|(aid, v)| (PyRep::Integer(aid as i64), PyRep::Real(v))).collect();
-                m_attrs.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
-                module_entries.push((PyRep::Integer(m_state.item_id), PyRep::Dict(m_attrs)));
-            }
-            for m in fit.modules.values().filter(|m| m.state == eve_dogma::ModuleState::Offline) {
-                let mut m_map: HashMap<u16, f64> = ctx.sde.types.get(&m.type_id).map(|t| t.default_attributes.clone()).unwrap_or_default();
-                m_map.insert(2, 0.0);
-                let mut m_attrs: Vec<(PyRep, PyRep)> = m_map.into_iter().map(|(aid, v)| (PyRep::Integer(aid as i64), PyRep::Real(v))).collect();
-                m_attrs.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
-                module_entries.push((PyRep::Integer(m.item_id), PyRep::Dict(m_attrs)));
-            }
-
-            let ship_type_id = fit.ship.type_id;
-            let active_stance = fit
-                .active_stance_type_id
-                .or_else(|| eve_dogma::ShipFittingEngine::default_t3d_stance_type_id(ship_type_id))
-                .map(|tid| PyRep::Integer(tid as i64))
-                .unwrap_or(PyRep::None);
-
-            ctx.store_ship_fitting(ship_id, fit);
 
             if method == "GetAllInfo" {
                 Some(Ok(build_all_info(ctx, session, char_id, ship_id, ship_type_id, active_stance, entries, module_entries, args)))

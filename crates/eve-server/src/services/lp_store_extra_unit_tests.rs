@@ -351,3 +351,39 @@ fn concord_lp_exchange_transfers_corp_balances_and_delayed_rewards() {
         panic!("expected Dict");
     }
 }
+
+#[test]
+fn rw_manager_returns_empty_site_queries() {
+    let ctx = make_ctx();
+    let mut unauth = SessionState::new(9402);
+    assert!(call_lp(&ctx, &mut unauth, "RWManager", "solarsystem_contains_rw_instances", &[]).is_err());
+    assert!(call_lp(&ctx, &mut unauth, "RWManager", "get_closest_rw_stations", &[PyRep::Integer(30_000_142)]).is_err());
+
+    let mut sess = make_session(90_000_001, 98_700_001, Some(60_003_760));
+    assert_eq!(
+        call_lp(&ctx, &mut sess, "RWManager", "solarsystem_contains_rw_instances", &[]).unwrap(),
+        PyRep::Bool(false)
+    );
+    assert_eq!(
+        call_lp(
+            &ctx,
+            &mut sess,
+            "RWManager",
+            "solarsystem_contains_rw_instances",
+            &[PyRep::Integer(30_000_142)],
+        )
+        .unwrap(),
+        PyRep::Bool(false)
+    );
+    assert_eq!(
+        call_lp(
+            &ctx,
+            &mut sess,
+            "RWManager",
+            "get_closest_rw_stations",
+            &[PyRep::Integer(30_000_142)],
+        )
+        .unwrap(),
+        PyRep::Dict(Vec::new())
+    );
+}

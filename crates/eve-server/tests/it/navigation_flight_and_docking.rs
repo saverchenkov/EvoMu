@@ -155,6 +155,87 @@ async fn test_navigation_undock_and_station_docking() {
 }
 
 #[tokio::test]
+async fn test_navigation_dock_at_warp_destination_before_server_tick_completes() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let mut sess = setup_pilot(&ctx, 2102, DEMO_PILOT).await;
+    let ship_id = sess.ship_id.expect("active ship");
+    let sys_handle = ctx.systems.get_or_spawn(JITA_SYS);
+
+    ctx.advance_secs(12);
+    let undock_rep = rpc(&ctx, &mut sess, "stationSvc", "Undock", &[])
+        .await
+        .expect("Undock");
+    let PyRep::KeyVal(ukv) = undock_rep else {
+        panic!("Expected KeyVal from Undock");
+    };
+    let beyonce_id = ukv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+    ctx.advance_secs(12);
+
+    let st_pos = ctx.sde.stations[&JITA_44_STATION].position;
+    let st_radius = ctx.sde.types[&ctx.sde.stations[&JITA_44_STATION].station_type_id].radius;
+    // Place ship 500,000 km away and initiate real warp to Jita 4-4
+    let start_pos = st_pos + DVec3::new(500_000_000.0, 0.0, 0.0);
+    assert!(sys_handle.set_ball_position(ship_id, start_pos).await);
+    rpc_bound(
+        &ctx,
+        &mut sess,
+        beyonce_id,
+        "CmdWarpToStuff",
+        &[PyRep::String("item".into()), PyRep::Integer(JITA_44_STATION)],
+    )
+    .await
+    .expect("CmdWarpToStuff to Jita 4-4");
+
+    // Step until ship enters Decelerating within docking range (if not already Stop, test immediately;
+    // otherwise simulate the 1-tick lag right at landing position while MovementMode::Warp is active)
+    let mut tested_mid_warp = false;
+    let mut docked_while_warping = false;
+    for _ in 0..30 {
+        sys_handle.step_manual(1.0).await.unwrap();
+        let Some((_, b)) = sys_handle.get_ball_snapshot(ship_id).await.unwrap() else {
+            break;
+        };
+        if let MovementMode::Warp { phase, .. } = b.mode {
+            if phase != eve_destiny::WarpPhase::Aligning && b.position.distance(st_pos) > st_radius + 50_000.0 && !tested_mid_warp {
+                tested_mid_warp = true;
+                let err = rpc(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(JITA_44_STATION)])
+                    .await
+                    .unwrap_err();
+                assert_eq!(err.code, "ShipInWarp");
+            }
+            if b.position.distance(st_pos) <= st_radius + 2_500.0 {
+                let dock_ok = rpc(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(JITA_44_STATION)])
+                    .await
+                    .expect("Dock should succeed at warp destination before server Stop tick");
+                assert!(matches!(dock_ok, PyRep::KeyVal(_)));
+                assert_eq!(sess.station_id, Some(JITA_44_STATION));
+                docked_while_warping = true;
+                break;
+            }
+        }
+    }
+    assert!(tested_mid_warp, "Must verify mid-warp ShipInWarp rejection");
+    if !docked_while_warping {
+        // Fallback: if 1.0s step jumped straight from >2.5km to Stop in one tick, place ship at landing in Decelerating
+        // and verify stationSvc.Dock still clears warp and docks cleanly
+        let landing = st_pos + DVec3::new(st_radius, 0.0, 0.0);
+        let mut wm = MovementMode::new_warp(start_pos, landing, 3.0);
+        if let MovementMode::Warp { ref mut phase, .. } = wm {
+            *phase = eve_destiny::WarpPhase::Decelerating;
+        }
+        assert!(sys_handle.set_ball_position(ship_id, landing).await);
+        sys_handle.set_movement_mode(ship_id, wm).await.unwrap();
+        let dock_ok = rpc(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(JITA_44_STATION)])
+            .await
+            .expect("Dock at destination during Decelerating Warp");
+        assert!(matches!(dock_ok, PyRep::KeyVal(_)));
+        assert_eq!(sess.station_id, Some(JITA_44_STATION));
+    }
+    assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+}
+
+#[tokio::test]
 async fn test_navigation_structure_docking_and_tethering() {
     // parity: feat:navigation.dock-structure
     // parity: feat:navigation.tether

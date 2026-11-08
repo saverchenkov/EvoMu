@@ -2246,7 +2246,8 @@ async fn test_ships_frigate_escape_bay_blockade_runner_scan_and_board_skill_clon
 
     ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&c1) { ch.clone_grade = 2; } });
     let board_ok = call_service(&ctx, &mut sess1, "ship", "Board", vec![PyRep::Integer(bustard_id)], HashMap::new()).await.expect("Omega clone with skills must board Bustard");
-    assert_eq!(board_ok.dict_get("shipID").and_then(|v| v.as_i64()), Some(bustard_id));
+    assert!(matches!(&board_ok, PyRep::Tuple(items) if items.len() == 4));
+    assert_eq!(sess1.ship_id, Some(bustard_id));
 
     // In space boarding (`ship.Board`):
     let unpiloted_bustard = 940_040;
@@ -2274,7 +2275,8 @@ async fn test_ships_frigate_escape_bay_blockade_runner_scan_and_board_skill_clon
 
     ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&c2) { ch.clone_grade = 2; } });
     let space_board_ok = call_service(&ctx, &mut sess_space, "ship", "Board", vec![PyRep::Integer(unpiloted_bustard)], HashMap::new()).await.expect("Omega in space boards");
-    assert_eq!(space_board_ok.dict_get("shipID").and_then(|v| v.as_i64()), Some(unpiloted_bustard));
+    assert!(matches!(&space_board_ok, PyRep::Tuple(items) if items.len() == 4));
+    assert_eq!(sess_space.ship_id, Some(unpiloted_bustard));
 }
 
 #[tokio::test]

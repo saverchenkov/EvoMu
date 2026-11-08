@@ -224,11 +224,18 @@ async fn eject_and_board_in_space_and_docked_guards_and_capsule_transitions() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(
-        docked_board.dict_get("shipID").and_then(PyRep::as_i64),
-        Some(ship2_id)
-    );
+    let PyRep::Tuple(ship_state) = docked_board else {
+        panic!("Expected 4-tuple shipState from ship.Board, got {docked_board:?}");
+    };
+    assert_eq!(ship_state.len(), 4);
+    assert!(ship_state.iter().all(|part| matches!(part, PyRep::Dict(_))));
     assert_eq!(sess.ship_id, Some(ship2_id));
+    let board_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        board_notifs.iter().any(|n| n.event == "ProcessGodmaPrimeLocation"
+            && n.args.first() == Some(&PyRep::Integer(ship2_id))),
+        "ship.Board must emit ProcessGodmaPrimeLocation for newly boarded ship"
+    );
     clear_session_change_timer(&ctx, char_id);
 
     // 4. Move to space and test LeaveShip error, weapon/criminal timers on Eject, and valid Eject -> Board in space
@@ -342,13 +349,21 @@ async fn eject_and_board_in_space_and_docked_guards_and_capsule_transitions() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(
-        board_space.dict_get("shipID").and_then(PyRep::as_i64),
-        Some(ship2_id)
+    let PyRep::Tuple(space_ship_state) = board_space else {
+        panic!("Expected 4-tuple shipState from in-space ship.Board, got {board_space:?}");
+    };
+    assert_eq!(space_ship_state.len(), 4);
+    assert!(space_ship_state.iter().all(|part| matches!(part, PyRep::Dict(_))));
+    assert_eq!(sess.ship_id, Some(ship2_id));
+    let space_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        space_notifs.iter().any(|n| n.event == "OnSessionChanged"),
+        "OnSessionChanged expected on in-space ship.Board"
     );
-    assert_eq!(
-        board_space.dict_get("oldShipID").and_then(PyRep::as_i64),
-        Some(capsule_id)
+    assert!(
+        space_notifs.iter().any(|n| n.event == "ProcessGodmaPrimeLocation"
+            && n.args.first() == Some(&PyRep::Integer(ship2_id))),
+        "ProcessGodmaPrimeLocation expected on in-space ship.Board"
     );
     assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&capsule_id)));
 }
@@ -413,4 +428,92 @@ async fn create_newbie_ship_from_active_ship_with_args_spawns_starter_fit_and_no
     assert!(notifs.iter().any(|n| n.event == "OnItemChange"));
     assert!(notifs.iter().any(|n| n.event == "OnPodOrCorvetteAssembly"));
     assert!(notifs.iter().any(|n| n.event == "OnSessionChanged"));
+}
+
+#[tokio::test]
+async fn ship_board_returns_4_tuple_ship_state_and_primes_fitted_modules() {
+    let ctx = test_ctx();
+    let char_id = 91_201_i64;
+    let station_id = 60_003_760_i64;
+    let sys_id = 30_000_142_u32;
+    let old_ship = 91_202_i64;
+    let venture_id = 91_203_i64;
+    let miner1_id = 91_204_i64;
+    let miner2_id = 91_205_i64;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|s| {
+        let mut ch = make_char(char_id, "BoardMiner", 98_000_001, sys_id, old_ship);
+        ch.station_id = Some(station_id);
+        let demo_skills = s.skills.values().next().cloned().unwrap_or_default();
+        s.skills.insert(char_id, demo_skills);
+        s.characters.insert(char_id, ch);
+        for (id, tid, loc, flag) in [
+            (old_ship, 587_u32, station_id, InventoryFlag::Hangar),
+            (venture_id, 32880_u32, station_id, InventoryFlag::Hangar),
+            (miner1_id, 483_u32, venture_id, InventoryFlag::HiSlot0),
+            (miner2_id, 483_u32, venture_id, InventoryFlag::HiSlot1),
+        ] {
+            s.items.insert(
+                id,
+                InventoryItemRecord {
+                    item_id: id,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: loc,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        s.weapon_banks.insert(venture_id, HashMap::from([(miner1_id, vec![miner1_id, miner2_id])]));
+    });
+
+    let mut sess = make_sess(char_id, Some(sys_id), Some(station_id), Some(old_ship));
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let rep = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "ship",
+        "Board",
+        &[PyRep::Integer(venture_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("ship.Board venture");
+
+    let PyRep::Tuple(ship_state) = rep else {
+        panic!("ship.Board must return 4-tuple shipState, got {rep:?}");
+    };
+    assert_eq!(ship_state.len(), 4);
+    assert!(matches!(ship_state[0], PyRep::Dict(_)));
+    assert!(matches!(ship_state[1], PyRep::Dict(_)));
+    let PyRep::Dict(wb_entries) = &ship_state[2] else {
+        panic!("wbData must be Dict");
+    };
+    assert_eq!(wb_entries.len(), 1);
+    assert_eq!(wb_entries[0].0, PyRep::Integer(miner1_id));
+    assert!(matches!(ship_state[3], PyRep::Dict(_)));
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    let prime = notifs
+        .iter()
+        .find(|n| n.event == "ProcessGodmaPrimeLocation")
+        .expect("ProcessGodmaPrimeLocation emitted on ship.Board");
+    assert_eq!(prime.args.len(), 2);
+    assert_eq!(prime.args[0], PyRep::Integer(venture_id));
+    let PyRep::Dict(prime_items) = &prime.args[1] else {
+        panic!("ProcessGodmaPrimeLocation data must be Dict");
+    };
+    for expected_id in [venture_id, miner1_id, miner2_id] {
+        assert!(
+            prime_items.iter().any(|(k, _)| *k == PyRep::Integer(expected_id)),
+            "ProcessGodmaPrimeLocation must prime item {expected_id}"
+        );
+    }
 }

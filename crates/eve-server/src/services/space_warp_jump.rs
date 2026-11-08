@@ -1222,18 +1222,6 @@ async fn handle_dock(
         (st.position, r)
     };
 
-    if matches!(ball.mode, MovementMode::Warp { .. }) {
-        return Err(BridgeRpcError {
-            code: "ShipInWarp".into(),
-            message: "Cannot dock while ship is still in warp".into(),
-        });
-    }
-    if is_structure && handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
-        return Err(BridgeRpcError {
-            code: "ShipWarpScrambled".into(),
-            message: "Cannot dock at an Upwell structure while ship is warp scrambled".into(),
-        });
-    }
     let target_radius = handle
         .get_ball_snapshot(dock_id)
         .await
@@ -1243,7 +1231,30 @@ async fn handle_dock(
         .filter(|&r| r > 0.0)
         .unwrap_or(sde_target_radius);
     let dist = ball.position.distance(target_pos);
-    let max_dock_dist = target_radius + 2_500.0;
+    let max_dock_dist = if !session.address.is_empty() {
+        target_radius + 35_000.0
+    } else {
+        target_radius + 2_500.0
+    };
+    let arrived_at_warp_dest = match ball.mode {
+        MovementMode::Warp { destination, .. } => {
+            if dist <= max_dock_dist && destination.distance(target_pos) <= max_dock_dist {
+                true
+            } else {
+                return Err(BridgeRpcError {
+                    code: "ShipInWarp".into(),
+                    message: "Cannot dock while ship is still in warp".into(),
+                });
+            }
+        }
+        _ => false,
+    };
+    if is_structure && handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
+        return Err(BridgeRpcError {
+            code: "ShipWarpScrambled".into(),
+            message: "Cannot dock at an Upwell structure while ship is warp scrambled".into(),
+        });
+    }
     if dist > max_dock_dist {
         return Err(BridgeRpcError {
             code: "OutsideDockingPerimeter".into(),
@@ -1253,6 +1264,13 @@ async fn handle_dock(
                 max_dock_dist
             ),
         });
+    }
+    if arrived_at_warp_dest {
+        let _ = handle.force_stop_warp(ship_id);
+        ctx.active_warps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&ship_id);
     }
     match ctx.db.dock_character(char_id, dock_id, is_structure) {
         Ok(_) => {

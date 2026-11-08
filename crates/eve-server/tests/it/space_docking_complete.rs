@@ -446,7 +446,12 @@ async fn test_session_change_timer_triggers_and_coverage() {
     let board_ok = rpc(&ctx, &mut sess, "ship", "Board", &[PyRep::Integer(board_ship_id)])
         .await
         .expect("Board");
-    assert!(matches!(board_ok, PyRep::KeyVal(_)));
+    let PyRep::Tuple(ship_state) = board_ok else {
+        panic!("Expected 4-tuple shipState from ship.Board, got {board_ok:?}");
+    };
+    assert_eq!(ship_state.len(), 4);
+    assert!(ship_state.iter().all(|p| matches!(p, PyRep::Dict(_))));
+    assert_eq!(sess.ship_id, Some(board_ship_id));
     let board_timer = get_session_change_timer(&ctx, char_id).expect("board timer");
     assert_eq!(board_timer.reason, "board_or_eject");
 

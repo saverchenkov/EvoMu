@@ -435,3 +435,93 @@ async fn undock_and_dock_upwell_structure_online_modules_and_guard_branches() {
     assert_eq!(sess.structure_id, Some(st_id));
     assert!(!ctx.db.with_snapshot(|s| s.module_active_states.contains(&mod_id)));
 }
+
+#[tokio::test]
+async fn station_dock_at_warp_destination_succeeds_while_mid_warp_still_rejects() {
+    let ctx = test_ctx_with_clock(1_800_000_000);
+    let char_id = 920_301_i64;
+    let corp_id = 98_200_301_i64;
+    let jita_sys = 30_000_142_u32;
+    let jita_station = 60_003_760_i64;
+    let ship_id = 920_302_i64;
+    let kw = HashMap::new();
+
+    let st_pos = ctx.sde.stations.get(&jita_station).unwrap().position;
+    let st_radius = ctx
+        .sde
+        .types
+        .get(&ctx.sde.stations.get(&jita_station).unwrap().station_type_id)
+        .map(|t| t.radius)
+        .unwrap_or(0.0);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = clone_char_with(snap, char_id, "WarpDockPilot", corp_id, jita_sys, ship_id);
+        ch.station_id = None;
+        ch.structure_id = None;
+        snap.characters.insert(char_id, ch);
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: jita_sys as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let sys_h = ctx.systems.get_or_spawn(jita_sys);
+    let origin = st_pos + DVec3::new(1_000_000_000.0, 0.0, 0.0);
+    let landing = st_pos + DVec3::new(st_radius, 0.0, 0.0);
+    // 1. Mid-warp far away from station -> ShipInWarp
+    let mut warp_mode = MovementMode::new_warp(origin, landing, 3.0);
+    if let MovementMode::Warp { ref mut phase, .. } = warp_mode {
+        *phase = eve_destiny::WarpPhase::Decelerating;
+    }
+    sys_h
+        .spawn_ball_with_meta(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: st_pos + DVec3::new(500_000.0, 0.0, 0.0),
+                velocity: DVec3::new(-50_000.0, 0.0, 0.0),
+                max_velocity: 350.0,
+                inertia: 2.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: warp_mode.clone(),
+            },
+            eve_destiny::CombatState::default(),
+            eve_destiny::SlimItemMeta::default(),
+        )
+        .await
+        .unwrap();
+    ctx.active_warps.lock().unwrap().insert(ship_id, char_id);
+
+    let mut sess = make_sess(char_id, corp_id, Some(jita_sys), None, None, Some(ship_id));
+    assert_eq!(
+        handle(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(jita_station)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "ShipInWarp"
+    );
+    assert_eq!(sess.station_id, None);
+
+    // 2. Ship has arrived within docking range at warp destination while server mode is still Warp (1 Hz lag)
+    assert!(sys_h.set_ball_position(ship_id, landing).await);
+    let dock_res = handle(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(jita_station)], &kw)
+        .await
+        .unwrap()
+        .expect("stationSvc.Dock should succeed once ship has arrived within docking range of destination");
+    assert_eq!(dock_res.dict_get("locationID"), Some(&PyRep::Integer(jita_station)));
+    assert_eq!(sess.station_id, Some(jita_station));
+    assert!(!ctx.active_warps.lock().unwrap().contains_key(&ship_id));
+}

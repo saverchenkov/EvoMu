@@ -88,15 +88,16 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
         )
         .await
         .expect("Board second ship in station");
-    let PyRep::KeyVal(bkv) = board_res else {
-        panic!("Expected KeyVal from ship.Board");
+    let PyRep::Tuple(ship_state) = board_res else {
+        panic!("Expected 4-tuple shipState from ship.Board, got {board_res:?}");
     };
-    assert_eq!(bkv.get("shipID").unwrap().as_i64().unwrap(), second_ship_id);
-    assert_eq!(bkv.get("oldShipID").unwrap().as_i64().unwrap(), first_ship_id);
+    assert_eq!(ship_state.len(), 4);
+    assert!(ship_state.iter().all(|part| matches!(part, PyRep::Dict(_))));
     assert_eq!(sess.ship_id, Some(second_ship_id));
 
     let board_notifs = ctx.drain_notifications_for_char(char_id);
-    // The server announces the ship change as an `OnSessionChanged` `shipid` (old, new) change;
+    // The server announces the ship change as an `OnSessionChanged` `shipid` (old, new) change
+    // and primes godma with `ProcessGodmaPrimeLocation`;
     // the V24 client derives `ProcessActiveShipChanged` itself (`DogmaLocation.MakeShipActive`).
     let sess_change = board_notifs
         .iter()
@@ -107,6 +108,11 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
     };
     assert!(changes.iter().any(|(k, v)| *k == PyRep::String("shipid".into())
         && *v == PyRep::Tuple(vec![PyRep::Integer(first_ship_id), PyRep::Integer(second_ship_id)])));
+    assert!(
+        board_notifs.iter().any(|n| n.event == "ProcessGodmaPrimeLocation"
+            && n.args.first() == Some(&PyRep::Integer(second_ship_id))),
+        "ship.Board must emit ProcessGodmaPrimeLocation for newly boarded ship"
+    );
     assert!(
         board_notifs
             .iter()

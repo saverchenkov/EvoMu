@@ -370,23 +370,117 @@ pub(crate) fn handle_unload_ammo(
     Ok(PyRep::None)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn build_all_info(
+pub(crate) fn evaluate_ship_dogma_attributes(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+) -> Result<(u32, PyRep, Vec<(PyRep, PyRep)>, Vec<(PyRep, PyRep)>), BridgeRpcError> {
+    let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id)?;
+    let eval_ctx = fit.evaluated_context(&ctx.sde);
+    let mut ship_attr_ids: std::collections::BTreeSet<u16> = eval_ctx
+        .ship
+        .base_attributes
+        .keys()
+        .copied()
+        .chain(eval_ctx.ship.modifiers.iter().map(|m| m.target_attribute_id))
+        .collect();
+    ship_attr_ids.insert(attr_ids::CPU_LOAD);
+    ship_attr_ids.insert(attr_ids::POWER_LOAD);
+    let mut ship_attrs_map: HashMap<u16, f64> = HashMap::with_capacity(ship_attr_ids.len());
+    for attr_id in ship_attr_ids {
+        let val = eval_ctx.ship.get_attribute(attr_id, &ctx.sde);
+        ship_attrs_map.insert(attr_id, val);
+    }
+    let dyn_attrs = ctx
+        .db
+        .with_snapshot(|s| s.items.get(&ship_id).map(|it| it.dynamic_attributes.clone()))
+        .unwrap_or_default();
+    for (attr_id, val) in dyn_attrs {
+        ship_attrs_map.insert(attr_id, val);
+    }
+    super::super::fitting_scanners_superweapons::apply_active_dbuffs_and_system_effects_to_ship_attrs(
+        ctx,
+        ship_id,
+        &mut ship_attrs_map,
+    );
+    let mut entries: Vec<(PyRep, PyRep)> = ship_attrs_map
+        .into_iter()
+        .map(|(k, v)| (PyRep::Integer(k as i64), PyRep::Real(v)))
+        .collect();
+    entries.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
+
+    let mut module_entries = Vec::with_capacity(fit.modules.len());
+    for m_state in &eval_ctx.ship_located_items {
+        let attr_ids_set: std::collections::BTreeSet<u16> = m_state
+            .base_attributes
+            .keys()
+            .copied()
+            .chain(m_state.modifiers.iter().map(|m| m.target_attribute_id))
+            .collect();
+        let mut m_map: HashMap<u16, f64> = attr_ids_set
+            .into_iter()
+            .map(|aid| (aid, m_state.get_attribute(aid, &ctx.sde)))
+            .collect();
+        let is_mod_online = fit
+            .modules
+            .get(&m_state.item_id)
+            .map(|m| m.state != eve_dogma::ModuleState::Offline)
+            .unwrap_or(true);
+        m_map.insert(2, if is_mod_online { 1.0 } else { 0.0 });
+        crate::services::tactical_modules::apply_projected_rtc_to_module_attrs(
+            ctx,
+            ship_id,
+            &mut m_map,
+        );
+        let mut m_attrs: Vec<(PyRep, PyRep)> = m_map
+            .into_iter()
+            .map(|(aid, v)| (PyRep::Integer(aid as i64), PyRep::Real(v)))
+            .collect();
+        m_attrs.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
+        module_entries.push((PyRep::Integer(m_state.item_id), PyRep::Dict(m_attrs)));
+    }
+    for m in fit
+        .modules
+        .values()
+        .filter(|m| m.state == eve_dogma::ModuleState::Offline)
+    {
+        let mut m_map: HashMap<u16, f64> = ctx
+            .sde
+            .types
+            .get(&m.type_id)
+            .map(|t| t.default_attributes.clone())
+            .unwrap_or_default();
+        m_map.insert(2, 0.0);
+        let mut m_attrs: Vec<(PyRep, PyRep)> = m_map
+            .into_iter()
+            .map(|(aid, v)| (PyRep::Integer(aid as i64), PyRep::Real(v)))
+            .collect();
+        m_attrs.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
+        module_entries.push((PyRep::Integer(m.item_id), PyRep::Dict(m_attrs)));
+    }
+
+    let ship_type_id = fit.ship.type_id;
+    let active_stance = fit
+        .active_stance_type_id
+        .or_else(|| eve_dogma::ShipFittingEngine::default_t3d_stance_type_id(ship_type_id))
+        .map(|tid| PyRep::Integer(tid as i64))
+        .unwrap_or(PyRep::None);
+
+    ctx.store_ship_fitting(ship_id, fit);
+    Ok((ship_type_id, active_stance, entries, module_entries))
+}
+
+fn emit_godma_prime_location_and_ship_state(
     ctx: &ServerContext,
     session: &SessionState,
     char_id: i64,
     ship_id: i64,
     ship_type_id: u32,
-    active_stance: PyRep,
-    entries: Vec<(PyRep, PyRep)>,
-    module_entries: Vec<(PyRep, PyRep)>,
-    args: &[PyRep],
-) -> PyRep {
-    let now_ft = ctx.now_blueos_filetime_ticks();
-    let header = eve_proto::DBRowDescriptor::inv_item_header();
-    let prime_char = !matches!(args.first(), Some(PyRep::Bool(false) | PyRep::Integer(0) | PyRep::None));
-    let prime_ship = !matches!(args.get(1), Some(PyRep::Bool(false) | PyRep::Integer(0) | PyRep::None));
-
+    entries: &[(PyRep, PyRep)],
+    module_entries: &[(PyRep, PyRep)],
+    now_ft: i64,
+    header: &eve_proto::DBRowDescriptor,
+) -> (Vec<(PyRep, PyRep)>, PyRep) {
     let ship_inv_row = if let Some(mut it) = ctx.db.get_item(ship_id) {
         it.singleton = true;
         header.build_dbrow(super::super::item_to_packed_cells(ctx, &it))
@@ -397,7 +491,11 @@ pub(crate) fn build_all_info(
             .get(&ship_type_id)
             .map(|t| (i64::from(t.group_id), i64::from(t.category_id)))
             .unwrap_or((25, 6));
-        let loc = session.station_id.or(session.solar_system_id.map(i64::from)).unwrap_or(0);
+        let loc = session
+            .station_id
+            .or(session.structure_id)
+            .or(session.solar_system_id.map(i64::from))
+            .unwrap_or(0);
         header.build_dbrow(vec![
             PyRep::Integer(ship_id),
             PyRep::Integer(i64::from(ship_type_id)),
@@ -415,7 +513,7 @@ pub(crate) fn build_all_info(
         PyRep::keyval([
             ("itemID", PyRep::Integer(ship_id)),
             ("invItem", ship_inv_row),
-            ("attributes", PyRep::Dict(entries.clone())),
+            ("attributes", PyRep::Dict(entries.to_vec())),
             ("activeEffects", PyRep::Dict(Vec::new())),
             ("time", PyRep::Integer(now_ft)),
             ("wallclockTime", PyRep::Integer(now_ft)),
@@ -500,6 +598,83 @@ pub(crate) fn build_all_info(
         vec![PyRep::Integer(ship_id), PyRep::Dict(ship_info_entries.clone())],
     );
 
+    let wb_data = ctx.db.with_snapshot(|snap| {
+        crate::services::combat_crimewatch::combat_weapons_spool::build_weapon_banks_dict(
+            snap, ship_id,
+        )
+    });
+    let ship_state = PyRep::Tuple(vec![
+        PyRep::Dict(Vec::new()),
+        PyRep::Dict(Vec::new()),
+        wb_data,
+        PyRep::Dict(Vec::new()),
+    ]);
+    (ship_info_entries, ship_state)
+}
+
+pub(crate) fn prime_ship_on_board(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    ship_id: i64,
+) -> PyRep {
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let header = eve_proto::DBRowDescriptor::inv_item_header();
+    let (ship_type_id, entries, module_entries) =
+        match evaluate_ship_dogma_attributes(ctx, char_id, ship_id) {
+            Ok((tid, _stance, entries, module_entries)) => (tid, entries, module_entries),
+            Err(_) => {
+                let tid = ctx
+                    .db
+                    .get_item(ship_id)
+                    .map(|it| it.type_id)
+                    .unwrap_or(0);
+                (tid, Vec::new(), Vec::new())
+            }
+        };
+    let (_ship_info_entries, ship_state) = emit_godma_prime_location_and_ship_state(
+        ctx,
+        session,
+        char_id,
+        ship_id,
+        ship_type_id,
+        &entries,
+        &module_entries,
+        now_ft,
+        &header,
+    );
+    ship_state
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_all_info(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    ship_id: i64,
+    ship_type_id: u32,
+    active_stance: PyRep,
+    entries: Vec<(PyRep, PyRep)>,
+    module_entries: Vec<(PyRep, PyRep)>,
+    args: &[PyRep],
+) -> PyRep {
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let header = eve_proto::DBRowDescriptor::inv_item_header();
+    let prime_char = !matches!(args.first(), Some(PyRep::Bool(false) | PyRep::Integer(0) | PyRep::None));
+    let prime_ship = !matches!(args.get(1), Some(PyRep::Bool(false) | PyRep::Integer(0) | PyRep::None));
+
+    let (ship_info_entries, ship_state) = emit_godma_prime_location_and_ship_state(
+        ctx,
+        session,
+        char_id,
+        ship_id,
+        ship_type_id,
+        &entries,
+        &module_entries,
+        now_ft,
+        &header,
+    );
+
     let char_info = if prime_char {
         let char_type_id = 1373u32;
         let (cha, int, mem, per, wil) = ctx.db.with_snapshot(|snap| {
@@ -557,12 +732,6 @@ pub(crate) fn build_all_info(
     };
 
     let ship_info = if prime_ship { PyRep::Dict(ship_info_entries) } else { PyRep::None };
-    let ship_state = PyRep::Tuple(vec![
-        PyRep::Dict(Vec::new()),
-        PyRep::Dict(Vec::new()),
-        PyRep::Dict(Vec::new()),
-        PyRep::Dict(Vec::new()),
-    ]);
 
     PyRep::keyval([
         ("shipID", PyRep::Integer(ship_id)),

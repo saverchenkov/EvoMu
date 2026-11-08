@@ -925,7 +925,10 @@ async fn test_ships_board_ship_skill_and_clone_check_and_persistence() {
     let board_rep = rpc(&ctx, &mut sess, "ship", "Board", &[PyRep::Integer(target_ship_id)])
         .await
         .expect("Board ship with required skill");
-    assert_eq!(board_rep.dict_get("shipID").and_then(|v| v.as_i64()), Some(target_ship_id));
+    let PyRep::Tuple(ship_state) = board_rep else {
+        panic!("Expected 4-tuple shipState from ship.Board, got {board_rep:?}");
+    };
+    assert_eq!(ship_state.len(), 4);
     assert_eq!(sess.ship_id, Some(target_ship_id));
 
     let reloaded = reload_db(&ctx);

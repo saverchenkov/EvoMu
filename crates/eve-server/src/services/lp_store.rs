@@ -1373,8 +1373,20 @@ pub fn handle(
             }
             Some(Ok(PyRep::Dict(by_group)))
         }
-        ("RWManager", "solarsystem_contains_rw_instances") => Some(Ok(PyRep::Bool(false))),
-        ("RWManager", "get_closest_rw_stations") => Some(Ok(PyRep::Dict(Vec::new()))),
+        // Resource Wars (`RWManager`): retired in live EVE Online (2020), queried by V24 `lpStoreSvc` / `rwService`.
+        // Return authentic empty/no-RW-sites responses so LP Store and station service UI open cleanly.
+        ("RWManager", "solarsystem_contains_rw_instances") => {
+            if let Err(e) = ServerContext::require_character(session) {
+                return Some(Err(e));
+            }
+            Some(Ok(PyRep::Bool(false)))
+        }
+        ("RWManager", "get_closest_rw_stations") => {
+            if let Err(e) = ServerContext::require_character(session) {
+                return Some(Err(e));
+            }
+            Some(Ok(PyRep::Dict(Vec::new())))
+        }
         _ => None,
     }
 }
