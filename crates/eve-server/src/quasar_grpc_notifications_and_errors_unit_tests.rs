@@ -1,6 +1,7 @@
 //! Semantic unit tests split from `quasar_grpc_unit_tests`.
 
 use crate::quasar_grpc::*;
+use crate::router::client_compat::normalize_macho_notification;
 use crate::router::ServerContext;
 use bytes::{Buf, BytesMut};
 use eve_proto::quasar::{

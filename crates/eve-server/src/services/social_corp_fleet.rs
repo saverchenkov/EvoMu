@@ -1604,12 +1604,10 @@ fn handle_get_capital_system_info(
                 .map(|(&sys_id, _)| sys_id as i64)
                 .min();
             cfg.capital_system_id = sov_sys.or_else(|| {
-                Some(
-                    snap.characters
-                        .get(&char_id)
-                        .map(|c| c.solar_system_id as i64)
-                        .unwrap_or(session.solar_system_id.unwrap_or(30_000_142) as i64),
-                )
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| c.solar_system_id as i64)
+                    .or(session.solar_system_id.map(i64::from))
             });
         }
         cfg

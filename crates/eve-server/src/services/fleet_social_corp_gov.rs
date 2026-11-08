@@ -266,7 +266,7 @@ pub(super) fn handle_add_corporation(
                 s.characters
                     .get(&char_id)
                     .map(|c| (c.active_ship_id, c.solar_system_id, c.station_id.or(c.structure_id)))
-                    .unwrap_or((0, session.solar_system_id.unwrap_or(30_000_142), session.station_id.or(session.structure_id)))
+                    .unwrap_or((0, session.solar_system_id.unwrap_or(0), session.station_id.or(session.structure_id)))
             });
             if act_ship != 0 {
                 session.ship_id = Some(act_ship);

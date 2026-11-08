@@ -943,12 +943,15 @@ pub fn handle_industry_facilities_bps(
             }
             let fid = resolve_caller_facility_id(ctx, session, char_id, args.first().and_then(|a| a.as_i64()));
             let owner_filter = args.get(1).and_then(|a| a.as_i64());
-            let locs = ctx.db.with_snapshot(|snap| {
+            let locs = match ctx.db.with_snapshot(|snap| -> Result<Vec<PyRep>, BridgeRpcError> {
                 let sys_id = snap.structures.get(&fid).map(|s| s.solar_system_id)
                     .or_else(|| ctx.sde.stations.get(&fid).map(|st| st.solar_system_id as u32))
                     .or(session.solar_system_id)
                     .or_else(|| snap.characters.get(&char_id).map(|c| c.solar_system_id))
-                    .unwrap_or(30_000_142);
+                    .ok_or_else(|| BridgeRpcError {
+                        code: "FacilityLocationNotFound".into(),
+                        message: format!("Could not resolve solar system for facility {fid}"),
+                    })?;
                 let type_id = snap.structures.get(&fid).map(|s| s.type_id as i64)
                     .or_else(|| ctx.sde.stations.get(&fid).map(|st| st.station_type_id as i64))
                     .unwrap_or(1529);
@@ -971,8 +974,11 @@ pub fn handle_industry_facilities_bps(
                         }
                     }
                 }
-                out
-            });
+                Ok(out)
+            }) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             Some(Ok(PyRep::List(locs)))
         }
 

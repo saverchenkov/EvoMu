@@ -1277,7 +1277,7 @@ pub(super) fn handle_corps(
                 Ok((corp_id, applicant_id, old_corp_id, status_str, app_msg, app_ts, welcome_mail_id, released)) => {
                     crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
                     if status_str == "Accepted" {
-                        let fallback_sys = session.solar_system_id.unwrap_or(30_000_142);
+                        let fallback_sys = session.solar_system_id.unwrap_or(0);
                         let fallback_dock = session.station_id.or(session.structure_id);
                         let (old_ally, new_ally, old_role, app_sys, app_dock) = ctx.db.with_snapshot(|s| {
                             let (sys_id, dock_id) = s

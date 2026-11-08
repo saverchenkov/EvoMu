@@ -2,7 +2,7 @@
 //! `normalize_macho_rpc_reply`, `normalize_macho_notification`, `normalize_quasar_any_payload`
 //! leaf/varint coercion branches, JWT subject/expiry/SSO verification, and HTTP/2 gRPC streams.
 
-use crate::quasar_grpc::*;
+use crate::router::client_compat::normalize_macho_rpc_reply;
 use eve_proto::PyRep;
 
 #[test]

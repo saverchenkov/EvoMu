@@ -464,10 +464,21 @@ async fn handle_qa_scan_sites(
             message: "scanMgr.QAScanSites requires GM/QA role".into(),
         }));
     }
-    let sys_id = bound_entry
+    let Some(sys_id) = bound_entry
         .map(|b| b.object_id as u32)
+        .filter(|&v| v > 0)
         .or(session.solar_system_id)
-        .unwrap_or(30_000_142);
+        .or_else(|| {
+            session.character_id.and_then(|cid| {
+                ctx.db.with_snapshot(|s| s.characters.get(&cid).map(|c| c.solar_system_id))
+            })
+        })
+    else {
+        return Some(Err(BridgeRpcError {
+            code: "InvalidSolarSystem".into(),
+            message: "scanMgr.QAScanSites requires an active solar system".into(),
+        }));
+    };
     let (sigs, anomalies) = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
     let now_unix = ctx.now_unix();
     let mut results = format_anomalies(anomalies, now_unix);

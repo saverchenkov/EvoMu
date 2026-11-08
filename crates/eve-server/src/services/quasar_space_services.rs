@@ -397,15 +397,17 @@ pub fn register_handlers(
         router.register_handler(
             "eve.region.GetRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let region_id = get_identifier_or_int(dyn_msg, 1).unwrap_or(10_000_002) as u32;
-                if region_id == 0 {
+                let Some(region_id) = get_identifier_or_int(dyn_msg, 1)
+                    .filter(|&v| v > 0)
+                    .map(|v| v as u32)
+                else {
                     return Err((STATUS_BAD_REQUEST, "Region ID must be positive".into()));
-                }
+                };
                 let (fac_id, name) = sde_r
                     .regions
                     .get(&region_id)
-                    .map(|r| (r.faction_id.unwrap_or(500_001) as u64, r.name.clone()))
-                    .unwrap_or((500_001, "The Forge".into()));
+                    .map(|r| (r.faction_id.unwrap_or(0) as u64, r.name.clone()))
+                    .ok_or_else(|| (STATUS_NOT_FOUND, format!("Region {region_id} not found")))?;
                 encode_domain_message(&d, "eve.region.GetResponse", |reg, resp| {
                     set_domain_attributes(reg, resp, region_id as u64, fac_id, &name);
                 })
@@ -419,8 +421,14 @@ pub fn register_handlers(
             "eve.region.GetAllRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
                 let count = sde_r.regions.len() as u64;
+                let (first_id, first_name) = sde_r
+                    .regions
+                    .values()
+                    .next()
+                    .map(|r| (r.region_id as u64, r.name.as_str()))
+                    .unwrap_or((0, ""));
                 encode_domain_message(&d, "eve.region.GetAllResponse", |reg, resp| {
-                    set_domain_attributes(reg, resp, 10_000_002, count, "The Forge");
+                    set_domain_attributes(reg, resp, first_id, count, first_name);
                 })
             }),
         );
@@ -436,14 +444,15 @@ pub fn register_handlers(
                     return Err((STATUS_BAD_REQUEST, "Region query cannot be empty".into()));
                 }
                 let q_lower = query.to_lowercase();
-                let matched_id = sde_r
+                let matched = sde_r
                     .regions
                     .values()
                     .find(|r| r.name.to_lowercase().contains(&q_lower))
-                    .map(|r| r.region_id)
-                    .unwrap_or(10_000_002);
+                    .ok_or_else(|| (STATUS_NOT_FOUND, format!("No region matched '{query}'")))?;
+                let matched_id = matched.region_id;
+                let matched_fac = matched.faction_id.unwrap_or(0) as u64;
                 encode_domain_message(&d, "eve.region.SearchResponse", |reg, resp| {
-                    set_domain_attributes(reg, resp, matched_id as u64, 500_001, &query);
+                    set_domain_attributes(reg, resp, matched_id as u64, matched_fac, &query);
                 })
             }),
         );
@@ -456,10 +465,12 @@ pub fn register_handlers(
         router.register_handler(
             "eve.universe.constellation.GetAllInRegionRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let region_id = get_int_field(dyn_msg, 1).unwrap_or(10_000_002) as u32;
-                if region_id == 0 {
+                let Some(region_id) = get_int_field(dyn_msg, 1)
+                    .filter(|&v| v > 0)
+                    .map(|v| v as u32)
+                else {
                     return Err((STATUS_BAD_REQUEST, "Region ID must be positive".into()));
-                }
+                };
                 let first_const = sde_c
                     .constellations
                     .values()
@@ -520,7 +531,7 @@ pub fn register_handlers(
         router.register_handler(
             "eve.bubble.presence.api.GetInBubbleRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
-                let cid = ctx.effective_character_id().unwrap_or(90_000_001);
+                let cid = require_character(ctx)? as u32;
                 let sys_id = db_b.with_snapshot(|s| {
                     s.characters
                         .get(&(cid as i64))
@@ -539,10 +550,12 @@ pub fn register_handlers(
         router.register_handler(
             "eve.bubble.presence.api.GetInBubbleByCharacterRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let char_id = get_int_field(dyn_msg, 1).unwrap_or(90_000_001) as u32;
-                if char_id == 0 {
+                let Some(char_id) = get_int_field(dyn_msg, 1)
+                    .filter(|&v| v > 0)
+                    .map(|v| v as u32)
+                else {
                     return Err((STATUS_BAD_REQUEST, "Character ID must be positive".into()));
-                }
+                };
                 let sys_id = db_b.with_snapshot(|s| {
                     s.characters
                         .get(&(char_id as i64))

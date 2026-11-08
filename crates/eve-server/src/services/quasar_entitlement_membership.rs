@@ -1,7 +1,9 @@
 //! `quasar_entitlement_membership` — Quasar Entitlement, Omega & Membership Services (`Q-3`).
 
 use super::quasar_auth_user::{read_identity_store, with_identity_store};
-use crate::quasar_gateway::{require_admin_role, NoticeScope, PublicGatewayRouter};
+use crate::quasar_gateway::{
+    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_UNAUTHORIZED,
+};
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, DynamicQuasarMessage,
@@ -291,7 +293,9 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             req_name,
             Arc::new(move |ctx, _any, dyn_msg| {
                 require_admin_role(ctx)?;
-                let caller_cid = ctx.effective_character_id().unwrap_or(90_000_001) as u64;
+                let Some(caller_cid) = ctx.effective_character_id().filter(|&v| v > 0).map(u64::from) else {
+                    return Err((STATUS_UNAUTHORIZED, "Active character session required".into()));
+                };
                 let (target_cid, ship_type_id) = extract_logo_entitlement_target(ctx, dyn_msg)?;
                 with_identity_store(&db_logo, |guard| {
                     let map = if is_alliance {
@@ -523,7 +527,9 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     router.register_handler(
         "eve.membership.GetCharacterAllRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
-            let cid = ctx.effective_character_id().unwrap_or(90000001) as i64;
+            let Some(cid) = ctx.effective_character_id().filter(|&v| v > 0).map(i64::from) else {
+                return Err((STATUS_UNAUTHORIZED, "Active character session required".into()));
+            };
             let (corp_id, alliance_id) = db_mem.with_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get(&cid) {
                     (ch.corporation_id, ch.alliance_id)
@@ -570,7 +576,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     router.register_handler(
         "eve.membership.corporation.GetCharacterRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let cid = dyn_msg
+            let Some(cid) = dyn_msg
                 .get(1)
                 .and_then(|v| match v {
                     DynamicValue::Message(sub) => sub.get(1).and_then(|u| match u {
@@ -581,8 +587,14 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                     }),
                     _ => None,
                 })
-                .or_else(|| ctx.effective_character_id().map(|c| c as i64))
-                .unwrap_or(90000001);
+                .filter(|&v| v > 0)
+                .or_else(|| ctx.effective_character_id().filter(|&v| v > 0).map(|c| c as i64))
+            else {
+                return Err((
+                    STATUS_UNAUTHORIZED,
+                    "Character ID or active character session required".into(),
+                ));
+            };
 
             let (corp_id, title) = db_corp_mem.with_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get(&cid) {

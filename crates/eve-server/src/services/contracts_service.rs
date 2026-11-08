@@ -62,7 +62,33 @@ fn parse_item_ids(raw: Option<&PyRep>) -> Vec<i64> {
     }
 }
 
-fn contract_to_pyrep(c: &ContractRecord, snap: &eve_db::WorldStateSnapshot) -> PyRep {
+fn contract_location_ids(
+    sde: &eve_sde::SdeRegistry,
+    snap: &eve_db::WorldStateSnapshot,
+    location_id: i64,
+) -> (i64, i64) {
+    let sys_id = sde
+        .stations
+        .get(&location_id)
+        .map(|st| st.solar_system_id)
+        .or_else(|| snap.structures.get(&location_id).map(|st| st.solar_system_id))
+        .unwrap_or(0);
+    let region_id = if sys_id > 0 {
+        sde.solar_systems
+            .get(&sys_id)
+            .map(|sys| i64::from(sys.region_id))
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    (i64::from(sys_id), region_id)
+}
+
+fn contract_to_pyrep(
+    c: &ContractRecord,
+    snap: &eve_db::WorldStateSnapshot,
+    sde: &eve_sde::SdeRegistry,
+) -> PyRep {
     let items_rep = PyRep::List(c.item_ids.iter().map(|&id| PyRep::Integer(id)).collect());
     let detailed_items_rep = PyRep::List(c.item_ids.iter().filter_map(|&id| {
         let it = snap.items.get(&id)?;
@@ -92,12 +118,16 @@ fn contract_to_pyrep(c: &ContractRecord, snap: &eve_db::WorldStateSnapshot) -> P
     let primary_runs = primary.and_then(|it| it.blueprint_runs_remaining).map(|r| PyRep::Integer(r as i64)).unwrap_or(PyRep::Integer(-1));
     let primary_dmg = primary.map(|it| it.dynamic_attributes.get(&3).copied().unwrap_or(0.0)).unwrap_or(0.0);
     let primary_muta = primary.and_then(|it| it.source_mutaplasmid_id).map(|m| PyRep::Integer(m as i64)).unwrap_or(PyRep::None);
+    let (start_sys_id, start_reg_id) = contract_location_ids(sde, snap, c.start_station_id);
+    let (end_sys_id, end_reg_id) = contract_location_ids(sde, snap, c.end_station_id);
     let base_fields = [
         ("contractID", PyRep::Integer(c.contract_id)), ("issuerID", PyRep::Integer(c.issuer_id)),
         ("issuerCorpID", PyRep::Integer(c.issuer_corp_id)), ("acceptorID", c.acceptor_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
         ("assigneeID", PyRep::Integer(c.assignee_id)), ("availability", PyRep::String(availability)),
         ("type", PyRep::String(c.contract_type.clone())), ("status", PyRep::String(c.status.clone())),
         ("startStationID", PyRep::Integer(c.start_station_id)), ("endStationID", PyRep::Integer(c.end_station_id)),
+        ("startSolarSystemID", PyRep::Integer(start_sys_id)), ("endSolarSystemID", PyRep::Integer(end_sys_id)),
+        ("startRegionID", PyRep::Integer(start_reg_id)), ("endRegionID", PyRep::Integer(end_reg_id)),
         ("price", PyRep::Real(c.price.to_wire_f64())), ("reward", PyRep::Real(c.reward.to_wire_f64())),
         ("collateral", PyRep::Real(c.collateral.to_wire_f64())), ("buyout", PyRep::Real(c.buyout.to_wire_f64())),
         ("currentBid", PyRep::Real(c.current_bid.to_wire_f64())), ("currentBidderID", c.current_bidder_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
@@ -1546,7 +1576,7 @@ pub fn handle(
                 if !check_contract_visibility(c, char_id, caller_corp, caller_alliance) && c.acceptor_id != Some(char_id) {
                     return Err(rpc_err("ContractAccessDenied", format!("Character {char_id} cannot view private contract {cid}")));
                 }
-                Ok(contract_to_pyrep(c, snap))
+                Ok(contract_to_pyrep(c, snap, &ctx.sde))
             });
             if res.is_ok() && method == "GetContractInfo" { notify_contract(ctx, char_id, "OnShowContract", cid); }
             Some(res)
@@ -1587,7 +1617,7 @@ pub fn handle(
                                 && item_type_ok
                         }).cloned().collect();
                     list.sort_by_key(|c| c.contract_id);
-                    Ok::<_, std::convert::Infallible>(list.iter().map(|c| contract_to_pyrep(c, snap)).collect::<Vec<_>>())
+                    Ok::<_, std::convert::Infallible>(list.iter().map(|c| contract_to_pyrep(c, snap, &ctx.sde)).collect::<Vec<_>>())
                 }).unwrap();
             Some(Ok(PyRep::List(rows)))
         }
@@ -1625,7 +1655,7 @@ pub fn handle(
                         }
                 }).cloned().collect();
                 list.sort_by_key(|c| c.contract_id);
-                Ok::<_, std::convert::Infallible>(list.iter().map(|c| contract_to_pyrep(c, snap)).collect::<Vec<_>>())
+                Ok::<_, std::convert::Infallible>(list.iter().map(|c| contract_to_pyrep(c, snap, &ctx.sde)).collect::<Vec<_>>())
             }).unwrap();
             Some(Ok(PyRep::List(rows)))
         }
@@ -1641,7 +1671,7 @@ pub fn handle(
                         && (c.issuer_id == char_id || c.acceptor_id == Some(char_id) || c.assignee_id == char_id || c.current_bidder_id == Some(char_id))
                 }).cloned().collect();
                 list.sort_by_key(|c| c.contract_id);
-                Ok::<_, std::convert::Infallible>(list.iter().map(|c| contract_to_pyrep(c, snap)).collect::<Vec<_>>())
+                Ok::<_, std::convert::Infallible>(list.iter().map(|c| contract_to_pyrep(c, snap, &ctx.sde)).collect::<Vec<_>>())
             }).unwrap();
             Some(Ok(PyRep::List(rows)))
         }
@@ -1684,7 +1714,7 @@ pub fn handle(
                     }
                 }).cloned().collect();
                 list.sort_by_key(|c| c.contract_id);
-                Ok(list.iter().map(|c| contract_to_pyrep(c, snap)).collect())
+                Ok(list.iter().map(|c| contract_to_pyrep(c, snap, &ctx.sde)).collect())
             });
             Some(res.map(PyRep::List))
         }

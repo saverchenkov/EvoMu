@@ -1098,7 +1098,16 @@ pub async fn handle(
             }))
         }
         ("facWarMgr", "GetControlBunkerIDInSystem") => {
-            let sys_id = session.solar_system_id.unwrap_or(30000142);
+            let Some(sys_id) = session.solar_system_id.or_else(|| {
+                session.character_id.and_then(|cid| {
+                    ctx.db.with_snapshot(|s| s.characters.get(&cid).map(|c| c.solar_system_id))
+                })
+            }) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSolarSystem".into(),
+                    message: "Active solar system required for GetControlBunkerIDInSystem".into(),
+                }));
+            };
             let bunker_opt = ctx.db.with_snapshot(|s| {
                 s.structures
                     .values()
@@ -1196,12 +1205,23 @@ pub async fn handle(
             Some(Ok(dict))
         }
         ("facWarMgr", "GetSolarSystemLPs") => {
-            let sys_id = args
+            let Some(sys_id) = args
                 .first()
                 .and_then(|a| a.as_i64())
                 .and_then(|v| u32::try_from(v).ok())
+                .filter(|&v| v > 0)
                 .or(session.solar_system_id)
-                .unwrap_or(30000142);
+                .or_else(|| {
+                    session.character_id.and_then(|cid| {
+                        ctx.db.with_snapshot(|s| s.characters.get(&cid).map(|c| c.solar_system_id))
+                    })
+                })
+            else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSolarSystem".into(),
+                    message: "Solar system ID required for GetSolarSystemLPs".into(),
+                }));
+            };
             let lp = ctx.db.with_snapshot(|s| {
                 s.fw_runtime.ihub_lp_donations.get(&sys_id).copied().unwrap_or(0)
             });

@@ -815,7 +815,10 @@ pub fn register_economy_planetary_industry_handlers(
     router.register_handler(
         "eve.isk.wallet.api.TransferByOwnerRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let caller = ctx.effective_character_id().unwrap_or(90_000_001) as i64;
+            let Some(caller_u32) = ctx.effective_character_id().filter(|&v| v > 0) else {
+                return Err((STATUS_UNAUTHORIZED, "Active character session required".into()));
+            };
+            let caller = caller_u32 as i64;
             let amount = match dyn_msg.get(5) {
                 Some(DynamicValue::Message(m)) => match m.get(1) {
                     Some(DynamicValue::Int64(i)) => *i,

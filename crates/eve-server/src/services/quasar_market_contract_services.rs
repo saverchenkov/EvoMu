@@ -320,7 +320,9 @@ pub fn register_handlers(
         router.register_handler(
             "eve.contacts.GetAllForCharacterRequest",
             Arc::new(move |ctx, _req_any, _dyn_msg| {
-                let char_id = ctx.effective_character_id().unwrap_or(90_000_001) as i64;
+                let Some(char_id) = ctx.effective_character_id().filter(|&v| v > 0).map(i64::from) else {
+                    return Err((STATUS_UNAUTHORIZED, "Active character session required".into()));
+                };
                 let mut out = Vec::new();
                 db_contacts.with_snapshot(|snap| {
                     if let Some(ch) = snap.characters.get(&char_id) {

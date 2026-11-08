@@ -801,10 +801,18 @@ pub fn register_handlers(
     router.register_handler(
         "eve.mission.api.GetCompletedCountRequest",
         Arc::new(move |ctx, _any, msg| {
-            let cid = extract_u64_checked(msg, 1)?
+            let cid = match extract_u64_checked(msg, 1)?
                 .map(|v| v as i64)
                 .or_else(|| ctx.effective_character_id().map(|c| c as i64))
-                .unwrap_or(90000001);
+            {
+                Some(id) if id > 0 => id,
+                _ => {
+                    return Err((
+                        STATUS_UNAUTHORIZED,
+                        "Character ID required to query completed mission count".into(),
+                    ))
+                }
+            };
             let completed_count = db_mission.with_snapshot(|snap| {
                 snap.characters.get(&cid).map(|_| 15u64).unwrap_or(0)
             });

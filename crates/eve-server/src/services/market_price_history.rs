@@ -429,12 +429,14 @@ pub fn build_price_history_rows(
         let mut daily_map: std::collections::BTreeMap<String, (f64, f64, i64, i64, f64)> = std::collections::BTreeMap::new();
         for tx in &snap.market_transactions {
             if tx.type_id == type_id {
-                let tx_region = snap
+                let Some(tx_region) = snap
                     .market_orders
                     .values()
                     .find(|o| o.station_id == tx.location_id)
                     .map(|o| o.region_id)
-                    .unwrap_or(10_000_002);
+                else {
+                    continue;
+                };
                 if tx_region == region_id {
                     let date_str = eve_db::ledger::unix_secs_to_date_str(tx.date_unix);
                     let unit_price = tx.price.to_wire_f64();

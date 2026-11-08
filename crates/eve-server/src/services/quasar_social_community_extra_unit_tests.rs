@@ -305,12 +305,29 @@ fn calendar_contact_labels_and_standings_verify_wire_payloads_and_clamping() {
     .unwrap();
     assert_eq!(decode_sub_varint(&corp_rsp.value, 1, 1), Some(84));
 
-    // 3. Standings commands clamp at +10.0 and -10.0 and handle unauthenticated fallback
+    // 3. Standings commands clamp at +10.0 and -10.0 and fail closed when unauthenticated
+    let err_inc = invoke_quasar(
+        &router,
+        "eve.standing.api.IncreaseCommanded",
+        &unauth_ctx,
+        &DynamicQuasarMessage::new("Inc"),
+    )
+    .unwrap_err();
+    assert_eq!(err_inc.0, STATUS_UNAUTHORIZED);
+    let err_dec = invoke_quasar(
+        &router,
+        "eve.standing.api.DecreaseCommanded",
+        &unauth_ctx,
+        &DynamicQuasarMessage::new("Dec"),
+    )
+    .unwrap_err();
+    assert_eq!(err_dec.0, STATUS_UNAUTHORIZED);
+
     for _ in 0..15 {
         invoke_quasar(
             &router,
             "eve.standing.api.IncreaseCommanded",
-            &unauth_ctx,
+            &player_ctx,
             &DynamicQuasarMessage::new("Inc"),
         )
         .unwrap();
@@ -319,7 +336,7 @@ fn calendar_contact_labels_and_standings_verify_wire_payloads_and_clamping() {
         invoke_quasar(
             &router,
             "eve.standing.api.DecreaseCommanded",
-            &unauth_ctx,
+            &player_ctx,
             &DynamicQuasarMessage::new("Dec"),
         )
         .unwrap();

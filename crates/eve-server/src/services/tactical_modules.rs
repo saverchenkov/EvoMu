@@ -213,12 +213,13 @@ pub fn apply_projected_remote_assistance(
     };
 
     // Enforce full safety level, Criminal/Suspect inheritance, and CONCORD interference for remote assistance
-    let sys_id = ctx.db.with_snapshot(|snap| {
-        snap.characters
-            .get(&char_id)
-            .map(|c| c.solar_system_id)
-            .unwrap_or(30_000_142)
-    });
+    let sys_id = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id))
+        .ok_or_else(|| BridgeRpcError {
+            code: "CharacterNotFound".into(),
+            message: format!("Character {char_id} not found for remote assistance"),
+        })?;
     crate::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_remote_assistance(
         ctx,
         char_id,

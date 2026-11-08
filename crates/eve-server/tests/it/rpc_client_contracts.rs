@@ -2087,7 +2087,7 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
                 }
             }
         }
-        let nargs = eve_server::quasar_grpc::normalize_macho_notification(ev, nargs.clone());
+        let nargs = eve_server::router::client_compat::normalize_macho_notification(ev, nargs.clone());
         let nargs = &nargs;
         if nargs.len() < arity_min || nargs.len() > arity_max {
             notify_violations.push(format!(

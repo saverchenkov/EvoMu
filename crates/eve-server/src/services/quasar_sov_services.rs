@@ -492,7 +492,9 @@ pub fn register_handlers(
         router.register_handler(
             "eve.factionwarfare.leaderboard.characters.GetRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
-                let cid = ctx.effective_character_id().unwrap_or(90_000_001) as u64;
+                let Some(cid) = ctx.effective_character_id().filter(|&v| v > 0).map(u64::from) else {
+                    return Err((STATUS_UNAUTHORIZED, "Active character session required".into()));
+                };
                 encode_domain_message(
                     &d,
                     "eve.factionwarfare.leaderboard.characters.GetResponse",
@@ -508,7 +510,9 @@ pub fn register_handlers(
         router.register_handler(
             "eve.factionwarfare.leaderboard.corporations.GetRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
-                let corp_id = ctx.effective_corporation_id().unwrap_or(98_000_001) as u64;
+                let Some(corp_id) = ctx.effective_corporation_id().filter(|&v| v > 0).map(u64::from) else {
+                    return Err((STATUS_UNAUTHORIZED, "Corporation membership required".into()));
+                };
                 encode_domain_message(
                     &d,
                     "eve.factionwarfare.leaderboard.corporations.GetResponse",
@@ -539,10 +543,13 @@ pub fn register_handlers(
         router.register_handler(
             "eve.factionwarfare.stats.character.GetRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
-                let char_id = get_int_field(dyn_msg, 1)
-                    .map(|v| v as u32)
-                    .or_else(|| ctx.effective_character_id())
-                    .unwrap_or(90_000_001) as u64;
+                let Some(char_id) = get_int_field(dyn_msg, 1)
+                    .filter(|&v| v > 0)
+                    .map(|v| v as u64)
+                    .or_else(|| ctx.effective_character_id().filter(|&v| v > 0).map(u64::from))
+                else {
+                    return Err((STATUS_BAD_REQUEST, "Character ID is required".into()));
+                };
                 encode_domain_message(
                     &d,
                     "eve.factionwarfare.stats.character.GetResponse",

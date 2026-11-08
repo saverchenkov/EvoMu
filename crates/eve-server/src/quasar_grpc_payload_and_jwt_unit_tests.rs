@@ -1,6 +1,7 @@
 //! Semantic unit tests split from `quasar_grpc_extra_unit_tests`.
 
 use crate::quasar_grpc::*;
+use crate::router::client_compat::normalize_macho_notification;
 use crate::router::ServerContext;
 use bytes::{Buf, Bytes, BytesMut};
 use eve_proto::quasar::{
@@ -69,8 +70,30 @@ fn normalize_macho_notification_exhaustive_edge_cases() {
         vec![PyRep::Integer(1)]
     );
 
-    // OnGodmaShipEffect with 11 args passthrough
-    let eleven = vec![PyRep::Integer(1); 11];
+    // OnGodmaShipEffect with valid 11 args passthrough
+    let valid_ft = PyRep::Integer(133_500_000_000_000_000);
+    let valid_env = PyRep::Tuple(vec![
+        PyRep::Integer(1),
+        PyRep::None,
+        PyRep::Integer(1),
+        PyRep::None,
+        PyRep::None,
+        PyRep::List(Vec::new()),
+        PyRep::Integer(1),
+    ]);
+    let eleven = vec![
+        PyRep::Integer(1),
+        PyRep::Integer(1),
+        valid_ft.clone(),
+        PyRep::Integer(1),
+        PyRep::Integer(1),
+        valid_env,
+        valid_ft,
+        PyRep::Real(0.0),
+        PyRep::Integer(0),
+        PyRep::None,
+        PyRep::None,
+    ];
     assert_eq!(
         normalize_macho_notification("OnGodmaShipEffect", eleven.clone()),
         eleven

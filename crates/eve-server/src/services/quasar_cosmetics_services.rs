@@ -25,7 +25,8 @@ use super::quasar_space_services::{
     set_domain_attributes, set_domain_field,
 };
 use crate::quasar_gateway::{
-    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_FORBIDDEN,
+    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
+    STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
@@ -118,13 +119,34 @@ pub fn register_handlers(
     {
         let d = Arc::clone(&desc);
         let st = Arc::clone(&state);
+        let db_ship = Arc::clone(&db);
         router.register_handler(
             "eve.cosmetic.ship.api.request.GetRequest",
-            Arc::new(move |_ctx, _any, dyn_msg| {
-                let ship_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_001) as u64;
-                let (char_id, corp_id) = {
+            Arc::new(move |ctx, _any, dyn_msg| {
+                let Some(ship_id) = get_int_field(dyn_msg, 1).filter(|&v| v > 0).map(|v| v as u64) else {
+                    return Err((STATUS_BAD_REQUEST, "Ship ID is required".into()));
+                };
+                let stored = {
                     let data = st.data.read().unwrap_or_else(|e| e.into_inner());
-                    data.ship_logos.get(&ship_id).copied().unwrap_or((90_000_001, 98_000_001))
+                    data.ship_logos.get(&ship_id).copied()
+                };
+                let (char_id, corp_id) = match stored {
+                    Some(ids) => ids,
+                    None => db_ship.with_snapshot(|snap| {
+                        let owner_char = snap
+                            .items
+                            .get(&(ship_id as i64))
+                            .map(|it| it.owner_id as u32)
+                            .or_else(|| ctx.effective_character_id())
+                            .unwrap_or(0);
+                        let owner_corp = snap
+                            .characters
+                            .get(&(owner_char as i64))
+                            .map(|ch| ch.corporation_id as u32)
+                            .or_else(|| ctx.effective_corporation_id())
+                            .unwrap_or(0);
+                        (owner_char, owner_corp)
+                    }),
                 };
                 encode_domain_message(&d, "eve_public.cosmetic.ship.api.GetResponse", |reg, resp| {
                     set_domain_attributes(reg, resp, char_id as u64, corp_id as u64, "ShipLogoConfig");
@@ -166,8 +188,14 @@ pub fn register_handlers(
         let st = Arc::clone(&state);
         router.register_handler(
             "eve.cosmetic.corporation.palette.api.GetRequest",
-            Arc::new(move |_ctx, _any, dyn_msg| {
-                let corp_id = get_int_field(dyn_msg, 1).unwrap_or(98_000_001) as u64;
+            Arc::new(move |ctx, _any, dyn_msg| {
+                let Some(corp_id) = get_int_field(dyn_msg, 1)
+                    .filter(|&v| v > 0)
+                    .map(|v| v as u64)
+                    .or_else(|| ctx.effective_corporation_id().filter(|&v| v > 0).map(u64::from))
+                else {
+                    return Err((STATUS_BAD_REQUEST, "Corporation ID is required".into()));
+                };
                 let palette = st
                     .data
                     .read()
@@ -192,7 +220,9 @@ pub fn register_handlers(
         router.register_handler(
             "eve.cosmetic.corporation.palette.api.GetOwnRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
-                let corp_id = ctx.effective_corporation_id().unwrap_or(98_000_001) as u64;
+                let Some(corp_id) = ctx.effective_corporation_id().filter(|&v| v > 0).map(u64::from) else {
+                    return Err((STATUS_UNAUTHORIZED, "Corporation membership required".into()));
+                };
                 let palette = st
                     .data
                     .read()
@@ -224,7 +254,9 @@ pub fn register_handlers(
                         "Corporation director role required to set corporation palette".into(),
                     ));
                 }
-                let corp_id = ctx.effective_corporation_id().unwrap_or(98_000_001) as u64;
+                let Some(corp_id) = ctx.effective_corporation_id().filter(|&v| v > 0).map(u64::from) else {
+                    return Err((STATUS_UNAUTHORIZED, "Corporation membership required".into()));
+                };
                 st.data
                     .write()
                     .unwrap_or_else(|e| e.into_inner())
@@ -325,7 +357,10 @@ pub fn register_handlers(
                 if req_name.contains(".admin.") {
                     require_admin_role(ctx)?;
                 }
-                let cid = ctx.effective_character_id().unwrap_or(90_000_001) as i64;
+                let Some(cid_u32) = ctx.effective_character_id().filter(|&v| v > 0) else {
+                    return Err((STATUS_UNAUTHORIZED, "Active character session required".into()));
+                };
+                let cid = cid_u32 as i64;
                 let domain_key = req_name.rsplit_once(".api.").map(|(p, _)| p).unwrap_or(req_name);
                 if !req_name.contains(".Get") && !req_name.contains(".List") && !req_name.contains(".Search") {
                     let hex_payload: String = if any.value.is_empty() {
@@ -344,7 +379,8 @@ pub fn register_handlers(
                     s.characters
                         .get(&cid)
                         .map(|c| c.corporation_id as u64)
-                        .unwrap_or(98_000_001)
+                        .or_else(|| ctx.effective_corporation_id().map(u64::from))
+                        .unwrap_or(0)
                 });
                 let skin_id = sde_cosm.skins.keys().next().copied().unwrap_or(1) as u64;
                 let custom_record = st

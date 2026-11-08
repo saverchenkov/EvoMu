@@ -766,7 +766,7 @@ pub async fn advance_site_wave_or_complete(
     solar_system_id: SolarSystemId,
     site_id: &str,
 ) -> Result<PyRep, BridgeRpcError> {
-    let char_id = session.character_id.unwrap_or(90_000_001);
+    let (_, char_id) = ServerContext::require_character(session)?;
     if session.station_id.is_some() || session.structure_id.is_some() {
         return Err(BridgeRpcError {
             code: "ShipDocked".into(),

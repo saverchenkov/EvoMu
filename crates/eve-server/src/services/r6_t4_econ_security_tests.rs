@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::quasar_grpc::{normalize_macho_notification, normalize_macho_rpc_reply};
+use crate::router::client_compat::{normalize_macho_notification, normalize_macho_rpc_reply};
 use crate::router::ServerContext;
 use eve_db::{
     corp_roles, service_roles, CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents,

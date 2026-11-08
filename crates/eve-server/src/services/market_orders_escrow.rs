@@ -1139,19 +1139,27 @@ pub fn handle_orders_escrow(
             }
 
             let now_unix = ctx.now_unix();
-            let region_id = session.region_id.unwrap_or(10_000_002);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let _ = crate::services::structure_profile_services::apply_due_profiles_and_check_upwell_market(
                     ctx, snap, station_id, char_id, now_unix, "MarketServiceOffline",
                 )?;
                 let st_sys = super::resolve_station_solar_system(ctx, snap, station_id);
                 let st_reg = st_sys.and_then(|s| ctx.sde.solar_systems.get(&s).map(|sys| sys.region_id));
-                if st_reg != Some(region_id) {
-                    return Err(BridgeRpcError {
+                let region_id = match session.region_id {
+                    Some(reg) => {
+                        if st_reg != Some(reg) {
+                            return Err(BridgeRpcError {
+                                code: "InvalidMarketStation".into(),
+                                message: format!("Station {station_id} is not in region {reg}"),
+                            });
+                        }
+                        reg
+                    }
+                    None => st_reg.ok_or_else(|| BridgeRpcError {
                         code: "InvalidMarketStation".into(),
-                        message: format!("Station {station_id} is not in region {region_id}"),
-                    });
-                }
+                        message: format!("Could not resolve region for station {station_id}"),
+                    })?,
+                };
                 let sk = snap.skills.get(&char_id);
                 let vis_lvl = sk.and_then(|m| m.get(&3447)).map(|s| s.level).unwrap_or(0);
                 let max_vis_jumps = crate::services::market_contracts::max_remote_jumps_for_skill_level(vis_lvl);

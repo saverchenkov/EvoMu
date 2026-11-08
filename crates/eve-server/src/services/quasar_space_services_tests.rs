@@ -465,3 +465,42 @@ fn dbs_dungeons_npc_ship_stargate_lock_ai_assistant_and_cdn_handlers() {
     let cdn_rsp = invoke(&router, "eve_public.space.api.cdn.GetUpdateRequest", &ctx, &cdn_req).unwrap();
     assert!(!cdn_rsp.value.is_empty());
 }
+
+#[test]
+fn space_handlers_fail_closed_when_ids_are_missing() {
+    let (router, _db, _sde) = setup_router();
+    let anon = AuthoritativeContext::default();
+    let empty_msg = DynamicQuasarMessage::new("Empty");
+
+    assert_eq!(
+        invoke(&router, "eve.bubble.presence.api.GetInBubbleRequest", &anon, &empty_msg)
+            .unwrap_err()
+            .0,
+        STATUS_UNAUTHORIZED
+    );
+    assert_eq!(
+        invoke(
+            &router,
+            "eve.bubble.presence.api.GetInBubbleByCharacterRequest",
+            &anon,
+            &empty_msg
+        )
+        .unwrap_err()
+        .0,
+        STATUS_BAD_REQUEST
+    );
+    assert_eq!(
+        invoke(&router, "eve.region.GetRequest", &anon, &empty_msg)
+            .unwrap_err()
+            .0,
+        STATUS_BAD_REQUEST
+    );
+    let mut missing_region_search = DynamicQuasarMessage::new("Search");
+    missing_region_search.set(1, DynamicValue::String("ZyzNonexistentRegion999".into()));
+    assert_eq!(
+        invoke(&router, "eve.region.SearchRequest", &anon, &missing_region_search)
+            .unwrap_err()
+            .0,
+        STATUS_NOT_FOUND
+    );
+}

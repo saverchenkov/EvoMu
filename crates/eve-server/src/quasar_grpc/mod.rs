@@ -11,11 +11,9 @@
 #![forbid(unsafe_code)]
 
 pub(crate) mod normalize_notices;
-pub(crate) mod normalize_replies;
 
-pub use normalize_notices::{normalize_macho_notification, normalize_quasar_client_response};
+pub use normalize_notices::normalize_quasar_client_response;
 pub(crate) use normalize_notices::normalize_quasar_any_payload;
-pub use normalize_replies::normalize_macho_rpc_reply;
 
 use crate::router::ServerContext;
 use bytes::{Buf, Bytes, BytesMut};
@@ -679,6 +677,7 @@ fn decompress_grpc_payload(raw: &[u8], encoding: &str) -> anyhow::Result<Vec<u8>
 mod tests {
     use super::*;
     use crate::quasar_gateway::{NoticeScope, STATUS_FORBIDDEN, STATUS_OK};
+    use crate::router::client_compat::normalize_macho_rpc_reply;
     use eve_proto::quasar::{
         AuthoritativeContext, EvePublicNotice, EvePublicResponse, GoogleAny, GoogleTimestamp,
         TYPE_GOOGLEAPIS_PREFIX,

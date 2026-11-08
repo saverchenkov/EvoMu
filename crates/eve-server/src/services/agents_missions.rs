@@ -180,7 +180,12 @@ pub async fn handle_with_bound(
 
         ("agentMgr", "GetEntryPoint") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let Some(sys_id) = session.solar_system_id.or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSolarSystem".into(),
+                    message: format!("Character {char_id} has no active solar system"),
+                }));
+            };
             let bm = ctx.db.with_snapshot(|snap| {
                 snap.active_missions
                     .values()
@@ -214,7 +219,12 @@ pub async fn handle_with_bound(
 
         ("agentMgr", "GetStandingGainsForMission") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let Some(sys_id) = session.solar_system_id.or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSolarSystem".into(),
+                    message: format!("Character {char_id} has no active solar system"),
+                }));
+            };
             let (agent_id, _) = resolve_target_agent_id_with_bound(ctx, session, bound_entry, char_id, sys_id, args, _kwargs);
             let corp_id = ctx.sde.agents.get(&agent_id).map_or(1_000_035, |a| a.corporation_id);
             Some(Ok(PyRep::Dict(vec![

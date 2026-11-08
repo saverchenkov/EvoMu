@@ -1,7 +1,7 @@
 //! Unit and mutation-killing tests for `crate::quasar_grpc` RPC reply normalization,
 //! notification normalization, Quasar protobuf payload coercion, and HTTP/2 gRPC transport.
 
-use crate::quasar_grpc::*;
+use crate::router::client_compat::normalize_macho_rpc_reply;
 use eve_proto::{BridgeRpcError, PyRep};
 
 #[test]

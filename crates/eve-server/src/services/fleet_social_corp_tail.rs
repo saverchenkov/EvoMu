@@ -1037,7 +1037,7 @@ pub(crate) fn handle_kick_out_members(
                     s.characters
                         .get(&tid)
                         .map(|c| (c.active_ship_id, c.solar_system_id, c.station_id.or(c.structure_id)))
-                        .unwrap_or((0, session.solar_system_id.unwrap_or(30_000_142), session.station_id.or(session.structure_id)))
+                        .unwrap_or((0, session.solar_system_id.unwrap_or(0), session.station_id.or(session.structure_id)))
                 });
                 if tid == char_id {
                     session.corporation_id = Some(npc_corp);
@@ -1121,18 +1121,19 @@ pub fn execute_pending_auto_kicks_for_docked_char(
             }
         }
         if corp_id != npc_corp {
-            let (c_sys, c_dock) = ctx.db.with_snapshot(|s| {
+            let loc = ctx.db.with_snapshot(|s| {
                 s.characters
                     .get(&char_id)
                     .map(|c| (c.solar_system_id, c.station_id.or(c.structure_id)))
-                    .unwrap_or((30_000_142, None))
             });
-            ctx.invalidate_bound_objects_for_session_transition(
-                char_id,
-                c_sys,
-                c_dock,
-                "corp_change",
-            );
+            if let Some((c_sys, c_dock)) = loc {
+                ctx.invalidate_bound_objects_for_session_transition(
+                    char_id,
+                    c_sys,
+                    c_dock,
+                    "corp_change",
+                );
+            }
         }
         emit_member_removed_notifications(
             ctx,

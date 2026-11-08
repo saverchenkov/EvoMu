@@ -652,11 +652,19 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         Arc::new(move |ctx, _any, dyn_msg| {
             state_bcast.refresh_from_db(ctx_now_unix(ctx));
             let projects = state_bcast.projects.read().unwrap_or_else(|e| e.into_inner());
-            let sys_id = match dyn_msg.get(1) {
+            let Some(sys_id) = (match dyn_msg.get(1) {
                 Some(DynamicValue::Repeated(list)) => list.first().and_then(|v| extract_id(Some(v))),
                 other => extract_id(other),
-            }
-            .unwrap_or(30_000_142);
+            })
+            .filter(|&v| v > 0)
+            .or_else(|| {
+                let cid = ctx.effective_character_id()? as i64;
+                state_bcast.db.as_ref()?.with_snapshot(|snap| {
+                    snap.characters.get(&cid).map(|c| c.solar_system_id as u64)
+                })
+            }) else {
+                return Err((STATUS_BAD_REQUEST, "Solar system ID or active character required".into()));
+            };
             let mut sys_b = Vec::new();
             encode_varint_field(1, sys_id, &mut sys_b);
             let mut bcast = Vec::new();

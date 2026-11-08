@@ -398,11 +398,22 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     // 8. eve.standing.api.IncreaseCommanded & DecreaseCommanded
     let state_st = Arc::clone(&state);
     let db_st = Arc::clone(&db);
-    let inc_handler: QuasarHandlerFn = Arc::new(move |ctx, _any, _dyn_msg| {
-        let cid = ctx.effective_character_id().unwrap_or(90000001);
+    let inc_handler: QuasarHandlerFn = Arc::new(move |ctx, _any, dyn_msg| {
+        let Some(cid) = ctx.effective_character_id().filter(|&v| v > 0) else {
+            return Err((STATUS_UNAUTHORIZED, "Active character session required".into()));
+        };
+        let target_id = dyn_msg
+            .get(1)
+            .and_then(|v| match v {
+                DynamicValue::Uint64(n) => Some(*n as u32),
+                DynamicValue::Int64(n) => u32::try_from(*n).ok(),
+                DynamicValue::Uint32(n) => Some(*n),
+                _ => None,
+            })
+            .unwrap_or(0);
         {
             let mut st = state_st.standings.write().unwrap_or_else(|e| e.into_inner());
-            let entry = st.entry((cid, 90000002)).or_insert(0.0);
+            let entry = st.entry((cid, target_id)).or_insert(0.0);
             *entry = (*entry + 1.0).min(10.0);
         }
         state_st.sync_to_db(&db_st);
@@ -416,11 +427,22 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
 
     let state_std = Arc::clone(&state);
     let db_std = Arc::clone(&db);
-    let dec_handler: QuasarHandlerFn = Arc::new(move |ctx, _any, _dyn_msg| {
-        let cid = ctx.effective_character_id().unwrap_or(90000001);
+    let dec_handler: QuasarHandlerFn = Arc::new(move |ctx, _any, dyn_msg| {
+        let Some(cid) = ctx.effective_character_id().filter(|&v| v > 0) else {
+            return Err((STATUS_UNAUTHORIZED, "Active character session required".into()));
+        };
+        let target_id = dyn_msg
+            .get(1)
+            .and_then(|v| match v {
+                DynamicValue::Uint64(n) => Some(*n as u32),
+                DynamicValue::Int64(n) => u32::try_from(*n).ok(),
+                DynamicValue::Uint32(n) => Some(*n),
+                _ => None,
+            })
+            .unwrap_or(0);
         {
             let mut st = state_std.standings.write().unwrap_or_else(|e| e.into_inner());
-            let entry = st.entry((cid, 90000002)).or_insert(0.0);
+            let entry = st.entry((cid, target_id)).or_insert(0.0);
             *entry = (*entry - 1.0).max(-10.0);
         }
         state_std.sync_to_db(&db_std);

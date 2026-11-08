@@ -468,10 +468,14 @@ pub fn handle(
                         s.attack_security_status_threshold.unwrap_or(0.0),
                         s.attack_if_other_security_status_dropping,
                         s.attack_if_at_war,
-                        snap.characters.get(&session.character_id.unwrap_or(0)).map(|c| c.corporation_id).unwrap_or(98_000_001),
+                        session
+                            .character_id
+                            .and_then(|cid| snap.characters.get(&cid).map(|c| c.corporation_id))
+                            .or(session.corporation_id)
+                            .unwrap_or(0),
                     )
                 } else {
-                    (0.0, 0.0, false, true, 98_000_001)
+                    (0.0, 0.0, false, true, session.corporation_id.unwrap_or(0))
                 }
             });
             Some(Ok(PyRep::Object {

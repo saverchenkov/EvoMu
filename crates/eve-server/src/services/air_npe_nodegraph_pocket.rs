@@ -497,7 +497,10 @@ pub(crate) fn try_cleanup_npe_pocket_and_restore_ui(
                         .origin_solar_system_id
                         .or(runner.pocket_solar_system_id)
                         .or_else(|| snap.characters.get(&char_id).map(|c| c.solar_system_id))
-                        .unwrap_or(30_000_142);
+                        .ok_or_else(|| BridgeRpcError {
+                            code: "CharacterNotFound".into(),
+                            message: format!("Character {char_id} has no known solar system"),
+                        })?;
                     let dock_target = snap.characters.get(&char_id).and_then(|ch| {
                         if ch.station_id.is_none() && ch.structure_id.is_none() {
                             resolve_npe_dock_target(
