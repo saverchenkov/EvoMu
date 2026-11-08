@@ -110,6 +110,28 @@ async fn test_sov_warzone_dynamic_dbs_ess_fw_and_sov_indices() {
     .unwrap()
     .unwrap();
     assert!(settings.dict_get("bountyRiskModifierMax").is_some());
+    assert_eq!(settings.dict_get("earlyPayoutThresholdFactor"), Some(&PyRep::Real(0.25)));
+    assert_eq!(settings.dict_get("latePayoutThresholdFactor"), Some(&PyRep::Real(0.75)));
+    assert_eq!(settings.dict_get("reservePulseIntervalSeconds"), Some(&PyRep::Integer(60)));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs.insert(
+            "dynamic_resource_settings".into(),
+            r#"{"reservePulseIntervalSeconds":90}"#.into(),
+        );
+    });
+    let overridden = handle(
+        &ctx,
+        &mut sess,
+        "dynamicResourceCacheMgr",
+        "GetDynamicResourceSettings",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(overridden.dict_get("reservePulseIntervalSeconds"), Some(&PyRep::Integer(90)));
 
     let agency = handle(&ctx, &mut sess, "dynamicResourceCacheMgr", "GetESSAgencyData", &[], &kw)
         .await
@@ -169,6 +191,10 @@ async fn test_sov_warzone_dynamic_dbs_ess_fw_and_sov_indices() {
         .unwrap();
     assert!(matches!(iteritems, PyRep::List(ref l) if !l.is_empty()));
 
+    let sov_oid = ServerContext::method_call_object_id("sovMgr", "GetSovStructuresInfoForSolarSystem");
+    ctx.put_cached_object(sov_oid.clone(), PyRep::List(vec![]), true);
+    assert!(ctx.object_cache.read().unwrap().contains_key(&crate::router::cache_object_key(&sov_oid)));
+
     assert_eq!(
         handle(&ctx, &mut sess, "sovMgr", "remove_from_cache", &[], &kw)
             .await
@@ -176,6 +202,7 @@ async fn test_sov_warzone_dynamic_dbs_ess_fw_and_sov_indices() {
             .unwrap(),
         PyRep::None
     );
+    assert!(!ctx.object_cache.read().unwrap().contains_key(&crate::router::cache_object_key(&sov_oid)));
 
     for m in ["iteritems", "itervalues", "keys"] {
         let r = handle(&ctx, &mut sess, "fwWarzoneSolarsystem", m, &[], &kw)

@@ -54,37 +54,127 @@ pub(crate) fn collect_all_warzone_systems(ctx: &ServerContext) -> Vec<(u32, f64,
     })
 }
 
-fn dynamic_resource_settings() -> PyRep {
+fn dynamic_resource_settings_from_db(ctx: &ServerContext) -> PyRep {
+    let overrides: HashMap<String, serde_json::Value> = ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
+            .get("dynamic_resource_settings")
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .unwrap_or_default()
+    });
+    let real = |key: &str, default: f64| -> PyRep {
+        let v = overrides.get(key).and_then(|j| j.as_f64()).unwrap_or(default);
+        PyRep::Real(v)
+    };
+    let int = |key: &str, default: i64| -> PyRep {
+        let v = overrides.get(key).and_then(|j| j.as_i64()).unwrap_or(default);
+        PyRep::Integer(v)
+    };
     PyRep::Dict(vec![
-        (PyRep::String("bountyRiskModifierMax".into()), PyRep::Real(2.0)),
-        (PyRep::String("bountyRiskModifierMin".into()), PyRep::Real(0.5)),
-        (PyRep::String("bountyRiskModifierEquilibrium".into()), PyRep::Real(1.15)),
-        (PyRep::String("mainBankShare".into()), PyRep::Real(0.05)),
-        (PyRep::String("reserveBankShare".into()), PyRep::Real(0.05)),
-        (PyRep::String("linkDurationSeconds".into()), PyRep::Integer(300)),
-        (PyRep::String("linkDistanceMeters".into()), PyRep::Real(2500.0)),
-        (PyRep::String("autoPayoutTimeSeconds".into()), PyRep::Integer(10800)),
-        (PyRep::String("reserveBankUnlockDurationSeconds".into()), PyRep::Integer(2700)),
+        (PyRep::String("bountyRiskModifierMax".into()), real("bountyRiskModifierMax", 2.0)),
+        (PyRep::String("bountyRiskModifierMin".into()), real("bountyRiskModifierMin", 0.5)),
+        (PyRep::String("bountyRiskModifierEquilibrium".into()), real("bountyRiskModifierEquilibrium", 1.15)),
+        (PyRep::String("mainBankShare".into()), real("mainBankShare", 0.05)),
+        (PyRep::String("reserveBankShare".into()), real("reserveBankShare", 0.05)),
+        (PyRep::String("linkDurationSeconds".into()), int("linkDurationSeconds", 300)),
+        (PyRep::String("linkDistanceMeters".into()), real("linkDistanceMeters", 2500.0)),
+        (PyRep::String("autoPayoutTimeSeconds".into()), int("autoPayoutTimeSeconds", 10800)),
+        (PyRep::String("reserveBankUnlockDurationSeconds".into()), int("reserveBankUnlockDurationSeconds", 2700)),
         (PyRep::String("reserveBankKeyGroupIDs".into()), PyRep::List(vec![PyRep::Integer(4102)])),
-        (PyRep::String("autopaymentIntervalSeconds".into()), PyRep::Integer(10800)),
-        (PyRep::String("bountiesCut".into()), PyRep::Real(0.10)),
-        (PyRep::String("bufferTimeSeconds".into()), PyRep::Integer(300)),
-        (PyRep::String("equilibriumValue".into()), PyRep::Real(1.15)),
-        (PyRep::String("mainBankPayRatio".into()), PyRep::Real(0.50)),
-        (PyRep::String("maxOutput".into()), PyRep::Real(2.0)),
-        (PyRep::String("minOutput".into()), PyRep::Real(0.5)),
-        (PyRep::String("reserveBankMaxPayout".into()), PyRep::Real(100_000_000.0)),
-        (PyRep::String("reserveBankTimeAccessFactor".into()), PyRep::Real(1.0)),
-        (PyRep::String("timeIntervalSeconds".into()), PyRep::Integer(60)),
+        (PyRep::String("autopaymentIntervalSeconds".into()), int("autopaymentIntervalSeconds", 10800)),
+        (PyRep::String("bountiesCut".into()), real("bountiesCut", 0.10)),
+        (PyRep::String("bufferTimeSeconds".into()), int("bufferTimeSeconds", 300)),
+        (PyRep::String("earlyPayoutThresholdFactor".into()), real("earlyPayoutThresholdFactor", 0.25)),
+        (PyRep::String("equilibriumValue".into()), real("equilibriumValue", 1.15)),
+        (PyRep::String("latePayoutThresholdFactor".into()), real("latePayoutThresholdFactor", 0.75)),
+        (PyRep::String("mainBankPayRatio".into()), real("mainBankPayRatio", 0.50)),
+        (PyRep::String("maxOutput".into()), real("maxOutput", 2.0)),
+        (PyRep::String("minOutput".into()), real("minOutput", 0.5)),
+        (PyRep::String("reserveBankMaxPayout".into()), real("reserveBankMaxPayout", 100_000_000.0)),
+        (PyRep::String("reserveBankTimeAccessFactor".into()), real("reserveBankTimeAccessFactor", 1.0)),
+        (PyRep::String("reservePulseIntervalSeconds".into()), int("reservePulseIntervalSeconds", 60)),
+        (PyRep::String("timeIntervalSeconds".into()), int("timeIntervalSeconds", 60)),
     ])
 }
 
-fn handle_sov_mgr_remove_from_cache(
+fn handle_get_dynamic_resource_settings(
+    ctx: &ServerContext,
     session: &SessionState,
 ) -> Result<PyRep, BridgeRpcError> {
-    // const-ok: client-side memoized cache invalidation notification returns None
     ServerContext::require_character(session)?;
+    Ok(dynamic_resource_settings_from_db(ctx))
+}
+
+fn handle_sov_mgr_remove_from_cache(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    ServerContext::require_character(session)?;
+    if let Some(arg_oid) = args.first() {
+        ctx.invalidate_cached_object(arg_oid);
+    }
+    let arg_filter = args.first().map(crate::router::cache_object_key);
+    let to_invalidate: Vec<PyRep> = {
+        let cache = ctx.object_cache.read().unwrap_or_else(|e| e.into_inner());
+        cache
+            .iter()
+            .filter(|(k, _)| {
+                k.contains("(sovMgr,")
+                    && arg_filter.as_deref().is_none_or(|af| {
+                        k.contains(af) || k.contains("(sovMgr,GetSovStructuresInfoForSolarSystem)")
+                    })
+            })
+            .map(|(_, rec)| rec.object_id.clone())
+            .collect()
+    };
+    for oid in to_invalidate {
+        ctx.invalidate_cached_object(&oid);
+    }
+    ctx.invalidate_cached_method("sovMgr", "GetSovStructuresInfoForSolarSystem");
     Ok(PyRep::None)
+}
+
+fn handle_fw_warzone_collection(
+    ctx: &ServerContext,
+    session: &SessionState,
+    method: &str,
+) -> Result<PyRep, BridgeRpcError> {
+    ServerContext::require_character(session)?;
+    let systems = collect_all_warzone_systems(ctx);
+    let list: Vec<PyRep> = match method {
+        "iteritems" => systems
+            .into_iter()
+            .map(|(sys_id, contested, owner_fac, occupier_fac, frontline)| {
+                let st = build_warzone_occupation_state(
+                    ctx,
+                    sys_id,
+                    contested,
+                    owner_fac,
+                    occupier_fac,
+                    frontline,
+                );
+                PyRep::Tuple(vec![PyRep::Integer(i64::from(sys_id)), st])
+            })
+            .collect(),
+        "itervalues" => systems
+            .into_iter()
+            .map(|(sys_id, contested, owner_fac, occupier_fac, frontline)| {
+                build_warzone_occupation_state(
+                    ctx,
+                    sys_id,
+                    contested,
+                    owner_fac,
+                    occupier_fac,
+                    frontline,
+                )
+            })
+            .collect(),
+        _ => systems
+            .into_iter()
+            .map(|(sys_id, _, _, _, _)| PyRep::Integer(i64::from(sys_id)))
+            .collect(),
+    };
+    Ok(PyRep::List(list))
 }
 
 pub async fn handle(
@@ -136,11 +226,7 @@ pub async fn handle(
         }
 
         ("dynamicResourceCacheMgr", "GetDynamicResourceSettings") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            Some(Ok(dynamic_resource_settings()))
+            Some(handle_get_dynamic_resource_settings(ctx, session))
         }
 
         ("dynamicResourceCacheMgr", "GetESSAgencyData") => {
@@ -296,7 +382,7 @@ pub async fn handle(
                 Some(Ok(mult.unwrap_or(default_val)))
             } else if let Some(key_str) = first_arg.as_str() {
                 if key_str == "settings" {
-                    Some(Ok(dynamic_resource_settings()))
+                    Some(Ok(dynamic_resource_settings_from_db(ctx)))
                 } else {
                     Some(Ok(default_val))
                 }
@@ -325,65 +411,13 @@ pub async fn handle(
         }
 
         ("sovMgr", "remove_from_cache") => {
-            Some(handle_sov_mgr_remove_from_cache(session))
+            Some(handle_sov_mgr_remove_from_cache(ctx, session, args))
         }
 
-        ("fwWarzoneSolarsystem", "iteritems") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let systems = collect_all_warzone_systems(ctx);
-            let items: Vec<PyRep> = systems
-                .into_iter()
-                .map(|(sys_id, contested, owner_fac, occupier_fac, frontline)| {
-                    let st = build_warzone_occupation_state(
-                        ctx,
-                        sys_id,
-                        contested,
-                        owner_fac,
-                        occupier_fac,
-                        frontline,
-                    );
-                    PyRep::Tuple(vec![PyRep::Integer(i64::from(sys_id)), st])
-                })
-                .collect();
-            Some(Ok(PyRep::List(items)))
-        }
-
-        ("fwWarzoneSolarsystem", "itervalues") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let systems = collect_all_warzone_systems(ctx);
-            let values: Vec<PyRep> = systems
-                .into_iter()
-                .map(|(sys_id, contested, owner_fac, occupier_fac, frontline)| {
-                    build_warzone_occupation_state(
-                        ctx,
-                        sys_id,
-                        contested,
-                        owner_fac,
-                        occupier_fac,
-                        frontline,
-                    )
-                })
-                .collect();
-            Some(Ok(PyRep::List(values)))
-        }
-
-        ("fwWarzoneSolarsystem", "keys") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let systems = collect_all_warzone_systems(ctx);
-            let keys: Vec<PyRep> = systems
-                .into_iter()
-                .map(|(sys_id, _, _, _, _)| PyRep::Integer(i64::from(sys_id)))
-                .collect();
-            Some(Ok(PyRep::List(keys)))
+        ("fwWarzoneSolarsystem", "iteritems")
+        | ("fwWarzoneSolarsystem", "itervalues")
+        | ("fwWarzoneSolarsystem", "keys") => {
+            Some(handle_fw_warzone_collection(ctx, session, method))
         }
 
         _ => None,

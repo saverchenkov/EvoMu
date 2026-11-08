@@ -528,3 +528,23 @@ async fn call_component_from_client_validates_and_executes_item_trader() {
     .expect_err("missing trader");
     assert_eq!(missing_trader.code, "ItemTraderNotFoundInSystem");
 }
+
+#[tokio::test]
+async fn ess_mgr_clear_cache_evicts_ess_entries_only() {
+    let ctx = test_ctx();
+    let mut sess = make_session(9001, 98000001, Some(30000142), None, 0);
+    let ess_oid = ServerContext::method_call_object_id("essMgr", "GetDataForClientSolarSystem");
+    let other_oid = ServerContext::method_call_object_id("sovMgr", "GetSovStructuresInfoForSolarSystem");
+    ctx.put_cached_object(ess_oid.clone(), PyRep::None, true);
+    ctx.put_cached_object(other_oid.clone(), PyRep::None, true);
+
+    let res = handle(&ctx, &mut sess, None, "essMgr", "clear_cache", &[], &HashMap::new())
+        .await
+        .expect("handled")
+        .expect("ok");
+    assert_eq!(res, PyRep::None);
+
+    let cache = ctx.object_cache.read().unwrap();
+    assert!(!cache.contains_key(&crate::router::cache_object_key(&ess_oid)));
+    assert!(cache.contains_key(&crate::router::cache_object_key(&other_oid)));
+}

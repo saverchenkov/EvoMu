@@ -174,7 +174,7 @@ pub fn station_hosted_lp_corps(sde: &eve_sde::SdeRegistry, delivery_loc_id: i64)
     corps
 }
 
-fn take_offer(
+fn handle_take_offer(
     ctx: &ServerContext,
     session: &mut SessionState,
     args: &[PyRep],
@@ -832,7 +832,7 @@ fn take_offer(
     }
 }
 
-fn get_character_lp_balances(
+fn handle_get_character_lp_balances(
     ctx: &ServerContext,
     session: &SessionState,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
@@ -863,7 +863,7 @@ fn get_character_lp_balances(
     Some(Ok(PyRep::List(rows)))
 }
 
-fn transfer_lp(
+fn handle_transfer_lp(
     ctx: &ServerContext,
     session: &SessionState,
     args: &[PyRep],
@@ -1058,11 +1058,11 @@ pub fn handle(
         }
 
         // parity: rpc:LPStoreMgr.TakeOfferForCharacter
-        ("LPStoreMgr", "TakeOfferForCharacter") => take_offer(ctx, session, args, false),
+        ("LPStoreMgr", "TakeOfferForCharacter") => handle_take_offer(ctx, session, args, false),
         // parity: rpc:LPStoreMgr.TakeOfferForCorporation
-        ("LPStoreMgr", "TakeOfferForCorporation") => take_offer(ctx, session, args, true),
+        ("LPStoreMgr", "TakeOfferForCorporation") => handle_take_offer(ctx, session, args, true),
 
-        ("LPSvc", "GetAllMyCharacterWalletLPBalances") => get_character_lp_balances(ctx, session),
+        ("LPSvc", "GetAllMyCharacterWalletLPBalances") => handle_get_character_lp_balances(ctx, session),
 
         ("LPSvc", "GetAllMyCorporationWalletLPBalances") => {
             let (_, char_id) = match ServerContext::require_character(session) {
@@ -1123,8 +1123,8 @@ pub fn handle(
             Some(res.map(PyRep::List))
         }
 
-        ("LPSvc", "TransferLPFromMyWalletToOtherCorp") => transfer_lp(ctx, session, args, false),
-        ("LPSvc", "TransferLPFromMyCorpWalletToOtherCorp") => transfer_lp(ctx, session, args, true),
+        ("LPSvc", "TransferLPFromMyWalletToOtherCorp") => handle_transfer_lp(ctx, session, args, false),
+        ("LPSvc", "TransferLPFromMyCorpWalletToOtherCorp") => handle_transfer_lp(ctx, session, args, true),
 
         ("LPStoreMgr", "ExchangeConcordLP") | ("LPSvc", "ExchangeConcordLP") => {
             let (_, char_id) = match ServerContext::require_character(session) {

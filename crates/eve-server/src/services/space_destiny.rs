@@ -339,11 +339,66 @@ pub fn compute_pilot_warp_speed_au_s(
 pub(crate) use space_nav_travel::sync_ship_cloak_and_mjfg_from_fitting;
 
 fn handle_ess_mgr_clear_cache(
+    ctx: &ServerContext,
     session: &SessionState,
+    args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    // const-ok: client-side memoized cache invalidation notification returns None
     ServerContext::require_character(session)?;
+    if let Some(arg_oid) = args.first() {
+        ctx.invalidate_cached_object(arg_oid);
+    }
+    let to_invalidate: Vec<PyRep> = {
+        let cache = ctx.object_cache.read().unwrap_or_else(|e| e.into_inner());
+        cache
+            .iter()
+            .filter(|(k, _)| k.contains("(essMgr,"))
+            .map(|(_, rec)| rec.object_id.clone())
+            .collect()
+    };
+    for oid in to_invalidate {
+        ctx.invalidate_cached_object(&oid);
+    }
+    ctx.invalidate_cached_method("essMgr", "GetDataForClientSolarSystem");
+    ctx.invalidate_cached_method("essMgr", "prime_cache_result");
     Ok(PyRep::None)
+}
+
+fn handle_ess_thefts_for_client_system(
+    ctx: &ServerContext,
+    session: &SessionState,
+    is_reserve: bool,
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    let Some(sys_id) = session.solar_system_id else {
+        return Ok(PyRep::List(Vec::new()));
+    };
+    let thefts = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        let map = if is_reserve {
+            &rt.ess_reserve_bank_thefts
+        } else {
+            &rt.ess_main_bank_thefts
+        };
+        map.get(&sys_id).cloned().unwrap_or_default()
+    });
+    let rows: Vec<PyRep> = thefts
+        .into_iter()
+        .map(|(char_id, amount, ts)| {
+            PyRep::keyval([
+                ("characterID", PyRep::Integer(char_id)),
+                ("stolenISK", PyRep::Real(amount)),
+                ("timestamp", PyRep::Integer(ts as i64)),
+            ])
+        })
+        .collect();
+    Ok(PyRep::List(rows))
+}
+
+fn handle_ess_prime_cache_result(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    crate::services::encounter_surveillance_system::prime_cache_result(ctx, session, args)
 }
 
 pub async fn handle(
@@ -398,9 +453,9 @@ pub async fn handle(
             Some(space_nav_travel::handle_cmd_goto_direction(ctx, session, bound_entry, args).await)
         }
         // parity: destiny:GotoPoint
-        ("beyonce", "CmdGotoPoint") => Some(
-            space_nav_travel::handle_cmd_goto_point(ctx, session, bound_entry, args).await,
-        ),
+        ("beyonce", "CmdGotoPoint") => {
+            Some(space_nav_travel::handle_cmd_goto_point(ctx, session, bound_entry, args).await)
+        }
         // parity: feat:navigation.jump-fatigue, rpc:jumpTimers.GetTimers, notify:OnJumpTimersUpdated
         ("jumpTimers", "GetTimers") => {
             Some(space_nav_travel::handle_get_jump_timers(ctx, session, args))
@@ -473,57 +528,11 @@ pub async fn handle(
         }
 
         ("essMgr", "GetMainBankTheftsForClientSolarSystem") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Ok(PyRep::List(Vec::new())));
-            };
-            let thefts = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                rt.ess_main_bank_thefts
-                    .get(&sys_id)
-                    .cloned()
-                    .unwrap_or_default()
-            });
-            let rows: Vec<PyRep> = thefts
-                .into_iter()
-                .map(|(char_id, amount, ts)| {
-                    PyRep::keyval([
-                        ("characterID", PyRep::Integer(char_id)),
-                        ("stolenISK", PyRep::Real(amount)),
-                        ("timestamp", PyRep::Integer(ts as i64)),
-                    ])
-                })
-                .collect();
-            Some(Ok(PyRep::List(rows)))
+            Some(handle_ess_thefts_for_client_system(ctx, session, false))
         }
 
         ("essMgr", "GetReserveBankTheftsForClientSolarSystem") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Ok(PyRep::List(Vec::new())));
-            };
-            let thefts = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                rt.ess_reserve_bank_thefts
-                    .get(&sys_id)
-                    .cloned()
-                    .unwrap_or_default()
-            });
-            let rows: Vec<PyRep> = thefts
-                .into_iter()
-                .map(|(char_id, amount, ts)| {
-                    PyRep::keyval([
-                        ("characterID", PyRep::Integer(char_id)),
-                        ("stolenISK", PyRep::Real(amount)),
-                        ("timestamp", PyRep::Integer(ts as i64)),
-                    ])
-                })
-                .collect();
-            Some(Ok(PyRep::List(rows)))
+            Some(handle_ess_thefts_for_client_system(ctx, session, true))
         }
 
         ("essMgr", "IsClientLinkedToReserveBank") => {
@@ -725,12 +734,12 @@ pub async fn handle(
         }
 
         ("essMgr", "clear_cache") => {
-            Some(handle_ess_mgr_clear_cache(session))
+            Some(handle_ess_mgr_clear_cache(ctx, session, args))
         }
 
         // parity: rpc:essMgr.prime_cache_result
         ("essMgr", "prime_cache_result") => {
-            Some(crate::services::encounter_surveillance_system::prime_cache_result(ctx, session, args))
+            Some(handle_ess_prime_cache_result(ctx, session, args))
         }
 
         _ => {

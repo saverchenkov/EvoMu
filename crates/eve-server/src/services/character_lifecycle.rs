@@ -27,6 +27,9 @@ pub struct LifecycleStore {
     /// characterID -> unix time the delete was prepared.
     #[serde(default)]
     pub delete_prepared_unix: HashMap<i64, u64>,
+    /// userID -> validation toggle state (`charUnboundMgr.ToggleValidation`).
+    #[serde(default)]
+    pub validation_toggled_by_user: HashMap<u64, bool>,
 }
 
 fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
@@ -174,9 +177,15 @@ pub fn handle(
             }
             None
         }
-        ("charUnboundMgr", "PrepareCharacterForDelete") => Some(prepare(ctx, session, user_id, args)),
-        ("charUnboundMgr", "CancelCharacterDeletePrepare") => Some(cancel(ctx, user_id, args)),
-        ("charUnboundMgr", "DeleteCharacter") => Some(delete(ctx, session, user_id, args)),
+        ("charUnboundMgr", "PrepareCharacterForDelete") => {
+            Some(handle_prepare_character_delete(ctx, session, user_id, args))
+        }
+        ("charUnboundMgr", "CancelCharacterDeletePrepare") => {
+            Some(handle_cancel_character_delete(ctx, user_id, args))
+        }
+        ("charUnboundMgr", "DeleteCharacter") => {
+            Some(handle_delete_character(ctx, session, user_id, args))
+        }
         ("charUnboundMgr", "GetQAStarterSystemIDs") => {
             let primary_sys = session
                 .solar_system_id
@@ -197,7 +206,7 @@ pub fn handle(
             ])))
         }
         // parity: rpc:charUnboundMgr.ToggleValidation
-        ("charUnboundMgr", "ToggleValidation") => handle_toggle_validation(session, args),
+        ("charUnboundMgr", "ToggleValidation") => handle_toggle_validation(ctx, session, args),
         ("charUnboundMgr", "UpdateCharacterBloodline") => {
             let char_id = match owned_char_arg(ctx, user_id, args, "UpdateCharacterBloodline") {
                 Ok(id) => id,
@@ -271,9 +280,24 @@ pub fn handle(
     }
 }
 
-fn handle_toggle_validation(_session: &SessionState, _args: &[PyRep]) -> Option<Result<PyRep, BridgeRpcError>> {
-    // const-ok: toggle validation confirmation for character creation pipeline
-    Some(Ok(PyRep::Bool(true)))
+fn handle_toggle_validation(
+    ctx: &ServerContext,
+    session: &SessionState,
+    _args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let user_id = match ServerContext::require_auth(session) {
+        Ok(uid) => uid,
+        Err(e) => return Some(Err(e)),
+    };
+    let next_state = ctx.db.with_mut_snapshot(|snap| {
+        let mut store = load_store(snap);
+        let entry = store.validation_toggled_by_user.entry(user_id).or_insert(false);
+        *entry = !*entry;
+        let next = *entry;
+        save_store(snap, &store);
+        next
+    });
+    Some(Ok(PyRep::Bool(next_state)))
 }
 
 fn has_active_combat_timer(ctx: &ServerContext, char_id: i64, now: u64) -> bool {
@@ -356,7 +380,7 @@ fn validate_character_safe_for_biomass(
     Ok(())
 }
 
-fn prepare(
+fn handle_prepare_character_delete(
     ctx: &ServerContext,
     session: &SessionState,
     user_id: u64,
@@ -381,7 +405,7 @@ fn prepare(
     Ok(PyRep::Integer((now + BIOMASS_DELAY_SECS) as i64))
 }
 
-fn cancel(ctx: &ServerContext, user_id: u64, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+fn handle_cancel_character_delete(ctx: &ServerContext, user_id: u64, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let char_id = owned_char_arg(ctx, user_id, args, "CancelCharacterDeletePrepare")?;
     let removed = ctx.db.with_mut_snapshot(|snap| {
         let mut store = load_store(snap);
@@ -392,7 +416,7 @@ fn cancel(ctx: &ServerContext, user_id: u64, args: &[PyRep]) -> Result<PyRep, Br
     Ok(PyRep::Bool(removed))
 }
 
-fn delete(ctx: &ServerContext, session: &mut SessionState, user_id: u64, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+fn handle_delete_character(ctx: &ServerContext, session: &mut SessionState, user_id: u64, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let char_id = owned_char_arg(ctx, user_id, args, "DeleteCharacter")?;
     let doomheim = doomheim_corp_id(ctx)
         .ok_or_else(|| err("SdeMissing", "Doomheim corporation not found in SDE"))?;

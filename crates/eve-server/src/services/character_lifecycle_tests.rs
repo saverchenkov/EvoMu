@@ -441,3 +441,33 @@ fn char_mgr_queries_roles_kills_activity_and_cohorts() {
     .unwrap()
     .is_err());
 }
+
+#[test]
+fn char_unbound_mgr_toggle_validation_persists_per_user_state() {
+    let ctx = test_ctx();
+    let mut sess = auth_session(42, 90_000_001, 98_000_001, 30_000_142);
+    let kw = HashMap::new();
+
+    let first = handle(&ctx, &mut sess, "charUnboundMgr", "ToggleValidation", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert_eq!(first, PyRep::Bool(true));
+
+    let second = handle(&ctx, &mut sess, "charUnboundMgr", "ToggleValidation", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert_eq!(second, PyRep::Bool(false));
+
+    let third = handle(&ctx, &mut sess, "charUnboundMgr", "ToggleValidation", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert_eq!(third, PyRep::Bool(true));
+
+    let persisted = ctx.db.with_snapshot(|s| {
+        load_store(s)
+            .validation_toggled_by_user
+            .get(&42)
+            .copied()
+    });
+    assert_eq!(persisted, Some(true));
+}

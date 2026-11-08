@@ -938,6 +938,37 @@ fn jump_outcome_rep(o: &JumpOutcome, sys_id: u32) -> PyRep {
     ])
 }
 
+async fn handle_jump_to_fleet_beacon_outcome(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+    is_deployable: bool,
+) -> Result<PyRep, BridgeRpcError> {
+    jump_to_fleet_beacon(ctx, session, args, is_deployable)
+        .await
+        .map(|o| jump_outcome_rep(&o, session.solar_system_id.unwrap_or(0)))
+}
+
+async fn handle_bridge_to_fleet_beacon(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    is_deployable: bool,
+) -> Result<PyRep, BridgeRpcError> {
+    bridge_to_fleet_beacon(ctx, session, args, is_deployable).await
+}
+
+async fn handle_group_jump_to_fleet_beacon_outcome(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+    is_deployable: bool,
+) -> Result<PyRep, BridgeRpcError> {
+    group_jump_to_fleet_beacon(ctx, session, args, is_deployable)
+        .await
+        .map(|o| jump_outcome_rep(&o, session.solar_system_id.unwrap_or(0)))
+}
+
 /// RPC entry point for the cyno / jump portal surface of `beyonce`.
 pub(crate) async fn handle_cyno_portal(
     ctx: &ServerContext,
@@ -947,33 +978,25 @@ pub(crate) async fn handle_cyno_portal(
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("beyonce", "CmdJumpToFleetModuleBeacon") => Some(
-            jump_to_fleet_beacon(ctx, session, args, false)
-                .await
-                .map(|o| jump_outcome_rep(&o, session.solar_system_id.unwrap_or(0))),
-        ),
-        ("beyonce", "CmdJumpToFleetDeployableBeacon") => Some(
-            jump_to_fleet_beacon(ctx, session, args, true)
-                .await
-                .map(|o| jump_outcome_rep(&o, session.solar_system_id.unwrap_or(0))),
-        ),
+        ("beyonce", "CmdJumpToFleetModuleBeacon") => {
+            Some(handle_jump_to_fleet_beacon_outcome(ctx, session, args, false).await)
+        }
+        ("beyonce", "CmdJumpToFleetDeployableBeacon") => {
+            Some(handle_jump_to_fleet_beacon_outcome(ctx, session, args, true).await)
+        }
         // rpc-lint: allow legacy client alias CmdBridgeThroughStargate
         ("beyonce", "CmdBridgeToFleetModuleBeacon" | "CmdBridgeThroughStargate") => {
-            Some(bridge_to_fleet_beacon(ctx, session, args, false).await)
+            Some(handle_bridge_to_fleet_beacon(ctx, session, args, false).await)
         }
         ("beyonce", "CmdBridgeToFleetDeployableBeacon") => {
-            Some(bridge_to_fleet_beacon(ctx, session, args, true).await)
+            Some(handle_bridge_to_fleet_beacon(ctx, session, args, true).await)
         }
-        ("beyonce", "CmdGroupJumpToFleetModuleBeacon") => Some(
-            group_jump_to_fleet_beacon(ctx, session, args, false)
-                .await
-                .map(|o| jump_outcome_rep(&o, session.solar_system_id.unwrap_or(0))),
-        ),
-        ("beyonce", "CmdGroupJumpToFleetDeployableBeacon") => Some(
-            group_jump_to_fleet_beacon(ctx, session, args, true)
-                .await
-                .map(|o| jump_outcome_rep(&o, session.solar_system_id.unwrap_or(0))),
-        ),
+        ("beyonce", "CmdGroupJumpToFleetModuleBeacon") => {
+            Some(handle_group_jump_to_fleet_beacon_outcome(ctx, session, args, false).await)
+        }
+        ("beyonce", "CmdGroupJumpToFleetDeployableBeacon") => {
+            Some(handle_group_jump_to_fleet_beacon_outcome(ctx, session, args, true).await)
+        }
         // rpc-lint: allow legacy client alias CmdJumpThroughPortal
         ("beyonce", "CmdJumpThroughFleet" | "CmdJumpThroughPortal") => Some(
             jump_through_fleet(ctx, session, args)
