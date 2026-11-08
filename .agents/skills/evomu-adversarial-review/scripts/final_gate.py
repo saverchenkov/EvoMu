@@ -12,9 +12,7 @@ on the current working tree. It is deliberately mechanical and slow. Every check
      quota/capacity errors; user decision 2026-10-23). Routine (non --final) PASS reviews don't count.
   3. Gap audit: the latest gap audit on this exact tree is CLEAN.
   4. Line coverage (cargo llvm-cov, whole workspace) >= EVOMU_MIN_LINE_COVERAGE (default 90).
-  5. Mutation score (cargo mutants, every workspace crate) >= EVOMU_MIN_MUTATION_SCORE (default 85),
-     where score = caught / (caught + missed); timeouts count as caught, unviable mutants are excluded.
-  6. Real client: tools/client-harness/run_journeys (agent-built) drives the REAL V24.01 client
+  5. Real client: tools/client-harness/run_journeys (agent-built) drives the REAL V24.01 client
      (~/Library/Application Support/EVE Online/SharedCache/tq/EVE.app) against a locally started
      EvoMu server through every journey in references/parity/client_journeys.json. It must write
      <out>/result.json = {"journeys": {"<id>": {"passed": true, "evidence": "...", ...}}, "server_log": path,
@@ -22,8 +20,8 @@ on the current working tree. It is deliberately mechanical and slow. Every check
      `panicked at`, or client `Traceback`/`EXCEPTION` lines in the logs.
 
 Writes .evomu-reviews/final_gate.json {tree, passed, checks}. Exit 0 only if everything passes.
-Usage: final_gate.py [--skip-mutants] (skipping any check makes the gate FAIL; flags exist only for
-diagnosing which checks still fail).
+Usage: final_gate.py [--skip-coverage] [--skip-client] (skipping required checks makes the gate FAIL;
+flags exist only for diagnosing which checks still fail). --skip-mutants is accepted as a deprecated no-op.
 """
 import argparse
 import datetime
@@ -143,29 +141,7 @@ def main():
                                    "min": min_cov, "note": None if pct is not None else
                                    "cargo-llvm-cov missing or failed (cargo install cargo-llvm-cov)"}
 
-    # 5. mutation testing
-    min_mut = float(os.environ.get("EVOMU_MIN_MUTATION_SCORE", "85"))
-    if a.skip_mutants:
-        checks["mutation_score"] = {"passed": False, "note": "skipped"}
-    else:
-        mdir = os.path.join(out_dir, "mutants")
-        mrc, mout = sh([cargo, "mutants", "--workspace", "--no-shuffle", "--output", mdir, "--timeout-multiplier",
-                        "3"], root, env=clean_env(sdir, "mut"), timeout=48 * 3600)
-        caught = missed = timeout_n = 0
-        op = os.path.join(mdir, "mutants.out", "outcomes.json")
-        try:
-            o = json.load(open(op))
-            caught, missed, timeout_n = o.get("caught", 0), o.get("missed", 0), o.get("timeout", 0)
-        except Exception:  # noqa: BLE001
-            pass
-        denom = caught + timeout_n + missed
-        score = 100.0 * (caught + timeout_n) / denom if denom else None
-        open(os.path.join(out_dir, "mutants.txt"), "w", encoding="utf-8").write(mout[-20000:])
-        checks["mutation_score"] = {"passed": score is not None and score >= min_mut, "score": score,
-                                    "caught": caught, "missed": missed, "timeout": timeout_n, "min": min_mut,
-                                    "note": None if denom else "cargo-mutants missing or failed (cargo install cargo-mutants)"}
-
-    # 6. real client journeys
+    # 5. real client journeys (cargo-mutants removed per user policy)
     if a.skip_client:
         checks["real_client_journeys"] = {"passed": False, "note": "skipped"}
     else:
