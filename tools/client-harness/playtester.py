@@ -885,10 +885,38 @@ class PlaytesterMemory:
     def _load_personas_cfg(self) -> Dict[str, Any]:
         if PERSONAS_PATH.exists():
             try:
-                return json.loads(PERSONAS_PATH.read_text(encoding="utf-8"))
+                cfg = json.loads(PERSONAS_PATH.read_text(encoding="utf-8"))
+                raw_frontier = (
+                    cfg.get("initial_coverage_frontier")
+                    or cfg.get("initial_frontier")
+                    or []
+                )
+                norm_frontier = []
+                for item in raw_frontier:
+                    if isinstance(item, dict):
+                        feat_name = item.get("feature") or item.get("feature_id") or ""
+                        if feat_name:
+                            norm = dict(item)
+                            norm.setdefault("feature", str(feat_name))
+                            norm.setdefault("status", "untested")
+                            norm_frontier.append(norm)
+                    elif isinstance(item, str) and item:
+                        norm_frontier.append({"feature": item, "status": "untested"})
+                cfg["initial_coverage_frontier"] = norm_frontier
+                return cfg
             except Exception:
                 pass
         return {"personas": [], "initial_coverage_frontier": []}
+
+    def _persona_initial_goal(self, persona: Dict[str, Any]) -> str:
+        goals = persona.get("goals")
+        if isinstance(goals, list) and goals:
+            return str(goals[0])
+        if persona.get("description"):
+            return str(persona["description"])
+        if persona.get("title"):
+            return str(persona["title"])
+        return "Explore the game"
 
     def _load_or_init(self) -> Dict[str, Any]:
         if self.memory_path.exists():
@@ -912,7 +940,7 @@ class PlaytesterMemory:
             "active_persona_index": 0,
             "active_persona_steps": 0,
             "active_persona": first_persona,
-            "current_goal": first_persona.get("goals", ["Explore the game"])[0],
+            "current_goal": self._persona_initial_goal(first_persona),
             "working_memory": [
                 "Fresh playtester memory initialized. Priority: verify recently reported bugs (#527-#531: skill training, PLEX store, structure cosmetics, warp animation) and explore core gameplay loops."
             ],
@@ -939,8 +967,7 @@ class PlaytesterMemory:
                     self.data["active_persona_index"] = idx
                     self.data["active_persona"] = p
                     self.data["active_persona_steps"] = 0
-                    goals = p.get("goals") or ["Explore EVE Online systems"]
-                    self.data["current_goal"] = goals[0]
+                    self.data["current_goal"] = self._persona_initial_goal(p)
                     self.save()
                     return
 
@@ -952,8 +979,7 @@ class PlaytesterMemory:
             self.data["active_persona_index"] = idx
             self.data["active_persona"] = next_p
             self.data["active_persona_steps"] = 0
-            goals = next_p.get("goals") or ["Explore EVE Online systems"]
-            self.data["current_goal"] = goals[0]
+            self.data["current_goal"] = self._persona_initial_goal(next_p)
             log_info(f"Rotated persona -> [{next_p.get('id')}] {next_p.get('title')}")
             self.save()
 

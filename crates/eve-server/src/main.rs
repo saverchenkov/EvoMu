@@ -125,80 +125,74 @@ async fn main() -> Result<()> {
     let xmpp_bind = cfg.bind_address.clone();
     let xmpp_limiter = Arc::clone(&conn_limiter);
     tokio::spawn(async move {
-        let mut xmpp_listener = None;
-        for _ in 0..20 {
+        let xmpp_listener = loop {
             match TcpListener::bind((xmpp_bind.as_str(), 5222u16)).await {
-                Ok(listener) => {
-                    xmpp_listener = Some(listener);
-                    break;
-                }
-                Err(_) => tokio::time::sleep(Duration::from_millis(250)).await,
+                Ok(listener) => break listener,
+                Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
             }
-        }
-        if let Some(xmpp_listener) = xmpp_listener {
-            while let Ok((mut stream, _addr)) = xmpp_listener.accept().await {
-                let Ok(permit) = Arc::clone(&xmpp_limiter).try_acquire_owned() else {
-                    continue;
-                };
-                tokio::spawn(async move {
-                    let _permit = permit;
-                    let mut buf = [0u8; 2048];
-                    let mut stream_count = 0u32;
-                    loop {
-                        let Ok(n) = stream.read(&mut buf).await else {
-                            break;
+        };
+        while let Ok((mut stream, _addr)) = xmpp_listener.accept().await {
+            let Ok(permit) = Arc::clone(&xmpp_limiter).try_acquire_owned() else {
+                continue;
+            };
+            tokio::spawn(async move {
+                let _permit = permit;
+                let mut buf = [0u8; 2048];
+                let mut stream_count = 0u32;
+                loop {
+                    let Ok(n) = stream.read(&mut buf).await else {
+                        break;
+                    };
+                    if n == 0 {
+                        break;
+                    }
+                    let chunk = String::from_utf8_lossy(&buf[..n]);
+                    if chunk.contains("<stream:stream") {
+                        stream_count += 1;
+                        let reply: &[u8] = if stream_count == 1 {
+                            b"<?xml version='1.0'?><stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' from='chat.evomu.local' id='evomu1' version='1.0'><stream:features><mechanisms xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><mechanism>PLAIN</mechanism><mechanism>ANONYMOUS</mechanism></mechanisms></stream:features>"
+                        } else {
+                            b"<?xml version='1.0'?><stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' from='chat.evomu.local' id='evomu2' version='1.0'><stream:features><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/><session xmlns='urn:ietf:params:xml:ns:xmpp-session'/></stream:features>"
                         };
-                        if n == 0 {
+                        if stream.write_all(reply).await.is_err() {
                             break;
                         }
-                        let chunk = String::from_utf8_lossy(&buf[..n]);
-                        if chunk.contains("<stream:stream") {
-                            stream_count += 1;
-                            let reply: &[u8] = if stream_count == 1 {
-                                b"<?xml version='1.0'?><stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' from='chat.evomu.local' id='evomu1' version='1.0'><stream:features><mechanisms xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><mechanism>PLAIN</mechanism><mechanism>ANONYMOUS</mechanism></mechanisms></stream:features>"
-                            } else {
-                                b"<?xml version='1.0'?><stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' from='chat.evomu.local' id='evomu2' version='1.0'><stream:features><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/><session xmlns='urn:ietf:params:xml:ns:xmpp-session'/></stream:features>"
-                            };
-                            if stream.write_all(reply).await.is_err() {
-                                break;
-                            }
-                        } else if chunk.contains("<auth") {
-                            let reply = b"<success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>";
-                            if stream.write_all(reply).await.is_err() {
-                                break;
-                            }
-                        } else if chunk.contains("<presence") {
-                            if let Some(to_pos) = chunk.find("to='").or_else(|| chunk.find("to=\"")) {
-                                let rest = &chunk[to_pos + 4..];
-                                if let Some(end_pos) = rest.find(['\'', '"']) {
-                                    let room_jid = &rest[..end_pos];
-                                    let p_reply = if chunk.contains("unavailable") {
-                                        format!("<presence from='{room_jid}' to='user@chat.evomu.local/eve' type='unavailable'><x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='member' role='none'/><status code='110'/></x></presence>")
-                                    } else {
-                                        format!("<presence from='{room_jid}' to='user@chat.evomu.local/eve'><x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='member' role='participant'/><status code='110'/></x></presence>")
-                                    };
-                                    if stream.write_all(p_reply.as_bytes()).await.is_err() {
-                                        break;
-                                    }
-                                }
-                            }
-                        } else if let Some(id_pos) = chunk.find("id='").or_else(|| chunk.find("id=\"")) {
-                            let rest = &chunk[id_pos + 4..];
+                    } else if chunk.contains("<auth") {
+                        let reply = b"<success xmlns='urn:ietf:params:xml:ns:xmpp-sasl'/>";
+                        if stream.write_all(reply).await.is_err() {
+                            break;
+                        }
+                    } else if chunk.contains("<presence") {
+                        if let Some(to_pos) = chunk.find("to='").or_else(|| chunk.find("to=\"")) {
+                            let rest = &chunk[to_pos + 4..];
                             if let Some(end_pos) = rest.find(['\'', '"']) {
-                                let stanza_id = &rest[..end_pos];
-                                let iq_reply = if chunk.contains("<bind") {
-                                    format!("<iq type='result' id='{stanza_id}'><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'><jid>user@chat.evomu.local/eve</jid></bind></iq>")
+                                let room_jid = &rest[..end_pos];
+                                let p_reply = if chunk.contains("unavailable") {
+                                    format!("<presence from='{room_jid}' to='user@chat.evomu.local/eve' type='unavailable'><x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='member' role='none'/><status code='110'/></x></presence>")
                                 } else {
-                                    format!("<iq type='result' id='{stanza_id}'/>")
+                                    format!("<presence from='{room_jid}' to='user@chat.evomu.local/eve'><x xmlns='http://jabber.org/protocol/muc#user'><item affiliation='member' role='participant'/><status code='110'/></x></presence>")
                                 };
-                                if stream.write_all(iq_reply.as_bytes()).await.is_err() {
+                                if stream.write_all(p_reply.as_bytes()).await.is_err() {
                                     break;
                                 }
                             }
                         }
+                    } else if let Some(id_pos) = chunk.find("id='").or_else(|| chunk.find("id=\"")) {
+                        let rest = &chunk[id_pos + 4..];
+                        if let Some(end_pos) = rest.find(['\'', '"']) {
+                            let stanza_id = &rest[..end_pos];
+                            let iq_reply = if chunk.contains("<bind") {
+                                format!("<iq type='result' id='{stanza_id}'><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'><jid>user@chat.evomu.local/eve</jid></bind></iq>")
+                            } else {
+                                format!("<iq type='result' id='{stanza_id}'/>")
+                            };
+                            if stream.write_all(iq_reply.as_bytes()).await.is_err() {
+                                break;
+                            }
+                        }
                     }
-                });
-            }
+                }
+            });
         }
     });
 
