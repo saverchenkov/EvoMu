@@ -273,6 +273,8 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         // parity: feat:navigation.ansiblex-link
         ("structureJumpBridgeMgr", "GetLinkedStructure") => Some(super::structure_lifecycle_rpc::handle_get_linked_structure(ctx, session, args)),
         ("structureJumpBridgeMgr", "GetJbStructureDestination") => Some(super::structure_lifecycle_rpc::handle_get_jb_structure_destination(ctx, session, args)),
+        ("structureJumpBridgeMgr", "InstallJumpBridgeLink") => Some(super::structure_lifecycle_rpc::handle_install_jump_bridge_link(ctx, session, args)),
+        ("structureJumpBridgeMgr", "UninstallJumpBridgeLink") => Some(super::structure_lifecycle_rpc::handle_uninstall_jump_bridge_link(ctx, session, args)),
         ("structureDirectory", "GetJumpBridgesWithMyAccess") => Some(super::structure_lifecycle_rpc::handle_get_jump_bridges_with_my_access(ctx, session)),
         ("structureDirectory", "GetNearbyJumpBridges") => Some(super::structure_lifecycle_rpc::handle_get_nearby_jump_bridges(ctx, session)),
         _ => None,

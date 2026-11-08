@@ -5,7 +5,7 @@ use eve_db::InventoryFlag;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use crate::router::ServerContext;
-use super::structure_upwell_ops::load_ext_state;
+use super::structure_upwell_ops::{load_ext_state, require_structure_corp_manager, save_ext_state};
 
 fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
@@ -372,6 +372,111 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
     ctx.quasar_gateway.on_session_changed(session, now_unix);
     let new_beyonce = ctx.bind_object(session, "beyonce", dest_sys_id as i64)?;
     Ok(PyRep::keyval([("solarSystemID", PyRep::Integer(dest_sys_id as i64)), ("beyonceBoundID", PyRep::Integer(new_beyonce as i64))]))
+}
+
+pub(crate) fn handle_install_jump_bridge_link(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let from_id = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .ok_or_else(|| err("MissingStructureId", "InstallJumpBridgeLink requires source structureID"))?;
+    let to_id = args
+        .get(1)
+        .and_then(|a| a.as_i64())
+        .ok_or_else(|| err("MissingStructureId", "InstallJumpBridgeLink requires target structureID"))?;
+    if from_id == to_id {
+        return Err(err("InvalidLinkTarget", "Cannot link an Ansiblex Jump Gate to itself"));
+    }
+    ctx.db.try_with_mut_snapshot(|snap| {
+        let from_st = require_structure_corp_manager(snap, session, char_id, from_id)?;
+        let to_st = snap
+            .structures
+            .get(&to_id)
+            .cloned()
+            .ok_or_else(|| err("StructureNotFound", format!("Structure {to_id} does not exist")))?;
+        if to_st.state == "Destroyed" {
+            return Err(err("StructureDestroyed", format!("Structure {to_id} has been destroyed")));
+        }
+        if from_st.type_id != ANSIBLEX_TYPE_ID || to_st.type_id != ANSIBLEX_TYPE_ID {
+            return Err(err("InvalidStructureType", "Both structures must be Ansiblex Jump Gates (35841)"));
+        }
+        let from_ally = snap.corporations.get(&from_st.owner_corp_id).and_then(|c| c.alliance_id);
+        let to_ally = snap.corporations.get(&to_st.owner_corp_id).and_then(|c| c.alliance_id);
+        let same_owner = from_st.owner_corp_id == to_st.owner_corp_id
+            || (from_ally.is_some() && from_ally == to_ally);
+        if !same_owner {
+            return Err(err(
+                "StructureOwnershipViolation",
+                "Linked Ansiblex Jump Gates must belong to the same corporation or alliance",
+            ));
+        }
+        if !is_sovereign_nullsec_for_ansiblex(&ctx.sde, from_st.solar_system_id)
+            || !is_sovereign_nullsec_for_ansiblex(&ctx.sde, to_st.solar_system_id)
+        {
+            return Err(err(
+                "JumpBridgeRequiresSovNull",
+                "Ansiblex Jump Gates can only be linked in sovereign null-security systems",
+            ));
+        }
+        let dist_ly = crate::services::space_destiny::space_nav_travel::distance_ly(
+            ctx,
+            from_st.solar_system_id,
+            to_st.solar_system_id,
+        );
+        if dist_ly > ANSIBLEX_MAX_RANGE_LY {
+            return Err(err(
+                "JumpBridgeOutOfRange",
+                format!("Ansiblex link distance ({dist_ly:.2} LY) exceeds {ANSIBLEX_MAX_RANGE_LY:.1} LY maximum"),
+            ));
+        }
+        let mut ext = load_ext_state(snap);
+        if let Some(prev_a) = ext.jump_bridge_links.remove(&from_id) {
+            if ext.jump_bridge_links.get(&prev_a) == Some(&from_id) {
+                ext.jump_bridge_links.remove(&prev_a);
+            }
+        }
+        if let Some(prev_b) = ext.jump_bridge_links.remove(&to_id) {
+            if ext.jump_bridge_links.get(&prev_b) == Some(&to_id) {
+                ext.jump_bridge_links.remove(&prev_b);
+            }
+        }
+        ext.jump_bridge_links.insert(from_id, to_id);
+        ext.jump_bridge_links.insert(to_id, from_id);
+        save_ext_state(snap, &ext);
+        Ok(PyRep::keyval([
+            ("fromStructureID", PyRep::Integer(from_id)),
+            ("toStructureID", PyRep::Integer(to_id)),
+            ("linked", PyRep::Bool(true)),
+        ]))
+    })
+}
+
+pub(crate) fn handle_uninstall_jump_bridge_link(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let structure_id = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .ok_or_else(|| err("MissingStructureId", "UninstallJumpBridgeLink requires structureID"))?;
+    ctx.db.try_with_mut_snapshot(|snap| {
+        let _ = require_structure_corp_manager(snap, session, char_id, structure_id)?;
+        let mut ext = load_ext_state(snap);
+        let prev = ext.jump_bridge_links.remove(&structure_id);
+        if let Some(partner) = prev {
+            if ext.jump_bridge_links.get(&partner) == Some(&structure_id) {
+                ext.jump_bridge_links.remove(&partner);
+            }
+        }
+        save_ext_state(snap, &ext);
+        Ok(PyRep::Bool(prev.is_some()))
+    })
 }
 
 #[cfg(test)] #[path = "structure_ansiblex_navigation_tests.rs"]
