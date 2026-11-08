@@ -83,10 +83,10 @@ fn test_binary_add_balls_roundtrip_all_13_modes() {
     let mut warp_buf = Vec::new();
     encode_single_ball_with_meta(&mut warp_buf, &balls[3], 42, Some(&meta));
     assert_eq!(warp_buf[99], 0xFF);
-    assert_eq!(i32::from_le_bytes(warp_buf[124..128].try_into().unwrap()), 42);
+    assert_eq!(i32::from_le_bytes(warp_buf[124..128].try_into().unwrap()), -1);
     assert_eq!(i64::from_le_bytes(warp_buf[128..136].try_into().unwrap()), (-1.0f64).to_bits() as i64);
-    assert_eq!(i64::from_le_bytes(warp_buf[136..144].try_into().unwrap()), 15_000.0f64.to_bits() as i64);
-    assert_eq!(i64::from_le_bytes(warp_buf[144..152].try_into().unwrap()), 30);
+    assert_eq!(i64::from_le_bytes(warp_buf[136..144].try_into().unwrap()), 0.0f64.to_bits() as i64);
+    assert_eq!(i64::from_le_bytes(warp_buf[144..152].try_into().unwrap()), 3000);
 
     let mut missile_buf = Vec::new();
     encode_single_ball_with_meta(&mut missile_buf, &balls[5], 42, Some(&meta));
@@ -111,7 +111,8 @@ fn test_binary_add_balls_roundtrip_all_13_modes() {
     assert_eq!(decoded[1].target_id, Some(40_009_076));
     assert_eq!(decoded[1].follow_range, Some(2_500.0));
     assert_eq!(decoded[3].warp_destination, Some(DVec3::new(2.0 * AU_METERS, 1.0e8, -5.0e7)));
-    assert_eq!(decoded[3].warp_speed_tenth_au_s, Some(30));
+    assert_eq!(decoded[3].warp_speed_milli_au_s, Some(3000));
+    assert_eq!(decoded[3].effect_stamp, Some(-1));
     assert_eq!(decoded[4].target_id, Some(60_003_760));
     assert_eq!(decoded[4].follow_range, Some(5_000.0));
     assert_eq!(decoded[5].target_id, Some(1001));

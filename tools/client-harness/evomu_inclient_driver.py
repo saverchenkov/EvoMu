@@ -38,6 +38,7 @@ from evomu_inclient_helpers import (
     _wait_session_attr,
     _wait_view_settled,
     _wait_warp_fx_settled,
+    _warp_animated,
     _warp_full,
 )
 
@@ -219,7 +220,7 @@ def _execute_all_journeys(cfg, ipc):
         beyonce_jita.CmdAlignTo(40009077)
         beyonce_jita.CmdSetSpeedFraction(1.0)
         beyonce_jita.CmdStop()
-        _warp_full(sm, beyonce_jita, 40009077)
+        warp_anim = _warp_animated(sm, beyonce_jita, 40009077)
         beyonce_jita.CmdStop()
         route_sys = [
             (30000142, 50001249, 30000144),
@@ -255,9 +256,9 @@ def _execute_all_journeys(cfg, ipc):
         _assert_ui_rendered(sm, "hangar")
         record(
             "undock_navigate",
-            len(jumped_systems) == 3 and bm_res is not None,
-            "Real V24.01 client undocked, created bookmark, executed CmdFollowBall/CmdOrbit/CmdAlignTo/CmdWarpToStuff, jumped 3 stargates %r, and redocked at Jita 4-4"
-            % (jumped_systems,),
+            len(jumped_systems) == 3 and bm_res is not None and bool(warp_anim),
+            "Real V24.01 client undocked, created bookmark, executed CmdFollowBall/CmdOrbit/CmdAlignTo/CmdWarpToStuff (animated warp telemetry=%r), jumped 3 stargates %r, and redocked at Jita 4-4"
+            % (warp_anim, jumped_systems),
         )
 
     # 6. local_chat

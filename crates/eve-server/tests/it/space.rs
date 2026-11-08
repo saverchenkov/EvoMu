@@ -690,7 +690,7 @@ async fn test_p7_destiny_binary_stream_undock_movement_and_stargate_jump() {
     assert_eq!(a5, "WarpTo");
     assert_eq!(args5[0], PyRep::Integer(ship_id));
     assert_eq!(args5.len(), 6);
-    assert_eq!(args5[5], PyRep::Integer(50));
+    assert_eq!(args5[5], PyRep::Integer(5000));
 
     // Warp tunnel visual goes out as OnSpecialFX('effects.Warping'); OnActivatingWarp is raised by
     // the client's own destiny tick and must never appear on the wire.

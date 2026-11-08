@@ -531,7 +531,7 @@ fn wire_slim_meta_damage_state_set_state_and_destiny_event_edge_cases() {
     if let PyRep::Tuple(top) = warp_ev {
         if let PyRep::Tuple(call) = &top[1] {
             if let PyRep::Tuple(args) = &call[1] {
-                assert_eq!(args[5], PyRep::Integer(28));
+                assert_eq!(args[5], PyRep::Integer(2750));
             }
         }
     }

@@ -208,20 +208,34 @@ pub fn encode_single_ball_with_park(
             buf.push(0xFFu8);
         }
         MovementMode::Warp {
+            origin,
             destination,
             warp_speed_au_s,
-            ..
+            total_distance,
+            phase,
+            elapsed_warp_time,
         } => {
             // WARP_Struct (53 bytes, V24.01 `_destiny.so` `0x74eeb..0x74f53`):
-            // uint8 formationID, double targX, targY, targZ, int32 effectStamp, double followRange, int64 followID, int64 warpSpeed
+            // uint8 formationID, double targX, targY, targZ, int32 effectStamp, double totalDistance, double stopDistance, int64 warpSpeed (milli-AU/s)
             buf.push(0xFFu8);
             buf.extend_from_slice(&destination.x.to_le_bytes());
             buf.extend_from_slice(&destination.y.to_le_bytes());
             buf.extend_from_slice(&destination.z.to_le_bytes());
-            buf.extend_from_slice(&effect_stamp.to_le_bytes());
-            buf.extend_from_slice(&((-1.0f64).to_bits() as i64).to_le_bytes());
-            buf.extend_from_slice(&(15_000.0f64.to_bits() as i64).to_le_bytes());
-            buf.extend_from_slice(&((*warp_speed_au_s * 10.0) as i64).to_le_bytes());
+            let (warp_effect_stamp, wire_total_distance) = if *phase == crate::WarpPhase::Aligning {
+                (-1_i32, -1.0_f64)
+            } else {
+                let start_stamp = (stamp as i32 - elapsed_warp_time.round() as i32).max(0);
+                let dist = if *total_distance > 0.0 {
+                    *total_distance
+                } else {
+                    (*destination - *origin).length()
+                };
+                (start_stamp, dist)
+            };
+            buf.extend_from_slice(&warp_effect_stamp.to_le_bytes());
+            buf.extend_from_slice(&wire_total_distance.to_le_bytes());
+            buf.extend_from_slice(&0.0_f64.to_le_bytes());
+            buf.extend_from_slice(&((*warp_speed_au_s * 1000.0).round() as i64).to_le_bytes());
         }
         MovementMode::Missile { target_id } => {
             // MISSILE_Struct (49 bytes, `DestinyStructs.h:170-179`):
@@ -756,15 +770,16 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
             warp_speed_au_s,
         } => PyRep::Tuple(vec![
             PyRep::String("WarpTo".into()),
-            // V24 `_destiny.Ballpark.WarpTo(ballID, x, y, z, distance, warpSpeedTenthAuPerSec)` 6-tuple
-            // (`autopilot.pyj:221` slices `dstVector = args[1:-2]` to extract `(x, y, z)`).
+            // V24 `_destiny.Ballpark.WarpTo(ballID, x, y, z, distance, warpSpeedMilliAuPerSec)` 6-tuple
+            // (`autopilot.pyj:221` slices `dstVector = args[1:-2]` to extract `(x, y, z)`;
+            // V24 `_destiny.so` divides the 6th integer arg by `1000.0` to compute warp acceleration).
             PyRep::Tuple(vec![
                 PyRep::Integer(*ball_id),
                 PyRep::Real(destination[0]),
                 PyRep::Real(destination[1]),
                 PyRep::Real(destination[2]),
                 PyRep::Integer(0),
-                PyRep::Integer((*warp_speed_au_s * 10.0).round() as i64),
+                PyRep::Integer((*warp_speed_au_s * 1000.0).round() as i64),
             ]),
         ]),
         DestinyEvent::SetBallMassive {

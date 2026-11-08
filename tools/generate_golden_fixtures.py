@@ -200,10 +200,10 @@ def encode_destiny_ball(mode, pos, vel, max_vel, mass=1067000.0, radius=37.0, in
     elif mode == 3:  # Warp
         dest = extra["destination"]
         buf.extend(struct.pack("<ddd", dest.x, dest.y, dest.z))
-        buf.extend(struct.pack("<i", 0))  # effect_stamp
-        buf.extend(struct.pack("<q", struct.unpack("<q", struct.pack("<d", -1.0))[0]))
-        buf.extend(struct.pack("<q", struct.unpack("<q", struct.pack("<d", 15000.0))[0]))
-        buf.extend(struct.pack("<q", int(extra["warp_speed_au_s"] * 10.0)))
+        buf.extend(struct.pack("<i", -1))  # effect_stamp (-1 while aligning)
+        buf.extend(struct.pack("<d", -1.0))  # totalDistance (-1.0 while aligning)
+        buf.extend(struct.pack("<d", 0.0))  # stopDistance (0.0)
+        buf.extend(struct.pack("<q", int(round(extra["warp_speed_au_s"] * 1000.0))))
     return bytes(buf)
 
 
@@ -486,6 +486,36 @@ def capture_all():
             ],
         })
         bp_fs.Evolve()
+
+    # Non-master client replay parity check (#531): verify SetState (WriteFullStateToStream -> ReadFullStateFromStream)
+    # and WarpTo(milli-AU/s) both accelerate a client ballpark past the V24 tunnel threshold (0.005 * 3.0 * AU_M).
+    bp_srv = blue.classes.CreateInstance('destiny.Ballpark')
+    bp_srv.isMaster = True
+    bp_srv.Start()
+    bp_srv.AddBall(1000001, 5000000.0, 40.0, 300.0, True, False, True, True, False,
+                   0.0, 0.0, 0.0, 228.0, 0.0, 0.0, 2.0, 1.0)
+    bp_srv.ego = 1000001
+    bp_srv.WarpTo(1000001, 10.0 * AU_M, 0.0, 0.0, 0.0, 3000)
+    for _ in range(3):
+        bp_srv.Evolve()
+    ms_srv = blue.classes.CreateInstance('blue.MemStream')
+    bp_srv.WriteFullStateToStream(ms_srv)
+    raw_state = ms_srv.Read()
+    bp_cli = blue.classes.CreateInstance('destiny.Ballpark')
+    bp_cli.isMaster = False
+    bp_cli.Start()
+    ms_cli = blue.classes.CreateInstance('blue.MemStream')
+    ms_cli.Write(raw_state)
+    ms_cli.Seek(0, 0)
+    bp_cli.ReadFullStateFromStream(ms_cli)
+    b_cli = bp_cli.balls[1000001]
+    max_cli_speed = 0.0
+    for _ in range(10):
+        bp_cli.Evolve()
+        spd = math.sqrt(float(b_cli.vx)**2 + float(b_cli.vy)**2 + float(b_cli.vz)**2)
+        if spd > max_cli_speed:
+            max_cli_speed = spd
+    assert max_cli_speed > 0.005 * 3.0 * AU_M, "non-master _destiny.so warp replay failed: max_speed=%r" % (max_cli_speed,)
 
     payload = {
         "scenarios": {

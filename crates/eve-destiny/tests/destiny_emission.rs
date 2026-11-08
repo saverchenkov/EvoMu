@@ -307,18 +307,33 @@ async fn test_add_balls_on_grid_entry_and_add_balls2_for_resident() {
     let mut c = Cur(state, 0);
     assert_eq!(c.u8(), 1);
     assert_eq!(c.u32() as i64, tick);
-    let MovementMode::Warp { destination, warp_speed_au_s, .. } = a_ball.mode else {
+    let MovementMode::Warp {
+        origin,
+        destination,
+        warp_speed_au_s,
+        total_distance,
+        phase,
+        elapsed_warp_time,
+    } = a_ball.mode
+    else {
         panic!("A crosses the grid wall while still in warp")
     };
+    assert_ne!(phase, eve_destiny::WarpPhase::Aligning);
     assert_free_ball_prefix(&mut c, &a_ball, eve_destiny::wire::DST_BALL_WARP, 1_000_170, 0);
-    // WARP_Struct (DestinyStructs.h:124-133); the two int64 constants are the values Crucible logs
-    // for a warp in progress (:130-131): bit patterns of -1.0 and 15000.0.
+    // WARP_Struct (53 bytes, V24.01 `_destiny.so`):
+    // formationID(0xFF), targX/Y/Z, effectStamp(warp start tick), totalDistance, stopDistance(0.0), warpSpeed(milli-AU/s).
     assert_eq!(c.u8(), 0xFF);
     assert_eq!([c.f64(), c.f64(), c.f64()], destination.to_array());
-    assert_eq!(c.i32() as i64, tick, "WARP_Struct.effectStamp");
-    assert_eq!(c.i64(), -4_616_189_618_054_758_400);
-    assert_eq!(c.i64(), 4_669_471_951_536_783_360);
-    assert_eq!(c.i64(), (warp_speed_au_s * 10.0) as i64, "speed = AU/s * 10 (i64 in V24 _destiny.so)");
+    let expected_stamp = (tick as i32 - elapsed_warp_time.round() as i32).max(0) as i64;
+    let expected_total = if total_distance > 0.0 {
+        total_distance
+    } else {
+        (destination - origin).length()
+    };
+    assert_eq!(c.i32() as i64, expected_stamp, "WARP_Struct.effectStamp");
+    assert_eq!(c.f64(), expected_total, "WARP_Struct.totalDistance");
+    assert_eq!(c.f64(), 0.0, "WARP_Struct.stopDistance");
+    assert_eq!(c.i64(), (warp_speed_au_s * 1000.0).round() as i64, "speed = AU/s * 1000 (milli-AU/s in V24 _destiny.so)");
     assert_eq!(c.1, state.len());
 }
 
@@ -353,7 +368,7 @@ async fn test_warp_to_and_special_fx_on_warp_start_and_exit() {
             PyRep::Real(dest.y),
             PyRep::Real(dest.z),
             PyRep::Integer(0),
-            PyRep::Integer(50),
+            PyRep::Integer(5000),
         ]);
         // Client `Park.OnSpecialFX(shipID, moduleID, moduleTypeID, targetID, otherTypeID, guid,
         // isOffensive, start, active, duration=-1, repeat=None, startTime=None, timeFromStart=0,
@@ -401,6 +416,68 @@ async fn test_warp_to_and_special_fx_on_warp_start_and_exit() {
     assert_eq!(fx.len(), 1);
     assert_eq!(fx[0][5], PyRep::String("effects.Warping".into()));
     assert_eq!((&fx[0][7], &fx[0][8]), (&PyRep::Integer(0), &PyRep::Integer(0)));
+}
+
+#[tokio::test]
+async fn test_warp_struct_milli_au_aligning_and_active_regression_531() {
+    // Regression for #531: V24.01 `_destiny.so` takes warpSpeed in milli-AU/s (AU/s * 1000) in both
+    // `WarpTo` and `WARP_Struct`, and expects `effectStamp = -1, totalDistance = -1.0` while aligning
+    // vs non-negative `effectStamp` and positive `totalDistance` once warp acceleration starts.
+    let mut park = two_ship_park();
+    let origin = park.balls[&SHIP_A].position;
+    let dest = DVec3::new(10.0 * eve_destiny::AU_METERS, 0.0, 0.0);
+    park.set_mode(SHIP_A, MovementMode::new_warp(origin, dest, 3.0)).expect("warp");
+
+    // 1. WarpTo 6th arg is milli-AU/s (3000 for 3.0 AU/s)
+    let actions = wire_for(&mut park, SHIP_A);
+    let warp_args = args_of(&actions, "WarpTo")[0];
+    assert_eq!(warp_args[5], PyRep::Integer(3000));
+
+    // 2. WARP_Struct while Aligning
+    let buf_align = eve_destiny::wire::encode_add_balls_with_park(
+        0,
+        park.current_tick as u32,
+        &[&park.balls[&SHIP_A]],
+        Some(&park),
+    );
+    let mut c = Cur(&buf_align, 5);
+    assert_free_ball_prefix(&mut c, &park.balls[&SHIP_A], eve_destiny::wire::DST_BALL_WARP, 1_000_170, 0);
+    assert_eq!(c.u8(), 0xFF);
+    assert_eq!([c.f64(), c.f64(), c.f64()], dest.to_array());
+    assert_eq!(c.i32(), -1, "aligning WARP_Struct.effectStamp must be -1");
+    assert_eq!(c.f64(), -1.0, "aligning WARP_Struct.totalDistance must be -1.0");
+    assert_eq!(c.f64(), 0.0, "WARP_Struct.stopDistance must be 0.0");
+    assert_eq!(c.i64(), 3000, "WARP_Struct.warpSpeed must be milli-AU/s");
+
+    // 3. Step until warp acceleration starts, then verify active WARP_Struct
+    for _ in 0..30 {
+        park.step(1.0);
+        if let MovementMode::Warp { phase, .. } = park.balls[&SHIP_A].mode {
+            if phase != eve_destiny::WarpPhase::Aligning {
+                break;
+            }
+        }
+    }
+    let MovementMode::Warp { phase, total_distance, elapsed_warp_time, .. } = park.balls[&SHIP_A].mode else {
+        panic!("expected ship still in warp after alignment");
+    };
+    assert_ne!(phase, eve_destiny::WarpPhase::Aligning);
+    let active_tick = park.current_tick as u32;
+    let buf_active = eve_destiny::wire::encode_add_balls_with_park(
+        0,
+        active_tick,
+        &[&park.balls[&SHIP_A]],
+        Some(&park),
+    );
+    let mut c2 = Cur(&buf_active, 5);
+    assert_free_ball_prefix(&mut c2, &park.balls[&SHIP_A], eve_destiny::wire::DST_BALL_WARP, 1_000_170, 0);
+    assert_eq!(c2.u8(), 0xFF);
+    assert_eq!([c2.f64(), c2.f64(), c2.f64()], dest.to_array());
+    let expected_enter_stamp = (active_tick as i32 - elapsed_warp_time.round() as i32).max(0);
+    assert_eq!(c2.i32(), expected_enter_stamp, "active WARP_Struct.effectStamp");
+    assert_eq!(c2.f64(), total_distance, "active WARP_Struct.totalDistance");
+    assert_eq!(c2.f64(), 0.0, "active WARP_Struct.stopDistance");
+    assert_eq!(c2.i64(), 3000, "active WARP_Struct.warpSpeed");
 }
 
 #[tokio::test]

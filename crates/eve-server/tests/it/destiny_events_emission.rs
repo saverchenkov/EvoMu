@@ -155,7 +155,7 @@ async fn test_warp_to_and_warp_special_fx_emitted_on_warp() {
     assert_eq!(w[0], PyRep::Integer(ship_id));
     assert_eq!((real(&w[1]), real(&w[2]), real(&w[3])), (destination.x, destination.y, destination.z));
     assert_eq!(w[4], PyRep::Integer(0), "distance (stopDistance) is 0");
-    assert_eq!(w[5], PyRep::Integer((warp_speed_au_s * 10.0).round() as i64), "warpSpeed is AU/s x 10");
+    assert_eq!(w[5], PyRep::Integer((warp_speed_au_s * 1000.0).round() as i64), "warpSpeed is AU/s x 1000 (milli-AU/s)");
 
     let fx = find(&actions, "OnSpecialFX");
     assert_eq!(fx.len(), 1, "warp start emits one OnSpecialFX");

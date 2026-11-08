@@ -587,7 +587,8 @@ async fn test_warp_full_lifecycle_align_accelerate_cruise_decelerate_and_dropout
     let (_, _, decoded) = eve_destiny::wire::decode_add_balls(&encoded).expect("decode warp");
     assert_eq!(decoded[0].mode, eve_destiny::wire::DSTBALL_WARP);
     assert_eq!(decoded[0].warp_destination, Some(dest));
-    assert_eq!(decoded[0].warp_speed_tenth_au_s, Some(30));
+    assert_eq!(decoded[0].warp_speed_milli_au_s, Some(3000));
+    assert_eq!(decoded[0].effect_stamp, Some(-1));
 
     let (mut saw_align, mut saw_accel, mut saw_cruise, mut saw_decel, mut exited) =
         (false, false, false, false, false);

@@ -94,8 +94,8 @@ fn encode_and_decode_all_thirteen_movement_modes_roundtrip() {
     assert_eq!(decoded[3].id, 103);
     assert_eq!(decoded[3].mode, DST_BALL_WARP);
     assert_eq!(decoded[3].warp_destination, Some(DVec3::new(1.0e9, 2.0e9, -3.0e9)));
-    assert_eq!(decoded[3].warp_speed_tenth_au_s, Some(30));
-    assert_eq!(decoded[3].effect_stamp, Some(42));
+    assert_eq!(decoded[3].warp_speed_milli_au_s, Some(3000));
+    assert_eq!(decoded[3].effect_stamp, Some(38));
 
     // 4: Orbit
     assert_eq!(decoded[4].id, 104);

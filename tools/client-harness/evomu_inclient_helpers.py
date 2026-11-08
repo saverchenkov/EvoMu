@@ -599,6 +599,113 @@ def _warp_full(sm, b_obj, tid, stuff_type="item", distance=0.0):
     _wait_view_settled(sm)
 
 
+def _warp_animated(sm, b_obj, tid, stuff_type="item", distance=0.0, max_ticks=45):
+    """Execute one stepped warp leg and assert client-side warp physics & tunnel FX activate."""
+    _ensure_warp_signal_tracker(sm)
+    start_before = int(_WARP_SIGNAL_STATE["started"])
+    finish_before = int(_WARP_SIGNAL_STATE["finished"])
+    sess = getattr(__builtin__, "session", None)
+    sid = int(getattr(sess, "shipid", 0) or 0) if sess is not None else 0
+    michelle = sm.services.get("michelle") if hasattr(sm, "services") else None
+    fx_svc = sm.services.get("fxSequencer") if hasattr(sm, "services") else None
+
+    for _ in range(4):
+        sm.RemoteSvc("slash").SlashCmd("/heal")
+        try:
+            b_obj.CmdWarpToStuff(stuff_type, tid, float(distance))
+            break
+        except Exception as exc:
+            msg = str(exc)
+            if "WarpDistanceTooShort" in msg:
+                return {"skipped": True}
+            if "ShipInWarp" in msg or "ShipAlreadyInWarp" in msg:
+                sm.RemoteSvc("timeControl").AdvanceClock(120)
+                _sleep_sim_ms(400)
+                _wait_warp_fx_settled(sm, timeout_sec=4.0)
+                start_before = int(_WARP_SIGNAL_STATE["started"])
+                finish_before = int(_WARP_SIGNAL_STATE["finished"])
+                continue
+            raise
+
+    # 0.005 * 3.0 * AU_METERS (~2.24e9 m/s): exact threshold in V24 Warp.WarpLoop for warp tunnel/explosion.
+    tunnel_speed_threshold = 0.005 * 3.0 * 149597870700.0
+    saw_warp_mode = False
+    saw_active_stamp = False
+    saw_tunnel_gfx = False
+    saw_explosion = False
+    max_speed = 0.0
+
+    for _ in range(int(max_ticks)):
+        _sleep_sim_ms(1000)
+        try:
+            sm.RemoteSvc("timeControl").AdvanceClock(1)
+        except Exception:
+            pass
+        bp = michelle.GetBallpark() if (sid and michelle is not None) else None
+        ball = bp.GetBall(sid) if (bp is not None and sid) else None
+        if ball is not None:
+            mode = int(getattr(ball, "mode", 0) or 0)
+            est = int(getattr(ball, "effectStamp", -1) or -1)
+            spd = (
+                float(getattr(ball, "vx", 0.0) or 0.0) ** 2
+                + float(getattr(ball, "vy", 0.0) or 0.0) ** 2
+                + float(getattr(ball, "vz", 0.0) or 0.0) ** 2
+            ) ** 0.5
+            max_speed = max(max_speed, spd)
+            if mode == 3:
+                saw_warp_mode = True
+                if est >= 0:
+                    saw_active_stamp = True
+            if fx_svc is not None and hasattr(fx_svc, "balls"):
+                for eff in (fx_svc.balls.get(sid) or {}).values():
+                    if getattr(eff, "hasExploded", False):
+                        saw_explosion = True
+                    gfx = getattr(eff, "gfx", None)
+                    if gfx is not None and getattr(gfx, "display", False):
+                        saw_tunnel_gfx = True
+            if saw_active_stamp and max_speed >= tunnel_speed_threshold and (saw_tunnel_gfx or saw_explosion or mode != 3):
+                break
+            if saw_active_stamp and mode != 3:
+                break
+
+    sm.RemoteSvc("timeControl").AdvanceClock(120)
+    _sleep_sim_ms(400)
+    _wait_warp_fx_settled(sm, timeout_sec=8.0, min_finished=finish_before + 1)
+    _wait_view_settled(sm)
+
+    started_delta = int(_WARP_SIGNAL_STATE["started"]) - start_before
+    finished_delta = int(_WARP_SIGNAL_STATE["finished"]) - finish_before
+    if not (
+        saw_warp_mode
+        and saw_active_stamp
+        and max_speed >= tunnel_speed_threshold
+        and (saw_tunnel_gfx or saw_explosion)
+        and (not _WARP_SIGNAL_STATE["hooked"] or (started_delta >= 1 and finished_delta >= 1))
+    ):
+        raise AssertionError(
+            "Client warp animation/physics check failed (#531): "
+            "warp_mode=%r active_stamp=%r max_speed=%.3e threshold=%.3e "
+            "tunnel_gfx=%r exploded=%r signals=(+%d/+%d)"
+            % (
+                saw_warp_mode,
+                saw_active_stamp,
+                max_speed,
+                tunnel_speed_threshold,
+                saw_tunnel_gfx,
+                saw_explosion,
+                started_delta,
+                finished_delta,
+            )
+        )
+    return {
+        "max_speed": max_speed,
+        "saw_tunnel_gfx": saw_tunnel_gfx,
+        "saw_explosion": saw_explosion,
+        "started_delta": started_delta,
+        "finished_delta": finished_delta,
+    }
+
+
 def _undock_ship(sm):
     _wait_view_settled(sm)
     sess = getattr(__builtin__, "session", None)

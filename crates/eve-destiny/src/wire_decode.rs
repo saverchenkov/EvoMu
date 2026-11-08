@@ -32,7 +32,7 @@ pub struct DecodedBall {
     pub owner_id: Option<i64>,
     pub effect_stamp: Option<i32>,
     pub warp_destination: Option<DVec3>,
-    pub warp_speed_tenth_au_s: Option<u32>,
+    pub warp_speed_milli_au_s: Option<u32>,
 }
 
 /// Decodes a binary `AddBalls` / `SetState` buffer produced by [`crate::wire::encode_add_balls`]
@@ -136,7 +136,7 @@ pub fn decode_add_balls(bytes: &[u8]) -> Result<(u8, u32, Vec<DecodedBall>), Str
         let mut owner_id = None;
         let mut effect_stamp = None;
         let mut warp_destination = None;
-        let mut warp_speed_tenth_au_s = None;
+        let mut warp_speed_milli_au_s = None;
 
         match mode {
             DST_BALL_GOTO => {
@@ -167,7 +167,7 @@ pub fn decode_add_balls(bytes: &[u8]) -> Result<(u8, u32, Vec<DecodedBall>), Str
                 let ws = read_i64(bytes, &mut offset)? as u32;
                 effect_stamp = Some(est);
                 warp_destination = Some(DVec3::new(wx, wy, wz));
-                warp_speed_tenth_au_s = Some(ws);
+                warp_speed_milli_au_s = Some(ws);
             }
             DST_BALL_MISSILE => {
                 let tid = read_i64(bytes, &mut offset)?;
@@ -233,7 +233,7 @@ pub fn decode_add_balls(bytes: &[u8]) -> Result<(u8, u32, Vec<DecodedBall>), Str
             owner_id,
             effect_stamp,
             warp_destination,
-            warp_speed_tenth_au_s,
+            warp_speed_milli_au_s,
         });
     }
 
