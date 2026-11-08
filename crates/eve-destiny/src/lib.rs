@@ -799,6 +799,8 @@ pub struct SlimItemMeta {
     #[serde(default)] pub skin_material_set_id: Option<u32>,
     #[serde(default)] pub jump_target: Option<(i64, u32)>,
     #[serde(default)] pub war_faction_id: Option<i64>,
+    #[serde(default)] pub name: Option<String>,
+    #[serde(default)] pub dest_system_owner_id: Option<i64>,
 }
 
 impl Default for SlimItemMeta {
@@ -816,6 +818,8 @@ impl Default for SlimItemMeta {
             skin_material_set_id: None,
             jump_target: None,
             war_faction_id: None,
+            name: None,
+            dest_system_owner_id: None,
         }
     }
 }

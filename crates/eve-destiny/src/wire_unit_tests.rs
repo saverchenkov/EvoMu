@@ -362,6 +362,26 @@ fn slim_item_meta_and_dict_covers_stargate_wormhole_npc_and_player_ship() {
     let gate_dict = slim_item_dict(&gate_heuristic, &gate_meta);
     if let PyRep::Dict(entries) = gate_dict {
         assert!(entries.iter().any(|(k, _)| matches!(k, PyRep::String(s) if s == "jumps")));
+        assert!(entries.iter().any(|(k, v)| matches!(k, PyRep::String(s) if s == "destinationSystemStatusIcons") && matches!(v, PyRep::List(l) if l.is_empty())));
+        assert!(entries.iter().any(|(k, v)| matches!(k, PyRep::String(s) if s == "originSystemOwnerID") && matches!(v, PyRep::Integer(1))));
+        assert!(entries.iter().any(|(k, v)| matches!(k, PyRep::String(s) if s == "destinationSystemOwnerID") && matches!(v, PyRep::Integer(1))));
+    } else {
+        panic!("expected PyRep::Dict");
+    }
+
+    // Named ship slim item includes non-empty "name" (#656)
+    let named_ship_ball = sample_ball(499, MovementMode::Stop);
+    let named_ship_meta = SlimItemMeta {
+        group_id: 25,
+        category_id: 6,
+        owner_id: 90_000_001,
+        char_id: Some(90_000_001),
+        name: Some("My Rifter".to_string()),
+        ..SlimItemMeta::default()
+    };
+    let named_dict = slim_item_dict(&named_ship_ball, &named_ship_meta);
+    if let PyRep::Dict(entries) = named_dict {
+        assert!(entries.iter().any(|(k, v)| matches!(k, PyRep::String(s) if s == "name") && matches!(v, PyRep::String(n) if n == "My Rifter")));
     } else {
         panic!("expected PyRep::Dict");
     }

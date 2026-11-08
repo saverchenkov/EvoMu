@@ -1035,7 +1035,9 @@ pub(crate) mod milestone_logon_browser_lockdown_policy {
         else {
             panic!("expected Tuple from GetSkillQueueAndFreePoints");
         };
-        let queue_entries = extract_rowset_lines(&queue_and_free[0]);
+        let PyRep::List(queue_entries) = &queue_and_free[0] else {
+            panic!("expected List of KeyVals from GetSkillQueueAndFreePoints[0]");
+        };
         assert_eq!(queue_entries.len(), 1);
     }
 

@@ -161,7 +161,7 @@ async fn test_action_plan_ch1_to_ch5_character_skills_and_gm() {
         .dispatch_rpc(&mut sess, "skillMgr2", None, "GetSkillQueue", &[], &kw, None)
         .await
         .expect("GetSkillQueue");
-    assert!(matches!(queue_rep, PyRep::Rowset { .. }));
+    assert!(matches!(queue_rep, PyRep::List(_)));
 
     // Verify skill level completed in DB
     let trained_lvl = ctx.db.with_snapshot(|snap| {

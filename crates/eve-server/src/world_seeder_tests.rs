@@ -240,8 +240,10 @@ fn seed_dual_anchor_and_full_catalog_create_tier1_and_tier2_orders_idempotently(
             .values()
             .all(|o| !(o.type_id == 880_030 && o.is_bid)));
 
-        // T1 item 880_010 gets ask (+6%) and bid (-6%) in Jita (hub_mult = 1.00).
+        // T1 item 880_010 gets ask (+6%) and bid (-6%) in Jita (hub_mult = 1.00), rounded to 4 sig figs.
         let fair = compute_living_world_fair_price(1_000.0, 0.0, 1.00);
+        let expected_ask = crate::services::market_contracts::round_to_4_sig_figs((fair * 1.06).max(1.0));
+        let expected_bid = crate::services::market_contracts::round_to_4_sig_figs((fair * 0.94).max(0.5));
         let jita_ask = snap
             .market_orders
             .values()
@@ -249,7 +251,7 @@ fn seed_dual_anchor_and_full_catalog_create_tier1_and_tier2_orders_idempotently(
             .expect("Jita T1 ask");
         assert!(!jita_ask.is_npc);
         assert_eq!(jita_ask.vol_entered, 1_000);
-        assert_eq!(jita_ask.price, IskCents::from_f64_isk(fair * 1.06));
+        assert_eq!(jita_ask.price, IskCents::from_f64_isk(expected_ask));
 
         let jita_bid = snap
             .market_orders
@@ -257,8 +259,17 @@ fn seed_dual_anchor_and_full_catalog_create_tier1_and_tier2_orders_idempotently(
             .find(|o| o.station_id == 60_003_760 && o.type_id == 880_010 && o.is_bid)
             .expect("Jita T1 bid");
         assert_eq!(jita_bid.vol_entered, 500);
-        assert_eq!(jita_bid.price, IskCents::from_f64_isk(fair * 0.94));
-        assert_eq!(jita_bid.escrow, IskCents::from_f64_isk((fair * 0.94) * 500.0));
+        assert_eq!(jita_bid.price, IskCents::from_f64_isk(expected_bid));
+        assert_eq!(jita_bid.escrow, IskCents::from_f64_isk(expected_bid * 500.0));
+        for order in snap.market_orders.values() {
+            assert!(
+                crate::services::market_contracts::is_valid_4_sig_fig_price(order.price.to_wire_f64()),
+                "seeded order {} (type {}) price {} must conform to 4-sig-fig tick rule",
+                order.order_id,
+                order.type_id,
+                order.price.to_wire_f64()
+            );
+        }
 
         // Faction item 880_040 (faction 500_001) is seeded at Jita (500_001) with vol=100, NOT at Amarr (500_003).
         let jita_fac = snap
@@ -304,7 +315,23 @@ fn seed_dual_anchor_and_full_catalog_create_tier1_and_tier2_orders_idempotently(
             .values()
             .find(|o| o.station_id == 60_003_760 && o.type_id == 880_020 && !o.is_bid)
             .expect("fallback item ask");
-        assert_eq!(ask_fb.price, IskCents::from_f64_isk(fair_fb * 1.06));
+        assert_eq!(
+            ask_fb.price,
+            IskCents::from_f64_isk(crate::services::market_contracts::round_to_4_sig_figs((fair_fb * 1.06).max(1.0)))
+        );
+        for order in snap.market_orders.values() {
+            assert!(
+                crate::services::market_contracts::is_valid_4_sig_fig_price(order.price.to_wire_f64()),
+                "seeded order {} (type {}) price {} must conform to 4-sig-fig tick rule",
+                order.order_id,
+                order.type_id,
+                order.price.to_wire_f64()
+            );
+        }
+        assert_eq!(crate::services::market_contracts::round_to_4_sig_figs(12_560.58), 12_560.0);
+        assert!(crate::services::market_contracts::is_valid_4_sig_fig_price(
+            crate::services::market_contracts::round_to_4_sig_figs(12_560.58)
+        ));
     });
 }
 

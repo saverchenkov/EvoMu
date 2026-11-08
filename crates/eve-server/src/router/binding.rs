@@ -667,19 +667,27 @@ impl ServerContext {
             .get(&type_id)
             .map(|t| (t.group_id, t.category_id))
             .unwrap_or((25, 6));
-        let (corp_id, alliance_id, war_faction_id, security_status, raw_skin) = self.db.with_snapshot(|snap| {
+        let (corp_id, alliance_id, war_faction_id, security_status, raw_skin, custom_name) = self.db.with_snapshot(|snap| {
             let Some(ch) = snap.characters.get(&char_id) else {
-                return (1_000_009, 0, None, 0.0, None);
+                return (1_000_009, 0, None, 0.0, None, None);
             };
             let skin = snap.applied_ship_skins.get(&ch.active_ship_id).copied();
+            let ship_name = snap
+                .item_custom_names
+                .get(&ch.active_ship_id)
+                .filter(|n| !n.is_empty() && snap.items.get(&ch.active_ship_id).is_some_and(|i| i.type_id == type_id))
+                .cloned();
             (
                 ch.corporation_id,
                 ch.alliance_id.unwrap_or(0),
                 ch.war_faction_id,
                 ch.security_status,
                 skin,
+                ship_name,
             )
         });
+        let ship_display_name = custom_name
+            .or_else(|| self.sde.types.get(&type_id).map(|t| t.name.clone()).filter(|n| !n.is_empty()));
         let skin_id = raw_skin.map(|raw| {
             self.sde
                 .skin_licenses
@@ -704,6 +712,8 @@ impl ServerContext {
             skin_material_set_id,
             jump_target: None,
             war_faction_id,
+            name: ship_display_name,
+            ..Default::default()
         }
     }
 

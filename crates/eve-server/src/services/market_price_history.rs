@@ -13,6 +13,8 @@ use super::market_trading::{load_market_order_meta, save_market_order_meta, Mark
 pub(crate) struct ModifyCrossResult {
     pub delivered_to_corp_deliveries: i32,
     pub final_escrow: IskCents,
+    pub acct_updates: Vec<(bool, i64, u8, IskCents)>,
+    pub item_deliveries: Vec<(i64, InventoryItemRecord)>,
 }
 
 /// Executes crossed order fills when a market order price is modified via `ModifyCharOrder`.
@@ -32,11 +34,18 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
 ) -> Result<ModifyCrossResult, BridgeRpcError> {
     let order = match snap.market_orders.get(&order_id).cloned() {
         Some(o) => o,
-        None => return Ok(ModifyCrossResult { delivered_to_corp_deliveries: 0, final_escrow: IskCents(0) }),
+        None => return Ok(ModifyCrossResult {
+            delivered_to_corp_deliveries: 0,
+            final_escrow: IskCents(0),
+            acct_updates: Vec::new(),
+            item_deliveries: Vec::new(),
+        }),
     };
 
     let tax_collector = crate::services::wallet_serverops::tax_collector_id(ctx);
     let mut delivered_to_corp_deliveries = 0_i32;
+    let mut acct_updates: Vec<(bool, i64, u8, IskCents)> = Vec::new();
+    let mut item_deliveries: Vec<(i64, InventoryItemRecord)> = Vec::new();
 
     if order.is_bid {
         // Buy order modified upward: crosses resting ask orders within buy order range
@@ -90,9 +99,12 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
                 if let Some(seller) = snap.characters.get_mut(&ask.owner_id) {
                     seller.balance = seller.balance.checked_add(seller_net).unwrap_or(seller.balance);
                     seller_bal = Some(seller.balance);
+                    acct_updates.push((false, ask.owner_id, 1, seller.balance));
                 } else if let Some(seller_corp) = snap.corporations.get_mut(&ask.owner_id) {
                     let s_div = seller_meta.account_key.map(|k| (k.saturating_sub(999)).clamp(1, 7) as u8).unwrap_or(1);
-                    seller_bal = Some(seller_corp.credit_division(s_div, seller_net));
+                    let sb = seller_corp.credit_division(s_div, seller_net);
+                    seller_bal = Some(sb);
+                    acct_updates.push((true, ask.owner_id, s_div, sb));
                 }
             }
 
@@ -106,10 +118,12 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
                 if is_corp_order {
                     if let Some(corp_mut) = snap.corporations.get_mut(&caller_corp_id) {
                         let div_id = meta.account_key.map(|ak| (ak.saturating_sub(999)).clamp(1, 7) as u8).unwrap_or(1);
-                        corp_mut.credit_division(div_id, refund);
+                        let bal_after = corp_mut.credit_division(div_id, refund);
+                        acct_updates.push((true, caller_corp_id, div_id, bal_after));
                     }
                 } else if let Some(buyer) = snap.characters.get_mut(&char_id) {
                     buyer.balance = buyer.balance.checked_add(refund).unwrap_or(buyer.balance);
+                    acct_updates.push((false, char_id, 1, buyer.balance));
                 }
             } else if fill_cost.0 > escrow_released {
                 let uncovered = IskCents(fill_cost.0 - escrow_released);
@@ -127,6 +141,7 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
                         });
                     };
                     corp_mut.set_division_balance(div_id, bal_after);
+                    acct_updates.push((true, caller_corp_id, div_id, bal_after));
                     snap.append_journal(caller_corp_id, "MarketEscrowShortfall", uncovered, bal_after, format!("Margin shortfall for fill of order {order_id}"));
                 } else {
                     let cur_bal = snap.characters.get(&char_id).map(|c| c.balance).unwrap_or(IskCents(0));
@@ -139,6 +154,7 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
                     let ch_mut = snap.characters.get_mut(&char_id).unwrap();
                     ch_mut.balance = IskCents(ch_mut.balance.0 - uncovered.0);
                     let bal_after = ch_mut.balance;
+                    acct_updates.push((false, char_id, 1, bal_after));
                     snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
                         owner_id: char_id,
                         entry_type: "MarketEscrowShortfall",
@@ -191,14 +207,19 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
                 let delivery_item_id = snap.next_entity_id;
                 let flag = if is_corp_order { InventoryFlag::Deliveries } else { InventoryFlag::Hangar };
                 let deliv_loc = if order.type_id == PLEX_TYPE_ID { order.station_id } else { ask.station_id };
-                snap.items.insert(
-                    delivery_item_id,
-                    InventoryItemRecord {
-                        item_id: delivery_item_id, type_id: order.type_id, owner_id: buyer_owner_id,
-                        location_id: deliv_loc, flag, quantity: fill_qty, singleton: false,
-                        version: 1, ..Default::default()
-                    },
+                let rec = InventoryItemRecord {
+                    item_id: delivery_item_id, type_id: order.type_id, owner_id: buyer_owner_id,
+                    location_id: deliv_loc, flag, quantity: fill_qty, singleton: false,
+                    version: 1, ..Default::default()
+                };
+                snap.items.insert(delivery_item_id, rec.clone());
+                let buyer_issued_by = snap.market_order_meta.get(&order_id).and_then(|m| m.issued_by);
+                let rec_char = super::market_trading::resolve_corp_recipient_char(
+                    snap,
+                    buyer_owner_id,
+                    buyer_issued_by.or(Some(char_id)),
                 );
+                item_deliveries.push((rec_char, rec));
             }
             if is_corp_order { delivered_to_corp_deliveries += fill_qty; }
         }
@@ -242,6 +263,7 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
                 let covered = if let Some(buyer_ch) = snap.characters.get_mut(&bid.owner_id) {
                     if let Some(new_bal) = buyer_ch.balance.checked_sub(uncovered) {
                         buyer_ch.balance = new_bal;
+                        acct_updates.push((false, bid.owner_id, 1, new_bal));
                         snap.append_journal(bid.owner_id, "MarketEscrowCover", uncovered, new_bal, format!("Covered margin escrow shortfall for buy order {bid_id}"));
                         true
                     } else { false }
@@ -249,6 +271,7 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
                     let div_bal = buyer_corp.division_balance(b_div_id);
                     if let Some(new_bal) = div_bal.checked_sub(uncovered) {
                         buyer_corp.set_division_balance(b_div_id, new_bal);
+                        acct_updates.push((true, bid.owner_id, b_div_id, new_bal));
                         snap.append_journal(bid.owner_id, "MarketEscrowCover", uncovered, new_bal, format!("Covered margin escrow shortfall for buy order {bid_id}"));
                         true
                     } else { false }
@@ -258,8 +281,10 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
                     if bid.escrow.0 > 0 {
                         if let Some(buyer_ch) = snap.characters.get_mut(&bid.owner_id) {
                             buyer_ch.balance = buyer_ch.balance.checked_add(bid.escrow).unwrap_or(buyer_ch.balance);
+                            acct_updates.push((false, bid.owner_id, 1, buyer_ch.balance));
                         } else if let Some(buyer_corp) = snap.corporations.get_mut(&bid.owner_id) {
-                            buyer_corp.credit_division(b_div_id, bid.escrow);
+                            let rb = buyer_corp.credit_division(b_div_id, bid.escrow);
+                            acct_updates.push((true, bid.owner_id, b_div_id, rb));
                         }
                     }
                     if let Some(o_mut) = snap.market_orders.get_mut(&bid_id) {
@@ -277,11 +302,14 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
             if is_corp_order {
                 if let Some(corp_mut) = snap.corporations.get_mut(&caller_corp_id) {
                     let div_id = meta.account_key.map(|ak| (ak.saturating_sub(999)).clamp(1, 7) as u8).unwrap_or(1);
-                    seller_bal = Some(corp_mut.credit_division(div_id, seller_net));
+                    let sb = corp_mut.credit_division(div_id, seller_net);
+                    seller_bal = Some(sb);
+                    acct_updates.push((true, caller_corp_id, div_id, sb));
                 }
             } else if let Some(seller) = snap.characters.get_mut(&char_id) {
                 seller.balance = seller.balance.checked_add(seller_net).unwrap_or(seller.balance);
                 seller_bal = Some(seller.balance);
+                acct_updates.push((false, char_id, 1, seller.balance));
             }
 
             snap.journal_market_fill(eve_db::ledger::MarketFill {
@@ -324,20 +352,26 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
                 snap.next_entity_id += 1;
                 let delivery_item_id = snap.next_entity_id;
                 let flag = if buyer_is_corp { InventoryFlag::Deliveries } else { InventoryFlag::Hangar };
-                snap.items.insert(
-                    delivery_item_id,
-                    InventoryItemRecord {
-                        item_id: delivery_item_id, type_id: order.type_id, owner_id: bid.owner_id,
-                        location_id: order.station_id, flag, quantity: fill_qty, singleton: false,
-                        version: 1, ..Default::default()
-                    },
-                );
+                let rec = InventoryItemRecord {
+                    item_id: delivery_item_id, type_id: order.type_id, owner_id: bid.owner_id,
+                    location_id: order.station_id, flag, quantity: fill_qty, singleton: false,
+                    version: 1, ..Default::default()
+                };
+                snap.items.insert(delivery_item_id, rec.clone());
+                let b_issued = snap.market_order_meta.get(&bid_id).and_then(|m| m.issued_by);
+                let rec_char = super::market_trading::resolve_corp_recipient_char(snap, bid.owner_id, b_issued);
+                item_deliveries.push((rec_char, rec));
             }
         }
     }
 
     let final_escrow = snap.market_orders.get(&order_id).map(|o| o.escrow).unwrap_or(IskCents(0));
-    Ok(ModifyCrossResult { delivered_to_corp_deliveries, final_escrow })
+    Ok(ModifyCrossResult {
+        delivered_to_corp_deliveries,
+        final_escrow,
+        acct_updates,
+        item_deliveries,
+    })
 }
 
 /// Converts a "YYYY-MM-DD" date string to Unix epoch seconds (midnight UTC).

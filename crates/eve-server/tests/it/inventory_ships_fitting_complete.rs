@@ -1057,6 +1057,7 @@ async fn test_ships_board_eject_corvette_insurance_repair_killmarks_mastery_t3c(
 
     let char_id = 90_000_001i64;
     let ship_id = 100_000_001i64;
+    let _station_id = 60_003_760i64;
 
     let expected_ref_val = eve_server::formulas::compute_ship_insurance_reference_value(&ctx.sde, 587);
     let ins_quote = ctx
@@ -1187,10 +1188,11 @@ async fn test_ships_board_eject_corvette_insurance_repair_killmarks_mastery_t3c(
     let pod_id = leave_rep.as_i64().expect("capsule_id integer");
     assert_eq!(sess.ship_id, Some(pod_id));
 
+    // Non-corvette ship (Rifter) in station must NOT block CreateNewbieShip (#656)
     let corvette_rep = ctx
         .dispatch_rpc(&mut sess, "dogmaIM", None, "CreateNewbieShip", &[], &kw, None)
         .await
-        .expect("CreateNewbieShip");
+        .expect("CreateNewbieShip succeeds even with non-corvette ship in station");
     let corvette_id = corvette_rep.dict_get("shipID").and_then(|v| v.as_i64()).unwrap();
     assert!(corvette_id > 0);
     let cd_corvette_err = ctx
@@ -1204,6 +1206,26 @@ async fn test_ships_board_eject_corvette_insurance_repair_killmarks_mastery_t3c(
         .await
         .expect_err("CreateNewbieShip while already in a corvette must fail with AlreadyInNewbieShip");
     assert_eq!(already_corv_err.code, "AlreadyInNewbieShip");
+
+    // Leave corvette into capsule -> calling CreateNewbieShip again while Corvette is in station fails AlreadyHaveShipInStation
+    ctx.advance_secs(12);
+    let pod_after_corvette = ctx
+        .dispatch_rpc(&mut sess, "ship", None, "LeaveShip", &[], &kw, None)
+        .await
+        .expect("LeaveShip from corvette");
+    assert!(pod_after_corvette.as_i64().is_some());
+    let dup_corvette_err = ctx
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "CreateNewbieShip", &[], &kw, None)
+        .await
+        .expect_err("CreateNewbieShip must fail when character already has a corvette in station");
+    assert_eq!(dup_corvette_err.code, "AlreadyHaveShipInStation");
+
+    // Re-board corvette before undocking
+    ctx.advance_secs(12);
+    ctx.dispatch_rpc(&mut sess, "ship", None, "Board", &[PyRep::Integer(corvette_id)], &kw, None)
+        .await
+        .expect("Board back into corvette");
+    ctx.advance_secs(12);
 
     let sys_id = 30_000_142u32;
     sess.station_id = None;

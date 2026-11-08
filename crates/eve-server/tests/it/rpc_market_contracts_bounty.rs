@@ -1544,4 +1544,73 @@ async fn test_issue_631_buy_order_escrow_deducts_wallet_and_emits_on_account_cha
     assert_eq!(acct_notif.args.get(2), Some(&PyRep::Real(expected_bal)));
 }
 
+#[tokio::test]
+async fn test_remote_immediate_buy_and_notifications_e2e() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let mut seller_sess = setup_pilot(&ctx, 1511, "demo", "demo-secret", SELLER_CHAR_ID).await;
+    let mut buyer_sess = setup_pilot(&ctx, 1512, "other", "other-secret", BUYER_CHAR_ID).await;
+    let remote_station_id = 60_003_757_i64;
+    let empty_kw = HashMap::new();
+
+    let seller_item_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.market_orders.retain(|_, o| o.type_id != ISOGEN);
+        if let Some(ch) = snap.characters.get_mut(&SELLER_CHAR_ID) {
+            ch.balance = IskCents::from_isk(500_000);
+            ch.station_id = Some(remote_station_id);
+            ch.solar_system_id = JITA_SYSTEM_ID;
+        }
+        if let Some(ch) = snap.characters.get_mut(&BUYER_CHAR_ID) {
+            ch.balance = IskCents::from_isk(500_000);
+            ch.station_id = Some(JITA_STATION_ID);
+            ch.solar_system_id = JITA_SYSTEM_ID;
+        }
+        seed_hangar_item(snap, ISOGEN, SELLER_CHAR_ID, remote_station_id, 50)
+    });
+
+    // Seller places remote ask at 60003757 (duration=90) while docked there
+    let sell_arg = PyRep::List(vec![PyRep::keyval([
+        ("itemID", PyRep::Integer(seller_item_id)),
+        ("typeID", PyRep::Integer(ISOGEN as i64)),
+        ("price", PyRep::Real(120.0)),
+        ("quantity", PyRep::Integer(20)),
+        ("stationID", PyRep::Integer(remote_station_id)),
+        ("duration", PyRep::Integer(90)),
+    ])]);
+    ctx.dispatch_rpc(
+        &mut seller_sess, "marketProxy", None, "PlaceMultiSellOrder",
+        &[sell_arg, PyRep::Bool(false)], &empty_kw, None,
+    )
+    .await
+    .expect("PlaceMultiSellOrder remote");
+
+    let _ = ctx.drain_notifications_for_char(BUYER_CHAR_ID);
+    let _ = ctx.drain_notifications_for_char(SELLER_CHAR_ID);
+
+    // Buyer docked in Jita clicks Buy Now (duration=0) at remote station 60003757 (#659 + #660)
+    let res = ctx
+        .dispatch_rpc(
+            &mut buyer_sess, "marketProxy", None, "PlaceBuyOrder",
+            &[
+                PyRep::Integer(remote_station_id), PyRep::Integer(ISOGEN as i64),
+                PyRep::Real(120.0), PyRep::Integer(5), PyRep::Integer(-1),
+                PyRep::Integer(1), PyRep::Integer(0), PyRep::Bool(false), PyRep::None,
+            ],
+            &empty_kw, None,
+        )
+        .await
+        .expect("remote immediate PlaceBuyOrder");
+    let kv = kv_map(&res);
+    assert_eq!(kv.get("filledImmediately").and_then(PyRep::as_bool), Some(true));
+
+    let buyer_notifs = ctx.drain_notifications_for_char(BUYER_CHAR_ID);
+    assert!(buyer_notifs.iter().any(|n| n.event == "OnAccountChange"));
+    assert!(buyer_notifs.iter().any(|n| n.event == "OnItemChange"));
+    assert!(ctx
+        .drain_notifications_for_char(SELLER_CHAR_ID)
+        .iter()
+        .any(|n| n.event == "OnAccountChange"));
+}
+
 }

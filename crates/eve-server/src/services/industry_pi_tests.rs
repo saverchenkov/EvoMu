@@ -447,4 +447,19 @@ fn industry_job_queries_and_monitor_connect_disconnect_work() {
     .unwrap()
     .unwrap();
     assert_eq!(disc.as_bool(), Some(true));
+
+    // DisconnectJob(None), empty args, or <= 0 must succeed as Ok(None) instead of raising JobNotFound (#661)
+    for args in [vec![PyRep::None], vec![], vec![PyRep::Integer(0)], vec![PyRep::Integer(-1)]] {
+        let res = handle_industry_job_queries(
+            &ctx,
+            &mut session,
+            "industryMonitor",
+            "DisconnectJob",
+            &args,
+            &HashMap::new(),
+        )
+        .unwrap()
+        .expect("DisconnectJob(None/empty/non-positive) must return Ok(None)");
+        assert_eq!(res, PyRep::None);
+    }
 }

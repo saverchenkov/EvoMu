@@ -203,35 +203,53 @@ fn normalize_contract_reply(rep: PyRep) -> PyRep {
 }
 
 fn normalize_skill_queue_rowset(rep: PyRep) -> PyRep {
-    let PyRep::Rowset { mut columns, mut rows } = rep else {
+    let PyRep::Rowset { columns, rows } = rep else {
         return rep;
     };
-    if columns.iter().any(|c| c == "trainingEndTime") {
-        return PyRep::Rowset { columns, rows };
-    }
+    let has_end = columns.iter().any(|c| c == "trainingEndTime");
     let dur_idx = columns.iter().position(|c| c == "durationSeconds");
-    columns.push("queuePosition".to_string());
-    columns.push("trainingStartTime".to_string());
-    columns.push("trainingEndTime".to_string());
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(1_700_000_000);
     let mut cur_ft = (now_unix + 11_644_473_600) * 10_000_000;
-    for (idx, row) in rows.iter_mut().enumerate() {
-        let dur_secs = dur_idx
-            .and_then(|i| row.get(i))
-            .and_then(|v| v.as_f64())
-            .unwrap_or(60.0)
-            .max(1.0);
-        let start_ft = cur_ft;
-        let end_ft = start_ft + (dur_secs * 10_000_000.0) as i64;
-        cur_ft = end_ft;
-        row.push(PyRep::Integer(idx as i64));
-        row.push(PyRep::Integer(start_ft));
-        row.push(PyRep::Integer(end_ft));
-    }
-    PyRep::Rowset { columns, rows }
+    let list_entries = rows
+        .into_iter()
+        .enumerate()
+        .map(|(idx, row)| {
+            let mut entries = Vec::with_capacity(columns.len() + 3);
+            for (col, val) in columns.iter().zip(row.into_iter()) {
+                entries.push((col.as_str(), val));
+            }
+            if !has_end {
+                let dur_secs = dur_idx
+                    .and_then(|i| entries.get(i))
+                    .and_then(|(_, v)| v.as_f64())
+                    .unwrap_or(60.0)
+                    .max(1.0);
+                let start_ft = cur_ft;
+                let end_ft = start_ft + (dur_secs * 10_000_000.0) as i64;
+                cur_ft = end_ft;
+                let mut kv_map: HashMap<String, PyRep> = entries
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v))
+                    .collect();
+                kv_map
+                    .entry("queuePosition".to_string())
+                    .or_insert_with(|| PyRep::Integer(idx as i64));
+                kv_map
+                    .entry("trainingStartTime".to_string())
+                    .or_insert_with(|| PyRep::Integer(start_ft));
+                kv_map
+                    .entry("trainingEndTime".to_string())
+                    .or_insert_with(|| PyRep::Integer(end_ft));
+                PyRep::KeyVal(kv_map)
+            } else {
+                PyRep::keyval(entries)
+            }
+        })
+        .collect();
+    PyRep::List(list_entries)
 }
 
 /// MachoNet wire-compatibility adjustments for live EVE V24.01 clients.
@@ -1330,5 +1348,29 @@ mod client_compat_tests {
         let empty_rs = PyRep::rowset(cols, vec![]);
         let empty_res = normalize_macho_rpc_reply("corpRegistry", "GetTitles", Ok(empty_rs)).unwrap();
         assert_eq!(empty_res, PyRep::Dict(vec![]));
+    }
+
+    #[test]
+    fn skill_queue_normalizes_to_list_of_keyvals_for_v24() {
+        let legacy = PyRep::rowset(
+            vec!["trainingTypeID", "trainingToLevel", "durationSeconds"],
+            vec![vec![
+                PyRep::Integer(3300),
+                PyRep::Integer(2),
+                PyRep::Real(120.0),
+            ]],
+        );
+        let rep = normalize_macho_rpc_reply("skillMgr2", "GetSkillQueue", Ok(legacy)).unwrap();
+        let PyRep::List(entries) = rep else {
+            panic!("expected PyRep::List of KeyVals");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].dict_get("trainingTypeID"), Some(&PyRep::Integer(3300)));
+        assert!(entries[0].dict_get("trainingStartTime").is_some());
+        assert!(entries[0].dict_get("trainingEndTime").is_some());
+
+        let kv_list = PyRep::List(entries.clone());
+        let notif = normalize_macho_notification("OnNewSkillQueueSaved", vec![kv_list.clone()]);
+        assert_eq!(notif, vec![kv_list]);
     }
 }

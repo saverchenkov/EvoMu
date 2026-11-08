@@ -249,12 +249,16 @@ fn seed_market_catalog_internal(
 
                 // Tier 1: Skillbooks (category 16) and Blueprints (category 9) get NPC sell orders at basePrice
                 let is_npc_seeded = inv_type.category_id == 16 || inv_type.category_id == 9;
-                let ask_isk = crate::services::market_contracts::round_to_4_sig_fig_price(if is_npc_seeded {
-                    effective_base_price
-                } else {
-                    (fair_isk * 1.06).max(1.0)
-                });
-                let bid_isk = crate::services::market_contracts::round_to_4_sig_fig_price((fair_isk * 0.94).max(0.5));
+                let ask_isk = crate::services::market_contracts::round_to_4_sig_figs(
+                    if is_npc_seeded {
+                        effective_base_price.max(0.01)
+                    } else {
+                        (fair_isk * 1.06).max(1.0)
+                    },
+                );
+                let bid_isk = crate::services::market_contracts::round_to_4_sig_figs(
+                    (fair_isk * 0.94).max(0.5),
+                );
                 let vol = if full_jita_catalog { 1_000_000 } else { 1_000 };
 
                 if existing.insert((1_000_035, station_id, type_id, false)) {
@@ -354,15 +358,17 @@ fn seed_npc_skillbooks_and_faction_items(
             }
             existing.insert((owner, station_id, t.type_id, false));
             let vol = if is_faction_item { 100 } else { 1_000 };
-            let price_isk = crate::services::market_contracts::round_to_4_sig_fig_price(if t.base_price > 0.0 {
-                t.base_price
-            } else {
-                bom_map
-                    .get(&t.type_id)
-                    .copied()
-                    .filter(|&b| b > 0.0)
-                    .unwrap_or(DEFAULT_FALLBACK_BASE_PRICE_ISK)
-            });
+            let price_isk = crate::services::market_contracts::round_to_4_sig_figs(
+                if t.base_price > 0.0 {
+                    t.base_price
+                } else {
+                    bom_map
+                        .get(&t.type_id)
+                        .copied()
+                        .filter(|&b| b > 0.0)
+                        .unwrap_or(DEFAULT_FALLBACK_BASE_PRICE_ISK)
+                },
+            );
             snap.next_entity_id += 1;
             let id = snap.next_entity_id;
             snap.market_orders.insert(

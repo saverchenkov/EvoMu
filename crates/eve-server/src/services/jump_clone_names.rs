@@ -979,11 +979,11 @@ pub fn lookup_effective_attr_from_tuple(attrs: (f64, f64, f64, f64, f64), attr_i
     }
 }
 
-/// Skill queue rowset as returned by `skillMgr2.GetSkillQueue`; also the `newQueue` payload of
-/// `OnNewSkillQueueSaved` (`skillQueueSvc.OnNewSkillQueueSaved(newQueue)` stores it as the queue).
+/// Skill queue list of `utillib.KeyVal` entries as returned by `skillMgr2.GetSkillQueue`,
+/// `skillMgr2.GetSkillQueueAndFreePoints`, and `OnNewSkillQueueSaved` (`#658`).
 pub(crate) fn skill_queue_rowset(ctx: &ServerContext, char_id: i64) -> PyRep {
     let now_unix = ctx.now_unix();
-    let rows = ctx.db.with_snapshot(|snap| {
+    let entries = ctx.db.with_snapshot(|snap| {
         let paused = snap.paused_skill_queues.contains(&char_id);
         snap.skill_queues
             .get(&char_id)
@@ -1008,34 +1008,22 @@ pub(crate) fn skill_queue_rowset(ctx: &ServerContext, char_id: i64) -> PyRep {
                             }
                             None => (PyRep::None, PyRep::None),
                         };
-                        vec![
-                            PyRep::Integer(e.type_id as i64),
-                            PyRep::Integer(e.target_level as i64),
-                            PyRep::Real(e.start_sp),
-                            PyRep::Real(e.end_sp),
-                            PyRep::Real(e.duration_seconds),
-                            PyRep::Integer(idx as i64),
-                            start_rep,
-                            end_rep,
-                        ]
+                        PyRep::keyval([
+                            ("trainingTypeID", PyRep::Integer(e.type_id as i64)),
+                            ("trainingToLevel", PyRep::Integer(e.target_level as i64)),
+                            ("trainingStartSP", PyRep::Real(e.start_sp)),
+                            ("trainingDestinationSP", PyRep::Real(e.end_sp)),
+                            ("durationSeconds", PyRep::Real(e.duration_seconds)),
+                            ("queuePosition", PyRep::Integer(idx as i64)),
+                            ("trainingStartTime", start_rep),
+                            ("trainingEndTime", end_rep),
+                        ])
                     })
                     .collect()
             })
             .unwrap_or_default()
     });
-    PyRep::rowset(
-        vec![
-            "trainingTypeID",
-            "trainingToLevel",
-            "trainingStartSP",
-            "trainingDestinationSP",
-            "durationSeconds",
-            "queuePosition",
-            "trainingStartTime",
-            "trainingEndTime",
-        ],
-        rows,
-    )
+    PyRep::List(entries)
 }
 
 pub(crate) async fn handle_public_qa_tools(

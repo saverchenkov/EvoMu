@@ -53,26 +53,35 @@ pub fn is_valid_4_sig_fig_price(price_isk: f64) -> bool {
     rem <= 9_999
 }
 
-/// Rounds a positive ISK price to the nearest valid EVE 4-significant-figure tick price
-/// (at minimum 0.01 ISK / 1 cent) so `is_valid_4_sig_fig_price` always accepts the result.
+/// Rounds a positive price in ISK to the nearest EVE 4-significant-figure tick (`#657`).
+/// Guarantees [`is_valid_4_sig_fig_price`] holds for the returned value for all positive finite inputs.
+pub fn round_to_4_sig_figs(price_isk: f64) -> f64 {
+    if !price_isk.is_finite() || price_isk <= 0.0 {
+        return price_isk;
+    }
+    let scaled_cents = (price_isk * 100.0).round();
+    if !scaled_cents.is_finite() || scaled_cents < 1.0 {
+        return 0.01;
+    }
+    let mut cents = scaled_cents as i128;
+    let mut step: i128 = 1;
+    while cents / step > 9_999 {
+        step *= 10;
+    }
+    cents = ((cents + step / 2) / step) * step;
+    if cents / step > 9_999 {
+        step *= 10;
+        cents = ((cents + step / 2) / step) * step;
+    }
+    (cents as f64) / 100.0
+}
+
+/// Alias for [`round_to_4_sig_figs`] clamping non-positive inputs to `0.01` ISK.
 pub fn round_to_4_sig_fig_price(price_isk: f64) -> f64 {
     if !price_isk.is_finite() || price_isk <= 0.0 {
         return 0.01;
     }
-    let cents = (price_isk * 100.0).round().max(1.0) as i128;
-    let mut digits = 0u32;
-    let mut v = cents;
-    while v > 0 {
-        digits += 1;
-        v /= 10;
-    }
-    let rounded_cents = if digits <= 4 {
-        cents
-    } else {
-        let step = 10_i128.pow(digits - 4);
-        ((cents + step / 2) / step) * step
-    };
-    (rounded_cents as f64) / 100.0
+    round_to_4_sig_figs(price_isk)
 }
 
 /// Max jump distance allowed by remote market skills (`Procurement` `16594`, `Marketing` `16598`,
@@ -660,7 +669,7 @@ pub fn handle(
                     let escrow_delta = new_escrow.0 - order.escrow.0;
                     let net_wallet_debit_cents = relist_fee.0.saturating_add(escrow_delta);
 
-                    if is_corp_order {
+                    let mod_acct_after: Option<(bool, i64, u8, IskCents)> = if is_corp_order {
                         let div_id = meta.account_key.map(|ak| (ak.saturating_sub(999)).clamp(1, 7) as u8)
                             .unwrap_or(1);
                         let Some(corp_mut) = snap.corporations.get_mut(&caller_corp_id) else {
@@ -687,6 +696,7 @@ pub fn handle(
                             bal_after,
                             format!("Relist fee for modifying corporate order {order_id}"),
                         );
+                        (net_wallet_debit_cents != 0).then_some((true, caller_corp_id, div_id, bal_after))
                     } else { let cur_bal = snap.characters.get(&char_id).map(|c| c.balance).unwrap_or(IskCents(0));
                         if net_wallet_debit_cents > 0 && cur_bal.0 < net_wallet_debit_cents {
                             return Err(rpc_err("InsufficientFunds", "Not enough ISK for order modification relist fee and escrow delta"));
@@ -710,8 +720,11 @@ pub fn handle(
                                 )
                                 .with_context(eve_db::ledger::JournalContext::MarketOrder, order_id),
                             });
+                            (net_wallet_debit_cents != 0).then_some((false, char_id, 1, bal_after))
+                        } else {
+                            None
                         }
-                    }
+                    };
 
                     if let Some((st_corp_id, _)) = structure_owner_opt {
                         if owner_share.0 > 0 {
@@ -744,6 +757,7 @@ pub fn handle(
                     Ok((
                         old_price, new_price, relist_fee, scc_surcharge, final_escrow, escrow_delta,
                         meta, procurement_lvl, marketing_lvl, daytrading_lvl, visibility_lvl, delivered_to_corp_deliveries,
+                        mod_acct_after, cross_res.acct_updates, cross_res.item_deliveries,
                     ))
                 });
 
@@ -751,7 +765,17 @@ pub fn handle(
                     Ok((
                         old_price, new_price, relist_fee, scc_surcharge, final_escrow, escrow_delta,
                         meta, proc_lvl, mkt_lvl, day_lvl, vis_lvl, corp_delivered_qty,
+                        mod_acct_after, cross_acct_updates, cross_item_deliveries,
                     )) => {
+                        if let Some((is_c, own, div, bal)) = mod_acct_after {
+                            super::market_trading::emit_market_account_change(ctx, is_c, own, div, bal);
+                        }
+                        for (is_c, own, div, bal) in cross_acct_updates {
+                            super::market_trading::emit_market_account_change(ctx, is_c, own, div, bal);
+                        }
+                        for (rec_char, rec) in &cross_item_deliveries {
+                            super::market_trading::emit_market_item_change(ctx, *rec_char, rec, vec![(3, PyRep::Integer(0))]);
+                        }
                         notify_char(ctx, char_id, "OnOwnOrdersChanged", crate::services::market_price_history::build_own_order_changed_payload(ctx, order_id, "Modify", false));
                         Some(Ok(PyRep::keyval([
                             ("orderID", PyRep::Integer(order_id)),

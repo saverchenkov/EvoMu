@@ -237,7 +237,10 @@ fn skill_queue_save_inject_and_query_handlers_enforce_all_constraints() {
     let q_rep = handle(&ctx, &mut sess, "skillMgr2", "GetSkillQueue", &[], &kw)
         .unwrap()
         .unwrap();
-    assert_eq!(rowset_len(&q_rep), 1);
+    let PyRep::List(q_items) = q_rep else {
+        panic!("expected List of KeyVals from GetSkillQueue");
+    };
+    assert_eq!(q_items.len(), 1);
 
     let q_free = handle(
         &ctx,

@@ -69,6 +69,7 @@ pub fn populate_system_celestials(
                 security_status: 0.0,
                 is_cloaked: false,
                 jump_target,
+                name: (!cel.name.is_empty()).then(|| cel.name.clone()),
                 ..Default::default()
             },
         );

@@ -593,6 +593,139 @@ fn issue_601_611_612_market_tick_same_system_buy_and_wallet_item_notifications()
 }
 
 #[test]
+fn remote_station_immediate_buy_duration_zero_succeeds_and_emits_wallet_item_notifications() {
+    let ctx = test_ctx();
+    let buyer_id = 91_000_051_i64;
+    let seller_id = 91_000_052_i64;
+    // Different station in The Forge (same region 10000002 as Jita)
+    let remote_station_id = 60_003_757_i64;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_orders.retain(|_, o| o.type_id != 34);
+        let base = snap.characters.values().next().unwrap().clone();
+        let mut buyer = base.clone();
+        buyer.character_id = buyer_id;
+        buyer.user_id = 1;
+        buyer.name = "RemoteBuyer".into();
+        buyer.corporation_id = 1_000_009;
+        buyer.balance = IskCents::from_isk(500_000);
+        buyer.station_id = Some(JITA_STATION_ID);
+        buyer.solar_system_id = 30_000_142;
+        snap.characters.insert(buyer_id, buyer);
+
+        let mut seller = base;
+        seller.character_id = seller_id;
+        seller.user_id = 2;
+        seller.name = "RemoteSeller".into();
+        seller.corporation_id = 1_000_009;
+        seller.balance = IskCents::from_isk(100_000);
+        seller.station_id = Some(remote_station_id);
+        seller.solar_system_id = 30_000_142;
+        snap.characters.insert(seller_id, seller);
+        snap.market_orders.insert(
+            820_901,
+            MarketOrderRecord {
+                order_id: 820_901,
+                owner_id: seller_id,
+                station_id: remote_station_id,
+                region_id: THE_FORGE_REGION_ID,
+                type_id: 34,
+                is_bid: false,
+                price: IskCents::from_isk(100),
+                vol_entered: 20,
+                vol_remaining: 20,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+    });
+
+    let mut buyer_sess = jita_session(buyer_id, 1_000_009);
+    ctx.db.acquire_online_lock(1, 9201, Some(buyer_id), true, ctx.now_unix()).unwrap();
+    ctx.db.acquire_online_lock(2, 9202, Some(seller_id), true, ctx.now_unix()).unwrap();
+    // Remote non-immediate limit buy order (duration=90) without Procurement still rejects with StationMismatch
+    let limit_err = handle(
+        &ctx,
+        &mut buyer_sess,
+        "marketProxy",
+        "PlaceBuyOrder",
+        &[
+            PyRep::Integer(remote_station_id),
+            PyRep::Integer(34),
+            PyRep::Real(100.0),
+            PyRep::Integer(5),
+            PyRep::Integer(-1),
+            PyRep::Integer(1),
+            PyRep::Integer(90),
+            PyRep::Bool(false),
+            PyRep::None,
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(limit_err.code, "StationMismatch");
+
+    let _ = ctx.drain_notifications_for_char(buyer_id);
+    let _ = ctx.drain_notifications_for_char(seller_id);
+
+    // Remote immediate buy order (duration=0) matches resting remote ask and delivers to remote station hangar (#659)
+    let res = handle(
+        &ctx,
+        &mut buyer_sess,
+        "marketProxy",
+        "PlaceBuyOrder",
+        &[
+            PyRep::Integer(remote_station_id),
+            PyRep::Integer(34),
+            PyRep::Real(100.0),
+            PyRep::Integer(5),
+            PyRep::Integer(-1),
+            PyRep::Integer(1),
+            PyRep::Integer(0),
+            PyRep::Bool(false),
+            PyRep::None,
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        res.dict_get("filledImmediately").and_then(PyRep::as_bool),
+        Some(true)
+    );
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.market_orders[&820_901].vol_remaining, 15);
+        assert!(snap.items.values().any(|i| {
+            i.owner_id == buyer_id
+                && i.location_id == remote_station_id
+                && i.flag == InventoryFlag::Hangar
+                && i.type_id == 34
+                && i.quantity == 5
+        }));
+    });
+
+    let buyer_notifs = ctx.drain_notifications_for_char(buyer_id);
+    assert!(
+        buyer_notifs.iter().any(|n| n.event == "OnAccountChange"),
+        "expected OnAccountChange for immediate buyer, got {:?}",
+        buyer_notifs.iter().map(|n| &n.event).collect::<Vec<_>>()
+    );
+    assert!(
+        buyer_notifs.iter().any(|n| n.event == "OnItemChange"),
+        "expected OnItemChange for immediate buyer delivery"
+    );
+    let seller_notifs = ctx.drain_notifications_for_char(seller_id);
+    assert!(
+        seller_notifs.iter().any(|n| n.event == "OnAccountChange"),
+        "expected OnAccountChange for matched seller"
+    );
+}
+
+#[test]
 fn issue_631_resting_buy_order_deducts_wallet_and_emits_account_change() {
     let ctx = test_ctx();
     let buyer_id = 91_200_631i64;
@@ -664,4 +797,236 @@ fn issue_631_resting_buy_order_deducts_wallet_and_emits_account_change() {
     .as_f64()
     .unwrap();
     assert_eq!(live_bal, expected_bal);
+}
+
+#[test]
+fn market_v24_resting_buy_order_visibility_and_account_item_notifications() {
+    let ctx = test_ctx();
+    let buyer_id = 91_000_061_i64;
+    let seller_id = 91_000_062_i64;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_orders.retain(|_, o| o.type_id != 34);
+        let base = snap.characters.values().next().unwrap().clone();
+        let mut buyer = base.clone();
+        buyer.character_id = buyer_id;
+        buyer.user_id = 1;
+        buyer.name = "V24MarketBuyer".into();
+        buyer.corporation_id = 1_000_009;
+        buyer.balance = IskCents::from_isk(1_000_000);
+        buyer.station_id = Some(JITA_STATION_ID);
+        buyer.solar_system_id = 30_000_142;
+        snap.characters.insert(buyer_id, buyer);
+
+        let mut seller = base;
+        seller.character_id = seller_id;
+        seller.user_id = 2;
+        seller.name = "V24MarketSeller".into();
+        seller.corporation_id = 1_000_009;
+        seller.balance = IskCents::from_isk(1_000_000);
+        seller.station_id = Some(JITA_STATION_ID);
+        seller.solar_system_id = 30_000_142;
+        snap.characters.insert(seller_id, seller);
+        snap.next_entity_id += 1;
+        let sell_stack_id = snap.next_entity_id;
+        snap.items.insert(
+            sell_stack_id,
+            InventoryItemRecord {
+                item_id: sell_stack_id,
+                type_id: 34,
+                owner_id: seller_id,
+                location_id: JITA_STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut buyer_sess = jita_session(buyer_id, 1_000_009);
+    ctx.db.acquire_online_lock(1, 9201, Some(buyer_id), true, ctx.now_unix()).unwrap();
+    ctx.db.acquire_online_lock(2, 9202, Some(seller_id), true, ctx.now_unix()).unwrap();
+    let mut seller_sess = jita_session(seller_id, 1_000_009);
+    let _ = ctx.drain_notifications_for_char(buyer_id);
+    let _ = ctx.drain_notifications_for_char(seller_id);
+
+    // 1. Place V24 9-arg resting buy order with duration=1 & broker percentage 0.03
+    let place_buy = handle(
+        &ctx,
+        &mut buyer_sess,
+        "marketProxy",
+        "PlaceBuyOrder",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Integer(34),
+            PyRep::Real(7950.0),
+            PyRep::Integer(1),
+            PyRep::Integer(-1),
+            PyRep::Integer(1),
+            PyRep::Integer(1),
+            PyRep::Bool(false),
+            PyRep::Real(0.03),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let buy_oid = place_buy.dict_get("orderID").and_then(PyRep::as_i64).unwrap();
+    assert_eq!(
+        place_buy.dict_get("filledImmediately").and_then(PyRep::as_bool),
+        Some(false)
+    );
+    let buy_notifs = ctx.drain_notifications_for_char(buyer_id);
+    assert!(buy_notifs.iter().any(|n| n.event == "OnAccountChange"));
+    assert!(buy_notifs.iter().any(|n| n.event == "OnOwnOrdersChanged"));
+
+    // Verify order appears in GetOrders(34) Buyers rowset AND GetCharOrders()
+    let get_orders = handle(
+        &ctx,
+        &mut buyer_sess,
+        "marketProxy",
+        "GetOrders",
+        &[PyRep::Integer(34)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::Tuple(parts) = get_orders else {
+        panic!("expected 2-tuple from GetOrders");
+    };
+    let buyers_rows = parts[1].crowset_rows().expect("Buyers crowset rows");
+    assert!(
+        buyers_rows
+            .iter()
+            .any(|r| r.dbrow_get("orderID").and_then(PyRep::as_i64) == Some(buy_oid)),
+        "Buyers rowset should include order {buy_oid}"
+    );
+    let char_orders = handle(&ctx, &mut buyer_sess, "marketProxy", "GetCharOrders", &[], &kw)
+        .unwrap()
+        .unwrap();
+    let char_has_oid = char_orders
+        .crowset_rows()
+        .map(|rows| {
+            rows.iter()
+                .any(|r| r.dbrow_get("orderID").and_then(PyRep::as_i64) == Some(buy_oid))
+        })
+        .unwrap_or_else(|| format!("{char_orders:?}").contains(&buy_oid.to_string()));
+    assert!(char_has_oid, "GetCharOrders should include order {buy_oid}");
+
+    // 2. ModifyCharOrder price upward emits OnAccountChange (#660)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(o) = snap.market_orders.get(&buy_oid).cloned() {
+            let mut m = load_market_order_meta(snap, &o, ctx.now_unix());
+            m.issue_unix = ctx.now_unix().saturating_sub(400);
+            save_market_order_meta(snap, buy_oid, m);
+        }
+    });
+    let mod_res = crate::services::market_contracts::handle(
+        &ctx,
+        &mut buyer_sess,
+        "marketProxy",
+        "ModifyCharOrder",
+        &[PyRep::Integer(buy_oid), PyRep::Real(8000.0)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(mod_res.dict_get("newPrice").and_then(PyRep::as_f64), Some(8000.0));
+    assert!(ctx
+        .drain_notifications_for_char(buyer_id)
+        .iter()
+        .any(|n| n.event == "OnAccountChange"));
+
+    // 3. PlaceMultiSellOrder partial/resting sell emits OnItemChange & OnAccountChange (#660)
+    let sell_res = handle(
+        &ctx,
+        &mut seller_sess,
+        "marketProxy",
+        "PlaceMultiSellOrder",
+        &[
+            PyRep::List(vec![PyRep::keyval([
+                ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                ("typeID", PyRep::Integer(34)),
+                ("itemID", PyRep::Integer(0)),
+                ("price", PyRep::Real(9000.0)),
+                ("quantity", PyRep::Integer(10)),
+                ("duration", PyRep::Integer(90)),
+            ])]),
+            PyRep::Bool(false),
+            PyRep::Integer(90),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let sell_oid = sell_res.dict_get("orderID").and_then(PyRep::as_i64).unwrap();
+    let sell_notifs = ctx.drain_notifications_for_char(seller_id);
+    assert!(sell_notifs.iter().any(|n| n.event == "OnItemChange"));
+    assert!(sell_notifs.iter().any(|n| n.event == "OnAccountChange"));
+
+    // 4. BuyMultipleItems emits OnAccountChange (buyer & seller) and OnItemChange (buyer)
+    let _ = ctx.drain_notifications_for_char(buyer_id);
+    let _ = ctx.drain_notifications_for_char(seller_id);
+    let multi_buy = handle(
+        &ctx,
+        &mut buyer_sess,
+        "marketProxy",
+        "BuyMultipleItems",
+        &[
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(34),
+                PyRep::Integer(2),
+                PyRep::Real(9000.0),
+            ])]),
+            PyRep::Integer(JITA_STATION_ID),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        multi_buy.dict_get("totalQuantity").and_then(PyRep::as_i64),
+        Some(2)
+    );
+    let mb_buyer_notifs = ctx.drain_notifications_for_char(buyer_id);
+    assert!(mb_buyer_notifs.iter().any(|n| n.event == "OnAccountChange"));
+    assert!(mb_buyer_notifs.iter().any(|n| n.event == "OnItemChange"));
+    assert!(ctx
+        .drain_notifications_for_char(seller_id)
+        .iter()
+        .any(|n| n.event == "OnAccountChange"));
+
+    // 5. CancelCharOrder on buy order emits OnAccountChange, on sell order emits OnItemChange (#660)
+    handle(
+        &ctx,
+        &mut buyer_sess,
+        "marketProxy",
+        "CancelCharOrder",
+        &[PyRep::Integer(buy_oid), PyRep::Integer(JITA_STATION_ID)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(ctx
+        .drain_notifications_for_char(buyer_id)
+        .iter()
+        .any(|n| n.event == "OnAccountChange"));
+
+    handle(
+        &ctx,
+        &mut seller_sess,
+        "marketProxy",
+        "CancelCharOrder",
+        &[PyRep::Integer(sell_oid), PyRep::Integer(JITA_STATION_ID)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(ctx
+        .drain_notifications_for_char(seller_id)
+        .iter()
+        .any(|n| n.event == "OnItemChange"));
 }

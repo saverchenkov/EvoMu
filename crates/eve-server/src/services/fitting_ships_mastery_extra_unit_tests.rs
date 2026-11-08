@@ -352,3 +352,65 @@ async fn eject_and_board_in_space_and_docked_guards_and_capsule_transitions() {
     );
     assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&capsule_id)));
 }
+
+#[tokio::test]
+async fn create_newbie_ship_from_active_ship_with_args_spawns_starter_fit_and_notifications() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let rifter_id = ctx.db.with_mut_snapshot(|s| {
+        s.items.retain(|_, i| !(i.owner_id == char_id && matches!(i.type_id, 588 | 596 | 601 | 606)));
+        let ch = s.characters.get_mut(&char_id).unwrap();
+        ch.station_id = Some(station_id);
+        ch.solar_system_id = 30_000_142;
+        ch.race_id = 1; // Caldari -> Ibis (601)
+        s.next_entity_id += 1;
+        let rid = s.next_entity_id;
+        s.items.insert(
+            rid,
+            InventoryItemRecord {
+                item_id: rid,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        ch.active_ship_id = rid;
+        rid
+    });
+    let mut sess = make_session(char_id, Some(station_id), 30_000_142, rifter_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let kw = HashMap::new();
+
+    // V24 client sends CreateNewbieShip(shipID, locationID) directly from Rifter
+    let res = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "CreateNewbieShip",
+        &[PyRep::Integer(rifter_id), PyRep::Integer(station_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("CreateNewbieShip ok from active Rifter");
+    let new_id = res.dict_get("shipID").and_then(PyRep::as_i64).unwrap();
+    assert_eq!(res.dict_get("typeID").and_then(PyRep::as_i64), Some(601));
+    assert_eq!(sess.ship_id, Some(new_id));
+
+    // Civilian Miner (3651) in HiSlot0 and 1x Tritanium (34) in Cargo
+    ctx.db.with_snapshot(|s| {
+        assert!(s.items.values().any(|i| i.location_id == new_id && i.type_id == 3651 && i.flag == InventoryFlag::HiSlot0 && i.singleton));
+        assert!(s.items.values().any(|i| i.location_id == new_id && i.type_id == 34 && i.flag == InventoryFlag::Cargo && i.quantity == 1));
+    });
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs.iter().any(|n| n.event == "OnItemChange"));
+    assert!(notifs.iter().any(|n| n.event == "OnPodOrCorvetteAssembly"));
+    assert!(notifs.iter().any(|n| n.event == "OnSessionChanged"));
+}

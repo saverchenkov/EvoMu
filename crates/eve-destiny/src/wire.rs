@@ -401,9 +401,18 @@ pub fn slim_item_dict(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
         ("skinID", meta.skin_id.map(|s| PyRep::Integer(i64::from(s))).unwrap_or(PyRep::None)),
         ("skinMaterialSetID", meta.skin_material_set_id.map(|m| PyRep::Integer(i64::from(m))).unwrap_or(PyRep::None)),
     ];
+    if let Some(name) = meta.name.as_deref().filter(|n| !n.is_empty()) {
+        entries.push(("name", PyRep::String(name.to_string())));
+    }
     if meta.group_id == 10 {
         // DERIVED: V24.01 `StargateSetup` indexes corruption/suppression 2-tuples directly.
         let zero_of_five = PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(5)]);
+        entries.push(("destinationSystemStatusIcons", PyRep::List(vec![])));
+        entries.push(("originSystemOwnerID", PyRep::Integer(meta.owner_id)));
+        entries.push((
+            "destinationSystemOwnerID",
+            PyRep::Integer(meta.dest_system_owner_id.unwrap_or(meta.owner_id)),
+        ));
         entries.push(("destinationCorruptionStageAndMaximum", zero_of_five.clone()));
         entries.push(("localCorruptionStageAndMaximum", zero_of_five.clone()));
         entries.push(("destinationSuppressionStageAndMaximum", zero_of_five.clone()));

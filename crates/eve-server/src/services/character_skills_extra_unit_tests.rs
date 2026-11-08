@@ -459,18 +459,16 @@ fn save_new_queue_accepts_v24_dict_payload_activate_flag_and_paused_timestamps()
         .unwrap();
     assert_eq!(eot_paused, PyRep::None);
 
-    let PyRep::Rowset { columns, rows } =
+    let PyRep::List(rows) =
         handle(&ctx, &mut sess, "skillMgr2", "GetSkillQueue", &[], &HashMap::new())
             .unwrap()
             .unwrap()
     else {
-        panic!("expected Rowset from GetSkillQueue");
+        panic!("expected List of KeyVals from GetSkillQueue");
     };
-    let start_col = columns.iter().position(|c| c == "trainingStartTime").unwrap();
-    let end_col = columns.iter().position(|c| c == "trainingEndTime").unwrap();
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0][start_col], PyRep::None);
-    assert_eq!(rows[0][end_col], PyRep::None);
+    assert_eq!(rows[0].dict_get("trainingStartTime"), Some(&PyRep::None));
+    assert_eq!(rows[0].dict_get("trainingEndTime"), Some(&PyRep::None));
 
     // 2. V24.01 `CommitTransaction` with `activate=True` activates training on index 0.
     let _ = ctx.drain_notifications_for_char(char_id);
@@ -515,19 +513,22 @@ fn save_new_queue_accepts_v24_dict_payload_activate_flag_and_paused_timestamps()
     else {
         panic!("expected Tuple");
     };
-    let PyRep::Rowset {
-        columns: qf_cols,
-        rows: qf_rows,
-    } = &qf[0]
-    else {
-        panic!("expected Rowset in GetSkillQueueAndFreePoints[0]");
+    let PyRep::List(qf_rows) = &qf[0] else {
+        panic!("expected List of KeyVals in GetSkillQueueAndFreePoints[0]");
     };
-    let s_idx = qf_cols.iter().position(|c| c == "trainingStartTime").unwrap();
-    let e_idx = qf_cols.iter().position(|c| c == "trainingEndTime").unwrap();
     assert_eq!(qf_rows.len(), 2);
-    let t0_start = qf_rows[0][s_idx].as_i64().expect("active trainingStartTime");
-    let t0_end = qf_rows[0][e_idx].as_i64().expect("active trainingEndTime");
-    let t1_start = qf_rows[1][s_idx].as_i64().expect("queued entry 1 trainingStartTime");
+    let t0_start = qf_rows[0]
+        .dict_get("trainingStartTime")
+        .and_then(PyRep::as_i64)
+        .expect("active trainingStartTime");
+    let t0_end = qf_rows[0]
+        .dict_get("trainingEndTime")
+        .and_then(PyRep::as_i64)
+        .expect("active trainingEndTime");
+    let t1_start = qf_rows[1]
+        .dict_get("trainingStartTime")
+        .and_then(PyRep::as_i64)
+        .expect("queued entry 1 trainingStartTime");
     assert_eq!(t1_start, t0_end);
     assert!(t0_end > t0_start);
 

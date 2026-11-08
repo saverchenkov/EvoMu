@@ -339,3 +339,30 @@ fn combat_state_slim_meta_ewar_and_skill_prerequisites_cover_branches() {
         );
     });
 }
+
+#[test]
+fn build_ship_slim_meta_populates_name_from_custom_or_sde_type() {
+    let ctx = test_ctx();
+    let (char_id, active_ship_id, ship_type_id) = ctx.db.with_snapshot(|snap| {
+        let ch = snap.characters.values().next().unwrap();
+        let ship = snap.items.get(&ch.active_ship_id).unwrap();
+        (ch.character_id, ch.active_ship_id, ship.type_id)
+    });
+
+    // Clear any custom name -> should fall back to SDE type name
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_custom_names.remove(&active_ship_id);
+    });
+    let expected_type_name = ctx.sde.types.get(&ship_type_id).map(|t| t.name.clone());
+    let fallback_meta = ctx.build_ship_slim_meta(char_id, ship_type_id);
+    assert_eq!(fallback_meta.name, expected_type_name);
+    assert!(fallback_meta.name.is_some());
+
+    // Set a custom name -> build_ship_slim_meta must prefer the custom ship name
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_custom_names
+            .insert(active_ship_id, "USS Custom Playtest".into());
+    });
+    let custom_meta = ctx.build_ship_slim_meta(char_id, ship_type_id);
+    assert_eq!(custom_meta.name.as_deref(), Some("USS Custom Playtest"));
+}

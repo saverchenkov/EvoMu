@@ -51,8 +51,8 @@ async fn test_char_skill_queue_prerequisites_and_alpha_caps() {
     let init_queue = rpc(&ctx, &mut sess, "skillMgr2", "GetSkillQueue", &[])
         .await
         .expect("skillMgr2.GetSkillQueue");
-    let PyRep::Rowset { rows, .. } = init_queue else {
-        panic!("expected rowset from GetSkillQueue");
+    let PyRep::List(rows) = init_queue else {
+        panic!("expected List of KeyVals from GetSkillQueue");
     };
     assert!(rows.is_empty(), "Initial skill queue should be empty");
 
@@ -92,12 +92,12 @@ async fn test_char_skill_queue_prerequisites_and_alpha_caps() {
     let cur_queue = rpc(&ctx, &mut sess, "skillMgr2", "GetSkillQueue", &[])
         .await
         .expect("skillMgr2.GetSkillQueue after save");
-    let PyRep::Rowset { rows: cur_rows, .. } = cur_queue else {
-        panic!("expected rowset from GetSkillQueue");
+    let PyRep::List(cur_rows) = cur_queue else {
+        panic!("expected List of KeyVals from GetSkillQueue");
     };
     assert_eq!(cur_rows.len(), 1);
-    assert_eq!(cur_rows[0][0], PyRep::Integer(3300));
-    assert_eq!(cur_rows[0][1], PyRep::Integer(5));
+    assert_eq!(cur_rows[0].dict_get("trainingTypeID"), Some(&PyRep::Integer(3300)));
+    assert_eq!(cur_rows[0].dict_get("trainingToLevel"), Some(&PyRep::Integer(5)));
 
     // 5. Enforce Alpha clone limits (clone_grade = 1):
     // Alpha clones cannot queue skills beyond their per-skill Alpha cap

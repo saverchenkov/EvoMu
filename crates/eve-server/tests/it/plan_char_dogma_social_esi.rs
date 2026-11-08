@@ -56,11 +56,11 @@ async fn test_plan_ch2_skill_queue_and_brain_injection() {
 
     // 2. GetSkillQueue, GetEndOfTraining (active, partial progress, and paused via AbortTraining)
     let get_q = ctx.dispatch_rpc(&mut sess, "skillMgr2", None, "GetSkillQueue", &[], &kw, None).await.expect("GetSkillQueue");
-    let PyRep::Rowset { rows, .. } = get_q else { panic!("expected Rowset from GetSkillQueue") };
-    assert_eq!(rows.len(), 3, "GetSkillQueue must return 3 rows");
-    assert_eq!(rows[0][0], PyRep::Integer(3300));
-    assert_eq!(rows[1][0], PyRep::Integer(3386));
-    assert_eq!(rows[2][0], PyRep::Integer(3392));
+    let PyRep::List(rows) = get_q else { panic!("expected List of KeyVals from GetSkillQueue") };
+    assert_eq!(rows.len(), 3, "GetSkillQueue must return 3 entries");
+    assert_eq!(rows[0].dict_get("trainingTypeID"), Some(&PyRep::Integer(3300)));
+    assert_eq!(rows[1].dict_get("trainingTypeID"), Some(&PyRep::Integer(3386)));
+    assert_eq!(rows[2].dict_get("trainingTypeID"), Some(&PyRep::Integer(3392)));
 
     let end_train = ctx.dispatch_rpc(&mut sess, "skillMgr2", None, "GetEndOfTraining", &[], &kw, None).await.expect("GetEndOfTraining");
     let PyRep::Integer(end_ft) = end_train else { panic!("expected Integer from GetEndOfTraining") };
