@@ -600,15 +600,15 @@ async fn test_dogma_im_parity() {
         .expect_err("Immediate second CreateNewbieShip must hit cooldown");
     assert_eq!(cooldown_err.code, "NewbieShipCooldown");
 
-    // Call while not in capsule
+    // Call while already in corvette (even after cooldown expires) -> AlreadyInNewbieShip
     let claim_key = -8_800_000 - PILOT1;
     ctx.db.with_mut_snapshot(|snap| {
         snap.item_custom_names.remove(&claim_key);
     });
-    let not_in_capsule_err = rpc(&ctx, &mut sess, "dogmaIM", "CreateNewbieShip", &[])
+    let already_corv_err = rpc(&ctx, &mut sess, "dogmaIM", "CreateNewbieShip", &[])
         .await
         .expect_err("CreateNewbieShip while in corvette must fail");
-    assert_eq!(not_in_capsule_err.code, "NotInCapsule");
+    assert_eq!(already_corv_err.code, "AlreadyInNewbieShip");
 
     // Call while not docked
     ctx.db.with_mut_snapshot(|snap| {

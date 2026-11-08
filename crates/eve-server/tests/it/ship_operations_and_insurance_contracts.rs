@@ -113,19 +113,15 @@ async fn test_insurance_contracts_get_for_ship_and_corp_roles() {
     let bal_after_invalid = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
     assert_eq!(bal_before_invalid, bal_after_invalid);
 
-    // Test all 6 tiers via their advertised ISK premiums from GetInsurancePrices (R-INS-03)
+    // Test all 6 tiers via GetInsurancePrices reference value -> client-equivalent insurance formula (R-INS-03)
     let prices_res = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "GetInsurancePrices", &[PyRep::Integer(587)], &kw, None).await.unwrap();
-    let PyRep::List(prices_list) = prices_res else { panic!("expected List") };
-    let PyRep::KeyVal(price_entry) = &prices_list[0] else { panic!("expected KeyVal") };
-    let PyRep::List(tiers) = price_entry.get("levels").unwrap() else { panic!("expected List") };
+    let PyRep::Dict(prices_dict) = prices_res else { panic!("expected Dict, got {prices_res:?}") };
+    let ref_val = prices_dict.iter().find(|(k, _)| k.as_i64() == Some(587)).and_then(|(_, v)| v.as_f64()).expect("587 insurance reference price");
+    let tiers = eve_server::formulas::compute_insurance_levels(ref_val);
     assert_eq!(tiers.len(), 6);
 
     let expected_fractions = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
-    for (i, tier_rep) in tiers.iter().enumerate() {
-        let PyRep::KeyVal(tier_kv) = tier_rep else { panic!("expected KeyVal") };
-        let name = tier_kv.get("name").and_then(|v| v.as_str()).unwrap();
-        let cost_isk = tier_kv.get("costISK").and_then(|v| v.as_f64()).unwrap();
-        let payout_isk = tier_kv.get("payoutISK").and_then(|v| v.as_f64()).unwrap();
+    for (i, (name, cost_isk, payout_isk)) in tiers.into_iter().enumerate() {
         let exp_frac = expected_fractions[i];
 
         let tier_res = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_id), PyRep::Real(cost_isk)], &kw_void, None).await.unwrap();

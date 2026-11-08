@@ -1190,6 +1190,9 @@ pub fn handle_orders_escrow(
 
                 let mut total_sales_tax = IskCents(0);
                 let mut orders_created = Vec::with_capacity(planned_fills.len());
+                let mut buyer_bal_after: Option<f64> = None;
+                let mut seller_acct_updates: Vec<(bool, i64, String, f64)> = Vec::new();
+                let mut delivered_item_records: Vec<InventoryItemRecord> = Vec::new();
                 let tax_collector = crate::services::wallet_serverops::tax_collector_id(ctx);
 
                 for (oid, fill_tid, fill_qty, fill_gross, seller_id, is_npc, ask_price, ord_st_id, ord_reg_id) in planned_fills {
@@ -1197,6 +1200,9 @@ pub fn handle_orders_escrow(
                         buyer.balance = buyer.balance.checked_sub(fill_gross).unwrap_or(IskCents(0));
                         buyer.balance
                     });
+                    if let Some(b) = buyer_bal {
+                        buyer_bal_after = Some(b.to_wire_f64());
+                    }
                     let (mut seller_net, mut seller_bal, mut fill_tax) = (IskCents(0), None, IskCents(0));
                     if !is_npc {
                         let seller_meta = snap.market_orders.get(&oid).map(|o| load_market_order_meta(snap, o, now_unix));
@@ -1207,9 +1213,13 @@ pub fn handle_orders_escrow(
                         if let Some(seller) = snap.characters.get_mut(&seller_id) {
                             seller.balance = seller.balance.checked_add(seller_net).unwrap_or(seller.balance);
                             seller_bal = Some(seller.balance);
+                            seller_acct_updates.push((false, seller_id, "cash".to_string(), seller.balance.to_wire_f64()));
                         } else if let Some(seller_corp) = snap.corporations.get_mut(&seller_id) {
                             let s_div = seller_meta.and_then(|m| m.account_key).map(|k| (k.saturating_sub(999)).clamp(1, 7) as u8).unwrap_or(1);
-                            seller_bal = Some(seller_corp.credit_division(s_div, seller_net));
+                            let s_bal = seller_corp.credit_division(s_div, seller_net);
+                            seller_bal = Some(s_bal);
+                            let s_key = if s_div <= 1 { "cash".to_string() } else { format!("cash{s_div}") };
+                            seller_acct_updates.push((true, seller_id, s_key, s_bal.to_wire_f64()));
                         }
                     }
 
@@ -1255,13 +1265,12 @@ pub fn handle_orders_escrow(
                     } else {
                         snap.next_entity_id += 1;
                         let new_item_id = snap.next_entity_id;
-                        snap.items.insert(
-                            new_item_id,
-                            InventoryItemRecord {
-                                item_id: new_item_id, type_id: fill_tid, owner_id: char_id, location_id: ord_st_id,
-                                flag: InventoryFlag::Hangar, quantity: fill_qty, singleton: false, version: 1, ..Default::default()
-                            },
-                        );
+                        let new_item = InventoryItemRecord {
+                            item_id: new_item_id, type_id: fill_tid, owner_id: char_id, location_id: ord_st_id,
+                            flag: InventoryFlag::Hangar, quantity: fill_qty, singleton: false, version: 1, ..Default::default()
+                        };
+                        snap.items.insert(new_item_id, new_item.clone());
+                        delivered_item_records.push(new_item);
                         new_item_id
                     };
 
@@ -1274,11 +1283,36 @@ pub fn handle_orders_escrow(
                     ]));
                 }
 
-                Ok((purchased_lines, total_qty_bought, total_cost, total_sales_tax, orders_created, item_statuses))
+                Ok((purchased_lines, total_qty_bought, total_cost, total_sales_tax, orders_created, item_statuses, buyer_bal_after, seller_acct_updates, delivered_item_records))
             });
 
             match res {
-                Ok((line_count, total_qty, total_cost, total_sales_tax, orders_created, item_statuses)) => {
+                Ok((line_count, total_qty, total_cost, total_sales_tax, orders_created, item_statuses, buyer_bal_after, seller_acct_updates, delivered_item_records)) => {
+                    if let Some(bal_f64) = buyer_bal_after {
+                        let _ = ctx.notify_account_change(char_id, "cash", char_id, bal_f64);
+                    }
+                    let mut final_seller_accts: HashMap<(bool, i64, String), f64> = HashMap::new();
+                    for (is_corp_s, s_owner, s_key, s_bal) in seller_acct_updates {
+                        final_seller_accts.insert((is_corp_s, s_owner, s_key), s_bal);
+                    }
+                    for ((is_corp_s, s_owner, s_key), s_bal) in final_seller_accts {
+                        if is_corp_s {
+                            ctx.notify(
+                                NotificationTarget::Corporation(s_owner),
+                                "OnAccountChange",
+                                "corpid",
+                                vec![PyRep::String(s_key), PyRep::Integer(s_owner), PyRep::Real(s_bal)],
+                            );
+                        } else {
+                            let _ = ctx.notify_account_change(s_owner, &s_key, s_owner, s_bal);
+                        }
+                    }
+                    for item_rec in delivered_item_records {
+                        let item_row = DBRowDescriptor::inv_item_header().build_dbrow(
+                            crate::services::inventory_bound::item_to_packed_cells(ctx, &item_rec),
+                        );
+                        let _ = ctx.notify_item_change(char_id, item_row, vec![(3, PyRep::Integer(0))]);
+                    }
                     if args.len() >= 3 {
                         Some(Ok(PyRep::List(orders_created)))
                     } else {

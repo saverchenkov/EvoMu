@@ -509,14 +509,11 @@ async fn test_station_services_and_corp_station_mgr_parity() {
     let ins_jita = rpc(&ctx, &mut s1, "insuranceSvc", "GetInsurancePrices", &[])
         .await
         .expect("GetInsurancePrices must succeed at Jita which offers insurance");
-    let PyRep::List(ins_list) = ins_jita else {
-        panic!("GetInsurancePrices must return a List, got {ins_jita:?}");
+    let PyRep::Dict(ins_dict) = ins_jita else {
+        panic!("GetInsurancePrices must return a Dict, got {ins_jita:?}");
     };
-    assert!(!ins_list.is_empty(), "Insurance prices list must not be empty");
-    let PyRep::KeyVal(first_ins) = &ins_list[0] else {
-        panic!("Expected KeyVal in insurance list");
-    };
-    assert!(first_ins.get("referenceValue").is_some(), "Expected referenceValue in insurance quote");
+    assert!(!ins_dict.is_empty(), "Insurance prices dict must not be empty");
+    assert!(ins_dict.iter().all(|(k, v)| k.as_i64().is_some() && v.as_f64().is_some_and(|p| p > 0.0)), "Expected (typeID, positive price) pairs in insurance dict");
 
     let reproc_jita = rpc(&ctx, &mut s1, "reprocessingSvc", "GetQuotes", &[])
         .await

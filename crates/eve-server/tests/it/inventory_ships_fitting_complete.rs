@@ -1057,7 +1057,6 @@ async fn test_ships_board_eject_corvette_insurance_repair_killmarks_mastery_t3c(
 
     let char_id = 90_000_001i64;
     let ship_id = 100_000_001i64;
-    let station_id = 60_003_760i64;
 
     let expected_ref_val = eve_server::formulas::compute_ship_insurance_reference_value(&ctx.sde, 587);
     let ins_quote = ctx
@@ -1188,22 +1187,6 @@ async fn test_ships_board_eject_corvette_insurance_repair_killmarks_mastery_t3c(
     let pod_id = leave_rep.as_i64().expect("capsule_id integer");
     assert_eq!(sess.ship_id, Some(pod_id));
 
-    let dup_corvette_err = ctx
-        .dispatch_rpc(&mut sess, "dogmaIM", None, "CreateNewbieShip", &[], &kw, None)
-        .await
-        .expect_err("CreateNewbieShip must fail when character already has a non-capsule ship in station");
-    assert_eq!(dup_corvette_err.code, "AlreadyHaveShipInStation");
-
-    ctx.db.with_mut_snapshot(|snap| {
-        for it in snap.items.values_mut() {
-            if it.owner_id == char_id && it.location_id == station_id && it.item_id != pod_id {
-                let is_ship = ctx.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 6);
-                if is_ship {
-                    it.location_id = 60_003_761;
-                }
-            }
-        }
-    });
     let corvette_rep = ctx
         .dispatch_rpc(&mut sess, "dogmaIM", None, "CreateNewbieShip", &[], &kw, None)
         .await
@@ -1216,6 +1199,11 @@ async fn test_ships_board_eject_corvette_insurance_repair_killmarks_mastery_t3c(
         .expect_err("CreateNewbieShip within 60s must fail with NewbieShipCooldown");
     assert_eq!(cd_corvette_err.code, "NewbieShipCooldown");
     ctx.advance_virtual_clock(65);
+    let already_corv_err = ctx
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "CreateNewbieShip", &[], &kw, None)
+        .await
+        .expect_err("CreateNewbieShip while already in a corvette must fail with AlreadyInNewbieShip");
+    assert_eq!(already_corv_err.code, "AlreadyInNewbieShip");
 
     let sys_id = 30_000_142u32;
     sess.station_id = None;

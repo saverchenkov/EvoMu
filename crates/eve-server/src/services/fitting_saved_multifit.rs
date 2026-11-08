@@ -237,39 +237,23 @@ pub(crate) async fn handle_ships_and_services(
                 ship_type_ids = types.into_iter().take(50).collect();
             }
 
+            // V24 `InsuranceSvc.PrimeInsurancePrices` calls `self.insurancePrice.update(pricesByTypeIDs)`,
+            // expecting `{typeID: referencePrice}` matching `GetInsurancePrice(typeID)`.
+            let mut seen_types = std::collections::HashSet::new();
+            ship_type_ids.retain(|tid| seen_types.insert(*tid));
             let live_prices = ctx.db.with_snapshot(|snap| crate::services::industry_pi::industry_rigs::collect_live_market_adjusted_prices(snap));
-            let entries: Vec<PyRep> = ship_type_ids
+            let entries: Vec<(PyRep, PyRep)> = ship_type_ids
                 .into_iter()
                 .filter_map(|type_id| {
                     let ref_val = crate::services::industry_pi::industry_rigs::compute_ship_insurance_reference_value_with_prices(&ctx.sde, &live_prices, type_id);
                     if ref_val <= 0.0 {
                         return None;
                     }
-                    let (platinum_cost, platinum_payout) = compute_insurance_quote(ref_val, 1.0);
-                    let levels: Vec<PyRep> = crate::formulas::compute_insurance_levels(ref_val)
-                        .into_iter()
-                        .map(|(name, cost, payout)| {
-                            PyRep::keyval([
-                                ("name", PyRep::String(name.to_string())),
-                                ("cost", PyRep::Real(cost)),
-                                ("costISK", PyRep::Real(cost)),
-                                ("payout", PyRep::Real(payout)),
-                                ("payoutISK", PyRep::Real(payout)),
-                            ])
-                        })
-                        .collect();
-                    Some(PyRep::keyval([
-                        ("typeID", PyRep::Integer(type_id as i64)),
-                        ("shipTypeID", PyRep::Integer(type_id as i64)),
-                        ("referenceValue", PyRep::Real(ref_val)),
-                        ("platinumCostISK", PyRep::Real(platinum_cost)),
-                        ("platinumPayoutISK", PyRep::Real(platinum_payout)),
-                        ("levels", PyRep::List(levels)),
-                    ]))
+                    Some((PyRep::Integer(type_id as i64), PyRep::Real(ref_val)))
                 })
                 .collect();
 
-            Some(Ok(PyRep::List(entries)))
+            Some(Ok(PyRep::Dict(entries)))
         }
 
         ("dynamicItemService", "CreateDynamicItem") | ("dynamicItemSvc", "CreateDynamicItem") => {

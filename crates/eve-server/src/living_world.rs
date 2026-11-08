@@ -785,10 +785,14 @@ impl LivingWorldDirector {
                             .map(|o| o.price)
                             .min()
                             .unwrap_or_else(|| {
-                                sde.types
+                                let raw = sde
+                                    .types
                                     .get(&ore_type_id)
-                                    .map(|t| IskCents::from_f64_isk(t.base_price.max(5.0)))
-                                    .unwrap_or_else(|| IskCents::from_isk(5))
+                                    .map(|t| t.base_price.max(5.0))
+                                    .unwrap_or(5.0);
+                                IskCents::from_f64_isk(
+                                    crate::services::market_contracts::round_to_4_sig_fig_price(raw),
+                                )
                             });
                         let mut found_order = false;
                         for order in snap.market_orders.values_mut() {

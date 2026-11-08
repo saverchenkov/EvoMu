@@ -409,14 +409,14 @@ async fn test_combat_insurance_void_and_expiry_live() {
     };
     assert!(ref_value > 0.0, "Ship must have positive insurance reference value");
 
-    // Also verify GetInsurancePrices list shape
-    let list_quote = rpc(&ctx, &mut sess, "insuranceSvc", "GetInsurancePrices", &[PyRep::List(vec![PyRep::Integer(ship_tid as i64)])])
+    // Also verify GetInsurancePrices dict<typeID, price> shape
+    let prices_dict_rep = rpc(&ctx, &mut sess, "insuranceSvc", "GetInsurancePrices", &[PyRep::List(vec![PyRep::Integer(ship_tid as i64)])])
         .await
         .expect("GetInsurancePrices");
-    let PyRep::List(quotes) = list_quote else {
-        panic!("GetInsurancePrices must return List of quotes, got {list_quote:?}");
+    let PyRep::Dict(quotes) = prices_dict_rep else {
+        panic!("GetInsurancePrices must return Dict<typeID, price>, got {prices_dict_rep:?}");
     };
-    assert!(!quotes.is_empty(), "GetInsurancePrices must return at least one quote");
+    assert!(quotes.iter().any(|(k, v)| k.as_i64() == Some(ship_tid as i64) && v.as_f64().is_some_and(|p| p > 0.0)), "GetInsurancePrices must contain positive price for {ship_tid}");
 
     // 2. Buy Platinum Insurance (fraction = 1.0)
     let insure_res = rpc(&ctx, &mut sess, "insuranceSvc", "InsureShip", &[PyRep::Integer(ship_id), PyRep::Real(1.0)])

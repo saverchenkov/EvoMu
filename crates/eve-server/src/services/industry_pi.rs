@@ -1070,7 +1070,24 @@ pub(crate) fn handle_industry_job_queries(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let job_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            if matches!(args.first(), None | Some(PyRep::None)) {
+                let res = ctx.db.try_with_mut_snapshot(|snap| {
+                    let mut monitors = crate::services::notify_emitters_character_services::load_industry_material_monitors(snap);
+                    let had_monitors = monitors.values().any(|sub| sub.char_id == char_id);
+                    if had_monitors {
+                        monitors.retain(|_, sub| sub.char_id != char_id);
+                        crate::services::notify_emitters_character_services::save_industry_material_monitors(snap, &monitors);
+                    }
+                    let nid = -8_950_000_000_000_i64 - char_id;
+                    snap.owner_notes.remove(&nid);
+                    Ok(PyRep::None)
+                });
+                return Some(res);
+            }
+            let job_id = args
+                .first()
+                .and_then(|a| a.as_i64().or_else(|| a.dict_get("jobID").and_then(|v| v.as_i64())))
+                .unwrap_or(0);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut monitors = crate::services::notify_emitters_character_services::load_industry_material_monitors(snap);
                 if let Some(sub) = monitors.get(&job_id) {

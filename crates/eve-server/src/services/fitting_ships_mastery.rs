@@ -722,33 +722,32 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     message: "Corvette claim cooldown is still active".into(),
                 }));
             }
-            let capsule_group = ctx.sde.groups.values().find(|g| g.name == "Capsule").map(|g| g.group_id);
-            let in_capsule = ctx.db.with_snapshot(|snap| {
-                let active = snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0);
-                snap.items
-                    .get(&active)
+            let corvette_group = ctx.sde.groups.values().find(|g| g.name == "Corvette").map(|g| g.group_id);
+            let prev_ship_id = ctx
+                .db
+                .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.active_ship_id).filter(|&id| id > 0))
+                .or(session.ship_id);
+            let in_corvette = ctx.db.with_snapshot(|snap| {
+                prev_ship_id
+                    .and_then(|active| snap.items.get(&active))
                     .and_then(|i| ctx.sde.types.get(&i.type_id))
-                    .is_some_and(|t| Some(t.group_id) == capsule_group)
+                    .is_some_and(|t| Some(t.group_id) == corvette_group)
             });
-            if !in_capsule {
+            if in_corvette {
                 return Some(Err(BridgeRpcError {
-                    code: "NotInCapsule".into(),
-                    message: "A corvette can only be issued to a pilot docked in a capsule".into(),
+                    code: "AlreadyInNewbieShip".into(),
+                    message: "Character is already in a corvette".into(),
                 }));
             }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let has_non_pod_ship = snap.items.values().any(|i| {
-                    i.owner_id == char_id
-                        && i.location_id == station_id
-                        && i.singleton
-                        && i.type_id != 670
-                        && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 6)
-                });
-                if has_non_pod_ship {
-                    return Err(BridgeRpcError {
-                        code: "AlreadyHaveShipInStation".into(),
-                        message: "Character already has an assembled ship in this station".into(),
-                    });
+                // Leave any current non-corvette ship safely in the station/structure hangar.
+                if let Some(old_id) = prev_ship_id {
+                    if let Some(old_it) = snap.items.get_mut(&old_id) {
+                        if old_it.owner_id == char_id {
+                            old_it.location_id = station_id;
+                            old_it.flag = InventoryFlag::Hangar;
+                        }
+                    }
                 }
                 let race_id = snap
                     .characters
@@ -757,7 +756,6 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     .unwrap_or(2);
                 // DERIVED selection: the lowest-ID published SDE type in group "Corvette" whose raceID
                 // matches the character's race (Reaper/Impairor/Ibis/Velator in the V24 SDE).
-                let corvette_group = ctx.sde.groups.values().find(|g| g.name == "Corvette").map(|g| g.group_id);
                 let Some(corvette_type_id) = ctx
                     .sde
                     .types
@@ -773,31 +771,57 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 };
                 snap.next_entity_id += 1;
                 let corvette_id = snap.next_entity_id;
-                snap.items.insert(
-                    corvette_id,
-                    eve_db::InventoryItemRecord {
-                        item_id: corvette_id,
-                        type_id: corvette_type_id,
-                        owner_id: char_id,
-                        location_id: station_id,
-                        flag: InventoryFlag::Hangar,
-                        quantity: 1,
-                        singleton: true,
-                        version: 1,
-                        ..Default::default()
-                    },
-                );
+                let corvette_item = eve_db::InventoryItemRecord {
+                    item_id: corvette_id,
+                    type_id: corvette_type_id,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                };
+                snap.items.insert(corvette_id, corvette_item.clone());
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.active_ship_id = corvette_id;
                 }
-                Ok((corvette_id, corvette_type_id, race_id))
+                Ok((corvette_item, corvette_type_id, race_id))
             });
             match res {
-                Ok((corvette_id, corvette_tid, race_id)) => {
+                Ok((corvette_item, corvette_tid, race_id)) => {
+                    let corvette_id = corvette_item.item_id;
                     ctx.db.with_mut_snapshot(|snap| {
                         snap.item_custom_names.insert(claim_key, now_unix.to_string());
                     });
+                    if let Some(old_id) = prev_ship_id {
+                        ctx.invalidate_ship_fitting(old_id);
+                    }
+                    ctx.invalidate_ship_fitting(corvette_id);
                     session.ship_id = Some(corvette_id);
+                    let corvette_row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(
+                        crate::services::inventory_bound::item_to_packed_cells(ctx, &corvette_item),
+                    );
+                    let _ = ctx.notify_item_change(char_id, corvette_row, vec![(3, PyRep::Integer(0))]);
+                    if prev_ship_id != Some(corvette_id) {
+                        let changes = vec![(
+                            PyRep::String("shipid".to_string()),
+                            PyRep::Tuple(vec![
+                                prev_ship_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                                PyRep::Integer(corvette_id),
+                            ]),
+                        )];
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(char_id),
+                            "OnSessionChanged",
+                            "clientID",
+                            vec![
+                                PyRep::Bool(false),
+                                PyRep::Integer(session.session_id as i64),
+                                PyRep::Dict(changes),
+                            ],
+                        );
+                    }
                     // `ProcessActiveShipChanged` is derived by the V24 client (`DogmaLocation.MakeShipActive`)
                     // from the `shipid` session change; the server never sends it.
                     Some(Ok(PyRep::keyval([

@@ -269,4 +269,70 @@ async fn ships_mastery_leave_ship_corvette_mastery_killmarks_repair_simulation_t
     .expect("handled")
     .expect("CreateNewbieShip ok");
     assert_ne!(corvette_res, PyRep::None);
+
+    // Issue #603: CreateNewbieShip while docked in a regular non-corvette ship leaves it in hangar,
+    // issues a Corvette, and emits OnItemChange + OnSessionChanged; calling again inside Corvette fails.
+    let rifter2_id = 96_400_300i64;
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(
+            rifter2_id,
+            InventoryItemRecord {
+                item_id: rifter2_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        if let Some(ch) = s.characters.get_mut(&char_id) {
+            ch.active_ship_id = rifter2_id;
+        }
+        s.item_custom_names.remove(&(-8_800_000 - char_id));
+    });
+    session.ship_id = Some(rifter2_id);
+    ctx.db
+        .acquire_online_lock(1, session.session_id.max(1), Some(char_id), true, ctx.now_unix())
+        .expect("register online session for CreateNewbieShip notif");
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let board_corv = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut session,
+        None,
+        "dogmaIM",
+        "CreateNewbieShip",
+        &[PyRep::Integer(rifter2_id), PyRep::Integer(station_id)],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect("CreateNewbieShip from non-capsule ship must succeed");
+    let new_corv_id = board_corv.dict_get("shipID").and_then(PyRep::as_i64).unwrap();
+    assert_eq!(session.ship_id, Some(new_corv_id));
+    assert!(ctx.db.with_snapshot(|s| {
+        s.items.get(&rifter2_id).is_some_and(|i| i.location_id == station_id && i.flag == InventoryFlag::Hangar)
+    }));
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs.iter().any(|n| n.event == "OnItemChange"));
+    assert!(notifs.iter().any(|n| n.event == "OnSessionChanged"));
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.item_custom_names.remove(&(-8_800_000 - char_id));
+    });
+    let err_already_corv = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut session,
+        None,
+        "dogmaIM",
+        "CreateNewbieShip",
+        &[],
+        &HashMap::new(),
+    )
+    .await
+    .expect("handled")
+    .expect_err("CreateNewbieShip while already in corvette must fail");
+    assert_eq!(err_already_corv.code, "AlreadyInNewbieShip");
 }

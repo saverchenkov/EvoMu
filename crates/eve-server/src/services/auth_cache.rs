@@ -1173,7 +1173,7 @@ pub async fn handle(
                         location_id,
                         flag,
                         quantity: qty,
-                        singleton: is_ship,
+                        singleton: is_ship && qty == 1,
                         version: 1,
                         dynamic_attributes: HashMap::new(),
                         source_mutaplasmid_id: None,
@@ -1181,17 +1181,25 @@ pub async fn handle(
                         is_blueprint_copy: false,
                         blueprint_runs_remaining: None,
                     };
-                    snap.items.insert(item_id, item);
-                    Ok((item_id, location_id))
+                    snap.items.insert(item_id, item.clone());
+                    Ok((item, location_id))
                 });
                 match res {
-                    Ok((item_id, loc_id)) => Some(Ok(PyRep::keyval([
-                        ("command", PyRep::String(cmd.to_string())),
-                        ("itemID", PyRep::Integer(item_id)),
-                        ("typeID", PyRep::Integer(type_id as i64)),
-                        ("quantity", PyRep::Integer(qty as i64)),
-                        ("locationID", PyRep::Integer(loc_id)),
-                    ]))),
+                    Ok((item, loc_id)) => {
+                        let item_id = item.item_id;
+                        let item_row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(
+                            crate::services::inventory_bound::item_to_packed_cells(ctx, &item),
+                        );
+                        // ixLocationID (3) = 0 signals newly created item arrival to client `invCache`
+                        let _ = ctx.notify_item_change(cid, item_row, vec![(3, PyRep::Integer(0))]);
+                        Some(Ok(PyRep::keyval([
+                            ("command", PyRep::String(cmd.to_string())),
+                            ("itemID", PyRep::Integer(item_id)),
+                            ("typeID", PyRep::Integer(type_id as i64)),
+                            ("quantity", PyRep::Integer(qty as i64)),
+                            ("locationID", PyRep::Integer(loc_id)),
+                        ])))
+                    }
                     Err(e) => Some(Err(e)),
                 }
             } else if let Some(rest) = cmd.strip_prefix("/setskill ").or_else(|| cmd.strip_prefix("/giveskill ")) {

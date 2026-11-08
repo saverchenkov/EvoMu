@@ -808,14 +808,6 @@ pub fn handle(
                 }));
             }
             let quantity_i32 = quantity as i32;
-            if station_id != docked_station_id {
-                return Some(Err(BridgeRpcError {
-                    code: "StationMismatch".into(),
-                    message: format!(
-                        "Cannot place market order at station {station_id} while docked at {docked_station_id}"
-                    ),
-                }));
-            }
             let station_info = ctx.sde.solar_systems.values().find_map(|sys| {
                 if sys.region_id == region_id {
                     sys.stations.iter().find(|st| st.station_id == station_id)
@@ -826,7 +818,7 @@ pub fn handle(
             let station_owner_corp = station_info.map(|s| s.owner_corporation_id).unwrap_or(0);
             let owner_faction_id = station_info.and_then(|s| s.owner_faction_id);
 
-            let (broker_lvl, _acct_lvl, mt_lvl, vis_lvl, faction_standing, corp_standing, max_open_orders, m_tier) =
+            let (broker_lvl, _acct_lvl, mt_lvl, vis_lvl, proc_lvl, faction_standing, corp_standing, max_open_orders, m_tier, remote_station_ok) =
                 ctx.db.with_snapshot(|snap| {
                     let sk = snap.skills.get(&char_id);
                     let b_lvl = sk.and_then(|m| m.get(&3446)).map(|s| s.level).unwrap_or(0);
@@ -836,6 +828,7 @@ pub fn handle(
                         .and_then(|m| m.get(&3447))
                         .map(|s| s.level)
                         .unwrap_or(0);
+                    let p_lvl = sk.and_then(|m| m.get(&16594)).map(|s| s.level).unwrap_or(0);
                     let trade_lvl = sk.and_then(|m| m.get(&3443)).map(|s| s.level).unwrap_or(0) as usize;
                     let retail_lvl = sk.and_then(|m| m.get(&3444)).map(|s| s.level).unwrap_or(0) as usize;
                     let wholesale_lvl = sk.and_then(|m| m.get(&16596)).map(|s| s.level).unwrap_or(0) as usize;
@@ -848,10 +841,50 @@ pub fn handle(
                     let c_st = ch
                         .and_then(|c| c.standings.get(&station_owner_corp).copied())
                         .unwrap_or(0.0);
-                    let m_sys = ctx.sde.stations.get(&station_id).map(|s| s.solar_system_id).unwrap_or(0);
+                    let m_sys = resolve_station_solar_system(ctx, snap, station_id).unwrap_or(0);
                     let tier = snap.fw_runtime.ihub_tiers.get(&m_sys).copied().unwrap_or(0);
-                    (b_lvl, a_lvl, m_lvl, v_lvl, f_st, c_st, order_limit, tier)
+                    let st_ok = if station_id == docked_station_id {
+                        true
+                    } else {
+                        let docked_sys = resolve_station_solar_system(ctx, snap, docked_station_id);
+                        let target_sys = resolve_station_solar_system(ctx, snap, station_id);
+                        let in_same_region = target_sys.is_some_and(|ts| {
+                            ctx.sde
+                                .solar_systems
+                                .get(&ts)
+                                .is_some_and(|s| s.region_id == region_id)
+                        });
+                        if !in_same_region {
+                            false
+                        } else if duration_days == 0 {
+                            // Immediate buy (BuySimple / duration=0) can buy any sell order in the same region.
+                            true
+                        } else {
+                            match (docked_sys, target_sys) {
+                                (Some(ds), Some(ts)) if ds == ts => true,
+                                (Some(ds), Some(ts)) => {
+                                    let max_jumps =
+                                        super::market_contracts::max_remote_jumps_for_skill_level(p_lvl);
+                                    max_jumps >= 32_767
+                                        || (max_jumps > 0
+                                            && solar_system_jump_distance(ctx, ds, ts)
+                                                .is_some_and(|d| (d as i64) <= max_jumps))
+                                }
+                                _ => false,
+                            }
+                        }
+                    };
+                    (b_lvl, a_lvl, m_lvl, v_lvl, p_lvl, f_st, c_st, order_limit, tier, st_ok)
                 });
+            let _ = proc_lvl;
+            if !remote_station_ok {
+                return Some(Err(BridgeRpcError {
+                    code: "StationMismatch".into(),
+                    message: format!(
+                        "Cannot place market order at station {station_id} while docked at {docked_station_id}"
+                    ),
+                }));
+            }
             if type_id != PLEX_TYPE_ID
                 && order_range > super::market_contracts::max_remote_jumps_for_skill_level(vis_lvl)
             {
@@ -977,6 +1010,18 @@ pub fn handle(
                 let mut actual_sales_tax_charged = IskCents(0);
                 let mut matched_sellers: Vec<(i64, i64)> = Vec::new();
                 let mut delivered_items: Vec<(i64, TypeId, i64, i64)> = Vec::new();
+                let mut delivered_item_records: Vec<InventoryItemRecord> = Vec::new();
+                let mut buyer_acct_after: Option<(String, i64, f64)> = None;
+                let mut seller_acct_updates: Vec<(bool, i64, String, f64)> = Vec::new();
+                let buyer_acct_key_str = if use_corp {
+                    if div_id <= 1 {
+                        "cash".to_string()
+                    } else {
+                        format!("cash{div_id}")
+                    }
+                } else {
+                    "cash".to_string()
+                };
 
                 for (oid, _) in candidate_ids {
                     if remaining_qty <= 0 {
@@ -1022,6 +1067,9 @@ pub fn handle(
                                 buyer.balance
                             })
                         };
+                        if let Some(bal) = buyer_bal {
+                            buyer_acct_after = Some((buyer_acct_key_str.clone(), order_owner_id, bal.to_wire_f64()));
+                        }
                         let (mut seller_net, mut seller_bal, mut fill_tax) = (IskCents(0), None, IskCents(0));
                         if !resting.is_npc {
                             matched_sellers.push((oid, resting.owner_id));
@@ -1040,9 +1088,27 @@ pub fn handle(
                             if let Some(seller) = snap.characters.get_mut(&resting.owner_id) {
                                 seller.balance = seller.balance.checked_add(seller_net).unwrap_or(seller.balance);
                                 seller_bal = Some(seller.balance);
+                                seller_acct_updates.push((
+                                    false,
+                                    resting.owner_id,
+                                    "cash".to_string(),
+                                    seller.balance.to_wire_f64(),
+                                ));
                             } else if let Some(seller_corp) = snap.corporations.get_mut(&resting.owner_id) {
                                 let s_div = (seller_meta.account_key.unwrap_or(1000).saturating_sub(999)).clamp(1, 7) as u8;
-                                seller_bal = Some(seller_corp.credit_division(s_div, seller_net));
+                                let s_bal = seller_corp.credit_division(s_div, seller_net);
+                                seller_bal = Some(s_bal);
+                                let s_key = if s_div <= 1 {
+                                    "cash".to_string()
+                                } else {
+                                    format!("cash{s_div}")
+                                };
+                                seller_acct_updates.push((
+                                    true,
+                                    resting.owner_id,
+                                    s_key,
+                                    s_bal.to_wire_f64(),
+                                ));
                             }
                         }
                         snap.journal_market_fill(eve_db::ledger::MarketFill {
@@ -1080,21 +1146,20 @@ pub fn handle(
                             } else {
                                 resting.station_id
                             };
-                            snap.items.insert(
-                                new_item_id,
-                                InventoryItemRecord {
-                                    item_id: new_item_id,
-                                    type_id,
-                                    owner_id: order_owner_id,
-                                    location_id: deliv_station,
-                                    flag: deliv_flag,
-                                    quantity: fill_qty,
-                                    singleton: false,
-                                    version: 1,
-                                    ..Default::default()
-                                },
-                            );
+                            let new_item = InventoryItemRecord {
+                                item_id: new_item_id,
+                                type_id,
+                                owner_id: order_owner_id,
+                                location_id: deliv_station,
+                                flag: deliv_flag,
+                                quantity: fill_qty,
+                                singleton: false,
+                                version: 1,
+                                ..Default::default()
+                            };
+                            snap.items.insert(new_item_id, new_item.clone());
                             delivered_items.push((new_item_id, type_id, deliv_flag as i64, deliv_station));
+                            delivered_item_records.push(new_item);
                         }
                     }
 
@@ -1145,6 +1210,9 @@ pub fn handle(
                         IskCents(0),
                         matched_sellers,
                         delivered_items,
+                        delivered_item_records,
+                        buyer_acct_after,
+                        seller_acct_updates,
                     ));
                 }
 
@@ -1205,11 +1273,13 @@ pub fn handle(
                     if let Some(corp) = snap.corporations.get_mut(&caller_corp_id) {
                         let bal_after = corp.division_balance(div_id).checked_sub(broker_fee).unwrap_or(IskCents(0));
                         corp.set_division_balance(div_id, bal_after);
+                        buyer_acct_after = Some((buyer_acct_key_str.clone(), caller_corp_id, bal_after.to_wire_f64()));
                         snap.append_journal(caller_corp_id, "MarketBrokerFee", broker_fee, bal_after, format!("Broker fee for corporate order on type {type_id}"));
                     }
                 } else if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.balance = ch.balance.checked_sub(broker_fee).unwrap_or(IskCents(0));
                     let bal_after = ch.balance;
+                    buyer_acct_after = Some(("cash".to_string(), char_id, bal_after.to_wire_f64()));
                     snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
                         owner_id: char_id,
                         entry_type: "MarketBrokerFee",
@@ -1240,6 +1310,9 @@ pub fn handle(
                         buyer.balance
                     })
                 };
+                if let Some(bal) = escrow_bal {
+                    buyer_acct_after = Some((buyer_acct_key_str.clone(), order_owner_id, bal.to_wire_f64()));
+                }
 
                 snap.next_entity_id += 1;
                 let new_oid = snap.next_entity_id;
@@ -1273,11 +1346,43 @@ pub fn handle(
                             .with_context(eve_db::ledger::JournalContext::MarketOrder, new_oid),
                     });
                 }
-                Ok((new_oid, false, broker_fee, actual_sales_tax_charged, escrow, matched_sellers, delivered_items))
+                Ok((new_oid, false, broker_fee, actual_sales_tax_charged, escrow, matched_sellers, delivered_items, delivered_item_records, buyer_acct_after, seller_acct_updates))
             });
 
             match res {
-                Ok((order_id, filled_immediately, broker_fee, actual_sales_tax_charged, escrow_cents, matched_sellers, delivered_items)) => {
+                Ok((order_id, filled_immediately, broker_fee, actual_sales_tax_charged, escrow_cents, matched_sellers, delivered_items, delivered_item_records, buyer_acct_after, seller_acct_updates)) => {
+                    if let Some((acct_key, wallet_owner_id, bal_f64)) = buyer_acct_after {
+                        if use_corp {
+                            ctx.notify(
+                                NotificationTarget::Corporation(wallet_owner_id),
+                                "OnAccountChange",
+                                "corpid",
+                                vec![
+                                    PyRep::String(acct_key),
+                                    PyRep::Integer(wallet_owner_id),
+                                    PyRep::Real(bal_f64),
+                                ],
+                            );
+                        } else {
+                            let _ = ctx.notify_account_change(char_id, &acct_key, wallet_owner_id, bal_f64);
+                        }
+                    }
+                    let mut final_seller_accts: HashMap<(bool, i64, String), f64> = HashMap::new();
+                    for (is_corp_s, s_owner, s_key, s_bal) in seller_acct_updates {
+                        final_seller_accts.insert((is_corp_s, s_owner, s_key), s_bal);
+                    }
+                    for ((is_corp_s, s_owner, s_key), s_bal) in final_seller_accts {
+                        if is_corp_s {
+                            ctx.notify(
+                                NotificationTarget::Corporation(s_owner),
+                                "OnAccountChange",
+                                "corpid",
+                                vec![PyRep::String(s_key), PyRep::Integer(s_owner), PyRep::Real(s_bal)],
+                            );
+                        } else {
+                            let _ = ctx.notify_account_change(s_owner, &s_key, s_owner, s_bal);
+                        }
+                    }
                     for (matched_oid, seller_id) in matched_sellers {
                         ctx.notify(NotificationTarget::Character(seller_id), "OnOwnOrdersChanged", "charid", crate::services::market_price_history::build_own_order_changed_payload(ctx, matched_oid, "Change", false));
                     }
@@ -1285,6 +1390,12 @@ pub fn handle(
                         // "OnMarketItemReceived" is emitted by the server; the client-local
                         // "OnClientEvent_MarketItemReceived" is scattered internally by MarketQuote.
                         ctx.notify(NotificationTarget::Character(char_id), "OnMarketItemReceived", "charid", vec![PyRep::Integer(iid), PyRep::Integer(tid as i64), PyRep::Integer(flag_id), PyRep::Integer(loc_id)]);
+                    }
+                    for item_rec in delivered_item_records {
+                        let item_row = DBRowDescriptor::inv_item_header().build_dbrow(
+                            crate::services::inventory_bound::item_to_packed_cells(ctx, &item_rec),
+                        );
+                        let _ = ctx.notify_item_change(char_id, item_row, vec![(3, PyRep::Integer(0))]);
                     }
                     ctx.notify(NotificationTarget::Character(char_id), "OnOwnOrdersChanged", "charid", crate::services::market_price_history::build_own_order_changed_payload(ctx, order_id, if filled_immediately { "Change" } else { "Add" }, use_corp));
                     Some(Ok(PyRep::keyval([

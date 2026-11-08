@@ -282,10 +282,10 @@ async fn test_contract_proxy_and_insurance_rpcs() {
         )
         .await
         .expect("GetInsurancePrices");
-    let PyRep::List(price_entries) = prices else {
-        panic!("Expected list from GetInsurancePrices");
+    let PyRep::Dict(price_entries) = prices else {
+        panic!("Expected Dict from GetInsurancePrices, got {prices:?}");
     };
-    assert!(!price_entries.is_empty());
+    assert!(price_entries.iter().any(|(k, v)| k.as_i64() == Some(587) && v.as_f64().is_some_and(|p| p > 0.0)));
 
     // 2. Insure ship and call insuranceSvc.GetContracts
     let ship_id = ctx

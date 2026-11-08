@@ -341,7 +341,10 @@ async fn insurance_svc_personal_corp_void_old_and_error_branches() {
     .await
     .expect("handled")
     .expect("all prices");
-    assert!(matches!(all_prices, PyRep::List(ref items) if !items.is_empty()));
+    assert!(matches!(all_prices, PyRep::Dict(ref items) if !items.is_empty()));
+    if let PyRep::Dict(ref items) = all_prices {
+        assert!(items.iter().all(|(k, v)| k.as_i64().is_some() && v.as_f64().is_some_and(|p| p > 0.0)));
+    }
 
     // UnInsureShip + verify GetContractForShip returns None afterward
     let unins = handle_ships_and_services(

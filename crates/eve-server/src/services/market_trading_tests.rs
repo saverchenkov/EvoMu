@@ -437,3 +437,157 @@ fn place_buy_order_resting_and_immediate_matching_execution() {
         assert!(bought_stack.quantity >= 50);
     });
 }
+
+#[test]
+fn issue_601_611_612_market_tick_same_system_buy_and_wallet_item_notifications() {
+    use crate::services::market_contracts::{is_valid_4_sig_fig_price, round_to_4_sig_fig_price};
+    use crate::world_seeder::seed_full_market_catalog;
+
+    // Issue #611: round_to_4_sig_fig_price and seeded orders always pass 4-sig-fig validation.
+    for p in [0.5, 1.23, 99.99, 100.01, 2708.62, 9999.9, 123_456.78] {
+        let rounded = round_to_4_sig_fig_price(p);
+        assert!(is_valid_4_sig_fig_price(rounded), "rounded {p} -> {rounded} invalid");
+    }
+    assert_eq!(round_to_4_sig_fig_price(2708.62), 2709.0);
+
+    let ctx = test_ctx();
+    let seeded_count = seed_full_market_catalog(&ctx.db, &ctx.sde);
+    assert!(seeded_count > 0, "expected seeded market orders");
+    ctx.db.with_snapshot(|s| {
+        for o in s.market_orders.values() {
+            assert!(
+                is_valid_4_sig_fig_price(o.price.to_wire_f64()),
+                "seeded order {} (type {}) has invalid price {}",
+                o.order_id,
+                o.type_id,
+                o.price.to_wire_f64()
+            );
+        }
+    });
+
+    // Issue #612 + #601: Docked at Jita II (60015260), buy player sell order at Jita IV-4 (60003760)
+    // in same solar system (30000142). Verify OnAccountChange (buyer + seller) & OnItemChange emitted.
+    let buyer_id = 91_200_001i64;
+    let seller_id = 91_200_002i64;
+    let docked_other_jita_station = 60_015_260i64;
+    let seller_uid = 99_200u64;
+    ctx.db.with_mut_snapshot(|s| {
+        s.market_orders.clear();
+        let mut seller_acc = s.accounts.values().next().cloned().unwrap();
+        seller_acc.user_id = seller_uid;
+        seller_acc.username = "seller_601".into();
+        s.accounts.insert(seller_acc.username.clone(), seller_acc);
+
+        let template = s.characters.values().next().cloned().unwrap();
+        let mut buyer = template.clone();
+        buyer.character_id = buyer_id;
+        buyer.user_id = 1;
+        buyer.balance = IskCents::from_isk(500_000);
+        buyer.station_id = Some(docked_other_jita_station);
+        s.characters.insert(buyer_id, buyer);
+
+        let mut seller = template;
+        seller.character_id = seller_id;
+        seller.user_id = seller_uid;
+        seller.balance = IskCents::from_isk(1_000);
+        seller.station_id = Some(JITA_STATION_ID);
+        s.characters.insert(seller_id, seller);
+
+        s.market_orders.insert(
+            991_001,
+            MarketOrderRecord {
+                order_id: 991_001,
+                owner_id: seller_id,
+                station_id: JITA_STATION_ID,
+                region_id: THE_FORGE_REGION_ID,
+                type_id: 34,
+                is_bid: false,
+                price: IskCents::from_f64_isk(2709.0),
+                vol_entered: 10,
+                vol_remaining: 10,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents::ZERO,
+            },
+        );
+    });
+    ctx.db
+        .acquire_online_lock(1, 9201, Some(buyer_id), true, ctx.now_unix())
+        .expect("buyer online");
+    ctx.db
+        .acquire_online_lock(seller_uid, 9202, Some(seller_id), true, ctx.now_unix())
+        .expect("seller online");
+    let _ = ctx.drain_notifications_for_char(buyer_id);
+    let _ = ctx.drain_notifications_for_char(seller_id);
+
+    let mut buyer_sess = SessionState {
+        session_id: 9201,
+        user_id: Some(1),
+        character_id: Some(buyer_id),
+        corporation_id: Some(1_000_009),
+        station_id: Some(docked_other_jita_station),
+        solar_system_id: Some(30_000_142),
+        region_id: Some(THE_FORGE_REGION_ID),
+        ..Default::default()
+    };
+    let kw = HashMap::new();
+    let buy_ok = handle(
+        &ctx,
+        &mut buyer_sess,
+        "marketProxy",
+        "PlaceBuyOrder",
+        &[
+            PyRep::Integer(JITA_STATION_ID), // Jita 4-4 while docked at Jita 60015260
+            PyRep::Integer(34),
+            PyRep::Real(2709.0),
+            PyRep::Integer(2),
+            PyRep::Integer(-1),
+            PyRep::Integer(1),
+            PyRep::Integer(0),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .expect("same-system Jita PlaceBuyOrder must succeed");
+    assert_eq!(buy_ok.dict_get("filledImmediately"), Some(&PyRep::Bool(true)));
+
+    let buyer_notifs = ctx.drain_notifications_for_char(buyer_id);
+    let acct_notif = buyer_notifs
+        .iter()
+        .find(|n| n.event == "OnAccountChange" && n.args.first() == Some(&PyRep::String("cash".into())))
+        .expect("expected OnAccountChange for buyer");
+    assert_eq!(acct_notif.args.get(2), Some(&PyRep::Real(500_000.0 - 2.0 * 2709.0)));
+    assert!(
+        buyer_notifs.iter().any(|n| n.event == "OnItemChange"),
+        "expected OnItemChange for buyer delivered item"
+    );
+    let seller_notifs = ctx.drain_notifications_for_char(seller_id);
+    assert!(
+        seller_notifs.iter().any(|n| n.event == "OnAccountChange" && n.args.first() == Some(&PyRep::String("cash".into()))),
+        "expected OnAccountChange for seller"
+    );
+
+    // Resting order (duration=90) at remote Perimeter station (60003766) with Procurement=0 still fails with StationMismatch
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut buyer_sess,
+            "marketProxy",
+            "PlaceBuyOrder",
+            &[
+                PyRep::Integer(60_003_766),
+                PyRep::Integer(34),
+                PyRep::Real(10.0),
+                PyRep::Integer(5),
+                PyRep::Integer(-1),
+                PyRep::Integer(1),
+                PyRep::Integer(90),
+            ],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "StationMismatch"
+    );
+}

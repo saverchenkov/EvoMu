@@ -417,4 +417,37 @@ async fn gm_slash_commands_and_qa_rpcs_execute_and_enforce_roles() {
         .unwrap()
         .unwrap();
     assert_eq!(kill_res.dict_get("destroyed"), Some(&PyRep::Bool(true)));
+
+    // Issue #610: /fit "me" <type_id> (quoted target from client svc_slash) fits module & emits OnItemChange
+    let uid = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.user_id)).unwrap_or(1);
+    ctx.db
+        .acquire_online_lock(uid, sess.session_id.max(1), Some(char_id), true, ctx.now_unix())
+        .expect("register online session for /fit notif");
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let current_ship_id = ctx.db.with_snapshot(|s| s.characters[&char_id].active_ship_id);
+    let quoted_fit = handle_gm_slash_ext(&ctx, &mut sess, char_id, r#"/fit "me" 2048"#)
+        .await
+        .unwrap()
+        .expect("quoted /fit \"me\" 2048 must succeed");
+    assert_eq!(quoted_fit.dict_get("shipID"), Some(&PyRep::Integer(current_ship_id)));
+    let fitted_id = quoted_fit.dict_get("itemID").and_then(PyRep::as_i64).unwrap();
+    let fit_notifs = ctx.drain_notifications_for_char(char_id);
+    let fit_item_change = fit_notifs
+        .iter()
+        .find(|n| n.event == "OnItemChange")
+        .expect("OnItemChange must be emitted for /fit");
+    if let Some(PyRep::DBRow { columns: cells, .. }) = fit_item_change.args.first() {
+        assert_eq!(cells.first().and_then(|(_, v)| v.as_i64()), Some(fitted_id));
+        assert_eq!(cells.get(1).and_then(|(_, v)| v.as_i64()), Some(2048));
+        assert_eq!(cells.get(3).and_then(|(_, v)| v.as_i64()), Some(current_ship_id));
+    } else {
+        panic!("expected DBRow in /fit OnItemChange, got {:?}", fit_item_change.args);
+    }
+    assert_eq!(
+        fit_item_change.args.get(1),
+        Some(&PyRep::Dict(vec![
+            (PyRep::Integer(3), PyRep::Integer(0)),
+            (PyRep::Integer(4), PyRep::Integer(0)),
+        ]))
+    );
 }

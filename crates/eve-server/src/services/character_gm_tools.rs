@@ -768,7 +768,11 @@ pub async fn handle_gm_slash_ext(
     }
 
     if let Some(rest) = cmd.strip_prefix("/fit ") {
-        let tokens: Vec<&str> = rest.split_whitespace().collect();
+        let tokens: Vec<&str> = rest
+            .split_whitespace()
+            .map(|t| t.trim_matches('"'))
+            .filter(|t| !t.is_empty())
+            .collect();
         if tokens.is_empty() {
             return Some(Err(BridgeRpcError {
                 code: "InvalidSlashArgument".into(),
@@ -952,6 +956,17 @@ pub async fn handle_gm_slash_ext(
         return match res {
             Ok((rec, chosen_flag)) => {
                 ctx.invalidate_ship_fitting(ship_id);
+                let _ = ctx.get_or_rebuild_ship_fitting(rec.owner_id, ship_id);
+                let item_row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(
+                    crate::services::inventory_bound::item_to_packed_cells(ctx, &rec),
+                );
+                // ixLocationID (3) = 0, ixFlag (4) = 0 notifies `invCache`, `godma`, and `dogmaLocation`
+                // of the newly fitted module on `ship_id` at `chosen_flag`.
+                let _ = ctx.notify_item_change(
+                    rec.owner_id,
+                    item_row,
+                    vec![(3, PyRep::Integer(0)), (4, PyRep::Integer(0))],
+                );
                 Some(Ok(PyRep::keyval([
                     ("command", PyRep::String(cmd.to_string())),
                     ("shipID", PyRep::Integer(ship_id)),

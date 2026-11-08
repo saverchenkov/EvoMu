@@ -297,9 +297,6 @@ async fn test_newbie_ship_racial_corvette_in_capsule_with_cooldown() {
     eve_testkit::attest(&["feat:ships.newbie-ship"]);
     let ctx = new_ctx();
     let mut s = pilot(&ctx, C1, 6501).await;
-    // Docked in a Rifter: refused.
-    s.ship_id = Some(100_000_001);
-    assert_eq!(call(&ctx, &mut s, "dogmaIM", "CreateNewbieShip", vec![]).await.unwrap_err().code, "NotInCapsule");
     // Move every owned hull out of the station, put the pilot in a capsule.
     ctx.db.with_mut_snapshot(|snap| {
         for it in snap.items.values_mut() {
@@ -321,16 +318,22 @@ async fn test_newbie_ship_racial_corvette_in_capsule_with_cooldown() {
     assert_eq!((corvette.location_id, corvette.flag, corvette.singleton), (JITA44, InventoryFlag::Hangar, true));
     assert_eq!(s.ship_id, Some(corvette.item_id));
 
-    // Back in a capsule (corvette moved away): still on cooldown.
+    // Already in a corvette (even after cooldown expires): refused with AlreadyInNewbieShip.
+    ctx.advance_virtual_clock(61);
+    assert_eq!(
+        call(&ctx, &mut s, "dogmaIM", "CreateNewbieShip", vec![]).await.unwrap_err().code,
+        "AlreadyInNewbieShip"
+    );
+
+    // Back in a capsule (corvette moved away) and reset cooldown: first claim succeeds, immediate second hits cooldown.
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.get_mut(&corvette.item_id).unwrap().location_id = 60_008_494;
         snap.characters.get_mut(&C1).unwrap().active_ship_id = 650_001;
     });
     s.ship_id = Some(650_001);
-    assert_eq!(call(&ctx, &mut s, "dogmaIM", "CreateNewbieShip", vec![]).await.unwrap_err().code, "NewbieShipCooldown");
-    ctx.advance_virtual_clock(61);
     let again = call(&ctx, &mut s, "dogmaIM", "CreateNewbieShip", vec![]).await.expect("after cooldown");
     assert_ne!(int(&again, "shipID"), corvette.item_id);
+    assert_eq!(call(&ctx, &mut s, "dogmaIM", "CreateNewbieShip", vec![]).await.unwrap_err().code, "NewbieShipCooldown");
 }
 
 #[tokio::test]

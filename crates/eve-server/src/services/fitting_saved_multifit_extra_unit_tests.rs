@@ -136,10 +136,20 @@ async fn insurance_corp_roles_exact_isk_cost_uninsure_get_contracts_and_prices()
     .await
     .unwrap()
     .unwrap();
-    let plat_cost = match &prices_rep {
-        PyRep::List(v) => v[0].dict_get("platinumCostISK").unwrap().as_f64().unwrap(),
-        _ => panic!("expected list"),
+    let ref_val = match &prices_rep {
+        PyRep::Dict(entries) => entries
+            .iter()
+            .find(|(k, _)| k.as_i64() == Some(587))
+            .and_then(|(_, v)| v.as_f64())
+            .expect("expected Rifter typeID 587 entry in GetInsurancePrices dict"),
+        other => panic!("expected Dict from GetInsurancePrices, got {other:?}"),
     };
+    let levels = crate::formulas::compute_insurance_levels(ref_val);
+    let plat_cost = levels
+        .iter()
+        .find(|(name, _, _)| *name == "Platinum")
+        .map(|(_, cost, _)| *cost)
+        .unwrap();
     assert!(plat_cost > 1.0);
 
     let ins_ok = handle_ships_and_services(

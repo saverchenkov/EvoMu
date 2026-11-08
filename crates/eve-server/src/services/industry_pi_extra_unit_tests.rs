@@ -450,4 +450,10 @@ fn industry_job_queries_permissions_and_monitor_branches() {
 
     let disc_job = handle_industry_job_queries(&ctx, &mut sess_a, "industryMonitor", "DisconnectJob", &[PyRep::Integer(601)], &HashMap::new()).unwrap().unwrap();
     assert_eq!(disc_job.dict_get("unsubscribed"), Some(&PyRep::Bool(true)));
+
+    // Calling DisconnectJob(None) or with no args (industryWnd.Close when jobData is None) cleanly returns None
+    let disc_none = handle_industry_job_queries(&ctx, &mut sess_a, "industryMonitor", "DisconnectJob", &[PyRep::None], &HashMap::new()).unwrap().unwrap();
+    assert_eq!(disc_none, PyRep::None);
+    let disc_empty = handle_industry_job_queries(&ctx, &mut sess_a, "industryMonitor", "DisconnectJob", &[], &HashMap::new()).unwrap().unwrap();
+    assert_eq!(disc_empty, PyRep::None);
 }

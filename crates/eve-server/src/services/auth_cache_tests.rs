@@ -386,4 +386,39 @@ async fn gm_slash_commands_giveisk_ban_suspend_role_giveitem_setskill_teleport_a
         .code,
         "UnknownSlashCommand"
     );
+
+    // Issue #600: /createitem <ship> 1 must emit OnItemChange DBRow + change {3: 0}
+    let cid = sess.character_id.unwrap();
+    ctx.db
+        .acquire_online_lock(uid, sess.session_id.max(1), Some(cid), true, ctx.now_unix())
+        .expect("register online session for /createitem notif");
+    let _ = ctx.drain_notifications_for_char(cid);
+    let create_ship = handle(
+        &ctx,
+        &mut sess,
+        "slash",
+        "SlashCmd",
+        &[PyRep::String("/createitem 587 1".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("/createitem 587 1 ok");
+    let created_ship_id = create_ship.dict_get("itemID").and_then(PyRep::as_i64).unwrap();
+    let notifs = ctx.drain_notifications_for_char(cid);
+    let item_change = notifs
+        .iter()
+        .find(|n| n.event == "OnItemChange")
+        .expect("OnItemChange must be emitted for /createitem");
+    if let Some(PyRep::DBRow { columns: cells, .. }) = item_change.args.first() {
+        assert_eq!(cells.first().and_then(|(_, v)| v.as_i64()), Some(created_ship_id));
+        assert_eq!(cells.get(1).and_then(|(_, v)| v.as_i64()), Some(587));
+        assert_eq!(cells.get(7).and_then(|(_, v)| v.as_i64()), Some(6)); // categoryID = Ship
+    } else {
+        panic!("expected DBRow in /createitem OnItemChange, got {:?}", item_change.args);
+    }
+    assert_eq!(
+        item_change.args.get(1),
+        Some(&PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(0))]))
+    );
 }

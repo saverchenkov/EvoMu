@@ -53,6 +53,28 @@ pub fn is_valid_4_sig_fig_price(price_isk: f64) -> bool {
     rem <= 9_999
 }
 
+/// Rounds a positive ISK price to the nearest valid EVE 4-significant-figure tick price
+/// (at minimum 0.01 ISK / 1 cent) so `is_valid_4_sig_fig_price` always accepts the result.
+pub fn round_to_4_sig_fig_price(price_isk: f64) -> f64 {
+    if !price_isk.is_finite() || price_isk <= 0.0 {
+        return 0.01;
+    }
+    let cents = (price_isk * 100.0).round().max(1.0) as i128;
+    let mut digits = 0u32;
+    let mut v = cents;
+    while v > 0 {
+        digits += 1;
+        v /= 10;
+    }
+    let rounded_cents = if digits <= 4 {
+        cents
+    } else {
+        let step = 10_i128.pow(digits - 4);
+        ((cents + step / 2) / step) * step
+    };
+    (rounded_cents as f64) / 100.0
+}
+
 /// Max jump distance allowed by remote market skills (`Procurement` `16594`, `Marketing` `16598`,
 /// `Daytrading` `16595`, `Visibility` `3447`):
 /// Level 0 = station only (`-1`), Level 1 = solar system (`0`), Level 2 = 5 jumps,
