@@ -65,12 +65,54 @@ pub(crate) fn is_in_access_group(
     char_id: i64,
     group_id: i64,
 ) -> bool {
+    let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+    let (corp_id_opt, alliance_id_opt) =
+        effective_char_corp_and_alliance(snap, session, char_id);
+    if let Some(grp) = ext.owner_groups.get(&group_id) {
+        use crate::services::structure_acl_defense_rules::{
+            is_acl_creator_active_for_corp, is_acl_role_allowed, is_acl_role_excluded,
+        };
+        let char_corp = corp_id_opt.unwrap_or(0);
+        if let Some(&r) = grp.members.get(&char_id) {
+            if is_acl_role_excluded(r) {
+                return false;
+            }
+            if is_acl_role_allowed(r) {
+                return grp.owner_corp_id == 0
+                    || char_id != grp.creator_id
+                    || char_corp == grp.owner_corp_id;
+            }
+            return false;
+        }
+        if is_acl_creator_active_for_corp(char_id, char_corp, grp) {
+            return true;
+        }
+        if let Some(cid) = corp_id_opt {
+            if let Some(&r) = grp.members.get(&cid) {
+                if is_acl_role_excluded(r) {
+                    return false;
+                }
+                if is_acl_role_allowed(r) {
+                    return true;
+                }
+            }
+        }
+        if let Some(aid) = alliance_id_opt {
+            if let Some(&r) = grp.members.get(&aid) {
+                if is_acl_role_excluded(r) {
+                    return false;
+                }
+                if is_acl_role_allowed(r) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
     if let Some(members) = snap.access_groups.get(&group_id) {
         if members.contains(&char_id) {
             return true;
         }
-        let (corp_id_opt, alliance_id_opt) =
-            effective_char_corp_and_alliance(snap, session, char_id);
         if let Some(cid) = corp_id_opt {
             if members.contains(&cid) {
                 return true;
@@ -216,10 +258,6 @@ pub(crate) fn folder_access_level(
         } else {
             AccessLevel::None
         };
-    }
-
-    if f.owner_id == char_id {
-        return AccessLevel::Admin;
     }
 
     let mut level = AccessLevel::None;

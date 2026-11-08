@@ -64,13 +64,30 @@ pub fn normalize_acl_role_value(raw: i64) -> Result<i64, BridgeRpcError> {
     }
 }
 
-pub fn is_acl_admin(char_id: i64, grp: &ops::AccessGroupRecord) -> bool {
-    grp.creator_id == char_id || grp.members.get(&char_id).copied() == Some(ACL_ROLE_ADMIN)
+pub fn is_acl_creator_active_for_corp(
+    char_id: i64,
+    char_corp: i64,
+    grp: &ops::AccessGroupRecord,
+) -> bool {
+    grp.creator_id == char_id
+        && (grp.owner_corp_id == 0 || char_corp == grp.owner_corp_id)
+        && !grp
+            .members
+            .get(&char_id)
+            .copied()
+            .is_some_and(is_acl_role_excluded)
 }
 
-pub fn is_acl_manager_or_admin(char_id: i64, grp: &ops::AccessGroupRecord) -> bool {
-    is_acl_admin(char_id, grp)
-        || grp.members.get(&char_id).copied() == Some(ACL_ROLE_MANAGER)
+pub fn is_acl_admin(char_id: i64, char_corp: i64, grp: &ops::AccessGroupRecord) -> bool {
+    is_acl_creator_active_for_corp(char_id, char_corp, grp)
+        || (grp.members.get(&char_id).copied() == Some(ACL_ROLE_ADMIN)
+            && (grp.owner_corp_id == 0 || char_id != grp.creator_id || char_corp == grp.owner_corp_id))
+}
+
+pub fn is_acl_manager_or_admin(char_id: i64, char_corp: i64, grp: &ops::AccessGroupRecord) -> bool {
+    is_acl_admin(char_id, char_corp, grp)
+        || (grp.members.get(&char_id).copied() == Some(ACL_ROLE_MANAGER)
+            && (grp.owner_corp_id == 0 || char_id != grp.creator_id || char_corp == grp.owner_corp_id))
 }
 
 /// Synchronizes docking `allowed_*` / `blocked_*` sets on `pid` after modifying `entity_id`
@@ -187,15 +204,30 @@ pub fn handle_set_member_role(
         let mut ext = load_ext_state(snap);
         let grp = ext.owner_groups.get(&group_id).ok_or_else(|| err("AccessGroupNotFound", format!("Group {group_id} not found")))?;
 
-        let is_admin_or_dir = is_acl_admin(char_id, grp)
-            || (grp.owner_corp_id != 0 && ops::require_corp_profile_manager(snap, session, char_id, grp.owner_corp_id).is_ok())
+        let caller_corp = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.corporation_id)
+            .or(session.corporation_id)
+            .unwrap_or(0);
+        let is_active_corp_dir = grp.owner_corp_id != 0
+            && ops::require_corp_profile_manager(snap, session, char_id, grp.owner_corp_id).is_ok();
+        let is_admin_or_dir = is_acl_admin(char_id, caller_corp, grp)
+            || is_active_corp_dir
             || session.has_gm_role();
-        if !is_admin_or_dir && !is_acl_manager_or_admin(char_id, grp) {
+        if !is_admin_or_dir && !is_acl_manager_or_admin(char_id, caller_corp, grp) {
             return Err(err("InsufficientCorpRoles", "Caller lacks manager permissions in this access group"));
         }
+        let creator_in_owner_corp = grp.owner_corp_id != 0
+            && snap
+                .characters
+                .get(&grp.creator_id)
+                .is_some_and(|c| c.corporation_id == grp.owner_corp_id);
+        let can_override_creator = session.has_gm_role()
+            || (is_active_corp_dir && (char_id != grp.creator_id || !creator_in_owner_corp));
         for &(entity_id, role, _, _) in &classified {
             let target_existing_role = grp.members.get(&entity_id).copied().unwrap_or(0);
-            if entity_id == grp.creator_id && role != ACL_ROLE_ADMIN && !session.has_gm_role() {
+            if entity_id == grp.creator_id && role != ACL_ROLE_ADMIN && !can_override_creator {
                 return Err(err("InsufficientCorpRoles", "Cannot demote or block access group creator"));
             }
             if (matches!(role, ACL_ROLE_ADMIN | ACL_ROLE_MANAGER)
@@ -262,7 +294,13 @@ pub fn handle_edit_group(
     ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_ext_state(snap);
         let grp = ext.owner_groups.get(&group_id).ok_or_else(|| err("AccessGroupNotFound", format!("Group {group_id} not found")))?;
-        let is_admin_or_dir = is_acl_admin(char_id, grp)
+        let caller_corp = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.corporation_id)
+            .or(session.corporation_id)
+            .unwrap_or(0);
+        let is_admin_or_dir = is_acl_admin(char_id, caller_corp, grp)
             || (grp.owner_corp_id != 0 && ops::require_corp_profile_manager(snap, session, char_id, grp.owner_corp_id).is_ok())
             || session.has_gm_role();
 
@@ -293,10 +331,22 @@ pub fn handle_get_group(
     ctx.db.with_snapshot(|snap| {
         let ext = load_ext_state(snap);
         let grp = ext.owner_groups.get(&group_id).ok_or_else(|| err("AccessGroupNotFound", format!("Group {group_id} not found")))?;
-        let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-        let can_view = grp.creator_id == char_id
-            || grp.members.get(&char_id).copied().is_some_and(is_acl_role_allowed)
-            || (grp.owner_corp_id != 0 && grp.owner_corp_id == caller_corp)
+        let caller_corp = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.corporation_id)
+            .or(session.corporation_id)
+            .unwrap_or(0);
+        let explicitly_excluded = grp
+            .members
+            .get(&char_id)
+            .copied()
+            .is_some_and(is_acl_role_excluded);
+        let can_view = !explicitly_excluded
+            && (is_acl_creator_active_for_corp(char_id, caller_corp, grp)
+                || (grp.members.get(&char_id).copied().is_some_and(is_acl_role_allowed)
+                    && (grp.owner_corp_id == 0 || char_id != grp.creator_id || grp.owner_corp_id == caller_corp))
+                || (grp.owner_corp_id != 0 && grp.owner_corp_id == caller_corp))
             || session.has_gm_role();
         if !can_view {
             return Err(err("AccessGroupAccessDenied", "Caller does not have access to view this access group"));
@@ -322,10 +372,22 @@ pub fn handle_get_members(
     ctx.db.with_snapshot(|snap| {
         let ext = load_ext_state(snap);
         let grp = ext.owner_groups.get(&group_id).ok_or_else(|| err("AccessGroupNotFound", format!("Group {group_id} not found")))?;
-        let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-        let can_view = grp.creator_id == char_id
-            || grp.members.get(&char_id).copied().is_some_and(is_acl_role_allowed)
-            || (grp.owner_corp_id != 0 && grp.owner_corp_id == caller_corp)
+        let caller_corp = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.corporation_id)
+            .or(session.corporation_id)
+            .unwrap_or(0);
+        let explicitly_excluded = grp
+            .members
+            .get(&char_id)
+            .copied()
+            .is_some_and(is_acl_role_excluded);
+        let can_view = !explicitly_excluded
+            && (is_acl_creator_active_for_corp(char_id, caller_corp, grp)
+                || (grp.members.get(&char_id).copied().is_some_and(is_acl_role_allowed)
+                    && (grp.owner_corp_id == 0 || char_id != grp.creator_id || grp.owner_corp_id == caller_corp))
+                || (grp.owner_corp_id != 0 && grp.owner_corp_id == caller_corp))
             || session.has_gm_role();
         if !can_view {
             return Err(err("AccessGroupAccessDenied", "Caller does not have access to view this access group's members"));

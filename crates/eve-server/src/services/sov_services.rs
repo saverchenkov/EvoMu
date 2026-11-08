@@ -124,11 +124,16 @@ pub(crate) fn can_access_sov_hub_fuel(
     if group_id > 0 {
         let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
         if let Some(grp) = ext.owner_groups.get(&group_id) {
-            use crate::services::structure_acl_defense_rules::is_acl_role_allowed;
+            use crate::services::structure_acl_defense_rules::{
+                is_acl_creator_active_for_corp, is_acl_role_allowed,
+            };
             if let Some(&r) = grp.members.get(&char_id) {
-                return is_acl_role_allowed(r);
+                return is_acl_role_allowed(r)
+                    && (grp.owner_corp_id == 0
+                        || char_id != grp.creator_id
+                        || corp_id == grp.owner_corp_id);
             }
-            if grp.creator_id == char_id {
+            if is_acl_creator_active_for_corp(char_id, corp_id, grp) {
                 return true;
             }
             if let Some(&r) = grp.members.get(&corp_id) {

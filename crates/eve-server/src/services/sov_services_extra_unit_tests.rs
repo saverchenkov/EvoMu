@@ -150,7 +150,9 @@ fn adm_all_index_tiers_hub_resolution_and_fuel_acl_precedence_kill_mutations() {
         save_ext_state(snap, &ext);
         snap.sov_runtime.fuel_access_groups.insert(active_hub_id, 88);
 
-        assert!(can_access_sov_hub_fuel(snap, active_hub_id, creator_cid, other_corp, None, 0, false));
+        // Creator retains access while still in the owner corp, but loses creator privilege if moved to another corp (#573).
+        assert!(can_access_sov_hub_fuel(snap, active_hub_id, creator_cid, owner_corp, None, 0, false));
+        assert!(!can_access_sov_hub_fuel(snap, active_hub_id, creator_cid, other_corp, None, 0, false));
         assert!(can_access_sov_hub_fuel(snap, active_hub_id, member_cid, other_corp, None, 0, false));
         assert!(!can_access_sov_hub_fuel(
             snap,

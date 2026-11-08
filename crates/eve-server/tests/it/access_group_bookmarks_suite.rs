@@ -665,3 +665,133 @@ async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
     let eve_destiny::MovementMode::Warp { destination, .. } = ball.mode else { panic!("ship must enter MovementMode::Warp") };
     assert!(destination.length() > 900_000.0 && destination.distance(safe_pos) < 1.0, "Warp destination must match non-zero safe spot coordinates");
 }
+
+#[tokio::test]
+async fn it_ex_director_loses_acl_and_shared_bookmark_folder_admin_after_demotion_or_departure() {
+    let ctx = create_test_context();
+    let corp_a = 98_444_001_i64;
+    let corp_b = 98_444_002_i64;
+    let creator_id = 90_444_001_i64;
+    let new_ceo_id = 90_444_002_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for cid in [corp_a, corp_b] {
+            snap.corporations.insert(
+                cid,
+                eve_db::CorporationRecord {
+                    corporation_id: cid,
+                    ceo_id: if cid == corp_a { new_ceo_id } else { creator_id },
+                    members: if cid == corp_a {
+                        [creator_id, new_ceo_id].into_iter().collect()
+                    } else {
+                        [creator_id].into_iter().collect()
+                    },
+                    member_roles: if cid == corp_a {
+                        [
+                            (creator_id, eve_db::corp_roles::ROLE_DIRECTOR),
+                            (new_ceo_id, eve_db::corp_roles::ROLE_DIRECTOR),
+                        ]
+                        .into_iter()
+                        .collect()
+                    } else {
+                        HashMap::new()
+                    },
+                    ..Default::default()
+                },
+            );
+        }
+        let template = snap.characters[&PILOT1].clone();
+        let mut ch_creator = template.clone();
+        ch_creator.character_id = creator_id;
+        ch_creator.name = "Ex Director".into();
+        ch_creator.corporation_id = corp_a;
+        snap.characters.insert(creator_id, ch_creator);
+
+        let mut ch_ceo = template;
+        ch_ceo.character_id = new_ceo_id;
+        ch_ceo.name = "New CEO".into();
+        ch_ceo.corporation_id = corp_a;
+        snap.characters.insert(new_ceo_id, ch_ceo);
+    });
+
+    let mut creator_sess = login_select(&ctx, creator_id, 7801).await;
+    creator_sess.corporation_id = Some(corp_a);
+    creator_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    let mut ceo_sess = login_select(&ctx, new_ceo_id, 7802).await;
+    ceo_sess.corporation_id = Some(corp_a);
+    ceo_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+
+    // Director creates a corp-owned ACL group and an ACL-governed shared bookmark folder
+    let grp_kv = rpc(
+        &ctx,
+        &mut creator_sess,
+        "ownerGroupManager",
+        "Create",
+        &[PyRep::String("Fleet Safes ACL".into()), PyRep::String("Corp".into()), PyRep::Bool(true)],
+    )
+    .await;
+    let grp_id = grp_kv.dict_get("groupID").and_then(|v| v.as_i64()).unwrap();
+
+    let add_f = rpc(
+        &ctx,
+        &mut creator_sess,
+        "accessGroupBookmarkMgr",
+        "AddFolder",
+        &[
+            PyRep::Bool(false),
+            PyRep::String("Director Shared".into()),
+            PyRep::String("Shared".into()),
+            PyRep::Integer(grp_id),
+            PyRep::None,
+            PyRep::None,
+            PyRep::None,
+        ],
+    )
+    .await;
+    let folder_id = add_f.dict_get("folderID").and_then(|v| v.as_i64()).unwrap();
+
+    // New CEO blocks the former director from the corp-owned group (previously blocked by creator_id immunity!)
+    let _ = rpc(
+        &ctx,
+        &mut ceo_sess,
+        "ownerGroupManager",
+        "UpdateMembershipTypes",
+        &[
+            PyRep::Integer(grp_id),
+            PyRep::List(vec![PyRep::Integer(creator_id)]),
+            PyRep::Integer(eve_server::services::structure_acl_defense_rules::ACL_ROLE_EXCLUDED),
+        ],
+    )
+    .await;
+
+    // Strip director role and verify creator loses both ownerGroupManager admin & accessGroupBookmarkMgr folder access
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.corporations.get_mut(&corp_a) {
+            c.member_roles.remove(&creator_id);
+            c.members.remove(&creator_id);
+        }
+        snap.characters.get_mut(&creator_id).unwrap().corporation_id = corp_b;
+    });
+    creator_sess.corporation_id = Some(corp_b);
+    creator_sess.corp_role = 0;
+
+    let edit_err = rpc_err(
+        &ctx,
+        &mut creator_sess,
+        "ownerGroupManager",
+        "EditGroup",
+        &[PyRep::Integer(grp_id), PyRep::String("Hijacked".into()), PyRep::String(String::new())],
+    )
+    .await;
+    assert_eq!(edit_err.code, "InsufficientCorpRoles");
+
+    let bm_err = rpc_err(
+        &ctx,
+        &mut creator_sess,
+        "accessGroupBookmarkMgr",
+        "GetFolderInfo",
+        &[PyRep::Integer(folder_id)],
+    )
+    .await;
+    assert_eq!(bm_err.code, "UserError");
+}

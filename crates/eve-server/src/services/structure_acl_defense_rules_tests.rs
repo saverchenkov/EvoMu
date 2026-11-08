@@ -445,3 +445,86 @@ fn fuel_bay_validation_consumption_disposal_and_character_service_rpcs_work() {
     let _ = handle_character_check_service(&ctx, &mut sess, &[PyRep::Integer(sid), PyRep::Integer(1)]);
     assert!(handle_character_has_setting(&ctx, &mut sess, &[PyRep::Integer(sid), PyRep::Integer(1)]).is_ok());
 }
+
+#[test]
+fn ex_director_creator_loses_corp_acl_admin_and_can_be_demoted_by_director() {
+    let ctx = test_ctx();
+    let corp_a = 98_750_i64;
+    let corp_b = 98_751_i64;
+    let ex_dir = 7_501_i64;
+    let active_dir = 7_502_i64;
+    let group_id = 80_750_001_i64;
+    seed_char_and_corp(&ctx, ex_dir, corp_a, 30_000_142, true);
+    seed_char_and_corp(&ctx, active_dir, corp_a, 30_000_142, false);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.corporations.get_mut(&corp_a) {
+            c.ceo_id = active_dir;
+        }
+        let mut ext = load_ext_state(snap);
+        ext.owner_groups.insert(
+            group_id,
+            ops::AccessGroupRecord {
+                group_id,
+                creator_id: ex_dir,
+                owner_corp_id: corp_a,
+                name: "Corp ACL".into(),
+                description: "Corp".into(),
+                members: [(ex_dir, ACL_ROLE_ADMIN)].into_iter().collect(),
+            },
+        );
+        save_ext_state(snap, &ext);
+    });
+
+    // Active corp CEO/director can demote/exclude creator on a corp-owned group
+    let mut dir_sess = SessionState::new(7502);
+    dir_sess.user_id = Some(active_dir as u64);
+    dir_sess.character_id = Some(active_dir);
+    dir_sess.corporation_id = Some(corp_a);
+    handle_set_member_role(
+        &ctx,
+        &dir_sess,
+        &[PyRep::Integer(group_id), PyRep::Integer(ex_dir), PyRep::Integer(ACL_ROLE_EXCLUDED)],
+    )
+    .expect("active corp director can block creator on corp group");
+
+    let mut ex_sess = SessionState::new(7501);
+    ex_sess.user_id = Some(ex_dir as u64);
+    ex_sess.character_id = Some(ex_dir);
+    ex_sess.corporation_id = Some(corp_a);
+
+    assert_eq!(
+        handle_edit_group(&ctx, &ex_sess, &[PyRep::Integer(group_id), PyRep::String("Hacked".into())])
+            .unwrap_err()
+            .code,
+        "InsufficientCorpRoles"
+    );
+    assert_eq!(
+        handle_get_group(&ctx, &ex_sess, &[PyRep::Integer(group_id)])
+            .unwrap_err()
+            .code,
+        "AccessGroupAccessDenied"
+    );
+
+    // Clear explicit member entry AND move ex_dir to corp_b -> ex_dir still has no creator admin/view
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        ext.owner_groups.get_mut(&group_id).unwrap().members.clear();
+        save_ext_state(snap, &ext);
+        if let Some(ch) = snap.characters.get_mut(&ex_dir) {
+            ch.corporation_id = corp_b;
+        }
+    });
+    ex_sess.corporation_id = Some(corp_b);
+    assert_eq!(
+        handle_edit_group(&ctx, &ex_sess, &[PyRep::Integer(group_id), PyRep::String("Hacked".into())])
+            .unwrap_err()
+            .code,
+        "InsufficientCorpRoles"
+    );
+    assert_eq!(
+        handle_get_members(&ctx, &ex_sess, &[PyRep::Integer(group_id)])
+            .unwrap_err()
+            .code,
+        "AccessGroupAccessDenied"
+    );
+}

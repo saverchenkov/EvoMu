@@ -830,20 +830,34 @@ pub fn apply_group_member_batch(
             .collect::<Result<_, BridgeRpcError>>()?;
         let mut ext = load_ext_state(snap);
         if let Some(grp) = ext.owner_groups.get(&group_or_struct_id) {
-            let is_admin_or_dir = is_acl_admin(char_id, grp)
-                || (grp.owner_corp_id != 0
-                    && ops::require_corp_profile_manager(snap, session, char_id, grp.owner_corp_id)
-                        .is_ok())
+            let caller_corp = snap
+                .characters
+                .get(&char_id)
+                .map(|c| c.corporation_id)
+                .or(session.corporation_id)
+                .unwrap_or(0);
+            let is_active_corp_dir = grp.owner_corp_id != 0
+                && ops::require_corp_profile_manager(snap, session, char_id, grp.owner_corp_id)
+                    .is_ok();
+            let is_admin_or_dir = is_acl_admin(char_id, caller_corp, grp)
+                || is_active_corp_dir
                 || session.has_gm_role();
-            let is_mgr = is_admin_or_dir || is_acl_manager_or_admin(char_id, grp);
+            let is_mgr = is_admin_or_dir || is_acl_manager_or_admin(char_id, caller_corp, grp);
             if !is_mgr {
                 return Err(err(
                     "InsufficientCorpRoles",
                     "Caller is not a manager or admin of this access group",
                 ));
             }
+            let creator_in_owner_corp = grp.owner_corp_id != 0
+                && snap
+                    .characters
+                    .get(&grp.creator_id)
+                    .is_some_and(|c| c.corporation_id == grp.owner_corp_id);
+            let can_override_creator = session.has_gm_role()
+                || (is_active_corp_dir && (char_id != grp.creator_id || !creator_in_owner_corp));
             for &(eid, role, _) in &classified {
-                if eid == grp.creator_id && (!is_add || role != ACL_ROLE_ADMIN) && !session.has_gm_role() {
+                if eid == grp.creator_id && (!is_add || role != ACL_ROLE_ADMIN) && !can_override_creator {
                     return Err(err(
                         "InsufficientCorpRoles",
                         "Cannot remove, demote, or block access group creator",
