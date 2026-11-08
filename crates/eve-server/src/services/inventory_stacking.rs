@@ -513,6 +513,7 @@ pub(crate) async fn handle_multi_add(
             .then(|| snap.structures.get(&new_loc).map(|st| st.owner_corp_id))
             .flatten()
             .unwrap_or(0);
+        let active_ship_id = session.ship_id.or_else(|| snap.characters.get(&char_id).map(|c| c.active_ship_id));
         for &item_id in &item_ids {
             let pre_item = snap
                 .items
@@ -522,33 +523,43 @@ pub(crate) async fn handle_multi_add(
                     code: "ItemNotFound".into(),
                     message: format!("Item {item_id} not found"),
                 })?;
-            let it = snap.items.get_mut(&item_id).ok_or_else(|| BridgeRpcError {
-                code: "ItemNotFound".into(),
-                message: format!("Item {item_id} not found"),
-            })?;
-            let old_flag = it.flag;
+            let it_snapshot = &pre_item;
+            let old_flag = it_snapshot.flag;
             let old_flag_u16 = old_flag as u16;
-            let old_loc = it.location_id;
-            let it_tid = it.type_id;
-            let it_qty = it.quantity;
-            if old_loc != new_loc {
-                old_containers.insert((old_loc, item_id, it_tid, it_qty));
-            }
-            it.location_id = new_loc;
-            it.flag = flag;
-            if dst_struct_corp > 0 {
-                it.owner_id = dst_struct_corp;
+            let old_loc = it_snapshot.location_id;
+            let it_tid = it_snapshot.type_id;
+            let it_qty = it_snapshot.quantity;
+            let new_owner = if dst_struct_corp > 0 {
+                dst_struct_corp
             } else if (116..=122).contains(&flag_u16) && caller_corp_id > 0 {
-                it.owner_id = caller_corp_id;
+                caller_corp_id
             } else if (116..=122).contains(&old_flag_u16)
                 || old_flag_u16 == 133
                 || matches!(flag, InventoryFlag::Hangar | InventoryFlag::Cargo)
                 || is_ship_hold
                 || looted_from_space_ids.contains(&item_id)
             {
-                it.owner_id = char_id;
+                char_id
+            } else {
+                it_snapshot.owner_id
+            };
+            let is_space_loot = looted_from_space_ids.contains(&item_id);
+            let mut spec = eve_db::TransferItemSpec::move_whole(
+                if is_space_loot { None } else { Some(char_id) },
+                if is_space_loot { Some(it_snapshot.owner_id) } else { None },
+                Some(new_owner),
+                new_loc,
+                flag,
+            );
+            spec.reject_fitted = false;
+            spec.active_ship_id = active_ship_id;
+            snap.transfer_inventory_item(item_id, spec).map_err(|e| BridgeRpcError {
+                code: "InventoryMoveFailed".into(),
+                message: e.to_string(),
+            })?;
+            if old_loc != new_loc {
+                old_containers.insert((old_loc, item_id, it_tid, it_qty));
             }
-            it.version += 1;
             snap.module_online_states.remove(&item_id);
             snap.module_active_states.remove(&item_id);
             snap.module_active_charges.remove(&item_id);

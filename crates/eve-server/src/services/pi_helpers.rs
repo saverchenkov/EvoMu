@@ -1057,7 +1057,7 @@ pub fn consume_pi_import_commodities(
                 || it.type_id != type_id
                 || it.quantity <= 0
                 || it.flag == eve_db::InventoryFlag::Locked
-                || snap.is_item_locked_in_contract_or_job(it.item_id)
+                || snap.is_item_or_ancestor_locked_or_impounded(it.item_id)
             {
                 return false;
             }
@@ -1103,15 +1103,20 @@ pub fn consume_pi_import_commodities(
     matching_item_ids.sort();
     let mut remaining = qty as i32;
     for iid in matching_item_ids {
-        let Some(item) = snap.items.get_mut(&iid) else { continue };
-        if item.quantity <= remaining {
-            remaining -= item.quantity;
-            snap.items.remove(&iid);
-        } else {
-            item.quantity -= remaining;
-            item.version += 1;
-            break;
+        let Some(avail) = snap.items.get(&iid).map(|it| it.quantity) else {
+            continue;
+        };
+        let take = avail.min(remaining);
+        if take <= 0 {
+            continue;
         }
+        let opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id);
+        snap.consume_exact_item_quantity(iid, take, opts)
+            .map_err(|e| BridgeRpcError {
+                code: "InventoryError".into(),
+                message: e.to_string(),
+            })?;
+        remaining -= take;
         if remaining == 0 {
             break;
         }

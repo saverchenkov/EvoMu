@@ -185,15 +185,19 @@ fn handle_crate_claim_loot(ctx: &ServerContext, session: &SessionState, args: &[
             return Err(err("LootAlreadyClaimed", format!("Loot from crate {crate_id} has already been claimed")));
         }
         ext.opened_crates.remove(&crate_id);
-        if crate_item.quantity > 1 {
-            if let Some(it_mut) = snap.items.get_mut(&crate_id) {
-                it_mut.quantity -= 1;
-                it_mut.version += 1;
-            }
-        } else {
+        let active_ship = session.ship_id.or_else(|| snap.characters.get(&char_id).map(|c| c.active_ship_id));
+        if crate_item.quantity == 1 {
             claimed.push(crate_id);
-            snap.items.remove(&crate_id);
         }
+        snap.consume_exact_item_quantity(
+            crate_id,
+            1,
+            eve_db::ConsumeExactOptions {
+                active_ship_id: active_ship,
+                ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), crate_item.owner_id)
+            },
+        )
+        .map_err(|e| err("ItemLocked", e.to_string()))?;
         let mut first_delivered = (0_i64, 0_u32, 0_i32);
         for &(item_type, qty) in &spec.items {
             snap.next_entity_id += 1;
@@ -265,16 +269,20 @@ fn handle_crate_claim_fitting(ctx: &ServerContext, session: &SessionState, args:
         }
         let claimed = ext.claimed_crate_loot.entry(char_id).or_default();
         ext.opened_crates.remove(&crate_id);
-        if crate_item.quantity > 1 {
-            if let Some(it_mut) = snap.items.get_mut(&crate_id) {
-                it_mut.quantity -= 1;
-                it_mut.version += 1;
-            }
-        } else {
+        let active_ship = session.ship_id.or_else(|| snap.characters.get(&char_id).map(|c| c.active_ship_id));
+        if crate_item.quantity <= 1 {
             claimed.push(key);
             claimed.push(crate_id);
-            snap.items.remove(&crate_id);
         }
+        snap.consume_exact_item_quantity(
+            crate_id,
+            1,
+            eve_db::ConsumeExactOptions {
+                active_ship_id: active_ship,
+                ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), crate_item.owner_id)
+            },
+        )
+        .map_err(|e| err("ItemLocked", e.to_string()))?;
         snap.next_entity_id += 1;
         let ship_item_id = snap.next_entity_id;
         snap.items.insert(ship_item_id, InventoryItemRecord {
@@ -305,12 +313,16 @@ fn handle_crate_claim_loot_stack(ctx: &ServerContext, session: &SessionState, ar
         if actual_to_open <= 0 {
             return Err(err("NoCratesToOpen", "No crates available in stack"));
         }
-        if crate_item.quantity <= actual_to_open {
-            snap.items.remove(&crate_id);
-        } else if let Some(item_mut) = snap.items.get_mut(&crate_id) {
-            item_mut.quantity -= actual_to_open;
-            item_mut.version += 1;
-        }
+        let active_ship = session.ship_id.or_else(|| snap.characters.get(&char_id).map(|c| c.active_ship_id));
+        snap.consume_exact_item_quantity(
+            crate_id,
+            actual_to_open,
+            eve_db::ConsumeExactOptions {
+                active_ship_id: active_ship,
+                ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), crate_item.owner_id)
+            },
+        )
+        .map_err(|e| err("ItemLocked", e.to_string()))?;
         for (item_type, base_qty) in spec.items {
             snap.next_entity_id += 1;
             let new_item_id = snap.next_entity_id;
@@ -354,16 +366,20 @@ fn handle_crate_claim_skill_bundle(ctx: &ServerContext, session: &SessionState, 
             return Err(err("SkillBundleAlreadyClaimed", format!("Skill bundle {bundle_id} from crate {crate_id} already claimed")));
         }
         ext.opened_crates.remove(&crate_id);
-        if crate_item.quantity > 1 {
-            if let Some(it_mut) = snap.items.get_mut(&crate_id) {
-                it_mut.quantity -= 1;
-                it_mut.version += 1;
-            }
-        } else {
+        let active_ship = session.ship_id.or_else(|| snap.characters.get(&char_id).map(|c| c.active_ship_id));
+        if crate_item.quantity <= 1 {
             claimed.push(key);
             claimed.push(crate_id);
-            snap.items.remove(&crate_id);
         }
+        snap.consume_exact_item_quantity(
+            crate_id,
+            1,
+            eve_db::ConsumeExactOptions {
+                active_ship_id: active_ship,
+                ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), crate_item.owner_id)
+            },
+        )
+        .map_err(|e| err("ItemLocked", e.to_string()))?;
         // DATA GAP: V24 crates.fsdbinary defines skillBundleID but not per-bundle skill lists.
         let bundle_skills: Vec<TypeId> = spec
             .items

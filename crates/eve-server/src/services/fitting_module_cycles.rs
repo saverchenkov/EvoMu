@@ -501,14 +501,18 @@ pub(crate) async fn handle_module_cycles(
                     }
                     let (charge_item_id, probe_type_id) = in_slot_id?;
 
-                    let mut rem = 0;
-                    if let Some(ci) = snap.items.get_mut(&charge_item_id) {
-                        ci.quantity = (ci.quantity - 1).max(0);
-                        rem = ci.quantity;
-                    }
-                    if rem == 0 {
-                        snap.items.remove(&charge_item_id);
-                    }
+                    let mut rem = if let Some(c_owner) = snap.items.get(&charge_item_id).map(|ci| ci.owner_id) {
+                        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), c_owner);
+                        opts.reject_fitted = false;
+                        opts.active_ship_id = Some(ship_id);
+                        match snap.consume_exact_item_quantity(charge_item_id, 1, opts) {
+                            Ok(Some(it)) => it.quantity,
+                            Ok(None) => 0,
+                            Err(_) => return None,
+                        }
+                    } else {
+                        return None;
+                    };
                     let mut auto_reloaded = 0;
                     if rem == 0 {
                         if let Some((_, _, r_qty)) = reload_into_slot(snap) {

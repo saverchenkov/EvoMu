@@ -450,12 +450,16 @@ fn damage_crystal(ctx: &ServerContext, cycle: &ActiveMiningCycle, crystal: Cryst
             return false;
         }
         let id = item.item_id;
-        if item.quantity > 1 {
-            item.quantity -= 1;
-            item.dynamic_attributes.remove(&attr::DAMAGE);
-            item.version += 1;
-        } else {
-            snap.items.remove(&id);
+        let owner_id = item.owner_id;
+        let opts = eve_db::ConsumeExactOptions {
+            reject_fitted: false,
+            ..eve_db::ConsumeExactOptions::for_owner_exact(None, owner_id)
+        };
+        if snap.consume_exact_item_quantity(id, 1, opts).is_err() {
+            return false;
+        }
+        if let Some(rem) = snap.items.get_mut(&id) {
+            rem.dynamic_attributes.remove(&attr::DAMAGE);
         }
         true
     });

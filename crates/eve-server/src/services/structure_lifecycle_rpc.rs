@@ -247,25 +247,23 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
         };
         let item_id = if let Some(cid) = cargo_item_id_opt {
             let item = snap.items.get(&cid).ok_or_else(|| err("MissingStructureItem", format!("Cargo item {cid} not found")))?;
-            if (item.owner_id != char_id && item.owner_id != corp_id) || item.location_id != ship_id || item.quantity < 1 || item.flag == InventoryFlag::Locked || snap.is_item_locked_in_contract_or_job(cid) {
+            if (item.owner_id != char_id && item.owner_id != corp_id) || item.location_id != ship_id || item.quantity < 1 || snap.is_item_or_ancestor_locked_or_impounded(cid) {
                 return Err(err("MissingStructureItem", format!("Cargo item {cid} not available in cargo")));
             }
             cid
         } else {
             snap.items
                 .values()
-                .filter(|i| (i.owner_id == char_id || i.owner_id == corp_id) && i.location_id == ship_id && i.type_id == type_id && i.quantity >= 1 && i.flag != InventoryFlag::Locked && !snap.is_item_locked_in_contract_or_job(i.item_id))
+                .filter(|i| (i.owner_id == char_id || i.owner_id == corp_id) && i.location_id == ship_id && i.type_id == type_id && i.quantity >= 1 && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id))
                 .map(|i| i.item_id)
                 .min()
                 .ok_or_else(|| err("MissingStructureItem", format!("Anchoring requires structure type {type_id} in active ship {ship_id} cargo")))?
         };
-        if let Some(item) = snap.items.get_mut(&item_id) {
-            if item.quantity > 1 {
-                item.quantity -= 1;
-                item.version += 1;
-            } else {
-                snap.items.remove(&item_id);
-            }
+        if let Some(item_owner) = snap.items.get(&item_id).map(|i| i.owner_id) {
+            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), item_owner);
+            opts.active_ship_id = Some(ship_id);
+            snap.consume_exact_item_quantity(item_id, 1, opts)
+                .map_err(|e| err("ItemLocked", e.to_string()))?;
         }
         let has_prefit_core = ctx
             .sde
@@ -956,16 +954,21 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
                 return Err(err("InvalidItemLocation", format!("Cannot unfit module into location {new_loc}")));
             }
             if matches!(src.flag as u16, 92..=94) {
-                snap.items.remove(&item_id);
-                snap.module_online_states.remove(&item_id);
+                snap.remove_system_cleanup_item(item_id);
                 return Ok((structure_id, item_id, src.type_id, src.flag as i64, true, false, false, released));
             }
             let was_service = (164..=171).contains(&(src.flag as u16));
-            if let Some(it) = snap.items.get_mut(&item_id) {
-                it.location_id = new_loc;
-                it.flag = flag;
-                it.version += 1;
-            }
+            let unfit_actor = if src.owner_id == char_id { Some(char_id) } else { None };
+            let mut unfit_spec = eve_db::TransferItemSpec::move_whole(
+                unfit_actor,
+                None,
+                None,
+                new_loc,
+                flag,
+            );
+            unfit_spec.reject_fitted = false;
+            snap.transfer_inventory_item(item_id, unfit_spec)
+                .map_err(|e| err("InventoryError", e.to_string()))?;
             snap.module_online_states.remove(&item_id);
             if was_service {
                 if let Some(lf) = ext.lifecycle.get_mut(&structure_id) {
@@ -1027,12 +1030,17 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
             }) {
                 return Err(err("SlotAlreadyOccupied", format!("Structure {structure_id} slot {flag_u16} already has charges loaded")));
             }
-            if let Some(it) = snap.items.get_mut(&item_id) {
-                it.location_id = structure_id;
-                it.flag = flag;
-                it.owner_id = st.owner_corp_id;
-                it.version += 1;
-            }
+            let fit_actor = if src.owner_id == char_id { Some(char_id) } else { None };
+            let mut charge_spec = eve_db::TransferItemSpec::move_whole(
+                fit_actor,
+                None,
+                Some(st.owner_corp_id),
+                structure_id,
+                flag,
+            );
+            charge_spec.reject_fitted = false;
+            snap.transfer_inventory_item(item_id, charge_spec)
+                .map_err(|e| err("InventoryError", e.to_string()))?;
             return Ok((structure_id, item_id, src.type_id, src.flag as i64, false, true, false, released));
         }
         check_module_fits_structure(mod_type, st.type_id, profile.group_id, &profile, flag_u16)?;
@@ -1059,11 +1067,14 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
         } else {
             online && !matches!(flag_u16, 92..=94)
         };
+        let fit_actor = if src.owner_id == char_id { Some(char_id) } else { None };
         let fitted_id = if src.quantity > 1 {
-            if let Some(it) = snap.items.get_mut(&item_id) {
-                it.quantity -= 1;
-                it.version += 1;
-            }
+            snap.consume_exact_item_quantity(
+                item_id,
+                1,
+                eve_db::ConsumeExactOptions::for_owner_exact(fit_actor, src.owner_id),
+            )
+            .map_err(|e| err("InventoryError", e.to_string()))?;
             snap.next_entity_id += 1;
             let new_id = snap.next_entity_id;
             snap.items.insert(
@@ -1082,11 +1093,18 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
             );
             new_id
         } else {
+            let mut fit_spec = eve_db::TransferItemSpec::move_whole(
+                fit_actor,
+                Some(src.owner_id),
+                None,
+                structure_id,
+                flag,
+            );
+            fit_spec.reject_fitted = false;
+            snap.transfer_inventory_item(item_id, fit_spec)
+                .map_err(|e| err("InventoryError", e.to_string()))?;
             if let Some(it) = snap.items.get_mut(&item_id) {
-                it.location_id = structure_id;
-                it.flag = flag;
                 it.singleton = true;
-                it.version += 1;
             }
             item_id
         };

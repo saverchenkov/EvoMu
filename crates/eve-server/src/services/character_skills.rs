@@ -1325,14 +1325,18 @@ pub fn handle(
                         });
                     };
 
-                    if let Some(item) = snap.items.get_mut(&item_id) {
-                        if item.quantity > 1 {
-                            item.quantity -= 1;
-                            item.version += 1;
-                        } else {
-                            snap.items.remove(&item_id);
-                        }
-                    }
+                    snap.consume_exact_item_quantity(
+                        item_id,
+                        1,
+                        eve_db::ConsumeExactOptions {
+                            active_ship_id: current_ship,
+                            ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id)
+                        },
+                    )
+                    .map_err(|e| BridgeRpcError {
+                        code: "ItemLocked".into(),
+                        message: e.to_string(),
+                    })?;
 
                     snap.skills.entry(char_id).or_default().insert(
                         skill_type_id,

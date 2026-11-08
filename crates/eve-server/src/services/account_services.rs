@@ -1022,15 +1022,18 @@ fn handle_inner(
                             code: "UserError".into(),
                             message: "NoMultiTrainingCertificateFound".into(),
                         })?;
-                    let cert = snap.items.get_mut(&cert_id).ok_or_else(|| BridgeRpcError {
+                    snap.consume_exact_item_quantity(
+                        cert_id,
+                        1,
+                        eve_db::ConsumeExactOptions {
+                            active_ship_id: effective_ship,
+                            ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id)
+                        },
+                    )
+                    .map_err(|_| BridgeRpcError {
                         code: "UserError".into(),
                         message: "NoMultiTrainingCertificateFound".into(),
                     })?;
-                    cert.quantity -= 1;
-                    cert.version += 1;
-                    if cert.quantity <= 0 {
-                        snap.items.remove(&cert_id);
-                    }
                     let key = format!("mct_slots:{uid}");
                     let mut slots: Vec<u64> = snap
                         .service_state_blobs
@@ -1109,15 +1112,18 @@ fn handle_inner(
                         code: "UserError".into(),
                         message: "NoResculptCertificateFound".into(),
                     })?;
-                let cert = snap.items.get_mut(&cert_id).ok_or_else(|| BridgeRpcError {
+                snap.consume_exact_item_quantity(
+                    cert_id,
+                    1,
+                    eve_db::ConsumeExactOptions {
+                        active_ship_id: effective_ship,
+                        ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id)
+                    },
+                )
+                .map_err(|_| BridgeRpcError {
                     code: "UserError".into(),
                     message: "NoResculptCertificateFound".into(),
                 })?;
-                cert.quantity -= 1;
-                cert.version += 1;
-                if cert.quantity <= 0 {
-                    snap.items.remove(&cert_id);
-                }
                 let cur: u32 = snap
                     .service_state_blobs
                     .get(&format!("account_resculpt_tokens:{uid}"))

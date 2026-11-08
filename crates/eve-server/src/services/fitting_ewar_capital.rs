@@ -973,44 +973,27 @@ pub(crate) async fn commit_post_cycle_activation_effects(
                     .map(|i| (i.item_id, i.quantity))
                 {
                     if avail >= fuel_qty_needed {
-                        let rem = snap
-                            .items
-                            .get_mut(&fid)
-                            .map(|f_it| {
-                                f_it.quantity -= fuel_qty_needed;
-                                f_it.quantity
-                            })
-                            .unwrap_or(0);
-                        if rem == 0 {
-                            snap.items.remove(&fid);
+                        if let Some(f_owner) = snap.items.get(&fid).map(|f| f.owner_id) {
+                            let opts = eve_db::ConsumeExactOptions::for_owner_exact(None, f_owner);
+                            let _ = snap.consume_exact_item_quantity(fid, fuel_qty_needed, opts);
                         }
                     }
                 }
             }
             if let Some(cid) = deferred.cap_booster_charge_id {
-                let rem = snap
-                    .items
-                    .get_mut(&cid)
-                    .map(|ci| {
-                        ci.quantity = ci.quantity.saturating_sub(1);
-                        ci.quantity
-                    })
-                    .unwrap_or(0);
-                if rem == 0 {
-                    snap.items.remove(&cid);
+                if let Some(c_owner) = snap.items.get(&cid).map(|ci| ci.owner_id) {
+                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, c_owner);
+                    opts.reject_fitted = false;
+                    let _ = snap.consume_exact_item_quantity(cid, 1, opts);
                 }
             }
             for (turret_id, charge_id) in deferred.turret_charge_consumptions {
-                let mut remove_cid: Option<i64> = None;
-                if let Some(ci) = snap.items.get_mut(&charge_id) {
-                    ci.quantity = ci.quantity.saturating_sub(1);
-                    if ci.quantity == 0 {
-                        remove_cid = Some(ci.item_id);
+                if let Some(c_owner) = snap.items.get(&charge_id).map(|ci| ci.owner_id) {
+                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, c_owner);
+                    opts.reject_fitted = false;
+                    if matches!(snap.consume_exact_item_quantity(charge_id, 1, opts), Ok(None)) {
+                        snap.module_active_charges.remove(&turret_id);
                     }
-                }
-                if let Some(rcid) = remove_cid {
-                    snap.items.remove(&rcid);
-                    snap.module_active_charges.remove(&turret_id);
                 }
             }
         });

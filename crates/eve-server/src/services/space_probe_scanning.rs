@@ -181,14 +181,18 @@ pub async fn activate_scan_probe_launcher(
     let to_launch = requested_count.clamp(1, max_can_launch).min(loaded_qty);
 
     let (allocated_probe_ids, remaining_in_launcher) = ctx.db.with_mut_snapshot(|snap| {
-        let mut rem = 0;
-        if let Some(ci) = snap.items.get_mut(&charge_item_id) {
-            ci.quantity = (ci.quantity - to_launch).max(0);
-            rem = ci.quantity;
-        }
-        if rem == 0 {
-            snap.items.remove(&charge_item_id);
-        }
+        let rem = if let Some(owner) = snap.items.get(&charge_item_id).map(|ci| ci.owner_id) {
+            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), owner);
+            opts.reject_fitted = false;
+            opts.active_ship_id = Some(ship_id);
+            match snap.consume_exact_item_quantity(charge_item_id, to_launch, opts) {
+                Ok(Some(it)) => it.quantity,
+                Ok(None) => 0,
+                Err(_) => loaded_qty,
+            }
+        } else {
+            0
+        };
         let mut ids = Vec::with_capacity(to_launch as usize);
         for _ in 0..to_launch {
             snap.next_entity_id += 1;

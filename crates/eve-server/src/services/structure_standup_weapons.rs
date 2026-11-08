@@ -174,17 +174,12 @@ fn consume_structure_charge(
         let Some(cid) = candidate_id else {
             return false;
         };
-        let remove = if let Some(it) = snap.items.get_mut(&cid) {
-            it.quantity -= qty_needed;
-            it.version = it.version.saturating_add(1);
-            it.quantity <= 0
-        } else {
-            false
+        let Some(c_owner) = snap.items.get(&cid).map(|it| it.owner_id) else {
+            return false;
         };
-        if remove {
-            snap.items.remove(&cid);
-        }
-        true
+        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, c_owner);
+        opts.reject_fitted = false;
+        snap.consume_exact_item_quantity(cid, qty_needed, opts).is_ok()
     })
 }
 

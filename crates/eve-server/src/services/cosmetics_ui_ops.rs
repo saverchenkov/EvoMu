@@ -283,14 +283,15 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
                     format!("Character {char_id} does not own SKIN license item (typeID {requested_skin_id}) at current station/structure or active ship"),
                 ));
             };
-            if let Some(item) = snap.items.get_mut(&item_id) {
-                if item.quantity > 1 {
-                    item.quantity -= 1;
-                    item.version += 1;
-                } else {
-                    snap.items.remove(&item_id);
-                }
-            }
+            snap.consume_exact_item_quantity(
+                item_id,
+                1,
+                eve_db::ConsumeExactOptions {
+                    active_ship_id: current_ship,
+                    ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id)
+                },
+            )
+            .map_err(|e| err("ItemLocked", e.to_string()))?;
             let list = snap.licensed_skins.entry(char_id).or_default();
             if !list.contains(&requested_skin_id) {
                 list.push(requested_skin_id);

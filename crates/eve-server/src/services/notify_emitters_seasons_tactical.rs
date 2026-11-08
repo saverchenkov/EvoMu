@@ -910,14 +910,13 @@ pub(crate) fn handle_load_ammo(
             }
         }
 
-        if let Some(stack) = snap.items.get_mut(&first_charge_id) {
-            if stack.quantity > total_needed {
-                stack.quantity -= total_needed;
-                stack.version += 1;
-            } else {
-                snap.items.remove(&first_charge_id);
-            }
-        }
+        let charge_owner = snap.items.get(&first_charge_id).map(|it| it.owner_id).unwrap_or(char_id);
+        snap.consume_exact_item_quantity(
+            first_charge_id,
+            total_needed,
+            eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), charge_owner),
+        )
+        .map_err(|e| rpc_err("InventoryError", e.to_string()))?;
         for &(mod_id, alloc_qty) in &mod_allocations {
             let Some(mod_item) = snap.items.get(&mod_id).cloned() else {
                 continue;

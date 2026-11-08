@@ -971,13 +971,16 @@ pub fn handle(
                                 ),
                             });
                         };
-                        if let Some(it) = snap.items.get_mut(&hid) {
-                            if it.quantity > qty_i32 {
-                                it.quantity -= qty_i32;
-                                it.version += 1;
-                            } else { snap.items.remove(&hid);
-                            }
-                        }
+                        let mut opts = eve_db::ConsumeExactOptions::for_character_stack(char_id);
+                        opts.required_location_id = Some(station_id);
+                        opts.required_flag = Some(InventoryFlag::Hangar);
+                        snap.consume_exact_item_quantity(hid, qty_i32, opts)
+                            .map_err(|_| BridgeRpcError {
+                                code: "InsufficientPlexBalance".into(),
+                                message: format!(
+                                    "Insufficient unlocked PLEX in vault ({vault_plex}) or hangar to sell {quantity} PLEX"
+                                ),
+                            })?;
                     }
 
                     // Match globally against any resting PLEX buy orders across all regions

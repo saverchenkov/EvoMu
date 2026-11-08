@@ -600,8 +600,16 @@ async fn handle_random_jump_filament(
         crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, p_char, p_ship);
     }
     ctx.db.try_with_mut_snapshot(|snap| {
-        if let Some(item) = snap.items.get_mut(&fil_item_id) {
-            if item.quantity > 1 { item.quantity -= 1; item.version += 1; } else { snap.items.remove(&fil_item_id); }
+        if let Some(fil_owner) = snap.items.get(&fil_item_id).map(|i| i.owner_id) {
+            snap.consume_exact_item_quantity(
+                fil_item_id,
+                1,
+                eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), fil_owner),
+            )
+            .map_err(|e| BridgeRpcError {
+                code: "FilamentLocked".into(),
+                message: e.to_string(),
+            })?;
         }
         for &(p_char, p_ship, _) in &jumpers {
             if let Some(ch) = snap.characters.get_mut(&p_char) {

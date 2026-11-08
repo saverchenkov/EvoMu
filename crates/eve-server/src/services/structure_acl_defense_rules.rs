@@ -959,17 +959,17 @@ pub fn consume_structure_fuel_blocks(
         if rem == 0 {
             break;
         }
-        let remove_it = if let Some(it) = snap.items.get_mut(&iid) {
-            let take = rem.min(it.quantity.max(0) as u32);
-            it.quantity -= take as i32;
-            it.version += 1;
-            rem -= take;
-            it.quantity <= 0
-        } else {
-            false
+        let Some((it_owner, avail)) = snap.items.get(&iid).map(|it| (it.owner_id, it.quantity.max(0) as u32)) else {
+            continue;
         };
-        if remove_it {
-            snap.items.remove(&iid);
+        let take = rem.min(avail);
+        if take == 0 {
+            continue;
+        }
+        let mut fuel_opts = eve_db::ConsumeExactOptions::for_owner_exact(None, it_owner);
+        fuel_opts.reject_singleton = true;
+        if snap.consume_exact_item_quantity(iid, take as i32, fuel_opts).is_ok() {
+            rem -= take;
         }
     }
     if let Some(st) = snap.structures.get_mut(&structure_id) {
@@ -1215,7 +1215,7 @@ pub fn finalize_fuel_bay_move_in_snap(
                 .map(|i| i.item_id);
             if let Some(tid) = merge_target {
                 if let Some(new_q) = snap.items.get(&tid).and_then(|t| t.quantity.checked_add(moving.quantity)) {
-                    snap.items.remove(&moved_item_id);
+                    snap.remove_system_cleanup_item(moved_item_id);
                     if let Some(t) = snap.items.get_mut(&tid) {
                         t.owner_id = owner_corp;
                         t.quantity = new_q;

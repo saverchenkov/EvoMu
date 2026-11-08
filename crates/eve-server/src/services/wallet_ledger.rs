@@ -553,12 +553,12 @@ fn deposit_plex_inner(
         if item.quantity < qty_i32 {
             return Err(rpc_err("NotEnoughQuantity", "stack has fewer units than requested"));
         }
-        if item.quantity == qty_i32 {
-            snap.items.remove(&item_id);
-        } else if let Some(i) = snap.items.get_mut(&item_id) {
-            i.quantity -= qty_i32;
-            i.version += 1;
-        }
+        let mut opts = eve_db::ConsumeExactOptions::for_character_stack(char_id);
+        opts.expected_owner_id = item.owner_id;
+        opts.required_location_id = Some(location_id);
+        opts.required_flag = Some(item.flag);
+        snap.consume_exact_item_quantity(item_id, qty_i32, opts)
+            .map_err(|e| rpc_err("ItemLocked", e.to_string()))?;
         let rem_plex = snap.adjust_plex_vault(char_id, qty).ok_or_else(|| rpc_err("VaultError", "vault update failed"))?;
         snap.next_entity_id += 1;
         let tx_id = snap.next_entity_id as u64;

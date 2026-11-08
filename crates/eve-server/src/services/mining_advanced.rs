@@ -1339,19 +1339,21 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
                                 && (st_owner_corp == 0 || it.owner_id == st_owner_corp)
                                 && matches!(it.flag, InventoryFlag::StructureFuel | InventoryFlag::SpecializedFuelBay)
                                 && it.quantity > 0
-                                && !snap.is_item_locked_in_contract_or_job(it.item_id)
+                                && !snap.is_item_or_ancestor_locked_or_impounded(it.item_id)
                                 && if is_fuel { ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136) } else { it.type_id == 81143 }
                         })
                         .map(|it| it.item_id).collect();
                     ids.sort_unstable();
                     for iid in ids {
                         if *rem_ref == 0 { break; }
-                        if let Some(it) = snap.items.get_mut(&iid) {
-                            let take = (it.quantity.max(0) as u32).min(*rem_ref);
-                            it.quantity -= take as i32;
-                            it.version += 1;
+                        let Some((owner_id, avail)) = snap.items.get(&iid).map(|it| (it.owner_id, it.quantity)) else {
+                            continue;
+                        };
+                        let take = (avail.max(0) as u32).min(*rem_ref);
+                        if take == 0 { continue; }
+                        let opts = eve_db::ConsumeExactOptions::for_owner_exact(None, owner_id);
+                        if snap.consume_exact_item_quantity(iid, take as i32, opts).is_ok() {
                             *rem_ref -= take;
-                            if it.quantity <= 0 { snap.items.remove(&iid); }
                         }
                     }
                 }

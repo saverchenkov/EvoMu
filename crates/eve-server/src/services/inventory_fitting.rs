@@ -425,10 +425,7 @@ pub async fn handle(
                     }
                     let old_loc = src_item.location_id;
                     ctx.db.with_mut_snapshot(|snap| {
-                        snap.items.remove(&item_id);
-                        snap.module_online_states.remove(&item_id);
-                        snap.module_active_states.remove(&item_id);
-                        snap.module_active_charges.remove(&item_id);
+                        snap.remove_system_cleanup_item(item_id);
                     });
                     ctx.invalidate_ship_fitting(old_loc);
                     let _ = ctx.get_or_rebuild_ship_fitting(char_id, old_loc);
@@ -1104,36 +1101,40 @@ pub async fn handle(
                 if let Some(split_qty) = split_qty_opt {
                     let orig_id = item_id;
                     let split_res = ctx.db.try_with_mut_snapshot(|snap| {
-                        let orig = snap.items.get_mut(&item_id).ok_or_else(|| format!("Item {item_id} not found"))?;
-                        if orig.singleton || split_qty >= orig.quantity { return Err("Cannot split".to_string()); }
-                        orig.quantity -= split_qty;
-                        orig.version += 1;
-                        snap.next_entity_id += 1;
-                        let new_id = snap.next_entity_id;
-                        let split_rec = eve_db::InventoryItemRecord {
-                            item_id: new_id, type_id: orig.type_id, owner_id: char_id, location_id: active_ship,
-                            flag, quantity: split_qty, singleton: false, version: 1, ..Default::default()
-                        };
-                        snap.items.insert(new_id, split_rec.clone());
-                        Ok(split_rec)
+                        let mut spec = eve_db::TransferItemSpec::move_whole(
+                            None,
+                            None,
+                            Some(char_id),
+                            active_ship,
+                            flag,
+                        );
+                        spec.quantity = Some(split_qty);
+                        spec.reject_singleton = true;
+                        spec.active_ship_id = Some(active_ship);
+                        snap.transfer_inventory_item(item_id, spec)
+                            .map_err(|e| e.to_string())
                     });
                     match split_res {
                         Ok(split_item) => { did_split = Some((orig_id, split_qty)); item_id = split_item.item_id; source_item_opt = Some(split_item); }
                         Err(e) => return Some(Err(BridgeRpcError { code: "SplitFailed".into(), message: e })),
                     }
                 } else {
-                    let changed_owner = ctx.db.with_mut_snapshot(|snap| {
-                        if let Some(it) = snap.items.get_mut(&item_id) {
-                            let changed = it.owner_id != char_id;
-                            it.owner_id = char_id;
-                            it.location_id = active_ship;
-                            it.flag = flag;
-                            it.version += 1;
-                            return changed;
-                        }
-                        false
-                    });
-                    if changed_owner {
+                    let prev_owner = source_item_opt.as_ref().map(|s| s.owner_id);
+                    if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
+                        let mut spec = eve_db::TransferItemSpec::move_whole(
+                            None,
+                            None,
+                            Some(char_id),
+                            active_ship,
+                            flag,
+                        );
+                        spec.reject_fitted = false;
+                        spec.active_ship_id = Some(active_ship);
+                        snap.transfer_inventory_item(item_id, spec)
+                    }) {
+                        return Some(Err(BridgeRpcError { code: "InventoryMoveFailed".into(), message: e.to_string() }));
+                    }
+                    if prev_owner.is_some_and(|owner_id| owner_id != char_id) {
                         crate::services::quasar_cosmetics_live::strip_ship_cosmetics_for_ships(&ctx.db, &[item_id]);
                     }
                     if let Some(src) = source_item_opt.as_mut() { src.owner_id = char_id; src.location_id = active_ship; src.flag = flag; }
@@ -1207,10 +1208,7 @@ pub async fn handle(
                             .get(&target_iid)
                             .and_then(|t| t.quantity.checked_add(moving.quantity).map(|nq| (t.quantity, nq)));
                         if let Some((prev_qty, new_qty)) = target_qty {
-                            snap.items.remove(&item_id);
-                            snap.module_online_states.remove(&item_id);
-                            snap.module_active_states.remove(&item_id);
-                            snap.module_active_charges.remove(&item_id);
+                            snap.remove_system_cleanup_item(item_id);
                             let target_item = snap.items.get_mut(&target_iid).unwrap();
                             target_item.quantity = new_qty;
                             target_item.version += 1;
@@ -1559,7 +1557,7 @@ pub async fn handle(
                 Err(e) => {
                     if let Some((orig_id, sq)) = did_split {
                         ctx.db.with_mut_snapshot(|snap| {
-                            snap.items.remove(&item_id);
+                            snap.remove_system_cleanup_item(item_id);
                             if let Some(orig) = snap.items.get_mut(&orig_id) {
                                 orig.quantity += sq;
                                 orig.version = orig.version.saturating_sub(1);

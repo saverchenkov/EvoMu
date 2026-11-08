@@ -604,10 +604,18 @@ pub fn handle(
                             format!("Item {iid} must be owned by issuer at station {start_station_id}"),
                         ));
                     }
-                    if item_snap.flag == InventoryFlag::Locked || already_locked {
+                    let item_flag = item_snap.flag;
+                    if item_flag == InventoryFlag::Locked
+                        || already_locked
+                        || snap.is_item_or_ancestor_locked_or_impounded(iid)
+                        || snap.is_war_hq_structure(iid)
+                        || eve_db::WorldStateSnapshot::is_fitted_slot_flag(item_flag)
+                        || snap.is_container_non_empty(iid)
+                        || !snap.has_structure_acl_access(start_station_id, char_id)
+                    {
                         return Err(rpc_err(
                             "ContractItemLocked",
-                            format!("Item {iid} is currently locked in an active job or contract"),
+                            format!("Item {iid} is locked, fitted, non-empty, or ineligible for contracting"),
                         ));
                     }
                     if for_corp {
@@ -886,26 +894,26 @@ pub fn handle(
                     } else {
                         (char_id, InventoryFlag::Hangar)
                     };
+                    let acceptor_active_ship = snap.characters.get(&char_id).map(|ch| ch.active_ship_id);
                     for (cand_id, take_qty) in requested_transfers {
-                        let cur_qty = snap.items.get(&cand_id).map(|i| i.quantity).unwrap_or(0);
-                        if take_qty >= cur_qty {
-                            if let Some(it) = snap.items.get_mut(&cand_id) {
-                                it.owner_id = issuer_entity_id;
-                                it.location_id = c.start_station_id;
-                                it.flag = req_dest_flag;
-                                it.version += 1;
-                            }
-                        } else if let Some(it) = snap.items.get_mut(&cand_id) {
-                            let tid = it.type_id;
-                            it.quantity -= take_qty;
-                            it.version += 1;
-                            snap.next_entity_id += 1;
-                            let split_id = snap.next_entity_id;
-                            snap.items.insert(split_id, InventoryItemRecord {
-                                item_id: split_id, type_id: tid, owner_id: issuer_entity_id, location_id: c.start_station_id,
-                                flag: req_dest_flag, quantity: take_qty, singleton: false, version: 1, ..Default::default()
-                            });
-                        }
+                        let (cur_owner, cur_qty) = snap
+                            .items
+                            .get(&cand_id)
+                            .map(|i| (i.owner_id, i.quantity))
+                            .unwrap_or((0, 0));
+                        let actor = if cur_owner == char_id { Some(char_id) } else { None };
+                        let mut xfer = eve_db::TransferItemSpec::move_whole(
+                            actor,
+                            None,
+                            Some(issuer_entity_id),
+                            c.start_station_id,
+                            req_dest_flag,
+                        );
+                        xfer.quantity = if take_qty >= cur_qty { None } else { Some(take_qty) };
+                        xfer.reject_non_empty_container = true;
+                        xfer.active_ship_id = acceptor_active_ship;
+                        snap.transfer_inventory_item(cand_id, xfer)
+                            .map_err(|e| rpc_err("ContractTransferFailed", e.to_string()))?;
                     }
 
                     let mut transferred_ids = Vec::new();
@@ -1309,7 +1317,7 @@ pub fn handle(
                         item.version += 1;
                     }
                 }
-                for wid in wraps_to_remove { snap.items.remove(&wid); }
+                for wid in wraps_to_remove { snap.remove_system_cleanup_item(wid); }
                 if let Some(c_mut) = snap.contracts.get_mut(&cid) { c_mut.status = "Completed".into(); }
                 if let Some(dep_raw) = snap.service_state_blobs.remove(&format!("contract_deposit:{cid}")).and_then(|s| s.parse::<i64>().ok()) {
                     snap.credit_contract_issuer(&c, IskCents(dep_raw));
@@ -1772,7 +1780,7 @@ pub fn break_courier_plastic_wrap(
         }
     }
     snap.strip_ship_cosmetics(&transferred_ids);
-    snap.items.remove(&wrap_id);
+    snap.remove_system_cleanup_item(wrap_id);
     Ok((cid, issuer_id, item_ids))
 }
 

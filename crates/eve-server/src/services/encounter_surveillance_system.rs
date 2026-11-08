@@ -417,13 +417,14 @@ pub async fn handle_ess_link(
                     sys_id,
                     None,
                 )?;
-                if let Some(key_item) = snap.items.get_mut(&key_id) {
-                    if key_item.quantity > 1 {
-                        key_item.quantity -= 1;
-                        key_item.version += 1;
-                    } else {
-                        snap.items.remove(&key_id);
-                    }
+                if let Some(key_owner) = snap.items.get(&key_id).map(|i| i.owner_id) {
+                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), key_owner);
+                    opts.active_ship_id = Some(ship_id);
+                    snap.consume_exact_item_quantity(key_id, 1, opts)
+                        .map_err(|e| BridgeRpcError {
+                            code: "EssKeyLocked".into(),
+                            message: e.to_string(),
+                        })?;
                 }
                 let new_until = now_unix + dur_mins * 60;
                 unlocked_until_new = Some(new_until);

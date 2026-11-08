@@ -474,14 +474,14 @@ fn handle_take_offer(
                     .is_some_and(|name| name.starts_with("courier_cargo:"));
                 if owner_matches
                     && loc_and_flag_matches
-                    && it.flag != InventoryFlag::Locked
+                    && !snap.is_item_or_ancestor_locked_or_impounded(it.item_id)
+                    && !eve_db::WorldStateSnapshot::is_fitted_slot_flag(it.flag)
                     && !it.is_blueprint_copy
                     && it.dynamic_attributes.get(&3).copied().unwrap_or(0.0) <= 0.0
                     && it.source_mutaplasmid_id.is_none()
                     && !is_active_ship
                     && !has_contained_items
                     && !is_courier_cargo
-                    && !snap.is_item_locked_in_contract_or_job(it.item_id)
                 {
                     available = available.saturating_add(it.quantity);
                     matching_ids.push(it.item_id);
@@ -623,22 +623,26 @@ fn handle_take_offer(
                 if remaining <= 0 {
                     break;
                 }
-                let remove_whole = if let Some(it) = snap.items.get_mut(&iid) {
-                    if it.quantity <= remaining {
-                        remaining -= it.quantity;
-                        true
-                    } else {
-                        it.quantity -= remaining;
-                        it.version += 1;
-                        remaining = 0;
-                        false
-                    }
-                } else {
-                    false
+                let Some((it_owner, avail)) = snap.items.get(&iid).map(|it| (it.owner_id, it.quantity)) else {
+                    continue;
                 };
-                if remove_whole {
-                    snap.items.remove(&iid);
+                let take = remaining.min(avail);
+                if take <= 0 {
+                    continue;
                 }
+                let actor = if it_owner == char_id { Some(char_id) } else { None };
+                let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(actor, it_owner);
+                opts.reject_blueprint_copy = true;
+                opts.active_ship_id = Some(ch.active_ship_id);
+                if snap.consume_exact_item_quantity(iid, take, opts).is_ok() {
+                    remaining -= take;
+                }
+            }
+            if remaining > 0 {
+                return Err(BridgeRpcError {
+                    code: "MissingRequiredItems".into(),
+                    message: format!("LP offer {} required items could not be consumed atomically", offer.offer_id),
+                });
             }
         }
 

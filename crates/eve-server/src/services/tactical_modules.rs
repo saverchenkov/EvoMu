@@ -713,15 +713,25 @@ pub async fn handle_entosis_link_activation(
     let Some(stront_item_id) = stront_avail_id else {
         return Err(BridgeRpcError { code: "InsufficientFuel".into(), message: "Entosis Link requires 1 Strontium Clathrates (16275) per cycle".into() });
     };
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut rem = 0;
-        if let Some(it) = snap.items.get_mut(&stront_item_id) {
-            it.quantity -= 1;
-            rem = it.quantity;
+    ctx.db.try_with_mut_snapshot(|snap| {
+        if let Some(owner) = snap.items.get(&stront_item_id).map(|i| i.owner_id) {
+            snap.consume_exact_item_quantity(
+                stront_item_id,
+                1,
+                eve_db::ConsumeExactOptions {
+                    active_ship_id: Some(ship_id),
+                    ..eve_db::ConsumeExactOptions::for_character_stack(char_id)
+                },
+            )
+            .map_err(|e| BridgeRpcError {
+                code: "InsufficientFuel".into(),
+                message: e.to_string(),
+            })?;
+            let _ = owner;
         }
-        if rem <= 0 { snap.items.remove(&stront_item_id); }
         snap.module_active_states.insert(module_id);
-    });
+        Ok::<(), BridgeRpcError>(())
+    })?;
 
     let is_capital = matches!(ship_group_id, 30 | 485 | 547 | 659 | 883 | 1538 | 4594);
     let base_cycle_s = mod_type.default_attributes.get(&73).copied().unwrap_or(300_000.0) / 1000.0;
@@ -1009,9 +1019,13 @@ pub async fn activate_command_burst(
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.insert(module_id);
         let exhausted = charge_item_id_opt.is_some_and(|cid| {
-            let zero = snap.items.get_mut(&cid).is_some_and(|ci| { ci.quantity = ci.quantity.saturating_sub(1); ci.quantity == 0 });
-            if zero { snap.items.remove(&cid); }
-            zero
+            let Some(owner) = snap.items.get(&cid).map(|ci| ci.owner_id) else {
+                return true;
+            };
+            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), owner);
+            opts.reject_fitted = false;
+            opts.active_ship_id = Some(ship_id);
+            matches!(snap.consume_exact_item_quantity(cid, 1, opts), Ok(None))
         });
         if exhausted { snap.module_active_charges.remove(&module_id); } else { snap.module_active_charges.insert(module_id, c_tid); }
     });

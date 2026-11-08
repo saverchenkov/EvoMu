@@ -91,14 +91,12 @@ pub fn prepare_ancillary_module(
                 })
                 .map(|i| i.item_id)
             {
-                consumed_charge = true;
-                let mut rem = 0;
-                if let Some(ci) = snap.items.get_mut(&cid) {
-                    ci.quantity = ci.quantity.saturating_sub(1);
-                    rem = ci.quantity;
-                }
-                if rem == 0 {
-                    snap.items.remove(&cid);
+                if let Some(c_owner) = snap.items.get(&cid).map(|ci| ci.owner_id) {
+                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, c_owner);
+                    opts.reject_fitted = false;
+                    if snap.consume_exact_item_quantity(cid, 1, opts).is_ok() {
+                        consumed_charge = true;
+                    }
                 }
             }
         });
@@ -142,14 +140,12 @@ pub fn prepare_ancillary_module(
                 })
                 .map(|i| i.item_id)
             {
-                fueled = true;
-                let mut rem = 0;
-                if let Some(ci) = snap.items.get_mut(&cid) {
-                    ci.quantity -= aar_paste_rate;
-                    rem = ci.quantity;
-                }
-                if rem == 0 {
-                    snap.items.remove(&cid);
+                if let Some(c_owner) = snap.items.get(&cid).map(|ci| ci.owner_id) {
+                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, c_owner);
+                    opts.reject_fitted = false;
+                    if snap.consume_exact_item_quantity(cid, aar_paste_rate, opts).is_ok() {
+                        fueled = true;
+                    }
                 }
             }
         });

@@ -1322,20 +1322,17 @@ pub(crate) fn sync_structure_with_released(
                     None
                 } else {
                     let core_type = profile.core_type_id.unwrap_or(0);
-                    installed_core_item(snap, &st, core_type).map(|core_item| {
-                        match snap.items.get_mut(&core_item) {
-                            Some(it) if it.quantity > 1 => {
-                                it.quantity -= 1;
-                                it.version += 1;
-                            }
-                            _ => {
-                                snap.items.remove(&core_item);
-                            }
-                        }
+                    installed_core_item(snap, &st, core_type).and_then(|core_item| {
+                        let owner_id = snap.items.get(&core_item).map(|it| it.owner_id)?;
+                        let opts = eve_db::ConsumeExactOptions {
+                            reject_fitted: false,
+                            ..eve_db::ConsumeExactOptions::for_owner_exact(None, owner_id)
+                        };
+                        snap.consume_exact_item_quantity(core_item, 1, opts).ok()?;
                         if let Some(s) = snap.structures.get_mut(&structure_id) {
                             s.quantum_core_installed = true;
                         }
-                        (STATE_ONLINING, now + ONLINING_SECS)
+                        Some((STATE_ONLINING, now + ONLINING_SECS))
                     })
                 }
             }

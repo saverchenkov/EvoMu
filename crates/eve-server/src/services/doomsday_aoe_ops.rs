@@ -401,7 +401,7 @@ where
                         && i.flag != eve_db::InventoryFlag::Locked
                         && i.quantity > 0
                         && matches_fuel(i.type_id)
-                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                        && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
                 })
                 .map(|i| (if i.flag as u16 == 133 { 0 } else { 1 }, i.item_id, i.quantity))
                 .collect();
@@ -419,17 +419,17 @@ where
                 if remaining <= 0 {
                     break;
                 }
-                let mut remove_stack = false;
-                if let Some(it) = snap.items.get_mut(&fid) {
-                    let take = remaining.min(it.quantity);
-                    it.quantity -= take;
-                    it.version += 1;
-                    remaining -= take;
-                    remove_stack = it.quantity <= 0;
+                let Some((owner_id, avail)) = snap.items.get(&fid).map(|it| (it.owner_id, it.quantity)) else {
+                    continue;
+                };
+                let take = remaining.min(avail);
+                if take <= 0 {
+                    continue;
                 }
-                if remove_stack {
-                    snap.items.remove(&fid);
-                }
+                let opts = eve_db::ConsumeExactOptions::for_owner_exact(None, owner_id);
+                snap.consume_exact_item_quantity(fid, take, opts)
+                    .map_err(|e| e.to_string())?;
+                remaining -= take;
             }
             Ok(())
         })

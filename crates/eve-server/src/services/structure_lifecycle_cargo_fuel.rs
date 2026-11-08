@@ -107,23 +107,35 @@ pub async fn handle_jettison_structure_fuel(
             let mut moved_blocks = 0u32;
             if !explicit_item_ids.is_empty() {
                 for iid in &explicit_item_ids {
-                    let it = snap.items.get_mut(iid).ok_or_else(|| err("ItemNotFound", format!("Fuel item {iid} not found")))?;
-                    if it.location_id != structure_id {
+                    let (it_loc, it_owner, it_flag, it_type, it_qty) = snap
+                        .items
+                        .get(iid)
+                        .map(|it| (it.location_id, it.owner_id, it.flag, it.type_id, it.quantity))
+                        .ok_or_else(|| err("ItemNotFound", format!("Fuel item {iid} not found")))?;
+                    if it_loc != structure_id {
                         return Err(err("ItemNotInFuelBay", format!("Item {iid} is not located in structure {structure_id}")));
                     }
-                    if it.owner_id != st.owner_corp_id {
+                    if it_owner != st.owner_corp_id {
                         return Err(err("ItemOwnershipViolation", format!("Item {iid} is not owned by structure owner corp {}", st.owner_corp_id)));
                     }
-                    let in_fuel_bay = it.flag == InventoryFlag::SpecializedFuelBay || it.flag == InventoryFlag::StructureFuel || it.flag as u16 == 172 || it.flag as u16 == 163;
-                    if !in_fuel_bay || !rules::is_valid_structure_fuel_bay_item(ctx, it.type_id) {
-                        return Err(err("ItemNotFuel", format!("Item {iid} (type {}) is not structure fuel in fuel bay", it.type_id)));
+                    let in_fuel_bay = it_flag == InventoryFlag::SpecializedFuelBay || it_flag == InventoryFlag::StructureFuel || it_flag as u16 == 172 || it_flag as u16 == 163;
+                    if !in_fuel_bay || !rules::is_valid_structure_fuel_bay_item(ctx, it_type) {
+                        return Err(err("ItemNotFuel", format!("Item {iid} (type {it_type}) is not structure fuel in fuel bay")));
                     }
-                    if rules::is_fuel_block_type(ctx, it.type_id) {
-                        moved_blocks = moved_blocks.saturating_add(it.quantity.max(0) as u32);
+                    if rules::is_fuel_block_type(ctx, it_type) {
+                        moved_blocks = moved_blocks.saturating_add(it_qty.max(0) as u32);
                     }
-                    it.location_id = container_id;
-                    it.flag = InventoryFlag::Cargo;
-                    it.version += 1;
+                    // Fuel Technician / Station Manager / Director authorization already checked by `has_structure_fuel_bay_role`.
+                    let mut spec = eve_db::TransferItemSpec::move_whole(
+                        None,
+                        Some(st.owner_corp_id),
+                        None,
+                        container_id,
+                        InventoryFlag::Cargo,
+                    );
+                    spec.reject_fitted = false;
+                    snap.transfer_inventory_item(*iid, spec)
+                        .map_err(|e| err("InventoryError", e.to_string()))?;
                     moved_ids.push(*iid);
                 }
                 if let Some(s) = snap.structures.get_mut(&structure_id) {
@@ -165,14 +177,14 @@ pub async fn handle_jettison_structure_fuel(
                 let mut rem = req_qty_u32;
                 for iid in bay_matching {
                     if rem == 0 { break; }
-                    let remove_it = if let Some(it) = snap.items.get_mut(&iid) {
-                        let take = rem.min(it.quantity.max(0) as u32);
-                        it.quantity -= take as i32;
-                        it.version += 1;
+                    let Some((it_owner, avail)) = snap.items.get(&iid).map(|it| (it.owner_id, it.quantity.max(0) as u32)) else { continue; };
+                    let take = rem.min(avail);
+                    if take == 0 { continue; }
+                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, it_owner);
+                    opts.reject_singleton = true;
+                    if snap.consume_exact_item_quantity(iid, take as i32, opts).is_ok() {
                         rem -= take;
-                        it.quantity <= 0
-                    } else { false };
-                    if remove_it { snap.items.remove(&iid); }
+                    }
                 }
                 if is_block {
                     if let Some(s) = snap.structures.get_mut(&structure_id) {

@@ -51,6 +51,7 @@ pub(crate) fn verify_and_consume_mission_delivery_items(
                     .get(&item.item_id)
                     .is_some_and(|s| s == &courier_tag)
                 && granted_courier_item_id.is_some_and(|gid| item.item_id >= gid)
+                && !snap.is_item_or_ancestor_locked_or_impounded(item.item_id)
         };
         let found_qty: i32 = snap
             .items
@@ -67,7 +68,6 @@ pub(crate) fn verify_and_consume_mission_delivery_items(
             });
         }
         let mut rem = req_units;
-        let mut to_remove = Vec::new();
         let mut matching_ids: Vec<i64> = snap
             .items
             .values()
@@ -79,19 +79,20 @@ pub(crate) fn verify_and_consume_mission_delivery_items(
             if rem <= 0 {
                 break;
             }
-            if let Some(item) = snap.items.get_mut(&iid) {
-                if item.quantity <= rem {
-                    rem -= item.quantity;
-                    to_remove.push(iid);
-                } else {
-                    item.quantity -= rem;
-                    rem = 0;
-                }
+            let Some(avail) = snap.items.get(&iid).map(|it| it.quantity) else {
+                continue;
+            };
+            let take = avail.min(rem);
+            if take <= 0 {
+                continue;
             }
-        }
-        for iid in to_remove {
-            snap.items.remove(&iid);
-            snap.item_custom_names.remove(&iid);
+            let opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id);
+            snap.consume_exact_item_quantity(iid, take, opts)
+                .map_err(|e| BridgeRpcError {
+                    code: "InventoryError".into(),
+                    message: e.to_string(),
+                })?;
+            rem -= take;
         }
         return Ok(());
     }
@@ -111,7 +112,9 @@ pub(crate) fn verify_and_consume_mission_delivery_items(
         item.owner_id == char_id
             && item.type_id == req_tid
             && item.quantity > 0
-            && !snap.is_item_locked_in_contract_or_job(item.item_id)
+            && !snap.is_item_or_ancestor_locked_or_impounded(item.item_id)
+            && !eve_db::WorldStateSnapshot::is_fitted_slot_flag(item.flag)
+            && !snap.is_container_non_empty(item.item_id)
             && !snap
                 .item_custom_names
                 .get(&item.item_id)
@@ -142,7 +145,6 @@ pub(crate) fn verify_and_consume_mission_delivery_items(
     }
 
     let mut rem = req_units;
-    let mut to_remove = Vec::new();
     let mut matching_ids: Vec<i64> = snap
         .items
         .values()
@@ -150,23 +152,21 @@ pub(crate) fn verify_and_consume_mission_delivery_items(
         .map(|it| it.item_id)
         .collect();
     matching_ids.sort_unstable();
+    let delivery_opts = eve_db::ConsumeExactOptions {
+        active_ship_id,
+        ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id)
+    };
     for iid in matching_ids {
         if rem <= 0 {
             break;
         }
-        if let Some(item) = snap.items.get_mut(&iid) {
-            if item.quantity <= rem {
-                rem -= item.quantity;
-                to_remove.push(iid);
-            } else {
-                item.quantity -= rem;
-                rem = 0;
-            }
+        let Some(avail) = snap.items.get(&iid).map(|it| it.quantity) else {
+            continue;
+        };
+        let take = rem.min(avail);
+        if take > 0 && snap.consume_exact_item_quantity(iid, take, delivery_opts).is_ok() {
+            rem -= take;
         }
-    }
-    for iid in to_remove {
-        snap.items.remove(&iid);
-        snap.item_custom_names.remove(&iid);
     }
     Ok(())
 }

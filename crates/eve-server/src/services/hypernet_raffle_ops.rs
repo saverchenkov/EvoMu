@@ -535,18 +535,24 @@ pub fn handle(
                             format!("Need {required_cores} HyperCores (type 52568) in station hangar"),
                         )
                     })?;
-                if let Some(ci) = snap.items.get_mut(&core_item_id) {
-                    if ci.quantity > required_cores {
-                        ci.quantity -= required_cores;
-                        ci.version += 1;
-                    } else {
-                        snap.items.remove(&core_item_id);
-                    }
-                }
-                // Move item into HyperNet escrow
+                let mut core_opts = eve_db::ConsumeExactOptions::for_character_stack(char_id);
+                core_opts.required_location_id = Some(station_id);
+                core_opts.required_flag = Some(InventoryFlag::Hangar);
+                snap.consume_exact_item_quantity(core_item_id, required_cores, core_opts)
+                    .map_err(|e| rpc_err("InsufficientHyperCores", e.to_string()))?;
+                // Validate and transfer item into HyperNet escrow (-52_568), then seal with Locked flag
+                let mut escrow_spec = eve_db::TransferItemSpec::move_whole(
+                    Some(char_id),
+                    Some(char_id),
+                    Some(-52_568),
+                    -52_568,
+                    InventoryFlag::Hangar,
+                );
+                escrow_spec.reject_non_empty_container = true;
+                escrow_spec.active_ship_id = snap.characters.get(&char_id).map(|c| c.active_ship_id);
+                snap.transfer_inventory_item(item_id, escrow_spec)
+                    .map_err(|e| rpc_err("InvalidRaffleItem", e.to_string()))?;
                 if let Some(it) = snap.items.get_mut(&item_id) {
-                    it.owner_id = -52_568;
-                    it.location_id = -52_568;
                     it.flag = InventoryFlag::Locked;
                     it.version += 1;
                 }
@@ -1225,21 +1231,27 @@ pub fn handle_character_seeding(
                     break;
                 }
                 let take = rem_to_deduct.min(qty);
+                let mut core_opts = eve_db::ConsumeExactOptions::for_character_stack(target_char_id);
+                core_opts.required_location_id = Some(station_id);
+                core_opts.required_flag = Some(InventoryFlag::Hangar);
+                snap.consume_exact_item_quantity(cid_stack, take, core_opts)
+                    .map_err(|e| rpc_err("InsufficientHyperCores", e.to_string()))?;
                 rem_to_deduct -= take;
-                if let Some(ci) = snap.items.get_mut(&cid_stack) {
-                    if ci.quantity > take {
-                        ci.quantity -= take;
-                        ci.version += 1;
-                    } else {
-                        snap.items.remove(&cid_stack);
-                    }
-                }
             }
             let mut out_recs = Vec::with_capacity(planned.len());
             for (iid, item_type_id, req_cores) in planned {
+                let mut escrow_spec = eve_db::TransferItemSpec::move_whole(
+                    Some(target_char_id),
+                    Some(target_char_id),
+                    Some(-52_568),
+                    -52_568,
+                    InventoryFlag::Hangar,
+                );
+                escrow_spec.reject_non_empty_container = true;
+                escrow_spec.active_ship_id = snap.characters.get(&target_char_id).map(|c| c.active_ship_id);
+                snap.transfer_inventory_item(iid, escrow_spec)
+                    .map_err(|e| rpc_err("InvalidRaffleItem", e.to_string()))?;
                 if let Some(it) = snap.items.get_mut(&iid) {
-                    it.owner_id = -52_568;
-                    it.location_id = -52_568;
                     it.flag = InventoryFlag::Locked;
                     it.version += 1;
                 }

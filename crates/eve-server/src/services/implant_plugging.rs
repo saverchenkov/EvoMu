@@ -189,7 +189,7 @@ pub fn purge_expired_boosters_in_snapshot(
         .collect();
     let mut ships = Vec::new();
     for (item_id, owner_id) in expired_ids {
-        snap.items.remove(&item_id);
+        snap.remove_system_cleanup_item(item_id);
         if let Some(ch) = snap.characters.get(&owner_id) {
             ships.push(ch.active_ship_id);
         }
@@ -292,7 +292,7 @@ pub fn sync_clone_jump_implants_and_boosters(
         .map(|item| item.item_id)
         .collect();
     for bid in booster_ids_to_remove {
-        snap.items.remove(&bid);
+        snap.remove_system_cleanup_item(bid);
     }
 
     // Rebuild `InventoryFlag::Implant` items on `char_id` to match `snap.active_implants[&char_id]`.
@@ -307,7 +307,7 @@ pub fn sync_clone_jump_implants_and_boosters(
         .map(|item| item.item_id)
         .collect();
     for iid in old_implant_ids {
-        snap.items.remove(&iid);
+        snap.remove_system_cleanup_item(iid);
     }
     let active_tids = snap
         .active_implants
@@ -428,11 +428,25 @@ pub fn inject_implant(
                     blueprint_runs_remaining: None,
                 },
             );
-        } else if let Some(src) = snap.items.get_mut(&item_id) {
-            src.location_id = char_id;
-            src.flag = InventoryFlag::Implant;
-            src.singleton = true;
-            src.version += 1;
+        } else {
+            snap.transfer_inventory_item(
+                item_id,
+                eve_db::TransferItemSpec::move_whole(
+                    Some(char_id),
+                    Some(char_id),
+                    Some(char_id),
+                    char_id,
+                    InventoryFlag::Implant,
+                ),
+            )
+            .map_err(|e| BridgeRpcError {
+                code: "ImplantLocked".into(),
+                message: e.to_string(),
+            })?;
+            if let Some(src) = snap.items.get_mut(&item_id) {
+                src.singleton = true;
+                src.version += 1;
+            }
         }
         let active = snap.active_implants.entry(char_id).or_default();
         if !active.contains(&item.type_id) {
@@ -475,7 +489,7 @@ pub fn destroy_implant(
                     message: format!("Item {item_id} is not a plugged-in implant of character {char_id}"),
                 });
             }
-            snap.items.remove(&item_id);
+            snap.remove_system_cleanup_item(item_id);
             item.type_id
         } else {
             let tid = u32::try_from(item_id).map_err(|_| BridgeRpcError {
@@ -503,7 +517,7 @@ pub fn destroy_implant(
                 });
             }
             if let Some(iid) = matching_iid {
-                snap.items.remove(&iid);
+                snap.remove_system_cleanup_item(iid);
             }
             tid
         };
@@ -1012,14 +1026,18 @@ pub fn inject_skillpoints(
             }
         };
 
-        if let Some(item) = snap.items.get_mut(&item_id) {
-            if item.quantity > 1 {
-                item.quantity -= 1;
-                item.version += 1;
-            } else {
-                snap.items.remove(&item_id);
-            }
-        }
+        snap.consume_exact_item_quantity(
+            item_id,
+            1,
+            eve_db::ConsumeExactOptions {
+                active_ship_id: current_ship,
+                ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id)
+            },
+        )
+        .map_err(|e| BridgeRpcError {
+            code: "SkillInjectorLocked".into(),
+            message: e.to_string(),
+        })?;
 
         let rem_non_dim: i64 = if non_dim_yield.is_some() {
             snap.items

@@ -1240,14 +1240,15 @@ pub fn activate_ship_emblem_license(
                     format!("Character {char_id} does not own emblem license item (typeID {license_type_id}) at current station/structure or active ship"),
                 )
             })?;
-        if let Some(item) = snap.items.get_mut(&item_id) {
-            if item.quantity > 1 {
-                item.quantity -= 1;
-                item.version += 1;
-            } else {
-                snap.items.remove(&item_id);
-            }
-        }
+        snap.consume_exact_item_quantity(
+            item_id,
+            1,
+            eve_db::ConsumeExactOptions {
+                active_ship_id: current_ship,
+                ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id)
+            },
+        )
+        .map_err(|e| mk_err("ItemLocked", e.to_string()))?;
         Ok(())
     })?;
     let is_alliance = cosmetic_type == 2;

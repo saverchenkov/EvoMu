@@ -843,7 +843,7 @@ pub(crate) fn validate_and_apply_fitting(
                             && i.type_id != 60
                             && i.quantity > 0
                             && !alsc_locked.contains(&i.item_id)
-                            && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                            && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
                     })
                     .map(|i| (i.item_id, i.quantity))
                     .collect();
@@ -889,20 +889,35 @@ pub(crate) fn validate_and_apply_fitting(
                     }
                     let take = avail.min(to_consume);
                     if take == avail && (!is_mod || take == 1) {
-                        if let Some(it) = snap.items.get_mut(&cid) {
-                            it.location_id = ship_id;
-                            it.flag = flag;
-                            it.singleton = is_mod || take == 1;
-                            it.version += 1;
-                            moved_items.push(it.clone());
+                        if let Ok(mut moved) = snap.transfer_inventory_item(
+                            cid,
+                            eve_db::TransferItemSpec::move_whole(
+                                Some(char_id),
+                                Some(char_id),
+                                None,
+                                ship_id,
+                                flag,
+                            ),
+                        ) {
+                            moved.singleton = is_mod || take == 1;
+                            if let Some(it) = snap.items.get_mut(&cid) {
+                                it.singleton = moved.singleton;
+                            }
+                            moved_items.push(moved);
                             if is_mod {
                                 snap.module_online_states.insert(cid, online);
                             }
                         }
                     } else {
-                        if let Some(orig) = snap.items.get_mut(&cid) {
-                            orig.quantity -= take;
-                            orig.version += 1;
+                        if snap
+                            .consume_exact_item_quantity(
+                                cid,
+                                take,
+                                eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id),
+                            )
+                            .is_err()
+                        {
+                            continue;
                         }
                         snap.next_entity_id += 1;
                         let split_id = snap.next_entity_id;

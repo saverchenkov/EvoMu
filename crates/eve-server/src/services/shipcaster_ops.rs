@@ -281,12 +281,16 @@ pub async fn deploy_fw_beacon_constructor(
             Ok(record)
         })?;
         snap.next_entity_id = alloc_id;
-        if let Some(mut_item) = snap.items.get_mut(&constructor_item_id) {
-            if mut_item.quantity > 1 {
-                mut_item.quantity -= 1;
-            } else {
-                snap.items.remove(&constructor_item_id);
-            }
+        if let Some(con_owner) = snap.items.get(&constructor_item_id).map(|i| i.owner_id) {
+            snap.consume_exact_item_quantity(
+                constructor_item_id,
+                1,
+                eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), con_owner),
+            )
+            .map_err(|e| BridgeRpcError {
+                code: "ConstructorLocked".into(),
+                message: e.to_string(),
+            })?;
         }
         Ok::<LandingPadRecord, BridgeRpcError>(new_pad)
     })?;
@@ -439,12 +443,14 @@ async fn contribute_fw_beacon_material_inner(
         })?;
 
         let take_i32 = i32::try_from(take).unwrap_or(i32::MAX);
-        if let Some(mut_item) = snap.items.get_mut(&cargo_item_id) {
-            if mut_item.quantity > take_i32 {
-                mut_item.quantity -= take_i32;
-            } else {
-                snap.items.remove(&cargo_item_id);
-            }
+        if let Some(cargo_owner) = snap.items.get(&cargo_item_id).map(|i| i.owner_id) {
+            let mut opts = eve_db::ConsumeExactOptions::for_character_stack(char_id);
+            opts.expected_owner_id = cargo_owner;
+            snap.consume_exact_item_quantity(cargo_item_id, take_i32, opts)
+                .map_err(|e| BridgeRpcError {
+                    code: "MaterialLocked".into(),
+                    message: e.to_string(),
+                })?;
         }
         if let Some((lp_corp, lp_per_unit)) = lp_reward_opt {
             let lp_gain = i64::from(lp_per_unit) * i64::from(take);

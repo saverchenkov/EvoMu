@@ -353,6 +353,7 @@ pub(super) async fn handle_store_vessel(
                     "Ship Maintenance Bay access denied by ship configuration",
                 ));
             }
+            let target_owner = target.owner_id;
             let dest_flag = select_and_validate_bay_dest_flag(
                 ctx,
                 snap,
@@ -362,11 +363,17 @@ pub(super) async fn handle_store_vessel(
                 target_ship_id,
                 host_ship_id,
             )?;
-            if let Some(target_mut) = snap.items.get_mut(&target_ship_id) {
-                target_mut.location_id = host_ship_id;
-                target_mut.flag = dest_flag;
-                target_mut.version += 1;
-            }
+            snap.transfer_inventory_item(
+                target_ship_id,
+                eve_db::TransferItemSpec::move_whole(
+                    Some(char_id),
+                    Some(target_owner),
+                    None,
+                    host_ship_id,
+                    dest_flag,
+                ),
+            )
+            .map_err(|e| err("InventoryError", e.to_string()))?;
             Ok(PyRep::keyval([
                 ("storedShipID", PyRep::Integer(target_ship_id)),
                 ("hostShipID", PyRep::Integer(host_ship_id)),
@@ -477,12 +484,6 @@ pub(super) async fn handle_store_vessel(
                 supplied_password,
                 true,
             )?;
-            if let Some(target_mut) = snap.items.get_mut(&target_ship_id) {
-                target_mut.location_id = host_ship_id;
-                target_mut.flag = dest_flag;
-                target_mut.version += 1;
-            }
-            snap.item_positions.remove(&target_ship_id);
             let existing_cap = snap
                 .items
                 .values()
@@ -524,6 +525,18 @@ pub(super) async fn handle_store_vessel(
             if let Some(ch) = snap.characters.get_mut(&char_id) {
                 ch.active_ship_id = cap_id;
             }
+            snap.transfer_inventory_item(
+                target_ship_id,
+                eve_db::TransferItemSpec::move_whole(
+                    Some(char_id),
+                    None,
+                    None,
+                    host_ship_id,
+                    dest_flag,
+                ),
+            )
+            .map_err(|e| err("InventoryError", e.to_string()))?;
+            snap.item_positions.remove(&target_ship_id);
             Ok((cap_id, dest_flag as i64))
         })?;
         cleanup_ship_leaving_space(ctx, sys_id, &sys, char_id, target_ship_id).await;
@@ -598,11 +611,17 @@ pub(super) async fn handle_store_vessel(
                 supplied_password,
                 false,
             )?;
-            if let Some(target_mut) = snap.items.get_mut(&target_ship_id) {
-                target_mut.location_id = host_ship_id;
-                target_mut.flag = dest_flag;
-                target_mut.version += 1;
-            }
+            snap.transfer_inventory_item(
+                target_ship_id,
+                eve_db::TransferItemSpec::move_whole(
+                    Some(char_id),
+                    None,
+                    None,
+                    host_ship_id,
+                    dest_flag,
+                ),
+            )
+            .map_err(|e| err("InventoryError", e.to_string()))?;
             snap.item_positions.remove(&target_ship_id);
             Ok(dest_flag as i64)
         })?;

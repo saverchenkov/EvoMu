@@ -51,6 +51,7 @@ pub use accounts::{base64url_decode_no_pad, base64url_encode_no_pad};
 pub use clock::{ServerClock, VirtualServerClock};
 pub use fw_seed::DEFAULT_FW_WARZONE_SYSTEMS;
 pub use gateway_tokens::QuasarVerifiedToken;
+pub use inventory::{ConsumeExactOptions, TransferItemSpec};
 pub use ledger::{JournalEntryInput, JournalMeta};
 pub use persistence::{
     record_last_wal_error, set_wal_error_hook, set_wal_poison_check_hook, WorldRepository,

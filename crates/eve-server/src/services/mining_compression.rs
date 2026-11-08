@@ -760,8 +760,8 @@ pub fn handle_structure_compression_mgr(
                     });
                 }
 
-                let (raw_tid, decomp_qty) = {
-                    let Some(item) = snap.items.get_mut(&item_id) else {
+                let (raw_tid, decomp_qty, orig_qty) = {
+                    let Some(item) = snap.items.get(&item_id) else {
                         return Err(BridgeRpcError {
                             code: "ItemNotFound".into(),
                             message: format!("Item {item_id} not found"),
@@ -837,11 +837,16 @@ pub fn handle_structure_compression_mgr(
                             message: "Quantity too small to yield decompressed gas units".into(),
                         });
                     }
-                    item.quantity = 0;
-                    (raw_tid, total_raw)
+                    (raw_tid, total_raw, item.quantity)
                 };
 
-                snap.items.remove(&item_id);
+                let mut decomp_opts = eve_db::ConsumeExactOptions::for_character_stack(char_id);
+                decomp_opts.expected_owner_id = item_owner;
+                snap.consume_exact_item_quantity(item_id, orig_qty, decomp_opts)
+                    .map_err(|e| BridgeRpcError {
+                        code: "ItemLocked".into(),
+                        message: e.to_string(),
+                    })?;
 
                 snap.next_entity_id += 1;
                 let new_id = snap.next_entity_id;

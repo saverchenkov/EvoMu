@@ -983,7 +983,7 @@ pub fn handle_industry_jobs(
                     let mut matching_stacks: Vec<(bool, i64, i32)> = snap.items.values().filter(|i| {
                         let loc_ok = input_container_id.map_or(i.location_id == station_id || i.location_id == bp_rec.location_id, |cid| i.location_id == cid);
                         let flag_ok = explicit_input_flag.map_or(true, |ef| input_is_non_office_container || i.flag == ef);
-                        loc_ok && flag_ok && can_use_industry_source_item(snap, i) && i.type_id == mat_tid && i.quantity > 0 && !i.singleton
+                        loc_ok && flag_ok && can_use_industry_source_item(snap, i) && i.type_id == mat_tid && i.quantity > 0 && !i.singleton && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
                     }).map(|i| (i.owner_id != job_owner_id || i.flag != effective_input_flag, i.item_id, i.quantity)).collect();
                     matching_stacks.sort_by_key(|(is_fallback, id, _)| (*is_fallback, *id));
                     let total_avail: i64 = matching_stacks.iter().map(|(_, _, q)| i64::from(*q)).sum();
@@ -995,16 +995,19 @@ pub fn handle_industry_jobs(
                         if rem <= 0 {
                             break;
                         }
-                        if let Some(m_item) = snap.items.get_mut(&mid) {
-                            let take = m_item.quantity.min(rem);
-                            if m_item.quantity > take {
-                                m_item.quantity -= take;
-                                m_item.version += 1;
-                            } else {
-                                snap.items.remove(&mid);
-                            }
-                            rem -= take;
-                        }
+                        let Some((m_owner, m_avail)) = snap.items.get(&mid).map(|i| (i.owner_id, i.quantity)) else {
+                            continue;
+                        };
+                        let take = m_avail.min(rem);
+                        let mut mat_opts = eve_db::ConsumeExactOptions::for_character_stack(char_id);
+                        mat_opts.expected_owner_id = m_owner;
+                        // Corp hangar division roles were already verified by `has_corp_div_take` (which respects `session.corp_role`).
+                        mat_opts.actor_char_id = if m_owner == char_id { Some(char_id) } else { None };
+                        snap.consume_exact_item_quantity(mid, take, mat_opts).map_err(|e| BridgeRpcError {
+                            code: err_code.into(),
+                            message: e.to_string(),
+                        })?;
+                        rem -= take;
                     }
                     if let Some(entry) = consumed_materials.iter_mut().find(|(t, _)| *t == mat_tid) {
                         entry.1 = entry.1.saturating_add(req_qty);

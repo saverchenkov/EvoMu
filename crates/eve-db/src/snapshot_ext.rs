@@ -1032,9 +1032,10 @@ impl WorldStateSnapshot {
         }
     }
 
-    /// Shared predicate verifying that `item` is owned by `char_id`, is unlocked (`flag != Locked`),
-    /// is not the character's currently boarded ship, is not escrowed in an active contract or active
-    /// industry job, and is physically located in the caller's current docked Hangar or co-located active ship Cargo.
+    /// Shared predicate verifying that `item` is owned by `char_id`, is unlocked and un-impounded
+    /// across its entire ancestor chain, is not the character's currently boarded or structure-controlled
+    /// ship, is not fitted, is not a non-empty container, is not escrowed in an active contract/job/trade,
+    /// and is physically located in the caller's current docked Hangar or co-located active ship Cargo.
     pub fn is_item_consumable_by(
         &self,
         item: &InventoryItemRecord,
@@ -1045,11 +1046,21 @@ impl WorldStateSnapshot {
         if item.owner_id != char_id || item.quantity <= 0 {
             return false;
         }
-        if item.flag == InventoryFlag::Locked {
+        if self.is_item_or_ancestor_locked_or_impounded(item.item_id) {
             return false;
         }
-        if self.is_character_boarded_or_saved_ship(char_id, active_ship_id, item.item_id) {
+        if Self::is_fitted_slot_flag(item.flag) || self.is_container_non_empty(item.item_id) {
             return false;
+        }
+        if self.is_character_boarded_or_saved_ship(char_id, active_ship_id, item.item_id)
+            || self.is_structure_controller_saved_ship(item.item_id)
+        {
+            return false;
+        }
+        if let Some(loc_id) = station_or_struct_id {
+            if !self.has_structure_acl_access(loc_id, char_id) {
+                return false;
+            }
         }
         let at_dock_hangar = station_or_struct_id.is_some()
             && Some(item.location_id) == station_or_struct_id
@@ -1057,15 +1068,13 @@ impl WorldStateSnapshot {
         let in_ship_cargo = active_ship_id
             .filter(|&sid| {
                 !self.is_item_locked_in_contract_or_job(sid)
+                    && !self.is_item_or_ancestor_locked_or_impounded(sid)
                     && self.is_ship_colocated_with_character(char_id, sid, station_or_struct_id)
             })
             .is_some()
             && Some(item.location_id) == active_ship_id
             && item.flag == InventoryFlag::Cargo;
-        if !(at_dock_hangar || in_ship_cargo) {
-            return false;
-        }
-        !self.is_item_locked_in_contract_or_job(item.item_id)
+        at_dock_hangar || in_ship_cargo
     }
 
     /// Credits a contract issuer (corporation master wallet division 1000 when `c.for_corp`,

@@ -876,14 +876,18 @@ fn handle_item_consume(
                 .components
                 .get(&comp_id)
                 .is_some_and(SdeSkinComponent::is_pattern);
-            if let Some(it) = s.items.get_mut(&(item_id as i64)) {
-                if (it.quantity as u64) <= quantity {
-                    s.items.remove(&(item_id as i64));
-                } else {
-                    it.quantity -= quantity as i32;
-                    it.version += 1;
-                }
-            }
+            s.consume_exact_item_quantity(
+                item_id as i64,
+                quantity as i32,
+                eve_db::ConsumeExactOptions {
+                    active_ship_id: current_ship,
+                    ..eve_db::ConsumeExactOptions::for_owner_exact(Some(cid as i64), cid as i64)
+                },
+            )
+            .map_err(|e| eve_proto::BridgeRpcError {
+                code: STATUS_PRECONDITION_FAILED.to_string(),
+                message: e.to_string(),
+            })?;
             Ok((comp_id, uses_granted, is_pattern))
         })
         .map_err(|e| (e.code.parse::<u32>().unwrap_or(500), e.message))?;

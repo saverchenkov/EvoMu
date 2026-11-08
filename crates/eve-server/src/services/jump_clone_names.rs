@@ -641,14 +641,15 @@ pub(crate) fn extract_skills(
         }
 
         // 8. Consume extractor item
-        if let Some(it) = snap.items.get_mut(&extractor_item_id) {
-            if it.quantity > 1 {
-                it.quantity -= 1;
-                it.version += 1;
-            } else {
-                snap.items.remove(&extractor_item_id);
-            }
-        }
+        snap.consume_exact_item_quantity(
+            extractor_item_id,
+            1,
+            eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id),
+        )
+        .map_err(|e| BridgeRpcError {
+            code: "SkillExtractorConsumeFailed".into(),
+            message: e.to_string(),
+        })?;
 
         // 9. Decrement character allocated SP by 500,000
         if let Some(ch) = snap.characters.get_mut(&char_id) {

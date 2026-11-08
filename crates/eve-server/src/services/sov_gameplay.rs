@@ -365,7 +365,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
             if it.location_id != ship_id || it.flag != InventoryFlag::Cargo {
                 return Err(BridgeRpcError { code: "ItemNotInCargo".into(), message: format!("Mercenary Den item {first_arg} must be in active ship cargo") });
             }
-            if snap.is_item_locked_in_contract_or_job(first_arg) {
+            if snap.is_item_or_ancestor_locked_or_impounded(first_arg) {
                 return Err(BridgeRpcError { code: "ItemLockedInContractOrJob".into(), message: format!("Mercenary Den item {first_arg} is locked in an open contract or industry job") });
             }
             first_arg
@@ -378,7 +378,7 @@ pub async fn handle_anchor_mercenary_den_rpc(
                         && i.flag == InventoryFlag::Cargo
                         && i.type_id == TYPE_MERCENARY_DEN
                         && i.quantity >= 1
-                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                        && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
                 })
                 .map(|i| i.item_id)
                 .min()
@@ -387,12 +387,15 @@ pub async fn handle_anchor_mercenary_den_rpc(
                     message: "Ship cargo does not contain an unlocked Mercenary Den (85230)".into(),
                 })?
         };
-        if let Some(it) = snap.items.get_mut(&item_id) {
-            it.quantity -= 1;
-            if it.quantity <= 0 {
-                snap.items.remove(&item_id);
-            }
-        }
+        snap.consume_exact_item_quantity(
+            item_id,
+            1,
+            eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id),
+        )
+        .map_err(|e| BridgeRpcError {
+            code: "InventoryError".into(),
+            message: e.to_string(),
+        })?;
 
         snap.next_entity_id += 1;
         let den_id = snap.next_entity_id;
@@ -804,7 +807,7 @@ pub async fn apply_mercenary_den_weapon_damage(
             .map(|i| i.item_id)
             .collect();
         for iid in item_ids {
-            if let Some(it) = snap.items.remove(&iid) {
+            if let Some(it) = snap.remove_system_cleanup_item(iid) {
                 stack_sizes.push(it.quantity as u32);
             }
         }
@@ -1035,13 +1038,12 @@ pub async fn dispatch_special_structure_attack(
     };
     ctx.db.with_mut_snapshot(|snap| {
         for cid in charges {
-            if let Some(ch) = snap.items.get_mut(cid) {
-                if ch.quantity > 1 {
-                    ch.quantity -= 1;
-                    ch.version += 1;
-                } else {
-                    snap.items.remove(cid);
-                }
+            if let Some(owner_id) = snap.items.get(cid).map(|ch| ch.owner_id) {
+                let opts = eve_db::ConsumeExactOptions {
+                    reject_fitted: false,
+                    ..eve_db::ConsumeExactOptions::for_owner_exact(None, owner_id)
+                };
+                let _ = snap.consume_exact_item_quantity(*cid, 1, opts);
             }
         }
         if let Some(s) = snap.structures.get_mut(&structure_id) {
@@ -1301,18 +1303,23 @@ pub async fn handle_anchor_sov_hub_rpc(
             if it.location_id != ship_id || it.flag != InventoryFlag::Cargo {
                 return Err(BridgeRpcError { code: "ItemNotInCargo".into(), message: format!("Sovereignty Hub item {first_arg} must be in active ship cargo") });
             }
-            if snap.is_item_locked_in_contract_or_job(first_arg) {
+            if snap.is_item_or_ancestor_locked_or_impounded(first_arg) {
                 return Err(BridgeRpcError { code: "ItemLockedInContractOrJob".into(), message: format!("Sovereignty Hub item {first_arg} is locked in an open contract or industry job") });
             }
             first_arg
         } else {
             snap.items.values()
-                .filter(|i| i.type_id == TYPE_SOVEREIGNTY_HUB && i.location_id == ship_id && i.flag == InventoryFlag::Cargo && (i.owner_id == char_id || i.owner_id == corp_id) && i.quantity >= 1 && !snap.is_item_locked_in_contract_or_job(i.item_id))
+                .filter(|i| i.type_id == TYPE_SOVEREIGNTY_HUB && i.location_id == ship_id && i.flag == InventoryFlag::Cargo && (i.owner_id == char_id || i.owner_id == corp_id) && i.quantity >= 1 && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id))
                 .map(|i| i.item_id).min()
                 .ok_or_else(|| BridgeRpcError { code: "MissingStructureItem".into(), message: "Unlocked Sovereignty Hub item not found in active ship cargo".into() })?
         };
-        if let Some(it) = snap.items.get_mut(&item_id) {
-            if it.quantity > 1 { it.quantity -= 1; } else { snap.items.remove(&item_id); }
+        if let Some(hub_owner) = snap.items.get(&item_id).map(|i| i.owner_id) {
+            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), hub_owner);
+            opts.active_ship_id = Some(ship_id);
+            snap.consume_exact_item_quantity(item_id, 1, opts).map_err(|e| BridgeRpcError {
+                code: "ItemLockedInContractOrJob".into(),
+                message: e.to_string(),
+            })?;
         }
         snap.next_entity_id += 1;
         let id = 1_000_000_000_000 + snap.next_entity_id;

@@ -368,20 +368,22 @@ pub fn handle_orders_escrow(
                             ),
                         });
                     }
-                    if let Some(item_mut) = snap.items.get_mut(&item_id) {
-                        let old_qty = item_mut.quantity;
-                        let old_loc = item_mut.location_id;
-                        if item_mut.quantity > quantity_i32 {
-                            item_mut.quantity -= quantity_i32;
-                            item_mut.version += 1;
+                    let old_qty = item.quantity;
+                    let old_loc = item.location_id;
+                    let mut sell_opts = eve_db::ConsumeExactOptions::for_character_stack(char_id);
+                    sell_opts.expected_owner_id = item.owner_id;
+                    sell_opts.reject_non_empty_container = true;
+                    sell_opts.active_ship_id = snap.characters.get(&char_id).map(|c| c.active_ship_id);
+                    match snap.consume_exact_item_quantity(item_id, quantity_i32, sell_opts) {
+                        Ok(Some(updated)) => {
                             consumed_items.push((
-                                item_mut.clone(),
+                                updated,
                                 // V24.01 invCache uses ixStackSize (9), not legacy ixQuantity (5).
                                 vec![(9, PyRep::Integer(old_qty as i64))],
                             ));
-                        } else {
-                            let mut removed_rec = item_mut.clone();
-                            snap.items.remove(&item_id);
+                        }
+                        Ok(None) => {
+                            let mut removed_rec = item.clone();
                             removed_rec.location_id = 6;
                             removed_rec.flag = InventoryFlag::None;
                             removed_rec.quantity = 0;
@@ -389,6 +391,12 @@ pub fn handle_orders_escrow(
                                 removed_rec,
                                 vec![(3, PyRep::Integer(old_loc)), (9, PyRep::Integer(old_qty as i64))],
                             ));
+                        }
+                        Err(e) => {
+                            return Err(BridgeRpcError {
+                                code: "ItemLocked".into(),
+                                message: e.to_string(),
+                            });
                         }
                     }
 

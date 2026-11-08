@@ -277,13 +277,10 @@ pub async fn trigger_structure_auto_defense_on_grid(
                 let Some((charge_iid, dmg)) = loaded_charge_sde_damage(ctx, snap, structure_id, st_owner_corp, &mod_item) else {
                     continue;
                 };
-                if let Some(ch_it) = snap.items.get_mut(&charge_iid) {
-                    if ch_it.quantity > 1 {
-                        ch_it.quantity -= 1;
-                        ch_it.version += 1;
-                    } else {
-                        snap.items.remove(&charge_iid);
-                    }
+                if let Some(c_owner) = snap.items.get(&charge_iid).map(|it| it.owner_id) {
+                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, c_owner);
+                    opts.reject_fitted = false;
+                    let _ = snap.consume_exact_item_quantity(charge_iid, 1, opts);
                 }
                 cur_cap = (cur_cap - cap_need).max(0.0);
                 ext.structure_cap_state.insert(structure_id, (cur_cap, now_unix));
@@ -610,13 +607,10 @@ fn consume_structure_charge_in_snap(
             format!("Standup weapon requires ammo of charge group {req_charge_group}"),
         ));
     };
-    if let Some(it) = snap.items.get_mut(&charge_iid) {
-        if it.quantity > 1 {
-            it.quantity -= 1;
-            it.version = it.version.saturating_add(1);
-        } else {
-            snap.items.remove(&charge_iid);
-        }
+    if let Some(c_owner) = snap.items.get(&charge_iid).map(|it| it.owner_id) {
+        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, c_owner);
+        opts.reject_fitted = false;
+        let _ = snap.consume_exact_item_quantity(charge_iid, 1, opts);
     }
     Ok(charge_tid)
 }

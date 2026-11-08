@@ -328,15 +328,26 @@ pub async fn activate_interdiction_sphere_launcher(
                     );
                 }
             }
-            let mut rem = 0;
-            if let Some(ci) = snap.items.get_mut(&charge_item_id) {
-                ci.quantity = (ci.quantity - 1).max(0);
-                ci.version += 1;
-                rem = ci.quantity;
-            }
-            if rem == 0 {
-                snap.items.remove(&charge_item_id);
-            }
+            let mut rem = if let Some(c_owner) = snap.items.get(&charge_item_id).map(|ci| ci.owner_id) {
+                let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), c_owner);
+                opts.reject_fitted = false;
+                opts.active_ship_id = Some(ship_id);
+                match snap.consume_exact_item_quantity(charge_item_id, 1, opts) {
+                    Ok(Some(it)) => it.quantity,
+                    Ok(None) => 0,
+                    Err(e) => {
+                        return Err(BridgeRpcError {
+                            code: "InventoryError".into(),
+                            message: e.to_string(),
+                        });
+                    }
+                }
+            } else {
+                return Err(BridgeRpcError {
+                    code: "NoProbesLoaded".into(),
+                    message: "Interdiction Sphere Launcher has no Warp Disrupt Probe loaded.".into(),
+                });
+            };
             let mut reloaded_qty = 0;
             if rem == 0 {
                 let cargo_probe_opt = snap
@@ -373,17 +384,22 @@ pub async fn activate_interdiction_sphere_launcher(
                         .map(|t| t.volume.max(0.1))
                         .unwrap_or(probe_vol);
                     let r_cap = (launcher_cap / r_vol).floor().max(1.0) as i32;
-                    let mut take = 0;
-                    let mut cargo_rem = 0;
-                    if let Some(c_item) = snap.items.get_mut(&cargo_id) {
-                        take = c_item.quantity.min(r_cap);
-                        c_item.quantity -= take;
-                        c_item.version += 1;
-                        cargo_rem = c_item.quantity;
-                    }
-                    if cargo_rem == 0 {
-                        snap.items.remove(&cargo_id);
-                    }
+                    let take = if let Some((c_owner, c_avail)) = snap.items.get(&cargo_id).map(|c| (c.owner_id, c.quantity)) {
+                        let req = c_avail.min(r_cap);
+                        if req > 0 {
+                            let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), c_owner);
+                            opts.active_ship_id = Some(ship_id);
+                            if snap.consume_exact_item_quantity(cargo_id, req, opts).is_ok() {
+                                req
+                            } else {
+                                0
+                            }
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
                     if take > 0 {
                         snap.next_entity_id += 1;
                         let slot_stack_id = snap.next_entity_id;

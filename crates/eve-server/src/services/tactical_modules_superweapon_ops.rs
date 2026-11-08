@@ -148,7 +148,7 @@ fn deduct_superweapon_fuel(
                         && matches!(i.flag as u16, 5 | 133)
                         && i.flag != eve_db::InventoryFlag::Locked
                         && i.quantity > 0
-                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                        && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
                 })
                 .map(|i| (if (i.flag as u16) == 133 { 0 } else { 1 }, i.item_id, i.flag, i.quantity))
                 .collect();
@@ -167,24 +167,21 @@ fn deduct_superweapon_fuel(
                 if remaining <= 0 {
                     break;
                 }
-                let mut remove_stack = false;
-                let mut took = 0;
-                if let Some(it) = snap.items.get_mut(&fid) {
-                    took = remaining.min(it.quantity);
-                    it.quantity -= took;
-                    it.version += 1;
-                    remaining -= took;
-                    remove_stack = it.quantity <= 0;
+                let Some((owner_id, avail)) = snap.items.get(&fid).map(|it| (it.owner_id, it.quantity)) else {
+                    continue;
+                };
+                let took = remaining.min(avail);
+                if took <= 0 {
+                    continue;
                 }
-                if took > 0 {
-                    if let Some((_, q)) = consumed_by_flag.iter_mut().find(|(f, _)| *f == flag) {
-                        *q += took;
-                    } else {
-                        consumed_by_flag.push((flag, took));
-                    }
-                }
-                if remove_stack {
-                    snap.items.remove(&fid);
+                let opts = eve_db::ConsumeExactOptions::for_owner_exact(None, owner_id);
+                snap.consume_exact_item_quantity(fid, took, opts)
+                    .map_err(|e| e.to_string())?;
+                remaining -= took;
+                if let Some((_, q)) = consumed_by_flag.iter_mut().find(|(f, _)| *f == flag) {
+                    *q += took;
+                } else {
+                    consumed_by_flag.push((flag, took));
                 }
             }
             Ok((fuel_qty, consumed_by_flag))

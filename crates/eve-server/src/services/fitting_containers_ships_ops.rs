@@ -146,7 +146,7 @@ pub(crate) async fn handle_clear_charges(
             snap.module_active_charges.remove(&mid);
         }
         for cid in charge_ids {
-            let Some((type_id, qty)) = snap
+            let Some(c_flag) = snap
                 .items
                 .get(&cid)
                 .filter(|c| {
@@ -154,33 +154,25 @@ pub(crate) async fn handle_clear_charges(
                         && c.location_id == ship_id
                         && matches!(c.flag as u16, 11..=34)
                 })
-                .map(|c| (c.type_id, c.quantity.max(1)))
+                .map(|c| c.flag)
             else {
                 continue;
             };
-            let existing_cargo_stack_id = snap
-                .items
-                .values()
-                .find(|it| {
-                    it.item_id != cid
-                        && it.owner_id == char_id
-                        && it.location_id == ship_id
-                        && it.flag == InventoryFlag::Cargo
-                        && it.type_id == type_id
-                        && !it.singleton
-                })
-                .map(|it| it.item_id);
-            if let Some(target_id) = existing_cargo_stack_id {
-                if let Some(stack) = snap.items.get_mut(&target_id) {
-                    stack.quantity += qty;
-                    stack.version += 1;
-                }
-                snap.items.remove(&cid);
-            } else if let Some(charge_item) = snap.items.get_mut(&cid) {
-                charge_item.flag = InventoryFlag::Cargo;
-                charge_item.singleton = false;
-                charge_item.version += 1;
+            let _ = c_flag;
+            if let Some(it) = snap.items.get_mut(&cid) {
+                it.singleton = false;
             }
+            let mut spec = eve_db::TransferItemSpec::move_whole(
+                Some(char_id),
+                Some(char_id),
+                Some(char_id),
+                ship_id,
+                InventoryFlag::Cargo,
+            );
+            spec.reject_fitted = false;
+            spec.merge_at_destination = true;
+            spec.active_ship_id = Some(ship_id);
+            let _ = snap.transfer_inventory_item(cid, spec);
         }
     });
 
@@ -1275,27 +1267,23 @@ fn handle_import_export_with_planet(
             match src {
                 ImportSource::ByItemId(iid, tid, qty) => {
                     let q_i32 = qty as i32;
-                    if let Some(it) = snap.items.get_mut(&iid) {
-                        if it.quantity <= q_i32 {
-                            snap.items.remove(&iid);
-                        } else {
-                            it.quantity -= q_i32;
-                            it.version += 1;
-                        }
+                    let Some(it_owner) = snap.items.get(&iid).map(|it| it.owner_id) else { continue };
+                    let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), it_owner);
+                    opts.reject_singleton = false;
+                    if snap.consume_exact_item_quantity(iid, q_i32, opts).is_ok() {
+                        *net.pins[pin_idx].contents.entry(tid).or_insert(0) += qty;
                     }
-                    *net.pins[pin_idx].contents.entry(tid).or_insert(0) += qty;
                 }
                 ImportSource::ByTypeId(tid, qty, matching_ids) => {
                     let mut rem = qty as i32;
                     for iid in matching_ids {
-                        let Some(it) = snap.items.get_mut(&iid) else { continue };
-                        if it.quantity <= rem {
-                            rem -= it.quantity;
-                            snap.items.remove(&iid);
-                        } else {
-                            it.quantity -= rem;
-                            it.version += 1;
-                            break;
+                        let Some((it_owner, avail)) = snap.items.get(&iid).map(|it| (it.owner_id, it.quantity)) else { continue };
+                        let take = rem.min(avail);
+                        if take <= 0 { continue; }
+                        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), it_owner);
+                        opts.reject_singleton = false;
+                        if snap.consume_exact_item_quantity(iid, take, opts).is_ok() {
+                            rem -= take;
                         }
                         if rem == 0 {
                             break;

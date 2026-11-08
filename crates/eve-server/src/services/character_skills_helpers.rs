@@ -931,14 +931,15 @@ fn handle_split_skill_injector(
         }
         let loc_id = item.location_id;
         let flag = item.flag;
-        if let Some(src) = snap.items.get_mut(&item_id) {
-            if src.quantity > qty_i32 {
-                src.quantity -= qty_i32;
-                src.version += 1;
-            } else {
-                snap.items.remove(&item_id);
-            }
-        }
+        snap.consume_exact_item_quantity(
+            item_id,
+            qty_i32,
+            eve_db::ConsumeExactOptions {
+                active_ship_id: current_ship,
+                ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id)
+            },
+        )
+        .map_err(|e| err("ItemLocked", e.to_string()))?;
         if let Some(existing_small) = snap.items.values_mut().find(|it| {
             it.owner_id == char_id
                 && it.location_id == loc_id
@@ -1012,14 +1013,15 @@ fn handle_combine_skill_injector(
         }
         let loc_id = item.location_id;
         let flag = item.flag;
-        if let Some(src) = snap.items.get_mut(&item_id) {
-            if src.quantity > small_to_consume {
-                src.quantity -= small_to_consume;
-                src.version += 1;
-            } else {
-                snap.items.remove(&item_id);
-            }
-        }
+        snap.consume_exact_item_quantity(
+            item_id,
+            small_to_consume,
+            eve_db::ConsumeExactOptions {
+                active_ship_id: current_ship,
+                ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id)
+            },
+        )
+        .map_err(|e| err("ItemLocked", e.to_string()))?;
         if let Some(existing_large) = snap.items.values_mut().find(|it| {
             it.owner_id == char_id
                 && it.location_id == loc_id

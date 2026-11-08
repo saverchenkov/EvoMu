@@ -867,8 +867,8 @@ pub(crate) fn item_at_hub(snap: &WorldStateSnapshot, caller: &Caller, it: &Inven
     };
     valid_owner
         && it.quantity >= 1
-        && it.flag != eve_db::InventoryFlag::Locked
-        && !snap.is_item_locked_in_contract_or_job(it.item_id)
+        && !snap.is_item_or_ancestor_locked_or_impounded(it.item_id)
+        && !eve_db::WorldStateSnapshot::is_fitted_slot_flag(it.flag)
         && (it.location_id == hub_id
             || snap
                 .characters
@@ -876,18 +876,12 @@ pub(crate) fn item_at_hub(snap: &WorldStateSnapshot, caller: &Caller, it: &Inven
                 .is_some_and(|ch| ch.active_ship_id == it.location_id && ch.solar_system_id == hub_sys))
 }
 
-/// Removes `qty` units from an inventory stack, deleting it when empty.
+/// Removes `qty` units from an inventory stack via the centralized snapshot consumer, deleting it when empty.
 pub(crate) fn consume_items(snap: &mut WorldStateSnapshot, item_id: i64, qty: i32) {
-    let empty = match snap.items.get_mut(&item_id) {
-        Some(it) => {
-            it.quantity -= qty;
-            it.version += 1;
-            it.quantity <= 0
-        }
-        None => false,
-    };
-    if empty {
-        snap.items.remove(&item_id);
+    if let Some(owner_id) = snap.items.get(&item_id).map(|it| it.owner_id) {
+        let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, owner_id);
+        opts.reject_singleton = false;
+        let _ = snap.consume_exact_item_quantity(item_id, qty, opts);
     }
 }
 

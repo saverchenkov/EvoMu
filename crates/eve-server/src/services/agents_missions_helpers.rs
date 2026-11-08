@@ -504,8 +504,7 @@ pub fn reclaim_courier_cargo(
                 .collect();
             for (iid, qty) in tagged_items {
                 if qty <= remaining_to_reclaim {
-                    snap.items.remove(&iid);
-                    snap.item_custom_names.remove(&iid);
+                    snap.remove_system_cleanup_item(iid);
                     remaining_to_reclaim -= qty;
                 } else {
                     if let Some(it) = snap.items.get_mut(&iid) {

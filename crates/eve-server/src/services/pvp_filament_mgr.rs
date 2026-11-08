@@ -1063,12 +1063,16 @@ pub async fn handle(
                 let total_required_pilots = (match_spec.fleet_size * match_spec.number_of_fleets).max(2);
                 let needed_fleets = match_spec.number_of_fleets.max(2).saturating_sub(1);
 
-                if let Some(it) = snap.items.get_mut(&item_id) {
-                    if it.quantity > 1 {
-                        it.quantity -= 1;
-                    } else {
-                        snap.items.remove(&item_id);
-                    }
+                if let Some(fil_owner) = snap.items.get(&item_id).map(|i| i.owner_id) {
+                    snap.consume_exact_item_quantity(
+                        item_id,
+                        1,
+                        eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), fil_owner),
+                    )
+                    .map_err(|e| BridgeRpcError {
+                        code: "FilamentLocked".into(),
+                        message: e.to_string(),
+                    })?;
                 }
 
                 let mut ticket_groups: HashMap<i64, Vec<(i64, u32, i64, u64)>> = HashMap::new();

@@ -936,12 +936,10 @@ fn resolve_structure_weapon_tick(
                 }
                 continue;
             }
-            if let Some(c) = snap.items.get_mut(&charge_item_id) {
-                c.quantity = c.quantity.saturating_sub(capped as i32);
-                c.version += 1;
-                if c.quantity <= 0 {
-                    snap.items.remove(&charge_item_id);
-                }
+            if let Some(c_owner) = snap.items.get(&charge_item_id).map(|c| c.owner_id) {
+                let mut opts = eve_db::ConsumeExactOptions::for_owner_exact(None, c_owner);
+                opts.reject_fitted = false;
+                let _ = snap.consume_exact_item_quantity(charge_item_id, capped as i32, opts);
             }
             ext.weapon_cooldowns.insert(w.item_id, new_rem);
             dirty_ext = true;

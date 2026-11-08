@@ -541,14 +541,17 @@ pub fn handle_pi_colonies(
                                             message: "Command Center item required in ship cargo".into(),
                                         });
                                     };
-                                    if let Some(item) = snap.items.get_mut(&cc_item_id) {
-                                        consumed_cc_items.push(item.clone());
-                                        if item.quantity > 1 {
-                                            item.quantity -= 1;
-                                            item.version += 1;
-                                        } else {
-                                            snap.items.remove(&cc_item_id);
-                                        }
+                                    if let Some(cc_item) = snap.items.get(&cc_item_id).cloned() {
+                                        consumed_cc_items.push(cc_item.clone());
+                                        snap.consume_exact_item_quantity(
+                                            cc_item_id,
+                                            1,
+                                            eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), cc_item.owner_id),
+                                        )
+                                        .map_err(|e| BridgeRpcError {
+                                            code: "CommandCenterItemLocked".into(),
+                                            message: e.to_string(),
+                                        })?;
                                     }
                                     snap.next_entity_id += 1;
                                     let server_pin_id = snap.next_entity_id;

@@ -187,12 +187,13 @@ pub fn handle_upgrade_gantry(
                 message: format!("Upgrading gantry requires item type {target_tid} in active ship cargo"),
             });
         };
-        if let Some(u) = snap.items.get_mut(&up_iid) {
-            if u.quantity > 1 {
-                u.quantity -= 1;
-            } else {
-                snap.items.remove(&up_iid);
-            }
+        if let Some(u_owner) = snap.items.get(&up_iid).map(|u| u.owner_id) {
+            snap.consume_exact_item_quantity(
+                up_iid,
+                1,
+                eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), u_owner),
+            )
+            .map_err(|e| err("CustomsOfficeItemLocked", e.to_string()))?;
         }
         if let Some(it) = snap.items.get_mut(&orbital_id) {
             it.type_id = target_tid;

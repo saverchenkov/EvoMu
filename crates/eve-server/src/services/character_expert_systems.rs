@@ -201,14 +201,18 @@ pub fn handle(
                     }
                 }
 
-                if let Some(item_mut) = snap.items.get_mut(&item_id) {
-                    if item_mut.quantity > 1 {
-                        item_mut.quantity -= 1;
-                        item_mut.version += 1;
-                    } else {
-                        snap.items.remove(&item_id);
-                    }
-                }
+                snap.consume_exact_item_quantity(
+                    item_id,
+                    1,
+                    eve_db::ConsumeExactOptions {
+                        active_ship_id: session.ship_id,
+                        ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id)
+                    },
+                )
+                .map_err(|e| BridgeRpcError {
+                    code: "ItemLocked".into(),
+                    message: e.to_string(),
+                })?;
 
                 let mut records = load_expert_systems(snap, char_id);
                 let entry = records.entry(resolved_type_id).or_insert(ExpertSystemRecord {

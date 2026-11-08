@@ -632,10 +632,7 @@ pub(crate) async fn handle_dogma_im(
                         }
                     }
                     let found = (loc, item.flag as i64, item.type_id as i64, item.quantity as i64);
-                    snap.items.remove(&item_id);
-                    snap.module_online_states.remove(&item_id);
-                    snap.module_active_states.remove(&item_id);
-                    snap.module_active_charges.remove(&item_id);
+                    snap.remove_system_cleanup_item(item_id);
                     Ok(Some(found))
                 } else {
                     Ok(None)

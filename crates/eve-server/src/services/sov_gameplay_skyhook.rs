@@ -363,7 +363,7 @@ pub async fn handle_anchor_skyhook_rpc(
                     message: format!("Orbital Skyhook item {first_arg} must be in active ship cargo"),
                 });
             }
-            if snap.is_item_locked_in_contract_or_job(first_arg) {
+            if snap.is_item_or_ancestor_locked_or_impounded(first_arg) {
                 return Err(BridgeRpcError {
                     code: "ItemLockedInContractOrJob".into(),
                     message: format!("Orbital Skyhook item {first_arg} is locked in an open contract or industry job"),
@@ -379,7 +379,7 @@ pub async fn handle_anchor_skyhook_rpc(
                         && i.flag == InventoryFlag::Cargo
                         && i.type_id == TYPE_ORBITAL_SKYHOOK
                         && i.quantity >= 1
-                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                        && !snap.is_item_or_ancestor_locked_or_impounded(i.item_id)
                 })
                 .map(|i| i.item_id)
                 .min()
@@ -390,12 +390,16 @@ pub async fn handle_anchor_skyhook_rpc(
                     ),
                 })?
         };
-        if let Some(it) = snap.items.get_mut(&item_id) {
-            it.quantity -= 1;
-            if it.quantity <= 0 {
-                snap.items.remove(&item_id);
-            }
-        }
+        let item_owner = snap.items.get(&item_id).map(|it| it.owner_id).unwrap_or(char_id);
+        snap.consume_exact_item_quantity(
+            item_id,
+            1,
+            eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), item_owner),
+        )
+        .map_err(|e| BridgeRpcError {
+            code: "InventoryError".into(),
+            message: e.to_string(),
+        })?;
         snap.next_entity_id += 1;
         let id = snap.next_entity_id;
         let pos_arr = [planet_anchor_pos.x, planet_anchor_pos.y, planet_anchor_pos.z];

@@ -262,16 +262,22 @@ pub fn register_item_delivery_and_definitions(
                     if item.location_id != char_loc || item.flag != eve_db::InventoryFlag::Hangar {
                         return Some(8);
                     }
+                    if snap.is_item_or_ancestor_locked_or_impounded(iid)
+                        || snap.is_container_non_empty(iid)
+                        || item.singleton
+                    {
+                        return Some(7);
+                    }
                     Some(iid)
                 } else {
                     snap.items
                         .values()
                         .filter(|item| {
                             item.owner_id == cid as i64
-                                && !snap.is_item_locked_in_contract_or_job(item.item_id)
+                                && !snap.is_item_or_ancestor_locked_or_impounded(item.item_id)
                                 && item.type_id == target_type_id
                                 && !item.singleton
-                                && !snap.items.values().any(|c| c.location_id == item.item_id)
+                                && !snap.is_container_non_empty(item.item_id)
                                 && item.quantity >= (batch_size as i32)
                                 && item.flag == eve_db::InventoryFlag::Hangar
                                 && item.location_id == char_loc
@@ -282,19 +288,20 @@ pub fn register_item_delivery_and_definitions(
                 let Some(iid) = chosen else {
                     return None;
                 };
-                let mut remove = false;
-                if let Some(item) = snap.items.get_mut(&iid) {
-                    let take = ((item.quantity.min(allowed_qty as i32) as i64) / batch_size) * batch_size;
+                if let Some(avail_qty) = snap.items.get(&iid).map(|it| it.quantity) {
+                    let take = ((avail_qty.min(allowed_qty as i32) as i64) / batch_size) * batch_size;
                     if take > 0 {
-                        item.quantity -= take as i32;
-                        delivered_units = take;
-                        consumed_loc = char_loc;
-                        found = true;
-                        remove = item.quantity == 0;
+                        let opts = eve_db::ConsumeExactOptions {
+                            required_location_id: Some(char_loc),
+                            required_flag: Some(eve_db::InventoryFlag::Hangar),
+                            ..eve_db::ConsumeExactOptions::for_character_stack(cid as i64)
+                        };
+                        if snap.consume_exact_item_quantity(iid, take as i32, opts).is_ok() {
+                            delivered_units = take;
+                            consumed_loc = char_loc;
+                            found = true;
+                        }
                     }
-                }
-                if remove {
-                    snap.items.remove(&iid);
                 }
                 None
             });
