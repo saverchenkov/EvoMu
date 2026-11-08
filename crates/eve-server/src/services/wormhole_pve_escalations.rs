@@ -439,9 +439,19 @@ pub async fn step_wormhole_pve_system(
         return;
     }
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-    let (ball_map, combat_states): (BTreeMap<i64, Ball>, BTreeMap<i64, CombatState>) = {
+    let (ball_map, combat_states, scrambled_drifters): (
+        BTreeMap<i64, Ball>,
+        BTreeMap<i64, CombatState>,
+        std::collections::HashSet<i64>,
+    ) = {
         let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
-        (bp.balls.clone(), bp.combat_states.clone())
+        let scrambled = bp
+            .balls
+            .keys()
+            .copied()
+            .filter(|&id| bp.is_ball_scrambled(id))
+            .collect();
+        (bp.balls.clone(), bp.combat_states.clone(), scrambled)
     };
     let active_ships: HashMap<i64, (i64, u32)> = ctx.db.with_snapshot(|snap| {
         snap.characters
@@ -650,9 +660,7 @@ pub async fn step_wormhole_pve_system(
             let Some(dball) = ball_map.get(&drifter_bid) else {
                 continue;
             };
-            let is_scrambled = combat_states
-                .get(&drifter_bid)
-                .is_some_and(|cs| cs.is_warp_scrambled());
+            let is_scrambled = scrambled_drifters.contains(&drifter_bid);
             if is_scrambled {
                 continue;
             }
@@ -1078,6 +1086,35 @@ pub fn process_wormhole_sites_on_downtime(ctx: &ServerContext) -> usize {
     }
 
     despawned_sites.len()
+}
+
+#[cfg(test)]
+pub(crate) fn register_test_triggered_drifter_relay(
+    ctx: &ServerContext,
+    solar_system_id: SolarSystemId,
+    relay_ball_id: i64,
+    drifter_ball_id: i64,
+) {
+    let now_unix = ctx.now_unix();
+    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    with_pve_exploration_reg(ctx, |reg| {
+        reg.active_relays.insert(
+            relay_ball_id,
+            DecloakedRelayInfo {
+                relay_ball_id,
+                solar_system_id,
+                site_id: format!("WH-TEST-{relay_ball_id}"),
+                position: [0.0; 3],
+                capital_was_on_grid: true,
+                triggered: true,
+                spawned_drifter_ball_id: Some(drifter_ball_id),
+                spawned_drifter_type_id: Some(34_495),
+                last_warp_unix: now_unix,
+                last_warp_sim_s: sys_handle.sim_elapsed_secs(),
+                warp_hop_count: 0,
+            },
+        );
+    });
 }
 
 #[cfg(test)]

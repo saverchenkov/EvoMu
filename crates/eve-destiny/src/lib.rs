@@ -632,7 +632,7 @@ impl CombatState {
         self.is_interdiction_nullified = nullified;
     }
 
-    pub fn is_warp_scrambled(&self) -> bool {
+    pub(crate) fn is_warp_scrambled(&self) -> bool {
         self.warp_scramble_strength > 0 && self.warp_scramble_strength >= self.warp_core_strength
     }
 

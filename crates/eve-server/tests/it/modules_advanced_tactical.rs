@@ -2505,7 +2505,7 @@ async fn test_mjd_spool_and_warp_scramble_propulsion_shutoff() {
         PyRep::Integer(scrambler_id), PyRep::String("warpScramble".into()), PyRep::Integer(ship_mjd), PyRep::Integer(1),
     ]).await.unwrap();
     let cs_wcs_scram = sys.get_combat_state(ship_mjd).await.unwrap().unwrap();
-    assert!(!cs_wcs_scram.is_warp_scrambled(), "WCS (+2) overcomes 2 scram points for warping");
+    assert!(!sys.is_ball_scrambled(ship_mjd).await.unwrap(), "WCS (+2) overcomes 2 scram points for warping");
     assert!(cs_wcs_scram.is_mwd_mjd_disabled, "Scrambler still sets is_mwd_mjd_disabled with WCS active");
     for _ in 0..10 {
         sys.step_manual(1.0).await.unwrap();

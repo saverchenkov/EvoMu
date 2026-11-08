@@ -545,7 +545,7 @@ async fn test_small_ship_standard_shattered_drifter_and_thera_systems() {
     let post_guard_cs = k_handle.get_combat_state(drifter_test_ship).await.unwrap().unwrap();
     let post_guard_ball = k_handle.get_ball_snapshot(drifter_test_ship).await.unwrap().unwrap().1;
     assert!(post_guard_cs.shield_hp < pre_guard_shield, "K-space Drifter battleship guards must deal weapon damage");
-    assert!(post_guard_cs.is_warp_scrambled(), "K-space Drifter battleship guards must warp-scramble target");
+    assert!(k_handle.is_ball_scrambled(drifter_test_ship).await.unwrap(), "K-space Drifter battleship guards must warp-scramble target");
     assert!(post_guard_ball.speed_fraction < 1.0, "K-space Drifter battleship guards must web target");
 
     // Jump into Conflux Eyrie (31000004) via wormholeMgr.WormholeJump and assert C2 Pulsar (+44% shield HP) system effect!

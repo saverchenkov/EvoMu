@@ -88,6 +88,19 @@ pub async fn try_activate_dungeon_runtime_gate(
     let Some((_, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
         return Some(Err(BridgeRpcError::user_error("ShipNotInSpace")));
     };
+    if let Err(e) = ctx
+        .validate_ship_movement(
+            char_id,
+            ship_id,
+            crate::services::space_nav_movement_guard::MovementIntent::AccelerationGate {
+                sys_id,
+                kind: crate::services::space_nav_movement_guard::AccelerationGateKind::Dungeon,
+            },
+        )
+        .await
+    {
+        return Some(Err(e));
+    }
 
     // Verify proximity <= 2,500m to the acceleration gate
     let gate_pos = if gate_id > 0 {

@@ -620,7 +620,15 @@ pub fn require_ship_ready_for_filament_jump(
             message: "Cannot activate filament while a Weapons Timer is active".into(),
         });
     }
-    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "activate filament")?;
+    crate::services::space_nav_movement_guard::validate_pre_movement_locks(
+        ctx,
+        ship_id,
+        &crate::services::space_nav_movement_guard::MovementIntent::AbyssalOrVoidFilament {
+            from_sys: sys_id,
+            reject_when_cloaked: false,
+            reject_when_tethered: false,
+        },
+    )?;
     if let Some(active_timer) =
         crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None)
     {
@@ -651,6 +659,12 @@ pub fn require_ship_ready_for_filament_jump(
             }
         }
         if let Some(cs) = bp.combat_states.get(&ship_id) {
+            if cs.lance_disrupted_remaining_s > 0.0 {
+                return Err(BridgeRpcError {
+                    code: "DisruptiveLanceDebuffActive".into(),
+                    message: "Cannot activate filament while disrupted by a Superweapon Lance".into(),
+                });
+            }
             if cs.warp_scramble_strength > 0 {
                 return Err(BridgeRpcError {
                     code: "WarpScrambled".into(),
@@ -1269,6 +1283,8 @@ pub fn reconnect_character_in_space_sync(
     // If the character's ship is already active in space, preserve the live ball position,
     // capacitor, tackle warp scrambles, and combat status instead of resetting to origin or defaults.
     // If the ship emergency-warped off grid, automatically initiate a return warp back to the pre-disconnect grid spot.
+    let pre_warp_eligible =
+        crate::services::space_nav_movement_guard::check_sync_pre_warp_eligibility(ctx, ship_id);
     if let Some(existing_pos) = sys_handle.get_ball_position_sync(ship_id) {
         if let Ok(mut bp) = sys_handle.ballpark.write() {
             bp.observer_events.remove(&ship_id);
@@ -1276,7 +1292,9 @@ pub fn reconnect_character_in_space_sync(
             if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
                 cs.is_emergency_warping = false;
             }
-            if !bp.is_ball_scrambled(ship_id) {
+            if pre_warp_eligible
+                && crate::services::space_nav_movement_guard::can_warp_in_ballpark(&bp, ship_id)
+            {
                 if let Some(orig_arr) = pre_warp_pos_opt {
                     let orig_pos = DVec3::from_array(orig_arr);
                     if existing_pos.distance(orig_pos) > 10_000.0 {
@@ -1325,7 +1343,9 @@ pub fn reconnect_character_in_space_sync(
     if let Ok(mut bp) = sys_handle.ballpark.write() {
         bp.observer_events.remove(&ship_id);
         bp.queue_set_state(ship_id);
-        if !bp.is_ball_scrambled(ship_id) {
+        if pre_warp_eligible
+            && crate::services::space_nav_movement_guard::can_warp_in_ballpark(&bp, ship_id)
+        {
             if let Some(orig_arr) = pre_warp_pos_opt {
                 let orig_pos = DVec3::from_array(orig_arr);
                 if final_pos.distance(orig_pos) > 10_000.0 {

@@ -572,7 +572,17 @@ pub async fn activate_outpost_raid_gate_in_space(
     }
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let Some((_, sb)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
+    let validated = ctx
+        .validate_ship_movement(
+            char_id,
+            ship_id,
+            crate::services::space_nav_movement_guard::MovementIntent::AccelerationGate {
+                sys_id,
+                kind: crate::services::space_nav_movement_guard::AccelerationGateKind::InsurgencyOutpost,
+            },
+        )
+        .await?;
+    let Some(sb) = validated.ball else {
         return Err(BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Active ship ball not found in space".into(),

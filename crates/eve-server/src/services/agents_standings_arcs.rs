@@ -1251,6 +1251,30 @@ pub(super) async fn handle_extended_with_bound(
             if session.station_id.is_some() || session.structure_id.is_some() {
                 return Some(Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot activate dungeon acceleration gate while docked".into() }));
             }
+            if let Some(ship_id) = session.ship_id {
+                let is_burner_gate = ctx.db.with_snapshot(|snap| {
+                    load_mission_meta(snap, char_id, mission_id).is_some_and(|mt| mt.is_anomic_burner)
+                        || ctx.sde.missions.get(&mission_id).is_some_and(|t| t.title.contains("Anomic"))
+                });
+                let kind = if is_burner_gate {
+                    crate::services::space_nav_movement_guard::AccelerationGateKind::AnomicBurner
+                } else {
+                    crate::services::space_nav_movement_guard::AccelerationGateKind::DedOrExploration
+                };
+                if let Err(e) = ctx
+                    .validate_ship_movement(
+                        char_id,
+                        ship_id,
+                        crate::services::space_nav_movement_guard::MovementIntent::AccelerationGate {
+                            sys_id: session.solar_system_id.unwrap_or(30_000_142),
+                            kind,
+                        },
+                    )
+                    .await
+                {
+                    return Some(Err(e));
+                }
+            }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 // Enforce Anomic Burner frigate/small-hull gate restriction (feat:pve.anomic-burner-missions)
                 let is_burner = load_mission_meta(snap, char_id, mission_id)

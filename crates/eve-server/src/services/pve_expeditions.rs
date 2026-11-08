@@ -796,6 +796,17 @@ pub async fn validate_and_advance_pve_site_room(
     sys_id: SolarSystemId,
     raw_site_id: &str,
 ) -> Result<PyRep, BridgeRpcError> {
+    if let (Some(char_id), Some(ship_id)) = (session.character_id, session.ship_id) {
+        ctx.validate_ship_movement(
+            char_id,
+            ship_id,
+            crate::services::space_nav_movement_guard::MovementIntent::AccelerationGate {
+                sys_id,
+                kind: crate::services::space_nav_movement_guard::AccelerationGateKind::DedOrExploration,
+            },
+        )
+        .await?;
+    }
     let mut site_id = raw_site_id.to_string();
     let (rating_to_check, sleeper_info, site_pos_opt, canonical_site_id) =
         crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {

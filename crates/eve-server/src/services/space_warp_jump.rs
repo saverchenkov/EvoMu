@@ -514,26 +514,14 @@ async fn handle_cmd_warp_to_stuff(
     );
     let landing_dist = current_ball.position.distance(landing_pos);
 
-    if handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
-        return Err(BridgeRpcError {
-            code: "WarpScrambled".into(),
-            message: "WarpScrambled: Warp drive disabled by warp disruption/scrambler effect"
-                .into(),
-        });
-    }
-
-    let mut is_covert_cloaked = false;
-    if let Ok(Some(cs_check)) = handle.get_combat_state(ship_id).await {
-        if cs_check.is_cloaked && cs_check.gate_cloak_remaining_ticks == 0 && !cs_check.is_covert_cloak {
-            return Err(BridgeRpcError {
-                code: "CloakedCannotWarp".into(),
-                message: "Cannot initiate warp while cloaked without a Covert Ops Cloaking Device"
-                    .into(),
-            });
-        }
-        is_covert_cloaked =
-            cs_check.is_cloaked && cs_check.is_covert_cloak && cs_check.gate_cloak_remaining_ticks == 0;
-    }
+    let validated = ctx
+        .validate_ship_movement(
+            char_id,
+            ship_id,
+            crate::services::space_nav_movement_guard::MovementIntent::Warp { sys_id },
+        )
+        .await?;
+    let is_covert_cloaked = validated.is_covert_cloaked;
 
     let warp_dir = (landing_pos - current_ball.position).normalize_or_zero();
     let mut dest_pos = landing_pos - warp_dir * min_range;
@@ -713,10 +701,15 @@ async fn handle_cmd_stargate_jump(
             message: "Session has no active ship".into(),
         });
     };
-    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
-    crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "jump")?;
-    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp")?;
-    crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "warp")?;
+    crate::services::space_nav_movement_guard::validate_pre_movement_locks(
+        ctx,
+        ship_id,
+        &crate::services::space_nav_movement_guard::MovementIntent::StargateJump {
+            from_sys: old_sys,
+            to_sys: old_sys,
+            gate_id: 0,
+        },
+    )?;
     let Some(gate_id) = args.first().and_then(|a| a.as_i64()) else {
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
@@ -777,66 +770,17 @@ async fn handle_cmd_stargate_jump(
         });
     }
 
-    if matches!(current_ball.mode, MovementMode::Warp { .. }) {
-        return Err(BridgeRpcError {
-            code: "ShipInWarp".into(),
-            message: "Cannot jump while ship is mid-warp".into(),
-        });
-    }
-
-    let ball_type_id = current_ball.type_id;
-    let item_type_id = ctx
-        .db
-        .with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id))
-        .unwrap_or(0);
-    let ship_type_id = if ball_type_id != 0 {
-        ball_type_id
-    } else {
-        item_type_id
-    };
-    let ship_group_id = ctx
-        .sde
-        .types
-        .get(&ship_type_id)
-        .map(|t| t.group_id)
-        .unwrap_or(0);
-    let is_restricted_capital = matches!(ship_group_id, 30 | 485 | 547 | 659 | 883 | 1538 | 4594);
-    let is_zarzakh_gate =
-        old_sys == SOLAR_SYSTEM_ZARZAKH || jump.to_solar_system_id == SOLAR_SYSTEM_ZARZAKH;
-    let is_orca = ship_type_id == 28606 || ship_group_id == 941;
-    let is_freighter = matches!(ship_group_id, 513 | 902);
-    let is_zarzakh_restricted = is_zarzakh_gate
-        && !is_orca
-        && (is_restricted_capital || is_freighter);
-
-    if is_zarzakh_restricted {
-        return Err(BridgeRpcError {
-            code: "ShipCannotUseStargate".into(),
-            message: format!(
-                "Capital ship or freighter type {} (group {}) cannot jump stargate {gate_id}",
-                ship_type_id, ship_group_id
-            ),
-        });
-    }
-
-    let is_pochven_gate = ctx.sde.solar_systems.get(&old_sys).map(|s| s.region_id) == Some(10_000_070)
-        || ctx.sde.solar_systems.get(&jump.to_solar_system_id).map(|s| s.region_id) == Some(10_000_070);
-    let is_highsec_gate = ctx.sde.solar_systems.get(&old_sys).is_some_and(|s| s.security_status >= 0.45)
-        || ctx.sde.solar_systems.get(&jump.to_solar_system_id).is_some_and(|s| s.security_status >= 0.45);
-    let is_supercapital = matches!(ship_group_id, 30 | 659);
-
-    if (is_pochven_gate && (is_restricted_capital || is_freighter))
-        || is_supercapital
-        || (is_highsec_gate && is_restricted_capital)
-    {
-        return Err(BridgeRpcError {
-            code: "CapitalShipCannotJumpStargate".into(),
-            message: format!(
-                "Capital ship or freighter type {} (group {}) cannot jump stargate {gate_id}",
-                ship_type_id, ship_group_id
-            ),
-        });
-    }
+    // Pochven Triglavian Clade Home Systems & Zarzakh Horizon Siege checked after unified movement validation.
+    ctx.validate_ship_movement(
+        char_id,
+        ship_id,
+        crate::services::space_nav_movement_guard::MovementIntent::StargateJump {
+            from_sys: old_sys,
+            to_sys: jump.to_solar_system_id,
+            gate_id,
+        },
+    )
+    .await?;
 
     // DERIVED: Pochven Triglavian Clade Home Systems (Kino, Niarja, Archee in region 10_000_070) require +6.0 Triglavian standing to jump stargates
     let is_pochven_home_system = ctx.sde.solar_systems.get(&jump.to_solar_system_id).is_some_and(|sys| {
@@ -852,13 +796,6 @@ async fn handle_cmd_stargate_jump(
         if trig_standing < 6.0 {
             return Err(BridgeRpcError::user_error("SystemCheck_JumpFailed_StandingsTooLow"));
         }
-    }
-
-    // Zarzakh Horizon Siege state gating (`feat:navigation.zarzakh-local-horizon-siege`)
-    if (old_sys == SOLAR_SYSTEM_ZARZAKH || jump.to_solar_system_id == SOLAR_SYSTEM_ZARZAKH)
-        && crate::services::cluster_macho_misc_services::is_zarzakh_horizon_siege_active(ctx)
-    {
-        return Err(BridgeRpcError::user_error("HorizonSiegeGateAccessDenied"));
     }
 
     if old_sys == SOLAR_SYSTEM_ZARZAKH {

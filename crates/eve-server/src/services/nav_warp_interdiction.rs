@@ -412,12 +412,11 @@ pub(crate) async fn validate_pre_warp_common(
     sys_id: u32,
     sys_handle: &crate::system_actor::SystemHandle,
 ) -> Result<(), BridgeRpcError> {
-    if (32_000_000..=32_999_999).contains(&sys_id) {
-        return Err(BridgeRpcError {
-            code: "CannotWarpInAbyssalSpace".into(),
-            message: "Warp navigation is disabled inside Abyssal Deadspace".into(),
-        });
-    }
+    crate::services::space_nav_movement_guard::validate_pre_movement_locks(
+        ctx,
+        ship_id,
+        &crate::services::space_nav_movement_guard::MovementIntent::Warp { sys_id },
+    )?;
     crate::services::space_destiny::space_nav_travel::ensure_not_mjd_spooling(
         sys_handle,
         ship_id,
@@ -427,10 +426,6 @@ pub(crate) async fn validate_pre_warp_common(
         ctx, sys_id, ship_id, "warp",
     )
     .await?;
-    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp")?;
-    crate::services::space_navigation_advanced::check_immobilizing_module_active(
-        ctx, ship_id, "warp",
-    )?;
     crate::services::tourney_service::check_tourney_warp_restricted(ctx, sys_id, char_id)?;
     crate::services::combat_crimewatch::check_crimewatch_action_restriction(
         ctx,
@@ -515,38 +510,14 @@ pub(crate) async fn execute_agency_content_warp(
     )
     .await;
 
-    let is_scrambled = sys_handle.is_ball_scrambled_sync(ship_id)
-        || sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false)
-        || sys_handle
-            .get_combat_state(ship_id)
-            .await
-            .ok()
-            .flatten()
-            .is_some_and(|cs| cs.is_warp_scrambled());
-    if is_scrambled {
-        return Err(BridgeRpcError {
-            code: "WarpScrambled".into(),
-            message: "WarpScrambled: Warp drive disabled by warp disruption/scrambler effect"
-                .into(),
-        });
-    }
-
-    let mut is_covert_cloaked = false;
-    if let Ok(Some(cs_check)) = sys_handle.get_combat_state(ship_id).await {
-        if cs_check.is_cloaked
-            && cs_check.gate_cloak_remaining_ticks == 0
-            && !cs_check.is_covert_cloak
-        {
-            return Err(BridgeRpcError {
-                code: "CloakedCannotWarp".into(),
-                message: "Cannot initiate warp while cloaked without a Covert Ops Cloaking Device"
-                    .into(),
-            });
-        }
-        is_covert_cloaked = cs_check.is_cloaked
-            && cs_check.is_covert_cloak
-            && cs_check.gate_cloak_remaining_ticks == 0;
-    }
+    let validated = ctx
+        .validate_ship_movement(
+            char_id,
+            ship_id,
+            crate::services::space_nav_movement_guard::MovementIntent::AgencyWarp { sys_id },
+        )
+        .await?;
+    let is_covert_cloaked = validated.is_covert_cloaked;
 
     crate::services::pve_dungeon_runtime::check_deadspace_warp_allowed(
         ctx,
@@ -749,44 +720,17 @@ pub async fn handle_use_warp_vector(
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     validate_pre_warp_common(ctx, char_id, ship_id, sys_id, &sys_handle).await?;
-    let is_scrambled = sys_handle.is_ball_scrambled_sync(ship_id)
-        || sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false)
-        || sys_handle
-            .get_combat_state(ship_id)
-            .await
-            .ok()
-            .flatten()
-            .is_some_and(|cs| cs.is_warp_scrambled());
-    if is_scrambled {
-        return Err(BridgeRpcError {
-            code: "WarpScrambled".into(),
-            message: "WarpScrambled: Warp drive disabled by warp disruption/scrambler effect".into(),
-        });
-    }
-    if let Ok(Some(cs_check)) = sys_handle.get_combat_state(ship_id).await {
-        if cs_check.is_cloaked
-            && cs_check.gate_cloak_remaining_ticks == 0
-            && !cs_check.is_covert_cloak
-        {
-            return Err(BridgeRpcError {
-                code: "CloakedCannotWarp".into(),
-                message: "Cannot initiate warp while cloaked without a Covert Ops Cloaking Device"
-                    .into(),
-            });
-        }
-    }
-
-    let (_, ship_ball) = sys_handle
-        .get_ball_snapshot(ship_id)
-        .await
-        .map_err(|e| BridgeRpcError {
-            code: "DestinyQueryFailed".into(),
-            message: e,
-        })?
-        .ok_or_else(|| BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
-        })?;
+    let validated = ctx
+        .validate_ship_movement(
+            char_id,
+            ship_id,
+            crate::services::space_nav_movement_guard::MovementIntent::VectorWarp { sys_id },
+        )
+        .await?;
+    let ship_ball = validated.ball.ok_or_else(|| BridgeRpcError {
+        code: "ShipNotInSpace".into(),
+        message: format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
+    })?;
     ensure_not_in_active_warp(&ship_ball.mode)?;
 
     // `warpVectorMgr.UseVector(itemID)` only accepts an owned Warp Vector Data item (`group 4599`) in active ship cargo.

@@ -562,7 +562,7 @@ pub async fn handle_mmju_activate(
         return Err(err("ShipCloaked", "Cannot activate Mobile Micro Jump Unit while cloaked"));
     }
     let is_scrambled = handle.is_ball_scrambled(ship_id).await.unwrap_or(false)
-        || ship_cs.is_some_and(|cs| cs.is_warp_scrambled() || cs.is_mwd_mjd_disabled);
+        || ship_cs.is_some_and(|cs| cs.is_mwd_mjd_disabled);
     if is_scrambled {
         return Err(err(
             "WarpScrambled",
@@ -747,7 +747,7 @@ fn step_mmju_spools_in_actor(
         };
         let is_blocked = ballpark.is_ball_scrambled(entry.ship_id)
             || ballpark.combat_states.get(&entry.ship_id).is_some_and(|cs| {
-                cs.is_cloaked || cs.is_warp_scrambled() || cs.is_mwd_mjd_disabled
+                cs.is_cloaked || cs.is_mwd_mjd_disabled
             });
         if is_blocked {
             continue;

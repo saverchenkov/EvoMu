@@ -950,15 +950,18 @@ pub(crate) async fn caller_in_space(
         return Err(err("ShipDocked", "Cannot jump while docked"));
     }
     let handle = ctx.systems.get_or_spawn(sys_id);
-    let ball = handle
-        .get_ball_snapshot(ship_id)
-        .await
-        .map_err(|e| err("DestinyCommandFailed", e))?
-        .map(|(_, b)| b)
-        .ok_or_else(|| err("ShipNotInSpace", "Active ship is not in space"))?;
-    if matches!(ball.mode, MovementMode::Warp { .. }) {
-        return Err(err("ShipInWarp", "Cannot jump while in warp"));
-    }
+    let validated = ctx
+        .validate_ship_movement(
+            char_id,
+            ship_id,
+            crate::services::space_nav_movement_guard::MovementIntent::CynoJump {
+                from_sys: sys_id,
+                to_sys: sys_id,
+                allow_bubbled,
+            },
+        )
+        .await?;
+    let ball = validated.ball.ok_or_else(|| err("ShipNotInSpace", "Active ship is not in space"))?;
     let now = ctx.now_unix();
     let release_portal_mod = {
         let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
@@ -975,27 +978,14 @@ pub(crate) async fn caller_in_space(
     if let Some(pmod_id) = release_portal_mod {
         let _ = handle.remove_module_cycle(ship_id, pmod_id).await;
     }
-    let combat_state = handle.get_combat_state(ship_id).await.ok().flatten();
-    if combat_state
+    if validated
+        .combat_state
         .as_ref()
         .is_some_and(|cs| cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0)
     {
         return Err(err(
             "CannotJumpWhileCloaked",
             "Cannot jump or bridge while cloaked",
-        ));
-    }
-    let net_wcs_negative = combat_state
-        .is_some_and(|cs| cs.warp_scramble_strength > cs.warp_core_strength);
-    let is_blocked = if allow_bubbled {
-        net_wcs_negative
-    } else {
-        net_wcs_negative || handle.is_ball_scrambled(ship_id).await.unwrap_or(false)
-    };
-    if is_blocked {
-        return Err(err(
-            "WarpScrambled",
-            "Cannot jump or bridge while warp scrambled or inside a warp disruption bubble",
         ));
     }
     {
@@ -1006,8 +996,6 @@ pub(crate) async fn caller_in_space(
             }
         }
     }
-    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
-    crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "jump")?;
     crate::services::combat_crimewatch::check_crimewatch_action_restriction(
         ctx, char_id, ship_id, sys_id, "jump_drive", now,
     )?;

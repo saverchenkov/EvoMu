@@ -660,21 +660,17 @@ pub(crate) async fn handle_void_space_player_jump(
         });
     }
 
+    ctx.validate_ship_movement(
+        char_id,
+        ship_id,
+        crate::services::space_nav_movement_guard::MovementIntent::AbyssalOrVoidFilament {
+            from_sys: cur_sys,
+            reject_when_cloaked: true,
+            reject_when_tethered: true,
+        },
+    )
+    .await?;
     let origin_handle = ctx.systems.get_or_spawn(cur_sys);
-    if let Ok(Some(cs)) = origin_handle.get_combat_state(ship_id).await {
-        if cs.is_cloaked {
-            return Err(BridgeRpcError {
-                code: "ShipIsCloaked".into(),
-                message: "Cannot activate filament while cloaked".into(),
-            });
-        }
-        if cs.is_tethered {
-            return Err(BridgeRpcError {
-                code: "ShipIsTethered".into(),
-                message: "Cannot activate filament while tethered".into(),
-            });
-        }
-    }
     let ship_pos = if let Ok(Some((_, ball))) = origin_handle.get_ball_snapshot(ship_id).await {
         [ball.position.x, ball.position.y, ball.position.z]
     } else {
@@ -953,12 +949,15 @@ pub(crate) async fn handle_void_space_end_gate_activation(
     }
 
     let void_handle = ctx.systems.get_or_spawn(VOID_SPACE_SYSTEM_ID);
-    if void_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
-        return Err(BridgeRpcError {
-            code: "WarpScrambled".into(),
-            message: "Cannot activate Void Space exit gate while warp scrambled".into(),
-        });
-    }
+    ctx.validate_ship_movement(
+        char_id,
+        ship_id,
+        crate::services::space_nav_movement_guard::MovementIntent::AccelerationGate {
+            sys_id: VOID_SPACE_SYSTEM_ID,
+            kind: crate::services::space_nav_movement_guard::AccelerationGateKind::VoidExit,
+        },
+    )
+    .await?;
 
     let Some((_, gb)) = void_handle.get_ball_snapshot(gate_id).await.ok().flatten() else {
         return Err(BridgeRpcError {

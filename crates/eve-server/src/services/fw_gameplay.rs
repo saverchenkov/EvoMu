@@ -417,24 +417,7 @@ pub(crate) async fn check_gate_tackle_and_nav_locks(
     ship_id: i64,
     ship_ball: &Ball,
 ) -> Result<(), BridgeRpcError> {
-    if matches!(ship_ball.mode, MovementMode::Warp { .. }) {
-        return Err(BridgeRpcError {
-            code: "ShipInWarp".into(),
-            message: "Cannot activate an acceleration gate while warping".into(),
-        });
-    }
-    if let Err(reason) = crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp") {
-        return Err(BridgeRpcError {
-            code: "ShipNavigationLocked".into(),
-            message: reason.message,
-        });
-    }
-    if let Err(reason) = crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "warp") {
-        return Err(BridgeRpcError {
-            code: "ImmobilizingModuleActive".into(),
-            message: reason.message,
-        });
-    }
+    let _ = ship_ball;
     let has_wcs = ctx.db.with_snapshot(|snap| {
         snap.items.values().any(|item| {
             item.location_id == ship_id
@@ -448,16 +431,15 @@ pub(crate) async fn check_gate_tackle_and_nav_locks(
             message: "Ships fitted with Warp Core Stabilizers cannot activate this acceleration gate".into(),
         });
     }
-    let is_scrambled = sys_handle
-        .is_ball_scrambled(ship_id)
-        .await
-        .unwrap_or_else(|_| sys_handle.is_ball_scrambled_sync(ship_id));
-    if is_scrambled {
-        return Err(BridgeRpcError {
-            code: "WarpScrambled".into(),
-            message: "Cannot activate acceleration gate while warp scrambled or disrupted".into(),
-        });
-    }
+    ctx.validate_ship_movement(
+        0,
+        ship_id,
+        crate::services::space_nav_movement_guard::MovementIntent::AccelerationGate {
+            sys_id: sys_handle.solar_system_id,
+            kind: crate::services::space_nav_movement_guard::AccelerationGateKind::FwComplex,
+        },
+    )
+    .await?;
     Ok(())
 }
 

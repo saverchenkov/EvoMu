@@ -117,20 +117,22 @@ async fn handle_wormhole_jump(
         .get_item(ship_id)
         .map(|i| i.type_id)
         .unwrap_or(current_ball.type_id);
-    let ship_group_id = ctx
+    ctx.validate_ship_movement(
+        char_id,
+        ship_id,
+        crate::services::space_nav_movement_guard::MovementIntent::WormholeJump {
+            from_sys: old_sys,
+            max_jump_mass: None,
+        },
+    )
+    .await?;
+
+    let _ship_group_id = ctx
         .sde
         .types
         .get(&ship_type_id)
         .map(|t| t.group_id)
         .unwrap_or(0);
-    if matches!(ship_group_id, 30 | 659) {
-        return Err(BridgeRpcError {
-            code: "ShipRestrictedFromWormhole".into(),
-            message: format!(
-                "Ship type {ship_type_id} (group {ship_group_id}) is restricted from entering wormholes (Supercarrier/Titan prohibition)"
-            ),
-        });
-    }
 
     crate::services::tactical_modules::prepare_ship_for_wormhole_jump(
         ctx,
@@ -555,18 +557,14 @@ async fn handle_random_jump_filament(
         None
     }.unwrap_or(DVec3::new(100_000_000.0, 0.0, 0.0));
 
-    if old_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
-        return Err(BridgeRpcError {
-            code: "ShipWarpScrambled".into(),
-            message: "Cannot activate filament while warp scrambled".into(),
-        });
-    }
-    if matches!(current_ball.mode, MovementMode::Warp { .. }) {
-        return Err(BridgeRpcError {
-            code: "CannotActivateFilamentInWarp".into(),
-            message: "Cannot activate filament while in warp".into(),
-        });
-    }
+    ctx.validate_ship_movement(
+        char_id,
+        ship_id,
+        crate::services::space_nav_movement_guard::MovementIntent::RandomFilament {
+            from_sys: old_sys,
+        },
+    )
+    .await?;
     let mut jumpers = vec![(char_id, ship_id, current_ball)];
     for mate_id in fleet_members {
         if mate_id == char_id || jumpers.len() >= max_capacity { continue; }
@@ -807,28 +805,24 @@ async fn handle_cmd_jump_to_structure_beacon(
         (None, args.first().and_then(|a| a.as_i64()).unwrap_or(0))
     };
     let cur_sys_handle = ctx.systems.get_or_spawn(cur_sys_id);
-    let (_, current_ball) = cur_sys_handle
-        .get_ball_snapshot(ship_id)
-        .await
-        .map_err(|e| BridgeRpcError {
-            code: "DestinyCommandFailed".into(),
-            message: e,
-        })?
-        .ok_or_else(|| BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Active ship is not spawned in space".into(),
-        })?;
-    if matches!(current_ball.mode, MovementMode::Warp { .. }) {
-        return Err(BridgeRpcError {
-            code: "ShipInWarp".into(),
-            message: "Cannot jump while in warp".into(),
-        });
-    }
-    if cur_sys_handle
-        .get_combat_state(ship_id)
-        .await
-        .ok()
-        .flatten()
+    let validated_jump = ctx
+        .validate_ship_movement(
+            char_id,
+            ship_id,
+            crate::services::space_nav_movement_guard::MovementIntent::CynoJump {
+                from_sys: cur_sys_id,
+                to_sys: cur_sys_id,
+                allow_bubbled: false,
+            },
+        )
+        .await?;
+    let current_ball = validated_jump.ball.ok_or_else(|| BridgeRpcError {
+        code: "ShipNotInSpace".into(),
+        message: "Active ship is not spawned in space".into(),
+    })?;
+    if validated_jump
+        .combat_state
+        .as_ref()
         .is_some_and(|cs| cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0)
     {
         return Err(BridgeRpcError {
@@ -836,14 +830,6 @@ async fn handle_cmd_jump_to_structure_beacon(
             message: "Cannot jump while cloaked".into(),
         });
     }
-    if cur_sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
-        return Err(BridgeRpcError {
-            code: "WarpScrambled".into(),
-            message: "Cannot jump while warp scrambled".into(),
-        });
-    }
-    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
-    crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "jump")?;
     let now_check = ctx.now_unix();
     crate::services::combat_crimewatch::check_crimewatch_action_restriction(
         ctx, char_id, ship_id, cur_sys_id, "jump_drive", now_check,
@@ -853,18 +839,19 @@ async fn handle_cmd_jump_to_structure_beacon(
         .db
         .with_snapshot(|snap| validate_structure_cyno_beacon(snap, char_id, target_struct_id, target_sys_hint))?;
     let target_sys_id = target_struct.solar_system_id;
-    if (31_000_000..32_000_000).contains(&cur_sys_id)
-        || (31_000_000..32_000_000).contains(&target_sys_id)
-    {
-        return Err(BridgeRpcError { code: "JumpDriveForbiddenInWormholeSpace".into(), message: "Jump drive and cynosural beacon operations are prohibited in wormhole space".into() });
-    }
+    crate::services::space_nav_movement_guard::validate_pre_movement_locks(
+        ctx,
+        ship_id,
+        &crate::services::space_nav_movement_guard::MovementIntent::CynoJump {
+            from_sys: cur_sys_id,
+            to_sys: target_sys_id,
+            allow_bubbled: false,
+        },
+    )?;
     if (32_000_000..=32_999_999).contains(&cur_sys_id)
         || (32_000_000..=32_999_999).contains(&target_sys_id)
     {
         return Err(BridgeRpcError { code: "JumpDriveForbiddenInAbyssalSpace".into(), message: "Jump drive and cynosural beacon operations are prohibited in Abyssal Deadspace".into() });
-    }
-    if cur_sys_id == 30_100_000 || target_sys_id == 30_100_000 {
-        return Err(BridgeRpcError { code: "JumpDriveForbiddenInZarzakh".into(), message: "Jump drive and cynosural beacon operations are prohibited in Zarzakh".into() });
     }
     if ctx.sde.solar_systems.get(&target_sys_id).map(|s| s.region_id) == Some(10_000_070) {
         return Err(BridgeRpcError { code: "CannotJumpToPochven".into(), message: format!("Region-wide cyno jammer prevents jump drives from entering Pochven system {target_sys_id}") });

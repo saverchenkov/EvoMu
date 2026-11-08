@@ -737,33 +737,34 @@ pub(super) async fn handle_scanning_and_wormholes(
             {
                 return Some(res);
             }
+            let validated_gate = match ctx
+                .validate_ship_movement(
+                    char_id,
+                    ship_id,
+                    crate::services::space_nav_movement_guard::MovementIntent::AccelerationGate {
+                        sys_id,
+                        kind: crate::services::space_nav_movement_guard::AccelerationGateKind::Generic,
+                    },
+                )
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            let Some((_, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
+            let Some(ship_ball) = validated_gate.ball else {
                 return Some(Err(BridgeRpcError {
                     code: "ShipNotInSpace".into(),
                     message: "Ship is not in space".into(),
                 }));
             };
-
-            let ship_type_id = ship_ball.type_id;
-            let ship_type = ctx.sde.types.get(&ship_type_id);
-            let ship_rig_size = ship_type
+            let ship_group_id = validated_gate.ship_group_id;
+            let ship_rig_size = ctx
+                .sde
+                .types
+                .get(&validated_gate.ship_type_id)
                 .and_then(|t| t.default_attributes.get(&1547).copied())
                 .unwrap_or(0.0);
-            let ship_group_id = ship_type
-                .map(|t| t.group_id)
-                .unwrap_or(0);
-
-            // SDE dogma rigSize: 4.0 = Capital hulls; mass > 500M kg = Freighters / Capital Industrials
-            if ship_rig_size >= 4.0
-                || ship_ball.mass > 500_000_000.0
-                || [30, 485, 547, 659, 883, 1538, 4594].contains(&ship_group_id)
-            {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipTooLargeForGate".into(),
-                    message: "Capital ships cannot activate this acceleration gate".into(),
-                }));
-            }
             if let Err(e) = crate::services::pve_special_sites::check_drifter_hive_gate_access(ctx, sys_id, gate_id) {
                 return Some(Err(e));
             }

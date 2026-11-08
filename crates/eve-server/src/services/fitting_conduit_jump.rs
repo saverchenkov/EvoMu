@@ -689,22 +689,24 @@ pub(crate) async fn group_jump_to_resolved_beacon(
         {
             continue;
         }
-        if let Ok(Some((_, ball))) = origin_handle.get_ball_snapshot(m_ship).await {
-            let in_warp = matches!(ball.mode, MovementMode::Warp { .. });
-            let is_scrambled = origin_handle.is_ball_scrambled(m_ship).await.unwrap_or(false);
-            let is_tethered = origin_handle
-                .get_combat_state(m_ship)
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|cs| cs.is_tethered || cs.warp_scramble_strength > cs.warp_core_strength);
-            let is_immobilized = crate::services::tactical_modules::check_ship_navigation_lock(ctx, m_ship, "jump").is_err()
-                || crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, m_ship, "jump").is_err();
-            if !in_warp
-                && !is_scrambled
-                && !is_tethered
-                && !is_immobilized
-                && ball.position.distance(caller_ball.position) <= 10_000.0
+        let valid_move = ctx
+            .validate_ship_movement(
+                m_char,
+                m_ship,
+                crate::services::space_nav_movement_guard::MovementIntent::ConduitJump {
+                    from_sys: sys_id,
+                    to_sys: beacon.solar_system_id,
+                    allow_bubbled: false,
+                },
+            )
+            .await;
+        if let Ok(vm) = valid_move {
+            let is_tethered = vm.combat_state.as_ref().is_some_and(|cs| cs.is_tethered);
+            if !is_tethered
+                && vm
+                    .ball
+                    .as_ref()
+                    .is_some_and(|b| b.position.distance(caller_ball.position) <= 10_000.0)
             {
                 qualified_passengers.push((m_char, m_ship));
             }

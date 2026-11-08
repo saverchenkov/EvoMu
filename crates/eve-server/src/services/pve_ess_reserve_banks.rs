@@ -688,12 +688,6 @@ pub async fn try_activate_ess_acceleration_gate(
             message: "Ship is not in space".into(),
         }));
     };
-    if matches!(ship_ball.mode, MovementMode::Warp { .. }) {
-        return Some(Err(BridgeRpcError {
-            code: "ShipInWarp".into(),
-            message: "Cannot activate ESS acceleration gate while ship is in warp".into(),
-        }));
-    }
     if crate::services::space_destiny::check_session_change_timer_active(
         ctx,
         char_id,
@@ -704,17 +698,18 @@ pub async fn try_activate_ess_acceleration_gate(
     {
         return Some(Err(BridgeRpcError::user_error("SessionChangeInProgress")));
     }
-    if let Err(e) = crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp") {
+    if let Err(e) = ctx
+        .validate_ship_movement(
+            char_id,
+            ship_id,
+            crate::services::space_nav_movement_guard::MovementIntent::AccelerationGate {
+                sys_id,
+                kind: crate::services::space_nav_movement_guard::AccelerationGateKind::EssBank,
+            },
+        )
+        .await
+    {
         return Some(Err(e));
-    }
-    if let Err(e) = crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "warp") {
-        return Some(Err(e));
-    }
-    if sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
-        return Some(Err(BridgeRpcError {
-            code: "WarpScrambled".into(),
-            message: "Cannot activate ESS acceleration gate while warp scrambled".into(),
-        }));
     }
     let Some((_, gate_ball)) = sys_handle.get_ball_snapshot(gate_id).await.ok().flatten() else {
         return Some(Err(BridgeRpcError {

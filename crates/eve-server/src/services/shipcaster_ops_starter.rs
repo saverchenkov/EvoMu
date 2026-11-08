@@ -394,30 +394,18 @@ pub async fn prevalidate_shipcaster_jump(
         ));
     }
 
-    if let Err(e) = crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")
-    {
-        return Err(e);
-    }
+    let validated = ctx
+        .validate_ship_movement(
+            char_id,
+            ship_id,
+            crate::services::space_nav_movement_guard::MovementIntent::ShipcasterJump {
+                from_sys: origin_sys,
+                to_sys: origin_sys,
+            },
+        )
+        .await?;
 
-    if matches!(ship_ball.mode, MovementMode::Warp { .. }) {
-        return Err(rpc_err("ShipInWarp", "Cannot jump shipcaster while ship is mid-warp"));
-    }
-
-    if old_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
-        return Err(rpc_err(
-            "WarpScrambled",
-            "Cannot jump shipcaster while warp scrambled or disrupted",
-        ));
-    }
-
-    let pre_cs = old_handle.get_combat_state(ship_id).await.ok().flatten();
-    if let Some(ref cs) = pre_cs {
-        if cs.warp_scramble_strength > 0 {
-            return Err(rpc_err("WarpScrambled", "Cannot jump shipcaster while warp scrambled"));
-        }
-    }
-
-    Ok((cur_tick, ship_ball, pre_cs))
+    Ok((cur_tick, ship_ball, validated.combat_state))
 }
 
 /// Executes jump handoff across system actors, moving the ball and emitting complete session changes.

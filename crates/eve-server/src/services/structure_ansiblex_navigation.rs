@@ -198,9 +198,15 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
     let structure_id = args.first().and_then(|a| a.as_i64()).ok_or_else(|| err("MissingStructureId", "CmdJumpThroughStructureStargate requires structureID"))?;
     let sys_id = session.solar_system_id.ok_or_else(|| err("NoSolarSystem", "Session has no solarSystemID"))?;
     let ship_id = session.ship_id.ok_or_else(|| err("NoActiveShip", "Session has no active ship"))?;
-    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
-    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp")?;
-    crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "jump")?;
+    ctx.validate_ship_movement(
+        char_id,
+        ship_id,
+        crate::services::space_nav_movement_guard::MovementIntent::AnsiblexJump {
+            from_sys: sys_id,
+            to_sys: sys_id,
+        },
+    )
+    .await?;
     let now_unix = ctx.now_unix();
     if ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner()).states.get(&char_id).is_some_and(|st| st.is_weapon_timer_active(now_unix)) {
         return Err(err("WeaponsTimerActive", "Cannot jump through structure stargate while weapons timer is active"));
