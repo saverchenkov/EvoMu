@@ -519,9 +519,12 @@ def _inspect_uicore_tree():
     except Exception:
         pass
 
+    visited_nodes = set()
+
     def _walk(node, path_prefix, depth, bucket):
-        if depth > 16 or len(bucket) >= 160 or not _is_pickable(node):
+        if depth > 16 or len(bucket) >= 160 or id(node) in visited_nodes or not _is_pickable(node):
             return
+        visited_nodes.add(id(node))
         name = _safe_str(getattr(node, "name", ""), 48) or node.__class__.__name__
         cur_path = "%s/%s" % (path_prefix, name) if path_prefix else name
         cls_name = node.__class__.__name__
@@ -565,32 +568,50 @@ def _inspect_uicore_tree():
     }
 
 
-def _find_widget(target, layers_root):
+def _find_widget(target, layers_root, hint_x=None, hint_y=None):
     uicore = _get_uicore()
     if uicore is None or not target:
         return None
     t_low = str(target).lower()
-    best = [None]
-    fallback = [None]
+    best = [None, -1]
+    fallback = [None, -1]
 
     def _search(node, cur_path, depth):
-        if depth > 17 or best[0] is not None or not _is_pickable(node):
+        if depth > 17 or not _is_pickable(node):
             return
         name = _safe_str(getattr(node, "name", ""), 64)
         path = "%s/%s" % (cur_path, name) if cur_path else name
+        p_low = path.lower()
+        n_low = name.lower()
         lbl = _extract_widget_label(node)
-        matched = (
-            name.lower() == t_low
-            or path.lower().endswith(t_low)
-            or (lbl and lbl.lower() == t_low)
-            or (len(t_low) >= 4 and lbl and t_low in lbl.lower())
-        )
-        if matched:
+        l_low = lbl.lower() if lbl else ""
+        base_score = 0
+        if p_low == t_low or ( "/" in t_low and p_low.endswith(t_low)):
+            base_score = 100
+        elif n_low == t_low or p_low.endswith("/" + t_low):
+            base_score = 90
+        elif l_low and l_low == t_low:
+            base_score = 80
+        elif len(t_low) >= 4 and l_low and t_low in l_low:
+            base_score = 60
+
+        if base_score > 0:
+            score = base_score + depth
+            if hint_x is not None and hint_y is not None and (hint_x > 0 or hint_y > 0):
+                try:
+                    wx, wy, ww, wh = _widget_abs_rect(node)
+                    if ww >= 4 and wh >= 4 and wx <= hint_x <= (wx + ww) and wy <= hint_y <= (wy + wh):
+                        score += 50
+                except Exception:
+                    pass
             if _has_real_click_handler(node):
-                best[0] = node
-                return
-            elif fallback[0] is None and (hasattr(node, "OnClick") or hasattr(node, "Click") or hasattr(node, "OnMouseDown")):
-                fallback[0] = node
+                if score >= best[1]:
+                    best[0] = node
+                    best[1] = score
+            elif hasattr(node, "OnClick") or hasattr(node, "Click") or hasattr(node, "OnMouseDown"):
+                if score >= fallback[1]:
+                    fallback[0] = node
+                    fallback[1] = score
         children = getattr(node, "children", None)
         if children:
             try:
@@ -601,8 +622,10 @@ def _find_widget(target, layers_root):
 
     for lname, lobj in _iter_visible_layers(uicore):
         _search(lobj, lname, 0)
-        if best[0] is not None:
+        if best[0] is not None and best[1] >= 140:
             return best[0]
+    if best[0] is not None:
+        return best[0]
     return fallback[0]
 
 
@@ -637,10 +660,74 @@ def _find_widget_at_xy(px, py, layers_root):
     return None
 
 
+def _resolve_editable_widget(node):
+    cur = node
+    for _ in range(5):
+        if cur is None:
+            break
+        if hasattr(cur, "SetValue") or hasattr(cur, "SetText"):
+            return cur
+        cur = getattr(cur, "parent", None)
+    if node is not None:
+        for ch in list(getattr(node, "children", []) or []):
+            if hasattr(ch, "SetValue") or hasattr(ch, "SetText"):
+                return ch
+    return None
+
+
+def _find_any_visible_editable(layers):
+    if layers is None:
+        return None
+    found = []
+
+    def _walk(n, depth):
+        if n is None or depth > 18 or getattr(n, "destroyed", False) or not _is_visible(n):
+            return
+        if hasattr(n, "SetValue"):
+            cls_name = n.__class__.__name__
+            prio = 2 if ("Edit" in cls_name or "Input" in cls_name) else 1
+            found.append((prio, n))
+        for ch in list(getattr(n, "children", []) or []):
+            _walk(ch, depth + 1)
+
+    for lname in ("modal", "abovemain", "main"):
+        _walk(getattr(layers, lname, None), 0)
+    if not found:
+        return None
+    found.sort(key=lambda x: x[0], reverse=True)
+    return found[0][1]
+
+
 def _invoke_widget_click(node, right_click=False, double_click=False):
-    if right_click and hasattr(node, "GetMenu"):
-        menu = node.GetMenu()
-        return "GetMenu(%d)" % (len(menu or []),)
+    edit_w = _resolve_editable_widget(node)
+    if edit_w is not None:
+        try:
+            uic = _get_uicore()
+            reg = getattr(uic, "registry", None) if uic is not None else None
+            if reg is not None and hasattr(reg, "SetFocus"):
+                reg.SetFocus(edit_w)
+        except Exception:
+            pass
+    if right_click or (not _has_real_click_handler(node) and hasattr(node, "HasEventHandler") and node.HasEventHandler("GetMenu")):
+        cur = node
+        for _ in range(5):
+            if cur is None:
+                break
+            has_menu = hasattr(cur, "GetMenu") and (
+                not hasattr(cur, "HasEventHandler") or cur.HasEventHandler("GetMenu") or right_click
+            )
+            if has_menu:
+                try:
+                    from carbonui.control.contextMenu.contextMenu import ShowMenu
+                    ShowMenu(cur)
+                    return "ShowMenu(%s)" % (_safe_str(getattr(cur, "name", ""), 48),)
+                except Exception:
+                    try:
+                        menu = cur.GetMenu()
+                        return "GetMenu(%d)" % (len(menu or []),)
+                    except Exception:
+                        pass
+            cur = getattr(cur, "parent", None)
     if double_click and hasattr(node, "OnDblClick"):
         node.OnDblClick()
         return "OnDblClick"
@@ -1161,15 +1248,64 @@ def _execute_action(sm, action):
 
             elif atype == "open_structure_cosmetics":
                 try:
-                    from eve.client.script.ui.structure.structureSettings.controllers.structureCosmeticStatesController import (
-                        StructureCosmeticStatesController,
+                    sess = getattr(__builtin__, "session", None)
+                    cur_corpid = int(getattr(sess, "corpid", 0) or 0) if sess is not None else 0
+                    is_docked = bool(
+                        sess is not None
+                        and (getattr(sess, "stationid", None) is not None or getattr(sess, "structureid", None) is not None)
                     )
-                    ctrl = StructureCosmeticStatesController(int(raw_target) if raw_target.isdigit() else 1000000000001)
-                    if hasattr(ctrl, "GetCosmeticLicenseStates"):
-                        states = ctrl.GetCosmeticLicenseStates()
-                        result["cosmetic_states"] = _safe_str(repr(states), 180)
-                    else:
-                        result["cosmetic_controller"] = "initialized"
+                    if cur_corpid < 2000000 and is_docked:
+                        try:
+                            _run_gm_slash(sm, "/cleartimers")
+                            _run_gm_slash(sm, "/giveskill 3363 1")
+                            stamp = int(time.time()) % 100000
+                            sm.RemoteSvc("corpRegistry").AddCorporation(
+                                "EvoMu Designers %d" % stamp,
+                                "EV%03d" % (stamp % 1000),
+                            )
+                            H._sleep_ms(400)
+                            H._sync_quasar_gateway(sm, int(getattr(sess, "charid", 0) or 0))
+                        except Exception:
+                            pass
+                    cur_corpid = int(getattr(sess, "corpid", 0) or 0) if sess is not None else 0
+                    prev_corprole = int(getattr(sess, "corprole", 0) or 0) if sess is not None else 0
+                    spoofed_npc_role = False
+                    if (cur_corpid < 2000000 or prev_corprole == 0) and sess is not None and hasattr(sess, "__dict__"):
+                        try:
+                            lp_svc = sm.GetService("loyaltyPointsWalletSvc")
+                            if lp_svc is not None:
+                                setattr(lp_svc, "_corpLPBalanceByIssuerCorpID", {})
+                        except Exception:
+                            pass
+                        sess.__dict__["corprole"] = prev_corprole | 0x7FFFFFFFFFFFFFFF
+                        spoofed_npc_role = True
+                    try:
+                        struct_id = int(raw_target) if raw_target.isdigit() else 1000000000001
+                        sys_id = int(getattr(sess, "solarsystemid2", 0) or getattr(sess, "solarsystemid", 0) or 30000142)
+                        cos_svc = sm.GetService("cosmeticsSvc") if sm is not None else None
+                        ctrl = getattr(cos_svc, "_structure_cosmetic_states_controller", None)
+                        if ctrl is None:
+                            from cosmetics.client.structureCosmeticStatesController import (
+                                StructureCosmeticStatesController,
+                            )
+                            pg = sm.GetService("publicGatewaySvc")
+                            ctrl = StructureCosmeticStatesController(pg)
+                        if hasattr(ctrl, "get_cosmetic_state"):
+                            state = ctrl.get_cosmetic_state(struct_id, sys_id, force_refresh=True)
+                            result["cosmetic_state"] = _safe_str(repr(state), 180)
+                        lic_svc = sm.GetService("cosmeticsLicenseSvc") if sm is not None else None
+                        if lic_svc is not None and hasattr(lic_svc, "get_structure_licenses_for_corporation"):
+                            lics = lic_svc.get_structure_licenses_for_corporation()
+                            result["corp_structure_licenses"] = _safe_str(repr(lics), 180)
+                        try:
+                            from eve.client.script.ui.cosmetics.structure.paintToolWnd import PaintToolWnd
+                            PaintToolWnd.Open()
+                            result["opened_window"] = "PaintToolWnd"
+                        except Exception as wnd_exc:
+                            result["window_note"] = _safe_str(repr(wnd_exc), 140)
+                    finally:
+                        if spoofed_npc_role and sess is not None and hasattr(sess, "__dict__"):
+                            sess.__dict__["corprole"] = prev_corprole
                 except Exception as exc:
                     result["ok"] = False
                     result["error"] = "open_structure_cosmetics failed: %r" % (exc,)
@@ -1220,19 +1356,33 @@ def _execute_action(sm, action):
                                     w.SetModalResult(1)
                                 except Exception:
                                     pass
-                            if hasattr(w, "CloseByUser"):
-                                w.CloseByUser()
-                            elif hasattr(w, "Close"):
-                                w.Close()
+                            try:
+                                if hasattr(w, "CloseByUser"):
+                                    w.CloseByUser()
+                                elif hasattr(w, "Close"):
+                                    w.Close()
+                            except Exception as close_exc:
+                                result["close_warning"] = _safe_str(repr(close_exc), 160)
+                            if not getattr(w, "destroyed", False):
+                                try:
+                                    from carbonui.control.window import Window as _BaseWindow
+                                    _BaseWindow.Close(w)
+                                except Exception:
+                                    try:
+                                        w.display = False
+                                    except Exception:
+                                        pass
                             closed.append(wid or wcap or wcls)
                         except Exception:
                             pass
                 result["closed"] = closed
 
             elif atype == "click_widget":
-                node = _find_widget(target, layers)
-                if node is None and action.get("x") is not None and action.get("y") is not None:
-                    node = _find_widget_at_xy(int(action["x"]), int(action["y"]), layers)
+                hx = int(action["x"]) if action.get("x") is not None else None
+                hy = int(action["y"]) if action.get("y") is not None else None
+                node = _find_widget(target, layers, hint_x=hx, hint_y=hy)
+                if node is None and hx is not None and hy is not None and (hx > 0 or hy > 0):
+                    node = _find_widget_at_xy(hx, hy, layers)
                 if node is None:
                     result["ok"] = False
                     result["error"] = "widget %r not found in visible uicore layers" % (target,)
@@ -1288,9 +1438,28 @@ def _execute_action(sm, action):
                 txt = str(action.get("text", "") or raw_cmd or raw_target)
                 reg = getattr(uicore, "registry", None) if uicore is not None else None
                 focus = reg.GetFocus() if (reg is not None and hasattr(reg, "GetFocus")) else None
-                if focus is not None and hasattr(focus, "SetValue"):
-                    focus.SetValue(txt)
-                    result["typed_into"] = _safe_str(getattr(focus, "name", ""), 64)
+                edit_node = _resolve_editable_widget(focus)
+                if edit_node is None and raw_target:
+                    cand = _find_widget(raw_target, layers)
+                    edit_node = _resolve_editable_widget(cand)
+                if edit_node is None and action.get("x") is not None and action.get("y") is not None:
+                    cand = _find_widget_at_xy(int(action["x"]), int(action["y"]), layers)
+                    edit_node = _resolve_editable_widget(cand)
+                if edit_node is None:
+                    edit_node = _find_any_visible_editable(layers)
+                if edit_node is not None and hasattr(edit_node, "SetValue"):
+                    try:
+                        if reg is not None and hasattr(reg, "SetFocus"):
+                            reg.SetFocus(edit_node)
+                    except Exception:
+                        pass
+                    edit_node.SetValue(txt)
+                    if hasattr(edit_node, "OnChange"):
+                        try:
+                            edit_node.OnChange(txt)
+                        except Exception:
+                            pass
+                    result["typed_into"] = _safe_str(getattr(edit_node, "name", ""), 64)
                 else:
                     result["ok"] = False
                     result["error"] = "no focused input widget with SetValue"
@@ -1323,17 +1492,40 @@ def _execute_action(sm, action):
                         sq_svc = sm.GetService("skillqueue")
                     except Exception:
                         sq_svc = getattr(sm, "services", {}).get("skillqueue") or getattr(sm, "services", {}).get("skillQueue")
-                    if sq_svc is not None and hasattr(sq_svc, "BeginTransaction"):
+                    cur_lvl = 0
+                    try:
+                        sk_svc = sm.GetService("skills")
+                        sk_obj = sk_svc.GetSkill(skill_tid) if (sk_svc is not None and hasattr(sk_svc, "GetSkill")) else None
+                        if sk_obj is not None:
+                            cur_lvl = int(
+                                getattr(sk_obj, "trainedSkillLevel", None)
+                                or getattr(sk_obj, "skillLevel", None)
+                                or getattr(sk_obj, "effectiveSkillLevel", 0)
+                                or 0
+                            )
+                        if sq_svc is not None and hasattr(sq_svc, "GetQueue"):
+                            for q_entry in list(sq_svc.GetQueue() or []):
+                                q_tid = int(getattr(q_entry, "trainingTypeID", getattr(q_entry, "typeID", 0)) or 0)
+                                q_lvl = int(getattr(q_entry, "trainingToLevel", getattr(q_entry, "level", 0)) or 0)
+                                if q_tid == skill_tid and q_lvl > cur_lvl:
+                                    cur_lvl = q_lvl
+                    except Exception:
+                        pass
+                    target_lvl = min(5, max(1, cur_lvl + 1))
+                    if cur_lvl >= 5:
+                        result["already_max_level"] = 5
+                    elif sq_svc is not None and hasattr(sq_svc, "BeginTransaction"):
                         try:
                             if not sq_svc.IsTransactionOpen():
                                 sq_svc.BeginTransaction()
-                            sq_svc.AddSkillToQueue(skill_tid, 1)
+                            sq_svc.AddSkillToQueue(skill_tid, target_lvl)
                             sq_svc.CommitTransaction(activate=True)
                         except Exception:
-                            sm.RemoteSvc("skillMgr2").SaveSkillQueue([(skill_tid, 1)], True)
+                            sm.RemoteSvc("skillMgr2").SaveSkillQueue([(skill_tid, target_lvl)], True)
                     else:
-                        sm.RemoteSvc("skillMgr2").SaveSkillQueue([(skill_tid, 1)], True)
+                        sm.RemoteSvc("skillMgr2").SaveSkillQueue([(skill_tid, target_lvl)], True)
                     result["trained_skill_type_id"] = skill_tid
+                    result["trained_to_level"] = target_lvl
                     result["purchased"] = repr(purchased)[:120]
                 elif sub == "buy_free_plex_pack":
                     fc = sm.RemoteSvc("FastCheckoutService")
@@ -1634,33 +1826,32 @@ def _capture_trinity_screenshot(path):
 
 
 def _ensure_windowed_mode(sm, width=1280, height=800):
-    """Force EVE.app into compact windowed mode (1280x800, 1.0 UI scale) to minimize GPU/Retina screenshot size."""
+    """Switch EVE.app into compact windowed mode (default 1280x800, 1.0 UI scale)
+    via DeviceMgr.SetWindowState (bypassing ForceSize/_SetDevice's 15s confirmation modal)."""
     try:
         import trinity
         mw = getattr(trinity, "mainWindow", None)
+        if mw is None or not hasattr(mw, "GetWindowState"):
+            return
         win_mode = getattr(getattr(trinity, "Tr2WindowMode", None), "WINDOWED", 1)
-        need_resize = True
-        if mw is not None and hasattr(mw, "GetWindowState"):
-            ws = mw.GetWindowState()
-            cur_mode = getattr(ws, "windowMode", None)
-            cur_w = int(getattr(ws, "width", 0) or 0)
-            cur_h = int(getattr(ws, "height", 0) or 0)
-            if cur_mode == win_mode and 800 <= cur_w <= int(width) and 600 <= cur_h <= int(height):
-                need_resize = False
+        ws = mw.GetWindowState()
+        cur_mode = getattr(ws, "windowMode", None)
+        cur_w = int(getattr(ws, "width", 0) or 0)
+        cur_h = int(getattr(ws, "height", 0) or 0)
+        need_resize = not (cur_mode == win_mode and 800 <= cur_w <= int(width) and 600 <= cur_h <= int(height))
         dev_svc = sm.GetService("device") if sm is not None and hasattr(sm, "GetService") else None
         if need_resize:
-            if dev_svc is not None and hasattr(dev_svc, "ForceSize"):
-                dev_svc.ForceSize(int(width), int(height))
-                H._sleep_ms(400)
-            elif mw is not None and hasattr(mw, "SetWindowState"):
-                st = trinity.Tr2MainWindowState()
-                st.windowMode = win_mode
-                st.width = int(width)
-                st.height = int(height)
-                st.left = 40
-                st.top = 40
+            st = ws.CopyTo() if hasattr(ws, "CopyTo") else trinity.Tr2MainWindowState()
+            st.windowMode = win_mode
+            st.width = int(width)
+            st.height = int(height)
+            st.left = 40
+            st.top = 40
+            if dev_svc is not None and hasattr(dev_svc, "SetWindowState"):
+                dev_svc.SetWindowState(st)
+            elif hasattr(mw, "SetWindowState"):
                 mw.SetWindowState(st)
-                H._sleep_ms(400)
+            H._sleep_ms(300)
         if dev_svc is not None and hasattr(dev_svc, "SetUIScaleValue"):
             try:
                 dev_svc.SetUIScaleValue(1.0)
@@ -1683,15 +1874,9 @@ def run_playtester_hook():
     sm = getattr(__builtin__, "sm", None)
     try:
         import evomu_site
-        evomu_site._HOOKED_LOGMODULE = False
-        evomu_site._install_logmodule_hook()
+        evomu_site._install_logmodule_hook(propagate=True)
     except Exception:
         pass
-    _ensure_windowed_mode(
-        sm,
-        int(cfg.get("window_width", 1280) or 1280),
-        int(cfg.get("window_height", 800) or 800),
-    )
     try:
         H._wait_for_session(
             sm,

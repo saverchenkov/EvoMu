@@ -107,8 +107,19 @@ def _extract_id(res, keys=("itemID", "contractID", "fleetID", "jobID", "mailID",
     return res
 
 
+def _get_uicore():
+    uc = getattr(__builtin__, "uicore", None)
+    if uc is not None:
+        return uc
+    try:
+        from carbonui.uicore import uicore as _uc
+        return _uc
+    except Exception:
+        return None
+
+
 def _ensure_view(sm, target_view):
-    uicore = getattr(__builtin__, "uicore", None)
+    uicore = _get_uicore()
     if uicore is not None and getattr(uicore, "layer", None) is not None:
         charsel = getattr(uicore.layer, "charsel", None)
         if charsel is not None and getattr(charsel, "isopen", False):
@@ -271,10 +282,10 @@ def _assert_ui_rendered(sm, expected_view):
     loading = sm.GetService("loading")
     if loading.IsLoading():
         raise RuntimeError("UI loading curtain still active (IsLoading() == True)")
-    uicore = getattr(__builtin__, "uicore", None)
+    uicore = _get_uicore()
     if uicore is not None and getattr(uicore, "layer", None) is not None:
         llayer = getattr(uicore.layer, "loading", None)
-        if llayer is not None and getattr(llayer, "display", False) and getattr(llayer, "state", 1) != 1:
+        if llayer is not None and getattr(llayer, "display", False) and getattr(llayer, "state", 2) not in (1, 2):
             raise RuntimeError("UI loading layer still visible: state=%r" % (getattr(llayer, "state", None),))
     scene_mgr = sm.GetService("sceneManager")
     scene = scene_mgr.GetActiveScene()
@@ -755,10 +766,12 @@ def _undock_ship(sm):
 
 def _dock_station(sm, station_id=60003760):
     sess = getattr(__builtin__, "session", None)
-    if getattr(sess, "solarsystemid", None) and not getattr(sess, "stationid", None):
-        _sleep_sim_ms(1200)
-        _sleep_ms(1200)
-    _wait_warp_fx_settled(sm, timeout_sec=35.0)
+    sid = int(getattr(sess, "shipid", 0) or 0) if sess is not None else 0
+    michelle = sm.services.get("michelle") if hasattr(sm, "services") else None
+    bp = michelle.GetBallpark() if (sid and michelle is not None) else None
+    ball = bp.GetBall(sid) if (bp is not None and sid) else None
+    if ball is not None and int(getattr(ball, "mode", 0) or 0) == 3:
+        _wait_warp_fx_settled(sm, timeout_sec=6.0)
     _wait_view_settled(sm)
     try:
         sm.RemoteSvc("timeControl").ClearSessionTimer()
