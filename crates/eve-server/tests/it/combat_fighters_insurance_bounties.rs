@@ -2651,7 +2651,10 @@ async fn test_parity_lifecycle_industry_and_corp_quit() {
         let mut members = HashSet::new();
         members.insert(pilot_char_id); members.insert(90_000_002i64);
         let mut member_roles = HashMap::new();
-        member_roles.insert(pilot_char_id, corp_roles::ROLE_FACTORY_MANAGER);
+        member_roles.insert(
+            pilot_char_id,
+            corp_roles::ROLE_FACTORY_MANAGER | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0],
+        );
         s.corporations.insert(player_corp_id, CorporationRecord {
             corporation_id: player_corp_id, name: "Frontier Industrial LLC".into(), ticker: "FI-LLC".into(),
             ceo_id: 90_000_002, alliance_id: None, tax_rate: 0.05, master_wallet: IskCents(100_000_000_00),

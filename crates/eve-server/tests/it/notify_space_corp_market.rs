@@ -2176,8 +2176,8 @@ async fn test_on_industry_materials_v24_dict_shape() {
     let sag1_initial: i32 = 2_000_000;
     let sag2_initial: i32 = 500_000;
     let take3_only = 1u64 << 15; // Take3 (bit 15), NOT Take1 (bit 13)
-    let wrong_div_roles = eve_db::corp_roles::ROLE_FACTORY_MANAGER | (1u64 << 15); // Factory Manager + Take3
-    let fm_roles = eve_db::corp_roles::ROLE_FACTORY_MANAGER | (1u64 << 13); // Factory Manager + Take1 (bit 13)
+    let wrong_div_roles = eve_db::corp_roles::ROLE_FACTORY_MANAGER | (1u64 << 15) | eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]; // Factory Manager + Take3 + Account Take 1
+    let fm_roles = eve_db::corp_roles::ROLE_FACTORY_MANAGER | (1u64 << 13) | eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]; // Factory Manager + Take1 + Account Take 1
     ctx.db.with_mut_snapshot(|snap| {
         let mut corp = eve_db::CorporationRecord {
             corporation_id: corp_id,

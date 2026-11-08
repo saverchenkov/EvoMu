@@ -246,7 +246,9 @@ async fn test_live_industry_service_offline_pause_resume_batch_complete_and_ex_c
     rpc(&ctx, &mut s1, "corpRegistry", "UpdateApplicationOffer", &[PyRep::Integer(int(&app, "applicationID")), PyRep::String("Accepted".into())])
         .await
         .expect("Accept application");
-    let mgr_roles = corp_roles::ROLE_FACTORY_MANAGER | corp_roles::ROLE_HANGAR_CAN_TAKE[0];
+    let mgr_roles = corp_roles::ROLE_FACTORY_MANAGER
+        | corp_roles::ROLE_HANGAR_CAN_TAKE[0]
+        | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0];
     rpc(&ctx, &mut s1, "corpRegistry", "UpdateMember", &[PyRep::Integer(PILOT_2), PyRep::Integer(mgr_roles as i64)])
         .await
         .expect("Grant Factory Manager");

@@ -735,7 +735,7 @@ async fn test_esi5_corporation_divisions_blueprints_and_standings() {
                 type_id: 688, // Rifter Blueprint
                 owner_id: corp_id,
                 location_id: jita_station,
-                flag: InventoryFlag::Hangar,
+                flag: InventoryFlag::CorpSAG1,
                 quantity: 1,
                 singleton: true,
                 ..Default::default()

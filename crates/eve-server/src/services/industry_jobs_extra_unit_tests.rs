@@ -487,7 +487,14 @@ fn corp_industry_jobs_remote_range_bpc_restrictions_te_research_and_cancel_error
         "CrpAccessDenied"
     );
 
-    sess.corp_role = corp_roles::ROLE_FACTORY_MANAGER | (1u64 << 13);
+    sess.corp_role = corp_roles::ROLE_FACTORY_MANAGER | (1u64 << 13) | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0];
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&corp_id)
+            .unwrap()
+            .member_roles
+            .insert(char_id, corp_roles::ROLE_FACTORY_MANAGER | (1u64 << 13) | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]);
+    });
     let corp_job_rep = handle_industry_jobs(
         &ctx,
         &mut sess,

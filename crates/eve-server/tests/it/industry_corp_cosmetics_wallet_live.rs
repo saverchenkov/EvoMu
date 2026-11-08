@@ -216,6 +216,8 @@ async fn test_live_industry_capital_and_supercapital_restrictions() {
     let ls_titan_bpo = items_at(&ctx, PILOT_1, freighter, titan_bp)[0].0;
 
     let (azbel_id, _) = deploy_online_upwell(&ctx, &mut s1, lowsec_sys, AZBEL, &[MFG_PLANT], 3_000).await;
+    crate::industry_live_support::move_item(&ctx, &mut s1, ls_dread_bpo, azbel_id, 4).await;
+    crate::industry_live_support::move_item(&ctx, &mut s1, ls_titan_bpo, azbel_id, 4).await;
     let no_shipyard = install(&ctx, &mut s1, ls_dread_bpo, azbel_id, 1, 1, &[])
         .await
         .expect_err("Azbel without Capital Shipyard must reject capital");
@@ -289,6 +291,12 @@ async fn test_live_industry_facility_tax_and_job_cost_formula() {
     let freighter = board_loaded_freighter(&ctx, &mut s1, &cargo).await;
     let st_bpo = items_at(&ctx, PILOT_1, freighter, tax_bp)[0].0;
     let (raitaru_id, _) = deploy_online_upwell(&ctx, &mut s1, PERIMETER_SYS, RAITARU, &[MFG_PLANT], 1_500).await;
+    crate::industry_live_support::move_item(&ctx, &mut s1, st_bpo, raitaru_id, 4).await;
+    for m in &mats {
+        for (item_id, _) in items_at(&ctx, PILOT_1, freighter, m.type_id) {
+            crate::industry_live_support::move_item(&ctx, &mut s1, item_id, raitaru_id, 4).await;
+        }
+    }
 
     let denied = rpc(
         &ctx,

@@ -106,13 +106,13 @@ async fn test_industry_blueprint_data_owner_limits_facilities_taxes_and_sci() {
             let svc = seed_item(snap, 35_878, corp_id, sid, InventoryFlag::ServiceSlot0, 1, true, false, None);
             snap.items.get_mut(&svc).unwrap().dynamic_attributes.insert(2, 1.0);
         }
-        let bpid = seed_item(snap, RIFTER_BP_TYPE_ID, corp_id, hs_raitaru_id, InventoryFlag::Hangar, 1, true, false, None);
+        let bpid = seed_item(snap, RIFTER_BP_TYPE_ID, corp_id, hs_raitaru_id, InventoryFlag::CorpSAG1, 1, true, false, None);
         if let Some(bp) = snap.items.get_mut(&bpid) { bp.dynamic_attributes = HashMap::from([(1112, 10.0), (1113, 20.0)]); }
         let bpcid = seed_item(snap, RIFTER_BP_TYPE_ID, char_id, JITA_STATION_ID, InventoryFlag::Hangar, 1, true, true, Some(4));
         if let Some(bpc) = snap.items.get_mut(&bpcid) { bpc.dynamic_attributes = HashMap::from([(1112, 8.0), (1113, 16.0)]); }
         if let Some(sde_bp) = ctx.sde.blueprints.get(&RIFTER_BP_TYPE_ID) {
             for m in &sde_bp.materials {
-                seed_item(snap, m.type_id, corp_id, hs_raitaru_id, InventoryFlag::Hangar, (m.quantity as i32) * 10, false, false, None);
+                seed_item(snap, m.type_id, corp_id, hs_raitaru_id, InventoryFlag::CorpSAG1, (m.quantity as i32) * 10, false, false, None);
                 seed_item(snap, m.type_id, char_id, JITA_STATION_ID, InventoryFlag::Hangar, (m.quantity as i32) * 10, false, false, None);
             }
         }
@@ -1330,7 +1330,10 @@ async fn test_p0_issues_18_and_19_industry_auth_and_pi_simulation() {
         if let Some(c) = snap.corporations.get_mut(&corp_id) {
             c.member_roles.insert(
                 char_line,
-                eve_db::corp_roles::ROLE_FACTORY_MANAGER | eve_db::corp_roles::ROLE_STATION_MANAGER,
+                eve_db::corp_roles::ROLE_FACTORY_MANAGER
+                    | eve_db::corp_roles::ROLE_STATION_MANAGER
+                    | eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[2]
+                    | eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[0],
             );
         }
     });

@@ -260,7 +260,19 @@ pub fn handle_industry_jobs(
 
             let now_unix = ctx.now_unix();
             // Matured 24h hangar-division role grants take effect before corp hangar Take checks.
-            crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, session.corporation_id.unwrap_or(0));
+            let char_corp_for_promote = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .or(session.corporation_id)
+                    .unwrap_or(0)
+            });
+            if char_corp_for_promote > 0 {
+                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(
+                    ctx,
+                    char_corp_for_promote,
+                );
+            }
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 sync_industry_job_pause_states(snap, now_unix);
@@ -352,29 +364,27 @@ pub fn handle_industry_jobs(
                         });
                     }
                 }
-                let job_owner_id = if use_corp {
+                let (job_owner_id, is_corp_ceo, eff_corp_roles) = if use_corp {
                     if char_corp_id <= 0 {
                         return Err(BridgeRpcError {
                             code: "OwnerAccessDenied".into(),
                             message: "Character does not belong to a corporation".into(),
                         });
                     }
+                    let (is_ceo, eff_roles) =
+                        crate::services::inventory_bound::get_effective_corp_roles_at_location_in_snap_at(
+                            snap,
+                            char_corp_id,
+                            char_id,
+                            Some(station_id),
+                            now_unix,
+                        );
                     const FACTORY_ROLES: u64 = eve_db::corp_roles::ROLE_DIRECTOR
                         | eve_db::corp_roles::ROLE_FACTORY_MANAGER
                         | eve_db::corp_roles::ROLE_RENT_FACTORY_FACILITY
                         | eve_db::corp_roles::ROLE_RENT_RESEARCH_FACILITY;
-                    let has_factory_role = session.has_gm_role()
-                        || (session.corp_role & FACTORY_ROLES) != 0
-                        || snap.corporations.get(&char_corp_id).is_some_and(|c| {
-                            c.ceo_id == char_id
-                                || c.member_roles
-                                    .get(&char_id)
-                                    .is_some_and(|&r| (r & FACTORY_ROLES) != 0)
-                        })
-                        || snap
-                            .corp_role_assignments
-                            .get(&(char_corp_id, char_id))
-                            .is_some_and(|a| (a.roles & FACTORY_ROLES) != 0);
+                    let has_factory_role =
+                        session.has_gm_role() || is_ceo || (eff_roles & FACTORY_ROLES) != 0;
                     if !has_factory_role {
                         return Err(BridgeRpcError {
                             code: "CrpAccessDenied".into(),
@@ -383,9 +393,9 @@ pub fn handle_industry_jobs(
                                     .into(),
                         });
                     }
-                    char_corp_id
+                    (char_corp_id, is_ceo, eff_roles)
                 } else {
-                    char_id
+                    (char_id, false, 0u64)
                 };
 
                 let (rig_mat_bonus, _, _) =
@@ -457,15 +467,161 @@ pub fn handle_industry_jobs(
                     });
                 }
 
+                let cs_state =
+                    crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state_snap(snap);
+                let ext =
+                    crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+
                 let is_usable_industry_flag = |flag: InventoryFlag| -> bool {
                     !matches!(flag, InventoryFlag::Locked | InventoryFlag::Impounded)
                         && !matches!(
                             flag as u16,
-                            11..=34 | 36 | 92..=94 | 125..=132 | 145 | 158 | 164..=171
+                            11..=34
+                                | 36
+                                | 62
+                                | 63
+                                | 72
+                                | 92..=94
+                                | 125..=132
+                                | 145
+                                | 158
+                                | 164..=172
+                                | 180
                         )
                 };
+                let has_div_take_role = |is_container: bool, flag: InventoryFlag| -> bool {
+                    if session.has_gm_role()
+                        || is_corp_ceo
+                        || eve_db::corp_roles::has_role(eff_corp_roles, eve_db::corp_roles::ROLE_DIRECTOR)
+                    {
+                        return true;
+                    }
+                    let flag_num = flag as u16;
+                    if !(116..=122).contains(&flag_num) {
+                        return false;
+                    }
+                    let div_idx = (flag_num - 116) as usize;
+                    let req = if is_container {
+                        eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[div_idx]
+                    } else {
+                        eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE[div_idx]
+                    };
+                    eve_db::corp_roles::has_role(eff_corp_roles, req)
+                };
+                let is_item_blocked = |s: &eve_db::WorldStateSnapshot, it: &InventoryItemRecord| -> bool {
+                    it.type_id == 60
+                        || !is_usable_industry_flag(it.flag)
+                        || s.is_item_locked_in_contract_or_job(it.item_id)
+                        || cs_state.alsc_locked_items.contains(&it.item_id)
+                        || ext.asset_safety_wraps.values().any(|w| {
+                            !w.retrieval_fee_paid
+                                && (w.wrap_id == it.item_id
+                                    || w.wrap_id == it.location_id
+                                    || w.item_ids.contains(&it.item_id))
+                        })
+                };
+                let can_use_industry_source_item =
+                    |snap: &eve_db::WorldStateSnapshot, it: &InventoryItemRecord| -> bool {
+                        if is_item_blocked(snap, it) {
+                            return false;
+                        }
+                        if it.owner_id != char_id && !(use_corp && it.owner_id == job_owner_id) {
+                            return false;
+                        }
+                        if it.location_id == station_id {
+                            if use_corp && it.owner_id == job_owner_id {
+                                return (116..=122).contains(&(it.flag as u16))
+                                    && has_div_take_role(false, it.flag);
+                            }
+                            return it.owner_id == char_id && it.flag == InventoryFlag::Hangar;
+                        }
+                        // Walk parent containers/office up to station_id.
+                        let Some(first_parent) = snap.items.get(&it.location_id) else {
+                            return false;
+                        };
+                        if first_parent.type_id == 27 {
+                            // Direct child of a corp office folder: loose hangar division item.
+                            return use_corp
+                                && it.owner_id == job_owner_id
+                                && first_parent.owner_id == job_owner_id
+                                && !is_item_blocked(snap, first_parent)
+                                && (116..=122).contains(&(it.flag as u16))
+                                && has_div_take_role(false, it.flag);
+                        }
+                        // Item inside a container: only Unlocked (64) or Hangar (4) is valid inside containers.
+                        if !matches!(it.flag, InventoryFlag::Unlocked | InventoryFlag::Hangar) {
+                            return false;
+                        }
+                        let mut cur_loc = it.location_id;
+                        let mut top_container: Option<&InventoryItemRecord> = None;
+                        for _ in 0..8 {
+                            let Some(cont) = snap.items.get(&cur_loc) else {
+                                return false;
+                            };
+                            if cont.type_id == 27 {
+                                if !use_corp
+                                    || cont.owner_id != job_owner_id
+                                    || is_item_blocked(snap, cont)
+                                {
+                                    return false;
+                                }
+                                break;
+                            }
+                            if cont.owner_id != char_id
+                                && !(use_corp && cont.owner_id == job_owner_id)
+                            {
+                                return false;
+                            }
+                            if cont.type_id == 3_468 || is_item_blocked(snap, cont) {
+                                return false;
+                            }
+                            if let Some(req_pw) = cs_state.container_passwords.get(&cont.item_id) {
+                                if !req_pw.is_empty()
+                                    && !cs_state
+                                        .unlocked_containers
+                                        .contains(&(cont.item_id, char_id))
+                                {
+                                    return false;
+                                }
+                            }
+                            if top_container.is_some()
+                                && !matches!(
+                                    cont.flag,
+                                    InventoryFlag::Unlocked | InventoryFlag::Hangar
+                                )
+                            {
+                                return false;
+                            }
+                            top_container = Some(cont);
+                            if cont.location_id == station_id {
+                                break;
+                            }
+                            cur_loc = cont.location_id;
+                        }
+                        let Some(root_cont) = top_container else {
+                            return false;
+                        };
+                        if use_corp && root_cont.owner_id == job_owner_id {
+                            if it.owner_id != job_owner_id && it.owner_id != char_id {
+                                return false;
+                            }
+                            (116..=122).contains(&(root_cont.flag as u16))
+                                && has_div_take_role(true, root_cont.flag)
+                        } else {
+                            root_cont.owner_id == char_id
+                                && it.owner_id == char_id
+                                && root_cont.flag == InventoryFlag::Hangar
+                        }
+                    };
+
                 if let Some(ef) = explicit_input_flag {
-                    if !is_usable_industry_flag(ef) {
+                    if !is_usable_industry_flag(ef)
+                        || (!use_corp && !matches!(ef, InventoryFlag::Hangar | InventoryFlag::Unlocked))
+                        || (use_corp
+                            && raw_input_container.filter(|&id| id != station_id).is_none()
+                            && !matches!(ef, InventoryFlag::Hangar)
+                            && !(116..=122).contains(&(ef as u16)))
+                    {
                         return Err(BridgeRpcError {
                             code: "CrpAccessDenied".into(),
                             message: format!(
@@ -473,6 +629,38 @@ pub fn handle_industry_jobs(
                                 ef as u16
                             ),
                         });
+                    }
+                    if use_corp
+                        && raw_input_container.filter(|&id| id != station_id).is_none()
+                        && (116..=122).contains(&(ef as u16))
+                        && !has_div_take_role(false, ef)
+                    {
+                        let div_num = (ef as u16).saturating_sub(115);
+                        return Err(BridgeRpcError {
+                            code: "CrpAccessDenied".into(),
+                            message: format!(
+                                "Missing corporation hangar division {div_num} Take role"
+                            ),
+                        });
+                    }
+                }
+                if use_corp {
+                    if let Some(cid) = raw_input_container.filter(|&id| id != station_id) {
+                        if let Some(cont) = snap.items.get(&cid) {
+                            if cont.type_id != 27
+                                && cont.owner_id == job_owner_id
+                                && (116..=122).contains(&(cont.flag as u16))
+                                && !has_div_take_role(true, cont.flag)
+                            {
+                                let div_num = (cont.flag as u16).saturating_sub(115);
+                                return Err(BridgeRpcError {
+                                    code: "CrpAccessDenied".into(),
+                                    message: format!(
+                                        "Missing corporation container division {div_num} Take role"
+                                    ),
+                                });
+                            }
+                        }
                     }
                 }
 
@@ -485,8 +673,7 @@ pub fn handle_industry_jobs(
                             && i.type_id == bp_type_id
                             && explicit_bp_item_id.map(|eid| i.item_id == eid).unwrap_or(true)
                             && i.quantity >= 1
-                            && is_usable_industry_flag(i.flag)
-                            && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                            && can_use_industry_source_item(snap, i)
                     })
                     .cloned()
                     .collect();
@@ -672,6 +859,17 @@ pub fn handle_industry_jobs(
 
                 let total_debit_cents = IskCents::from_f64_isk(total_debit_isk);
                 if use_corp && snap.corporations.contains_key(&job_owner_id) {
+                    if total_debit_cents.0 > 0
+                        && !session.has_gm_role()
+                        && !is_corp_ceo
+                        && !eve_db::corp_roles::has_role(eff_corp_roles, eve_db::corp_roles::ROLE_DIRECTOR)
+                        && !eve_db::corp_roles::has_role(eff_corp_roles, eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[0])
+                    {
+                        return Err(BridgeRpcError {
+                            code: "CrpAccessDenied".into(),
+                            message: "Paying corporation industry job fees requires Director or Division 1 Account Take role".into(),
+                        });
+                    }
                     let corp_bal = snap
                         .corporations
                         .get(&job_owner_id)
@@ -693,14 +891,30 @@ pub fn handle_industry_jobs(
                 }
 
                 let input_container_id = raw_input_container.filter(|&id| id != station_id);
+                let mut input_is_non_office_container = false;
                 if let Some(cid) = input_container_id {
                     let Some(cont) = snap.items.get(&cid) else {
                         return Err(BridgeRpcError { code: "InvalidInputContainer".into(), message: format!("Input container {cid} does not exist") });
                     };
-                    if !is_usable_industry_flag(cont.flag)
+                    let pw_locked = cs_state
+                        .container_passwords
+                        .get(&cid)
+                        .is_some_and(|pw| !pw.is_empty() && !cs_state.unlocked_containers.contains(&(cid, char_id)));
+                    if is_item_blocked(snap, cont)
+                        || cont.type_id == 3_468
+                        || pw_locked
+                        || (cont.owner_id != char_id && !(use_corp && cont.owner_id == job_owner_id))
                         || !crate::services::industry_pi::is_industry_loc_at_facility(snap, cont.location_id, station_id, docked_id, char_id, use_corp, job_owner_id)
                     {
-                        return Err(BridgeRpcError { code: "InvalidInputContainer".into(), message: format!("Input container {cid} is at location {}, not facility {station_id}", cont.location_id) });
+                        return Err(BridgeRpcError { code: "InvalidInputContainer".into(), message: format!("Input container {cid} is inaccessible or not at facility {station_id}") });
+                    }
+                    input_is_non_office_container = cont.type_id != 27;
+                    if input_is_non_office_container && use_corp && cont.owner_id == job_owner_id && !has_div_take_role(true, cont.flag) {
+                        let div_num = (cont.flag as u16).saturating_sub(115);
+                        return Err(BridgeRpcError {
+                            code: "CrpAccessDenied".into(),
+                            message: format!("Missing corporation container division {div_num} Take role"),
+                        });
                     }
                 }
                 let mut is_out_item_container = false;
@@ -749,29 +963,12 @@ pub fn handle_industry_jobs(
                         snap.items.values().find(|i| i.owner_id == job_owner_id && i.location_id == station_id && (116..=122).contains(&(i.flag as u16))).map(|i| i.flag).unwrap_or(InventoryFlag::CorpSAG1)
                     }
                 });
-                let has_corp_div_take = |snap: &eve_db::WorldStateSnapshot, flag: InventoryFlag| -> bool {
-                    if !is_usable_industry_flag(flag) {
-                        return false;
-                    }
-                    if !use_corp || !(116..=122).contains(&(flag as u16)) {
-                        return true;
-                    }
-                    let div_idx = (flag as u16 - 116) as u64;
-                    let req_role = eve_db::corp_roles::ROLE_DIRECTOR | (1u64 << (13 + div_idx));
-                    session.has_gm_role()
-                        || (session.corp_role & req_role) != 0
-                        || snap.corporations.get(&job_owner_id).is_some_and(|c| {
-                            c.ceo_id == char_id
-                                || c.member_roles
-                                    .get(&char_id)
-                                    .is_some_and(|&r| (r & req_role) != 0)
-                        })
-                        || snap
-                            .corp_role_assignments
-                            .get(&(job_owner_id, char_id))
-                            .is_some_and(|a| (a.roles & req_role) != 0)
-                };
-                if use_corp && (explicit_input_flag.is_some() || input_container_id.is_some()) && !has_corp_div_take(snap, effective_input_flag) {
+                if use_corp
+                    && !input_is_non_office_container
+                    && explicit_input_flag.is_some()
+                    && (116..=122).contains(&(effective_input_flag as u16))
+                    && !has_div_take_role(false, effective_input_flag)
+                {
                     let div_num = (effective_input_flag as u16).saturating_sub(115);
                     return Err(BridgeRpcError {
                         code: "CrpAccessDenied".into(),
@@ -785,12 +982,8 @@ pub fn handle_industry_jobs(
                     if req_qty <= 0 { return Ok(()); }
                     let mut matching_stacks: Vec<(bool, i64, i32)> = snap.items.values().filter(|i| {
                         let loc_ok = input_container_id.map_or(i.location_id == station_id || i.location_id == bp_rec.location_id, |cid| i.location_id == cid);
-                        let owner_ok = i.owner_id == char_id || (use_corp && i.owner_id == job_owner_id);
-                        let flag_ok = explicit_input_flag.map_or(
-                            owner_ok && is_usable_industry_flag(i.flag) && has_corp_div_take(snap, i.flag),
-                            |ef| owner_ok && i.flag == ef && is_usable_industry_flag(ef) && has_corp_div_take(snap, ef),
-                        );
-                        flag_ok && loc_ok && i.type_id == mat_tid && i.quantity > 0 && !i.singleton && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                        let flag_ok = explicit_input_flag.map_or(true, |ef| input_is_non_office_container || i.flag == ef);
+                        loc_ok && flag_ok && can_use_industry_source_item(snap, i) && i.type_id == mat_tid && i.quantity > 0 && !i.singleton
                     }).map(|i| (i.owner_id != job_owner_id || i.flag != effective_input_flag, i.item_id, i.quantity)).collect();
                     matching_stacks.sort_by_key(|(is_fallback, id, _)| (*is_fallback, *id));
                     let total_avail: i64 = matching_stacks.iter().map(|(_, _, q)| i64::from(*q)).sum();

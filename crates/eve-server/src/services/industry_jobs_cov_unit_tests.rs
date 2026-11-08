@@ -518,14 +518,18 @@ fn corp_roles_funds_containers_cancel_refund_and_complete_guards() {
         "CrpAccessDenied"
     );
     sess.corp_role = corp_roles::ROLE_FACTORY_MANAGER;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.get_mut(&corp_id).unwrap().member_roles.insert(char_id, corp_roles::ROLE_FACTORY_MANAGER | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]);
+    });
     assert_eq!(
         handle_industry_jobs(&ctx, &mut sess, "industryManager", "InstallJob", &[PyRep::keyval([("blueprintItemID", PyRep::Integer(73_002)), ("blueprintTypeID", PyRep::Integer(688)), ("useCorp", PyRep::Bool(true)), ("inputFlag", PyRep::Integer(InventoryFlag::CorpSAG2 as i64))])], &kw).unwrap().unwrap_err().code,
         "CrpAccessDenied"
     );
 
-    sess.corp_role = corp_roles::ROLE_FACTORY_MANAGER | (1u64 << 14); // Division 2 Take
+    sess.corp_role = corp_roles::ROLE_FACTORY_MANAGER | (1u64 << 14) | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]; // Division 2 Take + Account Take 1
     ctx.db.with_mut_snapshot(|snap| {
         let c = snap.corporations.get_mut(&corp_id).unwrap();
+        c.member_roles.insert(char_id, corp_roles::ROLE_FACTORY_MANAGER | (1u64 << 14) | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]);
         c.master_wallet = IskCents(0);
         c.set_division_balance(1, IskCents(0));
     });
