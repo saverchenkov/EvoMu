@@ -385,6 +385,7 @@ async fn ewar_structure_immunity_safety_levels_and_lowsec_pod_escalation() {
 #[tokio::test]
 async fn t1_and_stacked_crystal_volatility_vorton_arc_and_already_active_checks() {
     let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
     let kw = HashMap::new();
 
     let mut sde = (*ctx.sde).clone();
@@ -396,7 +397,7 @@ async fn t1_and_stacked_crystal_volatility_vorton_arc_and_already_active_checks(
             53,
             7,
             5.0,
-            vec![(6, 10.0), (51, 1_000.0), (54, 20_000.0), (64, 1.0), (158, 5_000.0), (160, 100.0), (604, 86.0)],
+            vec![(6, 10.0), (51, 10_000.0), (54, 20_000.0), (64, 1.0), (158, 5_000.0), (160, 100.0), (604, 86.0)],
         ),
     );
     // T1 Crystal (attr 786 == 0.0 -> never degrades)

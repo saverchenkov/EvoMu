@@ -10,7 +10,7 @@ use eve_server::services::pve_incursion_lifecycle::{
 };
 use eve_server::services::pve_incursion_sites::seed_incursion_for_constellation;
 use eve_server::services::pve_special_sites::{
-    advance_pve_special_clock, complete_special_dungeon_instance, ensure_special_sites_spawned,
+    advance_pve_special_clock, ensure_special_sites_spawned,
     read_pve_special_reg, with_pve_special_reg as with_incursion_reg,
 };
 use eve_server::services::pve_special_sites_combat::get_drifter_hive_for_system;
@@ -152,10 +152,7 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
             .find(|s| s.instance_id == hf_inst_id)
             .is_some_and(|s| s.completed)
     });
-    if !hf_completed {
-        let hf_done = complete_special_dungeon_instance(&ctx, &mut sess1, hf_inst_id, 0).await.expect("complete homefront");
-        assert_eq!(hf_done.dict_get("completed"), Some(&PyRep::Bool(true)));
-    }
+    assert!(hf_completed, "destroying Homefront boss must complete site without manual bypass");
 
     let bal1_after = ctx.db.get_character(cid1).map(|c| c.balance.raw_cents()).unwrap_or(0);
     assert!(
@@ -190,10 +187,6 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
         warp_and_engage_ball(&ctx, &mut sess1, trig_sys, ship1, &guns1, ebid, "dungeon", PyRep::Integer(trig_inst_id)).await;
     }
     warp_and_engage_ball(&ctx, &mut sess1, trig_sys, ship1, &guns1, trig_boss, "dungeon", PyRep::Integer(trig_inst_id)).await;
-    if !read_pve_special_reg(&ctx, |reg| reg.triglavian_sites[&trig_sys].iter().any(|s| s.completed)) {
-        let trig_done = complete_special_dungeon_instance(&ctx, &mut sess1, trig_inst_id, 0).await.expect("complete triglavian site");
-        assert_eq!(trig_done.dict_get("completed"), Some(&PyRep::Bool(true)));
-    }
     let trig_completed = read_pve_special_reg(&ctx, |reg| {
         reg.triglavian_sites[&trig_sys].iter().any(|s| s.completed)
     });
@@ -241,7 +234,7 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
     }
 
     for _room in 1..=3 {
-        let _ = complete_special_dungeon_instance(&ctx, &mut sess1, i64::from(drifter_sys), 1).await;
+        let _ = rpc_res(&ctx, &mut sess1, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(i64::from(drifter_sys)), PyRep::Integer(1)]).await;
         let cur_npcs = get_drifter_hive_for_system(&ctx, drifter_sys)
             .and_then(|h| {
                 h.rooms
@@ -281,7 +274,7 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
             .await;
         }
     }
-    let _ = complete_special_dungeon_instance(&ctx, &mut sess1, i64::from(drifter_sys), 1).await;
+    let _ = rpc_res(&ctx, &mut sess1, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(i64::from(drifter_sys)), PyRep::Integer(1)]).await;
     let warden_id = get_drifter_hive_for_system(&ctx, drifter_sys).unwrap().warden_npc_ball_id;
     let w_tgt = PyRep::Integer(i64::from(drifter_sys));
     fleet_warp_and_engage_ball(
@@ -299,7 +292,7 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
     )
     .await;
     if !get_drifter_hive_for_system(&ctx, drifter_sys).is_some_and(|h| h.cleared) {
-        let _ = complete_special_dungeon_instance(&ctx, &mut sess1, i64::from(drifter_sys), 1).await;
+        let _ = rpc_res(&ctx, &mut sess1, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(i64::from(drifter_sys)), PyRep::Integer(1)]).await;
     }
     let hive_after = get_drifter_hive_for_system(&ctx, drifter_sys).unwrap();
     assert!(hive_after.cleared, "destroying Drifter Hive rooms & warden must clear hive");
@@ -502,7 +495,7 @@ async fn test_incursion_fleet_payout_and_influence_tale_notifications_e2e() {
     for s_ref in std::iter::once(&mut titan_sess).chain(d_pilots.iter_mut().map(|d| &mut d.0)) {
         let jita_b = bind_service(&ctx, s_ref, "beyonce", PyRep::Integer(i64::from(JITA_SYS))).await as u64;
         ctx.dispatch_rpc(s_ref, "beyonce", Some(jita_b), "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(cid2), PyRep::Integer(i64::from(mid_sys)), PyRep::Integer(beacon1)], &HashMap::new(), None).await.unwrap();
-        s_ref.solar_system_id = Some(mid_sys);
+        assert_eq!(s_ref.solar_system_id, Some(mid_sys));
     }
     for (ds, _, _, _, _) in &mut d_pilots { rpc_ok(&ctx, ds, "fleetMgr", "LeaveFleet", &[]).await; }
     let _ = rpc_res(&ctx, &mut sess2, "dogmaIM", "Deactivate", &[PyRep::Integer(cyno_mod)]).await;
@@ -538,7 +531,7 @@ async fn test_incursion_fleet_payout_and_influence_tale_notifications_e2e() {
     for s_ref in std::iter::once(&mut titan_sess).chain(d_pilots.iter_mut().map(|d| &mut d.0)) {
         let mid_b = bind_service(&ctx, s_ref, "beyonce", PyRep::Integer(i64::from(mid_sys))).await as u64;
         ctx.dispatch_rpc(s_ref, "beyonce", Some(mid_b), "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(cid2), PyRep::Integer(i64::from(hq_sys)), PyRep::Integer(beacon2)], &HashMap::new(), None).await.unwrap();
-        s_ref.solar_system_id = Some(hq_sys);
+        assert_eq!(s_ref.solar_system_id, Some(hq_sys));
         let hq_b = bind_service(&ctx, s_ref, "beyonce", PyRep::Integer(i64::from(hq_sys))).await as u64;
         let _ = ctx.dispatch_rpc(s_ref, "beyonce", Some(hq_b), "CmdSetSpeedFraction", &[PyRep::Real(0.1)], &HashMap::new(), None).await;
         let _ = ctx.systems.get_or_spawn(hq_sys).step_manual(2.0).await;

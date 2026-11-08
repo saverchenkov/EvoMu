@@ -480,6 +480,7 @@ impl ServerContext {
     /// account/character table (`WorldRepository::new_empty()`) without demo secrets, and provisions
     /// operator-supplied player and admin accounts from `EVOMU_ACCOUNTS` / `EVOMU_GM_ACCOUNT`.
     pub fn new_production() -> Self {
+        let _env_read_guard = acquire_test_env_read_guard();
         let db = Arc::new(WorldRepository::new_empty());
         if let Ok(accounts_spec) = std::env::var("EVOMU_ACCOUNTS") {
             for entry in accounts_spec.split(',') {

@@ -465,9 +465,16 @@ async fn test_navigation_starter_and_interstellar_shipcasters_live() {
         .await;
     eve_server::services::space_destiny::clear_session_change_timer(&ctx, rookie_char_id);
 
-    // Negative check: Empire militia enlisted pilot is refused by Deathless Shipcaster (enlist while docked, then undock)
-    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&rookie_char_id).unwrap().station_id = Some(60_003_760); });
-    rookie_sess.station_id = Some(60_003_760);
+    // Negative check: Empire militia enlisted pilot is refused by Deathless Shipcaster (dock at Turnur station, enlist, undock & warp back to shipcaster)
+    let turnur_station_id = 60_005_119_i64;
+    crate::pve_e2e_common::warp_and_dock_at_station(
+        &ctx,
+        &mut rookie_sess,
+        ship_id,
+        turnur_sys,
+        turnur_station_id,
+    )
+    .await;
     rpc(
         &ctx,
         &mut rookie_sess,
@@ -477,8 +484,18 @@ async fn test_navigation_starter_and_interstellar_shipcasters_live() {
     )
     .await
     .expect("Enlist in Caldari State militia");
-    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&rookie_char_id).unwrap().station_id = None; });
-    rookie_sess.station_id = None;
+    crate::pve_e2e_common::undock_from_station(&ctx, &mut rookie_sess, turnur_sys).await;
+    crate::pve_e2e_common::move_ship_to_ball(
+        &ctx,
+        &mut rookie_sess,
+        turnur_sys,
+        ship_id,
+        "item",
+        PyRep::Integer(zarzakh_entry_launcher_id),
+    )
+    .await;
+    ctx.advance_secs(11);
+    let _ = turnur_handle.step_manual(11.0).await;
     let empire_refused = rpc(
         &ctx,
         &mut rookie_sess,
@@ -494,9 +511,15 @@ async fn test_navigation_starter_and_interstellar_shipcasters_live() {
     .expect_err("Empire militia must be refused by Deathless Shipcaster");
     assert_eq!(empire_refused.code, "EmpireMilitiaRefused");
 
-    // Remove direct enlistment while docked, then return to grid as neutral
-    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&rookie_char_id).unwrap().station_id = Some(60_003_760); });
-    rookie_sess.station_id = Some(60_003_760);
+    // Remove direct enlistment while docked in Turnur, then undock and return to grid as neutral
+    crate::pve_e2e_common::warp_and_dock_at_station(
+        &ctx,
+        &mut rookie_sess,
+        ship_id,
+        turnur_sys,
+        turnur_station_id,
+    )
+    .await;
     rpc(
         &ctx,
         &mut rookie_sess,
@@ -506,11 +529,20 @@ async fn test_navigation_starter_and_interstellar_shipcasters_live() {
     )
     .await
     .expect("RemoveMyDirectEnlistment");
-    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&rookie_char_id).unwrap().station_id = None; });
-    rookie_sess.station_id = None;
+    crate::pve_e2e_common::undock_from_station(&ctx, &mut rookie_sess, turnur_sys).await;
+    crate::pve_e2e_common::move_ship_to_ball(
+        &ctx,
+        &mut rookie_sess,
+        turnur_sys,
+        ship_id,
+        "item",
+        PyRep::Integer(zarzakh_entry_launcher_id),
+    )
+    .await;
 
     // Positive check: Neutral pilot jumps through Turnur beacon into Zarzakh
-    eve_server::services::space_destiny::clear_session_change_timer(&ctx, rookie_char_id);
+    ctx.advance_secs(11);
+    let _ = turnur_handle.step_manual(11.0).await;
     let zarzakh_jump_ok = rpc(
         &ctx,
         &mut rookie_sess,
