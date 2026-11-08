@@ -392,8 +392,8 @@ async fn test_homefront_sites_and_hypernet_raffle_e2e() {
     let PyRep::Dict(unseeded_outer) = unseeded_res else {
         panic!("Expected dict");
     };
-    let PyRep::Dict(unseeded_inner) = &unseeded_outer[0].1 else {
-        panic!("Expected inner dict");
+    let PyRep::List(unseeded_inner) = &unseeded_outer[0].1 else {
+        panic!("Expected inner list");
     };
     assert!(unseeded_inner.is_empty(), "Unseeded system must not lazily fabricate Homefront sites");
 

@@ -54,12 +54,13 @@ async fn test_pve_agent_finder_and_conversation() {
     // 1a. Query Level 1 Security (division 24) agents
     let l1_rep = ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetAgents", &[PyRep::Integer(1), PyRep::Integer(24)], &kw, None).await.expect("GetAgents L1");
     let PyRep::Rowset { columns: agents_cols, rows: l1_rows } = l1_rep else { panic!("Expected Rowset from GetAgents") };
-    assert_eq!(agents_cols, vec!["agentID", "agentTypeID", "divisionID", "corporationID", "factionID", "solarsystemID", "stationID", "level", "quality", "hasAccess"]);
+    assert_eq!(agents_cols, vec!["agentID", "agentTypeID", "divisionID", "corporationID", "factionID", "solarsystemID", "stationID", "level", "quality", "hasAccess", "isLocatorAgent"]);
     assert!(!l1_rows.is_empty(), "Level 1 Security agents must be found");
     for row in &l1_rows {
         assert_eq!(row[7].as_i64(), Some(1), "Agent level must be 1");
         assert_eq!(row[2].as_i64(), Some(24), "Division must be 24");
         assert_eq!(row[9], PyRep::Bool(true), "L1 agents must have access by default");
+        assert!(matches!(row[10], PyRep::Bool(_)), "isLocatorAgent must be bool (#636)");
     }
 
     // 1b. Filter by corporation

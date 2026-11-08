@@ -193,10 +193,25 @@ async fn test_authentic_career_goals_and_milestones() {
         Some(eve_proto::quasar::DynamicValue::Message(m)) => m,
         other => panic!("expected Attributes message, got {other:?}"),
     };
-    assert!(matches!(first_attrs.get(1), Some(eve_proto::quasar::DynamicValue::Message(m)) if matches!(m.get(1), Some(eve_proto::quasar::DynamicValue::Uint32(v)) if *v >= 582_516)));
-    assert!(matches!(first_attrs.get(2), Some(eve_proto::quasar::DynamicValue::Message(m)) if matches!(m.get(1), Some(eve_proto::quasar::DynamicValue::Uint32(v)) if *v >= 659_200)));
+    assert!(matches!(first_attrs.get(1), Some(eve_proto::quasar::DynamicValue::Message(m)) if matches!(m.get(1), Some(eve_proto::quasar::DynamicValue::Uint32(v)) if *v >= 599_000)));
+    assert!(matches!(first_attrs.get(2), Some(eve_proto::quasar::DynamicValue::Message(m)) if matches!(m.get(1), Some(eve_proto::quasar::DynamicValue::Uint32(v)) if *v >= 599_000)));
     assert!(matches!(first_attrs.get(4), Some(eve_proto::quasar::DynamicValue::Uint32(v)) if *v >= 1) || matches!(first_attrs.get(4), Some(eve_proto::quasar::DynamicValue::Uint64(v)) if *v >= 1));
-    assert!(matches!(first_attrs.get(6), Some(eve_proto::quasar::DynamicValue::Repeated(v)) if v.len() == 4));
+    assert!(matches!(first_attrs.get(6), Some(eve_proto::quasar::DynamicValue::Repeated(v)) if v.len() >= 7));
+    if let Some(eve_proto::quasar::DynamicValue::Repeated(anns)) = first_attrs.get(6) {
+        let keys: Vec<String> = anns
+            .iter()
+            .filter_map(|a| match a {
+                eve_proto::quasar::DynamicValue::Message(m) => match m.get(1) {
+                    Some(eve_proto::quasar::DynamicValue::String(s)) => Some(s.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert!(keys.contains(&"duration".to_string()), "missing duration annotation: {keys:?}");
+        assert!(keys.contains(&"auraTextID".to_string()), "missing auraTextID annotation: {keys:?}");
+        assert!(keys.contains(&"order".to_string()), "missing order annotation: {keys:?}");
+    }
     assert!(matches!(first_attrs.get(7), Some(eve_proto::quasar::DynamicValue::Uint32(v)) if *v >= 1) || matches!(first_attrs.get(7), Some(eve_proto::quasar::DynamicValue::Int32(v)) if *v >= 1));
     assert!(matches!(first_attrs.get(12), Some(eve_proto::quasar::DynamicValue::Repeated(v)) if !v.is_empty()));
 

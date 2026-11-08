@@ -151,6 +151,7 @@ pub(super) fn handle_get_agents(
                     PyRep::Integer(a.level as i64),
                     PyRep::Integer(20),
                     PyRep::Bool(has_access),
+                    PyRep::Bool(a.is_locator),
                 ]
             })
             .collect::<Vec<_>>()
@@ -159,7 +160,9 @@ pub(super) fn handle_get_agents(
     // Column names follow the client: `Agents.__GetAllAgents` indexes the rowset with
     // `Filter('stationID')`, `Filter('solarsystemID')`, `Filter('corporationID')`,
     // `Filter('factionID')` and `Filter('agentTypeID')`
-    // (`eve/client/script/ui/station/agents/agents.pyj:110-117`).
+    // (`eve/client/script/ui/station/agents/agents.pyj:110-117`), and Agency
+    // `agentContentPiece.py:109` / `contentProviderLocatorAgents.py:10` read
+    // `agent.isLocatorAgent`.
     Ok(PyRep::rowset(
         vec![
             "agentID",
@@ -172,6 +175,7 @@ pub(super) fn handle_get_agents(
             "level",
             "quality",
             "hasAccess",
+            "isLocatorAgent",
         ],
         rows,
     ))

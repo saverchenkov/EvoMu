@@ -40,7 +40,7 @@ pub(super) fn make_def(career_id: u32, activity_name: &str, activity_kind: &str)
         name_message_id: 0,
         description_message_id: 0,
         threat: 0,
-        _provenance: None,
+        ..Default::default()
     }
 }
 
@@ -206,7 +206,7 @@ fn manager_persistence_claim_rollbacks_and_edge_cases() {
         name_message_id: 0,
         description_message_id: 0,
         threat: 2,
-        _provenance: None,
+        ..Default::default()
     };
 
     // Pre-populate quasar_state_blobs with:

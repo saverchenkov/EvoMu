@@ -285,3 +285,45 @@ fn chat_contacts_settings_cspa_charges_notes_and_extract_ids() {
     assert!(extract_id_list(None).is_empty());
     assert!(handle_chat_and_social(&ctx, &mut session, "other", "UnknownMethod", &[], &kw).is_none());
 }
+
+#[test]
+fn xmpp_iq_reply_includes_query_child_for_disco_muc_and_expiring_record() {
+    let bind = xmpp_iq_reply("<iq type='set' id='iq-1'><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/></iq>", "iq-1");
+    assert!(bind.contains("<bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'>"));
+
+    let disco_forme = xmpp_iq_reply(
+        "<iq type='get' id='iq-2' to='conference.chat.evomu.local'><query xmlns='http://jabber.org/protocol/disco#items' node='forme'></query></iq>",
+        "iq-2",
+    );
+    assert!(disco_forme.contains("xmlns='http://jabber.org/protocol/disco#items'"));
+    assert!(disco_forme.contains("node='forme'"));
+    assert!(disco_forme.contains("<query"));
+
+    let disco_info = xmpp_iq_reply(
+        "<iq type='get' id='iq-3'><query xmlns='http://jabber.org/protocol/disco#info'/></iq>",
+        "iq-3",
+    );
+    assert!(disco_info.contains("<query xmlns='http://jabber.org/protocol/disco#info'>"));
+    assert!(disco_info.contains("feature var='http://jabber.org/protocol/muc'"));
+
+    let muc_admin = xmpp_iq_reply(
+        "<iq type='get' id='iq-4'><query xmlns='http://jabber.org/protocol/muc#admin'/></iq>",
+        "iq-4",
+    );
+    assert!(muc_admin.contains("<query xmlns='http://jabber.org/protocol/muc#admin'/>"));
+
+    let muc_owner = xmpp_iq_reply(
+        "<iq type='get' id='iq-5'><query xmlns='http://jabber.org/protocol/muc#owner'/></iq>",
+        "iq-5",
+    );
+    assert!(muc_owner.contains("<query xmlns='http://jabber.org/protocol/muc#owner'/>"));
+
+    let exp = xmpp_iq_reply(
+        "<iq type='get' id='iq-6'><query xmlns='urn:xmpp:expiring_record#search'/></iq>",
+        "iq-6",
+    );
+    assert!(exp.contains("<query xmlns='urn:xmpp:expiring_record#search'/>"));
+
+    let fallback = xmpp_iq_reply("<iq type='get' id='iq-7'><ping xmlns='urn:xmpp:ping'/></iq>", "iq-7");
+    assert_eq!(fallback, "<iq type='result' id='iq-7'/>");
+}

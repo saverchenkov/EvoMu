@@ -39,7 +39,7 @@ fn gateway_handlers_all_endpoints_aliases_and_wire_fallbacks() {
         name_message_id: 0,
         description_message_id: 0,
         threat: 1,
-        _provenance: None,
+        ..Default::default()
     });
     register_career_goal_handlers(&router, Arc::clone(&db), Arc::clone(&mgr));
 

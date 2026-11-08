@@ -14,7 +14,7 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{SolarSystemId, TypeId};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 type CharacterId = i64;
@@ -1123,34 +1123,35 @@ pub async fn handle_pve_special_sites(
             ensure_special_sites_spawned(ctx).await;
             let is_pochven = ctx.sde.solar_systems.get(&sys_id).is_some_and(|s| s.region_id == 10_000_070);
 
-            let by_dng = with_pve_special_reg(ctx, |reg| {
+            let entries = with_pve_special_reg(ctx, |reg| {
                 if is_pochven && !reg.triglavian_sites.contains_key(&sys_id) {
                     let sites = crate::services::pve_special_sites_ops::build_triglavian_sites_from_sde(
                         &ctx.sde, sys_id, false, empire_navy_ships(500_002),
                     );
                     reg.triglavian_sites.insert(sys_id, sites);
                 }
-                let mut map: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
+                let mut list_entries: Vec<(u32, i64)> = Vec::new();
                 if let Some(list) = reg.triglavian_sites.get(&sys_id) {
                     for s in list {
                         if !s.completed {
-                            map.entry(s.dungeon_id).or_default().push(s.instance_id);
+                            list_entries.push((s.dungeon_id, s.instance_id));
                         }
                     }
                 }
-                map
+                list_entries.sort_unstable_by_key(|&(_, instance_id)| instance_id);
+                list_entries
             });
-            let inner: Vec<(PyRep, PyRep)> = by_dng
+            let items: Vec<PyRep> = entries
                 .into_iter()
-                .map(|(did, mut ids)| {
-                    ids.sort_unstable();
-                    (
-                        PyRep::Integer(did as i64),
-                        PyRep::List(ids.into_iter().map(PyRep::Integer).collect()),
-                    )
+                .map(|(dungeon_id, instance_id)| {
+                    PyRep::keyval([
+                        ("dungeonID", PyRep::Integer(dungeon_id as i64)),
+                        ("instanceID", PyRep::Integer(instance_id)),
+                        ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                    ])
                 })
                 .collect();
-            Some(Ok(PyRep::Dict(vec![(PyRep::Integer(sys_id as i64), PyRep::Dict(inner))])))
+            Some(Ok(PyRep::Dict(vec![(PyRep::Integer(sys_id as i64), PyRep::List(items))])))
         }
 
         ("dungeonInstanceCacheMgr", "GetSignatureInstances") => {

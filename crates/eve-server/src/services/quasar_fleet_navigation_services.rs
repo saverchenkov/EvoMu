@@ -10,8 +10,8 @@ use crate::quasar_gateway::{
     STATUS_NOT_FOUND, STATUS_NOT_IMPLEMENTED, STATUS_PRECONDITION_FAILED,
 };
 use crate::services::quasar_daily_goals::{
-    daily_goal_day_bucket, encode_goal_attributes, encode_goal_earnings, encode_goal_identifier,
-    extract_uuid, CharacterDailyGoal, DailyGoalManager,
+    daily_goal_day_bucket, encode_goal_attributes_for_day_bucket, encode_goal_earnings,
+    encode_goal_identifier, extract_uuid, CharacterDailyGoal, DailyGoalManager,
 };
 use crate::services::quasar_social_chat::ctx_queue_notice;
 use eve_db::{IskCents, WorldRepository};
@@ -99,7 +99,7 @@ fn encode_daily_goal_created(goal: &CharacterDailyGoal) -> Vec<u8> {
     encode_goal_identifier(&goal.uuid, &mut id_bytes);
     encode_bytes_field(1, &id_bytes, &mut out);
     let mut attr_bytes = Vec::new();
-    encode_goal_attributes(&goal.template, &mut attr_bytes);
+    encode_goal_attributes_for_day_bucket(&goal.template, goal.day_bucket, &mut attr_bytes);
     encode_bytes_field(2, &attr_bytes, &mut out);
     out
 }

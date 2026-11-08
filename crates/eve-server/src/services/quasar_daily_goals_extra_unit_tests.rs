@@ -124,9 +124,9 @@ fn custom_template_message_ids_and_extract_uuid_edge_cases() {
     tpl.description_message_id = 0;
     tpl.help_text_message_id = 0;
     tpl.assigner_corporation_id = 0;
-    assert_eq!(tpl.effective_name_message_id(), 665_455);
-    assert_eq!(tpl.effective_description_message_id(), 696_260);
-    assert_eq!(tpl.effective_help_text_message_id(), 665_456);
+    assert_eq!(tpl.effective_name_message_id(), 659_195);
+    assert_eq!(tpl.effective_description_message_id(), 696_251);
+    assert_eq!(tpl.effective_help_text_message_id(), 659_196);
     assert_eq!(tpl.effective_assigner_corporation_id(), 1_000_419);
 
     // extract_uuid edge cases: wrong byte length, non-bytes inner field, non-message outer field

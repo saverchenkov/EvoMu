@@ -79,18 +79,25 @@ fn clone_names_install_validation_and_ship_clone_state_paths() {
         .expect("set name");
     ctx.db.with_snapshot(|s| assert_eq!(name_of(s, jc_id), "Wormhole Pod"));
 
-    // ValidateInstallJumpClone: insufficient ISK -> NotEnoughMoney
-    let err = validate_install_jump_clone(&ctx, &sess, &[]).expect_err("insufficient funds");
-    assert_eq!(err.code, "NotEnoughMoney");
+    // ValidateInstallJumpClone: insufficient ISK -> JumpCloneValidationInsufficientFunds
+    let funds_errs = validate_install_jump_clone(&ctx, &sess, &[]).expect("validation list");
+    assert!(matches!(
+        &funds_errs,
+        PyRep::List(v) if v.iter().any(|x| matches!(x, PyRep::Tuple(t) if t.first().and_then(|s| s.as_str()) == Some("UI/Medical/Errors/JumpCloneValidationInsufficientFunds")))
+    ));
 
-    // Grant 5M ISK -> limit reached (0 Infomorph Psychology skill levels vs 1 existing clone) -> JumpCloneLimitReached
+    // Grant 5M ISK -> limit reached (0 Infomorph Psychology skill levels vs 1 existing clone) -> SkillReqNotFulfilled
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().balance = IskCents::from_f64_isk(5_000_000.0);
     });
-    let err = validate_install_jump_clone(&ctx, &sess, &[]).expect_err("clone limit reached");
-    assert_eq!(err.code, "JumpCloneLimitReached");
+    assert_eq!(
+        validate_install_jump_clone(&ctx, &sess, &[]).expect("validation list"),
+        PyRep::List(vec![PyRep::String(
+            "UI/Medical/Errors/JumpCloneValidationSkillReqNotFulfilled".into()
+        )])
+    );
 
-    // Train Infomorph Psychology 2 -> ValidateInstallJumpClone succeeds
+    // Train Infomorph Psychology 2 -> ValidateInstallJumpClone returns empty list []
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(char_id).or_default().insert(
             24242,
@@ -101,7 +108,7 @@ fn clone_names_install_validation_and_ship_clone_state_paths() {
             },
         );
     });
-    assert_eq!(validate_install_jump_clone(&ctx, &sess, &[]).unwrap(), PyRep::Bool(true));
+    assert_eq!(validate_install_jump_clone(&ctx, &sess, &[]).unwrap(), PyRep::List(vec![]));
 
     // GetShipCloneState returns rowset containing the clone installed on ship_id
     let ship_state = get_ship_clone_state(&ctx, &sess, &[PyRep::Integer(ship_id)]).expect("ship clone state");

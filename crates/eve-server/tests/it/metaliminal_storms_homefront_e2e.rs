@@ -185,18 +185,13 @@ async fn test_homefront_site_instances_v24_registry_and_completion() {
         panic!("Expected Dict from GetHomefrontSiteInstances");
     };
 
-    let Some((_, PyRep::Dict(jita_dungeons))) = hf_dict.iter().find(|(k, _)| k.as_i64() == Some(jita as i64)) else {
+    let Some((_, PyRep::List(jita_dungeons))) = hf_dict.iter().find(|(k, _)| k.as_i64() == Some(jita as i64)) else {
         panic!("Dict must contain entry for queried solar system {jita}");
     };
     assert!(!jita_dungeons.is_empty(), "Jita must have seeded Homefront dungeons");
 
-    let (did_rep, list_rep) = &jita_dungeons[0];
-    let did = did_rep.as_i64().expect("dungeonID") as u32;
-    let PyRep::List(inst_list) = list_rep else {
-        panic!("Expected List of instance IDs");
-    };
-    assert!(!inst_list.is_empty(), "Dungeon must have active instance IDs");
-    let target_instance_id = inst_list[0].as_i64().expect("instanceID");
+    let did = jita_dungeons[0].dict_get("dungeonID").and_then(|v| v.as_i64()).expect("dungeonID") as u32;
+    let target_instance_id = jita_dungeons[0].dict_get("instanceID").and_then(|v| v.as_i64()).expect("instanceID");
 
     // SDE Archetype 70 verification: verify dungeon ID is from SDE archetype 70
     let d_archetype = ctx.sde.dungeons.get(&did).and_then(|d| d.archetype_id);
@@ -288,15 +283,12 @@ async fn test_homefront_site_instances_v24_registry_and_completion() {
     let PyRep::Dict(hf_after_dict) = &hf_after_rep else {
         panic!("Expected Dict");
     };
-    let Some((_, PyRep::Dict(jita_after))) = hf_after_dict.iter().find(|(k, _)| k.as_i64() == Some(jita as i64)) else {
+    let Some((_, PyRep::List(jita_after))) = hf_after_dict.iter().find(|(k, _)| k.as_i64() == Some(jita as i64)) else {
         panic!("Missing Jita in after dict");
     };
     let active_remaining: Vec<i64> = jita_after
         .iter()
-        .flat_map(|(_, l)| match l {
-            PyRep::List(ids) => ids.iter().filter_map(|i| i.as_i64()).collect::<Vec<_>>(),
-            _ => Vec::new(),
-        })
+        .filter_map(|e| e.dict_get("instanceID").and_then(|v| v.as_i64()))
         .collect();
     assert!(
         !active_remaining.contains(&target_instance_id),
@@ -317,6 +309,6 @@ async fn test_homefront_site_instances_v24_registry_and_completion() {
         .await
         .expect("GetHomefrontSiteInstances for nullsec");
     let PyRep::Dict(ns_dict) = &nullsec_rep else { panic!("Expected Dict") };
-    let (_, PyRep::Dict(ns_dungeons)) = &ns_dict[0] else { panic!("Expected Dict") };
+    let (_, PyRep::List(ns_dungeons)) = &ns_dict[0] else { panic!("Expected List") };
     assert!(ns_dungeons.is_empty(), "Nullsec system must not have Homefront operations");
 }

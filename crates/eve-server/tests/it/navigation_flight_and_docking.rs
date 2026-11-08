@@ -2999,10 +2999,9 @@ async fn test_pve_incursion_payout_and_homefront_ops() {
 
     // Homefront Operations
     let PyRep::Dict(hf_dict) = rpc(&ctx, &mut sess1, "dungeonInstanceCacheMgr", "GetHomefrontSiteInstances", &[PyRep::Integer(JITA_SYS as i64)]).await.unwrap() else { panic!("Expected Dict") };
-    let (_, PyRep::Dict(jita_dungeons)) = hf_dict.iter().find(|(k, _)| k.as_i64() == Some(JITA_SYS as i64)).unwrap() else { panic!() };
-    let (did_rep, PyRep::List(inst_list)) = &jita_dungeons[0] else { panic!() };
-    let did = did_rep.as_i64().unwrap() as u32;
-    let inst_id = inst_list[0].as_i64().unwrap();
+    let (_, PyRep::List(jita_dungeons)) = hf_dict.iter().find(|(k, _)| k.as_i64() == Some(JITA_SYS as i64)).unwrap() else { panic!() };
+    let did = jita_dungeons[0].dict_get("dungeonID").and_then(|v| v.as_i64()).unwrap() as u32;
+    let inst_id = jita_dungeons[0].dict_get("instanceID").and_then(|v| v.as_i64()).unwrap();
     assert_eq!(ctx.sde.dungeons.get(&did).and_then(|d| d.archetype_id), Some(70));
 
     let hf_boss_bid = with_pve_special_reg(&ctx, |reg| reg.homefront_sites[&JITA_SYS].iter().find(|s| s.instance_id == inst_id).unwrap().boss_npc_ball_id);

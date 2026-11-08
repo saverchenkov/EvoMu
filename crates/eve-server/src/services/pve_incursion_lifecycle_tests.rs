@@ -477,6 +477,16 @@ fn test_world_event_tales_collection_and_notifications() {
 
     let all_tales = collect_all_world_event_tales(&ctx, None);
     assert!(all_tales.len() >= 5);
+    for tale in &all_tales {
+        assert!(
+            tale.dict_get("templateNameID").and_then(|v| v.as_i64()).is_some(),
+            "world event tale missing templateNameID (#639): {tale:?}"
+        );
+        assert!(
+            tale.dict_get("aggressorFactionID").and_then(|v| v.as_i64()).is_some(),
+            "world event tale missing aggressorFactionID (#639): {tale:?}"
+        );
+    }
 
     let inc_only =
         collect_all_world_event_tales(&ctx, Some(INCURSION_TALE_TEMPLATE_ID as i64));

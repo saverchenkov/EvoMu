@@ -750,8 +750,9 @@ pub fn normalize_macho_rpc_reply(
                             .collect(),
                         _ => Vec::new(),
                     };
+                    let quote_type_id = q.dict_get("typeID").cloned().unwrap_or(PyRep::Integer(0));
                     let entry = PyRep::keyval([
-                        ("typeID", PyRep::Integer(0)),
+                        ("typeID", quote_type_id),
                         ("totalISKCost", PyRep::Real(0.0)),
                         ("recoverables", PyRep::List(recoverables)),
                     ]);

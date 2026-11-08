@@ -82,21 +82,20 @@ pub fn set_jump_clone_name(
     Ok(PyRep::None)
 }
 
-/// `ValidateInstallJumpClone`: validates prerequisites (docked, clone capacity, funds)
-/// for installing a jump clone at the current station or structure.
+/// `ValidateInstallJumpClone`: returns a `PyRep::List` of V24.01 localization labels
+/// (or `(label, kwargs)` tuples) describing why installing a jump clone is blocked,
+/// or an empty list `[]` when all prerequisites are satisfied (#637).
 pub fn validate_install_jump_clone(
     ctx: &ServerContext,
     session: &SessionState,
     _args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    let mut errors: Vec<PyRep> = Vec::new();
     if session.station_id.is_none() && session.structure_id.is_none() {
-        return Err(BridgeRpcError {
-            code: "MustBeDocked".into(),
-            message:
-                "ValidateInstallJumpClone requires being docked at an NPC station or structure"
-                    .into(),
-        });
+        errors.push(PyRep::String(
+            "UI/Medical/Errors/JumpCloneValidationNotDocked".into(),
+        ));
     }
     let (clone_count, max_clones, balance) = ctx.db.with_snapshot(|snap| {
         let count = snap.jump_clones.get(&char_id).map(|v| v.len()).unwrap_or(0);
@@ -120,23 +119,27 @@ pub fn validate_install_jump_clone(
             .unwrap_or(0);
         (count, info_lvl + adv_lvl + elite_lvl, bal)
     });
+    if max_clones == 0 {
+        errors.push(PyRep::String(
+            "UI/Medical/Errors/JumpCloneValidationSkillReqNotFulfilled".into(),
+        ));
+    } else if clone_count >= max_clones {
+        errors.push(PyRep::String(
+            "UI/Medical/Errors/JumpCloneValidationCloneCapacityReached".into(),
+        ));
+    }
     // Canonical jump clone installation fee: 900,000 ISK = 90,000,000 cents
     let clone_cost_cents = 90_000_000;
     if balance < clone_cost_cents {
-        return Err(BridgeRpcError {
-            code: "NotEnoughMoney".into(),
-            message: "Insufficient funds to install jump clone (900,000 ISK required)".into(),
-        });
+        errors.push(PyRep::Tuple(vec![
+            PyRep::String("UI/Medical/Errors/JumpCloneValidationInsufficientFunds".into()),
+            PyRep::Dict(vec![(
+                PyRep::String("cloneCost".into()),
+                PyRep::Integer(900_000),
+            )]),
+        ]));
     }
-    if clone_count >= max_clones {
-        return Err(BridgeRpcError {
-            code: "JumpCloneLimitReached".into(),
-            message: format!(
-                "Maximum number of jump clones ({max_clones}) reached for current Infomorph Psychology skill levels"
-            ),
-        });
-    }
-    Ok(PyRep::Bool(true))
+    Ok(PyRep::List(errors))
 }
 
 /// `GetShipCloneState`: returns clones installed in a ship's Clone Vat Bay (`jumpCloneID`, `ownerID`, `locationID`, `cloneName`).

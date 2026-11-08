@@ -10,7 +10,6 @@ use crate::services::pve_special_sites::{
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::SolarSystemId;
-use std::collections::BTreeMap;
 
 pub fn ensure_homefront_sites_for_system_locked(
     ctx: &ServerContext,
@@ -144,25 +143,26 @@ pub fn handle_get_homefront_site_instances(
     };
 
     let reply = with_pve_special_reg(ctx, |reg| {
-        let mut by_dungeon: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
+        let mut entries: Vec<(u32, i64)> = Vec::new();
         if let Some(list) = reg.homefront_sites.get(&sys_id) {
             for s in list {
                 if !s.completed {
-                    by_dungeon.entry(s.dungeon_id).or_default().push(s.instance_id);
+                    entries.push((s.dungeon_id, s.instance_id));
                 }
             }
         }
-        let inner: Vec<(PyRep, PyRep)> = by_dungeon
+        entries.sort_unstable_by_key(|&(_, instance_id)| instance_id);
+        let items: Vec<PyRep> = entries
             .into_iter()
-            .map(|(did, mut ids)| {
-                ids.sort_unstable();
-                (
-                    PyRep::Integer(did as i64),
-                    PyRep::List(ids.into_iter().map(PyRep::Integer).collect()),
-                )
+            .map(|(dungeon_id, instance_id)| {
+                PyRep::keyval([
+                    ("dungeonID", PyRep::Integer(dungeon_id as i64)),
+                    ("instanceID", PyRep::Integer(instance_id)),
+                    ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                ])
             })
             .collect();
-        PyRep::Dict(vec![(PyRep::Integer(sys_id as i64), PyRep::Dict(inner))])
+        PyRep::Dict(vec![(PyRep::Integer(sys_id as i64), PyRep::List(items))])
     });
 
     Ok(reply)

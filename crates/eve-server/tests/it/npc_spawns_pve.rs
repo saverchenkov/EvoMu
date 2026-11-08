@@ -1039,7 +1039,7 @@ async fn test_sde_backed_pirate_strongholds_homefront_and_triglavian_sites() {
     .unwrap() else {
         panic!()
     };
-    let PyRep::Dict(null_dngs) = &null_hf[0].1 else {
+    let PyRep::List(null_dngs) = &null_hf[0].1 else {
         panic!()
     };
     assert!(null_dngs.is_empty(), "Null-sec system must have 0 Homefront Operation instances");
@@ -1055,14 +1055,12 @@ async fn test_sde_backed_pirate_strongholds_homefront_and_triglavian_sites() {
     .unwrap() else {
         panic!()
     };
-    let PyRep::Dict(jita_dngs) = &jita_hf[0].1 else {
+    let PyRep::List(jita_dngs) = &jita_hf[0].1 else {
         panic!()
     };
-    let (hf_did, PyRep::List(hf_insts)) = (&jita_dngs[0].0, &jita_dngs[0].1) else {
-        panic!()
-    };
-    assert_eq!(ctx.sde.dungeons[&(hf_did.as_i64().unwrap() as u32)].archetype_id, Some(70));
-    let hf_iid = hf_insts[0].as_i64().unwrap();
+    let hf_did = jita_dngs[0].dict_get("dungeonID").and_then(|v| v.as_i64()).unwrap() as u32;
+    assert_eq!(ctx.sde.dungeons[&hf_did].archetype_id, Some(70));
+    let hf_iid = jita_dngs[0].dict_get("instanceID").and_then(|v| v.as_i64()).unwrap();
     let hf_boss_bid = with_pve_special_reg(&ctx, |reg| {
         reg.homefront_sites[&jita]
             .iter()
@@ -1097,7 +1095,7 @@ async fn test_sde_backed_pirate_strongholds_homefront_and_triglavian_sites() {
     .unwrap() else {
         panic!()
     };
-    let PyRep::Dict(g_dngs) = &g_rep[0].1 else {
+    let PyRep::List(g_dngs) = &g_rep[0].1 else {
         panic!()
     };
     assert_eq!(g_dngs.len(), 2);

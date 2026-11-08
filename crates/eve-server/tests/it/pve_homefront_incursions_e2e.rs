@@ -26,14 +26,24 @@ use crate::pve_e2e_common::{
 fn dict_first_inner_id(rep: &PyRep) -> Option<i64> {
     if let PyRep::Dict(top) = rep {
         for (_, sys_val) in top {
-            if let PyRep::Dict(dngs) = sys_val {
-                for (_, list_rep) in dngs {
-                    if let PyRep::List(ids) = list_rep {
-                        if let Some(first) = ids.first().and_then(|v| v.as_i64()) {
-                            return Some(first);
+            match sys_val {
+                PyRep::Dict(dngs) => {
+                    for (_, list_rep) in dngs {
+                        if let PyRep::List(ids) = list_rep {
+                            if let Some(first) = ids.first().and_then(|v| v.as_i64()) {
+                                return Some(first);
+                            }
                         }
                     }
                 }
+                PyRep::List(entries) => {
+                    for entry in entries {
+                        if let Some(id) = entry.dict_get("instanceID").and_then(|v| v.as_i64()) {
+                            return Some(id);
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }

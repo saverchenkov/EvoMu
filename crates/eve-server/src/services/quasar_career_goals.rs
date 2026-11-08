@@ -38,7 +38,7 @@ pub const CAREER_PATH_MESSAGE_IDS: [(u32, u32, u32); 4] = [
 /// `name_message_id` (`582531..582689`, `665435..665481`), `description_message_id` (`696260..696439`),
 /// and `threat` are DERIVED offsets from client UI base localization IDs because individual goal
 /// definitions are served dynamically by live Quasar.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CareerGoalDef {
     pub uuid: [u8; 16],
     pub career_id: u32, // 1: Explorer, 2: Industrialist, 3: Enforcer, 4: Soldier of Fortune (Attributes.Career)
@@ -58,6 +58,16 @@ pub struct CareerGoalDef {
     pub description_message_id: u32,
     #[serde(default)]
     pub threat: u32,
+    #[serde(default)]
+    pub duration: Option<u32>,
+    #[serde(default)]
+    pub aura_text_id: Option<u32>,
+    #[serde(default)]
+    pub agency_link_text_id: Option<u32>,
+    #[serde(default)]
+    pub agency_screen: Option<String>,
+    #[serde(default)]
+    pub order: Option<u32>,
     #[serde(default)]
     pub _provenance: Option<String>,
 }
@@ -162,6 +172,28 @@ impl CareerGoalDef {
         } else {
             3
         }
+    }
+
+    /// Returns the estimated duration in minutes (`ui_annotations["duration"]`).
+    pub fn effective_duration(&self) -> u32 {
+        self.duration
+            .filter(|&d| d > 0)
+            .unwrap_or_else(|| (self.career_points * 2).max(5))
+    }
+
+    /// Returns the V24.01 Aura hint localization message ID (`ui_annotations["auraTextID"]`),
+    /// falling back to `effective_description_message_id()` when unspecified.
+    pub fn effective_aura_text_id(&self) -> u32 {
+        self.aura_text_id
+            .filter(|&id| id > 0)
+            .unwrap_or_else(|| self.effective_description_message_id())
+    }
+
+    /// Returns the display sort order within its activity group (`ui_annotations["order"]`).
+    pub fn effective_order(&self) -> u32 {
+        self.order
+            .filter(|&o| o > 0)
+            .unwrap_or_else(|| (self.uuid[15] as u32).max(1))
     }
 }
 

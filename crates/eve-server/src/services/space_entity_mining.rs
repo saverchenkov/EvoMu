@@ -888,10 +888,15 @@ pub async fn handle(
                     message: "Reprocessing requires being docked at a station or structure".into(),
                 }));
             };
-            let is_batch_call =
-                args.len() >= 2 || matches!(args.first(), Some(PyRep::List(_)));
+            let is_batch_call = args.len() >= 2
+                || matches!(
+                    args.first(),
+                    Some(PyRep::List(_) | PyRep::Dict(_) | PyRep::Tuple(_))
+                );
             let item_ids: Vec<i64> = match args.first() {
                 Some(PyRep::List(list)) => list.iter().filter_map(|a| a.as_i64()).collect(),
+                Some(PyRep::Tuple(tuple)) => tuple.iter().filter_map(|a| a.as_i64()).collect(),
+                Some(PyRep::Dict(entries)) => entries.iter().filter_map(|(k, _)| k.as_i64()).collect(),
                 Some(first) => first.as_i64().into_iter().collect(),
                 None => Vec::new(),
             };
@@ -1215,6 +1220,8 @@ pub async fn handle(
             }
             let item_ids: Vec<i64> = match args.first() {
                 Some(PyRep::List(list)) => list.iter().filter_map(|a| a.as_i64()).collect(),
+                Some(PyRep::Tuple(tuple)) => tuple.iter().filter_map(|a| a.as_i64()).collect(),
+                Some(PyRep::Dict(entries)) => entries.iter().filter_map(|(k, _)| k.as_i64()).collect(),
                 Some(first) => first.as_i64().into_iter().collect(),
                 None => Vec::new(),
             };
@@ -1281,6 +1288,7 @@ pub async fn handle(
                     }
                     quotes.push(PyRep::keyval([
                         ("itemID", PyRep::Integer(item_id)),
+                        ("typeID", PyRep::Integer(item.type_id as i64)),
                         ("stationBaseYield", PyRep::Real(item_base_yield)),
                         ("yieldRate", PyRep::Real(yield_rate)),
                         ("stationTaxRate", PyRep::Real(item_tax_rate)),

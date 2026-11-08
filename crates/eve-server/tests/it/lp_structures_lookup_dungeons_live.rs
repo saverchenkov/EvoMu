@@ -587,8 +587,8 @@ async fn test_homefront_sites_and_escalations_live() {
     else {
         panic!("Expected Dict");
     };
-    let PyRep::Dict(d_map) = sys_map.iter().find(|(k, _)| k.as_i64() == Some(JITA as i64)).map(|(_, v)| v).unwrap() else {
-        panic!("Expected inner Dict");
+    let PyRep::List(d_map) = sys_map.iter().find(|(k, _)| k.as_i64() == Some(JITA as i64)).map(|(_, v)| v).unwrap() else {
+        panic!("Expected inner List");
     };
     assert!(!d_map.is_empty(), "Jita must have active SDE archetype-70 Homefront site instances");
 
@@ -607,7 +607,7 @@ async fn test_homefront_sites_and_escalations_live() {
         .iter()
         .find(|(k, _)| k.as_i64() == Some(PERIMETER as i64))
         .and_then(|(_, v)| match v {
-            PyRep::Dict(m) => Some(m.len()),
+            PyRep::List(m) => Some(m.len()),
             _ => None,
         })
         .unwrap_or(0);

@@ -1029,12 +1029,15 @@ pub fn collect_all_world_event_tales(
                 } else {
                     "TriglavianMinorVictory"
                 };
+                let trig_name_id = if active_sites > 0 { 546_083 } else { 564_038 };
                 if template_filter.is_some() {
                     out.push(str_dict([
                         ("tale_id", PyRep::Integer(tale_id)),
                         ("taleID", PyRep::Integer(tale_id)),
                         ("template_id", PyRep::Integer(5201)),
                         ("templateID", PyRep::Integer(5201)),
+                        ("templateNameID", PyRep::Integer(trig_name_id)),
+                        ("aggressorFactionID", PyRep::Integer(500_026)),
                         ("solar_system_id", PyRep::Integer(i64::from(sys_id))),
                         ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
                         ("managerSolarSystemID", PyRep::Integer(i64::from(sys_id))),
@@ -1044,11 +1047,13 @@ pub fn collect_all_world_event_tales(
                         ("activeSites", PyRep::Integer(active_sites as i64)),
                         ("start_date", PyRep::Integer(now_ft - 864_000_000_000)),
                         ("end_date", PyRep::Integer(now_ft + 864_000_000_000)),
+                        ("endTime", PyRep::Integer(now_ft + 864_000_000_000)),
                     ]));
                 } else {
                     out.push(str_dict([
                         ("taleID", PyRep::Integer(tale_id)),
                         ("templateID", PyRep::Integer(5201)),
+                        ("templateNameID", PyRep::Integer(trig_name_id)),
                         ("templateClassID", PyRep::String("triglavianInvasion".into())),
                         ("managerSolarSystemID", PyRep::Integer(i64::from(sys_id))),
                         ("solar_system_id", PyRep::Integer(i64::from(sys_id))),
@@ -1058,6 +1063,7 @@ pub fn collect_all_world_event_tales(
                         ("systemState", PyRep::String(sys_state.into())),
                         ("activeSites", PyRep::Integer(active_sites as i64)),
                         ("aggressorFactionID", PyRep::Integer(500_026)),
+                        ("endTime", PyRep::Integer(now_ft + 864_000_000_000)),
                         (
                             "sceneTypesByLocationID",
                             PyRep::Dict(vec![(
@@ -1090,12 +1096,15 @@ pub fn collect_all_world_event_tales(
                 } else {
                     "EdencomMinorVictory"
                 };
+                let eden_name_id = if is_fortress { 562_402 } else { 565_828 };
                 if template_filter.is_some() {
                     out.push(str_dict([
                         ("tale_id", PyRep::Integer(tale_id)),
                         ("taleID", PyRep::Integer(tale_id)),
                         ("template_id", PyRep::Integer(5202)),
                         ("templateID", PyRep::Integer(5202)),
+                        ("templateNameID", PyRep::Integer(eden_name_id)),
+                        ("aggressorFactionID", PyRep::Integer(500_027)),
                         ("solar_system_id", PyRep::Integer(i64::from(sys_id))),
                         ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
                         ("managerSolarSystemID", PyRep::Integer(i64::from(sys_id))),
@@ -1104,11 +1113,13 @@ pub fn collect_all_world_event_tales(
                         ("systemState", PyRep::String(sys_state.into())),
                         ("start_date", PyRep::Integer(now_ft - 864_000_000_000)),
                         ("end_date", PyRep::Integer(now_ft + 864_000_000_000)),
+                        ("endTime", PyRep::Integer(now_ft + 864_000_000_000)),
                     ]));
                 } else {
                     out.push(str_dict([
                         ("taleID", PyRep::Integer(tale_id)),
                         ("templateID", PyRep::Integer(5202)),
+                        ("templateNameID", PyRep::Integer(eden_name_id)),
                         ("templateClassID", PyRep::String("edencomDefense".into())),
                         ("managerSolarSystemID", PyRep::Integer(i64::from(sys_id))),
                         ("solar_system_id", PyRep::Integer(i64::from(sys_id))),
@@ -1117,6 +1128,7 @@ pub fn collect_all_world_event_tales(
                         ("state", PyRep::String(sys_state.into())),
                         ("systemState", PyRep::String(sys_state.into())),
                         ("aggressorFactionID", PyRep::Integer(500_027)),
+                        ("endTime", PyRep::Integer(now_ft + 864_000_000_000)),
                         (
                             "sceneTypesByLocationID",
                             PyRep::Dict(vec![(
@@ -1151,7 +1163,9 @@ pub fn collect_all_world_event_tales(
                     ("taleID", PyRep::Integer(tale_id)),
                     ("template_id", PyRep::Integer(STORM_TALE_TEMPLATE_ID)),
                     ("templateID", PyRep::Integer(STORM_TALE_TEMPLATE_ID)),
+                    ("templateNameID", PyRep::Integer(568_980)),
                     ("templateClassID", PyRep::String("metaliminalStorm".into())),
+                    ("aggressorFactionID", PyRep::Integer(500_026)),
                     ("managerSolarSystemID", PyRep::Integer(i64::from(sys_id))),
                     ("solar_system_id", PyRep::Integer(i64::from(sys_id))),
                     ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
@@ -1161,6 +1175,7 @@ pub fn collect_all_world_event_tales(
                     ("systemState", PyRep::String(weather_name)),
                     ("start_date", PyRep::Integer(now_ft - 432_000_000_000)),
                     ("end_date", PyRep::Integer(end_ft)),
+                    ("endTime", PyRep::Integer(end_ft)),
                 ]));
             }
         }
@@ -1175,23 +1190,40 @@ pub fn collect_all_world_event_tales(
             }
             let start_ft = ((wt.start_unix + 11_644_473_600) * 10_000_000) as i64;
             let end_ft = ((wt.end_unix + 11_644_473_600) * 10_000_000) as i64;
+            let tpl_lower = wt.template_class_id.to_ascii_lowercase();
+            let tpl_name_id = if tpl_lower.contains("triglavian") {
+                546_083
+            } else if tpl_lower.contains("edencom") {
+                564_037
+            } else if tpl_lower.contains("storm") {
+                568_980
+            } else {
+                564_035
+            };
+            let aggressor_faction = if wt.aggressor_faction_id > 0 {
+                wt.aggressor_faction_id
+            } else {
+                500_019
+            };
             out.push(str_dict([
                 ("tale_id", PyRep::Integer(wt.tale_id)),
                 ("taleID", PyRep::Integer(wt.tale_id)),
                 ("template_id", PyRep::Integer(wt.template_id)),
                 ("templateID", PyRep::Integer(wt.template_id)),
+                ("templateNameID", PyRep::Integer(tpl_name_id)),
                 ("templateClassID", PyRep::String(wt.template_class_id.clone())),
                 ("managerSolarSystemID", PyRep::Integer(i64::from(wt.solar_system_id))),
                 ("solar_system_id", PyRep::Integer(i64::from(wt.solar_system_id))),
                 ("solarSystemID", PyRep::Integer(i64::from(wt.solar_system_id))),
                 ("locationID", PyRep::Integer(i64::from(wt.solar_system_id))),
                 ("constellationID", PyRep::Integer(i64::from(wt.constellation_id))),
-                ("aggressorFactionID", PyRep::Integer(wt.aggressor_faction_id)),
+                ("aggressorFactionID", PyRep::Integer(aggressor_faction)),
                 ("state", PyRep::String(wt.state.clone())),
                 ("systemState", PyRep::String(wt.state.clone())),
                 ("influence", PyRep::Real(wt.influence)),
                 ("start_date", PyRep::Integer(start_ft)),
                 ("end_date", PyRep::Integer(end_ft)),
+                ("endTime", PyRep::Integer(end_ft)),
             ]));
         }
 
@@ -1222,6 +1254,8 @@ pub fn collect_all_world_event_tales(
             ("taleID", PyRep::Integer(i64::from(tale_id))),
             ("template_id", PyRep::Integer(i64::from(tpl_id))),
             ("templateID", PyRep::Integer(i64::from(tpl_id))),
+            ("templateNameID", PyRep::Integer(564_035)),
+            ("aggressorFactionID", PyRep::Integer(500_019)),
             ("managerSolarSystemID", PyRep::Integer(i64::from(sys_id))),
             ("solar_system_id", PyRep::Integer(i64::from(sys_id))),
             ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
@@ -1231,6 +1265,7 @@ pub fn collect_all_world_event_tales(
             ("systemState", PyRep::String("Active".into())),
             ("start_date", PyRep::Integer(start_ft)),
             ("end_date", PyRep::Integer(now_ft + 864_000_000_000)),
+            ("endTime", PyRep::Integer(now_ft + 864_000_000_000)),
         ]));
     }
 

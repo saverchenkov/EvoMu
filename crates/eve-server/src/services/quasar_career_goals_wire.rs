@@ -74,6 +74,87 @@ pub fn encode_career_goal_wire(g: &CharacterCareerGoal, out: &mut Vec<u8>) {
     encode_bytes_field(5, &label_state, out);
 }
 
+fn encode_career_goal_ui_annotations(def: &CareerGoalDef, field_num: u32, attr_bytes: &mut Vec<u8>) {
+    encode_bytes_field(
+        field_num,
+        &encode_ui_annotation("group", def.effective_group()),
+        attr_bytes,
+    );
+    encode_bytes_field(
+        field_num,
+        &encode_ui_annotation("subtype", "CAREER_PATH_GOAL"),
+        attr_bytes,
+    );
+    encode_bytes_field(
+        field_num,
+        &encode_ui_annotation("name", &def.name),
+        attr_bytes,
+    );
+    encode_bytes_field(
+        field_num,
+        &encode_ui_annotation("description", &def.description),
+        attr_bytes,
+    );
+    encode_bytes_field(
+        field_num,
+        &encode_ui_annotation("duration", &def.effective_duration().to_string()),
+        attr_bytes,
+    );
+    encode_bytes_field(
+        field_num,
+        &encode_ui_annotation("auraTextID", &def.effective_aura_text_id().to_string()),
+        attr_bytes,
+    );
+    encode_bytes_field(
+        field_num,
+        &encode_ui_annotation("order", &def.effective_order().to_string()),
+        attr_bytes,
+    );
+    if let Some(link_id) = def.agency_link_text_id.filter(|&id| id > 0) {
+        encode_bytes_field(
+            field_num,
+            &encode_ui_annotation("agencyLinkTextID", &link_id.to_string()),
+            attr_bytes,
+        );
+        let screen = def
+            .agency_screen
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("HOMEPAGE");
+        encode_bytes_field(
+            field_num,
+            &encode_ui_annotation("agencyScreen", screen),
+            attr_bytes,
+        );
+    }
+}
+
+/// Returns authentic V24.01 `(name_msg_id, description_msg_id)` for AIR Career Program milestones (#638).
+fn career_milestone_message_ids(ms: &CareerMilestoneDef) -> (u32, u32) {
+    match ms.milestone_id {
+        1 => (602_236, 610_011),   // Explorer Graduation
+        2 => (602_238, 610_012),   // Industrialist Graduation
+        3 => (602_240, 610_013),   // Enforcer Graduation
+        4 => (602_242, 610_014),   // Soldier of Fortune Graduation
+        101 => (599_620, 599_619), // Overall 750 CP
+        102 => (602_248, 602_246), // Overall 1500 CP
+        103 => (602_250, 602_251), // Overall 2250 CP
+        104 => (602_252, 602_253), // Overall 3000 CP
+        _ => {
+            let fallback = ms
+                .career_id
+                .and_then(|cid| {
+                    CAREER_PATH_MESSAGE_IDS
+                        .iter()
+                        .find(|(id, _, _)| *id == cid)
+                        .map(|(_, n, d)| (*n, *d))
+                })
+                .unwrap_or((599_620, 599_619));
+            fallback
+        }
+    }
+}
+
 /// Wire encoder for `eve_public.career.goal.api.GetDefinitionsResponse.Goal`.
 pub fn encode_career_goal_definition_wire(def: &CareerGoalDef, out: &mut Vec<u8>) {
     let mut id_bytes = Vec::new();
@@ -91,10 +172,7 @@ pub fn encode_career_goal_definition_wire(def: &CareerGoalDef, out: &mut Vec<u8>
 
     encode_varint_field(3, 0, &mut attr_bytes); // progress
     encode_varint_field(4, def.target.max(1), &mut attr_bytes); // target
-    encode_bytes_field(6, &encode_ui_annotation("group", def.effective_group()), &mut attr_bytes);
-    encode_bytes_field(6, &encode_ui_annotation("subtype", "CAREER_PATH_GOAL"), &mut attr_bytes);
-    encode_bytes_field(6, &encode_ui_annotation("name", &def.name), &mut attr_bytes);
-    encode_bytes_field(6, &encode_ui_annotation("description", &def.description), &mut attr_bytes);
+    encode_career_goal_ui_annotations(def, 6, &mut attr_bytes);
     encode_varint_field(7, def.effective_threat() as u64, &mut attr_bytes); // threat
     encode_varint_field(8, 0, &mut attr_bytes); // completed = false
     encode_varint_field(9, def.career_id.clamp(1, 4) as u64, &mut attr_bytes); // career enum
@@ -112,16 +190,7 @@ pub fn encode_career_milestone_definition_wire(ms: &CareerMilestoneDef, out: &mu
     encode_bytes_field(1, &id_bytes, out);
 
     let mut attr_bytes = Vec::new();
-    let name_msg_id = ms
-        .career_id
-        .and_then(|cid| {
-            CAREER_PATH_MESSAGE_IDS
-                .iter()
-                .find(|(id, _, _)| *id == cid)
-                .map(|(_, n, _)| *n)
-        })
-        .unwrap_or(582_520 + ms.milestone_id);
-    let desc_msg_id = 659_200 + ms.milestone_id;
+    let (name_msg_id, desc_msg_id) = career_milestone_message_ids(ms);
 
     let mut name_id = Vec::new();
     encode_varint_field(1, name_msg_id as u64, &mut name_id);
@@ -142,6 +211,9 @@ pub fn encode_career_milestone_definition_wire(ms: &CareerMilestoneDef, out: &mu
     encode_bytes_field(6, &encode_ui_annotation("subtype", subtype), &mut attr_bytes);
     encode_bytes_field(6, &encode_ui_annotation("name", &ms.description), &mut attr_bytes);
     encode_bytes_field(6, &encode_ui_annotation("description", &ms.description), &mut attr_bytes);
+    encode_bytes_field(6, &encode_ui_annotation("duration", "0"), &mut attr_bytes);
+    encode_bytes_field(6, &encode_ui_annotation("auraTextID", &desc_msg_id.to_string()), &mut attr_bytes);
+    encode_bytes_field(6, &encode_ui_annotation("order", &ms.milestone_id.to_string()), &mut attr_bytes);
     encode_varint_field(7, 1, &mut attr_bytes);
     encode_varint_field(8, 0, &mut attr_bytes);
     encode_varint_field(
@@ -170,16 +242,7 @@ pub fn encode_internal_career_milestone_definition_wire(ms: &CareerMilestoneDef,
     encode_bytes_field(1, &id_bytes, out);
 
     let mut attr_bytes = Vec::new();
-    let name_msg_id = ms
-        .career_id
-        .and_then(|cid| {
-            CAREER_PATH_MESSAGE_IDS
-                .iter()
-                .find(|(id, _, _)| *id == cid)
-                .map(|(_, n, _)| *n)
-        })
-        .unwrap_or(582_520 + ms.milestone_id);
-    let desc_msg_id = 659_200 + ms.milestone_id;
+    let (name_msg_id, desc_msg_id) = career_milestone_message_ids(ms);
 
     let mut name_id = Vec::new();
     encode_varint_field(1, name_msg_id as u64, &mut name_id);
@@ -198,6 +261,9 @@ pub fn encode_internal_career_milestone_definition_wire(ms: &CareerMilestoneDef,
     encode_bytes_field(5, &encode_ui_annotation("group", group), &mut attr_bytes);
     encode_bytes_field(5, &encode_ui_annotation("subtype", subtype), &mut attr_bytes);
     encode_bytes_field(5, &encode_ui_annotation("name", &ms.description), &mut attr_bytes);
+    encode_bytes_field(5, &encode_ui_annotation("duration", "0"), &mut attr_bytes);
+    encode_bytes_field(5, &encode_ui_annotation("auraTextID", &desc_msg_id.to_string()), &mut attr_bytes);
+    encode_bytes_field(5, &encode_ui_annotation("order", &ms.milestone_id.to_string()), &mut attr_bytes);
     encode_varint_field(6, 1, &mut attr_bytes);
     encode_varint_field(
         7,
@@ -262,9 +328,7 @@ pub fn encode_internal_career_goal_definition_wire(def: &CareerGoalDef, out: &mu
     encode_bytes_field(2, &desc_id, &mut attr_bytes);
 
     encode_varint_field(3, def.target.max(1), &mut attr_bytes);
-    encode_bytes_field(5, &encode_ui_annotation("group", def.effective_group()), &mut attr_bytes);
-    encode_bytes_field(5, &encode_ui_annotation("subtype", "CAREER_PATH_GOAL"), &mut attr_bytes);
-    encode_bytes_field(5, &encode_ui_annotation("name", &def.name), &mut attr_bytes);
+    encode_career_goal_ui_annotations(def, 5, &mut attr_bytes);
     encode_varint_field(6, def.effective_threat() as u64, &mut attr_bytes);
     encode_varint_field(7, def.career_id.clamp(1, 4) as u64, &mut attr_bytes);
     encode_varint_field(8, def.career_points as u64, &mut attr_bytes);

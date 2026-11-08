@@ -18,9 +18,14 @@ fn career_goal_wire_encoders_and_extractors() {
         career_points: 20,
         isk_reward: 75_000,
         sp_reward: 250.0,
-        name_message_id: 582_600,
-        description_message_id: 696_300,
+        name_message_id: 601_356,
+        description_message_id: 601_544,
         threat: 2,
+        duration: Some(40),
+        aura_text_id: Some(601_732),
+        agency_link_text_id: Some(601_920),
+        agency_screen: Some("COSMIC_SIGNATURES".into()),
+        order: Some(3),
         _provenance: None,
     };
 
@@ -51,10 +56,14 @@ fn career_goal_wire_encoders_and_extractors() {
     let mut def_buf = Vec::new();
     encode_career_goal_definition_wire(&def, &mut def_buf);
     assert!(!def_buf.is_empty());
+    assert!(def_buf.windows(b"auraTextID".len()).any(|w| w == b"auraTextID"));
+    assert!(def_buf.windows(b"duration".len()).any(|w| w == b"duration"));
+    assert!(def_buf.windows(b"agencyScreen".len()).any(|w| w == b"agencyScreen"));
 
     let mut int_def_buf = Vec::new();
     encode_internal_career_goal_definition_wire(&def, &mut int_def_buf);
     assert!(!int_def_buf.is_empty());
+    assert!(int_def_buf.windows(b"auraTextID".len()).any(|w| w == b"auraTextID"));
 
     let ms_career = CareerMilestoneDef {
         milestone_id: 2,

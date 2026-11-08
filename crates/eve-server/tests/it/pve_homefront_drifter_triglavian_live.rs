@@ -54,18 +54,13 @@ async fn test_homefront_operations_live() {
         panic!("Expected Dict from GetHomefrontSiteInstances");
     };
 
-    let Some((_, PyRep::Dict(jita_dungeons))) = jita_hf.iter().find(|(k, _)| k.as_i64() == Some(jita as i64)) else {
+    let Some((_, PyRep::List(jita_dungeons))) = jita_hf.iter().find(|(k, _)| k.as_i64() == Some(jita as i64)) else {
         panic!("Dict must contain entry for queried solar system {jita}");
     };
     assert!(!jita_dungeons.is_empty(), "Jita must have seeded Homefront dungeons");
 
-    let (did_rep, list_rep) = &jita_dungeons[0];
-    let did = did_rep.as_i64().expect("dungeonID") as u32;
-    let PyRep::List(inst_list) = list_rep else {
-        panic!("Expected List of instance IDs");
-    };
-    assert!(!inst_list.is_empty(), "Dungeon must have active instance IDs");
-    let target_instance_id = inst_list[0].as_i64().expect("instanceID");
+    let did = jita_dungeons[0].dict_get("dungeonID").and_then(|v| v.as_i64()).expect("dungeonID") as u32;
+    let target_instance_id = jita_dungeons[0].dict_get("instanceID").and_then(|v| v.as_i64()).expect("instanceID");
 
     // SDE Archetype 70 verification
     let d_archetype = ctx.sde.dungeons.get(&did).and_then(|d| d.archetype_id);
@@ -83,7 +78,7 @@ async fn test_homefront_operations_live() {
     .expect("GetHomefrontSiteInstances null-sec") else {
         panic!("Expected Dict");
     };
-    let PyRep::Dict(null_dngs) = &null_hf[0].1 else { panic!() };
+    let PyRep::List(null_dngs) = &null_hf[0].1 else { panic!() };
     assert!(null_dngs.is_empty(), "Null-sec system must have 0 Homefront Operation instances");
 
     // 3. Locate boss ball and verify combat state in space
@@ -149,15 +144,12 @@ async fn test_homefront_operations_live() {
     .expect("GetHomefrontSiteInstances after completion") else {
         panic!("Expected Dict");
     };
-    let Some((_, PyRep::Dict(jita_after_dngs))) = hf_after.iter().find(|(k, _)| k.as_i64() == Some(jita as i64)) else {
+    let Some((_, PyRep::List(jita_after_dngs))) = hf_after.iter().find(|(k, _)| k.as_i64() == Some(jita as i64)) else {
         panic!();
     };
     let remaining_instances: Vec<i64> = jita_after_dngs
         .iter()
-        .flat_map(|(_, l)| match l {
-            PyRep::List(ids) => ids.iter().filter_map(|i| i.as_i64()).collect::<Vec<_>>(),
-            _ => Vec::new(),
-        })
+        .filter_map(|e| e.dict_get("instanceID").and_then(|v| v.as_i64()))
         .collect();
     assert!(
         !remaining_instances.contains(&target_instance_id),
@@ -359,7 +351,7 @@ async fn test_triglavian_edencom_sites_and_standings_live() {
     .expect("GetTriglavianSiteInstances Gammel") else {
         panic!("Expected Dict");
     };
-    let PyRep::Dict(g_dngs) = &g_rep[0].1 else { panic!() };
+    let PyRep::List(g_dngs) = &g_rep[0].1 else { panic!() };
     // Major Conduit (8802) and Minor Conduit (8742)
     assert_eq!(g_dngs.len(), 2, "Gammel must contain 2 Triglavian conduits");
 
@@ -376,7 +368,7 @@ async fn test_triglavian_edencom_sites_and_standings_live() {
     .expect("GetTriglavianSiteInstances EDENCOM") else {
         panic!("Expected Dict");
     };
-    let PyRep::Dict(ed_dngs) = &ed_rep[0].1 else { panic!() };
+    let PyRep::List(ed_dngs) = &ed_rep[0].1 else { panic!() };
     // EDENCOM Field Base (8808) and Forward Post (8792)
     assert_eq!(ed_dngs.len(), 2, "EDENCOM system must contain 2 EDENCOM sites");
 

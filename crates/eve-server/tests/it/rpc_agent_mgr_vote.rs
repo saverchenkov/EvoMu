@@ -238,11 +238,11 @@ async fn test_agent_mgr_career_and_epic_arcs() {
         other => panic!("Expected PyRep::List from GetPlausibleMissionIDs, got: {other:?}"),
     }
 
-    // 4. agentMgr.GetMyEpicArcStatus
+    // 4. agentMgr.GetMyEpicArcStatus -> dict {epicArcID: {missionID: KeyVal}} (#639)
     let epic_status_res = rpc(&ctx, &mut sess, "agentMgr", "GetMyEpicArcStatus", &[])
         .await
         .expect("agentMgr.GetMyEpicArcStatus");
-    assert!(matches!(epic_status_res, PyRep::List(_)));
+    assert!(matches!(epic_status_res, PyRep::Dict(_)));
 
     // 5. agentMgr.GetMessagesForEpicArcMissions
     let epic_msgs_res = rpc(

@@ -258,7 +258,16 @@ async fn homefront_and_triglavian_site_workflows_and_errors() {
     .await
     .expect("handled")
     .expect("homefront dict");
-    assert!(matches!(res, PyRep::Dict(_)));
+    let PyRep::Dict(ref hf_outer) = res else {
+        panic!("expected homefront outer dict, got {res:?}");
+    };
+    let (_, PyRep::List(ref hf_entries)) = hf_outer[0] else {
+        panic!("expected homefront list, got {hf_outer:?}");
+    };
+    assert_eq!(hf_entries.len(), 2);
+    assert!(hf_entries[0].dict_get("dungeonID").and_then(|v| v.as_i64()).is_some());
+    assert!(hf_entries[0].dict_get("instanceID").and_then(|v| v.as_i64()).is_some());
+    assert_eq!(hf_entries[0].dict_get("solarSystemID").and_then(|v| v.as_i64()), Some(hs_sys as i64));
 
     let hf = read_pve_special_reg(&ctx, |reg| {
         reg.homefront_sites.get(&hs_sys).and_then(|v| v.first().cloned())
@@ -312,7 +321,16 @@ async fn homefront_and_triglavian_site_workflows_and_errors() {
     .await
     .expect("handled")
     .expect("trig dict");
-    assert!(matches!(trig_res, PyRep::Dict(_)));
+    let PyRep::Dict(ref trig_outer) = trig_res else {
+        panic!("expected trig outer dict, got {trig_res:?}");
+    };
+    let (_, PyRep::List(ref trig_entries)) = trig_outer[0] else {
+        panic!("expected trig list, got {trig_outer:?}");
+    };
+    assert_eq!(trig_entries.len(), 2);
+    assert!(trig_entries[0].dict_get("dungeonID").and_then(|v| v.as_i64()).is_some());
+    assert!(trig_entries[0].dict_get("instanceID").and_then(|v| v.as_i64()).is_some());
+    assert_eq!(trig_entries[0].dict_get("solarSystemID").and_then(|v| v.as_i64()), Some(trig_sys as i64));
 
     let trig = read_pve_special_reg(&ctx, |reg| {
         reg.triglavian_sites.get(&trig_sys).and_then(|v| v.first().cloned())

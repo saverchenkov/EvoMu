@@ -444,12 +444,18 @@ async fn station_entry_handlers_match_v24_client_shapes_and_effective_attributes
     assert_eq!(code_bytes.first().copied(), Some(b'c'), "marshalled code object starts with 'c'");
     assert!(code_bytes.windows(b"SettingsInfo".len()).any(|w| w == b"SettingsInfo"));
 
-    // 5. `agentMgr.GetAgents` -> 10-column rowset with `solarsystemID` (lowercase 's' in system).
+    // 5. `agentMgr.GetAgents` -> 11-column rowset with `solarsystemID` and `isLocatorAgent` (#636).
     let agents = ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetAgents", &[], &kw, None).await.expect("GetAgents");
-    let PyRep::Rowset { columns, .. } = &agents else { panic!("GetAgents rowset") };
-    assert_eq!(columns.len(), 10);
+    let PyRep::Rowset { columns, rows } = &agents else { panic!("GetAgents rowset") };
+    assert_eq!(columns.len(), 11);
     assert!(columns.iter().any(|c| c == "solarsystemID"), "Agents.__GetAllAgents filters by solarsystemID: {columns:?}");
+    assert!(columns.iter().any(|c| c == "isLocatorAgent"), "Agency expects isLocatorAgent column (#636): {columns:?}");
     assert!(!columns.iter().any(|c| c == "solarSystemID"));
+    if let Some(first_row) = rows.first() {
+        assert_eq!(first_row.len(), columns.len());
+        let loc_idx = columns.iter().position(|c| c == "isLocatorAgent").unwrap();
+        assert!(matches!(first_row[loc_idx], PyRep::Bool(_)));
+    }
 
     // 6. `fwWarzoneSolarsystem.GetLocalOccupationState` -> `(solarsystemID, None)` in non-FW Jita (`30000142`),
     // and `(solarsystemID, KeyVal)` in low-sec FW warzone Asabona (`30000012`).

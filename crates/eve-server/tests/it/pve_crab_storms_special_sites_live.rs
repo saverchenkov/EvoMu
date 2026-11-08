@@ -566,7 +566,7 @@ async fn test_homefront_drifter_hives_and_triglavian_sites_live() {
 
     let hf_jita = ok(&ctx, &mut hf1.sess, "dungeonInstanceCacheMgr", "GetHomefrontSiteInstances", &[]).await;
     let jita_site_count: usize = dict_get_int(&hf_jita, i64::from(JITA_SYS)).and_then(|d| match d {
-        PyRep::Dict(v) => Some(v.iter().filter_map(|(_, ids)| match ids { PyRep::List(l) => Some(l.len()), _ => None }).sum()),
+        PyRep::List(v) => Some(v.len()),
         _ => None,
     }).unwrap_or(0);
     assert!(jita_site_count > 0, "High-sec Jita must have archetype-70 Homefront sites");

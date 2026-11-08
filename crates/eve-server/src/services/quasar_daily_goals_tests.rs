@@ -119,9 +119,9 @@ fn template_effective_getters_and_day_bucket_boundaries() {
 
     let mut tpl = default_daily_bonus_template();
     assert_eq!(tpl.effective_goal_category(), 2);
-    assert_eq!(tpl.effective_name_message_id(), 659_195);
-    assert_eq!(tpl.effective_description_message_id(), 696_260);
-    assert_eq!(tpl.effective_help_text_message_id(), 665_456);
+    assert_eq!(tpl.effective_name_message_id(), 722_674);
+    assert_eq!(tpl.effective_description_message_id(), 698_433);
+    assert_eq!(tpl.effective_help_text_message_id(), 698_433);
     assert_eq!(tpl.effective_assigner_corporation_id(), 1_000_419);
 
     tpl.name_message_id = 0;
@@ -130,12 +130,12 @@ fn template_effective_getters_and_day_bucket_boundaries() {
     tpl.assigner_corporation_id = 0;
 
     let expected = [
-        (1, 1, 665_455, 696_260, 665_456),
-        (2, 1, 665_390, 696_245, 665_395),
-        (3, 1, 665_435, 696_251, 665_401),
-        (4, 1, 665_465, 696_262, 665_466),
+        (1, 1, 659_195, 696_251, 659_196),
+        (2, 1, 659_218, 696_247, 659_219),
+        (3, 1, 665_435, 696_245, 665_436),
+        (4, 1, 541_824, 1_041_584, 1_004_955),
         (5, 1, 665_394, 696_246, 665_412),
-        (6, 2, 582_520, 582_521, 582_521),
+        (6, 2, 722_674, 698_433, 698_433),
         (99, 1, 582_520, 582_521, 582_521),
     ];
     for (cat, eff_cat, name_id, desc_id, help_id) in expected {
@@ -266,8 +266,27 @@ fn set_templates_and_encode_attributes_all_categories() {
         t.isk_reward = if cat % 2 == 1 { 100_000 } else { 0 };
         t.sp_reward = if cat % 2 == 0 { 2_500.0 } else { 0.0 };
         let mut encoded = Vec::new();
-        encode_goal_attributes(&t, &mut encoded);
+        encode_goal_attributes_for_day_bucket(&t, 20_548, &mut encoded);
         assert!(!encoded.is_empty());
+        // Verify fields 10 (active_after) and 11 (active_until) are encoded as non-epoch timestamps
+        let decoded_attrs = QuasarDescriptorRegistry::empty_with_builtins()
+            .decode_dynamic_or_wire("", &encoded)
+            .expect("decode Attributes");
+        let after_secs = match decoded_attrs.get(10) {
+            Some(DynamicValue::Message(m)) => match m.get(1) {
+                Some(DynamicValue::Uint64(s)) => *s,
+                other => panic!("unexpected active_after.seconds: {other:?}"),
+            },
+            other => panic!("missing field 10 active_after: {other:?}"),
+        };
+        let until_secs = match decoded_attrs.get(11) {
+            Some(DynamicValue::Message(m)) => match m.get(1) {
+                Some(DynamicValue::Uint64(s)) => *s,
+                other => panic!("unexpected active_until.seconds: {other:?}"),
+            },
+            other => panic!("missing field 11 active_until: {other:?}"),
+        };
+        assert!(after_secs > 1_700_000_000 && until_secs == after_secs + 86_400);
         let mut earn = Vec::new();
         encode_goal_earnings(&t, 4, &mut earn);
         if t.isk_reward > 0 || t.sp_reward > 0.0 {

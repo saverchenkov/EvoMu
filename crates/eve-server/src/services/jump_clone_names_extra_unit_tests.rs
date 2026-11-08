@@ -74,24 +74,27 @@ fn jump_clone_name_boundaries_validation_skills_and_ship_clone_state() {
         let ch = snap.characters.get_mut(&char_id).unwrap();
         ch.balance = IskCents(89_999_999);
     });
-    assert_eq!(
-        validate_install_jump_clone(&ctx, &sess, &[]).unwrap_err().code,
-        "NotEnoughMoney"
-    );
+    let funds_errs = validate_install_jump_clone(&ctx, &sess, &[]).unwrap();
+    assert!(matches!(
+        &funds_errs,
+        PyRep::List(v) if v.iter().any(|x| matches!(x, PyRep::Tuple(t) if t.first().and_then(|s| s.as_str()) == Some("UI/Medical/Errors/JumpCloneValidationInsufficientFunds")))
+    ));
 
     ctx.db.with_mut_snapshot(|snap| {
         let ch = snap.characters.get_mut(&char_id).unwrap();
         ch.balance = IskCents(90_000_000);
         snap.skills.remove(&char_id);
     });
-    // 1 existing clone >= 0 max_clones -> JumpCloneLimitReached
+    // 0 max_clones -> SkillReqNotFulfilled
     assert_eq!(
-        validate_install_jump_clone(&ctx, &sess, &[]).unwrap_err().code,
-        "JumpCloneLimitReached"
+        validate_install_jump_clone(&ctx, &sess, &[]).unwrap(),
+        PyRep::List(vec![PyRep::String(
+            "UI/Medical/Errors/JumpCloneValidationSkillReqNotFulfilled".into()
+        )])
     );
 
-    // Add level 1 in 33407 (max_clones = 1, still == clone_count 1 -> JumpCloneLimitReached),
-    // then add level 1 in 73910 (max_clones = 2 > clone_count 1 -> Ok(true))
+    // Add level 1 in 33407 (max_clones = 1, still == clone_count 1 -> CloneCapacityReached),
+    // then add level 1 in 73910 (max_clones = 2 > clone_count 1 -> Ok([]))
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(char_id).or_default().insert(
             33407,
@@ -103,8 +106,10 @@ fn jump_clone_name_boundaries_validation_skills_and_ship_clone_state() {
         );
     });
     assert_eq!(
-        validate_install_jump_clone(&ctx, &sess, &[]).unwrap_err().code,
-        "JumpCloneLimitReached"
+        validate_install_jump_clone(&ctx, &sess, &[]).unwrap(),
+        PyRep::List(vec![PyRep::String(
+            "UI/Medical/Errors/JumpCloneValidationCloneCapacityReached".into()
+        )])
     );
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(char_id).or_default().insert(
@@ -118,7 +123,7 @@ fn jump_clone_name_boundaries_validation_skills_and_ship_clone_state() {
     });
     assert_eq!(
         validate_install_jump_clone(&ctx, &sess, &[]).unwrap(),
-        PyRep::Bool(true)
+        PyRep::List(vec![])
     );
 
     // GetShipCloneState on owned non-active ship returns the clone row with exact 100-char label

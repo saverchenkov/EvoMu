@@ -1578,13 +1578,16 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
     let mid_status = rpc_call(&ctx, &mut sess, "agentMgr", "GetMyEpicArcStatus", &[])
         .await
         .expect("GetMyEpicArcStatus after mission 1");
-    let PyRep::List(mid_arcs) = mid_status else {
-        panic!("Expected list from GetMyEpicArcStatus");
+    let PyRep::Dict(mid_arcs) = mid_status else {
+        panic!("Expected dict from GetMyEpicArcStatus (#639)");
     };
-    let active_arc = mid_arcs
+    let (_, PyRep::Dict(mid_missions)) = mid_arcs
         .iter()
-        .find(|a| a.dict_get("epicArcID").and_then(|v| v.as_i64()) == Some(arc_id as i64))
-        .expect("Active epic arc entry present after mission 1");
+        .find(|(k, _)| k.as_i64() == Some(arc_id as i64))
+        .expect("Active epic arc entry present after mission 1") else {
+        panic!("Expected mission dict for active epic arc");
+    };
+    let active_arc = &mid_missions[0].1;
     assert_eq!(active_arc.dict_get("state").and_then(|v| v.as_str()), Some("Active"));
     assert_eq!(active_arc.dict_get("onCooldown"), Some(&PyRep::Bool(false)));
 
@@ -1624,13 +1627,16 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
     let epic_status = rpc_call(&ctx, &mut sess, "agentMgr", "GetMyEpicArcStatus", &[])
         .await
         .expect("GetMyEpicArcStatus");
-    let PyRep::List(arcs) = epic_status else {
-        panic!("Expected list from GetMyEpicArcStatus");
+    let PyRep::Dict(arcs) = epic_status else {
+        panic!("Expected dict from GetMyEpicArcStatus (#639)");
     };
-    let done_arc = arcs
+    let (_, PyRep::Dict(done_missions)) = arcs
         .iter()
-        .find(|a| a.dict_get("epicArcID").and_then(|v| v.as_i64()) == Some(arc_id as i64))
-        .expect("Completed epic arc entry");
+        .find(|(k, _)| k.as_i64() == Some(arc_id as i64))
+        .expect("Completed epic arc entry") else {
+        panic!("Expected mission dict for completed epic arc");
+    };
+    let done_arc = &done_missions[0].1;
     assert_eq!(done_arc.dict_get("state").and_then(|v| v.as_str()), Some("Cooldown"));
     assert_eq!(done_arc.dict_get("onCooldown"), Some(&PyRep::Bool(true)));
 

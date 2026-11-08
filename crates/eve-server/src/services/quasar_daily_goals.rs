@@ -32,11 +32,12 @@ use std::sync::{Arc, RwLock};
 ///
 /// Contribution categories map to `res:/staticdata/contributionmethods.fsdbinary` and
 /// `eve_public.dailygoal.ContributionConfiguration`:
-/// - `1`: Kill NPC (`DestroyNPC`, titleID `665455`, progressDescriptionID `696260`)
-/// - `2`: Mine Ore (`MineAsteroid`, titleID `665390`, progressDescriptionID `696245`)
-/// - `3`: Scan Signature (`ScanSignature`, titleID `665435`, progressDescriptionID `696251`)
-/// - `4`: Space Jump (`JumpStargate`, titleID `665465`, progressDescriptionID `696262`)
+/// - `1`: Kill NPC (`DestroyNonCapsuleers`, titleID `659195`, progressDescriptionID `696251`)
+/// - `2`: Mine Ore (`MineMaterials`, titleID `659218`, progressDescriptionID `696247`)
+/// - `3`: Scan Signature (`ScanSignature`, titleID `665435`, progressDescriptionID `696245`)
+/// - `4`: Space Jump (`JumpStargate`, titleID `541824`, progressDescriptionID `1041584`)
 /// - `5`: Manufacture Item (`ManufactureItem`, titleID `665394`, progressDescriptionID `696246`)
+/// - `6`: Daily Bonus (`DailyBonus`, titleID `722674`, progressDescriptionID `698433`)
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DailyGoalTemplate {
     pub uuid: [u8; 16],
@@ -76,11 +77,12 @@ impl DailyGoalTemplate {
             return self.name_message_id;
         }
         match self.category {
-            1 => 665_455, // DestroyNPC.titleID
-            2 => 665_390, // MineAsteroid.titleID
-            3 => 665_435, // ScanSignature.titleID
-            4 => 665_465, // JumpStargate.titleID
-            5 => 665_394, // ManufactureItem.titleID
+            1 => 659_195, // Destroy Non-Capsuleers
+            2 => 659_218, // Mine Materials
+            3 => 665_435, // Scan Signatures
+            4 => 541_824, // Jump through Stargate
+            5 => 665_394, // Manufacture
+            6 => 722_674, // Daily Bonus
             _ => 582_520, // Enforcer careerPath nameID
         }
     }
@@ -91,11 +93,12 @@ impl DailyGoalTemplate {
             return self.description_message_id;
         }
         match self.category {
-            1 => 696_260, // DestroyNPC.progressDescriptionID
-            2 => 696_245, // MineAsteroid.progressDescriptionID
-            3 => 696_251, // ScanSignature.progressDescriptionID
-            4 => 696_262, // JumpStargate.progressDescriptionID
-            5 => 696_246, // ManufactureItem.progressDescriptionID
+            1 => 696_251, // Non-Capsuleers destroyed
+            2 => 696_247, // Materials mined
+            3 => 696_245, // Signatures scanned
+            4 => 1_041_584, // Jump through a Stargate into a different Solar System
+            5 => 696_246, // Items manufactured
+            6 => 698_433, // Daily Bonus Rewards
             _ => 582_521, // Enforcer careerPath descriptionID
         }
     }
@@ -106,11 +109,12 @@ impl DailyGoalTemplate {
             return self.help_text_message_id;
         }
         match self.category {
-            1 => 665_456,
-            2 => 665_395,
-            3 => 665_401,
-            4 => 665_466,
-            5 => 665_412, // ManufactureItem.descriptionID
+            1 => 659_196,   // Destroy ships piloted by non-capsuleers.
+            2 => 659_219,   // Mine raw materials.
+            3 => 665_436,   // Scan cosmic signatures to 100% resolution with a probe scanner.
+            4 => 1_004_955, // You will earn progress towards this goal whenever you complete a jump between solar systems...
+            5 => 665_412,   // Install manufacturing jobs for items of a specific type.
+            6 => 698_433,   // Daily Bonus Rewards
             _ => 582_521,
         }
     }
@@ -168,6 +172,13 @@ impl Default for DailyGoalManager {
 /// Daily goals reset at 11:00 UTC downtime (39_600s offset from 00:00 UTC).
 pub fn daily_goal_day_bucket(now_unix: u64) -> u64 {
     now_unix.saturating_sub(39_600) / 86_400
+}
+
+/// Returns `(active_after_unix, active_until_unix)` covering the 24h downtime bucket window.
+pub fn daily_goal_window_unix(day_bucket: u64) -> (u64, u64) {
+    let active_after = 39_600_u64.saturating_add(day_bucket.saturating_mul(86_400));
+    let active_until = active_after.saturating_add(86_400);
+    (active_after, active_until)
 }
 
 fn ensure_character_daily_goals_with_templates(
@@ -228,9 +239,9 @@ pub fn default_daily_bonus_template() -> DailyGoalTemplate {
         sp_reward: 10_000.0,
         completion_cost_isk: None,
         completion_cost_evermarks: None,
-        name_message_id: 659_195,
-        description_message_id: 696_260,
-        help_text_message_id: 665_456,
+        name_message_id: 722_674,
+        description_message_id: 698_433,
+        help_text_message_id: 698_433,
         assigner_corporation_id: 1_000_419,
     }
 }
@@ -242,13 +253,13 @@ pub fn build_sde_daily_goal_templates(sde: &eve_sde::SdeRegistry) -> Vec<DailyGo
     // completion costs (Some(2_500) EM, Some(100_000) ISK) are server-authored (DERIVED).
     let specs: [(&str, u32, u32, u64, i64, f64, Option<i64>, Option<i64>, u32, u32, u32); 5] = [
         // DERIVED: target=25, isk_reward=500_000, sp_reward=5_000.0, completion_cost_evermarks=Some(2_500)
-        ("KillNPC", 1, 3, 25, 500_000, 5_000.0, None, Some(2_500), 659_195, 696_260, 665_456),
+        ("KillNPC", 1, 3, 25, 500_000, 5_000.0, None, Some(2_500), 659_195, 696_251, 659_196),
         // DERIVED: target=2_000, isk_reward=500_000, sp_reward=5_000.0, completion_cost_isk=Some(100_000), completion_cost_evermarks=Some(2_500)
-        ("MineOre", 2, 2, 2_000, 500_000, 5_000.0, Some(100_000), Some(2_500), 665_390, 696_245, 665_395),
+        ("MineOre", 2, 2, 2_000, 500_000, 5_000.0, Some(100_000), Some(2_500), 659_218, 696_247, 659_219),
         // DERIVED: target=5, isk_reward=500_000, sp_reward=5_000.0, completion_cost_evermarks=Some(2_500)
-        ("ScanSignature", 3, 1, 5, 500_000, 5_000.0, None, Some(2_500), 665_435, 696_251, 665_401),
+        ("ScanSignature", 3, 1, 5, 500_000, 5_000.0, None, Some(2_500), 665_435, 696_245, 665_436),
         // DERIVED: target=10, isk_reward=500_000, sp_reward=5_000.0, completion_cost_evermarks=Some(2_500)
-        ("SpaceJump", 4, 4, 10, 500_000, 5_000.0, None, Some(2_500), 665_465, 696_262, 665_466),
+        ("SpaceJump", 4, 4, 10, 500_000, 5_000.0, None, Some(2_500), 541_824, 1_041_584, 1_004_955),
         // DERIVED: target=1, isk_reward=500_000, sp_reward=5_000.0, completion_cost_evermarks=Some(2_500)
         ("ManufactureItem", 5, 2, 1, 500_000, 5_000.0, None, Some(2_500), 665_394, 696_246, 665_412),
     ];
@@ -925,6 +936,26 @@ fn encode_sp_unit(sp: u32) -> Vec<u8> {
 
 /// Encodes `eve_public.dailygoal.Attributes` / `eve.dailygoal.Attributes` matching V24 descriptors.
 pub fn encode_goal_attributes(tpl: &DailyGoalTemplate, out: &mut Vec<u8>) {
+    encode_goal_attributes_with_window(tpl, 39_600, 39_600 + 86_400, out);
+}
+
+/// Encodes `eve_public.dailygoal.Attributes` / `eve.dailygoal.Attributes` with explicit active timestamps.
+pub fn encode_goal_attributes_for_day_bucket(
+    tpl: &DailyGoalTemplate,
+    day_bucket: u64,
+    out: &mut Vec<u8>,
+) {
+    let (active_after, active_until) = daily_goal_window_unix(day_bucket);
+    encode_goal_attributes_with_window(tpl, active_after, active_until, out);
+}
+
+/// Encodes `eve_public.dailygoal.Attributes` / `eve.dailygoal.Attributes` with explicit window timestamps.
+pub fn encode_goal_attributes_with_window(
+    tpl: &DailyGoalTemplate,
+    active_after_unix: u64,
+    active_until_unix: u64,
+    out: &mut Vec<u8>,
+) {
     // 1: name_message (.eve_public.localization.message.Identifier { 1: uint32 sequential })
     encode_bytes_field(1, &encode_loc_message_id(tpl.effective_name_message_id()), out);
     // 2: description_message (.eve_public.localization.message.Identifier { 1: uint32 sequential })
@@ -956,6 +987,18 @@ pub fn encode_goal_attributes(tpl: &DailyGoalTemplate, out: &mut Vec<u8>) {
     }
     // 9: target (uint64)
     encode_varint_field(9, tpl.target, out);
+    // 10: active_after (.google.protobuf.Timestamp)
+    let after_ts = GoogleTimestamp {
+        seconds: active_after_unix as i64,
+        nanos: 0,
+    };
+    encode_bytes_field(10, &after_ts.encode_proto(), out);
+    // 11: active_until (.google.protobuf.Timestamp)
+    let until_ts = GoogleTimestamp {
+        seconds: active_until_unix as i64,
+        nanos: 0,
+    };
+    encode_bytes_field(11, &until_ts.encode_proto(), out);
 }
 
 /// Encodes `repeated eve_public.dailygoal.api.Earning` (one `Earning` per `Unit` oneof variant).
@@ -1010,7 +1053,7 @@ pub fn register_daily_goal_handlers(
                 encode_goal_identifier(&g.uuid, &mut id_bytes);
                 encode_bytes_field(1, &id_bytes, &mut goal_entry);
                 let mut attr_bytes = Vec::new();
-                encode_goal_attributes(&g.template, &mut attr_bytes);
+                encode_goal_attributes_for_day_bucket(&g.template, g.day_bucket, &mut attr_bytes);
                 encode_bytes_field(2, &attr_bytes, &mut goal_entry);
                 encode_varint_field(3, g.current_progress, &mut goal_entry);
                 encode_goal_earnings(&g.template, 5, &mut goal_entry);
@@ -1045,7 +1088,7 @@ pub fn register_daily_goal_handlers(
 
             let mut out = Vec::new();
             let mut attr_bytes = Vec::new();
-            encode_goal_attributes(&g.template, &mut attr_bytes);
+            encode_goal_attributes_for_day_bucket(&g.template, g.day_bucket, &mut attr_bytes);
             encode_bytes_field(1, &attr_bytes, &mut out);
             encode_varint_field(2, g.current_progress, &mut out);
             encode_goal_earnings(&g.template, 4, &mut out);
@@ -1315,7 +1358,7 @@ pub fn register_daily_goal_handlers(
 
             let mut out = Vec::new();
             let mut attr_bytes = Vec::new();
-            encode_goal_attributes(&g.template, &mut attr_bytes);
+            encode_goal_attributes_for_day_bucket(&g.template, g.day_bucket, &mut attr_bytes);
             encode_bytes_field(1, &attr_bytes, &mut out);
 
             Ok(GoogleAny {

@@ -3877,19 +3877,25 @@ fn count_nested_instances(rep: &PyRep, expected_sys: u32) -> usize {
     else {
         panic!("missing solarSystemID {expected_sys} in {outer:?}");
     };
-    let PyRep::Dict(by_dungeon) = inner else {
-        panic!("expected inner Dict, got {inner:?}");
+    let PyRep::List(entries) = inner else {
+        panic!("expected List of dungeon KeyVals, got {inner:?}");
     };
-    let mut total = 0;
-    for (did, insts) in by_dungeon {
-        assert!(did.as_i64().unwrap_or(0) > 0, "dungeon_id must be positive");
-        let PyRep::List(ids) = insts else {
-            panic!("expected List of instance_ids, got {insts:?}");
-        };
-        assert!(!ids.is_empty(), "dungeon {did:?} must have >= 1 instance");
-        total += ids.len();
+    for entry in entries {
+        assert!(
+            entry.dict_get("dungeonID").and_then(|v| v.as_i64()).unwrap_or(0) > 0,
+            "dungeonID must be positive in {entry:?}"
+        );
+        assert!(
+            entry.dict_get("instanceID").and_then(|v| v.as_i64()).unwrap_or(0) > 0,
+            "instanceID must be positive in {entry:?}"
+        );
+        assert_eq!(
+            entry.dict_get("solarSystemID").and_then(|v| v.as_i64()),
+            Some(i64::from(expected_sys)),
+            "solarSystemID mismatch in {entry:?}"
+        );
     }
-    total
+    entries.len()
 }
 
 #[tokio::test]

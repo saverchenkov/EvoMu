@@ -192,6 +192,35 @@ async fn reprocessing_quotes_and_reprocess_npc_structure_and_error_paths() {
     .expect("tuple quote");
     assert!(matches!(tuple_quote, PyRep::Tuple(ref t) if t.len() == 3));
 
+    // V24 client sends Dict {itemID: invItem} to GetQuotes; quote must return item typeID and outputs
+    let dict_quote = handle(
+        &ctx,
+        &mut sess,
+        "reprocessingSvc",
+        "GetQuotes",
+        &[
+            PyRep::Dict(vec![(
+                PyRep::Integer(ore_stack_id),
+                PyRep::keyval([("itemID", PyRep::Integer(ore_stack_id))]),
+            )]),
+            PyRep::Integer(ship_id),
+        ],
+        None,
+    )
+    .await
+    .expect("handled")
+    .expect("dict quote");
+    let PyRep::Tuple(ref dq_parts) = dict_quote else {
+        panic!("expected 3-tuple from GetQuotes Dict, got {dict_quote:?}");
+    };
+    let PyRep::List(ref dq_list) = dq_parts[2] else {
+        panic!("expected quote list");
+    };
+    assert_eq!(dq_list.len(), 1);
+    assert_eq!(dq_list[0].dict_get("itemID").and_then(|v| v.as_i64()), Some(ore_stack_id));
+    assert_eq!(dq_list[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(1230));
+    assert!(!matches!(dq_list[0].dict_get("outputs"), Some(PyRep::List(o)) if o.is_empty()));
+
     // 2. Reprocess active ship rejected
     let err = handle(&ctx, &mut sess, "reprocessingSvc", "Reprocess", &[PyRep::Integer(ship_id)], None)
         .await

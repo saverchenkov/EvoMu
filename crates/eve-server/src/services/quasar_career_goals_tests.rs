@@ -18,7 +18,7 @@ fn career_goal_def_effective_attributes_and_milestones() {
         name_message_id: 0,
         description_message_id: 0,
         threat: 0,
-        _provenance: None,
+        ..Default::default()
     };
     assert_eq!(def.effective_name_message_id(), 582_516 + 7);
     assert_eq!(def.effective_description_message_id(), 582_517 + 1_000 + 7);
@@ -82,7 +82,7 @@ fn career_goal_manager_lifecycle_and_gateway_handlers() {
         name_message_id: 0,
         description_message_id: 0,
         threat: 1,
-        _provenance: None,
+        ..Default::default()
     });
 
     let cid = 90_000_001_u32;

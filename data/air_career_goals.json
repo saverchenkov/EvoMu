@@ -30,9 +30,14 @@
       1
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665455,
-    "description_message_id": 696260,
-    "threat": 1
+    "name_message_id": 601461,
+    "description_message_id": 601649,
+    "threat": 1,
+    "aura_text_id": 601837,
+    "agency_link_text_id": 602025,
+    "agency_screen": "HOMEPAGE",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Enforcer",
@@ -65,9 +70,14 @@
       2
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665456,
-    "description_message_id": 696261,
-    "threat": 2
+    "name_message_id": 601462,
+    "description_message_id": 601650,
+    "threat": 2,
+    "aura_text_id": 601838,
+    "agency_link_text_id": 602026,
+    "agency_screen": "HOMEPAGE",
+    "duration": 40,
+    "order": 2
   },
   {
     "career_name": "Enforcer",
@@ -100,9 +110,14 @@
       3
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665457,
-    "description_message_id": 696262,
-    "threat": 3
+    "name_message_id": 601463,
+    "description_message_id": 601651,
+    "threat": 3,
+    "aura_text_id": 601839,
+    "agency_link_text_id": 602027,
+    "agency_screen": "HOMEPAGE",
+    "duration": 60,
+    "order": 3
   },
   {
     "career_name": "Enforcer",
@@ -135,9 +150,14 @@
       4
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665458,
-    "description_message_id": 696263,
-    "threat": 3
+    "name_message_id": 601464,
+    "description_message_id": 601652,
+    "threat": 3,
+    "aura_text_id": 601840,
+    "agency_link_text_id": 602028,
+    "agency_screen": "HOMEPAGE",
+    "duration": 80,
+    "order": 4
   },
   {
     "career_name": "Enforcer",
@@ -170,9 +190,14 @@
       5
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665459,
-    "description_message_id": 696264,
-    "threat": 3
+    "name_message_id": 601465,
+    "description_message_id": 601653,
+    "threat": 3,
+    "aura_text_id": 601841,
+    "agency_link_text_id": 602029,
+    "agency_screen": "HOMEPAGE",
+    "duration": 100,
+    "order": 5
   },
   {
     "career_name": "Enforcer",
@@ -205,9 +230,14 @@
       6
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665435,
-    "description_message_id": 696260,
-    "threat": 1
+    "name_message_id": 601442,
+    "description_message_id": 601630,
+    "threat": 1,
+    "aura_text_id": 601818,
+    "agency_link_text_id": 602006,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Enforcer",
@@ -240,9 +270,14 @@
       7
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665436,
-    "description_message_id": 696261,
-    "threat": 1
+    "name_message_id": 601443,
+    "description_message_id": 601631,
+    "threat": 1,
+    "aura_text_id": 601819,
+    "agency_link_text_id": 602007,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 20,
+    "order": 2
   },
   {
     "career_name": "Enforcer",
@@ -275,9 +310,14 @@
       8
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665437,
-    "description_message_id": 696262,
-    "threat": 1
+    "name_message_id": 601444,
+    "description_message_id": 601632,
+    "threat": 1,
+    "aura_text_id": 601820,
+    "agency_link_text_id": 602008,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 20,
+    "order": 3
   },
   {
     "career_name": "Enforcer",
@@ -310,9 +350,14 @@
       9
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665438,
-    "description_message_id": 696263,
-    "threat": 1
+    "name_message_id": 601445,
+    "description_message_id": 601633,
+    "threat": 1,
+    "aura_text_id": 601821,
+    "agency_link_text_id": 602009,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 20,
+    "order": 4
   },
   {
     "career_name": "Enforcer",
@@ -345,9 +390,14 @@
       10
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665439,
-    "description_message_id": 696264,
-    "threat": 1
+    "name_message_id": 601446,
+    "description_message_id": 601634,
+    "threat": 1,
+    "aura_text_id": 601822,
+    "agency_link_text_id": 602010,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 20,
+    "order": 5
   },
   {
     "career_name": "Enforcer",
@@ -380,9 +430,14 @@
       11
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665440,
-    "description_message_id": 696265,
-    "threat": 1
+    "name_message_id": 601447,
+    "description_message_id": 601635,
+    "threat": 1,
+    "aura_text_id": 601823,
+    "agency_link_text_id": 602011,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 20,
+    "order": 6
   },
   {
     "career_name": "Enforcer",
@@ -415,9 +470,14 @@
       12
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665441,
-    "description_message_id": 696266,
-    "threat": 1
+    "name_message_id": 601448,
+    "description_message_id": 601636,
+    "threat": 1,
+    "aura_text_id": 601824,
+    "agency_link_text_id": 602012,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 20,
+    "order": 7
   },
   {
     "career_name": "Enforcer",
@@ -450,9 +510,14 @@
       13
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665442,
-    "description_message_id": 696267,
-    "threat": 1
+    "name_message_id": 601449,
+    "description_message_id": 601637,
+    "threat": 1,
+    "aura_text_id": 601825,
+    "agency_link_text_id": 602013,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 20,
+    "order": 8
   },
   {
     "career_name": "Enforcer",
@@ -485,9 +550,14 @@
       14
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665443,
-    "description_message_id": 696268,
-    "threat": 1
+    "name_message_id": 601450,
+    "description_message_id": 601638,
+    "threat": 1,
+    "aura_text_id": 601826,
+    "agency_link_text_id": 602014,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 20,
+    "order": 9
   },
   {
     "career_name": "Enforcer",
@@ -520,9 +590,14 @@
       15
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665444,
-    "description_message_id": 696269,
-    "threat": 1
+    "name_message_id": 601451,
+    "description_message_id": 601639,
+    "threat": 1,
+    "aura_text_id": 601827,
+    "agency_link_text_id": 602015,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 20,
+    "order": 10
   },
   {
     "career_name": "Enforcer",
@@ -555,9 +630,14 @@
       16
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582531,
-    "description_message_id": 582532,
-    "threat": 1
+    "name_message_id": 601452,
+    "description_message_id": 601640,
+    "threat": 1,
+    "aura_text_id": 601828,
+    "agency_link_text_id": 602016,
+    "agency_screen": "SECURITY_AGENTS",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Enforcer",
@@ -590,9 +670,14 @@
       17
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582532,
-    "description_message_id": 582533,
-    "threat": 1
+    "name_message_id": 601453,
+    "description_message_id": 601641,
+    "threat": 1,
+    "aura_text_id": 601829,
+    "agency_link_text_id": 602017,
+    "agency_screen": "SECURITY_AGENTS",
+    "duration": 30,
+    "order": 2
   },
   {
     "career_name": "Enforcer",
@@ -625,9 +710,14 @@
       18
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582533,
-    "description_message_id": 582534,
-    "threat": 2
+    "name_message_id": 601454,
+    "description_message_id": 601642,
+    "threat": 2,
+    "aura_text_id": 601830,
+    "agency_link_text_id": 602018,
+    "agency_screen": "SECURITY_AGENTS",
+    "duration": 40,
+    "order": 3
   },
   {
     "career_name": "Enforcer",
@@ -660,9 +750,14 @@
       19
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582534,
-    "description_message_id": 582535,
-    "threat": 2
+    "name_message_id": 601455,
+    "description_message_id": 601643,
+    "threat": 2,
+    "aura_text_id": 601831,
+    "agency_link_text_id": 602019,
+    "agency_screen": "SECURITY_AGENTS",
+    "duration": 50,
+    "order": 4
   },
   {
     "career_name": "Enforcer",
@@ -695,9 +790,14 @@
       20
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582535,
-    "description_message_id": 582536,
-    "threat": 3
+    "name_message_id": 601456,
+    "description_message_id": 601644,
+    "threat": 3,
+    "aura_text_id": 601832,
+    "agency_link_text_id": 602020,
+    "agency_screen": "SECURITY_AGENTS",
+    "duration": 60,
+    "order": 5
   },
   {
     "career_name": "Enforcer",
@@ -730,9 +830,14 @@
       21
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665475,
-    "description_message_id": 696280,
-    "threat": 1
+    "name_message_id": 601457,
+    "description_message_id": 601645,
+    "threat": 1,
+    "aura_text_id": 601833,
+    "agency_link_text_id": 602021,
+    "agency_screen": "ABYSSAL_DEADSPACE",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Enforcer",
@@ -765,9 +870,14 @@
       22
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665476,
-    "description_message_id": 696281,
-    "threat": 2
+    "name_message_id": 601458,
+    "description_message_id": 601646,
+    "threat": 2,
+    "aura_text_id": 601834,
+    "agency_link_text_id": 602022,
+    "agency_screen": "ABYSSAL_DEADSPACE",
+    "duration": 40,
+    "order": 2
   },
   {
     "career_name": "Enforcer",
@@ -800,9 +910,14 @@
       23
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665477,
-    "description_message_id": 696282,
-    "threat": 2
+    "name_message_id": 601459,
+    "description_message_id": 601647,
+    "threat": 2,
+    "aura_text_id": 601835,
+    "agency_link_text_id": 602023,
+    "agency_screen": "ABYSSAL_DEADSPACE",
+    "duration": 50,
+    "order": 3
   },
   {
     "career_name": "Enforcer",
@@ -835,9 +950,14 @@
       24
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665478,
-    "description_message_id": 696283,
-    "threat": 3
+    "name_message_id": 601460,
+    "description_message_id": 601648,
+    "threat": 3,
+    "aura_text_id": 601836,
+    "agency_link_text_id": 602024,
+    "agency_screen": "ABYSSAL_DEADSPACE",
+    "duration": 60,
+    "order": 4
   },
   {
     "career_name": "Enforcer",
@@ -870,9 +990,14 @@
       25
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665474,
-    "description_message_id": 696283,
-    "threat": 1
+    "name_message_id": 601466,
+    "description_message_id": 601654,
+    "threat": 1,
+    "aura_text_id": 601842,
+    "agency_link_text_id": 602030,
+    "agency_screen": "HOMEPAGE",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Enforcer",
@@ -905,9 +1030,14 @@
       26
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665475,
-    "description_message_id": 696284,
-    "threat": 2
+    "name_message_id": 601467,
+    "description_message_id": 601655,
+    "threat": 2,
+    "aura_text_id": 601843,
+    "agency_link_text_id": 602031,
+    "agency_screen": "HOMEPAGE",
+    "duration": 40,
+    "order": 2
   },
   {
     "career_name": "Enforcer",
@@ -940,9 +1070,14 @@
       27
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665476,
-    "description_message_id": 696285,
-    "threat": 3
+    "name_message_id": 601468,
+    "description_message_id": 601656,
+    "threat": 3,
+    "aura_text_id": 601844,
+    "agency_link_text_id": 602032,
+    "agency_screen": "HOMEPAGE",
+    "duration": 60,
+    "order": 3
   },
   {
     "career_name": "Enforcer",
@@ -975,9 +1110,14 @@
       28
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665477,
-    "description_message_id": 696286,
-    "threat": 3
+    "name_message_id": 601469,
+    "description_message_id": 601657,
+    "threat": 3,
+    "aura_text_id": 601845,
+    "agency_link_text_id": 602033,
+    "agency_screen": "HOMEPAGE",
+    "duration": 100,
+    "order": 4
   },
   {
     "career_name": "Enforcer",
@@ -1010,9 +1150,14 @@
       29
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582544,
-    "description_message_id": 582545,
-    "threat": 1
+    "name_message_id": 601470,
+    "description_message_id": 601658,
+    "threat": 1,
+    "aura_text_id": 601846,
+    "agency_link_text_id": 602034,
+    "agency_screen": "COMBAT_ANOMOLIES",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Enforcer",
@@ -1045,9 +1190,14 @@
       30
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582545,
-    "description_message_id": 582546,
-    "threat": 2
+    "name_message_id": 601471,
+    "description_message_id": 601659,
+    "threat": 2,
+    "aura_text_id": 601847,
+    "agency_link_text_id": 602035,
+    "agency_screen": "COMBAT_ANOMOLIES",
+    "duration": 50,
+    "order": 2
   },
   {
     "career_name": "Enforcer",
@@ -1080,9 +1230,14 @@
       31
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582546,
-    "description_message_id": 582547,
-    "threat": 3
+    "name_message_id": 601472,
+    "description_message_id": 601660,
+    "threat": 3,
+    "aura_text_id": 601848,
+    "agency_link_text_id": 602036,
+    "agency_screen": "COMBAT_ANOMOLIES",
+    "duration": 100,
+    "order": 3
   },
   {
     "career_name": "Enforcer",
@@ -1115,9 +1270,14 @@
       32
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582547,
-    "description_message_id": 582548,
-    "threat": 1
+    "name_message_id": 601473,
+    "description_message_id": 601661,
+    "threat": 1,
+    "aura_text_id": 601849,
+    "agency_link_text_id": 602037,
+    "agency_screen": "EPIC_ARCS",
+    "duration": 10,
+    "order": 1
   },
   {
     "career_name": "Enforcer",
@@ -1150,9 +1310,14 @@
       33
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582548,
-    "description_message_id": 582549,
-    "threat": 1
+    "name_message_id": 601474,
+    "description_message_id": 601662,
+    "threat": 1,
+    "aura_text_id": 601850,
+    "agency_link_text_id": 602038,
+    "agency_screen": "EPIC_ARCS",
+    "duration": 20,
+    "order": 2
   },
   {
     "career_name": "Enforcer",
@@ -1185,9 +1350,14 @@
       34
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582549,
-    "description_message_id": 582550,
-    "threat": 1
+    "name_message_id": 601475,
+    "description_message_id": 601663,
+    "threat": 1,
+    "aura_text_id": 601851,
+    "agency_link_text_id": 602039,
+    "agency_screen": "EPIC_ARCS",
+    "duration": 30,
+    "order": 3
   },
   {
     "career_name": "Enforcer",
@@ -1220,9 +1390,14 @@
       35
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582550,
-    "description_message_id": 582551,
-    "threat": 2
+    "name_message_id": 601476,
+    "description_message_id": 601664,
+    "threat": 2,
+    "aura_text_id": 601852,
+    "agency_link_text_id": 602040,
+    "agency_screen": "EPIC_ARCS",
+    "duration": 40,
+    "order": 4
   },
   {
     "career_name": "Enforcer",
@@ -1255,9 +1430,14 @@
       36
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582551,
-    "description_message_id": 582552,
-    "threat": 3
+    "name_message_id": 601477,
+    "description_message_id": 601665,
+    "threat": 3,
+    "aura_text_id": 601853,
+    "agency_link_text_id": 602041,
+    "agency_screen": "EPIC_ARCS",
+    "duration": 100,
+    "order": 5
   },
   {
     "career_name": "Enforcer",
@@ -1290,9 +1470,14 @@
       37
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665476,
-    "description_message_id": 696293,
-    "threat": 1
+    "name_message_id": 601478,
+    "description_message_id": 601666,
+    "threat": 1,
+    "aura_text_id": 601854,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 10,
+    "order": 1
   },
   {
     "career_name": "Enforcer",
@@ -1325,9 +1510,14 @@
       38
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665477,
-    "description_message_id": 696294,
-    "threat": 1
+    "name_message_id": 601479,
+    "description_message_id": 601667,
+    "threat": 1,
+    "aura_text_id": 601855,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 30,
+    "order": 2
   },
   {
     "career_name": "Enforcer",
@@ -1360,9 +1550,14 @@
       39
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665478,
-    "description_message_id": 696295,
-    "threat": 2
+    "name_message_id": 601480,
+    "description_message_id": 601668,
+    "threat": 2,
+    "aura_text_id": 601856,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 50,
+    "order": 3
   },
   {
     "career_name": "Enforcer",
@@ -1395,9 +1590,14 @@
       40
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665479,
-    "description_message_id": 696296,
-    "threat": 3
+    "name_message_id": 601481,
+    "description_message_id": 601669,
+    "threat": 3,
+    "aura_text_id": 601857,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 100,
+    "order": 4
   },
   {
     "career_name": "Enforcer",
@@ -1430,9 +1630,14 @@
       41
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665485,
-    "description_message_id": 696298,
-    "threat": 1
+    "name_message_id": 601482,
+    "description_message_id": 601670,
+    "threat": 1,
+    "aura_text_id": 601858,
+    "agency_link_text_id": 602046,
+    "agency_screen": "SECURITY_AGENTS",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Enforcer",
@@ -1465,9 +1670,14 @@
       42
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665486,
-    "description_message_id": 696299,
-    "threat": 1
+    "name_message_id": 601483,
+    "description_message_id": 601671,
+    "threat": 1,
+    "aura_text_id": 601859,
+    "agency_link_text_id": 602047,
+    "agency_screen": "SECURITY_AGENTS",
+    "duration": 30,
+    "order": 2
   },
   {
     "career_name": "Enforcer",
@@ -1500,9 +1710,14 @@
       43
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665487,
-    "description_message_id": 696300,
-    "threat": 2
+    "name_message_id": 601484,
+    "description_message_id": 601672,
+    "threat": 2,
+    "aura_text_id": 601860,
+    "agency_link_text_id": 602048,
+    "agency_screen": "SECURITY_AGENTS",
+    "duration": 50,
+    "order": 3
   },
   {
     "career_name": "Enforcer",
@@ -1535,9 +1750,14 @@
       44
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665488,
-    "description_message_id": 696301,
-    "threat": 3
+    "name_message_id": 601485,
+    "description_message_id": 601673,
+    "threat": 3,
+    "aura_text_id": 601861,
+    "agency_link_text_id": 602049,
+    "agency_screen": "SECURITY_AGENTS",
+    "duration": 60,
+    "order": 4
   },
   {
     "career_name": "Enforcer",
@@ -1570,9 +1790,14 @@
       45
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582560,
-    "description_message_id": 582561,
-    "threat": 1
+    "name_message_id": 601486,
+    "description_message_id": 601674,
+    "threat": 1,
+    "aura_text_id": 601862,
+    "agency_link_text_id": 602050,
+    "agency_screen": "FACTION_WARFARE_AGENTS",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Enforcer",
@@ -1605,9 +1830,14 @@
       46
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582561,
-    "description_message_id": 582562,
-    "threat": 1
+    "name_message_id": 601487,
+    "description_message_id": 601675,
+    "threat": 1,
+    "aura_text_id": 601863,
+    "agency_link_text_id": 602051,
+    "agency_screen": "FACTION_WARFARE_AGENTS",
+    "duration": 30,
+    "order": 2
   },
   {
     "career_name": "Enforcer",
@@ -1640,9 +1870,14 @@
       47
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582562,
-    "description_message_id": 582563,
-    "threat": 2
+    "name_message_id": 601488,
+    "description_message_id": 601676,
+    "threat": 2,
+    "aura_text_id": 601864,
+    "agency_link_text_id": 602052,
+    "agency_screen": "FACTION_WARFARE_AGENTS",
+    "duration": 40,
+    "order": 3
   },
   {
     "career_name": "Enforcer",
@@ -1675,9 +1910,14 @@
       48
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582563,
-    "description_message_id": 582564,
-    "threat": 2
+    "name_message_id": 601489,
+    "description_message_id": 601677,
+    "threat": 2,
+    "aura_text_id": 601865,
+    "agency_link_text_id": 602053,
+    "agency_screen": "FACTION_WARFARE_AGENTS",
+    "duration": 50,
+    "order": 4
   },
   {
     "career_name": "Enforcer",
@@ -1710,9 +1950,14 @@
       49
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582564,
-    "description_message_id": 582565,
-    "threat": 2
+    "name_message_id": 601490,
+    "description_message_id": 601678,
+    "threat": 2,
+    "aura_text_id": 601866,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 50,
+    "order": 5
   },
   {
     "career_name": "Explorer",
@@ -1745,9 +1990,14 @@
       1
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665449,
-    "description_message_id": 696300,
-    "threat": 1
+    "name_message_id": 601361,
+    "description_message_id": 601549,
+    "threat": 1,
+    "aura_text_id": 601737,
+    "agency_link_text_id": 601925,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Explorer",
@@ -1780,9 +2030,14 @@
       2
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665450,
-    "description_message_id": 696301,
-    "threat": 1
+    "name_message_id": 601362,
+    "description_message_id": 601550,
+    "threat": 1,
+    "aura_text_id": 601738,
+    "agency_link_text_id": 601926,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 30,
+    "order": 2
   },
   {
     "career_name": "Explorer",
@@ -1815,9 +2070,14 @@
       3
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665451,
-    "description_message_id": 696302,
-    "threat": 2
+    "name_message_id": 601363,
+    "description_message_id": 601551,
+    "threat": 2,
+    "aura_text_id": 601739,
+    "agency_link_text_id": 601927,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 50,
+    "order": 3
   },
   {
     "career_name": "Explorer",
@@ -1850,9 +2110,14 @@
       4
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665452,
-    "description_message_id": 696303,
-    "threat": 3
+    "name_message_id": 601364,
+    "description_message_id": 601552,
+    "threat": 3,
+    "aura_text_id": 601740,
+    "agency_link_text_id": 601928,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 100,
+    "order": 4
   },
   {
     "career_name": "Explorer",
@@ -1885,9 +2150,14 @@
       5
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665483,
-    "description_message_id": 696308,
-    "threat": 1
+    "name_message_id": 601356,
+    "description_message_id": 601544,
+    "threat": 1,
+    "aura_text_id": 601732,
+    "agency_link_text_id": 601920,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 30,
+    "order": 1
   },
   {
     "career_name": "Explorer",
@@ -1920,9 +2190,14 @@
       6
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665484,
-    "description_message_id": 696309,
-    "threat": 1
+    "name_message_id": 601357,
+    "description_message_id": 601545,
+    "threat": 1,
+    "aura_text_id": 601733,
+    "agency_link_text_id": 601921,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 30,
+    "order": 2
   },
   {
     "career_name": "Explorer",
@@ -1955,9 +2230,14 @@
       7
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665485,
-    "description_message_id": 696310,
-    "threat": 1
+    "name_message_id": 601358,
+    "description_message_id": 601546,
+    "threat": 1,
+    "aura_text_id": 601734,
+    "agency_link_text_id": 601922,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 30,
+    "order": 3
   },
   {
     "career_name": "Explorer",
@@ -1990,9 +2270,14 @@
       8
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665486,
-    "description_message_id": 696311,
-    "threat": 1
+    "name_message_id": 601359,
+    "description_message_id": 601547,
+    "threat": 1,
+    "aura_text_id": 601735,
+    "agency_link_text_id": 601923,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 30,
+    "order": 4
   },
   {
     "career_name": "Explorer",
@@ -2025,9 +2310,14 @@
       9
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665487,
-    "description_message_id": 696312,
-    "threat": 1
+    "name_message_id": 601360,
+    "description_message_id": 601548,
+    "threat": 1,
+    "aura_text_id": 601736,
+    "agency_link_text_id": 601924,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 30,
+    "order": 5
   },
   {
     "career_name": "Explorer",
@@ -2060,9 +2350,14 @@
       10
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582574,
-    "description_message_id": 582575,
-    "threat": 1
+    "name_message_id": 601365,
+    "description_message_id": 601553,
+    "threat": 1,
+    "aura_text_id": 601741,
+    "agency_link_text_id": 601929,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Explorer",
@@ -2095,9 +2390,14 @@
       11
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582575,
-    "description_message_id": 582576,
-    "threat": 1
+    "name_message_id": 601366,
+    "description_message_id": 601554,
+    "threat": 1,
+    "aura_text_id": 601742,
+    "agency_link_text_id": 601930,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 30,
+    "order": 2
   },
   {
     "career_name": "Explorer",
@@ -2130,9 +2430,14 @@
       12
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582576,
-    "description_message_id": 582577,
-    "threat": 2
+    "name_message_id": 601367,
+    "description_message_id": 601555,
+    "threat": 2,
+    "aura_text_id": 601743,
+    "agency_link_text_id": 601931,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 50,
+    "order": 3
   },
   {
     "career_name": "Explorer",
@@ -2165,9 +2470,14 @@
       13
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582577,
-    "description_message_id": 582578,
-    "threat": 3
+    "name_message_id": 601368,
+    "description_message_id": 601556,
+    "threat": 3,
+    "aura_text_id": 601744,
+    "agency_link_text_id": 601932,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 60,
+    "order": 4
   },
   {
     "career_name": "Explorer",
@@ -2200,9 +2510,14 @@
       14
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582578,
-    "description_message_id": 582579,
-    "threat": 3
+    "name_message_id": 601369,
+    "description_message_id": 601557,
+    "threat": 3,
+    "aura_text_id": 601745,
+    "agency_link_text_id": 601933,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 100,
+    "order": 5
   },
   {
     "career_name": "Explorer",
@@ -2235,9 +2550,14 @@
       15
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582579,
-    "description_message_id": 582580,
-    "threat": 3
+    "name_message_id": 601370,
+    "description_message_id": 601558,
+    "threat": 3,
+    "aura_text_id": 601746,
+    "agency_link_text_id": 601934,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 100,
+    "order": 1
   },
   {
     "career_name": "Explorer",
@@ -2270,9 +2590,14 @@
       16
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582580,
-    "description_message_id": 582581,
-    "threat": 3
+    "name_message_id": 601371,
+    "description_message_id": 601559,
+    "threat": 3,
+    "aura_text_id": 601747,
+    "agency_link_text_id": 601935,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 100,
+    "order": 2
   },
   {
     "career_name": "Explorer",
@@ -2305,9 +2630,14 @@
       17
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582581,
-    "description_message_id": 582582,
-    "threat": 3
+    "name_message_id": 601372,
+    "description_message_id": 601560,
+    "threat": 3,
+    "aura_text_id": 601748,
+    "agency_link_text_id": 601936,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 100,
+    "order": 3
   },
   {
     "career_name": "Explorer",
@@ -2340,9 +2670,14 @@
       18
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665531,
-    "description_message_id": 696328,
-    "threat": 1
+    "name_message_id": 601373,
+    "description_message_id": 601561,
+    "threat": 1,
+    "aura_text_id": 601749,
+    "agency_link_text_id": 601937,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Explorer",
@@ -2375,9 +2710,14 @@
       19
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665532,
-    "description_message_id": 696329,
-    "threat": 1
+    "name_message_id": 601374,
+    "description_message_id": 601562,
+    "threat": 1,
+    "aura_text_id": 601750,
+    "agency_link_text_id": 601938,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 30,
+    "order": 2
   },
   {
     "career_name": "Explorer",
@@ -2410,9 +2750,14 @@
       20
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665533,
-    "description_message_id": 696330,
-    "threat": 2
+    "name_message_id": 601375,
+    "description_message_id": 601563,
+    "threat": 2,
+    "aura_text_id": 601751,
+    "agency_link_text_id": 601939,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 40,
+    "order": 3
   },
   {
     "career_name": "Explorer",
@@ -2445,9 +2790,14 @@
       21
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665534,
-    "description_message_id": 696331,
-    "threat": 3
+    "name_message_id": 601376,
+    "description_message_id": 601564,
+    "threat": 3,
+    "aura_text_id": 601752,
+    "agency_link_text_id": 601940,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 60,
+    "order": 4
   },
   {
     "career_name": "Explorer",
@@ -2480,9 +2830,14 @@
       22
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665462,
-    "description_message_id": 696319,
-    "threat": 1
+    "name_message_id": 601377,
+    "description_message_id": 601565,
+    "threat": 1,
+    "aura_text_id": 601753,
+    "agency_link_text_id": 601941,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Explorer",
@@ -2515,9 +2870,14 @@
       23
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665463,
-    "description_message_id": 696320,
-    "threat": 1
+    "name_message_id": 601378,
+    "description_message_id": 601566,
+    "threat": 1,
+    "aura_text_id": 601754,
+    "agency_link_text_id": 601942,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 30,
+    "order": 2
   },
   {
     "career_name": "Explorer",
@@ -2550,9 +2910,14 @@
       24
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665464,
-    "description_message_id": 696321,
-    "threat": 2
+    "name_message_id": 601379,
+    "description_message_id": 601567,
+    "threat": 2,
+    "aura_text_id": 601755,
+    "agency_link_text_id": 601943,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 40,
+    "order": 3
   },
   {
     "career_name": "Explorer",
@@ -2585,9 +2950,14 @@
       25
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665465,
-    "description_message_id": 696322,
-    "threat": 3
+    "name_message_id": 601380,
+    "description_message_id": 601568,
+    "threat": 3,
+    "aura_text_id": 601756,
+    "agency_link_text_id": 601944,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 60,
+    "order": 4
   },
   {
     "career_name": "Explorer",
@@ -2620,9 +2990,14 @@
       26
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582590,
-    "description_message_id": 582591,
-    "threat": 1
+    "name_message_id": 601381,
+    "description_message_id": 601569,
+    "threat": 1,
+    "aura_text_id": 601757,
+    "agency_link_text_id": 601945,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Explorer",
@@ -2655,9 +3030,14 @@
       27
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582591,
-    "description_message_id": 582592,
-    "threat": 1
+    "name_message_id": 601382,
+    "description_message_id": 601570,
+    "threat": 1,
+    "aura_text_id": 601758,
+    "agency_link_text_id": 601946,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 30,
+    "order": 2
   },
   {
     "career_name": "Explorer",
@@ -2690,9 +3070,14 @@
       28
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582592,
-    "description_message_id": 582593,
-    "threat": 2
+    "name_message_id": 601383,
+    "description_message_id": 601571,
+    "threat": 2,
+    "aura_text_id": 601759,
+    "agency_link_text_id": 601947,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 40,
+    "order": 3
   },
   {
     "career_name": "Explorer",
@@ -2725,9 +3110,14 @@
       29
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582593,
-    "description_message_id": 582594,
-    "threat": 3
+    "name_message_id": 601384,
+    "description_message_id": 601572,
+    "threat": 3,
+    "aura_text_id": 601760,
+    "agency_link_text_id": 601948,
+    "agency_screen": "COSMIC_SIGNATURES",
+    "duration": 60,
+    "order": 4
   },
   {
     "career_name": "Explorer",
@@ -2760,9 +3150,14 @@
       30
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582594,
-    "description_message_id": 582595,
-    "threat": 1
+    "name_message_id": 601385,
+    "description_message_id": 601573,
+    "threat": 1,
+    "aura_text_id": 601761,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Explorer",
@@ -2795,9 +3190,14 @@
       31
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582595,
-    "description_message_id": 582596,
-    "threat": 2
+    "name_message_id": 601386,
+    "description_message_id": 601574,
+    "threat": 2,
+    "aura_text_id": 601762,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 40,
+    "order": 2
   },
   {
     "career_name": "Explorer",
@@ -2830,9 +3230,14 @@
       32
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582596,
-    "description_message_id": 582597,
-    "threat": 3
+    "name_message_id": 601387,
+    "description_message_id": 601575,
+    "threat": 3,
+    "aura_text_id": 601763,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 80,
+    "order": 3
   },
   {
     "career_name": "Explorer",
@@ -2865,9 +3270,14 @@
       33
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582597,
-    "description_message_id": 582598,
-    "threat": 3
+    "name_message_id": 601388,
+    "description_message_id": 601576,
+    "threat": 3,
+    "aura_text_id": 601764,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 60,
+    "order": 1
   },
   {
     "career_name": "Explorer",
@@ -2900,9 +3310,14 @@
       34
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582598,
-    "description_message_id": 582599,
-    "threat": 3
+    "name_message_id": 601389,
+    "description_message_id": 601577,
+    "threat": 3,
+    "aura_text_id": 601765,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 80,
+    "order": 2
   },
   {
     "career_name": "Explorer",
@@ -2935,9 +3350,14 @@
       35
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582599,
-    "description_message_id": 582600,
-    "threat": 3
+    "name_message_id": 601390,
+    "description_message_id": 601578,
+    "threat": 3,
+    "aura_text_id": 601766,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 100,
+    "order": 3
   },
   {
     "career_name": "Explorer",
@@ -2970,9 +3390,14 @@
       36
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582600,
-    "description_message_id": 582601,
-    "threat": 1
+    "name_message_id": 601391,
+    "description_message_id": 601579,
+    "threat": 1,
+    "aura_text_id": 601767,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Explorer",
@@ -3005,9 +3430,14 @@
       37
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582601,
-    "description_message_id": 582602,
-    "threat": 1
+    "name_message_id": 601392,
+    "description_message_id": 601580,
+    "threat": 1,
+    "aura_text_id": 601768,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 30,
+    "order": 2
   },
   {
     "career_name": "Explorer",
@@ -3040,9 +3470,14 @@
       38
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582602,
-    "description_message_id": 582603,
-    "threat": 2
+    "name_message_id": 601393,
+    "description_message_id": 601581,
+    "threat": 2,
+    "aura_text_id": 601769,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 40,
+    "order": 3
   },
   {
     "career_name": "Explorer",
@@ -3075,9 +3510,14 @@
       39
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582603,
-    "description_message_id": 582604,
-    "threat": 3
+    "name_message_id": 601394,
+    "description_message_id": 601582,
+    "threat": 3,
+    "aura_text_id": 601770,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 70,
+    "order": 4
   },
   {
     "career_name": "Explorer",
@@ -3110,9 +3550,14 @@
       40
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582604,
-    "description_message_id": 582605,
-    "threat": 3
+    "name_message_id": 601395,
+    "description_message_id": 601583,
+    "threat": 3,
+    "aura_text_id": 601771,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 100,
+    "order": 5
   },
   {
     "career_name": "Industrialist",
@@ -3145,9 +3590,14 @@
       1
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665479,
-    "description_message_id": 696334,
-    "threat": 2
+    "name_message_id": 601414,
+    "description_message_id": 601602,
+    "threat": 2,
+    "aura_text_id": 601790,
+    "agency_link_text_id": 601978,
+    "agency_screen": "ASTEROID_BELTS",
+    "duration": 50,
+    "order": 1
   },
   {
     "career_name": "Industrialist",
@@ -3180,9 +3630,14 @@
       2
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665480,
-    "description_message_id": 696335,
-    "threat": 2
+    "name_message_id": 601415,
+    "description_message_id": 601603,
+    "threat": 2,
+    "aura_text_id": 601791,
+    "agency_link_text_id": 601979,
+    "agency_screen": "ASTEROID_BELTS",
+    "duration": 50,
+    "order": 2
   },
   {
     "career_name": "Industrialist",
@@ -3215,9 +3670,14 @@
       3
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665481,
-    "description_message_id": 696336,
-    "threat": 2
+    "name_message_id": 601416,
+    "description_message_id": 601604,
+    "threat": 2,
+    "aura_text_id": 601792,
+    "agency_link_text_id": 601980,
+    "agency_screen": "ASTEROID_BELTS",
+    "duration": 50,
+    "order": 3
   },
   {
     "career_name": "Industrialist",
@@ -3250,9 +3710,14 @@
       4
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665482,
-    "description_message_id": 696337,
-    "threat": 2
+    "name_message_id": 601417,
+    "description_message_id": 601605,
+    "threat": 2,
+    "aura_text_id": 601793,
+    "agency_link_text_id": 601981,
+    "agency_screen": "ASTEROID_BELTS",
+    "duration": 50,
+    "order": 4
   },
   {
     "career_name": "Industrialist",
@@ -3285,9 +3750,14 @@
       5
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665483,
-    "description_message_id": 696338,
-    "threat": 3
+    "name_message_id": 601418,
+    "description_message_id": 601606,
+    "threat": 3,
+    "aura_text_id": 601794,
+    "agency_link_text_id": 601982,
+    "agency_screen": "ASTEROID_BELTS",
+    "duration": 100,
+    "order": 5
   },
   {
     "career_name": "Industrialist",
@@ -3320,9 +3790,14 @@
       6
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665488,
-    "description_message_id": 696340,
-    "threat": 1
+    "name_message_id": 601424,
+    "description_message_id": 601612,
+    "threat": 1,
+    "aura_text_id": 601800,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Industrialist",
@@ -3355,9 +3830,14 @@
       7
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665489,
-    "description_message_id": 696341,
-    "threat": 1
+    "name_message_id": 601425,
+    "description_message_id": 601613,
+    "threat": 1,
+    "aura_text_id": 601801,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 30,
+    "order": 2
   },
   {
     "career_name": "Industrialist",
@@ -3390,9 +3870,14 @@
       8
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665490,
-    "description_message_id": 696342,
-    "threat": 2
+    "name_message_id": 601426,
+    "description_message_id": 601614,
+    "threat": 2,
+    "aura_text_id": 601802,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 50,
+    "order": 3
   },
   {
     "career_name": "Industrialist",
@@ -3425,9 +3910,14 @@
       9
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665491,
-    "description_message_id": 696343,
-    "threat": 3
+    "name_message_id": 601427,
+    "description_message_id": 601615,
+    "threat": 3,
+    "aura_text_id": 601803,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 100,
+    "order": 4
   },
   {
     "career_name": "Industrialist",
@@ -3460,9 +3950,14 @@
       10
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665528,
-    "description_message_id": 696353,
-    "threat": 2
+    "name_message_id": 601396,
+    "description_message_id": 601584,
+    "threat": 2,
+    "aura_text_id": 601772,
+    "agency_link_text_id": 601960,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 40,
+    "order": 1
   },
   {
     "career_name": "Industrialist",
@@ -3495,9 +3990,14 @@
       11
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665529,
-    "description_message_id": 696354,
-    "threat": 2
+    "name_message_id": 601397,
+    "description_message_id": 601585,
+    "threat": 2,
+    "aura_text_id": 601773,
+    "agency_link_text_id": 601961,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 40,
+    "order": 2
   },
   {
     "career_name": "Industrialist",
@@ -3530,9 +4030,14 @@
       12
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665530,
-    "description_message_id": 696355,
-    "threat": 2
+    "name_message_id": 601398,
+    "description_message_id": 601586,
+    "threat": 2,
+    "aura_text_id": 601774,
+    "agency_link_text_id": 601962,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 40,
+    "order": 3
   },
   {
     "career_name": "Industrialist",
@@ -3565,9 +4070,14 @@
       13
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665531,
-    "description_message_id": 696356,
-    "threat": 2
+    "name_message_id": 601399,
+    "description_message_id": 601587,
+    "threat": 2,
+    "aura_text_id": 601775,
+    "agency_link_text_id": 601963,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 40,
+    "order": 4
   },
   {
     "career_name": "Industrialist",
@@ -3600,9 +4110,14 @@
       14
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665532,
-    "description_message_id": 696357,
-    "threat": 2
+    "name_message_id": 601400,
+    "description_message_id": 601588,
+    "threat": 2,
+    "aura_text_id": 601776,
+    "agency_link_text_id": 601964,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 40,
+    "order": 5
   },
   {
     "career_name": "Industrialist",
@@ -3635,9 +4150,14 @@
       15
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665533,
-    "description_message_id": 696358,
-    "threat": 2
+    "name_message_id": 601401,
+    "description_message_id": 601589,
+    "threat": 2,
+    "aura_text_id": 601777,
+    "agency_link_text_id": 601965,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 40,
+    "order": 6
   },
   {
     "career_name": "Industrialist",
@@ -3670,9 +4190,14 @@
       16
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665534,
-    "description_message_id": 696359,
-    "threat": 2
+    "name_message_id": 601402,
+    "description_message_id": 601590,
+    "threat": 2,
+    "aura_text_id": 601778,
+    "agency_link_text_id": 601966,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 40,
+    "order": 7
   },
   {
     "career_name": "Industrialist",
@@ -3705,9 +4230,14 @@
       17
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665535,
-    "description_message_id": 696360,
-    "threat": 2
+    "name_message_id": 601403,
+    "description_message_id": 601591,
+    "threat": 2,
+    "aura_text_id": 601779,
+    "agency_link_text_id": 601967,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 40,
+    "order": 8
   },
   {
     "career_name": "Industrialist",
@@ -3740,9 +4270,14 @@
       18
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665536,
-    "description_message_id": 696361,
-    "threat": 2
+    "name_message_id": 601404,
+    "description_message_id": 601592,
+    "threat": 2,
+    "aura_text_id": 601780,
+    "agency_link_text_id": 601968,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 40,
+    "order": 9
   },
   {
     "career_name": "Industrialist",
@@ -3775,9 +4310,14 @@
       19
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665537,
-    "description_message_id": 696362,
-    "threat": 2
+    "name_message_id": 601405,
+    "description_message_id": 601593,
+    "threat": 2,
+    "aura_text_id": 601781,
+    "agency_link_text_id": 601969,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 40,
+    "order": 10
   },
   {
     "career_name": "Industrialist",
@@ -3810,9 +4350,14 @@
       20
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665548,
-    "description_message_id": 696365,
-    "threat": 1
+    "name_message_id": 601406,
+    "description_message_id": 601594,
+    "threat": 1,
+    "aura_text_id": 601782,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Industrialist",
@@ -3845,9 +4390,14 @@
       21
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665549,
-    "description_message_id": 696366,
-    "threat": 1
+    "name_message_id": 601407,
+    "description_message_id": 601595,
+    "threat": 1,
+    "aura_text_id": 601783,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 30,
+    "order": 2
   },
   {
     "career_name": "Industrialist",
@@ -3880,9 +4430,14 @@
       22
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665550,
-    "description_message_id": 696367,
-    "threat": 2
+    "name_message_id": 601408,
+    "description_message_id": 601596,
+    "threat": 2,
+    "aura_text_id": 601784,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 40,
+    "order": 3
   },
   {
     "career_name": "Industrialist",
@@ -3915,9 +4470,14 @@
       23
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665551,
-    "description_message_id": 696368,
-    "threat": 2
+    "name_message_id": 601409,
+    "description_message_id": 601597,
+    "threat": 2,
+    "aura_text_id": 601785,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 50,
+    "order": 4
   },
   {
     "career_name": "Industrialist",
@@ -3950,9 +4510,14 @@
       24
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665552,
-    "description_message_id": 696369,
-    "threat": 3
+    "name_message_id": 601410,
+    "description_message_id": 601598,
+    "threat": 3,
+    "aura_text_id": 601786,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 100,
+    "order": 5
   },
   {
     "career_name": "Industrialist",
@@ -3985,9 +4550,14 @@
       25
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582629,
-    "description_message_id": 582630,
-    "threat": 1
+    "name_message_id": 601411,
+    "description_message_id": 601599,
+    "threat": 1,
+    "aura_text_id": 601787,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Industrialist",
@@ -4020,9 +4590,14 @@
       26
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582630,
-    "description_message_id": 582631,
-    "threat": 2
+    "name_message_id": 601412,
+    "description_message_id": 601600,
+    "threat": 2,
+    "aura_text_id": 601788,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 50,
+    "order": 2
   },
   {
     "career_name": "Industrialist",
@@ -4055,9 +4630,14 @@
       27
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582631,
-    "description_message_id": 582632,
-    "threat": 3
+    "name_message_id": 601413,
+    "description_message_id": 601601,
+    "threat": 3,
+    "aura_text_id": 601789,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 100,
+    "order": 3
   },
   {
     "career_name": "Industrialist",
@@ -4090,9 +4670,14 @@
       28
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582632,
-    "description_message_id": 582633,
-    "threat": 1
+    "name_message_id": 601419,
+    "description_message_id": 601607,
+    "threat": 1,
+    "aura_text_id": 601795,
+    "agency_link_text_id": 601983,
+    "agency_screen": "ASTEROID_BELTS",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Industrialist",
@@ -4125,9 +4710,14 @@
       29
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582633,
-    "description_message_id": 582634,
-    "threat": 1
+    "name_message_id": 601420,
+    "description_message_id": 601608,
+    "threat": 1,
+    "aura_text_id": 601796,
+    "agency_link_text_id": 601984,
+    "agency_screen": "ASTEROID_BELTS",
+    "duration": 20,
+    "order": 2
   },
   {
     "career_name": "Industrialist",
@@ -4160,9 +4750,14 @@
       30
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582634,
-    "description_message_id": 582635,
-    "threat": 1
+    "name_message_id": 601421,
+    "description_message_id": 601609,
+    "threat": 1,
+    "aura_text_id": 601797,
+    "agency_link_text_id": 601985,
+    "agency_screen": "ASTEROID_BELTS",
+    "duration": 30,
+    "order": 3
   },
   {
     "career_name": "Industrialist",
@@ -4195,9 +4790,14 @@
       31
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582635,
-    "description_message_id": 582636,
-    "threat": 1
+    "name_message_id": 601422,
+    "description_message_id": 601610,
+    "threat": 1,
+    "aura_text_id": 601798,
+    "agency_link_text_id": 601986,
+    "agency_screen": "ASTEROID_BELTS",
+    "duration": 30,
+    "order": 4
   },
   {
     "career_name": "Industrialist",
@@ -4230,9 +4830,14 @@
       32
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582636,
-    "description_message_id": 582637,
-    "threat": 2
+    "name_message_id": 601423,
+    "description_message_id": 601611,
+    "threat": 2,
+    "aura_text_id": 601799,
+    "agency_link_text_id": 601987,
+    "agency_screen": "ASTEROID_BELTS",
+    "duration": 50,
+    "order": 5
   },
   {
     "career_name": "Industrialist",
@@ -4265,9 +4870,14 @@
       33
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582637,
-    "description_message_id": 582638,
-    "threat": 1
+    "name_message_id": 601428,
+    "description_message_id": 601616,
+    "threat": 1,
+    "aura_text_id": 601804,
+    "agency_link_text_id": 601992,
+    "agency_screen": "DISTRIBUTION_AGENTS",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Industrialist",
@@ -4300,9 +4910,14 @@
       34
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582638,
-    "description_message_id": 582639,
-    "threat": 1
+    "name_message_id": 601429,
+    "description_message_id": 601617,
+    "threat": 1,
+    "aura_text_id": 601805,
+    "agency_link_text_id": 601993,
+    "agency_screen": "DISTRIBUTION_AGENTS",
+    "duration": 30,
+    "order": 2
   },
   {
     "career_name": "Industrialist",
@@ -4335,9 +4950,14 @@
       35
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582639,
-    "description_message_id": 582640,
-    "threat": 2
+    "name_message_id": 601430,
+    "description_message_id": 601618,
+    "threat": 2,
+    "aura_text_id": 601806,
+    "agency_link_text_id": 601994,
+    "agency_screen": "DISTRIBUTION_AGENTS",
+    "duration": 40,
+    "order": 3
   },
   {
     "career_name": "Industrialist",
@@ -4370,9 +4990,14 @@
       36
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582640,
-    "description_message_id": 582641,
-    "threat": 2
+    "name_message_id": 601431,
+    "description_message_id": 601619,
+    "threat": 2,
+    "aura_text_id": 601807,
+    "agency_link_text_id": 601995,
+    "agency_screen": "DISTRIBUTION_AGENTS",
+    "duration": 50,
+    "order": 4
   },
   {
     "career_name": "Industrialist",
@@ -4405,9 +5030,14 @@
       37
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582641,
-    "description_message_id": 582642,
-    "threat": 3
+    "name_message_id": 601432,
+    "description_message_id": 601620,
+    "threat": 3,
+    "aura_text_id": 601808,
+    "agency_link_text_id": 601996,
+    "agency_screen": "DISTRIBUTION_AGENTS",
+    "duration": 60,
+    "order": 5
   },
   {
     "career_name": "Industrialist",
@@ -4440,9 +5070,14 @@
       38
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582642,
-    "description_message_id": 582643,
-    "threat": 1
+    "name_message_id": 601433,
+    "description_message_id": 601621,
+    "threat": 1,
+    "aura_text_id": 601809,
+    "agency_link_text_id": 601997,
+    "agency_screen": "MINING_AGENTS",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Industrialist",
@@ -4475,9 +5110,14 @@
       39
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582643,
-    "description_message_id": 582644,
-    "threat": 1
+    "name_message_id": 601434,
+    "description_message_id": 601622,
+    "threat": 1,
+    "aura_text_id": 601810,
+    "agency_link_text_id": 601998,
+    "agency_screen": "MINING_AGENTS",
+    "duration": 30,
+    "order": 2
   },
   {
     "career_name": "Industrialist",
@@ -4510,9 +5150,14 @@
       40
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582644,
-    "description_message_id": 582645,
-    "threat": 2
+    "name_message_id": 601435,
+    "description_message_id": 601623,
+    "threat": 2,
+    "aura_text_id": 601811,
+    "agency_link_text_id": 601999,
+    "agency_screen": "MINING_AGENTS",
+    "duration": 40,
+    "order": 3
   },
   {
     "career_name": "Industrialist",
@@ -4545,9 +5190,14 @@
       41
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582645,
-    "description_message_id": 582646,
-    "threat": 2
+    "name_message_id": 601436,
+    "description_message_id": 601624,
+    "threat": 2,
+    "aura_text_id": 601812,
+    "agency_link_text_id": 602000,
+    "agency_screen": "MINING_AGENTS",
+    "duration": 50,
+    "order": 4
   },
   {
     "career_name": "Industrialist",
@@ -4580,9 +5230,14 @@
       42
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582646,
-    "description_message_id": 582647,
-    "threat": 3
+    "name_message_id": 601437,
+    "description_message_id": 601625,
+    "threat": 3,
+    "aura_text_id": 601813,
+    "agency_link_text_id": 602001,
+    "agency_screen": "MINING_AGENTS",
+    "duration": 60,
+    "order": 5
   },
   {
     "career_name": "Industrialist",
@@ -4615,9 +5270,14 @@
       43
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665525,
-    "description_message_id": 696377,
-    "threat": 1
+    "name_message_id": 601438,
+    "description_message_id": 601626,
+    "threat": 1,
+    "aura_text_id": 601814,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Industrialist",
@@ -4650,9 +5310,14 @@
       44
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665526,
-    "description_message_id": 696378,
-    "threat": 1
+    "name_message_id": 601439,
+    "description_message_id": 601627,
+    "threat": 1,
+    "aura_text_id": 601815,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 20,
+    "order": 2
   },
   {
     "career_name": "Industrialist",
@@ -4685,9 +5350,14 @@
       45
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665527,
-    "description_message_id": 696379,
-    "threat": 2
+    "name_message_id": 601440,
+    "description_message_id": 601628,
+    "threat": 2,
+    "aura_text_id": 601816,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 50,
+    "order": 3
   },
   {
     "career_name": "Industrialist",
@@ -4720,9 +5390,14 @@
       46
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665528,
-    "description_message_id": 696380,
-    "threat": 2
+    "name_message_id": 601441,
+    "description_message_id": 601629,
+    "threat": 2,
+    "aura_text_id": 601817,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 50,
+    "order": 4
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4755,9 +5430,14 @@
       1
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665565,
-    "description_message_id": 696390,
-    "threat": 1
+    "name_message_id": 601491,
+    "description_message_id": 601679,
+    "threat": 1,
+    "aura_text_id": 601867,
+    "agency_link_text_id": 602055,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4790,9 +5470,14 @@
       2
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665566,
-    "description_message_id": 696391,
-    "threat": 1
+    "name_message_id": 601492,
+    "description_message_id": 601680,
+    "threat": 1,
+    "aura_text_id": 601868,
+    "agency_link_text_id": 602056,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 20,
+    "order": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4825,9 +5510,14 @@
       3
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665567,
-    "description_message_id": 696392,
-    "threat": 1
+    "name_message_id": 601493,
+    "description_message_id": 601681,
+    "threat": 1,
+    "aura_text_id": 601869,
+    "agency_link_text_id": 602057,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 20,
+    "order": 3
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4860,9 +5550,14 @@
       4
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665568,
-    "description_message_id": 696393,
-    "threat": 1
+    "name_message_id": 601494,
+    "description_message_id": 601682,
+    "threat": 1,
+    "aura_text_id": 601870,
+    "agency_link_text_id": 602058,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 20,
+    "order": 4
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4895,9 +5590,14 @@
       5
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665569,
-    "description_message_id": 696394,
-    "threat": 1
+    "name_message_id": 601495,
+    "description_message_id": 601683,
+    "threat": 1,
+    "aura_text_id": 601871,
+    "agency_link_text_id": 602059,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 20,
+    "order": 5
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4930,9 +5630,14 @@
       6
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665570,
-    "description_message_id": 696395,
-    "threat": 1
+    "name_message_id": 601496,
+    "description_message_id": 601684,
+    "threat": 1,
+    "aura_text_id": 601872,
+    "agency_link_text_id": 602060,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 20,
+    "order": 6
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4965,9 +5670,14 @@
       7
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665571,
-    "description_message_id": 696396,
-    "threat": 1
+    "name_message_id": 601497,
+    "description_message_id": 601685,
+    "threat": 1,
+    "aura_text_id": 601873,
+    "agency_link_text_id": 602061,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 20,
+    "order": 7
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5000,9 +5710,14 @@
       8
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665572,
-    "description_message_id": 696397,
-    "threat": 1
+    "name_message_id": 601498,
+    "description_message_id": 601686,
+    "threat": 1,
+    "aura_text_id": 601874,
+    "agency_link_text_id": 602062,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 20,
+    "order": 8
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5035,9 +5750,14 @@
       9
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665573,
-    "description_message_id": 696398,
-    "threat": 1
+    "name_message_id": 601499,
+    "description_message_id": 601687,
+    "threat": 1,
+    "aura_text_id": 601875,
+    "agency_link_text_id": 602063,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 20,
+    "order": 9
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5070,9 +5790,14 @@
       10
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665574,
-    "description_message_id": 696399,
-    "threat": 1
+    "name_message_id": 601500,
+    "description_message_id": 601688,
+    "threat": 1,
+    "aura_text_id": 601876,
+    "agency_link_text_id": 602064,
+    "agency_screen": "CAREER_AGENTS",
+    "duration": 20,
+    "order": 10
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5105,9 +5830,14 @@
       11
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582661,
-    "description_message_id": 582662,
-    "threat": 1
+    "name_message_id": 601501,
+    "description_message_id": 601689,
+    "threat": 1,
+    "aura_text_id": 601877,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5140,9 +5870,14 @@
       12
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582662,
-    "description_message_id": 582663,
-    "threat": 2
+    "name_message_id": 601502,
+    "description_message_id": 601690,
+    "threat": 2,
+    "aura_text_id": 601878,
+    "agency_link_text_id": 602066,
+    "agency_screen": "FLEET_FINDER",
+    "duration": 50,
+    "order": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5175,9 +5910,14 @@
       13
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582663,
-    "description_message_id": 582664,
-    "threat": 3
+    "name_message_id": 601503,
+    "description_message_id": 601691,
+    "threat": 3,
+    "aura_text_id": 601879,
+    "agency_link_text_id": 602067,
+    "agency_screen": "CORP_RECRUITMENT",
+    "duration": 60,
+    "order": 3
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5210,9 +5950,14 @@
       14
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582664,
-    "description_message_id": 582665,
-    "threat": 1
+    "name_message_id": 601504,
+    "description_message_id": 601692,
+    "threat": 1,
+    "aura_text_id": 601880,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 20,
+    "order": 4
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5245,9 +5990,14 @@
       15
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582665,
-    "description_message_id": 582666,
-    "threat": 1
+    "name_message_id": 601505,
+    "description_message_id": 601693,
+    "threat": 1,
+    "aura_text_id": 601881,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 20,
+    "order": 5
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5280,9 +6030,14 @@
       16
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582666,
-    "description_message_id": 582667,
-    "threat": 2
+    "name_message_id": 601506,
+    "description_message_id": 601694,
+    "threat": 2,
+    "aura_text_id": 601882,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 40,
+    "order": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5315,9 +6070,14 @@
       17
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582667,
-    "description_message_id": 582668,
-    "threat": 2
+    "name_message_id": 601507,
+    "description_message_id": 601695,
+    "threat": 2,
+    "aura_text_id": 601883,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 40,
+    "order": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5350,9 +6110,14 @@
       18
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582668,
-    "description_message_id": 582669,
-    "threat": 2
+    "name_message_id": 601508,
+    "description_message_id": 601696,
+    "threat": 2,
+    "aura_text_id": 601884,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 40,
+    "order": 3
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5385,9 +6150,14 @@
       19
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582669,
-    "description_message_id": 582670,
-    "threat": 2
+    "name_message_id": 601509,
+    "description_message_id": 601697,
+    "threat": 2,
+    "aura_text_id": 601885,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 40,
+    "order": 4
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5420,9 +6190,14 @@
       20
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582670,
-    "description_message_id": 582671,
-    "threat": 2
+    "name_message_id": 601510,
+    "description_message_id": 601698,
+    "threat": 2,
+    "aura_text_id": 601886,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 40,
+    "order": 5
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5455,9 +6230,14 @@
       21
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665610,
-    "description_message_id": 696415,
-    "threat": 2
+    "name_message_id": 601511,
+    "description_message_id": 601699,
+    "threat": 2,
+    "aura_text_id": 601887,
+    "agency_link_text_id": 602075,
+    "agency_screen": "HOMEPAGE",
+    "duration": 40,
+    "order": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5490,9 +6270,14 @@
       22
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665611,
-    "description_message_id": 696416,
-    "threat": 3
+    "name_message_id": 601512,
+    "description_message_id": 601700,
+    "threat": 3,
+    "aura_text_id": 601888,
+    "agency_link_text_id": 602076,
+    "agency_screen": "HOMEPAGE",
+    "duration": 60,
+    "order": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5525,9 +6310,14 @@
       23
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665612,
-    "description_message_id": 696417,
-    "threat": 3
+    "name_message_id": 601513,
+    "description_message_id": 601701,
+    "threat": 3,
+    "aura_text_id": 601889,
+    "agency_link_text_id": 602077,
+    "agency_screen": "HOMEPAGE",
+    "duration": 80,
+    "order": 3
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5560,9 +6350,14 @@
       24
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 659361,
-    "description_message_id": 696402,
-    "threat": 2
+    "name_message_id": 601514,
+    "description_message_id": 601702,
+    "threat": 2,
+    "aura_text_id": 601890,
+    "agency_link_text_id": 602078,
+    "agency_screen": "FACTION_WARFARE_INFO",
+    "duration": 40,
+    "order": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5595,9 +6390,14 @@
       25
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 659362,
-    "description_message_id": 696403,
-    "threat": 3
+    "name_message_id": 601515,
+    "description_message_id": 601703,
+    "threat": 3,
+    "aura_text_id": 601891,
+    "agency_link_text_id": 602079,
+    "agency_screen": "FACTION_WARFARE_INFO",
+    "duration": 60,
+    "order": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5630,9 +6430,14 @@
       26
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 659363,
-    "description_message_id": 696404,
-    "threat": 3
+    "name_message_id": 601516,
+    "description_message_id": 601704,
+    "threat": 3,
+    "aura_text_id": 601892,
+    "agency_link_text_id": 602080,
+    "agency_screen": "FACTION_WARFARE_INFO",
+    "duration": 80,
+    "order": 3
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5665,9 +6470,14 @@
       27
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 659364,
-    "description_message_id": 696405,
-    "threat": 3
+    "name_message_id": 601517,
+    "description_message_id": 601705,
+    "threat": 3,
+    "aura_text_id": 601893,
+    "agency_link_text_id": 602081,
+    "agency_screen": "FACTION_WARFARE_INFO",
+    "duration": 100,
+    "order": 4
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5700,9 +6510,14 @@
       28
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582678,
-    "description_message_id": 582679,
-    "threat": 1
+    "name_message_id": 601518,
+    "description_message_id": 601706,
+    "threat": 1,
+    "aura_text_id": 601894,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5735,9 +6550,14 @@
       29
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582679,
-    "description_message_id": 582680,
-    "threat": 2
+    "name_message_id": 601519,
+    "description_message_id": 601707,
+    "threat": 2,
+    "aura_text_id": 601895,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 40,
+    "order": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5770,9 +6590,14 @@
       30
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582680,
-    "description_message_id": 582681,
-    "threat": 3
+    "name_message_id": 601520,
+    "description_message_id": 601708,
+    "threat": 3,
+    "aura_text_id": 601896,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 60,
+    "order": 3
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5805,9 +6630,14 @@
       31
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582681,
-    "description_message_id": 582682,
-    "threat": 1
+    "name_message_id": 601521,
+    "description_message_id": 601709,
+    "threat": 1,
+    "aura_text_id": 601897,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 20,
+    "order": 4
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5840,9 +6670,14 @@
       32
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582682,
-    "description_message_id": 582683,
-    "threat": 2
+    "name_message_id": 601522,
+    "description_message_id": 601710,
+    "threat": 2,
+    "aura_text_id": 601898,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 40,
+    "order": 5
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5875,9 +6710,14 @@
       33
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582683,
-    "description_message_id": 582684,
-    "threat": 3
+    "name_message_id": 601523,
+    "description_message_id": 601711,
+    "threat": 3,
+    "aura_text_id": 601899,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 60,
+    "order": 6
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5910,9 +6750,14 @@
       34
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582684,
-    "description_message_id": 582685,
-    "threat": 1
+    "name_message_id": 601524,
+    "description_message_id": 601712,
+    "threat": 1,
+    "aura_text_id": 601900,
+    "agency_link_text_id": 602088,
+    "agency_screen": "FACTION_WARFARE_LEARN",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5945,9 +6790,14 @@
       35
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582685,
-    "description_message_id": 582686,
-    "threat": 2
+    "name_message_id": 601525,
+    "description_message_id": 601713,
+    "threat": 2,
+    "aura_text_id": 601901,
+    "agency_link_text_id": 602089,
+    "agency_screen": "FACTION_WARFARE_LEARN",
+    "duration": 50,
+    "order": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5980,9 +6830,14 @@
       36
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582686,
-    "description_message_id": 582687,
-    "threat": 1
+    "name_message_id": 601526,
+    "description_message_id": 601714,
+    "threat": 1,
+    "aura_text_id": 601902,
+    "agency_link_text_id": 602090,
+    "agency_screen": "FACTION_WARFARE_AGENTS",
+    "duration": 20,
+    "order": 3
   },
   {
     "career_name": "Soldier of Fortune",
@@ -6015,9 +6870,14 @@
       37
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582687,
-    "description_message_id": 582688,
-    "threat": 3
+    "name_message_id": 601527,
+    "description_message_id": 601715,
+    "threat": 3,
+    "aura_text_id": 601903,
+    "agency_link_text_id": 602091,
+    "agency_screen": "FACTION_WARFARE_SYSTEMS",
+    "duration": 60,
+    "order": 4
   },
   {
     "career_name": "Soldier of Fortune",
@@ -6050,9 +6910,14 @@
       38
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582688,
-    "description_message_id": 582689,
-    "threat": 3
+    "name_message_id": 601528,
+    "description_message_id": 601716,
+    "threat": 3,
+    "aura_text_id": 601904,
+    "agency_link_text_id": 602092,
+    "agency_screen": "FACTION_WARFARE_SYSTEMS",
+    "duration": 60,
+    "order": 5
   },
   {
     "career_name": "Soldier of Fortune",
@@ -6085,9 +6950,14 @@
       39
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665643,
-    "description_message_id": 696436,
-    "threat": 1
+    "name_message_id": 601529,
+    "description_message_id": 601717,
+    "threat": 1,
+    "aura_text_id": 601905,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 20,
+    "order": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -6120,9 +6990,14 @@
       40
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665644,
-    "description_message_id": 696437,
-    "threat": 1
+    "name_message_id": 601530,
+    "description_message_id": 601718,
+    "threat": 1,
+    "aura_text_id": 601906,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 30,
+    "order": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -6155,9 +7030,14 @@
       41
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665645,
-    "description_message_id": 696438,
-    "threat": 2
+    "name_message_id": 601531,
+    "description_message_id": 601719,
+    "threat": 2,
+    "aura_text_id": 601907,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 50,
+    "order": 3
   },
   {
     "career_name": "Soldier of Fortune",
@@ -6190,9 +7070,14 @@
       42
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665646,
-    "description_message_id": 696439,
-    "threat": 1
+    "name_message_id": 601532,
+    "description_message_id": 601720,
+    "threat": 1,
+    "aura_text_id": 601908,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 20,
+    "order": 4
   },
   {
     "career_name": "Soldier of Fortune",
@@ -6225,9 +7110,14 @@
       43
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665647,
-    "description_message_id": 696440,
-    "threat": 1
+    "name_message_id": 601533,
+    "description_message_id": 601721,
+    "threat": 1,
+    "aura_text_id": 601909,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 30,
+    "order": 5
   },
   {
     "career_name": "Soldier of Fortune",
@@ -6260,9 +7150,14 @@
       44
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 665648,
-    "description_message_id": 696441,
-    "threat": 2
+    "name_message_id": 601534,
+    "description_message_id": 601722,
+    "threat": 2,
+    "aura_text_id": 601910,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 50,
+    "order": 6
   },
   {
     "career_name": "Soldier of Fortune",
@@ -6295,9 +7190,14 @@
       45
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582695,
-    "description_message_id": 582696,
-    "threat": 1
+    "name_message_id": 601535,
+    "description_message_id": 601723,
+    "threat": 1,
+    "aura_text_id": 601911,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 10,
+    "order": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -6330,9 +7230,14 @@
       46
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582696,
-    "description_message_id": 582697,
-    "threat": 1
+    "name_message_id": 601536,
+    "description_message_id": 601724,
+    "threat": 1,
+    "aura_text_id": 601912,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 20,
+    "order": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -6365,9 +7270,14 @@
       47
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582697,
-    "description_message_id": 582698,
-    "threat": 1
+    "name_message_id": 601537,
+    "description_message_id": 601725,
+    "threat": 1,
+    "aura_text_id": 601913,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 30,
+    "order": 3
   },
   {
     "career_name": "Soldier of Fortune",
@@ -6400,9 +7310,14 @@
       48
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582698,
-    "description_message_id": 582699,
-    "threat": 2
+    "name_message_id": 601538,
+    "description_message_id": 601726,
+    "threat": 2,
+    "aura_text_id": 601914,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 50,
+    "order": 4
   },
   {
     "career_name": "Soldier of Fortune",
@@ -6435,9 +7350,14 @@
       49
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 582699,
-    "description_message_id": 582700,
-    "threat": 3
+    "name_message_id": 601539,
+    "description_message_id": 601727,
+    "threat": 3,
+    "aura_text_id": 601915,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 60,
+    "order": 5
   },
   {
     "career_name": "Soldier of Fortune",
@@ -6470,9 +7390,14 @@
       50
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 659385,
-    "description_message_id": 696427,
-    "threat": 1
+    "name_message_id": 601540,
+    "description_message_id": 601728,
+    "threat": 1,
+    "aura_text_id": 601916,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 10,
+    "order": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -6505,9 +7430,14 @@
       51
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 659386,
-    "description_message_id": 696428,
-    "threat": 1
+    "name_message_id": 601541,
+    "description_message_id": 601729,
+    "threat": 1,
+    "aura_text_id": 601917,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 20,
+    "order": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -6540,9 +7470,14 @@
       52
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 659387,
-    "description_message_id": 696429,
-    "threat": 2
+    "name_message_id": 601542,
+    "description_message_id": 601730,
+    "threat": 2,
+    "aura_text_id": 601918,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 40,
+    "order": 3
   },
   {
     "career_name": "Soldier of Fortune",
@@ -6575,8 +7510,13 @@
       53
     ],
     "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
-    "name_message_id": 659388,
-    "description_message_id": 696430,
-    "threat": 3
+    "name_message_id": 601543,
+    "description_message_id": 601731,
+    "threat": 3,
+    "aura_text_id": 601919,
+    "agency_link_text_id": null,
+    "agency_screen": "",
+    "duration": 80,
+    "order": 4
   }
 ]

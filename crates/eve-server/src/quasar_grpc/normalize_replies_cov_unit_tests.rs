@@ -489,6 +489,7 @@ fn normalize_map_paperdoll_peacetreaty_petitioner_planet_pos_raffle_reprocess_sc
             PyRep::Real(0.55),
             PyRep::List(vec![PyRep::keyval([
                 ("itemID", PyRep::Integer(700)),
+                ("typeID", PyRep::Integer(1230)),
                 (
                     "outputs",
                     PyRep::List(vec![PyRep::keyval([
@@ -500,7 +501,18 @@ fn normalize_map_paperdoll_peacetreaty_petitioner_planet_pos_raffle_reprocess_sc
         ])),
     )
     .expect("quotes");
-    assert!(matches!(quotes, PyRep::Tuple(t) if t.len() == 3));
+    let PyRep::Tuple(ref qt) = quotes else {
+        panic!("expected tuple");
+    };
+    assert_eq!(qt.len(), 3);
+    let PyRep::Dict(ref qentries) = qt[2] else {
+        panic!("expected normalized quotes Dict");
+    };
+    assert_eq!(qentries[0].0, PyRep::Integer(700));
+    assert_eq!(
+        qentries[0].1.dict_get("typeID").and_then(|v| v.as_i64()),
+        Some(1230)
+    );
 
     let rec = normalize_macho_rpc_reply(
         "scanMgr",

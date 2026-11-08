@@ -1485,6 +1485,45 @@ fn handle_xmpp_hostname(ctx: &ServerContext) -> Option<Result<PyRep, BridgeRpcEr
     Some(Ok(PyRep::String(host)))
 }
 
+/// Build an XMPP `<iq type='result'>` stanza matching the client's IQ query namespace.
+/// V24.01 `xmppchatsvc.GetChannels` reads `response.children[0].children` on `disco#items`,
+/// raising `IndexError` if the server returns an empty `<iq type='result' id='...'/>`.
+pub fn xmpp_iq_reply(chunk: &str, stanza_id: &str) -> String {
+    if chunk.contains("<bind") {
+        format!(
+            "<iq type='result' id='{stanza_id}'><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'><jid>user@chat.evomu.local/eve</jid></bind></iq>"
+        )
+    } else if chunk.contains("http://jabber.org/protocol/disco#items") {
+        if chunk.contains("node='forme'") || chunk.contains("node=\"forme\"") {
+            format!(
+                "<iq type='result' id='{stanza_id}'><query xmlns='http://jabber.org/protocol/disco#items' node='forme'/></iq>"
+            )
+        } else {
+            format!(
+                "<iq type='result' id='{stanza_id}'><query xmlns='http://jabber.org/protocol/disco#items'/></iq>"
+            )
+        }
+    } else if chunk.contains("http://jabber.org/protocol/disco#info") {
+        format!(
+            "<iq type='result' id='{stanza_id}'><query xmlns='http://jabber.org/protocol/disco#info'><identity category='conference' type='text' name='Conference'/><feature var='http://jabber.org/protocol/muc'/></query></iq>"
+        )
+    } else if chunk.contains("http://jabber.org/protocol/muc#admin") {
+        format!(
+            "<iq type='result' id='{stanza_id}'><query xmlns='http://jabber.org/protocol/muc#admin'/></iq>"
+        )
+    } else if chunk.contains("http://jabber.org/protocol/muc#owner") {
+        format!(
+            "<iq type='result' id='{stanza_id}'><query xmlns='http://jabber.org/protocol/muc#owner'/></iq>"
+        )
+    } else if chunk.contains("urn:xmpp:expiring_record#search") {
+        format!(
+            "<iq type='result' id='{stanza_id}'><query xmlns='urn:xmpp:expiring_record#search'/></iq>"
+        )
+    } else {
+        format!("<iq type='result' id='{stanza_id}'/>")
+    }
+}
+
 #[cfg(test)]
 #[path = "fleet_social_chat_tests.rs"]
 pub(crate) mod fleet_social_chat_tests;

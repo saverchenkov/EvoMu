@@ -885,7 +885,7 @@ async fn test_home_station_and_jump_clones_parity() {
     let validate_ok = rpc(&ctx, &mut s1, "jumpCloneSvc", "ValidateInstallJumpClone", &[])
         .await
         .expect("jumpCloneSvc.ValidateInstallJumpClone");
-    assert_eq!(validate_ok, PyRep::Bool(true));
+    assert_eq!(validate_ok, PyRep::List(vec![]));
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(c1) = snap.characters.get_mut(&PILOT1) {
@@ -897,8 +897,11 @@ async fn test_home_station_and_jump_clones_parity() {
     s1.structure_id = None;
     let err_undocked = rpc(&ctx, &mut s1, "jumpCloneSvc", "ValidateInstallJumpClone", &[])
         .await
-        .expect_err("ValidateInstallJumpClone when undocked must fail");
-    assert_eq!(err_undocked.code, "MustBeDocked");
+        .expect("ValidateInstallJumpClone returns error label list (#637)");
+    assert!(matches!(
+        &err_undocked,
+        PyRep::List(v) if v.contains(&PyRep::String("UI/Medical/Errors/JumpCloneValidationNotDocked".into()))
+    ));
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(c1) = snap.characters.get_mut(&PILOT1) {
@@ -909,8 +912,14 @@ async fn test_home_station_and_jump_clones_parity() {
     s1.station_id = Some(STATION_JITA);
     let err_funds = rpc(&ctx, &mut s1, "jumpCloneSvc", "ValidateInstallJumpClone", &[])
         .await
-        .expect_err("ValidateInstallJumpClone with low ISK must fail");
-    assert_eq!(err_funds.code, "NotEnoughMoney");
+        .expect("ValidateInstallJumpClone returns error label list (#637)");
+    assert_eq!(
+        err_funds,
+        PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::String("UI/Medical/Errors/JumpCloneValidationInsufficientFunds".into()),
+            PyRep::Dict(vec![(PyRep::String("cloneCost".into()), PyRep::Integer(900_000))]),
+        ])])
+    );
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(c1) = snap.characters.get_mut(&PILOT1) {
@@ -922,8 +931,13 @@ async fn test_home_station_and_jump_clones_parity() {
     });
     let err_limit = rpc(&ctx, &mut s1, "jumpCloneSvc", "ValidateInstallJumpClone", &[])
         .await
-        .expect_err("ValidateInstallJumpClone with 0 clone capacity must fail");
-    assert_eq!(err_limit.code, "JumpCloneLimitReached");
+        .expect("ValidateInstallJumpClone returns skill error label list (#637)");
+    assert_eq!(
+        err_limit,
+        PyRep::List(vec![PyRep::String(
+            "UI/Medical/Errors/JumpCloneValidationSkillReqNotFulfilled".into()
+        )])
+    );
 
     let clone_id = 777_001i64;
     ctx.db.with_mut_snapshot(|snap| {

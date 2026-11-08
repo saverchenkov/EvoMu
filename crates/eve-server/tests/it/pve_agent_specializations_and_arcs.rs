@@ -568,8 +568,9 @@ async fn test_pve_research_locator_and_epic_arcs() {
     });
 
     let status_rep = ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetMyEpicArcStatus", &[], &kw, None).await.expect("GetMyEpicArcStatus");
-    let PyRep::List(arcs) = status_rep else { panic!() };
-    let arc1 = arcs.iter().find(|a| a.dict_get("epicArcID").and_then(|v| v.as_i64()) == Some(arc_id as i64)).expect("Arc 1 present");
+    let PyRep::Dict(arcs) = status_rep else { panic!("Expected Dict from GetMyEpicArcStatus (#639)") };
+    let (_, PyRep::Dict(arc1_missions)) = arcs.iter().find(|(k, _)| k.as_i64() == Some(arc_id as i64)).expect("Arc 1 present") else { panic!() };
+    let arc1 = &arc1_missions[0].1;
     assert_eq!(arc1.dict_get("state").and_then(|v| v.as_str()), Some("Active"));
     assert_eq!(arc1.dict_get("chosenBranch").and_then(|v| v.as_str()), Some("HyasyodaBranch"));
 
@@ -601,8 +602,9 @@ async fn test_pve_research_locator_and_epic_arcs() {
     sess.station_id = epic_agent.station_id;
 
     let post_status = ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetMyEpicArcStatus", &[], &kw, None).await.expect("GetMyEpicArcStatus post");
-    let PyRep::List(post_arcs) = post_status else { panic!() };
-    let post_arc1 = post_arcs.iter().find(|a| a.dict_get("epicArcID").and_then(|v| v.as_i64()) == Some(arc_id as i64)).unwrap();
+    let PyRep::Dict(post_arcs) = post_status else { panic!("Expected Dict from GetMyEpicArcStatus (#639)") };
+    let (_, PyRep::Dict(post_missions)) = post_arcs.iter().find(|(k, _)| k.as_i64() == Some(arc_id as i64)).unwrap() else { panic!() };
+    let post_arc1 = &post_missions[0].1;
     assert_eq!(post_arc1.dict_get("onCooldown"), Some(&PyRep::Bool(true)));
     assert_eq!(post_arc1.dict_get("state").and_then(|v| v.as_str()), Some("Cooldown"));
 

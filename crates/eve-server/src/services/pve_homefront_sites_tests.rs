@@ -36,7 +36,18 @@ fn homefront_seeding_security_filtering_and_rpc_queries() {
 
     let res = handle_get_homefront_site_instances(&ctx, &session, &[])
         .expect("highsec homefront query succeeds");
-    assert!(matches!(res, PyRep::Dict(_)));
+    let PyRep::Dict(ref outer) = res else {
+        panic!("expected outer Dict, got {res:?}");
+    };
+    let (_, PyRep::List(ref entries)) = outer[0] else {
+        panic!("expected system list in outer dict, got {outer:?}");
+    };
+    assert_eq!(entries.len(), 2);
+    for entry in entries {
+        assert!(entry.dict_get("dungeonID").and_then(|v| v.as_i64()).is_some());
+        assert!(entry.dict_get("instanceID").and_then(|v| v.as_i64()).is_some());
+        assert_eq!(entry.dict_get("solarSystemID").and_then(|v| v.as_i64()), Some(hs_sys as i64));
+    }
     with_pve_special_reg(&ctx, |reg| {
         let sites = reg.homefront_sites.get(&hs_sys).expect("seeded homefront list");
         assert_eq!(sites.len(), 2);

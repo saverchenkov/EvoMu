@@ -253,7 +253,19 @@ pub fn emit_signal_tracker_full_state_for_system(
                     PyRep::Integer(st.structure_id),
                     PyRep::keyval([
                         ("itemID", PyRep::Integer(st.structure_id)),
+                        ("targetID", PyRep::Integer(st.structure_id)),
                         ("typeID", PyRep::Integer(i64::from(st.type_id))),
+                        (
+                            "groupID",
+                            PyRep::Integer(i64::from(
+                                ctx.sde
+                                    .types
+                                    .get(&st.type_id)
+                                    .map(|t| t.group_id)
+                                    .unwrap_or(1657),
+                            )),
+                        ),
+                        ("categoryID", PyRep::Integer(65)),
                         ("name", PyRep::String(st.name.clone())),
                         (
                             "position",

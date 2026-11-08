@@ -220,8 +220,8 @@ async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
     // 1. Homefront Operations
     let hf_init = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetHomefrontSiteInstances", &[PyRep::Integer(30_000_142)], &kw, None).await.expect("GetHomefrontSiteInstances initial");
     let PyRep::Dict(hf_dict) = &hf_init else { panic!("Expected Dict") };
-    let dungeons = hf_dict.iter().find(|(k, _)| k.as_i64() == Some(30_000_142)).and_then(|(_, v)| match v { PyRep::Dict(d) => Some(d), _ => None }).expect("Jita sites");
-    let hf_inst_id = match &dungeons[0].1 { PyRep::List(ids) => ids[0].as_i64().unwrap(), _ => panic!() };
+    let dungeons = hf_dict.iter().find(|(k, _)| k.as_i64() == Some(30_000_142)).and_then(|(_, v)| match v { PyRep::List(d) => Some(d), _ => None }).expect("Jita sites");
+    let hf_inst_id = dungeons[0].dict_get("instanceID").and_then(|v| v.as_i64()).unwrap();
     let hf_boss_bid = with_pve_special_reg(&ctx, |reg| reg.homefront_sites[&30_000_142].iter().find(|s| s.instance_id == hf_inst_id).unwrap().boss_npc_ball_id);
     let jita_sys = ctx.systems.get_or_spawn(30_000_142);
     let init_bal = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance.0);
@@ -234,8 +234,8 @@ async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
 
     let hf_rep = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetHomefrontSiteInstances", &[PyRep::Integer(30_000_142)], &kw, None).await.expect("GetHomefrontSiteInstances after completion");
     let PyRep::Dict(hf_after_dict) = &hf_rep else { panic!("Expected Dict") };
-    let dungeons_after = hf_after_dict.iter().find(|(k, _)| k.as_i64() == Some(30_000_142)).and_then(|(_, v)| match v { PyRep::Dict(d) => Some(d), _ => None }).expect("Jita sites after");
-    let after_instances: Vec<i64> = dungeons_after.iter().flat_map(|(_, l)| match l { PyRep::List(ids) => ids.iter().filter_map(|i| i.as_i64()).collect::<Vec<_>>(), _ => Vec::new() }).collect();
+    let dungeons_after = hf_after_dict.iter().find(|(k, _)| k.as_i64() == Some(30_000_142)).and_then(|(_, v)| match v { PyRep::List(d) => Some(d), _ => None }).expect("Jita sites after");
+    let after_instances: Vec<i64> = dungeons_after.iter().filter_map(|e| e.dict_get("instanceID").and_then(|v| v.as_i64())).collect();
     assert!(!after_instances.contains(&hf_inst_id), "Completed Homefront instance must not be returned");
 
     // 2. Metaliminal Roaming Storms
@@ -257,7 +257,7 @@ async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
     assert_eq!(hive_reg.element_type_id, 34_557);
     let trig_wh = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(31_000_001)], &kw, None).await.expect("GetTriglavianSiteInstances for Drifter Hive system");
     let PyRep::Dict(trig_wh_dict) = &trig_wh else { panic!("Expected Dict") };
-    let PyRep::Dict(trig_wh_dng) = &trig_wh_dict[0].1 else { panic!("Expected inner Dict") };
+    let PyRep::List(trig_wh_dng) = &trig_wh_dict[0].1 else { panic!("Expected inner List") };
     assert!(trig_wh_dng.is_empty(), "Drifter Hive wormhole systems must not return fake Triglavian sites");
 
     // 4. Triglavian Minor Victory Systems query & dynamic site completion
@@ -272,7 +272,7 @@ async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
     // Pure read query in Jita returns empty without fabricating sites
     let jita_trig_rep = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_000_142)], &kw, None).await.expect("GetTriglavianSiteInstances for Jita");
     let PyRep::Dict(jita_trig_dict) = &jita_trig_rep else { panic!("Expected Dict") };
-    let PyRep::Dict(jita_trig_dng) = &jita_trig_dict[0].1 else { panic!("Expected inner Dict") };
+    let PyRep::List(jita_trig_dng) = &jita_trig_dict[0].1 else { panic!("Expected inner List") };
     assert!(jita_trig_dng.is_empty(), "Jita must not fabricate Triglavian sites on read query");
 
     // Gammel (30003076) automatically contains 2 Triglavian site instances without fixture injection
@@ -284,7 +284,7 @@ async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
 
     let gammel_trig = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_003_076)], &kw, None).await.expect("GetTriglavianSiteInstances in Gammel");
     let PyRep::Dict(gammel_dict) = &gammel_trig else { panic!("Expected Dict") };
-    let PyRep::Dict(gammel_dng) = &gammel_dict[0].1 else { panic!("Expected inner Dict") };
+    let PyRep::List(gammel_dng) = &gammel_dict[0].1 else { panic!("Expected inner List") };
     assert_eq!(gammel_dng.len(), 2, "Gammel minor victory system automatically contains 2 Triglavian site instances");
     let (trig_inst_id, trig_boss_bid) = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
         let s = &reg.triglavian_sites[&30_003_076][0];
@@ -298,7 +298,7 @@ async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
     assert!(again.is_err(), "Site completed by in-space kill must reject a second completion");
     let trig_after = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_003_076)], &kw, None).await.expect("GetTriglavianSiteInstances after completion");
     let PyRep::Dict(trig_after_dict) = &trig_after else { panic!("Expected Dict") };
-    let PyRep::Dict(trig_after_dng) = &trig_after_dict[0].1 else { panic!("Expected inner Dict") };
+    let PyRep::List(trig_after_dng) = &trig_after_dict[0].1 else { panic!("Expected inner List") };
     assert_eq!(trig_after_dng.len(), 1, "Completed site instance removed from active instances");
 
     let (trig_standing, edencom_standing) = ctx.db.with_snapshot(|snap| {

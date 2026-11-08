@@ -972,7 +972,8 @@ pub(super) async fn handle_extended_with_bound(
         ("agentMgr", "GetMyEpicArcStatus") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let now_unix = ctx.now_unix();
-            let list = ctx.db.with_snapshot(|snap| {
+            let now_ft = ((now_unix.max(0) as i64) + 11_644_473_600) * 10_000_000;
+            let dict_entries = ctx.db.with_snapshot(|snap| {
                 load_epic_arc_states(snap, char_id)
                     .into_iter()
                     .map(|a| {
@@ -982,22 +983,66 @@ pub(super) async fn handle_extended_with_bound(
                         } else {
                             "Active"
                         };
-                        PyRep::keyval([
-                            ("epicArcID", PyRep::Integer(a.epic_arc_id as i64)),
-                            ("agentID", PyRep::Integer(a.agent_id)),
-                            ("factionID", PyRep::Integer(a.faction_id)),
-                            ("chapter", PyRep::Integer(a.chapter as i64)),
-                            ("state", PyRep::String(state_str.into())),
-                            ("onCooldown", PyRep::Bool(on_cd)),
-                            ("chosenBranch", a.chosen_branch.map(PyRep::String).unwrap_or(PyRep::None)),
-                            ("completedMissions", PyRep::List(a.completed_missions.into_iter().map(|m| PyRep::Integer(m as i64)).collect())),
-                            ("cooldownUntilUnix", a.cooldown_until_unix.map(|u| PyRep::Integer(u as i64)).unwrap_or(PyRep::None)),
-                            ("repeatCooldownSeconds", PyRep::Integer(7_776_000)),
-                        ])
+                        let completed_ft = a
+                            .completed_at_unix
+                            .map(|u| PyRep::Integer(((u.max(0) as i64) + 11_644_473_600) * 10_000_000))
+                            .unwrap_or(PyRep::Integer(now_ft));
+                        let branch_rep = a.chosen_branch.clone().map(PyRep::String).unwrap_or(PyRep::None);
+                        let cd_rep = a.cooldown_until_unix.map(|u| PyRep::Integer(u as i64)).unwrap_or(PyRep::None);
+
+                        let mut missions_dict: Vec<(PyRep, PyRep)> = a
+                            .completed_missions
+                            .iter()
+                            .map(|&m| {
+                                (
+                                    PyRep::Integer(m as i64),
+                                    PyRep::keyval([
+                                        ("acceptedDate", PyRep::Integer(now_ft)),
+                                        ("completedDate", completed_ft.clone()),
+                                        ("quitDate", PyRep::None),
+                                        ("nameID", PyRep::Integer(0)),
+                                        ("epicArcID", PyRep::Integer(a.epic_arc_id as i64)),
+                                        ("agentID", PyRep::Integer(a.agent_id)),
+                                        ("factionID", PyRep::Integer(a.faction_id)),
+                                        ("chapter", PyRep::Integer(a.chapter as i64)),
+                                        ("state", PyRep::String(state_str.into())),
+                                        ("onCooldown", PyRep::Bool(on_cd)),
+                                        ("chosenBranch", branch_rep.clone()),
+                                        ("cooldownUntilUnix", cd_rep.clone()),
+                                    ]),
+                                )
+                            })
+                            .collect();
+                        if missions_dict.is_empty() {
+                            let active_mid = snap
+                                .active_missions
+                                .values()
+                                .find(|m| m.character_id == char_id && m.agent_id == a.agent_id)
+                                .map(|m| m.mission_id as i64)
+                                .unwrap_or(0);
+                            missions_dict.push((
+                                PyRep::Integer(active_mid),
+                                PyRep::keyval([
+                                    ("acceptedDate", PyRep::Integer(now_ft)),
+                                    ("completedDate", PyRep::None),
+                                    ("quitDate", PyRep::None),
+                                    ("nameID", PyRep::Integer(0)),
+                                    ("epicArcID", PyRep::Integer(a.epic_arc_id as i64)),
+                                    ("agentID", PyRep::Integer(a.agent_id)),
+                                    ("factionID", PyRep::Integer(a.faction_id)),
+                                    ("chapter", PyRep::Integer(a.chapter as i64)),
+                                    ("state", PyRep::String(state_str.into())),
+                                    ("onCooldown", PyRep::Bool(on_cd)),
+                                    ("chosenBranch", branch_rep),
+                                    ("cooldownUntilUnix", cd_rep),
+                                ]),
+                            ));
+                        }
+                        (PyRep::Integer(a.epic_arc_id as i64), PyRep::Dict(missions_dict))
                     })
                     .collect::<Vec<_>>()
             });
-            Some(Ok(PyRep::List(list)))
+            Some(Ok(PyRep::Dict(dict_entries)))
         }
 
         ("agentMgr", "GetMessagesForEpicArcMissions") => {

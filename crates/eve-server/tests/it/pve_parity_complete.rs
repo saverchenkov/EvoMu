@@ -4549,7 +4549,7 @@ async fn test_pve_drifter_hives_multiroom_progression_and_loot() {
     // GetTriglavianSiteInstances returns clean empty list in wormhole systems
     let trig_wh = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(31_000_001)], &kw, None).await.expect("GetTriglavianSiteInstances");
     let PyRep::Dict(trig_wh_dict) = trig_wh else { panic!("Expected Dict") };
-    let PyRep::Dict(trig_wh_dng) = &trig_wh_dict[0].1 else { panic!("Expected inner Dict") };
+    let PyRep::List(trig_wh_dng) = &trig_wh_dict[0].1 else { panic!("Expected inner List") };
     assert!(trig_wh_dng.is_empty(), "Drifter Hive must not overload Triglavian site instances");
 }
 
@@ -4593,13 +4593,13 @@ async fn test_pve_triglavian_sites_and_minor_victory_systems() {
     // 2. Pure read query in Jita (30000142) returns empty without fabricating sites
     let jita_trig = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_000_142)], &kw, None).await.expect("GetTriglavianSiteInstances in Jita");
     let PyRep::Dict(j_dict) = jita_trig else { panic!("Expected Dict") };
-    let PyRep::Dict(j_dng) = &j_dict[0].1 else { panic!("Expected inner Dict") };
+    let PyRep::List(j_dng) = &j_dict[0].1 else { panic!("Expected inner List") };
     assert!(j_dng.is_empty(), "Jita must not fabricate Triglavian sites");
 
     // 3. EDENCOM minor victory system Bei (30002048) contains authentic EDENCOM sites & ships
     let bei_trig = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_002_048)], &kw, None).await.expect("GetTriglavianSiteInstances in Bei");
     let PyRep::Dict(b_dict) = bei_trig else { panic!("Expected Dict") };
-    let PyRep::Dict(b_dng) = &b_dict[0].1 else { panic!("Expected inner Dict") };
+    let PyRep::List(b_dng) = &b_dict[0].1 else { panic!("Expected inner List") };
     assert_eq!(b_dng.len(), 2, "Bei must contain 2 EDENCOM site instances");
     with_pve_special_reg(&ctx, |reg| {
         let site = &reg.triglavian_sites[&30_002_048][0];
@@ -4617,7 +4617,7 @@ async fn test_pve_triglavian_sites_and_minor_victory_systems() {
 
     let gammel_trig = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_003_076)], &kw, None).await.expect("GetTriglavianSiteInstances in Gammel");
     let PyRep::Dict(g_dict) = gammel_trig else { panic!("Expected Dict") };
-    let PyRep::Dict(g_dng) = &g_dict[0].1 else { panic!("Expected inner Dict") };
+    let PyRep::List(g_dng) = &g_dict[0].1 else { panic!("Expected inner List") };
     assert_eq!(g_dng.len(), 2, "Gammel must contain 2 Triglavian site instances");
 
     let (boss_bid, beacon_bid, esc_bid) = with_pve_special_reg(&ctx, |reg| {
@@ -4660,7 +4660,7 @@ async fn test_pve_triglavian_sites_and_minor_victory_systems() {
         .await
         .expect("GetTriglavianSiteInstances after boss kill");
     let PyRep::Dict(after_dict) = trig_after else { panic!("Expected Dict") };
-    let PyRep::Dict(after_dng) = &after_dict[0].1 else { panic!("Expected inner Dict") };
+    let PyRep::List(after_dng) = &after_dict[0].1 else { panic!("Expected inner List") };
     assert_eq!(after_dng.len(), 1, "Completed site instance removed from active instances");
 
     // Verify rewards: ISK payout, Sealed Survey Database (48121) cargo drop, and dual standings change

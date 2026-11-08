@@ -90,6 +90,13 @@ async fn get_agents_and_metadata_queries_cover_filters_and_branches() {
         .unwrap()
         .unwrap();
     assert!(rowset_len(&rows_rep) > 0);
+    if let PyRep::Rowset { columns, rows } = &rows_rep {
+        let loc_idx = columns
+            .iter()
+            .position(|c| c == "isLocatorAgent")
+            .expect("GetAgents must include isLocatorAgent column (#636)");
+        assert!(matches!(rows[0][loc_idx], PyRep::Bool(_)));
+    }
 
     // Lowsec / nullsec filters exclude highsec agents
     kw.insert("securityStatus".into(), PyRep::String("nullsec".into()));

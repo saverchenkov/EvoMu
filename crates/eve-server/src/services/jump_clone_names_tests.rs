@@ -56,24 +56,20 @@ async fn jump_clone_names_and_extract_skills_mutations() {
         assert_eq!(name_of(snap, clone_id), "");
     });
 
-    // ValidateInstallJumpClone
+    // ValidateInstallJumpClone returns V24.01 list of localization error labels (#637)
     let mut undocked = sess.clone();
     undocked.station_id = None;
     undocked.structure_id = None;
-    assert_eq!(
-        validate_install_jump_clone(&ctx, &undocked, &[]).unwrap_err().code,
-        "MustBeDocked"
-    );
+    let undocked_errs = validate_install_jump_clone(&ctx, &undocked, &[]).unwrap();
+    assert!(matches!(&undocked_errs, PyRep::List(v) if v.iter().any(|x| x.as_str() == Some("UI/Medical/Errors/JumpCloneValidationNotDocked"))));
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {
             ch.balance = IskCents(100);
         }
     });
-    assert_eq!(
-        validate_install_jump_clone(&ctx, &sess, &[]).unwrap_err().code,
-        "NotEnoughMoney"
-    );
+    let funds_errs = validate_install_jump_clone(&ctx, &sess, &[]).unwrap();
+    assert!(matches!(&funds_errs, PyRep::List(v) if v.iter().any(|x| matches!(x, PyRep::Tuple(t) if t.first().and_then(|s| s.as_str()) == Some("UI/Medical/Errors/JumpCloneValidationInsufficientFunds")))));
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {
@@ -90,7 +86,7 @@ async fn jump_clone_names_and_extract_skills_mutations() {
     });
     assert_eq!(
         validate_install_jump_clone(&ctx, &sess, &[]).unwrap(),
-        PyRep::Bool(true)
+        PyRep::List(vec![])
     );
 
     // GetShipCloneState

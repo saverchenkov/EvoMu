@@ -414,13 +414,21 @@ async fn handle_extended_rpcs_cover_agent_mgr_epic_arc_tracker_standings_keeper_
         .unwrap(),
         PyRep::None
     );
-    assert!(matches!(
-        handle_extended(&ctx, &mut session, "agentMgr", "GetMyEpicArcStatus", &[], &HashMap::new())
-            .await
-            .unwrap()
-            .unwrap(),
-        PyRep::List(ref v) if v.len() == 1
-    ));
+    let epic_status = handle_extended(&ctx, &mut session, "agentMgr", "GetMyEpicArcStatus", &[], &HashMap::new())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(&epic_status, PyRep::Dict(ref d) if d.len() == 1));
+    if let PyRep::Dict(arcs) = &epic_status {
+        let PyRep::Dict(missions) = &arcs[0].1 else {
+            panic!("GetMyEpicArcStatus must map epicArcID -> dict of missionID -> KeyVal (#639)");
+        };
+        assert!(!missions.is_empty());
+        assert!(missions[0].1.dict_get("acceptedDate").is_some());
+        assert!(missions[0].1.dict_get("completedDate").is_some());
+        assert!(missions[0].1.dict_get("quitDate").is_some());
+        assert!(missions[0].1.dict_get("nameID").is_some());
+    }
     assert_eq!(
         handle_extended(
             &ctx,

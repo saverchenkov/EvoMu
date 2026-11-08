@@ -1501,6 +1501,36 @@ async fn test_mining_reprocessing_curves_scrapmetal_and_prismaticite() {
     let ore_yield = get_dict_val(&ore_rep, "yieldRate").and_then(|v| v.as_f64()).unwrap();
     assert!(ore_yield > 0.75, "Ore at rigged NS Tatara must receive structure/rig/nullsec/implant bonuses (got {ore_yield})");
 
+    // V24 client Dict {itemID: invItem} input to GetQuotes preserves typeID (Miner I = 482) and non-empty outputs
+    let miner_dict_quote = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "GetQuotes",
+            &[
+                PyRep::Dict(vec![(
+                    PyRep::Integer(100_000_870),
+                    PyRep::keyval([("itemID", PyRep::Integer(100_000_870))]),
+                )]),
+                PyRep::Integer(char_id),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap();
+    let PyRep::Tuple(ref m_parts) = miner_dict_quote else {
+        panic!("expected 3-tuple from GetQuotes Dict, got {miner_dict_quote:?}");
+    };
+    let PyRep::List(ref m_quotes) = m_parts[2] else {
+        panic!("expected quote list");
+    };
+    assert_eq!(m_quotes.len(), 1);
+    assert_eq!(get_dict_val(&m_quotes[0], "itemID").and_then(|v| v.as_i64()), Some(100_000_870));
+    assert_eq!(get_dict_val(&m_quotes[0], "typeID").and_then(|v| v.as_i64()), Some(482));
+    assert!(!matches!(get_dict_val(&m_quotes[0], "outputs"), Some(PyRep::List(o)) if o.is_empty()));
+
     // Module (482) and packaged ship (587) ignore Upwell structure, rig, security-band, Reprocessing, and RX-804 bonuses -> exact 55% at Scrapmetal V
     let mod_rep = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(100_000_870)], &kw, None).await.unwrap();
     let ship_rep = ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(100_000_871)], &kw, None).await.unwrap();
@@ -2551,6 +2581,7 @@ async fn test_e5_agent_finder_and_conversation_lifecycle() {
             "level",
             "quality",
             "hasAccess",
+            "isLocatorAgent",
         ]
     );
     assert!(!agents_rows.is_empty(), "Level 1 Security agents must be found");

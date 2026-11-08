@@ -181,11 +181,9 @@ async fn main() -> Result<()> {
                         let rest = &chunk[id_pos + 4..];
                         if let Some(end_pos) = rest.find(['\'', '"']) {
                             let stanza_id = &rest[..end_pos];
-                            let iq_reply = if chunk.contains("<bind") {
-                                format!("<iq type='result' id='{stanza_id}'><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'><jid>user@chat.evomu.local/eve</jid></bind></iq>")
-                            } else {
-                                format!("<iq type='result' id='{stanza_id}'/>")
-                            };
+                            let iq_reply = eve_server::services::fleet_social::xmpp_iq_reply(
+                                &chunk, stanza_id,
+                            );
                             if stream.write_all(iq_reply.as_bytes()).await.is_err() {
                                 break;
                             }
