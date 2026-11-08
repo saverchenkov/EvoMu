@@ -841,11 +841,11 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
         ]),
         DestinyEvent::OnActivatingWarp { ball_id } => PyRep::Tuple(vec![
             PyRep::String("OnActivatingWarp".into()),
-            PyRep::Tuple(vec![PyRep::Integer(*ball_id)]),
+            PyRep::Tuple(vec![PyRep::Integer(*ball_id), PyRep::Integer(i64::from(stamp))]),
         ]),
         DestinyEvent::OnDeactivatingWarp { ball_id } => PyRep::Tuple(vec![
             PyRep::String("OnDeactivatingWarp".into()),
-            PyRep::Tuple(vec![PyRep::Integer(*ball_id)]),
+            PyRep::Tuple(vec![PyRep::Integer(*ball_id), PyRep::Integer(i64::from(stamp))]),
         ]),
         DestinyEvent::OnSpecialFX {
             ball_id,

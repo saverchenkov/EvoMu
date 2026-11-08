@@ -412,6 +412,9 @@ async fn test_warp_to_and_special_fx_on_warp_start_and_exit() {
         args_of(&actions, "SetBallMassive")[0],
         &[PyRep::Integer(SHIP_A), PyRep::Integer(1)]
     );
+    let pos_updates = args_of(&actions, "SetBallPosition");
+    assert_eq!(pos_updates.len(), 1, "warp exit must emit SetBallPosition alongside Stop (#556)");
+    assert_eq!(pos_updates[0][0], PyRep::Integer(SHIP_A));
     let fx = args_of(&actions, "OnSpecialFX");
     assert_eq!(fx.len(), 1);
     assert_eq!(fx[0][5], PyRep::String("effects.Warping".into()));

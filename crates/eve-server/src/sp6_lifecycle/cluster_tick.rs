@@ -639,7 +639,21 @@ fn execute_due_abyssal_collapse_sync(
 /// Runs all time-driven SP-6 / SP-7 lifecycle progressions when server time advances from `prev_unix`
 /// by `secs` seconds (or when `tick_background_cluster` runs with `secs == 0`).
 pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
-    crate::services::notify_emitters_tournaments_anomalies::emit_sim_clock_rebase_if_advanced(ctx, prev_unix, secs);
+    on_advance_secs_with_sim_clock_rebase(ctx, prev_unix, secs, true);
+}
+
+/// Variant of [`on_advance_secs`] allowing callers like `timeControl.AdvanceClock` to advance
+/// server time without pushing `DoSimClockRebase` onto live clients whose local `blue.os` clock
+/// cannot be warped cleanly by `AdjustTimes`.
+pub fn on_advance_secs_with_sim_clock_rebase(
+    ctx: &ServerContext,
+    prev_unix: u64,
+    secs: u64,
+    emit_sim_clock_rebase: bool,
+) {
+    if emit_sim_clock_rebase {
+        crate::services::notify_emitters_tournaments_anomalies::emit_sim_clock_rebase_if_advanced(ctx, prev_unix, secs);
+    }
     crate::services::space_destiny::space_probe_scanning::tick_probe_warp_end(ctx);
     let now_unix = ctx.now_unix();
 

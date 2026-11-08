@@ -523,7 +523,11 @@ def _wait_warp_fx_settled(sm, timeout_sec=4.0, min_finished=0):
         sid = int(getattr(sess, "shipid", 0) or 0) if sess is not None else 0
         michelle = sm.services.get("michelle") if hasattr(sm, "services") else None
         space_svc = sm.services.get("space") if hasattr(sm, "services") else None
-        fx_svc = sm.services.get("fxSequencer") if hasattr(sm, "services") else None
+        fx_svc = (
+            (sm.services.get("FxSequencer") or sm.services.get("fxSequencer"))
+            if hasattr(sm, "services")
+            else None
+        )
         deadline = time.time() + float(timeout_sec)
         while time.time() < deadline:
             sess = getattr(__builtin__, "session", None)
@@ -607,7 +611,11 @@ def _warp_animated(sm, b_obj, tid, stuff_type="item", distance=0.0, max_ticks=45
     sess = getattr(__builtin__, "session", None)
     sid = int(getattr(sess, "shipid", 0) or 0) if sess is not None else 0
     michelle = sm.services.get("michelle") if hasattr(sm, "services") else None
-    fx_svc = sm.services.get("fxSequencer") if hasattr(sm, "services") else None
+    fx_svc = (
+        (sm.services.get("FxSequencer") or sm.services.get("fxSequencer"))
+        if hasattr(sm, "services")
+        else None
+    )
 
     for _ in range(4):
         sm.RemoteSvc("slash").SlashCmd("/heal")
@@ -656,8 +664,15 @@ def _warp_animated(sm, b_obj, tid, stuff_type="item", distance=0.0, max_ticks=45
                 saw_warp_mode = True
                 if est >= 0:
                     saw_active_stamp = True
-            if fx_svc is not None and hasattr(fx_svc, "balls"):
-                for eff in (fx_svc.balls.get(sid) or {}).values():
+            if fx_svc is not None and sid:
+                fx_effects = []
+                if hasattr(fx_svc, "GetAllBallActivations"):
+                    for act in (fx_svc.GetAllBallActivations(sid) or ()):
+                        eff = getattr(act, "effect", None)
+                        fx_effects.append(eff if eff is not None else act)
+                elif hasattr(fx_svc, "balls"):
+                    fx_effects.extend((fx_svc.balls.get(sid) or {}).values())
+                for eff in fx_effects:
                     if getattr(eff, "hasExploded", False):
                         saw_explosion = True
                     gfx = getattr(eff, "gfx", None)

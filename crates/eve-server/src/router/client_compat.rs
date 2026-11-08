@@ -298,6 +298,22 @@ pub fn normalize_macho_rpc_reply(
             return Ok(PyRep::List(Vec::new()));
         }
     }
+    if (matches!(service, "corpRegistry" | "machoNet") && method == "GetCorporation")
+        || (service == "corpmgr" && matches!(method, "GetCorporations" | "GetPublicInfo"))
+    {
+        if let Ok(PyRep::KeyVal(entries)) = rpc_res {
+            let mut header = Vec::with_capacity(entries.len());
+            let mut line = Vec::with_capacity(entries.len());
+            for (k, v) in entries {
+                header.push(PyRep::String(k));
+                line.push(v);
+            }
+            return Ok(PyRep::Object {
+                type_name: "util.Row".into(),
+                args: Box::new(PyRep::Tuple(vec![PyRep::List(header), PyRep::List(line)])),
+            });
+        }
+    }
     crate::quasar_grpc::normalize_macho_rpc_reply(service, method, rpc_res)
 }
 
@@ -759,5 +775,43 @@ mod client_compat_tests {
             panic!("expected UserError args tuple");
         };
         assert_eq!(u_args[0].as_str(), Some("UnMachoDestination"));
+    }
+
+    #[test]
+    fn corp_info_keyval_normalizes_to_util_row_for_live_client() {
+        let kv = PyRep::KeyVal(
+            [
+                ("corporationID".to_string(), PyRep::Integer(98_100_001)),
+                (
+                    "corporationName".to_string(),
+                    PyRep::String("Demo Corp".into()),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        for svc in ["corpRegistry", "machoNet"] {
+            let res = normalize_macho_rpc_reply(svc, "GetCorporation", Ok(kv.clone())).unwrap();
+            let PyRep::Object { type_name, args } = res else {
+                panic!("expected util.Row PyRep::Object for {svc}");
+            };
+            assert_eq!(type_name, "util.Row");
+            let PyRep::Tuple(state) = *args else {
+                panic!("expected 2-tuple (header, line)");
+            };
+            let (PyRep::List(hdr), PyRep::List(row)) = (&state[0], &state[1]) else {
+                panic!("expected header and line lists");
+            };
+            let pairs: HashMap<&str, &PyRep> = hdr
+                .iter()
+                .zip(row.iter())
+                .map(|(k, v)| (k.as_str().unwrap(), v))
+                .collect();
+            assert_eq!(pairs.get("corporationID"), Some(&&PyRep::Integer(98_100_001)));
+            assert_eq!(
+                pairs.get("corporationName"),
+                Some(&&PyRep::String("Demo Corp".into()))
+            );
+        }
     }
 }

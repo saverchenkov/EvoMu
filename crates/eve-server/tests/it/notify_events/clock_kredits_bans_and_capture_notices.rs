@@ -178,6 +178,28 @@ async fn test_parity_notify_sim_clock_rebase_and_analysis_kredits() {
         "0-second advance must not emit DoSimClockRebase"
     );
 
+    // Regression (#531/#556): timeControl.AdvanceClock advances server time without emitting
+    // DoSimClockRebase so live EVE.app _destiny.Ballpark does not stall via AdjustTimes.
+    s1.role |= eve_machonet::service_roles::ROLE_GM_DEFAULT;
+    let before_tc_unix = ctx.now_unix();
+    let tc_res = rpc(
+        &ctx,
+        &mut s1,
+        "timeControl",
+        "AdvanceClock",
+        &[PyRep::Integer(15)],
+    )
+    .await
+    .expect("timeControl.AdvanceClock");
+    assert_eq!(tc_res, PyRep::Bool(true));
+    assert!(ctx.now_unix() >= before_tc_unix + 15);
+    assert!(
+        !drain_events(&ctx, &mut s1, PILOT_A)
+            .iter()
+            .any(|(e, _)| e == "DoSimClockRebase"),
+        "timeControl.AdvanceClock must not emit DoSimClockRebase (#531)"
+    );
+
     // --- Part B: OnAnalysisKreditsChange ---
     // B1: Negative check on invalid classification
     let err = rpc(

@@ -650,6 +650,7 @@ impl Ballpark {
         }
 
         for ball_id in warp_exit_stops {
+            let mut landing_pos = None;
             if let Some(b) = self.balls.get_mut(&ball_id) {
                 let max_v = b.max_velocity.max(0.0);
                 if !b.velocity.is_finite() {
@@ -664,6 +665,9 @@ impl Ballpark {
                         };
                     }
                 }
+                if b.position.is_finite() {
+                    landing_pos = Some(b.position.to_array());
+                }
             }
             if let Some(cs) = self.combat_states.get_mut(&ball_id) {
                 cs.is_emergency_warping = false;
@@ -672,6 +676,7 @@ impl Ballpark {
                     cs.undock_invulnerable_remaining_ticks.max(10);
                 cs.sync_invuln_with_undock_timer = true;
             }
+            let ev_pos = landing_pos.map(|position| DestinyEvent::SetBallPosition { ball_id, position });
             let ev = DestinyEvent::Stop { ball_id };
             let ev_massive = DestinyEvent::SetBallMassive {
                 ball_id,
@@ -684,6 +689,9 @@ impl Ballpark {
                 guid: "effects.Warping".to_string(),
                 is_active: false,
             };
+            if let Some(ref pos_ev) = ev_pos {
+                self.pending_events.push(pos_ev.clone());
+            }
             self.pending_events.push(ev.clone());
             self.pending_events.push(ev_massive.clone());
             self.pending_events.push(ev_deact.clone());
@@ -691,6 +699,9 @@ impl Ballpark {
             if let Some(&gid) = self.ball_grid_ids.get(&ball_id) {
                 // `OnDeactivatingWarp` is raised by the client's own destiny tick; it is kept in
                 // `pending_events` for the simulation but never queued onto the wire.
+                if let Some(ref pos_ev) = ev_pos {
+                    self.queue_event_for_grid_observers(gid, None, pos_ev);
+                }
                 self.queue_event_for_grid_observers(gid, None, &ev);
                 self.queue_event_for_grid_observers(gid, None, &ev_massive);
                 self.queue_event_for_grid_observers(gid, None, &ev_sfx);

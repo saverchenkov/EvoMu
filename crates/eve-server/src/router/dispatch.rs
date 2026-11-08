@@ -425,7 +425,7 @@ impl ServerContext {
                 Some(PyRep::Integer(i)) => *i as u64,
                 _ => 12,
             };
-            self.advance_secs(secs);
+            self.advance_secs_without_sim_clock_rebase(secs);
             if secs > 0 {
                 if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
                     let sys_h = self.systems.get_or_spawn(sys_id);

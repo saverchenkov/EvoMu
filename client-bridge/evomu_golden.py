@@ -68,7 +68,7 @@ def decode_add_balls(raw_bytes):
             dx, dy, dz = struct.unpack("<ddd", bytes(ba[pos:pos + 24]))
             ws = struct.unpack("<q", bytes(ba[pos + 44:pos + 52]))[0]
             pos += 52
-            extra = {"destination": [dx, dy, dz], "warp_speed_au_s": float(ws) / 10.0}
+            extra = {"destination": [dx, dy, dz], "warp_speed_au_s": float(ws) / 1000.0}
         elif mode_byte == 5:
             tid = struct.unpack("<q", bytes(ba[pos:pos + 8]))[0]
             pos += 48
@@ -130,15 +130,15 @@ def encode_add_balls(stamp, balls):
             )))
         elif mode_byte == 3:
             dx, dy, dz = extra["destination"]
-            ws = int(round(float(extra["warp_speed_au_s"]) * 10.0))
+            ws = int(round(float(extra["warp_speed_au_s"]) * 1000.0))
             out.extend(bytearray(struct.pack(
                 "<dddiqqq",
                 float(dx),
                 float(dy),
                 float(dz),
-                0,
+                -1,
                 struct.unpack("<q", struct.pack("<d", -1.0))[0],
-                struct.unpack("<q", struct.pack("<d", 15000.0))[0],
+                struct.unpack("<q", struct.pack("<d", 0.0))[0],
                 ws,
             )))
         elif mode_byte == 5:

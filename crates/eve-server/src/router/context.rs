@@ -732,6 +732,20 @@ impl ServerContext {
     /// jetcan despawn (3600s lifetime), moon field natural decay progression (`T-7`), and
     /// SP-6 / SP-7 background cluster lifecycle timers (`plan:SP-6`, `plan:SP-7`).
     pub fn advance_secs(&self, secs: u64) {
+        self.advance_secs_inner(secs, true);
+    }
+
+    /// Advances the server clock by `secs` seconds without emitting `DoSimClockRebase`.
+    ///
+    /// Used by `timeControl.AdvanceClock`, which fast-forwards server-side physics via
+    /// `fast_forward_clock` while live clients continue ticking `blue.os.GetSimTime()` at real-time
+    /// rate; sending `DoSimClockRebase` would shift `Ballpark.AdjustTimes` into the future and
+    /// stall client `Evolve()` updates.
+    pub fn advance_secs_without_sim_clock_rebase(&self, secs: u64) {
+        self.advance_secs_inner(secs, false);
+    }
+
+    fn advance_secs_inner(&self, secs: u64, emit_sim_clock_rebase: bool) {
         let prev_unix = self.now_unix_secs();
         self.clock().advance_secs(secs);
         let cur_unix = self.now_unix_secs();
@@ -740,7 +754,12 @@ impl ServerContext {
                 .insert("__server_now_unix".into(), cur_unix.to_string());
         });
         if secs > 0 {
-            crate::sp6_lifecycle::on_advance_secs(self, prev_unix, secs);
+            crate::sp6_lifecycle::on_advance_secs_with_sim_clock_rebase(
+                self,
+                prev_unix,
+                secs,
+                emit_sim_clock_rebase,
+            );
             crate::services::pve_special_sites::on_server_clock_advanced(self, secs);
             crate::services::mining_advanced::tick_all_metenox_moon_drills(
                 self,

@@ -291,13 +291,13 @@ async fn test_destiny_steering_navigation_and_warp() {
     let PyRep::Tuple(ac_outer) = &act_rep else { panic!("Expected tuple") };
     let PyRep::Tuple(ac_action) = &ac_outer[1] else { panic!("Expected action tuple") };
     assert_eq!(ac_action[0].as_str(), Some("OnActivatingWarp"));
-    assert_eq!(ac_action[1], PyRep::Tuple(vec![PyRep::Integer(ship_id)]));
+    assert_eq!(ac_action[1], PyRep::Tuple(vec![PyRep::Integer(ship_id), PyRep::Integer(36)]));
 
     let deact_rep = encode_destiny_event(37, &DestinyEvent::OnDeactivatingWarp { ball_id: ship_id }, Some(&park));
     let PyRep::Tuple(da_outer) = &deact_rep else { panic!("Expected tuple") };
     let PyRep::Tuple(da_action) = &da_outer[1] else { panic!("Expected action tuple") };
     assert_eq!(da_action[0].as_str(), Some("OnDeactivatingWarp"));
-    assert_eq!(da_action[1], PyRep::Tuple(vec![PyRep::Integer(ship_id)]));
+    assert_eq!(da_action[1], PyRep::Tuple(vec![PyRep::Integer(ship_id), PyRep::Integer(37)]));
 }
 
 // ============================================================================

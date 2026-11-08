@@ -23,8 +23,8 @@ mod drone_reconnect_finish;
 pub mod drone_return;
 
 pub use cluster_tick::{
-    on_advance_secs, populate_persisted_space_objects, seed_persisted_abandoned_drones,
-    tick_background_cluster,
+    on_advance_secs, on_advance_secs_with_sim_clock_rebase, populate_persisted_space_objects,
+    seed_persisted_abandoned_drones, tick_background_cluster,
 };
 pub use cluster_tick_downtime::{
     cleanup_npc_wrecks_and_reset_missions_on_downtime, clear_safe_logoff,
