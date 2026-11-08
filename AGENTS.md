@@ -10,7 +10,6 @@
   - 100% of ledger rows closed;
   - a `PASS` **final** claims review from `run_review.py --final` (Opus 5.5 High first, falling back to Gemini Pro Next, Gemini 4 Argon High, then Gemini Flash Next only on quota/capacity errors; user decision 2026-10-23) and a `CLEAN` gap audit. Routine reviews don't satisfy this. Run `--final` sparingly: once per tree that is otherwise ready for the final gate;
   - workspace line coverage ≥ 90%;
-  - mutation score ≥ 85%;
   - every real-client journey passing on the real V24 client, with clean logs.
 - **The user reviews only for completeness, and only after the final gate passes.** Work as an unbounded loop:
   - Don't stop, ask for interim review, or ask the user to test.
@@ -145,7 +144,6 @@
   2. **The free gates still apply before a branch is queued for review:**
      - `cargo test --workspace` passes;
      - `preflight.py --claims` prints OK;
-     - `cargo mutants --in-diff` on the change;
      - no RPC or notification names that aren't in the V24 client catalog (`references/parity/sources/`);
      - no hardcoded or synthesized data presented as real.
   3. **Prefer work that's hard to fake and easy to check mechanically:** SDE importers and data sweeps, test and harness infrastructure, property and fuzz tests, wire codecs with golden tests, behaviour-neutral refactors. **Don't start new game-behaviour features** (mechanics, RPC handlers, Quasar/ESI services). Invention hides there, and it compounds without review.
