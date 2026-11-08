@@ -256,7 +256,16 @@ async fn test_quasar_character_ship_logo_entitlements_live() {
         let (_, _, dg_bytes) = q_rpc(&ctx, &mut pilot.sess, "eve_public.dailygoal.api.GetAllCurrentRequest", Vec::new()).await;
         let dg_wm = WireMessage::decode(&dg_bytes).unwrap();
         for idx in 0..dg_wm.fields.len().min(4) {
-            let id_bytes = dg_wm.fields[idx].value.as_bytes().unwrap().to_vec();
+            let goal_wm = WireMessage::decode(dg_wm.fields[idx].value.as_bytes().unwrap()).unwrap();
+            let id_bytes = goal_wm
+                .fields
+                .iter()
+                .find(|f| f.field_number == 1)
+                .expect("Goal.id")
+                .value
+                .as_bytes()
+                .unwrap()
+                .to_vec();
             let mut dg_prog = Vec::new();
             encode_bytes_field(1, &id_bytes, &mut dg_prog);
             encode_bytes_field(2, &seq_msg(cid), &mut dg_prog);

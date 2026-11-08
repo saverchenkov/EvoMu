@@ -421,7 +421,44 @@ fn gameplay_events_and_all_12_rpc_handlers() {
             },
         )
         .expect("eve.dailygoal.api.GetAllRequest");
-    assert_eq!(get_all_curr.value, get_all_internal.value);
+    let cur_dyn = router
+        .descriptors
+        .decode_dynamic("eve_public.dailygoal.api.GetAllCurrentResponse", &get_all_curr.value)
+        .expect("decode GetAllCurrentResponse");
+    let int_dyn = router
+        .descriptors
+        .decode_dynamic("eve.dailygoal.api.GetAllResponse", &get_all_internal.value)
+        .expect("decode eve.dailygoal.api.GetAllResponse");
+    let cur_uuids: Vec<Vec<u8>> = match cur_dyn.get(1) {
+        Some(DynamicValue::Repeated(items)) => items
+            .iter()
+            .filter_map(|it| match it {
+                DynamicValue::Message(g) => match g.get(1) {
+                    Some(DynamicValue::Message(id)) => match id.get(1) {
+                        Some(DynamicValue::Bytes(b)) => Some(b.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let int_uuids: Vec<Vec<u8>> = match int_dyn.get(1) {
+        Some(DynamicValue::Repeated(items)) => items
+            .iter()
+            .filter_map(|it| match it {
+                DynamicValue::Message(id) => match id.get(1) {
+                    Some(DynamicValue::Bytes(b)) => Some(b.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    assert_eq!(cur_uuids, int_uuids);
 
     let goals = router.progression.daily_goals.get_or_init_goals_at(char_id, 600_000);
     let g1_uuid = goals[0].uuid; // KillNPC (cat 1, target 25)

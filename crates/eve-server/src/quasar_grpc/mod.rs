@@ -72,6 +72,7 @@ pub async fn handle_quasar_grpc_connection(
         .map(|sa| eve_db::gateway_tokens::normalize_peer_ip(sa.ip()));
     let mut h2_conn = h2::server::Builder::new()
         .max_concurrent_streams(256)
+        .max_local_error_reset_streams(None)
         .initial_window_size(1_048_576)
         .initial_connection_window_size(4_194_304)
         .max_frame_size(1_048_576)
@@ -82,11 +83,10 @@ pub async fn handle_quasar_grpc_connection(
         let (request, respond) = match accept_res {
             Ok(pair) => pair,
             Err(e) => {
-                if e.is_io() {
-                    break;
+                if !e.is_io() {
+                    tracing::warn!(error = %e, "Quasar gRPC stream accept error");
                 }
-                tracing::warn!(error = %e, "Quasar gRPC stream accept error");
-                continue;
+                break;
             }
         };
         let stream_ctx = Arc::clone(&ctx);
@@ -1062,5 +1062,554 @@ mod tests {
                 PyRep::Integer(133_499_990_000_000_000),
             ])
         );
+    }
+
+    #[tokio::test]
+    async fn test_quasar_grpc_h2c_e2e_client_crash_flows_wire_conformant() {
+        use crate::services::quasar_campaign_state::{
+            campaign_id_to_uuid_bytes, CAMPAIGN_STATE_ACTIVE, CAMPAIGN_STATE_COMPLETED,
+            CampaignObjectiveRecord, CampaignRecord, CampaignTrackRecord, OBJECTIVE_STATE_ACTIVE,
+            TRACK_STATE_STARTED,
+        };
+        use eve_proto::quasar::{
+            encode_bytes_field, encode_string_field, DynamicValue, QuasarDescriptorRegistry,
+        };
+
+        let ctx = Arc::new(ServerContext::with_repository(Arc::new(
+            eve_db::WorldRepository::with_demo_seed(),
+        )));
+        let now_u = ctx.now_unix();
+        let char_id: u32 = 90_000_001;
+        let corp_id: i64 = ctx.db.with_snapshot(|s| {
+            s.characters
+                .get(&(char_id as i64))
+                .map(|c| c.corporation_id)
+                .unwrap_or(98_000_001)
+        });
+
+        // Seed #256 (Corporation Goals): active corp project with unclaimed contribution reward.
+        let corp_goal_id: u64 = 7_700_001;
+        let mut corp_goal_uuid = vec![0u8; 16];
+        corp_goal_uuid[0..8].copy_from_slice(b"CORPGOAL");
+        corp_goal_uuid[8..16].copy_from_slice(&corp_goal_id.to_be_bytes());
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.corp_projects.insert(
+                corp_goal_id as i64,
+                eve_db::CorpProjectRecord {
+                    project_id: corp_goal_id as i64,
+                    corporation_id: corp_id,
+                    name: "Quasar 256 Test Goal".into(),
+                    target_quantity: 100,
+                    current_quantity: 40,
+                    isk_per_unit: eve_db::IskCents::from_isk(1_000),
+                    escrow_remaining: eve_db::IskCents::from_isk(50_000),
+                },
+            );
+            let mut details = eve_db::PersistedProjectDetails {
+                status: "Active".into(),
+                ..Default::default()
+            };
+            details.char_contributions.insert(char_id as i64, 40);
+            snap.alliance_war_state
+                .project_details
+                .insert(corp_goal_id as i64, details);
+        });
+
+        // Seed #257 (Career Goals / Job Board Relevance Profile): complete 2 career goals so claiming both APIs works.
+        let career_goals = ctx.quasar_gateway.progression.career_goals.get_or_init_goals(char_id);
+        let career_goal_uuid = career_goals.first().expect("seeded career goal 1").uuid;
+        let career_goal_uuid_2 = career_goals.get(1).expect("seeded career goal 2").uuid;
+        ctx.quasar_gateway
+            .progression
+            .career_goals
+            .mark_completed(char_id, &career_goal_uuid, now_u)
+            .expect("complete career goal 1");
+        ctx.quasar_gateway
+            .progression
+            .career_goals
+            .mark_completed(char_id, &career_goal_uuid_2, now_u)
+            .expect("complete career goal 2");
+
+        // Seed #259 (Achievements): complete 1 achievement so GetUnclaimedRequest returns a reward.
+        let ach_list = ctx.quasar_gateway.progression.achievements.get_or_init_achievements(char_id);
+        let ach_id = ach_list.first().expect("seeded achievement").def.id;
+        let ach_cat_id = ach_list.first().expect("seeded achievement").def.category_id;
+        ctx.quasar_gateway
+            .progression
+            .achievements
+            .mark_completed(char_id, ach_id, now_u)
+            .expect("complete achievement");
+
+        // Seed #260 (Daily Goals): complete 1 daily goal (remaining unclaimed).
+        let daily_goals = ctx
+            .quasar_gateway
+            .progression
+            .daily_goals
+            .get_or_init_goals_at(char_id, now_u);
+        let first_daily = daily_goals.first().expect("seeded daily goal").clone();
+        ctx.quasar_gateway
+            .progression
+            .daily_goals
+            .add_progress(char_id, &first_daily.uuid, first_daily.template.target, now_u);
+
+        // Seed #264 (Campaigns): active campaign in "event" namespace + upcoming + objective + track.
+        let camp_id: u64 = 5501;
+        let obj_id: u64 = 5502;
+        let trk_id: u64 = 5503;
+        let upcoming_camp_id: u64 = 5504;
+        let mut contributors = HashMap::new();
+        contributors.insert(char_id, (20i64, 2i64));
+        let mut trk_participants = HashMap::new();
+        trk_participants.insert(char_id, 2u64);
+        ctx.quasar_gateway
+            .progression
+            .extra
+            .register_campaign(
+                CampaignRecord {
+                    id: camp_id,
+                    name: "Quasar 264 Campaign".into(),
+                    description: "Reconciliation test".into(),
+                    namespace: "eve".into(),
+                    scheduled_start_unix: now_u.saturating_sub(60),
+                    scheduled_expiry_unix: now_u + 86_400,
+                    state: CAMPAIGN_STATE_ACTIVE,
+                    transition_unix: now_u.saturating_sub(60),
+                    etag: 1,
+                    objectives: vec![obj_id],
+                    ..Default::default()
+                },
+                vec![CampaignObjectiveRecord {
+                    id: obj_id,
+                    campaign_id: camp_id,
+                    name: "Mine Ore Objective".into(),
+                    target_progress: 100,
+                    current_progress: 20,
+                    committed_participants: vec![char_id],
+                    contributors,
+                    contribution_method: "MineAsteroid".into(),
+                    isk_reward_per_interval: 10_000,
+                    isk_reward_progress_interval: 10,
+                    state: OBJECTIVE_STATE_ACTIVE,
+                    transition_unix: now_u.saturating_sub(60),
+                    ..Default::default()
+                }],
+                vec![CampaignTrackRecord {
+                    id: trk_id,
+                    campaign_id: camp_id,
+                    key: "track_1".into(),
+                    target_progress_value: 50,
+                    current_progress: 2,
+                    participants: trk_participants,
+                    isk_reward_per_interval: 5_000,
+                    isk_reward_progress_interval: 1,
+                    state: TRACK_STATE_STARTED,
+                    transition_unix: now_u.saturating_sub(60),
+                    ..Default::default()
+                }],
+            )
+            .expect("register active campaign");
+        ctx.quasar_gateway
+            .progression
+            .extra
+            .register_campaign(
+                CampaignRecord {
+                    id: upcoming_camp_id,
+                    name: "Upcoming Campaign".into(),
+                    namespace: "eve".into(),
+                    scheduled_start_unix: now_u + 3600,
+                    state: 0,
+                    ..Default::default()
+                },
+                Vec::new(),
+                Vec::new(),
+            )
+            .expect("register upcoming campaign");
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let srv_ctx = Arc::clone(&ctx);
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = listener.accept().await {
+                let c = Arc::clone(&srv_ctx);
+                tokio::spawn(async move {
+                    let _ = handle_quasar_grpc_connection(sock, c).await;
+                });
+            }
+        });
+
+        let tcp = TcpStream::connect(addr).await.expect("connect");
+        let (mut h2_client, h2_conn) = h2::client::handshake(tcp).await.expect("h2 handshake");
+        tokio::spawn(async move {
+            let _ = h2_conn.await;
+        });
+
+        let dev_jwt = ctx
+            .db
+            .issue_gateway_dev_token(1, None, "tranquility", now_u + 3600, now_u)
+            .expect("issue_gateway_dev_token");
+        let app_uuid = uuid::Uuid::new_v4();
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("http://127.0.0.1/eve_public.gateway.Requests/Send")
+            .header("content-type", "application/grpc")
+            .header("authorization", format!("Bearer {dev_jwt}"))
+            .header("application_instance_uuid", app_uuid.to_string())
+            .body(())
+            .unwrap();
+        let (rsp_fut, mut send_body) = h2_client.send_request(req, false).unwrap();
+        let rsp = rsp_fut.await.unwrap();
+        assert_eq!(rsp.status(), StatusCode::OK);
+        let mut reader = GrpcFrameReader::new(rsp.into_body(), "identity".into());
+
+        // Helper encoded request payloads
+        let mut goal_id_req = Vec::new();
+        {
+            let mut id_msg = Vec::new();
+            encode_bytes_field(1, &corp_goal_uuid, &mut id_msg);
+            encode_bytes_field(1, &id_msg, &mut goal_id_req);
+        }
+        let mut career_claim_req = Vec::new();
+        {
+            let mut id_msg = Vec::new();
+            encode_bytes_field(1, &career_goal_uuid, &mut id_msg);
+            encode_bytes_field(1, &id_msg, &mut career_claim_req);
+        }
+        let mut career_api_claim_req = Vec::new();
+        {
+            let mut id_msg = Vec::new();
+            encode_bytes_field(1, &career_goal_uuid_2, &mut id_msg);
+            encode_bytes_field(1, &id_msg, &mut career_api_claim_req);
+        }
+        let mut daily_get_req = Vec::new();
+        {
+            let mut id_msg = Vec::new();
+            encode_bytes_field(1, &first_daily.uuid, &mut id_msg);
+            encode_bytes_field(1, &id_msg, &mut daily_get_req);
+        }
+        let mut ach_get_req = Vec::new();
+        {
+            let mut u = [0u8; 16];
+            u[12..16].copy_from_slice(&ach_id.to_be_bytes());
+            let mut id_msg = Vec::new();
+            encode_bytes_field(1, &u, &mut id_msg);
+            encode_bytes_field(1, &id_msg, &mut ach_get_req);
+        }
+        let mut ach_cat_req = Vec::new();
+        {
+            let mut u = [0u8; 16];
+            u[12..16].copy_from_slice(&ach_cat_id.to_be_bytes());
+            let mut id_msg = Vec::new();
+            encode_bytes_field(1, &u, &mut id_msg);
+            encode_bytes_field(1, &id_msg, &mut ach_cat_req);
+        }
+        let mut camp_get_req = Vec::new();
+        {
+            let mut id_msg = Vec::new();
+            encode_bytes_field(1, &campaign_id_to_uuid_bytes(camp_id), &mut id_msg);
+            encode_bytes_field(1, &id_msg, &mut camp_get_req);
+        }
+        let mut camp_ns_req = Vec::new();
+        {
+            let mut ns_msg = Vec::new();
+            encode_string_field(1, "eve", &mut ns_msg);
+            encode_bytes_field(1, &ns_msg, &mut camp_ns_req);
+        }
+
+        let cases: Vec<(&str, Vec<u8>, &str, bool)> = vec![
+            // #256 corporation/client/goals/goalsController.py -> get_unclaimed_goal_ids
+            ("eve_public.corporationgoal.api.GetMineWithRewardsRequest", Vec::new(), "eve_public.corporationgoal.api.GetMineWithRewardsResponse", true),
+            ("eve_public.corporationgoal.api.GetActiveRequest", Vec::new(), "eve_public.corporationgoal.api.GetActiveResponse", true),
+            ("eve_public.corporationgoal.api.GetAllRequest", Vec::new(), "eve_public.corporationgoal.api.GetAllResponse", true),
+            ("eve_public.corporationgoal.api.GetInactiveRequest", Vec::new(), "eve_public.corporationgoal.api.GetInactiveResponse", false),
+            ("eve_public.corporationgoal.api.GetContributorSummariesForGoalRequest", goal_id_req.clone(), "eve_public.corporationgoal.api.GetContributorSummariesForGoalResponse", true),
+            ("eve_public.corporationgoal.api.GetMyContributorSummaryForGoalRequest", goal_id_req.clone(), "eve_public.corporationgoal.api.GetMyContributorSummaryForGoalResponse", true),
+            ("eve_public.corporationgoal.api.GetMyContributorSummariesRequest", Vec::new(), "eve_public.corporationgoal.api.GetMyContributorSummariesResponse", true),
+            ("eve_public.goal.api.GetRequest", goal_id_req.clone(), "eve_public.goal.api.GetResponse", true),
+            ("eve_public.goal.api.GetAllRequest", Vec::new(), "eve_public.goal.api.GetAllResponse", true),
+            ("eve_public.goal.api.GetCapacityRequest", Vec::new(), "eve_public.goal.api.GetCapacityResponse", true),
+            // #257 jobboard/client/relevance_profile.py -> _build_profile (career goals, skill plans, freelance)
+            ("eve_public.career.goal.api.GetDefinitionsRequest", Vec::new(), "eve_public.career.goal.api.GetDefinitionsResponse", true),
+            ("eve_public.career.goal.api.GetAllRequest", Vec::new(), "eve_public.career.goal.api.GetAllResponse", true),
+            ("eve_public.app.eveonline.career.goal.GetAllRequest", Vec::new(), "eve_public.app.eveonline.career.goal.GetAllResponse", true),
+            ("eve_public.app.eveonline.career.goal.ClaimRewardRequest", career_claim_req, "eve_public.app.eveonline.career.goal.ClaimRewardResponse", true),
+            ("eve_public.career.goal.api.ClaimRewardRequest", career_api_claim_req, "eve_public.career.goal.api.ClaimRewardResponse", false),
+            ("eve_public.skill.plan.GetAllRequest", Vec::new(), "eve_public.skill.plan.GetAllResponse", false),
+            ("eve_public.skill.plan.GetActiveRequest", Vec::new(), "eve_public.skill.plan.GetActiveResponse", false),
+            ("eve_public.freelance.project.api.GetAllActiveRequest", Vec::new(), "eve_public.freelance.project.api.GetAllActiveResponse", false),
+            ("eve_public.freelance.project.api.GetAllCommittedRequest", Vec::new(), "eve_public.freelance.project.api.GetAllCommittedResponse", false),
+            ("eve_public.freelance.project.api.GetAllUnredeemedRequest", Vec::new(), "eve_public.freelance.project.api.GetAllUnredeemedResponse", false),
+            ("eve_public.freelance.project.api.GetCommitLimitsRequest", Vec::new(), "eve_public.freelance.project.api.GetCommitLimitsResponse", true),
+            ("eve_public.freelance.project.api.GetCreationLimitsRequest", Vec::new(), "eve_public.freelance.project.api.GetCreationLimitsResponse", true),
+            ("eve_public.freelance.project.api.GetCreationPricesRequest", Vec::new(), "eve_public.freelance.project.api.GetCreationPricesResponse", true),
+            ("eve_public.freelance.contributionmethod.definition.api.GetAllLatestRequest", Vec::new(), "eve_public.freelance.contributionmethod.definition.api.GetAllLatestResponse", true),
+            ("eve_public.freelance.contributionmethod.definition.api.GetAllLatestWithinMajorRequest", Vec::new(), "eve_public.freelance.contributionmethod.definition.api.GetAllLatestWithinMajorResponse", true),
+            // #259 btnDataAchievements.py -> update_badge
+            ("eve_public.achievement.reward.api.GetUnclaimedRequest", Vec::new(), "eve_public.achievement.reward.api.GetUnclaimedResponse", true),
+            ("eve_public.achievement.api.GetRequest", ach_get_req, "eve_public.achievement.api.GetResponse", true),
+            ("eve_public.achievement.category.api.GetRequest", ach_cat_req, "eve_public.achievement.category.api.GetResponse", false),
+            ("eve_public.achievement.showcase.api.GetCharacterScoreRequest", Vec::new(), "eve_public.achievement.showcase.api.GetCharacterScoreResponse", true),
+            ("eve_public.achievement.definition.api.cdn.GetLatestRequest", vec![0x10, 0x01], "eve_public.achievement.definition.api.cdn.GetLatestResponse", true),
+            // #260 dailygoals/client/goalsController.py -> get_unclaimed_goal_ids
+            ("eve_public.dailygoal.api.GetAllCurrentRequest", Vec::new(), "eve_public.dailygoal.api.GetAllCurrentResponse", true),
+            ("eve_public.dailygoal.api.GetAllCompletedWithEntitlementsRequest", Vec::new(), "eve_public.dailygoal.api.GetAllCompletedWithEntitlementsResponse", true),
+            ("eve_public.dailygoal.api.GetAllWithRewardsRequest", Vec::new(), "eve_public.dailygoal.api.GetAllWithRewardsResponse", true),
+            ("eve_public.dailygoal.api.GetRequest", daily_get_req.clone(), "eve_public.dailygoal.api.GetResponse", true),
+            ("eve_public.dailygoal.api.RedeemRequest", daily_get_req, "eve_public.dailygoal.api.RedeemResponse", false),
+            // #264 campaigns/client/v1/repository.py -> _wait_to_reconcile
+            ("eve_public.campaign.api.GetAllRequest", Vec::new(), "eve_public.campaign.api.GetAllResponse", true),
+            ("eve_public.campaign.api.GetAllForNamespaceRequest", camp_ns_req.clone(), "eve_public.campaign.api.GetAllForNamespaceResponse", true),
+            ("eve_public.campaign.api.GetRequest", camp_get_req.clone(), "eve_public.campaign.api.GetResponse", true),
+            ("eve_public.campaign.api.GetStatusRequest", camp_get_req.clone(), "eve_public.campaign.api.GetStatusResponse", true),
+            ("eve_public.campaign.api.GetParticipantStatsRequest", camp_get_req, "eve_public.campaign.api.GetParticipantStatsResponse", true),
+            ("eve_public.campaign.api.GetLimitsRequest", Vec::new(), "eve_public.campaign.api.GetLimitsResponse", true),
+            ("eve_public.campaign.api.GetAllUnredeemedRewardsRequest", Vec::new(), "eve_public.campaign.api.GetAllUnredeemedRewardsResponse", true),
+            ("eve_public.campaign.api.GetAllUnredeemedParticipantRewardsRequest", camp_ns_req, "eve_public.campaign.api.GetAllUnredeemedParticipantRewardsResponse", true),
+            ("eve_public.campaign.contributionmethod.definition.api.GetAllRequest", Vec::new(), "eve_public.campaign.contributionmethod.definition.api.GetAllResponse", true),
+            ("eve_public.campaign.trigger.eventmatch.definition.api.GetAllRequest", Vec::new(), "eve_public.campaign.trigger.eventmatch.definition.api.GetAllResponse", true),
+            ("type.evetech.net/eve_public.corporationgoal.api.GetMineWithRewardsRequest", Vec::new(), "eve_public.corporationgoal.api.GetMineWithRewardsResponse", true),
+            ("type.evetech.net/eve_public.dailygoal.api.GetAllCurrentRequest", Vec::new(), "eve_public.dailygoal.api.GetAllCurrentResponse", true),
+            ("type.evetech.net/eve_public.campaign.api.GetAllRequest", Vec::new(), "eve_public.campaign.api.GetAllResponse", true),
+            ("type.evetech.net/eve_public.achievement.reward.api.GetUnclaimedRequest", Vec::new(), "eve_public.achievement.reward.api.GetUnclaimedResponse", true),
+        ];
+
+        for (idx, (req_type, req_bytes, expected_rsp_type, require_non_empty)) in cases.iter().enumerate() {
+            let mut corr = vec![0u8; 16];
+            corr[14] = (idx >> 8) as u8;
+            corr[15] = (idx & 0xFF) as u8;
+            let type_url = if eve_proto::quasar::has_quasar_type_url_prefix(req_type) {
+                (*req_type).to_string()
+            } else {
+                format!("{TYPE_GOOGLEAPIS_PREFIX}{req_type}")
+            };
+            let pub_req = EvePublicRequest {
+                issued: Some(GoogleTimestamp {
+                    seconds: now_u as i64,
+                    nanos: 0,
+                }),
+                correlation_uuid: corr.clone(),
+                payload: Some(GoogleAny {
+                    type_url,
+                    value: req_bytes.clone(),
+                }),
+                external_origin: "eve-desktop-client/3619879 tq".into(),
+                application_instance_uuid: app_uuid.as_bytes().to_vec(),
+                authoritative_context: Some(AuthoritativeContext::for_session_at(
+                    Some(1),
+                    Some(char_id),
+                    Some(corp_id as u32),
+                    0,
+                    "tranquility",
+                    Vec::new(),
+                    now_u,
+                )),
+                trace_context: None,
+            };
+            let is_last = idx + 1 == cases.len();
+            send_body
+                .send_data(frame_grpc_message(&pub_req.encode_proto()), is_last)
+                .unwrap();
+            let raw_rsp = reader
+                .next_message()
+                .await
+                .unwrap()
+                .expect("streamed EvePublicResponse");
+            let decoded = EvePublicResponse::decode_proto(&raw_rsp).expect("decode EvePublicResponse");
+            assert_eq!(
+                decoded.status_code, STATUS_OK,
+                "{req_type} returned status {} ({})",
+                decoded.status_code, decoded.status_message
+            );
+            let payload = decoded
+                .payload
+                .as_ref()
+                .unwrap_or_else(|| panic!("{req_type} missing payload"));
+            let norm = QuasarDescriptorRegistry::normalize_type_name(&payload.type_url);
+            assert_eq!(
+                norm, *expected_rsp_type,
+                "{req_type} returned unexpected type_url {}",
+                payload.type_url
+            );
+            if *require_non_empty {
+                assert!(
+                    !payload.value.is_empty(),
+                    "{req_type} returned empty bytes for {expected_rsp_type}"
+                );
+            }
+            let dyn_rsp = ctx
+                .quasar_gateway
+                .descriptors
+                .decode_dynamic(norm, &payload.value)
+                .unwrap_or_else(|e| panic!("{req_type} -> {norm} failed descriptor decode: {e}"));
+
+            // Spot-check critical nested decoded structures
+            if *req_type == "eve_public.dailygoal.api.GetAllCurrentRequest" {
+                match dyn_rsp.get(1) {
+                    Some(DynamicValue::Repeated(items)) => {
+                        assert!(!items.is_empty(), "GetAllCurrentResponse.goals should be non-empty");
+                        for it in items {
+                            let DynamicValue::Message(goal) = it else {
+                                panic!("GetAllCurrentResponse.goals entry must decode as Goal message");
+                            };
+                            assert!(goal.get(1).is_some(), "Goal.id must be populated");
+                            assert!(goal.get(2).is_some(), "Goal.goal attributes must be populated");
+                        }
+                    }
+                    other => panic!("Unexpected GetAllCurrentResponse field 1: {other:?}"),
+                }
+            } else if *req_type == "eve_public.dailygoal.api.GetAllCompletedWithEntitlementsRequest" {
+                match dyn_rsp.get(1) {
+                    Some(DynamicValue::Repeated(items)) => {
+                        assert!(!items.is_empty(), "GetAllCompletedWithEntitlementsResponse.goals non-empty");
+                        let DynamicValue::Message(goal) = &items[0] else {
+                            panic!("GetAllCompletedWithEntitlementsResponse.goals entry must be Goal");
+                        };
+                        assert!(goal.get(1).is_some(), "Completed Goal.id must be populated");
+                    }
+                    other => panic!("Unexpected GetAllCompletedWithEntitlementsResponse field 1: {other:?}"),
+                }
+            } else if *req_type == "eve_public.app.eveonline.career.goal.ClaimRewardRequest" {
+                assert!(dyn_rsp.get(1).is_some(), "ClaimRewardResponse.goal must be populated");
+            }
+        }
+        assert!(reader.next_message().await.unwrap().is_none());
+        let _ = CAMPAIGN_STATE_COMPLETED;
+    }
+
+    #[tokio::test]
+    async fn test_quasar_grpc_h2c_unlimited_resets_and_non_io_accept_error_breaks() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let ctx = Arc::new(ServerContext::with_repository(Arc::new(
+            eve_db::WorldRepository::with_demo_seed(),
+        )));
+
+        // Part 1: Over 1024 unary RPC calls and stream resets on a single persistent HTTP/2
+        // connection must succeed without triggering `locally-reset streams reached limit (1024)`.
+        {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("local_addr");
+            let srv_ctx = Arc::clone(&ctx);
+            let srv_task = tokio::spawn(async move {
+                let (sock, _) = listener.accept().await.expect("accept");
+                handle_quasar_grpc_connection(sock, srv_ctx).await
+            });
+
+            let tcp = TcpStream::connect(addr).await.expect("connect");
+            let (mut h2_client, h2_conn) = h2::client::handshake(tcp).await.expect("h2 handshake");
+            let mut conn_task = tokio::spawn(async move {
+                let _ = h2_conn.await;
+            });
+
+            for i in 0..2_200 {
+                tokio::time::timeout(
+                    Duration::from_secs(2),
+                    std::future::poll_fn(|cx| h2_client.poll_ready(cx)),
+                )
+                .await
+                .unwrap_or_else(|_| panic!("poll_ready timeout at i={i}"))
+                .expect("h2 ready");
+                let req = Request::builder()
+                    .method("POST")
+                    .uri("http://127.0.0.1/eve_public.gateway.Requests/Ping")
+                    .header("content-type", "application/grpc")
+                    .body(())
+                    .unwrap();
+                if i % 2 == 0 {
+                    // Normal unary Ping completion (>1024 unary calls total)
+                    let (rsp_fut, mut send_body) = h2_client.send_request(req, false).unwrap();
+                    send_body
+                        .send_data(Bytes::from_static(&EMPTY_GRPC_FRAME), true)
+                        .unwrap();
+                    let rsp = tokio::time::timeout(Duration::from_secs(2), rsp_fut)
+                        .await
+                        .unwrap_or_else(|_| panic!("unary ping rsp timeout at i={i}"))
+                        .expect("unary ping");
+                    assert_eq!(rsp.status(), StatusCode::OK);
+                    let mut reader = GrpcFrameReader::new(rsp.into_body(), "identity".into());
+                    let frame = reader.next_message().await.unwrap().expect("ping frame");
+                    assert!(frame.is_empty());
+                    assert!(reader.next_message().await.unwrap().is_none());
+                } else {
+                    // Server-aborted stream via truncated frame (>1024 server stream resets total)
+                    let (rsp_fut, mut send_body) = h2_client.send_request(req, false).unwrap();
+                    send_body
+                        .send_data(Bytes::from_static(&[0, 0, 0, 0, 5, 1, 2]), true)
+                        .unwrap();
+                    let _ = tokio::time::timeout(Duration::from_secs(2), rsp_fut)
+                        .await
+                        .unwrap_or_else(|_| panic!("reset stream rsp timeout at i={i}"));
+                }
+            }
+            std::future::poll_fn(|cx| h2_client.poll_ready(cx))
+                .await
+                .expect("h2 ready final");
+            let req = Request::builder()
+                .method("POST")
+                .uri("http://127.0.0.1/eve_public.gateway.Requests/Ping")
+                .header("content-type", "application/grpc")
+                .body(())
+                .unwrap();
+            let (rsp_fut, mut send_body) = h2_client.send_request(req, false).unwrap();
+            send_body
+                .send_data(Bytes::from_static(&EMPTY_GRPC_FRAME), true)
+                .unwrap();
+            let rsp = rsp_fut.await.expect("ping after >1024 calls/resets");
+            assert_eq!(rsp.status(), StatusCode::OK);
+            let mut reader = GrpcFrameReader::new(rsp.into_body(), "identity".into());
+            let frame = reader.next_message().await.unwrap().expect("ping frame");
+            assert!(frame.is_empty());
+            assert!(reader.next_message().await.unwrap().is_none());
+
+            drop(h2_client);
+            let _ = tokio::time::timeout(Duration::from_secs(2), &mut conn_task)
+                .await
+                .unwrap_or_else(|_| {
+                    conn_task.abort();
+                    Ok(())
+                });
+            let _ = tokio::time::timeout(Duration::from_secs(2), srv_task)
+                .await
+                .expect("server exited cleanly after client close");
+        }
+
+        // Part 2: A connection-level non-IO HTTP/2 protocol error while the TCP socket remains open
+        // must break out of `h2_conn.accept().await` cleanly instead of spinning forever.
+        {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("local_addr");
+            let srv_ctx = Arc::clone(&ctx);
+            let srv_task = tokio::spawn(async move {
+                let (sock, _) = listener.accept().await.expect("accept");
+                handle_quasar_grpc_connection(sock, srv_ctx).await
+            });
+
+            let mut raw = TcpStream::connect(addr).await.expect("connect");
+            // HTTP/2 client connection preface + empty SETTINGS frame + SETTINGS ACK.
+            raw.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+                .await
+                .unwrap();
+            raw.write_all(&[0, 0, 0, 0x04, 0x00, 0, 0, 0, 0])
+                .await
+                .unwrap();
+            let mut buf = [0u8; 64];
+            let _ = raw.read(&mut buf).await.unwrap();
+            raw.write_all(&[0, 0, 0, 0x04, 0x01, 0, 0, 0, 0])
+                .await
+                .unwrap();
+            // Send connection-level WINDOW_UPDATE (type 0x08) on stream 0 with increment 0 -> PROTOCOL_ERROR.
+            raw.write_all(&[0, 0, 4, 0x08, 0x00, 0, 0, 0, 0, 0, 0, 0, 0])
+                .await
+                .unwrap();
+            raw.flush().await.unwrap();
+
+            // Even with `raw` kept open (no EOF/IO error), the server accept loop must terminate promptly.
+            let joined = tokio::time::timeout(Duration::from_secs(2), srv_task)
+                .await
+                .expect("accept loop must break on non-IO HTTP/2 protocol error instead of spinning")
+                .expect("server task panicked");
+            assert!(joined.is_ok(), "unexpected error: {joined:?}");
+            drop(raw);
+        }
     }
 }

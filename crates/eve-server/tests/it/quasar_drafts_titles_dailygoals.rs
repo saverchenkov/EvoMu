@@ -457,7 +457,9 @@ async fn quasar_daily_goals_configurable_and_admin_targeting() {
     let goal_items: Vec<&WireField> = current_wm.fields.iter().filter(|f| f.field_number == 1).collect();
     assert!(
         goal_items.iter().any(|item| {
-            let id_wm = WireMessage::decode(item.value.as_bytes().unwrap()).unwrap();
+            let goal_wm = WireMessage::decode(item.value.as_bytes().unwrap()).unwrap();
+            let id_bytes = goal_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap();
+            let id_wm = WireMessage::decode(id_bytes).unwrap();
             let uuid = id_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap();
             uuid == &custom_uuid
         }),

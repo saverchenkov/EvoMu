@@ -1005,9 +1005,19 @@ pub fn register_daily_goal_handlers(
             let goals = mgr.get_or_init_goals_at(cid, ctx.now_unix());
             let mut out = Vec::new();
             for g in &goals {
+                let mut goal_entry = Vec::new();
                 let mut id_bytes = Vec::new();
                 encode_goal_identifier(&g.uuid, &mut id_bytes);
-                encode_bytes_field(1, &id_bytes, &mut out);
+                encode_bytes_field(1, &id_bytes, &mut goal_entry);
+                let mut attr_bytes = Vec::new();
+                encode_goal_attributes(&g.template, &mut attr_bytes);
+                encode_bytes_field(2, &attr_bytes, &mut goal_entry);
+                encode_varint_field(3, g.current_progress, &mut goal_entry);
+                encode_goal_earnings(&g.template, 5, &mut goal_entry);
+                if g.paid_completion {
+                    encode_varint_field(6, 1, &mut goal_entry);
+                }
+                encode_bytes_field(1, &goal_entry, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.GetAllCurrentResponse"),
@@ -1058,9 +1068,11 @@ pub fn register_daily_goal_handlers(
             let goals = mgr.get_or_init_goals_at(cid, ctx.now_unix());
             let mut out = Vec::new();
             for g in goals.iter().filter(|g| g.completed) {
+                let mut goal_entry = Vec::new();
                 let mut id_bytes = Vec::new();
                 encode_goal_identifier(&g.uuid, &mut id_bytes);
-                encode_bytes_field(1, &id_bytes, &mut out);
+                encode_bytes_field(1, &id_bytes, &mut goal_entry);
+                encode_bytes_field(1, &goal_entry, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!(

@@ -14,8 +14,8 @@ use crate::quasar_gateway::{
 };
 use eve_db::{IskCents, WorldRepository};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, DynamicValue, GoogleAny, GoogleEmpty,
-    QuasarMessage, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
+    encode_bytes_field, encode_varint_field, DynamicValue, GoogleAny, WireMessage,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -905,7 +905,12 @@ pub fn register_career_goal_handlers(
                 let _ = mgr.claim_reward(cid, &target_uuid, &db_claim)?;
                 mgr.save_to_db();
             }
-            Ok(GoogleEmpty.to_any())
+            Ok(GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.ClaimRewardResponse"
+                ),
+                value: Vec::new(),
+            })
         }),
     );
 
@@ -980,7 +985,12 @@ pub fn register_career_goal_handlers(
                 );
             }
 
-            Ok(GoogleEmpty.to_any())
+            Ok(GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.admin.ProgressResponse"
+                ),
+                value: Vec::new(),
+            })
         }),
     );
 
@@ -1014,7 +1024,12 @@ pub fn register_career_goal_handlers(
                 ctx.now_unix(),
             );
 
-            Ok(GoogleEmpty.to_any())
+            Ok(GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.admin.CompleteResponse"
+                ),
+                value: Vec::new(),
+            })
         }),
     );
 
@@ -1069,7 +1084,16 @@ pub fn register_career_goal_handlers(
                 let _ = mgr.claim_reward(cid, &target_uuid, &db_app_claim)?;
                 mgr.save_to_db();
             }
-            Ok(GoogleEmpty.to_any())
+            let mut id_bytes = Vec::new();
+            encode_career_goal_identifier(&target_uuid, &mut id_bytes);
+            let mut out = Vec::new();
+            encode_bytes_field(1, &id_bytes, &mut out);
+            Ok(GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.app.eveonline.career.goal.ClaimRewardResponse"
+                ),
+                value: out,
+            })
         }),
     );
 
@@ -1162,7 +1186,12 @@ pub fn register_career_goal_handlers(
                 };
                 let _ = mgr.mark_completed(target_char, &target_uuid, ctx.now_unix())?;
                 mgr.save_to_db();
-                Ok(GoogleEmpty.to_any())
+                Ok(GoogleAny {
+                    type_url: format!(
+                        "{TYPE_GOOGLEAPIS_PREFIX}eve.career.goal.api.admin.CompleteResponse"
+                    ),
+                    value: Vec::new(),
+                })
             }),
         );
     }

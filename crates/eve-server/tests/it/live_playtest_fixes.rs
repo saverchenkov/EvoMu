@@ -273,16 +273,30 @@ async fn test_319_320_daily_goals_includes_daily_bonus_job() {
 
     let mut found_daily_bonus = false;
     for f in wm.fields.iter().filter(|f| f.field_number == 1) {
-        let Some(id_bytes) = f.value.as_bytes() else {
+        let Some(goal_bytes) = f.value.as_bytes() else {
             continue;
         };
+        let goal_dyn = reg
+            .decode_dynamic(
+                "eve_public.dailygoal.api.GetAllCurrentResponse.Goal",
+                goal_bytes,
+            )
+            .expect("decode GetAllCurrentResponse.Goal");
+        let Some(DynamicValue::Message(id_msg)) = goal_dyn.get(1) else {
+            continue;
+        };
+        let Some(DynamicValue::Bytes(uuid_bytes)) = id_msg.get(1) else {
+            continue;
+        };
+        let mut id_encoded = Vec::new();
+        encode_bytes_field(1, uuid_bytes, &mut id_encoded);
         let get_rsp = quasar_rpc(
             &ctx,
             &mut sess,
             "eve_public.dailygoal.api.GetRequest",
             {
                 let mut req = Vec::new();
-                encode_bytes_field(1, id_bytes, &mut req);
+                encode_bytes_field(1, &id_encoded, &mut req);
                 req
             },
         )

@@ -139,9 +139,15 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
 
     let mut uuids = Vec::new();
     for f in &goal_fields {
-        let id_dyn = reg
-            .decode_dynamic("eve_public.dailygoal.Identifier", f.value.as_bytes().unwrap())
-            .expect("decode Identifier");
+        let goal_dyn = reg
+            .decode_dynamic(
+                "eve_public.dailygoal.api.GetAllCurrentResponse.Goal",
+                f.value.as_bytes().unwrap(),
+            )
+            .expect("decode GetAllCurrentResponse.Goal");
+        let Some(DynamicValue::Message(id_dyn)) = goal_dyn.get(1) else {
+            panic!("missing Goal.id");
+        };
         let Some(DynamicValue::Bytes(b)) = id_dyn.get(1) else {
             panic!("missing uuid bytes");
         };

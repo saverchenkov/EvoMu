@@ -189,7 +189,7 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
         (ch.balance.0, ch.free_skill_points)
     });
 
-    // 1. Query current daily goals via eve_public.dailygoal.api.GetAllCurrentRequest (repeated Identifier goals = 1)
+    // 1. Query current daily goals via eve_public.dailygoal.api.GetAllCurrentRequest (repeated Goal goals = 1)
     let rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetAllCurrentRequest", Vec::new()).await;
     assert_eq!(rsp.status_code, STATUS_OK);
     let payload = rsp.payload.expect("payload present");
@@ -202,13 +202,19 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
     // Target configured goal #1 ([0x44, 0x47, 0x01, ..., 1]) and verify its Identifier is present
     let target_uuid = [0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
     assert!(goal_entries.iter().any(|f| {
-        reg.decode_dynamic("eve_public.dailygoal.Identifier", f.value.as_bytes().unwrap())
-            .ok()
-            .and_then(|m| match m.get(1) {
+        reg.decode_dynamic(
+            "eve_public.dailygoal.api.GetAllCurrentResponse.Goal",
+            f.value.as_bytes().unwrap(),
+        )
+        .ok()
+        .and_then(|m| match m.get(1) {
+            Some(eve_proto::quasar::DynamicValue::Message(id_msg)) => match id_msg.get(1) {
                 Some(eve_proto::quasar::DynamicValue::Bytes(b)) => Some(b.as_slice() == target_uuid),
                 _ => None,
-            })
-            .unwrap_or(false)
+            },
+            _ => None,
+        })
+        .unwrap_or(false)
     }));
 
     // Full goal definition + progress + earnings decoded via GetRequest -> GetResponse
@@ -241,15 +247,20 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
 
     let def_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetAllCompletedWithEntitlementsRequest", Vec::new()).await;
     assert_eq!(def_rsp.status_code, STATUS_OK);
-    let def_wm = WireMessage::decode(&def_rsp.payload.unwrap().value).unwrap();
-    assert!(def_wm.fields.iter().any(|f| {
-        reg.decode_dynamic("eve_public.dailygoal.Identifier", f.value.as_bytes().unwrap())
-            .ok()
-            .and_then(|m| match m.get(1) {
-                Some(eve_proto::quasar::DynamicValue::Bytes(b)) => Some(b.as_slice() == target_uuid),
-                _ => None,
-            })
-            .unwrap_or(false)
+    let def_dyn = reg.decode_dynamic("eve_public.dailygoal.api.GetAllCompletedWithEntitlementsResponse", &def_rsp.payload.unwrap().value).unwrap();
+    let Some(eve_proto::quasar::DynamicValue::Repeated(def_goals)) = def_dyn.get(1) else {
+        panic!("expected repeated goals in GetAllCompletedWithEntitlementsResponse: {def_dyn:?}");
+    };
+    assert!(def_goals.iter().any(|g| {
+        let eve_proto::quasar::DynamicValue::Message(gm) = g else {
+            return false;
+        };
+        match gm.get(1) {
+            Some(eve_proto::quasar::DynamicValue::Message(id_msg)) => {
+                matches!(id_msg.get(1), Some(eve_proto::quasar::DynamicValue::Bytes(b)) if b.as_slice() == target_uuid)
+            }
+            _ => false,
+        }
     }));
 
     let rew_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetAllWithRewardsRequest", Vec::new()).await;

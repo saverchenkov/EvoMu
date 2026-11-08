@@ -323,8 +323,9 @@ async fn test_quasar_achievements_career_and_daily_goals_live() {
     let dg_all = q_rpc(&ctx, &mut pilot, "eve_public.dailygoal.api.GetAllCurrentRequest", Vec::new()).await;
     assert_eq!(dg_all.status_code, STATUS_OK);
     let dg_wm = decode_wire(&dg_all);
-    let first_dg = wire_sub(&dg_wm, 1).expect("seeded daily goal");
-    let dg_uuid: [u8; 16] = wire_bytes(&first_dg, 1)
+    let first_dg_goal = wire_sub(&dg_wm, 1).expect("seeded daily goal");
+    let first_dg_id = wire_sub(&first_dg_goal, 1).expect("seeded daily goal id");
+    let dg_uuid: [u8; 16] = wire_bytes(&first_dg_id, 1)
         .as_slice()
         .try_into()
         .unwrap();
