@@ -217,6 +217,33 @@ pub(crate) fn is_structure_market_online(snap: &eve_db::WorldStateSnapshot, stru
     })
 }
 
+/// Checks whether `char_id` can view market orders at `location_id` (`#553`):
+/// NPC stations always return `true`; Upwell structures enforce online market service,
+/// `character_has_structure_acl_access`, docking/profile ACLs (including 14-day role freeze),
+/// and `SETTING_MARKET_TAX` service ACLs via `check_upwell_market_access_and_rate`.
+pub(crate) fn can_caller_view_upwell_market_orders(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    location_id: i64,
+    now_unix: u64,
+) -> bool {
+    let Some(st) = snap.structures.get(&location_id) else {
+        return true;
+    };
+    is_structure_market_online(snap, location_id)
+        && crate::esi::universe_routes::character_has_structure_acl_access(snap, char_id, st)
+        && crate::services::structure_profile_services::check_upwell_market_access_and_rate(
+            ctx,
+            snap,
+            location_id,
+            char_id,
+            now_unix,
+            "MarketHubOffline",
+        )
+        .is_ok()
+}
+
 pub(crate) fn resolve_structure_broker_rate(snap: &eve_db::WorldStateSnapshot, structure_id: i64) -> f64 {
     let nid = -(1_000_000_000_000_i64.saturating_add(structure_id.abs()));
     if let Some(note) = snap.owner_notes.get(&nid) {
@@ -442,7 +469,7 @@ pub fn handle(
         }
 
         "GetOrders" => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -470,7 +497,13 @@ pub fn handle(
                         o.type_id == type_id
                             && o.vol_remaining > 0
                             && o.region_id == region_id
-                            && is_structure_market_online(snap, o.station_id)
+                            && can_caller_view_upwell_market_orders(
+                                ctx,
+                                snap,
+                                char_id,
+                                o.station_id,
+                                now_unix,
+                            )
                     })
                     .collect();
                 matching.sort_by_key(|o| o.order_id);
@@ -492,9 +525,10 @@ pub fn handle(
         }
 
         "GetStationAsks" => {
-            if let Err(e) = ServerContext::require_character(session) {
-                return Some(Err(e));
-            }
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let Some(station_id) = session.station_id.or(session.structure_id) else {
                 return Some(Err(BridgeRpcError {
                     code: "NotDockedAtStation".into(),
@@ -508,13 +542,20 @@ pub fn handle(
                     message: "Session has no active region".into(),
                 }));
             };
+            let now_unix = ctx.now_unix();
             let rows = ctx.db.with_snapshot(|snap| {
                 best_asks_to_summary_rows(snap.market_orders.values().filter(|o| {
                     !o.is_bid
                         && o.vol_remaining > 0
                         && o.region_id == region_id
                         && o.station_id == station_id
-                        && is_structure_market_online(snap, o.station_id)
+                        && can_caller_view_upwell_market_orders(
+                            ctx,
+                            snap,
+                            char_id,
+                            o.station_id,
+                            now_unix,
+                        )
                 }))
             });
             Some(Ok(DBRowDescriptor::market_summary_header()
@@ -522,21 +563,30 @@ pub fn handle(
         }
 
         "GetRegionBest" => {
-            if let Err(e) = ServerContext::require_character(session) {
-                return Some(Err(e));
-            }
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let Some(region_id) = session.region_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoRegion".into(),
                     message: "Session has no active region".into(),
                 }));
             };
+            let now_unix = ctx.now_unix();
             let rows = ctx.db.with_snapshot(|snap| {
-                best_asks_to_summary_rows(
-                    snap.market_orders
-                        .values()
-                        .filter(|o| !o.is_bid && o.vol_remaining > 0 && o.region_id == region_id && is_structure_market_online(snap, o.station_id)),
-                )
+                best_asks_to_summary_rows(snap.market_orders.values().filter(|o| {
+                    !o.is_bid
+                        && o.vol_remaining > 0
+                        && o.region_id == region_id
+                        && can_caller_view_upwell_market_orders(
+                            ctx,
+                            snap,
+                            char_id,
+                            o.station_id,
+                            now_unix,
+                        )
+                }))
             });
             Some(Ok(DBRowDescriptor::market_summary_header()
                 .build_cindexed_rowset("typeID", rows)))

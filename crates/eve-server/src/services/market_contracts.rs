@@ -274,12 +274,16 @@ pub fn handle(
             }
 
             "GetSystemAsks" => {
-                if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
+                let (_, char_id) = match ServerContext::require_character(session) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
                 let Some(solar_system_id) = args.first().and_then(|a| a.as_i64()).map(|v| v as u32)
                     .or(session.solar_system_id)
                 else {
                     return Some(Err(rpc_err("NoSolarSystem", "GetSystemAsks requires an active solarSystemID")));
                 };
+                let now_unix = ctx.now_unix();
                 let rows = ctx.db.with_snapshot(|snap| {
                     crate::services::market_trading::best_asks_to_summary_rows(
                         snap.market_orders.values().filter(|o| {
@@ -287,7 +291,13 @@ pub fn handle(
                                 && o.vol_remaining > 0
                                 && resolve_station_solar_system(ctx, snap, o.station_id)
                                     == Some(solar_system_id)
-                                && crate::services::market_trading::is_structure_market_online(snap, o.station_id)
+                                && crate::services::market_trading::can_caller_view_upwell_market_orders(
+                                    ctx,
+                                    snap,
+                                    char_id,
+                                    o.station_id,
+                                    now_unix,
+                                )
                         }),
                     )
                 });
