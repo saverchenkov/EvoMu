@@ -1103,4 +1103,107 @@ async fn test_downtime_contract_expiry_settlement_and_corp_bill_division_isolati
     });
 }
 
+#[tokio::test]
+async fn test_wallet_transactions_crowset_and_entry_types_live_client_compat() {
+    use eve_db::ledger::{ref_types, JournalContext, JournalEntryInput, JournalMeta};
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let mut s1 = setup_pilot(&ctx, 991, "demo", "demo-secret", P1).await;
+    let kw = HashMap::new();
+
+    // Seed a donation journal entry so GetTransactions has a live row to convert.
+    let now = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        let meta = JournalMeta::new(ref_types::PLAYER_DONATION, P1, P2, now)
+            .with_context(JournalContext::Character, P1)
+            .with_account_key(1000);
+        snap.append_journal_entry(JournalEntryInput {
+            owner_id: P1,
+            entry_type: "player_donation",
+            amount: IskCents::from_isk(-250),
+            balance_after: IskCents::from_isk(99_750),
+            reason: "compat test".into(),
+            meta,
+        });
+    });
+
+    // 1. account.GetEntryTypes returns CRowset with entryTypeID/entryTypeName/entryTypeNameID/description
+    let entry_types = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "account",
+            None,
+            "GetEntryTypes",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("account.GetEntryTypes");
+    let PyRep::ObjectEx { header, list, .. } = &entry_types else {
+        panic!("expected CRowset ObjectEx, got {entry_types:?}");
+    };
+    assert!(
+        format!("{header:?}").contains("CRowset"),
+        "expected CRowset header, got {header:?}"
+    );
+    assert!(
+        list.iter().any(|r| {
+            matches!(r, PyRep::DBRow { columns, .. } if columns.iter().any(|(k, v)| k == "entryTypeID" && *v == PyRep::Integer(i64::from(ref_types::PLAYER_DONATION))))
+        }),
+        "GetEntryTypes must include PLAYER_DONATION"
+    );
+
+    // 2. account.GetTransactions under machoNet:26000 returns CRowset (blue.DBRow elements for KeyVal)
+    let macho_journal = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "account",
+            None,
+            "GetTransactions",
+            &[PyRep::Integer(1000), PyRep::None, PyRep::None, PyRep::Bool(false)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("machoNet account.GetTransactions");
+    let PyRep::ObjectEx { header: j_hdr, list: j_rows, .. } = &macho_journal else {
+        panic!("expected CRowset ObjectEx for machoNet GetTransactions, got {macho_journal:?}");
+    };
+    assert!(format!("{j_hdr:?}").contains("CRowset"));
+    assert_eq!(j_rows.len(), 1);
+    let wire = eve_proto::marshal::encode(&macho_journal);
+    let roundtrip = eve_proto::marshal::decode(&wire).expect("decode GetTransactions CRowset");
+    let PyRep::ObjectEx { list: rt_rows, .. } = roundtrip else {
+        panic!("decoded CRowset expected");
+    };
+    let PyRep::DBRow { columns, .. } = &rt_rows[0] else {
+        panic!("expected decoded DBRow");
+    };
+    let amt = columns
+        .iter()
+        .find(|(k, _)| k == "amount")
+        .and_then(|(_, v)| v.as_f64())
+        .unwrap();
+    assert!((amt + 250.0).abs() < 1e-6);
+
+    // 3. marketProxy.CharGetTransactions under machoNet:26000 returns CRowset too
+    let macho_mkt = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "marketProxy",
+            None,
+            "CharGetTransactions",
+            &[PyRep::None],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("machoNet marketProxy.CharGetTransactions");
+    let PyRep::ObjectEx { header: m_hdr, .. } = &macho_mkt else {
+        panic!("expected CRowset ObjectEx for machoNet CharGetTransactions, got {macho_mkt:?}");
+    };
+    assert!(format!("{m_hdr:?}").contains("CRowset"));
+}
+
 }

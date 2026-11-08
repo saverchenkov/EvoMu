@@ -895,7 +895,8 @@ pub(crate) async fn validate_passive_targeter_activation(
         .ship
         .get_attribute(attr_ids::MAX_TARGET_RANGE, &ctx.sde)
         .max(0.0);
-    let dist = (s_ball.position - t_ball.position).length();
+    let surface_offset = s_ball.radius + t_ball.radius;
+    let dist = ((s_ball.position - t_ball.position).length() - surface_offset).max(0.0);
     if dist > max_range {
         return Err(BridgeRpcError {
             code: "TargetOutOfRange".into(),
@@ -937,7 +938,7 @@ pub(crate) async fn validate_passive_targeter_activation(
         lock_time_ms,
         remaining_lock_ms: lock_time_ms,
         locked: false,
-        max_range_m: Some(max_range),
+        max_range_m: Some(max_range + surface_offset),
     })
 }
 

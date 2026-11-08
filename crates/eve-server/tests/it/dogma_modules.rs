@@ -1534,3 +1534,236 @@ async fn test_r2_track2_dogma_fitting_overload_targeters_and_weapons() {
     );
 }
 
+#[tokio::test]
+async fn test_batch_d_surface_targeting_and_online_cpu_pg_undock_effects() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(4199);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    let char_id = 90_000_001i64;
+    let ship_id = 100_000_001i64;
+    let station_id = 60_003_760i64;
+
+    // Seed offline 1MN Afterburner I (type 439: cpu=15, pg=10) in MedSlot0
+    let ab_id = 100_000_910i64;
+    seed_item(
+        &ctx,
+        ab_id,
+        439,
+        char_id,
+        ship_id,
+        InventoryFlag::MedSlot0,
+        1,
+        true,
+    );
+    grant_all_required_skills_for_type(&ctx, char_id, 439);
+    ctx.db.with_mut_snapshot(|s| {
+        s.module_online_states.insert(ab_id, false);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    // #616: Putting module online emits ship cpuLoad + powerLoad OnModuleAttributeChanges
+    let _ = sess.drain_notifications();
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "SetModuleOnline",
+        &[PyRep::Integer(ship_id), PyRep::Integer(ab_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SetModuleOnline");
+    let notes = sess.drain_notifications();
+    let mut saw_cpu_load = false;
+    let mut saw_power_load = false;
+    for (event, args) in &notes {
+        if event == "OnModuleAttributeChanges" {
+            if let Some(PyRep::List(changes)) = args.first() {
+                for ch in changes {
+                    if let PyRep::Tuple(t) = ch {
+                        if t.len() >= 7
+                            && t[1] == PyRep::Integer(char_id)
+                            && t[2] == PyRep::Integer(ship_id)
+                        {
+                            if t[3] == PyRep::Integer(i64::from(attr_ids::CPU_LOAD)) {
+                                saw_cpu_load = t[5].as_f64().unwrap_or(0.0)
+                                    > t[6].as_f64().unwrap_or(0.0);
+                            }
+                            if t[3] == PyRep::Integer(i64::from(attr_ids::POWER_LOAD)) {
+                                saw_power_load = t[5].as_f64().unwrap_or(0.0)
+                                    > t[6].as_f64().unwrap_or(0.0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        saw_cpu_load && saw_power_load,
+        "#616: SetModuleOnline must emit ship CPU_LOAD and POWER_LOAD changes: {notes:?}"
+    );
+
+    // #616: Taking module offline emits decreasing ship cpuLoad + powerLoad changes
+    let _ = sess.drain_notifications();
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "TakeModuleOffline",
+        &[PyRep::Integer(ship_id), PyRep::Integer(ab_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("TakeModuleOffline");
+    let off_notes = sess.drain_notifications();
+    let mut saw_cpu_drop = false;
+    let mut saw_power_drop = false;
+    for (event, args) in &off_notes {
+        if event == "OnModuleAttributeChanges" {
+            if let Some(PyRep::List(changes)) = args.first() {
+                for ch in changes {
+                    if let PyRep::Tuple(t) = ch {
+                        if t.len() >= 7 && t[2] == PyRep::Integer(ship_id) {
+                            if t[3] == PyRep::Integer(i64::from(attr_ids::CPU_LOAD)) {
+                                saw_cpu_drop = t[5].as_f64().unwrap_or(0.0)
+                                    < t[6].as_f64().unwrap_or(0.0);
+                            }
+                            if t[3] == PyRep::Integer(i64::from(attr_ids::POWER_LOAD)) {
+                                saw_power_drop = t[5].as_f64().unwrap_or(0.0)
+                                    < t[6].as_f64().unwrap_or(0.0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        saw_cpu_drop && saw_power_drop,
+        "#616: TakeModuleOffline must emit ship CPU_LOAD and POWER_LOAD reductions: {off_notes:?}"
+    );
+
+    // #617: Put online in station, Undock, call GetAllInfo -> activeEffects[16] is populated, Activate works
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "SetModuleOnline",
+        &[PyRep::Integer(ship_id), PyRep::Integer(ab_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SetModuleOnline before undock");
+
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[PyRep::Integer(station_id)], &kw, None)
+        .await
+        .expect("Undock");
+
+    let all_info = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "GetAllInfo",
+            &[PyRep::Bool(true), PyRep::Bool(true)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetAllInfo after Undock");
+    let PyRep::KeyVal(ref all_kv) = all_info else {
+        panic!("GetAllInfo must return KeyVal, got {all_info:?}");
+    };
+    let PyRep::Dict(ref ship_info) = all_kv["shipInfo"] else {
+        panic!("GetAllInfo.shipInfo must be Dict");
+    };
+    let ab_info = ship_info
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(ab_id))
+        .map(|(_, v)| v)
+        .expect("AB entry in GetAllInfo.shipInfo");
+    let ab_active_effects = ab_info
+        .dict_get("activeEffects")
+        .expect("activeEffects field on module info");
+    let PyRep::Dict(ref eff_map) = ab_active_effects else {
+        panic!("activeEffects must be Dict, got {ab_active_effects:?}");
+    };
+    assert!(
+        eff_map.iter().any(|(k, _)| k.as_i64() == Some(16)),
+        "#617: GetAllInfo after undock must include effectOnline (16) in activeEffects for online module: {ab_active_effects:?}"
+    );
+
+    // Activate in space must succeed without ModuleOffline
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[PyRep::Integer(ab_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("#617: Activating online module after undock must succeed");
+
+    // #615: Surface-to-surface target locking on NPC station (radius 25,000m, center dist ~26,000m > 22,500m, surface dist ~950m <= 22,500m)
+    let sys_id = sess.solar_system_id.unwrap_or(30_000_142);
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let (_, s_ball) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let ship_pos = s_ball.position;
+    let npc_station_target = 60_000_361i64;
+    let st_ball = Ball {
+        id: npc_station_target,
+        type_id: 1529,
+        position: ship_pos + DVec3::new(26_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1_000_000_000.0,
+        radius: 25_000.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    sys.spawn_ball_with_combat(st_ball, CombatState::default())
+        .await
+        .expect("spawn NPC station ball");
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "AddTarget",
+        &[PyRep::Integer(npc_station_target)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("#615: AddTarget on large-radius NPC station within surface target range must succeed");
+
+    // Lock must persist across destiny physics tick (surface max_range_m preserved)
+    let _ = sys.step_manual(1.0).await;
+    let locks = sys.get_target_locks(ship_id).await.unwrap();
+    assert!(
+        locks.iter().any(|l| l.target_id == npc_station_target),
+        "#615: NPC station lock must remain intact across destiny tick"
+    );
+}
+

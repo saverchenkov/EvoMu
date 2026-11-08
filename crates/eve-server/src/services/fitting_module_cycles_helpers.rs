@@ -422,18 +422,68 @@ pub(crate) fn build_all_info(
             ("description", PyRep::String(String::new())),
         ]),
     )];
+    let active_states = ctx.db.with_snapshot(|snap| snap.module_active_states.clone());
+    let build_active_effect_line = |mod_id: i64, effect_id: i64, dur_ms: f64| -> PyRep {
+        PyRep::List(vec![
+            PyRep::Integer(mod_id),
+            PyRep::Integer(effect_id),
+            PyRep::Integer(now_ft),
+            PyRep::Real(dur_ms),
+            PyRep::Integer(0),
+            PyRep::Tuple(vec![
+                PyRep::Integer(mod_id),
+                PyRep::Integer(char_id),
+                PyRep::Integer(ship_id),
+                PyRep::None,
+                PyRep::None,
+                PyRep::List(vec![PyRep::Integer(mod_id)]),
+                PyRep::Integer(effect_id),
+            ]),
+            PyRep::Integer(now_ft),
+            PyRep::Real(dur_ms),
+            PyRep::Integer(0),
+            PyRep::None,
+        ])
+    };
     for (mod_id_rep, mod_attrs_rep) in &module_entries {
         if let Some(mod_id) = mod_id_rep.as_i64() {
             if let Some(mut mod_item) = ctx.db.get_item(mod_id) {
                 mod_item.singleton = true;
                 let inv_row = header.build_dbrow(super::super::item_to_packed_cells(ctx, &mod_item));
+                let is_online = matches!(mod_attrs_rep, PyRep::Dict(pairs) if pairs.iter().any(|(k, v)| k.as_i64() == Some(2) && v.as_f64().is_some_and(|val| val > 0.5)));
+                let mut active_effects = Vec::new();
+                if let Some(type_rec) = ctx.sde.types.get(&mod_item.type_id) {
+                    if is_online && type_rec.effect_ids.contains(&16) {
+                        active_effects.push((
+                            PyRep::Integer(16),
+                            build_active_effect_line(mod_id, 16, 1_000.0),
+                        ));
+                    }
+                    if active_states.contains(&mod_id) {
+                        if let Some(def_eff) = type_rec.default_effect_id.filter(|&eid| eid != 16) {
+                            let dur_ms = match mod_attrs_rep {
+                                PyRep::Dict(pairs) => pairs
+                                    .iter()
+                                    .find(|(k, _)| k.as_i64() == Some(73))
+                                    .and_then(|(_, v)| v.as_f64())
+                                    .filter(|&d| d > 0.0)
+                                    .unwrap_or(1_000.0),
+                                _ => 1_000.0,
+                            };
+                            active_effects.push((
+                                PyRep::Integer(i64::from(def_eff)),
+                                build_active_effect_line(mod_id, i64::from(def_eff), dur_ms),
+                            ));
+                        }
+                    }
+                }
                 ship_info_entries.push((
                     PyRep::Integer(mod_id),
                     PyRep::keyval([
                         ("itemID", PyRep::Integer(mod_id)),
                         ("invItem", inv_row),
                         ("attributes", mod_attrs_rep.clone()),
-                        ("activeEffects", PyRep::Dict(Vec::new())),
+                        ("activeEffects", PyRep::Dict(active_effects)),
                         ("time", PyRep::Integer(now_ft)),
                         ("wallclockTime", PyRep::Integer(now_ft)),
                         ("description", PyRep::String(String::new())),

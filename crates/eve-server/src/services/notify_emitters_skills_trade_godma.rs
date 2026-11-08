@@ -43,6 +43,69 @@ fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
 }
 
 /// Clears the Alpha injector ready notification latch when an Alpha injector is consumed.
+pub(crate) fn snapshot_ship_fitting_attrs(
+    ctx: &ServerContext,
+    fit: &eve_dogma::ShipFittingEngine,
+) -> BTreeMap<u16, f64> {
+    let eval_ctx = fit.evaluated_context(&ctx.sde);
+    let mut attr_ids_set: std::collections::BTreeSet<u16> = eval_ctx
+        .ship
+        .base_attributes
+        .keys()
+        .copied()
+        .chain(eval_ctx.ship.modifiers.iter().map(|m| m.target_attribute_id))
+        .collect();
+    attr_ids_set.insert(eve_sde::attr_ids::CPU_LOAD);
+    attr_ids_set.insert(eve_sde::attr_ids::POWER_LOAD);
+    attr_ids_set
+        .into_iter()
+        .map(|attr_id| (attr_id, eval_ctx.ship.get_attribute(attr_id, &ctx.sde)))
+        .collect()
+}
+
+pub(crate) fn emit_ship_fitting_attr_changes(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    before: &BTreeMap<u16, f64>,
+    after: &BTreeMap<u16, f64>,
+) {
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let mut keys: std::collections::BTreeSet<u16> = before.keys().copied().collect();
+    keys.extend(after.keys().copied());
+    keys.insert(eve_sde::attr_ids::CPU_LOAD);
+    keys.insert(eve_sde::attr_ids::POWER_LOAD);
+    let mut changes = Vec::new();
+    for attr_id in keys {
+        let old_val = before.get(&attr_id).copied().unwrap_or(0.0);
+        let new_val = after.get(&attr_id).copied().unwrap_or(0.0);
+        if (new_val - old_val).abs() > 1e-9
+            || matches!(
+                attr_id,
+                eve_sde::attr_ids::CPU_LOAD | eve_sde::attr_ids::POWER_LOAD
+            )
+        {
+            changes.push(PyRep::Tuple(vec![
+                PyRep::String("OnModuleAttributeChange".into()),
+                PyRep::Integer(char_id),
+                PyRep::Integer(ship_id),
+                PyRep::Integer(i64::from(attr_id)),
+                PyRep::Integer(now_ft),
+                PyRep::Real(new_val),
+                PyRep::Real(old_val),
+                PyRep::None,
+            ]));
+        }
+    }
+    if !changes.is_empty() {
+        ctx.notify(
+            NotificationTarget::Character(char_id),
+            "OnModuleAttributeChanges",
+            "charid",
+            vec![PyRep::List(changes)],
+        );
+    }
+}
 pub fn clear_alpha_avail_notified(snap: &mut WorldStateSnapshot, char_id: i64) {
     let mut map = load_alpha_avail_notified(snap);
     if map.remove(&char_id).is_some() {
@@ -597,16 +660,20 @@ pub async fn handle_dogma_set_module_online(
     }
 
     let mut fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id)?;
+    let before_ship_attrs = snapshot_ship_fitting_attrs(ctx, &fit);
     if let Err(e) = fit.set_module_online(module_id, &ctx.sde) {
         return Err(err("FittingValidationFailed", e));
     }
+    let after_ship_attrs = snapshot_ship_fitting_attrs(ctx, &fit);
     ctx.store_ship_fitting(ship_id, fit);
-    ctx.db.with_mut_snapshot(|snap| {
+    ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
         snap.module_online_states.insert(module_id, true);
-    });
+        Ok(())
+    })?;
     ctx.invalidate_ship_fitting(ship_id);
 
     let _ = ctx.notify_module_online_state(char_id, module_id, true);
+    emit_ship_fitting_attr_changes(ctx, char_id, ship_id, &before_ship_attrs, &after_ship_attrs);
     if mod_type_id > 0 {
         emit_module_activation_godma_notifications(
             ctx,
@@ -681,6 +748,7 @@ pub async fn handle_dogma_take_module_offline(
     }
 
     let mut fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id)?;
+    let before_ship_attrs = snapshot_ship_fitting_attrs(ctx, &fit);
     let was_active_type = fit
         .modules
         .get(&module_id)
@@ -689,6 +757,7 @@ pub async fn handle_dogma_take_module_offline(
     if let Err(e) = fit.take_module_offline(module_id, &ctx.sde) {
         return Err(err("FittingValidationFailed", e));
     }
+    let after_ship_attrs = snapshot_ship_fitting_attrs(ctx, &fit);
     if let Some(m_tid) = was_active_type {
         let mod_state = fit.build_effective_module_state(module_id, m_tid, false, &ctx.sde);
         let react_delay_ms = mod_state.get_attribute(669, &ctx.sde);
@@ -703,14 +772,15 @@ pub async fn handle_dogma_take_module_offline(
         .map(|m| m.item_id)
         .collect();
     ctx.store_ship_fitting(ship_id, fit);
-    ctx.db.with_mut_snapshot(|snap| {
+    ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
         snap.module_online_states.insert(module_id, false);
         snap.module_active_states.remove(&module_id);
         for &mid in &offline_mod_ids {
             snap.module_online_states.insert(mid, false);
             snap.module_active_states.remove(&mid);
         }
-    });
+        Ok(())
+    })?;
     ctx.invalidate_ship_fitting(ship_id);
     let mut cleanup_mods = vec![module_id];
     for &mid in &offline_mod_ids {
@@ -761,6 +831,7 @@ pub async fn handle_dogma_take_module_offline(
     }
 
     let _ = ctx.notify_module_online_state(char_id, module_id, false);
+    emit_ship_fitting_attr_changes(ctx, char_id, ship_id, &before_ship_attrs, &after_ship_attrs);
 
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)),

@@ -790,7 +790,7 @@ pub(crate) async fn handle_dogma_im(
             }
 
             let max_range = fit.ship.get_attribute(attr_ids::MAX_TARGET_RANGE, &ctx.sde);
-            let surface_offset = if is_upwell_target { ship_ball.radius + target_ball.radius } else { 0.0 };
+            let surface_offset = ship_ball.radius + target_ball.radius;
             let dist = ((ship_ball.position - target_ball.position).length() - surface_offset).max(0.0);
             if dist > max_range {
                 return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: format!("Target distance ({dist:.1} m) exceeds maxTargetRange ({max_range:.1} m)") }));

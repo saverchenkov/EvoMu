@@ -60,8 +60,6 @@ const CLIENT_ONLY_PSEUDO_RPCS: &[&str] = &[
 /// documented FSD data gaps in `supervisor_triage.json`) and are explicitly asserted by existing
 /// negative tests to return `UnimplementedRPC`.
 const INTENTIONALLY_UNIMPLEMENTED_RPCS: &[&str] = &[
-    "RWManager.get_closest_rw_stations",
-    "RWManager.solarsystem_contains_rw_instances",
     "abyssal_content_manager.GenerateAbyssEncounterContent",
     "abyssal_content_manager.GenerateContentFromExistingPlan",
     "abyssal_content_manager.GetContentDetailsForShipLocation",
@@ -2978,4 +2976,33 @@ async fn test_v24_live_client_bug_report_regressions_330_to_352() {
             "#354: stationSvc.GetStation KeyVal missing `{req_field}`: {station_kv:?}"
         );
     }
+
+    // 8. #614: RWManager RPCs unblocked when opening LP Store in station services
+    let rw_sys = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "RWManager",
+            None,
+            "solarsystem_contains_rw_instances",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("RWManager.solarsystem_contains_rw_instances must succeed");
+    assert_eq!(rw_sys, PyRep::Bool(false));
+
+    let rw_stations = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "RWManager",
+            None,
+            "get_closest_rw_stations",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("RWManager.get_closest_rw_stations must succeed");
+    assert_eq!(rw_stations, PyRep::Dict(Vec::new()));
 }

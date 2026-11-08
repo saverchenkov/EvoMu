@@ -1373,6 +1373,8 @@ pub fn handle(
             }
             Some(Ok(PyRep::Dict(by_group)))
         }
+        ("RWManager", "solarsystem_contains_rw_instances") => Some(Ok(PyRep::Bool(false))),
+        ("RWManager", "get_closest_rw_stations") => Some(Ok(PyRep::Dict(Vec::new()))),
         _ => None,
     }
 }

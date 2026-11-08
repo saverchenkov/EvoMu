@@ -75,6 +75,7 @@ pub fn handle(
             }
         }
         ("account", "GetTransactions") => Some(handle_get_journal(ctx, session, args)),
+        ("account", "GetEntryTypes") => Some(handle_get_entry_types()),
         ("marketProxy", "CharGetTransactions") => {
             Some(handle_market_transactions(ctx, session, args, false))
         }
@@ -104,6 +105,49 @@ fn handle_get_journal(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     get_journal(ctx, session, args)
+}
+
+fn handle_get_entry_types() -> Result<PyRep, BridgeRpcError> {
+    use eve_db::ledger::ref_types;
+    use eve_proto::{DBRowDescriptor, DbColumnType};
+
+    const ENTRY_TYPES: &[(i32, &str, &str)] = &[
+        (0, "Undefined", "Undefined"),
+        (1, "Player Trading", "Direct trade between players"),
+        (ref_types::MARKET_TRANSACTION, "Market Transaction", "Market buy or sell transaction"),
+        (ref_types::PLAYER_DONATION, "Player Donation", "Direct ISK transfer between players"),
+        (17, "Bounty Prize", "NPC bounty payout"),
+        (33, "Agent Mission Reward", "Agent mission reward"),
+        (34, "Agent Mission Time Bonus Reward", "Agent mission time bonus reward"),
+        (ref_types::CORPORATION_ACCOUNT_WITHDRAWAL, "Corporation Account Withdrawal", "Corporation wallet transfer"),
+        (ref_types::MARKET_ESCROW, "Market Escrow", "Market order buy escrow"),
+        (ref_types::BROKER_FEE, "Brokers Fee", "Market broker fee"),
+        (ref_types::TRANSACTION_TAX, "Transaction Tax", "Market sales tax"),
+        (ref_types::CONTRACT_COLLATERAL, "Contract Collateral", "Contract courier collateral"),
+        (ref_types::CONTRACT_REWARD, "Contract Reward", "Contract courier reward"),
+        (ref_types::CONTRACT_PRICE, "Contract Price", "Contract item exchange price"),
+        (ref_types::CONTRACT_BROKERS_FEE, "Contract Brokers Fee", "Contract broker fee"),
+        (85, "Bounty Prizes", "Solar system bounty prize payout"),
+    ];
+
+    let descriptor = DBRowDescriptor::new([
+        ("entryTypeID", DbColumnType::I4),
+        ("entryTypeName", DbColumnType::WStr),
+        ("entryTypeNameID", DbColumnType::I4),
+        ("description", DbColumnType::WStr),
+    ]);
+    let rows = ENTRY_TYPES
+        .iter()
+        .map(|&(id, name, desc)| {
+            vec![
+                PyRep::Integer(i64::from(id)),
+                PyRep::String(name.to_string()),
+                PyRep::None,
+                PyRep::String(desc.to_string()),
+            ]
+        })
+        .collect();
+    Ok(descriptor.build_crowset(rows))
 }
 
 fn handle_market_transactions(

@@ -25,6 +25,27 @@ fn kv_float(entries: &HashMap<String, PyRep>, key: &str) -> f64 {
     }
 }
 
+fn rowset_to_crowset(rep: PyRep, col_types: &[(&str, DbColumnType)]) -> PyRep {
+    let PyRep::Rowset { columns, rows } = rep else {
+        return rep;
+    };
+    let descriptor = DBRowDescriptor::new(col_types.iter().map(|&(name, ty)| (name, ty)));
+    let col_indices: Vec<Option<usize>> = col_types
+        .iter()
+        .map(|&(name, _)| columns.iter().position(|c| c == name))
+        .collect();
+    let mapped_rows: Vec<Vec<PyRep>> = rows
+        .into_iter()
+        .map(|row| {
+            col_indices
+                .iter()
+                .map(|idx| idx.and_then(|i| row.get(i).cloned()).unwrap_or(PyRep::None))
+                .collect()
+        })
+        .collect();
+    descriptor.build_crowset(mapped_rows)
+}
+
 fn rowset_to_dict_by_key(rep: PyRep, key_col: &str) -> PyRep {
     let PyRep::Rowset { columns, rows } = rep else {
         return rep;
@@ -248,6 +269,25 @@ pub fn normalize_macho_rpc_reply(
     if service == "fleetProxy" && method == "GetAvailableFleetAds" {
         if let Ok(rep) = rpc_res {
             return Ok(rowset_to_dict_by_key(rep, "fleetID"));
+        }
+    }
+    if service == "account" && method == "GetTransactions" {
+        if let Ok(rep) = rpc_res {
+            return Ok(rowset_to_crowset(
+                rep,
+                &[
+                    ("transactionID", DbColumnType::I8),
+                    ("transactionDate", DbColumnType::FileTime),
+                    ("referenceID", DbColumnType::I8),
+                    ("entryTypeID", DbColumnType::I4),
+                    ("ownerID1", DbColumnType::I8),
+                    ("ownerID2", DbColumnType::I8),
+                    ("accountKey", DbColumnType::I4),
+                    ("amount", DbColumnType::R8),
+                    ("balance", DbColumnType::R8),
+                    ("description", DbColumnType::WStr),
+                ],
+            ));
         }
     }
     if service == "contractProxy" && (method == "GetContract" || method == "GetContractInfo") {

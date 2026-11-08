@@ -145,7 +145,8 @@ pub(crate) async fn handle_dogma_ops(
                 .as_ref()
                 .map(|f| f.ship.get_attribute(attr_ids::MAX_TARGET_RANGE, &ctx.sde))
                 .unwrap_or(100_000.0);
-            let dist = (ship_ball.position - target_ball.position).length();
+            let surface_offset = ship_ball.radius + target_ball.radius;
+            let dist = ((ship_ball.position - target_ball.position).length() - surface_offset).max(0.0);
             if dist > max_range {
                 return Some(Err(BridgeRpcError {
                     code: "TargetingFailed".into(),
@@ -194,7 +195,7 @@ pub(crate) async fn handle_dogma_ops(
                 lock_time_ms,
                 remaining_lock_ms: lock_time_ms,
                 locked: false,
-                max_range_m: Some(max_range),
+                max_range_m: Some(max_range + surface_offset),
             };
             if let Err(e) = sys.add_target_lock(source_id, lock).await {
                 return Some(Err(BridgeRpcError {
@@ -495,6 +496,10 @@ pub(crate) async fn handle_dogma_ops(
                 Err(e) => return Some(Err(e)),
             };
 
+            let before_ship_attrs =
+                crate::services::notify_emitters_skills_trade_godma::snapshot_ship_fitting_attrs(
+                    ctx, &fit,
+                );
             let mut newly_onlined = Vec::new();
             for mid in mod_ids {
                 let is_online = ctx.db.with_snapshot(|snap| {
@@ -504,17 +509,34 @@ pub(crate) async fn handle_dogma_ops(
                     newly_onlined.push(mid);
                 }
             }
+            let after_ship_attrs =
+                crate::services::notify_emitters_skills_trade_godma::snapshot_ship_fitting_attrs(
+                    ctx, &fit,
+                );
 
             ctx.store_ship_fitting(ship_id, fit);
-            ctx.db.with_mut_snapshot(|snap| {
+            if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                 for &mid in &newly_onlined {
                     snap.module_online_states.insert(mid, true);
                 }
-            });
+                Ok(())
+            }) {
+                return Some(Err(e));
+            }
             ctx.invalidate_ship_fitting(ship_id);
 
+            let any_onlined = !newly_onlined.is_empty();
             for mid in newly_onlined {
                 let _ = ctx.notify_module_online_state(char_id, mid, true);
+            }
+            if any_onlined {
+                crate::services::notify_emitters_skills_trade_godma::emit_ship_fitting_attr_changes(
+                    ctx,
+                    char_id,
+                    ship_id,
+                    &before_ship_attrs,
+                    &after_ship_attrs,
+                );
             }
 
             Some(Ok(PyRep::None))
