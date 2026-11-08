@@ -381,12 +381,93 @@ pub fn handle_pi_orbitals_gm(
                     message: "planetMgr.GMCreateNuggetLayer requires GM role".into(),
                 }));
             }
-            let _ = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id));
-            Some(Ok(PyRep::None))
+            let (explicit_planet, arg_offset) = match bound_planet {
+                Some(bp) => (Some(bp), 0usize),
+                None => (args.first().and_then(|a| a.as_i64()), 1usize),
+            };
+            let res_tid_arg = args
+                .get(arg_offset)
+                .and_then(|a| a.as_i64())
+                .filter(|&v| v > 0)
+                .map(|v| v as TypeId);
+            let (lat, lon) = parse_theta_phi(args.get(arg_offset + 1), args.get(arg_offset + 2));
+            let radius = args
+                .get(arg_offset + 3)
+                .and_then(|a| a.as_f64())
+                .filter(|&r| r > 0.0 && r.is_finite())
+                .unwrap_or(0.35);
+            let boost = args
+                .get(arg_offset + 4)
+                .and_then(|a| a.as_f64())
+                .filter(|&b| b > 0.0 && b.is_finite())
+                .unwrap_or(0.25);
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let planet_id = if let Some(pid) = explicit_planet {
+                    let known = snap.planetary_colonies.values().any(|c| c.planet_id == pid)
+                        || ctx.sde.solar_systems.values().any(|s| s.planet_ids.contains(&pid));
+                    if !known {
+                        return Err(BridgeRpcError {
+                            code: "InvalidPlanetID".into(),
+                            message: format!("Planet {pid} not found"),
+                        });
+                    }
+                    pid
+                } else {
+                    snap.planetary_colonies
+                        .iter()
+                        .find(|((cid, _), _)| *cid == char_id)
+                        .map(|((_, pid), _)| *pid)
+                        .or_else(|| {
+                            ctx.sde
+                                .solar_systems
+                                .values()
+                                .flat_map(|s| s.planet_ids.iter().copied())
+                                .next()
+                        })
+                        .unwrap_or(40_009_082)
+                };
+                let sys_id = ctx
+                    .sde
+                    .solar_systems
+                    .values()
+                    .find(|s| s.planet_ids.contains(&planet_id))
+                    .map(|s| s.solar_system_id)
+                    .or_else(|| {
+                        snap.planetary_colonies
+                            .values()
+                            .find(|c| c.planet_id == planet_id)
+                            .map(|c| c.solar_system_id)
+                    })
+                    .unwrap_or(30_000_142);
+                let resource_type_id = res_tid_arg.unwrap_or_else(|| {
+                    crate::services::industry_pi::list_sde_planet_p0_resources(ctx, sys_id, planet_id)
+                        .into_iter()
+                        .next()
+                        .unwrap_or(2268)
+                });
+                let mut depl = load_planet_depletion(snap, planet_id);
+                depl.nugget_layers.push(PiNuggetLayer {
+                    resource_type_id,
+                    latitude: lat,
+                    longitude: lon,
+                    radius,
+                    boost,
+                });
+                if depl.nugget_layers.len() > 64 {
+                    let excess = depl.nugget_layers.len() - 64;
+                    depl.nugget_layers.drain(0..excess);
+                }
+                save_planet_depletion(snap, &depl);
+                Ok(())
+            });
+            match res {
+                Ok(()) => Some(Ok(PyRep::None)),
+                Err(e) => Some(Err(e)),
+            }
         }
 
         ("planetMgr", "GMGetCompleteResource") => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -396,10 +477,75 @@ pub fn handle_pi_orbitals_gm(
                     message: "planetMgr.GMGetCompleteResource requires GM role".into(),
                 }));
             }
-            Some(Ok(PyRep::keyval([
-                ("data", PyRep::Bytes(vec![0u8; 36])),
-                ("numBands", PyRep::Integer(3)),
-            ])))
+            let (explicit_planet, res_arg) = match bound_planet {
+                Some(bp) => (Some(bp), args.first()),
+                None => (args.first().and_then(|a| a.as_i64()), args.get(1)),
+            };
+            let res_tid_arg = res_arg
+                .and_then(|a| a.as_i64())
+                .filter(|&v| v > 0)
+                .map(|v| v as TypeId);
+            let res = ctx.db.with_snapshot(|snap| {
+                let planet_id = if let Some(pid) = explicit_planet {
+                    let known = snap.planetary_colonies.values().any(|c| c.planet_id == pid)
+                        || ctx.sde.solar_systems.values().any(|s| s.planet_ids.contains(&pid));
+                    if !known {
+                        return Err(BridgeRpcError {
+                            code: "InvalidPlanetID".into(),
+                            message: format!("Planet {pid} not found"),
+                        });
+                    }
+                    pid
+                } else {
+                    snap.planetary_colonies
+                        .iter()
+                        .find(|((cid, _), _)| *cid == char_id)
+                        .map(|((_, pid), _)| *pid)
+                        .or_else(|| {
+                            ctx.sde
+                                .solar_systems
+                                .values()
+                                .flat_map(|s| s.planet_ids.iter().copied())
+                                .next()
+                        })
+                        .unwrap_or(40_009_082)
+                };
+                let sys_id = ctx
+                    .sde
+                    .solar_systems
+                    .values()
+                    .find(|s| s.planet_ids.contains(&planet_id))
+                    .map(|s| s.solar_system_id)
+                    .or_else(|| {
+                        snap.planetary_colonies
+                            .values()
+                            .find(|c| c.planet_id == planet_id)
+                            .map(|c| c.solar_system_id)
+                    })
+                    .unwrap_or(30_000_142);
+                let resource_type_id = res_tid_arg.unwrap_or_else(|| {
+                    crate::services::industry_pi::list_sde_planet_p0_resources(ctx, sys_id, planet_id)
+                        .into_iter()
+                        .next()
+                        .unwrap_or(2268)
+                });
+                let data = compute_planet_complete_resource_sh_bytes(
+                    ctx,
+                    snap,
+                    planet_id,
+                    resource_type_id,
+                );
+                Ok((data, planet_id, resource_type_id))
+            });
+            match res {
+                Ok((data, planet_id, resource_type_id)) => Some(Ok(PyRep::keyval([
+                    ("planetID", PyRep::Integer(planet_id)),
+                    ("resourceTypeID", PyRep::Integer(resource_type_id as i64)),
+                    ("data", PyRep::Bytes(data)),
+                    ("numBands", PyRep::Integer(3)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
         }
 
         _ => None,

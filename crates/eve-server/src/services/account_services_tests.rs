@@ -133,6 +133,21 @@ fn store_allocators_playtime_underage_and_subscription_sync() {
             .unwrap(),
         PyRep::None
     );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs.insert(
+            "kiring:eveguard_server_address".into(),
+            "https://eveguard.example.invalid".into(),
+        );
+    });
+    assert_eq!(
+        handle_inner(&ctx, &mut sess, "kiringMgr", "GetEveGuardServerAddress", &[], &kw)
+            .unwrap()
+            .unwrap(),
+        PyRep::String("https://eveguard.example.invalid".into())
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs.remove("kiring:eveguard_server_address");
+    });
     assert_eq!(
         handle_inner(&ctx, &mut sess, "kiringMgr", "IsMonochromeStyleEnabled", &[], &kw)
             .unwrap()

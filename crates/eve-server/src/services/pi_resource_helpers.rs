@@ -29,6 +29,19 @@ pub struct PlanetResourceDepletionState {
     /// Unix timestamp of last depletion simulation run.
     #[serde(default)]
     pub gm_last_sim_unix: u64,
+    /// GM-injected resource nugget layers boosting local resource density.
+    #[serde(default)]
+    pub nugget_layers: Vec<PiNuggetLayer>,
+}
+
+/// A localized GM-created resource nugget layer on a planet surface.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PiNuggetLayer {
+    pub resource_type_id: TypeId,
+    pub latitude: f64,
+    pub longitude: f64,
+    pub radius: f64,
+    pub boost: f64,
 }
 
 /// A localized surface depletion spot created by an extractor head program.
@@ -157,8 +170,73 @@ pub fn compute_planet_resource_density(
     }
     local_depl = local_depl.min(0.50);
 
+    let mut nugget_boost = 0.0;
+    for layer in &depl_state.nugget_layers {
+        if layer.resource_type_id == resource_tid {
+            let dist = (lat - layer.latitude).hypot(lon - layer.longitude);
+            if dist < layer.radius && layer.radius > 0.0 {
+                let falloff = 1.0 - (dist / layer.radius);
+                nugget_boost += layer.boost.max(0.0) * falloff;
+            }
+        }
+    }
+    nugget_boost = nugget_boost.min(0.80);
+
     let total_depletion = (colony_depletion + gm_depl + local_depl).min(0.85);
-    (base_richness * (1.0 - total_depletion)).clamp(0.02, 1.0)
+    (base_richness * (1.0 - total_depletion) + nugget_boost).clamp(0.02, 1.0)
+}
+
+/// Computes the 9 real spherical harmonic `f32` coefficients (36 bytes little-endian, `numBands = 3`)
+/// for `(planet_id, resource_tid)` from live colony extraction, depletion state, and GM nugget layers.
+pub fn compute_planet_complete_resource_sh_bytes(
+    _ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    planet_id: i64,
+    resource_tid: TypeId,
+) -> Vec<u8> {
+    let mut colony_extracted_qty = 0_u64;
+    for col in snap.planetary_colonies.values() {
+        if col.planet_id == planet_id {
+            colony_extracted_qty += col.extracted_commodities.get(&resource_tid).copied().unwrap_or(0);
+        }
+    }
+    let colony_depletion = ((colony_extracted_qty as f64) / 100_000.0).min(0.40);
+    let depl_state = load_planet_depletion(snap, planet_id);
+    let gm_depl = depl_state
+        .resource_depletion
+        .get(&resource_tid)
+        .copied()
+        .unwrap_or(0.0)
+        .max(depl_state.gm_depletion_rate);
+    let total_depletion = (colony_depletion + gm_depl).min(0.85);
+    let scale = 1.0 - total_depletion;
+
+    let mut coeffs = [0.0_f64; 9];
+    for (b, slot) in coeffs.iter_mut().enumerate() {
+        let base_c = (((planet_id as u64)
+            .wrapping_mul(31)
+            .wrapping_add((resource_tid as u64).wrapping_mul(17))
+            .wrapping_add(b as u64)
+            % 100) as f64)
+            / 100.0;
+        *slot = (if b == 0 { 0.50 + 0.08 * base_c } else { 0.08 * base_c }) * scale;
+    }
+
+    for layer in &depl_state.nugget_layers {
+        if layer.resource_type_id == resource_tid && layer.boost > 0.0 {
+            let basis = evaluate_spherical_harmonic_basis(layer.latitude, layer.longitude);
+            let w = layer.boost * layer.radius.clamp(0.05, 1.0);
+            for (slot, &b_val) in coeffs.iter_mut().zip(basis.iter()) {
+                *slot += w * b_val;
+            }
+        }
+    }
+
+    let mut bytes = Vec::with_capacity(36);
+    for c in coeffs {
+        bytes.extend_from_slice(&(c as f32).to_le_bytes());
+    }
+    bytes
 }
 
 /// Evaluates the resource distribution report across all P0 resources for a given pin,

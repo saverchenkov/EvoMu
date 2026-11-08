@@ -67,7 +67,9 @@ async fn fw_services_helpers_and_rpc_mutations() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(wzs.as_list().unwrap().len(), 2);
+    let wz_list = wzs.as_list().unwrap();
+    assert_eq!(wz_list.len(), 2);
+    assert!(wz_list[0].dict_get("systemCount").and_then(|v| v.as_i64()).is_some());
 
     let occ_all = handle(
         &ctx,

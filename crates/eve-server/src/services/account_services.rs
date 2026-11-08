@@ -165,9 +165,11 @@ pub(crate) fn try_with_store<T>(
 /// Called by `authentication.Login`: starts the playtime accrual window for the account.
 pub fn on_login(ctx: &ServerContext, uid: u64) {
     let now = ctx.now_unix();
+    let now_ft = ctx.now_blueos_filetime_ticks();
     with_store(ctx, |_, store| {
         store.login_start_unix.insert(uid, now);
         store.user_countries.entry(uid).or_insert_with(|| "US".into());
+        store.account_create_date.entry(uid).or_insert(now_ft);
     });
 }
 
@@ -593,7 +595,8 @@ fn handle_inner(
         ("authentication", "AccruedTime") => {
             let uid = ServerContext::require_auth(session)?;
             let now_unix = ctx.now_unix();
-            let accrued = with_store(ctx, |_, store| {
+            let accrued = ctx.db.with_snapshot(|snap| {
+                let store = load_store(snap);
                 let start = store
                     .login_start_unix
                     .get(&uid)
@@ -880,7 +883,8 @@ fn handle_inner(
         ("userSvc", "GetSessionPlaytimeMinutes") => {
             let uid = ServerContext::require_auth(session)?;
             let now_unix = ctx.now_unix();
-            let mins = with_store(ctx, |_, store| {
+            let mins = ctx.db.with_snapshot(|snap| {
+                let store = load_store(snap);
                 let start = store
                     .login_start_unix
                     .get(&uid)
@@ -893,13 +897,13 @@ fn handle_inner(
         }
         ("userSvc", "GetMultiCharactersTrainingSlots") => {
             let uid = ServerContext::require_auth(session)?;
-            let slots = with_store(ctx, |snap, store| {
+            let slots = ctx.db.with_snapshot(|snap| {
                 if let Some(blob) = snap.service_state_blobs.get(&format!("mct_slots:{uid}")) {
                     if let Ok(parsed) = serde_json::from_str::<Vec<u64>>(blob) {
                         return parsed;
                     }
                 }
-                store.mct_slots.get(&uid).cloned().unwrap_or_default()
+                load_store(snap).mct_slots.get(&uid).cloned().unwrap_or_default()
             });
             let now_unix = ctx.now_unix();
             let dict: Vec<(PyRep, PyRep)> = slots
@@ -1054,13 +1058,13 @@ fn handle_inner(
         }
         ("userSvc", "GetUpdatedMultiCharacterTraining") | ("userSvc", "InvalidateMultiCharacterTrainingCache") => {
             let uid = ServerContext::require_auth(session)?;
-            let slots = with_store(ctx, |snap, store| {
+            let slots = ctx.db.with_snapshot(|snap| {
                 if let Some(blob) = snap.service_state_blobs.get(&format!("mct_slots:{uid}")) {
                     if let Ok(parsed) = serde_json::from_str::<Vec<u64>>(blob) {
                         return parsed;
                     }
                 }
-                store.mct_slots.get(&uid).cloned().unwrap_or_default()
+                load_store(snap).mct_slots.get(&uid).cloned().unwrap_or_default()
             });
             if method == "InvalidateMultiCharacterTrainingCache" {
                 crate::services::notify_emitters_skills_trade_godma::emit_multiple_characters_training_updated(
@@ -1194,7 +1198,10 @@ fn handle_inner(
         ("kiringMgr", "GetKiringConfiguration") => {
             let is_underage = session
                 .user_id
-                .is_some_and(|uid| with_store(ctx, |_, st| st.underage_users.contains(&uid)));
+                .is_some_and(|uid| {
+                    ctx.db
+                        .with_snapshot(|snap| load_store(snap).underage_users.contains(&uid))
+                });
             Ok(Some(PyRep::keyval([
                 ("enabled", PyRep::Bool(false)),
                 ("antiAddictionEnabled", PyRep::Bool(is_underage)),
@@ -1204,20 +1211,42 @@ fn handle_inner(
         ("kiringMgr", "GetAntiAddictionCode") | ("kiringMgr", "GetSAuthAid") => {
             let code = session
                 .user_id
-                .map(|uid| with_store(ctx, |_, st| if st.underage_users.contains(&uid) { 1 } else { 0 }))
+                .map(|uid| {
+                    ctx.db.with_snapshot(|snap| {
+                        if load_store(snap).underage_users.contains(&uid) {
+                            1
+                        } else {
+                            0
+                        }
+                    })
+                })
                 .unwrap_or(0);
             Ok(Some(PyRep::Integer(code)))
         }
         ("kiringMgr", "GetEveGuardServerAddress") => {
-            let _ = session
-                .user_id
-                .map(|uid| with_store(ctx, |_, st| st.underage_users.contains(&uid)));
-            Ok(Some(PyRep::None))
+            let configured_addr = ctx
+                .global_config_values
+                .read()
+                .ok()
+                .and_then(|g| g.get("eveGuardServerAddress").and_then(|v| v.as_str()).map(str::to_string))
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    ctx.db.with_snapshot(|snap| {
+                        snap.service_state_blobs
+                            .get("kiring:eveguard_server_address")
+                            .filter(|s| !s.is_empty())
+                            .cloned()
+                    })
+                });
+            Ok(Some(configured_addr.map(PyRep::String).unwrap_or(PyRep::None)))
         }
         ("kiringMgr", "IsMonochromeStyleEnabled") | ("kiringMgr", "ShouldKickCheater") => {
             let banned = session
                 .user_id
-                .is_some_and(|uid| with_store(ctx, |_, st| st.underage_users.contains(&uid)));
+                .is_some_and(|uid| {
+                    ctx.db
+                        .with_snapshot(|snap| load_store(snap).underage_users.contains(&uid))
+                });
             Ok(Some(PyRep::Bool(banned)))
         }
         _ => Ok(None),

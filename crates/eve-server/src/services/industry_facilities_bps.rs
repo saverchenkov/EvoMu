@@ -1204,10 +1204,50 @@ pub fn handle_industry_facilities_bps(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let mut best_mat = 1.0_f64;
+            let mut best_time = 1.0_f64;
+            let mut best_cost = 1.0_f64;
+            for t in ctx.sde.types.values() {
+                if let Some(&m) = t.default_attributes.get(&2600) {
+                    if m > 0.0 {
+                        best_mat = best_mat.min(m);
+                    }
+                }
+                if let Some(&tm) = t
+                    .default_attributes
+                    .get(&2602)
+                    .or_else(|| t.default_attributes.get(&2721))
+                {
+                    if tm > 0.0 {
+                        best_time = best_time.min(tm);
+                    }
+                }
+                if let Some(&c) = t.default_attributes.get(&2601) {
+                    if c > 0.0 {
+                        best_cost = best_cost.min(c);
+                    }
+                }
+            }
+            ctx.db.with_snapshot(|snap| {
+                for (&sid, st) in &snap.structures {
+                    if st.state == "Destroyed" {
+                        continue;
+                    }
+                    if let Some((_, _, sys_id, _, mat_mod, time_mod, cost_mod)) =
+                        resolve_facility_modifiers_and_system(ctx, snap, sid)
+                    {
+                        let (rig_mat, _, _, _) =
+                            resolve_structure_rig_bonuses_full(ctx, snap, sid, sys_id);
+                        best_mat = best_mat.min((mat_mod * (1.0 - rig_mat)).clamp(0.01, 1.0));
+                        best_time = best_time.min(time_mod.clamp(0.01, 1.0));
+                        best_cost = best_cost.min(cost_mod.clamp(0.01, 1.0));
+                    }
+                }
+            });
             Some(Ok(PyRep::keyval([
-                ("materialMultiplier", PyRep::Real(0.99)),
-                ("timeMultiplier", PyRep::Real(0.70)),
-                ("costMultiplier", PyRep::Real(0.95)),
+                ("materialMultiplier", PyRep::Real(best_mat)),
+                ("timeMultiplier", PyRep::Real(best_time)),
+                ("costMultiplier", PyRep::Real(best_cost)),
             ])))
         }
 

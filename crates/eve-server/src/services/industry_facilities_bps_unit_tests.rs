@@ -404,11 +404,36 @@ fn blueprint_and_facility_manager_rpcs_work_end_to_end() {
     assert_eq!(taxes_rep.dict_get("tax"), Some(&PyRep::Real(0.035)));
 
     // GetMaxActivityModifiers, map.GetIndustryCostModifier, map.GetIndustryJobsOverLast24Hours
-    assert!(
+    let max_mods_base =
         handle_industry_facilities_bps(&ctx, &mut sess, "facilityManager", "GetMaxActivityModifiers", &[], &kw)
             .unwrap()
-            .is_ok()
-    );
+            .unwrap();
+    let base_mat = max_mods_base.dict_get("materialMultiplier").and_then(|v| v.as_f64()).unwrap();
+    assert!(base_mat > 0.0 && base_mat <= 0.99 + 1e-9);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut dyn_attrs = HashMap::new();
+        dyn_attrs.insert(2594_u16, 4.0_f64); // 4% rig material bonus
+        snap.items.insert(
+            999_881,
+            InventoryItemRecord {
+                item_id: 999_881,
+                type_id: 37178,
+                owner_id: 1_000_009,
+                location_id: struct_id,
+                flag: InventoryFlag::RigSlot0,
+                quantity: 1,
+                singleton: true,
+                dynamic_attributes: dyn_attrs,
+                ..Default::default()
+            },
+        );
+    });
+    let max_mods_rigged =
+        handle_industry_facilities_bps(&ctx, &mut sess, "facilityManager", "GetMaxActivityModifiers", &[], &kw)
+            .unwrap()
+            .unwrap();
+    let rigged_mat = max_mods_rigged.dict_get("materialMultiplier").and_then(|v| v.as_f64()).unwrap();
+    assert!(rigged_mat < base_mat, "fitted rig must improve GetMaxActivityModifiers materialMultiplier: {rigged_mat} < {base_mat}");
     assert!(
         handle_industry_facilities_bps(&ctx, &mut sess, "map", "GetIndustryCostModifier", &[], &kw)
             .unwrap()

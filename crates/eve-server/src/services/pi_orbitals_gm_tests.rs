@@ -177,6 +177,37 @@ fn test_pi_orbitals_gm_rpcs_and_access_checks() {
     .unwrap();
     assert_eq!(depl.dict_get("durationHours").and_then(|v| v.as_i64()), Some(10));
 
+    let before_density = ctx
+        .db
+        .with_snapshot(|snap| compute_planet_resource_density(&ctx, snap, planet_id, 2268, 0.25, 0.5));
+    assert_eq!(
+        handle_pi_orbitals_gm(
+            &ctx,
+            &mut gm,
+            "planetMgr",
+            "GMCreateNuggetLayer",
+            &[
+                PyRep::Integer(planet_id),
+                PyRep::Integer(2268),
+                PyRep::Real(0.25),
+                PyRep::Real(0.5),
+                PyRep::Real(0.4),
+                PyRep::Real(0.35),
+            ],
+            &HashMap::new(),
+            None
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::None
+    );
+    let after_density = ctx
+        .db
+        .with_snapshot(|snap| compute_planet_resource_density(&ctx, snap, planet_id, 2268, 0.25, 0.5));
+    assert!(
+        after_density > before_density,
+        "GMCreateNuggetLayer must boost density: before={before_density}, after={after_density}"
+    );
     assert_eq!(
         handle_pi_orbitals_gm(&ctx, &mut gm, "planetMgr", "GMCreateNuggetLayer", &[], &HashMap::new(), None)
             .unwrap()
@@ -188,11 +219,20 @@ fn test_pi_orbitals_gm_rpcs_and_access_checks() {
         &mut gm,
         "planetMgr",
         "GMGetCompleteResource",
-        &[],
+        &[PyRep::Integer(planet_id), PyRep::Integer(2268)],
         &HashMap::new(),
         None,
     )
     .unwrap()
     .unwrap();
     assert_eq!(comp.dict_get("numBands").and_then(|v| v.as_i64()), Some(3));
+    assert_eq!(comp.dict_get("planetID").and_then(|v| v.as_i64()), Some(planet_id));
+    let Some(PyRep::Bytes(sh_bytes)) = comp.dict_get("data") else {
+        panic!("GMGetCompleteResource data must be Bytes");
+    };
+    assert_eq!(sh_bytes.len(), 36);
+    assert!(
+        sh_bytes.iter().any(|&b| b != 0),
+        "GMGetCompleteResource must return real non-zero SH coefficients"
+    );
 }

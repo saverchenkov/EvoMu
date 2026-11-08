@@ -293,6 +293,29 @@ fn contacts_labels_blocklist_online_status_and_watchlist_work() {
         .unwrap();
     assert_eq!(rowset_len(&init_st), 1);
 
+    // Also verify DB-persisted watched contact fallback when esi_state is empty
+    let saved_esi = ctx.esi_state.char_contacts.write().unwrap().remove(&char_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.char_contacts.insert(
+            char_id,
+            vec![eve_db::SocialContactRecord {
+                contact_id: other_id,
+                contact_type: "character".into(),
+                standing: 5.0,
+                is_watched: true,
+                is_blocked: false,
+                label_ids: Vec::new(),
+            }],
+        );
+    });
+    let init_db = handle_contacts(&ctx, &mut sess, "onlineStatus", "GetInitialState", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert_eq!(rowset_len(&init_db), 1);
+    if let Some(prev) = saved_esi {
+        ctx.esi_state.char_contacts.write().unwrap().insert(char_id, prev);
+    }
+
     // BlockOwners, SendMail blocked check, UnblockOwners, DeleteContacts
     let blocked = handle_contacts(&ctx, &mut sess, "charMgr", "BlockOwners", &[PyRep::List(vec![PyRep::Integer(other_id)])], &kw)
         .unwrap()

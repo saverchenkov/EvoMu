@@ -950,19 +950,32 @@ fn handle_get_hq_system_ids(ctx: &ServerContext) -> Option<Result<PyRep, BridgeR
 }
 
 fn handle_get_all_warzones(ctx: &ServerContext) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (wz1_count, wz2_count) = ctx.db.with_snapshot(|snap| {
+        let mut c1 = 0_i64;
+        let mut c2 = 0_i64;
+        for st in snap.fw_system_occupations.values() {
+            if matches!(st.owner_faction_id, FACTION_CALDARI | FACTION_GALLENTE) {
+                c1 += 1;
+            } else if matches!(st.owner_faction_id, FACTION_AMARR | FACTION_MINMATAR) {
+                c2 += 1;
+            }
+        }
+        (c1, c2)
+    });
     let wz1 = PyRep::keyval([
         ("warzoneID", PyRep::Integer(1)),
         ("name", PyRep::String("Caldari - Gallente Warzone".into())),
         ("factionOneID", PyRep::Integer(FACTION_CALDARI)),
         ("factionTwoID", PyRep::Integer(FACTION_GALLENTE)),
+        ("systemCount", PyRep::Integer(wz1_count)),
     ]);
     let wz2 = PyRep::keyval([
         ("warzoneID", PyRep::Integer(2)),
         ("name", PyRep::String("Amarr - Minmatar Warzone".into())),
         ("factionOneID", PyRep::Integer(FACTION_AMARR)),
         ("factionTwoID", PyRep::Integer(FACTION_MINMATAR)),
+        ("systemCount", PyRep::Integer(wz2_count)),
     ]);
-    let _ = ctx.db.with_snapshot(|snap| snap.fw_system_occupations.len());
     Some(Ok(PyRep::List(vec![wz1, wz2])))
 }
 

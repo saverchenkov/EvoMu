@@ -1098,28 +1098,37 @@ pub fn handle_contacts(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let watched_ids: Vec<i64> = ctx
+            let mut watched_ids: Vec<i64> = ctx
                 .esi_state
                 .char_contacts
                 .read()
                 .ok()
                 .and_then(|g| {
                     g.get(&char_id).map(|list| {
-                        let mut ids: Vec<i64> = list
-                            .iter()
+                        list.iter()
                             .filter(|e| e.is_watched)
                             .map(|e| e.contact_id)
-                            .collect();
-                        ids.sort_unstable();
-                        ids
+                            .collect()
                     })
                 })
                 .unwrap_or_default();
+            ctx.db.with_snapshot(|snap| {
+                if let Some(db_list) = snap.char_contacts.get(&char_id) {
+                    for c in db_list {
+                        if c.is_watched && !watched_ids.contains(&c.contact_id) {
+                            watched_ids.push(c.contact_id);
+                        }
+                    }
+                }
+            });
+            watched_ids.sort_unstable();
+            watched_ids.dedup();
             let rows: Vec<Vec<PyRep>> = watched_ids
                 .into_iter()
                 .map(|cid| {
-                    let online =
-                        !is_blocked_by(ctx, cid, char_id) && is_character_online(ctx, cid);
+                    let online = !is_blocked_by(ctx, cid, char_id)
+                        && !is_blocked_by(ctx, char_id, cid)
+                        && is_character_online(ctx, cid);
                     vec![PyRep::Integer(cid), PyRep::Bool(online)]
                 })
                 .collect();

@@ -1388,7 +1388,6 @@ pub async fn handle_gm_qa_rpcs(
                 crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, ext_res.is_ok());
                 return Some(ext_res);
             }
-            let _ = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&cid));
             crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, false);
             Some(Err(BridgeRpcError {
                 code: "UnknownSlashCommand".into(),
