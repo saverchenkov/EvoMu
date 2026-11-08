@@ -199,22 +199,23 @@ fn character_and_corporation_market_order_authorization_and_queries() {
             ch.corporation_id = c_id;
             snap.characters.insert(id, ch);
         }
-        let corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "MarketCorp".to_string(),
-            ticker: "MCRP".to_string(),
-            ceo_id: cid,
-            hq_station_id: Some(60003760),
-            alliance_id: None,
-            tax_rate: 0.05,
-            master_wallet: IskCents(0),
-            members: HashSet::from([cid, member_cid]),
-            member_roles: HashMap::new(),
-            applications: HashMap::new(),
-            wallet_divisions: Vec::new(),
-            description: String::new(),
-            url: String::new(),
-        };
+        let corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "MarketCorp".to_string();
+            __corp.ticker = "MCRP".to_string();
+            __corp.ceo_id = cid;
+            __corp.hq_station_id = Some(60003760);
+            __corp.alliance_id = None;
+            __corp.tax_rate = 0.05;
+            __corp.members = HashSet::from([cid, member_cid]);
+            __corp.member_roles = HashMap::new();
+            __corp.applications = HashMap::new();
+            __corp.description = String::new();
+            __corp.url = String::new();
+            __corp.wallet_divisions = Vec::new();
+            let __mw = IskCents(0);
+            if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+            __corp };
         snap.corporations.insert(corp_id, corp);
 
         snap.market_orders.insert(

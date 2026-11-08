@@ -990,14 +990,13 @@ async fn test_station_standing_check_diplomacy_connections_and_corp_office_gates
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             player_corp,
-            eve_db::CorporationRecord {
-                corporation_id: player_corp,
-                name: "Test Pochven Corp".into(),
-                ticker: "TPCHV".into(),
-                ceo_id: pilot2,
-                members: [pilot1, pilot2].into_iter().collect(),
-                ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = player_corp;
+                __corp.name = "Test Pochven Corp".into();
+                __corp.ticker = "TPCHV".into();
+                __corp.ceo_id = pilot2;
+                __corp.members = [pilot1, pilot2].into_iter().collect();
+                __corp },
         );
         snap.characters.get_mut(&pilot1).unwrap().corporation_id = player_corp;
         snap.characters.get_mut(&pilot2).unwrap().corporation_id = player_corp;

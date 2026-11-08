@@ -147,31 +147,29 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "ESI3 Test Corp".to_string(),
-                ticker: "E3TC".to_string(),
-                ceo_id: 90_000_001,
-                alliance_id: Some(alliance_id),
-                tax_rate: 0.05,
-                master_wallet: IskCents::from_isk(50_000_000),
-                members: HashSet::from([90_000_001]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "ESI3 Test Corp".to_string();
+                __corp.ticker = "E3TC".to_string();
+                __corp.ceo_id = 90_000_001;
+                __corp.alliance_id = Some(alliance_id);
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([90_000_001]);
+                __corp.set_division_balance(1, IskCents::from_isk(50_000_000));
+                __corp },
         );
         snap.corporations.insert(
             enemy_corp_id,
-            CorporationRecord {
-                corporation_id: enemy_corp_id,
-                name: "Hostile Corp".to_string(),
-                ticker: "HSTL".to_string(),
-                ceo_id: 90_000_002,
-                alliance_id: None,
-                tax_rate: 0.10,
-                master_wallet: IskCents::from_isk(10_000_000),
-                members: HashSet::from([90_000_002]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = enemy_corp_id;
+                __corp.name = "Hostile Corp".to_string();
+                __corp.ticker = "HSTL".to_string();
+                __corp.ceo_id = 90_000_002;
+                __corp.alliance_id = None;
+                __corp.tax_rate = 0.10;
+                __corp.members = HashSet::from([90_000_002]);
+                __corp.set_division_balance(1, IskCents::from_isk(10_000_000));
+                __corp },
         );
         snap.alliances.insert(
             alliance_id,

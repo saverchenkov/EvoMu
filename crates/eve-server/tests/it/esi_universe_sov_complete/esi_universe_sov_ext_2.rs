@@ -191,15 +191,14 @@ async fn test_esi_sovereignty_campaigns_reflect_live_command_node_events() {
         ] {
             snap.corporations.insert(
                 cid,
-                CorporationRecord {
-                    corporation_id: cid,
-                    name: format!("Sov Campaign Corp {cid}"),
-                    ticker: "SOVC".into(),
-                    ceo_id: ceo,
-                    alliance_id: Some(aid),
-                    members: HashSet::from([ceo]),
-                    ..Default::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = cid;
+                    __corp.name = format!("Sov Campaign Corp {cid}");
+                    __corp.ticker = "SOVC".into();
+                    __corp.ceo_id = ceo;
+                    __corp.alliance_id = Some(aid);
+                    __corp.members = HashSet::from([ceo]);
+                    __corp },
             );
             snap.alliances.insert(
                 aid,
@@ -508,15 +507,14 @@ async fn test_esi_incursions_wars_and_single_killmail_reflect_live_state() {
         ] {
             snap.corporations.insert(
                 cid,
-                CorporationRecord {
-                    corporation_id: cid,
-                    name: format!("War Corp {cid}"),
-                    ticker: "WARC".into(),
-                    ceo_id: attacker_id,
-                    alliance_id: aid,
-                    members: HashSet::from([attacker_id]),
-                    ..Default::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = cid;
+                    __corp.name = format!("War Corp {cid}");
+                    __corp.ticker = "WARC".into();
+                    __corp.ceo_id = attacker_id;
+                    __corp.alliance_id = aid;
+                    __corp.members = HashSet::from([attacker_id]);
+                    __corp },
             );
         }
         snap.alliances.insert(

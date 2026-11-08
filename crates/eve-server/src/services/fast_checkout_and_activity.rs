@@ -1063,31 +1063,25 @@ fn handle_buy_offer(
         let vault_uid = active_char_id
             .and_then(|cid| snap.account_of_character(cid))
             .unwrap_or(user_id);
-        let mut cur_rem = snap.account_plex_vault.get(&vault_uid).copied().unwrap_or(0);
+        let mut cur_rem = snap.unified_plex_balance_for_user(vault_uid);
         if total_cost_plex > 0 {
-            let next = cur_rem
-                .checked_sub(total_cost_plex)
-                .filter(|&v| v >= 0)
+            cur_rem = snap
+                .adjust_unified_plex_for_user(vault_uid, -total_cost_plex)
                 .ok_or_else(|| BridgeRpcError {
                     code: "UserError".into(),
                     message: format!(
                         "UserError: Insufficient balance: need {total_cost_plex} PLEX, have {cur_rem}"
                     ),
                 })?;
-            snap.account_plex_vault.insert(vault_uid, next);
-            cur_rem = next;
         }
 
         if total_plex > 0 {
-            let next = cur_rem
-                .checked_add(total_plex)
-                .filter(|&v| v >= 0)
+            cur_rem = snap
+                .adjust_unified_plex_for_user(vault_uid, total_plex)
                 .ok_or_else(|| BridgeRpcError {
                     code: "ArithmeticOverflow".into(),
                     message: "Account PLEX vault overflows i64".into(),
                 })?;
-            snap.account_plex_vault.insert(vault_uid, next);
-            cur_rem = next;
         }
 
         snap.next_entity_id += 1;

@@ -534,11 +534,7 @@ pub fn flush_npc_bounty_tick(
         }
         if is_player_corp && tax_cents.raw_cents() > 0 {
             if let Some(corp) = snap.corporations.get_mut(&char_corp_id) {
-                corp.ensure_wallet_divisions();
-                corp.master_wallet = corp.master_wallet.checked_add(tax_cents).unwrap_or(corp.master_wallet);
-                if let Some(d0) = corp.wallet_divisions.first_mut() {
-                    d0.balance = d0.balance.checked_add(tax_cents).unwrap_or(d0.balance);
-                }
+                corp.credit_division(1, tax_cents);
             }
         }
         if is_kspace_nullsec {

@@ -64,20 +64,19 @@ fn setup_corp_env() -> (ServerContext, SessionState, i64, i64, i64, i64) {
             ch.balance = IskCents::from_isk(1_000_000);
             snap.characters.insert(cid, ch);
         }
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "Deep Coverage Corp".into(),
-            ticker: "DCVR".into(),
-            ceo_id,
-            master_wallet: IskCents::from_isk(100_000_000),
-            members: [ceo_id, member_id, third_id].into_iter().collect(),
-            member_roles: [(ceo_id, u64::MAX), (member_id, 0), (third_id, 0)]
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Deep Coverage Corp".into();
+            __corp.ticker = "DCVR".into();
+            __corp.ceo_id = ceo_id;
+            __corp.members = [ceo_id, member_id, third_id].into_iter().collect();
+            __corp.member_roles = [(ceo_id, u64::MAX), (member_id, 0), (third_id, 0)]
                 .into_iter()
-                .collect(),
-            hq_station_id: Some(station_id),
-            tax_rate: 0.05,
-            ..Default::default()
-        };
+                .collect();
+            __corp.hq_station_id = Some(station_id);
+            __corp.tax_rate = 0.05;
+            __corp.set_division_balance(1, IskCents::from_isk(100_000_000));
+            __corp };
         corp.ensure_wallet_divisions();
         for div in &mut corp.wallet_divisions {
             div.balance = IskCents::from_isk(10_000_000);

@@ -30,13 +30,12 @@ fn blueprint_data_corp_permissions_contract_visibility_and_nested_container_reso
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "BP Corp".into(),
-                ticker: "BPC".into(),
-                ceo_id: other_id, // char_id is NOT CEO initially
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "BP Corp".into();
+                __corp.ticker = "BPC".into();
+                __corp.ceo_id = other_id;
+                __corp },
         );
         snap.characters.get_mut(&char_id).unwrap().corporation_id = corp_id;
 
@@ -198,13 +197,12 @@ fn facility_manager_limits_locations_and_set_facility_taxes_dict_keyval_and_role
 
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Tax Corp".into(),
-                ticker: "TXC".into(),
-                ceo_id: other_id,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Tax Corp".into();
+                __corp.ticker = "TXC".into();
+                __corp.ceo_id = other_id;
+                __corp },
         );
         snap.characters.get_mut(&char_id).unwrap().corporation_id = corp_id;
         snap.structures.insert(

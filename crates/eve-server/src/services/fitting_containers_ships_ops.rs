@@ -1249,14 +1249,7 @@ fn handle_import_export_with_planet(
                     IskCents::from_f64_isk((0.5 * import_base_isk + export_base_isk) * player_poco_rate);
                 if player_share.0 > 0 {
                     if let Some(corp) = snap.corporations.get_mut(&cfg.owner_corp_id) {
-                        corp.ensure_wallet_divisions();
-                        corp.master_wallet = corp
-                            .master_wallet
-                            .checked_add(player_share)
-                            .unwrap_or(corp.master_wallet);
-                        if let Some(d0) = corp.wallet_divisions.first_mut() {
-                            d0.balance = corp.master_wallet;
-                        }
+                        corp.credit_division(1, player_share);
                     }
                 }
             }

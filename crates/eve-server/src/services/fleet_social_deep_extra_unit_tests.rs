@@ -381,16 +381,15 @@ async fn mail_cspa_labels_calendar_and_corp_contacts_deep_branches_kill_mutation
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                alliance_id: Some(ally_id),
-                name: "Social Test Corp".into(),
-                ticker: "STCP".into(),
-                ceo_id: sender_id,
-                members: [sender_id].into_iter().collect(),
-                member_roles: [(sender_id, u64::MAX)].into_iter().collect(),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.alliance_id = Some(ally_id);
+                __corp.name = "Social Test Corp".into();
+                __corp.ticker = "STCP".into();
+                __corp.ceo_id = sender_id;
+                __corp.members = [sender_id].into_iter().collect();
+                __corp.member_roles = [(sender_id, u64::MAX)].into_iter().collect();
+                __corp },
         );
         snap.alliances.insert(
             ally_id,

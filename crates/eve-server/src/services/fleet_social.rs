@@ -322,22 +322,12 @@ fn handle_office_manager(
                 }
                 let quote = 10_000.0 * (1.0 + (occupied as f64) * 0.5);
                 let fee = eve_db::IskCents((quote * 100.0) as i64);
-                if !corp.wallet_divisions.is_empty() {
-                    if corp.wallet_divisions[0].balance.0 < fee.0 {
-                        return Err(BridgeRpcError {
-                            code: "NotEnoughISK".into(),
-                            message: "Not enough ISK in corporation master wallet to rent office".into(),
-                        });
-                    }
-                    corp.wallet_divisions[0].balance =
-                        corp.wallet_divisions[0].balance.checked_sub(fee).unwrap_or(eve_db::IskCents(0));
-                } else if corp.master_wallet.0 < fee.0 {
+                if corp.debit_division(1, fee).is_none() {
                     return Err(BridgeRpcError {
                         code: "NotEnoughISK".into(),
                         message: "Not enough ISK in corporation master wallet to rent office".into(),
                     });
                 }
-                corp.master_wallet = corp.master_wallet.checked_sub(fee).unwrap_or(eve_db::IskCents(0));
 
                 let office_id = snap.items.keys().max().copied().unwrap_or(920_000_000).max(920_000_000) + 1;
                 snap.items.insert(

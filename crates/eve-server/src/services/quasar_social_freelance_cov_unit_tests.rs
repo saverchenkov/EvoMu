@@ -155,7 +155,10 @@ fn serde_defaults_snapshot_mapping_admin_role_divisions_and_extractors() {
     assert_eq!(check_corp_admin_role(&ctx_pm, None, pm_cid, corp_id).unwrap(), (false, corp_roles::ROLE_PROJECT_MANAGER, 1));
 
     db.with_mut_snapshot(|snap| {
-        snap.corporations.insert(corp_id as i64, CorporationRecord { corporation_id: corp_id as i64, ceo_id: ceo_cid as i64, ..Default::default() });
+        snap.corporations.insert(corp_id as i64, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id as i64;
+            __corp.ceo_id = ceo_cid as i64;
+            __corp });
     });
     let ctx_ceo_zero = sess(Some(1), Some(ceo_cid), Some(corp_id), 0);
     assert_eq!(check_corp_admin_role(&ctx_ceo_zero, Some(&db), ceo_cid, corp_id).unwrap(), (true, 0, 1));
@@ -187,9 +190,12 @@ fn create_request_config_variants_negative_budget_and_escrow_role_checks() {
 
     let (dir_cid, pm_cid, corp_id) = (90_000_001_u32, 90_000_002_u32, 1_000_009_u32);
     db.with_mut_snapshot(|snap| {
-        let c = snap.corporations.entry(corp_id as i64).or_insert_with(|| CorporationRecord { corporation_id: corp_id as i64, ceo_id: dir_cid as i64, ..Default::default() });
+        let c = snap.corporations.entry(corp_id as i64).or_insert_with(|| { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id as i64;
+            __corp.ceo_id = dir_cid as i64;
+            __corp });
         c.members.extend([dir_cid as i64, pm_cid as i64]);
-        c.master_wallet = IskCents::from_isk(200_000_000);
+        c.set_division_balance(1, IskCents::from_isk(200_000_000));
         c.set_division_balance(1, IskCents::from_isk(200_000_000));
         c.set_division_balance(4, IskCents::from_isk(200_000_000));
         c.member_roles.insert(pm_cid as i64, corp_roles::ROLE_PROJECT_MANAGER);
@@ -311,8 +317,11 @@ fn full_lifecycle_queries_close_escrow_guard_delete_and_redeem_reward() {
         w_ch.character_id = worker_cid as i64;
         w_ch.corporation_id = corp_id as i64;
         snap.characters.insert(worker_cid as i64, w_ch);
-        let c = snap.corporations.entry(corp_id as i64).or_insert_with(|| CorporationRecord { corporation_id: corp_id as i64, ceo_id: dir_cid as i64, ..Default::default() });
-        c.master_wallet = IskCents::from_isk(80_000_000);
+        let c = snap.corporations.entry(corp_id as i64).or_insert_with(|| { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id as i64;
+            __corp.ceo_id = dir_cid as i64;
+            __corp });
+        c.set_division_balance(1, IskCents::from_isk(80_000_000));
         c.set_division_balance(1, IskCents::from_isk(80_000_000));
         c.member_roles.insert(pm_cid as i64, corp_roles::ROLE_PROJECT_MANAGER);
     });

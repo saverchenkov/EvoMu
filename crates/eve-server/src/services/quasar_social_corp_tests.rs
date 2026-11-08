@@ -93,11 +93,10 @@ fn corp_skill_plan_and_milestone_rpc_handlers() {
         let c = snap
             .corporations
             .entry(corp_id as i64)
-            .or_insert_with(|| eve_db::CorporationRecord {
-                corporation_id: corp_id as i64,
-                ceo_id: cid as i64,
-                ..Default::default()
-            });
+            .or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = corp_id as i64;
+                __corp.ceo_id = cid as i64;
+                __corp });
         c.ceo_id = cid as i64;
         c.members.insert(90_000_001);
         c.members.insert(90_000_002);
@@ -281,11 +280,10 @@ fn corporation_goal_and_reward_rpc_handlers() {
         let c = snap
             .corporations
             .entry(corp_id as i64)
-            .or_insert_with(|| eve_db::CorporationRecord {
-                corporation_id: corp_id as i64,
-                ceo_id: cid as i64,
-                ..Default::default()
-            });
+            .or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = corp_id as i64;
+                __corp.ceo_id = cid as i64;
+                __corp });
         c.ceo_id = cid as i64;
         c.members.insert(90_000_001);
         c.members.insert(90_000_002);

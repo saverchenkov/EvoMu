@@ -1006,14 +1006,13 @@ async fn test_session_attribute_changes_propagate_across_location_ship_corp_and_
     // 3. Corp propagation: PILOT_B joins CEO PILOT_A's player corporation -> OnSessionChanged("corpid") + auto-sync
     let player_corp_id = 98_500_001_i64;
     ctx.db.with_mut_snapshot(|snap| {
-        let mut corp = CorporationRecord {
-            corporation_id: player_corp_id,
-            name: "Session Propagation Corp".into(),
-            ticker: "SPROP".into(),
-            ceo_id: PILOT_A,
-            hq_station_id: Some(JITA_STATION),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = player_corp_id;
+            __corp.name = "Session Propagation Corp".into();
+            __corp.ticker = "SPROP".into();
+            __corp.ceo_id = PILOT_A;
+            __corp.hq_station_id = Some(JITA_STATION);
+            __corp };
         corp.members.insert(PILOT_A);
         corp.member_roles.insert(PILOT_A, u64::MAX);
         snap.corporations.insert(player_corp_id, corp);
@@ -1271,25 +1270,23 @@ async fn test_eiv_market_adjusted_prices_and_warable_lookup_regressions() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             98_600_001,
-            CorporationRecord {
-                corporation_id: 98_600_001,
-                name: "Standalone WarCitadel Corp".into(),
-                ticker: "SWCC".into(),
-                ceo_id: 90_000_050,
-                alliance_id: None,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = 98_600_001;
+                __corp.name = "Standalone WarCitadel Corp".into();
+                __corp.ticker = "SWCC".into();
+                __corp.ceo_id = 90_000_050;
+                __corp.alliance_id = None;
+                __corp },
         );
         snap.corporations.insert(
             98_600_002,
-            CorporationRecord {
-                corporation_id: 98_600_002,
-                name: "Allied WarCitadel Member Corp".into(),
-                ticker: "AWMC".into(),
-                ceo_id: 90_000_051,
-                alliance_id: Some(99_600_002),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = 98_600_002;
+                __corp.name = "Allied WarCitadel Member Corp".into();
+                __corp.ticker = "AWMC".into();
+                __corp.ceo_id = 90_000_051;
+                __corp.alliance_id = Some(99_600_002);
+                __corp },
         );
         for (sid, owner) in [(1_000_600_001_001_i64, 98_600_001_i64), (1_000_600_002_001_i64, 98_600_002_i64)] {
             snap.structures.insert(
@@ -1350,10 +1347,14 @@ async fn test_industry_container_division_and_reactor_gates() {
     let corp_id = 98_700_001_i64;
     let fm_sag1_only = eve_db::corp_roles::ROLE_FACTORY_MANAGER | (1u64 << 13);
     ctx.db.with_mut_snapshot(|snap| {
-        let mut corp = eve_db::CorporationRecord {
-            corporation_id: corp_id, name: "Gate Corp".into(), ticker: "GATE".into(),
-            ceo_id: PILOT_B, hq_station_id: Some(JITA_STATION), master_wallet: IskCents(100_000_000_00), ..Default::default()
-        };
+        let mut corp = { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Gate Corp".into();
+            __corp.ticker = "GATE".into();
+            __corp.ceo_id = PILOT_B;
+            __corp.hq_station_id = Some(JITA_STATION);
+            __corp.set_division_balance(1, IskCents(100_000_000_00));
+            __corp };
         corp.members.insert(PILOT_A);
         corp.member_roles.insert(PILOT_A, fm_sag1_only);
         snap.corporations.insert(corp_id, corp);

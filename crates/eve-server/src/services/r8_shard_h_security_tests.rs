@@ -96,15 +96,14 @@ async fn issue_489_junior_accountant_blocked_and_division_roles_enforced() {
             ch.station_id = Some(JITA_STATION_ID);
             ch.balance = IskCents::from_isk(100_000_000);
         }
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "Audit489Corp".into(),
-            ticker: "A489".into(),
-            ceo_id,
-            master_wallet: IskCents::from_isk(500_000_000),
-            members: HashSet::from([char_id, ceo_id]),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Audit489Corp".into();
+            __corp.ticker = "A489".into();
+            __corp.ceo_id = ceo_id;
+            __corp.members = HashSet::from([char_id, ceo_id]);
+            __corp.set_division_balance(1, IskCents::from_isk(500_000_000));
+            __corp };
         corp.credit_division(2, IskCents::from_isk(500_000_000));
         // Grant ROLE_JUNIOR_ACCOUNTANT + full wallet/hangar take bits, but NO Trader/Accountant/Director.
         corp.member_roles.insert(
@@ -333,15 +332,14 @@ fn issue_489_place_multi_sell_order_restricts_corp_flags_and_hangar_take_roles()
             ch.corporation_id = corp_id;
             ch.station_id = Some(JITA_STATION_ID);
         }
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "FlagAuditCorp".into(),
-            ticker: "F489".into(),
-            ceo_id,
-            master_wallet: IskCents::from_isk(100_000_000),
-            members: HashSet::from([char_id, ceo_id]),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "FlagAuditCorp".into();
+            __corp.ticker = "F489".into();
+            __corp.ceo_id = ceo_id;
+            __corp.members = HashSet::from([char_id, ceo_id]);
+            __corp.set_division_balance(1, IskCents::from_isk(100_000_000));
+            __corp };
         // Trader with CorpSAG1 take only — missing CorpSAG2 take and Deliveries take.
         corp.member_roles.insert(
             char_id,

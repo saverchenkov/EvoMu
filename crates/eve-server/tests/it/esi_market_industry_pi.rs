@@ -133,18 +133,17 @@ pub(crate) fn make_corp(
         | ROLE_CONTRACT_MANAGER
         | ROLE_FACTORY_MANAGER
         | ROLE_STATION_MANAGER;
-    let mut corp = CorporationRecord {
-        corporation_id,
-        name: name.to_string(),
-        ticker: ticker.to_string(),
-        ceo_id,
-        alliance_id,
-        tax_rate,
-        members: HashSet::from([ceo_id]),
-        member_roles: HashMap::from([(ceo_id, roles)]),
-        master_wallet: IskCents::from_isk(500_000_000),
-        ..Default::default()
-    };
+    let mut corp = { let mut __corp = CorporationRecord::default();
+        __corp.corporation_id = corporation_id;
+        __corp.name = name.to_string();
+        __corp.ticker = ticker.to_string();
+        __corp.ceo_id = ceo_id;
+        __corp.alliance_id = alliance_id;
+        __corp.tax_rate = tax_rate;
+        __corp.members = HashSet::from([ceo_id]);
+        __corp.member_roles = HashMap::from([(ceo_id, roles)]);
+        __corp.set_division_balance(1, IskCents::from_isk(500_000_000));
+        __corp };
     corp.ensure_wallet_divisions();
     for d in &mut corp.wallet_divisions {
         d.balance = IskCents::from_isk(500_000_000);
@@ -719,14 +718,13 @@ async fn test_esi_market_groups_sde_descriptions_and_structure_orders_acl_hub() 
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Market Hub Test Corp".into(),
-                ticker: "MHTC".into(),
-                ceo_id: char_id,
-                members: HashSet::from([char_id]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Market Hub Test Corp".into();
+                __corp.ticker = "MHTC".into();
+                __corp.ceo_id = char_id;
+                __corp.members = HashSet::from([char_id]);
+                __corp },
         );
 
         // (a) Fortizar with online Standup Market Hub I (35892)
@@ -900,12 +898,12 @@ async fn test_esi_corp_endpoint_specific_role_gates_and_routes() {
             ch.balance = IskCents::from_isk(250_000_000);
             snap.characters.insert(cid, ch);
         }
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "Role Gate Remediation Corp".into(),
-            ticker: "RGRC".into(),
-            ceo_id,
-            members: HashSet::from([
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Role Gate Remediation Corp".into();
+            __corp.ticker = "RGRC".into();
+            __corp.ceo_id = ceo_id;
+            __corp.members = HashSet::from([
                 ceo_id,
                 no_role_id,
                 sec_officer_id,
@@ -913,8 +911,8 @@ async fn test_esi_corp_endpoint_specific_role_gates_and_routes() {
                 jr_accountant_id,
                 trader_id,
                 station_mgr_id,
-            ]),
-            member_roles: HashMap::from([
+            ]);
+            __corp.member_roles = HashMap::from([
                 (
                     ceo_id,
                     corp_roles::ROLE_DIRECTOR
@@ -928,10 +926,9 @@ async fn test_esi_corp_endpoint_specific_role_gates_and_routes() {
                 (jr_accountant_id, corp_roles::ROLE_JUNIOR_ACCOUNTANT),
                 (trader_id, corp_roles::ROLE_TRADER),
                 (station_mgr_id, corp_roles::ROLE_STATION_MANAGER),
-            ]),
-            master_wallet: IskCents::from_isk(250_000_000),
-            ..Default::default()
-        };
+            ]);
+            __corp.set_division_balance(1, IskCents::from_isk(250_000_000));
+            __corp };
         corp.ensure_wallet_divisions();
         for d in &mut corp.wallet_divisions {
             d.balance = IskCents::from_isk(250_000_000);
@@ -2504,14 +2501,13 @@ pub(crate) mod esi_market_groups_sde_descriptions {
             }
             snap.corporations.insert(
                 corp_id,
-                CorporationRecord {
-                    corporation_id: corp_id,
-                    name: "Market Hub Test Corp".into(),
-                    ticker: "MHTC".into(),
-                    ceo_id: char_id,
-                    members: HashSet::from([char_id]),
-                    ..Default::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = corp_id;
+                    __corp.name = "Market Hub Test Corp".into();
+                    __corp.ticker = "MHTC".into();
+                    __corp.ceo_id = char_id;
+                    __corp.members = HashSet::from([char_id]);
+                    __corp },
             );
 
             // (a) Fortizar with online Standup Market Hub I (35892)
@@ -2693,12 +2689,12 @@ pub(crate) mod esi_market_groups_sde_descriptions {
                 ch.balance = IskCents::from_isk(250_000_000);
                 snap.characters.insert(cid, ch);
             }
-            let mut corp = CorporationRecord {
-                corporation_id: corp_id,
-                name: "Role Gate Remediation Corp".into(),
-                ticker: "RGRC".into(),
-                ceo_id,
-                members: HashSet::from([
+            let mut corp = { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Role Gate Remediation Corp".into();
+                __corp.ticker = "RGRC".into();
+                __corp.ceo_id = ceo_id;
+                __corp.members = HashSet::from([
                     ceo_id,
                     no_role_id,
                     sec_officer_id,
@@ -2706,8 +2702,8 @@ pub(crate) mod esi_market_groups_sde_descriptions {
                     jr_accountant_id,
                     trader_id,
                     station_mgr_id,
-                ]),
-                member_roles: HashMap::from([
+                ]);
+                __corp.member_roles = HashMap::from([
                     (
                         ceo_id,
                         corp_roles::ROLE_DIRECTOR
@@ -2721,10 +2717,9 @@ pub(crate) mod esi_market_groups_sde_descriptions {
                     (jr_accountant_id, corp_roles::ROLE_JUNIOR_ACCOUNTANT),
                     (trader_id, corp_roles::ROLE_TRADER),
                     (station_mgr_id, corp_roles::ROLE_STATION_MANAGER),
-                ]),
-                master_wallet: IskCents::from_isk(250_000_000),
-                ..Default::default()
-            };
+                ]);
+                __corp.set_division_balance(1, IskCents::from_isk(250_000_000));
+                __corp };
             corp.ensure_wallet_divisions();
             for d in &mut corp.wallet_divisions {
                 d.balance = IskCents::from_isk(250_000_000);
@@ -4152,24 +4147,23 @@ pub(crate) mod esi_corp_role_gated_mining {
                     snap.characters.insert(cid, ch);
                 }
 
-                let mut corp = CorporationRecord {
-                    corporation_id: corp_id,
-                    name: "Role Gate Test Corp".into(),
-                    ticker: "RGTC".into(),
-                    ceo_id,
-                    tax_rate: 0.05,
-                    members: HashSet::from([
+                let mut corp = { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = corp_id;
+                    __corp.name = "Role Gate Test Corp".into();
+                    __corp.ticker = "RGTC".into();
+                    __corp.ceo_id = ceo_id;
+                    __corp.tax_rate = 0.05;
+                    __corp.members = HashSet::from([
                         ceo_id,
                         station_mgr_id,
                         accountant_id,
                         trader_id,
                         plain_member_id,
-                    ]),
-                    member_roles,
-                    hq_station_id: Some(jita_station),
-                    master_wallet: IskCents::from_isk(250_000_000),
-                    ..Default::default()
-                };
+                    ]);
+                    __corp.member_roles = member_roles;
+                    __corp.hq_station_id = Some(jita_station);
+                    __corp.set_division_balance(1, IskCents::from_isk(250_000_000));
+                    __corp };
                 corp.ensure_wallet_divisions();
                 for d in &mut corp.wallet_divisions {
                     d.balance = IskCents::from_isk(250_000_000);
@@ -4486,18 +4480,17 @@ pub(crate) mod esi_corp_role_gated_mining {
                 }
                 snap.corporations.insert(
                     corp_id,
-                    CorporationRecord {
-                        corporation_id: corp_id,
-                        name: "Industry Market Corp".into(),
-                        ticker: "IMC".into(),
-                        ceo_id: seller_id,
-                        tax_rate: 0.05,
-                        members: HashSet::from([seller_id]),
-                        member_roles,
-                        hq_station_id: Some(jita_station),
-                        master_wallet: IskCents::from_isk(100_000_000),
-                        ..Default::default()
-                    },
+                    { let mut __corp = CorporationRecord::default();
+                        __corp.corporation_id = corp_id;
+                        __corp.name = "Industry Market Corp".into();
+                        __corp.ticker = "IMC".into();
+                        __corp.ceo_id = seller_id;
+                        __corp.tax_rate = 0.05;
+                        __corp.members = HashSet::from([seller_id]);
+                        __corp.member_roles = member_roles;
+                        __corp.hq_station_id = Some(jita_station);
+                        __corp.set_division_balance(1, IskCents::from_isk(100_000_000));
+                        __corp },
                 );
                 snap.structures.insert(
                     structure_id,
@@ -4854,13 +4847,12 @@ pub(crate) mod esi_corp_mining_customs_offices {
         let athanor_id = 1_000_000_811_001_i64;
 
         ctx.db.with_mut_snapshot(|snap| {
-            let mut corp = CorporationRecord {
-                corporation_id: corp_id,
-                name: "B2 Mining & Customs Corp".into(),
-                ticker: "B2MC".into(),
-                ceo_id,
-                ..Default::default()
-            };
+            let mut corp = { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "B2 Mining & Customs Corp".into();
+                __corp.ticker = "B2MC".into();
+                __corp.ceo_id = ceo_id;
+                __corp };
             corp.member_roles.insert(ceo_id, ROLE_DIRECTOR);
             corp.member_roles.insert(miner_id, ROLE_STATION_MANAGER);
             corp.member_roles.insert(accountant_id, ROLE_ACCOUNTANT);
@@ -5233,14 +5225,13 @@ pub(crate) mod esi_corp_mining_customs_offices {
         let bare_astrahus_id = 1_000_000_831_002_i64;
 
         ctx.db.with_mut_snapshot(|snap| {
-            let mut corp = CorporationRecord {
-                corporation_id: corp_id,
-                name: "B2 Market & Citadel Corp".into(),
-                ticker: "B2MC".into(),
-                ceo_id,
-                master_wallet: IskCents(50_000_000_00),
-                ..Default::default()
-            };
+            let mut corp = { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "B2 Market & Citadel Corp".into();
+                __corp.ticker = "B2MC".into();
+                __corp.ceo_id = ceo_id;
+                __corp.set_division_balance(1, IskCents(50_000_000_00));
+                __corp };
             corp.member_roles.insert(ceo_id, ROLE_DIRECTOR);
             corp.member_roles
                 .insert(trader_id, ROLE_TRADER | eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]);
@@ -6284,14 +6275,13 @@ pub(crate) mod esi_char_public_contracts_live {
             plain_member.corporation_id = corp1;
             snap.characters.insert(member_char, plain_member);
 
-            let mut corp = CorporationRecord {
-                corporation_id: corp1,
-                name: "P6 Corp".to_string(),
-                ticker: "P6C".to_string(),
-                ceo_id: char1,
-                master_wallet: IskCents::from_isk(500_000_000),
-                ..Default::default()
-            };
+            let mut corp = { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp1;
+                __corp.name = "P6 Corp".to_string();
+                __corp.ticker = "P6C".to_string();
+                __corp.ceo_id = char1;
+                __corp.set_division_balance(1, IskCents::from_isk(500_000_000));
+                __corp };
             corp.ensure_wallet_divisions();
             corp.members.insert(member_char);
             corp.member_roles.insert(member_char, 0);
@@ -6492,15 +6482,14 @@ pub(crate) mod esi_char_public_contracts_live {
             )
         });
         let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
-            let mut corp = CorporationRecord {
-                corporation_id: corp1,
-                name: "P6 Corp".to_string(),
-                ticker: "P6C".to_string(),
-                ceo_id: char1,
-                tax_rate: 0.11, // PvE bounty tax rate — must NOT be reported as facility industry tax
-                master_wallet: IskCents::from_isk(500_000_000),
-                ..Default::default()
-            };
+            let mut corp = { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp1;
+                __corp.name = "P6 Corp".to_string();
+                __corp.ticker = "P6C".to_string();
+                __corp.ceo_id = char1;
+                __corp.tax_rate = 0.11;
+                __corp.set_division_balance(1, IskCents::from_isk(500_000_000));
+                __corp };
             corp.ensure_wallet_divisions();
             snap.corporations.insert(corp1, corp);
             snap.skills.entry(char1).or_default().insert(
@@ -6675,9 +6664,12 @@ pub(crate) mod esi_char_public_contracts_live {
 
         let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
             let base = snap.characters[&ceo_id].clone();
-            let mut corp = CorporationRecord {
-                corporation_id: corp1, name: "Roles Gate Corp".into(), ticker: "RGC".into(), ceo_id, ..Default::default()
-            };
+            let mut corp = { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp1;
+                __corp.name = "Roles Gate Corp".into();
+                __corp.ticker = "RGC".into();
+                __corp.ceo_id = ceo_id;
+                __corp };
             for (cid, roles) in [
                 (ceo_id, ROLE_DIRECTOR),
                 (plain_id, 0),
@@ -6919,25 +6911,23 @@ pub(crate) mod esi_char_contract_party_isolation {
             )
         });
         let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
-            let mut c1 = CorporationRecord {
-                corporation_id: corp1,
-                name: "Party Isolation Corp".into(),
-                ticker: "PIC1".into(),
-                ceo_id: char1,
-                master_wallet: IskCents::from_isk(500_000_000),
-                ..Default::default()
-            };
+            let mut c1 = { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp1;
+                __corp.name = "Party Isolation Corp".into();
+                __corp.ticker = "PIC1".into();
+                __corp.ceo_id = char1;
+                __corp.set_division_balance(1, IskCents::from_isk(500_000_000));
+                __corp };
             c1.ensure_wallet_divisions();
             snap.corporations.insert(corp1, c1);
 
-            let c3 = CorporationRecord {
-                corporation_id: corp3,
-                name: "Third Party Corp".into(),
-                ticker: "TPC3".into(),
-                ceo_id: char3,
-                master_wallet: IskCents::from_isk(100_000_000),
-                ..Default::default()
-            };
+            let c3 = { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp3;
+                __corp.name = "Third Party Corp".into();
+                __corp.ticker = "TPC3".into();
+                __corp.ceo_id = char3;
+                __corp.set_division_balance(1, IskCents::from_isk(100_000_000));
+                __corp };
             snap.corporations.insert(corp3, c3);
             let mut bystander = snap.characters[&char1].clone();
             bystander.character_id = char3;
@@ -7113,14 +7103,13 @@ pub(crate) mod esi_char_contract_party_isolation {
             )
         });
         let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
-            let mut c1 = CorporationRecord {
-                corporation_id: corp1,
-                name: "Retention Corp".into(),
-                ticker: "RETC".into(),
-                ceo_id: char1,
-                master_wallet: IskCents::from_isk(500_000_000),
-                ..Default::default()
-            };
+            let mut c1 = { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp1;
+                __corp.name = "Retention Corp".into();
+                __corp.ticker = "RETC".into();
+                __corp.ceo_id = char1;
+                __corp.set_division_balance(1, IskCents::from_isk(500_000_000));
+                __corp };
             c1.ensure_wallet_divisions();
             snap.corporations.insert(corp1, c1);
             Ok(())
@@ -7426,16 +7415,15 @@ pub(crate) mod esi_calendar_rpc_http_persistence {
             }
             snap.corporations.insert(
                 corp_id,
-                CorporationRecord {
-                    corporation_id: corp_id,
-                    name: "Calendar Corp".into(),
-                    ticker: "CALC".into(),
-                    ceo_id,
-                    tax_rate: 0.05,
-                    members: HashSet::from([ceo_id, wingman_id]),
-                    member_roles: HashMap::from([(ceo_id, ROLE_DIRECTOR), (wingman_id, 0)]),
-                    ..CorporationRecord::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = corp_id;
+                    __corp.name = "Calendar Corp".into();
+                    __corp.ticker = "CALC".into();
+                    __corp.ceo_id = ceo_id;
+                    __corp.tax_rate = 0.05;
+                    __corp.members = HashSet::from([ceo_id, wingman_id]);
+                    __corp.member_roles = HashMap::from([(ceo_id, ROLE_DIRECTOR), (wingman_id, 0)]);
+                    __corp },
             );
         });
 
@@ -7572,17 +7560,16 @@ pub(crate) mod esi_calendar_rpc_http_persistence {
             }
             snap.corporations.insert(
                 corp_id,
-                CorporationRecord {
-                    corporation_id: corp_id,
-                    name: "Diplo Corp".into(),
-                    ticker: "DPLC".into(),
-                    ceo_id,
-                    alliance_id: Some(alliance_id),
-                    tax_rate: 0.05,
-                    members: HashSet::from([ceo_id]),
-                    member_roles: HashMap::from([(ceo_id, ROLE_DIRECTOR)]),
-                    ..CorporationRecord::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = corp_id;
+                    __corp.name = "Diplo Corp".into();
+                    __corp.ticker = "DPLC".into();
+                    __corp.ceo_id = ceo_id;
+                    __corp.alliance_id = Some(alliance_id);
+                    __corp.tax_rate = 0.05;
+                    __corp.members = HashSet::from([ceo_id]);
+                    __corp.member_roles = HashMap::from([(ceo_id, ROLE_DIRECTOR)]);
+                    __corp },
             );
             snap.alliances.insert(
                 alliance_id,
@@ -7735,17 +7722,16 @@ pub(crate) mod esi_calendar_rpc_http_persistence {
             snap.skills.entry(ceo_id).or_default().clear();
             snap.corporations.insert(
                 corp_id,
-                CorporationRecord {
-                    corporation_id: corp_id,
-                    name: "Governance Corp".into(),
-                    ticker: "GOVC".into(),
-                    ceo_id,
-                    alliance_id: Some(alliance_id),
-                    tax_rate: 0.05,
-                    members: HashSet::from([ceo_id, member_id]),
-                    member_roles: HashMap::from([(ceo_id, ROLE_DIRECTOR), (member_id, 0)]),
-                    ..CorporationRecord::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = corp_id;
+                    __corp.name = "Governance Corp".into();
+                    __corp.ticker = "GOVC".into();
+                    __corp.ceo_id = ceo_id;
+                    __corp.alliance_id = Some(alliance_id);
+                    __corp.tax_rate = 0.05;
+                    __corp.members = HashSet::from([ceo_id, member_id]);
+                    __corp.member_roles = HashMap::from([(ceo_id, ROLE_DIRECTOR), (member_id, 0)]);
+                    __corp },
             );
             snap.alliances.insert(
                 alliance_id,
@@ -7996,20 +7982,19 @@ pub(crate) mod esi_corp_blueprints_structures_live {
             snap.characters.insert(ceo_id, ch);
             snap.corporations.insert(
                 corp_id,
-                CorporationRecord {
-                    corporation_id: corp_id,
-                    name: "Industrial Structure Corp".into(),
-                    ticker: "INDS".into(),
-                    ceo_id,
-                    master_wallet: IskCents::from_isk(100_000_000),
-                    tax_rate: 0.05,
-                    members: HashSet::from([ceo_id]),
-                    member_roles: HashMap::from([(
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = corp_id;
+                    __corp.name = "Industrial Structure Corp".into();
+                    __corp.ticker = "INDS".into();
+                    __corp.ceo_id = ceo_id;
+                    __corp.tax_rate = 0.05;
+                    __corp.members = HashSet::from([ceo_id]);
+                    __corp.member_roles = HashMap::from([(
                         ceo_id,
                         ROLE_DIRECTOR | ROLE_FACTORY_MANAGER | ROLE_STATION_MANAGER,
-                    )]),
-                    ..CorporationRecord::default()
-                },
+                    )]);
+                    __corp.set_division_balance(1, IskCents::from_isk(100_000_000));
+                    __corp },
             );
             // Seed corp BPO (Rifter Blueprint = 684) and Astrahus item (35832) + Standup Market Hub I (35892)
             snap.items.insert(
@@ -8262,17 +8247,16 @@ pub(crate) mod esi_corp_blueprints_structures_live {
             }
             snap.corporations.insert(
                 corp_id,
-                CorporationRecord {
-                    corporation_id: corp_id,
-                    name: "Freelance Sponsor Corp".into(),
-                    ticker: "FRSC".into(),
-                    ceo_id: manager_id,
-                    master_wallet: IskCents::from_isk(100_000_000),
-                    tax_rate: 0.05,
-                    members: HashSet::from([manager_id]),
-                    member_roles: HashMap::from([(manager_id, ROLE_DIRECTOR)]),
-                    ..CorporationRecord::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = corp_id;
+                    __corp.name = "Freelance Sponsor Corp".into();
+                    __corp.ticker = "FRSC".into();
+                    __corp.ceo_id = manager_id;
+                    __corp.tax_rate = 0.05;
+                    __corp.members = HashSet::from([manager_id]);
+                    __corp.member_roles = HashMap::from([(manager_id, ROLE_DIRECTOR)]);
+                    __corp.set_division_balance(1, IskCents::from_isk(100_000_000));
+                    __corp },
             );
             // Seed 500 Tritanium (type_id 34) in contractor's Jita hangar
             snap.items.insert(

@@ -67,11 +67,10 @@ fn freelance_project_lifecycle_and_rpc_handlers() {
         let c = snap
             .corporations
             .entry(corp_id as i64)
-            .or_insert_with(|| eve_db::CorporationRecord {
-                corporation_id: corp_id as i64,
-                ceo_id: dir_cid as i64,
-                ..Default::default()
-            });
+            .or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = corp_id as i64;
+                __corp.ceo_id = dir_cid as i64;
+                __corp });
         c.ceo_id = dir_cid as i64;
         c.members.insert(dir_cid as i64);
         c.members.insert(worker_cid as i64);

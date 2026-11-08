@@ -136,7 +136,12 @@ async fn test_e1_broker_fee_and_sales_tax_skill_discounts() {
     let struct_id = 1_040_000_111_001_i64;
     ctx.db.with_mut_snapshot(|snap| {
         let cid = snap.characters[&90_000_001].corporation_id;
-        snap.corporations.insert(cid, CorporationRecord { corporation_id: cid, name: "Mkt".into(), ticker: "MKT".into(), ceo_id: 90_000_001, ..Default::default() });
+        snap.corporations.insert(cid, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = cid;
+            __corp.name = "Mkt".into();
+            __corp.ticker = "MKT".into();
+            __corp.ceo_id = 90_000_001;
+            __corp });
         snap.structures.insert(struct_id, eve_db::UpwellStructureRecord {
             structure_id: struct_id, type_id: 35833, owner_corp_id: cid, solar_system_id: 30_000_142,
             name: "Hub".into(), position: [0.0; 3], state: "ShieldVulnerable".into(), quantum_core_installed: true,
@@ -1186,14 +1191,13 @@ pub(crate) mod market_modify_relist_tick_size {
         // 5. Corporate Orders (`GetCorporationOrders`, `accountKey`, `InventoryFlag::Deliveries`) (`feat:market.corp-orders`)
         let (corp_id, corp_buy_oid) = ctx.db.with_mut_snapshot(|snap| {
             let cid = snap.characters[&90_000_001].corporation_id;
-            let mut corp = CorporationRecord {
-                corporation_id: cid,
-                name: "Trader Corp".into(),
-                ticker: "TRDR".into(),
-                ceo_id: 90_000_001,
-                master_wallet: IskCents::from_isk(10_000_000),
-                ..Default::default()
-            };
+            let mut corp = { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = cid;
+                __corp.name = "Trader Corp".into();
+                __corp.ticker = "TRDR".into();
+                __corp.ceo_id = 90_000_001;
+                __corp.set_division_balance(1, IskCents::from_isk(10_000_000));
+                __corp };
             corp.ensure_wallet_divisions();
             if let Some(div3) = corp.wallet_divisions.iter_mut().find(|d| d.division_id == 3) {
                 div3.balance = IskCents::from_isk(5_000_000);
@@ -1454,7 +1458,7 @@ pub(crate) mod market_modify_relist_tick_size {
         // Train Trade (3443) = 1 (+4 orders -> 9 max) and place order at Upwell structure (`feat:market.structure-markets`)
         s1.station_id = None;
         s1.structure_id = Some(structure_id);
-        let corp_bal_before_str = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet);
+        let corp_bal_before_str = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet_balance());
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(ch) = snap.characters.get_mut(&90_000_001) {
                 ch.station_id = Some(structure_id);
@@ -1471,7 +1475,7 @@ pub(crate) mod market_modify_relist_tick_size {
         let PyRep::KeyVal(sb_order_kv) = str_buy else { panic!("Expected KeyVal"); };
         let str_fee = sb_order_kv.get("brokerFeeISK").and_then(|v| v.as_f64()).unwrap();
         assert!((str_fee - 300.0).abs() < 0.01); // 1.5% default structure broker rate on 20,000 ISK = 300 ISK
-        let corp_bal_after_str = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet);
+        let corp_bal_after_str = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet_balance());
         assert_eq!(corp_bal_after_str.0 - corp_bal_before_str.0, 15_000); // 50% (150.00 ISK) to structure owner corp wallet
     }
 
@@ -2262,22 +2266,23 @@ async fn test_e2_structure_market_service_and_order_expiry() {
             ch.solar_system_id = JITA_SYSTEM_ID;
             ch.region_id = JITA_REGION_ID as u32;
         }
-        let mut corp = CorporationRecord {
-            corporation_id: CORP_ID,
-            name: "Market Test Corp".into(),
-            ticker: "MKTC".into(),
-            ceo_id: P1,
-            alliance_id: None,
-            tax_rate: 0.05,
-            master_wallet: IskCents(50_000_000_00),
-            wallet_divisions: Vec::new(),
-            description: String::new(),
-            url: String::new(),
-            hq_station_id: Some(AMARR_STATION_ID),
-            members: [P1].into_iter().collect(),
-            member_roles: HashMap::from([(P1, corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_TRADER)]),
-            applications: HashMap::new(),
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = CORP_ID;
+            __corp.name = "Market Test Corp".into();
+            __corp.ticker = "MKTC".into();
+            __corp.ceo_id = P1;
+            __corp.alliance_id = None;
+            __corp.tax_rate = 0.05;
+            __corp.description = String::new();
+            __corp.url = String::new();
+            __corp.hq_station_id = Some(AMARR_STATION_ID);
+            __corp.members = [P1].into_iter().collect();
+            __corp.member_roles = HashMap::from([(P1, corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_TRADER)]);
+            __corp.applications = HashMap::new();
+            __corp.wallet_divisions = Vec::new();
+            let __mw = IskCents(50_000_000_00);
+            if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+            __corp };
         corp.ensure_wallet_divisions();
         corp.wallet_divisions[0].balance = IskCents(50_000_000_00);
         snap.corporations.insert(CORP_ID, corp);
@@ -2957,22 +2962,23 @@ async fn test_e6_pi_extractor_expiry_and_launch_canister() {
             ch.balance = IskCents(50_000_000_00);
             ch.solar_system_id = JITA_SYSTEM_ID;
         }
-        let mut poco_corp = CorporationRecord {
-            corporation_id: POCO_CORP_ID,
-            name: "Orbital Customs Corp".into(),
-            ticker: "POCO".into(),
-            ceo_id: 90_000_002,
-            alliance_id: None,
-            tax_rate: 0.05,
-            master_wallet: IskCents(1_000_000_00),
-            wallet_divisions: Vec::new(),
-            description: String::new(),
-            url: String::new(),
-            hq_station_id: Some(JITA_STATION_ID),
-            members: [90_000_002].into_iter().collect(),
-            member_roles: HashMap::new(),
-            applications: HashMap::new(),
-        };
+        let mut poco_corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = POCO_CORP_ID;
+            __corp.name = "Orbital Customs Corp".into();
+            __corp.ticker = "POCO".into();
+            __corp.ceo_id = 90_000_002;
+            __corp.alliance_id = None;
+            __corp.tax_rate = 0.05;
+            __corp.description = String::new();
+            __corp.url = String::new();
+            __corp.hq_station_id = Some(JITA_STATION_ID);
+            __corp.members = [90_000_002].into_iter().collect();
+            __corp.member_roles = HashMap::new();
+            __corp.applications = HashMap::new();
+            __corp.wallet_divisions = Vec::new();
+            let __mw = IskCents(1_000_000_00);
+            if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+            __corp };
         poco_corp.ensure_wallet_divisions();
         poco_corp.wallet_divisions[0].balance = IskCents(1_000_000_00);
         snap.corporations.insert(POCO_CORP_ID, poco_corp);
@@ -3275,7 +3281,7 @@ async fn test_e6_pi_extractor_expiry_and_launch_canister() {
     });
 
     let p1_bal_before_poco = ctx.db.get_character(P1).unwrap().balance.0;
-    let poco_corp_before = ctx.db.with_snapshot(|s| s.corporations[&POCO_CORP_ID].master_wallet.0);
+    let poco_corp_before = ctx.db.with_snapshot(|s| s.corporations[&POCO_CORP_ID].master_wallet_balance().0);
     let poco_export_rep = rpc(
         &ctx,
         &mut sess_relogin,
@@ -3296,7 +3302,7 @@ async fn test_e6_pi_extractor_expiry_and_launch_canister() {
         .unwrap_or(0.0);
     assert!(export_tax_isk > 0.0, "POCO export must charge positive exportTaxISK");
     let p1_bal_after_poco = ctx.db.get_character(P1).unwrap().balance.0;
-    let poco_corp_after = ctx.db.with_snapshot(|s| s.corporations[&POCO_CORP_ID].master_wallet.0);
+    let poco_corp_after = ctx.db.with_snapshot(|s| s.corporations[&POCO_CORP_ID].master_wallet_balance().0);
     assert!(p1_bal_after_poco < p1_bal_before_poco, "P1 wallet debited by POCO export tax");
     assert!(poco_corp_after > poco_corp_before, "POCO owner corporation credited with player tax share");
     let poco_launch_id = poco_export_rep.dict_get("launchID").and_then(|v| v.as_i64()).expect("poco_launch_id");

@@ -72,17 +72,16 @@ fn make_session(char_id: i64, corp_id: i64, sys_id: u32, structure_id: Option<i6
 
 fn seed_char_and_corp(ctx: &ServerContext, char_id: i64, corp_id: i64, sys_id: u32, is_ceo: bool) {
     ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.entry(corp_id).or_insert_with(|| CorporationRecord {
-            corporation_id: corp_id,
-            name: format!("Corp {corp_id}"),
-            ticker: "ACL".into(),
-            ceo_id: if is_ceo { char_id } else { char_id + 900 },
-            hq_station_id: Some(60003760),
-            tax_rate: 0.0,
-            master_wallet: IskCents(0),
-            members: HashSet::from([char_id]),
-            ..Default::default()
-        });
+        snap.corporations.entry(corp_id).or_insert_with(|| { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = format!("Corp {corp_id}");
+            __corp.ticker = "ACL".into();
+            __corp.ceo_id = if is_ceo { char_id } else { char_id + 900 };
+            __corp.hq_station_id = Some(60003760);
+            __corp.tax_rate = 0.0;
+            __corp.members = HashSet::from([char_id]);
+            __corp.set_division_balance(1, IskCents(0));
+            __corp });
         if let Some(corp) = snap.corporations.get_mut(&corp_id) {
             corp.members.insert(char_id);
         }

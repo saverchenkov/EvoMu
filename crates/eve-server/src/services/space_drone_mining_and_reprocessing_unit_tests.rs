@@ -180,15 +180,14 @@ async fn reprocessing_npc_station_corp_hangar_locks_singleton_and_insufficient_f
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Mining Corp".into(),
-                ticker: "MINE".into(),
-                ceo_id: char_id,
-                members: HashSet::from([char_id]),
-                member_roles: HashMap::from([(char_id, eve_db::corp_roles::ROLE_DIRECTOR)]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Mining Corp".into();
+                __corp.ticker = "MINE".into();
+                __corp.ceo_id = char_id;
+                __corp.members = HashSet::from([char_id]);
+                __corp.member_roles = HashMap::from([(char_id, eve_db::corp_roles::ROLE_DIRECTOR)]);
+                __corp },
         );
         snap.items.insert(
             corp_ore_id,

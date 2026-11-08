@@ -18,8 +18,9 @@ use crate::sqlite_store::notes_lp_sequence_store::rollback_d6;
 use crate::sqlite_store::rollback::rollback_dirty_from_sqlite;
 use crate::sqlite_store::sync::{replace_sqlite_from_snapshot, sync_dirty_to_sqlite};
 use crate::types::{
-    AsteroidRecord, CharacterRecord, ContractRecord, InventoryItemRecord, MailRecord,
-    MarketOrderRecord, SystemDynamicState, WalletJournalEntry,
+    AccountRecord, AsteroidRecord, CharacterRecord, ContractRecord, CorporationRecord,
+    InventoryItemRecord, MailRecord, MarketOrderRecord, SkillQueueEntry, SystemDynamicState,
+    UpwellStructureRecord, WalletJournalEntry,
 };
 use crate::IskCents;
 
@@ -342,4 +343,93 @@ fn fp_asteroid_sensitive_to_all_ten_fields() {
     snap.asteroids.insert(asteroid_id, base);
     let fp = compute_fingerprints(&snap);
     assert_eq!(fp.asteroids[&asteroid_id], h0);
+}
+
+#[test]
+fn canonical_fingerprints_distinguish_none_from_zero_sentinel_and_extra_fields() {
+    use super::fingerprints::{
+        fp_account, fp_json, fp_skill_queue, fp_structure,
+    };
+
+    let acc_none = AccountRecord {
+        user_id: 1,
+        username: "u".into(),
+        password_token: "p".into(),
+        role: 0,
+        banned_until_unix: None,
+        ban_reason: None,
+    };
+    let acc_zero = AccountRecord {
+        banned_until_unix: Some(0),
+        ..acc_none.clone()
+    };
+    assert_ne!(fp_account(&acc_none), fp_account(&acc_zero));
+
+    let snap = build_populated_snapshot();
+    let item_base = snap.items.values().next().unwrap().clone();
+    let item_muta0 = InventoryItemRecord {
+        source_mutaplasmid_id: Some(0),
+        ..item_base.clone()
+    };
+    assert_ne!(fp_item(&InventoryItemRecord { source_mutaplasmid_id: None, ..item_base.clone() }), fp_item(&item_muta0));
+
+    let item_bpc_none = InventoryItemRecord {
+        blueprint_runs_remaining: None,
+        ..item_base.clone()
+    };
+    let item_bpc_neg1 = InventoryItemRecord {
+        blueprint_runs_remaining: Some(-1),
+        ..item_base.clone()
+    };
+    assert_ne!(fp_item(&item_bpc_none), fp_item(&item_bpc_neg1));
+
+    let c_base = snap.contracts.values().next().unwrap().clone();
+    assert_ne!(
+        fp_contract(&ContractRecord { acceptor_id: None, ..c_base.clone() }),
+        fp_contract(&ContractRecord { acceptor_id: Some(-1), ..c_base.clone() })
+    );
+    assert_ne!(
+        fp_contract(&c_base),
+        fp_contract(&ContractRecord {
+            for_corp: !c_base.for_corp,
+            ..c_base
+        })
+    );
+
+    let st_base = snap.structures.values().next().unwrap().clone();
+    let st_zero = UpwellStructureRecord {
+        self_destruct_at_unix: Some(0),
+        ..st_base.clone()
+    };
+    assert_ne!(
+        fp_structure(&UpwellStructureRecord {
+            self_destruct_at_unix: None,
+            ..st_base
+        }),
+        fp_structure(&st_zero)
+    );
+
+    let sq_none = vec![SkillQueueEntry {
+        type_id: 3402,
+        target_level: 1,
+        start_sp: 0.0,
+        end_sp: 250.0,
+        duration_seconds: 60.0,
+        started_at_unix: None,
+    }];
+    let sq_zero = vec![SkillQueueEntry {
+        started_at_unix: Some(0),
+        ..sq_none[0].clone()
+    }];
+    assert_ne!(fp_skill_queue(&sq_none), fp_skill_queue(&sq_zero));
+
+    let mut c1 = CorporationRecord::new(98_001, "Alpha", "ALP", 90_001);
+    let mut c2 = CorporationRecord::new(98_001, "Alpha", "ALP", 90_001);
+    for id in [10, 20, 30, 40, 50] {
+        c1.members.insert(id);
+    }
+    for id in [50, 30, 10, 40, 20] {
+        c2.members.insert(id);
+    }
+    assert_eq!(fp_json(&c1), fp_json(&c2));
 }

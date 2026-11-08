@@ -105,17 +105,16 @@ fn setup_ui_and_features_env() -> (Arc<ServerContext>, EsiRouter) {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Apex Horizon Syndicate".to_string(),
-                ticker: "APEX".to_string(),
-                ceo_id: char_id,
-                alliance_id: None,
-                tax_rate: 0.05,
-                master_wallet: IskCents::from_isk(5_000_000),
-                members: HashSet::from([char_id, 90_000_002]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Apex Horizon Syndicate".to_string();
+                __corp.ticker = "APEX".to_string();
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = None;
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([char_id, 90_000_002]);
+                __corp.set_division_balance(1, IskCents::from_isk(5_000_000));
+                __corp },
         );
 
         // Active ship for character 90000001: Raven (type_id 638)
@@ -854,22 +853,23 @@ async fn test_r3_track6_esi_quasar_destiny_and_dogma_regressions() {
         }
         snap.corporations.insert(
             corp_id,
-            eve_db::CorporationRecord {
-                corporation_id: corp_id,
-                name: "Track 6 Corp".into(),
-                ticker: "TRK6".into(),
-                ceo_id: char_id,
-                alliance_id: Some(alliance_id),
-                tax_rate: 0.05,
-                master_wallet: eve_db::IskCents(0),
-                members: [char_id].into_iter().collect(),
-                member_roles: HashMap::new(),
-                applications: HashMap::new(),
-                wallet_divisions: Vec::new(),
-                description: String::new(),
-                url: String::new(),
-                hq_station_id: Some(60_003_760),
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Track 6 Corp".into();
+                __corp.ticker = "TRK6".into();
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = Some(alliance_id);
+                __corp.tax_rate = 0.05;
+                __corp.members = [char_id].into_iter().collect();
+                __corp.member_roles = HashMap::new();
+                __corp.applications = HashMap::new();
+                __corp.description = String::new();
+                __corp.url = String::new();
+                __corp.hq_station_id = Some(60_003_760);
+                __corp.wallet_divisions = Vec::new();
+                let __mw = eve_db::IskCents(0);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         snap.alliances.insert(
             alliance_id,

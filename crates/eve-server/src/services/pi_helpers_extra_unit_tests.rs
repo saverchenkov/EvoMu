@@ -400,18 +400,16 @@ fn orbital_customs_interbus_corp_alliance_and_standing_tax_brackets() {
         save_orbital_settings(snap, planet_id, &cfg);
         snap.corporations.insert(
             owner_corp,
-            CorporationRecord {
-                corporation_id: owner_corp,
-                alliance_id: Some(99_000_111),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = owner_corp;
+                __corp.alliance_id = Some(99_000_111);
+                __corp },
         );
         snap.corporations
             .entry(char_corp)
-            .or_insert_with(|| CorporationRecord {
-                corporation_id: char_corp,
-                ..Default::default()
-            })
+            .or_insert_with(|| { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = char_corp;
+                __corp })
             .alliance_id = Some(99_000_111);
         assert_eq!(
             resolve_character_orbital_access_and_tax(snap, char_id, planet_id)

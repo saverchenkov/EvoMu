@@ -101,16 +101,15 @@ fn seed_three_pilots(ctx: &ServerContext) -> (i64, i64, i64, i64, i64) {
         }
         snap.corporations.insert(
             corp1,
-            CorporationRecord {
-                corporation_id: corp1,
-                alliance_id: Some(ally1),
-                name: "Comms Test Corp".into(),
-                ticker: "CMTC".into(),
-                ceo_id: c1,
-                members: [c1, c2].into_iter().collect(),
-                member_roles: [(c1, corp_roles::ROLE_DIRECTOR), (c2, 0)].into_iter().collect(),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp1;
+                __corp.alliance_id = Some(ally1);
+                __corp.name = "Comms Test Corp".into();
+                __corp.ticker = "CMTC".into();
+                __corp.ceo_id = c1;
+                __corp.members = [c1, c2].into_iter().collect();
+                __corp.member_roles = [(c1, corp_roles::ROLE_DIRECTOR), (c2, 0)].into_iter().collect();
+                __corp },
         );
         snap.alliances.insert(
             ally1,

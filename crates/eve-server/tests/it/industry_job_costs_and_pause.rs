@@ -138,7 +138,7 @@ async fn test_live_job_cost_sci_progression_facility_taxes_and_wallet_journal() 
     for (tid, _) in bom(&ctx, small_bp, 1) {
         unload(&ctx, &mut s2, tid, raitaru_id).await;
     }
-    let corp_bal_0 = ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet.to_wire_f64());
+    let corp_bal_0 = ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet_balance().to_wire_f64());
 
     let aj = install(&ctx, &mut s2, alpha_bpo, raitaru_id, 1, 2, &[]).await.expect("Alpha InstallJob at Upwell Raitaru");
     let tot_eiv = real(&aj, "estimatedItemValue") * 2.0;
@@ -149,7 +149,7 @@ async fn test_live_job_cost_sci_progression_facility_taxes_and_wallet_journal() 
     assert!((aj_scc - (tot_eiv * 0.04 * 100.0).round() / 100.0).abs() < 0.02);
     assert!((aj_alpha - (tot_eiv * 0.0025 * 100.0).round() / 100.0).abs() < 0.02);
     assert!((real(&aj, "totalJobCost") - (aj_base + aj_ftax + aj_scc + aj_alpha)).abs() < 0.02);
-    let corp_bal_1 = ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet.to_wire_f64());
+    let corp_bal_1 = ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet_balance().to_wire_f64());
     assert!(((corp_bal_1 - corp_bal_0) - aj_ftax).abs() < 0.02, "structure owner corp receives the facility tax");
 }
 

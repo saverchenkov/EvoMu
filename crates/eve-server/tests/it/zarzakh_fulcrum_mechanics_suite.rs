@@ -295,22 +295,23 @@ async fn test_fulcrum_docking_and_alignment_services() {
     ctx.db.with_mut_snapshot(|s| {
         s.corporations.insert(
             corp_id,
-            eve_db::CorporationRecord {
-                corporation_id: corp_id,
-                name: "Pirate Fleet Corp".into(),
-                ticker: "PIRAT".into(),
-                ceo_id: char_id,
-                alliance_id: None,
-                tax_rate: 0.0,
-                master_wallet: eve_db::IskCents::from_isk(100_000_000),
-                members: [char_id].into_iter().collect(),
-                member_roles: HashMap::new(),
-                applications: HashMap::new(),
-                wallet_divisions: Vec::new(),
-                description: "Pirates".into(),
-                url: "".into(),
-                hq_station_id: Some(fulcrum_station_id),
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Pirate Fleet Corp".into();
+                __corp.ticker = "PIRAT".into();
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = None;
+                __corp.tax_rate = 0.0;
+                __corp.members = [char_id].into_iter().collect();
+                __corp.member_roles = HashMap::new();
+                __corp.applications = HashMap::new();
+                __corp.description = "Pirates".into();
+                __corp.url = "".into();
+                __corp.hq_station_id = Some(fulcrum_station_id);
+                __corp.wallet_divisions = Vec::new();
+                let __mw = eve_db::IskCents::from_isk(100_000_000);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         s.characters.get_mut(&char_id).unwrap().corporation_id = corp_id;
         s.characters.get_mut(&char_id).unwrap().war_faction_id = None; // Neutral first

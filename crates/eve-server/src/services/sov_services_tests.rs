@@ -98,14 +98,13 @@ fn can_access_sov_hub_fuel_acl_precedence_and_corp_roles() {
     ctx.db.with_mut_snapshot(|snap| {
         let corp = snap.corporations
             .entry(owner_corp)
-            .or_insert_with(|| eve_db::CorporationRecord {
-                corporation_id: owner_corp,
-                ceo_id: 90_000_099,
-                alliance_id: Some(ally_id),
-                name: "OwnerCorp".into(),
-                ticker: "OWNC".into(),
-                ..Default::default()
-            });
+            .or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = owner_corp;
+                __corp.ceo_id = 90_000_099;
+                __corp.alliance_id = Some(ally_id);
+                __corp.name = "OwnerCorp".into();
+                __corp.ticker = "OWNC".into();
+                __corp });
         corp.ceo_id = 90_000_099;
         corp.alliance_id = Some(ally_id);
         corp.member_roles.insert(char_allowed, 0);
@@ -215,14 +214,13 @@ async fn record_hub_hack_claim_system_sovereignty_and_sov_mgr_rpcs() {
         let corp = snap
             .corporations
             .entry(cid)
-            .or_insert_with(|| eve_db::CorporationRecord {
-                corporation_id: cid,
-                ceo_id: char_id,
-                alliance_id: Some(ally_id),
-                name: "NullSovCorp".into(),
-                ticker: "NSOV".into(),
-                ..Default::default()
-            });
+            .or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = cid;
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = Some(ally_id);
+                __corp.name = "NullSovCorp".into();
+                __corp.ticker = "NSOV".into();
+                __corp });
         corp.ceo_id = char_id;
         corp.alliance_id = Some(ally_id);
         let nsys = ctx

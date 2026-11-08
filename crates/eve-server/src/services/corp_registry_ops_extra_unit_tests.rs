@@ -46,17 +46,16 @@ pub(super) fn setup_ctx() -> (ServerContext, SessionState, i64, i64, i64, i64) {
             ch.corporation_id = corp_id;
             ch.station_id = Some(station_id);
         }
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "Vanguard Logistics Corp".into(),
-            ticker: "VGLC".into(),
-            ceo_id,
-            master_wallet: IskCents::from_isk(50_000_000),
-            members: [ceo_id, member_id].into_iter().collect(),
-            member_roles: [(ceo_id, u64::MAX), (member_id, 0)].into_iter().collect(),
-            hq_station_id: Some(station_id),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Vanguard Logistics Corp".into();
+            __corp.ticker = "VGLC".into();
+            __corp.ceo_id = ceo_id;
+            __corp.members = [ceo_id, member_id].into_iter().collect();
+            __corp.member_roles = [(ceo_id, u64::MAX), (member_id, 0)].into_iter().collect();
+            __corp.hq_station_id = Some(station_id);
+            __corp.set_division_balance(1, IskCents::from_isk(50_000_000));
+            __corp };
         corp.ensure_wallet_divisions();
         snap.corporations.insert(corp_id, corp);
     });

@@ -95,7 +95,7 @@ async fn test_alliance_dictatorial_declare_executor_support_and_persistence() {
     sess.corporation_id = Some(corp_id);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-            corp.master_wallet = eve_db::IskCents(2_000_000_000_00);
+            corp.set_division_balance(1, eve_db::IskCents(2_000_000_000_00));
             if let Some(div) = corp.wallet_divisions.first_mut() {
                 div.balance = eve_db::IskCents(2_000_000_000_00);
             }

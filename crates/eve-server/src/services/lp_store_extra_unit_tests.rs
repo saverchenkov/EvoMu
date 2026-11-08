@@ -59,10 +59,13 @@ fn mission_reward_corp_tax_player_vs_npc_and_station_hosted_corps() {
             ch.corporation_id = player_corp;
             ch.balance = IskCents::from_isk(500_000);
         }
-        let mut corp = CorporationRecord {
-            corporation_id: player_corp, name: "Tax Corp".into(), ticker: "TAXC".into(),
-            ceo_id: char_id, tax_rate: 0.10, ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = player_corp;
+            __corp.name = "Tax Corp".into();
+            __corp.ticker = "TAXC".into();
+            __corp.ceo_id = char_id;
+            __corp.tax_rate = 0.10;
+            __corp };
         corp.ensure_wallet_divisions();
         snap.corporations.insert(player_corp, corp);
         for (eid, etype, amt, bal) in [
@@ -169,10 +172,12 @@ fn take_offer_standing_militia_locked_tradein_and_corp_role_guards() {
             ch.loyalty_points.insert(npc_corp, 1_000);
             ch.standings.insert(npc_corp, 0.5);
         }
-        snap.corporations.insert(player_corp, CorporationRecord {
-            corporation_id: player_corp, name: "Player Corp".into(), ticker: "PLRC".into(),
-            ceo_id: 90_000_099, ..Default::default()
-        });
+        snap.corporations.insert(player_corp, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = player_corp;
+            __corp.name = "Player Corp".into();
+            __corp.ticker = "PLRC".into();
+            __corp.ceo_id = 90_000_099;
+            __corp });
     });
 
     assert_eq!(
@@ -259,10 +264,12 @@ fn concord_lp_exchange_transfers_corp_balances_and_delayed_rewards() {
             ch.station_id = Some(station_id);
             ch.loyalty_points.insert(CONCORD_CORP_ID, 1_000);
         }
-        snap.corporations.insert(player_corp, CorporationRecord {
-            corporation_id: player_corp, name: "Player Corp".into(), ticker: "PLRC".into(),
-            ceo_id: 90_000_099, ..Default::default()
-        });
+        snap.corporations.insert(player_corp, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = player_corp;
+            __corp.name = "Player Corp".into();
+            __corp.ticker = "PLRC".into();
+            __corp.ceo_id = 90_000_099;
+            __corp });
     });
 
     let mut sess = make_session(char_id, player_corp, Some(station_id));

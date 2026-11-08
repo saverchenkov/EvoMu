@@ -748,11 +748,8 @@ pub fn execute_death_pipeline_sync_inner(
             let payout_cents = IskCents::from_f64_isk(calculated_insurance_payout);
             let (journal_char_id, bal_after) = if ins_is_corp {
                 if let Some(corp) = snap.corporations.get_mut(&ins_owner_id) {
-                    corp.master_wallet = corp.master_wallet.checked_add(payout_cents).unwrap_or(corp.master_wallet);
-                    if let Some(div0) = corp.wallet_divisions.first_mut() {
-                        div0.balance = corp.master_wallet;
-                    }
-                    (ins_owner_id, corp.master_wallet)
+                    let bal = corp.credit_division(1, payout_cents);
+                    (ins_owner_id, bal)
                 } else {
                     (ins_owner_id, payout_cents)
                 }

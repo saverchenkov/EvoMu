@@ -81,10 +81,13 @@ fn sweep_expired_orders_filtered_owner_filter_stack_merge_and_exact_boundary() {
 
     ctx.db.with_mut_snapshot(|s| {
         s.market_orders.clear();
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id, ceo_id: char_id, name: "Test Market Corp".into(),
-            ticker: "TMKC".into(), master_wallet: IskCents::from_isk(1_000_000), ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.ceo_id = char_id;
+            __corp.name = "Test Market Corp".into();
+            __corp.ticker = "TMKC".into();
+            __corp.set_division_balance(1, IskCents::from_isk(1_000_000));
+            __corp };
         corp.set_division_balance(3, IskCents::from_isk(200_000));
         s.corporations.insert(corp_id, corp);
 
@@ -142,10 +145,13 @@ fn market_proxy_corp_orders_history_and_remote_modify_validation() {
         s.market_orders.clear();
         s.characters.get_mut(&char_id).unwrap().corporation_id = corp_id;
         s.characters.get_mut(&char_id).unwrap().balance = IskCents::from_isk(50_000_000);
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id, ceo_id: char_id, name: "Modify Corp".into(),
-            ticker: "MODC".into(), master_wallet: IskCents::from_isk(10_000_000), ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.ceo_id = char_id;
+            __corp.name = "Modify Corp".into();
+            __corp.ticker = "MODC".into();
+            __corp.set_division_balance(1, IskCents::from_isk(10_000_000));
+            __corp };
         corp.set_division_balance(2, IskCents::from_isk(5_000_000));
         corp.member_roles.insert(char_id, corp_roles::ROLE_TRADER);
         s.corporations.insert(corp_id, corp);
@@ -266,10 +272,13 @@ fn plex_sell_order_and_contract_proxy_escrow_and_lookup_branches() {
             s.characters.insert(cid, ch);
         }
 
-        let mut corp = CorporationRecord {
-            corporation_id: buyer_corp, ceo_id: rich_buyer, name: "PLEX Buyer Corp".into(),
-            ticker: "PLBC".into(), master_wallet: IskCents::from_isk(30_000_000), ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = buyer_corp;
+            __corp.ceo_id = rich_buyer;
+            __corp.name = "PLEX Buyer Corp".into();
+            __corp.ticker = "PLBC".into();
+            __corp.set_division_balance(1, IskCents::from_isk(30_000_000));
+            __corp };
         corp.set_division_balance(2, IskCents::from_isk(30_000_000));
         s.corporations.insert(buyer_corp, corp);
 

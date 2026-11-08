@@ -30,22 +30,23 @@ async fn test_rpc_lookup_svc_batch() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             98_000_001,
-            eve_db::CorporationRecord {
-                corporation_id: 98_000_001,
-                name: "Federation Defense Corp".into(),
-                ticker: "FED".into(),
-                ceo_id: 90_000_001,
-                alliance_id: Some(99_000_001),
-                tax_rate: 0.05,
-                master_wallet: eve_db::IskCents::from_isk(1_000_000),
-                members: HashSet::from([90_000_001]),
-                member_roles: HashMap::new(),
-                applications: HashMap::new(),
-                wallet_divisions: Vec::new(),
-                description: String::new(),
-                url: String::new(),
-                hq_station_id: Some(60_003_760),
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = 98_000_001;
+                __corp.name = "Federation Defense Corp".into();
+                __corp.ticker = "FED".into();
+                __corp.ceo_id = 90_000_001;
+                __corp.alliance_id = Some(99_000_001);
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([90_000_001]);
+                __corp.member_roles = HashMap::new();
+                __corp.applications = HashMap::new();
+                __corp.description = String::new();
+                __corp.url = String::new();
+                __corp.hq_station_id = Some(60_003_760);
+                __corp.wallet_divisions = Vec::new();
+                let __mw = eve_db::IskCents::from_isk(1_000_000);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         snap.alliances.insert(
             99_000_001,
@@ -309,24 +310,22 @@ async fn test_rpc_lookup_svc_batch() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             98_000_050,
-            eve_db::CorporationRecord {
-                corporation_id: 98_000_050,
-                name: "Target Federation Corp".into(),
-                ticker: "TFC".into(),
-                ceo_id: 90_000_050,
-                ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = 98_000_050;
+                __corp.name = "Target Federation Corp".into();
+                __corp.ticker = "TFC".into();
+                __corp.ceo_id = 90_000_050;
+                __corp },
         );
         snap.corporations.insert(
             98_000_051,
-            eve_db::CorporationRecord {
-                corporation_id: 98_000_051,
-                name: "Peaceful Federation Corp".into(),
-                ticker: "PFC".into(),
-                ceo_id: 90_000_051,
-                alliance_id: Some(99_000_051),
-                ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = 98_000_051;
+                __corp.name = "Peaceful Federation Corp".into();
+                __corp.ticker = "PFC".into();
+                __corp.ceo_id = 90_000_051;
+                __corp.alliance_id = Some(99_000_051);
+                __corp },
         );
         snap.structures.insert(
             1_000_000_050_001,
@@ -371,14 +370,13 @@ async fn test_rpc_lookup_svc_batch() {
         );
         snap.corporations.insert(
             98_000_077,
-            eve_db::CorporationRecord {
-                corporation_id: 98_000_077,
-                name: "Federation War Target Corp".into(),
-                ticker: "FWTC".into(),
-                ceo_id: 90_000_077,
-                alliance_id: Some(99_000_077),
-                ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = 98_000_077;
+                __corp.name = "Federation War Target Corp".into();
+                __corp.ticker = "FWTC".into();
+                __corp.ceo_id = 90_000_077;
+                __corp.alliance_id = Some(99_000_077);
+                __corp },
         );
         snap.structures.insert(
             1_000_000_050_001,
@@ -3434,23 +3432,21 @@ async fn test_batch2_lookup_warable_and_sov_structures() {
         }
         snap.corporations.insert(
             warable_corp,
-            CorporationRecord {
-                corporation_id: warable_corp,
-                name: "WarEligible Vanguard".into(),
-                ticker: "WEVG".into(),
-                ceo_id: 90_000_002,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = warable_corp;
+                __corp.name = "WarEligible Vanguard".into();
+                __corp.ticker = "WEVG".into();
+                __corp.ceo_id = 90_000_002;
+                __corp },
         );
         snap.corporations.insert(
             non_warable_corp,
-            CorporationRecord {
-                corporation_id: non_warable_corp,
-                name: "WarEligible Pacifists".into(),
-                ticker: "WEPF".into(),
-                ceo_id: 90_000_003,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = non_warable_corp;
+                __corp.name = "WarEligible Pacifists".into();
+                __corp.ticker = "WEPF".into();
+                __corp.ceo_id = 90_000_003;
+                __corp },
         );
         snap.alliances.insert(
             warable_alliance,

@@ -111,14 +111,13 @@ fn adm_all_index_tiers_hub_resolution_and_fuel_acl_precedence_kill_mutations() {
         );
         snap.corporations.insert(
             owner_corp,
-            CorporationRecord {
-                corporation_id: owner_corp,
-                ceo_id: creator_cid,
-                alliance_id: None,
-                name: "Owner".into(),
-                ticker: "OWN".into(),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = owner_corp;
+                __corp.ceo_id = creator_cid;
+                __corp.alliance_id = None;
+                __corp.name = "Owner".into();
+                __corp.ticker = "OWN".into();
+                __corp },
         );
 
         assert!(!can_access_sov_hub_fuel(
@@ -196,14 +195,13 @@ async fn sov_rpcs_dev_indices_map_beyonce_and_hub_hacks_kill_mutations() {
         let cid = snap.characters[&char_id].corporation_id;
         snap.corporations.insert(
             cid,
-            CorporationRecord {
-                corporation_id: cid,
-                ceo_id: 90_000_999,
-                alliance_id: Some(ally_id),
-                name: "SovTestCorp".into(),
-                ticker: "STC".into(),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = cid;
+                __corp.ceo_id = 90_000_999;
+                __corp.alliance_id = Some(ally_id);
+                __corp.name = "SovTestCorp".into();
+                __corp.ticker = "STC".into();
+                __corp },
         );
         snap.alliances.insert(
             ally_id,

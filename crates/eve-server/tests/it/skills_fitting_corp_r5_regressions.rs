@@ -68,30 +68,28 @@ async fn r5_225_226_227_231_corp_wallet_transfer_applications_titles_votes_and_a
             (jr_acct, 512 | eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]),
             (member_no_shares, 0),
         ]);
-        let mut corp_rec_a = CorporationRecord {
-            corporation_id: corp_a,
-            name: "R5 Corp A".into(),
-            ticker: "R5CA".into(),
-            ceo_id: ceo_a,
-            master_wallet: IskCents::from_isk(10_000_000),
-            members: HashSet::from([ceo_a, jr_acct, member_no_shares]),
-            member_roles: roles_a,
-            ..Default::default()
-        };
+        let mut corp_rec_a = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_a;
+            __corp.name = "R5 Corp A".into();
+            __corp.ticker = "R5CA".into();
+            __corp.ceo_id = ceo_a;
+            __corp.members = HashSet::from([ceo_a, jr_acct, member_no_shares]);
+            __corp.member_roles = roles_a;
+            __corp.set_division_balance(1, IskCents::from_isk(10_000_000));
+            __corp };
         corp_rec_a.ensure_wallet_divisions();
         corp_rec_a.set_division_balance(1, IskCents::from_isk(10_000_000));
         corp_rec_a.set_division_balance(2, IskCents::from_isk(5_000_000));
         snap.corporations.insert(corp_a, corp_rec_a);
 
-        let mut corp_rec_b = CorporationRecord {
-            corporation_id: corp_b,
-            name: "R5 Corp B".into(),
-            ticker: "R5CB".into(),
-            ceo_id: ceo_b,
-            members: HashSet::from([ceo_b]),
-            member_roles: HashMap::from([(ceo_b, u64::MAX)]),
-            ..Default::default()
-        };
+        let mut corp_rec_b = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_b;
+            __corp.name = "R5 Corp B".into();
+            __corp.ticker = "R5CB".into();
+            __corp.ceo_id = ceo_b;
+            __corp.members = HashSet::from([ceo_b]);
+            __corp.member_roles = HashMap::from([(ceo_b, u64::MAX)]);
+            __corp };
         corp_rec_b.ensure_wallet_divisions();
         snap.corporations.insert(corp_b, corp_rec_b);
     });
@@ -117,7 +115,7 @@ async fn r5_225_226_227_231_corp_wallet_transfer_applications_titles_votes_and_a
     ctx.db.with_snapshot(|snap| {
         let c = snap.corporations.get(&corp_a).unwrap();
         assert_eq!(c.division_balance(1), IskCents::from_isk(8_000_000));
-        assert_eq!(c.master_wallet, IskCents::from_isk(8_000_000));
+        assert_eq!(c.master_wallet_balance(), IskCents::from_isk(8_000_000));
         assert_eq!(c.division_balance(2), IskCents::from_isk(7_000_000));
         let j_div1 = snap.corp_wallet_journals.get(&(corp_a, 1)).map_or(0, |v| v.len());
         let j_div2 = snap.corp_wallet_journals.get(&(corp_a, 2)).map_or(0, |v| v.len());
@@ -468,16 +466,15 @@ async fn r5_232_234_235_236_237_projects_skills_fitting_clones_and_agents() {
         ch.free_skill_points = 50_000.0;
         snap.characters.insert(pilot_id, ch);
 
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "R5 Proj Corp".into(),
-            ticker: "R5PC".into(),
-            ceo_id: 90_000_001,
-            master_wallet: IskCents::from_isk(20_000_000),
-            members: HashSet::from([pilot_id]),
-            member_roles: HashMap::from([(pilot_id, eve_db::corp_roles::ROLE_PROJECT_MANAGER | eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[0])]),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "R5 Proj Corp".into();
+            __corp.ticker = "R5PC".into();
+            __corp.ceo_id = 90_000_001;
+            __corp.members = HashSet::from([pilot_id]);
+            __corp.member_roles = HashMap::from([(pilot_id, eve_db::corp_roles::ROLE_PROJECT_MANAGER | eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[0])]);
+            __corp.set_division_balance(1, IskCents::from_isk(20_000_000));
+            __corp };
         corp.ensure_wallet_divisions();
         corp.set_division_balance(1, IskCents::from_isk(20_000_000));
         corp.set_division_balance(2, IskCents::from_isk(20_000_000));

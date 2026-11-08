@@ -120,11 +120,10 @@ fn structure_fees_preconditions_fulcrum_thera_and_structure_to_structure_jump() 
 
         snap.corporations.insert(
             owner_corp,
-            CorporationRecord {
-                corporation_id: owner_corp,
-                name: "StructOwner".into(),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = owner_corp;
+                __corp.name = "StructOwner".into();
+                __corp },
         );
         for (sid, sys) in [
             (struct_dep, hs_sys),
@@ -278,7 +277,7 @@ fn structure_fees_preconditions_fulcrum_thera_and_structure_to_structure_jump() 
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.zarzakh_gate_locks.contains_key(&cid));
         assert_eq!(
-            snap.corporations[&owner_corp].master_wallet,
+            snap.corporations[&owner_corp].master_wallet_balance(),
             IskCents(25_000)
         );
     });

@@ -536,7 +536,7 @@ async fn test_quasar_state_blobs_persistence_reload_sqlite() {
             c
         });
         corp.ceo_id = 90_000_110;
-        corp.master_wallet = eve_db::IskCents::from_f64_isk(100_000_000.0);
+        corp.set_division_balance(1, eve_db::IskCents::from_f64_isk(100_000_000.0));
     });
 
     // 1. Mutate Freelance via CreateRequest (with required_type_id = 35 Pyerite, batch_size = 10)

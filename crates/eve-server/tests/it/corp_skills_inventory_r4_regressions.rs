@@ -84,15 +84,14 @@ async fn r4_176_180_181_183_ship_bay_passwords_alsc_locks_and_container_roles() 
         member_roles.insert(fleetmate_id, (1u64 << 13) | (1u64 << 20));
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "R4 Test Corp".into(),
-                ticker: "R4TC".into(),
-                ceo_id: owner_id,
-                members,
-                member_roles,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "R4 Test Corp".into();
+                __corp.ticker = "R4TC".into();
+                __corp.ceo_id = owner_id;
+                __corp.members = members;
+                __corp.member_roles = member_roles;
+                __corp },
         );
         snap.items.insert(
             host_ship_id,
@@ -471,15 +470,14 @@ async fn r4_177_178_179_182_184_185_186_187_skills_corp_ammo_agents_and_killcoun
         member_roles.insert(ceo_id, u64::MAX);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "R4 Gov Corp".into(),
-                ticker: "R4GC".into(),
-                ceo_id,
-                members,
-                member_roles,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "R4 Gov Corp".into();
+                __corp.ticker = "R4GC".into();
+                __corp.ceo_id = ceo_id;
+                __corp.members = members;
+                __corp.member_roles = member_roles;
+                __corp },
         );
         snap.items.insert(
             ship_id,

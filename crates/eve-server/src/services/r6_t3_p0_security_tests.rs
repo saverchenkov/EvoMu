@@ -75,11 +75,15 @@ fn r6_t3_01_biomass_destroys_ephemeral_implants_boosters_clones_and_protects_con
     let ctx = new_ctx(now);
     let (st, corp, ceo, ch) = (60003760, 98_500_001, 90_500_001, 90_500_002);
     ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.insert(corp, CorporationRecord {
-            corporation_id: corp, name: "BioCorp".into(), ticker: "BIO".into(), ceo_id: ceo,
-            hq_station_id: Some(st), members: [ceo, ch].into(), member_roles: [(ceo, u64::MAX), (ch, 0)].into(),
-            ..Default::default()
-        });
+        snap.corporations.insert(corp, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp;
+            __corp.name = "BioCorp".into();
+            __corp.ticker = "BIO".into();
+            __corp.ceo_id = ceo;
+            __corp.hq_station_id = Some(st);
+            __corp.members = [ceo, ch].into();
+            __corp.member_roles = [(ceo, u64::MAX), (ch, 0)].into();
+            __corp });
         let c_rec = mk_char(snap, ch, 7001, corp, st, 77_000_002);
         snap.characters.insert(ch, c_rec);
         for (id, tid, oid, loc, flag) in [
@@ -124,11 +128,15 @@ async fn r6_t3_02_non_division_corp_assets_and_corp_containers_protected_on_add_
     let ctx = new_ctx(1_700_000_000);
     let (st, corp, ceo, thief) = (60003760, 98_500_010, 90_500_010, 90_500_011);
     ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.insert(corp, CorporationRecord {
-            corporation_id: corp, name: "VaultCorp".into(), ticker: "VALT".into(), ceo_id: ceo,
-            hq_station_id: Some(st), members: [ceo, thief].into(),
-            member_roles: [(ceo, u64::MAX), (thief, 1u64 << 13)].into(), ..Default::default()
-        });
+        snap.corporations.insert(corp, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp;
+            __corp.name = "VaultCorp".into();
+            __corp.ticker = "VALT".into();
+            __corp.ceo_id = ceo;
+            __corp.hq_station_id = Some(st);
+            __corp.members = [ceo, thief].into();
+            __corp.member_roles = [(ceo, u64::MAX), (thief, 1u64 << 13)].into();
+            __corp });
         let t_rec = mk_char(snap, thief, 7010, corp, st, 0);
         snap.characters.insert(thief, t_rec);
         for (id, tid, loc, flag, single) in [
@@ -166,11 +174,15 @@ fn r6_t3_03_personnel_manager_escalation_title_delay_and_role_drop_stasis_enforc
     let ctx = new_ctx(1_700_000_000);
     let (st, corp, ceo, pm, target) = (60003760, 98_500_020, 90_500_020, 90_500_021, 90_500_022);
     ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.insert(corp, CorporationRecord {
-            corporation_id: corp, name: "GovCorp".into(), ticker: "GOVC".into(), ceo_id: ceo,
-            hq_station_id: Some(st), members: [ceo, pm, target].into(),
-            member_roles: [(ceo, u64::MAX), (pm, corp_roles::ROLE_PERSONNEL_MANAGER), (target, 0)].into(), ..Default::default()
-        });
+        snap.corporations.insert(corp, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp;
+            __corp.name = "GovCorp".into();
+            __corp.ticker = "GOVC".into();
+            __corp.ceo_id = ceo;
+            __corp.hq_station_id = Some(st);
+            __corp.members = [ceo, pm, target].into();
+            __corp.member_roles = [(ceo, u64::MAX), (pm, corp_roles::ROLE_PERSONNEL_MANAGER), (target, 0)].into();
+            __corp });
         snap.corp_governance.entry(corp).or_default().titles.insert(1, ("Treasury".into(), 1u64 << 13));
         for (cid, r) in [(ceo, u64::MAX), (pm, corp_roles::ROLE_PERSONNEL_MANAGER), (target, 0)] {
             let c_rec = mk_char(snap, cid, cid as u64, corp, st, 0);
@@ -287,11 +299,15 @@ async fn r6_t3_05_war_surrender_cannot_be_reaccepted_to_drain_corp_wallet() {
     let (loser, winner, l_ceo, w_ceo, war_id) = (98_500_040, 98_500_041, 90_500_040, 90_500_041, 55_001i64);
     ctx.db.with_mut_snapshot(|snap| {
         for (cid, ceo, bal) in [(loser, l_ceo, 5_000_000_000i64), (winner, w_ceo, 100_000_000i64)] {
-            let mut corp_rec = CorporationRecord {
-                corporation_id: cid, name: "WarCorp".into(), ticker: "WAR".into(), ceo_id: ceo,
-                master_wallet: IskCents(bal * 100), members: [ceo].into(), member_roles: [(ceo, u64::MAX)].into(),
-                ..Default::default()
-            };
+            let mut corp_rec = { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = cid;
+                __corp.name = "WarCorp".into();
+                __corp.ticker = "WAR".into();
+                __corp.ceo_id = ceo;
+                __corp.members = [ceo].into();
+                __corp.member_roles = [(ceo, u64::MAX)].into();
+                __corp.set_division_balance(1, IskCents(bal * 100));
+                __corp };
             corp_rec.ensure_wallet_divisions();
             corp_rec.wallet_divisions[0].balance = IskCents(bal * 100);
             snap.corporations.insert(cid, corp_rec);

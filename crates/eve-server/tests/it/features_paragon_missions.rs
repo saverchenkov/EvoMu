@@ -70,10 +70,16 @@ fn seed_corp_and_pilots(ctx: &ServerContext, corp_id: i64, ceo_id: i64, members_
             });
             ch.user_id = uid; ch.corporation_id = corp_id; ch.solar_system_id = JITA_SYS; ch.station_id = None; ch.structure_id = None; ch.active_ship_id = ship_id;
         }
-        snap.corporations.insert(corp_id, CorporationRecord {
-            corporation_id: corp_id, name: format!("Corp {corp_id}"), ticker: "TST".into(), ceo_id, hq_station_id: Some(JITA_STATION),
-            members: member_ids, member_roles: role_map, master_wallet: IskCents(500_000_000_00), ..Default::default()
-        });
+        snap.corporations.insert(corp_id, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = format!("Corp {corp_id}");
+            __corp.ticker = "TST".into();
+            __corp.ceo_id = ceo_id;
+            __corp.hq_station_id = Some(JITA_STATION);
+            __corp.members = member_ids;
+            __corp.member_roles = role_map;
+            __corp.set_division_balance(1, IskCents(500_000_000_00));
+            __corp });
     });
 }
 
@@ -592,12 +598,12 @@ async fn test_structure_profiles_acl_mapping_and_delayed_apply() {
     assert_eq!(rpc(&ctx, &mut pub_sess, "structureSettings", "CharacterHasService", &[PyRep::Integer(ST_ID), PyRep::Integer(6)]).await.unwrap(), PyRep::Bool(false));
     assert_eq!(rpc(&ctx, &mut pub_sess, "structureSettings", "CharacterCheckService", &[PyRep::Integer(ST_ID), PyRep::Integer(6)]).await.unwrap_err().code, "StructureServiceAccessDenied");
 
-    let owner_wal_0 = ctx.db.with_snapshot(|s| s.corporations.get(&CORP_OWNER).unwrap().master_wallet.0);
+    let owner_wal_0 = ctx.db.with_snapshot(|s| s.corporations.get(&CORP_OWNER).unwrap().master_wallet_balance().0);
     rpc(&ctx, &mut vip_sess, "marketProxy", "PlaceBuyOrder", &[PyRep::Integer(ST_ID), PyRep::Integer(34), PyRep::Real(100.0), PyRep::Integer(100), PyRep::Integer(90)]).await.expect("VIP PlaceBuyOrder");
-    let owner_wal_1 = ctx.db.with_snapshot(|s| s.corporations.get(&CORP_OWNER).unwrap().master_wallet.0);
+    let owner_wal_1 = ctx.db.with_snapshot(|s| s.corporations.get(&CORP_OWNER).unwrap().master_wallet_balance().0);
     assert_eq!(owner_wal_1 - owner_wal_0, 100_00);
     rpc(&ctx, &mut pub_sess, "marketProxy", "PlaceBuyOrder", &[PyRep::Integer(ST_ID), PyRep::Integer(34), PyRep::Real(100.0), PyRep::Integer(100), PyRep::Integer(90)]).await.expect("Pub PlaceBuyOrder");
-    let owner_wal_2 = ctx.db.with_snapshot(|s| s.corporations.get(&CORP_OWNER).unwrap().master_wallet.0);
+    let owner_wal_2 = ctx.db.with_snapshot(|s| s.corporations.get(&CORP_OWNER).unwrap().master_wallet_balance().0);
     assert_eq!(owner_wal_2 - owner_wal_1, 500_00);
     assert_eq!(rpc(&ctx, &mut pub_sess, "structureControl", "TakeControl", &[PyRep::Integer(ST_ID)]).await.unwrap_err().code, "DefenseAccessDenied");
     rpc(&ctx, &mut vip_sess, "structureControl", "TakeControl", &[PyRep::Integer(ST_ID)]).await.expect("VIP gunner TakeControl");

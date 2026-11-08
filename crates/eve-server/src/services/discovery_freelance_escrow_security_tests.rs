@@ -218,7 +218,7 @@ fn r7_td_06_freelance_escrow_payout_wallet_sync_role_and_item_lock_enforced() {
     // Verify corp master_wallet and wallet division 1 stay strictly synchronized (4_000_000 ISK remaining)
     db.with_snapshot(|snap| {
         let corp = &snap.corporations[&(corp_id as i64)];
-        assert_eq!(corp.master_wallet, IskCents::from_isk(4_000_000));
+        assert_eq!(corp.master_wallet_balance(), IskCents::from_isk(4_000_000));
         assert_eq!(corp.division_balance(1), IskCents::from_isk(4_000_000));
     });
 
@@ -325,7 +325,7 @@ fn r7_td_06_freelance_escrow_payout_wallet_sync_role_and_item_lock_enforced() {
     .expect("director closes second project");
     db.with_snapshot(|snap| {
         let corp = &snap.corporations[&(corp_id as i64)];
-        assert_eq!(corp.master_wallet, IskCents::from_isk(4_000_000));
+        assert_eq!(corp.master_wallet_balance(), IskCents::from_isk(4_000_000));
         assert_eq!(corp.division_balance(1), IskCents::from_isk(4_000_000));
     });
     let _ = (encode_bytes_field, encode_varint_field);

@@ -286,14 +286,13 @@ async fn ess_gate_restrictions_module_checks_autopayout_tiebreak_and_reserve_lin
     db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "NullCorp".into(),
-                ticker: "NUL".into(),
-                ceo_id: c1,
-                tax_rate: 0.10,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "NullCorp".into();
+                __corp.ticker = "NUL".into();
+                __corp.ceo_id = c1;
+                __corp.tax_rate = 0.10;
+                __corp },
         );
         for cid in [c1, c2] {
             if let Some(ch) = snap.characters.get_mut(&cid) {
@@ -418,7 +417,7 @@ async fn ess_gate_restrictions_module_checks_autopayout_tiebreak_and_reserve_lin
         snap.characters.get_mut(&c1).unwrap().balance = IskCents(0);
 
         credit_ballpark_npc_bounty_with_ess_split(&sde, snap, null_sys, c1, 1_000_000.0, 1_000_000.0, 1.0, 23_753, now_unix);
-        assert!(snap.corporations[&corp_id].master_wallet.0 > 0, "player corp should receive bounty tax");
+        assert!(snap.corporations[&corp_id].master_wallet_balance().0 > 0, "player corp should receive bounty tax");
         snap.characters.get_mut(&c1).unwrap().balance = IskCents(0);
 
         let st = snap.system_states.entry(null_sys).or_default();

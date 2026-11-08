@@ -414,7 +414,8 @@ pub fn load_snapshot_from_sqlite(
             .map_err(|e| e.to_string())?;
         for r in rows {
             let js = r.map_err(|e| e.to_string())?;
-            let corp: CorporationRecord = serde_json::from_str(&js).map_err(|e| e.to_string())?;
+            let mut corp: CorporationRecord = serde_json::from_str(&js).map_err(|e| e.to_string())?;
+            corp.ensure_wallet_divisions();
             snap.corporations.insert(corp.corporation_id, corp);
         }
     }

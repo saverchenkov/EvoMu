@@ -124,18 +124,17 @@ async fn setup_sov_fw_env(ctx: &ServerContext) -> SessionState {
         );
         snap.corporations.insert(
             CORP_ID,
-            eve_db::CorporationRecord {
-                corporation_id: CORP_ID,
-                name: "Sov Test Holding Corp".into(),
-                ticker: "STHC".into(),
-                ceo_id: CHAR_ID,
-                alliance_id: Some(ALLIANCE_ID),
-                tax_rate: 0.05,
-                master_wallet: eve_db::IskCents(0),
-                members: HashSet::from([CHAR_ID]),
-                member_roles,
-                ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = CORP_ID;
+                __corp.name = "Sov Test Holding Corp".into();
+                __corp.ticker = "STHC".into();
+                __corp.ceo_id = CHAR_ID;
+                __corp.alliance_id = Some(ALLIANCE_ID);
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([CHAR_ID]);
+                __corp.member_roles = member_roles;
+                __corp.set_division_balance(1, eve_db::IskCents(0));
+                __corp },
         );
 
         snap.alliances.insert(
@@ -278,14 +277,13 @@ async fn test_sov_mgr_structures_and_fuel_access() {
         snap.structures.insert(1_000_000_090_003, mk_struct(1_000_000_090_003, 81826, 98_000_001, "Metenox Moon Drill", 2000.0));
         snap.corporations.insert(
             98_000_077,
-            eve_db::CorporationRecord {
-                corporation_id: 98_000_077,
-                name: "Rival Sov Corp".into(),
-                ticker: "RSC".into(),
-                ceo_id: 90_000_077,
-                alliance_id: Some(99_000_077),
-                ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = 98_000_077;
+                __corp.name = "Rival Sov Corp".into();
+                __corp.ticker = "RSC".into();
+                __corp.ceo_id = 90_000_077;
+                __corp.alliance_id = Some(99_000_077);
+                __corp },
         );
         snap.structures.insert(1_000_000_090_004, mk_struct(1_000_000_090_004, 32226, 98_000_077, "Rival TCU", 3000.0));
     });

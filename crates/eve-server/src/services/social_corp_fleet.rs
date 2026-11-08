@@ -300,13 +300,13 @@ pub async fn handle(
                 if corp.alliance_id.is_some() {
                     return Err(BridgeRpcError { code: "AlreadyInAlliance".into(), message: "Corporation is already in an alliance".into() });
                 }
-                corp.ensure_wallet_divisions();
-                if corp.wallet_divisions[0].balance < alliance_fee {
-                    return Err(BridgeRpcError { code: "InsufficientFunds".into(), message: "Creating an alliance requires 1,000,000,000 ISK in the corporation master wallet".into() });
-                }
-                corp.wallet_divisions[0].balance = corp.wallet_divisions[0].balance.checked_sub(alliance_fee).unwrap();
-                corp.master_wallet = corp.wallet_divisions[0].balance;
-                let new_bal = corp.wallet_divisions[0].balance.to_f64_isk();
+                let new_bal = corp
+                    .debit_division(1, alliance_fee)
+                    .ok_or_else(|| BridgeRpcError {
+                        code: "InsufficientFunds".into(),
+                        message: "Creating an alliance requires 1,000,000,000 ISK in the corporation master wallet".into(),
+                    })?
+                    .to_f64_isk();
                 let next_jid = snap.corp_wallet_journals.values().flatten().map(|j| j.id).max().unwrap_or(500_000) + 1;
                 snap.corp_wallet_journals.entry((corp_id, 1)).or_default().push(eve_db::snapshot_ext::CorpWalletJournalRecord {
                     id: next_jid,
@@ -2044,40 +2044,10 @@ fn handle_pay_alliance_bill(
                 code: "CorporationNotFound".into(),
                 message: "Executor corporation not found".into(),
             })?;
-        corp.ensure_wallet_divisions();
-        let div_bal = corp
-            .wallet_divisions
-            .iter()
-            .find(|d| d.division_id == div_id)
-            .map(|d| {
-                if div_id == 1 {
-                    d.balance.min(corp.master_wallet)
-                } else {
-                    d.balance
-                }
-            })
-            .unwrap_or(eve_db::IskCents(0));
-        if div_bal.0 < amt.0 {
-            return Err(BridgeRpcError {
-                code: "NotEnoughMoney".into(),
-                message: "Insufficient corporation division ISK to pay alliance bill".into(),
-            });
-        }
-        if div_id == 1 {
-            corp.master_wallet = corp
-                .master_wallet
-                .checked_sub(amt)
-                .unwrap_or(eve_db::IskCents(0));
-        }
-        let mut bal_after = corp.master_wallet;
-        if let Some(d) = corp
-            .wallet_divisions
-            .iter_mut()
-            .find(|d| d.division_id == div_id)
-        {
-            d.balance = d.balance.checked_sub(amt).unwrap_or(eve_db::IskCents(0));
-            bal_after = d.balance;
-        }
+        let bal_after = corp.debit_division(div_id, amt).ok_or_else(|| BridgeRpcError {
+            code: "NotEnoughMoney".into(),
+            message: "Insufficient corporation division ISK to pay alliance bill".into(),
+        })?;
         snap.append_journal(
             corp_id,
             "BillPayment",

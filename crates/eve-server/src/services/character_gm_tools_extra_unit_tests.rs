@@ -510,12 +510,11 @@ async fn gm_slash_kill_contact_cluster_energy_secstatus_and_qa_rpcs() {
         );
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Test Corp".into(),
-                ticker: "TSTC".into(),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Test Corp".into();
+                __corp.ticker = "TSTC".into();
+                __corp },
         );
     });
     let c_ally = handle_gm_slash_ext(&ctx, &mut sess, char_id, &format!("/contact {ally_id} 25.0")).await.unwrap().unwrap();

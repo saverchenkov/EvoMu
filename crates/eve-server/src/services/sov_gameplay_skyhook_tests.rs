@@ -106,12 +106,11 @@ async fn anchor_skyhook_rpc_validation_and_deployment() {
         let corp = snap
             .corporations
             .entry(cid)
-            .or_insert_with(|| eve_db::CorporationRecord {
-                corporation_id: cid,
-                ceo_id: char_id,
-                alliance_id: Some(ally_id),
-                ..Default::default()
-            });
+            .or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = cid;
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = Some(ally_id);
+                __corp });
         corp.ceo_id = char_id;
         corp.alliance_id = Some(ally_id);
         snap.system_states.entry(null_sys).or_default().solar_system_id = null_sys;
@@ -260,13 +259,12 @@ async fn skyhook_weapon_damage_silo_link_theft_and_owner_extraction() {
         let cid = snap.characters[&char_id].corporation_id;
         snap.corporations
             .entry(cid)
-            .or_insert_with(|| eve_db::CorporationRecord {
-                corporation_id: cid,
-                ceo_id: char_id,
-                name: "SkyhookOwnerCorp".into(),
-                ticker: "SKOC".into(),
-                ..Default::default()
-            })
+            .or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = cid;
+                __corp.ceo_id = char_id;
+                __corp.name = "SkyhookOwnerCorp".into();
+                __corp.ticker = "SKOC".into();
+                __corp })
             .ceo_id = char_id;
         let mut thief = snap.characters[&char_id].clone();
         thief.character_id = thief_id;

@@ -744,15 +744,14 @@ async fn test_r4_170_structure_release_control_restores_docked_ship() {
         roles.insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Gunner 170 Corp".into(),
-                ticker: "G170".into(),
-                ceo_id: char_id,
-                members: HashSet::from([char_id]),
-                member_roles: roles,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Gunner 170 Corp".into();
+                __corp.ticker = "G170".into();
+                __corp.ceo_id = char_id;
+                __corp.members = HashSet::from([char_id]);
+                __corp.member_roles = roles;
+                __corp },
         );
         snap.structures.insert(
             struct_id,
@@ -1236,16 +1235,16 @@ async fn test_r4_175_poco_tax_syncs_corp_wallet_division_zero() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "POCO 175 Corp".into(),
-                ticker: "P175".into(),
-                ceo_id: char_id,
-                members: HashSet::from([char_id]),
-                master_wallet: IskCents(0),
-                wallet_divisions: vec![],
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "POCO 175 Corp".into();
+                __corp.ticker = "P175".into();
+                __corp.ceo_id = char_id;
+                __corp.members = HashSet::from([char_id]);
+                __corp.wallet_divisions = vec![];
+                let __mw = IskCents(0);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         // Seed command center on planet 40009082
         snap.items.insert(
@@ -1340,7 +1339,7 @@ async fn test_r4_175_poco_tax_syncs_corp_wallet_division_zero() {
     let (master_bal, div0_bal) = ctx.db.with_snapshot(|snap| {
         let corp = &snap.corporations[&corp_id];
         (
-            corp.master_wallet.0,
+            corp.master_wallet_balance().0,
             corp.wallet_divisions.first().map(|d| d.balance.0).unwrap_or(-1),
         )
     });

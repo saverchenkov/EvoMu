@@ -233,15 +233,14 @@ fn build_price_history_fallback_from_transactions_and_corp_transactions_rpc() {
         roles.insert(accountant_member, corp_roles::ROLE_JUNIOR_ACCOUNTANT);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "TxHistCorp".into(),
-                ticker: "TXHC".into(),
-                ceo_id,
-                members: HashSet::from([ceo_id, unauth_member, accountant_member]),
-                member_roles: roles,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "TxHistCorp".into();
+                __corp.ticker = "TXHC".into();
+                __corp.ceo_id = ceo_id;
+                __corp.members = HashSet::from([ceo_id, unauth_member, accountant_member]);
+                __corp.member_roles = roles;
+                __corp },
         );
         // Anchor order at station_id so tx_region resolves to region_id
         snap.market_orders.insert(

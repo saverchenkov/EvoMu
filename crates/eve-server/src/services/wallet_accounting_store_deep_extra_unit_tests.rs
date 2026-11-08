@@ -104,18 +104,17 @@ fn setup_wallet_world(now_unix: u64) -> (ServerContext, Arc<VirtualServerClock>,
             (corp1, "Alpha Ledger Corp", "ALCP", char1, 0.20),
             (corp2, "Beta Ledger Corp", "BLCP", char2, 0.10),
         ] {
-            let mut corp = CorporationRecord {
-                corporation_id: cid,
-                name: name.into(),
-                ticker: ticker.into(),
-                ceo_id: ceo,
-                master_wallet: IskCents::from_isk(10_000_000),
-                members: [ceo].into_iter().collect(),
-                member_roles: [(ceo, corp_roles::ROLE_DIRECTOR)].into_iter().collect(),
-                hq_station_id: Some(station_id),
-                tax_rate: tax,
-                ..Default::default()
-            };
+            let mut corp = { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = cid;
+                __corp.name = name.into();
+                __corp.ticker = ticker.into();
+                __corp.ceo_id = ceo;
+                __corp.members = [ceo].into_iter().collect();
+                __corp.member_roles = [(ceo, corp_roles::ROLE_DIRECTOR)].into_iter().collect();
+                __corp.hq_station_id = Some(station_id);
+                __corp.tax_rate = tax;
+                __corp.set_division_balance(1, IskCents::from_isk(10_000_000));
+                __corp };
             corp.ensure_wallet_divisions();
             for (idx, div) in corp.wallet_divisions.iter_mut().enumerate() {
                 div.balance = if idx == 0 {
@@ -203,7 +202,7 @@ async fn corp_wallet_divisions_journal_filters_market_txs_and_automatic_bills() 
     ledger(&ctx, &mut sess1, "account", "GiveCashFromCorpAccount", &[PyRep::Integer(corp1), PyRep::Real(250_000.0), PyRep::Integer(1000)], &kw_to).unwrap();
     ctx.db.with_snapshot(|snap| {
         let c = &snap.corporations[&corp1];
-        assert_eq!(c.master_wallet, IskCents::from_isk(9_750_000));
+        assert_eq!(c.master_wallet_balance(), IskCents::from_isk(9_750_000));
         assert_eq!(c.wallet_divisions[0].balance, IskCents::from_isk(9_750_000));
         assert_eq!(c.wallet_divisions[2].balance, IskCents::from_isk(5_250_000));
     });
@@ -215,7 +214,7 @@ async fn corp_wallet_divisions_journal_filters_market_txs_and_automatic_bills() 
         &kw,
     ).unwrap();
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.corporations[&corp1].master_wallet, IskCents::from_isk(9_750_000));
+        assert_eq!(snap.corporations[&corp1].master_wallet_balance(), IskCents::from_isk(9_750_000));
         assert_eq!(snap.corporations[&corp1].wallet_divisions[2].balance, IskCents::from_isk(5_150_000));
         assert_eq!(snap.characters[&char2].balance, IskCents::from_isk(1_100_000));
     });
@@ -291,8 +290,8 @@ async fn corp_wallet_divisions_journal_filters_market_txs_and_automatic_bills() 
     assert_eq!(process_due_automatic_bills(&ctx), 1, "only enabled bill type 2 paid at due_unix");
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.corporations[&corp1].wallet_divisions[1].balance, IskCents::from_isk(4_700_000));
-        assert_eq!(snap.corporations[&corp1].master_wallet, IskCents::from_isk(9_750_000));
-        assert_eq!(snap.corporations[&corp2].master_wallet, IskCents::from_isk(10_300_000));
+        assert_eq!(snap.corporations[&corp1].master_wallet_balance(), IskCents::from_isk(9_750_000));
+        assert_eq!(snap.corporations[&corp2].master_wallet_balance(), IskCents::from_isk(10_300_000));
     });
 }
 
@@ -497,21 +496,21 @@ async fn fast_checkout_activity_mgr_and_bounties_taxes_kill_mutations() {
     // NPC Bounty Tick & Corp Tax threshold (< 100,000 ISK tax-free vs == 100,000 ISK taxed at 20%)
     let sys_id = 30_000_142_u32;
     let char1_before = ctx.db.with_snapshot(|s| s.characters[&char1].balance);
-    let corp1_before = ctx.db.with_snapshot(|s| s.corporations[&corp1].master_wallet);
+    let corp1_before = ctx.db.with_snapshot(|s| s.corporations[&corp1].master_wallet_balance());
 
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.pending_bounty_ticks.insert((sys_id, char1), 99_999.0);
     });
     let (pilot_sub, _, _) = flush_npc_bounty_tick(&ctx, sys_id, char1, 0.0);
     assert!((pilot_sub - 99_999.0).abs() < 1e-6, "< 100k bounty tick must be untaxed");
-    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp1].master_wallet), corp1_before);
+    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp1].master_wallet_balance()), corp1_before);
 
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.pending_bounty_ticks.insert((sys_id, char1), 100_000.0);
     });
     let (pilot_taxed, _, _) = flush_npc_bounty_tick(&ctx, sys_id, char1, 0.0);
     assert!((pilot_taxed - 80_000.0).abs() < 1e-6, "== 100k bounty tick taxed at 20%");
-    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp1].master_wallet.0), corp1_before.0 + IskCents::from_isk(20_000).0);
+    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp1].master_wallet_balance().0), corp1_before.0 + IskCents::from_isk(20_000).0);
     assert_eq!(ctx.db.with_snapshot(|s| s.characters[&char1].balance.0), char1_before.0 + IskCents::from_isk(99_999 + 80_000).0);
 
     // Lowsec CONCORD Security Office Clone Soldier Tag turn-in fee & sec status delta

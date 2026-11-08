@@ -480,13 +480,23 @@ async fn test_esi_corp_blueprints_projects_and_structure_markets_live() {
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ceo) = snap.characters.get_mut(&PILOT_A) { (ceo.corporation_id, ceo.station_id, ceo.structure_id) = (corp_id, None, Some(struct_id)); }
-        snap.corporations.insert(corp_id, CorporationRecord {
-            corporation_id: corp_id, name: "Kalakiota Logistics Corp".into(), ticker: "KLCL".into(), ceo_id: PILOT_A,
-            alliance_id: None, tax_rate: 0.05, master_wallet, members: HashSet::from([PILOT_A]),
-            member_roles: HashMap::from([(PILOT_A, ROLE_DIRECTOR | ROLE_STATION_MANAGER)]),
-            applications: HashMap::new(), wallet_divisions: CorporationRecord::default_wallet_divisions(master_wallet),
-            description: String::new(), url: String::new(), hq_station_id: None,
-        });
+        snap.corporations.insert(corp_id, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Kalakiota Logistics Corp".into();
+            __corp.ticker = "KLCL".into();
+            __corp.ceo_id = PILOT_A;
+            __corp.alliance_id = None;
+            __corp.tax_rate = 0.05;
+            __corp.members = HashSet::from([PILOT_A]);
+            __corp.member_roles = HashMap::from([(PILOT_A, ROLE_DIRECTOR | ROLE_STATION_MANAGER)]);
+            __corp.applications = HashMap::new();
+            __corp.description = String::new();
+            __corp.url = String::new();
+            __corp.hq_station_id = None;
+            __corp.wallet_divisions = CorporationRecord::default_wallet_divisions(master_wallet);
+            let __mw = master_wallet;
+            if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+            __corp });
         snap.structures.insert(struct_id, UpwellStructureRecord {
             structure_id: struct_id, type_id: 35_833, owner_corp_id: corp_id, solar_system_id: SYS_JITA,
             name: "Jita Trade Citadel".into(), state: "ShieldVulnerable".into(), fuel_blocks: 200, quantum_core_installed: true, ..Default::default()

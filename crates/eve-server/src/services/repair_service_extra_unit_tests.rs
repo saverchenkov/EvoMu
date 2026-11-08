@@ -181,14 +181,13 @@ async fn ownership_corp_hangar_divisions_and_container_location_checks() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Repair Corp".into(),
-                ticker: "RPRC".into(),
-                ceo_id: 99_999_999, // char_id is NOT CEO initially
-                hq_station_id: Some(station_id),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Repair Corp".into();
+                __corp.ticker = "RPRC".into();
+                __corp.ceo_id = 99_999_999;
+                __corp.hq_station_id = Some(station_id);
+                __corp },
         );
         if let Some(sh) = snap.items.get_mut(&ship_id) {
             sh.location_id = station_id;
@@ -325,13 +324,12 @@ async fn upwell_structure_states_tether_repair_and_tax_wallet_credit() {
         }
         snap.corporations.insert(
             owner_corp,
-            CorporationRecord {
-                corporation_id: owner_corp,
-                name: "Citadel Owner".into(),
-                ticker: "CTDL".into(),
-                ceo_id: 1,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = owner_corp;
+                __corp.name = "Citadel Owner".into();
+                __corp.ticker = "CTDL".into();
+                __corp.ceo_id = 1;
+                __corp },
         );
         snap.structures.insert(
             struct_id,
@@ -380,13 +378,12 @@ async fn upwell_structure_states_tether_repair_and_tax_wallet_credit() {
         st.owner_corp_id = player_corp;
         snap.corporations.insert(
             player_corp,
-            CorporationRecord {
-                corporation_id: player_corp,
-                name: "Player Corp".into(),
-                ticker: "PLRC".into(),
-                ceo_id: char_id,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = player_corp;
+                __corp.name = "Player Corp".into();
+                __corp.ticker = "PLRC".into();
+                __corp.ceo_id = char_id;
+                __corp },
         );
         let mut ext = load_ext_state(snap);
         ext.access_profiles.insert(

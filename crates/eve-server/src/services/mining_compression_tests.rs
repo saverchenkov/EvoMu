@@ -443,14 +443,13 @@ async fn test_corp_and_character_mining_ledger_rpcs() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Mining Corp".into(),
-                ticker: "MINE".into(),
-                ceo_id: char_id,
-                tax_rate: 0.05,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Mining Corp".into();
+                __corp.ticker = "MINE".into();
+                __corp.ceo_id = char_id;
+                __corp.tax_rate = 0.05;
+                __corp },
         );
         snap.structures.insert(
             obs_id,

@@ -116,17 +116,16 @@ pub(super) fn seed_char_corp_ship(
     is_ceo: bool,
 ) {
     ctx.db.with_mut_snapshot(|snap| {
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: format!("Corp {corp_id}"),
-            ticker: "TST".into(),
-            ceo_id: if is_ceo { char_id } else { char_id + 999 },
-            hq_station_id: Some(60003760),
-            tax_rate: 0.05,
-            master_wallet: IskCents(10_000_000),
-            members: HashSet::from([char_id]),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = format!("Corp {corp_id}");
+            __corp.ticker = "TST".into();
+            __corp.ceo_id = if is_ceo { char_id } else { char_id + 999 };
+            __corp.hq_station_id = Some(60003760);
+            __corp.tax_rate = 0.05;
+            __corp.members = HashSet::from([char_id]);
+            __corp.set_division_balance(1, IskCents(10_000_000));
+            __corp };
         if !is_ceo {
             corp.member_roles
                 .insert(char_id, eve_db::corp_roles::ROLE_STATION_MANAGER);

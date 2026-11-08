@@ -35,7 +35,7 @@ fn corporate_sell_and_cancel_orders_and_margin_trading_insolvency() {
             corp.ceo_id = other_char;
             corp.member_roles.insert(char_id, 0);
             corp.ensure_wallet_divisions();
-            corp.master_wallet = IskCents::from_isk(1_000_000);
+            corp.set_division_balance(1, IskCents::from_isk(1_000_000));
         }
         insert_item(s, 34, char_id, JITA_STATION_ID, InventoryFlag::Hangar, 500, false)
     });

@@ -196,12 +196,11 @@ fn create_request_validation_parameter_extraction_and_budget_branches() {
     let pm_cid = 90_000_002_u32;
     let corp_id = 1_000_009_u32;
     db.with_mut_snapshot(|snap| {
-        let c = snap.corporations.entry(corp_id as i64).or_insert_with(|| eve_db::CorporationRecord {
-            corporation_id: corp_id as i64,
-            ceo_id: dir_cid as i64,
-            ..Default::default()
-        });
-        c.master_wallet = IskCents::from_isk(100_000_000);
+        let c = snap.corporations.entry(corp_id as i64).or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = corp_id as i64;
+            __corp.ceo_id = dir_cid as i64;
+            __corp });
+        c.set_division_balance(1, IskCents::from_isk(100_000_000));
         c.set_division_balance(1, IskCents::from_isk(100_000_000));
         c.set_division_balance(3, IskCents::from_isk(100_000_000));
         for id in [dir_cid as i64, pm_cid as i64] {
@@ -352,12 +351,11 @@ fn query_admin_kick_and_redeem_reward_error_and_success_branches() {
     let other_corp = 1_000_010_u32;
 
     db.with_mut_snapshot(|snap| {
-        let c = snap.corporations.entry(corp_id as i64).or_insert_with(|| eve_db::CorporationRecord {
-            corporation_id: corp_id as i64,
-            ceo_id: dir_cid as i64,
-            ..Default::default()
-        });
-        c.master_wallet = IskCents::from_isk(50_000_000);
+        let c = snap.corporations.entry(corp_id as i64).or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = corp_id as i64;
+            __corp.ceo_id = dir_cid as i64;
+            __corp });
+        c.set_division_balance(1, IskCents::from_isk(50_000_000));
         c.set_division_balance(1, IskCents::from_isk(50_000_000));
         for id in [dir_cid as i64, worker_cid as i64] {
             if let Some(ch) = snap.characters.get_mut(&id) {

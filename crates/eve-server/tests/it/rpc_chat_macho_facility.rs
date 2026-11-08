@@ -420,13 +420,12 @@ async fn test_facility_manager_and_macho_stats() {
         if let Some(ch) = snap.characters.get_mut(&PILOT_1) {
             ch.corporation_id = CORP_1;
         }
-        let corp = snap.corporations.entry(CORP_1).or_insert_with(|| eve_db::CorporationRecord {
-            corporation_id: CORP_1,
-            name: "Raitaru Corp".into(),
-            ticker: "RCORP".into(),
-            ceo_id: PILOT_1,
-            ..Default::default()
-        });
+        let corp = snap.corporations.entry(CORP_1).or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = CORP_1;
+            __corp.name = "Raitaru Corp".into();
+            __corp.ticker = "RCORP".into();
+            __corp.ceo_id = PILOT_1;
+            __corp });
         corp.members.insert(PILOT_1);
         corp.member_roles.insert(PILOT_1, eve_db::corp_roles::ROLE_DIRECTOR);
     });

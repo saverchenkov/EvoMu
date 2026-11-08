@@ -186,21 +186,19 @@ async fn test_equinox_hub_resources_fuel_and_upgrades_state_backed() {
         base_ch.character_id = 90_000_003;
         base_ch.corporation_id = CORP;
         snap.characters.insert(90_000_003, base_ch);
-        let mut c = eve_db::CorporationRecord {
-            corporation_id: CORP,
-            ceo_id: 99_999_001,
-            ..Default::default()
-        };
+        let mut c = { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = CORP;
+            __corp.ceo_id = 99_999_001;
+            __corp };
         c.members.extend([PILOT, 90_000_003]);
         c.member_roles.insert(PILOT, corp_roles::ROLE_DIRECTOR);
         snap.corporations.insert(CORP, c);
         snap.corporations.insert(
             98_000_002,
-            eve_db::CorporationRecord {
-                corporation_id: 98_000_002,
-                ceo_id: OTHER,
-                ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = 98_000_002;
+                __corp.ceo_id = OTHER;
+                __corp },
         );
         snap.structures.insert(HUB_A, structure(HUB_A, CORP, JITA, TYPE_SOVEREIGNTY_HUB));
         // Fuel in the pilot's active ship (pilot is in the hub's system), upgrade inside the hub,
@@ -342,21 +340,19 @@ async fn test_equinox_hub_workforce_transfer_network_state_backed() {
         base_ch.character_id = 90_000_003;
         base_ch.corporation_id = CORP;
         snap.characters.insert(90_000_003, base_ch);
-        let mut c = eve_db::CorporationRecord {
-            corporation_id: CORP,
-            ceo_id: 99_999_001,
-            ..Default::default()
-        };
+        let mut c = { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = CORP;
+            __corp.ceo_id = 99_999_001;
+            __corp };
         c.members.extend([PILOT, 90_000_003]);
         c.member_roles.insert(PILOT, corp_roles::ROLE_DIRECTOR);
         snap.corporations.insert(CORP, c);
         snap.corporations.insert(
             98_000_002,
-            eve_db::CorporationRecord {
-                corporation_id: 98_000_002,
-                ceo_id: OTHER,
-                ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = 98_000_002;
+                __corp.ceo_id = OTHER;
+                __corp },
         );
         snap.structures.insert(HUB_A, structure(HUB_A, CORP, JITA, TYPE_SOVEREIGNTY_HUB));
         snap.structures.insert(HUB_B, structure(HUB_B, CORP, PERIMETER, TYPE_SOVEREIGNTY_HUB));

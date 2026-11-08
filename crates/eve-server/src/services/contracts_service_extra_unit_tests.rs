@@ -59,19 +59,19 @@ pub(super) fn setup_extra_contracts_env() -> (
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "ContractCorp".into(),
-                ticker: "CTRC".into(),
-                ceo_id: issuer_id,
-                master_wallet: IskCents::from_isk(500_000_000),
-                wallet_divisions: vec![CorpWalletDivisionRecord {
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "ContractCorp".into();
+                __corp.ticker = "CTRC".into();
+                __corp.ceo_id = issuer_id;
+                __corp.wallet_divisions = vec![CorpWalletDivisionRecord {
                     division_id: 1,
                     name: "Master".into(),
                     balance: IskCents::from_isk(500_000_000),
-                }],
-                ..Default::default()
-            },
+                }];
+                let __mw = IskCents::from_isk(500_000_000);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         let base_char = snap.characters[&issuer_id].clone();
         if let Some(ch) = snap.characters.get_mut(&issuer_id) {

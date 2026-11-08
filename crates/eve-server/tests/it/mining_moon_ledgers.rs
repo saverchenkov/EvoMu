@@ -1434,12 +1434,23 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             owner_corp_id,
-            eve_db::CorporationRecord {
-                corporation_id: owner_corp_id, name: "Refinery Owner Corp".into(), ticker: "RFOWN".into(),
-                ceo_id: char_id, alliance_id: None, tax_rate: 0.15, master_wallet: eve_db::IskCents(0),
-                wallet_divisions: Vec::new(), description: String::new(), url: String::new(),
-                hq_station_id: Some(station_id), members: Default::default(), member_roles: Default::default(), applications: Default::default(),
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = owner_corp_id;
+                __corp.name = "Refinery Owner Corp".into();
+                __corp.ticker = "RFOWN".into();
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = None;
+                __corp.tax_rate = 0.15;
+                __corp.description = String::new();
+                __corp.url = String::new();
+                __corp.hq_station_id = Some(station_id);
+                __corp.members = Default::default();
+                __corp.member_roles = Default::default();
+                __corp.applications = Default::default();
+                __corp.wallet_divisions = Vec::new();
+                let __mw = eve_db::IskCents(0);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.corporation_id = owner_corp_id;
@@ -1458,7 +1469,7 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
         let added = snap.wallet_journal[journal_before..]
             .iter()
             .any(|e| e.character_id == char_id && e.entry_type == "ReprocessingTax" && e.amount.0 > 0);
-        let cw = snap.corporations.get(&owner_corp_id).map(|c| c.master_wallet.0).unwrap_or(0);
+        let cw = snap.corporations.get(&owner_corp_id).map(|c| c.master_wallet_balance().0).unwrap_or(0);
         (added, cw)
     });
     assert!(journal_added && corp_wallet > 0);

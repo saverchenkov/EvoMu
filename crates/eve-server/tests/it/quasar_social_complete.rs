@@ -102,14 +102,23 @@ async fn test_quasar_chat_and_presence_complete() {
             ch.corporation_id = 98000001;
             ch.alliance_id = Some(99000001);
         }
-        s.corporations.insert(98000001, eve_db::CorporationRecord {
-            corporation_id: 98000001, name: "Quasar Test Corp".into(), ticker: "QTC".into(),
-            ceo_id: 90000001, alliance_id: Some(99000001), tax_rate: 0.05,
-            master_wallet: eve_db::IskCents(0), members: std::collections::HashSet::from([90000001, 90000002]),
-            member_roles: std::collections::HashMap::from([(90000001, u64::MAX), (90000002, 0)]),
-            applications: std::collections::HashMap::new(), wallet_divisions: vec![],
-            description: String::new(), url: String::new(), hq_station_id: Some(60003760),
-        });
+        s.corporations.insert(98000001, { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = 98000001;
+            __corp.name = "Quasar Test Corp".into();
+            __corp.ticker = "QTC".into();
+            __corp.ceo_id = 90000001;
+            __corp.alliance_id = Some(99000001);
+            __corp.tax_rate = 0.05;
+            __corp.members = std::collections::HashSet::from([90000001, 90000002]);
+            __corp.member_roles = std::collections::HashMap::from([(90000001, u64::MAX), (90000002, 0)]);
+            __corp.applications = std::collections::HashMap::new();
+            __corp.description = String::new();
+            __corp.url = String::new();
+            __corp.hq_station_id = Some(60003760);
+            __corp.wallet_divisions = vec![];
+            let __mw = eve_db::IskCents(0);
+            if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+            __corp });
     });
 
     // Subscribe session to receive broadcast notices

@@ -339,14 +339,13 @@ async fn sov_hub_validation_proximity_locks_stack_splitting_and_anomaly_clearing
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Sov Corp".into(),
-                ticker: "SOV".into(),
-                ceo_id: 999_999, // not char_id
-                alliance_id: Some(alliance_id),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Sov Corp".into();
+                __corp.ticker = "SOV".into();
+                __corp.ceo_id = 999_999;
+                __corp.alliance_id = Some(alliance_id);
+                __corp },
         );
         snap.system_states.insert(
             null_sys,

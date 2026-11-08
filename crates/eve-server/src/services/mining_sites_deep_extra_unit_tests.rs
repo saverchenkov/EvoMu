@@ -371,14 +371,13 @@ async fn test_sov_hub_prospecting_deposit_seeding_and_respawn_timer() {
         );
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "SovCorp".into(),
-                ticker: "SOVC".into(),
-                ceo_id: char_id,
-                alliance_id: Some(alliance_id),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "SovCorp".into();
+                __corp.ticker = "SOVC".into();
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = Some(alliance_id);
+                __corp },
         );
         snap.system_states.entry(null_sys_id).or_default().sov_alliance_id = Some(alliance_id);
         snap.structures.insert(

@@ -249,13 +249,12 @@ async fn beyonce_corp_asset_transfer_self_destruct_siphon_expiry_and_spawnpoint_
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             target_corp,
-            CorporationRecord {
-                corporation_id: target_corp,
-                name: "Target Corp".into(),
-                ticker: "TGT".into(),
-                ceo_id: 90_000_002,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = target_corp;
+                __corp.name = "Target Corp".into();
+                __corp.ticker = "TGT".into();
+                __corp.ceo_id = 90_000_002;
+                __corp },
         );
         snap.items.insert(
             item_id,

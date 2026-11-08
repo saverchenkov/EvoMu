@@ -129,12 +129,23 @@ async fn test_d6_industry_pi_and_market_wallet_history_durable_across_sqlite_res
             *snap = demo;
             if let Some(ch) = snap.characters.get_mut(&P1) { ch.corporation_id = CORP_ID; ch.balance = IskCents::from_isk(500_000_000); ch.standings.insert(1_000_084, 6.0); }
             if let Some(ch) = snap.characters.get_mut(&P2) { ch.balance = IskCents::from_isk(500_000_000); }
-            let mut corp = CorporationRecord {
-                corporation_id: CORP_ID, name: "Durable Corp".into(), ticker: "DURB".into(), ceo_id: P1, alliance_id: None,
-                tax_rate: 0.05, master_wallet: IskCents::from_isk(200_000_000), wallet_divisions: Vec::new(), description: String::new(),
-                url: String::new(), hq_station_id: Some(JITA_STATION_ID), members: [P1].into_iter().collect(),
-                member_roles: HashMap::from([(P1, roles)]), applications: HashMap::new(),
-            };
+            let mut corp = { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = CORP_ID;
+                __corp.name = "Durable Corp".into();
+                __corp.ticker = "DURB".into();
+                __corp.ceo_id = P1;
+                __corp.alliance_id = None;
+                __corp.tax_rate = 0.05;
+                __corp.description = String::new();
+                __corp.url = String::new();
+                __corp.hq_station_id = Some(JITA_STATION_ID);
+                __corp.members = [P1].into_iter().collect();
+                __corp.member_roles = HashMap::from([(P1, roles)]);
+                __corp.applications = HashMap::new();
+                __corp.wallet_divisions = Vec::new();
+                let __mw = IskCents::from_isk(200_000_000);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp };
             corp.ensure_wallet_divisions();
             corp.wallet_divisions[0].balance = IskCents::from_isk(200_000_000);
             snap.corporations.insert(CORP_ID, corp);
@@ -542,12 +553,23 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
                 ch.clone_grade = 1;
                 ch.skill_points = 1_000_000.0;
             }
-            snap.corporations.insert(CORP_ID, CorporationRecord {
-                corporation_id: CORP_ID, name: "Durable Corp".into(), ticker: "DURB".into(), ceo_id: P1, alliance_id: None,
-                tax_rate: 0.05, master_wallet: IskCents::from_isk(50_000_000), wallet_divisions: Vec::new(), description: String::new(),
-                url: String::new(), hq_station_id: Some(JITA_STATION_ID), members: [P1].into_iter().collect(),
-                member_roles: HashMap::from([(P1, corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_STARBASE_CONFIG)]), applications: HashMap::new(),
-            });
+            snap.corporations.insert(CORP_ID, { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = CORP_ID;
+                __corp.name = "Durable Corp".into();
+                __corp.ticker = "DURB".into();
+                __corp.ceo_id = P1;
+                __corp.alliance_id = None;
+                __corp.tax_rate = 0.05;
+                __corp.description = String::new();
+                __corp.url = String::new();
+                __corp.hq_station_id = Some(JITA_STATION_ID);
+                __corp.members = [P1].into_iter().collect();
+                __corp.member_roles = HashMap::from([(P1, corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_STARBASE_CONFIG)]);
+                __corp.applications = HashMap::new();
+                __corp.wallet_divisions = Vec::new();
+                let __mw = IskCents::from_isk(50_000_000);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp });
             snap.skills.entry(P1).or_default().insert(3300, TrainedSkillRecord { type_id: 3300, level: 3, skill_points: 8_000.0 });
             snap.items.insert(mod2_id, make_item(mod2_id, 2889, P1, ship_id, InventoryFlag::HiSlot1, 1, true));
             snap.items.insert(ammo_id, make_item(ammo_id, 183, P1, ship_id, InventoryFlag::Cargo, 500, false));

@@ -105,17 +105,16 @@ fn seed_char(snap: &mut WorldStateSnapshot, cid: i64, corp: i64, aid: Option<i64
 }
 
 fn seed_corp(snap: &mut WorldStateSnapshot, corp: i64, ceo: i64, aid: Option<i64>) {
-    snap.corporations.insert(corp, CorporationRecord {
-        corporation_id: corp,
-        name: format!("Corp {corp}"),
-        ticker: "TST".into(),
-        ceo_id: ceo,
-        alliance_id: aid,
-        tax_rate: 0.1,
-        members: HashSet::from([ceo]),
-        member_roles: HashMap::from([(ceo, ROLE_DIRECTOR)]),
-        ..Default::default()
-    });
+    snap.corporations.insert(corp, { let mut __corp = CorporationRecord::default();
+        __corp.corporation_id = corp;
+        __corp.name = format!("Corp {corp}");
+        __corp.ticker = "TST".into();
+        __corp.ceo_id = ceo;
+        __corp.alliance_id = aid;
+        __corp.tax_rate = 0.1;
+        __corp.members = HashSet::from([ceo]);
+        __corp.member_roles = HashMap::from([(ceo, ROLE_DIRECTOR)]);
+        __corp });
 }
 
 fn sess(char_id: i64, corp_id: i64, sys_id: u32, station_id: Option<i64>, role: u64) -> SessionState {

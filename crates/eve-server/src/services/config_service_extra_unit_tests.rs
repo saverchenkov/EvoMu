@@ -214,13 +214,12 @@ fn config_owners_locations_tickers_and_station_solar_systems_coverage() {
         snap.characters.insert(char_id, ch);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Player Corp".into(),
-                ticker: "PLRC".into(),
-                ceo_id: char_id,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Player Corp".into();
+                __corp.ticker = "PLRC".into();
+                __corp.ceo_id = char_id;
+                __corp },
         );
         snap.alliances.insert(
             ally_id,

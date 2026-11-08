@@ -153,11 +153,16 @@ async fn test_r5_238_243_244_245_contracts_fingerprint_deposit_corp_accept_and_t
     s_acceptor.corp_role = 0;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_002) { ch.corporation_id = corp_id; }
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id, name: "R5 Contract Corp".into(), ticker: "R5CC".into(), ceo_id: 90_000_001,
-            alliance_id: None, tax_rate: 0.0, master_wallet: IskCents::from_isk(10_000_000),
-            members: HashSet::from([90_000_002]), ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "R5 Contract Corp".into();
+            __corp.ticker = "R5CC".into();
+            __corp.ceo_id = 90_000_001;
+            __corp.alliance_id = None;
+            __corp.tax_rate = 0.0;
+            __corp.members = HashSet::from([90_000_002]);
+            __corp.set_division_balance(1, IskCents::from_isk(10_000_000));
+            __corp };
         corp.set_division_balance(1, IskCents::from_isk(10_000_000));
         snap.corporations.insert(corp_id, corp);
         snap.items.insert(700_244, InventoryItemRecord {
@@ -221,7 +226,7 @@ async fn test_r5_238_243_244_245_contracts_fingerprint_deposit_corp_accept_and_t
         assert_eq!(c.acceptor_id, Some(corp_id));
         let corp = snap.corporations.get(&corp_id).unwrap();
         assert_eq!(corp.division_balance(1), IskCents::from_isk(9_500_000));
-        assert_eq!(corp.master_wallet, IskCents::from_isk(9_500_000));
+        assert_eq!(corp.master_wallet_balance(), IskCents::from_isk(9_500_000));
         let delivered = snap.items.get(&700_244).unwrap();
         assert_eq!(delivered.owner_id, corp_id);
         assert_eq!(delivered.flag, InventoryFlag::CorpDeliveries);
@@ -420,11 +425,16 @@ async fn test_r5_241_242_248_249_250_corp_wallet_sync_lp_tax_goal_rewards_indust
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) { ch.corporation_id = corp_id; }
         snap.skills.entry(char_id).or_default().insert(3380, TrainedSkillRecord { type_id: 3380, level: 5, skill_points: 256_000.0 });
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id, name: "R5 Econ Corp".into(), ticker: "R5EC".into(), ceo_id: char_id,
-            alliance_id: None, tax_rate: 0.10, master_wallet: IskCents::from_isk(1_000_000),
-            members: HashSet::from([char_id]), ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "R5 Econ Corp".into();
+            __corp.ticker = "R5EC".into();
+            __corp.ceo_id = char_id;
+            __corp.alliance_id = None;
+            __corp.tax_rate = 0.10;
+            __corp.members = HashSet::from([char_id]);
+            __corp.set_division_balance(1, IskCents::from_isk(1_000_000));
+            __corp };
         corp.set_division_balance(1, IskCents::from_isk(1_000_000));
         snap.corporations.insert(corp_id, corp);
     });
@@ -446,7 +456,7 @@ async fn test_r5_241_242_248_249_250_corp_wallet_sync_lp_tax_goal_rewards_indust
     let goal_id_bytes = cg_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap().to_vec();
     ctx.db.with_snapshot(|snap| {
         let corp = snap.corporations.get(&corp_id).unwrap();
-        assert_eq!(corp.master_wallet, IskCents::from_isk(990_000));
+        assert_eq!(corp.master_wallet_balance(), IskCents::from_isk(990_000));
         assert_eq!(corp.division_balance(1), IskCents::from_isk(990_000));
     });
     eve_server::services::space_mining_harvest::deposit_mined_ore_and_record_ledger(

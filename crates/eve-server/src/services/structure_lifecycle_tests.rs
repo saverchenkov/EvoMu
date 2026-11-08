@@ -409,16 +409,15 @@ fn package_structure_hack_reveal_and_validate_refit_work() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Unanchor Corp".into(),
-                ticker: "UAC".into(),
-                ceo_id: 8810,
-                hq_station_id: Some(60003760),
-                tax_rate: 0.0,
-                master_wallet: IskCents(0),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Unanchor Corp".into();
+                __corp.ticker = "UAC".into();
+                __corp.ceo_id = 8810;
+                __corp.hq_station_id = Some(60003760);
+                __corp.tax_rate = 0.0;
+                __corp.set_division_balance(1, IskCents(0));
+                __corp },
         );
         let mut st = make_record(sid, med_tid, corp_id, 30000142, STATE_SHIELD_VULNERABLE, true, 5);
         st.armor_hp = 50.0;
@@ -492,17 +491,13 @@ async fn destroy_and_package_structure_evacuate_gunner_docked_pilots_and_reset_h
         let base_char = ctx.db.with_snapshot(|s| s.characters.values().next().cloned().expect("demo char"));
 
         ctx.db.with_mut_snapshot(|snap| {
-            snap.corporations.insert(
-                corp_id,
-                CorporationRecord {
-                    corporation_id: corp_id,
-                    name: "Evac Corp".into(),
-                    ticker: "EVAC".into(),
-                    ceo_id: gunner_cid,
-                    hq_station_id: Some(60_003_760),
-                    ..Default::default()
-                },
-            );
+            let mut corp = CorporationRecord::default();
+            corp.corporation_id = corp_id;
+            corp.name = "Evac Corp".into();
+            corp.ticker = "EVAC".into();
+            corp.ceo_id = gunner_cid;
+            corp.hq_station_id = Some(60_003_760);
+            snap.corporations.insert(corp_id, corp);
             snap.structures.insert(
                 sid,
                 make_record(sid, med_tid, corp_id, sys_id, STATE_SHIELD_VULNERABLE, true, 5),

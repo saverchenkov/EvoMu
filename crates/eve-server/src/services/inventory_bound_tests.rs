@@ -174,14 +174,13 @@ fn invbroker_bound_methods_turret_slots_and_corp_roles_at_location() {
         snap.characters.insert(char_id, ch);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Test Bound Corp".into(),
-                ticker: "TBC".into(),
-                ceo_id: char_id,
-                hq_station_id: Some(hq_station),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Test Bound Corp".into();
+                __corp.ticker = "TBC".into();
+                __corp.ceo_id = char_id;
+                __corp.hq_station_id = Some(hq_station);
+                __corp },
         );
         snap.corp_governance
             .entry(corp_id)
@@ -351,14 +350,12 @@ fn issue_552_scoped_stasis_and_corp_office_container_take_rbacs() {
     let now = ctx.now_unix();
 
     ctx.db.with_mut_snapshot(|snap| {
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            ceo_id,
-            hq_station_id: Some(hq),
-            name: "ScopedCorp".into(),
-            ticker: "SCP".into(),
-            ..Default::default()
-        };
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.ceo_id = ceo_id;
+        corp.hq_station_id = Some(hq);
+        corp.name = "ScopedCorp".into();
+        corp.ticker = "SCP".into();
         corp.members.insert(ceo_id);
         corp.members.insert(mem_id);
         corp.member_roles.insert(mem_id, 0);

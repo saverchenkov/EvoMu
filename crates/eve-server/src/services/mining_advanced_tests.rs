@@ -134,14 +134,13 @@ async fn test_moon_extraction_lifecycle_and_tick() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Moon Corp".into(),
-                ticker: "MOON".into(),
-                ceo_id: char_id,
-                tax_rate: 0.05,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Moon Corp".into();
+                __corp.ticker = "MOON".into();
+                __corp.ceo_id = char_id;
+                __corp.tax_rate = 0.05;
+                __corp },
         );
         snap.structures.insert(
             struct_id,
@@ -353,14 +352,13 @@ async fn test_auto_moon_mining_details_output_and_hourly_tick() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Moon Corp".into(),
-                ticker: "MOON".into(),
-                ceo_id: char_id,
-                tax_rate: 0.05,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Moon Corp".into();
+                __corp.ticker = "MOON".into();
+                __corp.ceo_id = char_id;
+                __corp.tax_rate = 0.05;
+                __corp },
         );
         snap.structures.insert(
             metenox_id,
@@ -464,17 +462,13 @@ async fn test_metenox_fuel_no_double_count_disposal_sync_and_reinforce_pause() {
         if let Some(c) = snap.characters.get_mut(&char_id) {
             c.corporation_id = corp_id;
         }
-        snap.corporations.insert(
-            corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Moon Corp".into(),
-                ticker: "MOON".into(),
-                ceo_id: char_id,
-                tax_rate: 0.05,
-                ..Default::default()
-            },
-        );
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Moon Corp".into();
+        corp.ticker = "MOON".into();
+        corp.ceo_id = char_id;
+        corp.tax_rate = 0.05;
+        snap.corporations.insert(corp_id, corp);
         // Both st.fuel_blocks = 10 and item_fuel = 10 (synced bay): effective total must be 10, NOT 20.
         snap.structures.insert(
             metenox_id,

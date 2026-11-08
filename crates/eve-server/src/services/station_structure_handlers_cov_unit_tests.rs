@@ -41,14 +41,13 @@ fn setup_orbital_and_structure_world() -> (ServerContext, i64, i64, i64, i64, i6
         insert_char(snap, member_id, 9102, corp_id, IskCents::from_f64_isk(100_000_000.0));
         insert_char(snap, outsider_id, 9103, 98_710_999, IskCents::from_f64_isk(100_000_000.0));
 
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "Orbital Logistics".into(),
-            ticker: "ORBL".into(),
-            ceo_id,
-            master_wallet: IskCents::from_f64_isk(500_000_000.0),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Orbital Logistics".into();
+            __corp.ticker = "ORBL".into();
+            __corp.ceo_id = ceo_id;
+            __corp.set_division_balance(1, IskCents::from_f64_isk(500_000_000.0));
+            __corp };
         corp.ensure_wallet_divisions();
         snap.corporations.insert(corp_id, corp);
 

@@ -115,22 +115,23 @@ fn setup_esi_test_environment() -> (Arc<ServerContext>, Arc<EsiRouter>, OpenApiS
 
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Deep Space Logistics".to_string(),
-                ticker: "DSL".to_string(),
-                ceo_id: char_id,
-                alliance_id: Some(alliance_id),
-                tax_rate: 0.05,
-                master_wallet: IskCents::from_isk(250_000_000),
-                members: HashSet::from([char_id, 90_000_002]),
-                member_roles: HashMap::from([(char_id, eve_db::corp_roles::ROLE_DIRECTOR)]),
-                applications: HashMap::new(),
-                wallet_divisions: Vec::new(),
-                description: String::new(),
-                url: String::new(),
-                hq_station_id: None,
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Deep Space Logistics".to_string();
+                __corp.ticker = "DSL".to_string();
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = Some(alliance_id);
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([char_id, 90_000_002]);
+                __corp.member_roles = HashMap::from([(char_id, eve_db::corp_roles::ROLE_DIRECTOR)]);
+                __corp.applications = HashMap::new();
+                __corp.description = String::new();
+                __corp.url = String::new();
+                __corp.hq_station_id = None;
+                __corp.wallet_divisions = Vec::new();
+                let __mw = IskCents::from_isk(250_000_000);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
 
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -922,13 +923,12 @@ async fn test_esi_b2_corp_mining_and_customs_offices_live_http_and_sqlite() {
     let athanor_id = 1_000_000_811_001_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "B2 Mining & Customs Corp".into(),
-            ticker: "B2MC".into(),
-            ceo_id,
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "B2 Mining & Customs Corp".into();
+            __corp.ticker = "B2MC".into();
+            __corp.ceo_id = ceo_id;
+            __corp };
         corp.member_roles.insert(ceo_id, ROLE_DIRECTOR);
         corp.member_roles.insert(miner_id, ROLE_STATION_MANAGER);
         corp.member_roles.insert(accountant_id, ROLE_ACCOUNTANT);
@@ -1298,14 +1298,13 @@ async fn test_esi_b2_market_history_structure_and_corp_orders_live_http_and_sqli
     let bare_astrahus_id = 1_000_000_831_002_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "B2 Market & Citadel Corp".into(),
-            ticker: "B2MC".into(),
-            ceo_id,
-            master_wallet: IskCents(50_000_000_00),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "B2 Market & Citadel Corp".into();
+            __corp.ticker = "B2MC".into();
+            __corp.ceo_id = ceo_id;
+            __corp.set_division_balance(1, IskCents(50_000_000_00));
+            __corp };
         corp.member_roles.insert(ceo_id, ROLE_DIRECTOR);
         corp.member_roles
             .insert(trader_id, ROLE_TRADER | eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]);
@@ -2354,14 +2353,13 @@ async fn test_esi_p6_corp_contracts_live_rpc_auth_and_sqlite_persistence() {
         plain_member.corporation_id = corp1;
         snap.characters.insert(member_char, plain_member);
 
-        let mut corp = CorporationRecord {
-            corporation_id: corp1,
-            name: "P6 Corp".to_string(),
-            ticker: "P6C".to_string(),
-            ceo_id: char1,
-            master_wallet: IskCents::from_isk(500_000_000),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp1;
+            __corp.name = "P6 Corp".to_string();
+            __corp.ticker = "P6C".to_string();
+            __corp.ceo_id = char1;
+            __corp.set_division_balance(1, IskCents::from_isk(500_000_000));
+            __corp };
         corp.ensure_wallet_divisions();
         corp.members.insert(member_char);
         corp.member_roles.insert(member_char, 0);
@@ -2561,15 +2559,14 @@ async fn test_esi_p6_industry_jobs_and_facilities_live_rpc_and_sqlite_persistenc
         )
     });
     let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
-        let mut corp = CorporationRecord {
-            corporation_id: corp1,
-            name: "P6 Corp".to_string(),
-            ticker: "P6C".to_string(),
-            ceo_id: char1,
-            tax_rate: 0.11, // PvE bounty tax rate — must NOT be reported as facility industry tax
-            master_wallet: IskCents::from_isk(500_000_000),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp1;
+            __corp.name = "P6 Corp".to_string();
+            __corp.ticker = "P6C".to_string();
+            __corp.ceo_id = char1;
+            __corp.tax_rate = 0.11;
+            __corp.set_division_balance(1, IskCents::from_isk(500_000_000));
+            __corp };
         corp.ensure_wallet_divisions();
         snap.corporations.insert(corp1, corp);
         snap.skills.entry(char1).or_default().insert(
@@ -2744,9 +2741,12 @@ async fn test_esi_corp_roles_personnel_manager_and_grantable_role_gate() {
 
     let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
         let base = snap.characters[&ceo_id].clone();
-        let mut corp = CorporationRecord {
-            corporation_id: corp1, name: "Roles Gate Corp".into(), ticker: "RGC".into(), ceo_id, ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp1;
+            __corp.name = "Roles Gate Corp".into();
+            __corp.ticker = "RGC".into();
+            __corp.ceo_id = ceo_id;
+            __corp };
         for (cid, roles) in [
             (ceo_id, ROLE_DIRECTOR),
             (plain_id, 0),
@@ -2991,25 +2991,23 @@ async fn test_esi_p6_char_contract_party_isolation_and_bidder_privacy() {
         )
     });
     let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
-        let mut c1 = CorporationRecord {
-            corporation_id: corp1,
-            name: "Party Isolation Corp".into(),
-            ticker: "PIC1".into(),
-            ceo_id: char1,
-            master_wallet: IskCents::from_isk(500_000_000),
-            ..Default::default()
-        };
+        let mut c1 = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp1;
+            __corp.name = "Party Isolation Corp".into();
+            __corp.ticker = "PIC1".into();
+            __corp.ceo_id = char1;
+            __corp.set_division_balance(1, IskCents::from_isk(500_000_000));
+            __corp };
         c1.ensure_wallet_divisions();
         snap.corporations.insert(corp1, c1);
 
-        let c3 = CorporationRecord {
-            corporation_id: corp3,
-            name: "Third Party Corp".into(),
-            ticker: "TPC3".into(),
-            ceo_id: char3,
-            master_wallet: IskCents::from_isk(100_000_000),
-            ..Default::default()
-        };
+        let c3 = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp3;
+            __corp.name = "Third Party Corp".into();
+            __corp.ticker = "TPC3".into();
+            __corp.ceo_id = char3;
+            __corp.set_division_balance(1, IskCents::from_isk(100_000_000));
+            __corp };
         snap.corporations.insert(corp3, c3);
         let mut bystander = snap.characters[&char1].clone();
         bystander.character_id = char3;
@@ -3185,14 +3183,13 @@ async fn test_esi_p6_public_contract_204_on_accept_and_expiry_and_30d_retention(
         )
     });
     let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
-        let mut c1 = CorporationRecord {
-            corporation_id: corp1,
-            name: "Retention Corp".into(),
-            ticker: "RETC".into(),
-            ceo_id: char1,
-            master_wallet: IskCents::from_isk(500_000_000),
-            ..Default::default()
-        };
+        let mut c1 = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp1;
+            __corp.name = "Retention Corp".into();
+            __corp.ticker = "RETC".into();
+            __corp.ceo_id = char1;
+            __corp.set_division_balance(1, IskCents::from_isk(500_000_000));
+            __corp };
         c1.ensure_wallet_divisions();
         snap.corporations.insert(corp1, c1);
         Ok(())

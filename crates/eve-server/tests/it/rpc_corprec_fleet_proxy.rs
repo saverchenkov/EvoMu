@@ -71,15 +71,14 @@ async fn test_corprec_proxy_rpcs() {
         }
         snap.corporations.insert(
             corp_id,
-            eve_db::CorporationRecord {
-                corporation_id: corp_id,
-                name: "Frontier Exploits".into(),
-                ticker: "FEXP".into(),
-                ceo_id: PILOT_1,
-                master_wallet: eve_db::IskCents::from_isk(10_000_000),
-                members: std::collections::HashSet::from([PILOT_1]),
-                ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Frontier Exploits".into();
+                __corp.ticker = "FEXP".into();
+                __corp.ceo_id = PILOT_1;
+                __corp.members = std::collections::HashSet::from([PILOT_1]);
+                __corp.set_division_balance(1, eve_db::IskCents::from_isk(10_000_000));
+                __corp },
         );
     });
 

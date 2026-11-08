@@ -16,17 +16,16 @@ fn test_lookup_svc_bannedwords_and_all_lookup_rpcs() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             98_000_777,
-            CorporationRecord {
-                corporation_id: 98_000_777,
-                name: "Starlight Syndicate".into(),
-                ticker: "STRLT".into(),
-                ceo_id: 90_000_001,
-                alliance_id: Some(99_000_777),
-                tax_rate: 0.05,
-                description: "Test corp".into(),
-                hq_station_id: Some(60_003_760),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = 98_000_777;
+                __corp.name = "Starlight Syndicate".into();
+                __corp.ticker = "STRLT".into();
+                __corp.ceo_id = 90_000_001;
+                __corp.alliance_id = Some(99_000_777);
+                __corp.tax_rate = 0.05;
+                __corp.description = "Test corp".into();
+                __corp.hq_station_id = Some(60_003_760);
+                __corp },
         );
         snap.alliances.insert(
             99_000_777,

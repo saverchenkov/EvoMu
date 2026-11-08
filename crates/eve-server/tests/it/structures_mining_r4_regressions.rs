@@ -55,16 +55,15 @@ async fn test_r4_164_sov_hub_install_upgrade_ownership_flag_and_stack_split() {
         roles.insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Sov 164 Corp".into(),
-                ticker: "S164".into(),
-                ceo_id: char_id,
-                alliance_id: Some(alliance_id),
-                members: HashSet::from([char_id]),
-                member_roles: roles,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Sov 164 Corp".into();
+                __corp.ticker = "S164".into();
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = Some(alliance_id);
+                __corp.members = HashSet::from([char_id]);
+                __corp.member_roles = roles;
+                __corp },
         );
         snap.alliances.insert(
             alliance_id,
@@ -285,15 +284,14 @@ async fn test_r4_166_structure_fit_module_splits_stack() {
         roles.insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Fit 166 Corp".into(),
-                ticker: "F166".into(),
-                ceo_id: char_id,
-                members: HashSet::from([char_id]),
-                member_roles: roles,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Fit 166 Corp".into();
+                __corp.ticker = "F166".into();
+                __corp.ceo_id = char_id;
+                __corp.members = HashSet::from([char_id]);
+                __corp.member_roles = roles;
+                __corp },
         );
         snap.structures.insert(
             struct_id,

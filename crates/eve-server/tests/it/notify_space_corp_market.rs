@@ -854,13 +854,12 @@ async fn notify_batch9_diplomacy_fittings_offers_and_nes() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            eve_db::CorporationRecord {
-                corporation_id: corp_id,
-                name: "Test Diplo Corp".into(),
-                ticker: "TDC".into(),
-                ceo_id: PILOT_A,
-                ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Test Diplo Corp".into();
+                __corp.ticker = "TDC".into();
+                __corp.ceo_id = PILOT_A;
+                __corp },
         );
         if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
             ch.corporation_id = corp_id;
@@ -1296,13 +1295,12 @@ async fn notify_batch9_facilities_industry_trade_and_repackage_errors() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            eve_db::CorporationRecord {
-                corporation_id: corp_id,
-                name: "Ind Corp".into(),
-                ticker: "INDC".into(),
-                ceo_id: PILOT_A,
-                ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Ind Corp".into();
+                __corp.ticker = "INDC".into();
+                __corp.ceo_id = PILOT_A;
+                __corp },
         );
         if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
             ch.corporation_id = corp_id;
@@ -1791,13 +1789,12 @@ async fn notify_batch9_jump_queue_flagged_lists_and_cfg_data() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            eve_db::CorporationRecord {
-                corporation_id: corp_id,
-                name: "Cfg Corp".into(),
-                ticker: "CFGC".into(),
-                ceo_id: PILOT_A,
-                ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Cfg Corp".into();
+                __corp.ticker = "CFGC".into();
+                __corp.ceo_id = PILOT_A;
+                __corp },
         );
         if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
             ch.corporation_id = corp_id;
@@ -2179,15 +2176,14 @@ async fn test_on_industry_materials_v24_dict_shape() {
     let wrong_div_roles = eve_db::corp_roles::ROLE_FACTORY_MANAGER | (1u64 << 15) | eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]; // Factory Manager + Take3 + Account Take 1
     let fm_roles = eve_db::corp_roles::ROLE_FACTORY_MANAGER | (1u64 << 13) | eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]; // Factory Manager + Take1 + Account Take 1
     ctx.db.with_mut_snapshot(|snap| {
-        let mut corp = eve_db::CorporationRecord {
-            corporation_id: corp_id,
-            name: "Industry Division Corp".into(),
-            ticker: "IDIV".into(),
-            ceo_id: PILOT_B,
-            hq_station_id: Some(JITA_STATION),
-            master_wallet: IskCents(100_000_000_00),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Industry Division Corp".into();
+            __corp.ticker = "IDIV".into();
+            __corp.ceo_id = PILOT_B;
+            __corp.hq_station_id = Some(JITA_STATION);
+            __corp.set_division_balance(1, IskCents(100_000_000_00));
+            __corp };
         corp.members.insert(PILOT_A);
         corp.members.insert(PILOT_B);
         corp.member_roles.insert(PILOT_A, take3_only);

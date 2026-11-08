@@ -127,7 +127,7 @@ async fn test_quasar_batch2_freelance_projects_and_item_delivery_e2e() {
         corp.corporation_id = corp_id as i64;
         corp.name = "Freelance E2E Corp".into();
         corp.ceo_id = director_cid as i64;
-        corp.master_wallet = IskCents::from_isk(10_000_000);
+        corp.set_division_balance(1, IskCents::from_isk(10_000_000));
         snap.corporations.insert(corp_id as i64, corp);
 
         if let Some(ch) = snap.characters.get_mut(&(director_cid as i64)) {
@@ -183,7 +183,7 @@ async fn test_quasar_batch2_freelance_projects_and_item_delivery_e2e() {
 
     // Verify corp wallet debited by 1,000,000 ISK and CreatedNotice emitted
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.corporations[&(corp_id as i64)].master_wallet, IskCents::from_isk(9_000_000));
+        assert_eq!(snap.corporations[&(corp_id as i64)].master_wallet_balance(), IskCents::from_isk(9_000_000));
     });
     let dir_notices = poll_notice_names(&ctx, &dir_sess);
     assert!(dir_notices.iter().any(|n| n == "eve_public.freelance.project.api.CreatedNotice"));

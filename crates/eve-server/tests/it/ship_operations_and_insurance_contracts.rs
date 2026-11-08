@@ -162,14 +162,17 @@ async fn test_insurance_contracts_get_for_ship_and_corp_roles() {
     seed_item(&ctx, corp_ship_id, 587, test_corp_id, station_id, InventoryFlag::Hangar, 1, true);
     let corp_initial_bal = eve_db::IskCents::from_isk(50_000_000);
     ctx.db.with_mut_snapshot(|s| {
-        let corp = eve_db::CorporationRecord {
-            corporation_id: test_corp_id, name: "Corp Ins".into(), ticker: "CI".into(), ceo_id: 999_888,
-            master_wallet: corp_initial_bal,
-            members: std::collections::HashSet::from([char_id]),
-            member_roles: HashMap::from([(char_id, eve_db::corp_roles::ROLE_DIRECTOR)]),
-            wallet_divisions: eve_db::CorporationRecord::default_wallet_divisions(corp_initial_bal),
-            ..Default::default()
-        };
+        let corp = { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = test_corp_id;
+            __corp.name = "Corp Ins".into();
+            __corp.ticker = "CI".into();
+            __corp.ceo_id = 999_888;
+            __corp.members = std::collections::HashSet::from([char_id]);
+            __corp.member_roles = HashMap::from([(char_id, eve_db::corp_roles::ROLE_DIRECTOR)]);
+            __corp.wallet_divisions = eve_db::CorporationRecord::default_wallet_divisions(corp_initial_bal);
+            let __mw = corp_initial_bal;
+            if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+            __corp };
         s.corporations.insert(test_corp_id, corp);
         if let Some(c) = s.characters.get_mut(&char_id) { c.corporation_id = test_corp_id; }
     });
@@ -184,12 +187,12 @@ async fn test_insurance_contracts_get_for_ship_and_corp_roles() {
 
     // R-INS-01: Destroy corp-insured ship and verify payout goes to corp master wallet, leaving pilot balance untouched
     let pilot_bal_before_payout = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
-    let corp_bal_before_payout = ctx.db.with_snapshot(|s| s.corporations.get(&test_corp_id).unwrap().master_wallet);
+    let corp_bal_before_payout = ctx.db.with_snapshot(|s| s.corporations.get(&test_corp_id).unwrap().master_wallet_balance());
     let payout_returned = eve_server::services::combat_crimewatch::combat_wrecks_killmails::process_ship_insurance_payout(
         &ctx, char_id, corp_ship_id, 587, false,
     );
     assert!(payout_returned > 0.0);
-    let corp_bal_after_payout = ctx.db.with_snapshot(|s| s.corporations.get(&test_corp_id).unwrap().master_wallet);
+    let corp_bal_after_payout = ctx.db.with_snapshot(|s| s.corporations.get(&test_corp_id).unwrap().master_wallet_balance());
     let pilot_bal_after_payout = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
     assert_eq!(pilot_bal_after_payout, pilot_bal_before_payout, "Pilot personal balance must NOT change for corp-insured ship payout!");
     assert_eq!(corp_bal_after_payout.0 - corp_bal_before_payout.0, eve_db::IskCents::from_f64_isk(payout_returned).0, "Corp master wallet must increase by exact insurance payout!");
@@ -993,14 +996,13 @@ async fn test_r2_track6_quasar_esi_and_protocol() {
     ctx.db.with_mut_snapshot(|s| {
         s.corporations.insert(
             98_999_999,
-            eve_db::CorporationRecord {
-                corporation_id: 98_999_999,
-                name: "Foreign Corp".into(),
-                ticker: "FRGN".into(),
-                ceo_id: 90_000_002,
-                members: [90_000_002].into_iter().collect(),
-                ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = 98_999_999;
+                __corp.name = "Foreign Corp".into();
+                __corp.ticker = "FRGN".into();
+                __corp.ceo_id = 90_000_002;
+                __corp.members = [90_000_002].into_iter().collect();
+                __corp },
         );
     });
     let mail_err = ctx.dispatch_rpc(

@@ -338,11 +338,10 @@ fn fuel_add_validation_starvation_simulation_and_uninstall_overload_recovery_not
             ch2.corporation_id = corp_id;
             ch2.solar_system_id = sys_id;
         }
-        let mut corp_rec = CorporationRecord {
-            corporation_id: corp_id,
-            ceo_id: cid,
-            ..Default::default()
-        };
+        let mut corp_rec = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.ceo_id = cid;
+            __corp };
         corp_rec.members.extend([cid, 90_000_002]);
         snap.corporations.insert(corp_id, corp_rec);
         snap.structures.insert(

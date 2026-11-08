@@ -466,16 +466,15 @@ fn abandoned_destruction_drops_hangar_items_relocates_clones_and_hack_reveal_res
         snap.characters.insert(hacker_char, ch);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "AbandonCorp".into(),
-                ticker: "ABC".into(),
-                ceo_id: owner_char,
-                hq_station_id: Some(60003760),
-                tax_rate: 0.0,
-                master_wallet: IskCents(0),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "AbandonCorp".into();
+                __corp.ticker = "ABC".into();
+                __corp.ceo_id = owner_char;
+                __corp.hq_station_id = Some(60003760);
+                __corp.tax_rate = 0.0;
+                __corp.set_division_balance(1, IskCents(0));
+                __corp },
         );
         snap.structures.insert(
             sid,

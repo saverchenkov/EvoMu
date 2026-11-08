@@ -1283,22 +1283,23 @@ pub(crate) mod pi_poco_gantry_deploy_reinforce {
             ] {
                 snap.corporations.insert(
                     cid,
-                    CorporationRecord {
-                        corporation_id: cid,
-                        name: format!("Corp {cid}"),
-                        ticker: "CRP".into(),
-                        ceo_id: ceo,
-                        alliance_id: al,
-                        tax_rate: 0.05,
-                        master_wallet: IskCents::from_isk(10_000_000),
-                        members: HashSet::from([ceo]),
-                        member_roles: HashMap::from([(ceo, u64::MAX)]),
-                        applications: HashMap::new(),
-                        wallet_divisions: Vec::new(),
-                        description: String::new(),
-                        url: String::new(),
-                        hq_station_id: Some(LOWSEC_STATION_ID),
-                    },
+                    { let mut __corp = CorporationRecord::default();
+                        __corp.corporation_id = cid;
+                        __corp.name = format!("Corp {cid}");
+                        __corp.ticker = "CRP".into();
+                        __corp.ceo_id = ceo;
+                        __corp.alliance_id = al;
+                        __corp.tax_rate = 0.05;
+                        __corp.members = HashSet::from([ceo]);
+                        __corp.member_roles = HashMap::from([(ceo, u64::MAX)]);
+                        __corp.applications = HashMap::new();
+                        __corp.description = String::new();
+                        __corp.url = String::new();
+                        __corp.hq_station_id = Some(LOWSEC_STATION_ID);
+                        __corp.wallet_divisions = Vec::new();
+                        let __mw = IskCents::from_isk(10_000_000);
+                        if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                        __corp },
                 );
             }
             (
@@ -1466,7 +1467,7 @@ pub(crate) mod pi_poco_gantry_deploy_reinforce {
         .await
         .expect("Set neutral tax rate to 10%");
 
-        let corp_bal_before = ctx.db.with_snapshot(|snap| snap.corporations[&owner_corp].master_wallet);
+        let corp_bal_before = ctx.db.with_snapshot(|snap| snap.corporations[&owner_corp].master_wallet_balance());
         for (tid, base_val) in [
             (2268_u32, 5.0_f64),
             (3645, 400.0),
@@ -1504,7 +1505,7 @@ pub(crate) mod pi_poco_gantry_deploy_reinforce {
             let imp_tax = imp.dict_get("importTaxISK").and_then(|v| v.as_f64()).unwrap();
             assert!((imp_tax - 0.5 * base_val * 0.10).abs() < 1e-4);
         }
-        let corp_bal_after = ctx.db.with_snapshot(|snap| snap.corporations[&owner_corp].master_wallet);
+        let corp_bal_after = ctx.db.with_snapshot(|snap| snap.corporations[&owner_corp].master_wallet_balance());
         assert!(corp_bal_after.0 > corp_bal_before.0);
 
         // 4. Reinforce and destroy POCO via a single shield reinforcement timer

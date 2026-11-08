@@ -692,12 +692,12 @@ fn register_commerce_admin_handlers(
                         .quasar_commerce
                         .failed_fulfillments
                         .iter_mut()
-                        .find(|r| r.id == fid)
-                        .map(|rec| {
+                        .enumerate()
+                        .find(|(_, r)| r.id == fid)
+                        .map(|(idx, rec)| {
                             rec.retries += 1;
                             if !rec.fulfilled && rec.plex_units > 0 {
-                                rec.fulfilled = true;
-                                Some((rec.user_id, rec.plex_units))
+                                Some((idx, rec.user_id, rec.plex_units))
                             } else {
                                 None
                             }
@@ -705,21 +705,21 @@ fn register_commerce_admin_handlers(
                     let Some(maybe_credit) = credit_info else {
                         return false;
                     };
-                    if let Some((uid, amt)) = maybe_credit {
-                        let bal = snap.account_plex_vault.entry(uid).or_insert(0);
-                        *bal += amt;
-                        let new_bal = *bal;
-                        snap.next_entity_id += 1;
-                        let tx_id = snap.next_entity_id as u64;
-                        record_plex_transaction(
-                            snap,
-                            tx_id,
-                            uid,
-                            amt,
-                            new_bal,
-                            &format!("Admin retry fulfillment #{fid}"),
-                            now_unix,
-                        );
+                    if let Some((idx, uid, amt)) = maybe_credit {
+                        if let Some(new_bal) = snap.adjust_unified_plex_for_user(uid, amt) {
+                            snap.quasar_commerce.failed_fulfillments[idx].fulfilled = true;
+                            snap.next_entity_id += 1;
+                            let tx_id = snap.next_entity_id as u64;
+                            record_plex_transaction(
+                                snap,
+                                tx_id,
+                                uid,
+                                amt,
+                                new_bal,
+                                &format!("Admin retry fulfillment #{fid}"),
+                                now_unix,
+                            );
+                        }
                     }
                     true
                 });
@@ -739,29 +739,28 @@ fn register_commerce_admin_handlers(
             Arc::new(move |ctx, _any, _dyn_msg| {
                 let now_unix = ctx.now_unix();
                 db2.with_mut_snapshot(|snap| {
-                    let mut credits: Vec<(u64, u64, i64, i64, u32)> = Vec::new();
-                    for rec in &mut snap.quasar_commerce.failed_fulfillments {
+                    let mut candidates: Vec<(usize, u64, i64, u32)> = Vec::new();
+                    for (idx, rec) in snap.quasar_commerce.failed_fulfillments.iter_mut().enumerate() {
                         rec.retries += 1;
                         if !rec.fulfilled && rec.plex_units > 0 {
-                            rec.fulfilled = true;
-                            let bal = snap.account_plex_vault.entry(rec.user_id).or_insert(0);
-                            *bal += rec.plex_units;
-                            let new_bal = *bal;
-                            snap.next_entity_id += 1;
-                            let tx_id = snap.next_entity_id as u64;
-                            credits.push((tx_id, rec.user_id, rec.plex_units, new_bal, rec.id));
+                            candidates.push((idx, rec.user_id, rec.plex_units, rec.id));
                         }
                     }
-                    for (tx_id, uid, amt, new_bal, rec_id) in credits {
-                        record_plex_transaction(
-                            snap,
-                            tx_id,
-                            uid,
-                            amt,
-                            new_bal,
-                            &format!("Admin retry-all fulfillment #{rec_id}"),
-                            now_unix,
-                        );
+                    for (idx, uid, amt, rec_id) in candidates {
+                        if let Some(new_bal) = snap.adjust_unified_plex_for_user(uid, amt) {
+                            snap.quasar_commerce.failed_fulfillments[idx].fulfilled = true;
+                            snap.next_entity_id += 1;
+                            let tx_id = snap.next_entity_id as u64;
+                            record_plex_transaction(
+                                snap,
+                                tx_id,
+                                uid,
+                                amt,
+                                new_bal,
+                                &format!("Admin retry-all fulfillment #{rec_id}"),
+                                now_unix,
+                            );
+                        }
                     }
                 });
                 Ok(any_resp(

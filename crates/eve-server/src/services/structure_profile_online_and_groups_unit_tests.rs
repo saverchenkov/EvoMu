@@ -37,11 +37,10 @@ fn v24_service_online_matrix_candidate_settings_market_and_industry_checks() {
         snap.characters.insert(pilot_id, ch);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                ceo_id: pilot_id,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.ceo_id = pilot_id;
+                __corp },
         );
         for (sid, tid) in [
             (fort_id, 35_833),
@@ -209,12 +208,11 @@ fn owner_group_batch_roles_linked_profile_sync_and_structure_fallback() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                ceo_id: creator_id,
-                alliance_id: Some(ally_id),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.ceo_id = creator_id;
+                __corp.alliance_id = Some(ally_id);
+                __corp },
         );
         snap.alliances.insert(
             ally_id,

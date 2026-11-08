@@ -138,15 +138,14 @@ fn test_flush_npc_bounty_tick_nullsec_ess_dbs_and_player_corp_tax() {
         }
         snap.corporations.insert(
             player_corp_id,
-            CorporationRecord {
-                corporation_id: player_corp_id,
-                name: "NullRatters".into(),
-                ticker: "NRAT".into(),
-                ceo_id: char_id,
-                tax_rate: 0.15, // 15% corp tax
-                master_wallet: IskCents::ZERO,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = player_corp_id;
+                __corp.name = "NullRatters".into();
+                __corp.ticker = "NRAT".into();
+                __corp.ceo_id = char_id;
+                __corp.tax_rate = 0.15;
+                __corp.set_division_balance(1, IskCents::ZERO);
+                __corp },
         );
         snap.system_states.insert(
             null_sys_id,
@@ -170,8 +169,8 @@ fn test_flush_npc_bounty_tick_nullsec_ess_dbs_and_player_corp_tax() {
 
     ctx.db.with_snapshot(|snap| {
         let corp = snap.corporations.get(&player_corp_id).unwrap();
-        assert!(corp.master_wallet.raw_cents() > 0);
-        assert_eq!(corp.wallet_divisions[0].balance, corp.master_wallet);
+        assert!(corp.master_wallet_balance().raw_cents() > 0);
+        assert_eq!(corp.wallet_divisions[0].balance, corp.master_wallet_balance());
         let st = snap.system_states.get(&null_sys_id).unwrap();
         assert!(st.ess_main_bank.raw_cents() > 0);
         assert!(snap
@@ -322,18 +321,13 @@ async fn issue_544_pending_npc_bounty_persists_sqlite_and_flushes_on_downtime() 
         base_char.corporation_id = player_corp_id;
         let bal = base_char.balance;
         snap.characters.insert(char_id, base_char);
-        snap.corporations.insert(
-            player_corp_id,
-            CorporationRecord {
-                corporation_id: player_corp_id,
-                name: "DowntimeRatters".into(),
-                ticker: "DTR".into(),
-                ceo_id: char_id,
-                tax_rate: 0.10,
-                master_wallet: IskCents::ZERO,
-                ..Default::default()
-            },
-        );
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = player_corp_id;
+        corp.name = "DowntimeRatters".into();
+        corp.ticker = "DTR".into();
+        corp.ceo_id = char_id;
+        corp.tax_rate = 0.10;
+        snap.corporations.insert(player_corp_id, corp);
         snap.system_states.insert(
             null_sys_id,
             SystemDynamicState {
@@ -398,7 +392,7 @@ async fn issue_544_pending_npc_bounty_persists_sqlite_and_flushes_on_downtime() 
     ctx3.db.with_snapshot(|snap| {
         assert!(snap.characters[&char_id].balance > initial_bal);
         let corp = snap.corporations.get(&player_corp_id).unwrap();
-        assert!(corp.master_wallet.raw_cents() > 0);
+        assert!(corp.master_wallet_balance().raw_cents() > 0);
         let sys_st = snap.system_states.get(&null_sys_id).unwrap();
         assert!(sys_st.ess_main_bank.raw_cents() > 0);
         assert!(snap

@@ -89,26 +89,36 @@ fn quasar_alliance_corporation_handlers_deep_data_branches_and_edge_cases() {
             last_login_unix: 1_750_000_000, last_logout_unix: 1_750_003_600, logins_count: 42,
         });
 
-        let mut c = CorporationRecord {
-            corporation_id: corp_id, ceo_id: cid, hq_station_id: Some(60_003_760),
-            alliance_id: Some(ally_id), name: "DeepQuasarCorp".into(), ticker: "DQSC".into(),
-            master_wallet: IskCents::from_isk(5_000_000),
-            wallet_divisions: vec![
+        let mut c = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.ceo_id = cid;
+            __corp.hq_station_id = Some(60_003_760);
+            __corp.alliance_id = Some(ally_id);
+            __corp.name = "DeepQuasarCorp".into();
+            __corp.ticker = "DQSC".into();
+            __corp.wallet_divisions = vec![
                 CorpWalletDivisionRecord { division_id: 1, name: "Primary Treasury".into(), balance: IskCents::from_isk(5_000_000) },
                 CorpWalletDivisionRecord { division_id: 2, name: "Deficit Ops".into(), balance: IskCents(-25_000) },
-            ],
-            ..Default::default()
-        };
+            ];
+            let __mw = IskCents::from_isk(5_000_000);
+            if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+            __corp };
         c.members.extend([cid, cid2]);
         c.member_roles.insert(cid2, corp_roles::ROLE_ACCOUNTANT | corp_roles::ROLE_TRADER);
         snap.corporations.insert(corp_id, c);
 
-        snap.corporations.insert(corp_no_ally, CorporationRecord {
-            corporation_id: corp_no_ally, ceo_id: 980_103, name: "StandaloneCorp".into(), ticker: "STND".into(), ..Default::default()
-        });
-        snap.corporations.insert(npc_corp_id, CorporationRecord {
-            corporation_id: npc_corp_id, ceo_id: 3_000_001, name: "Caldari Provisions".into(), ticker: "CP".into(), ..Default::default()
-        });
+        snap.corporations.insert(corp_no_ally, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_no_ally;
+            __corp.ceo_id = 980_103;
+            __corp.name = "StandaloneCorp".into();
+            __corp.ticker = "STND".into();
+            __corp });
+        snap.corporations.insert(npc_corp_id, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = npc_corp_id;
+            __corp.ceo_id = 3_000_001;
+            __corp.name = "Caldari Provisions".into();
+            __corp.ticker = "CP".into();
+            __corp });
 
         snap.alliances.insert(ally_id, AllianceRecord {
             alliance_id: ally_id, name: "DeepQuasarAlliance".into(), short_name: "DQSA".into(),

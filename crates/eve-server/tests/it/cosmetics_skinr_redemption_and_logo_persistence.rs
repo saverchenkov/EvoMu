@@ -386,22 +386,23 @@ async fn revoked_hull_emblems_never_resurrect_after_live_cosmetics_mutations_and
             let sid = c.active_ship_id;
             s.corporations.insert(
                 corp_id,
-                CorporationRecord {
-                    corporation_id: corp_id,
-                    name: "Vanguard Cosmetics Corp".into(),
-                    ticker: "VGCC".into(),
-                    ceo_id: cid,
-                    alliance_id: Some(alliance_id),
-                    tax_rate: 0.05,
-                    master_wallet: IskCents(1_000_000_000),
-                    members: [cid].into_iter().collect(),
-                    member_roles: [(cid, corp_roles::ROLE_DIRECTOR)].into_iter().collect(),
-                    applications: HashMap::new(),
-                    wallet_divisions: CorporationRecord::default_wallet_divisions(IskCents(1_000_000_000)),
-                    description: String::new(),
-                    url: String::new(),
-                    hq_station_id: Some(JITA_STATION),
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = corp_id;
+                    __corp.name = "Vanguard Cosmetics Corp".into();
+                    __corp.ticker = "VGCC".into();
+                    __corp.ceo_id = cid;
+                    __corp.alliance_id = Some(alliance_id);
+                    __corp.tax_rate = 0.05;
+                    __corp.members = [cid].into_iter().collect();
+                    __corp.member_roles = [(cid, corp_roles::ROLE_DIRECTOR)].into_iter().collect();
+                    __corp.applications = HashMap::new();
+                    __corp.description = String::new();
+                    __corp.url = String::new();
+                    __corp.hq_station_id = Some(JITA_STATION);
+                    __corp.wallet_divisions = CorporationRecord::default_wallet_divisions(IskCents(1_000_000_000));
+                    let __mw = IskCents(1_000_000_000);
+                    if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                    __corp },
             );
             s.structures.insert(
                 struct_id,

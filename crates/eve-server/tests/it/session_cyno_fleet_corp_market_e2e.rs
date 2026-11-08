@@ -362,15 +362,14 @@ async fn test_corp_recruitment_ads_expiry_and_search_filters() {
         }
         snap.corporations.insert(
             corp_id,
-            eve_db::CorporationRecord {
-                corporation_id: corp_id,
-                name: "PvP Test Corp".into(),
-                ticker: "PVPT".into(),
-                ceo_id: char_id,
-                master_wallet: eve_db::IskCents::from_isk(10_000_000),
-                members: std::collections::HashSet::from([char_id]),
-                ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "PvP Test Corp".into();
+                __corp.ticker = "PVPT".into();
+                __corp.ceo_id = char_id;
+                __corp.members = std::collections::HashSet::from([char_id]);
+                __corp.set_division_balance(1, eve_db::IskCents::from_isk(10_000_000));
+                __corp },
         );
     });
 

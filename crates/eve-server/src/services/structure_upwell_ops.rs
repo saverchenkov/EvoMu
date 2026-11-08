@@ -1063,17 +1063,7 @@ pub fn credit_structure_owner_corp_div1(
         return;
     }
     if let Some(corp) = snap.corporations.get_mut(&owner_corp_id) {
-        if corp.wallet_divisions.is_empty() {
-            corp.ensure_wallet_divisions();
-        }
-        corp.master_wallet = corp
-            .master_wallet
-            .checked_add(fee)
-            .unwrap_or(corp.master_wallet);
-        if let Some(d) = corp.wallet_divisions.iter_mut().find(|d| d.division_id == 1) {
-            d.balance = d.balance.checked_add(fee).unwrap_or(d.balance);
-        }
-        let new_bal = corp.master_wallet;
+        let new_bal = corp.credit_division(1, fee);
         snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
             owner_id: owner_corp_id,
             entry_type,

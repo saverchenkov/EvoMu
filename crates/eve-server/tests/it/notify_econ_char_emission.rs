@@ -3243,7 +3243,7 @@ async fn test_wallet_bills_lp_trade_market_and_industry_notifications() {
     let corp_id = corp_rep.dict_get("corporationID").and_then(|v| v.as_i64()).expect("corp_id");
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-            corp.master_wallet = IskCents::from_f64_isk(500_000_000.0);
+            corp.set_division_balance(1, IskCents::from_f64_isk(500_000_000.0));
             for div in &mut corp.wallet_divisions {
                 div.balance = IskCents::from_f64_isk(500_000_000.0);
             }

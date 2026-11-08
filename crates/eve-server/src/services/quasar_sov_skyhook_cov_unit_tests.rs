@@ -371,11 +371,10 @@ fn query_handlers_sorting_filtering_and_error_paths() {
         }
         snap.corporations.insert(
             corp_a,
-            eve_db::CorporationRecord {
-                corporation_id: corp_a,
-                ceo_id: cid,
-                ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = corp_a;
+                __corp.ceo_id = cid;
+                __corp },
         );
         // Insert out-of-order IDs + a non-skyhook structure to verify filtering and sorting
         snap.structures

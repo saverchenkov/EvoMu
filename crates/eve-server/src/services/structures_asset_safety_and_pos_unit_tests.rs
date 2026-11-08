@@ -198,10 +198,14 @@ async fn pos_mgr_orbital_anchoring_gantry_upgrade_and_skyhook_reagent_siphon_mat
             alliance_id: ally_id, name: "Skyhook Ally".into(), short_name: "SKYA".into(),
             executor_corp_id: corp_id, member_corp_ids: HashSet::from([corp_id]), ..Default::default()
         });
-        snap.corporations.insert(corp_id, CorporationRecord {
-            corporation_id: corp_id, name: "Skyhook Corp".into(), ticker: "SKYC".into(),
-            ceo_id: char_id, alliance_id: Some(ally_id), members: HashSet::from([char_id]), ..Default::default()
-        });
+        snap.corporations.insert(corp_id, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Skyhook Corp".into();
+            __corp.ticker = "SKYC".into();
+            __corp.ceo_id = char_id;
+            __corp.alliance_id = Some(ally_id);
+            __corp.members = HashSet::from([char_id]);
+            __corp });
         let base_ch = snap.characters.values().next().cloned().expect("demo char");
         for (cid, c_corp, s_id) in [(char_id, corp_id, ship_id), (thief_id, 98_999, cruiser_id)] {
             let mut ch = base_ch.clone();

@@ -134,17 +134,19 @@ fn r8_503_quasar_corp_freelance_skyhook_vendor_auth_and_stale_role_rejection() {
             ch.corporation_id = corp_id;
             snap.characters.insert(cid, ch);
         }
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            ceo_id,
-            master_wallet: IskCents::from_isk(100_000_000),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.ceo_id = ceo_id;
+            __corp.set_division_balance(1, IskCents::from_isk(100_000_000));
+            __corp };
         corp.members.extend([ceo_id, stripped_member, proj_mgr_no_take]);
         corp.member_roles.insert(stripped_member, 0);
         corp.member_roles.insert(proj_mgr_no_take, corp_roles::ROLE_PROJECT_MANAGER);
         snap.corporations.insert(corp_id, corp);
-        snap.corporations.insert(other_corp_id, CorporationRecord { corporation_id: other_corp_id, ceo_id: 90_999_999, ..Default::default() });
+        snap.corporations.insert(other_corp_id, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = other_corp_id;
+            __corp.ceo_id = 90_999_999;
+            __corp });
     });
 
     let forged_ctx = auth_ctx(stripped_member, corp_id, u64::MAX);
@@ -224,10 +226,16 @@ async fn r8_522_bookmark_rpcs_and_esi_enforce_access_group_folder_acls() {
             ch.station_id = Some(60_003_760);
             snap.characters.insert(cid, ch);
         }
-        let mut corp = CorporationRecord { corporation_id: corp_id, ceo_id: admin_cid, ..Default::default() };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.ceo_id = admin_cid;
+            __corp };
         corp.members.extend([admin_cid, viewer_cid, zero_acl_cid]);
         snap.corporations.insert(corp_id, corp);
-        snap.corporations.insert(other_corp_id, CorporationRecord { corporation_id: other_corp_id, ceo_id: outsider_cid, ..Default::default() });
+        snap.corporations.insert(other_corp_id, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = other_corp_id;
+            __corp.ceo_id = outsider_cid;
+            __corp });
         snap.access_groups.insert(admin_gid, vec![admin_cid]);
         snap.access_groups.insert(view_gid, vec![viewer_cid]);
         snap.bookmark_folders.insert(
@@ -348,7 +356,10 @@ fn r8_525_526_skyhook_planet_scaled_harvest_and_sov_hub_startup_fuel_enforcement
             ch.corporation_id = corp_id;
             ch.solar_system_id = sys_id;
         }
-        let mut corp = CorporationRecord { corporation_id: corp_id, ceo_id: cid, ..Default::default() };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.ceo_id = cid;
+            __corp };
         corp.members.insert(cid);
         corp.member_roles.insert(cid, corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_STATION_MANAGER);
         snap.corporations.insert(corp_id, corp);

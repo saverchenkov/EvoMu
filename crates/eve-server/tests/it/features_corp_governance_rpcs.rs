@@ -44,7 +44,7 @@ async fn test_b22_corp_governance_shares_dividends_ceo_divisions_autokick() {
         let corp = s.corporations.get_mut(&corp_id).unwrap();
         corp.members.insert(PILOT_2);
         corp.ensure_wallet_divisions();
-        corp.master_wallet = IskCents::from_f64_isk(10_000_000.0);
+        corp.set_division_balance(1, IskCents::from_f64_isk(10_000_000.0));
         corp.wallet_divisions[0].balance = IskCents::from_f64_isk(10_000_000.0);
         s.characters.get_mut(&PILOT_2).unwrap().corporation_id = corp_id;
         s.characters.get_mut(&PILOT_2).unwrap().balance = IskCents::ZERO;
@@ -375,7 +375,7 @@ async fn test_b22_corp_projects_and_npc_corp_rules() {
         let corp = s.corporations.get_mut(&corp_id).unwrap();
         corp.members.insert(PILOT_2);
         corp.ensure_wallet_divisions();
-        corp.master_wallet = IskCents::from_f64_isk(10_000_000.0);
+        corp.set_division_balance(1, IskCents::from_f64_isk(10_000_000.0));
         corp.wallet_divisions[0].balance = IskCents::from_f64_isk(10_000_000.0);
         s.characters.get_mut(&PILOT_2).unwrap().corporation_id = corp_id;
         s.characters.get_mut(&PILOT_2).unwrap().balance = IskCents::ZERO;

@@ -51,13 +51,12 @@ async fn char_corp_alliance_and_community_fittings_save_get_update_delete_lifecy
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Fitting Corp".into(),
-                ticker: "FIT".into(),
-                ceo_id,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Fitting Corp".into();
+                __corp.ticker = "FIT".into();
+                __corp.ceo_id = ceo_id;
+                __corp },
         );
     });
     let _ = ctx

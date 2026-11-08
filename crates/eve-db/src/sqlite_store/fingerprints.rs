@@ -2,8 +2,8 @@
 
 use crate::types::*;
 use eve_sde::{SolarSystemId, TypeId};
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
 
 /// Fast zero-allocation FNV-1a 64-bit hasher for row-level dirty detection.
 pub(crate) struct FnvHasher(pub(crate) u64);
@@ -41,11 +41,6 @@ impl FnvHasher {
     }
 
     #[inline]
-    pub(crate) fn write_i32(&mut self, v: i32) {
-        self.write_bytes(&v.to_le_bytes());
-    }
-
-    #[inline]
     pub(crate) fn write_u8(&mut self, v: u8) {
         self.write_bytes(&[v]);
     }
@@ -55,6 +50,7 @@ impl FnvHasher {
         self.write_u8(u8::from(v));
     }
 
+    #[cfg(test)]
     #[inline]
     pub(crate) fn write_f64(&mut self, v: f64) {
         self.write_u64(v.to_bits());
@@ -89,559 +85,395 @@ pub(crate) fn fnv1a_hasher() -> FnvHasher {
     FnvHasher::new()
 }
 
+#[derive(Debug)]
+pub(crate) struct FnvSerError;
+
+impl std::fmt::Display for FnvSerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("fnv serialization error")
+    }
+}
+
+impl std::error::Error for FnvSerError {}
+
+impl serde::ser::Error for FnvSerError {
+    fn custom<T: std::fmt::Display>(_msg: T) -> Self {
+        Self
+    }
+}
+
+/// Zero-allocation deterministic FNV-1a serde serializer for persisted state structs.
+/// Maps combine order-independently via `(len, xor, sum)`; fields are visited via `#[derive(Serialize)]`.
+pub(crate) struct FnvSerializer<'a>(pub(crate) &'a mut FnvHasher);
+
+pub(crate) struct FnvSeqSer<'a>(&'a mut FnvHasher);
+
+impl serde::ser::SerializeSeq for FnvSeqSer<'_> {
+    type Ok = ();
+    type Error = FnvSerError;
+    fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), FnvSerError> {
+        value.serialize(FnvSerializer(self.0))
+    }
+    fn end(self) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeTuple for FnvSeqSer<'_> {
+    type Ok = ();
+    type Error = FnvSerError;
+    fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), FnvSerError> {
+        value.serialize(FnvSerializer(self.0))
+    }
+    fn end(self) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeTupleStruct for FnvSeqSer<'_> {
+    type Ok = ();
+    type Error = FnvSerError;
+    fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), FnvSerError> {
+        value.serialize(FnvSerializer(self.0))
+    }
+    fn end(self) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeTupleVariant for FnvSeqSer<'_> {
+    type Ok = ();
+    type Error = FnvSerError;
+    fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), FnvSerError> {
+        value.serialize(FnvSerializer(self.0))
+    }
+    fn end(self) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+}
+
+pub(crate) struct FnvMapSer<'a> {
+    parent: &'a mut FnvHasher,
+    len: u64,
+    xor: u64,
+    sum: u64,
+    pending_key_hash: u64,
+}
+
+impl serde::ser::SerializeMap for FnvMapSer<'_> {
+    type Ok = ();
+    type Error = FnvSerError;
+    fn serialize_key<T: ?Sized + Serialize>(&mut self, key: &T) -> Result<(), FnvSerError> {
+        self.pending_key_hash = canonical_fp(key);
+        Ok(())
+    }
+    fn serialize_value<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), FnvSerError> {
+        let mut eh = FnvHasher::new();
+        eh.write_u64(self.pending_key_hash);
+        value.serialize(FnvSerializer(&mut eh))?;
+        let entry_fp = eh.finish();
+        self.xor ^= entry_fp;
+        self.sum = self.sum.wrapping_add(entry_fp.rotate_left(13));
+        self.len = self.len.wrapping_add(1);
+        Ok(())
+    }
+    fn end(self) -> Result<(), FnvSerError> {
+        self.parent.write_u64(self.len);
+        self.parent.write_u64(self.xor);
+        self.parent.write_u64(self.sum);
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeStruct for FnvSeqSer<'_> {
+    type Ok = ();
+    type Error = FnvSerError;
+    fn serialize_field<T: ?Sized + Serialize>(
+        &mut self,
+        key: &'static str,
+        value: &T,
+    ) -> Result<(), FnvSerError> {
+        self.0.write_str(key);
+        value.serialize(FnvSerializer(self.0))
+    }
+    fn end(self) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+}
+
+impl serde::ser::SerializeStructVariant for FnvSeqSer<'_> {
+    type Ok = ();
+    type Error = FnvSerError;
+    fn serialize_field<T: ?Sized + Serialize>(
+        &mut self,
+        key: &'static str,
+        value: &T,
+    ) -> Result<(), FnvSerError> {
+        self.0.write_str(key);
+        value.serialize(FnvSerializer(self.0))
+    }
+    fn end(self) -> Result<(), FnvSerError> {
+        Ok(())
+    }
+}
+
+impl<'a> serde::Serializer for FnvSerializer<'a> {
+    type Ok = ();
+    type Error = FnvSerError;
+    type SerializeSeq = FnvSeqSer<'a>;
+    type SerializeTuple = FnvSeqSer<'a>;
+    type SerializeTupleStruct = FnvSeqSer<'a>;
+    type SerializeTupleVariant = FnvSeqSer<'a>;
+    type SerializeMap = FnvMapSer<'a>;
+    type SerializeStruct = FnvSeqSer<'a>;
+    type SerializeStructVariant = FnvSeqSer<'a>;
+
+    fn serialize_bool(self, v: bool) -> Result<(), FnvSerError> {
+        self.0.write_u8(1);
+        self.0.write_bool(v);
+        Ok(())
+    }
+    fn serialize_i8(self, v: i8) -> Result<(), FnvSerError> {
+        self.serialize_i64(i64::from(v))
+    }
+    fn serialize_i16(self, v: i16) -> Result<(), FnvSerError> {
+        self.serialize_i64(i64::from(v))
+    }
+    fn serialize_i32(self, v: i32) -> Result<(), FnvSerError> {
+        self.serialize_i64(i64::from(v))
+    }
+    fn serialize_i64(self, v: i64) -> Result<(), FnvSerError> {
+        self.0.write_u8(2);
+        self.0.write_i64(v);
+        Ok(())
+    }
+    fn serialize_u8(self, v: u8) -> Result<(), FnvSerError> {
+        self.serialize_u64(u64::from(v))
+    }
+    fn serialize_u16(self, v: u16) -> Result<(), FnvSerError> {
+        self.serialize_u64(u64::from(v))
+    }
+    fn serialize_u32(self, v: u32) -> Result<(), FnvSerError> {
+        self.serialize_u64(u64::from(v))
+    }
+    fn serialize_u64(self, v: u64) -> Result<(), FnvSerError> {
+        self.0.write_u8(3);
+        self.0.write_u64(v);
+        Ok(())
+    }
+    fn serialize_f32(self, v: f32) -> Result<(), FnvSerError> {
+        self.serialize_f64(f64::from(v))
+    }
+    fn serialize_f64(self, v: f64) -> Result<(), FnvSerError> {
+        self.0.write_u8(4);
+        let bits = if v == 0.0 { 0u64 } else { v.to_bits() };
+        self.0.write_u64(bits);
+        Ok(())
+    }
+    fn serialize_char(self, v: char) -> Result<(), FnvSerError> {
+        self.serialize_u32(v as u32)
+    }
+    fn serialize_str(self, v: &str) -> Result<(), FnvSerError> {
+        self.0.write_u8(5);
+        self.0.write_str(v);
+        Ok(())
+    }
+    fn serialize_bytes(self, v: &[u8]) -> Result<(), FnvSerError> {
+        self.0.write_u8(6);
+        self.0.write_u64(v.len() as u64);
+        self.0.write_bytes(v);
+        Ok(())
+    }
+    fn serialize_none(self) -> Result<(), FnvSerError> {
+        self.0.write_u8(7);
+        Ok(())
+    }
+    fn serialize_some<T: ?Sized + Serialize>(self, value: &T) -> Result<(), FnvSerError> {
+        self.0.write_u8(8);
+        value.serialize(self)
+    }
+    fn serialize_unit(self) -> Result<(), FnvSerError> {
+        self.0.write_u8(9);
+        Ok(())
+    }
+    fn serialize_unit_struct(self, name: &'static str) -> Result<(), FnvSerError> {
+        self.0.write_u8(10);
+        self.0.write_str(name);
+        Ok(())
+    }
+    fn serialize_unit_variant(
+        self,
+        _name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+    ) -> Result<(), FnvSerError> {
+        self.0.write_u8(11);
+        self.0.write_u32(variant_index);
+        self.0.write_str(variant);
+        Ok(())
+    }
+    fn serialize_newtype_struct<T: ?Sized + Serialize>(
+        self,
+        _name: &'static str,
+        value: &T,
+    ) -> Result<(), FnvSerError> {
+        value.serialize(self)
+    }
+    fn serialize_newtype_variant<T: ?Sized + Serialize>(
+        self,
+        _name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+        value: &T,
+    ) -> Result<(), FnvSerError> {
+        self.0.write_u8(12);
+        self.0.write_u32(variant_index);
+        self.0.write_str(variant);
+        value.serialize(self)
+    }
+    fn serialize_seq(self, len: Option<usize>) -> Result<FnvSeqSer<'a>, FnvSerError> {
+        self.0.write_u8(13);
+        if let Some(n) = len {
+            self.0.write_u64(n as u64);
+        }
+        Ok(FnvSeqSer(self.0))
+    }
+    fn serialize_tuple(self, len: usize) -> Result<FnvSeqSer<'a>, FnvSerError> {
+        self.0.write_u8(14);
+        self.0.write_u64(len as u64);
+        Ok(FnvSeqSer(self.0))
+    }
+    fn serialize_tuple_struct(
+        self,
+        _name: &'static str,
+        len: usize,
+    ) -> Result<FnvSeqSer<'a>, FnvSerError> {
+        self.0.write_u8(15);
+        self.0.write_u64(len as u64);
+        Ok(FnvSeqSer(self.0))
+    }
+    fn serialize_tuple_variant(
+        self,
+        _name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+        len: usize,
+    ) -> Result<FnvSeqSer<'a>, FnvSerError> {
+        self.0.write_u8(16);
+        self.0.write_u32(variant_index);
+        self.0.write_str(variant);
+        self.0.write_u64(len as u64);
+        Ok(FnvSeqSer(self.0))
+    }
+    fn serialize_map(self, _len: Option<usize>) -> Result<FnvMapSer<'a>, FnvSerError> {
+        self.0.write_u8(17);
+        Ok(FnvMapSer {
+            parent: self.0,
+            len: 0,
+            xor: 0,
+            sum: 0,
+            pending_key_hash: 0,
+        })
+    }
+    fn serialize_struct(
+        self,
+        _name: &'static str,
+        len: usize,
+    ) -> Result<FnvSeqSer<'a>, FnvSerError> {
+        self.0.write_u8(18);
+        self.0.write_u64(len as u64);
+        Ok(FnvSeqSer(self.0))
+    }
+    fn serialize_struct_variant(
+        self,
+        _name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+        len: usize,
+    ) -> Result<FnvSeqSer<'a>, FnvSerError> {
+        self.0.write_u8(19);
+        self.0.write_u32(variant_index);
+        self.0.write_str(variant);
+        self.0.write_u64(len as u64);
+        Ok(FnvSeqSer(self.0))
+    }
+}
+
+#[inline]
+pub(crate) fn canonical_fp<T: Serialize + ?Sized>(val: &T) -> u64 {
+    let mut h = FnvHasher::new();
+    let _ = val.serialize(FnvSerializer(&mut h));
+    h.finish()
+}
+
+#[inline]
 pub(crate) fn fp_account(a: &AccountRecord) -> u64 {
-    let mut h = FnvHasher::new();
-    h.write_u64(a.user_id);
-    h.write_str(&a.username);
-    h.write_str(&a.password_token);
-    h.write_u64(a.role);
-    h.write_u64(a.banned_until_unix.unwrap_or(0));
-    if let Some(ref r) = a.ban_reason {
-        h.write_str(r);
-    }
-    h.finish()
+    canonical_fp(a)
 }
 
+#[inline]
 pub(crate) fn fp_character(c: &CharacterRecord) -> u64 {
-    let mut h = FnvHasher::new();
-    h.write_i64(c.character_id);
-    h.write_u64(c.user_id);
-    h.write_str(&c.name);
-    h.write_u32(c.race_id);
-    h.write_u32(c.bloodline_id);
-    h.write_u32(c.ancestry_id);
-    h.write_u32(c.school_id);
-    h.write_i64(c.corporation_id);
-    h.write_i64(c.alliance_id.unwrap_or(-1));
-    h.write_i64(c.war_faction_id.unwrap_or(-1));
-    h.write_i64(c.station_id.unwrap_or(-1));
-    h.write_i64(c.structure_id.unwrap_or(-1));
-    h.write_u32(c.solar_system_id);
-    h.write_u32(c.constellation_id);
-    h.write_u32(c.region_id);
-    h.write_i64(c.active_ship_id);
-    h.write_i64(c.balance.0);
-    h.write_i64(c.plex_balance);
-    h.write_f64(c.security_status);
-    h.write_u32(c.clone_grade);
-    h.write_i64(c.home_station_id);
-    h.write_u8(c.neural.charisma);
-    h.write_u8(c.neural.intelligence);
-    h.write_u8(c.neural.memory);
-    h.write_u8(c.neural.perception);
-    h.write_u8(c.neural.willpower);
-    h.write_u8(c.neural.bonus_remaps);
-    h.write_u64(c.neural.last_remap_unix.unwrap_or(0));
-    h.write_u64(c.neural.remap_cooldown_until_unix.unwrap_or(0));
-    h.write_f64(c.skill_points);
-    h.write_f64(c.free_skill_points);
-    h.write_u64(c.last_clone_jump_unix);
-    h.write_f64(c.jump_fatigue_minutes);
-    h.write_u64(c.jump_cooldown_until_unix);
-    h.write_u64(c.jump_fatigue_until_unix);
-    h.write_str(&c.description);
-    h.write_str(&c.title);
-    h.write_u32(c.gender);
-    h.write_u64(c.create_date_unix);
-    c.autopilot_waypoints.hash(&mut h);
-    h.write_i64(c.fleet_id.unwrap_or(-1));
-    h.write_u64(c.version);
-    h.write_u64(c.system_epoch);
-    c.activity_status.hash(&mut h);
-    let mut lp_xor = 0u64;
-    for (&k, &v) in &c.loyalty_points {
-        let mut eh = FnvHasher::new();
-        eh.write_i64(k);
-        eh.write_i64(v);
-        lp_xor ^= eh.finish();
-    }
-    h.write_u64(lp_xor);
-    let mut st_xor = 0u64;
-    for (&k, &v) in &c.standings {
-        let mut eh = FnvHasher::new();
-        eh.write_i64(k);
-        eh.write_f64(v);
-        st_xor ^= eh.finish();
-    }
-    h.write_u64(st_xor);
-    h.finish()
+    canonical_fp(c)
 }
 
+#[inline]
 pub(crate) fn fp_item(i: &InventoryItemRecord) -> u64 {
-    let mut h = FnvHasher::new();
-    h.write_i64(i.item_id);
-    h.write_u32(i.type_id);
-    h.write_i64(i.owner_id);
-    h.write_i64(i.location_id);
-    h.write_u32(i.flag as u32);
-    h.write_i32(i.quantity);
-    h.write_bool(i.singleton);
-    h.write_u64(i.version);
-    h.write_u32(i.source_mutaplasmid_id.unwrap_or(0));
-    h.write_f64(i.insured_payout_isk);
-    h.write_bool(i.is_blueprint_copy);
-    h.write_i32(i.blueprint_runs_remaining.unwrap_or(-1));
-    let mut dyn_xor = 0u64;
-    for (&k, &v) in &i.dynamic_attributes {
-        let mut eh = FnvHasher::new();
-        eh.write_u32(k as u32);
-        eh.write_f64(v);
-        dyn_xor ^= eh.finish();
-    }
-    h.write_u64(dyn_xor);
-    h.finish()
+    canonical_fp(i)
 }
 
 #[inline]
 pub(crate) fn fp_market_order(o: &MarketOrderRecord) -> u64 {
-    const P: u64 = 0x517c_c1b7_2722_0a95;
-    let mut h = 0xcbf2_9ce4_8422_2325_u64;
-    h = (h ^ (o.order_id as u64)).wrapping_mul(P);
-    h = (h ^ (o.owner_id as u64)).wrapping_mul(P);
-    h = (h ^ (o.station_id as u64)).wrapping_mul(P);
-    h = (h ^ ((o.region_id as u64) | ((o.type_id as u64) << 32))).wrapping_mul(P);
-    h = (h ^ (o.price.0 as u64)).wrapping_mul(P);
-    h = (h ^ ((o.vol_entered as u32 as u64) | ((o.vol_remaining as u32 as u64) << 32)))
-        .wrapping_mul(P);
-    h = (h
-        ^ ((o.min_volume as u32 as u64)
-            | (u64::from(o.is_bid) << 32)
-            | (u64::from(o.is_npc) << 33)))
-        .wrapping_mul(P);
-    (h ^ (o.escrow.0 as u64)).wrapping_mul(P)
+    canonical_fp(o)
 }
 
 #[inline]
 pub(crate) fn fp_market_orders_digest(orders: &HashMap<i64, MarketOrderRecord>) -> u64 {
-    let mut xor = (orders.len() as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
-    for ord in orders.values() {
-        xor ^= fp_market_order(ord);
-    }
-    xor
+    canonical_fp(orders)
 }
 
+#[inline]
 pub(crate) fn fp_contract(c: &ContractRecord) -> u64 {
-    let mut h = FnvHasher::new();
-    h.write_i64(c.contract_id);
-    h.write_i64(c.issuer_id);
-    h.write_i64(c.issuer_corp_id);
-    h.write_i64(c.assignee_id);
-    h.write_i64(c.acceptor_id.unwrap_or(-1));
-    h.write_bool(c.for_corp);
-    h.write_str(&c.availability);
-    h.write_str(&c.contract_type);
-    h.write_str(&c.status);
-    h.write_str(&c.title);
-    h.write_i64(c.start_station_id);
-    h.write_i64(c.end_station_id);
-    h.write_i64(c.price.0);
-    h.write_i64(c.reward.0);
-    h.write_i64(c.collateral.0);
-    h.write_i64(c.buyout.0);
-    h.write_i64(c.current_bid.0);
-    h.write_i64(c.current_bidder_id.unwrap_or(-1));
-    h.write_u64(c.date_issued_unix);
-    h.write_u64(c.expiration_unix);
-    h.write_u32(c.num_days);
-    h.write_u64(c.item_ids.len() as u64);
-    for &id in &c.item_ids {
-        h.write_i64(id);
-    }
-    h.write_u64(c.requested_items.len() as u64);
-    for &(tid, qty) in &c.requested_items {
-        h.write_u32(tid);
-        h.write_i32(qty);
-    }
-    h.write_u64(c.bid_history.len() as u64);
-    for &(bidder_id, amount, ts) in &c.bid_history {
-        h.write_i64(bidder_id);
-        h.write_i64(amount.0);
-        h.write_u64(ts);
-    }
-    h.finish()
+    canonical_fp(c)
 }
 
+#[inline]
 pub(crate) fn fp_system_state(s: &SystemDynamicState) -> u64 {
-    let mut h = FnvHasher::new();
-    h.write_u32(s.solar_system_id);
-    h.write_f64(s.dbs_multiplier);
-    h.write_i64(s.ess_main_bank.0);
-    h.write_i64(s.ess_reserve_bank.0);
-    h.write_i64(s.ess_linked_character_id.unwrap_or(-1));
-    h.write_u64(s.ess_link_started_tick.unwrap_or(0));
-    h.write_i64(s.sov_alliance_id.unwrap_or(-1));
-    h.write_u8(s.military_index);
-    h.write_u8(s.industrial_index);
-    h.write_u8(s.strategic_index);
-    h.write_f64(s.fw_contested_pct);
-    h.write_u8(s.insurgency_corruption_stage);
-    h.write_u8(s.insurgency_suppression_stage);
-    h.write_f64(s.wormhole_remaining_mass_kg);
-    h.write_u32(s.wormhole_destination_system_id.unwrap_or(0));
-    if let Some(p) = s.signature_position {
-        h.write_f64(p[0]);
-        h.write_f64(p[1]);
-        h.write_f64(p[2]);
-    }
-    if let Some(p) = s.fw_complex_position {
-        h.write_f64(p[0]);
-        h.write_f64(p[1]);
-        h.write_f64(p[2]);
-    }
-    h.write_u64(s.fw_capture_seconds_elapsed);
-    h.write_u64(s.fw_capture_duration_seconds);
-    h.write_u64(s.last_fw_capture_tick);
-    h.write_u64(s.last_sov_claim_tick);
-    h.write_u64(s.ess_cycle_started_unix);
-    let mut contribs: Vec<(i64, i64)> = s
-        .ess_main_bank_contributors
-        .iter()
-        .map(|(&cid, &cents)| (cid, cents))
-        .collect();
-    contribs.sort_unstable_by_key(|&(cid, _)| cid);
-    h.write_u64(contribs.len() as u64);
-    for (cid, cents) in contribs {
-        h.write_i64(cid);
-        h.write_i64(cents);
-    }
-    h.finish()
+    canonical_fp(s)
 }
 
+#[inline]
 pub(crate) fn fp_structure(s: &UpwellStructureRecord) -> u64 {
-    let mut h = FnvHasher::new();
-    h.write_i64(s.structure_id);
-    h.write_u32(s.type_id);
-    h.write_i64(s.owner_corp_id);
-    h.write_u32(s.solar_system_id);
-    h.write_str(&s.name);
-    h.write_f64(s.position[0]);
-    h.write_f64(s.position[1]);
-    h.write_f64(s.position[2]);
-    h.write_str(&s.state);
-    h.write_bool(s.quantum_core_installed);
-    h.write_u32(s.fuel_blocks);
-    h.write_f64(s.shield_hp);
-    h.write_f64(s.armor_hp);
-    h.write_f64(s.hull_hp);
-    h.write_u64(s.reinforced_until_unix);
-    h.write_u64(s.last_damage_tick);
-    h.write_u64(s.last_damage_unix);
-    h.write_u64(s.self_destruct_at_unix.unwrap_or(0));
-    h.finish()
+    canonical_fp(s)
 }
 
+#[inline]
 pub(crate) fn fp_wallet_journal_slice(entries: &[WalletJournalEntry]) -> u64 {
-    let mut h = FnvHasher::new();
-    h.write_u64(entries.len() as u64);
-    for e in entries {
-        h.write_i64(e.entry_id);
-        h.write_i64(e.character_id);
-        h.write_str(&e.entry_type);
-        h.write_i64(e.amount.0);
-        h.write_i64(e.balance_after.0);
-        h.write_str(&e.reason);
-    }
-    h.finish()
+    canonical_fp(entries)
 }
 
+#[inline]
 pub(crate) fn fp_mails_slice(entries: &[MailRecord]) -> u64 {
-    let mut h = FnvHasher::new();
-    h.write_u64(entries.len() as u64);
-    for m in entries {
-        h.write_i64(m.message_id);
-        h.write_i64(m.sender_id);
-        h.write_i64(m.recipient_id);
-        h.write_str(&m.subject);
-        h.write_str(&m.body);
-    }
-    h.finish()
+    canonical_fp(entries)
 }
 
+#[inline]
 pub(crate) fn fp_skill_queue(q: &[SkillQueueEntry]) -> u64 {
-    let mut h = FnvHasher::new();
-    h.write_u64(q.len() as u64);
-    for entry in q {
-        h.write_u32(entry.type_id);
-        h.write_u8(entry.target_level);
-        h.write_f64(entry.start_sp);
-        h.write_f64(entry.end_sp);
-        h.write_f64(entry.duration_seconds);
-        h.write_u64(entry.started_at_unix.unwrap_or(0));
-    }
-    h.finish()
+    canonical_fp(q)
 }
 
 #[inline]
-fn hash_map_xor<K, V, F>(h: &mut FnvHasher, map: &HashMap<K, V>, mut hash_entry: F)
-where
-    F: FnMut(&mut FnvHasher, &K, &V),
-{
-    h.write_u64(map.len() as u64);
-    let mut xor = 0u64;
-    let mut sum = 0u64;
-    for (k, v) in map {
-        let mut eh = FnvHasher::new();
-        hash_entry(&mut eh, k, v);
-        let entry_fp = eh.finish();
-        xor ^= entry_fp;
-        sum = sum.wrapping_add(entry_fp.rotate_left(13));
-    }
-    h.write_u64(xor);
-    h.write_u64(sum);
-}
-
-#[inline]
-fn write_opt_u64(h: &mut FnvHasher, v: Option<u64>) {
-    match v {
-        Some(x) => {
-            h.write_u8(1);
-            h.write_u64(x);
-        }
-        None => h.write_u8(0),
-    }
-}
-
-#[inline]
-fn write_opt_i64(h: &mut FnvHasher, v: Option<i64>) {
-    match v {
-        Some(x) => {
-            h.write_u8(1);
-            h.write_i64(x);
-        }
-        None => h.write_u8(0),
-    }
-}
-
-#[inline]
-fn write_opt_f64(h: &mut FnvHasher, v: Option<f64>) {
-    match v {
-        Some(x) => {
-            h.write_u8(1);
-            h.write_f64(x);
-        }
-        None => h.write_u8(0),
-    }
-}
-
-#[inline]
-fn write_vec3(h: &mut FnvHasher, v: &[f64; 3]) {
-    h.write_f64(v[0]);
-    h.write_f64(v[1]);
-    h.write_f64(v[2]);
-}
-
-#[inline]
-fn write_opt_vec3(h: &mut FnvHasher, v: &Option<[f64; 3]>) {
-    match v {
-        Some(arr) => {
-            h.write_u8(1);
-            write_vec3(h, arr);
-        }
-        None => h.write_u8(0),
-    }
-}
-
 pub(crate) fn fp_sp6_lifecycle(st: &crate::Sp6PersistedState) -> u64 {
-    let crate::Sp6PersistedState {
-        safe_logoffs,
-        disconnected_ships,
-        self_destructs,
-        abyssal_sessions,
-        pvp_timers_until,
-        npc_timers_until,
-        weapon_timers_until,
-        criminal_timers_until,
-        last_downtime_day_idx,
-        ship_combat_hp,
-        space_object_meta,
-        missions_awaiting_downtime_respawn,
-        mission_initial_npc_counts,
-        mission_initial_npc_types,
-        active_scanner_probes,
-    } = st;
-    let mut h = FnvHasher::new();
-    hash_map_xor(&mut h, safe_logoffs, |eh, &k, v| {
-        let crate::SafeLogoffEntry {
-            char_id,
-            ship_id,
-            solar_system_id,
-            started_unix,
-            complete_at_unix,
-            completed,
-        } = *v;
-        eh.write_i64(k);
-        eh.write_i64(char_id);
-        eh.write_i64(ship_id);
-        eh.write_u32(solar_system_id);
-        eh.write_u64(started_unix);
-        eh.write_u64(complete_at_unix);
-        eh.write_bool(completed);
-    });
-    hash_map_xor(&mut h, disconnected_ships, |eh, &k, v| {
-        let crate::DisconnectedShipEntry {
-            char_id,
-            ship_id,
-            ship_type_id,
-            solar_system_id,
-            disconnected_at_unix,
-            remove_at_unix,
-            ref emergency_warp_dest,
-            ref last_position,
-            removed_from_space,
-            ref pre_warp_position,
-        } = *v;
-        eh.write_i64(k);
-        eh.write_i64(char_id);
-        eh.write_i64(ship_id);
-        eh.write_u32(ship_type_id);
-        eh.write_u32(solar_system_id);
-        eh.write_u64(disconnected_at_unix);
-        eh.write_u64(remove_at_unix);
-        write_opt_vec3(eh, emergency_warp_dest);
-        write_vec3(eh, last_position);
-        eh.write_bool(removed_from_space);
-        write_opt_vec3(eh, pre_warp_position);
-    });
-    hash_map_xor(&mut h, self_destructs, |eh, &k, v| {
-        let crate::SelfDestructPersistedEntry {
-            ship_id,
-            char_id,
-            solar_system_id,
-            started_unix,
-            detonate_at_unix,
-        } = *v;
-        eh.write_i64(k);
-        eh.write_i64(ship_id);
-        eh.write_i64(char_id);
-        eh.write_u32(solar_system_id);
-        eh.write_u64(started_unix);
-        eh.write_u64(detonate_at_unix);
-    });
-    hash_map_xor(&mut h, abyssal_sessions, |eh, &k, v| {
-        let crate::AbyssalPersistedSession {
-            char_id,
-            ship_id,
-            pocket_system_id,
-            origin_system_id,
-            entered_unix,
-            collapse_at_unix,
-        } = *v;
-        eh.write_i64(k);
-        eh.write_i64(char_id);
-        eh.write_i64(ship_id);
-        eh.write_u32(pocket_system_id);
-        eh.write_u32(origin_system_id);
-        eh.write_u64(entered_unix);
-        eh.write_u64(collapse_at_unix);
-    });
-    hash_map_xor(&mut h, pvp_timers_until, |eh, &k, &v| {
-        eh.write_i64(k);
-        eh.write_u64(v);
-    });
-    hash_map_xor(&mut h, npc_timers_until, |eh, &k, &v| {
-        eh.write_i64(k);
-        eh.write_u64(v);
-    });
-    hash_map_xor(&mut h, weapon_timers_until, |eh, &k, &v| {
-        eh.write_i64(k);
-        eh.write_u64(v);
-    });
-    hash_map_xor(&mut h, criminal_timers_until, |eh, &k, &v| {
-        eh.write_i64(k);
-        eh.write_u64(v);
-    });
-    write_opt_u64(&mut h, *last_downtime_day_idx);
-    hash_map_xor(&mut h, ship_combat_hp, |eh, &k, v| {
-        let crate::PersistedCombatHp {
-            shield_hp,
-            armor_hp,
-            hull_hp,
-        } = *v;
-        eh.write_i64(k);
-        eh.write_f64(shield_hp);
-        eh.write_f64(armor_hp);
-        eh.write_f64(hull_hp);
-    });
-    hash_map_xor(&mut h, space_object_meta, |eh, &k, v| {
-        let crate::PersistedSpaceObjectMeta {
-            created_unix,
-            is_npc_wreck,
-            anchor_start_unix,
-            anchoring_delay_secs,
-            anchor_completed,
-            bubble_radius_m,
-            drone_ball_id,
-            planet_id,
-        } = *v;
-        eh.write_i64(k);
-        write_opt_u64(eh, created_unix);
-        eh.write_bool(is_npc_wreck);
-        write_opt_u64(eh, anchor_start_unix);
-        eh.write_f64(anchoring_delay_secs);
-        eh.write_bool(anchor_completed);
-        write_opt_f64(eh, bubble_radius_m);
-        write_opt_i64(eh, drone_ball_id);
-        write_opt_i64(eh, planet_id);
-    });
-    h.write_u64(missions_awaiting_downtime_respawn.len() as u64);
-    for &(c, m) in missions_awaiting_downtime_respawn {
-        h.write_i64(c);
-        h.write_u32(m);
-    }
-    hash_map_xor(&mut h, mission_initial_npc_counts, |eh, k, &cnt| {
-        eh.write_str(k);
-        eh.write_u32(cnt);
-    });
-    hash_map_xor(&mut h, mission_initial_npc_types, |eh, k, tids| {
-        eh.write_str(k);
-        eh.write_u64(tids.len() as u64);
-        for &tid in tids {
-            eh.write_u32(tid);
-        }
-    });
-    hash_map_xor(&mut h, active_scanner_probes, |eh, &k, p| {
-        eh.write_i64(k);
-        eh.write_i64(p.probe_id);
-        eh.write_u32(p.probe_type_id);
-        eh.write_i64(p.owner_char_id);
-        eh.write_i64(p.ship_id);
-        eh.write_i64(p.launcher_module_id);
-        eh.write_u32(p.solar_system_id);
-        write_vec3(eh, &p.position);
-        write_vec3(eh, &p.destination);
-        eh.write_i32(p.range_step);
-        eh.write_u64(p.scan_range_m.to_bits());
-        eh.write_u64(p.base_sensor_strength.to_bits());
-        eh.write_u64(p.max_flight_time_s.to_bits());
-        eh.write_u64(p.launched_at_unix);
-        eh.write_i32(p.state);
-        write_opt_i64(eh, p.warp_end_ft);
-    });
-    h.finish()
+    canonical_fp(st)
 }
 
-pub(crate) fn fp_json<T: serde::Serialize>(val: &T) -> u64 {
-    let mut h = FnvHasher::new();
-    if let Ok(s) = serde_json::to_string(val) {
-        h.write_str(&s);
-    }
-    h.finish()
+#[inline]
+pub(crate) fn fp_json<T: Serialize + ?Sized>(val: &T) -> u64 {
+    canonical_fp(val)
 }
 
 #[inline]
 pub fn fp_asteroid(a: &AsteroidRecord) -> u64 {
-    let mut h = FnvHasher::new();
-    h.write_i64(a.asteroid_id);
-    h.write_u32(a.solar_system_id);
-    h.write_i64(a.belt_id);
-    h.write_u32(a.type_id);
-    h.write_i64(a.quantity);
-    h.write_i64(a.initial_quantity);
-    h.write_u64(a.position.0.to_bits());
-    h.write_u64(a.position.1.to_bits());
-    h.write_u64(a.position.2.to_bits());
-    h.write_u64(a.radius.to_bits());
-    h.finish()
+    canonical_fp(a)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -727,11 +559,7 @@ pub fn compute_fingerprints(snap: &WorldStateSnapshot) -> TableFingerprints {
     for (&cid, sk_map) in &snap.skills {
         let m = fp.skills.entry(cid).or_default();
         for (&tid, sk) in sk_map {
-            let mut h = FnvHasher::new();
-            h.write_u32(sk.type_id);
-            h.write_u8(sk.level);
-            h.write_f64(sk.skill_points);
-            m.insert(tid, h.finish());
+            m.insert(tid, canonical_fp(sk));
         }
     }
     for (&cid, q) in &snap.skill_queues {
@@ -852,8 +680,7 @@ mod tests {
     use super::fp_sp6_lifecycle;
     use crate::{
         AbyssalPersistedSession, DisconnectedShipEntry, PersistedCombatHp,
-        PersistedScannerProbe, PersistedSpaceObjectMeta, SafeLogoffEntry,
-        SelfDestructPersistedEntry, Sp6PersistedState,
+        PersistedSpaceObjectMeta, SafeLogoffEntry, SelfDestructPersistedEntry, Sp6PersistedState,
     };
     use std::collections::HashMap;
 
@@ -959,26 +786,6 @@ mod tests {
                     planet_id: Some(40_000_001),
                 },
             );
-            st.active_scanner_probes.insert(
-                k + 80_000,
-                PersistedScannerProbe {
-                    probe_id: k + 80_000,
-                    probe_type_id: 30_013,
-                    owner_char_id: k,
-                    ship_id: k + 20_000,
-                    launcher_module_id: k + 25_000,
-                    solar_system_id: 30_000_142,
-                    position: [1.0, 2.0, 3.0],
-                    destination: [4.0, 5.0, 6.0],
-                    range_step: 4,
-                    scan_range_m: 1_000_000.0,
-                    base_sensor_strength: 40.0,
-                    max_flight_time_s: 3_600.0,
-                    launched_at_unix: 1_700_050_000 + u,
-                    state: 1,
-                    warp_end_ft: Some(123_456),
-                },
-            );
         }
         st
     }
@@ -1064,7 +871,5 @@ mod tests {
 
         check(&|s| s.missions_awaiting_downtime_respawn.reverse(), "missions_awaiting_downtime_respawn.order");
         check(&|s| s.missions_awaiting_downtime_respawn[0].1 += 1, "missions_awaiting_downtime_respawn.val");
-        check(&|s| s.active_scanner_probes.get_mut(&80_101).unwrap().state = 0, "active_scanner_probes.state");
-        check(&|s| s.active_scanner_probes.get_mut(&80_101).unwrap().warp_end_ft = None, "active_scanner_probes.warp_end_ft");
     }
 }

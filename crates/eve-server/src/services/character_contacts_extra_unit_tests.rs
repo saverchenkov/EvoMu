@@ -118,15 +118,14 @@ fn public_and_private_info_employment_notes_and_respec_edge_branches() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Test Corp".into(),
-                ticker: "TSTC".into(),
-                ceo_id: char_id,
-                alliance_id: Some(ally_id),
-                hq_station_id: Some(60_003_760),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Test Corp".into();
+                __corp.ticker = "TSTC".into();
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = Some(ally_id);
+                __corp.hq_station_id = Some(60_003_760);
+                __corp },
         );
         let ch = snap.characters.get_mut(&char_id).unwrap();
         ch.corporation_id = corp_id;
@@ -488,14 +487,13 @@ fn home_station_remote_cooldown_pochven_rejection_and_self_destruct_non_capsule(
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "HQ Corp".into(),
-                ticker: "HQC".into(),
-                ceo_id: char_id,
-                hq_station_id: Some(non_cand_st),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "HQ Corp".into();
+                __corp.ticker = "HQC".into();
+                __corp.ceo_id = char_id;
+                __corp.hq_station_id = Some(non_cand_st);
+                __corp },
         );
         snap.characters.get_mut(&char_id).unwrap().corporation_id = corp_id;
     });

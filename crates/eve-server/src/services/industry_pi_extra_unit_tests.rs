@@ -348,14 +348,13 @@ fn industry_job_queries_permissions_and_monitor_branches() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Ind Corp".into(),
-                ticker: "IND".into(),
-                ceo_id: char_a,
-                hq_station_id: Some(station_id),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Ind Corp".into();
+                __corp.ticker = "IND".into();
+                __corp.ceo_id = char_a;
+                __corp.hq_station_id = Some(station_id);
+                __corp },
         );
         if let Some(ch) = snap.characters.get_mut(&char_a) {
             ch.corporation_id = corp_id;

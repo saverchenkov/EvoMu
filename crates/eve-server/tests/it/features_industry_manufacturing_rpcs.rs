@@ -604,9 +604,12 @@ async fn test_b33_phased_asteroid_field_mobile_anchor_and_prismaticite() {
     // 4. Unrefined Mineral reaction (requires online Standup Composite Reactor I 45537) & live reprocessingSvc.Reprocess variable batches
     let (athanor_id, bp_id) = (1_000_000_099_001_i64, 9_300_200_i64);
     p.ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.insert(9_800_099, CorporationRecord {
-            corporation_id: 9_800_099, name: "React Corp".into(), ticker: "RCT".into(), ceo_id: CHAR_ID, ..Default::default()
-        });
+        snap.corporations.insert(9_800_099, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = 9_800_099;
+            __corp.name = "React Corp".into();
+            __corp.ticker = "RCT".into();
+            __corp.ceo_id = CHAR_ID;
+            __corp });
         if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
             ch.corporation_id = 9_800_099;
             ch.balance = eve_db::IskCents(100_000_000_000);
@@ -752,9 +755,12 @@ async fn test_b33_moon_mining_and_reprocessing_curves() {
     );
     let now = p.ctx.now_unix_secs();
     p.ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.insert(corp_id, CorporationRecord {
-            corporation_id: corp_id, name: "B33 Mining Corp".into(), ticker: "B33M".into(), ceo_id: CHAR_ID, ..Default::default()
-        });
+        snap.corporations.insert(corp_id, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "B33 Mining Corp".into();
+            __corp.ticker = "B33M".into();
+            __corp.ceo_id = CHAR_ID;
+            __corp });
         if let Some(ch) = snap.characters.get_mut(&CHAR_ID) { ch.corporation_id = corp_id; }
         for (sid, tid, sys_id, pos) in [
             (athanor_id, ATHANOR, JITA, [100_000.0, 0.0, 0.0]),

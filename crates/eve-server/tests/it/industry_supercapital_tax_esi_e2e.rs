@@ -300,7 +300,7 @@ async fn test_shard1_live_industry_costs_corp_debit_pause_and_esi_jobs() {
             }
         }
 
-        let corp_bal_before = ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet.raw_cents());
+        let corp_bal_before = ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet_balance().raw_cents());
         let corp_job = install(&ctx, &mut s1, bp_item, raitaru_id, 1, 5, &[("useCorp", PyRep::Bool(true))])
             .await
             .expect("Install corp manufacturing job");
@@ -310,7 +310,7 @@ async fn test_shard1_live_industry_costs_corp_debit_pause_and_esi_jobs() {
         let scc_isk = real(&corp_job, "sccSurchargeISK");
         assert!((scc_isk - ((eiv_total * 0.04 * 100.0).round() / 100.0)).abs() < 0.05);
 
-        let corp_bal_after = ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet.raw_cents());
+        let corp_bal_after = ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet_balance().raw_cents());
         let expected_debit_cents = (total_cost_isk * 100.0).round() as i64;
         assert_eq!(
             corp_bal_before - corp_bal_after,

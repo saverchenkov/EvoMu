@@ -620,11 +620,23 @@ async fn test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_rep
     let comp_c50_tid = ctx.sde.compressible_types[&30370];
     let char_corp_id = ctx.db.with_snapshot(|snap| snap.characters[&char_id].corporation_id);
     ctx.db.with_mut_snapshot(|snap| {
-        let corp = snap.corporations.entry(char_corp_id).or_insert_with(|| eve_db::CorporationRecord {
-            corporation_id: char_corp_id, name: "Test Corp".into(), ticker: "TC".into(), ceo_id: char_id, alliance_id: None,
-            tax_rate: 0.15, master_wallet: eve_db::IskCents(0), wallet_divisions: Vec::new(), description: String::new(),
-            url: String::new(), hq_station_id: Some(60003760), members: Default::default(), member_roles: Default::default(), applications: Default::default(),
-        });
+        let corp = snap.corporations.entry(char_corp_id).or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = char_corp_id;
+            __corp.name = "Test Corp".into();
+            __corp.ticker = "TC".into();
+            __corp.ceo_id = char_id;
+            __corp.alliance_id = None;
+            __corp.tax_rate = 0.15;
+            __corp.description = String::new();
+            __corp.url = String::new();
+            __corp.hq_station_id = Some(60003760);
+            __corp.members = Default::default();
+            __corp.member_roles = Default::default();
+            __corp.applications = Default::default();
+            __corp.wallet_divisions = Vec::new();
+            let __mw = eve_db::IskCents(0);
+            if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+            __corp });
         corp.tax_rate = 0.15; // 15% corp member income tax (must NOT be used as structure reprocessing tax)
         corp.ceo_id = char_id;
         snap.structures.insert(comp_structure_id, make_structure(comp_structure_id, char_corp_id, 35836, 30000142, "Rigged Tatara", [0.0, 0.0, 0.0]));

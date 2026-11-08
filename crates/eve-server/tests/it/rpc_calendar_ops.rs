@@ -100,41 +100,43 @@ async fn test_calendar_manager_remediation_lifecycle() {
 
         snap.corporations.insert(
             corp_id,
-            eve_db::CorporationRecord {
-                corporation_id: corp_id,
-                name: "Remediation Corp".into(),
-                ticker: "REMED".into(),
-                ceo_id: PILOT1,
-                alliance_id: Some(ally_id),
-                tax_rate: 0.05,
-                master_wallet: eve_db::IskCents(10_000_000_00),
-                members: std::collections::HashSet::from([PILOT1, PILOT2]),
-                member_roles: HashMap::from([(PILOT1, eve_db::corp_roles::ROLE_DIRECTOR)]),
-                applications: HashMap::new(),
-                wallet_divisions: eve_db::CorporationRecord::default_wallet_divisions(eve_db::IskCents(10_000_000_00)),
-                description: "Remediation corp".into(),
-                url: "".into(),
-                hq_station_id: Some(60_003_760),
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Remediation Corp".into();
+                __corp.ticker = "REMED".into();
+                __corp.ceo_id = PILOT1;
+                __corp.alliance_id = Some(ally_id);
+                __corp.tax_rate = 0.05;
+                __corp.members = std::collections::HashSet::from([PILOT1, PILOT2]);
+                __corp.member_roles = HashMap::from([(PILOT1, eve_db::corp_roles::ROLE_DIRECTOR)]);
+                __corp.applications = HashMap::new();
+                __corp.description = "Remediation corp".into();
+                __corp.url = "".into();
+                __corp.hq_station_id = Some(60_003_760);
+                __corp.wallet_divisions = eve_db::CorporationRecord::default_wallet_divisions(eve_db::IskCents(10_000_000_00));
+                let __mw = eve_db::IskCents(10_000_000_00);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         snap.corporations.insert(
             member_corp_id,
-            eve_db::CorporationRecord {
-                corporation_id: member_corp_id,
-                name: "NonExec Member Corp".into(),
-                ticker: "NEXEC".into(),
-                ceo_id: pilot4,
-                alliance_id: Some(ally_id),
-                tax_rate: 0.05,
-                master_wallet: eve_db::IskCents(10_000_000_00),
-                members: std::collections::HashSet::from([pilot4]),
-                member_roles: HashMap::from([(pilot4, eve_db::corp_roles::ROLE_DIRECTOR)]),
-                applications: HashMap::new(),
-                wallet_divisions: eve_db::CorporationRecord::default_wallet_divisions(eve_db::IskCents(10_000_000_00)),
-                description: "Non-executor alliance member corp".into(),
-                url: "".into(),
-                hq_station_id: Some(60_003_760),
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = member_corp_id;
+                __corp.name = "NonExec Member Corp".into();
+                __corp.ticker = "NEXEC".into();
+                __corp.ceo_id = pilot4;
+                __corp.alliance_id = Some(ally_id);
+                __corp.tax_rate = 0.05;
+                __corp.members = std::collections::HashSet::from([pilot4]);
+                __corp.member_roles = HashMap::from([(pilot4, eve_db::corp_roles::ROLE_DIRECTOR)]);
+                __corp.applications = HashMap::new();
+                __corp.description = "Non-executor alliance member corp".into();
+                __corp.url = "".into();
+                __corp.hq_station_id = Some(60_003_760);
+                __corp.wallet_divisions = eve_db::CorporationRecord::default_wallet_divisions(eve_db::IskCents(10_000_000_00));
+                let __mw = eve_db::IskCents(10_000_000_00);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
 
         snap.alliances.insert(

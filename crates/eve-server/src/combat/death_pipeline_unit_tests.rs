@@ -171,7 +171,7 @@ async fn death_pipeline_rejects_non_ship_and_covers_all_insurance_branches() {
     let corp_id = ctx.db.with_snapshot(|s| *s.corporations.keys().next().unwrap());
     let corp_ship = 100_200_004;
     spawn_ship(&ctx, sys_id, corp_ship, victim, 587, DVec3::ZERO, 0.0);
-    let corp_bal_before = ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet);
+    let corp_bal_before = ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet_balance());
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.insurance_contracts.insert(
             corp_ship,
@@ -192,7 +192,7 @@ async fn death_pipeline_rejects_non_ship_and_covers_all_insurance_branches() {
         execute_death_pipeline_sync(&ctx, sys_id, victim, corp_ship, attacker, DVec3::ZERO, 1)
             .unwrap();
     assert_eq!(corp_res.insurance_payout_isk, 750_000.0);
-    let corp_bal_after = ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet);
+    let corp_bal_after = ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet_balance());
     assert_eq!(
         corp_bal_after,
         corp_bal_before.checked_add(IskCents::from_f64_isk(750_000.0)).unwrap()

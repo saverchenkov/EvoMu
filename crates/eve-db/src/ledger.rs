@@ -452,14 +452,7 @@ impl WorldStateSnapshot {
     /// Adds `delta` PLEX to the account vault of `char_id`. Returns the new balance, or `None` if the
     /// character is unknown or the vault would go negative (no change is made then).
     pub fn adjust_plex_vault(&mut self, char_id: i64, delta: i64) -> Option<i64> {
-        let uid = self.account_of_character(char_id)?;
-        let cur = self.account_plex_vault.get(&uid).copied().unwrap_or(0);
-        let next = cur.checked_add(delta)?;
-        if next < 0 {
-            return None;
-        }
-        self.account_plex_vault.insert(uid, next);
-        Some(next)
+        self.adjust_unified_plex(char_id, delta)
     }
 
     /// Migration: folds legacy per-character `plex_balance` values into the account-wide vault.

@@ -399,14 +399,13 @@ async fn test_market_broker_fee_and_sales_tax() {
         let corp_id = snap.characters[&90_000_001].corporation_id;
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Market Hub Corp".into(),
-                ticker: "MHUB".into(),
-                ceo_id: 90_000_001,
-                master_wallet: IskCents(0),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Market Hub Corp".into();
+                __corp.ticker = "MHUB".into();
+                __corp.ceo_id = 90_000_001;
+                __corp.set_division_balance(1, IskCents(0));
+                __corp },
         );
         snap.structures.insert(
             struct_id,
@@ -503,7 +502,7 @@ async fn test_market_broker_fee_and_sales_tax() {
     assert!((struct_fee - 250.0).abs() < 0.01);
     let corp_wallet = ctx
         .db
-        .with_snapshot(|snap| snap.corporations[&struct_corp_id].master_wallet);
+        .with_snapshot(|snap| snap.corporations[&struct_corp_id].master_wallet_balance());
     assert_eq!(corp_wallet, IskCents(20_000));
 }
 

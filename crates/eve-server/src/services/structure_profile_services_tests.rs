@@ -123,11 +123,10 @@ fn domain_acl_evaluation_industry_tax_jump_bridge_and_owner_group_batch() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                ceo_id: admin_id,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.ceo_id = admin_id;
+                __corp },
         );
         for (sid, tid) in [(st_id, 35_832), (jb_id, 35_841)] {
             snap.structures.insert(

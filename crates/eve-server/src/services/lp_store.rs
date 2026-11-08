@@ -650,11 +650,9 @@ fn handle_take_offer(
         let bal_after = if is_corp_take {
             let player_corp_id = ch.corporation_id;
             let ba = if let Some(corp_mut) = snap.corporations.get_mut(&player_corp_id) {
-                corp_mut.ensure_wallet_divisions();
-                let cur = corp_mut.wallet_divisions[0].balance;
+                let cur = corp_mut.division_balance(1);
                 let rem = cur.checked_sub(total_isk_cost).unwrap_or(IskCents(0));
-                corp_mut.wallet_divisions[0].balance = rem;
-                corp_mut.master_wallet = rem;
+                corp_mut.set_division_balance(1, rem);
                 rem
             } else {
                 IskCents(0)

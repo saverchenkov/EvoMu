@@ -390,9 +390,12 @@ async fn test_upwell_defense_settings_retaliation_and_gunner_takeover_sync() {
         let mut ch = s.characters[&dir_char].clone();
         ch.character_id = war_char; ch.corporation_id = war_corp;
         s.characters.insert(war_char, ch);
-        s.corporations.insert(war_corp, eve_db::CorporationRecord {
-            corporation_id: war_corp, name: "Hostiles".into(), ticker: "HOST".into(), ceo_id: war_char, ..Default::default()
-        });
+        s.corporations.insert(war_corp, { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = war_corp;
+            __corp.name = "Hostiles".into();
+            __corp.ticker = "HOST".into();
+            __corp.ceo_id = war_char;
+            __corp });
         s.wars.insert(999, eve_db::WarRecord { war_id: 999, aggressor_corp_id: war_corp, defender_corp_id: corp_id, started_unix: 100, mutual: true, active: true });
     });
     assert!(!ctx.db.with_snapshot(|s| acl_rules::evaluate_auto_defense_target(&ctx, s, st_id, dir_char)));
@@ -888,11 +891,10 @@ async fn test_upwell_anchoring_restrictions_end_to_end() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             foreign_corp,
-            eve_db::CorporationRecord {
-                corporation_id: foreign_corp,
-                alliance_id: Some(foreign_ally),
-                ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = foreign_corp;
+                __corp.alliance_id = Some(foreign_ally);
+                __corp },
         );
         snap.system_states.insert(
             HED_GP,
@@ -3607,7 +3609,7 @@ async fn test_upwell_market_acl_offline_filter_and_corp_div1_ledger() {
 
     ctx.db.with_snapshot(|s| {
         let corp = &s.corporations[&corp_id];
-        assert_eq!(corp.division_balance(1), corp.master_wallet);
+        assert_eq!(corp.division_balance(1), corp.master_wallet_balance());
         let cj = s.corp_wallet_journals.get(&(corp_id, 1)).expect("corp div 1 journal");
         assert!(cj.iter().any(|e| e.ref_type == "ReprocessingTax" && e.amount > 0.0));
         assert!(cj.iter().any(|e| e.ref_type == "JumpCloneInstallationFee" && (e.amount - 100_000.0).abs() < 1e-6));
@@ -3944,7 +3946,7 @@ async fn setup_corp_ceo(
         c.name = name.into();
         c.ticker = ticker.into();
         c.ceo_id = char_id;
-        c.master_wallet = IskCents::from_isk(100_000_000);
+        c.set_division_balance(1, IskCents::from_isk(100_000_000));
         c.members.insert(char_id);
         c.member_roles.insert(char_id, u64::MAX);
         snap.corporations.insert(corp_id, c);
@@ -4910,13 +4912,17 @@ async fn test_r_struct_ctrl_ship_bypass_01_saved_ship_locks_and_flex_pod_fallbac
     ctx.db.with_mut_snapshot(|snap| {
         ensure_account(snap, 60);
         ensure_account(snap, 61);
-        snap.corporations.insert(corp_id, CorporationRecord {
-            corporation_id: corp_id, name: "Control Guard Corp".into(), ticker: "CGD".into(), ceo_id: OWNER,
-            alliance_id: None, tax_rate: 0.05,
-            members: HashSet::from([OWNER]),
-            member_roles: HashMap::from([(OWNER, eve_db::corp_roles::ROLE_DIRECTOR)]),
-            master_wallet: IskCents::from_isk(500_000_000), ..Default::default()
-        });
+        snap.corporations.insert(corp_id, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Control Guard Corp".into();
+            __corp.ticker = "CGD".into();
+            __corp.ceo_id = OWNER;
+            __corp.alliance_id = None;
+            __corp.tax_rate = 0.05;
+            __corp.members = HashSet::from([OWNER]);
+            __corp.member_roles = HashMap::from([(OWNER, eve_db::corp_roles::ROLE_DIRECTOR)]);
+            __corp.set_division_balance(1, IskCents::from_isk(500_000_000));
+            __corp });
         let base_ch = snap.characters.get(&OWNER).cloned().unwrap();
         if let Some(ch) = snap.characters.get_mut(&OWNER) {
             ch.user_id = 60;
@@ -7146,13 +7152,12 @@ async fn test_structures_anchoring_profiles_defense_directory() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Test Upwell Corp".into(),
-                ticker: "TUPC".into(),
-                ceo_id: cid,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Test Upwell Corp".into();
+                __corp.ticker = "TUPC".into();
+                __corp.ceo_id = cid;
+                __corp },
         );
         snap.corp_governance.entry(corp_id).or_default().created_unix = t0 - 10 * 86_400;
         snap.next_entity_id += 1;

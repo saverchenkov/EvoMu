@@ -204,24 +204,25 @@ async fn test_lp_store_offers_and_purchases() {
         bals.insert(CALDARI_NAVY_CORP, 30_000);
         eve_server::services::lp_store::save_corp_lp_balances(snap, player_corp_id, &bals);
         if let Some(corp) = snap.corporations.get_mut(&player_corp_id) {
-            corp.master_wallet = IskCents::from_isk(100_000_000);
+            corp.set_division_balance(1, IskCents::from_isk(100_000_000));
         } else {
-            let corp = eve_db::types::CorporationRecord {
-                corporation_id: player_corp_id,
-                name: "Test Corp".into(),
-                ticker: "TEST".into(),
-                ceo_id: CHAR_ID + 1, // ensure the caller is not CEO so role check applies
-                alliance_id: None,
-                tax_rate: 0.0,
-                master_wallet: IskCents::from_isk(100_000_000),
-                members: [CHAR_ID].into_iter().collect(),
-                member_roles: std::collections::HashMap::new(),
-                applications: std::collections::HashMap::new(),
-                wallet_divisions: vec![],
-                description: "".into(),
-                url: "".into(),
-                hq_station_id: None,
-            };
+            let corp = { let mut __corp = eve_db::types::CorporationRecord::default();
+                __corp.corporation_id = player_corp_id;
+                __corp.name = "Test Corp".into();
+                __corp.ticker = "TEST".into();
+                __corp.ceo_id = CHAR_ID + 1;
+                __corp.alliance_id = None;
+                __corp.tax_rate = 0.0;
+                __corp.members = [CHAR_ID].into_iter().collect();
+                __corp.member_roles = std::collections::HashMap::new();
+                __corp.applications = std::collections::HashMap::new();
+                __corp.description = "".into();
+                __corp.url = "".into();
+                __corp.hq_station_id = None;
+                __corp.wallet_divisions = vec![];
+                let __mw = IskCents::from_isk(100_000_000);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp };
             snap.corporations.insert(player_corp_id, corp);
         }
     });
@@ -306,7 +307,7 @@ async fn test_lp_store_offers_and_purchases() {
         
         let corp = snap.corporations.get(&player_corp_id).unwrap();
         assert_eq!(
-            corp.master_wallet,
+            corp.master_wallet_balance(),
             IskCents::from_isk(100_000_000).checked_sub(IskCents::from_isk(2_400_000)).unwrap(),
             "Corporation wallet should be debited"
         );
@@ -826,16 +827,15 @@ async fn test_lp_store_mgr_gameplay() {
         ch.balance = IskCents::from_isk(100_000_000);
         ch.station_id = Some(station_id);
 
-        let mut corp = eve_db::types::CorporationRecord {
-            corporation_id: corp_id,
-            name: "LP Test Corp".into(),
-            ticker: "LPTC".into(),
-            ceo_id: char_id + 999,
-            master_wallet: IskCents::from_isk(100_000_000),
-            members: [char_id].into_iter().collect(),
-            hq_station_id: Some(station_id),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = eve_db::types::CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "LP Test Corp".into();
+            __corp.ticker = "LPTC".into();
+            __corp.ceo_id = char_id + 999;
+            __corp.members = [char_id].into_iter().collect();
+            __corp.hq_station_id = Some(station_id);
+            __corp.set_division_balance(1, IskCents::from_isk(100_000_000));
+            __corp };
         corp.ensure_wallet_divisions();
         corp.wallet_divisions[0].balance = IskCents::from_isk(100_000_000);
         s.corporations.insert(corp_id, corp);
@@ -1890,22 +1890,23 @@ async fn test_lp_store_corporation_purchase_and_delivery() {
 
     // Setup player corporation with wallet, LP balance, and trade-in ammo for real Tranquility offer 3565
     ctx.db.with_mut_snapshot(|snap| {
-        let mut corp = eve_db::types::CorporationRecord {
-            corporation_id: CORP_ID,
-            name: "Parity Test Corp".into(),
-            ticker: "PTC".into(),
-            ceo_id: CHAR_ID + 9999,
-            alliance_id: None,
-            tax_rate: 0.0,
-            master_wallet: IskCents::from_isk(50_000_000),
-            members: [CHAR_ID].into_iter().collect(),
-            member_roles: HashMap::new(),
-            applications: HashMap::new(),
-            wallet_divisions: vec![],
-            description: "".into(),
-            url: "".into(),
-            hq_station_id: Some(JITA_CALDARI_STATION),
-        };
+        let mut corp = { let mut __corp = eve_db::types::CorporationRecord::default();
+            __corp.corporation_id = CORP_ID;
+            __corp.name = "Parity Test Corp".into();
+            __corp.ticker = "PTC".into();
+            __corp.ceo_id = CHAR_ID + 9999;
+            __corp.alliance_id = None;
+            __corp.tax_rate = 0.0;
+            __corp.members = [CHAR_ID].into_iter().collect();
+            __corp.member_roles = HashMap::new();
+            __corp.applications = HashMap::new();
+            __corp.description = "".into();
+            __corp.url = "".into();
+            __corp.hq_station_id = Some(JITA_CALDARI_STATION);
+            __corp.wallet_divisions = vec![];
+            let __mw = IskCents::from_isk(50_000_000);
+            if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+            __corp };
         corp.ensure_wallet_divisions();
         corp.wallet_divisions[0].balance = IskCents::from_isk(50_000_000);
         snap.corporations.insert(CORP_ID, corp);

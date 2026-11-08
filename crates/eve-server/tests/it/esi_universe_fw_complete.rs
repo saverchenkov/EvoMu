@@ -293,14 +293,13 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "FW Frontline Corp".to_string(),
-                ticker: "FWCORP".to_string(),
-                ceo_id: char_id,
-                members: HashSet::from([char_id]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "FW Frontline Corp".to_string();
+                __corp.ticker = "FWCORP".to_string();
+                __corp.ceo_id = char_id;
+                __corp.members = HashSet::from([char_id]);
+                __corp },
         );
         sid
     });
@@ -745,14 +744,13 @@ async fn test_esi_universe_celestials_stations_structures_and_jumps_kills() {
         ] {
             snap.corporations.insert(
                 cid,
-                CorporationRecord {
-                    corporation_id: cid,
-                    name: name.to_string(),
-                    ticker: ticker.to_string(),
-                    ceo_id: ceo,
-                    members: HashSet::from([ceo]),
-                    ..Default::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = cid;
+                    __corp.name = name.to_string();
+                    __corp.ticker = ticker.to_string();
+                    __corp.ceo_id = ceo;
+                    __corp.members = HashSet::from([ceo]);
+                    __corp },
             );
         }
         snap.structures.insert(

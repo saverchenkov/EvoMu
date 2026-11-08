@@ -545,11 +545,23 @@ async fn test_rpc_industry_insurance_market_reprocessing_and_orbitals() {
         let cid = 98_000_077;
         s.characters.get_mut(&C1).unwrap().corporation_id = cid;
         s.characters.get_mut(&C2).unwrap().corporation_id = cid;
-        s.corporations.insert(cid, eve_db::CorporationRecord {
-            corporation_id: cid, name: "TC".into(), ticker: "TC".into(), ceo_id: C1, alliance_id: None, tax_rate: 0.05, master_wallet: eve_db::IskCents(0),
-            members: Default::default(), member_roles: Default::default(), applications: Default::default(),
-            wallet_divisions: eve_db::CorporationRecord::default_wallet_divisions(eve_db::IskCents(0)), description: String::new(), url: String::new(), hq_station_id: Some(JITA_44),
-        });
+        s.corporations.insert(cid, { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = cid;
+            __corp.name = "TC".into();
+            __corp.ticker = "TC".into();
+            __corp.ceo_id = C1;
+            __corp.alliance_id = None;
+            __corp.tax_rate = 0.05;
+            __corp.members = Default::default();
+            __corp.member_roles = Default::default();
+            __corp.applications = Default::default();
+            __corp.description = String::new();
+            __corp.url = String::new();
+            __corp.hq_station_id = Some(JITA_44);
+            __corp.wallet_divisions = eve_db::CorporationRecord::default_wallet_divisions(eve_db::IskCents(0));
+            let __mw = eve_db::IskCents(0);
+            if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+            __corp });
         eve_server::services::industry_pi::save_orbital_settings(s, 40_009_082, &eve_server::services::industry_pi::OrbitalCustomsSettings { planet_id: 40_009_082, owner_corp_id: cid, ..Default::default() });
         s.industry_jobs.insert(43, eve_db::IndustryJobRecord {
             job_id: 43, installer_id: C1, facility_id: JITA_44, blueprint_item_id: 885_001, blueprint_type_id: 683,

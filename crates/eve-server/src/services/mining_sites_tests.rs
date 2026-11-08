@@ -282,15 +282,14 @@ async fn test_sov_hub_save_and_get_installed_upgrades() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Sov Corp".into(),
-                ticker: "SOV".into(),
-                ceo_id: char_id,
-                alliance_id: Some(alliance_id),
-                tax_rate: 0.05,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Sov Corp".into();
+                __corp.ticker = "SOV".into();
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = Some(alliance_id);
+                __corp.tax_rate = 0.05;
+                __corp },
         );
         snap.system_states.insert(
             null_sys,

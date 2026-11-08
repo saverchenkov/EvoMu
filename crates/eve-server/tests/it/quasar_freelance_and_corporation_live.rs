@@ -64,7 +64,7 @@ async fn founder_with_corp(ctx: &ServerContext, budget_isk: f64) -> (SessionStat
 fn corp_wallet(ctx: &ServerContext, corp_id: i64) -> IskCents {
     ctx.db.with_snapshot(|s| {
         let c = &s.corporations[&corp_id];
-        if c.master_wallet.raw_cents() > 0 { c.master_wallet } else { c.division_balance(1) }
+        if c.master_wallet_balance().raw_cents() > 0 { c.master_wallet_balance() } else { c.division_balance(1) }
     })
 }
 

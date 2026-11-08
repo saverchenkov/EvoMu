@@ -80,10 +80,13 @@ fn setup_pilot_session(ctx: &ServerContext, sess_id: u64, char_id: i64, corp_id:
         ch.solar_system_id = sys_id;
         ch.balance = IskCents::from_isk(1_000_000_000);
         ch.active_ship_id = ship_id;
-        let corp = snap.corporations.entry(corp_id).or_insert_with(|| eve_db::CorporationRecord {
-            corporation_id: corp_id, name: format!("Corp {corp_id}"), ticker: "CORP".into(),
-            ceo_id: char_id, master_wallet: IskCents::from_isk(1_000_000_000), ..Default::default()
-        });
+        let corp = snap.corporations.entry(corp_id).or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = format!("Corp {corp_id}");
+            __corp.ticker = "CORP".into();
+            __corp.ceo_id = char_id;
+            __corp.set_division_balance(1, IskCents::from_isk(1_000_000_000));
+            __corp });
         corp.members.insert(char_id);
         corp.member_roles.insert(char_id, roles);
     });

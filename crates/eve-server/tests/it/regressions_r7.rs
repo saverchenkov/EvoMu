@@ -95,29 +95,27 @@ async fn test_r7_p0_01_corp_roles_never_escalate_to_quasar_gm_or_bypass_escrow_a
         c2.corporation_id = corp_b;
         snap.characters.insert(other_ceo_id, c2);
 
-        let mut ca = CorporationRecord {
-            corporation_id: corp_a,
-            name: "Corp A".into(),
-            ticker: "CRPA".into(),
-            ceo_id,
-            master_wallet: IskCents::from_isk(10_000_000),
-            members: HashSet::from([ceo_id, member_id]),
-            member_roles: HashMap::from([(ceo_id, u64::MAX), (member_id, colliding)]),
-            ..Default::default()
-        };
+        let mut ca = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_a;
+            __corp.name = "Corp A".into();
+            __corp.ticker = "CRPA".into();
+            __corp.ceo_id = ceo_id;
+            __corp.members = HashSet::from([ceo_id, member_id]);
+            __corp.member_roles = HashMap::from([(ceo_id, u64::MAX), (member_id, colliding)]);
+            __corp.set_division_balance(1, IskCents::from_isk(10_000_000));
+            __corp };
         ca.ensure_wallet_divisions();
         ca.set_division_balance(1, IskCents::from_isk(10_000_000));
         snap.corporations.insert(corp_a, ca);
 
-        let mut cb = CorporationRecord {
-            corporation_id: corp_b,
-            name: "Corp B".into(),
-            ticker: "CRPB".into(),
-            ceo_id: other_ceo_id,
-            members: HashSet::from([other_ceo_id]),
-            member_roles: HashMap::from([(other_ceo_id, u64::MAX)]),
-            ..Default::default()
-        };
+        let mut cb = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_b;
+            __corp.name = "Corp B".into();
+            __corp.ticker = "CRPB".into();
+            __corp.ceo_id = other_ceo_id;
+            __corp.members = HashSet::from([other_ceo_id]);
+            __corp.member_roles = HashMap::from([(other_ceo_id, u64::MAX)]);
+            __corp };
         cb.ensure_wallet_divisions();
         snap.corporations.insert(corp_b, cb);
     });
@@ -184,16 +182,15 @@ async fn test_r7_p0_02_title_bitmask_shift_24h_role_delay_edit_project_and_goal_
         p.corporation_id = corp_id;
         snap.characters.insert(pilot_id, p);
 
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "Title Corp".into(),
-            ticker: "TTLC".into(),
-            ceo_id,
-            master_wallet: IskCents::from_isk(15_000_000),
-            members: HashSet::from([ceo_id, pilot_id]),
-            member_roles: HashMap::from([(ceo_id, u64::MAX), (pilot_id, 0)]),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Title Corp".into();
+            __corp.ticker = "TTLC".into();
+            __corp.ceo_id = ceo_id;
+            __corp.members = HashSet::from([ceo_id, pilot_id]);
+            __corp.member_roles = HashMap::from([(ceo_id, u64::MAX), (pilot_id, 0)]);
+            __corp.set_division_balance(1, IskCents::from_isk(15_000_000));
+            __corp };
         corp.ensure_wallet_divisions();
         corp.set_division_balance(1, IskCents::from_isk(15_000_000));
         corp.set_division_balance(2, IskCents::from_isk(3_000_000));
@@ -361,13 +358,13 @@ async fn test_r7_p0_02_title_bitmask_shift_24h_role_delay_edit_project_and_goal_
     assert_eq!(g2.status_code, STATUS_OK);
     let (g1_wire, g2_wire) = (g1.payload.unwrap().value, g2.payload.unwrap().value);
     assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp_id].division_balance(3)), IskCents::from_isk(2_500_000));
-    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet), IskCents::from_isk(14_990_000));
+    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet_balance()), IskCents::from_isk(14_990_000));
 
     let close_rsp = q_call(&ctx, &sess_p, "eve_public.goal.api.CloseRequest", g1_wire.clone(), now_matured);
     assert_eq!(close_rsp.status_code, STATUS_OK);
     assert_eq!(close_rsp.payload.unwrap().type_url, "type.googleapis.com/eve_public.goal.api.CloseResponse");
     assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp_id].division_balance(3)), IskCents::from_isk(3_100_000));
-    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet), IskCents::from_isk(14_990_000));
+    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet_balance()), IskCents::from_isk(14_990_000));
 
     let del_closed = q_call(&ctx, &sess_p, "eve_public.goal.api.DeleteRequest", g1_wire, now_matured);
     assert_eq!(del_closed.status_code, STATUS_OK);
@@ -377,7 +374,7 @@ async fn test_r7_p0_02_title_bitmask_shift_24h_role_delay_edit_project_and_goal_
     assert_eq!(del_rsp.status_code, STATUS_OK);
     assert_eq!(del_rsp.payload.unwrap().type_url, "type.googleapis.com/eve_public.goal.api.DeleteResponse");
     assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp_id].division_balance(3)), IskCents::from_isk(4_000_000));
-    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet), IskCents::from_isk(14_990_000));
+    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet_balance()), IskCents::from_isk(14_990_000));
 }
 
 #[tokio::test]

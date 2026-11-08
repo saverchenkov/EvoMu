@@ -113,17 +113,16 @@ async fn test_esi3_universe_status_meta_dogma_killmails_insurance_fw() {
         );
         snap.corporations.insert(
             enemy_corp_id,
-            CorporationRecord {
-                corporation_id: enemy_corp_id,
-                name: "Guristas Raiders Corp".to_string(),
-                ticker: "GURIST".to_string(),
-                ceo_id: 90_000_002,
-                alliance_id: None,
-                tax_rate: 0.1,
-                master_wallet: IskCents::from_isk(10_000_000),
-                members: HashSet::from([90_000_002]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = enemy_corp_id;
+                __corp.name = "Guristas Raiders Corp".to_string();
+                __corp.ticker = "GURIST".to_string();
+                __corp.ceo_id = 90_000_002;
+                __corp.alliance_id = None;
+                __corp.tax_rate = 0.1;
+                __corp.members = HashSet::from([90_000_002]);
+                __corp.set_division_balance(1, IskCents::from_isk(10_000_000));
+                __corp },
         );
 
         // Upwell Structure

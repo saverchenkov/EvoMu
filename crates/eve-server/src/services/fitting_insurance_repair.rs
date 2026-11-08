@@ -288,35 +288,9 @@ pub(super) fn handle_insure_ship(
                     format!("Corporation {caller_corp_id} not found"),
                 )
             })?;
-            corp.ensure_wallet_divisions();
             let div_id = (corp_acct_key.saturating_sub(999)).clamp(1, 7) as u8;
-            if div_id == 1 {
-                let avail = corp
-                    .wallet_divisions
-                    .first()
-                    .map(|d| d.balance.min(corp.master_wallet))
-                    .unwrap_or(corp.master_wallet);
-                let nb = avail
-                    .checked_sub(cost_cents)
-                    .ok_or_else(|| rpc_err("InsufficientFunds", "Not enough corporation ISK to insure ship"))?;
-                corp.master_wallet = nb;
-                if let Some(div) = corp.wallet_divisions.first_mut() {
-                    div.balance = nb;
-                }
-                nb
-            } else {
-                let div = corp
-                    .wallet_divisions
-                    .iter_mut()
-                    .find(|d| d.division_id == div_id)
-                    .ok_or_else(|| rpc_err("InsufficientFunds", "Not enough corporation ISK to insure ship"))?;
-                let nb = div
-                    .balance
-                    .checked_sub(cost_cents)
-                    .ok_or_else(|| rpc_err("InsufficientFunds", "Not enough corporation ISK to insure ship"))?;
-                div.balance = nb;
-                nb
-            }
+            corp.debit_division(div_id, cost_cents)
+                .ok_or_else(|| rpc_err("InsufficientFunds", "Not enough corporation ISK to insure ship"))?
         } else {
             let ch = snap.characters.get_mut(&char_id).ok_or_else(|| {
                 rpc_err("CharacterNotFound", format!("Character {char_id} not found"))

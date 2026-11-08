@@ -101,14 +101,13 @@ async fn test_bounty_proxy_bounties_and_pool_search() {
             c.ceo_id = P2;
             c.alliance_id = Some(ALLIANCE_ID);
         } else {
-            snap.corporations.insert(CORP_ID, eve_db::CorporationRecord {
-                corporation_id: CORP_ID,
-                name: "Bounty Target Corp".into(),
-                ticker: "BTC".into(),
-                ceo_id: P2,
-                alliance_id: Some(ALLIANCE_ID),
-                ..Default::default()
-            });
+            snap.corporations.insert(CORP_ID, { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = CORP_ID;
+                __corp.name = "Bounty Target Corp".into();
+                __corp.ticker = "BTC".into();
+                __corp.ceo_id = P2;
+                __corp.alliance_id = Some(ALLIANCE_ID);
+                __corp });
         }
         if let Some(a) = snap.alliances.get_mut(&ALLIANCE_ID) {
             a.name = "Bounty Alliance".into();

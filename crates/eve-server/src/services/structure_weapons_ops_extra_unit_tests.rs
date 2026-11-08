@@ -38,11 +38,10 @@ async fn target_locking_error_branches_structure_vs_structure_and_max_locked_tar
         snap.characters.insert(hostile_id, h);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                ceo_id: gunner_id,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.ceo_id = gunner_id;
+                __corp },
         );
         for (sid, pos) in [(st_id, [0.0, 0.0, 0.0]), (other_st_id, [50_000.0, 0.0, 0.0])] {
             snap.structures.insert(
@@ -263,11 +262,10 @@ async fn standup_weapon_highsec_superweapon_charge_capacitor_and_burst_projector
         snap.characters.insert(hostile_id, h);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                ceo_id: gunner_id,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.ceo_id = gunner_id;
+                __corp },
         );
         snap.structures.insert(
             st_id,

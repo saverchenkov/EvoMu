@@ -65,22 +65,23 @@ async fn test_standings_and_contacts_notifications() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Test Corp".into(),
-                ticker: "TEST".into(),
-                ceo_id: P1,
-                alliance_id: Some(ally_id),
-                tax_rate: 0.0,
-                master_wallet: eve_db::IskCents(0),
-                members: HashSet::from([P1, P2]),
-                member_roles: HashMap::from([(P1, u64::MAX), (P2, 0)]),
-                applications: HashMap::new(),
-                wallet_divisions: Vec::new(),
-                description: String::new(),
-                url: String::new(),
-                hq_station_id: Some(STATION_JITA),
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Test Corp".into();
+                __corp.ticker = "TEST".into();
+                __corp.ceo_id = P1;
+                __corp.alliance_id = Some(ally_id);
+                __corp.tax_rate = 0.0;
+                __corp.members = HashSet::from([P1, P2]);
+                __corp.member_roles = HashMap::from([(P1, u64::MAX), (P2, 0)]);
+                __corp.applications = HashMap::new();
+                __corp.description = String::new();
+                __corp.url = String::new();
+                __corp.hq_station_id = Some(STATION_JITA);
+                __corp.wallet_divisions = Vec::new();
+                let __mw = eve_db::IskCents(0);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         snap.alliances.insert(
             ally_id,
@@ -278,14 +279,13 @@ async fn test_corp_enlistment_and_logo_notifications() {
         }
         snap.corporations.insert(
             test_corp,
-            CorporationRecord {
-                corporation_id: test_corp,
-                name: "FW Test Corp".into(),
-                ticker: "FWTC".into(),
-                ceo_id: P1,
-                hq_station_id: Some(STATION_JITA),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = test_corp;
+                __corp.name = "FW Test Corp".into();
+                __corp.ticker = "FWTC".into();
+                __corp.ceo_id = P1;
+                __corp.hq_station_id = Some(STATION_JITA);
+                __corp },
         );
     });
     s1.corporation_id = Some(test_corp);

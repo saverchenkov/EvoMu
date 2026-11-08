@@ -447,15 +447,14 @@ async fn test_r4_191_corp_goal_close_and_delete_require_director_role_bit() {
         roles.insert(non_dir_id, eve_db::corp_roles::ROLE_ACCOUNTANT);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Goal 191 Corp".into(),
-                ticker: "G191".into(),
-                ceo_id,
-                members: HashSet::from([ceo_id, non_dir_id]),
-                member_roles: roles,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Goal 191 Corp".into();
+                __corp.ticker = "G191".into();
+                __corp.ceo_id = ceo_id;
+                __corp.members = HashSet::from([ceo_id, non_dir_id]);
+                __corp.member_roles = roles;
+                __corp },
         );
     });
 
@@ -553,14 +552,13 @@ async fn test_r4_192_personal_contracts_excluded_from_corp_contract_queries() {
             .corporation_id = corp_id;
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Contracts 192 Corp".into(),
-                ticker: "C192".into(),
-                ceo_id: char_id,
-                members: HashSet::from([char_id, other_member]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Contracts 192 Corp".into();
+                __corp.ticker = "C192".into();
+                __corp.ceo_id = char_id;
+                __corp.members = HashSet::from([char_id, other_member]);
+                __corp },
         );
         // Personal contract issued by other_member (for_corp == false, but issuer_corp_id == corp_id)
         snap.contracts.insert(
@@ -694,14 +692,13 @@ async fn test_r4_193_contract_deposit_refunds_and_unbid_corp_auction_item_return
         snap.characters.get_mut(&c1).unwrap().corporation_id = corp_id;
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Auction 193 Corp".into(),
-                ticker: "A193".into(),
-                ceo_id: c1,
-                members: HashSet::from([c1]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Auction 193 Corp".into();
+                __corp.ticker = "A193".into();
+                __corp.ceo_id = c1;
+                __corp.members = HashSet::from([c1]);
+                __corp },
         );
         // 1. Contract assigned to c2 with a 10,000 ISK deposit in service_state_blobs
         snap.contracts.insert(
@@ -826,15 +823,14 @@ async fn test_r4_194_take_offer_for_corporation_deducts_analysis_kredits() {
         let ch = snap.characters.get_mut(&char_id).unwrap();
         ch.corporation_id = corp_id;
         ch.station_id = Some(60_012_256);
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "LP 194 Corp".into(),
-            ticker: "LP94".into(),
-            ceo_id: char_id,
-            members: HashSet::from([char_id]),
-            master_wallet: IskCents::from_isk(10_000_000),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "LP 194 Corp".into();
+            __corp.ticker = "LP94".into();
+            __corp.ceo_id = char_id;
+            __corp.members = HashSet::from([char_id]);
+            __corp.set_division_balance(1, IskCents::from_isk(10_000_000));
+            __corp };
         corp.ensure_wallet_divisions();
         corp.wallet_divisions[0].balance = IskCents::from_isk(10_000_000);
         snap.corporations.insert(corp_id, corp);

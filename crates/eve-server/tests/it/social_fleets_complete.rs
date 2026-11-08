@@ -612,7 +612,7 @@ async fn test_so3_corporation_roles_public_info_governance_shares_votes_and_alli
         );
         let corp = snap.corporations.get_mut(&corp_id).unwrap();
         corp.wallet_divisions[0].balance = eve_db::IskCents::from_isk(2_000_000_000);
-        corp.master_wallet = corp.wallet_divisions[0].balance;
+        corp.ensure_wallet_divisions();
     });
     let alliance_rep = ctx
         .dispatch_rpc(

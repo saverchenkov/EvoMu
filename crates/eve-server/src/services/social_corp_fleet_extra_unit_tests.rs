@@ -68,22 +68,23 @@ pub(super) fn setup_sandbox() -> (ServerContext, SessionState, SessionState) {
             };
             snap.corporations.insert(
                 corp_id,
-                CorporationRecord {
-                    corporation_id: corp_id,
-                    name: format!("Corp {corp_id}"),
-                    ticker: ticker.into(),
-                    ceo_id,
-                    alliance_id: None,
-                    tax_rate: 0.05,
-                    master_wallet: IskCents::from_isk(5_000_000_000),
-                    members: members.into_iter().collect::<HashSet<_>>(),
-                    member_roles: HashMap::from([(ceo_id, u64::MAX), (91_000_003, 0)]),
-                    applications: HashMap::new(),
-                    wallet_divisions: divs,
-                    description: String::new(),
-                    url: String::new(),
-                    hq_station_id: Some(60_003_760),
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = corp_id;
+                    __corp.name = format!("Corp {corp_id}");
+                    __corp.ticker = ticker.into();
+                    __corp.ceo_id = ceo_id;
+                    __corp.alliance_id = None;
+                    __corp.tax_rate = 0.05;
+                    __corp.members = members.into_iter().collect::<HashSet<_>>();
+                    __corp.member_roles = HashMap::from([(ceo_id, u64::MAX), (91_000_003, 0)]);
+                    __corp.applications = HashMap::new();
+                    __corp.description = String::new();
+                    __corp.url = String::new();
+                    __corp.hq_station_id = Some(60_003_760);
+                    __corp.wallet_divisions = divs;
+                    let __mw = IskCents::from_isk(5_000_000_000);
+                    if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                    __corp },
             );
         }
     });
@@ -176,7 +177,7 @@ async fn fleet_init_and_alliance_creation_application_error_branches() {
     // InsufficientFunds when wallet < 1B ISK
     ctx.db.with_mut_snapshot(|snap| {
         let corp = snap.corporations.get_mut(&98_100_001).unwrap();
-        corp.master_wallet = IskCents::from_isk(100_000);
+        corp.set_division_balance(1, IskCents::from_isk(100_000));
         corp.wallet_divisions[0].balance = IskCents::from_isk(100_000);
     });
     assert_eq!(
@@ -194,7 +195,7 @@ async fn fleet_init_and_alliance_creation_application_error_branches() {
     );
     ctx.db.with_mut_snapshot(|snap| {
         let corp = snap.corporations.get_mut(&98_100_001).unwrap();
-        corp.master_wallet = IskCents::from_isk(5_000_000_000);
+        corp.set_division_balance(1, IskCents::from_isk(5_000_000_000));
         corp.wallet_divisions[0].balance = IskCents::from_isk(5_000_000_000);
     });
 

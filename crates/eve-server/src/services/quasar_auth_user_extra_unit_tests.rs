@@ -533,7 +533,11 @@ fn character_transfer_validation_guards_and_execution_branches() {
         STATUS_PRECONDITION_FAILED
     );
 
-    db.with_mut_snapshot(|snap| snap.characters.get_mut(&char_id).unwrap().plex_balance = 1_200);
+    let src_uid = db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.plex_balance = 1_200;
+        ch.user_id
+    });
     let queued = queue_fn(
         &src_ctx,
         &dummy_any,
@@ -544,6 +548,7 @@ fn character_transfer_validation_guards_and_execution_branches() {
     db.with_snapshot(|snap| {
         let ch = &snap.characters[&char_id];
         assert_eq!(ch.user_id, dst_uid);
-        assert_eq!(ch.plex_balance, 200);
+        assert_eq!(ch.plex_balance, 0);
+        assert_eq!(snap.unified_plex_balance_for_user(src_uid), 200);
     });
 }

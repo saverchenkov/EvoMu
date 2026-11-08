@@ -285,16 +285,15 @@ async fn bookmarks_self_destruct_corp_transfer_turbo_dock_and_telemetry() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_b,
-            CorporationRecord {
-                corporation_id: corp_b,
-                name: "Beta Corp".into(),
-                ticker: "BETA".into(),
-                ceo_id: 90_000_099,
-                hq_station_id: Some(60003760),
-                tax_rate: 0.0,
-                master_wallet: Default::default(),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_b;
+                __corp.name = "Beta Corp".into();
+                __corp.ticker = "BETA".into();
+                __corp.ceo_id = 90_000_099;
+                __corp.hq_station_id = Some(60003760);
+                __corp.tax_rate = 0.0;
+                __corp.set_division_balance(1, Default::default());
+                __corp },
         );
         snap.structures.insert(
             struct_id,

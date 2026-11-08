@@ -118,22 +118,23 @@ fn setup_player_corp_and_alliance(ctx: &ServerContext, corp_id: i64, alliance_id
         members.insert(P1);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Upwell Parity Corp".into(),
-                ticker: "UPWL".into(),
-                ceo_id: P1,
-                alliance_id: Some(alliance_id),
-                tax_rate: 0.05,
-                master_wallet: eve_db::IskCents::from_isk(100_000_000),
-                members,
-                member_roles: roles,
-                applications: HashMap::new(),
-                wallet_divisions: Vec::new(),
-                description: String::new(),
-                url: String::new(),
-                hq_station_id: Some(JITA_44),
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Upwell Parity Corp".into();
+                __corp.ticker = "UPWL".into();
+                __corp.ceo_id = P1;
+                __corp.alliance_id = Some(alliance_id);
+                __corp.tax_rate = 0.05;
+                __corp.members = members;
+                __corp.member_roles = roles;
+                __corp.applications = HashMap::new();
+                __corp.description = String::new();
+                __corp.url = String::new();
+                __corp.hq_station_id = Some(JITA_44);
+                __corp.wallet_divisions = Vec::new();
+                let __mw = eve_db::IskCents::from_isk(100_000_000);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         let mut member_corp_ids = std::collections::HashSet::new();
         member_corp_ids.insert(corp_id);

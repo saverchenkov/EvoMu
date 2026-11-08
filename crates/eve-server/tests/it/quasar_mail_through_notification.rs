@@ -31,11 +31,10 @@ fn seed_test_fixtures(ctx: &ServerContext) {
             ch.solar_system_id = 30_000_142;
             ch.station_id = Some(60_003_760);
         }
-        let corp = snap.corporations.entry(corp_id).or_insert_with(|| eve_db::CorporationRecord {
-            corporation_id: corp_id,
-            ceo_id: char_id,
-            ..Default::default()
-        });
+        let corp = snap.corporations.entry(corp_id).or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.ceo_id = char_id;
+            __corp });
         corp.ceo_id = char_id;
         corp.members.insert(char_id);
         corp.members.insert(90_000_002);

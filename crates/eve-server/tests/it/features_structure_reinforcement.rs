@@ -477,14 +477,21 @@ async fn test_b39_standup_point_defense_battery() {
     let mut sess = setup_pilot(&ctx, gunner_id, gunner_ship, 587, hisec_sys, DVec3::ZERO, corp_id).await;
     ctx.db.with_mut_snapshot(|s| {
         s.characters.get_mut(&gunner_id).unwrap().alliance_id = Some(alliance_id);
-        s.corporations.insert(corp_id, CorporationRecord {
-            corporation_id: corp_id, alliance_id: Some(alliance_id), name: "Keepstar Corp".into(), ticker: "KEEP".into(),
-            ceo_id: gunner_id, members: [gunner_id].into_iter().collect(), ..Default::default()
-        });
-        s.corporations.insert(ally_corp_id, CorporationRecord {
-            corporation_id: ally_corp_id, alliance_id: Some(alliance_id), name: "Alliance Mate Corp".into(), ticker: "ALLY".into(),
-            ceo_id: gunner_id, ..Default::default()
-        });
+        s.corporations.insert(corp_id, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.alliance_id = Some(alliance_id);
+            __corp.name = "Keepstar Corp".into();
+            __corp.ticker = "KEEP".into();
+            __corp.ceo_id = gunner_id;
+            __corp.members = [gunner_id].into_iter().collect();
+            __corp });
+        s.corporations.insert(ally_corp_id, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = ally_corp_id;
+            __corp.alliance_id = Some(alliance_id);
+            __corp.name = "Alliance Mate Corp".into();
+            __corp.ticker = "ALLY".into();
+            __corp.ceo_id = gunner_id;
+            __corp });
         s.structures.insert(keepstar_id, UpwellStructureRecord {
             structure_id: keepstar_id, type_id: 35832, owner_corp_id: corp_id, solar_system_id: hisec_sys,
             name: "Test Keepstar".into(), position: [0.0; 3], state: "ShieldVulnerable".into(),
@@ -639,10 +646,13 @@ async fn test_b39_standup_guided_bomb_and_arcing_vorton() {
 
     let mut sess = setup_pilot(&ctx, gunner_id, gunner_ship, 587, null_sys, st_pos, corp_id).await;
     ctx.db.with_mut_snapshot(|s| {
-        s.corporations.insert(corp_id, CorporationRecord {
-            corporation_id: corp_id, name: "Keepstar Corp".into(), ticker: "KEEP".into(),
-            ceo_id: gunner_id, members: [gunner_id].into_iter().collect(), ..Default::default()
-        });
+        s.corporations.insert(corp_id, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Keepstar Corp".into();
+            __corp.ticker = "KEEP".into();
+            __corp.ceo_id = gunner_id;
+            __corp.members = [gunner_id].into_iter().collect();
+            __corp });
         s.structures.insert(keepstar_id, UpwellStructureRecord {
             structure_id: keepstar_id, type_id: TYPE_KEEPSTAR, owner_corp_id: corp_id, solar_system_id: null_sys,
             name: "Test Keepstar".into(), position: [st_pos.x, st_pos.y, st_pos.z], state: "ShieldVulnerable".into(),
@@ -800,10 +810,13 @@ async fn test_b39_standup_falloff_bomb_safety_timers_and_kills() {
 
     let mut sess = setup_pilot(&ctx, gunner_id, gunner_ship, 587, low_sys, st_pos, corp_id).await;
     ctx.db.with_mut_snapshot(|s| {
-        s.corporations.insert(corp_id, CorporationRecord {
-            corporation_id: corp_id, name: "Lowsec Keepstar".into(), ticker: "LKS".into(),
-            ceo_id: gunner_id, members: [gunner_id].into_iter().collect(), ..Default::default()
-        });
+        s.corporations.insert(corp_id, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Lowsec Keepstar".into();
+            __corp.ticker = "LKS".into();
+            __corp.ceo_id = gunner_id;
+            __corp.members = [gunner_id].into_iter().collect();
+            __corp });
         s.structures.insert(keepstar_id, UpwellStructureRecord {
             structure_id: keepstar_id, type_id: TYPE_KEEPSTAR, owner_corp_id: corp_id, solar_system_id: low_sys,
             name: "Lowsec Keepstar".into(), position: [st_pos.x, st_pos.y, st_pos.z], state: "ShieldVulnerable".into(),

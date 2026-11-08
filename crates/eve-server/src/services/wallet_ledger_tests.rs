@@ -44,25 +44,23 @@ fn give_cash_from_corp_account_validates_roles_balances_and_transfers() {
         mem.balance = IskCents::from_f64_isk(1_000.0);
         snap.characters.insert(member_id, mem);
 
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "Source Corp".into(),
-            ticker: "SRC".into(),
-            ceo_id,
-            master_wallet: IskCents::from_f64_isk(100_000.0),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Source Corp".into();
+            __corp.ticker = "SRC".into();
+            __corp.ceo_id = ceo_id;
+            __corp.set_division_balance(1, IskCents::from_f64_isk(100_000.0));
+            __corp };
         corp.ensure_wallet_divisions();
         corp.wallet_divisions[0].balance = IskCents::from_f64_isk(100_000.0);
         snap.corporations.insert(corp_id, corp);
 
-        let mut corp2 = CorporationRecord {
-            corporation_id: other_corp_id,
-            name: "Dest Corp".into(),
-            ticker: "DST".into(),
-            ceo_id: 90_000_099,
-            ..Default::default()
-        };
+        let mut corp2 = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = other_corp_id;
+            __corp.name = "Dest Corp".into();
+            __corp.ticker = "DST".into();
+            __corp.ceo_id = 90_000_099;
+            __corp };
         corp2.ensure_wallet_divisions();
         snap.corporations.insert(other_corp_id, corp2);
     });
@@ -219,7 +217,7 @@ fn give_cash_from_corp_account_validates_roles_balances_and_transfers() {
             IskCents::from_f64_isk(6_000.0)
         );
         assert_eq!(
-            snap.corporations[&other_corp_id].master_wallet,
+            snap.corporations[&other_corp_id].master_wallet_balance(),
             IskCents::from_f64_isk(3_000.0)
         );
     });
@@ -251,13 +249,12 @@ fn journal_and_market_transactions_filter_and_enforce_corp_roles() {
 
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Test Corp".into(),
-                ticker: "TST".into(),
-                ceo_id,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Test Corp".into();
+                __corp.ticker = "TST".into();
+                __corp.ceo_id = ceo_id;
+                __corp },
         );
         snap.append_journal_entry(JournalEntryInput {
             owner_id: ceo_id,
@@ -535,14 +532,11 @@ fn issue_550_wallet_rbac_trader_accountant_and_pending_stasis() {
     let now = ctx.now_unix();
 
     ctx.db.with_mut_snapshot(|snap| {
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "RBAC Ledger".into(),
-            ticker: "RBAC".into(),
-            ceo_id,
-            master_wallet: IskCents::from_isk(100_000),
-            ..Default::default()
-        };
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "RBAC Ledger".into();
+        corp.ticker = "RBAC".into();
+        corp.ceo_id = ceo_id;
         corp.ensure_wallet_divisions();
         corp.set_division_balance(1, IskCents::from_isk(100_000));
         corp.set_division_balance(2, IskCents::from_isk(50_000));

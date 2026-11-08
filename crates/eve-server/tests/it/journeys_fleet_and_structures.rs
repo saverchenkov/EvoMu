@@ -293,7 +293,7 @@ async fn test_journey_sovereignty_fw() {
     let corp_id = created.dict_get("corporationID").and_then(|v| v.as_i64()).expect("corporationID");
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(c) = snap.corporations.get_mut(&corp_id) {
-            c.master_wallet = eve_db::IskCents::from_isk(2_000_000_000);
+            c.set_division_balance(1, eve_db::IskCents::from_isk(2_000_000_000));
             c.set_division_balance(1, eve_db::IskCents::from_isk(2_000_000_000));
         }
     });

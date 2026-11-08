@@ -58,11 +58,10 @@ async fn structure_defense_volley_target_locking_weapon_activation_and_auto_defe
         snap.characters.insert(hostile_id, h_ch);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                ceo_id: gunner_id,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.ceo_id = gunner_id;
+                __corp },
         );
         snap.structures.insert(
             st_id,

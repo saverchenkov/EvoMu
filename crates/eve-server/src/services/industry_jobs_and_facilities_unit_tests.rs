@@ -140,14 +140,13 @@ fn blueprint_facility_and_industry_manager_rpc_end_to_end_branches() {
 
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Ind Corp".into(),
-                ticker: "INDC".into(),
-                ceo_id: char_id,
-                master_wallet: IskCents::from_isk(500_000_000),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Ind Corp".into();
+                __corp.ticker = "INDC".into();
+                __corp.ceo_id = char_id;
+                __corp.set_division_balance(1, IskCents::from_isk(500_000_000));
+                __corp },
         );
         snap.structures.insert(
             struct_id,

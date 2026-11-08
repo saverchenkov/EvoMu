@@ -825,6 +825,7 @@ pub struct NpeProgressRecord {
     pub current_node_id: u32,
     pub completed: bool,
     pub career_goal_progress: HashMap<u32, u64>,
+    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub claimed_goals: HashSet<u32>,
 }
 
@@ -981,7 +982,7 @@ pub struct FleetRecord {
     pub squad_details: HashMap<i64, FleetSquadRecord>,
     #[serde(default)]
     pub member_details: HashMap<i64, FleetMemberRecord>,
-    #[serde(default)]
+    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub invites: HashSet<i64>,
     #[serde(default)]
     pub motd: String,
@@ -1078,7 +1079,9 @@ pub struct CorporationRecord {
     pub ceo_id: i64,
     pub alliance_id: Option<i64>,
     pub tax_rate: f64,
-    pub master_wallet: IskCents,
+    #[serde(default)]
+    pub(crate) master_wallet: IskCents,
+    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub members: HashSet<i64>,
     #[serde(default)]
     pub member_roles: HashMap<i64, u64>,
@@ -1095,6 +1098,31 @@ pub struct CorporationRecord {
 }
 
 impl CorporationRecord {
+    pub fn new(
+        corporation_id: i64,
+        name: impl Into<String>,
+        ticker: impl Into<String>,
+        ceo_id: i64,
+    ) -> Self {
+        Self {
+            corporation_id,
+            name: name.into(),
+            ticker: ticker.into(),
+            ceo_id,
+            wallet_divisions: Self::default_wallet_divisions(IskCents(0)),
+            ..Default::default()
+        }
+    }
+
+    pub fn with_master_wallet(mut self, balance: IskCents) -> Self {
+        self.set_division_balance(1, balance);
+        self
+    }
+
+    pub fn master_wallet_balance(&self) -> IskCents {
+        self.division_balance(1)
+    }
+
     pub fn default_wallet_divisions(master_wallet: IskCents) -> Vec<CorpWalletDivisionRecord> {
         (1..=7)
             .map(|d| CorpWalletDivisionRecord {
@@ -1175,6 +1203,19 @@ impl CorporationRecord {
         self.set_division_balance(division_id, next);
         next
     }
+
+    pub fn debit_division(&mut self, division_id: u8, amount: IskCents) -> Option<IskCents> {
+        if amount.0 < 0 {
+            return None;
+        }
+        let cur = self.division_balance(division_id);
+        let next = cur.checked_sub(amount)?;
+        if next.0 < 0 {
+            return None;
+        }
+        self.set_division_balance(division_id, next);
+        Some(next)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1183,6 +1224,7 @@ pub struct ChatChannelRecord {
     pub name: String,
     pub motd: String,
     pub owner_id: Option<i64>,
+    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub members: HashSet<i64>,
     pub is_system_local: bool,
     pub solar_system_id: Option<SolarSystemId>,
@@ -1244,6 +1286,7 @@ pub struct AllianceRecord {
     pub name: String,
     pub short_name: String,
     pub executor_corp_id: i64,
+    #[serde(default, with = "crate::durable_domain_types::sorted_set_serde")]
     pub member_corp_ids: HashSet<i64>,
 }
 

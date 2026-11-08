@@ -388,7 +388,7 @@ async fn test_journey_corporation() {
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(c) = snap.corporations.get_mut(&corp_id) {
-            c.master_wallet = IskCents::from_isk(2_000_000_000);
+            c.set_division_balance(1, IskCents::from_isk(2_000_000_000));
             c.set_division_balance(1, IskCents::from_isk(2_000_000_000));
         }
     });

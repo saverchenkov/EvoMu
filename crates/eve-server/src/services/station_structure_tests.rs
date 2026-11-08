@@ -38,11 +38,10 @@ async fn station_queries_guests_standing_check_and_undock_dock_cycle() {
         snap.characters.insert(char_id, ch);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                alliance_id: Some(ally_id),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.alliance_id = Some(ally_id);
+                __corp },
         );
         snap.system_states.insert(
             30_000_144,

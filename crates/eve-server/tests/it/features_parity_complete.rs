@@ -2684,16 +2684,15 @@ async fn test_parity_remediation_esi_calendar_rpc_and_http_persistence() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Calendar Corp".into(),
-                ticker: "CALC".into(),
-                ceo_id,
-                tax_rate: 0.05,
-                members: HashSet::from([ceo_id, wingman_id]),
-                member_roles: HashMap::from([(ceo_id, ROLE_DIRECTOR), (wingman_id, 0)]),
-                ..CorporationRecord::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Calendar Corp".into();
+                __corp.ticker = "CALC".into();
+                __corp.ceo_id = ceo_id;
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([ceo_id, wingman_id]);
+                __corp.member_roles = HashMap::from([(ceo_id, ROLE_DIRECTOR), (wingman_id, 0)]);
+                __corp },
         );
     });
 
@@ -2840,17 +2839,16 @@ async fn test_parity_remediation_esi_contacts_labels_and_mail_lists() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Diplo Corp".into(),
-                ticker: "DPLC".into(),
-                ceo_id,
-                alliance_id: Some(alliance_id),
-                tax_rate: 0.05,
-                members: HashSet::from([ceo_id]),
-                member_roles: HashMap::from([(ceo_id, ROLE_DIRECTOR)]),
-                ..CorporationRecord::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Diplo Corp".into();
+                __corp.ticker = "DPLC".into();
+                __corp.ceo_id = ceo_id;
+                __corp.alliance_id = Some(alliance_id);
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([ceo_id]);
+                __corp.member_roles = HashMap::from([(ceo_id, ROLE_DIRECTOR)]);
+                __corp },
         );
         snap.alliances.insert(
             alliance_id,
@@ -3011,17 +3009,16 @@ async fn test_parity_remediation_esi_corp_governance_roles_limit_and_sov_map() {
         snap.skills.entry(ceo_id).or_default().clear();
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Governance Corp".into(),
-                ticker: "GOVC".into(),
-                ceo_id,
-                alliance_id: Some(alliance_id),
-                tax_rate: 0.05,
-                members: HashSet::from([ceo_id, member_id]),
-                member_roles: HashMap::from([(ceo_id, ROLE_DIRECTOR), (member_id, 0)]),
-                ..CorporationRecord::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Governance Corp".into();
+                __corp.ticker = "GOVC".into();
+                __corp.ceo_id = ceo_id;
+                __corp.alliance_id = Some(alliance_id);
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([ceo_id, member_id]);
+                __corp.member_roles = HashMap::from([(ceo_id, ROLE_DIRECTOR), (member_id, 0)]);
+                __corp },
         );
         snap.alliances.insert(
             alliance_id,
@@ -3298,20 +3295,19 @@ async fn test_parity_remediation_esi_corp_blueprints_and_structures_live_rpcs() 
         snap.characters.insert(ceo_id, ch);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Industrial Structure Corp".into(),
-                ticker: "INDS".into(),
-                ceo_id,
-                master_wallet: IskCents::from_isk(100_000_000),
-                tax_rate: 0.05,
-                members: HashSet::from([ceo_id]),
-                member_roles: HashMap::from([(
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Industrial Structure Corp".into();
+                __corp.ticker = "INDS".into();
+                __corp.ceo_id = ceo_id;
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([ceo_id]);
+                __corp.member_roles = HashMap::from([(
                     ceo_id,
                     ROLE_DIRECTOR | ROLE_FACTORY_MANAGER | ROLE_STATION_MANAGER,
-                )]),
-                ..CorporationRecord::default()
-            },
+                )]);
+                __corp.set_division_balance(1, IskCents::from_isk(100_000_000));
+                __corp },
         );
         // Seed corp BPO (Rifter Blueprint = 684) and Astrahus item (35832) + Standup Market Hub I (35892)
         snap.items.insert(
@@ -3550,17 +3546,16 @@ async fn test_parity_remediation_quasar_freelance_projects_and_item_delivery() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Freelance Sponsor Corp".into(),
-                ticker: "FRSC".into(),
-                ceo_id: manager_id,
-                master_wallet: IskCents::from_isk(100_000_000),
-                tax_rate: 0.05,
-                members: HashSet::from([manager_id]),
-                member_roles: HashMap::from([(manager_id, ROLE_DIRECTOR)]),
-                ..CorporationRecord::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Freelance Sponsor Corp".into();
+                __corp.ticker = "FRSC".into();
+                __corp.ceo_id = manager_id;
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([manager_id]);
+                __corp.member_roles = HashMap::from([(manager_id, ROLE_DIRECTOR)]);
+                __corp.set_division_balance(1, IskCents::from_isk(100_000_000));
+                __corp },
         );
         // Seed 500 Tritanium (type_id 34) in contractor's Jita hangar
         snap.items.insert(
@@ -4562,16 +4557,15 @@ async fn test_plan_esi5_corp_structures_timers_and_starbase_detail() {
 
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "ESI-5 Upwell Starbase Corp".into(),
-                ticker: "ES5C".into(),
-                ceo_id,
-                tax_rate: 0.075,
-                members: HashSet::from([ceo_id]),
-                member_roles: HashMap::from([(ceo_id, ROLE_DIRECTOR | ROLE_STATION_MANAGER | ROLE_FACTORY_MANAGER)]),
-                ..CorporationRecord::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "ESI-5 Upwell Starbase Corp".into();
+                __corp.ticker = "ES5C".into();
+                __corp.ceo_id = ceo_id;
+                __corp.tax_rate = 0.075;
+                __corp.members = HashSet::from([ceo_id]);
+                __corp.member_roles = HashMap::from([(ceo_id, ROLE_DIRECTOR | ROLE_STATION_MANAGER | ROLE_FACTORY_MANAGER)]);
+                __corp },
         );
 
         snap.items.insert(astrahus_item_id, make_item(astrahus_item_id, 35832, ceo_id, ship_id, InventoryFlag::Cargo, 1, false));
@@ -4694,15 +4688,14 @@ async fn test_plan_q5_social_and_organization_quasar_packages() {
             ch.corporation_id = corp_id;
             ch.solar_system_id = 30_000_142;
         }
-        snap.corporations.entry(corp_id).or_insert_with(|| CorporationRecord {
-            corporation_id: corp_id,
-            name: "Social Quasar Corp".into(),
-            ticker: "SQC".into(),
-            ceo_id: char_id,
-            members: HashSet::from([char_id]),
-            member_roles: HashMap::from([(char_id, ROLE_DIRECTOR)]),
-            ..CorporationRecord::default()
-        });
+        snap.corporations.entry(corp_id).or_insert_with(|| { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Social Quasar Corp".into();
+            __corp.ticker = "SQC".into();
+            __corp.ceo_id = char_id;
+            __corp.members = HashSet::from([char_id]);
+            __corp.member_roles = HashMap::from([(char_id, ROLE_DIRECTOR)]);
+            __corp });
         snap.alliances.entry(alliance_id).or_insert_with(|| AllianceRecord {
             alliance_id,
             name: "Social Quasar Alliance".into(),

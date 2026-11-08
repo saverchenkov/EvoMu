@@ -679,22 +679,23 @@ async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             player_corp_id,
-            eve_db::CorporationRecord {
-                corporation_id: player_corp_id,
-                name: "Sov Mining Corp".into(),
-                ticker: "SOVMN".into(),
-                ceo_id: char_id,
-                alliance_id: Some(player_alliance_id),
-                tax_rate: 0.05,
-                master_wallet: IskCents::from_isk(100_000_000),
-                wallet_divisions: Vec::new(),
-                description: String::new(),
-                url: String::new(),
-                hq_station_id: Some(60_003_760),
-                members: [char_id].into_iter().collect(),
-                member_roles: [(char_id, u64::MAX)].into_iter().collect(),
-                applications: Default::default(),
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = player_corp_id;
+                __corp.name = "Sov Mining Corp".into();
+                __corp.ticker = "SOVMN".into();
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = Some(player_alliance_id);
+                __corp.tax_rate = 0.05;
+                __corp.description = String::new();
+                __corp.url = String::new();
+                __corp.hq_station_id = Some(60_003_760);
+                __corp.members = [char_id].into_iter().collect();
+                __corp.member_roles = [(char_id, u64::MAX)].into_iter().collect();
+                __corp.applications = Default::default();
+                __corp.wallet_divisions = Vec::new();
+                let __mw = IskCents::from_isk(100_000_000);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         snap.alliances.insert(
             player_alliance_id,

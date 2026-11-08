@@ -104,7 +104,7 @@ async fn test_quasar_corporation_goals_complete() {
     );
     assert_eq!(cg_rsp.status_code, STATUS_OK);
     assert_eq!(
-        ctx.db.with_snapshot(|s| s.corporations[&98000001].master_wallet),
+        ctx.db.with_snapshot(|s| s.corporations[&98000001].master_wallet_balance()),
         eve_db::IskCents::from_isk(9_500_000),
         "CreateRequest with reward_pools must debit corp master_wallet"
     );

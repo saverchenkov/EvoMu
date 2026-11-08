@@ -323,7 +323,7 @@ async fn test_live_industry_facility_tax_and_job_cost_formula() {
         .expect("GetFacilityTaxes Raitaru");
     assert!((real(&raitaru_tax, "1") - 0.04).abs() < 1e-6);
 
-    let corp_bal_before = ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet.raw_cents());
+    let corp_bal_before = ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet_balance().raw_cents());
     let pilot_bal_before = ctx.db.with_snapshot(|s| s.characters[&PILOT_1].balance.raw_cents());
 
     let job_1 = install(&ctx, &mut s1, st_bpo, raitaru_id, 1, 5, &[])
@@ -334,7 +334,7 @@ async fn test_live_industry_facility_tax_and_job_cost_formula() {
     let sci_1 = real(&job_1, "systemCostIndex");
     assert!((st_tax_isk - ((st_eiv * 0.04 * 100.0).round() / 100.0)).abs() < 0.05);
 
-    let corp_bal_after = ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet.raw_cents());
+    let corp_bal_after = ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet_balance().raw_cents());
     let pilot_bal_after = ctx.db.with_snapshot(|s| s.characters[&PILOT_1].balance.raw_cents());
     let tax_cents = (st_tax_isk * 100.0).round() as i64;
     let total_cents = (real(&job_1, "totalJobCostISK") * 100.0).round() as i64;

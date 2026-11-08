@@ -375,28 +375,22 @@ fn test_contract_item_flags_asset_safety_alsc_and_corp_rbac_security() {
     let auc_item_id = 820_009_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
-        let mut corp = eve_db::CorporationRecord {
-            corporation_id: corp_id,
-            name: "Security Test Corp".into(),
-            ticker: "SEC".into(),
-            ceo_id: other_ceo,
-            master_wallet: IskCents::from_isk(50_000_000),
-            members: [other_ceo, issuer_id].into_iter().collect(),
-            ..Default::default()
-        };
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Security Test Corp".into();
+        corp.ticker = "SEC".into();
+        corp.ceo_id = other_ceo;
+        corp.members = [other_ceo, issuer_id].into_iter().collect();
         corp.ensure_wallet_divisions();
         corp.set_division_balance(1, IskCents::from_isk(50_000_000));
         snap.corporations.insert(corp_id, corp);
 
-        let mut buyer_corp = eve_db::CorporationRecord {
-            corporation_id: buyer_corp_id,
-            name: "Buyer Corp".into(),
-            ticker: "BUY".into(),
-            ceo_id: other_ceo,
-            master_wallet: IskCents::from_isk(50_000_000),
-            members: [other_ceo, acceptor_id].into_iter().collect(),
-            ..Default::default()
-        };
+        let mut buyer_corp = eve_db::CorporationRecord::default();
+        buyer_corp.corporation_id = buyer_corp_id;
+        buyer_corp.name = "Buyer Corp".into();
+        buyer_corp.ticker = "BUY".into();
+        buyer_corp.ceo_id = other_ceo;
+        buyer_corp.members = [other_ceo, acceptor_id].into_iter().collect();
         buyer_corp.ensure_wallet_divisions();
         buyer_corp.set_division_balance(1, IskCents::from_isk(50_000_000));
         snap.corporations.insert(buyer_corp_id, buyer_corp);

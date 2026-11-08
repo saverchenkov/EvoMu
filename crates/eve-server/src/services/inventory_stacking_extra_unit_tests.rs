@@ -314,16 +314,15 @@ async fn multi_add_capacity_rig_locked_courier_corp_role_and_in_space_unfit_guar
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Test Corp".into(),
-                ticker: "TSTC".into(),
-                ceo_id: char_id + 99,
-                members: HashSet::from([char_id]),
-                member_roles: HashMap::from([(char_id, 0)]),
-                master_wallet: IskCents::ZERO,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Test Corp".into();
+                __corp.ticker = "TSTC".into();
+                __corp.ceo_id = char_id + 99;
+                __corp.members = HashSet::from([char_id]);
+                __corp.member_roles = HashMap::from([(char_id, 0)]);
+                __corp.set_division_balance(1, IskCents::ZERO);
+                __corp },
         );
     });
     assert_eq!(
@@ -429,16 +428,15 @@ async fn list_ownership_corp_roles_range_and_loot_abandonment_rules() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "List Corp".into(),
-                ticker: "LSTC".into(),
-                ceo_id: corp_mate_id,
-                members: HashSet::from([char_id, corp_mate_id]),
-                member_roles: HashMap::from([(char_id, 0)]),
-                master_wallet: IskCents::ZERO,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "List Corp".into();
+                __corp.ticker = "LSTC".into();
+                __corp.ceo_id = corp_mate_id;
+                __corp.members = HashSet::from([char_id, corp_mate_id]);
+                __corp.member_roles = HashMap::from([(char_id, 0)]);
+                __corp.set_division_balance(1, IskCents::ZERO);
+                __corp },
         );
     });
     assert_eq!(

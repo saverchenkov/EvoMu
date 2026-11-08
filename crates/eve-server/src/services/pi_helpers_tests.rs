@@ -205,15 +205,14 @@ fn test_orbital_access_tax_upgrade_cc_and_expedited_transfer() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             owner_corp,
-            CorporationRecord {
-                corporation_id: owner_corp,
-                name: "POCO Corp".into(),
-                ticker: "POCO".into(),
-                ceo_id: 90_000_099,
-                alliance_id: Some(99_000_001),
-                tax_rate: 0.05,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = owner_corp;
+                __corp.name = "POCO Corp".into();
+                __corp.ticker = "POCO".into();
+                __corp.ceo_id = 90_000_099;
+                __corp.alliance_id = Some(99_000_001);
+                __corp.tax_rate = 0.05;
+                __corp },
         );
         let cfg = OrbitalCustomsSettings {
             planet_id,

@@ -199,14 +199,13 @@ fn biomass_delete_contracts_orders_jobs_colonies_and_corp_asset_rules_kill_mutat
 
         snap.corporations.insert(
             player_corp,
-            CorporationRecord {
-                corporation_id: player_corp,
-                name: "InheritCorp".into(),
-                ceo_id: cid,
-                hq_station_id: Some(office_st_1),
-                members: HashSet::from([cid, sac1, sac2]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = player_corp;
+                __corp.name = "InheritCorp".into();
+                __corp.ceo_id = cid;
+                __corp.hq_station_id = Some(office_st_1);
+                __corp.members = HashSet::from([cid, sac1, sac2]);
+                __corp },
         );
         for (iid, st) in [(920_001, office_st_1), (920_002, office_st_2)] {
             snap.items.insert(iid, InventoryItemRecord { item_id: iid, type_id: 27, owner_id: player_corp, location_id: st, flag: InventoryFlag::Hangar, quantity: 1, singleton: true, ..Default::default() });
@@ -326,7 +325,10 @@ fn char_mgr_home_station_scoped_roles_public_info_and_cohorts_kill_mutations() {
             c2.war_faction_id = Some(500_001);
             c2.standings.insert(500_001, 4.5);
         }
-        snap.corporations.insert(corp_id, CorporationRecord { corporation_id: corp_id, ceo_id: 0, ..Default::default() });
+        snap.corporations.insert(corp_id, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.ceo_id = 0;
+            __corp });
         snap.corp_role_assignments.insert((corp_id, cid), CorpMemberRoleAssignment { character_id: cid, roles: corp_roles::ROLE_PERSONNEL_MANAGER, ..Default::default() });
         snap.char_scoped_roles.insert(other_cid, CharacterScopedRolesRecord { roles: all_role_names, ..Default::default() });
         snap.employment_history.insert(other_cid, vec![(corp_id, 1_650_000_000, None)]);

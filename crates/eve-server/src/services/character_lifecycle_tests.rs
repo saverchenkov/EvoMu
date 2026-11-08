@@ -109,13 +109,12 @@ fn char_unbound_mgr_prepare_cancel_delete_bloodline_and_gender() {
         members.insert(sac_cid);
         snap.corporations.insert(
             player_corp,
-            CorporationRecord {
-                corporation_id: player_corp,
-                name: "TestPlayerCorp".into(),
-                ceo_id: sac_cid, // initially CEO to test CannotDeleteCorpCEO
-                members,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = player_corp;
+                __corp.name = "TestPlayerCorp".into();
+                __corp.ceo_id = sac_cid;
+                __corp.members = members;
+                __corp },
         );
         // Corp office at station_id (type 27)
         snap.items.insert(
@@ -364,10 +363,9 @@ fn char_mgr_queries_roles_kills_activity_and_cohorts() {
         }
         snap.corporations
             .entry(corp_id)
-            .or_insert_with(|| CorporationRecord {
-                corporation_id: corp_id,
-                ..Default::default()
-            })
+            .or_insert_with(|| { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp })
             .member_roles
             .insert(cid, corp_roles::ROLE_DIRECTOR);
         snap.killmails.insert(

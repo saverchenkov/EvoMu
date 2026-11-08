@@ -253,7 +253,16 @@ password_token = "cadet_secret_token"
         snap.standing_transactions.insert(c1_id, vec![StandingTransactionRecord { event_id: 1, from_id: 1_000_035, to_id: c1_id, modification: 0.5, event_type_id: 33 }]);
         snap.mails.push(MailRecord { message_id: 930_101, sender_id: c1_id, recipient_id: c2_id, subject: "Action Plan Parity".to_string(), body: "Testing durable world restart".to_string() });
         snap.fleets.insert(940_101, FleetRecord { fleet_id: 940_101, boss_id: c1_id, members: vec![c1_id], wings: vec![], squads: vec![], free_move: true, is_registered: true, ..Default::default() });
-        snap.corporations.insert(950_101, CorporationRecord { corporation_id: 950_101, name: "Parity Corps Ltd".to_string(), ticker: "PCL".to_string(), ceo_id: c1_id, alliance_id: None, tax_rate: 0.03, master_wallet: IskCents::from_isk(2_000_000), members: HashSet::from([c1_id]), ..Default::default() });
+        snap.corporations.insert(950_101, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = 950_101;
+            __corp.name = "Parity Corps Ltd".to_string();
+            __corp.ticker = "PCL".to_string();
+            __corp.ceo_id = c1_id;
+            __corp.alliance_id = None;
+            __corp.tax_rate = 0.03;
+            __corp.members = HashSet::from([c1_id]);
+            __corp.set_division_balance(1, IskCents::from_isk(2_000_000));
+            __corp });
         snap.bookmarks.insert(960_101, BookmarkRecord { bookmark_id: 960_101, owner_id: c1_id, label: "Safe Spot Perimeter".to_string(), solar_system_id: PERIMETER_SOLAR_SYSTEM_ID, x: 1000.0, y: 2000.0, z: 3000.0, item_id: None, memo: String::new(), folder_id: None, is_shared: false });
         snap.structures.insert(970_101, UpwellStructureRecord { structure_id: 970_101, type_id: 35832, owner_corp_id: 950_101, solar_system_id: PERIMETER_SOLAR_SYSTEM_ID, name: "Perimeter - Astrahus Hub".to_string(), position: [5000.0, 6000.0, 7000.0], state: "ShieldVulnerable".to_string(), quantum_core_installed: true, fuel_blocks: 1000, shield_hp: 1.0, armor_hp: 1.0, hull_hp: 1.0, reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None });
     });

@@ -270,7 +270,7 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
         let c = snap.corporations.get_mut(&rival_corp_id).unwrap();
         c.ensure_wallet_divisions();
         c.wallet_divisions[0].balance = eve_db::IskCents::from_isk(200_000_000);
-        c.master_wallet = c.wallet_divisions[0].balance;
+        c.ensure_wallet_divisions();
     });
     ctx.dispatch_rpc(
         &mut sess2,

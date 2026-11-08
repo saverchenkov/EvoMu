@@ -726,22 +726,23 @@ async fn test_ch4_character_sheet_biography_and_notes() {
         );
         snap.corporations.insert(
             1_000_170,
-            eve_db::CorporationRecord {
-                corporation_id: 1_000_170,
-                name: "Republic University".into(),
-                ticker: "RU".into(),
-                ceo_id: char_id,
-                alliance_id: None,
-                tax_rate: 0.11,
-                master_wallet: IskCents(0),
-                members: std::collections::HashSet::from([char_id]),
-                member_roles: HashMap::from([(char_id, u64::MAX)]),
-                applications: HashMap::new(),
-                wallet_divisions: Vec::new(),
-                description: String::new(),
-                url: String::new(),
-                hq_station_id: Some(60_003_760),
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = 1_000_170;
+                __corp.name = "Republic University".into();
+                __corp.ticker = "RU".into();
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = None;
+                __corp.tax_rate = 0.11;
+                __corp.members = std::collections::HashSet::from([char_id]);
+                __corp.member_roles = HashMap::from([(char_id, u64::MAX)]);
+                __corp.applications = HashMap::new();
+                __corp.description = String::new();
+                __corp.url = String::new();
+                __corp.hq_station_id = Some(60_003_760);
+                __corp.wallet_divisions = Vec::new();
+                let __mw = IskCents(0);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
     });
     let medal_res = ctx

@@ -215,26 +215,24 @@ async fn r8b_481_521_global_mute_persistence_and_chat_channel_acl_security() {
         s.characters.get_mut(&c2).unwrap().solar_system_id = 30_002_187;
         s.corporations.insert(
             corp1,
-            CorporationRecord {
-                corporation_id: corp1,
-                name: "R8B Corp One".into(),
-                ticker: "R8B1".into(),
-                ceo_id: c1,
-                members: HashSet::from([c1]),
-                member_roles: HashMap::from([(c1, eve_db::corp_roles::ROLE_DIRECTOR)]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp1;
+                __corp.name = "R8B Corp One".into();
+                __corp.ticker = "R8B1".into();
+                __corp.ceo_id = c1;
+                __corp.members = HashSet::from([c1]);
+                __corp.member_roles = HashMap::from([(c1, eve_db::corp_roles::ROLE_DIRECTOR)]);
+                __corp },
         );
         s.corporations.insert(
             corp2,
-            CorporationRecord {
-                corporation_id: corp2,
-                name: "R8B Corp Two".into(),
-                ticker: "R8B2".into(),
-                ceo_id: c2,
-                members: HashSet::from([c2]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp2;
+                __corp.name = "R8B Corp Two".into();
+                __corp.ticker = "R8B2".into();
+                __corp.ceo_id = c2;
+                __corp.members = HashSet::from([c2]);
+                __corp },
         );
     });
 

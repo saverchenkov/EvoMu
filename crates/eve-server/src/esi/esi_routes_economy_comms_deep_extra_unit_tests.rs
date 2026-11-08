@@ -39,13 +39,12 @@ fn build_ctx() -> Arc<ServerContext> {
                 snap.characters.insert(90_000_002, alt2);
             }
             let corp = snap.corporations.entry(corp_id).or_insert_with(|| {
-                eve_db::CorporationRecord {
-                    corporation_id: corp_id,
-                    name: "Demo Corp".into(),
-                    ticker: "DEMO".into(),
-                    ceo_id: 90_000_001,
-                    ..Default::default()
-                }
+                { let mut __corp = eve_db::CorporationRecord::default();
+                    __corp.corporation_id = corp_id;
+                    __corp.name = "Demo Corp".into();
+                    __corp.ticker = "DEMO".into();
+                    __corp.ceo_id = 90_000_001;
+                    __corp }
             });
             corp.ceo_id = 90_000_001;
             corp.alliance_id = Some(99_000_001);

@@ -453,14 +453,13 @@ async fn test_structure_auto_defense_retaliation_and_highsec_concord_rules() {
             ch.name = name.into();
             snap.characters.insert(cid, ch);
         }
-        snap.corporations.insert(enemy_war_corp, eve_db::CorporationRecord {
-            corporation_id: enemy_war_corp,
-            name: "Hostile War Corp".into(),
-            ticker: "WARZ".into(),
-            ceo_id: war_char,
-            members: std::collections::HashSet::from([war_char]),
-            ..Default::default()
-        });
+        snap.corporations.insert(enemy_war_corp, { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = enemy_war_corp;
+            __corp.name = "Hostile War Corp".into();
+            __corp.ticker = "WARZ".into();
+            __corp.ceo_id = war_char;
+            __corp.members = std::collections::HashSet::from([war_char]);
+            __corp });
         snap.wars.insert(9001, eve_db::WarRecord {
             war_id: 9001,
             aggressor_corp_id: enemy_war_corp,

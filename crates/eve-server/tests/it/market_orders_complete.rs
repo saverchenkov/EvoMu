@@ -420,14 +420,13 @@ async fn test_tick_size_relist_fee_broker_minimum_scc_surcharge_and_durations() 
         let cid = snap.characters[&90_000_001].corporation_id;
         snap.corporations.insert(
             cid,
-            CorporationRecord {
-                corporation_id: cid,
-                name: "Citadel Market Corp".into(),
-                ticker: "CMKT".into(),
-                ceo_id: 90_000_001,
-                master_wallet: IskCents(0),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = cid;
+                __corp.name = "Citadel Market Corp".into();
+                __corp.ticker = "CMKT".into();
+                __corp.ceo_id = 90_000_001;
+                __corp.set_division_balance(1, IskCents(0));
+                __corp },
         );
         snap.structures.insert(
             struct_id,
@@ -511,7 +510,7 @@ async fn test_tick_size_relist_fee_broker_minimum_scc_surcharge_and_durations() 
     };
     assert_eq!(zo_kv.get("brokerFeeISK"), Some(&PyRep::Real(500.0))); // 0.5% SCC surcharge on 100,000 ISK
     assert_eq!(
-        ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet),
+        ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet_balance()),
         IskCents(0),
         "Owner gets 0 ISK when owner rate is 0%"
     );
@@ -553,7 +552,7 @@ async fn test_tick_size_relist_fee_broker_minimum_scc_surcharge_and_durations() 
     };
     assert_eq!(op_kv.get("brokerFeeISK"), Some(&PyRep::Real(1_500.0)));
     assert_eq!(
-        ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet),
+        ctx.db.with_snapshot(|s| s.corporations[&corp_id].master_wallet_balance()),
         IskCents::from_isk(1_000),
         "Owner receives 1.0% (1,000 ISK) while 0.5% (500 ISK) goes to SCC"
     );
@@ -742,14 +741,13 @@ async fn test_ranged_buy_orders_corp_divisions_multisell_multibuy_expiry_and_his
     // 2. Corporate Buy & Sell Orders (`feat:market.corp-order-wallet-hangar-divisions`)
     let (corp_id, corp_sell_item_id, s2_fill_item_id) = ctx.db.with_mut_snapshot(|snap| {
         let cid = snap.characters[&90_000_001].corporation_id;
-        let mut corp = CorporationRecord {
-            corporation_id: cid,
-            name: "Division Traders Inc".into(),
-            ticker: "DIVT".into(),
-            ceo_id: 90_000_001,
-            master_wallet: IskCents::from_isk(10_000_000),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = cid;
+            __corp.name = "Division Traders Inc".into();
+            __corp.ticker = "DIVT".into();
+            __corp.ceo_id = 90_000_001;
+            __corp.set_division_balance(1, IskCents::from_isk(10_000_000));
+            __corp };
         corp.ensure_wallet_divisions();
         for d in &mut corp.wallet_divisions {
             d.balance = IskCents::from_isk(1_000_000);

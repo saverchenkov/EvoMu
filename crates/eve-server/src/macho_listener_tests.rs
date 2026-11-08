@@ -447,22 +447,15 @@ async fn select_character_restores_ceo_corprole_and_scoped_roles_over_machonet()
         if let Some(ch) = snap.characters.get_mut(&ceo_id) {
             ch.corporation_id = corp_id;
         }
-        let mut corp = eve_db::CorporationRecord {
-            corporation_id: corp_id,
-            name: "Playtest Corp".into(),
-            ticker: "PLAY".into(),
-            ceo_id,
-            alliance_id: None,
-            tax_rate: 0.05,
-            master_wallet: eve_db::IskCents(0),
-            members: std::collections::HashSet::from([ceo_id]),
-            member_roles: HashMap::from([(ceo_id, u64::MAX)]),
-            applications: HashMap::new(),
-            wallet_divisions: vec![],
-            description: String::new(),
-            url: String::new(),
-            hq_station_id: Some(60_003_760),
-        };
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Playtest Corp".into();
+        corp.ticker = "PLAY".into();
+        corp.ceo_id = ceo_id;
+        corp.tax_rate = 0.05;
+        corp.members = std::collections::HashSet::from([ceo_id]);
+        corp.member_roles = HashMap::from([(ceo_id, u64::MAX)]);
+        corp.hq_station_id = Some(60_003_760);
         corp.members.insert(ceo_id);
         snap.corporations.insert(corp_id, corp);
     });

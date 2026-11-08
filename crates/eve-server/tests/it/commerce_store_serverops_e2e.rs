@@ -274,22 +274,23 @@ async fn payment_purchase_schedules_tokens_and_fast_checkout() {
     };
     let metenox_id = 1_000_750_001i64;
     ctx.db.with_mut_snapshot(|snap| {
-        let corp = snap.corporations.entry(98_000_001).or_insert_with(|| eve_db::CorporationRecord {
-            corporation_id: 98_000_001,
-            name: "Payment Test Corp".into(),
-            ticker: "PAYC".into(),
-            ceo_id: cid,
-            alliance_id: None,
-            tax_rate: 0.1,
-            master_wallet: IskCents::from_isk(100_000_000),
-            members: [cid].into_iter().collect(),
-            member_roles: HashMap::new(),
-            applications: HashMap::new(),
-            wallet_divisions: eve_db::CorporationRecord::default_wallet_divisions(IskCents::from_isk(100_000_000)),
-            description: String::new(),
-            url: String::new(),
-            hq_station_id: Some(JITA_STATION),
-        });
+        let corp = snap.corporations.entry(98_000_001).or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = 98_000_001;
+            __corp.name = "Payment Test Corp".into();
+            __corp.ticker = "PAYC".into();
+            __corp.ceo_id = cid;
+            __corp.alliance_id = None;
+            __corp.tax_rate = 0.1;
+            __corp.members = [cid].into_iter().collect();
+            __corp.member_roles = HashMap::new();
+            __corp.applications = HashMap::new();
+            __corp.description = String::new();
+            __corp.url = String::new();
+            __corp.hq_station_id = Some(JITA_STATION);
+            __corp.wallet_divisions = eve_db::CorporationRecord::default_wallet_divisions(IskCents::from_isk(100_000_000));
+            let __mw = IskCents::from_isk(100_000_000);
+            if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+            __corp });
         corp.ceo_id = cid;
         corp.members.insert(cid);
         corp.member_roles
@@ -382,15 +383,14 @@ async fn freelance_project_delete_and_hypernet_relay_lifecycle() {
     seed_pilot(&ctx.db, dir_cid, 6421, "CorpDirector", corp_id, 50_000_000_00, 500);
     seed_pilot(&ctx.db, member_cid, 6422, "CorpMember", corp_id, 50_000_000_00, 500);
     ctx.db.with_mut_snapshot(|snap| {
-        let mut corp = eve_db::CorporationRecord {
-            corporation_id: corp_id,
-            name: "Commerce Ops Corp".into(),
-            ticker: "COC".into(),
-            ceo_id: dir_cid,
-            members: std::collections::HashSet::from([dir_cid, member_cid]),
-            member_roles: HashMap::from([(dir_cid, corp_roles::ROLE_DIRECTOR), (member_cid, 0)]),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Commerce Ops Corp".into();
+            __corp.ticker = "COC".into();
+            __corp.ceo_id = dir_cid;
+            __corp.members = std::collections::HashSet::from([dir_cid, member_cid]);
+            __corp.member_roles = HashMap::from([(dir_cid, corp_roles::ROLE_DIRECTOR), (member_cid, 0)]);
+            __corp };
         corp.ensure_wallet_divisions();
         snap.corporations.insert(corp_id, corp);
     });

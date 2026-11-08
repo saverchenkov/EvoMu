@@ -88,17 +88,16 @@ fn seed_pilot_and_structure(
     is_ceo: bool,
 ) {
     ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.entry(corp_id).or_insert_with(|| CorporationRecord {
-            corporation_id: corp_id,
-            name: format!("Corp {corp_id}"),
-            ticker: "CTL".into(),
-            ceo_id: if is_ceo { char_id } else { char_id + 500 },
-            hq_station_id: Some(60003760),
-            tax_rate: 0.0,
-            master_wallet: IskCents(0),
-            members: std::collections::HashSet::from([char_id]),
-            ..Default::default()
-        });
+        snap.corporations.entry(corp_id).or_insert_with(|| { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = format!("Corp {corp_id}");
+            __corp.ticker = "CTL".into();
+            __corp.ceo_id = if is_ceo { char_id } else { char_id + 500 };
+            __corp.hq_station_id = Some(60003760);
+            __corp.tax_rate = 0.0;
+            __corp.members = std::collections::HashSet::from([char_id]);
+            __corp.set_division_balance(1, IskCents(0));
+            __corp });
         let mut ch = snap.characters.values().next().cloned().expect("demo char");
         ch.character_id = char_id;
         ch.name = format!("Pilot {char_id}");

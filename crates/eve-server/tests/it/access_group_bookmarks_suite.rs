@@ -46,11 +46,14 @@ fn create_test_context() -> ServerContext {
         let members = [PILOT1, PILOT2].into_iter().collect();
         snap.corporations.insert(
             CORP_ID,
-            eve_db::CorporationRecord {
-                corporation_id: CORP_ID, name: "Alliance Command".into(),
-                ticker: "ACMD".into(), ceo_id: PILOT1,
-                members, member_roles, ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = CORP_ID;
+                __corp.name = "Alliance Command".into();
+                __corp.ticker = "ACMD".into();
+                __corp.ceo_id = PILOT1;
+                __corp.members = members;
+                __corp.member_roles = member_roles;
+                __corp },
         );
     });
 
@@ -676,29 +679,25 @@ async fn it_ex_director_loses_acl_and_shared_bookmark_folder_admin_after_demotio
 
     ctx.db.with_mut_snapshot(|snap| {
         for cid in [corp_a, corp_b] {
-            snap.corporations.insert(
-                cid,
-                eve_db::CorporationRecord {
-                    corporation_id: cid,
-                    ceo_id: if cid == corp_a { new_ceo_id } else { creator_id },
-                    members: if cid == corp_a {
-                        [creator_id, new_ceo_id].into_iter().collect()
-                    } else {
-                        [creator_id].into_iter().collect()
-                    },
-                    member_roles: if cid == corp_a {
-                        [
-                            (creator_id, eve_db::corp_roles::ROLE_DIRECTOR),
-                            (new_ceo_id, eve_db::corp_roles::ROLE_DIRECTOR),
-                        ]
-                        .into_iter()
-                        .collect()
-                    } else {
-                        HashMap::new()
-                    },
-                    ..Default::default()
-                },
-            );
+            let mut corp = eve_db::CorporationRecord::default();
+            corp.corporation_id = cid;
+            corp.ceo_id = if cid == corp_a { new_ceo_id } else { creator_id };
+            corp.members = if cid == corp_a {
+                [creator_id, new_ceo_id].into_iter().collect()
+            } else {
+                [creator_id].into_iter().collect()
+            };
+            corp.member_roles = if cid == corp_a {
+                [
+                    (creator_id, eve_db::corp_roles::ROLE_DIRECTOR),
+                    (new_ceo_id, eve_db::corp_roles::ROLE_DIRECTOR),
+                ]
+                .into_iter()
+                .collect()
+            } else {
+                HashMap::new()
+            };
+            snap.corporations.insert(cid, corp);
         }
         let template = snap.characters[&PILOT1].clone();
         let mut ch_creator = template.clone();

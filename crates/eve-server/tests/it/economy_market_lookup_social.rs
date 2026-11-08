@@ -270,23 +270,21 @@ async fn test_people_and_places_search_query_and_quick_query() {
         }
         snap.corporations.insert(
             98_000_001,
-            CorporationRecord {
-                corporation_id: 98_000_001,
-                name: "Vanguard Logistics".into(),
-                ticker: "VGLG".into(),
-                ceo_id: 90_000_001,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = 98_000_001;
+                __corp.name = "Vanguard Logistics".into();
+                __corp.ticker = "VGLG".into();
+                __corp.ceo_id = 90_000_001;
+                __corp },
         );
         snap.corporations.insert(
             98_000_222,
-            CorporationRecord {
-                corporation_id: 98_000_222,
-                name: "Starlight Cartography".into(),
-                ticker: "SLCT".into(),
-                ceo_id: 90_000_002,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = 98_000_222;
+                __corp.name = "Starlight Cartography".into();
+                __corp.ticker = "SLCT".into();
+                __corp.ceo_id = 90_000_002;
+                __corp },
         );
         snap.alliances.insert(
             99_000_222,

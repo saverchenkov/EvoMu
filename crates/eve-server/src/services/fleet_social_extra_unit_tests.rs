@@ -132,14 +132,13 @@ async fn office_manager_fulcrum_upwell_capacity_roles_and_wallet_branches_kill_m
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "OfficeTestCorp".into(),
-                ticker: "OFFC".into(),
-                ceo_id: other_char,
-                master_wallet: IskCents::from_isk(500),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "OfficeTestCorp".into();
+                __corp.ticker = "OFFC".into();
+                __corp.ceo_id = other_char;
+                __corp.set_division_balance(1, IskCents::from_isk(500));
+                __corp },
         );
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.corporation_id = corp_id;
@@ -182,7 +181,7 @@ async fn office_manager_fulcrum_upwell_capacity_roles_and_wallet_branches_kill_m
     assert_eq!(call_office(&ctx, &mut sess, "RentOffice", &[PyRep::Integer(struct_id)]).await.unwrap().unwrap_err().code, "NotEnoughISK");
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.get_mut(&corp_id).unwrap().master_wallet = IskCents::from_isk(100_000);
+        snap.corporations.get_mut(&corp_id).unwrap().set_division_balance(1, IskCents::from_isk(100_000));
     });
     let rent_struct = call_office(&ctx, &mut sess, "RentOffice", &[PyRep::Integer(struct_id)]).await.unwrap().unwrap();
     assert_eq!(rent_struct.dict_get("stationID"), Some(&PyRep::Integer(struct_id)));

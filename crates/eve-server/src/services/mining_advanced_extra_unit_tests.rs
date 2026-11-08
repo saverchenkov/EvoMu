@@ -164,14 +164,13 @@ async fn start_cancel_and_fracture_extraction_error_and_rig_bonus_branches() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Refinery Corp".into(),
-                ticker: "REFI".into(),
-                ceo_id: char_id,
-                tax_rate: 0.05,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Refinery Corp".into();
+                __corp.ticker = "REFI".into();
+                __corp.ceo_id = char_id;
+                __corp.tax_rate = 0.05;
+                __corp },
         );
         snap.structures.insert(
             struct_id,
@@ -450,14 +449,13 @@ async fn metenox_auto_moon_mining_statuses_and_production_tick() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Metenox Corp".into(),
-                ticker: "MTNX".into(),
-                ceo_id: char_id,
-                tax_rate: 0.05,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Metenox Corp".into();
+                __corp.ticker = "MTNX".into();
+                __corp.ceo_id = char_id;
+                __corp.tax_rate = 0.05;
+                __corp },
         );
         snap.structures.insert(
             metenox_id,

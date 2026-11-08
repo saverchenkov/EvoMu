@@ -82,7 +82,7 @@ fn set_corp_balance(ctx: &ServerContext, corp_id: i64, isk: f64) {
             for d in &mut corp.wallet_divisions {
                 d.balance = IskCents::from_f64_isk(isk);
             }
-            corp.master_wallet = IskCents::from_f64_isk(isk);
+            corp.set_division_balance(1, IskCents::from_f64_isk(isk));
         }
     });
 }

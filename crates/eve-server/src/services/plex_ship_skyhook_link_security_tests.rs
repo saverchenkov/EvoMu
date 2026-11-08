@@ -46,14 +46,13 @@ async fn deposit_plex_and_assemble_ship_enforce_locks_escrow_safety_location_and
         snap.characters.insert(char_id, ch);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Guard Corp".into(),
-                ticker: "GRDC".into(),
-                ceo_id,
-                tax_rate: 0.05,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Guard Corp".into();
+                __corp.ticker = "GRDC".into();
+                __corp.ceo_id = ceo_id;
+                __corp.tax_rate = 0.05;
+                __corp },
         );
         let mk_item =
             |id: i64, tid: u32, owner: i64, loc: i64, flag: InventoryFlag, qty: i32| {

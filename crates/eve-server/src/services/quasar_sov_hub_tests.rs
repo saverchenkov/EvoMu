@@ -99,11 +99,10 @@ fn sov_hub_resources_fuel_and_upgrade_rpc_handlers() {
         }
         snap.corporations.insert(
             corp_id,
-            eve_db::CorporationRecord {
-                corporation_id: corp_id,
-                ceo_id: cid,
-                ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.ceo_id = cid;
+                __corp },
         );
         snap.structures.insert(
             hub_id,

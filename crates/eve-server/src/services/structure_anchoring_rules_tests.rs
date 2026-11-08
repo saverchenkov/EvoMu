@@ -210,11 +210,10 @@ fn flex_sovereignty_corp_age_adm_and_pochven_customs_standing() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                alliance_id: Some(ally_id),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.alliance_id = Some(ally_id);
+                __corp },
         );
         // Young corporation (< 7 days) rejected
         snap.corp_governance.insert(

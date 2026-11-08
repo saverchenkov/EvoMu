@@ -73,7 +73,7 @@ fn set_corp_balance(ctx: &ServerContext, corp_id: i64, isk: f64) {
         if let Some(corp) = snap.corporations.get_mut(&corp_id) {
             corp.ensure_wallet_divisions();
             corp.wallet_divisions[0].balance = IskCents::from_f64_isk(isk);
-            corp.master_wallet = IskCents::from_f64_isk(isk);
+            corp.set_division_balance(1, IskCents::from_f64_isk(isk));
         }
     });
 }

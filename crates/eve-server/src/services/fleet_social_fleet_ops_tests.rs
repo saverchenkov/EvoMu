@@ -112,16 +112,15 @@ pub(crate) async fn seed_multi_member_fleet(ctx: &ServerContext) -> (i64, Sessio
         }
         snap.corporations.insert(
             98_000_001,
-            CorporationRecord {
-                corporation_id: 98_000_001,
-                name: "Test Corp".into(),
-                ticker: "TSTC".into(),
-                ceo_id: 90_000_001,
-                tax_rate: 0.05,
-                master_wallet: IskCents::from_isk(100_000_000),
-                members: chars.iter().map(|c| c.0).collect(),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = 98_000_001;
+                __corp.name = "Test Corp".into();
+                __corp.ticker = "TSTC".into();
+                __corp.ceo_id = 90_000_001;
+                __corp.tax_rate = 0.05;
+                __corp.members = chars.iter().map(|c| c.0).collect();
+                __corp.set_division_balance(1, IskCents::from_isk(100_000_000));
+                __corp },
         );
         let mut details = HashMap::new();
         details.insert(

@@ -401,22 +401,23 @@ fn config_corp_ticker_names_includes_governance_logo_fields() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            eve_db::CorporationRecord {
-                corporation_id: corp_id,
-                name: "Logo Corp".into(),
-                ticker: "LOGO".into(),
-                ceo_id: 90_000_001,
-                alliance_id: None,
-                tax_rate: 0.05,
-                master_wallet: eve_db::IskCents(0),
-                wallet_divisions: vec![],
-                description: String::new(),
-                url: String::new(),
-                hq_station_id: None,
-                members: HashSet::new(),
-                member_roles: HashMap::new(),
-                applications: HashMap::new(),
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Logo Corp".into();
+                __corp.ticker = "LOGO".into();
+                __corp.ceo_id = 90_000_001;
+                __corp.alliance_id = None;
+                __corp.tax_rate = 0.05;
+                __corp.description = String::new();
+                __corp.url = String::new();
+                __corp.hq_station_id = None;
+                __corp.members = HashSet::new();
+                __corp.member_roles = HashMap::new();
+                __corp.applications = HashMap::new();
+                __corp.wallet_divisions = vec![];
+                let __mw = eve_db::IskCents(0);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         let gov = snap.corp_governance.entry(corp_id).or_default();
         gov.logo = (415, 416, 417, 671);

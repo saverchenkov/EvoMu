@@ -25,16 +25,15 @@ fn build_projects_world(now_unix: u64) -> (ServerContext, SessionState, i64, i64
             ch.corporation_id = corp_id;
             ch.balance = IskCents::from_isk(10_000_000);
         }
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "Project Coverage Corp".into(),
-            ticker: "PCVC".into(),
-            ceo_id,
-            master_wallet: IskCents::from_isk(200_000_000),
-            members: [ceo_id].into_iter().collect(),
-            member_roles: [(ceo_id, corp_roles::ROLE_DIRECTOR)].into_iter().collect(),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Project Coverage Corp".into();
+            __corp.ticker = "PCVC".into();
+            __corp.ceo_id = ceo_id;
+            __corp.members = [ceo_id].into_iter().collect();
+            __corp.member_roles = [(ceo_id, corp_roles::ROLE_DIRECTOR)].into_iter().collect();
+            __corp.set_division_balance(1, IskCents::from_isk(200_000_000));
+            __corp };
         corp.ensure_wallet_divisions();
         corp.set_division_balance(3, IskCents::from_isk(50_000_000));
         snap.corporations.insert(corp_id, corp);
@@ -72,16 +71,16 @@ fn uuid_helpers_contributor_sync_wallet_sync_and_role_maturation_boundaries() {
 
     // 2. read_synced_corp_wallet_balance: div 1 syncs when master_wallet != div1 (both nonzero master & zero master)
     for (m_isk, d_isk, exp_isk) in [(7_500, 0, 7_500), (0, 4_200, 4_200)] {
-        let mut c = CorporationRecord {
-            corporation_id: 1,
-            master_wallet: IskCents::from_isk(m_isk),
-            wallet_divisions: vec![CorpWalletDivisionRecord {
+        let mut c = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = 1;
+            __corp.wallet_divisions = vec![CorpWalletDivisionRecord {
                 division_id: 1,
                 name: "Master".into(),
                 balance: IskCents::from_isk(d_isk),
-            }],
-            ..Default::default()
-        };
+            }];
+            let __mw = IskCents::from_isk(m_isk);
+            if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+            __corp };
         assert_eq!(read_synced_corp_wallet_balance(&mut c, 1), IskCents::from_isk(exp_isk));
         assert_eq!(c.division_balance(1), IskCents::from_isk(exp_isk));
     }

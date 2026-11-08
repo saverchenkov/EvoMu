@@ -104,11 +104,14 @@ async fn test_parity_esi_calendar_full_lifecycle_and_schema_validation() {
             ch.character_id = cid; ch.name = name.into(); ch.corporation_id = corp; ch.station_id = Some(60_003_760);
             snap.characters.insert(cid, ch);
         }
-        snap.corporations.insert(corp_id, CorporationRecord {
-            corporation_id: corp_id, name: "Cal Wing".into(), ticker: "CALW".into(), ceo_id,
-            members: HashSet::from([ceo_id, mem_id]), member_roles: HashMap::from([(ceo_id, u64::MAX), (mem_id, 0)]),
-            ..CorporationRecord::default()
-        });
+        snap.corporations.insert(corp_id, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Cal Wing".into();
+            __corp.ticker = "CALW".into();
+            __corp.ceo_id = ceo_id;
+            __corp.members = HashSet::from([ceo_id, mem_id]);
+            __corp.member_roles = HashMap::from([(ceo_id, u64::MAX), (mem_id, 0)]);
+            __corp });
     });
 
     let mut ceo_sess = make_sess(71_001, 1, ceo_id, corp_id);
@@ -229,11 +232,14 @@ async fn test_parity_esi_calendar_sqlite_durability_across_restarts() {
         let repo1 = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open_sqlite 1"));
         repo1.with_mut_snapshot(|snap| {
             *snap = WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
-            snap.corporations.insert(corp_id, CorporationRecord {
-                corporation_id: corp_id, name: "Persistent Corp".into(), ticker: "PCORP".into(), ceo_id,
-                members: HashSet::from([ceo_id, mem_id]), member_roles: HashMap::from([(ceo_id, u64::MAX), (mem_id, 0)]),
-                ..CorporationRecord::default()
-            });
+            snap.corporations.insert(corp_id, { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Persistent Corp".into();
+                __corp.ticker = "PCORP".into();
+                __corp.ceo_id = ceo_id;
+                __corp.members = HashSet::from([ceo_id, mem_id]);
+                __corp.member_roles = HashMap::from([(ceo_id, u64::MAX), (mem_id, 0)]);
+                __corp });
             for cid in [ceo_id, mem_id] {
                 if let Some(ch) = snap.characters.get_mut(&cid) { ch.corporation_id = corp_id; ch.user_id = 1; }
             }
@@ -480,15 +486,14 @@ async fn test_parity_remediation_character_calendar_lifecycle_and_sqlite() {
             *snap = WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
             snap.corporations.insert(
                 corp_id,
-                CorporationRecord {
-                    corporation_id: corp_id,
-                    name: "Calendar Tactical Wing".into(),
-                    ticker: "CTW".into(),
-                    ceo_id,
-                    members: HashSet::from([ceo_id, member_id]),
-                    member_roles: HashMap::from([(ceo_id, u64::MAX), (member_id, 0)]),
-                    ..CorporationRecord::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = corp_id;
+                    __corp.name = "Calendar Tactical Wing".into();
+                    __corp.ticker = "CTW".into();
+                    __corp.ceo_id = ceo_id;
+                    __corp.members = HashSet::from([ceo_id, member_id]);
+                    __corp.member_roles = HashMap::from([(ceo_id, u64::MAX), (member_id, 0)]);
+                    __corp },
             );
             let tpl = snap.characters[&ceo_id].clone();
             for (cid, corpid, name) in [

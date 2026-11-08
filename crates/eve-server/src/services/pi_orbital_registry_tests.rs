@@ -93,14 +93,13 @@ fn test_orbital_registry_get_tax_settings_update_and_revert() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "POCO Owners".into(),
-                ticker: "POCO".into(),
-                ceo_id: char_id,
-                tax_rate: 0.05,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "POCO Owners".into();
+                __corp.ticker = "POCO".into();
+                __corp.ceo_id = char_id;
+                __corp.tax_rate = 0.05;
+                __corp },
         );
         save_orbital_settings(
             snap,

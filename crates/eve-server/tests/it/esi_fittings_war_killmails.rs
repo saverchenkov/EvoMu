@@ -420,15 +420,14 @@ async fn test_esi_war_killmails_pagination_caching_and_world_state() {
             }
             snap.corporations.insert(
                 corp,
-                CorporationRecord {
-                    corporation_id: corp,
-                    name: format!("War Corp {corp}"),
-                    ticker: format!("W{}", corp % 1000),
-                    ceo_id: pilot,
-                    master_wallet: IskCents::from_isk(1_000),
-                    members: HashSet::from([pilot]),
-                    ..Default::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = corp;
+                    __corp.name = format!("War Corp {corp}");
+                    __corp.ticker = format!("W{}", corp % 1000);
+                    __corp.ceo_id = pilot;
+                    __corp.members = HashSet::from([pilot]);
+                    __corp.set_division_balance(1, IskCents::from_isk(1_000));
+                    __corp },
             );
         }
         snap.wars.insert(

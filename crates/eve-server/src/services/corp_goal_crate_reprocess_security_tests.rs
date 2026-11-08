@@ -201,16 +201,16 @@ fn r7_463_corp_goal_incremental_redemption_and_uncapped_unit_payout() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Uncapped Goal Corp".into(),
-                ceo_id: worker_id,
-                master_wallet: IskCents::from_isk(100_000_000),
-                wallet_divisions: CorporationRecord::default_wallet_divisions(IskCents::from_isk(
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Uncapped Goal Corp".into();
+                __corp.ceo_id = worker_id;
+                __corp.wallet_divisions = CorporationRecord::default_wallet_divisions(IskCents::from_isk(
                     100_000_000,
-                )),
-                ..Default::default()
-            },
+                ));
+                let __mw = IskCents::from_isk(100_000_000);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
     });
 

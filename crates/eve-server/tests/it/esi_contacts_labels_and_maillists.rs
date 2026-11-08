@@ -142,52 +142,48 @@ fn seed_orgs_and_pilots_sqlite(db_path: &Path) -> Arc<WorldRepository> {
         );
         snap.corporations.insert(
             exec_corp_id,
-            CorporationRecord {
-                corporation_id: exec_corp_id,
-                name: "Vanguard Executor".into(),
-                ticker: "VGEX".into(),
-                ceo_id,
-                alliance_id: Some(alliance_id),
-                tax_rate: 0.05,
-                members: HashSet::from([ceo_id, line_member_id]),
-                member_roles: HashMap::from([(ceo_id, ROLE_DIRECTOR), (line_member_id, 0)]),
-                ..CorporationRecord::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = exec_corp_id;
+                __corp.name = "Vanguard Executor".into();
+                __corp.ticker = "VGEX".into();
+                __corp.ceo_id = ceo_id;
+                __corp.alliance_id = Some(alliance_id);
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([ceo_id, line_member_id]);
+                __corp.member_roles = HashMap::from([(ceo_id, ROLE_DIRECTOR), (line_member_id, 0)]);
+                __corp },
         );
         snap.corporations.insert(
             member_corp_id,
-            CorporationRecord {
-                corporation_id: member_corp_id,
-                name: "Vanguard Wing".into(),
-                ticker: "VGWNG".into(),
-                ceo_id: ally_pilot_id,
-                alliance_id: Some(alliance_id),
-                members: HashSet::from([ally_pilot_id]),
-                member_roles: HashMap::from([(ally_pilot_id, ROLE_DIRECTOR)]),
-                ..CorporationRecord::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = member_corp_id;
+                __corp.name = "Vanguard Wing".into();
+                __corp.ticker = "VGWNG".into();
+                __corp.ceo_id = ally_pilot_id;
+                __corp.alliance_id = Some(alliance_id);
+                __corp.members = HashSet::from([ally_pilot_id]);
+                __corp.member_roles = HashMap::from([(ally_pilot_id, ROLE_DIRECTOR)]);
+                __corp },
         );
         snap.corporations.insert(
             outsider_corp_id,
-            CorporationRecord {
-                corporation_id: outsider_corp_id,
-                name: "Independent Haulers".into(),
-                ticker: "INDH".into(),
-                ceo_id: outsider_id,
-                members: HashSet::from([outsider_id]),
-                ..CorporationRecord::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = outsider_corp_id;
+                __corp.name = "Independent Haulers".into();
+                __corp.ticker = "INDH".into();
+                __corp.ceo_id = outsider_id;
+                __corp.members = HashSet::from([outsider_id]);
+                __corp },
         );
         snap.corporations.insert(
             rival_corp_id,
-            CorporationRecord {
-                corporation_id: rival_corp_id,
-                name: "Syndicate Raiders".into(),
-                ticker: "SYNR".into(),
-                ceo_id: 90_000_099,
-                alliance_id: Some(rival_alliance_id),
-                ..CorporationRecord::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = rival_corp_id;
+                __corp.name = "Syndicate Raiders".into();
+                __corp.ticker = "SYNR".into();
+                __corp.ceo_id = 90_000_099;
+                __corp.alliance_id = Some(rival_alliance_id);
+                __corp },
         );
 
         let tpl = snap.characters[&ceo_id].clone();

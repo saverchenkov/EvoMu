@@ -36,7 +36,7 @@ fn ensure_pilot(ctx: &ServerContext, char_id: i64, corp_id: i64, corp_role: u64)
         if !snap.corporations.contains_key(&corp_id) {
             if let Some(mut corp) = snap.corporations.values().next().cloned() {
                 corp.corporation_id = corp_id;
-                corp.master_wallet = IskCents::from_isk(500_000_000);
+                corp.set_division_balance(1, IskCents::from_isk(500_000_000));
                 corp.ensure_wallet_divisions();
                 snap.corporations.insert(corp_id, corp);
             }

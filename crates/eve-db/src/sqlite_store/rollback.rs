@@ -170,13 +170,7 @@ pub fn rollback_dirty_from_sqlite(
             Some(cur_map) => {
                 cur_map.len() != expected_map.len()
                     || expected_map.iter().any(|(&tid, &eh)| {
-                        cur_map.get(&tid).map(|sk| {
-                            let mut h = FnvHasher::new();
-                            h.write_u32(sk.type_id);
-                            h.write_u8(sk.level);
-                            h.write_f64(sk.skill_points);
-                            h.finish()
-                        }) != Some(eh)
+                        cur_map.get(&tid).map(canonical_fp) != Some(eh)
                     })
             }
         };

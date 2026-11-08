@@ -761,10 +761,10 @@ async fn it_structure_auto_defense_respects_disabled_flag_on_live_damage() {
 
     ctx.db.with_mut_snapshot(|snap| {
         for (cid, owner) in [(corp_a, gunner), (corp_b, attacker)] {
-            snap.corporations.insert(
-                cid,
-                eve_db::CorporationRecord { corporation_id: cid, ceo_id: owner, ..Default::default() },
-            );
+            let mut corp = eve_db::CorporationRecord::default();
+            corp.corporation_id = cid;
+            corp.ceo_id = owner;
+            snap.corporations.insert(cid, corp);
         }
         let template = snap.characters[&90_000_001].clone();
         let mut ch_gunner = template.clone();

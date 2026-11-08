@@ -48,14 +48,13 @@ fn generic_goals_escrow_roles_states_cross_corp_and_contributions() {
             ch.corporation_id = c_id as i64;
             snap.characters.insert(cid as i64, ch);
         }
-        let mut corp = CorporationRecord {
-            corporation_id: corp_a as i64,
-            name: "Corp A".into(),
-            ticker: "CRPA".into(),
-            ceo_id: ceo_a as i64,
-            master_wallet: IskCents::from_isk(10_000_000),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_a as i64;
+            __corp.name = "Corp A".into();
+            __corp.ticker = "CRPA".into();
+            __corp.ceo_id = ceo_a as i64;
+            __corp.set_division_balance(1, IskCents::from_isk(10_000_000));
+            __corp };
         corp.members.insert(ceo_a as i64);
         corp.members.insert(pm_a as i64);
         corp.member_roles

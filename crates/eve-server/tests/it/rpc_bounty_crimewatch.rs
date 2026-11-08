@@ -100,14 +100,13 @@ async fn test_bounty_proxy_operations() {
             ch.corporation_id = CORP_ID;
             ch.alliance_id = Some(ALLIANCE_ID);
         }
-        snap.corporations.entry(CORP_ID).or_insert_with(|| eve_db::CorporationRecord {
-            corporation_id: CORP_ID,
-            name: "Vanguard Federal Navy".into(),
-            ticker: "VFN".into(),
-            ceo_id: P2,
-            alliance_id: Some(ALLIANCE_ID),
-            ..Default::default()
-        });
+        snap.corporations.entry(CORP_ID).or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = CORP_ID;
+            __corp.name = "Vanguard Federal Navy".into();
+            __corp.ticker = "VFN".into();
+            __corp.ceo_id = P2;
+            __corp.alliance_id = Some(ALLIANCE_ID);
+            __corp });
         snap.alliances.entry(ALLIANCE_ID).or_insert_with(|| eve_db::AllianceRecord {
             alliance_id: ALLIANCE_ID,
             name: "Northern Coalition Federation".into(),

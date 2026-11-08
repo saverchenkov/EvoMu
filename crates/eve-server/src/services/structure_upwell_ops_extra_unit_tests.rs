@@ -67,18 +67,17 @@ pub(super) fn seed_corp_and_structure(
                 ..Default::default()
             },
         );
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "Upwell Owner Corp".into(),
-            ticker: "UOC".into(),
-            ceo_id,
-            alliance_id: Some(ally_id),
-            hq_station_id: Some(60_003_760),
-            tax_rate: 0.05,
-            master_wallet: IskCents(500_000_000),
-            members: HashSet::from([ceo_id, member_id]),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Upwell Owner Corp".into();
+            __corp.ticker = "UOC".into();
+            __corp.ceo_id = ceo_id;
+            __corp.alliance_id = Some(ally_id);
+            __corp.hq_station_id = Some(60_003_760);
+            __corp.tax_rate = 0.05;
+            __corp.members = HashSet::from([ceo_id, member_id]);
+            __corp.set_division_balance(1, IskCents(500_000_000));
+            __corp };
         corp.ensure_wallet_divisions();
         corp.set_division_balance(1, IskCents(500_000_000));
         snap.corporations.insert(corp_id, corp);

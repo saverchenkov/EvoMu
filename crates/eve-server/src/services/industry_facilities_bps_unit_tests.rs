@@ -245,13 +245,12 @@ fn blueprint_and_facility_manager_rpcs_work_end_to_end() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Indy Corp".into(),
-                ticker: "INDY".into(),
-                ceo_id: char_id,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Indy Corp".into();
+                __corp.ticker = "INDY".into();
+                __corp.ceo_id = char_id;
+                __corp },
         );
         snap.structures.insert(
             struct_id,

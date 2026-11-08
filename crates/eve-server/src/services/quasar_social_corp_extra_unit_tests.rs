@@ -342,14 +342,13 @@ fn corporation_goal_active_inactive_contributions_and_reward_redemption() {
         if let Some(ch) = snap.characters.get_mut(&(cid as i64)) {
             ch.corporation_id = corp_a as i64;
         }
-        let mut c = CorporationRecord {
-            corporation_id: corp_a as i64,
-            name: "Goal Corp".into(),
-            ticker: "GOAL".into(),
-            ceo_id: cid as i64,
-            master_wallet: IskCents::from_isk(10_000_000),
-            ..Default::default()
-        };
+        let mut c = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_a as i64;
+            __corp.name = "Goal Corp".into();
+            __corp.ticker = "GOAL".into();
+            __corp.ceo_id = cid as i64;
+            __corp.set_division_balance(1, IskCents::from_isk(10_000_000));
+            __corp };
         c.members.insert(cid as i64);
         c.ensure_wallet_divisions();
         snap.corporations.insert(corp_a as i64, c);

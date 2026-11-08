@@ -117,16 +117,15 @@ fn sweep_expired_orders_refunds_buy_escrow_and_returns_sell_items() {
 
     let (corp_id, initial_char_bal, initial_corp_bal, initial_plex) = ctx.db.with_mut_snapshot(|s| {
         let cid = s.characters[&char_id].corporation_id;
-        s.corporations.entry(cid).or_insert_with(|| eve_db::CorporationRecord {
-            corporation_id: cid,
-            ceo_id: char_id,
-            name: "SweepTestCorp".into(),
-            ticker: "SWTC".into(),
-            master_wallet: IskCents::from_isk(1_000_000),
-            ..Default::default()
-        });
+        s.corporations.entry(cid).or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = cid;
+            __corp.ceo_id = char_id;
+            __corp.name = "SweepTestCorp".into();
+            __corp.ticker = "SWTC".into();
+            __corp.set_division_balance(1, IskCents::from_isk(1_000_000));
+            __corp });
         let cbal = s.characters[&char_id].balance;
-        let corp_bal = s.corporations[&cid].master_wallet;
+        let corp_bal = s.corporations[&cid].master_wallet_balance();
         let plex_before = s.plex_vault_balance(char_id);
 
         // 1. Expired personal buy order
@@ -297,7 +296,7 @@ fn sweep_expired_orders_refunds_buy_escrow_and_returns_sell_items() {
 
     ctx.db.with_snapshot(|s| {
         assert_eq!(s.characters[&char_id].balance, IskCents(initial_char_bal.0 + 2000_00));
-        assert_eq!(s.corporations[&corp_id].master_wallet, initial_corp_bal);
+        assert_eq!(s.corporations[&corp_id].master_wallet_balance(), initial_corp_bal);
         assert_eq!(s.corporations[&corp_id].division_balance(2), IskCents(2500_00));
         assert_eq!(s.plex_vault_balance(char_id), initial_plex + 6);
         assert_eq!(s.market_orders[&700_001].vol_remaining, 0);

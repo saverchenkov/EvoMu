@@ -65,12 +65,11 @@ async fn sov_hub_save_upgrade_configuration_validation_and_install_lifecycle() {
         snap.characters.insert(char_id, ch);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                ceo_id: 999_999,
-                alliance_id: Some(ally_id),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.ceo_id = 999_999;
+                __corp.alliance_id = Some(ally_id);
+                __corp },
         );
         snap.alliances.insert(
             ally_id,

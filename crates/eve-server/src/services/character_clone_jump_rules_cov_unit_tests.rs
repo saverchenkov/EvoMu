@@ -83,23 +83,21 @@ fn alpha_capacity_structure_acl_and_leave_behind_fee_calculations() {
         ch.balance = IskCents::from_f64_isk(50_000_000.0);
         snap.characters.insert(char_id, ch);
 
-        let mut c1 = CorporationRecord {
-            corporation_id: owner_corp,
-            name: "Owner Corp".into(),
-            ticker: "OWNC".into(),
-            ceo_id: 96_920_099,
-            ..Default::default()
-        };
+        let mut c1 = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = owner_corp;
+            __corp.name = "Owner Corp".into();
+            __corp.ticker = "OWNC".into();
+            __corp.ceo_id = 96_920_099;
+            __corp };
         c1.ensure_wallet_divisions();
         snap.corporations.insert(owner_corp, c1);
 
-        let mut c2 = CorporationRecord {
-            corporation_id: caller_corp,
-            name: "Caller Corp".into(),
-            ticker: "CALC".into(),
-            ceo_id: char_id,
-            ..Default::default()
-        };
+        let mut c2 = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = caller_corp;
+            __corp.name = "Caller Corp".into();
+            __corp.ticker = "CALC".into();
+            __corp.ceo_id = char_id;
+            __corp };
         c2.ensure_wallet_divisions();
         snap.corporations.insert(caller_corp, c2);
 

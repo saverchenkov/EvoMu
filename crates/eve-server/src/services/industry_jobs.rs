@@ -1109,14 +1109,10 @@ pub fn handle_industry_jobs(
                         .corporations
                         .get_mut(&job_owner_id)
                         .map(|c| {
-                            c.ensure_wallet_divisions();
-                            c.wallet_divisions[0].balance = c
-                                .wallet_divisions[0]
-                                .balance
-                                .checked_sub(total_debit_cents)
-                                .unwrap_or(IskCents(0));
-                            c.master_wallet = c.wallet_divisions[0].balance;
-                            c.master_wallet
+                            let cur = c.division_balance(1);
+                            let next = cur.checked_sub(total_debit_cents).unwrap_or(IskCents(0));
+                            c.set_division_balance(1, next);
+                            next
                         })
                         .unwrap_or(IskCents(0));
                     let now_ts = ctx.now_unix();
@@ -1190,24 +1186,16 @@ pub fn handle_industry_jobs(
                         .or_else(|| resolve_facility_modifiers_and_system(ctx, snap, station_id).map(|m| m.1));
                     if let Some(fac_corp) = fac_owner_corp {
                         if !use_corp || fac_corp != job_owner_id {
-                            let scorp = snap.corporations.entry(fac_corp).or_insert_with(|| eve_db::CorporationRecord {
-                                corporation_id: fac_corp,
-                                name: ctx
+                            let scorp = snap.corporations.entry(fac_corp).or_insert_with(|| {
+                                let name = ctx
                                     .sde
                                     .npc_corporations
                                     .get(&fac_corp)
                                     .map(|c| c.name.clone())
-                                    .unwrap_or_else(|| format!("Corporation {fac_corp}")),
-                                ticker: "NPC".into(),
-                                ..Default::default()
+                                    .unwrap_or_else(|| format!("Corporation {fac_corp}"));
+                                eve_db::CorporationRecord::new(fac_corp, name, "NPC", 0)
                             });
-                            scorp.ensure_wallet_divisions();
-                            scorp.master_wallet = scorp
-                                .master_wallet
-                                .checked_add(fac_tax_cents)
-                                .unwrap_or(scorp.master_wallet);
-                            scorp.wallet_divisions[0].balance = scorp.master_wallet;
-                            let sbal = scorp.master_wallet;
+                            let sbal = scorp.credit_division(1, fac_tax_cents);
                             snap.append_journal(
                                 fac_corp,
                                 "IndustryFacilityTax",

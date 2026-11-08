@@ -1282,11 +1282,10 @@ async fn test_equinox_sov_hub_power_reagents_fuel_upgrades_and_workforce() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             CORP,
-            eve_db::CorporationRecord {
-                corporation_id: CORP,
-                ceo_id: PILOT,
-                ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = CORP;
+                __corp.ceo_id = PILOT;
+                __corp },
         );
         snap.structures.insert(hub_a, structure(hub_a, CORP, jita, TYPE_SOVEREIGNTY_HUB));
         snap.structures.insert(hub_b, structure(hub_b, CORP, perimeter, TYPE_SOVEREIGNTY_HUB));

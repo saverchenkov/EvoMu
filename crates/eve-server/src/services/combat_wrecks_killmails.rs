@@ -205,10 +205,7 @@ pub fn process_ship_insurance_payout(
             let is_victim = contract_owner_id.is_none() || contract_owner_id == Some(victim_char_id);
             if let Some(owner_id) = contract_owner_id {
                 if let Some(corp) = snap.corporations.get_mut(&owner_id) {
-                    corp.ensure_wallet_divisions();
-                    corp.master_wallet = corp.master_wallet.checked_add(payout_cents).unwrap_or(corp.master_wallet);
-                    if let Some(div) = corp.wallet_divisions.iter_mut().find(|d| d.division_id == 1) { div.balance = corp.master_wallet; }
-                    bal_after = Some(corp.master_wallet);
+                    bal_after = Some(corp.credit_division(1, payout_cents));
                     journal_target = Some(owner_id);
                 }
             }

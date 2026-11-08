@@ -144,18 +144,17 @@ async fn test_esi4_assets_char_and_corp_locations_and_names() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Apex Logistics Corp".to_string(),
-                ticker: "APXL".to_string(),
-                ceo_id: char_id,
-                alliance_id: None,
-                tax_rate: 0.05,
-                master_wallet: IskCents::from_isk(100_000),
-                members: HashSet::from([char_id]),
-                member_roles: HashMap::from([(char_id, eve_db::corp_roles::ROLE_DIRECTOR)]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Apex Logistics Corp".to_string();
+                __corp.ticker = "APXL".to_string();
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = None;
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([char_id]);
+                __corp.member_roles = HashMap::from([(char_id, eve_db::corp_roles::ROLE_DIRECTOR)]);
+                __corp.set_division_balance(1, IskCents::from_isk(100_000));
+                __corp },
         );
         snap.items.insert(
             char_ship_id,
@@ -400,14 +399,13 @@ async fn test_esi4_calendar_list_event_respond_and_attendees() {
         ctx.db.with_mut_snapshot(|snap| {
             snap.corporations.insert(
                 98_000_001,
-                CorporationRecord {
-                    corporation_id: 98_000_001,
-                    name: "Star Fleet Corp".to_string(),
-                    ticker: "SFC".to_string(),
-                    ceo_id: char_id,
-                    members: HashSet::from([char_id, other_char_id]),
-                    ..Default::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = 98_000_001;
+                    __corp.name = "Star Fleet Corp".to_string();
+                    __corp.ticker = "SFC".to_string();
+                    __corp.ceo_id = char_id;
+                    __corp.members = HashSet::from([char_id, other_char_id]);
+                    __corp },
             );
             if let Some(c) = snap.characters.get_mut(&char_id) {
                 c.corporation_id = 98_000_001;
@@ -620,18 +618,17 @@ async fn test_esi4_character_public_history_cspa_roles_titles() {
             | eve_db::corp_roles::ROLE_FACTORY_MANAGER;
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Vanguard Ind".to_string(),
-                ticker: "VGND".to_string(),
-                ceo_id: char_id,
-                alliance_id: Some(alliance_id),
-                tax_rate: 0.10,
-                master_wallet: IskCents(0),
-                members: HashSet::from([char_id]),
-                member_roles: HashMap::from([(char_id, role_mask)]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Vanguard Ind".to_string();
+                __corp.ticker = "VGND".to_string();
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = Some(alliance_id);
+                __corp.tax_rate = 0.10;
+                __corp.members = HashSet::from([char_id]);
+                __corp.member_roles = HashMap::from([(char_id, role_mask)]);
+                __corp.set_division_balance(1, IskCents(0));
+                __corp },
         );
         if let Some(c) = snap.characters.get_mut(&char_id) {
             c.corporation_id = corp_id;
@@ -1113,18 +1110,17 @@ async fn test_esi4_contacts_corp_and_alliance() {
             }
             snap.corporations.insert(
                 corp_id,
-                CorporationRecord {
-                    corporation_id: corp_id,
-                    name: "Coalition Vanguard".to_string(),
-                    ticker: "CVGD".to_string(),
-                    ceo_id: char_id,
-                    alliance_id: Some(alliance_id),
-                    tax_rate: 0.05,
-                    master_wallet: IskCents(0),
-                    members: HashSet::from([char_id]),
-                    member_roles: HashMap::from([(char_id, ROLE_DIRECTOR)]),
-                    ..Default::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = corp_id;
+                    __corp.name = "Coalition Vanguard".to_string();
+                    __corp.ticker = "CVGD".to_string();
+                    __corp.ceo_id = char_id;
+                    __corp.alliance_id = Some(alliance_id);
+                    __corp.tax_rate = 0.05;
+                    __corp.members = HashSet::from([char_id]);
+                    __corp.member_roles = HashMap::from([(char_id, ROLE_DIRECTOR)]);
+                    __corp.set_division_balance(1, IskCents(0));
+                    __corp },
             );
             snap.alliances.insert(
                 alliance_id,

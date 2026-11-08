@@ -102,23 +102,21 @@ async fn test_d6_single_source_of_truth_client_esi_quasar_and_restart() {
         let demo = WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
         ctx.db.with_mut_snapshot(|snap| {
             *snap = demo;
-            snap.corporations.insert(corp_id, CorporationRecord {
-                corporation_id: corp_id,
-                name: "SSOT Corp".into(),
-                ticker: "SSOT".into(),
-                ceo_id: char_id,
-                alliance_id: Some(alliance_id),
-                hq_station_id: Some(JITA_STATION_ID),
-                ..Default::default()
-            });
-            snap.corporations.insert(enemy_corp_id, CorporationRecord {
-                corporation_id: enemy_corp_id,
-                name: "Rival Corp".into(),
-                ticker: "RIVL".into(),
-                ceo_id: target_char_id,
-                hq_station_id: Some(JITA_STATION_ID),
-                ..Default::default()
-            });
+            snap.corporations.insert(corp_id, { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "SSOT Corp".into();
+                __corp.ticker = "SSOT".into();
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = Some(alliance_id);
+                __corp.hq_station_id = Some(JITA_STATION_ID);
+                __corp });
+            snap.corporations.insert(enemy_corp_id, { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = enemy_corp_id;
+                __corp.name = "Rival Corp".into();
+                __corp.ticker = "RIVL".into();
+                __corp.ceo_id = target_char_id;
+                __corp.hq_station_id = Some(JITA_STATION_ID);
+                __corp });
             snap.alliances.insert(alliance_id, AllianceRecord {
                 alliance_id,
                 name: "SSOT Alliance".into(),

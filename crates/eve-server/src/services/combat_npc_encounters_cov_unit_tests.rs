@@ -277,15 +277,14 @@ fn bounty_tick_thresholds_npc_vs_player_corp_wspace_and_nullsec_dbs_ess_splits()
         snap.characters.get_mut(&char_id).unwrap().corporation_id = pcorp;
         snap.corporations.insert(
             pcorp,
-            CorporationRecord {
-                corporation_id: pcorp,
-                name: "NullCorp".into(),
-                ticker: "NCRP".into(),
-                ceo_id: char_id,
-                tax_rate: 0.10,
-                master_wallet: IskCents::ZERO,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = pcorp;
+                __corp.name = "NullCorp".into();
+                __corp.ticker = "NCRP".into();
+                __corp.ceo_id = char_id;
+                __corp.tax_rate = 0.10;
+                __corp.set_division_balance(1, IskCents::ZERO);
+                __corp },
         );
         snap.system_states.insert(
             null_sys,
@@ -304,8 +303,8 @@ fn bounty_tick_thresholds_npc_vs_player_corp_wspace_and_nullsec_dbs_ess_splits()
 
     ctx.db.with_mut_snapshot(|snap| {
         let c = &snap.corporations[&pcorp];
-        assert!(c.master_wallet.raw_cents() > 0);
-        assert_eq!(c.wallet_divisions[0].balance, c.master_wallet);
+        assert!(c.master_wallet_balance().raw_cents() > 0);
+        assert_eq!(c.wallet_divisions[0].balance, c.master_wallet_balance());
         assert!(snap.system_states[&null_sys].ess_main_bank.raw_cents() > 0);
         snap.system_states.get_mut(&null_sys).unwrap().dbs_multiplier = 1.25;
     });

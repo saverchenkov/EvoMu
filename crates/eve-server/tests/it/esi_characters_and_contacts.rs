@@ -189,52 +189,48 @@ async fn test_parity_remediation_alliance_contacts_and_labels() {
             );
             snap.corporations.insert(
                 exec_corp_id,
-                CorporationRecord {
-                    corporation_id: exec_corp_id,
-                    name: "Executor Wing".into(),
-                    ticker: "EXECW".into(),
-                    ceo_id: exec_ceo_id,
-                    alliance_id: Some(alliance_id),
-                    members: HashSet::from([exec_ceo_id]),
-                    member_roles: HashMap::from([(exec_ceo_id, u64::MAX)]),
-                    ..CorporationRecord::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = exec_corp_id;
+                    __corp.name = "Executor Wing".into();
+                    __corp.ticker = "EXECW".into();
+                    __corp.ceo_id = exec_ceo_id;
+                    __corp.alliance_id = Some(alliance_id);
+                    __corp.members = HashSet::from([exec_ceo_id]);
+                    __corp.member_roles = HashMap::from([(exec_ceo_id, u64::MAX)]);
+                    __corp },
             );
             snap.corporations.insert(
                 member_corp_id,
-                CorporationRecord {
-                    corporation_id: member_corp_id,
-                    name: "Member Wing".into(),
-                    ticker: "MEMBW".into(),
-                    ceo_id: ally_member_id,
-                    alliance_id: Some(alliance_id),
-                    members: HashSet::from([ally_member_id]),
-                    member_roles: HashMap::from([(ally_member_id, u64::MAX)]),
-                    ..CorporationRecord::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = member_corp_id;
+                    __corp.name = "Member Wing".into();
+                    __corp.ticker = "MEMBW".into();
+                    __corp.ceo_id = ally_member_id;
+                    __corp.alliance_id = Some(alliance_id);
+                    __corp.members = HashSet::from([ally_member_id]);
+                    __corp.member_roles = HashMap::from([(ally_member_id, u64::MAX)]);
+                    __corp },
             );
             snap.corporations.insert(
                 outsider_corp_id,
-                CorporationRecord {
-                    corporation_id: outsider_corp_id,
-                    name: "Outsider Corp".into(),
-                    ticker: "OUTS".into(),
-                    ceo_id: outsider_id,
-                    alliance_id: None,
-                    members: HashSet::from([outsider_id]),
-                    ..CorporationRecord::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = outsider_corp_id;
+                    __corp.name = "Outsider Corp".into();
+                    __corp.ticker = "OUTS".into();
+                    __corp.ceo_id = outsider_id;
+                    __corp.alliance_id = None;
+                    __corp.members = HashSet::from([outsider_id]);
+                    __corp },
             );
             snap.corporations.insert(
                 target_corp_id,
-                CorporationRecord {
-                    corporation_id: target_corp_id,
-                    name: "Hostile Target Corp".into(),
-                    ticker: "HOSTL".into(),
-                    ceo_id: 90_000_099,
-                    alliance_id: None,
-                    ..CorporationRecord::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = target_corp_id;
+                    __corp.name = "Hostile Target Corp".into();
+                    __corp.ticker = "HOSTL".into();
+                    __corp.ceo_id = 90_000_099;
+                    __corp.alliance_id = None;
+                    __corp },
             );
             let tpl = snap.characters[&exec_ceo_id].clone();
             for (cid, corpid, allyid, name) in [

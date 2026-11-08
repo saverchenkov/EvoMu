@@ -90,16 +90,20 @@ fn make_item(item_id: i64, type_id: u32, owner_id: i64, location_id: i64, flag: 
 
 fn seed_corp_full(snap: &mut eve_db::WorldStateSnapshot, char_id: i64, corp_id: i64) {
     let roles = corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_ACCOUNTANT | corp_roles::ROLE_STATION_MANAGER | corp_roles::ROLE_STARBASE_CONFIG;
-    let mut corp = CorporationRecord {
-        corporation_id: corp_id, name: format!("B30 Corp {corp_id}"), ticker: "B30".into(), ceo_id: char_id,
-        hq_station_id: Some(JITA_STATION_ID), members: [char_id].into_iter().collect(),
-        member_roles: HashMap::from([(char_id, roles)]), ..Default::default()
-    };
+    let mut corp = { let mut __corp = CorporationRecord::default();
+        __corp.corporation_id = corp_id;
+        __corp.name = format!("B30 Corp {corp_id}");
+        __corp.ticker = "B30".into();
+        __corp.ceo_id = char_id;
+        __corp.hq_station_id = Some(JITA_STATION_ID);
+        __corp.members = [char_id].into_iter().collect();
+        __corp.member_roles = HashMap::from([(char_id, roles)]);
+        __corp };
     corp.ensure_wallet_divisions();
     for d in &mut corp.wallet_divisions {
         d.balance = IskCents::from_isk(50_000_000);
     }
-    corp.master_wallet = IskCents::from_isk(50_000_000);
+    corp.set_division_balance(1, IskCents::from_isk(50_000_000));
     snap.corporations.insert(corp_id, corp);
     if let Some(ch) = snap.characters.get_mut(&char_id) {
         ch.corporation_id = corp_id;
@@ -800,11 +804,15 @@ async fn test_b30_market_order_expiry_and_lp_durability() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.market_orders.retain(|_, o| o.region_id != AMARR_REGION_ID);
         let roles = corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_ACCOUNTANT | corp_roles::ROLE_TRADER;
-        let mut corp = CorporationRecord {
-            corporation_id: CORP_ID, name: "B30 Market Corp".into(), ticker: "B30M".into(), ceo_id: P1,
-            hq_station_id: Some(AMARR_STATION_ID), members: [P1].into_iter().collect(),
-            member_roles: HashMap::from([(P1, roles)]), ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = CORP_ID;
+            __corp.name = "B30 Market Corp".into();
+            __corp.ticker = "B30M".into();
+            __corp.ceo_id = P1;
+            __corp.hq_station_id = Some(AMARR_STATION_ID);
+            __corp.members = [P1].into_iter().collect();
+            __corp.member_roles = HashMap::from([(P1, roles)]);
+            __corp };
         corp.ensure_wallet_divisions();
         snap.corporations.insert(CORP_ID, corp);
         if let Some(ch) = snap.characters.get_mut(&P1) {

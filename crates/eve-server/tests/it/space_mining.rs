@@ -3753,13 +3753,12 @@ async fn test_parity_ui_lookup_all_methods() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Astraeus Mining Guild".to_string(),
-                ticker: "AMG".to_string(),
-                ceo_id: PILOT_1,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Astraeus Mining Guild".to_string();
+                __corp.ticker = "AMG".to_string();
+                __corp.ceo_id = PILOT_1;
+                __corp },
         );
     });
 

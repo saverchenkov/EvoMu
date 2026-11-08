@@ -47,14 +47,13 @@ async fn reprocessing_quotes_and_reprocess_npc_structure_and_error_paths() {
         ch.active_ship_id = ship_id;
         snap.characters.insert(char_id, ch);
 
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "Reproc Corp".into(),
-            ticker: "RPRC".into(),
-            ceo_id: char_id,
-            master_wallet: IskCents::from_f64_isk(50_000_000.0),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Reproc Corp".into();
+            __corp.ticker = "RPRC".into();
+            __corp.ceo_id = char_id;
+            __corp.set_division_balance(1, IskCents::from_f64_isk(50_000_000.0));
+            __corp };
         corp.ensure_wallet_divisions();
         snap.corporations.insert(corp_id, corp);
 

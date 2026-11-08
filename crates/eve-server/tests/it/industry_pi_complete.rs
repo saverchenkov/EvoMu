@@ -91,11 +91,16 @@ async fn test_industry_blueprint_data_owner_limits_facilities_taxes_and_sci() {
             ch.corporation_id = corp_id;
             ch.balance = IskCents::from_isk(500_000_000);
         }
-        snap.corporations.insert(corp_id, CorporationRecord {
-            corporation_id: corp_id, name: "Test Industry Corp".into(), ticker: "TIND".into(),
-            ceo_id: char_id, master_wallet: IskCents::from_isk(500_000_000), members: HashSet::from([char_id]),
-            member_roles: HashMap::from([(char_id, u64::MAX)]), hq_station_id: Some(JITA_STATION_ID), ..Default::default()
-        });
+        snap.corporations.insert(corp_id, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Test Industry Corp".into();
+            __corp.ticker = "TIND".into();
+            __corp.ceo_id = char_id;
+            __corp.members = HashSet::from([char_id]);
+            __corp.member_roles = HashMap::from([(char_id, u64::MAX)]);
+            __corp.hq_station_id = Some(JITA_STATION_ID);
+            __corp.set_division_balance(1, IskCents::from_isk(500_000_000));
+            __corp });
         let sk = snap.skills.entry(char_id).or_default();
         for (sid, lvl) in [(3380, 5), (MASS_PRODUCTION_SKILL, 5), (ADV_MASS_PRODUCTION_SKILL, 4), (LABORATORY_OPERATION_SKILL, 5), (ADV_LABORATORY_OPERATION_SKILL, 3), (MASS_REACTIONS_SKILL, 5), (ADV_MASS_REACTIONS_SKILL, 2), (SUPPLY_CHAIN_MGMT_SKILL, 3), (SCIENTIFIC_NETWORKING_SKILL, 2), (REMOTE_REACTIONS_SKILL, 4)] {
             sk.insert(sid, TrainedSkillRecord { type_id: sid, level: lvl, skill_points: 256_000.0 });
@@ -199,11 +204,16 @@ async fn test_industry_capital_construction_restrictions() {
     let corp = 98_000_001;
     let mut sess = setup_pilot(&ctx, 603, "demo", "demo-secret", p).await;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.entry(corp).or_insert_with(|| CorporationRecord {
-            corporation_id: corp, name: "Cap Corp".into(), ticker: "CAP".into(), ceo_id: p,
-            master_wallet: IskCents::from_isk(10_000_000_000), members: HashSet::from([p]),
-            member_roles: HashMap::from([(p, u64::MAX)]), hq_station_id: Some(JITA_STATION_ID), ..Default::default()
-        });
+        snap.corporations.entry(corp).or_insert_with(|| { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp;
+            __corp.name = "Cap Corp".into();
+            __corp.ticker = "CAP".into();
+            __corp.ceo_id = p;
+            __corp.members = HashSet::from([p]);
+            __corp.member_roles = HashMap::from([(p, u64::MAX)]);
+            __corp.hq_station_id = Some(JITA_STATION_ID);
+            __corp.set_division_balance(1, IskCents::from_isk(10_000_000_000));
+            __corp });
         if let Some(ch) = snap.characters.get_mut(&p) {
             ch.corporation_id = corp;
             ch.balance = IskCents::from_isk(10_000_000_000);
@@ -310,11 +320,16 @@ async fn test_lifecycle_industry_pause_and_many_jobs() {
     let struct_id: i64 = 1_000_714_001;
     let now_u = ctx.now_unix();
     let svc_id = ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.entry(corp).or_insert_with(|| CorporationRecord {
-            corporation_id: corp, name: "Lifecycle Corp".into(), ticker: "LIFE".into(), ceo_id: p,
-            master_wallet: IskCents::from_isk(1_000_000_000), members: HashSet::from([p]),
-            member_roles: HashMap::from([(p, u64::MAX)]), hq_station_id: Some(JITA_STATION_ID), ..Default::default()
-        });
+        snap.corporations.entry(corp).or_insert_with(|| { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp;
+            __corp.name = "Lifecycle Corp".into();
+            __corp.ticker = "LIFE".into();
+            __corp.ceo_id = p;
+            __corp.members = HashSet::from([p]);
+            __corp.member_roles = HashMap::from([(p, u64::MAX)]);
+            __corp.hq_station_id = Some(JITA_STATION_ID);
+            __corp.set_division_balance(1, IskCents::from_isk(1_000_000_000));
+            __corp });
         snap.structures.insert(struct_id, UpwellStructureRecord {
             structure_id: struct_id, type_id: 35825, solar_system_id: JITA_SOLAR_SYSTEM_ID,
             owner_corp_id: corp, name: "Raitaru".into(), state: "ShieldVulnerable".into(),
@@ -459,11 +474,16 @@ async fn run_industry_jobs_suite() -> (usize, f64, f64, i64, &'static str) {
     let (bpo_id, bpo2_id, t1_bpc_id, relic_id, _decryptor_id, reaction_bp_type_id, reaction_item_id) =
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(ch) = snap.characters.get_mut(&char_id) { ch.corporation_id = corp_id; ch.balance = IskCents::from_isk(1_000_000_000); }
-            snap.corporations.insert(corp_id, CorporationRecord {
-                corporation_id: corp_id, name: "Corp Industry Ltd".into(), ticker: "CIND".into(),
-                ceo_id: char_id, master_wallet: IskCents::from_isk(1_000_000_000), members: HashSet::from([char_id]),
-                member_roles: HashMap::from([(char_id, u64::MAX)]), hq_station_id: Some(JITA_STATION_ID), ..Default::default()
-            });
+            snap.corporations.insert(corp_id, { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Corp Industry Ltd".into();
+                __corp.ticker = "CIND".into();
+                __corp.ceo_id = char_id;
+                __corp.members = HashSet::from([char_id]);
+                __corp.member_roles = HashMap::from([(char_id, u64::MAX)]);
+                __corp.hq_station_id = Some(JITA_STATION_ID);
+                __corp.set_division_balance(1, IskCents::from_isk(1_000_000_000));
+                __corp });
             let sk = snap.skills.entry(char_id).or_default();
             for (stid, lvl) in [(MASS_PRODUCTION_SKILL, 5), (LABORATORY_OPERATION_SKILL, 5), (MASS_REACTIONS_SKILL, 5), (REACTIONS_SKILL, 4), (SUPPLY_CHAIN_MGMT_SKILL, 0), (SCIENTIFIC_NETWORKING_SKILL, 0), (3380, 5), (3388, 5), (11448, 5), (11452, 5), (21791, 5)] {
                 sk.insert(stid, TrainedSkillRecord { type_id: stid, level: lvl, skill_points: 256_000.0 });
@@ -734,22 +754,23 @@ async fn run_pi_full_suite() -> (Option<bool>, Option<i64>, f64, i64, i64) {
         seed_item(snap, 2534, char_id, ship_id, InventoryFlag::Cargo, 1, false, false, None);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Orbital Operations Corp".into(),
-                ticker: "ORBI".into(),
-                ceo_id: char_id,
-                alliance_id: None,
-                tax_rate: 0.05,
-                master_wallet: IskCents::from_isk(100_000_000),
-                members: HashSet::from([char_id]),
-                member_roles: HashMap::from([(char_id, u64::MAX)]),
-                applications: HashMap::new(),
-                wallet_divisions: Vec::new(),
-                description: String::new(),
-                url: String::new(),
-                hq_station_id: Some(JITA_STATION_ID),
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Orbital Operations Corp".into();
+                __corp.ticker = "ORBI".into();
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = None;
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([char_id]);
+                __corp.member_roles = HashMap::from([(char_id, u64::MAX)]);
+                __corp.applications = HashMap::new();
+                __corp.description = String::new();
+                __corp.url = String::new();
+                __corp.hq_station_id = Some(JITA_STATION_ID);
+                __corp.wallet_divisions = Vec::new();
+                let __mw = IskCents::from_isk(100_000_000);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         let sk = snap.skills.entry(char_id).or_default();
         for (stid, lvl) in [
@@ -1214,27 +1235,25 @@ async fn test_p0_issues_18_and_19_industry_auth_and_pi_simulation() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "P0 Auth Corp".into(),
-                ticker: "P0AC".into(),
-                ceo_id: char_ceo,
-                master_wallet: IskCents::from_isk(100_000_000),
-                members: [char_ceo, char_line].into_iter().collect(),
-                member_roles: HashMap::from([(char_ceo, u64::MAX), (char_line, 0)]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "P0 Auth Corp".into();
+                __corp.ticker = "P0AC".into();
+                __corp.ceo_id = char_ceo;
+                __corp.members = [char_ceo, char_line].into_iter().collect();
+                __corp.member_roles = HashMap::from([(char_ceo, u64::MAX), (char_line, 0)]);
+                __corp.set_division_balance(1, IskCents::from_isk(100_000_000));
+                __corp },
         );
         snap.corporations.insert(
             victim_corp_id,
-            CorporationRecord {
-                corporation_id: victim_corp_id,
-                name: "Victim Corp".into(),
-                ticker: "VICT".into(),
-                ceo_id: 90_000_999,
-                master_wallet: IskCents::from_isk(100_000_000),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = victim_corp_id;
+                __corp.name = "Victim Corp".into();
+                __corp.ticker = "VICT".into();
+                __corp.ceo_id = 90_000_999;
+                __corp.set_division_balance(1, IskCents::from_isk(100_000_000));
+                __corp },
         );
         let vbpo = seed_item(snap, RIFTER_BP_TYPE_ID, victim_corp_id, JITA_STATION_ID, InventoryFlag::CorpSAG1, 1, true, false, None);
         let _ = seed_item(snap, TRITANIUM_TYPE_ID, victim_corp_id, JITA_STATION_ID, InventoryFlag::CorpSAG1, 500_000, false, false, None);

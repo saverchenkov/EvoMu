@@ -179,18 +179,25 @@ fn place_multi_sell_corporate_roles_insolvent_margin_bid_and_corp_bid_cover() {
         insolv.balance = IskCents(0);
         s.characters.insert(insolv_buyer_id, insolv);
 
-        let mut s_corp = CorporationRecord {
-            corporation_id: seller_corp_id, name: "SellerCorp".into(), ticker: "SLCP".into(), ceo_id: 90_000_099,
-            master_wallet: IskCents::from_isk(500_000), members: HashSet::from([seller_id]), ..Default::default()
-        };
+        let mut s_corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = seller_corp_id;
+            __corp.name = "SellerCorp".into();
+            __corp.ticker = "SLCP".into();
+            __corp.ceo_id = 90_000_099;
+            __corp.members = HashSet::from([seller_id]);
+            __corp.set_division_balance(1, IskCents::from_isk(500_000));
+            __corp };
         s_corp.ensure_wallet_divisions();
         s_corp.wallet_divisions[0].balance = IskCents::from_isk(500_000);
         s.corporations.insert(seller_corp_id, s_corp);
 
-        let mut b_corp = CorporationRecord {
-            corporation_id: buyer_corp_id, name: "BuyerCorp".into(), ticker: "BYCP".into(), ceo_id: insolv_buyer_id,
-            master_wallet: IskCents::from_isk(100_000), ..Default::default()
-        };
+        let mut b_corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = buyer_corp_id;
+            __corp.name = "BuyerCorp".into();
+            __corp.ticker = "BYCP".into();
+            __corp.ceo_id = insolv_buyer_id;
+            __corp.set_division_balance(1, IskCents::from_isk(100_000));
+            __corp };
         b_corp.ensure_wallet_divisions();
         b_corp.wallet_divisions[0].balance = IskCents::from_isk(100_000);
         b_corp.wallet_divisions[1].balance = IskCents::from_isk(100_000);
@@ -242,7 +249,7 @@ fn place_multi_sell_corporate_roles_insolvent_margin_bid_and_corp_bid_cover() {
         assert_eq!(s.market_orders[&920_101].vol_remaining, 0);
         assert_eq!(s.characters[&insolv_buyer_id].balance, IskCents::from_isk(100));
         assert_eq!(s.market_orders[&920_102].vol_remaining, 0);
-        assert_eq!(s.corporations[&buyer_corp_id].master_wallet, IskCents::from_isk(100_000));
+        assert_eq!(s.corporations[&buyer_corp_id].master_wallet_balance(), IskCents::from_isk(100_000));
         assert_eq!(s.corporations[&buyer_corp_id].division_balance(2), IskCents::from_isk(99_700));
         assert_eq!(s.market_orders[&resting_oid].vol_remaining, 20);
         assert_eq!(s.market_orders[&resting_oid].owner_id, seller_corp_id);
@@ -266,10 +273,14 @@ fn cancel_char_order_corporate_roles_and_deliveries_stack_merge() {
         }
         s.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id, name: "CancelCorp".into(), ticker: "CNCL".into(), ceo_id: 90_000_099,
-                master_wallet: IskCents::from_isk(10_000), members: HashSet::from([member_id]), ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "CancelCorp".into();
+                __corp.ticker = "CNCL".into();
+                __corp.ceo_id = 90_000_099;
+                __corp.members = HashSet::from([member_id]);
+                __corp.set_division_balance(1, IskCents::from_isk(10_000));
+                __corp },
         );
         s.items.insert(930_001, mk_item(930_001, 35, corp_id, JITA_STATION_ID, InventoryFlag::Deliveries, 30, false));
         s.market_orders.insert(930_101, mk_order(930_101, corp_id, 34, true, 10, 50, false, 500));
@@ -299,7 +310,7 @@ fn cancel_char_order_corporate_roles_and_deliveries_stack_merge() {
     ctx.db.with_snapshot(|s| {
         assert_eq!(s.items[&930_001].quantity, 75);
         assert_eq!(s.items[&930_001].version, 2);
-        assert_eq!(s.corporations[&corp_id].master_wallet, IskCents::from_isk(10_000));
+        assert_eq!(s.corporations[&corp_id].master_wallet_balance(), IskCents::from_isk(10_000));
         assert_eq!(s.corporations[&corp_id].division_balance(2), IskCents::from_isk(500));
         let m = load_market_order_meta(s, &s.market_orders[&930_101], 0);
         assert_eq!(m.order_state, Some(3));
@@ -337,7 +348,13 @@ fn buy_multiple_items_entry_formats_visibility_partial_isk_npc_skill_and_plex() 
         s.skills.entry(buyer_id).or_default().insert(3447, TrainedSkillRecord { type_id: 3447, level: 5, skill_points: 256_000.0 });
         s.corporations.insert(
             seller_corp_id,
-            CorporationRecord { corporation_id: seller_corp_id, name: "AskCorp".into(), ticker: "ASKC".into(), ceo_id: 90_000_099, master_wallet: IskCents(0), ..Default::default() },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = seller_corp_id;
+                __corp.name = "AskCorp".into();
+                __corp.ticker = "ASKC".into();
+                __corp.ceo_id = 90_000_099;
+                __corp.set_division_balance(1, IskCents(0));
+                __corp },
         );
         s.market_orders.insert(940_001, mk_order(940_001, seller_corp_id, PLEX_TYPE_ID, false, 50, 1, false, 0));
         s.market_orders.insert(940_002, mk_order(940_002, 1_000_035, skill_tid, false, 50, 100, true, 0));
@@ -371,6 +388,6 @@ fn buy_multiple_items_entry_formats_visibility_partial_isk_npc_skill_and_plex() 
     ctx.db.with_snapshot(|s| {
         assert_eq!(s.plex_vault_balance(buyer_id), plex_before + 1);
         assert_eq!(s.market_orders[&940_002].vol_remaining, 100);
-        assert!(s.corporations[&seller_corp_id].master_wallet.0 > 0);
+        assert!(s.corporations[&seller_corp_id].master_wallet_balance().0 > 0);
     });
 }

@@ -106,23 +106,22 @@ fn r6_t3_07_corp_lp_store_enforces_roles_24h_delay_wallet_and_division_access() 
     let offer_id = 880_001i64;
 
     ctx.db.with_mut_snapshot(|snap| {
-        let mut corp_rec = CorporationRecord {
-            corporation_id: corp,
-            name: "LPCorp".into(),
-            ticker: "LPC".into(),
-            ceo_id: ceo,
-            hq_station_id: Some(st),
-            members: [ceo, brand_mgr, acct, pending_dir, dir_no_wallet].into(),
-            member_roles: [
+        let mut corp_rec = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp;
+            __corp.name = "LPCorp".into();
+            __corp.ticker = "LPC".into();
+            __corp.ceo_id = ceo;
+            __corp.hq_station_id = Some(st);
+            __corp.members = [ceo, brand_mgr, acct, pending_dir, dir_no_wallet].into();
+            __corp.member_roles = [
                 (ceo, u64::MAX),
                 (brand_mgr, ROLE_BRAND_MANAGER | ROLE_HANGAR_CAN_TAKE[0] | ROLE_DELIVERIES_HANGAR_TAKE | ROLE_ACCOUNT_CAN_TAKE[0]),
                 (acct, ROLE_ACCOUNTANT | ROLE_HANGAR_CAN_TAKE[0] | ROLE_DELIVERIES_HANGAR_TAKE | ROLE_ACCOUNT_CAN_TAKE[0]),
                 (pending_dir, ROLE_DIRECTOR | ROLE_HANGAR_CAN_TAKE[0] | ROLE_DELIVERIES_HANGAR_TAKE | ROLE_ACCOUNT_CAN_TAKE[0]),
                 (dir_no_wallet, ROLE_HANGAR_CAN_TAKE[0] | ROLE_DELIVERIES_HANGAR_TAKE | ROLE_ACCOUNT_CAN_TAKE[0]),
-            ].into(),
-            master_wallet: IskCents::from_isk(100_000_000),
-            ..Default::default()
-        };
+            ].into();
+            __corp.set_division_balance(1, IskCents::from_isk(100_000_000));
+            __corp };
         corp_rec.ensure_wallet_divisions();
         corp_rec.wallet_divisions[0].balance = IskCents::from_isk(100_000_000);
         snap.corporations.insert(corp, corp_rec);

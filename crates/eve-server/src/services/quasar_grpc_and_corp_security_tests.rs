@@ -163,13 +163,12 @@ async fn r6_t4_03_quasar_market_acl_redaction_and_esi_public_assigned_contracts(
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             owner_corp,
-            CorporationRecord {
-                corporation_id: owner_corp,
-                name: "OwnerCorp".into(),
-                ticker: "OWNR".into(),
-                ceo_id: member_cid,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = owner_corp;
+                __corp.name = "OwnerCorp".into();
+                __corp.ticker = "OWNR".into();
+                __corp.ceo_id = member_cid;
+                __corp },
         );
         for (cid, corp) in [(member_cid, owner_corp), (outsider_cid, outsider_corp)] {
             let mut ch = snap.characters[&90_000_001].clone();

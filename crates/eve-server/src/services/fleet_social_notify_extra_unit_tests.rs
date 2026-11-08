@@ -391,17 +391,16 @@ async fn corp_contacts_and_labels_all_branches_via_corp_registry() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Test Corp".into(),
-                ticker: "TSTC".into(),
-                ceo_id,
-                alliance_id: Some(ally_id),
-                tax_rate: 0.05,
-                members: HashSet::from([ceo_id]),
-                member_roles: HashMap::from([(ceo_id, eve_db::corp_roles::ROLE_DIRECTOR)]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Test Corp".into();
+                __corp.ticker = "TSTC".into();
+                __corp.ceo_id = ceo_id;
+                __corp.alliance_id = Some(ally_id);
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([ceo_id]);
+                __corp.member_roles = HashMap::from([(ceo_id, eve_db::corp_roles::ROLE_DIRECTOR)]);
+                __corp },
         );
         snap.alliances.insert(
             ally_id,

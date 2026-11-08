@@ -167,14 +167,16 @@ async fn test_esi5_alliance_info_history_divisions_and_shareholders() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Ishukone Strategic Holdings".to_string(),
-                ticker: "ISKH".to_string(),
-                ceo_id,
-                alliance_id: Some(alliance_id),
-                tax_rate: 0.05,
-                wallet_divisions: vec![
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Ishukone Strategic Holdings".to_string();
+                __corp.ticker = "ISKH".to_string();
+                __corp.ceo_id = ceo_id;
+                __corp.alliance_id = Some(alliance_id);
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([ceo_id, wingman_id]);
+                __corp.hq_station_id = Some(60_003_760);
+                __corp.wallet_divisions = vec![
                     CorpWalletDivisionRecord {
                         division_id: 1,
                         name: "Master Treasury".to_string(),
@@ -185,11 +187,8 @@ async fn test_esi5_alliance_info_history_divisions_and_shareholders() {
                         name: "SRP Escrow".to_string(),
                         balance: IskCents::from_isk(75_000_000),
                     },
-                ],
-                members: HashSet::from([ceo_id, wingman_id]),
-                hq_station_id: Some(60_003_760),
-                ..Default::default()
-            },
+                ];
+                __corp },
         );
         snap.corp_hangar_divisions.insert(
             corp_id,
@@ -422,16 +421,15 @@ async fn test_esi5_corporation_medals_container_logs_and_projects() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Hyasyoda Logistics Directorate".to_string(),
-                ticker: "HYLD".to_string(),
-                ceo_id,
-                tax_rate: 0.05,
-                members: HashSet::from([ceo_id, wingman_id]),
-                hq_station_id: Some(60_003_760),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Hyasyoda Logistics Directorate".to_string();
+                __corp.ticker = "HYLD".to_string();
+                __corp.ceo_id = ceo_id;
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([ceo_id, wingman_id]);
+                __corp.hq_station_id = Some(60_003_760);
+                __corp },
         );
         snap.items.insert(
             990_001,
@@ -679,16 +677,15 @@ async fn test_esi5_corporation_members_limit_titles_and_roles_history() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Lai Dai Directorate".to_string(),
-                ticker: "LDD".to_string(),
-                ceo_id,
-                tax_rate: 0.05,
-                members: HashSet::from([ceo_id, wingman_id]),
-                hq_station_id: Some(60_003_760),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Lai Dai Directorate".to_string();
+                __corp.ticker = "LDD".to_string();
+                __corp.ceo_id = ceo_id;
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([ceo_id, wingman_id]);
+                __corp.hq_station_id = Some(60_003_760);
+                __corp },
         );
         // Train Corporation Management IV (type 3363) on CEO
         snap.skills.entry(ceo_id).or_default().insert(
@@ -925,16 +922,15 @@ async fn test_esi_corporation_structures_timers_and_starbase_detail() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Upwell Consortium Operations".to_string(),
-                ticker: "UPCO".to_string(),
-                ceo_id,
-                tax_rate: 0.05,
-                members: HashSet::from([ceo_id]),
-                hq_station_id: Some(60_003_760),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Upwell Consortium Operations".to_string();
+                __corp.ticker = "UPCO".to_string();
+                __corp.ceo_id = ceo_id;
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([ceo_id]);
+                __corp.hq_station_id = Some(60_003_760);
+                __corp },
         );
         snap.structures.insert(
             struct_id,

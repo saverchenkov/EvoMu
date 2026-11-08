@@ -227,14 +227,10 @@ fn folder_access_level_enforces_owner_groups_exclusions_and_strips_shared_owner_
     let ally_gid = 80_900_001_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.insert(
-            corp_a,
-            eve_db::CorporationRecord {
-                corporation_id: corp_a,
-                ceo_id: blocked_member,
-                ..Default::default()
-            },
-        );
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_a;
+        corp.ceo_id = blocked_member;
+        snap.corporations.insert(corp_a, corp);
         let template = snap.characters.values().next().cloned().unwrap();
         let mut c1 = template.clone();
         c1.character_id = creator_id;

@@ -37,11 +37,10 @@ fn standing_skills_fulcrum_multiplier_and_upwell_dock_hull_matrix() {
         snap.characters.insert(char_id, ch);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                ceo_id: char_id,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.ceo_id = char_id;
+                __corp },
         );
         assert!((fulcrum_alignment_inertia_multiplier(snap, char_id, Some(60_015_187), 30_100_000) - 1.0).abs() < 1e-9);
         snap.characters.get_mut(&char_id).unwrap().war_faction_id = Some(500_010);
@@ -180,11 +179,10 @@ async fn anchor_orbital_gantry_and_upgrade_to_customs_office() {
         snap.characters.insert(char_id, ch);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                ceo_id: char_id,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.ceo_id = char_id;
+                __corp },
         );
         snap.items.insert(
             gantry_id,

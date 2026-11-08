@@ -73,11 +73,10 @@ fn home_station_resolution_hull_groups_highsec_tier_boundaries_and_rpc_restricti
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                hq_station_id: Some(valid_station_id),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.hq_station_id = Some(valid_station_id);
+                __corp },
         );
     });
 

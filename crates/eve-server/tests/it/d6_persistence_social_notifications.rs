@@ -27,13 +27,23 @@ fn temp_sqlite_path(tag: &str) -> std::path::PathBuf {
 fn seed_repo_with_corp(repo: &WorldRepository) {
     repo.with_mut_snapshot(|snap| {
         *snap = WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
-        snap.corporations.insert(98_000_001, eve_db::CorporationRecord {
-            corporation_id: 98_000_001, name: "D6 Social Corp".into(), ticker: "D6SOC".into(),
-            ceo_id: 90_000_001, alliance_id: Some(99_000_001), tax_rate: 0.05,
-            master_wallet: eve_db::IskCents(0), members: HashSet::from([90_000_001, 90_000_002]),
-            member_roles: HashMap::from([(90_000_001, u64::MAX)]), wallet_divisions: Vec::new(),
-            applications: HashMap::new(), description: String::new(), url: String::new(), hq_station_id: Some(60_003_760),
-        });
+        snap.corporations.insert(98_000_001, { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = 98_000_001;
+            __corp.name = "D6 Social Corp".into();
+            __corp.ticker = "D6SOC".into();
+            __corp.ceo_id = 90_000_001;
+            __corp.alliance_id = Some(99_000_001);
+            __corp.tax_rate = 0.05;
+            __corp.members = HashSet::from([90_000_001, 90_000_002]);
+            __corp.member_roles = HashMap::from([(90_000_001, u64::MAX)]);
+            __corp.applications = HashMap::new();
+            __corp.description = String::new();
+            __corp.url = String::new();
+            __corp.hq_station_id = Some(60_003_760);
+            __corp.wallet_divisions = Vec::new();
+            let __mw = eve_db::IskCents(0);
+            if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+            __corp });
         snap.alliances.insert(99_000_001, eve_db::AllianceRecord {
             alliance_id: 99_000_001, name: "D6 Social Alliance".into(), short_name: "D6ALY".into(),
             executor_corp_id: 98_000_001, member_corp_ids: HashSet::from([98_000_001]),

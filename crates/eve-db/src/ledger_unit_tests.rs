@@ -187,3 +187,18 @@ fn plex_vault_shared_account_balance_and_legacy_folding() {
     assert_eq!(unix_secs_to_date_str(0), "1970-01-01");
     assert_eq!(unix_secs_to_date_str(1_704_067_200), "2024-01-01");
 }
+
+#[test]
+fn adjust_plex_vault_automatically_folds_legacy_balances() {
+    let mut snap = WorldStateSnapshot::default();
+    snap.characters.insert(90_001, make_char(90_001, 7, 120));
+    snap.characters.insert(90_002, make_char(90_002, 7, 80));
+
+    assert_eq!(snap.unified_plex_balance(90_001), 200);
+    assert_eq!(snap.adjust_plex_vault(90_002, -150), Some(50));
+    assert_eq!(snap.account_plex_vault.get(&7).copied(), Some(50));
+    assert_eq!(snap.characters[&90_001].plex_balance, 0);
+    assert_eq!(snap.characters[&90_002].plex_balance, 0);
+    assert_eq!(snap.adjust_plex_vault(90_001, -51), None);
+    assert_eq!(snap.unified_plex_balance(90_001), 50);
+}

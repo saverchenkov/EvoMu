@@ -64,19 +64,18 @@ fn setup_wars_ctx() -> (
             (def_corp, def_char, "DEFD"),
             (ally_corp, ally_char, "ALLY"),
         ] {
-            let mut c = CorporationRecord {
-                corporation_id: corp_id,
-                name: format!("Corp {ticker}"),
-                ticker: ticker.into(),
-                ceo_id,
-                alliance_id: None,
-                tax_rate: 0.05,
-                master_wallet: IskCents::from_isk(500_000_000),
-                members: vec![ceo_id].into_iter().collect(),
-                member_roles: [(ceo_id, u64::MAX)].into_iter().collect(),
-                hq_station_id: Some(60_003_760),
-                ..Default::default()
-            };
+            let mut c = { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = format!("Corp {ticker}");
+                __corp.ticker = ticker.into();
+                __corp.ceo_id = ceo_id;
+                __corp.alliance_id = None;
+                __corp.tax_rate = 0.05;
+                __corp.members = vec![ceo_id].into_iter().collect();
+                __corp.member_roles = [(ceo_id, u64::MAX)].into_iter().collect();
+                __corp.hq_station_id = Some(60_003_760);
+                __corp.set_division_balance(1, IskCents::from_isk(500_000_000));
+                __corp };
             c.ensure_wallet_divisions();
             snap.corporations.insert(corp_id, c);
         }

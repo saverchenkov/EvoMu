@@ -571,15 +571,14 @@ async fn test_set_ball_free_radius_harmonic_sovereignty_and_controller_event() {
         }
         snap.corporations.insert(
             corp,
-            CorporationRecord {
-                corporation_id: corp,
-                name: "Sov Corp".into(),
-                ticker: "SOVC".into(),
-                ceo_id: PILOT,
-                alliance_id: Some(alliance),
-                members: HashSet::from([PILOT]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp;
+                __corp.name = "Sov Corp".into();
+                __corp.ticker = "SOVC".into();
+                __corp.ceo_id = PILOT;
+                __corp.alliance_id = Some(alliance);
+                __corp.members = HashSet::from([PILOT]);
+                __corp },
         );
         snap.alliances.insert(
             alliance,

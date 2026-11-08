@@ -46,14 +46,13 @@ fn setup_insurance_fixture() -> (ServerContext, i64, i64, i64, i64, i64, i64) {
         other.name = "OtherPilot".into();
         snap.characters.insert(other_char_id, other);
 
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "Insure Corp".into(),
-            ticker: "INSC".into(),
-            ceo_id: char_id,
-            master_wallet: IskCents::from_f64_isk(500_000_000.0),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Insure Corp".into();
+            __corp.ticker = "INSC".into();
+            __corp.ceo_id = char_id;
+            __corp.set_division_balance(1, IskCents::from_f64_isk(500_000_000.0));
+            __corp };
         corp.ensure_wallet_divisions();
         snap.corporations.insert(corp_id, corp);
 

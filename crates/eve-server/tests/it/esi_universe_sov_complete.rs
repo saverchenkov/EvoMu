@@ -215,15 +215,14 @@ async fn test_esi_sovereignty_structures_reflect_live_sov_state() {
         ] {
             snap.corporations.insert(
                 cid,
-                CorporationRecord {
-                    corporation_id: cid,
-                    name: format!("Corp {cid}"),
-                    ticker: "SOVT".into(),
-                    ceo_id: 90_000_001,
-                    alliance_id: aid,
-                    members: HashSet::from([90_000_001]),
-                    ..Default::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = cid;
+                    __corp.name = format!("Corp {cid}");
+                    __corp.ticker = "SOVT".into();
+                    __corp.ceo_id = 90_000_001;
+                    __corp.alliance_id = aid;
+                    __corp.members = HashSet::from([90_000_001]);
+                    __corp },
             );
         }
         for (aid, exec) in [(alliance, corp), (other_alliance, other_corp)] {

@@ -53,14 +53,13 @@ fn execute_crossed_order_fills_on_modify_buy_and_sell_margin_and_plex_branches()
             snap.characters.insert(cid, ch);
         }
 
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "CrossFillCorp".into(),
-            ticker: "CFCP".into(),
-            ceo_id: buyer_char,
-            master_wallet: IskCents(200_000),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "CrossFillCorp".into();
+            __corp.ticker = "CFCP".into();
+            __corp.ceo_id = buyer_char;
+            __corp.set_division_balance(1, IskCents(200_000));
+            __corp };
         corp.ensure_wallet_divisions();
         for d in &mut corp.wallet_divisions {
             d.balance = IskCents(200_000);
@@ -120,7 +119,7 @@ fn execute_crossed_order_fills_on_modify_buy_and_sell_margin_and_plex_branches()
         .unwrap();
         assert_eq!(res1.delivered_to_corp_deliveries, 5);
         assert_eq!(res1.final_escrow, IskCents(0));
-        assert_eq!(snap.corporations[&corp_id].master_wallet, IskCents(201_000));
+        assert_eq!(snap.corporations[&corp_id].master_wallet_balance(), IskCents(201_000));
         assert_eq!(meta_8001.order_state, Some(2));
 
         // Scenario 2: Character Buy Order (8003) with partial margin escrow (escrow_fraction = 0.25, escrow = 250)

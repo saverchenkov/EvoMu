@@ -60,13 +60,12 @@ fn seed_test_fixtures(ctx: &ServerContext) {
         let corp = snap
             .corporations
             .entry(1_000_170)
-            .or_insert_with(|| eve_db::CorporationRecord {
-                corporation_id: 1_000_170,
-                name: "Republic Military School".to_string(),
-                ticker: "RMS".to_string(),
-                ceo_id: 90_000_001,
-                ..Default::default()
-            });
+            .or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = 1_000_170;
+                __corp.name = "Republic Military School".to_string();
+                __corp.ticker = "RMS".to_string();
+                __corp.ceo_id = 90_000_001;
+                __corp });
         corp.ceo_id = 90_000_001;
         corp.members.insert(90_000_001);
         corp.member_roles.insert(

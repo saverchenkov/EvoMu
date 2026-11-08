@@ -100,9 +100,12 @@ fn compressor_hull_limits_reprocessing_service_rig_yields_and_metenox_helpers() 
         ch.structure_id = None;
         ch.active_ship_id = ship_id;
 
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id, ceo_id: 90_000_099, name: "RigCorp".into(), ticker: "RIGC".into(), ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.ceo_id = 90_000_099;
+            __corp.name = "RigCorp".into();
+            __corp.ticker = "RIGC".into();
+            __corp };
         corp.member_roles.insert(char_id, corp_roles::ROLE_HANGAR_CAN_TAKE[1]);
         snap.corporations.insert(corp_id, corp);
 
@@ -208,9 +211,12 @@ async fn in_space_and_structure_compression_error_branches_fleet_burst_and_corp_
             fleet_id: 501, boss_id: booster_id, members: vec![booster_id, miner_id], ..Default::default()
         });
 
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id, ceo_id: booster_id, name: "FleetCompressCorp".into(), ticker: "FCC".into(), ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.ceo_id = booster_id;
+            __corp.name = "FleetCompressCorp".into();
+            __corp.ticker = "FCC".into();
+            __corp };
         corp.member_roles.insert(miner_id, corp_roles::ROLE_HANGAR_CAN_TAKE[1]);
         snap.corporations.insert(corp_id, corp);
 

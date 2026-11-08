@@ -47,13 +47,12 @@ fn give_cash_and_cspa_contact_cost_work_and_validate() {
 
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Test Corp".into(),
-                ticker: "TST".into(),
-                ceo_id: char_a,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Test Corp".into();
+                __corp.ticker = "TST".into();
+                __corp.ceo_id = char_a;
+                __corp },
         );
     });
 
@@ -231,25 +230,23 @@ fn bill_mgr_personal_corporate_and_autopay_lifecycle() {
             ch.corporation_id = corp_id;
             ch.balance = IskCents::from_f64_isk(100_000.0);
         }
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "Debtor Corp".into(),
-            ticker: "DBT".into(),
-            ceo_id,
-            master_wallet: IskCents::from_f64_isk(200_000.0),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Debtor Corp".into();
+            __corp.ticker = "DBT".into();
+            __corp.ceo_id = ceo_id;
+            __corp.set_division_balance(1, IskCents::from_f64_isk(200_000.0));
+            __corp };
         corp.ensure_wallet_divisions();
         corp.wallet_divisions[0].balance = IskCents::from_f64_isk(200_000.0);
         snap.corporations.insert(corp_id, corp);
         snap.corporations.insert(
             cred_corp_id,
-            CorporationRecord {
-                corporation_id: cred_corp_id,
-                name: "CONCORD".into(),
-                ticker: "CND".into(),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = cred_corp_id;
+                __corp.name = "CONCORD".into();
+                __corp.ticker = "CND".into();
+                __corp },
         );
     });
 
@@ -397,14 +394,13 @@ fn pos_mgr_and_cluster_telemetry_handlers_work() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "POS Corp".into(),
-                ticker: "POS".into(),
-                ceo_id: char_id,
-                alliance_id: Some(ally_id),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "POS Corp".into();
+                __corp.ticker = "POS".into();
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = Some(ally_id);
+                __corp },
         );
         snap.system_states.insert(
             30_000_142,

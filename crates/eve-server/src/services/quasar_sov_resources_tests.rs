@@ -41,11 +41,10 @@ fn planet_star_resources_and_skyhook_admin_handlers() {
             ch.corporation_id = corp_id;
             ch.solar_system_id = sys_id;
         }
-        let corp = snap.corporations.entry(corp_id).or_insert_with(|| eve_db::CorporationRecord {
-            corporation_id: corp_id,
-            ceo_id: cid,
-            ..Default::default()
-        });
+        let corp = snap.corporations.entry(corp_id).or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.ceo_id = cid;
+            __corp });
         corp.members.insert(cid);
         corp.member_roles.insert(cid, corp_roles::ROLE_DIRECTOR);
         snap.structures.insert(

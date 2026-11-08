@@ -159,35 +159,33 @@ async fn test_esi5_alliance_and_corporation_public_identity() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             exec_corp_id,
-            CorporationRecord {
-                corporation_id: exec_corp_id,
-                name: "Vanguard Sovereign Logistics".to_string(),
-                ticker: "VSLG".to_string(),
-                ceo_id,
-                alliance_id: Some(alliance_id),
-                tax_rate: 0.065,
-                master_wallet: IskCents::from_isk(100_000_000),
-                members: HashSet::from([ceo_id, wingman_id]),
-                hq_station_id: Some(60_003_760),
-                description: "Sovereign industrial backbone".to_string(),
-                url: "https://vslg.evomu.test".to_string(),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = exec_corp_id;
+                __corp.name = "Vanguard Sovereign Logistics".to_string();
+                __corp.ticker = "VSLG".to_string();
+                __corp.ceo_id = ceo_id;
+                __corp.alliance_id = Some(alliance_id);
+                __corp.tax_rate = 0.065;
+                __corp.members = HashSet::from([ceo_id, wingman_id]);
+                __corp.hq_station_id = Some(60_003_760);
+                __corp.description = "Sovereign industrial backbone".to_string();
+                __corp.url = "https://vslg.evomu.test".to_string();
+                __corp.set_division_balance(1, IskCents::from_isk(100_000_000));
+                __corp },
         );
         snap.corporations.insert(
             member_corp_id,
-            CorporationRecord {
-                corporation_id: member_corp_id,
-                name: "Vanguard Mining Wing".to_string(),
-                ticker: "VMWG".to_string(),
-                ceo_id: wingman_id,
-                alliance_id: Some(alliance_id),
-                tax_rate: 0.03,
-                master_wallet: IskCents::from_isk(25_000_000),
-                members: HashSet::from([wingman_id]),
-                hq_station_id: Some(60_003_760),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = member_corp_id;
+                __corp.name = "Vanguard Mining Wing".to_string();
+                __corp.ticker = "VMWG".to_string();
+                __corp.ceo_id = wingman_id;
+                __corp.alliance_id = Some(alliance_id);
+                __corp.tax_rate = 0.03;
+                __corp.members = HashSet::from([wingman_id]);
+                __corp.hq_station_id = Some(60_003_760);
+                __corp.set_division_balance(1, IskCents::from_isk(25_000_000));
+                __corp },
         );
         snap.alliances.insert(
             alliance_id,
@@ -509,17 +507,16 @@ async fn test_esi5_corporation_membership_tracking_limit_and_roles() {
 
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Aegis Fleet Directorate".to_string(),
-                ticker: "AGFD".to_string(),
-                ceo_id,
-                tax_rate: 0.05,
-                members: HashSet::from([ceo_id, wingman_id]),
-                member_roles,
-                hq_station_id: Some(60_003_760),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Aegis Fleet Directorate".to_string();
+                __corp.ticker = "AGFD".to_string();
+                __corp.ceo_id = ceo_id;
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([ceo_id, wingman_id]);
+                __corp.member_roles = member_roles;
+                __corp.hq_station_id = Some(60_003_760);
+                __corp },
         );
     });
 
@@ -698,14 +695,19 @@ async fn test_esi5_corporation_divisions_blueprints_and_standings() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Kaalakiota Industrial Foundry".to_string(),
-                ticker: "KAAL".to_string(),
-                ceo_id,
-                master_wallet: IskCents::from_isk(100_000_000),
-                tax_rate: 0.04,
-                wallet_divisions: vec![
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Kaalakiota Industrial Foundry".to_string();
+                __corp.ticker = "KAAL".to_string();
+                __corp.ceo_id = ceo_id;
+                __corp.tax_rate = 0.04;
+                __corp.members = HashSet::from([ceo_id]);
+                __corp.member_roles = HashMap::from([(
+                    ceo_id,
+                    ROLE_DIRECTOR | ROLE_FACTORY_MANAGER | ROLE_STATION_MANAGER,
+                )]);
+                __corp.hq_station_id = Some(jita_station);
+                __corp.wallet_divisions = vec![
                     CorpWalletDivisionRecord {
                         division_id: 1,
                         name: "Capital Reserve".to_string(),
@@ -716,15 +718,10 @@ async fn test_esi5_corporation_divisions_blueprints_and_standings() {
                         name: "R&D Operations".to_string(),
                         balance: IskCents::from_isk(80_000_000),
                     },
-                ],
-                members: HashSet::from([ceo_id]),
-                member_roles: HashMap::from([(
-                    ceo_id,
-                    ROLE_DIRECTOR | ROLE_FACTORY_MANAGER | ROLE_STATION_MANAGER,
-                )]),
-                hq_station_id: Some(jita_station),
-                ..Default::default()
-            },
+                ];
+                let __mw = IskCents::from_isk(100_000_000);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
 
         // Seed unresearched corp BPO in Hangar (CorpSAG1); ME/TE research and BPC copy are driven via live RPCs.
@@ -933,16 +930,15 @@ async fn test_esi5_corporation_structures_facilities_and_starbases() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Upwell Deep Space Engineering".to_string(),
-                ticker: "UDSE".to_string(),
-                ceo_id,
-                tax_rate: 0.05,
-                members: HashSet::from([ceo_id]),
-                hq_station_id: Some(60_003_760),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Upwell Deep Space Engineering".to_string();
+                __corp.ticker = "UDSE".to_string();
+                __corp.ceo_id = ceo_id;
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([ceo_id]);
+                __corp.hq_station_id = Some(60_003_760);
+                __corp },
         );
 
         snap.structures.insert(
@@ -1283,24 +1279,23 @@ async fn test_esi_corp_role_gated_mining_customs_and_orders() {
                 snap.characters.insert(cid, ch);
             }
 
-            let mut corp = CorporationRecord {
-                corporation_id: corp_id,
-                name: "Role Gate Test Corp".into(),
-                ticker: "RGTC".into(),
-                ceo_id,
-                tax_rate: 0.05,
-                members: HashSet::from([
+            let mut corp = { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Role Gate Test Corp".into();
+                __corp.ticker = "RGTC".into();
+                __corp.ceo_id = ceo_id;
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([
                     ceo_id,
                     station_mgr_id,
                     accountant_id,
                     trader_id,
                     plain_member_id,
-                ]),
-                member_roles,
-                hq_station_id: Some(jita_station),
-                master_wallet: IskCents::from_isk(250_000_000),
-                ..Default::default()
-            };
+                ]);
+                __corp.member_roles = member_roles;
+                __corp.hq_station_id = Some(jita_station);
+                __corp.set_division_balance(1, IskCents::from_isk(250_000_000));
+                __corp };
             corp.ensure_wallet_divisions();
             for d in &mut corp.wallet_divisions {
                 d.balance = IskCents::from_isk(250_000_000);
@@ -1608,18 +1603,17 @@ async fn test_esi_market_history_prices_structures_and_industry_jobs() {
             }
             snap.corporations.insert(
                 corp_id,
-                CorporationRecord {
-                    corporation_id: corp_id,
-                    name: "Industry Market Corp".into(),
-                    ticker: "IMC".into(),
-                    ceo_id: seller_id,
-                    tax_rate: 0.05,
-                    members: HashSet::from([seller_id]),
-                    member_roles,
-                    hq_station_id: Some(jita_station),
-                    master_wallet: IskCents::from_isk(100_000_000),
-                    ..Default::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = corp_id;
+                    __corp.name = "Industry Market Corp".into();
+                    __corp.ticker = "IMC".into();
+                    __corp.ceo_id = seller_id;
+                    __corp.tax_rate = 0.05;
+                    __corp.members = HashSet::from([seller_id]);
+                    __corp.member_roles = member_roles;
+                    __corp.hq_station_id = Some(jita_station);
+                    __corp.set_division_balance(1, IskCents::from_isk(100_000_000));
+                    __corp },
             );
             snap.structures.insert(
                 structure_id,

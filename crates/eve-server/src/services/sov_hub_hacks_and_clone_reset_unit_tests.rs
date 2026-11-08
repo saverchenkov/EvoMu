@@ -46,13 +46,12 @@ fn clone_jump_reset_and_contract_helpers_kill_mutations() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             player_corp,
-            CorporationRecord {
-                corporation_id: player_corp,
-                ceo_id: 90_000_999,
-                name: "PlayerCorp".into(),
-                ticker: "PCRP".into(),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = player_corp;
+                __corp.ceo_id = 90_000_999;
+                __corp.name = "PlayerCorp".into();
+                __corp.ticker = "PCRP".into();
+                __corp },
         );
     });
     assert_eq!(

@@ -89,18 +89,17 @@ async fn journal(ctx: &ServerContext, s: &mut SessionState, key: i64, corp: bool
 fn setup_corp(ctx: &ServerContext) -> i64 {
     ctx.db.with_mut_snapshot(|snap| {
         let cid = 98_123_456;
-        let mut corp = CorporationRecord {
-            corporation_id: cid,
-            name: "Ledger Test Corp".into(),
-            ticker: "LDGR".into(),
-            ceo_id: P1,
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = cid;
+            __corp.name = "Ledger Test Corp".into();
+            __corp.ticker = "LDGR".into();
+            __corp.ceo_id = P1;
+            __corp };
         corp.ensure_wallet_divisions();
         for d in corp.wallet_divisions.iter_mut() {
             d.balance = IskCents::from_isk(1_000_000);
         }
-        corp.master_wallet = IskCents::from_isk(1_000_000);
+        corp.set_division_balance(1, IskCents::from_isk(1_000_000));
         corp.members.insert(P1);
         corp.members.insert(P2);
         snap.corporations.insert(cid, corp);
@@ -206,7 +205,7 @@ async fn test_give_cash_from_corp_account_roles_and_journal() {
     .expect("division 1 -> division 7");
     assert_eq!(div_balance(&ctx, corp, 1), IskCents::from_isk(960_000));
     assert_eq!(div_balance(&ctx, corp, 7), IskCents::from_isk(1_040_000));
-    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp].master_wallet), IskCents::from_isk(960_000));
+    assert_eq!(ctx.db.with_snapshot(|s| s.corporations[&corp].master_wallet_balance()), IskCents::from_isk(960_000));
 
     // Journal: corp side (division 3) and recipient side, with parties, ref type and reason.
     let corp_rows = journal(&ctx, &mut s2, 1002, true).await;
@@ -604,16 +603,15 @@ async fn test_corporation_and_personal_bills_and_autopay() {
     let now = ctx.now_unix();
 
     ctx.db.with_mut_snapshot(|snap| {
-        let corp = snap.corporations.entry(corp_id).or_insert_with(|| CorporationRecord {
-            corporation_id: corp_id,
-            name: "Trader Corp".into(),
-            ticker: "TRDR".into(),
-            ceo_id: P1,
-            master_wallet: IskCents::from_isk(10_000_000),
-            ..Default::default()
-        });
+        let corp = snap.corporations.entry(corp_id).or_insert_with(|| { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Trader Corp".into();
+            __corp.ticker = "TRDR".into();
+            __corp.ceo_id = P1;
+            __corp.set_division_balance(1, IskCents::from_isk(10_000_000));
+            __corp });
         corp.ceo_id = P1;
-        corp.master_wallet = IskCents::from_isk(10_000_000);
+        corp.set_division_balance(1, IskCents::from_isk(10_000_000));
         corp.ensure_wallet_divisions();
         for d in &mut corp.wallet_divisions {
             d.balance = IskCents::from_isk(1_000_000);
@@ -1051,18 +1049,17 @@ async fn test_downtime_contract_expiry_settlement_and_corp_bill_division_isolati
         if let Some(ch2) = snap.characters.get_mut(&P2) {
             ch2.corporation_id = corp_id;
         }
-        let corp = snap.corporations.entry(corp_id).or_insert_with(|| CorporationRecord {
-            corporation_id: corp_id,
-            name: "Trader Corp".into(),
-            ticker: "TRDR".into(),
-            ceo_id: P1,
-            master_wallet: IskCents::from_isk(50_000),
-            ..Default::default()
-        });
+        let corp = snap.corporations.entry(corp_id).or_insert_with(|| { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Trader Corp".into();
+            __corp.ticker = "TRDR".into();
+            __corp.ceo_id = P1;
+            __corp.set_division_balance(1, IskCents::from_isk(50_000));
+            __corp });
         corp.ceo_id = P1;
         corp.member_roles.insert(P2, 0);
         corp.ensure_wallet_divisions();
-        corp.master_wallet = IskCents::from_isk(50_000);
+        corp.set_division_balance(1, IskCents::from_isk(50_000));
         for d in &mut corp.wallet_divisions {
             if d.division_id == 1 {
                 d.balance = IskCents::from_isk(50_000);
@@ -1103,7 +1100,7 @@ async fn test_downtime_contract_expiry_settlement_and_corp_bill_division_isolati
         let corp = &snap.corporations[&corp_id];
         let div1 = corp.wallet_divisions.iter().find(|d| d.division_id == 1).unwrap().balance;
         let div2 = corp.wallet_divisions.iter().find(|d| d.division_id == 2).unwrap().balance;
-        assert_eq!(corp.master_wallet, IskCents::from_isk(50_000), "master_wallet untouched");
+        assert_eq!(corp.master_wallet_balance(), IskCents::from_isk(50_000), "master_wallet untouched");
         assert_eq!(div1, IskCents::from_isk(50_000), "Division 1 untouched");
         assert_eq!(div2, IskCents::from_isk(80_000), "Division 2 debited by 120k");
     });

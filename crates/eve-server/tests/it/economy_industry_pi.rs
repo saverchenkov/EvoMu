@@ -402,13 +402,12 @@ async fn test_industry_blueprint_data_facilities_jobs() {
         let corp_id = snap.characters[&90_000_001].corporation_id;
         snap.corporations.insert(
             corp_id,
-            eve_db::CorporationRecord {
-                corporation_id: corp_id,
-                name: "Industry Test Corp".into(),
-                ticker: "INDT".into(),
-                ceo_id: 90_000_001,
-                ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Industry Test Corp".into();
+                __corp.ticker = "INDT".into();
+                __corp.ceo_id = 90_000_001;
+                __corp },
         );
         snap.next_entity_id += 1;
         let bpo_id = snap.next_entity_id;
@@ -1495,14 +1494,13 @@ async fn test_lookup_warable_corps_and_alliances_enforces_structure_eligibility(
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             98_000_110,
-            CorporationRecord {
-                corporation_id: 98_000_110,
-                name: "Vanguard Structureless Corp".into(),
-                ticker: "VSC".into(),
-                ceo_id: 90_000_110,
-                alliance_id: Some(99_000_110),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = 98_000_110;
+                __corp.name = "Vanguard Structureless Corp".into();
+                __corp.ticker = "VSC".into();
+                __corp.ceo_id = 90_000_110;
+                __corp.alliance_id = Some(99_000_110);
+                __corp },
         );
         snap.alliances.insert(
             99_000_110,
@@ -1516,14 +1514,13 @@ async fn test_lookup_warable_corps_and_alliances_enforces_structure_eligibility(
         );
         snap.corporations.insert(
             98_000_111,
-            CorporationRecord {
-                corporation_id: 98_000_111,
-                name: "Vanguard Citadel Corp".into(),
-                ticker: "VCC".into(),
-                ceo_id: 90_000_111,
-                alliance_id: Some(99_000_111),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = 98_000_111;
+                __corp.name = "Vanguard Citadel Corp".into();
+                __corp.ticker = "VCC".into();
+                __corp.ceo_id = 90_000_111;
+                __corp.alliance_id = Some(99_000_111);
+                __corp },
         );
         snap.alliances.insert(
             99_000_111,
@@ -1538,14 +1535,13 @@ async fn test_lookup_warable_corps_and_alliances_enforces_structure_eligibility(
         );
         snap.corporations.insert(
             98_000_112,
-            CorporationRecord {
-                corporation_id: 98_000_112,
-                name: "Vanguard Standalone Corp".into(),
-                ticker: "VSC2".into(),
-                ceo_id: 90_000_112,
-                alliance_id: None,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = 98_000_112;
+                __corp.name = "Vanguard Standalone Corp".into();
+                __corp.ticker = "VSC2".into();
+                __corp.ceo_id = 90_000_112;
+                __corp.alliance_id = None;
+                __corp },
         );
         snap.structures.insert(
             1_030_000_111,

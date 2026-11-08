@@ -77,14 +77,13 @@ pub(super) fn setup_inv_ctx() -> (ServerContext, SessionState, i64, i64, i64, i6
 
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "InvExtra Corp".into(),
-                ticker: "IEXC".into(),
-                ceo_id: 96_699_999,
-                members: [char_id, 96_699_999].into_iter().collect(),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "InvExtra Corp".into();
+                __corp.ticker = "IEXC".into();
+                __corp.ceo_id = 96_699_999;
+                __corp.members = [char_id, 96_699_999].into_iter().collect();
+                __corp },
         );
 
         snap.items.insert(

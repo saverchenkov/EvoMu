@@ -156,7 +156,7 @@ async fn test_corp_market_divisions_no_isk_mint_or_div1_corruption() {
     ctx.db.with_snapshot(|snap| {
         let c = &snap.corporations[&corp_id];
         assert_eq!(c.division_balance(1), div1_init, "Div 1 must remain untouched by Div 2 buy order");
-        assert_eq!(c.master_wallet, div1_init);
+        assert_eq!(c.master_wallet_balance(), div1_init);
         assert!(c.division_balance(2).0 < div2_init.0);
     });
 
@@ -182,7 +182,7 @@ async fn test_corp_market_divisions_no_isk_mint_or_div1_corruption() {
     ctx.db.with_snapshot(|snap| {
         let c = &snap.corporations[&corp_id];
         assert_eq!(c.division_balance(1), div1_init, "Div 1 must remain untouched after Div 2 sell proceeds");
-        assert_eq!(c.master_wallet, div1_init);
+        assert_eq!(c.master_wallet_balance(), div1_init);
         assert!(c.division_balance(2).0 > div2_after_cancel.0);
         assert!(c.division_balance(2).0 < div2_after_cancel.0 + IskCents::from_isk(5_000_000).0, "No double-credit ISK mint");
     });

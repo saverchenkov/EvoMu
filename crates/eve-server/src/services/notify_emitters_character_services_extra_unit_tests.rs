@@ -82,13 +82,12 @@ fn setattr_industry_corp_division_roles_skills_and_fleet_emitters_kill_mutations
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                ceo_id: 90_000_999, // char_id is NOT CEO
-                name: "IndyCorp".into(),
-                ticker: "INDY".into(),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.ceo_id = 90_000_999;
+                __corp.name = "IndyCorp".into();
+                __corp.ticker = "INDY".into();
+                __corp },
         );
         let mut monitors = BTreeMap::new();
         monitors.insert(

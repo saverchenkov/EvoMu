@@ -72,19 +72,19 @@ fn make_ctx_and_session() -> (ServerContext, SessionState, i64, i64, i64) {
 
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Multifit Test Corp".into(),
-                ticker: "MFTC".into(),
-                ceo_id: 96_700_999,
-                master_wallet: IskCents::from_f64_isk(500_000_000.0),
-                wallet_divisions: vec![CorpWalletDivisionRecord {
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Multifit Test Corp".into();
+                __corp.ticker = "MFTC".into();
+                __corp.ceo_id = 96_700_999;
+                __corp.wallet_divisions = vec![CorpWalletDivisionRecord {
                     division_id: 1,
                     name: "Master".into(),
                     balance: IskCents::from_f64_isk(500_000_000.0),
-                }],
-                ..Default::default()
-            },
+                }];
+                let __mw = IskCents::from_f64_isk(500_000_000.0);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         snap.items.insert(ship_id, make_item(ship_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true));
     });

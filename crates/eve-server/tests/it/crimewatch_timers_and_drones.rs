@@ -100,10 +100,12 @@ async fn test_crimewatch_sec_status_loss_and_kill_rights_lifecycle_e2e() {
             (target_corp_id, "Target Corp", "TGT", &[victim_id, corp_mate_id, victim2_id][..]),
             (other_corp_id, "Other Corp", "OTH", &[pirate_id, outsider_id][..]),
         ] {
-            snap.corporations.insert(corp_id, CorporationRecord {
-                corporation_id: corp_id, name: name.into(), ticker: ticker.into(),
-                members: mems.iter().copied().collect(), ..Default::default()
-            });
+            snap.corporations.insert(corp_id, { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = name.into();
+                __corp.ticker = ticker.into();
+                __corp.members = mems.iter().copied().collect();
+                __corp });
         }
     });
 
@@ -1894,16 +1896,21 @@ async fn test_corporation_structure_ownership_and_station_manager_roles() {
     ctx.db.with_mut_snapshot(|snap| {
         let mut ceo_roles = HashMap::new();
         ceo_roles.insert(ceo_id, eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER);
-        snap.corporations.insert(corp_id, CorporationRecord {
-            corporation_id: corp_id, name: "Citadel Owners Corp".into(), ticker: "OWNR".into(), ceo_id,
-            members: std::collections::HashSet::from([ceo_id, mgr_id]), member_roles: ceo_roles,
-            ..Default::default()
-        });
-        snap.corporations.insert(other_corp, CorporationRecord {
-            corporation_id: other_corp, name: "Outsider Corp".into(), ticker: "OUTS".into(), ceo_id: outsider_id,
-            members: std::collections::HashSet::from([outsider_id]),
-            ..Default::default()
-        });
+        snap.corporations.insert(corp_id, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Citadel Owners Corp".into();
+            __corp.ticker = "OWNR".into();
+            __corp.ceo_id = ceo_id;
+            __corp.members = std::collections::HashSet::from([ceo_id, mgr_id]);
+            __corp.member_roles = ceo_roles;
+            __corp });
+        snap.corporations.insert(other_corp, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = other_corp;
+            __corp.name = "Outsider Corp".into();
+            __corp.ticker = "OUTS".into();
+            __corp.ceo_id = outsider_id;
+            __corp.members = std::collections::HashSet::from([outsider_id]);
+            __corp });
     });
     ceo_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
 

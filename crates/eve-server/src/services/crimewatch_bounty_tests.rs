@@ -28,15 +28,14 @@ fn bounty_proxy_kill_right_sales_placement_searches_leaderboards_and_gm_tools() 
         snap.characters.insert(target_char_id, t);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "BountyTestCorp".into(),
-                ticker: "BTC".into(),
-                ceo_id: char_id,
-                alliance_id: Some(alliance_id),
-                tax_rate: 0.10,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "BountyTestCorp".into();
+                __corp.ticker = "BTC".into();
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = Some(alliance_id);
+                __corp.tax_rate = 0.10;
+                __corp },
         );
         snap.alliances.insert(
             alliance_id,

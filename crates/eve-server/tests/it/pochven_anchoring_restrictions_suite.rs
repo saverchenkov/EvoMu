@@ -73,13 +73,12 @@ async fn test_pochven_anchoring_restrictions_customs_office_and_upwell_blocks() 
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Pochven Pioneer Corp".into(),
-                ticker: "PPIO".into(),
-                ceo_id: char_id,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Pochven Pioneer Corp".into();
+                __corp.ticker = "PPIO".into();
+                __corp.ceo_id = char_id;
+                __corp },
         );
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = POCHVEN_SYS_ID;
@@ -354,12 +353,11 @@ async fn test_pochven_existing_structures_survive_and_remain_operational() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Legacy Pochven Holdout".into(),
-                ticker: "HOLD".into(),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Legacy Pochven Holdout".into();
+                __corp.ticker = "HOLD".into();
+                __corp },
         );
         snap.structures.insert(
             existing_struct_id,

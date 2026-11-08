@@ -34,15 +34,14 @@ fn asset_inventory_which_filters_search_assets_and_aggression_timer_promotion() 
         roles.insert(trader_id, corp_roles::ROLE_TRADER);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "AssetSearchCorp".into(),
-                ticker: "ASCP".into(),
-                ceo_id,
-                members: HashSet::from([ceo_id, trader_id, plain_id]),
-                member_roles: roles,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "AssetSearchCorp".into();
+                __corp.ticker = "ASCP".into();
+                __corp.ceo_id = ceo_id;
+                __corp.members = HashSet::from([ceo_id, trader_id, plain_id]);
+                __corp.member_roles = roles;
+                __corp },
         );
         snap.items.insert(
             office_item_id,

@@ -45,27 +45,25 @@ fn setup_wallet_ops_world() -> (ServerContext, i64, i64, i64, i64) {
         mem.balance = IskCents::from_f64_isk(10_000_000.0);
         snap.characters.insert(member_id, mem);
 
-        let mut ca = CorporationRecord {
-            corporation_id: corp_a,
-            name: "Alpha Industry".into(),
-            ticker: "ALPI".into(),
-            ceo_id,
-            master_wallet: IskCents::from_f64_isk(100_000_000.0),
-            ..Default::default()
-        };
+        let mut ca = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_a;
+            __corp.name = "Alpha Industry".into();
+            __corp.ticker = "ALPI".into();
+            __corp.ceo_id = ceo_id;
+            __corp.set_division_balance(1, IskCents::from_f64_isk(100_000_000.0));
+            __corp };
         ca.ensure_wallet_divisions();
         ca.wallet_divisions[0].balance = IskCents::from_f64_isk(100_000_000.0);
         ca.wallet_divisions[1].balance = IskCents::from_f64_isk(25_000_000.0);
         snap.corporations.insert(corp_a, ca);
 
-        let mut cb = CorporationRecord {
-            corporation_id: corp_b,
-            name: "Beta Creditor".into(),
-            ticker: "BETC".into(),
-            ceo_id: 96_910_099,
-            master_wallet: IskCents::from_f64_isk(10_000_000.0),
-            ..Default::default()
-        };
+        let mut cb = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_b;
+            __corp.name = "Beta Creditor".into();
+            __corp.ticker = "BETC".into();
+            __corp.ceo_id = 96_910_099;
+            __corp.set_division_balance(1, IskCents::from_f64_isk(10_000_000.0));
+            __corp };
         cb.ensure_wallet_divisions();
         snap.corporations.insert(corp_b, cb);
     });
@@ -167,7 +165,7 @@ fn bills_autopay_and_tax_collector_workflow() {
         .expect("handled")
         .expect("autopay configured and processed");
     assert_eq!(
-        ctx.db.with_snapshot(|s| s.corporations[&corp_a].master_wallet),
+        ctx.db.with_snapshot(|s| s.corporations[&corp_a].master_wallet_balance()),
         IskCents::from_f64_isk(98_500_000.0)
     );
 

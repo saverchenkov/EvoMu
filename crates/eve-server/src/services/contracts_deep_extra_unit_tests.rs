@@ -91,14 +91,13 @@ fn create_contract_validation_and_for_corp_role_and_slot_branches() {
     seed_item(&ctx, 910_100, 34, issuer_id, JITA_STATION_ID, InventoryFlag::Hangar, 1_000, false);
 
     ctx.db.with_mut_snapshot(|snap| {
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "Contract Test Corp".into(),
-            ticker: "CTST".into(),
-            ceo_id: other_ceo,
-            master_wallet: IskCents::from_isk(50_000_000),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Contract Test Corp".into();
+            __corp.ticker = "CTST".into();
+            __corp.ceo_id = other_ceo;
+            __corp.set_division_balance(1, IskCents::from_isk(50_000_000));
+            __corp };
         corp.ensure_wallet_divisions();
         for d in &mut corp.wallet_divisions {
             d.balance = IskCents::from_isk(50_000_000);

@@ -488,22 +488,23 @@ async fn test_repackage_assemble_trash_encoded_crystal_and_item_locking() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            eve_db::CorporationRecord {
-                corporation_id: corp_id,
-                name: "Item Lock Corp".into(),
-                ticker: "ILC".into(),
-                ceo_id: char_id,
-                alliance_id: None,
-                tax_rate: 0.05,
-                master_wallet: eve_db::IskCents::from_isk(1_000_000),
-                members: HashSet::from([char_id]),
-                member_roles: HashMap::from([(char_id, u64::MAX)]),
-                applications: HashMap::new(),
-                wallet_divisions: Vec::new(),
-                description: String::new(),
-                url: String::new(),
-                hq_station_id: Some(station_id),
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Item Lock Corp".into();
+                __corp.ticker = "ILC".into();
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = None;
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([char_id]);
+                __corp.member_roles = HashMap::from([(char_id, u64::MAX)]);
+                __corp.applications = HashMap::new();
+                __corp.description = String::new();
+                __corp.url = String::new();
+                __corp.hq_station_id = Some(station_id);
+                __corp.wallet_divisions = Vec::new();
+                let __mw = eve_db::IskCents::from_isk(1_000_000);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.corporation_id = corp_id;

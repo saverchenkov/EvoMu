@@ -295,22 +295,23 @@ async fn test_vote_manager_cases_and_actions() {
         // Seed player corporation with PILOT1 as CEO and initial director
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "EvoMu Shareholder Collective".into(),
-                ticker: "ESHC".into(),
-                ceo_id: PILOT1,
-                alliance_id: None,
-                tax_rate: 0.05,
-                master_wallet: IskCents::from_isk(10_000_000),
-                members: HashSet::from([PILOT1, CANDIDATE_CEO]),
-                member_roles: HashMap::from([(PILOT1, u64::MAX)]),
-                applications: HashMap::new(),
-                wallet_divisions: Vec::new(),
-                description: "Corporate governance voting test corporation".into(),
-                url: "".into(),
-                hq_station_id: None,
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "EvoMu Shareholder Collective".into();
+                __corp.ticker = "ESHC".into();
+                __corp.ceo_id = PILOT1;
+                __corp.alliance_id = None;
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([PILOT1, CANDIDATE_CEO]);
+                __corp.member_roles = HashMap::from([(PILOT1, u64::MAX)]);
+                __corp.applications = HashMap::new();
+                __corp.description = "Corporate governance voting test corporation".into();
+                __corp.url = "".into();
+                __corp.hq_station_id = None;
+                __corp.wallet_divisions = Vec::new();
+                let __mw = IskCents::from_isk(10_000_000);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
     });
     sess.corporation_id = Some(corp_id);
@@ -736,16 +737,15 @@ async fn test_r3_track4_agents_skills_corp_and_clones_regressions() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "R3 Governance Corp".into(),
-                ticker: "R3GC".into(),
-                ceo_id: PILOT1,
-                master_wallet: IskCents::from_isk(10_000_000),
-                members: HashSet::from([PILOT1, CANDIDATE_CEO]),
-                member_roles: HashMap::from([(PILOT1, u64::MAX), (CANDIDATE_CEO, 0)]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "R3 Governance Corp".into();
+                __corp.ticker = "R3GC".into();
+                __corp.ceo_id = PILOT1;
+                __corp.members = HashSet::from([PILOT1, CANDIDATE_CEO]);
+                __corp.member_roles = HashMap::from([(PILOT1, u64::MAX), (CANDIDATE_CEO, 0)]);
+                __corp.set_division_balance(1, IskCents::from_isk(10_000_000));
+                __corp },
         );
         if let Some(c) = snap.corporations.get_mut(&corp_id) {
             c.ensure_wallet_divisions();

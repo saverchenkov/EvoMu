@@ -2655,12 +2655,23 @@ async fn test_parity_lifecycle_industry_and_corp_quit() {
             pilot_char_id,
             corp_roles::ROLE_FACTORY_MANAGER | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0],
         );
-        s.corporations.insert(player_corp_id, CorporationRecord {
-            corporation_id: player_corp_id, name: "Frontier Industrial LLC".into(), ticker: "FI-LLC".into(),
-            ceo_id: 90_000_002, alliance_id: None, tax_rate: 0.05, master_wallet: IskCents(100_000_000_00),
-            members, member_roles, applications: HashMap::new(), wallet_divisions: Vec::new(),
-            description: String::new(), url: String::new(), hq_station_id: None,
-        });
+        s.corporations.insert(player_corp_id, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = player_corp_id;
+            __corp.name = "Frontier Industrial LLC".into();
+            __corp.ticker = "FI-LLC".into();
+            __corp.ceo_id = 90_000_002;
+            __corp.alliance_id = None;
+            __corp.tax_rate = 0.05;
+            __corp.members = members;
+            __corp.member_roles = member_roles;
+            __corp.applications = HashMap::new();
+            __corp.description = String::new();
+            __corp.url = String::new();
+            __corp.hq_station_id = None;
+            __corp.wallet_divisions = Vec::new();
+            let __mw = IskCents(100_000_000_00);
+            if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+            __corp });
 
         let gov = s.corp_governance.entry(player_corp_id).or_default();
         gov.member_titles.insert(pilot_char_id, 1);

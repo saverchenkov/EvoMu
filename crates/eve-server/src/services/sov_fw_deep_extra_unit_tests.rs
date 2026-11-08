@@ -125,14 +125,13 @@ async fn sov_adm_vulnerability_windows_entosis_and_mercden_reinforcement_kill_mu
         snap.sov_runtime.adm_vulnerability_windows.insert(hub_id, (0, 0));
         snap.corporations.insert(
             atk_corp,
-            CorporationRecord {
-                corporation_id: atk_corp,
-                alliance_id: None,
-                name: "Attacker Corp".into(),
-                ticker: "ATKC".into(),
-                ceo_id: atk_char,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = atk_corp;
+                __corp.alliance_id = None;
+                __corp.name = "Attacker Corp".into();
+                __corp.ticker = "ATKC".into();
+                __corp.ceo_id = atk_char;
+                __corp },
         );
         let mut ch = snap.characters.values().next().unwrap().clone();
         ch.character_id = atk_char;

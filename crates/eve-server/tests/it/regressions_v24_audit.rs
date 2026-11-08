@@ -96,15 +96,14 @@ async fn test_sov_skyhooks_and_structures_audit() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Audit Corp".into(),
-                ticker: "AUDIT".into(),
-                ceo_id: char_id,
-                alliance_id: Some(alliance_id),
-                member_roles: HashMap::from([(char_id, corp_roles::ROLE_DIRECTOR)]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Audit Corp".into();
+                __corp.ticker = "AUDIT".into();
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = Some(alliance_id);
+                __corp.member_roles = HashMap::from([(char_id, corp_roles::ROLE_DIRECTOR)]);
+                __corp },
         );
         snap.system_states.insert(
             null_sys,
@@ -964,18 +963,17 @@ async fn test_structure_ops_and_asset_safety_audit() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Struct Corp".into(),
-                ticker: "STRCT".into(),
-                ceo_id: char_id,
-                alliance_id: None,
-                member_roles: HashMap::from([(
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Struct Corp".into();
+                __corp.ticker = "STRCT".into();
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = None;
+                __corp.member_roles = HashMap::from([(
                     char_id,
                     corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_STATION_MANAGER,
-                )]),
-                ..Default::default()
-            },
+                )]);
+                __corp },
         );
         snap.system_states.insert(
             sys_id,

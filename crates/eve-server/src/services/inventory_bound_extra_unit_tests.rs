@@ -387,14 +387,13 @@ fn colocation_multiadd_destination_and_structure_fuel_transfer_branches() {
         snap.characters.insert(char_id, ch);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Fuel Corp".into(),
-                ticker: "FUEL".into(),
-                ceo_id: char_id,
-                hq_station_id: Some(60_003_760),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Fuel Corp".into();
+                __corp.ticker = "FUEL".into();
+                __corp.ceo_id = char_id;
+                __corp.hq_station_id = Some(60_003_760);
+                __corp },
         );
         snap.corp_role_assignments.insert(
             (corp_id, char_id),

@@ -76,13 +76,12 @@ fn pos_mgr_moon_lookup_permissions_sentry_notifications_password_and_links() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Starbase Corp".into(),
-                ticker: "SBC".into(),
-                ceo_id,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Starbase Corp".into();
+                __corp.ticker = "SBC".into();
+                __corp.ceo_id = ceo_id;
+                __corp },
         );
         snap.structures.insert(
             tower_id,
@@ -293,13 +292,12 @@ async fn unanchor_orbital_distance_system_ownership_and_ship_cargo_branches() {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Orbital Corp".into(),
-                ticker: "ORB".into(),
-                ceo_id,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Orbital Corp".into();
+                __corp.ticker = "ORB".into();
+                __corp.ceo_id = ceo_id;
+                __corp },
         );
         snap.items.insert(
             ship_id,
@@ -428,14 +426,13 @@ fn bills_receivable_access_denied_roles_reload_fsd_and_cluster_stats() {
             ch.balance = IskCents::from_f64_isk(bal);
             snap.characters.insert(cid, ch);
         }
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "Bill Corp".into(),
-            ticker: "BLC".into(),
-            ceo_id,
-            master_wallet: IskCents::from_f64_isk(100.0),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Bill Corp".into();
+            __corp.ticker = "BLC".into();
+            __corp.ceo_id = ceo_id;
+            __corp.set_division_balance(1, IskCents::from_f64_isk(100.0));
+            __corp };
         corp.ensure_wallet_divisions();
         snap.corporations.insert(corp_id, corp);
     });

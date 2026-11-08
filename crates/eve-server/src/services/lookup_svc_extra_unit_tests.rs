@@ -218,15 +218,14 @@ fn lookup_svc_exact_matching_npc_filtering_locations_and_war_eligibility_matrix(
         ] {
             snap.corporations.insert(
                 cid,
-                CorporationRecord {
-                    corporation_id: cid,
-                    name: name.into(),
-                    ticker: ticker.into(),
-                    ceo_id: player_char_id,
-                    alliance_id: ally,
-                    tax_rate: 0.05,
-                    ..Default::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = cid;
+                    __corp.name = name.into();
+                    __corp.ticker = ticker.into();
+                    __corp.ceo_id = player_char_id;
+                    __corp.alliance_id = ally;
+                    __corp.tax_rate = 0.05;
+                    __corp },
             );
         }
 
@@ -451,13 +450,12 @@ fn search_query_and_quick_query_groups_flags_and_error_branches() {
         );
         snap.corporations.insert(
             98_200_001,
-            CorporationRecord {
-                corporation_id: 98_200_001,
-                name: "fullcorpnamesearch".into(),
-                ticker: "tckrz".into(),
-                ceo_id: char_id,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = 98_200_001;
+                __corp.name = "fullcorpnamesearch".into();
+                __corp.ticker = "tckrz".into();
+                __corp.ceo_id = char_id;
+                __corp },
         );
         snap.alliances.insert(
             99_200_001,

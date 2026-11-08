@@ -353,13 +353,12 @@ fn check_corp_lp_role_and_hangar_flag_authorization_matrix() {
     );
 
     // 2. Insert corporation: CEO gets (true, u64::MAX); non-director member rejected
-    let mut corp = CorporationRecord {
-        corporation_id: corp_id,
-        ceo_id,
-        name: "Test Corp".into(),
-        ticker: "TSTC".into(),
-        ..Default::default()
-    };
+    let mut corp = { let mut __corp = CorporationRecord::default();
+        __corp.corporation_id = corp_id;
+        __corp.ceo_id = ceo_id;
+        __corp.name = "Test Corp".into();
+        __corp.ticker = "TSTC".into();
+        __corp };
     corp.member_roles.insert(member_id, 0);
     snap.corporations.insert(corp_id, corp);
     sess.corp_role = 0;

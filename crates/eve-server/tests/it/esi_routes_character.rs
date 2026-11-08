@@ -123,18 +123,18 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
         ];
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "ESI4 Director Corp".to_string(),
-                ticker: "E4DC".to_string(),
-                ceo_id: 90_000_001,
-                alliance_id: Some(alliance_id),
-                tax_rate: 0.05,
-                master_wallet: IskCents::from_isk(250_000_000),
-                wallet_divisions,
-                members: HashSet::from([90_000_001]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "ESI4 Director Corp".to_string();
+                __corp.ticker = "E4DC".to_string();
+                __corp.ceo_id = 90_000_001;
+                __corp.alliance_id = Some(alliance_id);
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([90_000_001]);
+                __corp.wallet_divisions = wallet_divisions;
+                let __mw = IskCents::from_isk(250_000_000);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         snap.active_implants.insert(90_000_001, vec![9899, 9941]);
         snap.jump_clones.insert(
@@ -255,17 +255,16 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
             .insert(880_011, [-4500.0, 8250.0, -1100.0]);
         snap.corporations.insert(
             98_000_702,
-            CorporationRecord {
-                corporation_id: 98_000_702,
-                name: "Other CEO Corp".to_string(),
-                ticker: "OTHR".to_string(),
-                ceo_id: 90_000_002,
-                alliance_id: None,
-                tax_rate: 0.05,
-                master_wallet: IskCents::from_isk(1_000_000),
-                members: HashSet::from([90_000_002]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = 98_000_702;
+                __corp.name = "Other CEO Corp".to_string();
+                __corp.ticker = "OTHR".to_string();
+                __corp.ceo_id = 90_000_002;
+                __corp.alliance_id = None;
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([90_000_002]);
+                __corp.set_division_balance(1, IskCents::from_isk(1_000_000));
+                __corp },
         );
         Ok(())
     });

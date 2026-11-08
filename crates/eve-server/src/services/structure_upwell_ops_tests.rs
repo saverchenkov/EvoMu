@@ -44,17 +44,16 @@ fn make_session(char_id: i64, corp_id: i64, structure_id: Option<i64>, role: u64
 
 fn seed_upwell_fixture(ctx: &ServerContext, char_id: i64, corp_id: i64, sid: i64) {
     ctx.db.with_mut_snapshot(|snap| {
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: format!("Upwell Corp {corp_id}"),
-            ticker: "UPW".into(),
-            ceo_id: char_id,
-            hq_station_id: Some(60003760),
-            tax_rate: 0.05,
-            master_wallet: IskCents(500_000_000),
-            members: HashSet::from([char_id]),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = format!("Upwell Corp {corp_id}");
+            __corp.ticker = "UPW".into();
+            __corp.ceo_id = char_id;
+            __corp.hq_station_id = Some(60003760);
+            __corp.tax_rate = 0.05;
+            __corp.members = HashSet::from([char_id]);
+            __corp.set_division_balance(1, IskCents(500_000_000));
+            __corp };
         corp.ensure_wallet_divisions();
         corp.set_division_balance(1, IskCents(500_000_000));
         snap.corporations.insert(corp_id, corp);
@@ -428,12 +427,11 @@ async fn guests_hangar_view_clones_and_structure_access_profile_helpers_work() {
         snap.characters.insert(7702, ch2);
         snap.corporations.insert(
             98999,
-            CorporationRecord {
-                corporation_id: 98999,
-                name: "Outsider Corp".into(),
-                ticker: "OUT".into(),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = 98999;
+                __corp.name = "Outsider Corp".into();
+                __corp.ticker = "OUT".into();
+                __corp },
         );
     });
     let mut sess = make_session(7701, 98770, Some(sid), 1);
@@ -505,6 +503,6 @@ async fn guests_hangar_view_clones_and_structure_access_profile_helpers_work() {
         );
     });
     ctx.db.with_snapshot(|s| {
-        assert_eq!(s.corporations[&98770].master_wallet, IskCents(525_000_000));
+        assert_eq!(s.corporations[&98770].master_wallet_balance(), IskCents(525_000_000));
     });
 }

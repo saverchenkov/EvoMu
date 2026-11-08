@@ -233,28 +233,16 @@ fn give_cash_from_corp(
             .corporations
             .get_mut(&corp_id)
             .ok_or_else(|| rpc_err("CorporationNotFound", format!("Corporation {corp_id} not found")))?;
-        corp.ensure_wallet_divisions();
-        let from_pos = corp.wallet_divisions.iter().position(|d| d.division_id == from_div).expect("7 divisions");
-        let new_from = corp.wallet_divisions[from_pos]
-            .balance
-            .checked_sub(amount)
+        let new_from = corp
+            .debit_division(from_div, amount)
             .ok_or_else(|| rpc_err("NotEnoughMoney", "Insufficient funds in the source wallet division"))?;
-        corp.wallet_divisions[from_pos].balance = new_from;
-        if from_div == 1 {
-            corp.master_wallet = new_from;
-        }
         let internal = to_id == corp_id;
         let mut to_bal = None;
         if internal {
             let to_div = to_key
                 .and_then(division_of)
                 .ok_or_else(|| rpc_err("InvalidAccountKey", "toAccountKey required for a division transfer"))?;
-            let to_pos = corp.wallet_divisions.iter().position(|d| d.division_id == to_div).expect("7 divisions");
-            let nb = corp.wallet_divisions[to_pos].balance.checked_add(amount).unwrap_or(corp.wallet_divisions[to_pos].balance);
-            corp.wallet_divisions[to_pos].balance = nb;
-            if to_div == 1 {
-                corp.master_wallet = nb;
-            }
+            let nb = corp.credit_division(to_div, amount);
             to_bal = Some((corp_id, to_div as i32 + 999, nb));
         }
         if !internal {
@@ -262,12 +250,7 @@ fn give_cash_from_corp(
                 ch.balance = ch.balance.checked_add(amount).unwrap_or(ch.balance);
                 to_bal = Some((to_id, ACCOUNTING_KEY_CASH, ch.balance));
             } else if let Some(other) = snap.corporations.get_mut(&to_id) {
-                other.ensure_wallet_divisions();
-                other.master_wallet = other.master_wallet.checked_add(amount).unwrap_or(other.master_wallet);
-                let mw = other.master_wallet;
-                if let Some(d) = other.wallet_divisions.iter_mut().find(|d| d.division_id == 1) {
-                    d.balance = mw;
-                }
+                let mw = other.credit_division(1, amount);
                 to_bal = Some((to_id, ACCOUNTING_KEY_CASH, mw));
             } else {
                 return Err(rpc_err("InvalidRecipient", format!("Recipient {to_id} not found")));

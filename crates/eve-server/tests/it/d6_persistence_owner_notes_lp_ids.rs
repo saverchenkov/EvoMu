@@ -82,18 +82,17 @@ fn rowset_maps(rep: &PyRep) -> Vec<HashMap<String, PyRep>> {
 }
 
 fn seed_corp_for_pilot(snap: &mut eve_db::WorldStateSnapshot, char_id: i64, corp_id: i64) {
-    let mut corp = CorporationRecord {
-        corporation_id: corp_id,
-        name: format!("Persistence Test Corp {corp_id}"),
-        ticker: "PRST".into(),
-        ceo_id: char_id,
-        ..Default::default()
-    };
+    let mut corp = { let mut __corp = CorporationRecord::default();
+        __corp.corporation_id = corp_id;
+        __corp.name = format!("Persistence Test Corp {corp_id}");
+        __corp.ticker = "PRST".into();
+        __corp.ceo_id = char_id;
+        __corp };
     corp.ensure_wallet_divisions();
     for d in &mut corp.wallet_divisions {
         d.balance = IskCents::from_isk(50_000_000);
     }
-    corp.master_wallet = IskCents::from_isk(50_000_000);
+    corp.set_division_balance(1, IskCents::from_isk(50_000_000));
     corp.members.insert(char_id);
     corp.member_roles.insert(char_id, u64::MAX);
     snap.corporations.insert(corp_id, corp);
@@ -450,7 +449,7 @@ async fn test_d6_ids_monotonic_and_durable_notifications_across_sqlite_restart()
             if let Some(c) = snap.corporations.get_mut(&corp_id_1) {
                 c.ensure_wallet_divisions();
                 c.wallet_divisions[0].balance = IskCents::from_isk(2_000_000_000);
-                c.master_wallet = c.wallet_divisions[0].balance;
+                c.ensure_wallet_divisions();
             }
         });
 
@@ -571,7 +570,7 @@ async fn test_d6_ids_monotonic_and_durable_notifications_across_sqlite_restart()
             if let Some(c) = snap.corporations.get_mut(&corp_id_2) {
                 c.ensure_wallet_divisions();
                 c.wallet_divisions[0].balance = IskCents::from_isk(2_000_000_000);
-                c.master_wallet = c.wallet_divisions[0].balance;
+                c.ensure_wallet_divisions();
             }
         });
 

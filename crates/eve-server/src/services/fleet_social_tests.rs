@@ -172,16 +172,15 @@ async fn office_manager_lifecycle_and_fleet_rpc_handlers() {
     let station_id = *ctx.sde.stations.keys().find(|&&id| id != 60_015_187).unwrap_or(&60_003_760);
 
     ctx.db.with_mut_snapshot(|snap| {
-        let mut corp = eve_db::CorporationRecord {
-            corporation_id: corp_id,
-            name: "test corp".into(),
-            ticker: "TSTC".into(),
-            ceo_id: char_id,
-            hq_station_id: Some(station_id),
-            tax_rate: 0.05,
-            master_wallet: IskCents::from_isk(10_000_000),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "test corp".into();
+            __corp.ticker = "TSTC".into();
+            __corp.ceo_id = char_id;
+            __corp.hq_station_id = Some(station_id);
+            __corp.tax_rate = 0.05;
+            __corp.set_division_balance(1, IskCents::from_isk(10_000_000));
+            __corp };
         corp.ensure_wallet_divisions();
         snap.corporations.insert(corp_id, corp);
         if let Some(ch) = snap.characters.get_mut(&char_id) {

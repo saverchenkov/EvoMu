@@ -58,14 +58,13 @@ async fn r8b_519_524_biomass_docked_corp_job_asset_safety_and_esi_private_market
         s.characters.insert(victim_id, v);
         s.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Biomass Test Corp".into(),
-                ticker: "BMTC".into(),
-                ceo_id: heir_id,
-                members: HashSet::from([heir_id, victim_id]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Biomass Test Corp".into();
+                __corp.ticker = "BMTC".into();
+                __corp.ceo_id = heir_id;
+                __corp.members = HashSet::from([heir_id, victim_id]);
+                __corp },
         );
         for (id, tid, owner, loc, flag) in [
             (880_519_000, 27, corp_id, jita_station, InventoryFlag::None),

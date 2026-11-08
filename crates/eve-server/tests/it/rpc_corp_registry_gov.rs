@@ -75,7 +75,7 @@ fn set_corp_balance(ctx: &ServerContext, corp_id: i64, isk: f64) {
         if let Some(corp) = snap.corporations.get_mut(&corp_id) {
             corp.ensure_wallet_divisions();
             corp.wallet_divisions[0].balance = IskCents::from_f64_isk(isk);
-            corp.master_wallet = IskCents::from_f64_isk(isk);
+            corp.set_division_balance(1, IskCents::from_f64_isk(isk));
         }
     });
 }
@@ -327,7 +327,7 @@ async fn test_corp_shares_dividends_and_ceo_transition() {
     ctx.db.with_mut_snapshot(|snap| {
         let corp = snap.corporations.get_mut(&corp_id).unwrap();
         assert_eq!(corp.wallet_divisions[0].balance, eve_db::IskCents(0));
-        assert_eq!(corp.master_wallet, eve_db::IskCents(0));
+        assert_eq!(corp.master_wallet_balance(), eve_db::IskCents(0));
         corp.ensure_wallet_divisions();
         assert_eq!(corp.division_balance(1), eve_db::IskCents(0));
     });

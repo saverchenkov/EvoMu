@@ -221,19 +221,19 @@ fn build_ctx() -> (ServerContext, SessionState, i64, i64, i64) {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Cov Ind Corp".into(),
-                ticker: "CIND".into(),
-                ceo_id: 90_000_999,
-                master_wallet: IskCents::from_f64_isk(1_000_000_000.0),
-                wallet_divisions: vec![CorpWalletDivisionRecord {
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Cov Ind Corp".into();
+                __corp.ticker = "CIND".into();
+                __corp.ceo_id = 90_000_999;
+                __corp.wallet_divisions = vec![CorpWalletDivisionRecord {
                     division_id: 1,
                     name: "Master".into(),
                     balance: IskCents::from_f64_isk(1_000_000_000.0),
-                }],
-                ..Default::default()
-            },
+                }];
+                let __mw = IskCents::from_f64_isk(1_000_000_000.0);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         let skills = snap.skills.entry(char_id).or_default();
         for sid in [3380, 3387, 24625, 3406, 24624, 11448, 11452, 21791, 45746, 45748] {
@@ -530,7 +530,6 @@ fn corp_roles_funds_containers_cancel_refund_and_complete_guards() {
     ctx.db.with_mut_snapshot(|snap| {
         let c = snap.corporations.get_mut(&corp_id).unwrap();
         c.member_roles.insert(char_id, corp_roles::ROLE_FACTORY_MANAGER | (1u64 << 14) | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]);
-        c.master_wallet = IskCents(0);
         c.set_division_balance(1, IskCents(0));
     });
     assert_eq!(
@@ -541,7 +540,7 @@ fn corp_roles_funds_containers_cancel_refund_and_complete_guards() {
     // Restore corp wallet -> install corp job consuming exact 100x Tritanium (stack 73_003 removed!)
     ctx.db.with_mut_snapshot(|snap| {
         let c = snap.corporations.get_mut(&corp_id).unwrap();
-        c.master_wallet = IskCents::from_f64_isk(1_000_000_000.0);
+        c.set_division_balance(1, IskCents::from_f64_isk(1_000_000_000.0));
         c.set_division_balance(1, IskCents::from_f64_isk(1_000_000_000.0));
     });
     let cj_rep = handle_industry_jobs(

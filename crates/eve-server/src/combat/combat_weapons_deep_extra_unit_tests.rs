@@ -357,18 +357,18 @@ async fn tractor_stop_distance_drone_bandwidth_multi_ship_drones_and_death_pipel
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "TestCorp".into(),
-                ticker: "TCRP".into(),
-                master_wallet: IskCents::from_f64_isk(1_000_000.0),
-                wallet_divisions: vec![CorpWalletDivisionRecord {
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "TestCorp".into();
+                __corp.ticker = "TCRP".into();
+                __corp.wallet_divisions = vec![CorpWalletDivisionRecord {
                     division_id: 1,
                     name: "Master".into(),
                     balance: IskCents::from_f64_isk(1_000_000.0),
-                }],
-                ..CorporationRecord::default()
-            },
+                }];
+                let __mw = IskCents::from_f64_isk(1_000_000.0);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         let mut ship_rec = make_item(victim_ship, bs_type_id, corp_id, i64::from(sys_id), InventoryFlag::None, 1);
         ship_rec.singleton = true;
@@ -445,7 +445,7 @@ async fn tractor_stop_distance_drone_bandwidth_multi_ship_drones_and_death_pipel
     assert_eq!(res.ejected_capsule_id, Some(escape_frig));
     assert_eq!(res.insurance_payout_isk, 5_000_000.0);
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.corporations[&corp_id].master_wallet, IskCents::from_f64_isk(6_000_000.0));
+        assert_eq!(snap.corporations[&corp_id].master_wallet_balance(), IskCents::from_f64_isk(6_000_000.0));
         assert!(!snap.items.values().any(|i| i.type_id == 31716 && i.location_id == res.wreck_item_id));
         assert_eq!(snap.contracts[&courier_contract].status, "Failed");
         assert_eq!(snap.characters[&victim_char].active_ship_id, escape_frig);

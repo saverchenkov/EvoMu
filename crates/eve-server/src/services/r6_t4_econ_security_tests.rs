@@ -185,14 +185,13 @@ fn test_405_and_406_contracts_corp_courier_and_public_deposit_refund() {
         if let Some(ch) = s.characters.get_mut(&hauler_char) {
             ch.active_ship_id = ship_id;
         }
-        let mut corp = CorporationRecord {
-            corporation_id: hauler_corp,
-            name: "HaulCorp".into(),
-            ticker: "HAUL".into(),
-            ceo_id: hauler_char,
-            master_wallet: IskCents::from_isk(2_000_000),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = hauler_corp;
+            __corp.name = "HaulCorp".into();
+            __corp.ticker = "HAUL".into();
+            __corp.ceo_id = hauler_char;
+            __corp.set_division_balance(1, IskCents::from_isk(2_000_000));
+            __corp };
         corp.ensure_wallet_divisions();
         s.corporations.insert(hauler_corp, corp);
         s.items.insert(
@@ -281,7 +280,7 @@ fn test_405_and_406_contracts_corp_courier_and_public_deposit_refund() {
     ctx.db.with_snapshot(|s| {
         assert_eq!(s.contracts[&cid_1].status, "Completed");
         let corp = &s.corporations[&hauler_corp];
-        assert_eq!(corp.master_wallet, IskCents::from_isk(2_250_000));
+        assert_eq!(corp.master_wallet_balance(), IskCents::from_isk(2_250_000));
         assert_eq!(corp.division_balance(1), IskCents::from_isk(2_250_000));
     });
 
@@ -329,14 +328,13 @@ fn test_407_wallet_give_cash_and_bill_payments_sync_corp_div1_and_enforce_debtor
         ensure_test_char(s, char_a, "PilotA", corp_debtor, JITA_STATION, 5_000_000);
         ensure_test_char(s, char_b, "PilotB", corp_creditor, JITA_STATION, 1_000_000);
         for (cid, name, bal) in [(corp_debtor, "DebtCorp", 3_000_000_i64), (corp_creditor, "CredCorp", 500_000_i64)] {
-            let mut corp = CorporationRecord {
-                corporation_id: cid,
-                name: name.into(),
-                ticker: "CORP".into(),
-                ceo_id: char_a,
-                master_wallet: IskCents::from_isk(bal),
-                ..Default::default()
-            };
+            let mut corp = { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = cid;
+                __corp.name = name.into();
+                __corp.ticker = "CORP".into();
+                __corp.ceo_id = char_a;
+                __corp.set_division_balance(1, IskCents::from_isk(bal));
+                __corp };
             corp.ensure_wallet_divisions();
             corp.wallet_divisions[0].balance = IskCents::from_isk(bal);
             s.corporations.insert(cid, corp);
@@ -356,7 +354,7 @@ fn test_407_wallet_give_cash_and_bill_payments_sync_corp_div1_and_enforce_debtor
     ).unwrap().unwrap();
     ctx.db.with_snapshot(|s| {
         let cred = &s.corporations[&corp_creditor];
-        assert_eq!(cred.master_wallet, IskCents::from_isk(600_000));
+        assert_eq!(cred.master_wallet_balance(), IskCents::from_isk(600_000));
         assert_eq!(cred.division_balance(1), IskCents::from_isk(600_000));
     });
 
@@ -377,9 +375,9 @@ fn test_407_wallet_give_cash_and_bill_payments_sync_corp_div1_and_enforce_debtor
     ctx.db.with_snapshot(|s| {
         let debt = &s.corporations[&corp_debtor];
         let cred = &s.corporations[&corp_creditor];
-        assert_eq!(debt.master_wallet, IskCents::from_isk(2_700_000));
+        assert_eq!(debt.master_wallet_balance(), IskCents::from_isk(2_700_000));
         assert_eq!(debt.division_balance(1), IskCents::from_isk(2_700_000));
-        assert_eq!(cred.master_wallet, IskCents::from_isk(1_150_000));
+        assert_eq!(cred.master_wallet_balance(), IskCents::from_isk(1_150_000));
         assert_eq!(cred.division_balance(1), IskCents::from_isk(1_150_000));
     });
 }

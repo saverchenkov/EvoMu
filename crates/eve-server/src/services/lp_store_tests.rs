@@ -44,23 +44,21 @@ fn test_lp_store_reward_log_and_balances_and_transfers() {
         }
         snap.corporations.insert(
             player_corp,
-            CorporationRecord {
-                corporation_id: player_corp,
-                name: "Player Corp".into(),
-                ticker: "PLRC".into(),
-                ceo_id: char_id,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = player_corp;
+                __corp.name = "Player Corp".into();
+                __corp.ticker = "PLRC".into();
+                __corp.ceo_id = char_id;
+                __corp },
         );
         snap.corporations.insert(
             dest_corp,
-            CorporationRecord {
-                corporation_id: dest_corp,
-                name: "Dest Corp".into(),
-                ticker: "DSTC".into(),
-                ceo_id: char_id,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = dest_corp;
+                __corp.name = "Dest Corp".into();
+                __corp.ticker = "DSTC".into();
+                __corp.ceo_id = char_id;
+                __corp },
         );
         snap.corp_lp_balances.insert((player_corp, npc_corp), 8_000);
         record_lp_reward_log(snap, char_id, npc_corp, 5_000, "Mission completion".into(), now);
@@ -193,14 +191,13 @@ fn test_lp_store_offers_and_take_offer_char_and_corp() {
             c.loyalty_points.insert(npc_corp, 5_000);
             c.standings.insert(npc_corp, 5.0);
         }
-        let mut corp = CorporationRecord {
-            corporation_id: player_corp,
-            name: "Player Corp".into(),
-            ticker: "PLRC".into(),
-            ceo_id: char_id,
-            master_wallet: IskCents::from_isk(1_000_000),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = player_corp;
+            __corp.name = "Player Corp".into();
+            __corp.ticker = "PLRC".into();
+            __corp.ceo_id = char_id;
+            __corp.set_division_balance(1, IskCents::from_isk(1_000_000));
+            __corp };
         corp.ensure_wallet_divisions();
         snap.corporations.insert(player_corp, corp);
         snap.corp_lp_balances.insert((player_corp, npc_corp), 5_000);

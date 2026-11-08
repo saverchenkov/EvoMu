@@ -100,7 +100,7 @@ async fn test_alliance_and_war_notifications() {
         if let Some(corp) = snap.corporations.get_mut(&corp1) {
             corp.ensure_wallet_divisions();
             corp.wallet_divisions[0].balance = IskCents::from_isk(2_000_000_000);
-            corp.master_wallet = corp.wallet_divisions[0].balance;
+            corp.ensure_wallet_divisions();
         }
     });
     for c in [P1, P2, p3] {

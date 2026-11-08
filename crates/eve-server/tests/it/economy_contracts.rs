@@ -1437,18 +1437,17 @@ async fn test_r3_track3_industry_contracts_market_and_pi_regressions() {
     let corp_item_id = ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            eve_db::CorporationRecord {
-                corporation_id: corp_id,
-                name: "Contract Test Corp".into(),
-                ticker: "CTC".into(),
-                ceo_id: 90_000_001,
-                master_wallet: IskCents::from_isk(50_000_000),
-                members: [90_000_001].into_iter().collect(),
-                member_roles: [(90_000_001, eve_db::corp_roles::ROLE_CONTRACT_MANAGER | eve_db::corp_roles::ROLE_DIRECTOR)]
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Contract Test Corp".into();
+                __corp.ticker = "CTC".into();
+                __corp.ceo_id = 90_000_001;
+                __corp.members = [90_000_001].into_iter().collect();
+                __corp.member_roles = [(90_000_001, eve_db::corp_roles::ROLE_CONTRACT_MANAGER | eve_db::corp_roles::ROLE_DIRECTOR)]
                     .into_iter()
-                    .collect(),
-                ..Default::default()
-            },
+                    .collect();
+                __corp.set_division_balance(1, IskCents::from_isk(50_000_000));
+                __corp },
         );
         if let Some(c) = snap.corporations.get_mut(&corp_id) {
             c.ensure_wallet_divisions();
@@ -1478,7 +1477,7 @@ async fn test_r3_track3_industry_contracts_market_and_pi_regressions() {
     s1.corporation_id = Some(corp_id);
     s1.corp_role = eve_db::corp_roles::ROLE_CONTRACT_MANAGER | eve_db::corp_roles::ROLE_DIRECTOR;
 
-    let corp_bal_before = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet);
+    let corp_bal_before = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet_balance());
     let c_corp = rpc(
         &ctx,
         &mut s1,
@@ -1510,14 +1509,14 @@ async fn test_r3_track3_industry_contracts_market_and_pi_regressions() {
     let dep_isk = cc_kv.get("depositISK").and_then(|v| v.as_f64()).unwrap();
     assert!(dep_isk >= 100_000.0);
 
-    let corp_bal_after_create = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet);
+    let corp_bal_after_create = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet_balance());
     assert!(corp_bal_after_create.0 < corp_bal_before.0);
 
     // DeleteContract refunds deposit to corp wallet and restores item ownership to corp_id
     rpc(&ctx, &mut s1, "contractProxy", "DeleteContract", &[PyRep::Integer(corp_cid)])
         .await
         .expect("DeleteContract corp contract");
-    let corp_bal_after_delete = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet);
+    let corp_bal_after_delete = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet_balance());
     assert_eq!(
         corp_bal_after_delete.0 - corp_bal_after_create.0,
         IskCents::from_f64_isk(dep_isk).0,

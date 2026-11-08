@@ -21,15 +21,14 @@ fn corp_gov_tail_settings_assets_and_applications() {
     let station_id = *ctx.sde.stations.keys().next().unwrap_or(&60_003_760);
 
     ctx.db.with_mut_snapshot(|snap| {
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "tail corp".into(),
-            ticker: "TAIL".into(),
-            ceo_id: char_id,
-            hq_station_id: Some(station_id),
-            tax_rate: 0.1,
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "tail corp".into();
+            __corp.ticker = "TAIL".into();
+            __corp.ceo_id = char_id;
+            __corp.hq_station_id = Some(station_id);
+            __corp.tax_rate = 0.1;
+            __corp };
         corp.applications.insert(
             701,
             CorpApplicationRecord {

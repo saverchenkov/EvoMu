@@ -215,41 +215,38 @@ async fn test_lookup_warable_and_sov_structures_e2e() {
         // Standalone war-eligible corp (owns structure)
         snap.corporations.insert(
             98_000_101,
-            CorporationRecord {
-                corporation_id: 98_000_101,
-                name: "Vanguard Horizon".into(),
-                ticker: "VGHD".into(),
-                ceo_id: 90_000_101,
-                alliance_id: None,
-                members: [90_000_101].into_iter().collect(),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = 98_000_101;
+                __corp.name = "Vanguard Horizon".into();
+                __corp.ticker = "VGHD".into();
+                __corp.ceo_id = 90_000_101;
+                __corp.alliance_id = None;
+                __corp.members = [90_000_101].into_iter().collect();
+                __corp },
         );
         // Standalone non-war-eligible corp (no structure)
         snap.corporations.insert(
             98_000_102,
-            CorporationRecord {
-                corporation_id: 98_000_102,
-                name: "Vanguard Peacekeepers".into(),
-                ticker: "VGPK".into(),
-                ceo_id: 90_000_102,
-                alliance_id: None,
-                members: [90_000_102].into_iter().collect(),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = 98_000_102;
+                __corp.name = "Vanguard Peacekeepers".into();
+                __corp.ticker = "VGPK".into();
+                __corp.ceo_id = 90_000_102;
+                __corp.alliance_id = None;
+                __corp.members = [90_000_102].into_iter().collect();
+                __corp },
         );
         // External alliance + member corp with structure
         snap.corporations.insert(
             98_000_103,
-            CorporationRecord {
-                corporation_id: 98_000_103,
-                name: "Vanguard Sov Holding".into(),
-                ticker: "VGSH".into(),
-                ceo_id: 90_000_103,
-                alliance_id: Some(99_000_103),
-                members: [90_000_103].into_iter().collect(),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = 98_000_103;
+                __corp.name = "Vanguard Sov Holding".into();
+                __corp.ticker = "VGSH".into();
+                __corp.ceo_id = 90_000_103;
+                __corp.alliance_id = Some(99_000_103);
+                __corp.members = [90_000_103].into_iter().collect();
+                __corp },
         );
         snap.alliances.insert(
             99_000_103,
@@ -867,15 +864,14 @@ async fn test_search_and_paperdoll_apparel_e2e() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             98_000_555,
-            CorporationRecord {
-                corporation_id: 98_000_555,
-                name: "Vanguard Horizon".into(),
-                ticker: "VGHR".into(),
-                ceo_id: 90_000_002,
-                hq_station_id: Some(60_003_760),
-                alliance_id: Some(99_000_555),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = 98_000_555;
+                __corp.name = "Vanguard Horizon".into();
+                __corp.ticker = "VGHR".into();
+                __corp.ceo_id = 90_000_002;
+                __corp.hq_station_id = Some(60_003_760);
+                __corp.alliance_id = Some(99_000_555);
+                __corp },
         );
         snap.alliances.insert(
             99_000_555,

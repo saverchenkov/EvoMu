@@ -55,11 +55,10 @@ async fn anchor_orbital_and_upgrade_gantry_error_branches_and_nearest_planet() {
         snap.characters.insert(char_id, ch);
         snap.corporations.insert(
             player_corp,
-            CorporationRecord {
-                corporation_id: player_corp,
-                ceo_id: other_char,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = player_corp;
+                __corp.ceo_id = other_char;
+                __corp },
         );
         snap.items.insert(
             non_gantry_id,
@@ -378,11 +377,10 @@ fn get_structures_directory_info_standing_gates_and_fulcrum_timers() {
         snap.characters.insert(outsider_id, ch2);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                ceo_id: char_id,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.ceo_id = char_id;
+                __corp },
         );
         for (sid, state) in [
             (st_online, "ShieldVulnerable"),

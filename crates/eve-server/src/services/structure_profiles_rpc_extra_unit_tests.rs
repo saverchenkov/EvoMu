@@ -43,14 +43,13 @@ fn seed_entities(ctx: &ServerContext) {
         for (corp_id, ceo_id) in [(98_701_i64, 7101_i64), (98_702_i64, 7201_i64)] {
             snap.corporations.insert(
                 corp_id,
-                CorporationRecord {
-                    corporation_id: corp_id,
-                    name: format!("Corp {corp_id}"),
-                    ticker: "CRP".into(),
-                    ceo_id,
-                    hq_station_id: Some(60_003_760),
-                    ..Default::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = corp_id;
+                    __corp.name = format!("Corp {corp_id}");
+                    __corp.ticker = "CRP".into();
+                    __corp.ceo_id = ceo_id;
+                    __corp.hq_station_id = Some(60_003_760);
+                    __corp },
             );
         }
         snap.alliances.insert(

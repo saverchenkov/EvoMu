@@ -259,7 +259,7 @@ fn set_corp_wallet(ctx: &ServerContext, corp_id: i64, isk: i64) {
         let c = snap.corporations.get_mut(&corp_id).unwrap();
         c.ensure_wallet_divisions();
         c.wallet_divisions[0].balance = eve_db::IskCents::from_isk(isk);
-        c.master_wallet = c.wallet_divisions[0].balance;
+        c.ensure_wallet_divisions();
     });
 }
 
@@ -515,7 +515,7 @@ fn set_corp_wallet(ctx: &ServerContext, corp_id: i64, isk: i64) {
         let c = snap.corporations.get_mut(&corp_id).unwrap();
         c.ensure_wallet_divisions();
         c.wallet_divisions[0].balance = eve_db::IskCents::from_isk(isk);
-        c.master_wallet = c.wallet_divisions[0].balance;
+        c.ensure_wallet_divisions();
     });
 }
 
@@ -871,13 +871,12 @@ async fn test_access_group_bookmarks_full_lifecycle_and_management() {
 
     let corp_id = 98_000_555;
     ctx.db.with_mut_snapshot(|snap| {
-        let mut corp = eve_db::CorporationRecord {
-            corporation_id: corp_id,
-            name: "Bookmark Corp".into(),
-            ticker: "BKMC".into(),
-            ceo_id: 90_000_001,
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Bookmark Corp".into();
+            __corp.ticker = "BKMC".into();
+            __corp.ceo_id = 90_000_001;
+            __corp };
         corp.member_roles.insert(90_000_001, eve_db::corp_roles::ROLE_DIRECTOR);
         snap.corporations.insert(corp_id, corp);
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {

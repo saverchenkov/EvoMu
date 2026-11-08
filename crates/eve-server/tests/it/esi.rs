@@ -673,17 +673,16 @@ async fn test_esi_all_31_openapi_tags_sample_routes_and_schema_validation() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Apex Vanguard".to_string(),
-                ticker: "APEX".to_string(),
-                ceo_id: 90_000_001,
-                alliance_id: Some(alliance_id),
-                tax_rate: 0.05,
-                master_wallet: IskCents::from_isk(1_000_000),
-                members: HashSet::from([90_000_001]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Apex Vanguard".to_string();
+                __corp.ticker = "APEX".to_string();
+                __corp.ceo_id = 90_000_001;
+                __corp.alliance_id = Some(alliance_id);
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([90_000_001]);
+                __corp.set_division_balance(1, IskCents::from_isk(1_000_000));
+                __corp },
         );
         snap.alliances.insert(
             alliance_id,

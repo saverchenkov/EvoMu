@@ -44,11 +44,10 @@ fn skyhook_activation_and_stargate_lock_notices() {
                 ch.corporation_id = corp_id;
             }
         }
-        let mut c = eve_db::CorporationRecord {
-            corporation_id: corp_id,
-            ceo_id: cid,
-            ..Default::default()
-        };
+        let mut c = { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.ceo_id = cid;
+            __corp };
         c.members.extend([cid, 90_000_002]);
         snap.corporations.insert(corp_id, c);
         snap.structures.insert(

@@ -69,22 +69,23 @@ pub(super) fn setup_alliance_sandbox() -> (ServerContext, Arc<VirtualServerClock
             };
             snap.corporations.insert(
                 corp_id,
-                CorporationRecord {
-                    corporation_id: corp_id,
-                    name: format!("Corp {corp_id}"),
-                    ticker: if corp_id == 98_100_001 { "EXEC".into() } else { "MEMB".into() },
-                    ceo_id: cid,
-                    alliance_id: None,
-                    tax_rate: 0.05,
-                    master_wallet: IskCents::from_isk(5_000_000_000),
-                    members: HashSet::from([cid]),
-                    member_roles: HashMap::from([(cid, u64::MAX)]),
-                    applications: HashMap::new(),
-                    wallet_divisions: divs,
-                    description: String::new(),
-                    url: String::new(),
-                    hq_station_id: Some(60_003_760),
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = corp_id;
+                    __corp.name = format!("Corp {corp_id}");
+                    __corp.ticker = if corp_id == 98_100_001 { "EXEC".into() } else { "MEMB".into() };
+                    __corp.ceo_id = cid;
+                    __corp.alliance_id = None;
+                    __corp.tax_rate = 0.05;
+                    __corp.members = HashSet::from([cid]);
+                    __corp.member_roles = HashMap::from([(cid, u64::MAX)]);
+                    __corp.applications = HashMap::new();
+                    __corp.description = String::new();
+                    __corp.url = String::new();
+                    __corp.hq_station_id = Some(60_003_760);
+                    __corp.wallet_divisions = divs;
+                    let __mw = IskCents::from_isk(5_000_000_000);
+                    if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                    __corp },
             );
         }
         tpl.character_id = 91_000_001;
@@ -147,7 +148,7 @@ async fn social_alliance_lifecycle_timers_and_executor() {
     let aid = kv(&created, "allianceID").as_i64().unwrap();
     assert_eq!(kv(&created, "shortName").as_str(), Some("NACC"));
     assert_eq!(
-        ctx.db.with_snapshot(|s| s.corporations[&98_100_001].master_wallet.0),
+        ctx.db.with_snapshot(|s| s.corporations[&98_100_001].master_wallet_balance().0),
         4_000_000_000 * 100
     );
 

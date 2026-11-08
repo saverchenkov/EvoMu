@@ -130,21 +130,21 @@ fn seed_comprehensive_world(ctx: &ServerContext) {
         }
         snap.corporations.insert(
             OTHER_CORP_ID,
-            CorporationRecord {
-                corporation_id: OTHER_CORP_ID,
-                name: "Rival Corp".into(),
-                ticker: "RIVL".into(),
-                ceo_id: OTHER_CHAR_ID,
-                alliance_id: None,
-                tax_rate: 0.10,
-                master_wallet: IskCents::from_isk(50_000_000),
-                wallet_divisions: CorporationRecord::default_wallet_divisions(IskCents::from_isk(
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = OTHER_CORP_ID;
+                __corp.name = "Rival Corp".into();
+                __corp.ticker = "RIVL".into();
+                __corp.ceo_id = OTHER_CHAR_ID;
+                __corp.alliance_id = None;
+                __corp.tax_rate = 0.10;
+                __corp.members = HashSet::from([OTHER_CHAR_ID]);
+                __corp.member_roles = HashMap::from([(OTHER_CHAR_ID, u64::MAX)]);
+                __corp.wallet_divisions = CorporationRecord::default_wallet_divisions(IskCents::from_isk(
                     50_000_000,
-                )),
-                members: HashSet::from([OTHER_CHAR_ID]),
-                member_roles: HashMap::from([(OTHER_CHAR_ID, u64::MAX)]),
-                ..Default::default()
-            },
+                ));
+                let __mw = IskCents::from_isk(50_000_000);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         snap.alliances.insert(
             ALLIANCE_ID,

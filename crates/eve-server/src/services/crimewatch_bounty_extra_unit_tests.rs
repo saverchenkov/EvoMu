@@ -54,14 +54,13 @@ fn kill_right_sale_restrictions_expiry_and_queries_kill_mutations() {
 
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "RestrictionCorp".into(),
-                ticker: "RCRP".into(),
-                ceo_id: char_id,
-                alliance_id: Some(ally_id),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "RestrictionCorp".into();
+                __corp.ticker = "RCRP".into();
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = Some(ally_id);
+                __corp },
         );
         snap.alliances.insert(
             ally_id,

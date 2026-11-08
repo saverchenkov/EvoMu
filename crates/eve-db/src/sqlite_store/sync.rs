@@ -160,11 +160,7 @@ pub fn sync_dirty_to_sqlite(
             fp_map.remove(&tid);
         }
         for (&tid, sk) in sk_map {
-            let mut h = FnvHasher::new();
-            h.write_u32(sk.type_id);
-            h.write_u8(sk.level);
-            h.write_f64(sk.skill_points);
-            let digest = h.finish();
+            let digest = canonical_fp(sk);
             if fp_map.get(&tid) != Some(&digest) {
                 cold_changed = true;
                 tx.execute(
@@ -820,7 +816,7 @@ pub fn sync_dirty_to_sqlite(
                     corp.ceo_id,
                     corp.alliance_id,
                     corp.tax_rate,
-                    corp.master_wallet.0,
+                    corp.division_balance(1).0,
                     js,
                 ],
             )

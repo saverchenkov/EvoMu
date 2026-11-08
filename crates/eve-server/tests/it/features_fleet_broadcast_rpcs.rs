@@ -1286,28 +1286,26 @@ async fn test_invariant_single_source_of_truth_client_esi_quasar_and_restart() {
             *snap = demo;
             snap.corporations.insert(
                 corp_id,
-                CorporationRecord {
-                    corporation_id: corp_id,
-                    name: "B11 SSOT Corp".into(),
-                    ticker: "BSOT".into(),
-                    ceo_id: P1,
-                    alliance_id: Some(alliance_id),
-                    hq_station_id: Some(JITA_4_4),
-                    members: [P1].into_iter().collect(),
-                    ..Default::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = corp_id;
+                    __corp.name = "B11 SSOT Corp".into();
+                    __corp.ticker = "BSOT".into();
+                    __corp.ceo_id = P1;
+                    __corp.alliance_id = Some(alliance_id);
+                    __corp.hq_station_id = Some(JITA_4_4);
+                    __corp.members = [P1].into_iter().collect();
+                    __corp },
             );
             snap.corporations.insert(
                 rival_corp_id,
-                CorporationRecord {
-                    corporation_id: rival_corp_id,
-                    name: "B11 Rival Corp".into(),
-                    ticker: "BRVL".into(),
-                    ceo_id: P2,
-                    hq_station_id: Some(JITA_4_4),
-                    members: [P2].into_iter().collect(),
-                    ..Default::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = rival_corp_id;
+                    __corp.name = "B11 Rival Corp".into();
+                    __corp.ticker = "BRVL".into();
+                    __corp.ceo_id = P2;
+                    __corp.hq_station_id = Some(JITA_4_4);
+                    __corp.members = [P2].into_iter().collect();
+                    __corp },
             );
             snap.alliances.insert(
                 alliance_id,

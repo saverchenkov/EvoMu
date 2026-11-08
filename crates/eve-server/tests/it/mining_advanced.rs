@@ -608,22 +608,23 @@ async fn test_action_plan_mn13_to_mn16_moons_metenox_sites_ledgers() {
         for sid in [3386u32, 3410, 17940, 32918, 3429] {
             sk.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
         }
-        let corp = snap.corporations.entry(char_corp_id).or_insert_with(|| eve_db::CorporationRecord {
-            corporation_id: char_corp_id,
-            name: "Test Mining Corp".into(),
-            ticker: "TMC".into(),
-            ceo_id: char_id,
-            alliance_id: None,
-            tax_rate: 0.0,
-            master_wallet: eve_db::IskCents(0),
-            wallet_divisions: Vec::new(),
-            description: String::new(),
-            url: String::new(),
-            hq_station_id: Some(60003760),
-            members: Default::default(),
-            member_roles: Default::default(),
-            applications: Default::default(),
-        });
+        let corp = snap.corporations.entry(char_corp_id).or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = char_corp_id;
+            __corp.name = "Test Mining Corp".into();
+            __corp.ticker = "TMC".into();
+            __corp.ceo_id = char_id;
+            __corp.alliance_id = None;
+            __corp.tax_rate = 0.0;
+            __corp.description = String::new();
+            __corp.url = String::new();
+            __corp.hq_station_id = Some(60003760);
+            __corp.members = Default::default();
+            __corp.member_roles = Default::default();
+            __corp.applications = Default::default();
+            __corp.wallet_divisions = Vec::new();
+            let __mw = eve_db::IskCents(0);
+            if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+            __corp });
         corp.ceo_id = char_id;
         corp.member_roles.insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
         snap.structures.insert(

@@ -150,10 +150,13 @@ fn flush_validation_errors_cooldown_poco_tax_and_bound_moniker_routing() {
             pins: vec![PiPinState { pin_id: 701, type_id: 2469, ..Default::default() }],
             ..Default::default()
         });
-        let mut corp = CorporationRecord {
-            corporation_id: poco_corp_id, name: "POCO Owners".into(), ticker: "POCO".into(),
-            ceo_id: char_id, master_wallet: IskCents::from_isk(1_000), ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = poco_corp_id;
+            __corp.name = "POCO Owners".into();
+            __corp.ticker = "POCO".into();
+            __corp.ceo_id = char_id;
+            __corp.set_division_balance(1, IskCents::from_isk(1_000));
+            __corp };
         corp.ensure_wallet_divisions();
         snap.corporations.insert(poco_corp_id, corp);
         save_orbital_settings(snap, planet_id, &OrbitalCustomsSettings {
@@ -200,7 +203,7 @@ fn flush_validation_errors_cooldown_poco_tax_and_bound_moniker_routing() {
     let flush_ok = call_pi(&ctx, &mut sess, "Flush", &[PyRep::Integer(2268)], Some(&bound)).expect("bound Flush");
     assert!(flush_ok.dict_get("pocoExportTaxISK").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
     assert_eq!(flush_ok.dict_get("deliveredItemID").and_then(|v| v.as_i64()), Some(planet_id));
-    assert!(ctx.db.with_snapshot(|s| s.corporations[&poco_corp_id].master_wallet) > IskCents::from_isk(1_000));
+    assert!(ctx.db.with_snapshot(|s| s.corporations[&poco_corp_id].master_wallet_balance()) > IskCents::from_isk(1_000));
     assert_eq!(call_pi(&ctx, &mut sess, "Flush", &[], Some(&bound)).unwrap_err().code, "ExtractorCycleNotReady");
 }
 

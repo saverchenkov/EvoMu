@@ -263,17 +263,16 @@ fn price_history_averages_and_character_corp_authorization_matrix() {
         member_roles.insert(member_no_role, 1u64 << 40);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "AuthMatrixCorp".into(),
-                ticker: "AMXC".into(),
-                ceo_id,
-                hq_station_id: Some(60_003_760),
-                tax_rate: 0.05,
-                members: HashSet::from([ceo_id, member_no_role, member_trader, member_via_ra, npc_char_with_ctx_corp]),
-                member_roles,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "AuthMatrixCorp".into();
+                __corp.ticker = "AMXC".into();
+                __corp.ceo_id = ceo_id;
+                __corp.hq_station_id = Some(60_003_760);
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([ceo_id, member_no_role, member_trader, member_via_ra, npc_char_with_ctx_corp]);
+                __corp.member_roles = member_roles;
+                __corp },
         );
         snap.corp_role_assignments.insert(
             (corp_id, member_via_ra),

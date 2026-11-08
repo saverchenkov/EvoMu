@@ -303,7 +303,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                         (STATUS_NOT_FOUND, format!("Corporation {corpid} not found"))
                     })?;
                     let w = if c.wallet_divisions.is_empty() {
-                        CorporationRecord::default_wallet_divisions(c.master_wallet)
+                        CorporationRecord::default_wallet_divisions(c.master_wallet_balance())
                     } else {
                         c.wallet_divisions.clone()
                     };
@@ -341,7 +341,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     })?;
                     let h = s.corp_hangar_divisions.get(&corpid).cloned().unwrap_or_default();
                     let w = if c.wallet_divisions.is_empty() {
-                        CorporationRecord::default_wallet_divisions(c.master_wallet)
+                        CorporationRecord::default_wallet_divisions(c.master_wallet_balance())
                     } else {
                         c.wallet_divisions.clone()
                     };

@@ -46,15 +46,12 @@ pub(crate) fn grant_starter_plex_in_snapshot(
     if !granted_users.insert(user_id) {
         return;
     }
-    let new_bal = snap
-        .adjust_plex_vault(char_id, plex_grant)
-        .unwrap_or_else(|| {
-            let cur = snap.account_plex_vault.get(&user_id).copied().unwrap_or(0);
-            let next = cur.saturating_add(plex_grant);
-            snap.account_plex_vault.insert(user_id, next);
-            next
-        });
-    snap.account_plex_vault.insert(user_id, new_bal);
+    let Some(new_bal) = snap
+        .adjust_unified_plex(char_id, plex_grant)
+        .or_else(|| snap.adjust_unified_plex_for_user(user_id, plex_grant))
+    else {
+        return;
+    };
     snap.next_entity_id += 1;
     let tx_id = snap.next_entity_id.max(1) as u64;
     crate::services::quasar_payment_store::record_plex_transaction(

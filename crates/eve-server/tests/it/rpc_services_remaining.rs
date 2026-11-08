@@ -134,18 +134,17 @@ fn seed_char_and_corp(ctx: &ServerContext, char_id: i64, corp_id: i64, station_i
             user_id: 700, username: "pilot_demo".into(), password_token: "secret".into(),
             role: eve_db::service_roles::ROLE_PLAYER_DEFAULT, banned_until_unix: None, ban_reason: None,
         });
-        snap.corporations.insert(corp_id, CorporationRecord {
-            corporation_id: corp_id,
-            name: "Apex Vanguard Logistics".into(),
-            ticker: "APXVL".into(),
-            ceo_id: char_id,
-            alliance_id: Some(99_000_777),
-            tax_rate: 0.05,
-            master_wallet: IskCents::from_f64_isk(50_000_000.0),
-            members: [char_id].into_iter().collect(),
-            member_roles: roles,
-            ..Default::default()
-        });
+        snap.corporations.insert(corp_id, { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Apex Vanguard Logistics".into();
+            __corp.ticker = "APXVL".into();
+            __corp.ceo_id = char_id;
+            __corp.alliance_id = Some(99_000_777);
+            __corp.tax_rate = 0.05;
+            __corp.members = [char_id].into_iter().collect();
+            __corp.member_roles = roles;
+            __corp.set_division_balance(1, IskCents::from_f64_isk(50_000_000.0));
+            __corp });
         snap.characters.insert(char_id, make_char(char_id, corp_id, station_id, structure_id, ship_id));
         let loc = station_id.or(structure_id).unwrap_or(30_000_142);
         snap.items.insert(ship_id, make_item(ship_id, 587, char_id, loc, InventoryFlag::Hangar, 1, true, false));
@@ -2299,15 +2298,14 @@ async fn test_rpc_sweep_group2_beyonce_commands() {
         snap.items.insert(loot_hangar_id, mk_item(loot_hangar_id, 23, P1, JITA_44, InventoryFlag::Hangar, 1, true));
         snap.corporations.insert(
             target_player_corp,
-            CorporationRecord {
-                corporation_id: target_player_corp,
-                name: "Allied Fleet Corp".into(),
-                ticker: "AFC".into(),
-                ceo_id: P2,
-                tax_rate: 0.05,
-                hq_station_id: Some(JITA_44),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = target_player_corp;
+                __corp.name = "Allied Fleet Corp".into();
+                __corp.ticker = "AFC".into();
+                __corp.ceo_id = P2;
+                __corp.tax_rate = 0.05;
+                __corp.hq_station_id = Some(JITA_44);
+                __corp },
         );
         snap.structures.insert(st_id, mk_structure(st_id, 35832, corp_id));
     });

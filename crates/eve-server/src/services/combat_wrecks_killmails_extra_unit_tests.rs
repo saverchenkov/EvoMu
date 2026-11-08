@@ -37,19 +37,19 @@ fn corp_insurance_payout_contract_sync_voiding_assist_aggregation_and_destructio
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Insured Corp".into(),
-                ticker: "INSC".into(),
-                ceo_id: char_id,
-                master_wallet: IskCents::from_isk(1_000_000),
-                wallet_divisions: vec![CorpWalletDivisionRecord {
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Insured Corp".into();
+                __corp.ticker = "INSC".into();
+                __corp.ceo_id = char_id;
+                __corp.wallet_divisions = vec![CorpWalletDivisionRecord {
                     division_id: 1,
                     name: "Master".into(),
                     balance: IskCents::from_isk(1_000_000),
-                }],
-                ..Default::default()
-            },
+                }];
+                let __mw = IskCents::from_isk(1_000_000);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         // Unassembled ship with stale contract -> should be voided on sync
         let mut repacked = make_fighter_item(repacked_ship_id, 23_915, char_id, 60_003_760, InventoryFlag::Hangar, 1);
@@ -131,7 +131,7 @@ fn corp_insurance_payout_contract_sync_voiding_assist_aggregation_and_destructio
     assert_eq!(paid, 5_000_000.0);
     ctx.db.with_snapshot(|snap| {
         assert_eq!(
-            snap.corporations[&corp_id].master_wallet,
+            snap.corporations[&corp_id].master_wallet_balance(),
             IskCents::from_isk(6_000_000)
         );
         assert!(snap

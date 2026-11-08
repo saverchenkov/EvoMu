@@ -556,22 +556,8 @@ pub fn handle(
                         }
                         let corp = snap.corporations.get_mut(&issuer_corp_id).unwrap();
                         let div_num = (acct_div_idx + 1) as u8;
-                        if div_num == 1 {
-                            let new_bal = corp.master_wallet.checked_sub(total_upfront)
-                                .ok_or_else(|| rpc_err("InsufficientFunds", "Not enough corporation ISK to escrow contract reward"))?;
-                            corp.master_wallet = new_bal;
-                            // Fixes R1-P1-2: prevent division-1 balance inflation on insufficient funds
-                            if let Some(div) = corp.wallet_divisions.first_mut() {
-                                let new_div_bal = div.balance.checked_sub(total_upfront)
-                                    .ok_or_else(|| rpc_err("InsufficientFunds", "Not enough funds in corporation wallet division 1 to escrow contract reward"))?;
-                                div.balance = new_div_bal;
-                            }
-                        } else {
-                            let cur = corp.division_balance(div_num);
-                            let new_bal = cur.checked_sub(total_upfront)
-                                .ok_or_else(|| rpc_err("InsufficientFunds", format!("Not enough funds in corporation wallet division {div_num} to escrow contract reward")))?;
-                            corp.set_division_balance(div_num, new_bal);
-                        }
+                        corp.debit_division(div_num, total_upfront)
+                            .ok_or_else(|| rpc_err("InsufficientFunds", format!("Not enough funds in corporation wallet division {div_num} to escrow contract reward")))?;
                     } else if let Some(ch) = snap.characters.get_mut(&char_id) {
                         ch.balance = ch.balance.checked_sub(total_upfront)
                             .ok_or_else(|| rpc_err("InsufficientFunds", "Not enough ISK to escrow contract reward"))?;
@@ -1193,7 +1179,7 @@ pub fn handle(
                         snap.credit_contract_issuer(&c, IskCents(dep_raw));
                     }
                     if c.for_corp {
-                        let bal_after = snap.corporations.get(&c.issuer_corp_id).map(|corp| corp.master_wallet).unwrap_or(IskCents(0));
+                        let bal_after = snap.corporations.get(&c.issuer_corp_id).map(|corp| corp.division_balance(1)).unwrap_or(IskCents(0));
                         snap.append_journal(c.issuer_corp_id, "ContractAuctionSold", effective_bid, bal_after, format!("Auction contract {cid} bought out by {bidder_entity_id}"));
                     } else if let Some(issuer_ch) = snap.characters.get(&c.issuer_id) {
                         let bal_after = issuer_ch.balance;

@@ -1049,15 +1049,8 @@ fn register_federated_and_transfer_handlers(
                         }
                     }
                     if is_execute {
-                        // Paid transfer requires 1,000 PLEX in account PLEX vault or character PLEX balance
-                        let vault_plex = snap.account_plex_vault.get(&ch.user_id).copied().unwrap_or(0);
-                        if vault_plex >= 1_000 {
-                            snap.account_plex_vault.insert(ch.user_id, vault_plex - 1_000);
-                        } else if ch.plex_balance >= 1_000 {
-                            if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
-                                ch_mut.plex_balance -= 1_000;
-                            }
-                        } else {
+                        // Paid transfer requires 1,000 PLEX in unified account PLEX ledger
+                        if snap.adjust_unified_plex(char_id, -1_000).is_none() {
                             return Err((
                                 crate::quasar_gateway::STATUS_PRECONDITION_FAILED,
                                 "Paid character transfer requires 1,000 PLEX transfer fee".into(),

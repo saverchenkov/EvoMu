@@ -382,19 +382,19 @@ async fn test_character_biomass_cleanup_and_economy() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Biomass Test Corp".into(),
-                ticker: "BMTC".into(),
-                ceo_id: P1,
-                tax_rate: 0.05,
-                master_wallet: IskCents::from_isk(1_000_000),
-                members: HashSet::from([P1, P2, victim_corp]),
-                member_roles: HashMap::from([(P1, u64::MAX), (victim_corp, 128)]),
-                wallet_divisions: CorporationRecord::default_wallet_divisions(IskCents::from_isk(1_000_000)),
-                hq_station_id: Some(station_id),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Biomass Test Corp".into();
+                __corp.ticker = "BMTC".into();
+                __corp.ceo_id = P1;
+                __corp.tax_rate = 0.05;
+                __corp.members = HashSet::from([P1, P2, victim_corp]);
+                __corp.member_roles = HashMap::from([(P1, u64::MAX), (victim_corp, 128)]);
+                __corp.hq_station_id = Some(station_id);
+                __corp.wallet_divisions = CorporationRecord::default_wallet_divisions(IskCents::from_isk(1_000_000));
+                let __mw = IskCents::from_isk(1_000_000);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         for cid in [P1, P2, victim_corp] {
             if let Some(ch) = snap.characters.get_mut(&cid) {

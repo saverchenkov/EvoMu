@@ -96,18 +96,17 @@ pub(super) fn seed_pilot_and_structure(
         let corp = snap
             .corporations
             .entry(corp_id)
-            .or_insert_with(|| CorporationRecord {
-                corporation_id: corp_id,
-                name: format!("Corp {corp_id}"),
-                ticker: "CTL".into(),
-                ceo_id: if is_ceo { char_id } else { char_id + 500 },
-                alliance_id: ally_id,
-                hq_station_id: Some(60003760),
-                tax_rate: 0.0,
-                master_wallet: IskCents(0),
-                members: HashSet::from([char_id]),
-                ..Default::default()
-            });
+            .or_insert_with(|| { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = format!("Corp {corp_id}");
+                __corp.ticker = "CTL".into();
+                __corp.ceo_id = if is_ceo { char_id } else { char_id + 500 };
+                __corp.alliance_id = ally_id;
+                __corp.hq_station_id = Some(60003760);
+                __corp.tax_rate = 0.0;
+                __corp.members = HashSet::from([char_id]);
+                __corp.set_division_balance(1, IskCents(0));
+                __corp });
         corp.members.insert(char_id);
         if is_ceo {
             corp.member_roles.insert(char_id, u64::MAX);

@@ -27,23 +27,22 @@ pub(crate) fn seed_player_corps(ctx: &ServerContext) -> (SessionState, SessionSt
         snap.characters.insert(90_000_002, c2);
         snap.characters.insert(90_000_003, c3);
 
-        let mut corp1 = CorporationRecord {
-            corporation_id: 98_000_001,
-            name: "Alpha Holdings".into(),
-            ticker: "ALPH".into(),
-            ceo_id: 90_000_001,
-            alliance_id: Some(99_000_001),
-            tax_rate: 0.1,
-            master_wallet: IskCents::from_isk(50_000_000),
-            members: HashSet::from([90_000_001, 90_000_002]),
-            member_roles: HashMap::from([
+        let mut corp1 = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = 98_000_001;
+            __corp.name = "Alpha Holdings".into();
+            __corp.ticker = "ALPH".into();
+            __corp.ceo_id = 90_000_001;
+            __corp.alliance_id = Some(99_000_001);
+            __corp.tax_rate = 0.1;
+            __corp.members = HashSet::from([90_000_001, 90_000_002]);
+            __corp.member_roles = HashMap::from([
                 (90_000_001, corp_roles::ROLE_DIRECTOR),
                 (90_000_002, 0),
-            ]),
-            hq_station_id: Some(60_003_760),
-            ..Default::default()
-        };
-        corp1.wallet_divisions = CorporationRecord::default_wallet_divisions(corp1.master_wallet);
+            ]);
+            __corp.hq_station_id = Some(60_003_760);
+            __corp.set_division_balance(1, IskCents::from_isk(50_000_000));
+            __corp };
+        corp1.wallet_divisions = CorporationRecord::default_wallet_divisions(corp1.master_wallet_balance());
         corp1.wallet_divisions.push(CorpWalletDivisionRecord {
             division_id: 7,
             name: "Reserve".into(),
@@ -51,17 +50,16 @@ pub(crate) fn seed_player_corps(ctx: &ServerContext) -> (SessionState, SessionSt
         });
         snap.corporations.insert(98_000_001, corp1);
 
-        let mut corp2 = CorporationRecord {
-            corporation_id: 98_000_002,
-            name: "Beta Logistics".into(),
-            ticker: "BETA".into(),
-            ceo_id: 90_000_004,
-            tax_rate: 0.05,
-            master_wallet: IskCents::from_isk(20_000_000),
-            members: HashSet::from([90_000_003, 90_000_004]),
-            hq_station_id: Some(60_003_760),
-            ..Default::default()
-        };
+        let mut corp2 = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = 98_000_002;
+            __corp.name = "Beta Logistics".into();
+            __corp.ticker = "BETA".into();
+            __corp.ceo_id = 90_000_004;
+            __corp.tax_rate = 0.05;
+            __corp.members = HashSet::from([90_000_003, 90_000_004]);
+            __corp.hq_station_id = Some(60_003_760);
+            __corp.set_division_balance(1, IskCents::from_isk(20_000_000));
+            __corp };
         corp2.ensure_wallet_divisions();
         snap.corporations.insert(98_000_002, corp2);
     });

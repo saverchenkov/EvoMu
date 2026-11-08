@@ -1983,7 +1983,7 @@ async fn test_feat_corporation_corp_project_contribution_methods_e2e() {
     ctx.db.with_mut_snapshot(|s| {
         let corp = s.corporations.get_mut(&corp_id).unwrap();
         corp.ensure_wallet_divisions();
-        corp.master_wallet = IskCents::from_f64_isk(500_000_000.0);
+        corp.set_division_balance(1, IskCents::from_f64_isk(500_000_000.0));
         corp.wallet_divisions[0].balance = IskCents::from_f64_isk(500_000_000.0);
         corp.members.insert(PILOT_2);
         let p2 = s.characters.get_mut(&PILOT_2).unwrap();

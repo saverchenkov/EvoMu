@@ -494,14 +494,13 @@ fn market_proxy_error_guards_and_corporate_buy_order_matching() {
     );
 
     ctx.db.with_mut_snapshot(|s| {
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "Trade Corp".into(),
-            ticker: "TRDC".into(),
-            ceo_id: seller_id,
-            master_wallet: IskCents::from_isk(50_000_000),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Trade Corp".into();
+            __corp.ticker = "TRDC".into();
+            __corp.ceo_id = seller_id;
+            __corp.set_division_balance(1, IskCents::from_isk(50_000_000));
+            __corp };
         corp.ensure_wallet_divisions();
         s.corporations.insert(corp_id, corp);
     });

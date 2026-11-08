@@ -109,15 +109,14 @@ async fn test_esi4_character_agents_research_medals_roles_and_loyalty_offers() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Apex Research Collective".to_string(),
-                ticker: "APXR".to_string(),
-                ceo_id: char_id,
-                members: HashSet::from([char_id]),
-                member_roles: HashMap::from([(char_id, eve_db::corp_roles::ROLE_DIRECTOR)]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Apex Research Collective".to_string();
+                __corp.ticker = "APXR".to_string();
+                __corp.ceo_id = char_id;
+                __corp.members = HashSet::from([char_id]);
+                __corp.member_roles = HashMap::from([(char_id, eve_db::corp_roles::ROLE_DIRECTOR)]);
+                __corp },
         );
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.corporation_id = corp_id;
@@ -374,13 +373,17 @@ async fn test_esi4_wallet_char_and_corp_journal_and_transactions() {
         snap.char_wallet_transactions.remove(&char_id);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Sovereign Treasury Corp".to_string(),
-                ticker: "SVTR".to_string(),
-                ceo_id: char_id,
-                master_wallet: IskCents::from_isk(500_000_000),
-                wallet_divisions: vec![
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Sovereign Treasury Corp".to_string();
+                __corp.ticker = "SVTR".to_string();
+                __corp.ceo_id = char_id;
+                __corp.members = HashSet::from([char_id]);
+                __corp.member_roles = HashMap::from([(
+                    char_id,
+                    eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_ACCOUNTANT,
+                )]);
+                __corp.wallet_divisions = vec![
                     CorpWalletDivisionRecord {
                         division_id: 1,
                         name: "Master Wallet".to_string(),
@@ -391,14 +394,10 @@ async fn test_esi4_wallet_char_and_corp_journal_and_transactions() {
                         name: "Division 2".to_string(),
                         balance: IskCents::from_isk(125_000_000),
                     },
-                ],
-                members: HashSet::from([char_id]),
-                member_roles: HashMap::from([(
-                    char_id,
-                    eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_ACCOUNTANT,
-                )]),
-                ..Default::default()
-            },
+                ];
+                let __mw = IskCents::from_isk(500_000_000);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.corporation_id = corp_id;

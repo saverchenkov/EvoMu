@@ -47,25 +47,23 @@ fn bounty_leaderboards_aggregation_searches_and_gm_actions_kill_mutations() {
 
         snap.corporations.insert(
             corp_agg,
-            CorporationRecord {
-                corporation_id: corp_agg,
-                name: "Aggregated Pirate Corp".into(),
-                ticker: "APC".into(),
-                ceo_id: pilot_a,
-                alliance_id: Some(ally_agg),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_agg;
+                __corp.name = "Aggregated Pirate Corp".into();
+                __corp.ticker = "APC".into();
+                __corp.ceo_id = pilot_a;
+                __corp.alliance_id = Some(ally_agg);
+                __corp },
         );
         snap.corporations.insert(
             corp_direct,
-            CorporationRecord {
-                corporation_id: corp_direct,
-                name: "Direct Pirate Corp".into(),
-                ticker: "DPC".into(),
-                ceo_id: pilot_c,
-                alliance_id: Some(ally_direct),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_direct;
+                __corp.name = "Direct Pirate Corp".into();
+                __corp.ticker = "DPC".into();
+                __corp.ceo_id = pilot_c;
+                __corp.alliance_id = Some(ally_direct);
+                __corp },
         );
         snap.alliances.insert(
             ally_agg,

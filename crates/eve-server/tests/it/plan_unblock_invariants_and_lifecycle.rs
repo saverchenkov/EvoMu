@@ -282,24 +282,25 @@ async fn test_e3_corp_contract_wallet_roles_and_issuer_departure() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Contract Wallet Corp".into(),
-                ticker: "CWLT".into(),
-                ceo_id: 90_000_002,
-                alliance_id: None,
-                tax_rate: 0.05,
-                master_wallet: IskCents::from_f64_isk(10_000_000.0),
-                members: [90_000_001, 90_000_002].into_iter().collect(),
-                member_roles: HashMap::new(),
-                applications: HashMap::new(),
-                wallet_divisions: CorporationRecord::default_wallet_divisions(
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Contract Wallet Corp".into();
+                __corp.ticker = "CWLT".into();
+                __corp.ceo_id = 90_000_002;
+                __corp.alliance_id = None;
+                __corp.tax_rate = 0.05;
+                __corp.members = [90_000_001, 90_000_002].into_iter().collect();
+                __corp.member_roles = HashMap::new();
+                __corp.applications = HashMap::new();
+                __corp.description = String::new();
+                __corp.url = String::new();
+                __corp.hq_station_id = Some(JITA_STATION_ID);
+                __corp.wallet_divisions = CorporationRecord::default_wallet_divisions(
                     IskCents::from_f64_isk(10_000_000.0),
-                ),
-                description: String::new(),
-                url: String::new(),
-                hq_station_id: Some(JITA_STATION_ID),
-            },
+                );
+                let __mw = IskCents::from_f64_isk(10_000_000.0);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {
             ch.corporation_id = corp_id;
@@ -380,7 +381,7 @@ async fn test_e3_corp_contract_wallet_roles_and_issuer_departure() {
         }
     });
     let char_bal_before = ctx.db.get_character(90_000_001).unwrap().balance;
-    let corp_bal_before = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet);
+    let corp_bal_before = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet_balance());
 
     let created = ctx
         .dispatch_rpc(&mut s1, "contractProxy", None, "CreateContract", &c_args, &kw, None)
@@ -389,7 +390,7 @@ async fn test_e3_corp_contract_wallet_roles_and_issuer_departure() {
     let cid = created.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
 
     let char_bal_mid = ctx.db.get_character(90_000_001).unwrap().balance;
-    let corp_bal_mid = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet);
+    let corp_bal_mid = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet_balance());
     assert_eq!(char_bal_mid, char_bal_before);
     assert!(corp_bal_mid.0 < corp_bal_before.0);
 
@@ -403,7 +404,7 @@ async fn test_e3_corp_contract_wallet_roles_and_issuer_departure() {
         .expect("AcceptContract");
 
     let char_bal_after = ctx.db.get_character(90_000_001).unwrap().balance;
-    let corp_bal_after = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet);
+    let corp_bal_after = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet_balance());
     assert_eq!(char_bal_after, char_bal_before);
     assert_eq!(
         corp_bal_after.0 - corp_bal_mid.0,
@@ -429,17 +430,17 @@ async fn test_e3_corp_contract_wallet_roles_and_issuer_departure() {
     ];
     let created2 = ctx.dispatch_rpc(&mut s1, "contractProxy", None, "CreateContract", &courier_args(880_002_002), &kw, None).await.expect("CreateContract 2");
     let cid2 = created2.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
-    let corp_bal_pre_cancel = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet);
+    let corp_bal_pre_cancel = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet_balance());
     let _ = rpc(&ctx, &mut s1, "contractProxy", "DeleteContract", &[PyRep::Integer(cid2)]).await.expect("DeleteContract");
-    let corp_bal_post_cancel = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet);
+    let corp_bal_post_cancel = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet_balance());
     assert_eq!(corp_bal_post_cancel.0 - corp_bal_pre_cancel.0, IskCents::from_f64_isk(150_000.0).0, "Cancel must credit reward + deposit refund to corp wallet");
 
     let created3 = ctx.dispatch_rpc(&mut s1, "contractProxy", None, "CreateContract", &courier_args(880_002_003), &kw, None).await.expect("CreateContract 3");
     let cid3 = created3.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
     let _ = rpc(&ctx, &mut s2, "contractProxy", "AcceptContract", &[PyRep::Integer(cid3)]).await.expect("AcceptContract 3");
-    let corp_bal_pre_fail = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet);
+    let corp_bal_pre_fail = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet_balance());
     let _ = rpc(&ctx, &mut s2, "contractProxy", "FailContract", &[PyRep::Integer(cid3)]).await.expect("FailContract 3");
-    let corp_bal_post_fail = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet);
+    let corp_bal_post_fail = ctx.db.with_snapshot(|snap| snap.corporations[&corp_id].master_wallet_balance());
     assert_eq!(corp_bal_post_fail.0 - corp_bal_pre_fail.0, IskCents::from_f64_isk(150_000.0).0, "Courier failure must credit collateral + reward refund to corp wallet");
 }
 

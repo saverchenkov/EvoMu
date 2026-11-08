@@ -388,12 +388,11 @@ async fn alliance_fittings_community_content_role_update_delete_and_max_cap() {
         snap.characters.insert(cid, ch);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                ceo_id: cid,
-                alliance_id: Some(alliance_id),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.ceo_id = cid;
+                __corp.alliance_id = Some(alliance_id);
+                __corp },
         );
     });
 

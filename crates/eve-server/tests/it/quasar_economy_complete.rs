@@ -731,13 +731,12 @@ async fn test_quasar_accounting_loyalty_contracts() {
         let corp = snap
             .corporations
             .entry(1_000_170)
-            .or_insert_with(|| eve_db::CorporationRecord {
-                corporation_id: 1_000_170,
-                name: "Republic Military School".into(),
-                ticker: "RMS".into(),
-                ceo_id: 90_000_001,
-                ..Default::default()
-            });
+            .or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = 1_000_170;
+                __corp.name = "Republic Military School".into();
+                __corp.ticker = "RMS".into();
+                __corp.ceo_id = 90_000_001;
+                __corp });
         corp.members.insert(90_000_001);
         corp.member_roles
             .insert(90_000_001, eve_db::corp_roles::ROLE_ACCOUNTANT);
@@ -956,14 +955,13 @@ async fn test_p1_track_a_regressions_issues_20_21_22() {
         }
         snap.corporations.insert(
             98_000_001,
-            eve_db::CorporationRecord {
-                corporation_id: 98_000_001,
-                name: "Test Corp".into(),
-                ticker: "TSTC".into(),
-                ceo_id: 90_000_001,
-                master_wallet: eve_db::IskCents::from_isk(50_000_000),
-                ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = 98_000_001;
+                __corp.name = "Test Corp".into();
+                __corp.ticker = "TSTC".into();
+                __corp.ceo_id = 90_000_001;
+                __corp.set_division_balance(1, eve_db::IskCents::from_isk(50_000_000));
+                __corp },
         );
         snap.next_entity_id += 1;
         let i1 = snap.next_entity_id;
@@ -1065,7 +1063,7 @@ async fn test_p1_track_a_regressions_issues_20_21_22() {
         );
         cid
     });
-    let corp_bal_before = ctx.db.with_snapshot(|snap| snap.corporations[&98_000_001].master_wallet.0);
+    let corp_bal_before = ctx.db.with_snapshot(|snap| snap.corporations[&98_000_001].master_wallet_balance().0);
     let char_bal_before = ctx.db.get_character(90_000_001).unwrap().balance.0;
     ctx.dispatch_rpc(
         &mut sess_corp,
@@ -1078,7 +1076,7 @@ async fn test_p1_track_a_regressions_issues_20_21_22() {
     )
     .await
     .expect("FinishAuction on corporate auction");
-    let corp_bal_after = ctx.db.with_snapshot(|snap| snap.corporations[&98_000_001].master_wallet.0);
+    let corp_bal_after = ctx.db.with_snapshot(|snap| snap.corporations[&98_000_001].master_wallet_balance().0);
     let char_bal_after = ctx.db.get_character(90_000_001).unwrap().balance.0;
     assert_eq!(
         corp_bal_after - corp_bal_before,

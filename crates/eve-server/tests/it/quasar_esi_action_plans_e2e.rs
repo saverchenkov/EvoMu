@@ -305,7 +305,7 @@ async fn test_shard5_plan_esi5_live_corp_alliance_and_structures_end_to_end() {
         p1.corp_role = u64::MAX;
         ctx.db.with_mut_snapshot(|s| {
             if let Some(corp) = s.corporations.get_mut(&custom_corp_id) {
-                corp.master_wallet = eve_db::IskCents::from_isk(2_000_000_000);
+                corp.set_division_balance(1, eve_db::IskCents::from_isk(2_000_000_000));
             }
         });
 

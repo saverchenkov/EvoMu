@@ -119,32 +119,30 @@ fn create_event_roles_corporation_alliance_and_invitee_caps() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Exec Corp".into(),
-                ticker: "EXEC".into(),
-                ceo_id,
-                alliance_id: Some(ally_id),
-                tax_rate: 0.05,
-                member_roles: HashMap::from([
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Exec Corp".into();
+                __corp.ticker = "EXEC".into();
+                __corp.ceo_id = ceo_id;
+                __corp.alliance_id = Some(ally_id);
+                __corp.tax_rate = 0.05;
+                __corp.member_roles = HashMap::from([
                     (dir_id, corp_roles::ROLE_DIRECTOR),
                     (comm_id, ROLE_CHAT_MANAGER),
                     (member_id, 0),
-                ]),
-                ..Default::default()
-            },
+                ]);
+                __corp },
         );
         snap.corporations.insert(
             non_exec_corp_id,
-            CorporationRecord {
-                corporation_id: non_exec_corp_id,
-                name: "Sub Corp".into(),
-                ticker: "SUBC".into(),
-                ceo_id: dir_id,
-                alliance_id: Some(ally_id),
-                tax_rate: 0.05,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = non_exec_corp_id;
+                __corp.name = "Sub Corp".into();
+                __corp.ticker = "SUBC".into();
+                __corp.ceo_id = dir_id;
+                __corp.alliance_id = Some(ally_id);
+                __corp.tax_rate = 0.05;
+                __corp },
         );
         snap.alliances.insert(
             ally_id,
@@ -240,14 +238,13 @@ fn mutate_delete_edit_participants_and_rsvp_authorization_matrix() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Mut Corp".into(),
-                ticker: "MUTC".into(),
-                ceo_id: owner_id,
-                alliance_id: Some(ally_id),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Mut Corp".into();
+                __corp.ticker = "MUTC".into();
+                __corp.ceo_id = owner_id;
+                __corp.alliance_id = Some(ally_id);
+                __corp },
         );
         snap.alliances.insert(
             ally_id,

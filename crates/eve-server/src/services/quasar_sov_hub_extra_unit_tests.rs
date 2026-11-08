@@ -254,33 +254,30 @@ fn process_configuration_reordering_fuel_restore_hacked_hub_and_uninstall_recove
             ech.alliance_id = None;
         }
 
-        let mut ca = CorporationRecord {
-            corporation_id: corp_a,
-            alliance_id: Some(ally_id),
-            ceo_id: 99_999_001,
-            ..Default::default()
-        };
+        let mut ca = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_a;
+            __corp.alliance_id = Some(ally_id);
+            __corp.ceo_id = 99_999_001;
+            __corp };
         ca.members.extend([cid, 90_000_003]);
         ca.member_roles.insert(cid, corp_roles::ROLE_DIRECTOR);
         snap.corporations.insert(corp_a, ca);
 
         snap.corporations.insert(
             sister_corp,
-            CorporationRecord {
-                corporation_id: sister_corp,
-                alliance_id: Some(ally_id),
-                ceo_id: 90_000_004,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = sister_corp;
+                __corp.alliance_id = Some(ally_id);
+                __corp.ceo_id = 90_000_004;
+                __corp },
         );
         snap.corporations.insert(
             enemy_corp,
-            CorporationRecord {
-                corporation_id: enemy_corp,
-                alliance_id: None,
-                ceo_id: 90_000_002,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = enemy_corp;
+                __corp.alliance_id = None;
+                __corp.ceo_id = 90_000_002;
+                __corp },
         );
         snap.structures.insert(
             hub_id,

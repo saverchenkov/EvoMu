@@ -78,11 +78,15 @@ fn test_ctx() -> Arc<ServerContext> {
 }
 
 fn seed_corp(snap: &mut WorldStateSnapshot, corp_id: i64, ceo_id: i64, ally_id: Option<i64>) {
-    snap.corporations.insert(corp_id, CorporationRecord {
-        corporation_id: corp_id, name: format!("Corp {corp_id}"), ticker: format!("C{}", corp_id % 100),
-        ceo_id, alliance_id: ally_id, members: HashSet::from([ceo_id]),
-        member_roles: HashMap::from([(ceo_id, ROLE_DIRECTOR)]), ..Default::default()
-    });
+    snap.corporations.insert(corp_id, { let mut __corp = CorporationRecord::default();
+        __corp.corporation_id = corp_id;
+        __corp.name = format!("Corp {corp_id}");
+        __corp.ticker = format!("C{}", corp_id % 100);
+        __corp.ceo_id = ceo_id;
+        __corp.alliance_id = ally_id;
+        __corp.members = HashSet::from([ceo_id]);
+        __corp.member_roles = HashMap::from([(ceo_id, ROLE_DIRECTOR)]);
+        __corp });
 }
 
 fn seed_char(snap: &mut WorldStateSnapshot, cid: i64, corp: i64, aid: Option<i64>, sys: u32) {

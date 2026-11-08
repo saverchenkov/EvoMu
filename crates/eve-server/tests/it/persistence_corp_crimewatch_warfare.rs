@@ -575,7 +575,7 @@ async fn test_d6_warfare_fw_sov_and_insurgency_persist_and_rollback() {
                 if let Some(c) = snap.corporations.get_mut(&cid) {
                     c.ensure_wallet_divisions();
                     c.wallet_divisions[0].balance = IskCents::from_isk(3_000_000_000);
-                    c.master_wallet = c.wallet_divisions[0].balance;
+                    c.ensure_wallet_divisions();
                 }
             }
             snap.structures.insert(hq_id, make_structure(hq_id, corp_a, 30_000_142, 35832, "Aggressor Astrahus HQ"));

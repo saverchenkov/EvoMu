@@ -42,14 +42,13 @@ fn seed_corp_and_director(ctx: &ServerContext, char_id: i64, corp_id: i64, sid: 
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: format!("Profile Corp {corp_id}"),
-                ticker: "PRF".into(),
-                ceo_id: char_id,
-                hq_station_id: Some(60003760),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = format!("Profile Corp {corp_id}");
+                __corp.ticker = "PRF".into();
+                __corp.ceo_id = char_id;
+                __corp.hq_station_id = Some(60003760);
+                __corp },
         );
         let mut ch = snap.characters.values().next().cloned().expect("demo char");
         ch.character_id = char_id;

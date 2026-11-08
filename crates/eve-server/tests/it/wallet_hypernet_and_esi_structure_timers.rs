@@ -306,12 +306,15 @@ async fn test_esi_corporation_structures_timers_and_online_services() {
             ch.user_id = 1;
             ch.corporation_id = corp_id;
         }
-        snap.corporations.insert(corp_id, eve_db::CorporationRecord {
-            corporation_id: corp_id, name: "Deep Space Engineering".into(),
-            ticker: "DSE".into(), ceo_id, tax_rate: 0.05,
-            members: std::collections::HashSet::from([ceo_id]),
-            hq_station_id: Some(JITA_STATION), ..Default::default()
-        });
+        snap.corporations.insert(corp_id, { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Deep Space Engineering".into();
+            __corp.ticker = "DSE".into();
+            __corp.ceo_id = ceo_id;
+            __corp.tax_rate = 0.05;
+            __corp.members = std::collections::HashSet::from([ceo_id]);
+            __corp.hq_station_id = Some(JITA_STATION);
+            __corp });
         snap.structures.insert(struct_id, eve_db::UpwellStructureRecord {
             structure_id: struct_id, type_id: 35825, owner_corp_id: corp_id,
             solar_system_id: JITA_SOLAR_SYSTEM, name: "Perimeter Industrial Forge".into(),

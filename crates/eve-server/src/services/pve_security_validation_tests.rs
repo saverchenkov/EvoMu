@@ -45,16 +45,16 @@ fn r7_464_title_role_maturation_and_singleton_ship_container_delivery_blocked() 
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Title Maturation Corp".into(),
-                ceo_id,
-                master_wallet: IskCents::from_isk(20_000_000),
-                wallet_divisions: CorporationRecord::default_wallet_divisions(IskCents::from_isk(
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Title Maturation Corp".into();
+                __corp.ceo_id = ceo_id;
+                __corp.wallet_divisions = CorporationRecord::default_wallet_divisions(IskCents::from_isk(
                     20_000_000,
-                )),
-                ..Default::default()
-            },
+                ));
+                let __mw = IskCents::from_isk(20_000_000);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         let gov = snap.corp_governance.entry(corp_id).or_default();
         gov.titles

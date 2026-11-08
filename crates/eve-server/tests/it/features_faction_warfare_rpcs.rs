@@ -444,10 +444,7 @@ async fn test_fw_lp_complexes_kills_status_scaling_and_militia_store() {
         gch.standings.clear(); // 0.0 default raw standing — opposing militia gate must still reject!
         gch.loyalty_points.insert(STATE_PROTECTORATE_CORP, 50_000);
         if let Some(gcorp) = s.corporations.get_mut(&98_000_102) {
-            gcorp.master_wallet = IskCents::from_isk(50_000_000);
-            if let Some(d0) = gcorp.wallet_divisions.first_mut() {
-                d0.balance = gcorp.master_wallet;
-            }
+            gcorp.set_division_balance(1, IskCents::from_isk(50_000_000));
         }
     });
 

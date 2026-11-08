@@ -87,21 +87,20 @@ fn welcome_mail_restrictions_structures_reinforce_divisions_ally_cost_and_hq_bra
         );
         roles.insert(plain_id, 0);
 
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "GovernanceMatrixCorp".into(),
-            ticker: "GMXC".into(),
-            ceo_id,
-            hq_station_id: None,
-            members: HashSet::from([ceo_id, comms_id, plain_id]),
-            member_roles: roles,
-            wallet_divisions: vec![CorpWalletDivisionRecord {
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "GovernanceMatrixCorp".into();
+            __corp.ticker = "GMXC".into();
+            __corp.ceo_id = ceo_id;
+            __corp.hq_station_id = None;
+            __corp.members = HashSet::from([ceo_id, comms_id, plain_id]);
+            __corp.member_roles = roles;
+            __corp.wallet_divisions = vec![CorpWalletDivisionRecord {
                 division_id: 1,
                 name: "CustomMainWallet".into(),
                 balance: IskCents(0),
-            }],
-            ..Default::default()
-        };
+            }];
+            __corp };
         corp.applications.insert(
             1,
             CorpApplicationRecord {

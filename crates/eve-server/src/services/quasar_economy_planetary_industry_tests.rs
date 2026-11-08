@@ -125,22 +125,23 @@ fn extract_u64_and_accounting_journal_entries_and_auth() {
     seed_char(&db, other_cid, 98000999, 1_000_000);
 
     db.try_with_mut_snapshot(|snap| {
-        let corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "TestCorp".to_string(),
-            ticker: "TCRP".to_string(),
-            ceo_id: cid,
-            hq_station_id: Some(60003760),
-            alliance_id: None,
-            tax_rate: 0.05,
-            master_wallet: IskCents(0),
-            members: HashSet::from([cid]),
-            member_roles: HashMap::new(),
-            applications: HashMap::new(),
-            wallet_divisions: Vec::new(),
-            description: String::new(),
-            url: String::new(),
-        };
+        let corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "TestCorp".to_string();
+            __corp.ticker = "TCRP".to_string();
+            __corp.ceo_id = cid;
+            __corp.hq_station_id = Some(60003760);
+            __corp.alliance_id = None;
+            __corp.tax_rate = 0.05;
+            __corp.members = HashSet::from([cid]);
+            __corp.member_roles = HashMap::new();
+            __corp.applications = HashMap::new();
+            __corp.description = String::new();
+            __corp.url = String::new();
+            __corp.wallet_divisions = Vec::new();
+            let __mw = IskCents(0);
+            if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+            __corp };
         snap.corporations.insert(corp_id, corp);
         snap.wallet_journal.push(WalletJournalEntry {
             entry_id: 1,

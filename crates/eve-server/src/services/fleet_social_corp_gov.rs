@@ -209,25 +209,15 @@ pub(super) fn handle_add_corporation(
         let mut member_roles = HashMap::new();
         member_roles.insert(char_id, u64::MAX);
 
-        snap.corporations.insert(
-            cid,
-            CorporationRecord {
-                corporation_id: cid,
-                name: name.to_string(),
-                ticker: ticker.to_string(),
-                ceo_id: char_id,
-                alliance_id: None,
-                tax_rate,
-                master_wallet: IskCents(0),
-                members: HashSet::from([char_id]),
-                member_roles,
-                applications: HashMap::new(),
-                wallet_divisions,
-                description: description.to_string(),
-                url: url.to_string(),
-                hq_station_id: session.station_id.or(char_station_id),
-            },
-        );
+        let mut corp_rec = CorporationRecord::new(cid, name, ticker, char_id);
+        corp_rec.tax_rate = tax_rate;
+        corp_rec.members = HashSet::from([char_id]);
+        corp_rec.member_roles = member_roles;
+        corp_rec.wallet_divisions = wallet_divisions;
+        corp_rec.description = description.to_string();
+        corp_rec.url = url.to_string();
+        corp_rec.hq_station_id = session.station_id.or(char_station_id);
+        snap.corporations.insert(cid, corp_rec);
         snap.chat_channels.insert(format!("corpid:{cid}"), ChatChannelRecord { channel_id: format!("corpid:{cid}"), name: name.to_string(), motd: String::new(), owner_id: Some(char_id), members: HashSet::from([char_id]), is_system_local: false, solar_system_id: None, is_private: false, operators: HashSet::from([char_id]), password: None, is_delayed_local: false });
         let init_limit = snap.skills.get(&char_id).map(|sk| sk.values().map(|s| ctx.sde.types.get(&s.type_id).and_then(|t| t.default_attributes.get(&191).copied()).map_or(0, |b| (b.round() as i64) * i64::from(s.level))).sum::<i64>()).unwrap_or(0).max(10);
         snap.corp_member_limits.insert(cid, init_limit);
@@ -621,12 +611,7 @@ pub(super) fn handle_corp_gov(
                     if char_id != corp.ceo_id && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR) {
                         return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Paying dividends requires CEO or Director role".into() });
                     }
-                    corp.ensure_wallet_divisions();
-                    let cur_bal = if div_id == 1 {
-                        corp.division_balance(1).min(corp.master_wallet)
-                    } else {
-                        corp.division_balance(div_id)
-                    };
+                    let cur_bal = corp.division_balance(div_id);
                     if cur_bal < payout_cents {
                         return Err(BridgeRpcError { code: "InsufficientFunds".into(), message: "Insufficient corporation wallet funds for dividend payout".into() });
                     }
@@ -1194,14 +1179,11 @@ pub(super) fn handle_corp_gov(
                 let ad_fee = IskCents::from_isk(250_000);
                 let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                     if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-                        corp.ensure_wallet_divisions();
-                        if corp.wallet_divisions[0].balance >= ad_fee {
-                            corp.wallet_divisions[0].balance =
-                                corp.wallet_divisions[0].balance.checked_sub(ad_fee).unwrap();
-                            corp.master_wallet = corp.wallet_divisions[0].balance;
-                        } else if let Some(ch) = snap.characters.get_mut(&char_id) {
-                            if let Some(nb) = ch.balance.checked_sub(ad_fee) {
-                                ch.balance = nb;
+                        if corp.debit_division(1, ad_fee).is_none() {
+                            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                                if let Some(nb) = ch.balance.checked_sub(ad_fee) {
+                                    ch.balance = nb;
+                                }
                             }
                         }
                     }

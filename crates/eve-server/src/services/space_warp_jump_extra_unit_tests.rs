@@ -495,14 +495,13 @@ async fn dock_and_undock_enforce_crimewatch_upwell_structure_states_acl_and_ship
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "DockCorp".into(),
-                ticker: "DCK".into(),
-                ceo_id: char_id,
-                members: HashSet::from([char_id]),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "DockCorp".into();
+                __corp.ticker = "DCK".into();
+                __corp.ceo_id = char_id;
+                __corp.members = HashSet::from([char_id]);
+                __corp },
         );
         snap.structures.insert(
             struct_id,

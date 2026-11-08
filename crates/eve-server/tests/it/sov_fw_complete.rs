@@ -172,15 +172,14 @@ async fn fw_corp_allowed_enlistment_factions_gate_member_enlistment() {
     ctx.db.with_mut_snapshot(|s| {
         s.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Enlistment Test Corp".into(),
-                ticker: "ETC".into(),
-                ceo_id: OTHER,
-                members: HashSet::from([PILOT, OTHER]),
-                master_wallet: IskCents::from_isk(0),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Enlistment Test Corp".into();
+                __corp.ticker = "ETC".into();
+                __corp.ceo_id = OTHER;
+                __corp.members = HashSet::from([PILOT, OTHER]);
+                __corp.set_division_balance(1, IskCents::from_isk(0));
+                __corp },
         );
         for cid in [PILOT, OTHER] {
             s.characters.get_mut(&cid).unwrap().corporation_id = corp_id;
@@ -285,16 +284,15 @@ async fn sov_hub_anchoring_claims_unclaimed_nullsec_and_emits_notifications() {
         );
         s.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                alliance_id: Some(alliance_id),
-                name: "Test Sov Corp".into(),
-                ticker: "TSC".into(),
-                ceo_id: PILOT,
-                members: HashSet::from([PILOT]),
-                master_wallet: IskCents::from_isk(0),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.alliance_id = Some(alliance_id);
+                __corp.name = "Test Sov Corp".into();
+                __corp.ticker = "TSC".into();
+                __corp.ceo_id = PILOT;
+                __corp.members = HashSet::from([PILOT]);
+                __corp.set_division_balance(1, IskCents::from_isk(0));
+                __corp },
         );
         s.characters.get_mut(&PILOT).unwrap().corporation_id = corp_id;
         s.characters.get_mut(&PILOT).unwrap().alliance_id = Some(alliance_id);
@@ -386,16 +384,15 @@ async fn sov_info_adm_scaling_dev_indices_and_map_data() {
         );
         s.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                alliance_id: Some(alliance_id),
-                name: "Test Sov Corp".into(),
-                ticker: "TSC".into(),
-                ceo_id: PILOT,
-                members: HashSet::from([PILOT]),
-                master_wallet: IskCents::from_isk(0),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.alliance_id = Some(alliance_id);
+                __corp.name = "Test Sov Corp".into();
+                __corp.ticker = "TSC".into();
+                __corp.ceo_id = PILOT;
+                __corp.members = HashSet::from([PILOT]);
+                __corp.set_division_balance(1, IskCents::from_isk(0));
+                __corp },
         );
         s.characters.get_mut(&PILOT).unwrap().corporation_id = corp_id;
         s.characters.get_mut(&PILOT).unwrap().alliance_id = Some(alliance_id);
@@ -892,16 +889,15 @@ async fn skyhook_acquisition_theft_and_reagent_loss() {
         );
         s.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                alliance_id: Some(alliance_id),
-                name: "Test Sov Corp".into(),
-                ticker: "TSC".into(),
-                ceo_id: PILOT,
-                members: HashSet::from([PILOT]),
-                master_wallet: IskCents::from_isk(0),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.alliance_id = Some(alliance_id);
+                __corp.name = "Test Sov Corp".into();
+                __corp.ticker = "TSC".into();
+                __corp.ceo_id = PILOT;
+                __corp.members = HashSet::from([PILOT]);
+                __corp.set_division_balance(1, IskCents::from_isk(0));
+                __corp },
         );
         s.characters.get_mut(&PILOT).unwrap().corporation_id = corp_id;
         s.characters.get_mut(&PILOT).unwrap().alliance_id = Some(alliance_id);

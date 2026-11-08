@@ -829,7 +829,7 @@ async fn test_corp_governance_welcome_mails_structures_alliance() {
     ctx.db.with_mut_snapshot(|s| {
         let corp = s.corporations.get_mut(&corp_id).unwrap();
         corp.ensure_wallet_divisions();
-        corp.master_wallet = IskCents::from_f64_isk(1_000_000_000.0);
+        corp.set_division_balance(1, IskCents::from_f64_isk(1_000_000_000.0));
         corp.wallet_divisions[0].balance = IskCents::from_f64_isk(1_000_000_000.0);
     });
 
@@ -913,7 +913,7 @@ async fn test_corp_projects_goals_and_freelance_workflows() {
     ctx.db.with_mut_snapshot(|s| {
         let corp = s.corporations.get_mut(&corp_id).unwrap();
         corp.ensure_wallet_divisions();
-        corp.master_wallet = IskCents::from_f64_isk(10_000_000.0);
+        corp.set_division_balance(1, IskCents::from_f64_isk(10_000_000.0));
         corp.wallet_divisions[0].balance = IskCents::from_f64_isk(10_000_000.0);
     });
 
@@ -1711,16 +1711,15 @@ async fn test_corp_authorization_negative_checks_r_nav_01() {
     ctx.db.with_mut_snapshot(|s| {
         s.corporations.insert(
             corp_id,
-            eve_db::CorporationRecord {
-                corporation_id: corp_id,
-                name: "Leaderless Corp".into(),
-                ticker: "NOCEO".into(),
-                ceo_id: 0,
-                tax_rate: 0.0,
-                members: [member_no_roles, PILOT_3].into_iter().collect(),
-                member_roles: HashMap::new(),
-                ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Leaderless Corp".into();
+                __corp.ticker = "NOCEO".into();
+                __corp.ceo_id = 0;
+                __corp.tax_rate = 0.0;
+                __corp.members = [member_no_roles, PILOT_3].into_iter().collect();
+                __corp.member_roles = HashMap::new();
+                __corp },
         );
         if let Some(ch) = s.characters.get_mut(&member_no_roles) {
             ch.corporation_id = corp_id;
@@ -1745,16 +1744,15 @@ async fn test_corp_authorization_negative_checks_r_nav_01() {
     ctx.db.with_mut_snapshot(|s| {
         s.corporations.insert(
             sole_corp_id,
-            eve_db::CorporationRecord {
-                corporation_id: sole_corp_id,
-                name: "Sole Member Non-CEO Corp".into(),
-                ticker: "SOLNC".into(),
-                ceo_id: other_ceo,
-                tax_rate: 0.0,
-                members: [member_no_roles].into_iter().collect(),
-                member_roles: HashMap::new(),
-                ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = sole_corp_id;
+                __corp.name = "Sole Member Non-CEO Corp".into();
+                __corp.ticker = "SOLNC".into();
+                __corp.ceo_id = other_ceo;
+                __corp.tax_rate = 0.0;
+                __corp.members = [member_no_roles].into_iter().collect();
+                __corp.member_roles = HashMap::new();
+                __corp },
         );
         if let Some(ch) = s.characters.get_mut(&member_no_roles) {
             ch.corporation_id = sole_corp_id;

@@ -243,14 +243,13 @@ async fn sov_hub_data_hack_skyhook_tax_and_sov_hub_anchoring() {
         }
         snap.corporations.insert(
             cid,
-            eve_db::CorporationRecord {
-                corporation_id: cid,
-                ceo_id: char_id,
-                alliance_id: Some(aid),
-                name: "SovHubTestCorp".into(),
-                ticker: "SHTC".into(),
-                ..Default::default()
-            },
+            { let mut __corp = eve_db::CorporationRecord::default();
+                __corp.corporation_id = cid;
+                __corp.ceo_id = char_id;
+                __corp.alliance_id = Some(aid);
+                __corp.name = "SovHubTestCorp".into();
+                __corp.ticker = "SHTC".into();
+                __corp },
         );
         snap.alliances.insert(
             aid,

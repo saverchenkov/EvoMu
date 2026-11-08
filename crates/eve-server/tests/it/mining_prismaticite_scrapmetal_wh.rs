@@ -158,13 +158,12 @@ async fn test_mining_scrapmetal_yield_exclusions_at_npc_and_rigged_tatara() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Scrapmetal Test Corp".into(),
-                ticker: "SCRP".into(),
-                ceo_id: char_id,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Scrapmetal Test Corp".into();
+                __corp.ticker = "SCRP".into();
+                __corp.ceo_id = char_id;
+                __corp },
         );
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.corporation_id = corp_id;
@@ -346,13 +345,12 @@ async fn test_mining_prismaticite_reprocessing_and_unrefined_mineral_reactions()
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Reaction Test Corp".into(),
-                ticker: "REAC".into(),
-                ceo_id: char_id,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Reaction Test Corp".into();
+                __corp.ticker = "REAC".into();
+                __corp.ceo_id = char_id;
+                __corp },
         );
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.corporation_id = corp_id;

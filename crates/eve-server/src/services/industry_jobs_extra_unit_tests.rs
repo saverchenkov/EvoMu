@@ -195,19 +195,19 @@ fn make_ctx_and_session() -> (ServerContext, SessionState, i64, i64, i64) {
         }
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Industry Test Corp".into(),
-                ticker: "INDT".into(),
-                ceo_id: 90_000_999,
-                master_wallet: IskCents::from_f64_isk(1_000_000_000.0),
-                wallet_divisions: vec![CorpWalletDivisionRecord {
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Industry Test Corp".into();
+                __corp.ticker = "INDT".into();
+                __corp.ceo_id = 90_000_999;
+                __corp.wallet_divisions = vec![CorpWalletDivisionRecord {
                     division_id: 1,
                     name: "Master".into(),
                     balance: IskCents::from_f64_isk(1_000_000_000.0),
-                }],
-                ..Default::default()
-            },
+                }];
+                let __mw = IskCents::from_f64_isk(1_000_000_000.0);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         let skills = snap.skills.entry(char_id).or_default();
         for sid in [3380, 3387, 3406, 11448, 11452, 21791, 45746, 45748] {

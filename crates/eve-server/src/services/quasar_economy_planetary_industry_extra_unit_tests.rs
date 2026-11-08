@@ -107,22 +107,23 @@ fn nested_extract_u64_and_corp_journal_role_assignments_and_starter_corp_overrid
     db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "IndustryCorp".into(),
-                ticker: "ICRP".into(),
-                ceo_id,
-                hq_station_id: Some(60003760),
-                alliance_id: Some(99000500),
-                tax_rate: 0.1,
-                master_wallet: IskCents(0),
-                members: HashSet::from([ceo_id, trader_id, starter_char_id]),
-                member_roles: HashMap::new(),
-                applications: HashMap::new(),
-                wallet_divisions: Vec::new(),
-                description: String::new(),
-                url: String::new(),
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "IndustryCorp".into();
+                __corp.ticker = "ICRP".into();
+                __corp.ceo_id = ceo_id;
+                __corp.hq_station_id = Some(60003760);
+                __corp.alliance_id = Some(99000500);
+                __corp.tax_rate = 0.1;
+                __corp.members = HashSet::from([ceo_id, trader_id, starter_char_id]);
+                __corp.member_roles = HashMap::new();
+                __corp.applications = HashMap::new();
+                __corp.description = String::new();
+                __corp.url = String::new();
+                __corp.wallet_divisions = Vec::new();
+                let __mw = IskCents(0);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
         // Grant ROLE_TRADER via corp_role_assignments table
         snap.corp_role_assignments.insert(
@@ -237,22 +238,23 @@ fn contract_authorization_branches_corp_acceptor_alliance_and_empty_availability
     db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             ally_corp_id,
-            CorporationRecord {
-                corporation_id: ally_corp_id,
-                name: "AllyCorp".into(),
-                ticker: "ALYC".into(),
-                ceo_id: alliance_member,
-                hq_station_id: Some(60003760),
-                alliance_id: Some(alliance_id),
-                tax_rate: 0.0,
-                master_wallet: IskCents(0),
-                members: HashSet::from([alliance_member]),
-                member_roles: HashMap::new(),
-                applications: HashMap::new(),
-                wallet_divisions: Vec::new(),
-                description: String::new(),
-                url: String::new(),
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = ally_corp_id;
+                __corp.name = "AllyCorp".into();
+                __corp.ticker = "ALYC".into();
+                __corp.ceo_id = alliance_member;
+                __corp.hq_station_id = Some(60003760);
+                __corp.alliance_id = Some(alliance_id);
+                __corp.tax_rate = 0.0;
+                __corp.members = HashSet::from([alliance_member]);
+                __corp.member_roles = HashMap::new();
+                __corp.applications = HashMap::new();
+                __corp.description = String::new();
+                __corp.url = String::new();
+                __corp.wallet_divisions = Vec::new();
+                let __mw = IskCents(0);
+                if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+                __corp },
         );
 
         let mk_contract = |id: i64,

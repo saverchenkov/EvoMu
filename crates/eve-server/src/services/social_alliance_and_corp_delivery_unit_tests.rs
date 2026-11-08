@@ -297,7 +297,7 @@ async fn alliance_getters_kick_war_and_last_corp_close_and_auxiliary_rpcs() {
         let mut cred = snap.corporations.get(&98_100_001).unwrap().clone();
         cred.corporation_id = creditor_corp_id;
         cred.alliance_id = None;
-        cred.master_wallet = eve_db::IskCents(0);
+        cred.set_division_balance(1, eve_db::IskCents(0));
         cred.wallet_divisions = eve_db::CorporationRecord::default_wallet_divisions(eve_db::IskCents(0));
         snap.corporations.insert(creditor_corp_id, cred);
         let bill = crate::services::wallet_services_ext::CorpBillRecord {

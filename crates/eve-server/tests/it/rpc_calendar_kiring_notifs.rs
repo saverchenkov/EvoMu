@@ -89,22 +89,23 @@ async fn test_calendar_alliance_events_and_participant_management() {
             c2.corporation_id = corp_id;
             c2.alliance_id = Some(ally_id);
         }
-        snap.corporations.entry(corp_id).or_insert_with(|| eve_db::CorporationRecord {
-            corporation_id: corp_id,
-            name: "Calendar Test Corp".into(),
-            ticker: "CTST".into(),
-            ceo_id: 90_000_001,
-            alliance_id: Some(ally_id),
-            tax_rate: 0.05,
-            master_wallet: eve_db::IskCents(10_000_000_00),
-            members: std::collections::HashSet::from([90_000_001, 90_000_002]),
-            member_roles: HashMap::from([(90_000_001, eve_db::corp_roles::ROLE_DIRECTOR)]),
-            applications: HashMap::new(),
-            wallet_divisions: eve_db::CorporationRecord::default_wallet_divisions(eve_db::IskCents(10_000_000_00)),
-            description: "Test corp".into(),
-            url: "".into(),
-            hq_station_id: Some(60_003_760),
-        });
+        snap.corporations.entry(corp_id).or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Calendar Test Corp".into();
+            __corp.ticker = "CTST".into();
+            __corp.ceo_id = 90_000_001;
+            __corp.alliance_id = Some(ally_id);
+            __corp.tax_rate = 0.05;
+            __corp.members = std::collections::HashSet::from([90_000_001, 90_000_002]);
+            __corp.member_roles = HashMap::from([(90_000_001, eve_db::corp_roles::ROLE_DIRECTOR)]);
+            __corp.applications = HashMap::new();
+            __corp.description = "Test corp".into();
+            __corp.url = "".into();
+            __corp.hq_station_id = Some(60_003_760);
+            __corp.wallet_divisions = eve_db::CorporationRecord::default_wallet_divisions(eve_db::IskCents(10_000_000_00));
+            let __mw = eve_db::IskCents(10_000_000_00);
+            if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+            __corp });
         snap.alliances.entry(ally_id).or_insert_with(|| eve_db::AllianceRecord {
             alliance_id: ally_id,
             name: "Calendar Test Alliance".into(),

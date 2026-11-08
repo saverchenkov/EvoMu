@@ -92,22 +92,23 @@ fn seed_corp_and_three_members(ctx: &ServerContext, now: u64) -> (i64, i64, i64,
             ch.balance = IskCents::from_isk(5_000_000);
             snap.characters.insert(cid, ch);
         }
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "GovTest Corp".into(),
-            ticker: "GOVT".into(),
-            ceo_id,
-            alliance_id: None,
-            tax_rate: 0.1,
-            master_wallet: IskCents::from_isk(50_000_000),
-            members: HashSet::from([ceo_id, mem_a, mem_b]),
-            member_roles: HashMap::from([(ceo_id, u64::MAX)]),
-            applications: HashMap::new(),
-            wallet_divisions: vec![],
-            description: "Gov".into(),
-            url: String::new(),
-            hq_station_id: Some(60_003_760),
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "GovTest Corp".into();
+            __corp.ticker = "GOVT".into();
+            __corp.ceo_id = ceo_id;
+            __corp.alliance_id = None;
+            __corp.tax_rate = 0.1;
+            __corp.members = HashSet::from([ceo_id, mem_a, mem_b]);
+            __corp.member_roles = HashMap::from([(ceo_id, u64::MAX)]);
+            __corp.applications = HashMap::new();
+            __corp.description = "Gov".into();
+            __corp.url = String::new();
+            __corp.hq_station_id = Some(60_003_760);
+            __corp.wallet_divisions = vec![];
+            let __mw = IskCents::from_isk(50_000_000);
+            if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+            __corp };
         corp.ensure_wallet_divisions();
         corp.wallet_divisions[0].balance = IskCents::from_isk(50_000_000);
         snap.corporations.insert(corp_id, corp);

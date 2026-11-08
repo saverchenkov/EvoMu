@@ -452,22 +452,23 @@ async fn test_lp_store_mgr_take_offer_for_corporation() {
             ch.balance = IskCents::from_isk(10_000_000);
             ch.loyalty_points.insert(CALDARI_NAVY_CORP, 5_000);
         }
-        let mut corp = eve_db::types::CorporationRecord {
-            corporation_id: CORP_ID,
-            name: "LP Test Corp".into(),
-            ticker: "LPTC".into(),
-            ceo_id: CHAR_ID + 999,
-            alliance_id: None,
-            tax_rate: 0.05,
-            master_wallet: IskCents::from_isk(100_000_000),
-            members: [CHAR_ID].into_iter().collect(),
-            member_roles: HashMap::new(),
-            applications: HashMap::new(),
-            wallet_divisions: vec![],
-            description: "".into(),
-            url: "".into(),
-            hq_station_id: Some(STATION_ID),
-        };
+        let mut corp = { let mut __corp = eve_db::types::CorporationRecord::default();
+            __corp.corporation_id = CORP_ID;
+            __corp.name = "LP Test Corp".into();
+            __corp.ticker = "LPTC".into();
+            __corp.ceo_id = CHAR_ID + 999;
+            __corp.alliance_id = None;
+            __corp.tax_rate = 0.05;
+            __corp.members = [CHAR_ID].into_iter().collect();
+            __corp.member_roles = HashMap::new();
+            __corp.applications = HashMap::new();
+            __corp.description = "".into();
+            __corp.url = "".into();
+            __corp.hq_station_id = Some(STATION_ID);
+            __corp.wallet_divisions = vec![];
+            let __mw = IskCents::from_isk(100_000_000);
+            if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
+            __corp };
         corp.ensure_wallet_divisions();
         corp.wallet_divisions[0].balance = IskCents::from_isk(100_000_000);
         snap.corporations.insert(CORP_ID, corp);
@@ -510,7 +511,7 @@ async fn test_lp_store_mgr_take_offer_for_corporation() {
     ctx.db.with_mut_snapshot(|snap| {
         let c = snap.corporations.get_mut(&CORP_ID).unwrap();
         c.wallet_divisions[0].balance = IskCents::from_isk(1_000);
-        c.master_wallet = c.wallet_divisions[0].balance;
+        c.ensure_wallet_divisions();
     });
     let err_cfund = rpc(
         &ctx,
@@ -525,7 +526,7 @@ async fn test_lp_store_mgr_take_offer_for_corporation() {
     ctx.db.with_mut_snapshot(|snap| {
         let c = snap.corporations.get_mut(&CORP_ID).unwrap();
         c.wallet_divisions[0].balance = IskCents::from_isk(100_000_000);
-        c.master_wallet = c.wallet_divisions[0].balance;
+        c.ensure_wallet_divisions();
     });
 
     // 4. Validation: MissingRequiredItems in corp hangar (Offer 3565 needs 5,000x Iron Charge S)
@@ -587,7 +588,7 @@ async fn test_lp_store_mgr_take_offer_for_corporation() {
 
         let corp = snap.corporations.get(&CORP_ID).unwrap();
         assert_eq!(corp.wallet_divisions[0].balance, IskCents::from_isk(100_000_000 - 7_200_000));
-        assert_eq!(corp.master_wallet, IskCents::from_isk(100_000_000 - 7_200_000));
+        assert_eq!(corp.master_wallet_balance(), IskCents::from_isk(100_000_000 - 7_200_000));
         assert!(snap.wallet_journal.iter().any(|j| {
             j.character_id == CORP_ID
                 && j.entry_type == "LPStorePurchase"

@@ -345,3 +345,35 @@ fn corp_roles_and_corporation_wallet_divisions() {
     assert_eq!(corp.division_balance(1), IskCents(44_000));
     assert_eq!(corp.master_wallet, IskCents(44_000));
 }
+
+#[test]
+fn corp_division_single_entrypoint_credit_debit_and_builder() {
+    let mut corp = CorporationRecord::new(98_001_001, "Arch Corp", "ARCH", 90_001_001)
+        .with_master_wallet(IskCents::from_isk(1_000));
+    assert_eq!(corp.master_wallet_balance(), IskCents::from_isk(1_000));
+    assert_eq!(corp.division_balance(1), IskCents::from_isk(1_000));
+    assert_eq!(corp.master_wallet, corp.wallet_divisions[0].balance);
+
+    let after_credit = corp.credit_division(1, IskCents::from_isk(500));
+    assert_eq!(after_credit, IskCents::from_isk(1_500));
+    assert_eq!(corp.master_wallet_balance(), IskCents::from_isk(1_500));
+    assert_eq!(corp.wallet_divisions[0].balance, IskCents::from_isk(1_500));
+
+    assert_eq!(corp.debit_division(1, IskCents::from_isk(1_501)), None);
+    assert_eq!(corp.master_wallet_balance(), IskCents::from_isk(1_500));
+
+    assert_eq!(
+        corp.debit_division(1, IskCents::from_isk(250)),
+        Some(IskCents::from_isk(1_250))
+    );
+    assert_eq!(corp.master_wallet_balance(), IskCents::from_isk(1_250));
+    assert_eq!(corp.wallet_divisions[0].balance, IskCents::from_isk(1_250));
+
+    corp.credit_division(3, IskCents::from_isk(400));
+    assert_eq!(corp.division_balance(3), IskCents::from_isk(400));
+    assert_eq!(
+        corp.debit_division(3, IskCents::from_isk(150)),
+        Some(IskCents::from_isk(250))
+    );
+    assert_eq!(corp.master_wallet_balance(), IskCents::from_isk(1_250));
+}

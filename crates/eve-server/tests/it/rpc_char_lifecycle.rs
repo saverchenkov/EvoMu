@@ -101,13 +101,12 @@ async fn test_char_mgr_cohorts_homestation_and_corp_roles() {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {
             ch.corporation_id = corp_id;
         }
-        let mut corp = eve_db::CorporationRecord {
-            corporation_id: corp_id,
-            name: "Test Corp".into(),
-            ticker: "TC".into(),
-            ceo_id: 90_000_999,
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Test Corp".into();
+            __corp.ticker = "TC".into();
+            __corp.ceo_id = 90_000_999;
+            __corp };
         corp.member_roles.insert(90_000_001, expected_director_mask);
         snap.corporations.insert(corp_id, corp);
         snap.char_scoped_roles.insert(

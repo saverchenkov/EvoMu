@@ -48,15 +48,12 @@ async fn login_char(
 
 fn setup_corp_members(ctx: &ServerContext, corp_id: i64, p2_roles: u64, station_id: i64) {
     ctx.db.with_mut_snapshot(|snap| {
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "RBAC Security Corp".into(),
-            ticker: "RBSC".into(),
-            ceo_id: P1,
-            hq_station_id: Some(station_id),
-            master_wallet: IskCents::from_isk(50_000_000),
-            ..Default::default()
-        };
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "RBAC Security Corp".into();
+        corp.ticker = "RBSC".into();
+        corp.ceo_id = P1;
+        corp.hq_station_id = Some(station_id);
         corp.ensure_wallet_divisions();
         corp.set_division_balance(1, IskCents::from_isk(50_000_000));
         corp.set_division_balance(2, IskCents::from_isk(10_000_000));
@@ -464,12 +461,18 @@ async fn issue_553_market_acl_hides_denied_upwell_orders() {
     );
     let now = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.insert(owner_corp, CorporationRecord {
-            corporation_id: owner_corp, name: "Fort Owner".into(), ticker: "FORT".into(), ceo_id: P1, ..Default::default()
-        });
-        snap.corporations.insert(enemy_corp, CorporationRecord {
-            corporation_id: enemy_corp, name: "Guest Corp".into(), ticker: "GST".into(), ceo_id: P2, ..Default::default()
-        });
+        let mut corp_owner = CorporationRecord::default();
+        corp_owner.corporation_id = owner_corp;
+        corp_owner.name = "Fort Owner".into();
+        corp_owner.ticker = "FORT".into();
+        corp_owner.ceo_id = P1;
+        snap.corporations.insert(owner_corp, corp_owner);
+        let mut corp_enemy = CorporationRecord::default();
+        corp_enemy.corporation_id = enemy_corp;
+        corp_enemy.name = "Guest Corp".into();
+        corp_enemy.ticker = "GST".into();
+        corp_enemy.ceo_id = P2;
+        snap.corporations.insert(enemy_corp, corp_enemy);
         snap.characters.get_mut(&P1).unwrap().corporation_id = owner_corp;
         snap.characters.get_mut(&P2).unwrap().corporation_id = enemy_corp;
 

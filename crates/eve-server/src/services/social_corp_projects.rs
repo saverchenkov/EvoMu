@@ -412,17 +412,6 @@ pub struct CanonicalProjectSpec {
 
 fn read_synced_corp_wallet_balance(corp: &mut eve_db::CorporationRecord, div_id: u8) -> IskCents {
     corp.ensure_wallet_divisions();
-    if div_id == 1 {
-        let div1 = corp.division_balance(1);
-        if corp.master_wallet != div1 {
-            let unified = if corp.master_wallet.raw_cents() != 0 {
-                corp.master_wallet
-            } else {
-                div1
-            };
-            corp.set_division_balance(1, unified);
-        }
-    }
     corp.division_balance(div_id)
 }
 
@@ -675,7 +664,7 @@ pub fn redeem_corp_goal_reward_for_char(
         let corp_bal = snap
             .corporations
             .get(&proj.corporation_id)
-            .map(|c| if div_id == 1 { c.master_wallet } else { c.division_balance(div_id) })
+            .map(|c| c.division_balance(div_id))
             .unwrap_or(IskCents::ZERO);
         append_corp_journal(
             snap,
@@ -824,7 +813,7 @@ pub fn redeem_freelance_reward_for_char(
         let corp_bal = snap
             .corporations
             .get(&proj.corporation_id)
-            .map(|c| if div_id == 1 { c.master_wallet } else { c.division_balance(div_id) })
+            .map(|c| c.division_balance(div_id))
             .unwrap_or(IskCents::ZERO);
         append_corp_journal(
             snap,
@@ -1119,7 +1108,7 @@ fn record_server_project_activity_detailed(
             let corp_bal = snap
                 .corporations
                 .get(&proj.corporation_id)
-                .map(|c| if div_id == 1 { c.master_wallet } else { c.division_balance(div_id) })
+                .map(|c| c.division_balance(div_id))
                 .unwrap_or(IskCents::ZERO);
             append_corp_journal(
                 snap,

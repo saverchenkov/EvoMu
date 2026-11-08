@@ -234,15 +234,14 @@ async fn send_mail_corp_alliance_restrictions_cspa_blocks_and_quota() {
             ch.balance = IskCents::from_f64_isk(bal);
             snap.characters.insert(cid, ch);
         }
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "Mail Corp".into(),
-            ticker: "MLC".into(),
-            ceo_id,
-            alliance_id: Some(ally_id),
-            members: [ceo_id, dir_id, line_id].into_iter().collect(),
-            ..Default::default()
-        };
+        let mut corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "Mail Corp".into();
+            __corp.ticker = "MLC".into();
+            __corp.ceo_id = ceo_id;
+            __corp.alliance_id = Some(ally_id);
+            __corp.members = [ceo_id, dir_id, line_id].into_iter().collect();
+            __corp };
         corp.member_roles.insert(dir_id, corp_roles::ROLE_DIRECTOR);
         snap.corporations.insert(corp_id, corp);
         snap.corp_governance.entry(corp_id).or_default().restrict_corp_mails = true;

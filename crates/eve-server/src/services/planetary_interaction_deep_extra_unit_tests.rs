@@ -293,14 +293,13 @@ fn customs_office_tier_base_costs_interbus_floor_and_standings_tax_brackets() {
         for (corp, ally) in [(owner_corp, Some(ally_id)), (ally_corp, Some(ally_id))] {
             snap.corporations.insert(
                 corp,
-                CorporationRecord {
-                    corporation_id: corp,
-                    name: format!("Corp_{corp}"),
-                    ticker: "CRP".into(),
-                    ceo_id: corp_pilot,
-                    alliance_id: ally,
-                    ..Default::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = corp;
+                    __corp.name = format!("Corp_{corp}");
+                    __corp.ticker = "CRP".into();
+                    __corp.ceo_id = corp_pilot;
+                    __corp.alliance_id = ally;
+                    __corp },
             );
         }
         for (cid, corp, ally) in [
@@ -397,14 +396,13 @@ async fn user_launch_commodities_import_05x_export_10x_and_command_center_15x_ta
         ch.balance = IskCents::from_isk(1_000_000);
         snap.characters.insert(char_id, ch);
 
-        let mut owner_corp_rec = CorporationRecord {
-            corporation_id: poco_corp,
-            name: "POCO Tax Corp".into(),
-            ticker: "PTAX".into(),
-            ceo_id: 99_999,
-            master_wallet: IskCents(0),
-            ..Default::default()
-        };
+        let mut owner_corp_rec = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = poco_corp;
+            __corp.name = "POCO Tax Corp".into();
+            __corp.ticker = "PTAX".into();
+            __corp.ceo_id = 99_999;
+            __corp.set_division_balance(1, IskCents(0));
+            __corp };
         owner_corp_rec.ensure_wallet_divisions();
         snap.corporations.insert(poco_corp, owner_corp_rec);
 
@@ -561,6 +559,6 @@ async fn user_launch_commodities_import_05x_export_10x_and_command_center_15x_ta
     // Verify total tax (3,600 + 7,200 + 10,800 = 21,600 ISK) deducted from pilot and credited to POCO owner corp
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.characters[&char_id].balance, IskCents::from_isk(978_400));
-        assert_eq!(snap.corporations[&poco_corp].master_wallet, IskCents::from_isk(21_600));
+        assert_eq!(snap.corporations[&poco_corp].master_wallet_balance(), IskCents::from_isk(21_600));
     });
 }

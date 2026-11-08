@@ -286,14 +286,13 @@ async fn reprocessing_svc_reprocess_and_get_quotes_error_and_success_paths() {
 
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Refiner Corp".into(),
-                ticker: "REFC".into(),
-                ceo_id: char_id,
-                master_wallet: IskCents::from_isk(10_000_000),
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp.name = "Refiner Corp".into();
+                __corp.ticker = "REFC".into();
+                __corp.ceo_id = char_id;
+                __corp.set_division_balance(1, IskCents::from_isk(10_000_000));
+                __corp },
         );
         snap.structures.insert(
             struct_id,

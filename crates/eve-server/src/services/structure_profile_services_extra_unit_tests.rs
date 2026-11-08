@@ -162,11 +162,10 @@ fn effective_profile_delayed_transitions_and_domain_acl_evaluation_branches() {
         ] {
             snap.corporations.insert(
                 cid,
-                CorporationRecord {
-                    corporation_id: cid,
-                    alliance_id: aid,
-                    ..Default::default()
-                },
+                { let mut __corp = CorporationRecord::default();
+                    __corp.corporation_id = cid;
+                    __corp.alliance_id = aid;
+                    __corp },
             );
         }
         for (cid, name, corp, ally) in [

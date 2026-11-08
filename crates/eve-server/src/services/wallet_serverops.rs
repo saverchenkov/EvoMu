@@ -153,24 +153,9 @@ pub fn process_due_automatic_bills(ctx: &ServerContext) -> usize {
             let Some(corp) = snap.corporations.get_mut(&bill.debtor_id) else {
                 continue;
             };
-            corp.ensure_wallet_divisions();
-            let can_pay = corp
-                .wallet_divisions
-                .iter()
-                .find(|d| d.division_id == div_id)
-                .map(|d| d.balance.0 >= amt.0 && (div_id != 1 || corp.master_wallet.0 >= amt.0))
-                .unwrap_or(false);
-            if !can_pay {
+            let Some(debtor_bal) = corp.debit_division(div_id, amt) else {
                 continue;
-            }
-            if div_id == 1 {
-                corp.master_wallet = corp.master_wallet.checked_sub(amt).unwrap_or(IskCents(0));
-            }
-            let mut debtor_bal = corp.master_wallet;
-            if let Some(d) = corp.wallet_divisions.iter_mut().find(|d| d.division_id == div_id) {
-                d.balance = d.balance.checked_sub(amt).unwrap_or(IskCents(0));
-                debtor_bal = d.balance;
-            }
+            };
             snap.append_journal(
                 bill.debtor_id,
                 "BillPayment",
@@ -863,21 +848,9 @@ pub fn handle(
                 )?;
                 let corp = snap.corporations.get_mut(&corp_id)
                     .ok_or_else(|| rpc_err("CorporationNotFound", "Corporation not found"))?;
-                corp.ensure_wallet_divisions();
-                let div_bal = corp.wallet_divisions.iter().find(|d| d.division_id == div_id)
-                    .map(|d| if div_id == 1 { d.balance.min(corp.master_wallet) } else { d.balance })
-                    .unwrap_or(IskCents(0));
-                if div_bal.0 < amt.0 {
-                    return Err(rpc_err("NotEnoughMoney", "Insufficient corporation division ISK to pay bill"));
-                }
-                if div_id == 1 {
-                    corp.master_wallet = corp.master_wallet.checked_sub(amt).unwrap_or(IskCents(0));
-                }
-                let mut bal_after = corp.master_wallet;
-                if let Some(d) = corp.wallet_divisions.iter_mut().find(|d| d.division_id == div_id) {
-                    d.balance = d.balance.checked_sub(amt).unwrap_or(IskCents(0));
-                    bal_after = d.balance;
-                }
+                let bal_after = corp
+                    .debit_division(div_id, amt)
+                    .ok_or_else(|| rpc_err("NotEnoughMoney", "Insufficient corporation division ISK to pay bill"))?;
                 snap.append_journal(corp_id, "BillPayment", amt, bal_after, format!("Paid corporation bill {bill_id}"));
                 if let Some(cred) = snap.corporations.get_mut(&bill.creditor_id) {
                     cred.credit_division(1, amt);

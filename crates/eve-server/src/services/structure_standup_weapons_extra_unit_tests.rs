@@ -305,7 +305,10 @@ async fn standup_weapon_preconditions_and_point_defense_hostility_and_ammo_branc
             snap.characters.insert(cid, c);
         }
         for corp in [st_corp, ally_corp] {
-            snap.corporations.insert(corp, CorporationRecord { corporation_id: corp, alliance_id: Some(99_001), ..Default::default() });
+            snap.corporations.insert(corp, { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp;
+                __corp.alliance_id = Some(99_001);
+                __corp });
         }
         snap.fleets.insert(701, FleetRecord { fleet_id: 701, boss_id: gunner_id, members: vec![gunner_id, fleet_mate], ..Default::default() });
         for (iid, oid) in [(67_001, st_corp), (67_002, ally_corp)] {

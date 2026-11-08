@@ -148,11 +148,24 @@ fn market_group_types_and_place_buy_order_corporate_and_error_branches() {
         }
         s.corporations.insert(
             buyer_corp_id,
-            CorporationRecord { corporation_id: buyer_corp_id, name: "BuyerCorp".into(), ticker: "BCRP".into(), ceo_id: 90_000_099, master_wallet: IskCents::from_isk(1_000_000), members: HashSet::from([buyer_id]), ..Default::default() },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = buyer_corp_id;
+                __corp.name = "BuyerCorp".into();
+                __corp.ticker = "BCRP".into();
+                __corp.ceo_id = 90_000_099;
+                __corp.members = HashSet::from([buyer_id]);
+                __corp.set_division_balance(1, IskCents::from_isk(1_000_000));
+                __corp },
         );
         s.corporations.insert(
             seller_corp_id,
-            CorporationRecord { corporation_id: seller_corp_id, name: "SellerCorp".into(), ticker: "SCRP".into(), ceo_id: 90_000_098, master_wallet: IskCents(0), ..Default::default() },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = seller_corp_id;
+                __corp.name = "SellerCorp".into();
+                __corp.ticker = "SCRP".into();
+                __corp.ceo_id = 90_000_098;
+                __corp.set_division_balance(1, IskCents(0));
+                __corp },
         );
         s.market_orders.insert(951_001, mk_order(951_001, seller_corp_id, 34, false, 20, 10, false, 0));
     });
@@ -201,7 +214,7 @@ fn market_group_types_and_place_buy_order_corporate_and_error_branches() {
         assert_eq!(s.market_orders[&951_001].vol_remaining, 0);
         assert_eq!(s.market_orders[&new_oid].owner_id, buyer_corp_id);
         assert_eq!(s.market_orders[&new_oid].vol_remaining, 10);
-        assert!(s.corporations[&seller_corp_id].master_wallet.0 > 0);
+        assert!(s.corporations[&seller_corp_id].master_wallet_balance().0 > 0);
     });
 }
 
@@ -223,10 +236,14 @@ fn modify_char_order_remote_daytrading_visibility_and_corporate_escrow_refund() 
             ch.corporation_id = corp_id;
             ch.balance = IskCents::from_isk(10_000_000);
         }
-        let mut m_corp = CorporationRecord {
-            corporation_id: corp_id, name: "ModCorp".into(), ticker: "MDCP".into(), ceo_id: char_id,
-            master_wallet: IskCents::from_isk(500_000), members: HashSet::from([char_id]), ..Default::default()
-        };
+        let mut m_corp = { let mut __corp = CorporationRecord::default();
+            __corp.corporation_id = corp_id;
+            __corp.name = "ModCorp".into();
+            __corp.ticker = "MDCP".into();
+            __corp.ceo_id = char_id;
+            __corp.members = HashSet::from([char_id]);
+            __corp.set_division_balance(1, IskCents::from_isk(500_000));
+            __corp };
         m_corp.ensure_wallet_divisions();
         m_corp.wallet_divisions[0].balance = IskCents::from_isk(500_000);
         s.corporations.insert(corp_id, m_corp);
@@ -260,7 +277,7 @@ fn modify_char_order_remote_daytrading_visibility_and_corporate_escrow_refund() 
     assert_eq!(mod_ok.dict_get("newPrice").and_then(PyRep::as_f64), Some(50.0));
     assert_eq!(mod_ok.dict_get("range").and_then(PyRep::as_i64), Some(0));
     ctx.db.with_snapshot(|s| {
-        assert!(s.corporations[&corp_id].master_wallet > IskCents::from_isk(540_000));
+        assert!(s.corporations[&corp_id].master_wallet_balance() > IskCents::from_isk(540_000));
     });
 }
 

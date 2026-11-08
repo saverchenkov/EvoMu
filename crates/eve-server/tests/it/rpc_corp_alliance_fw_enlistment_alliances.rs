@@ -461,7 +461,7 @@ async fn test_alliance_registry_queries_and_attributes() {
         if let Some(c) = snap.corporations.get_mut(&corp1) {
             c.ensure_wallet_divisions();
             c.wallet_divisions[0].balance = IskCents::from_isk(2_500_000_000);
-            c.master_wallet = c.wallet_divisions[0].balance;
+            c.ensure_wallet_divisions();
         }
     });
 

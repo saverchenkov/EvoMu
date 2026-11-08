@@ -194,9 +194,13 @@ async fn test_clone_jump_preconditions_fees_and_same_location_swap() {
         let ch = snap.characters.get_mut(&pilot_id).unwrap();
         ch.corporation_id = owner_corp;
         ch.standings.insert(owner_corp, 6.0);
-        snap.corporations.insert(owner_corp, eve_db::CorporationRecord {
-            corporation_id: owner_corp, name: "CBAY".into(), ticker: "CB".into(), ceo_id: pilot_id, master_wallet: IskCents(0), ..Default::default()
-        });
+        snap.corporations.insert(owner_corp, { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = owner_corp;
+            __corp.name = "CBAY".into();
+            __corp.ticker = "CB".into();
+            __corp.ceo_id = pilot_id;
+            __corp.set_division_balance(1, IskCents(0));
+            __corp });
         seed_clone(snap, pilot_id, 8104, struct_id, vec![]);
         seed_clone(snap, pilot_id, 8105, struct_id, vec![]);
     });
@@ -229,7 +233,7 @@ async fn test_clone_jump_preconditions_fees_and_same_location_swap() {
     let bal_before = ctx.db.with_snapshot(|snap| snap.characters.get(&pilot_id).unwrap().balance.0);
     rpc(&ctx, &mut sess, "jumpCloneSvc", "CloneJump", vec![PyRep::Integer(8102)]).await.expect("Jump from structure");
 
-    let (bal_after, corp_wallet) = ctx.db.with_snapshot(|snap| (snap.characters.get(&pilot_id).unwrap().balance.0, snap.corporations.get(&owner_corp).unwrap().master_wallet.0));
+    let (bal_after, corp_wallet) = ctx.db.with_snapshot(|snap| (snap.characters.get(&pilot_id).unwrap().balance.0, snap.corporations.get(&owner_corp).unwrap().master_wallet_balance().0));
     assert_eq!(bal_before - bal_after, 100, "1 ISK min fee debited");
     assert_eq!(corp_wallet, 100, "1 ISK fee credited to corp");
 }

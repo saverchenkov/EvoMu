@@ -174,10 +174,9 @@ async fn undock_and_dock_upwell_structure_online_modules_and_guard_branches() {
         snap.characters.insert(char_id, ch);
         snap.corporations.insert(
             corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = corp_id;
+                __corp },
         );
         snap.structures.insert(
             st_id,

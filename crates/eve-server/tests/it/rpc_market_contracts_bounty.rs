@@ -432,13 +432,12 @@ async fn test_contract_proxy_and_insurance_rpcs() {
     // Corporation bid query requires ROLE_CONTRACT_MANAGER or Director
     let corp2_id = s2.corporation_id.unwrap_or(1_000_009);
     ctx.db.with_mut_snapshot(|snap| {
-        let corp = snap.corporations.entry(corp2_id).or_insert_with(|| eve_db::CorporationRecord {
-            corporation_id: corp2_id,
-            name: "Pilot2 Corp".into(),
-            ticker: "P2C".into(),
-            ceo_id: 90_000_001,
-            ..Default::default()
-        });
+        let corp = snap.corporations.entry(corp2_id).or_insert_with(|| { let mut __corp = eve_db::CorporationRecord::default();
+            __corp.corporation_id = corp2_id;
+            __corp.name = "Pilot2 Corp".into();
+            __corp.ticker = "P2C".into();
+            __corp.ceo_id = 90_000_001;
+            __corp });
         corp.members.insert(90_000_002);
         corp.member_roles.insert(90_000_002, 0);
     });

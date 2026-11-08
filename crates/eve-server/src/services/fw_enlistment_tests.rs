@@ -41,11 +41,10 @@ fn fw_enlistment_direct_join_leave_cooldown_and_corp_allowed_factions() {
         }
         snap.corporations.insert(
             player_corp,
-            CorporationRecord {
-                corporation_id: player_corp,
-                ceo_id: cid,
-                ..Default::default()
-            },
+            { let mut __corp = CorporationRecord::default();
+                __corp.corporation_id = player_corp;
+                __corp.ceo_id = cid;
+                __corp },
         );
     });
 
