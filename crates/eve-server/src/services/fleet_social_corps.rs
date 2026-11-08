@@ -1478,9 +1478,9 @@ pub(super) fn handle_corps(
                     crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
                         snap, corp_id, char_id, 0, now_unix,
                     );
-                let take_bit = 1u64 << (27 + u32::from(from_div - 1));
-                if !is_ceo && (eff_roles & (corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_ACCOUNTANT | take_bit)) == 0 {
-                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Transferring between corp wallet divisions requires Director, Accountant, or source wallet division take role".into() });
+                let take_bit = corp_roles::ROLE_ACCOUNT_CAN_TAKE[usize::from(from_div - 1)];
+                if !is_ceo && (eff_roles & (corp_roles::ROLE_DIRECTOR | take_bit)) == 0 {
+                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Transferring between corp wallet divisions requires Director or source wallet division take role".into() });
                 }
                 let corp = snap.corporations.get_mut(&corp_id).unwrap();
                 corp.ensure_wallet_divisions();

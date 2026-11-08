@@ -519,3 +519,140 @@ fn deposit_and_withdraw_plex_vault_lifecycle() {
         assert_eq!(snap.plex_vault_balance(char_id), 35);
     });
 }
+
+#[test]
+fn issue_550_wallet_rbac_trader_accountant_and_pending_stasis() {
+    let ctx = make_test_context();
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let ceo_id = 90_000_001_i64;
+    let mem_id = 90_000_002_i64;
+    let corp_id = 98_000_010_i64;
+    let now = ctx.now_unix();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord {
+            corporation_id: corp_id,
+            name: "RBAC Ledger".into(),
+            ticker: "RBAC".into(),
+            ceo_id,
+            master_wallet: IskCents::from_isk(100_000),
+            ..Default::default()
+        };
+        corp.ensure_wallet_divisions();
+        corp.set_division_balance(1, IskCents::from_isk(100_000));
+        corp.set_division_balance(2, IskCents::from_isk(50_000));
+        corp.members.insert(ceo_id);
+        corp.members.insert(mem_id);
+        // Prematurely mirrored role that is STILL gated in pending_role_grants
+        corp.member_roles
+            .insert(mem_id, corp_roles::ROLE_ACCOUNTANT | corp_roles::ROLE_ACCOUNT_CAN_TAKE[1]);
+        snap.corporations.insert(corp_id, corp);
+        snap.corp_governance.entry(corp_id).or_default().pending_role_grants.insert(
+            mem_id,
+            (corp_roles::ROLE_ACCOUNT_CAN_TAKE[1], now + 3_600),
+        );
+        if let Some(ch) = snap.characters.get_mut(&ceo_id) {
+            ch.corporation_id = corp_id;
+        }
+        if let Some(ch) = snap.characters.get_mut(&mem_id) {
+            ch.corporation_id = corp_id;
+            ch.balance = IskCents::from_isk(1_000);
+        }
+        snap.market_transactions.push(MarketTransactionRecord {
+            transaction_id: 9_000_001,
+            date_unix: now,
+            type_id: 34,
+            quantity: 100,
+            price: IskCents::from_isk(5),
+            buyer_id: corp_id,
+            seller_id: ceo_id,
+            location_id: 60_003_760,
+            buyer_account_key: 1000,
+            seller_account_key: 1000,
+            journal_ref_id: 1,
+        });
+    });
+
+    let mut mem_sess = char_session(mem_id, corp_id);
+    // Forged session.corp_role MUST NOT bypass DB role checks
+    mem_sess.corp_role = corp_roles::ROLE_DIRECTOR;
+
+    // 1. Accountant alone can view journal & market transactions, but CANNOT withdraw from div 1
+    let cash_err = handle(
+        &ctx,
+        &mut mem_sess,
+        "account",
+        "GiveCashFromCorpAccount",
+        &[PyRep::Integer(mem_id), PyRep::Real(100.0), PyRep::Integer(1000)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(cash_err.code, "CrpAccessDenied");
+
+    // 2. Unmatured pending_role_grants Account Take 2 stays blocked despite member_roles bit
+    let stasis_err = handle(
+        &ctx,
+        &mut mem_sess,
+        "account",
+        "GiveCashFromCorpAccount",
+        &[PyRep::Integer(mem_id), PyRep::Real(100.0), PyRep::Integer(1001)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(stasis_err.code, "CrpAccessDenied");
+
+    // 3. ROLE_TRADER alone can call marketProxy.CorpGetTransactions, NOT account.GetTransactions
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corp_governance.get_mut(&corp_id).unwrap().pending_role_grants.clear();
+        snap.corporations.get_mut(&corp_id).unwrap().member_roles.insert(mem_id, corp_roles::ROLE_TRADER);
+    });
+    assert!(handle(
+        &ctx,
+        &mut mem_sess,
+        "marketProxy",
+        "CorpGetTransactions",
+        &[PyRep::Integer(0), PyRep::Integer(1000)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .is_ok());
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut mem_sess,
+            "account",
+            "GetTransactions",
+            &[PyRep::Integer(1000), PyRep::None, PyRep::None, PyRep::Bool(true)],
+            &HashMap::new(),
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CrpAccessDenied"
+    );
+
+    // 4. Advance clock past stasis -> Account Take 2 matures and grants Div 2 withdrawal
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corp_governance.get_mut(&corp_id).unwrap().pending_role_grants.insert(
+            mem_id,
+            (corp_roles::ROLE_ACCOUNT_CAN_TAKE[1], now + 3_600),
+        );
+    });
+    ctx.advance_virtual_clock(3_601);
+    handle(
+        &ctx,
+        &mut mem_sess,
+        "account",
+        "GiveCashFromCorpAccount",
+        &[PyRep::Integer(mem_id), PyRep::Real(500.0), PyRep::Integer(1001)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap();
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.corporations[&corp_id].division_balance(2), IskCents::from_isk(49_500));
+        assert_eq!(snap.characters[&mem_id].balance, IskCents::from_isk(1_500));
+    });
+}

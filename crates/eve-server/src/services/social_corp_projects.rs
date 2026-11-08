@@ -166,6 +166,14 @@ pub(crate) fn effective_corp_member_roles(
         if let Some(&(p_mask, matured_at)) = gov.pending_role_grants.get(&char_id) {
             if now_unix >= matured_at {
                 roles |= p_mask;
+            } else {
+                // Only roles subject to 24h stasis (`CORP_DELAYED_DIVISION_ROLE_MASK`, Director,
+                // and Container Take bits) are suppressed while pending; `UpdateMember` also packs
+                // immediate roles like Accountant/Trader into `pending_role_grants`.
+                const DELAYED_STASIS_MASK: u64 = eve_db::corp_roles::CORP_DELAYED_DIVISION_ROLE_MASK
+                    | eve_db::corp_roles::ROLE_DIRECTOR
+                    | (0x7Fu64 << 42);
+                roles &= !(p_mask & DELAYED_STASIS_MASK);
             }
         }
         let unmatured_title_bits = gov

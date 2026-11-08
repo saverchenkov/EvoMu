@@ -433,7 +433,8 @@ async fn test_so2_corporation_roles_applications_and_wallet_divisions() {
         .expect_err("Member without Accountant/Director role must be denied GiveCashFromCorpAccount");
     assert_eq!(unauth_xfer.code, "CorpRoleDenied");
 
-    // 6. Pilot 1 updates Pilot 2's roles to Accountant (ROLE_ACCOUNTANT = 1 << 8)
+    // 6. Pilot 1 updates Pilot 2's roles to Accountant (ROLE_ACCOUNTANT = 1 << 8);
+    // under EVE wallet RBAC, Accountant alone cannot take ISK out of a corp division.
     let update_roles = ctx
         .dispatch_rpc(
             &mut sess1,
@@ -448,8 +449,57 @@ async fn test_so2_corporation_roles_applications_and_wallet_divisions() {
         .expect("UpdateMember");
     assert!(is_keyval(&update_roles));
 
-    // 7. Pilot 2 transfers funds between division 1 and division 2 and verifies via GetWalletDivisionsInfo
     sess2.corp_role = corp_roles::ROLE_ACCOUNTANT;
+    let accountant_denied = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "account",
+            None,
+            "GiveCashFromCorpAccount",
+            &[PyRep::Integer(1), PyRep::Integer(2), PyRep::Real(10_000_000.0)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("ROLE_ACCOUNTANT alone must not allow withdrawing from corp division");
+    assert_eq!(accountant_denied.code, "CorpRoleDenied");
+
+    // 7. Grant Account Can Take (Division 1): enters 24h role stasis until promoted,
+    // then allows Pilot 2 to transfer funds between division 1 and division 2.
+    ctx.dispatch_rpc(
+        &mut sess1,
+        "corpRegistry",
+        None,
+        "UpdateMember",
+        &[PyRep::Integer(90_000_002), PyRep::Integer(corp_roles::ROLE_ACCOUNT_CAN_TAKE[0] as i64)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("UpdateMember Account Take 1");
+
+    let stasis_denied = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "account",
+            None,
+            "GiveCashFromCorpAccount",
+            &[PyRep::Integer(1), PyRep::Integer(2), PyRep::Real(10_000_000.0)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Division take role in 24h stasis must stay denied before maturity");
+    assert_eq!(stasis_denied.code, "CorpRoleDenied");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(gov) = snap.corp_governance.get_mut(&corp_id) {
+            if let Some(entry) = gov.pending_role_grants.get_mut(&90_000_002) {
+                entry.1 = 0;
+            }
+        }
+    });
+
     let transfer_rep = ctx
         .dispatch_rpc(
             &mut sess2,
@@ -461,7 +511,7 @@ async fn test_so2_corporation_roles_applications_and_wallet_divisions() {
             None,
         )
         .await
-        .expect("GiveCashFromCorpAccount");
+        .expect("GiveCashFromCorpAccount after Account Take 1 matures");
     assert!(is_keyval(&transfer_rep));
 
     let divs_after = ctx

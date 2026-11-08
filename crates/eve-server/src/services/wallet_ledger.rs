@@ -152,27 +152,42 @@ fn give_cash_from_corp(
         .ok_or_else(|| rpc_err("InvalidAccountKey", format!("fromAccountKey {from_key} is not a corp wallet division")))?;
     let amount = IskCents::from_f64_isk(amount_isk);
     let now = ctx.now_unix();
+    let caller_corp_id = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0));
+    if caller_corp_id > 0 {
+        crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(
+            ctx,
+            caller_corp_id,
+        );
+    }
     let res = ctx.db.try_with_mut_snapshot(|snap| {
         let corp_id = snap
             .characters
             .get(&char_id)
             .map(|c| c.corporation_id)
             .ok_or_else(|| rpc_err("CharacterNotFound", "character not found"))?;
+        if !snap.corporations.contains_key(&corp_id) {
+            return Err(rpc_err("CorporationNotFound", format!("Corporation {corp_id} not found")));
+        }
+        let (is_ceo, eff_roles) =
+            crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+                snap, corp_id, char_id, 0, now,
+            );
+        let take_role = corp_roles::ROLE_ACCOUNT_CAN_TAKE[(from_div - 1) as usize];
+        if !is_ceo
+            && !corp_roles::has_role(eff_roles, corp_roles::ROLE_DIRECTOR)
+            && !corp_roles::has_role(eff_roles, take_role)
+        {
+            return Err(rpc_err(
+                "CrpAccessDenied",
+                format!("Withdrawing from wallet division {from_div} requires Director or Account Take {from_div}"),
+            ));
+        }
         let corp = snap
             .corporations
             .get_mut(&corp_id)
             .ok_or_else(|| rpc_err("CorporationNotFound", format!("Corporation {corp_id} not found")))?;
-        let role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-        let take_role = corp_roles::ROLE_ACCOUNT_CAN_TAKE[(from_div - 1) as usize];
-        if char_id != corp.ceo_id
-            && !corp_roles::has_role(role, corp_roles::ROLE_ACCOUNTANT)
-            && !corp_roles::has_role(role, take_role)
-        {
-            return Err(rpc_err(
-                "CrpAccessDenied",
-                format!("Withdrawing from wallet division {from_div} requires Accountant or Account Take {from_div}"),
-            ));
-        }
         corp.ensure_wallet_divisions();
         let from_pos = corp.wallet_divisions.iter().position(|d| d.division_id == from_div).expect("7 divisions");
         let new_from = corp.wallet_divisions[from_pos]
@@ -248,16 +263,29 @@ fn get_journal(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> R
     let year = args.get(1).and_then(|a| a.as_i64());
     let month = args.get(2).and_then(|a| a.as_i64());
     let is_corp = args.get(3).and_then(|a| a.as_bool()).unwrap_or(false);
+    let now = ctx.now_unix();
     let rows = ctx.db.with_snapshot(|snap| -> Result<Vec<Vec<PyRep>>, BridgeRpcError> {
         let owner = if is_corp {
             let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-            let corp = snap.corporations.get(&corp_id).ok_or_else(|| rpc_err("CorporationNotFound", "no corporation"))?;
-            let role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-            if char_id != corp.ceo_id
-                && !corp_roles::has_role(role, corp_roles::ROLE_ACCOUNTANT)
-                && !corp_roles::has_role(role, corp_roles::ROLE_JUNIOR_ACCOUNTANT)
-            {
-                return Err(rpc_err("CrpAccessDenied", "Corporation journal requires Accountant or Junior Accountant"));
+            if !snap.corporations.contains_key(&corp_id) {
+                return Err(rpc_err("CorporationNotFound", "no corporation"));
+            }
+            let (is_ceo, eff_roles) =
+                crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+                    snap, corp_id, char_id, 0, now,
+                );
+            let div_take = division_of(i64::from(account_key))
+                .map(|div| corp_roles::ROLE_ACCOUNT_CAN_TAKE[(div - 1) as usize])
+                .unwrap_or(0);
+            let allowed_mask = corp_roles::ROLE_DIRECTOR
+                | corp_roles::ROLE_ACCOUNTANT
+                | corp_roles::ROLE_JUNIOR_ACCOUNTANT
+                | div_take;
+            if !is_ceo && (eff_roles & allowed_mask) == 0 {
+                return Err(rpc_err(
+                    "CrpAccessDenied",
+                    "Corporation journal requires Director, Accountant, Junior Accountant, or Account Take for the division",
+                ));
             }
             corp_id
         } else {
@@ -308,16 +336,30 @@ fn market_transactions(
     let (_, char_id) = ServerContext::require_character(session)?;
     let from_unix = args.first().and_then(|a| a.as_i64()).map(unix_from_filetime).unwrap_or(0);
     let corp_key = if corp { args.get(1).and_then(|a| a.as_i64()).unwrap_or(1000) as i32 } else { ACCOUNTING_KEY_CASH };
+    let now = ctx.now_unix();
     let rows = ctx.db.with_snapshot(|snap| -> Result<Vec<Vec<PyRep>>, BridgeRpcError> {
         let owner = if corp {
             let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-            let c = snap.corporations.get(&corp_id).ok_or_else(|| rpc_err("CorporationNotFound", "no corporation"))?;
-            let role = c.member_roles.get(&char_id).copied().unwrap_or(0);
-            if char_id != c.ceo_id
-                && !corp_roles::has_role(role, corp_roles::ROLE_ACCOUNTANT)
-                && !corp_roles::has_role(role, corp_roles::ROLE_JUNIOR_ACCOUNTANT)
-            {
-                return Err(rpc_err("CrpAccessDenied", "Corporation transactions require Accountant or Junior Accountant"));
+            if !snap.corporations.contains_key(&corp_id) {
+                return Err(rpc_err("CorporationNotFound", "no corporation"));
+            }
+            let (is_ceo, eff_roles) =
+                crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
+                    snap, corp_id, char_id, 0, now,
+                );
+            let div_take = division_of(i64::from(corp_key))
+                .map(|div| corp_roles::ROLE_ACCOUNT_CAN_TAKE[(div - 1) as usize])
+                .unwrap_or(0);
+            let allowed_mask = corp_roles::ROLE_DIRECTOR
+                | corp_roles::ROLE_ACCOUNTANT
+                | corp_roles::ROLE_JUNIOR_ACCOUNTANT
+                | corp_roles::ROLE_TRADER
+                | div_take;
+            if !is_ceo && (eff_roles & allowed_mask) == 0 {
+                return Err(rpc_err(
+                    "CrpAccessDenied",
+                    "Corporation transactions require Director, Accountant, Junior Accountant, Trader, or Account Take for the division",
+                ));
             }
             corp_id
         } else {

@@ -172,8 +172,22 @@ async fn test_give_cash_from_corp_account_roles_and_journal() {
         .unwrap_err();
     assert_eq!(broke.code, "NotEnoughMoney");
 
-    // Accountant: division-to-division transfer inside the corp via toAccountKey.
+    // Accountant alone cannot withdraw from a corp division; Account Take 1 (or Director) is required.
     set_role(&ctx, corp, P2, corp_roles::ROLE_ACCOUNTANT);
+    let acct_denied = call_kw(
+        &ctx,
+        &mut s2,
+        "account",
+        "GiveCashFromCorpAccount",
+        &[PyRep::Integer(corp), PyRep::Real(40_000.0), PyRep::Integer(1000)],
+        &[("toAccountKey", PyRep::Integer(1006))],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(acct_denied.code, "CrpAccessDenied", "Accountant alone cannot withdraw from division 1");
+
+    // Division 1 take role allows division-to-division transfer inside the corp via toAccountKey.
+    set_role(&ctx, corp, P2, corp_roles::ROLE_ACCOUNTANT | corp_roles::ROLE_ACCOUNT_CAN_TAKE[0]);
     call_kw(
         &ctx,
         &mut s2,
