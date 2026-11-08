@@ -796,7 +796,16 @@ pub fn handle(
                                 session.corp_role = effective_role;
                                 if let Some((_, _, _, restored_ship)) = released_controllers.iter().find(|r| r.1 == tid) {
                                     if *restored_ship > 0 {
-                                        session.ship_id = Some(*restored_ship);
+                                        let _ = ctx.execute_session_transition_sync(
+                                            Some(session),
+                                            crate::router::SessionTransitionSpec::for_kind(
+                                                tid,
+                                                crate::router::TransitionKind::BoardShip { ship_id: *restored_ship },
+                                                "structure_control_release",
+                                            )
+                                            .with_apply_db(false)
+                                            .with_emit_on_session_changed(false),
+                                        );
                                     }
                                 }
                             }

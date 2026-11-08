@@ -404,21 +404,20 @@ pub fn handle_char_unbound(
             let now_unix = ctx.now_unix();
             session.character_id = Some(c.character_id); session.corporation_id = Some(c.corporation_id);
             session.alliance_id = c.alliance_id; session.war_faction_id = c.war_faction_id;
-            session.station_id = c.station_id; session.structure_id = c.structure_id;
-            session.solar_system_id = Some(eff_sys); session.constellation_id = Some(c.constellation_id);
-            session.region_id = Some(c.region_id); session.ship_id = Some(c.active_ship_id); session.race_id = Some(c.race_id);
+            crate::router::apply_session_from_character(session, &c, None, Some(&ctx.sde));
+            session.solar_system_id = Some(eff_sys);
+            session.race_id = Some(c.race_id);
             session.corp_role = ctx.db.with_snapshot(|snap| {
                 if !snap.corporations.contains_key(&c.corporation_id) {
                     return 0;
                 }
-                let (is_ceo, eff_roles) =
-                    crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-                        snap,
-                        c.corporation_id,
-                        c.character_id,
-                        0,
-                        now_unix,
-                    );
+                let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
+                    c.corporation_id,
+                    c.character_id,
+                    None,
+                    0,
+                    now_unix,
+                );
                 if is_ceo {
                     u64::MAX
                 } else {
@@ -1410,7 +1409,16 @@ pub async fn handle_gm_slash_ext(
                 Ok(outcome) => {
                     if victim_char_id == cid {
                         if let Some(cap_id) = outcome.ejected_capsule_id {
-                            session.ship_id = Some(cap_id);
+                            let _ = ctx.execute_session_transition_sync(
+                                Some(session),
+                                crate::router::SessionTransitionSpec::for_kind(
+                                    cid,
+                                    crate::router::TransitionKind::EjectToPod { capsule_id: cap_id },
+                                    "gm_kill",
+                                )
+                                .with_apply_db(false)
+                                .with_emit_on_session_changed(false),
+                            );
                         }
                     }
                     return Some(Ok(PyRep::keyval([

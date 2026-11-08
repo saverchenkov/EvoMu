@@ -303,9 +303,15 @@ async fn engage_structure_control(
             }
         }
         save_ext_state(snap, &ext);
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.active_ship_id = structure_id;
-        }
+        let _ = crate::router::apply_character_transition_in_snap(
+            snap,
+            &ctx.sde,
+            char_id,
+            crate::router::TransitionLocation::KeepCurrent,
+            Some(structure_id),
+            false,
+            false,
+        );
         Ok((all_released, None))
     })?;
     notify_released_structure_controllers(ctx, &released);
@@ -314,7 +320,16 @@ async fn engage_structure_control(
     }
 
     let old_ship = session.ship_id;
-    session.ship_id = Some(structure_id);
+    let _ = ctx.execute_session_transition_sync(
+        Some(session),
+        crate::router::SessionTransitionSpec::for_kind(
+            char_id,
+            crate::router::TransitionKind::BoardShip { ship_id: structure_id },
+            "structure_control",
+        )
+        .with_apply_db(false)
+        .with_emit_on_session_changed(false),
+    );
     emit_ship_session_change(ctx, session, char_id, old_ship, Some(structure_id));
     let _ = (sys_id, board_mode);
     Ok(sys_id)
@@ -484,7 +499,16 @@ fn sync_released_ship_on_session(
 ) {
     let old_ship = session.ship_id;
     if restored_ship > 0 {
-        session.ship_id = Some(restored_ship);
+        let _ = ctx.execute_session_transition_sync(
+            Some(session),
+            crate::router::SessionTransitionSpec::for_kind(
+                char_id,
+                crate::router::TransitionKind::BoardShip { ship_id: restored_ship },
+                "structure_control_release",
+            )
+            .with_apply_db(false)
+            .with_emit_on_session_changed(false),
+        );
         emit_ship_session_change(ctx, session, char_id, old_ship, Some(restored_ship));
     } else if session.ship_id == Some(structure_id) {
         session.ship_id = None;
@@ -502,10 +526,20 @@ pub fn prepare_ship_for_undock_while_controlling(ctx: &ServerContext, structure_
         }
         let fallback_ship = find_valid_pilot_fallback_ship(Some(ctx), snap, &ext, structure_id, char_id, None).unwrap_or(0);
         if fallback_ship > 0 {
-            if let Some(ch) = snap.characters.get_mut(&char_id) {
-                if ch.active_ship_id == structure_id || ch.active_ship_id <= 0 {
-                    ch.active_ship_id = fallback_ship;
-                }
+            if snap
+                .characters
+                .get(&char_id)
+                .is_some_and(|ch| ch.active_ship_id == structure_id || ch.active_ship_id <= 0)
+            {
+                let _ = crate::router::apply_character_transition_in_snap(
+                    snap,
+                    &ctx.sde,
+                    char_id,
+                    crate::router::TransitionLocation::KeepCurrent,
+                    Some(fallback_ship),
+                    false,
+                    false,
+                );
             }
         }
         Some(fallback_ship)
@@ -517,9 +551,15 @@ pub fn prepare_ship_for_undock_while_controlling(ctx: &ServerContext, structure_
 pub fn rollback_ship_after_failed_undock(ctx: &ServerContext, structure_id: i64, char_id: i64) {
     ctx.db.with_mut_snapshot(|snap| {
         if load_ext_state(snap).active_pilot_by_structure.get(&structure_id) == Some(&char_id) {
-            if let Some(ch) = snap.characters.get_mut(&char_id) {
-                ch.active_ship_id = structure_id;
-            }
+            let _ = crate::router::apply_character_transition_in_snap(
+                snap,
+                &ctx.sde,
+                char_id,
+                crate::router::TransitionLocation::KeepCurrent,
+                Some(structure_id),
+                false,
+                false,
+            );
         }
     });
 }
@@ -550,13 +590,23 @@ pub(crate) fn disengage_structure_control_in_snap(
     ext.active_pilot_by_structure.remove(&structure_id);
     ext.previous_ship_by_structure.remove(&structure_id);
     save_ext_state(snap, &ext);
-    let restored = if let Some(ch) = snap.characters.get_mut(&char_id) {
-        if existing_active.is_none() {
+    let restored = if existing_active.is_none() {
+        if let Some(ctx_ref) = ctx {
+            let _ = crate::router::apply_character_transition_in_snap(
+                snap,
+                &ctx_ref.sde,
+                char_id,
+                crate::router::TransitionLocation::KeepCurrent,
+                Some(fallback_ship),
+                false,
+                false,
+            );
+        } else if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.active_ship_id = fallback_ship;
         }
-        ch.active_ship_id
+        snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(fallback_ship)
     } else {
-        fallback_ship
+        snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(fallback_ship)
     };
     (sys_id, restored)
 }
@@ -634,28 +684,23 @@ pub(crate) fn sync_character_session(ctx: &ServerContext, session: &mut SessionS
             session.war_faction_id = new_wf;
         }
         apply_forced_session_ship_sync(ctx, session);
-        if let Some((act_ship, st_id, str_id, sys_id, const_id, reg_id, stale_struct)) = ctx.db.with_snapshot(|snap| {
-            snap.characters.get(&cid).map(|c| {
-                (
-                    c.active_ship_id, c.station_id, c.structure_id, c.solar_system_id, c.constellation_id, c.region_id,
-                    session.ship_id.is_some_and(|sid| snap.structures.contains_key(&sid)),
-                )
-            })
-        }) {
-            session.solar_system_id = Some(sys_id);
-            if const_id != 0 {
-                session.constellation_id = Some(const_id);
-            }
-            if reg_id != 0 {
-                session.region_id = Some(reg_id);
-            }
-            session.station_id = st_id;
-            session.structure_id = str_id;
-            if act_ship != 0 {
-                session.ship_id = Some(act_ship);
+        if let Some(ch) = ctx.db.get_character(cid).ok() {
+            let stale_struct = session.ship_id.is_some_and(|sid| {
+                ctx.db.with_snapshot(|snap| snap.structures.contains_key(&sid))
+            });
+            let override_ship = if ch.active_ship_id != 0 {
+                Some(Some(ch.active_ship_id))
             } else if stale_struct {
-                session.ship_id = None;
-            }
+                Some(None)
+            } else {
+                Some(session.ship_id)
+            };
+            crate::router::apply_session_from_character(
+                session,
+                &ch,
+                override_ship,
+                Some(&ctx.sde),
+            );
         }
     }
 }

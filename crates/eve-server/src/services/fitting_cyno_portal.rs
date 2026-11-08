@@ -789,22 +789,21 @@ pub async fn relocate_ship(
     crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let old = from.remove_ball(ship_id).await;
-    let dest_sys_rec = ctx.sde.solar_systems.get(&to_sys);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.jump_fatigue_minutes = fat_min;
             ch.jump_cooldown_until_unix = now + cd_secs;
             ch.jump_fatigue_until_unix = now + fat_secs;
-            ch.solar_system_id = to_sys;
-            if let Some(sr) = dest_sys_rec {
-                ch.constellation_id = sr.constellation_id;
-                ch.region_id = sr.region_id;
-            }
         }
-        if let Some(sh) = snap.items.get_mut(&ship_id) {
-            sh.location_id = to_sys as i64;
-            sh.version += 1;
-        }
+        let _ = crate::router::apply_character_transition_in_snap(
+            snap,
+            &ctx.sde,
+            char_id,
+            crate::router::TransitionLocation::Space { solar_system_id: to_sys },
+            Some(ship_id),
+            true,
+            false,
+        );
         snap.character_last_jump_unix.insert(char_id, now);
     });
     ctx.notify(
@@ -913,7 +912,18 @@ pub(super) async fn relocate_caller(
     fatigue_mult: f64,
 ) -> Result<(f64, f64, u64), BridgeRpcError> {
     let (cd_min, fat_min) = relocate_ship(ctx, char_id, ship_id, from_sys, to_sys, pos, dist_ly, fatigue_mult).await?;
-    session.solar_system_id = Some(to_sys);
+    let _ = ctx.execute_session_transition_sync(
+        Some(session),
+        crate::router::SessionTransitionSpec::for_kind(
+            char_id,
+            crate::router::TransitionKind::JumpSystem { solar_system_id: to_sys },
+            "cyno_jump",
+        )
+        .with_apply_db(false)
+        .with_cleanup_departing_space(false)
+        .with_sync_local_chat(false)
+        .with_emit_on_session_changed(false),
+    );
     crate::services::map_service::record_solar_system_jump(ctx, char_id, to_sys);
     let bound = ctx.bind_object(session, "beyonce", to_sys as i64)?;
     Ok((cd_min, fat_min, bound))

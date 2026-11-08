@@ -1189,11 +1189,18 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             };
             ctx.sync_character_local_chat(char_id, Some(old_sys), dest_sys_id);
 
-            session.solar_system_id = Some(updated_ch.solar_system_id);
-            session.constellation_id = Some(updated_ch.constellation_id);
-            session.region_id = Some(updated_ch.region_id);
-            session.station_id = None;
-            session.structure_id = None;
+            let _ = ctx.execute_session_transition_sync(
+                Some(session),
+                crate::router::SessionTransitionSpec::for_kind(
+                    char_id,
+                    crate::router::TransitionKind::JumpSystem { solar_system_id: updated_ch.solar_system_id },
+                    "wormhole_jump",
+                )
+                .with_apply_db(false)
+                .with_cleanup_departing_space(false)
+                .with_sync_local_chat(false)
+                .with_emit_on_session_changed(false),
+            );
             crate::services::map_service::record_solar_system_jump(ctx, char_id, dest_sys_id);
 
             let _ = ensure_system_signatures_and_anomalies(ctx, dest_sys_id).await;

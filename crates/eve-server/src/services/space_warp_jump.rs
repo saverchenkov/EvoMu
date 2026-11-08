@@ -926,11 +926,16 @@ async fn handle_cmd_stargate_jump(
     crate::services::notify_emitters_space_dungeons::emit_jump_cloak_started(ctx, char_id, ship_id);
     crate::services::notify_emitters_seasons_tactical::emit_restoring_invuln_updated(ctx, char_id, ship_id, 600_000_000);
 
-    session.solar_system_id = Some(updated_ch.solar_system_id);
-    session.constellation_id = Some(updated_ch.constellation_id);
-    session.region_id = Some(updated_ch.region_id);
-    session.station_id = None;
-    session.structure_id = None;
+    let jump_spec = crate::router::SessionTransitionSpec::for_kind(
+        char_id,
+        crate::router::TransitionKind::JumpSystem { solar_system_id: updated_ch.solar_system_id },
+        "stargate_jump",
+    )
+    .with_apply_db(false)
+    .with_cleanup_departing_space(false)
+    .with_sync_local_chat(false)
+    .with_emit_on_session_changed(false);
+    let _ = ctx.execute_session_transition_sync(Some(session), jump_spec);
     crate::services::map_service::record_solar_system_jump(ctx, char_id, dest_sys_id);
     crate::services::nav_warp_interdiction::advance_waypoints_on_arrival(
         ctx,
@@ -945,7 +950,6 @@ async fn handle_cmd_stargate_jump(
         dest_sys_id,
         now_unix,
     );
-    ctx.quasar_gateway.on_session_changed(session, now_unix);
     if let Some(expiry) = zarzakh_lock_expiry {
         let _ = crate::services::quasar_sov_services::publish_stargate_lock_activated_notice(
             &ctx.quasar_gateway, char_id, dest_sys_id, jump.destination_stargate_id as u64, expiry, now_unix,
@@ -1286,18 +1290,18 @@ async fn handle_dock(
                 sys_id,
                 ball.position.to_array(),
             );
-            deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
-    crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
-            crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, sys_id);
             let _ = handle.accept_docking(ship_id, dock_id, target_pos).await;
-            if is_structure {
-                session.structure_id = Some(dock_id);
-                session.station_id = None;
-            } else {
-                session.station_id = Some(dock_id);
-                session.structure_id = None;
-            }
-            ctx.invalidate_bound_objects_for_session_transition(char_id, sys_id, Some(dock_id), "dock");
+            let dock_spec = crate::router::SessionTransitionSpec::for_kind(
+                char_id,
+                crate::router::TransitionKind::Dock { dock_id, is_structure },
+                "dock",
+            )
+            .with_apply_db(false)
+            .with_cleanup_departing_space(false);
+            let _ = ctx.execute_session_transition_sync(Some(session), dock_spec);
+            deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
+            crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
+            crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, sys_id);
             if let Some(ship_rec) = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).cloned()) {
                 ctx.notify_item_record_change(
                     char_id,
@@ -1311,33 +1315,6 @@ async fn handle_dock(
             record_session_change_timer(ctx, char_id, now_unix, sys_id, cur_tick, "dock");
             crate::services::nav_warp_interdiction::advance_waypoints_on_arrival(
                 ctx, char_id, dock_id,
-            );
-            let sess_rep = PyRep::keyval([
-                ("userid", session.user_id.map(|u| PyRep::Integer(u as i64)).unwrap_or(PyRep::None)),
-                ("charid", PyRep::Integer(char_id)),
-                ("corpid", session.corporation_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                ("allianceid", session.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                ("shipid", session.ship_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                ("stationid", session.station_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                ("structureid", session.structure_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                ("solarsystemid2", session.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None)),
-                ("solarsystemid", PyRep::None),
-                ("locationid", PyRep::Integer(dock_id)),
-                ("constellationid", session.constellation_id.map(|c| PyRep::Integer(c as i64)).unwrap_or(PyRep::None)),
-                ("regionid", session.region_id.map(|r| PyRep::Integer(r as i64)).unwrap_or(PyRep::None)),
-            ]);
-            ctx.notify(
-                crate::router::NotificationTarget::Character(char_id),
-                "OnSessionChanged",
-                "charid",
-                vec![
-                    PyRep::Bool(false),
-                    sess_rep,
-                    PyRep::Dict(vec![(
-                        PyRep::String(if is_structure { "structureid" } else { "stationid" }.into()),
-                        PyRep::Tuple(vec![PyRep::None, PyRep::Integer(dock_id)]),
-                    )]),
-                ],
             );
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),

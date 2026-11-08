@@ -343,20 +343,34 @@ pub fn destroy_pod_and_respawn_faction_corvette_in_snap(
             ..Default::default()
         },
     );
+    let _ = (home_sys_id, const_id, reg_id);
+    if let Some(sde) = sde_opt {
+        let _ = crate::router::apply_character_transition_in_snap(
+            snap,
+            sde,
+            cid,
+            crate::router::TransitionLocation::Station {
+                solar_system_id: None,
+                station_id: home_station_id,
+            },
+            Some(corvette_id),
+            false,
+            false,
+        );
+    } else if let Some(ch) = snap.characters.get_mut(&cid) {
+        ch.active_ship_id = corvette_id;
+        ch.station_id = Some(home_station_id);
+        ch.structure_id = None;
+        ch.solar_system_id = home_sys_id;
+        ch.constellation_id = const_id;
+        ch.region_id = reg_id;
+        ch.version += 1;
+        ch.system_epoch += 1;
+    }
     let (vic_corp, vic_all) = snap
         .characters
-        .get_mut(&cid)
-        .map(|ch| {
-            ch.active_ship_id = corvette_id;
-            ch.station_id = Some(home_station_id);
-            ch.structure_id = None;
-            ch.solar_system_id = home_sys_id;
-            ch.constellation_id = const_id;
-            ch.region_id = reg_id;
-            ch.version += 1;
-            ch.system_epoch += 1;
-            (ch.corporation_id, ch.alliance_id)
-        })
+        .get(&cid)
+        .map(|ch| (ch.corporation_id, ch.alliance_id))
         .unwrap_or((1_000_009, None));
 
     snap.next_entity_id += 1;
@@ -1065,7 +1079,17 @@ fn step_abyssal_hazards_and_pylons_in_ballpark_with_options(
                 );
                 snap.item_positions.insert(cap_id, [b_pos.x, b_pos.y, b_pos.z]);
                 if cid > 0 {
-                    if let Some(ch) = snap.characters.get_mut(&cid) {
+                    if let Some(sde) = sde_opt {
+                        let _ = crate::router::apply_character_transition_in_snap(
+                            snap,
+                            sde,
+                            cid,
+                            crate::router::TransitionLocation::KeepCurrent,
+                            Some(cap_id),
+                            false,
+                            false,
+                        );
+                    } else if let Some(ch) = snap.characters.get_mut(&cid) {
                         ch.active_ship_id = cap_id;
                         ch.version += 1;
                         ch.system_epoch += 1;

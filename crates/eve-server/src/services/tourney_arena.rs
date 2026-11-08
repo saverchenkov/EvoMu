@@ -154,10 +154,16 @@ pub async fn handle(
                 })?;
                 old_sys = ch.solar_system_id;
                 old_st = ch.station_id;
-                ch.solar_system_id = arena_sys as u32;
-                ch.station_id = None;
-                ch.structure_id = None;
                 ship_id = ch.active_ship_id;
+                let _ = crate::router::apply_character_transition_in_snap(
+                    snap,
+                    &ctx.sde,
+                    caller_cid,
+                    crate::router::TransitionLocation::Space { solar_system_id: arena_sys as u32 },
+                    None,
+                    false,
+                    false,
+                );
 
                 if ship_id > 0 {
                     if let Some(ship_it) = snap.items.get_mut(&ship_id).filter(|it| it.owner_id == caller_cid) {
@@ -173,9 +179,22 @@ pub async fn handle(
                 return Some(Err(e));
             }
 
-            session.solar_system_id = Some(arena_sys as u32);
-            session.station_id = None;
-            session.structure_id = None;
+            let _ = ctx.execute_session_transition_sync(
+                Some(session),
+                crate::router::SessionTransitionSpec::for_kind(
+                    caller_cid,
+                    crate::router::TransitionKind::Teleport {
+                        solar_system_id: arena_sys as u32,
+                        dock_id: None,
+                        ship_id: None,
+                    },
+                    "tourney_arena",
+                )
+                .with_apply_db(false)
+                .with_sync_local_chat(false)
+                .with_invalidate_bounds(false)
+                .with_emit_on_session_changed(false),
+            );
 
             let sys_handle = ctx.systems.get_or_spawn(arena_sys as u32);
             if ship_id > 0 && ship_type_id > 0 {
@@ -256,11 +275,18 @@ pub async fn handle(
                     .map(|ch| (ch.solar_system_id, ch.station_id, ch.home_station_id, ch.active_ship_id))
                 {
                     let (home_st_id, home_sys) = resolve_valid_home_station(ctx, snap, raw_home, old_sys);
-                    if let Some(ch) = snap.characters.get_mut(&caller_cid) {
-                        ch.station_id = Some(home_st_id);
-                        ch.structure_id = None;
-                        ch.solar_system_id = home_sys;
-                    }
+                    let _ = crate::router::apply_character_transition_in_snap(
+                        snap,
+                        &ctx.sde,
+                        caller_cid,
+                        crate::router::TransitionLocation::Station {
+                            solar_system_id: Some(home_sys),
+                            station_id: home_st_id,
+                        },
+                        None,
+                        false,
+                        false,
+                    );
                     let mut valid_ref_ship = 0;
                     if ref_ship_id > 0 {
                         if let Some(ship_it) = snap.items.get_mut(&ref_ship_id).filter(|it| it.owner_id == caller_cid) {
@@ -277,9 +303,22 @@ pub async fn handle(
 
             if res.is_ok() {
                 if let Some((old_sys, old_st, home_sys, home_st_id, ref_ship)) = transfer_info {
-                    session.solar_system_id = Some(home_sys);
-                    session.station_id = Some(home_st_id);
-                    session.structure_id = None;
+                    let _ = ctx.execute_session_transition_sync(
+                        Some(session),
+                        crate::router::SessionTransitionSpec::for_kind(
+                            caller_cid,
+                            crate::router::TransitionKind::Teleport {
+                                solar_system_id: home_sys,
+                                dock_id: Some((home_st_id, false)),
+                                ship_id: None,
+                            },
+                            "tourney_return",
+                        )
+                        .with_apply_db(false)
+                        .with_sync_local_chat(false)
+                        .with_invalidate_bounds(false)
+                        .with_emit_on_session_changed(false),
+                    );
                     if ref_ship > 0 {
                         let sys_handle = ctx.systems.get_or_spawn(old_sys);
                         let _ = sys_handle.remove_ball(ref_ship).await;

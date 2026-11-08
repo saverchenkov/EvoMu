@@ -704,11 +704,15 @@ pub fn execute_death_pipeline_sync_inner(
                 }
                 snap.item_positions
                     .insert(esc_id, [victim_pos.x, victim_pos.y, victim_pos.z]);
-                if let Some(vic) = snap.characters.get_mut(&victim_char_id) {
-                    vic.active_ship_id = esc_id;
-                    vic.version += 1;
-                    vic.system_epoch += 1;
-                }
+                let _ = crate::router::apply_character_transition_in_snap(
+                    snap,
+                    &ctx.sde,
+                    victim_char_id,
+                    crate::router::TransitionLocation::KeepCurrent,
+                    Some(esc_id),
+                    false,
+                    false,
+                );
                 Some(esc_id)
             } else {
                 snap.next_entity_id += 1;
@@ -733,11 +737,15 @@ pub fn execute_death_pipeline_sync_inner(
                 );
                 snap.item_positions
                     .insert(cid, [victim_pos.x, victim_pos.y, victim_pos.z]);
-                if let Some(vic) = snap.characters.get_mut(&victim_char_id) {
-                    vic.active_ship_id = cid;
-                    vic.version += 1;
-                    vic.system_epoch += 1;
-                }
+                let _ = crate::router::apply_character_transition_in_snap(
+                    snap,
+                    &ctx.sde,
+                    victim_char_id,
+                    crate::router::TransitionLocation::KeepCurrent,
+                    Some(cid),
+                    false,
+                    false,
+                );
                 Some(cid)
             }
         } else {

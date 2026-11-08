@@ -17,7 +17,6 @@ use crate::services::pve_dungeon_runtime::{
 };
 use crate::services::pve_exploration_seeding::build_type_combat_state_from_sde;
 use crate::services::pve_special_sites::make_site_npc_ball;
-use eve_db::InventoryFlag;
 use eve_destiny::{Ball, MovementMode};
 use eve_dogma::attr_ids;
 use eve_machonet::SessionState;
@@ -519,36 +518,35 @@ pub(crate) fn try_cleanup_npe_pocket_and_restore_ui(
                     if let Some((dest_station, new_sys_id, new_const_id, new_reg_id, is_struct)) =
                         dock_target
                     {
-                        if let Some(ch) = snap.characters.get_mut(&char_id) {
-                            let old_sys_id = ch.solar_system_id;
-                            let ship_id = ch.active_ship_id;
-                            if is_struct {
-                                ch.station_id = None;
-                                ch.structure_id = Some(dest_station);
+                        if let Some((old_sys_id, ship_id, uid, cid_corp, aid)) = snap
+                            .characters
+                            .get(&char_id)
+                            .map(|ch| (ch.solar_system_id, ch.active_ship_id, ch.user_id, ch.corporation_id, ch.alliance_id))
+                        {
+                            let dest_loc = if is_struct {
+                                crate::router::TransitionLocation::Structure {
+                                    solar_system_id: Some(new_sys_id),
+                                    structure_id: dest_station,
+                                }
                             } else {
-                                ch.station_id = Some(dest_station);
-                                ch.structure_id = None;
-                            }
-                            ch.solar_system_id = new_sys_id;
-                            ch.constellation_id = new_const_id;
-                            ch.region_id = new_reg_id;
-                            ch.system_epoch += 1;
-                            ch.version += 1;
+                                crate::router::TransitionLocation::Station {
+                                    solar_system_id: Some(new_sys_id),
+                                    station_id: dest_station,
+                                }
+                            };
+                            let _ = crate::router::apply_character_transition_in_snap(
+                                snap, &ctx.sde, char_id, dest_loc, None, true, false,
+                            );
                             snap.item_positions.remove(&ship_id);
-                            if let Some(ship) = snap.items.get_mut(&ship_id) {
-                                ship.location_id = dest_station;
-                                ship.flag = InventoryFlag::Hangar;
-                                ship.version += 1;
-                            }
                             station_restore = Some((
                                 dest_station,
                                 is_struct,
                                 old_sys_id,
                                 new_sys_id,
                                 ship_id,
-                                ch.user_id,
-                                ch.corporation_id,
-                                ch.alliance_id,
+                                uid,
+                                cid_corp,
+                                aid,
                                 new_const_id,
                                 new_reg_id,
                             ));
@@ -610,17 +608,23 @@ pub(crate) fn try_cleanup_npe_pocket_and_restore_ui(
     {
         ctx.systems.get_or_spawn(old_sys_id).try_remove_ball(ship_id);
         if let Some(sess) = session.as_deref_mut() {
-            if is_struct {
-                sess.station_id = None;
-                sess.structure_id = Some(dest_station);
-            } else {
-                sess.station_id = Some(dest_station);
-                sess.structure_id = None;
-            }
-            sess.solar_system_id = Some(new_sys_id);
-            sess.constellation_id = Some(const_id);
-            sess.region_id = Some(reg_id);
+            let _ = ctx.execute_session_transition_sync(
+                Some(sess),
+                crate::router::SessionTransitionSpec::for_kind(
+                    char_id,
+                    crate::router::TransitionKind::Teleport {
+                        solar_system_id: new_sys_id,
+                        dock_id: Some((dest_station, is_struct)),
+                        ship_id: None,
+                    },
+                    "npe_return",
+                )
+                .with_apply_db(false)
+                .with_sync_local_chat(false)
+                .with_emit_on_session_changed(false),
+            );
         }
+        let _ = (const_id, reg_id);
         let (station_rep, structure_rep, change_key) = if is_struct {
             (PyRep::None, PyRep::Integer(dest_station), "structureid")
         } else {

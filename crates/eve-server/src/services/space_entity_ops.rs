@@ -601,41 +601,15 @@ pub async fn handle(
             if !is_sde_station && !is_struct {
                 return Some(Err(BridgeRpcError { code: "DockTargetNotFound".into(), message: format!("Station or structure {target_id} not found") }));
             }
-            // Game mechanics: Despawn active ship ball from physics simulation to avoid orphaned balls.
-            if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
-                let _ = ctx.systems.get_or_spawn(sys_id).remove_ball(ship_id).await;
-            }
-            let ship_id_opt = session.ship_id;
-            ctx.db.with_mut_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    if is_struct {
-                        ch.structure_id = Some(target_id);
-                        ch.station_id = None;
-                    } else {
-                        ch.station_id = Some(target_id);
-                        ch.structure_id = None;
-                    }
-                }
-                if let Some(sid) = ship_id_opt {
-                    if let Some(sh) = snap.items.get_mut(&sid) {
-                        sh.location_id = target_id;
-                        sh.flag = eve_db::InventoryFlag::Hangar;
-                    }
-                }
-            });
-            if is_struct {
-                session.structure_id = Some(target_id);
-                session.station_id = None;
-            } else {
-                session.station_id = Some(target_id);
-                session.structure_id = None;
-            }
-            ctx.invalidate_bound_objects_for_session_transition(
+            // Game mechanics: Despawn active ship ball from physics simulation and commit atomic dock transition.
+            let dock_spec = crate::router::SessionTransitionSpec::for_kind(
                 char_id,
-                session.solar_system_id.unwrap_or(0),
-                Some(target_id),
+                crate::router::TransitionKind::Dock { dock_id: target_id, is_structure: is_struct },
                 "turbo_dock",
-            );
+            )
+            .with_validate_destination(false)
+            .with_emit_on_session_changed(false);
+            let _ = ctx.execute_session_transition(Some(session), dock_spec).await;
             Some(Ok(PyRep::keyval([
                 ("locationID", PyRep::Integer(target_id)),
                 ("docked", PyRep::Bool(true)),

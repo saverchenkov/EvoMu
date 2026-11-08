@@ -152,9 +152,15 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     );
                     cid
                 };
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    ch.active_ship_id = capsule_id;
-                }
+                let _ = crate::router::apply_character_transition_in_snap(
+                    snap,
+                    &ctx.sde,
+                    char_id,
+                    crate::router::TransitionLocation::KeepCurrent,
+                    Some(capsule_id),
+                    false,
+                    false,
+                );
                 Ok(capsule_id)
             });
 
@@ -211,7 +217,16 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 }
             }
 
-            session.ship_id = Some(capsule_id);
+            let _ = ctx.execute_session_transition_sync(
+                Some(session),
+                crate::router::SessionTransitionSpec::for_kind(
+                    char_id,
+                    crate::router::TransitionKind::EjectToPod { capsule_id },
+                    "eject",
+                )
+                .with_apply_db(false)
+                .with_emit_on_session_changed(false),
+            );
             crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, old_ship_id);
             ctx.invalidate_ship_fitting(old_ship_id);
             ctx.invalidate_ship_fitting(capsule_id);
@@ -383,9 +398,15 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     return Err(BridgeRpcError { code: "NotAShip".into(), message: format!("Item {target_ship_id} is not a ship") });
                 }
                 ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, ship.type_id)?;
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    ch.active_ship_id = target_ship_id;
-                }
+                let _ = crate::router::apply_character_transition_in_snap(
+                    snap,
+                    &ctx.sde,
+                    char_id,
+                    crate::router::TransitionLocation::KeepCurrent,
+                    Some(target_ship_id),
+                    false,
+                    false,
+                );
                 Ok(target_ship_id)
             });
             match res {
@@ -426,7 +447,16 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         }
                     }
                     ctx.invalidate_ship_fitting(sid);
-                    session.ship_id = Some(sid);
+                    let _ = ctx.execute_session_transition_sync(
+                        Some(session),
+                        crate::router::SessionTransitionSpec::for_kind(
+                            char_id,
+                            crate::router::TransitionKind::BoardShip { ship_id: sid },
+                            "ship_board",
+                        )
+                        .with_apply_db(false)
+                        .with_emit_on_session_changed(false),
+                    );
                     let sys_id = session.solar_system_id.or_else(|| {
                 ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
             }).unwrap_or(0);
@@ -853,9 +883,15 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     spawned_items.push(trit_rec);
                 }
 
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    ch.active_ship_id = corvette_id;
-                }
+                let _ = crate::router::apply_character_transition_in_snap(
+                    snap,
+                    &ctx.sde,
+                    char_id,
+                    crate::router::TransitionLocation::KeepCurrent,
+                    Some(corvette_id),
+                    false,
+                    false,
+                );
                 snap.item_custom_names.insert(claim_key, now_unix.to_string());
                 Ok((corvette_id, corvette_type_id, race_id, spawned_items, old_ship_left))
             });
@@ -871,7 +907,16 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         ctx.notify_item_change(char_id, row, vec![(3, PyRep::Integer(old_loc))]);
                     }
                     ctx.invalidate_ship_fitting(corvette_id);
-                    session.ship_id = Some(corvette_id);
+                    let _ = ctx.execute_session_transition_sync(
+                        Some(session),
+                        crate::router::SessionTransitionSpec::for_kind(
+                            char_id,
+                            crate::router::TransitionKind::BoardShip { ship_id: corvette_id },
+                            "board_corvette",
+                        )
+                        .with_apply_db(false)
+                        .with_emit_on_session_changed(false),
+                    );
                     for item_rec in &spawned_items {
                         let row = eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(
                             crate::services::inventory_bound::item_to_packed_cells(ctx, item_rec),

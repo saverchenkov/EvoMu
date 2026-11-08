@@ -801,12 +801,23 @@ pub async fn handle_wrecks_killmails(
                     }
 
                     if let Some(cap_id) = death.ejected_capsule_id {
-                        session.ship_id = Some(cap_id);
+                        let _ = ctx.execute_session_transition_sync(
+                            Some(session),
+                            crate::router::SessionTransitionSpec::for_kind(
+                                char_id,
+                                crate::router::TransitionKind::EjectToPod { capsule_id: cap_id },
+                                "self_destruct",
+                            )
+                            .with_apply_db(false)
+                            .with_emit_on_session_changed(false),
+                        );
                     } else if let Ok(ch) = ctx.db.get_character(char_id) {
-                        session.ship_id = Some(ch.active_ship_id);
-                        session.station_id = ch.station_id;
-                        session.structure_id = ch.structure_id;
-                        session.solar_system_id = Some(ch.solar_system_id);
+                        crate::router::apply_session_from_character(
+                            session,
+                            &ch,
+                            None,
+                            Some(&ctx.sde),
+                        );
                         crate::services::map_service::record_solar_system_visit(ctx, char_id, ch.solar_system_id);
                     }
                     Some(Ok(PyRep::keyval([

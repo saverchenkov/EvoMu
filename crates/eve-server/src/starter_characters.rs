@@ -147,15 +147,23 @@ pub async fn provision_starter_characters(ctx: &ServerContext, cfg: &ServerConfi
             Ok(rep) => {
                 let char_id = rep.as_i64().unwrap_or_default();
                 if let Some(st_id) = starter.station_id {
-                    ctx.db.with_mut_snapshot(|snap| {
+                    let _ = ctx.db.try_with_mut_snapshot(|snap| {
+                        let res = crate::router::apply_character_transition_in_snap(
+                            snap,
+                            &ctx.sde,
+                            char_id,
+                            crate::router::TransitionLocation::Station {
+                                solar_system_id: None,
+                                station_id: st_id,
+                            },
+                            None,
+                            true,
+                            false,
+                        );
                         if let Some(ch) = snap.characters.get_mut(&char_id) {
-                            ch.station_id = Some(st_id);
                             ch.home_station_id = st_id;
-                            let ship_id = ch.active_ship_id;
-                            if let Some(ship_item) = snap.items.get_mut(&ship_id) {
-                                ship_item.location_id = st_id;
-                            }
                         }
+                        res
                     });
                 }
                 if let Some(bal) = starter.initial_balance_isk {

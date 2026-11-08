@@ -67,11 +67,18 @@ pub(super) async fn handle_return_players(
                 None => continue,
             };
             let (home_st_id, home_sys) = resolve_valid_home_station(ctx, snap, raw_home, old_sys);
-            if let Some(ch) = snap.characters.get_mut(&p.character_id) {
-                ch.station_id = Some(home_st_id);
-                ch.structure_id = None;
-                ch.solar_system_id = home_sys;
-            }
+            let _ = crate::router::apply_character_transition_in_snap(
+                snap,
+                &ctx.sde,
+                p.character_id,
+                crate::router::TransitionLocation::Station {
+                    solar_system_id: Some(home_sys),
+                    station_id: home_st_id,
+                },
+                None,
+                false,
+                false,
+            );
             let mut valid_ship_id = 0;
             if active_sid > 0 {
                 if let Some(ship_it) = snap
@@ -106,9 +113,22 @@ pub(super) async fn handle_return_players(
                 }
             }
             if session.character_id == Some(cid) {
-                session.station_id = Some(home_st_id);
-                session.structure_id = None;
-                session.solar_system_id = Some(home_sys);
+                let _ = ctx.execute_session_transition_sync(
+                    Some(session),
+                    crate::router::SessionTransitionSpec::for_kind(
+                        cid,
+                        crate::router::TransitionKind::Teleport {
+                            solar_system_id: home_sys,
+                            dock_id: Some((home_st_id, false)),
+                            ship_id: None,
+                        },
+                        "tourney_return",
+                    )
+                    .with_apply_db(false)
+                    .with_sync_local_chat(false)
+                    .with_invalidate_bounds(false)
+                    .with_emit_on_session_changed(false),
+                );
             }
             ctx.invalidate_bound_objects_for_session_transition(
                 cid,
@@ -178,11 +198,18 @@ pub(super) async fn handle_teleport_ref_home(
             .map(|ch| (ch.solar_system_id, ch.station_id, ch.home_station_id, ch.active_ship_id))
         {
             let (home_st_id, home_sys) = resolve_valid_home_station(ctx, snap, raw_home, old_sys);
-            if let Some(ch) = snap.characters.get_mut(&caller_cid) {
-                ch.station_id = Some(home_st_id);
-                ch.structure_id = None;
-                ch.solar_system_id = home_sys;
-            }
+            let _ = crate::router::apply_character_transition_in_snap(
+                snap,
+                &ctx.sde,
+                caller_cid,
+                crate::router::TransitionLocation::Station {
+                    solar_system_id: Some(home_sys),
+                    station_id: home_st_id,
+                },
+                None,
+                false,
+                false,
+            );
             let mut valid_ref_ship = 0;
             if ref_ship_id > 0 {
                 if let Some(ship_it) = snap
@@ -209,14 +236,20 @@ pub(super) async fn handle_teleport_ref_home(
                     let _ = ctx.systems.get_or_spawn(home_sys).remove_ball(ref_ship_id).await;
                 }
             }
-            session.station_id = Some(home_st_id);
-            session.structure_id = None;
-            session.solar_system_id = Some(home_sys);
-            ctx.invalidate_bound_objects_for_session_transition(
-                caller_cid,
-                home_sys,
-                Some(home_st_id),
-                "dock",
+            let _ = ctx.execute_session_transition_sync(
+                Some(session),
+                crate::router::SessionTransitionSpec::for_kind(
+                    caller_cid,
+                    crate::router::TransitionKind::Teleport {
+                        solar_system_id: home_sys,
+                        dock_id: Some((home_st_id, false)),
+                        ship_id: None,
+                    },
+                    "tourney_return",
+                )
+                .with_apply_db(false)
+                .with_sync_local_chat(false)
+                .with_emit_on_session_changed(false),
             );
             let sess_rep = PyRep::keyval([
                 ("charid", PyRep::Integer(caller_cid)),

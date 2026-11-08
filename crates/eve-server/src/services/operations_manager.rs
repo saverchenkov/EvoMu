@@ -681,9 +681,26 @@ pub fn handle(
                     let out = grant_operation_activation_rewards(snap, rec, op_defs, uid, char_id, sess_docked, op_id);
                     (cat_id, prev_op, is_replay, out)
                 };
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    ch.solar_system_id = op_sys;
-                }
+                let loc = snap
+                    .characters
+                    .get(&char_id)
+                    .and_then(|ch| {
+                        ch.station_id
+                            .map(|st| crate::router::TransitionLocation::Station {
+                                solar_system_id: Some(op_sys),
+                                station_id: st,
+                            })
+                            .or_else(|| {
+                                ch.structure_id.map(|st| crate::router::TransitionLocation::Structure {
+                                    solar_system_id: Some(op_sys),
+                                    structure_id: st,
+                                })
+                            })
+                    })
+                    .unwrap_or(crate::router::TransitionLocation::Space { solar_system_id: op_sys });
+                let _ = crate::router::apply_character_transition_in_snap(
+                    snap, &ctx.sde, char_id, loc, None, false, false,
+                );
                 save_store(snap, &store, now);
                 Ok((cat_id, prev_op, is_replay, out))
             });
@@ -943,9 +960,26 @@ pub fn handle(
             );
             let now = ctx.now_unix();
             ctx.db.with_mut_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    ch.solar_system_id = sys_id;
-                }
+                let loc = snap
+                    .characters
+                    .get(&char_id)
+                    .and_then(|ch| {
+                        ch.station_id
+                            .map(|st| crate::router::TransitionLocation::Station {
+                                solar_system_id: Some(sys_id),
+                                station_id: st,
+                            })
+                            .or_else(|| {
+                                ch.structure_id.map(|st| crate::router::TransitionLocation::Structure {
+                                    solar_system_id: Some(sys_id),
+                                    structure_id: st,
+                                })
+                            })
+                    })
+                    .unwrap_or(crate::router::TransitionLocation::Space { solar_system_id: sys_id });
+                let _ = crate::router::apply_character_transition_in_snap(
+                    snap, &ctx.sde, char_id, loc, None, false, false,
+                );
                 let mut store = load_store(snap);
                 let rec = store.by_character.entry(char_id).or_default();
                 rec.active_site_id = Some(site_id);

@@ -13,6 +13,7 @@ mod context_charges;
 mod context_runtime_persistence;
 pub mod dispatch;
 pub mod session;
+pub mod session_transition;
 
 #[cfg(test)]
 mod binding_deep_extra_unit_tests;
@@ -35,6 +36,7 @@ mod tests;
 
 pub use cache_notifications::*;
 pub use context::*;
+pub use session_transition::*;
 
 /// Canonical MachoNet error code returned for unimplemented RPC methods.
 pub const ERR_UNIMPLEMENTED: &str = "UnimplementedRPC";

@@ -616,11 +616,15 @@ pub async fn handle_ship_or_npc_destruction(
                         target_ball.position.z,
                     ],
                 );
-                if let Some(vch) = snap.characters.get_mut(&vcid) {
-                    vch.active_ship_id = esc_id;
-                    vch.version += 1;
-                    vch.system_epoch += 1;
-                }
+                let _ = crate::router::apply_character_transition_in_snap(
+                    snap,
+                    &ctx.sde,
+                    vcid,
+                    crate::router::TransitionLocation::KeepCurrent,
+                    Some(esc_id),
+                    false,
+                    false,
+                );
                 return (esc_id, esc_tid);
             }
             snap.next_entity_id += 1;
@@ -641,11 +645,15 @@ pub async fn handle_ship_or_npc_destruction(
                     target_ball.position.z,
                 ],
             );
-            if let Some(vch) = snap.characters.get_mut(&vcid) {
-                vch.active_ship_id = cid;
-                vch.version += 1;
-                vch.system_epoch += 1;
-            }
+            let _ = crate::router::apply_character_transition_in_snap(
+                snap,
+                &ctx.sde,
+                vcid,
+                crate::router::TransitionLocation::KeepCurrent,
+                Some(cid),
+                false,
+                false,
+            );
             (cid, 670)
         });
         crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {

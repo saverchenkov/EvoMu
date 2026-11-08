@@ -294,18 +294,38 @@ pub async fn save_location_and_leave_space(
         return (false, 0);
     };
     let info = ctx.db.with_mut_snapshot(|snap| {
-        let ch = snap.characters.get_mut(&cid)?;
-        if let Some(sys) = session.solar_system_id {
-            ch.solar_system_id = sys;
-        }
-        ch.station_id = session.station_id;
-        ch.structure_id = session.structure_id;
-        ch.version += 1;
-        Some((
-            ch.solar_system_id,
-            ch.active_ship_id,
-            ch.station_id.is_none() && ch.structure_id.is_none(),
-        ))
+        let loc = if let Some(st_id) = session.station_id {
+            crate::router::TransitionLocation::Station {
+                solar_system_id: session.solar_system_id,
+                station_id: st_id,
+            }
+        } else if let Some(str_id) = session.structure_id {
+            crate::router::TransitionLocation::Structure {
+                solar_system_id: session.solar_system_id,
+                structure_id: str_id,
+            }
+        } else if let Some(sys) = session.solar_system_id {
+            crate::router::TransitionLocation::Space { solar_system_id: sys }
+        } else {
+            crate::router::TransitionLocation::KeepCurrent
+        };
+        crate::router::apply_character_transition_in_snap(
+            snap,
+            &ctx.sde,
+            cid,
+            loc,
+            None,
+            false,
+            false,
+        )
+        .ok()
+        .map(|ch| {
+            (
+                ch.solar_system_id,
+                ch.active_ship_id,
+                ch.station_id.is_none() && ch.structure_id.is_none(),
+            )
+        })
     });
     let Some((sys_id, ship_id, in_space)) = info else {
         return (false, 0);
@@ -368,12 +388,7 @@ pub async fn handle(
         session.fleet_id = None;
         session.corporation_id = None;
         session.alliance_id = None;
-        session.station_id = None;
-        session.structure_id = None;
-        session.solar_system_id = None;
-        session.constellation_id = None;
-        session.region_id = None;
-        session.ship_id = None;
+        crate::router::clear_session_character_state(session);
         return Some(Ok(PyRep::keyval([
             ("loggedOut", PyRep::Bool(true)),
             ("removedFromSpace", PyRep::Bool(removed_from_space)),
@@ -406,10 +421,7 @@ pub async fn handle(
         ctx.release_session_bindings(session.session_id);
         session.character_id = None;
         session.fleet_id = None;
-        session.ship_id = None;
-        session.station_id = None;
-        session.structure_id = None;
-        session.solar_system_id = None;
+        crate::router::clear_session_character_state(session);
         return Some(Ok(PyRep::Bool(true)));
     }
     if (service, method) == ("multiLoginBlocker", "Login") {

@@ -991,14 +991,19 @@ pub async fn handle(
                 match_sys = m.solar_system_id;
 
                 for p in &refreshed {
-                    if let Some(ch) = snap.characters.get_mut(&p.character_id) {
-                        let old_sys = ch.solar_system_id;
-                        let old_st = ch.station_id;
-                        let user_id = ch.user_id;
+                    if let Some((old_sys, old_st, user_id, active_sid)) = snap.characters.get(&p.character_id).map(|ch| {
                         let active_sid = if ch.active_ship_id > 0 { ch.active_ship_id } else { p.ship_id };
-                        ch.solar_system_id = match_sys as u32;
-                        ch.station_id = None;
-                        ch.structure_id = None;
+                        (ch.solar_system_id, ch.station_id, ch.user_id, active_sid)
+                    }) {
+                        let _ = crate::router::apply_character_transition_in_snap(
+                            snap,
+                            &ctx.sde,
+                            p.character_id,
+                            crate::router::TransitionLocation::Space { solar_system_id: match_sys as u32 },
+                            None,
+                            false,
+                            false,
+                        );
                         let mut owned_ship = (0_i64, 0_u32);
                         if active_sid > 0 {
                             if let Some(ship_it) = snap.items.get_mut(&active_sid).filter(|it| it.owner_id == p.character_id) {
@@ -1040,9 +1045,22 @@ pub async fn handle(
                         }
                     }
                     if session.character_id == Some(cid) {
-                        session.solar_system_id = Some(match_sys as u32);
-                        session.station_id = None;
-                        session.structure_id = None;
+                        let _ = ctx.execute_session_transition_sync(
+                            Some(session),
+                            crate::router::SessionTransitionSpec::for_kind(
+                                cid,
+                                crate::router::TransitionKind::Teleport {
+                                    solar_system_id: match_sys as u32,
+                                    dock_id: None,
+                                    ship_id: None,
+                                },
+                                "tourney_match",
+                            )
+                            .with_apply_db(false)
+                            .with_sync_local_chat(false)
+                            .with_invalidate_bounds(false)
+                            .with_emit_on_session_changed(false),
+                        );
                     }
                     ctx.invalidate_bound_objects_for_session_transition(
                         cid,

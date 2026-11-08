@@ -1142,16 +1142,17 @@ pub(crate) async fn handle_qa_move_me_to(
             .spawn_ball_with_meta(new_ball, combat_state, slim_meta)
             .await;
     }
-    session.solar_system_id = Some(dest_sys_id);
-    session.constellation_id = Some(updated_ch.constellation_id);
-    session.region_id = Some(updated_ch.region_id);
-    session.station_id = None;
-    session.structure_id = None;
-    ctx.invalidate_bound_objects_for_session_transition(
-        cid,
-        dest_sys_id,
-        None,
-        "slash_teleport",
+    let _ = ctx.execute_session_transition_sync(
+        Some(session),
+        crate::router::SessionTransitionSpec::for_kind(
+            cid,
+            crate::router::TransitionKind::JumpSystem { solar_system_id: dest_sys_id },
+            "slash_teleport",
+        )
+        .with_apply_db(false)
+        .with_cleanup_departing_space(false)
+        .with_sync_local_chat(false)
+        .with_emit_on_session_changed(false),
     );
     Ok(PyRep::keyval([
         ("characterID", PyRep::Integer(cid)),

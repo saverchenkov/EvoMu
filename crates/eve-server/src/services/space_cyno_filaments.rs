@@ -350,12 +350,19 @@ async fn handle_wormhole_jump(
     )
     .await;
 
-    session.solar_system_id = Some(updated_ch.solar_system_id);
-    session.constellation_id = Some(updated_ch.constellation_id);
-    session.region_id = Some(updated_ch.region_id);
-    session.station_id = None;
-    session.structure_id = None;
-    ctx.quasar_gateway.on_session_changed(session, now_unix);
+    let _ = updated_ch;
+    let _ = ctx.execute_session_transition_sync(
+        Some(session),
+        crate::router::SessionTransitionSpec::for_kind(
+            char_id,
+            crate::router::TransitionKind::JumpSystem { solar_system_id: dest_sys_id },
+            "wormhole_jump",
+        )
+        .with_apply_db(false)
+        .with_cleanup_departing_space(false)
+        .with_sync_local_chat(false)
+        .with_emit_on_session_changed(false),
+    );
     crate::services::map_service::record_solar_system_jump(ctx, char_id, dest_sys_id);
     crate::services::combat_crimewatch::schedule_highsec_criminal_concord_if_needed(
         ctx,
@@ -609,17 +616,16 @@ async fn handle_random_jump_filament(
                 message: e.to_string(),
             })?;
         }
-        for &(p_char, p_ship, _) in &jumpers {
-            if let Some(ch) = snap.characters.get_mut(&p_char) {
-                ch.solar_system_id = dest_sys_id;
-                ch.constellation_id = dest_sys.constellation_id;
-                ch.region_id = dest_sys.region_id;
-                ch.station_id = None;
-                ch.structure_id = None;
-            }
-            if let Some(ship) = snap.items.get_mut(&p_ship) {
-                ship.location_id = dest_sys_id as i64;
-            }
+        for &(p_char, _p_ship, _) in &jumpers {
+            let _ = crate::router::apply_character_transition_in_snap(
+                snap,
+                &ctx.sde,
+                p_char,
+                crate::router::TransitionLocation::Space { solar_system_id: dest_sys_id },
+                None,
+                true,
+                false,
+            );
         }
         Ok::<(), BridgeRpcError>(())
     })?;
@@ -698,12 +704,18 @@ async fn handle_random_jump_filament(
         }
     }
 
-    session.solar_system_id = Some(dest_sys_id);
-    session.constellation_id = Some(dest_sys.constellation_id);
-    session.region_id = Some(dest_sys.region_id);
-    session.station_id = None;
-    session.structure_id = None;
-    ctx.quasar_gateway.on_session_changed(session, now_unix);
+    let _ = ctx.execute_session_transition_sync(
+        Some(session),
+        crate::router::SessionTransitionSpec::for_kind(
+            char_id,
+            crate::router::TransitionKind::JumpSystem { solar_system_id: dest_sys_id },
+            "filament_jump",
+        )
+        .with_apply_db(false)
+        .with_cleanup_departing_space(false)
+        .with_sync_local_chat(false)
+        .with_emit_on_session_changed(false),
+    );
 
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, dest_sys_id as i64)?;
     Ok(PyRep::keyval([
@@ -908,18 +920,15 @@ async fn handle_cmd_jump_to_structure_beacon(
         .map(|s| (s.constellation_id, s.region_id))
         .unwrap_or((0, 0));
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = target_sys_id;
-            if dest_const_id != 0 {
-                ch.constellation_id = dest_const_id;
-                ch.region_id = dest_reg_id;
-            }
-            ch.station_id = None;
-            ch.structure_id = None;
-        }
-        if let Some(ship) = snap.items.get_mut(&ship_id) {
-            ship.location_id = target_sys_id as i64;
-        }
+        let _ = crate::router::apply_character_transition_in_snap(
+            snap,
+            &ctx.sde,
+            char_id,
+            crate::router::TransitionLocation::Space { solar_system_id: target_sys_id },
+            Some(ship_id),
+            true,
+            false,
+        );
     });
     let target_pos = DVec3::from_array(target_struct.position) + DVec3::new(5_000.0, 0.0, 0.0);
     let dest_handle = ctx.systems.get_or_spawn(target_sys_id);
@@ -949,13 +958,19 @@ async fn handle_cmd_jump_to_structure_beacon(
         ctx, char_id, now_unix, target_sys_id, dest_tick, "jump_drive",
     );
     ctx.sync_character_local_chat(char_id, Some(cur_sys_id), target_sys_id);
-    session.solar_system_id = Some(target_sys_id);
-    if dest_const_id != 0 {
-        session.constellation_id = Some(dest_const_id);
-        session.region_id = Some(dest_reg_id);
-    }
-    session.station_id = None;
-    session.structure_id = None;
+    let _ = ctx.execute_session_transition_sync(
+        Some(session),
+        crate::router::SessionTransitionSpec::for_kind(
+            char_id,
+            crate::router::TransitionKind::JumpSystem { solar_system_id: target_sys_id },
+            "cyno_jump",
+        )
+        .with_apply_db(false)
+        .with_cleanup_departing_space(false)
+        .with_sync_local_chat(false)
+        .with_emit_on_session_changed(false),
+    );
+    let _ = (dest_const_id, dest_reg_id);
     crate::services::map_service::record_solar_system_jump(ctx, char_id, target_sys_id);
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, target_sys_id as i64)?;
 
@@ -1388,14 +1403,17 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
     let _ = cur_sys_handle.remove_ball(ship_id).await;
     let (dest_const_id, dest_reg_id) = ctx.sde.solar_systems.get(&target_sys_id).map(|s| (s.constellation_id, s.region_id)).unwrap_or((0, 0));
 
+    let _ = (dest_const_id, dest_reg_id);
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = target_sys_id;
-            if dest_const_id != 0 { ch.constellation_id = dest_const_id; ch.region_id = dest_reg_id; }
-            ch.station_id = None;
-            ch.structure_id = None;
-        }
-        if let Some(sh) = snap.items.get_mut(&ship_id) { sh.location_id = target_sys_id as i64; }
+        let _ = crate::router::apply_character_transition_in_snap(
+            snap,
+            &ctx.sde,
+            char_id,
+            crate::router::TransitionLocation::Space { solar_system_id: target_sys_id },
+            Some(ship_id),
+            true,
+            false,
+        );
     });
     let target_pos = beacon.position + DVec3::new(2_500.0, 0.0, 0.0);
     let dest_handle = ctx.systems.get_or_spawn(target_sys_id);
@@ -1416,10 +1434,18 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
     let now_unix = ctx.now_unix();
     crate::services::space_destiny::record_session_change_timer(ctx, char_id, now_unix, target_sys_id, dest_tick, "jump_drive");
     ctx.sync_character_local_chat(char_id, Some(cur_sys_id), target_sys_id);
-    session.solar_system_id = Some(target_sys_id);
-    if dest_const_id != 0 { session.constellation_id = Some(dest_const_id); session.region_id = Some(dest_reg_id); }
-    session.station_id = None;
-    session.structure_id = None;
+    let _ = ctx.execute_session_transition_sync(
+        Some(session),
+        crate::router::SessionTransitionSpec::for_kind(
+            char_id,
+            crate::router::TransitionKind::JumpSystem { solar_system_id: target_sys_id },
+            "cyno_jump",
+        )
+        .with_apply_db(false)
+        .with_cleanup_departing_space(false)
+        .with_sync_local_chat(false)
+        .with_emit_on_session_changed(false),
+    );
     crate::services::map_service::record_solar_system_jump(ctx, char_id, target_sys_id);
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, target_sys_id as i64)?;
 

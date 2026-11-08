@@ -181,17 +181,30 @@ pub(crate) async fn enforce_legacy_pvp_safety_and_concord(
         {
             Ok(dp) => {
                 if let Some(capsule_id) = dp.ejected_capsule_id {
-                    session.ship_id = Some(capsule_id);
-                    session.station_id = None;
-                    session.structure_id = None;
-                    session.solar_system_id = Some(sys_id);
+                    let _ = ctx.execute_session_transition_sync(
+                        Some(session),
+                        crate::router::SessionTransitionSpec::for_kind(
+                            char_id,
+                            crate::router::TransitionKind::Teleport {
+                                solar_system_id: sys_id,
+                                dock_id: None,
+                                ship_id: Some(capsule_id),
+                            },
+                            "pod_eject",
+                        )
+                        .with_apply_db(false)
+                        .with_sync_local_chat(false)
+                        .with_emit_on_session_changed(false),
+                    );
                 } else {
                     ctx.db.with_snapshot(|snap| {
                         if let Some(ch) = snap.characters.get(&char_id) {
-                            session.ship_id = Some(ch.active_ship_id);
-                            session.station_id = ch.station_id;
-                            session.structure_id = ch.structure_id;
-                            session.solar_system_id = Some(ch.solar_system_id);
+                            crate::router::apply_session_from_character(
+                                session,
+                                ch,
+                                None,
+                                Some(&ctx.sde),
+                            );
                         }
                     });
                 }

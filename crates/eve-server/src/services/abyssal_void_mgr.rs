@@ -505,18 +505,23 @@ async fn activate_trace(
             .map(|s| (s.constellation_id, s.region_id))
             .unwrap_or((20_000_020, 10_000_002)),
     };
-    session.solar_system_id = Some(ABYSSAL_SPACE_SYSTEM_ID);
-    session.constellation_id = Some(const_id);
-    session.region_id = Some(reg_id);
-    session.station_id = None;
-    session.structure_id = None;
-    ctx.invalidate_bound_objects_for_session_transition(
-        char_id,
-        ABYSSAL_SPACE_SYSTEM_ID,
-        None,
-        "filament_jump",
+    let _ = (const_id, reg_id);
+    let _ = entry_now;
+    let _ = ctx.execute_session_transition_sync(
+        Some(session),
+        crate::router::SessionTransitionSpec::for_kind(
+            char_id,
+            crate::router::TransitionKind::Teleport {
+                solar_system_id: ABYSSAL_SPACE_SYSTEM_ID,
+                dock_id: None,
+                ship_id: None,
+            },
+            "abyssal_entry",
+        )
+        .with_apply_db(false)
+        .with_sync_local_chat(false)
+        .with_emit_on_session_changed(false),
     );
-    ctx.quasar_gateway.on_session_changed(session, entry_now);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, ABYSSAL_SPACE_SYSTEM_ID);
     emit_abyssal_entry_notifications(ctx, char_id, pocket_id, tier, remaining_sec);
 
@@ -649,18 +654,23 @@ async fn activate_inventory_filament(
             .map(|s| (s.constellation_id, s.region_id))
             .unwrap_or((20_000_020, 10_000_002)),
     };
-    session.solar_system_id = Some(ABYSSAL_SPACE_SYSTEM_ID);
-    session.constellation_id = Some(const_id);
-    session.region_id = Some(reg_id);
-    session.station_id = None;
-    session.structure_id = None;
-    ctx.invalidate_bound_objects_for_session_transition(
-        char_id,
-        ABYSSAL_SPACE_SYSTEM_ID,
-        None,
-        "filament_jump",
+    let _ = (const_id, reg_id);
+    let _ = now_unix;
+    let _ = ctx.execute_session_transition_sync(
+        Some(session),
+        crate::router::SessionTransitionSpec::for_kind(
+            char_id,
+            crate::router::TransitionKind::Teleport {
+                solar_system_id: ABYSSAL_SPACE_SYSTEM_ID,
+                dock_id: None,
+                ship_id: None,
+            },
+            "abyssal_entry",
+        )
+        .with_apply_db(false)
+        .with_sync_local_chat(false)
+        .with_emit_on_session_changed(false),
     );
-    ctx.quasar_gateway.on_session_changed(session, now_unix);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, ABYSSAL_SPACE_SYSTEM_ID);
     emit_abyssal_entry_notifications(ctx, char_id, pocket_id, tier, 1_200);
     let gives_suspect =

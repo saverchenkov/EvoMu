@@ -545,16 +545,18 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         origin_pos[1] + 1_000.0,
         origin_pos[2] + 1_000.0,
     ];
-    let updated_ch = ctx.db.set_character_solar_system(char_id, origin_sys, &ctx.sde);
     let _ = ctx.db.try_with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = origin_sys;
-        }
-        if let Some(sh) = snap.items.get_mut(&ship_id) {
-            sh.location_id = origin_sys as i64;
-        }
+        let _ = crate::router::apply_character_transition_in_snap(
+            snap,
+            &ctx.sde,
+            char_id,
+            crate::router::TransitionLocation::Space { solar_system_id: origin_sys },
+            Some(ship_id),
+            true,
+            false,
+        )?;
         snap.item_positions.insert(ship_id, exit_pos);
-        Ok::<(), BridgeRpcError>(())
+        Ok::<(), eve_db::DbError>(())
     });
 
     let origin_sys_handle = ctx.systems.get_or_spawn(origin_sys);
@@ -575,27 +577,18 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
     );
     let _ = origin_sys_handle.spawn_ball_with_meta(ball, cs, slim_meta).await;
     let _ = origin_sys_handle.push_set_state(ship_id).await;
-    let (const_id, reg_id) = match updated_ch {
-        Ok(ch) => (ch.constellation_id, ch.region_id),
-        Err(_) => ctx
-            .sde
-            .solar_systems
-            .get(&origin_sys)
-            .map(|s| (s.constellation_id, s.region_id))
-            .unwrap_or((20_000_020, 10_000_002)),
-    };
-    session.solar_system_id = Some(origin_sys);
-    session.constellation_id = Some(const_id);
-    session.region_id = Some(reg_id);
-    session.station_id = None;
-    session.structure_id = None;
-    ctx.invalidate_bound_objects_for_session_transition(
-        char_id,
-        origin_sys,
-        None,
-        "filament_jump",
+    let _ = ctx.execute_session_transition_sync(
+        Some(session),
+        crate::router::SessionTransitionSpec::for_kind(
+            char_id,
+            crate::router::TransitionKind::JumpSystem { solar_system_id: origin_sys },
+            "abyssal_exit",
+        )
+        .with_apply_db(false)
+        .with_cleanup_departing_space(false)
+        .with_sync_local_chat(false)
+        .with_emit_on_session_changed(false),
     );
-    ctx.quasar_gateway.on_session_changed(session, ctx.now_unix());
     ctx.sync_character_local_chat(char_id, Some(pocket_sys), origin_sys);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, origin_sys);
     let origin_sec = ctx
@@ -785,12 +778,15 @@ pub(crate) async fn handle_void_space_player_jump(
     // client-supplied content_id is not trusted directly.
     let effective_content_id = target_id;
     let _ = ctx.db.try_with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = VOID_SPACE_SYSTEM_ID;
-        }
-        if let Some(sh) = snap.items.get_mut(&ship_id) {
-            sh.location_id = VOID_SPACE_SYSTEM_ID as i64;
-        }
+        let _ = crate::router::apply_character_transition_in_snap(
+            snap,
+            &ctx.sde,
+            char_id,
+            crate::router::TransitionLocation::Space { solar_system_id: VOID_SPACE_SYSTEM_ID },
+            Some(ship_id),
+            true,
+            false,
+        );
         snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]);
         let old_chan_id = format!("solarsystemid2:{cur_sys}");
         if let Some(chan) = snap.chat_channels.get_mut(&old_chan_id) {
@@ -842,14 +838,20 @@ pub(crate) async fn handle_void_space_player_jump(
         DVec3::ZERO,
     );
     let _ = void_handle.spawn_ball_with_combat(ball, cs).await;
-    session.solar_system_id = Some(VOID_SPACE_SYSTEM_ID);
-    session.station_id = None;
-    session.structure_id = None;
-    ctx.invalidate_bound_objects_for_session_transition(
-        char_id,
-        VOID_SPACE_SYSTEM_ID,
-        None,
-        "filament_jump",
+    let _ = ctx.execute_session_transition_sync(
+        Some(session),
+        crate::router::SessionTransitionSpec::for_kind(
+            char_id,
+            crate::router::TransitionKind::Teleport {
+                solar_system_id: VOID_SPACE_SYSTEM_ID,
+                dock_id: None,
+                ship_id: None,
+            },
+            "void_entry",
+        )
+        .with_apply_db(false)
+        .with_sync_local_chat(false)
+        .with_emit_on_session_changed(false),
     );
     crate::services::map_service::record_solar_system_visit(ctx, char_id, VOID_SPACE_SYSTEM_ID);
 
@@ -996,12 +998,15 @@ pub(crate) async fn handle_void_space_end_gate_activation(
     let finished_content_id = ctx
         .db
         .try_with_mut_snapshot(|snap| {
-            if let Some(ch) = snap.characters.get_mut(&char_id) {
-                ch.solar_system_id = origin_sys;
-            }
-            if let Some(sh) = snap.items.get_mut(&ship_id) {
-                sh.location_id = origin_sys as i64;
-            }
+            let _ = crate::router::apply_character_transition_in_snap(
+                snap,
+                &ctx.sde,
+                char_id,
+                crate::router::TransitionLocation::Space { solar_system_id: origin_sys },
+                Some(ship_id),
+                true,
+                false,
+            );
             snap.item_positions.insert(ship_id, exit_pos);
             let cid = snap
                 .abyssal_state
@@ -1025,14 +1030,20 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         DVec3::from_array(exit_pos),
     );
     let _ = origin_handle.spawn_ball_with_combat(ball, cs).await;
-    session.solar_system_id = Some(origin_sys);
-    session.station_id = None;
-    session.structure_id = None;
-    ctx.invalidate_bound_objects_for_session_transition(
-        char_id,
-        origin_sys,
-        None,
-        "filament_jump",
+    let _ = ctx.execute_session_transition_sync(
+        Some(session),
+        crate::router::SessionTransitionSpec::for_kind(
+            char_id,
+            crate::router::TransitionKind::Teleport {
+                solar_system_id: origin_sys,
+                dock_id: None,
+                ship_id: None,
+            },
+            "void_exit",
+        )
+        .with_apply_db(false)
+        .with_sync_local_chat(false)
+        .with_emit_on_session_changed(false),
     );
     ctx.sync_character_local_chat(char_id, Some(VOID_SPACE_SYSTEM_ID), origin_sys);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, origin_sys);

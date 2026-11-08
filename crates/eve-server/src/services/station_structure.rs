@@ -523,9 +523,13 @@ pub async fn handle(
             let _ = sys_handle.push_set_state(ship.item_id).await;
             crate::services::notify_emitters_seasons_tactical::emit_restoring_invuln_updated(ctx, char_id, ship.item_id, 300_000_000);
 
-            session.station_id = None;
-            session.structure_id = None;
-            ctx.invalidate_bound_objects_for_session_transition(char_id, ch.solar_system_id, None, "undock");
+            let undock_spec = crate::router::SessionTransitionSpec::for_kind(
+                char_id,
+                crate::router::TransitionKind::Undock { solar_system_id: ch.solar_system_id },
+                "undock",
+            )
+            .with_apply_db(false);
+            let _ = ctx.execute_session_transition_sync(Some(session), undock_spec);
             if let Some(ship_rec) = ctx.db.with_snapshot(|snap| snap.items.get(&ship.item_id).cloned()) {
                 ctx.notify_item_record_change(
                     char_id,
@@ -536,33 +540,6 @@ pub async fn handle(
                     ],
                 );
             }
-            let sess_rep = PyRep::keyval([
-                ("userid", session.user_id.map(|u| PyRep::Integer(u as i64)).unwrap_or(PyRep::None)),
-                ("charid", PyRep::Integer(char_id)),
-                ("corpid", session.corporation_id.map(PyRep::Integer).unwrap_or(PyRep::Integer(ch.corporation_id))),
-                ("allianceid", session.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                ("shipid", session.ship_id.map(PyRep::Integer).unwrap_or(PyRep::Integer(ship.item_id))),
-                ("stationid", PyRep::None),
-                ("structureid", PyRep::None),
-                ("solarsystemid2", session.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None)),
-                ("solarsystemid", session.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None)),
-                ("locationid", session.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None)),
-                ("constellationid", session.constellation_id.map(|c| PyRep::Integer(c as i64)).unwrap_or(PyRep::None)),
-                ("regionid", session.region_id.map(|r| PyRep::Integer(r as i64)).unwrap_or(PyRep::None)),
-            ]);
-            ctx.notify(
-                crate::router::NotificationTarget::Character(char_id),
-                "OnSessionChanged",
-                "charid",
-                vec![
-                    PyRep::Bool(false),
-                    sess_rep,
-                    PyRep::Dict(vec![(
-                        PyRep::String(if station_id >= 1_000_000_000_000 { "structureid" } else { "stationid" }.into()),
-                        PyRep::Tuple(vec![PyRep::Integer(station_id), PyRep::None]),
-                    )]),
-                ],
-            );
             if station_id >= 1_000_000_000_000 {
                 ctx.notify(
                     crate::router::NotificationTarget::Station(station_id),
@@ -844,18 +821,16 @@ pub async fn handle(
                     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
                         rt.authorized_shipping_storage.retain(|&(_, c)| c != char_id);
                     });
-                    if is_structure {
-                        session.structure_id = Some(dock_id);
-                        session.station_id = None;
-                    } else {
-                        session.station_id = Some(dock_id);
-                        session.structure_id = None;
-                    }
-                    ctx.invalidate_bound_objects_for_session_transition(
-                        char_id,
-                        sys_id,
-                        Some(dock_id),
-                        "dock",
+                    let _ = ctx.execute_session_transition_sync(
+                        Some(session),
+                        crate::router::SessionTransitionSpec::for_kind(
+                            char_id,
+                            crate::router::TransitionKind::Dock { dock_id, is_structure },
+                            "dock",
+                        )
+                        .with_apply_db(false)
+                        .with_cleanup_departing_space(false)
+                        .with_emit_on_session_changed(false),
                     );
                     if let Some(ship_rec) = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).cloned()) {
                         ctx.notify_item_record_change(

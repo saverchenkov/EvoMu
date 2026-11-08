@@ -321,9 +321,17 @@ pub(super) fn should_invalidate_bound_object(
             | "cyno_jump"
             | "filamentJump"
             | "filament_jump"
+            | "abyssal_entry"
+            | "abyssal_exit"
+            | "void_entry"
+            | "void_exit"
+            | "pvp_arena_entry"
+            | "pvp_arena_exit"
             | "jump_bridge"
             | "shipcaster"
             | "slash_teleport"
+            | "gm_teleport"
+            | "gm_jump"
             | "tourney_teleport"
     );
 

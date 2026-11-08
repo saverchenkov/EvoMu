@@ -484,12 +484,7 @@ pub async fn handle(
             session.character_id = None;
             session.corporation_id = None;
             session.alliance_id = None;
-            session.station_id = None;
-            session.structure_id = None;
-            session.solar_system_id = None;
-            session.constellation_id = None;
-            session.region_id = None;
-            session.ship_id = None;
+            crate::router::clear_session_character_state(session);
             session.race_id = None;
             session.corp_role = 0;
             session.fleet_id = None;
@@ -1698,18 +1693,25 @@ async fn handle_slash_teleport(
         }
     }
 
-    if target_cid == cid {
-        session.solar_system_id = Some(dest_sys_id);
-        session.constellation_id = Some(updated_ch.constellation_id);
-        session.region_id = Some(updated_ch.region_id);
-        session.station_id = None;
-        session.structure_id = None;
-    }
-    ctx.invalidate_bound_objects_for_session_transition(
-        target_cid,
-        dest_sys_id,
-        None,
-        "slash_teleport",
+    let sess_target = if target_cid == cid {
+        Some(session)
+    } else {
+        None
+    };
+    let _ = ctx.execute_session_transition_sync(
+        sess_target,
+        crate::router::SessionTransitionSpec::for_kind(
+            target_cid,
+            crate::router::TransitionKind::Teleport {
+                solar_system_id: dest_sys_id,
+                dock_id: None,
+                ship_id: None,
+            },
+            "slash_teleport",
+        )
+        .with_apply_db(false)
+        .with_sync_local_chat(false)
+        .with_emit_on_session_changed(false),
     );
 
     Ok(PyRep::keyval([

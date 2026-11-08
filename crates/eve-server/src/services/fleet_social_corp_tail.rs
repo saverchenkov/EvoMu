@@ -602,7 +602,16 @@ pub(crate) fn handle_update_members(
                     session.corp_role = effective_roles;
                     if let Some((_, _, _, restored_ship)) = released_controllers.iter().find(|r| r.1 == tid) {
                         if *restored_ship > 0 {
-                            session.ship_id = Some(*restored_ship);
+                            let _ = ctx.execute_session_transition_sync(
+                                Some(session),
+                                crate::router::SessionTransitionSpec::for_kind(
+                                    tid,
+                                    crate::router::TransitionKind::BoardShip { ship_id: *restored_ship },
+                                    "structure_control_release",
+                                )
+                                .with_apply_db(false)
+                                .with_emit_on_session_changed(false),
+                            );
                         }
                     }
                 } else {
@@ -1044,7 +1053,16 @@ pub(crate) fn handle_kick_out_members(
                     session.alliance_id = None;
                     session.corp_role = 0;
                     if act_ship != 0 {
-                        session.ship_id = Some(act_ship);
+                        let _ = ctx.execute_session_transition_sync(
+                            Some(session),
+                            crate::router::SessionTransitionSpec::for_kind(
+                                tid,
+                                crate::router::TransitionKind::BoardShip { ship_id: act_ship },
+                                "corp_change",
+                            )
+                            .with_apply_db(false)
+                            .with_emit_on_session_changed(false),
+                        );
                     }
                 }
                 if corp_id != npc_corp {
@@ -1116,7 +1134,16 @@ pub fn execute_pending_auto_kicks_for_docked_char(
             session.corp_role = 0;
             if let Some(act_ship) = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id)) {
                 if act_ship != 0 {
-                    session.ship_id = Some(act_ship);
+                    let _ = ctx.execute_session_transition_sync(
+                        Some(session),
+                        crate::router::SessionTransitionSpec::for_kind(
+                            char_id,
+                            crate::router::TransitionKind::BoardShip { ship_id: act_ship },
+                            "corp_change",
+                        )
+                        .with_apply_db(false)
+                        .with_emit_on_session_changed(false),
+                    );
                 }
             }
         }

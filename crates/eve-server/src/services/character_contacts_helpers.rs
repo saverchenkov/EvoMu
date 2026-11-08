@@ -143,12 +143,12 @@ pub(crate) fn handle_self_destruct_clone(
     );
     match ctx.db.respawn_character_at_home_station(char_id, ship_id, &ctx.sde) {
         Ok((ch, capsule)) => {
-            session.station_id = ch.station_id;
-            session.structure_id = ch.structure_id;
-            session.solar_system_id = Some(ch.solar_system_id);
-            session.constellation_id = Some(ch.constellation_id);
-            session.region_id = Some(ch.region_id);
-            session.ship_id = Some(capsule.item_id);
+            crate::router::apply_session_from_character(
+                session,
+                &ch,
+                Some(Some(capsule.item_id)),
+                Some(&ctx.sde),
+            );
             ctx.invalidate_bound_objects_for_session_transition(
                 char_id,
                 ch.solar_system_id,

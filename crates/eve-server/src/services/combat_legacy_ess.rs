@@ -999,11 +999,15 @@ pub async fn handle_legacy_and_ess(
                                     );
                                     cid
                                 };
-                                if let Some(vic) = snap.characters.get_mut(&victim_char_id) {
-                                    vic.active_ship_id = cap_id;
-                                    vic.version += 1;
-                                    vic.system_epoch += 1;
-                                }
+                                let _ = crate::router::apply_character_transition_in_snap(
+                                    snap,
+                                    &ctx.sde,
+                                    victim_char_id,
+                                    crate::router::TransitionLocation::KeepCurrent,
+                                    Some(cap_id),
+                                    false,
+                                    false,
+                                );
                             }
                             Ok::<_, std::convert::Infallible>((id, cap_id))
                         } else {

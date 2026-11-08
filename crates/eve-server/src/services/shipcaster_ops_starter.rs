@@ -546,11 +546,19 @@ pub async fn execute_shipcaster_jump(
         "shipcaster",
     );
 
-    session.solar_system_id = Some(dest_sys);
-    session.constellation_id = Some(updated_ch.constellation_id);
-    session.region_id = Some(updated_ch.region_id);
-    session.station_id = None;
-    session.structure_id = None;
+    let _ = updated_ch;
+    let _ = ctx.execute_session_transition_sync(
+        Some(session),
+        crate::router::SessionTransitionSpec::for_kind(
+            char_id,
+            crate::router::TransitionKind::JumpSystem { solar_system_id: dest_sys },
+            "shipcaster",
+        )
+        .with_apply_db(false)
+        .with_cleanup_departing_space(false)
+        .with_sync_local_chat(false)
+        .with_emit_on_session_changed(false),
+    );
     crate::services::map_service::record_solar_system_jump(ctx, char_id, dest_sys);
     let _ = ctx.bind_object(session, "beyonce", dest_sys as i64);
     let _ = new_handle.push_set_state(ship_id).await;

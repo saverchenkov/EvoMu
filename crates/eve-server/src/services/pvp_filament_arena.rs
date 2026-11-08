@@ -569,8 +569,21 @@ fn step_proving_grounds_arena_hazards_in_ballpark_with_options(
                             },
                         );
                         snap.item_positions.insert(cap_id, [pos.x, pos.y, pos.z]);
-                        if let Some(ch) = snap.characters.get_mut(&cid) {
-                            ch.active_ship_id = cap_id;
+                        let _ = sde_opt.map(|sde| {
+                            crate::router::apply_character_transition_in_snap(
+                                snap,
+                                sde,
+                                cid,
+                                crate::router::TransitionLocation::KeepCurrent,
+                                Some(cap_id),
+                                false,
+                                false,
+                            )
+                        });
+                        if sde_opt.is_none() {
+                            if let Some(ch) = snap.characters.get_mut(&cid) {
+                                ch.active_ship_id = cap_id;
+                            }
                         }
                         let (mass, radius, inertia, max_vel, shield, armor, hull, sig) = sde_opt
                             .and_then(|sde| sde.types.get(&670))
@@ -849,9 +862,22 @@ pub async fn spawn_matched_arena_instance(
     teams: Vec<Vec<i64>>,
     participants: Vec<(i64, i64, u32)>,
 ) {
-    session.solar_system_id = Some(32_000_001);
-    session.station_id = None;
-    session.structure_id = None;
+    let cid = session.character_id.unwrap_or(0);
+    let _ = ctx.execute_session_transition_sync(
+        Some(session),
+        crate::router::SessionTransitionSpec::for_kind(
+            cid,
+            crate::router::TransitionKind::Teleport {
+                solar_system_id: 32_000_001,
+                dock_id: None,
+                ship_id: None,
+            },
+            "pvp_arena_entry",
+        )
+        .with_apply_db(false)
+        .with_sync_local_chat(false)
+        .with_emit_on_session_changed(false),
+    );
     let arena = ctx.systems.get_or_spawn(32_000_001);
     let center = DVec3::from_array(arena_offset);
     if arena.get_ball_snapshot(end_gate_id).await.ok().flatten().is_none() {
@@ -1109,13 +1135,16 @@ pub async fn handle_pvp_end_gate_activation(
             .get(&char_id)
             .map(|c| c.active_ship_id)
             .filter(|&s| s > 0);
-        if let Some(c) = snap.characters.get_mut(&char_id) {
-            c.solar_system_id = osys;
-        }
+        let _ = crate::router::apply_character_transition_in_snap(
+            snap,
+            &ctx.sde,
+            char_id,
+            crate::router::TransitionLocation::Space { solar_system_id: osys },
+            active_ship_id,
+            true,
+            false,
+        );
         if let Some(sid) = active_ship_id {
-            if let Some(sh) = snap.items.get_mut(&sid) {
-                sh.location_id = osys as i64;
-            }
             snap.item_positions.insert(sid, opos);
         }
         save_pvp_store(snap, &store);
@@ -1126,14 +1155,20 @@ pub async fn handle_pvp_end_gate_activation(
         return Err(BridgeRpcError::user_error("NoActiveMatch"));
     };
 
-    session.solar_system_id = Some(osys);
-    session.station_id = None;
-    session.structure_id = None;
-    ctx.invalidate_bound_objects_for_session_transition(
-        char_id,
-        osys,
-        None,
-        "filament_jump",
+    let _ = ctx.execute_session_transition_sync(
+        Some(session),
+        crate::router::SessionTransitionSpec::for_kind(
+            char_id,
+            crate::router::TransitionKind::Teleport {
+                solar_system_id: osys,
+                dock_id: None,
+                ship_id: None,
+            },
+            "pvp_arena_exit",
+        )
+        .with_apply_db(false)
+        .with_sync_local_chat(false)
+        .with_emit_on_session_changed(false),
     );
     crate::services::map_service::record_solar_system_visit(ctx, char_id, osys);
     let cur_ship = active_ship_id.or(session.ship_id).unwrap_or(char_id);

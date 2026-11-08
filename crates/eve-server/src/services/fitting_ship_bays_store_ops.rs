@@ -522,9 +522,15 @@ pub(super) async fn handle_store_vessel(
                 cid
             };
             snap.item_positions.insert(cap_id, [pod_pos.x, pod_pos.y, pod_pos.z]);
-            if let Some(ch) = snap.characters.get_mut(&char_id) {
-                ch.active_ship_id = cap_id;
-            }
+            let _ = crate::router::apply_character_transition_in_snap(
+                snap,
+                &ctx.sde,
+                char_id,
+                crate::router::TransitionLocation::KeepCurrent,
+                Some(cap_id),
+                false,
+                false,
+            );
             snap.transfer_inventory_item(
                 target_ship_id,
                 eve_db::TransferItemSpec::move_whole(
@@ -576,7 +582,16 @@ pub(super) async fn handle_store_vessel(
                 },
             )
             .await;
-        session.ship_id = Some(capsule_id);
+        let _ = ctx.execute_session_transition_sync(
+            Some(session),
+            crate::router::SessionTransitionSpec::for_kind(
+                char_id,
+                crate::router::TransitionKind::EjectToPod { capsule_id },
+                "eject",
+            )
+            .with_apply_db(false)
+            .with_emit_on_session_changed(false),
+        );
         ctx.invalidate_ship_fitting(target_ship_id);
         ctx.invalidate_ship_fitting(capsule_id);
         let changes = vec![(

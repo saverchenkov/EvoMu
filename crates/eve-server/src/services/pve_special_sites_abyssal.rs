@@ -826,20 +826,36 @@ pub async fn enter_abyssal_pocket_with_trace(
         let _ = sys_handle.emit_destiny_event(r1_gate, evt).await;
     }
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = abyssal_sys_id;
-            ch.active_ship_id = ship_id;
-        }
-        if let Some(it) = snap.items.get_mut(&ship_id) {
-            it.location_id = abyssal_sys_id as i64;
-        }
+        let _ = crate::router::apply_character_transition_in_snap(
+            snap,
+            &ctx.sde,
+            char_id,
+            crate::router::TransitionLocation::Space { solar_system_id: abyssal_sys_id },
+            Some(ship_id),
+            true,
+            false,
+        );
         let old_chan_id = format!("solarsystemid2:{origin_sys}");
         if let Some(chan) = snap.chat_channels.get_mut(&old_chan_id) {
             chan.members.remove(&char_id);
         }
         snap.chat_channels.remove(&format!("solarsystemid2:{abyssal_sys_id}"));
     });
-    session.solar_system_id = Some(abyssal_sys_id);
+    let _ = ctx.execute_session_transition_sync(
+        Some(session),
+        crate::router::SessionTransitionSpec::for_kind(
+            char_id,
+            crate::router::TransitionKind::Teleport {
+                solar_system_id: abyssal_sys_id,
+                dock_id: None,
+                ship_id: Some(ship_id),
+            },
+            "abyssal_entry",
+        )
+        .with_apply_db(false)
+        .with_sync_local_chat(false)
+        .with_emit_on_session_changed(false),
+    );
     crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, ship_id);
     (pocket_id, room1_npcs)
 }

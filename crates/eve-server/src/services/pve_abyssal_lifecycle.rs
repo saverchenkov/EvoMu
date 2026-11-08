@@ -438,14 +438,15 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
                 snap.items.remove(did);
                 snap.item_positions.remove(did);
             }
-            if let Some(ch) = snap.characters.get_mut(cid) {
-                ch.solar_system_id = *origin_sys;
-                ch.version += 1;
-                ch.system_epoch += 1;
-            }
-            if let Some(sh) = snap.items.get_mut(sid) {
-                sh.location_id = *origin_sys as i64;
-            }
+            let _ = crate::router::apply_character_transition_in_snap(
+                snap,
+                &ctx.sde,
+                *cid,
+                crate::router::TransitionLocation::Space { solar_system_id: *origin_sys },
+                Some(*sid),
+                true,
+                false,
+            );
             snap.item_positions.insert(*sid, evacuated_pos);
             (
                 snap.items.get(sid).map(|i| i.type_id).unwrap_or(621),
@@ -577,12 +578,15 @@ pub fn evacuate_void_space_session_sync(
             } else {
                 vs.ship_id
             };
-            ch.solar_system_id = origin_sys;
-            ch.version += 1;
-            ch.system_epoch += 1;
-            if let Some(sh) = snap.items.get_mut(&sid) {
-                sh.location_id = origin_sys as i64;
-            }
+            let _ = crate::router::apply_character_transition_in_snap(
+                snap,
+                &ctx.sde,
+                cid,
+                crate::router::TransitionLocation::Space { solar_system_id: origin_sys },
+                Some(sid),
+                true,
+                false,
+            );
             snap.item_positions.insert(sid, exit_pos);
             let stype = snap.items.get(&sid).map(|i| i.type_id).unwrap_or(621);
             (true, sid, stype, cid)
@@ -756,14 +760,16 @@ pub fn reconcile_abyssal_login(
             ctx.invalidate_ship_fitting(ship_id);
             let rand_pos = random_offset_around_trace_origin(ctx, origin_pos);
             ctx.db.with_mut_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    ch.solar_system_id = origin_sys;
-                }
-                if let Some(sh) = snap.items.get_mut(&ship_id) {
-                    if sh.location_id == cur_sys as i64 {
-                        sh.location_id = origin_sys as i64;
-                    }
-                }
+                let _ = crate::router::apply_character_transition_in_snap(
+                    snap,
+                    &ctx.sde,
+                    char_id,
+                    crate::router::TransitionLocation::Space { solar_system_id: origin_sys },
+                    Some(ship_id),
+                    true,
+                    false,
+                );
+                let _ = cur_sys;
                 snap.item_positions.entry(ship_id).or_insert(rand_pos);
             });
             origin_sys

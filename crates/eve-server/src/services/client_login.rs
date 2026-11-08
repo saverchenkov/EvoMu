@@ -669,19 +669,17 @@ pub async fn handle(
                 }));
             }
 
-                                    // Consistently relocate character and active ship item
-            let _ = ctx.db.set_character_solar_system(char_id, selected_sys, &ctx.sde);
-            ctx.db.with_mut_snapshot(|snap| {
-                let active_ship_id = snap.characters.get(&char_id).map(|ch| ch.active_ship_id);
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    ch.station_id = None;
-                    ch.structure_id = None;
-                }
-                if let Some(ship_id) = active_ship_id {
-                    if let Some(ship) = snap.items.get_mut(&ship_id) {
-                        ship.location_id = selected_sys as i64;
-                    }
-                }
+            // Consistently relocate character and active ship item
+            let _ = ctx.db.try_with_mut_snapshot(|snap| {
+                crate::router::apply_character_transition_in_snap(
+                    snap,
+                    &ctx.sde,
+                    char_id,
+                    crate::router::TransitionLocation::Space { solar_system_id: selected_sys },
+                    None,
+                    true,
+                    false,
+                )
             });
             Some(Ok(PyRep::None))
         }

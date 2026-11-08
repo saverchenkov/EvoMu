@@ -1141,11 +1141,15 @@ pub async fn handle_character_logoff_or_disconnect(
     with_mut_sp6_state(&ctx.db, |st, snap| {
         snap.item_positions
             .insert(ship_id, [current_pos.x, current_pos.y, current_pos.z]);
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.station_id = None;
-            ch.structure_id = None;
-            ch.solar_system_id = sys_id;
-        }
+        let _ = crate::router::apply_character_transition_in_snap(
+            snap,
+            &ctx.sde,
+            char_id,
+            crate::router::TransitionLocation::Space { solar_system_id: sys_id },
+            None,
+            false,
+            false,
+        );
         st.disconnected_ships.insert(char_id, entry.clone());
     });
 

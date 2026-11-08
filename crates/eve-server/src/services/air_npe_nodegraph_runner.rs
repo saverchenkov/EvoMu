@@ -32,7 +32,7 @@ use crate::services::notify_emitters_operations_nodegraph::{
 use crate::services::operations_manager::{
     can_character_play_tutorial, load_store, push_operation_event, save_store, sync_air_npe_skip,
 };
-use eve_db::{InventoryFlag, WorldStateSnapshot};
+use eve_db::WorldStateSnapshot;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::BTreeMap;
@@ -633,16 +633,20 @@ pub fn transition_character_into_npe_pocket(
             if active_ship <= 0 {
                 return Err(BridgeRpcError::user_error("NoActiveShip"));
             }
-            let ch = snap.characters.get_mut(&char_id).unwrap();
-            ch.station_id = None;
-            ch.structure_id = None;
-            ch.system_epoch += 1;
-            ch.version += 1;
-            if let Some(ship) = snap.items.get_mut(&active_ship) {
-                ship.location_id = i64::from(s_id);
-                ship.flag = InventoryFlag::None;
-                ship.version += 1;
-            }
+            let _ = crate::router::apply_character_transition_in_snap(
+                snap,
+                &ctx.sde,
+                char_id,
+                crate::router::TransitionLocation::Space { solar_system_id: s_id },
+                None,
+                true,
+                false,
+            )
+            .map_err(|e| BridgeRpcError {
+                code: "SessionTransitionFailed".into(),
+                message: e.to_string(),
+            })?;
+            let ch = snap.characters.get(&char_id).unwrap();
             snap.item_positions
                 .insert(active_ship, NPE_POCKET_ANCHOR_POS);
             let stype = snap
@@ -665,10 +669,21 @@ pub fn transition_character_into_npe_pocket(
     spawn_or_move_ship_in_pocket(ctx, char_id, sys_id, ship_id, ship_type_id);
 
     if let Some(sess) = session.as_deref_mut() {
-        sess.station_id = None;
-        sess.structure_id = None;
-        sess.solar_system_id = Some(sys_id);
-        sess.ship_id = Some(ship_id);
+        let _ = ctx.execute_session_transition_sync(
+            Some(sess),
+            crate::router::SessionTransitionSpec::for_kind(
+                char_id,
+                crate::router::TransitionKind::Teleport {
+                    solar_system_id: sys_id,
+                    dock_id: None,
+                    ship_id: Some(ship_id),
+                },
+                "npe_pocket",
+            )
+            .with_apply_db(false)
+            .with_sync_local_chat(false)
+            .with_emit_on_session_changed(false),
+        );
         let _ = ctx.bind_object(sess, "beyonce", i64::from(sys_id));
     }
 

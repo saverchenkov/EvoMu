@@ -259,7 +259,16 @@ pub(super) fn handle_add_corporation(
                     .unwrap_or((0, session.solar_system_id.unwrap_or(0), session.station_id.or(session.structure_id)))
             });
             if act_ship != 0 {
-                session.ship_id = Some(act_ship);
+                let _ = ctx.execute_session_transition_sync(
+                    Some(session),
+                    crate::router::SessionTransitionSpec::for_kind(
+                        char_id,
+                        crate::router::TransitionKind::BoardShip { ship_id: act_ship },
+                        "corp_change",
+                    )
+                    .with_apply_db(false)
+                    .with_emit_on_session_changed(false),
+                );
             }
             if old_corp_id != corp_id {
                 ctx.invalidate_bound_objects_for_session_transition(

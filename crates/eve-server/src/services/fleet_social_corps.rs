@@ -1293,7 +1293,16 @@ pub(super) fn handle_corps(
                             session.corp_role = 0;
                             if let Some(act_ship) = ctx.db.with_snapshot(|s| s.characters.get(&applicant_id).map(|c| c.active_ship_id)) {
                                 if act_ship != 0 {
-                                    session.ship_id = Some(act_ship);
+                                    let _ = ctx.execute_session_transition_sync(
+                                        Some(session),
+                                        crate::router::SessionTransitionSpec::for_kind(
+                                            applicant_id,
+                                            crate::router::TransitionKind::BoardShip { ship_id: act_ship },
+                                            "corp_change",
+                                        )
+                                        .with_apply_db(false)
+                                        .with_emit_on_session_changed(false),
+                                    );
                                 }
                             }
                         }

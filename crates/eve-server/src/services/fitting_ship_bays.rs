@@ -232,9 +232,15 @@ pub(crate) async fn board_stored_ship(
             s.flag = if dock_id.is_some() { InventoryFlag::Hangar } else { InventoryFlag::None };
             s.version += 1;
         }
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.active_ship_id = stored_id;
-        }
+        let _ = crate::router::apply_character_transition_in_snap(
+            snap,
+            &ctx.sde,
+            char_id,
+            crate::router::TransitionLocation::KeepCurrent,
+            Some(stored_id),
+            false,
+            false,
+        );
         let is_cap = prev_ship_id
             .and_then(|p| snap.items.get(&p))
             .and_then(|i| ctx.sde.types.get(&i.type_id))
@@ -300,7 +306,16 @@ pub(crate) async fn board_stored_ship(
         let _ = sys.spawn_ball_with_meta(ball, cs, meta).await;
     }
     let old_ship = prev_ship_id.unwrap_or(0);
-    session.ship_id = Some(stored_id);
+    let _ = ctx.execute_session_transition_sync(
+        Some(session),
+        crate::router::SessionTransitionSpec::for_kind(
+            char_id,
+            crate::router::TransitionKind::BoardShip { ship_id: stored_id },
+            "ship_board",
+        )
+        .with_apply_db(false)
+        .with_emit_on_session_changed(false),
+    );
     ctx.invalidate_ship_fitting(stored_id);
     if let Some(prev) = prev_ship_id {
         crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, prev);

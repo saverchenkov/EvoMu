@@ -364,12 +364,7 @@ impl ServerContext {
             session.character_id = None;
             session.corporation_id = None;
             session.alliance_id = None;
-            session.station_id = None;
-            session.structure_id = None;
-            session.solar_system_id = None;
-            session.constellation_id = None;
-            session.region_id = None;
-            session.ship_id = None;
+            crate::router::clear_session_character_state(session);
             return Err(BridgeRpcError {
                 code: "ClusterShuttingDown".into(),
                 message: "Cluster is undergoing scheduled daily downtime; non-GM gameplay RPCs are rejected".into(),
@@ -402,12 +397,7 @@ impl ServerContext {
                         session.character_id = None;
                         session.corporation_id = None;
                         session.alliance_id = None;
-                        session.station_id = None;
-                        session.structure_id = None;
-                        session.solar_system_id = None;
-                        session.constellation_id = None;
-                        session.region_id = None;
-                        session.ship_id = None;
+                        crate::router::clear_session_character_state(session);
                         return Err(BridgeRpcError { code, message: msg });
                     }
                 }
@@ -418,12 +408,7 @@ impl ServerContext {
         if let Some(cid) = session.character_id {
             crate::services::fleet_social::fleet_social_notify::sync_session_fleet(self, session, cid);
             if let Ok(ch) = self.db.get_character(cid) {
-                session.ship_id = Some(ch.active_ship_id);
-                session.station_id = ch.station_id;
-                session.structure_id = ch.structure_id;
-                session.solar_system_id = Some(ch.solar_system_id);
-                session.constellation_id = Some(ch.constellation_id);
-                session.region_id = Some(ch.region_id);
+                crate::router::apply_session_from_character(session, &ch, None, Some(&self.sde));
             }
         }
         let now_unix = self.now_unix();

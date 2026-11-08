@@ -1117,9 +1117,15 @@ fn handle_ship_clone_installation(
                     }));
                 }
                 ctx.db.with_mut_snapshot(|snap| {
-                    if let Some(ch) = snap.characters.get_mut(&char_id) {
-                        ch.active_ship_id = host_ship_id;
-                    }
+                    let _ = crate::router::apply_character_transition_in_snap(
+                        snap,
+                        &ctx.sde,
+                        char_id,
+                        crate::router::TransitionLocation::KeepCurrent,
+                        Some(host_ship_id),
+                        false,
+                        false,
+                    );
                     let mut offers = load_ship_clone_offers(snap);
                     offers.insert(target_char_id, (char_id, host_ship_id));
                     save_ship_clone_offers(snap, &offers);

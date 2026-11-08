@@ -277,8 +277,7 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
     if let Some(active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, Some((sys_id, cur_tick))) {
         return Err(err("SessionChangeInProgress", format!("Cannot jump through structure stargate while 10s timer from '{}' is active", active.reason)));
     }
-    let dest_sys_info = ctx.sde.solar_systems.get(&dest_sys_id).ok_or_else(|| err("InvalidDestination", format!("Destination system {dest_sys_id} not in SDE")))?;
-    let (dest_const_id, dest_reg_id) = (dest_sys_info.constellation_id, dest_sys_info.region_id);
+    let _dest_sys_info = ctx.sde.solar_systems.get(&dest_sys_id).ok_or_else(|| err("InvalidDestination", format!("Destination system {dest_sys_id} not in SDE")))?;
     let dist_ly = crate::services::space_destiny::space_nav_travel::distance_ly(ctx, sys_id, dest_sys_id).max(0.01);
     let ozone_cost = ((ship_ball.mass * dist_ly * 0.000003 + 50.0).round() as i64).max(50);
     ctx.db.try_with_mut_snapshot(|snap| {
@@ -335,22 +334,16 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
     let prev_combat_state = old_handle.get_combat_state(ship_id).await.ok().flatten();
     let existing_ball = old_handle.remove_ball(ship_id).await;
     let updated_ch = ctx.db.with_mut_snapshot(|snap| {
-        {
-            let ch = snap.characters.get_mut(&char_id).unwrap();
-            ch.solar_system_id = dest_sys_id;
-            ch.constellation_id = dest_const_id;
-            ch.region_id = dest_reg_id;
-            ch.station_id = None;
-            ch.structure_id = None;
-            ch.active_ship_id = ship_id;
-            ch.version += 1;
-            ch.system_epoch += 1;
-        }
-        if let Some(ship) = snap.items.get_mut(&ship_id) {
-            ship.location_id = dest_sys_id as i64;
-            ship.version += 1;
-        }
-        snap.characters[&char_id].clone()
+        crate::router::apply_character_transition_in_snap(
+            snap,
+            &ctx.sde,
+            char_id,
+            crate::router::TransitionLocation::Space { solar_system_id: dest_sys_id },
+            Some(ship_id),
+            true,
+            false,
+        )
+        .expect("character must exist for ansiblex jump")
     });
     ctx.sync_character_local_chat(char_id, Some(sys_id), dest_sys_id);
     let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
@@ -370,13 +363,20 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
     let new_tick = new_handle.spawn_ball_with_meta(new_ball, combat_state, slim_meta).await.unwrap_or(0);
     let _ = new_handle.push_set_state(ship_id).await;
     crate::services::space_destiny::record_session_change_timer(ctx, char_id, now_unix, dest_sys_id, new_tick, "jump_bridge");
-    session.solar_system_id = Some(updated_ch.solar_system_id);
-    session.constellation_id = Some(updated_ch.constellation_id);
-    session.region_id = Some(updated_ch.region_id);
-    session.station_id = None;
-    session.structure_id = None;
+    let _ = updated_ch;
+    let _ = ctx.execute_session_transition_sync(
+        Some(session),
+        crate::router::SessionTransitionSpec::for_kind(
+            char_id,
+            crate::router::TransitionKind::JumpSystem { solar_system_id: dest_sys_id },
+            "jump_bridge",
+        )
+        .with_apply_db(false)
+        .with_cleanup_departing_space(false)
+        .with_sync_local_chat(false)
+        .with_emit_on_session_changed(false),
+    );
     crate::services::map_service::record_solar_system_jump(ctx, char_id, dest_sys_id);
-    ctx.quasar_gateway.on_session_changed(session, now_unix);
     let new_beyonce = ctx.bind_object(session, "beyonce", dest_sys_id as i64)?;
     Ok(PyRep::keyval([("solarSystemID", PyRep::Integer(dest_sys_id as i64)), ("beyonceBoundID", PyRep::Integer(new_beyonce as i64))]))
 }

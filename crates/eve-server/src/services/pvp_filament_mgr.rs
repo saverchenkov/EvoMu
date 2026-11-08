@@ -1117,14 +1117,15 @@ pub async fn handle(
                     store.match_filament_types.insert(mid, it_type_id);
 
                     for &(pid, p_ship_id, _) in &participants {
-                        if let Some(c) = snap.characters.get_mut(&pid) {
-                            c.solar_system_id = 32_000_001;
-                            c.station_id = None;
-                            c.structure_id = None;
-                        }
-                        if let Some(sh) = snap.items.get_mut(&p_ship_id) {
-                            sh.location_id = 32_000_001;
-                        }
+                        let _ = crate::router::apply_character_transition_in_snap(
+                            snap,
+                            &ctx.sde,
+                            pid,
+                            crate::router::TransitionLocation::Space { solar_system_id: 32_000_001 },
+                            Some(p_ship_id),
+                            true,
+                            false,
+                        );
                     }
 
                     Some((mid, end_gate_id, arena_offset, teams, participants))

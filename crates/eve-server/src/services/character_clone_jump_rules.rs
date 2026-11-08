@@ -619,26 +619,26 @@ pub fn handle_clone_jump(
         };
         crate::services::implant_plugging::sync_clone_jump_implants_and_boosters(&ctx.sde, snap, char_id);
 
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            if ship_clone_spawn_pos.is_some() {
-                ch.station_id = None;
-                ch.structure_id = None;
-            } else if dest_loc_id >= 1_000_000_000_000 {
-                ch.structure_id = Some(dest_loc_id);
-                ch.station_id = None;
-            } else {
-                ch.station_id = Some(dest_loc_id);
-                ch.structure_id = None;
-            }
-            ch.solar_system_id = dest_sys_id;
-            ch.constellation_id = dest_const_id;
-            ch.region_id = dest_reg_id;
-            ch.active_ship_id = capsule_id;
-            if !same_location_swap {
+        let target_loc = if ship_clone_spawn_pos.is_some() {
+            crate::router::TransitionLocation::Space { solar_system_id: dest_sys_id }
+        } else if dest_loc_id >= 1_000_000_000_000 {
+            crate::router::TransitionLocation::Structure { solar_system_id: Some(dest_sys_id), structure_id: dest_loc_id }
+        } else {
+            crate::router::TransitionLocation::Station { solar_system_id: Some(dest_sys_id), station_id: dest_loc_id }
+        };
+        let _ = crate::router::apply_character_transition_in_snap(
+            snap,
+            &ctx.sde,
+            char_id,
+            target_loc,
+            Some(capsule_id),
+            false,
+            false,
+        );
+        if !same_location_swap {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
                 ch.last_clone_jump_unix = now_unix;
             }
-            ch.version += 1;
-            ch.system_epoch += 1;
         }
         let cleared_zarzakh_gate = if dest_sys_id != 30_100_000 {
             snap.zarzakh_gate_locks.remove(&char_id).map(|(gid, _)| gid)
@@ -664,8 +664,8 @@ pub fn handle_clone_jump(
             jc_id,
             dest_loc_id,
             dest_sys_id,
-            dest_const_id,
-            dest_reg_id,
+            _dest_const_id,
+            _dest_reg_id,
             capsule_id,
             cooldown_sec,
             active_implants,
@@ -682,8 +682,6 @@ pub fn handle_clone_jump(
                 );
             }
             if let Some(spawn_pos) = ship_clone_spawn_pos {
-                session.station_id = None;
-                session.structure_id = None;
                 let (ch_corp_id, ch_alliance_id, ch_sec_status) = ctx.db.with_snapshot(|s| {
                     if let Some(ch) = s.characters.get(&char_id) {
                         let all_id = ch
@@ -722,22 +720,31 @@ pub fn handle_clone_jump(
                         is_cloaked: false, ..Default::default()
                     },
                 );
-            } else if dest_loc_id >= 1_000_000_000_000 {
-                session.structure_id = Some(dest_loc_id);
-                session.station_id = None;
-            } else {
-                session.station_id = Some(dest_loc_id);
-                session.structure_id = None;
             }
-            session.solar_system_id = Some(dest_sys_id);
-            session.constellation_id = Some(dest_const_id);
-            session.region_id = Some(dest_reg_id);
-            session.ship_id = Some(capsule_id);
+            let clone_dock = if ship_clone_spawn_pos.is_some() {
+                None
+            } else {
+                Some((dest_loc_id, dest_loc_id >= 1_000_000_000_000))
+            };
             let timer_reason = if dest_loc_id == departure_loc_id {
                 "clone_swap"
             } else {
                 "clone_jump"
             };
+            let clone_spec = crate::router::SessionTransitionSpec::for_kind(
+                char_id,
+                crate::router::TransitionKind::CloneJump {
+                    solar_system_id: dest_sys_id,
+                    dock_id: clone_dock,
+                    ship_id: Some(capsule_id),
+                },
+                timer_reason,
+            )
+            .with_apply_db(false)
+            .with_cleanup_departing_space(false)
+            .with_sync_local_chat(false)
+            .with_emit_on_session_changed(false);
+            let _ = ctx.execute_session_transition_sync(Some(session), clone_spec);
             crate::services::space_destiny::record_session_change_timer(
                 ctx,
                 char_id,
