@@ -43,18 +43,6 @@ pub async fn handle_weapons(
                     message: "Session has no active solar system".into(),
                 }));
             };
-            let module_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let _effect_name = args
-                .get(1)
-                .and_then(|a| a.as_str())
-                .unwrap_or("targetAttack")
-                .to_string();
-            let target_id_opt = args
-                .get(2)
-                .and_then(|a| a.as_i64())
-                .or_else(|| args.get(1).and_then(|a| a.as_i64()))
-                .or_else(|| kwargs.get("target").and_then(|v| v.as_i64()));
-
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let Some((attacker_tick, attacker_ball)) = sys_handle
                 .get_ball_snapshot(ship_id)
@@ -66,6 +54,25 @@ pub async fn handle_weapons(
                     code: "ShipNotInSpace".into(),
                     message: format!("Active ship {ship_id} is not spawned in space"),
                 }));
+            };
+
+            let rpc = RpcArgs::new(args, kwargs);
+            let module_id = match rpc.req_positive_i64(0, "moduleID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let _effect_name = match rpc.opt_str(1, "effectName") {
+                Ok(v) => v.unwrap_or("targetAttack").to_string(),
+                Err(_) => "targetAttack".to_string(),
+            };
+            let target_id_opt = match rpc
+                .opt_i64(2, "target")
+                .transpose()
+                .or_else(|| args.get(1).and_then(|a| a.as_i64()).map(Ok))
+            {
+                Some(Ok(id)) => Some(id),
+                Some(Err(e)) => return Some(Err(e)),
+                None => None,
             };
 
             if controlling_structure {

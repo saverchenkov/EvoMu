@@ -50,6 +50,7 @@ use crate::formulas::{
     turret_chance_to_hit_with_res, turret_shot_damage, vorton_arc_targets_with_cap,
 };
 use crate::router::{NotificationTarget, ServerContext};
+pub use crate::router::RpcArgs;
 use eve_db::{
     InventoryFlag, InventoryItemRecord, IskCents, KillRightRecord, KillmailRecord,
     SystemDynamicState, WalletJournalEntry,

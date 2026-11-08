@@ -16,7 +16,7 @@ use super::wallet_services_ext;
 pub use super::wallet_services_ext::*;
 pub use super::serverops_cluster::*;
 
-use crate::router::{NotificationTarget, ServerContext};
+use crate::router::{NotificationTarget, RpcArgs, ServerContext};
 use eve_db::{InventoryFlag, IskCents, WorldStateSnapshot};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -234,12 +234,12 @@ pub fn handle(
     service: &str,
     method: &str,
     args: &[PyRep],
-    _kwargs: &HashMap<String, PyRep>,
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    if let Some(res) = super::wallet_ledger::handle(ctx, session, service, method, args, _kwargs) {
+    if let Some(res) = super::wallet_ledger::handle(ctx, session, service, method, args, kwargs) {
         return Some(res);
     }
-    if let Some(res) = wallet_services_ext::handle(ctx, session, service, method, args, _kwargs) {
+    if let Some(res) = wallet_services_ext::handle(ctx, session, service, method, args, kwargs) {
         return Some(res);
     }
     match (service, method) {
@@ -273,7 +273,11 @@ pub fn handle(
             Some(Ok(PyRep::List(tower_rows)))
         }
         ("posMgr", "GetMoonForTower") => {
-            let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let rpc = RpcArgs::new(args, kwargs);
+            let tower_id = match rpc.req_i64(0, "towerID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let moon_id = ctx.db.with_snapshot(|snap| {
                 if tower_id <= 0 {
                     return None;
@@ -304,7 +308,11 @@ pub fn handle(
             Some(Ok(moon_id.map(PyRep::Integer).unwrap_or(PyRep::None)))
         }
         ("posMgr", "GetMoonProcessInfoForTower") => {
-            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let rpc = RpcArgs::new(args, kwargs);
+            let item_id = match rpc.req_positive_i64(0, "itemID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let prov = ctx.db.with_snapshot(|snap| snap.orbital_provision_types.get(&item_id).copied());
             Some(Ok(prov.map(PyRep::Integer).unwrap_or(PyRep::None)))
         }
@@ -324,7 +332,8 @@ pub fn handle(
 
         ("posMgr", "AssumeStructureControl") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let rpc = RpcArgs::new(args, kwargs);
+            let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let is_tower_owner = ctx.db.with_snapshot(|snap| {
                 let owner_id = snap.items.get(&item_id).map(|i| i.owner_id).or_else(|| snap.structures.get(&item_id).map(|s| s.owner_corp_id));
                 let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
@@ -351,7 +360,8 @@ pub fn handle(
 
         ("posMgr", "RelinquishStructureControl") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let rpc = RpcArgs::new(args, kwargs);
+            let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                 if let Some(st) = snap.starbase_settings.get_mut(&item_id) {
                     if st.active_controller_id == Some(char_id) { st.active_controller_id = None; }
@@ -365,7 +375,8 @@ pub fn handle(
 
         ("posMgr", "GetStarbasePermissions") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let rpc = RpcArgs::new(args, kwargs);
+            let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let (deploy_flags, usage_flags) = ctx.db.with_snapshot(|snap| {
                 let settings = snap.starbase_settings.get(&item_id);
                 let (anchor, unanchor, online, offline) = if let Some(s) = settings {
@@ -396,11 +407,12 @@ pub fn handle(
 
         ("posMgr", "SetStarbasePermissions") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
-            let flag_anchor = args.get(1).and_then(|a| a.as_str()).unwrap_or("corp").to_string();
-            let flag_unanchor = args.get(2).and_then(|a| a.as_str()).unwrap_or("corp").to_string();
-            let flag_online = args.get(3).and_then(|a| a.as_str()).unwrap_or("corp").to_string();
-            let flag_offline = args.get(4).and_then(|a| a.as_str()).unwrap_or("corp").to_string();
+            let rpc = RpcArgs::new(args, kwargs);
+            let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let flag_anchor = match rpc.opt_str(1, "anchor") { Ok(v) => v.unwrap_or("corp").to_string(), Err(e) => return Some(Err(e)) };
+            let flag_unanchor = match rpc.opt_str(2, "unanchor") { Ok(v) => v.unwrap_or("corp").to_string(), Err(e) => return Some(Err(e)) };
+            let flag_online = match rpc.opt_str(3, "online") { Ok(v) => v.unwrap_or("corp").to_string(), Err(e) => return Some(Err(e)) };
+            let flag_offline = match rpc.opt_str(4, "offline") { Ok(v) => v.unwrap_or("corp").to_string(), Err(e) => return Some(Err(e)) };
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                 check_starbase_auth(snap, session, char_id, item_id)?;
                 let entry = snap.starbase_settings.entry(item_id).or_default();
@@ -415,7 +427,8 @@ pub fn handle(
 
         ("posMgr", "GetTowerNotificationSettings") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let rpc = RpcArgs::new(args, kwargs);
+            let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let (send_fuel, show_cal) = ctx.db.with_snapshot(|snap| {
                 snap.starbase_settings.get(&item_id).map(|s| (s.notify_fuel, s.notify_calendar)).unwrap_or((true, false))
             });
@@ -430,9 +443,10 @@ pub fn handle(
 
         ("posMgr", "SetTowerNotifications") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
-            let show_calendar = matches!(args.get(1), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
-            let send_fuel = !matches!(args.get(2), Some(PyRep::Bool(false)) | Some(PyRep::Integer(0)));
+            let rpc = RpcArgs::new(args, kwargs);
+            let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let show_calendar = match rpc.opt_bool(1, "showInCalendar") { Ok(v) => v.unwrap_or(false), Err(e) => return Some(Err(e)) };
+            let send_fuel = match rpc.opt_bool(2, "sendFuelNotifications") { Ok(v) => v.unwrap_or(true), Err(e) => return Some(Err(e)) };
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                 check_starbase_auth(snap, session, char_id, item_id)?;
                 let s = snap.starbase_settings.entry(item_id).or_default();
@@ -445,7 +459,8 @@ pub fn handle(
 
         ("posMgr", "GetTowerSentrySettings") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let rpc = RpcArgs::new(args, kwargs);
+            let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let (standing, status, status_drop, corp_war, standing_owner_id) = ctx.db.with_snapshot(|snap| {
                 if let Some(s) = snap.starbase_settings.get(&item_id) {
                     (
@@ -486,12 +501,13 @@ pub fn handle(
 
         ("posMgr", "SetTowerSentrySettings") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
-            let standing = args.get(1).and_then(|a| match a { PyRep::Real(r) => Some(*r), PyRep::Integer(i) => Some(*i as f64), _ => None }).unwrap_or(0.0);
-            let status = args.get(2).and_then(|a| match a { PyRep::Real(r) => Some(*r), PyRep::Integer(i) => Some(*i as f64), _ => None }).unwrap_or(0.0);
-            let status_drop = matches!(args.get(3), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
-            let corp_war = matches!(args.get(4), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
-            let use_alliance = matches!(args.get(5), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
+            let rpc = RpcArgs::new(args, kwargs);
+            let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let standing = match rpc.opt_finite_f64(1, "standing") { Ok(v) => v.unwrap_or(0.0), Err(e) => return Some(Err(e)) };
+            let status = match rpc.opt_finite_f64(2, "status") { Ok(v) => v.unwrap_or(0.0), Err(e) => return Some(Err(e)) };
+            let status_drop = match rpc.opt_bool(3, "statusDrop") { Ok(v) => v.unwrap_or(false), Err(e) => return Some(Err(e)) };
+            let corp_war = match rpc.opt_bool(4, "corpWar") { Ok(v) => v.unwrap_or(false), Err(e) => return Some(Err(e)) };
+            let use_alliance = match rpc.opt_bool(5, "useAlliance") { Ok(v) => v.unwrap_or(false), Err(e) => return Some(Err(e)) };
 
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                 check_starbase_auth(snap, session, char_id, item_id)?;
@@ -508,10 +524,11 @@ pub fn handle(
 
         ("posMgr", "SetTowerPassword") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
-            let password = args.get(1).and_then(|a| a.as_str()).unwrap_or("password");
-            let allow_corp = matches!(args.get(2), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)) | None);
-            let allow_alliance = matches!(args.get(3), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)) | None);
+            let rpc = RpcArgs::new(args, kwargs);
+            let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let password = match rpc.req_str(1, "password") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let allow_corp = match rpc.opt_bool(2, "allowCorp") { Ok(v) => v.unwrap_or(true), Err(e) => return Some(Err(e)) };
+            let allow_alliance = match rpc.opt_bool(3, "allowAlliance") { Ok(v) => v.unwrap_or(true), Err(e) => return Some(Err(e)) };
 
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                 check_starbase_auth(snap, session, char_id, item_id)?;
@@ -526,7 +543,8 @@ pub fn handle(
 
         ("posMgr", "GetConsumptionFactor") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let rpc = RpcArgs::new(args, kwargs);
+            let tower_id = match rpc.req_positive_i64(0, "towerID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let factor = ctx.db.with_snapshot(|snap| {
                 let char_rec = snap.characters.get(&char_id);
                 let fallback_sys = session.solar_system_id.or_else(|| char_rec.map(|c| c.solar_system_id)).unwrap_or(0);
@@ -552,7 +570,8 @@ pub fn handle(
 
         ("posMgr", "GetSiloCapacityByItemID") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let rpc = RpcArgs::new(args, kwargs);
+            let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let cap = ctx.db.with_snapshot(|snap| {
                 snap.items.get(&item_id).and_then(|it| ctx.sde.types.get(&it.type_id)).map(|t| t.capacity).unwrap_or(20_000.0)
             });
@@ -561,12 +580,9 @@ pub fn handle(
 
         ("posMgr", "LinkResourceForTower") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
-            let target_ids: Vec<i64> = match args.get(1) {
-                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => items.iter().filter_map(|x| x.as_i64()).collect(),
-                Some(other) => other.as_i64().into_iter().collect(),
-                None => Vec::new(),
-            };
+            let rpc = RpcArgs::new(args, kwargs);
+            let tower_id = match rpc.req_positive_i64(0, "towerID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let target_ids = match rpc.req_id_or_id_list(1, "targetIDs") { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                 check_starbase_auth(snap, session, char_id, tower_id)?;
                 let tower_corp = snap.structures.get(&tower_id).map(|s| s.owner_corp_id).unwrap_or(0);
@@ -602,9 +618,10 @@ pub fn handle(
 
         ("posMgr", "ChangeStructureProvisionType") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
-            let item_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(100_000_002);
-            let provision_type_raw = args.get(2).and_then(|a| a.as_i64()).unwrap_or(16634);
+            let rpc = RpcArgs::new(args, kwargs);
+            let tower_id = match rpc.req_positive_i64(0, "towerID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let item_id = match rpc.req_positive_i64(1, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let provision_type_raw = match rpc.req_i64(2, "provisionTypeID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let provision_type = match u32::try_from(provision_type_raw) {
                 Ok(t) => t,
                 Err(_) => return Some(Err(rpc_err("InvalidTypeID", "Provision type ID must be a valid positive 32-bit integer"))),
@@ -822,7 +839,7 @@ pub fn handle(
             let from_account_key = args
                 .get(1)
                 .and_then(|a| a.as_i64())
-                .or_else(|| _kwargs.get("fromAccountKey").and_then(|v| v.as_i64()))
+                .or_else(|| kwargs.get("fromAccountKey").and_then(|v| v.as_i64()))
                 .unwrap_or(1000)
                 .clamp(1000, 1006) as u16;
             let div_id = (from_account_key - 999) as u8;
@@ -1009,13 +1026,10 @@ fn handle_give_cash(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let to_id = args.first().and_then(|a| a.as_i64())
-        .ok_or_else(|| rpc_err("InvalidArgument", "GiveCash requires toID"))?;
-    let amount_isk = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0);
-    let reason = args.get(2).and_then(|a| a.as_str()).unwrap_or("").to_string();
-    if !amount_isk.is_finite() || amount_isk <= 0.0 {
-        return Err(rpc_err("InvalidArgument", "GiveCash amount must be positive and finite"));
-    }
+    let rpc = RpcArgs::positional(args);
+    let to_id = rpc.req_positive_i64(0, "toID")?;
+    let amount_isk = rpc.req_positive_f64(1, "amount")?;
+    let reason = rpc.opt_str(2, "reason")?.unwrap_or("").to_string();
     if to_id == char_id {
         return Err(rpc_err("InvalidArgument", "Cannot give ISK to yourself"));
     }
@@ -1076,16 +1090,10 @@ fn handle_set_contact_cost(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let cost = match args.first() {
-        None | Some(PyRep::None) => None,
-        Some(v) => {
-            let isk = v.as_f64().ok_or_else(|| rpc_err("InvalidArgument", "SetContactCost expects an ISK amount or None"))?;
-            if !isk.is_finite() || isk < 0.0 {
-                return Err(rpc_err("InvalidArgument", "CSPA charge must be a non-negative ISK amount"));
-            }
-            Some(IskCents::from_f64_isk(isk))
-        }
-    };
+    let rpc = RpcArgs::positional(args);
+    let cost = rpc
+        .opt_non_negative_f64(0, "cost")?
+        .map(IskCents::from_f64_isk);
     ctx.db.with_mut_snapshot(|snap| match cost {
         Some(c) if c.0 > 0 => { snap.character_cspa_charges.insert(char_id, c); }
         _ => { snap.character_cspa_charges.remove(&char_id); }

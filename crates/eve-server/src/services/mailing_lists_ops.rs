@@ -555,7 +555,10 @@ fn handle_mailing_list_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let list_id = match crate::router::RpcArgs::positional(args).req_positive_i64(0, "listID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let mut s = ctx.social_extras.lock().unwrap();
             if let Some(ml) = s.mailing_lists.get_mut(&list_id) {
                 ml.members.remove(&char_id);
@@ -570,7 +573,10 @@ fn handle_mailing_list_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let list_id = match crate::router::RpcArgs::positional(args).req_positive_i64(0, "listID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let (corp_id, alliance_id) = ctx.db.with_snapshot(|snap| {
                 snap.characters
                     .get(&char_id)
@@ -620,8 +626,15 @@ fn handle_mailing_list_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let entity_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+            let rpc = crate::router::RpcArgs::positional(args);
+            let list_id = match rpc.req_positive_i64(0, "listID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let entity_id = match rpc.req_positive_i64(1, "entityID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
 
             let mut s = ctx.social_extras.lock().unwrap();
             let Some(ml) = s.mailing_lists.get_mut(&list_id) else {
@@ -647,7 +660,10 @@ fn handle_mailing_list_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let list_id = match crate::router::RpcArgs::positional(args).req_positive_i64(0, "listID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let (corp_id, alliance_id) = ctx.db.with_snapshot(|snap| {
                 snap.characters
                     .get(&char_id)
@@ -695,7 +711,10 @@ fn handle_mailing_list_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let list_id = match crate::router::RpcArgs::positional(args).req_positive_i64(0, "listID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
 
             let mut s = ctx.social_extras.lock().unwrap();
             let Some(ml) = s.mailing_lists.get_mut(&list_id) else {
@@ -721,7 +740,10 @@ fn handle_mailing_list_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let list_id = match crate::router::RpcArgs::positional(args).req_positive_i64(0, "listID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
 
             let mut s = ctx.social_extras.lock().unwrap();
             let Some(ml) = s.mailing_lists.get(&list_id) else {
@@ -759,7 +781,10 @@ fn handle_mailing_list_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let list_id = match crate::router::RpcArgs::positional(args).req_positive_i64(0, "listID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let (corp_id, alliance_id) = ctx.db.with_snapshot(|snap| {
                 snap.characters
                     .get(&char_id)
@@ -824,7 +849,10 @@ fn handle_mailing_list_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let list_id = match crate::router::RpcArgs::positional(args).req_positive_i64(0, "listID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let targets = extract_id_list(args.get(1));
 
             let mut affected = Vec::new();
@@ -868,7 +896,10 @@ fn handle_mailing_list_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let list_id = match crate::router::RpcArgs::positional(args).req_positive_i64(0, "listID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let title = args.get(1).and_then(|a| a.as_str()).unwrap_or("Welcome!");
             let body = args.get(2).and_then(|a| a.as_str()).unwrap_or("o7");
 
@@ -899,7 +930,10 @@ fn handle_mailing_list_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let list_id = match crate::router::RpcArgs::positional(args).req_positive_i64(0, "listID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let mut s = ctx.social_extras.lock().unwrap();
             let Some(ml) = s.mailing_lists.get_mut(&list_id) else {
                 return Some(Err(BridgeRpcError {
@@ -984,7 +1018,10 @@ fn handle_mailing_list_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let list_id = match crate::router::RpcArgs::positional(args).req_positive_i64(0, "listID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let default_access = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
             let default_role = args.get(2).and_then(|a| a.as_i64());
             let mail_cost = args.get(3).and_then(|a| a.as_i64());
@@ -1026,7 +1063,10 @@ fn handle_mailing_list_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let list_id = match crate::router::RpcArgs::positional(args).req_positive_i64(0, "listID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
 
             let mut s = ctx.social_extras.lock().unwrap();
             let Some(ml) = s.mailing_lists.get_mut(&list_id) else {
@@ -1074,7 +1114,10 @@ fn handle_mailing_list_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let list_id = match crate::router::RpcArgs::positional(args).req_positive_i64(0, "listID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let targets = extract_id_list(args.get(1));
 
             let new_role = match method {

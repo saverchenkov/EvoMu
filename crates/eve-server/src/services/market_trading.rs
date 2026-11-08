@@ -19,7 +19,7 @@ pub use market_orders_escrow::*;
 
 use super::market_contracts::PLEX_TYPE_ID;
 use crate::formulas::{compute_broker_fee_rate, compute_sales_tax_rate};
-use crate::router::{NotificationTarget, ServerContext};
+use crate::router::{NotificationTarget, RpcArgs, ServerContext};
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, MarketOrderRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
@@ -781,7 +781,11 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let docked_station_id = session.station_id.or(session.structure_id);
-            let arg_station_id = args.first().and_then(|a| a.as_i64());
+            let rpc = RpcArgs::new(args, _kwargs);
+            let arg_station_id = match rpc.opt_positive_i64(0, "stationID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let Some(station_id) = arg_station_id.or(docked_station_id) else {
                 return Some(Err(BridgeRpcError {
                     code: "NotDockedAtStation".into(),
@@ -795,48 +799,72 @@ pub fn handle(
                     message: "Session has no active region".into(),
                 }));
             };
-            let Some(raw_type_id) = args.get(1).and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidMarketOrder".into(),
-                    message: "Market order placement requires typeID".into(),
-                }));
+            let raw_type_id = match rpc.req_positive_i64(1, "typeID") {
+                Ok(v) => v,
+                Err(mut e) => {
+                    e.code = "InvalidMarketOrder".into();
+                    return Some(Err(e));
+                }
             };
             let type_id = raw_type_id as TypeId;
-            let price_isk = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.0);
-            let quantity = args.get(3).and_then(|a| a.as_i64()).unwrap_or(0);
+            let price_isk = match rpc.req_positive_f64(2, "price") {
+                Ok(v) => v,
+                Err(mut e) => {
+                    e.code = "InvalidMarketOrder".into();
+                    return Some(Err(e));
+                }
+            };
+            let quantity = match rpc.req_positive_i64(3, "quantity") {
+                Ok(v) => v,
+                Err(mut e) => {
+                    e.code = "InvalidMarketOrder".into();
+                    return Some(Err(e));
+                }
+            };
             let is_bid = true;
             let is_v24_buy_sig = matches!(args.get(6), Some(PyRep::Integer(_)));
             let order_range = if is_v24_buy_sig {
-                args.get(4).and_then(|a| a.as_i64()).unwrap_or(-1)
+                match rpc.opt_i64(4, "orderRange") {
+                    Ok(v) => v.unwrap_or(-1),
+                    Err(mut e) => { e.code = "InvalidMarketOrder".into(); return Some(Err(e)); }
+                }
             } else {
-                _kwargs
-                    .get("orderRange")
-                    .or_else(|| _kwargs.get("range"))
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(-1)
+                match rpc.opt_i64_any(99, &["orderRange", "range"]) {
+                    Ok(v) => v.unwrap_or(-1),
+                    Err(mut e) => { e.code = "InvalidMarketOrder".into(); return Some(Err(e)); }
+                }
             };
-            let min_volume_i32 = args
-                .get(5)
-                .and_then(|a| a.as_i64())
-                .unwrap_or(1)
-                .max(1) as i32;
+            let min_volume_i32 = match rpc.opt_positive_i64(5, "minVolume") {
+                Ok(v) => v.unwrap_or(1).min(i32::MAX as i64) as i32,
+                Err(mut e) => { e.code = "InvalidMarketOrder".into(); return Some(Err(e)); }
+            };
             let duration_days = if is_v24_buy_sig {
-                args.get(6).and_then(|a| a.as_i64()).unwrap_or(90)
+                match rpc.opt_i64(6, "duration") {
+                    Ok(v) => v.unwrap_or(90),
+                    Err(mut e) => { e.code = "InvalidMarketOrder".into(); return Some(Err(e)); }
+                }
             } else {
-                args.get(4).and_then(|a| a.as_i64()).unwrap_or(90)
+                match rpc.opt_i64(4, "duration") {
+                    Ok(v) => v.unwrap_or(90),
+                    Err(mut e) => { e.code = "InvalidMarketOrder".into(); return Some(Err(e)); }
+                }
             };
 
-            let use_corp = args
-                .get(7)
-                .and_then(|a| a.as_bool())
-                .or_else(|| _kwargs.get("useCorp").and_then(|v| v.as_bool()))
-                .unwrap_or(false);
-            let account_key = args
-                .get(8)
-                .and_then(|a| a.as_i64())
-                .or_else(|| _kwargs.get("accountKey").and_then(|v| v.as_i64()))
-                .unwrap_or(session.corp_account_key as i64)
-                .clamp(1000, 1006) as u16;
+            let use_corp = match rpc.opt_bool(7, "useCorp") {
+                Ok(v) => v.unwrap_or(false),
+                Err(mut e) => { e.code = "InvalidMarketOrder".into(); return Some(Err(e)); }
+            };
+            let account_key = if is_v24_buy_sig && matches!(args.get(8), Some(PyRep::Real(_))) {
+                match rpc.opt_i64(99, "accountKey") {
+                    Ok(v) => v.unwrap_or(session.corp_account_key as i64).clamp(1000, 1006) as u16,
+                    Err(mut e) => { e.code = "InvalidMarketOrder".into(); return Some(Err(e)); }
+                }
+            } else {
+                match rpc.opt_i64(8, "accountKey") {
+                    Ok(v) => v.unwrap_or(session.corp_account_key as i64).clamp(1000, 1006) as u16,
+                    Err(mut e) => { e.code = "InvalidMarketOrder".into(); return Some(Err(e)); }
+                }
+            };
 
             if !price_isk.is_finite()
                 || price_isk <= 0.0

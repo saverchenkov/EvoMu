@@ -14,7 +14,7 @@
 #![forbid(unsafe_code)]
 
 use super::market_contracts::PLEX_TYPE_ID;
-use crate::router::{NotificationTarget, ServerContext};
+use crate::router::{NotificationTarget, RpcArgs, ServerContext};
 use eve_db::corp_roles;
 use eve_db::ledger::{ref_types, JournalContext, JournalEntryInput, JournalMeta, ACCOUNTING_KEY_CASH};
 use eve_db::{InventoryFlag, IskCents};
@@ -52,10 +52,6 @@ fn year_month(unix: u64) -> (i64, i64) {
 /// Divisions 1..=7 map to account keys 1000..=1006 (`appConst.accountingKeyCash..Cash7`).
 fn division_of(account_key: i64) -> Option<u8> {
     (1000..=1006).contains(&account_key).then(|| (account_key - 999) as u8)
-}
-
-fn kw_or_arg<'a>(args: &'a [PyRep], idx: usize, kwargs: &'a HashMap<String, PyRep>, key: &str) -> Option<&'a PyRep> {
-    kwargs.get(key).or_else(|| args.get(idx)).filter(|v| !matches!(v, PyRep::None))
 }
 
 pub fn handle(
@@ -185,14 +181,12 @@ fn give_cash_from_corp(
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let to_id = args.first().and_then(|a| a.as_i64()).ok_or_else(|| rpc_err("InvalidArgument", "toID required"))?;
-    let amount_isk = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0);
-    let from_key = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
-    let to_key = kw_or_arg(args, 3, kwargs, "toAccountKey").and_then(|v| v.as_i64()).filter(|k| *k != 0);
-    let reason = kw_or_arg(args, 4, kwargs, "reason").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    if !amount_isk.is_finite() || amount_isk <= 0.0 {
-        return Err(rpc_err("InvalidArgument", "Transfer amount must be positive and finite"));
-    }
+    let rpc = RpcArgs::new(args, kwargs);
+    let to_id = rpc.req_positive_i64(0, "toID")?;
+    let amount_isk = rpc.req_positive_f64(1, "amount")?;
+    let from_key = rpc.opt_i64(2, "fromAccountKey")?.unwrap_or(0);
+    let to_key = rpc.opt_i64(3, "toAccountKey")?.filter(|k| *k != 0);
+    let reason = rpc.opt_str(4, "reason")?.unwrap_or("").to_string();
     let from_div = division_of(from_key)
         .ok_or_else(|| rpc_err("InvalidAccountKey", format!("fromAccountKey {from_key} is not a corp wallet division")))?;
     let amount = IskCents::from_f64_isk(amount_isk);
@@ -284,10 +278,11 @@ fn give_cash_from_corp(
 
 fn get_journal(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let account_key = args.first().and_then(|a| a.as_i64()).unwrap_or(ACCOUNTING_KEY_CASH as i64) as i32;
-    let year = args.get(1).and_then(|a| a.as_i64());
-    let month = args.get(2).and_then(|a| a.as_i64());
-    let is_corp = args.get(3).and_then(|a| a.as_bool()).unwrap_or(false);
+    let rpc = RpcArgs::positional(args);
+    let account_key = rpc.opt_i32(0, "accountKey")?.unwrap_or(ACCOUNTING_KEY_CASH);
+    let year = rpc.opt_i64(1, "year")?;
+    let month = rpc.opt_i64(2, "month")?;
+    let is_corp = rpc.opt_bool(3, "isCorp")?.unwrap_or(false);
     let now = ctx.now_unix();
     let rows = ctx.db.with_snapshot(|snap| -> Result<Vec<Vec<PyRep>>, BridgeRpcError> {
         let owner = if is_corp {
@@ -362,8 +357,9 @@ fn market_transactions(
     corp: bool,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let from_unix = args.first().and_then(|a| a.as_i64()).map(unix_from_filetime).unwrap_or(0);
-    let corp_key = if corp { args.get(1).and_then(|a| a.as_i64()).unwrap_or(1000) as i32 } else { ACCOUNTING_KEY_CASH };
+    let rpc = RpcArgs::positional(args);
+    let from_unix = rpc.opt_i64(0, "fromDate")?.map(unix_from_filetime).unwrap_or(0);
+    let corp_key = if corp { rpc.opt_i32(1, "accountKey")?.unwrap_or(1000) } else { ACCOUNTING_KEY_CASH };
     let now = ctx.now_unix();
     let rows = ctx.db.with_snapshot(|snap| -> Result<Vec<Vec<PyRep>>, BridgeRpcError> {
         let owner = if corp {
@@ -440,12 +436,10 @@ fn deposit_plex_inner(
     char_id: i64,
     args: &[PyRep],
 ) -> Result<(i64, u64, u64, i64, i64), BridgeRpcError> {
-    let location_id = args.first().and_then(|a| a.as_i64()).ok_or_else(|| rpc_err("InvalidArgument", "locationID required"))?;
-    let item_id = args.get(1).and_then(|a| a.as_i64()).ok_or_else(|| rpc_err("InvalidArgument", "itemID required"))?;
-    let qty = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
-    if qty <= 0 {
-        return Err(rpc_err("InvalidArgument", "quantity must be positive"));
-    }
+    let rpc = RpcArgs::positional(args);
+    let location_id = rpc.req_positive_i64(0, "locationID")?;
+    let item_id = rpc.req_positive_i64(1, "itemID")?;
+    let qty = rpc.req_positive_i64(2, "quantity")?;
     let Ok(qty_i32) = i32::try_from(qty) else {
         return Err(rpc_err("InvalidArgument", "quantity exceeds stack limit"));
     };

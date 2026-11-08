@@ -15,7 +15,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::router::ServerContext;
+use crate::router::{RpcArgs, ServerContext};
 pub use crate::services::lp_store_catalog::*;
 pub use eve_db::LpRewardLogEntry;
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
@@ -185,14 +185,15 @@ fn handle_take_offer(
         Err(e) => return Some(Err(e)),
     };
 
+    let rpc = RpcArgs::positional(args);
     let (explicit_corp_id, target_offer_id, qty) = if args.len() >= 3 {
-        let cid = args[0].as_i64();
-        let oid = args[1].as_i64().unwrap_or(0);
-        let q = args[2].as_i64().unwrap_or(1);
+        let cid = match rpc.opt_positive_i64(0, "corpID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+        let oid = match rpc.req_positive_i64(1, "offerID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+        let q = match rpc.req_i64(2, "quantity") { Ok(v) => v, Err(e) => return Some(Err(e)) };
         (cid, oid, q)
     } else {
-        let oid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-        let q = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+        let oid = match rpc.req_positive_i64(0, "offerID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+        let q = match rpc.opt_i64(1, "quantity") { Ok(v) => v.unwrap_or(1), Err(e) => return Some(Err(e)) };
         (None, oid, q)
     };
     if qty <= 0 {
@@ -880,20 +881,31 @@ fn handle_transfer_lp(
     } else {
         "TransferLPFromMyWalletToOtherCorp"
     };
-    let Some(target_corp_id) = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
-        return Some(Err(BridgeRpcError {
-            code: "InvalidTargetCorp".into(),
-            message: format!("{method_name} requires targetCorpID"),
-        }));
+    let rpc = RpcArgs::positional(args);
+    let target_corp_id = match rpc.req_positive_i64(0, "targetCorpID") {
+        Ok(v) => v,
+        Err(_) => {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidTargetCorp".into(),
+                message: format!("{method_name} requires targetCorpID"),
+            }));
+        }
     };
-    let npc_corp_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1_000_035);
+    let npc_corp_id = match rpc.opt_i64(1, "npcCorpID") {
+        Ok(Some(v)) => v,
+        Ok(None) => 1_000_035,
+        Err(e) => return Some(Err(e)),
+    };
     if npc_corp_id <= 0 {
         return Some(Err(BridgeRpcError {
             code: "InvalidCorpID".into(),
             message: "LP issuer corpID must be positive".into(),
         }));
     }
-    let amount = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
+    let amount = match rpc.req_i64(2, "amount") {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
     if amount <= 0 {
         return Some(Err(BridgeRpcError {
             code: "InvalidLPAmount".into(),
@@ -1167,7 +1179,11 @@ pub fn handle(
                     }));
                 }
             };
-            let concord_amount = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+            let rpc = RpcArgs::positional(args);
+            let concord_amount = match rpc.req_i64(1, "amount") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             if concord_amount <= 0 {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidLPAmount".into(),

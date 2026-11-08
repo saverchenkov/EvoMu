@@ -12,6 +12,7 @@ pub mod context;
 mod context_charges;
 mod context_runtime_persistence;
 pub mod dispatch;
+pub mod rpc_args;
 pub mod session;
 pub mod session_transition;
 
@@ -36,6 +37,7 @@ mod tests;
 
 pub use cache_notifications::*;
 pub use context::*;
+pub use rpc_args::RpcArgs;
 pub use session_transition::*;
 
 /// Canonical MachoNet error code returned for unimplemented RPC methods.

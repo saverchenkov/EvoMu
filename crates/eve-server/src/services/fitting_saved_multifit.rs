@@ -135,7 +135,13 @@ pub(crate) async fn handle_ships_and_services(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let is_corp = args.first().and_then(|a| a.as_bool()).unwrap_or(false);
+            let is_corp = match args.first() {
+                None | Some(PyRep::None) => false,
+                Some(PyRep::Bool(b)) => *b,
+                Some(PyRep::Integer(0)) => false,
+                Some(PyRep::Integer(1)) => true,
+                _ => return Some(Err(rpc_err("InvalidArgument", "Expected boolean or 0/1 for 'isCorp' (arg[0])"))),
+            };
             let owner = if is_corp {
                 let corp_id = session.corporation_id.unwrap_or(0);
                 if corp_id == 0 {
@@ -581,7 +587,10 @@ pub(crate) async fn handle_ships_and_services(
                 }
             }
             let now_unix = ctx.now_unix();
-            let confirm_reset = args.get(1).and_then(|a| a.as_bool()).unwrap_or(false);
+            let confirm_reset = match crate::router::RpcArgs::positional(args).opt_bool(1, "confirmReset") {
+                Ok(v) => v.unwrap_or(false),
+                Err(e) => return Some(Err(e)),
+            };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let active_ship_id = snap
                     .characters
@@ -1000,18 +1009,28 @@ pub(crate) async fn handle_ships_and_services(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let rpc = crate::router::RpcArgs::positional(args);
             let (item_id, raw_label) = if args.len() >= 2 {
-                (
-                    args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0),
-                    args.get(1).and_then(|a| a.as_str()).unwrap_or(""),
-                )
+                let id = match rpc.opt_positive_i64(0, "itemID") {
+                    Ok(v) => v.or(session.ship_id).unwrap_or(0),
+                    Err(e) => return Some(Err(e)),
+                };
+                let lbl = match rpc.req_str(1, "label") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                (id, lbl)
             } else {
+                let lbl = match rpc.req_str(0, "label") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
                 (
                     bound_entry
                         .map(|b| b.object_id)
                         .or(session.ship_id)
                         .unwrap_or(0),
-                    args.first().and_then(|a| a.as_str()).unwrap_or(""),
+                    lbl,
                 )
             };
             let label = raw_label.trim();

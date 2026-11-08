@@ -919,7 +919,11 @@ fn handle_alsc_lock_unlock(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let is_lock = method.contains("ALSCLock");
-    let container_id = args.first().and_then(|a| a.as_i64()).or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0);
+    let rpc = crate::router::RpcArgs::new(args, kwargs);
+    let container_id = rpc
+        .opt_positive_i64(0, "containerID")?
+        .or_else(|| bound_entry.map(|b| b.object_id))
+        .unwrap_or(0);
     if container_id <= 0 {
         return Err(BridgeRpcError { code: "InvalidContainer".into(), message: "Valid containerID required for ALSC lock/unlock".into() });
     }
@@ -1005,7 +1009,7 @@ fn handle_alsc_lock_unlock(
         let cfg = st.container_configs.get(&container_id).cloned().unwrap_or_default();
         let need_check = cfg.password_per_action || !st.unlocked_containers.contains(&(container_id, char_id));
         if need_check {
-            let provided = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.get(2).and_then(|a| a.as_str())).unwrap_or("");
+            let provided = rpc.opt_str(2, "password")?.unwrap_or("");
             let tid = ctx.db.with_snapshot(|s| s.items.get(&container_id).map(|i| i.type_id)).unwrap_or(0);
             if provided != req_pw {
                 st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordFailure".into(), item_id: container_id, item_type_id: tid, quantity: 1 });
@@ -1042,7 +1046,10 @@ async fn handle_validate_item_can_be_opened(
     args: &[PyRep], kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-    let item_id = args.first().and_then(|a| a.as_i64()).or_else(|| kwargs.get("itemID").and_then(|v| v.as_i64())).or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0);
+    let item_id = match crate::router::RpcArgs::new(args, kwargs).opt_positive_i64(0, "itemID") {
+        Ok(v) => v.or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0),
+        Err(e) => return Some(Err(e)),
+    };
     match validate_single_item_can_be_opened(ctx, char_id, item_id).await {
         Ok(()) => Some(Ok(PyRep::Bool(true))),
         Err(e) => Some(Err(e)),
@@ -1156,7 +1163,11 @@ pub(crate) async fn handle_containers_ships_and_fitting(
 
         ("invbroker", "ALSCConfigGet") => {
             let (_, _char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let container_id = args.first().and_then(|a| a.as_i64()).or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0);
+            let rpc = crate::router::RpcArgs::new(args, kwargs);
+            let container_id = match rpc.opt_positive_i64(0, "containerID") {
+                Ok(v) => v.or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0),
+                Err(e) => return Some(Err(e)),
+            };
             let st = read_container_ship_state(ctx);
             let has_pw = st.get_container_password(container_id, 1).is_some() || st.get_container_password(container_id, 2).is_some();
             let cfg = st.container_configs.get(&container_id).cloned().unwrap_or_default();
@@ -1182,7 +1193,11 @@ pub(crate) async fn handle_containers_ships_and_fitting(
 
         ("invbroker", "ALSCLogGet") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let container_id = args.first().and_then(|a| a.as_i64()).or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0);
+            let rpc = crate::router::RpcArgs::new(args, kwargs);
+            let container_id = match rpc.opt_positive_i64(0, "containerID") {
+                Ok(v) => v.or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0),
+                Err(e) => return Some(Err(e)),
+            };
             let auth_ok = ctx.db.with_snapshot(|snap| {
                 if let Some(cont) = snap.items.get(&container_id) {
                     let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);

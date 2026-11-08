@@ -381,8 +381,15 @@ pub async fn handle(
         ("corpRegistry", "ApplyToJoinAlliance") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let corp_id = session.corporation_id.unwrap_or(0);
-            let aid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let msg = args.get(1).and_then(|a| a.as_str()).unwrap_or("");
+            let rpc = crate::router::RpcArgs::positional(args);
+            let aid = match rpc.req_positive_i64(0, "allianceID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let msg = match rpc.opt_str(1, "applicationText") {
+                Ok(v) => v.unwrap_or(""),
+                Err(e) => return Some(Err(e)),
+            };
             let now_unix = ctx.now_unix();
             let check = ctx.db.with_snapshot(|snap| {
                 let Some(corp) = snap.corporations.get(&corp_id) else { return Err(("CorporationNotFound", format!("Corporation {corp_id} not found"))) };
@@ -672,11 +679,21 @@ pub async fn handle(
         | ("allianceRegistry", "EditContactsRelationshipID") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let aid = match require_executor(ctx, session) { Ok(a) => a, Err(e) => return Some(Err(e)) };
-            let contact_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let Some(standing) = args.get(1).and_then(|a| a.as_f64()).filter(|s| (-10.0..=10.0).contains(s)) else {
-                return Some(Err(BridgeRpcError { code: "InvalidStanding".into(), message: "Standing must be between -10 and +10".into() }));
+            let rpc = crate::router::RpcArgs::positional(args);
+            let contact_id = match rpc.req_positive_i64(0, "contactID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
             };
-            let label_mask = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0) as u64;
+            let standing = match rpc.req_finite_f64(1, "standing") {
+                Ok(s) if (-10.0..=10.0).contains(&s) => s,
+                _ => {
+                    return Some(Err(BridgeRpcError { code: "InvalidStanding".into(), message: "Standing must be between -10 and +10".into() }));
+                }
+            };
+            let label_mask = match rpc.opt_u64(2, "labelMask") {
+                Ok(v) => v.unwrap_or(0),
+                Err(e) => return Some(Err(e)),
+            };
             let prev = ctx.db.with_mut_snapshot(|snap| {
                 let ctype = if snap.alliances.contains_key(&contact_id) {
                     "alliance"

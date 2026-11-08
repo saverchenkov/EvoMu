@@ -734,15 +734,14 @@ fn handle_move_eject_time_gm(
     if !session.has_gm_role() {
         return Err(err("InsufficientRole", "structureAssetSafety.MoveEjectTimeGM requires GM role"));
     }
-    let (wrap_id, new_eject_time) = (
-        args.first().and_then(|a| a.as_i64()).unwrap_or(0),
-        args.get(1).and_then(|a| a.as_i64()).unwrap_or(0),
-    );
-    if wrap_id > 0 {
+    let rpc = crate::router::RpcArgs::positional(args);
+    let wrap_id = rpc.req_positive_i64(0, "wrapID")?;
+    let new_eject_time = rpc.req_non_negative_i64(1, "newEjectTime")?;
+    {
         let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
             let mut ext = load_ext_state(snap);
             if let Some(wrap) = ext.asset_safety_wraps.get_mut(&wrap_id) {
-                wrap.deliverable_after_unix = new_eject_time.max(0) as u64;
+                wrap.deliverable_after_unix = new_eject_time as u64;
                 save_ext_state(snap, &ext);
             }
             Ok(())

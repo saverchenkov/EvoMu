@@ -451,8 +451,15 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
             if !session.has_gm_role() {
                 return Some(Err(err("InsufficientRole", "shipCosmeticsMgr.RemoveSkin requires GM role")));
             }
-            let skin_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0) as u32;
-            let licensee_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(char_id);
+            let rpc = crate::router::RpcArgs::positional(args);
+            let skin_id = match rpc.req_u32(0, "skinID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let licensee_id = match rpc.opt_positive_i64(1, "characterID") {
+                Ok(v) => v.unwrap_or(char_id),
+                Err(e) => return Some(Err(e)),
+            };
             ctx.db.with_mut_snapshot(|snap| {
                 if let Some(list) = snap.licensed_skins.get_mut(&licensee_id) {
                     list.retain(|&id| id != skin_id);
@@ -469,8 +476,15 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
             if !session.has_gm_role() {
                 return Some(Err(err("InsufficientRole", "shipCosmeticsMgr.GMExpireSkinLicense requires GM role")));
             }
-            let skin_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0) as u32;
-            let licensee_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(char_id);
+            let rpc = crate::router::RpcArgs::positional(args);
+            let skin_id = match rpc.req_u32(0, "skinID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let licensee_id = match rpc.opt_positive_i64(1, "characterID") {
+                Ok(v) => v.unwrap_or(char_id),
+                Err(e) => return Some(Err(e)),
+            };
             ctx.db.with_mut_snapshot(|snap| {
                 if let Some(list) = snap.licensed_skins.get_mut(&licensee_id) {
                     list.retain(|&id| id != skin_id);

@@ -135,7 +135,15 @@ pub(crate) async fn handle_activate_fighter_ability_slots(
             message: "No fighter IDs provided".into(),
         }));
     }
-    let raw_slot_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(-1);
+    let raw_slot_id = match RpcArgs::positional(args).req_i64(1, "slotID") {
+        Ok(v) => v,
+        Err(e) => {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidFighterAbilitySlot".into(),
+                message: e.message,
+            }));
+        }
+    };
     if !(0..=2).contains(&raw_slot_id) {
         return Some(Err(BridgeRpcError {
             code: "InvalidFighterAbilitySlot".into(),
@@ -1427,12 +1435,30 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
     };
     let fighter_ball_id = match args.first() {
         Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
-            items.first().and_then(|x| x.as_i64()).unwrap_or(0)
+            match items.first().and_then(|x| x.as_i64()).filter(|&id| id > 0) {
+                Some(id) => id,
+                None => {
+                    return Some(Err(BridgeRpcError {
+                        code: "FighterNotFound".into(),
+                        message: "No valid fighter ID provided".into(),
+                    }));
+                }
+            }
         }
-        Some(a) => a.as_i64().unwrap_or(0),
-        None => 0,
+        _ => match RpcArgs::positional(args).req_positive_i64(0, "fighterID") {
+            Ok(id) => id,
+            Err(e) => return Some(Err(e)),
+        },
     };
-    let raw_slot_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(-1);
+    let raw_slot_id = match RpcArgs::positional(args).req_i64(1, "slotID") {
+        Ok(v) => v,
+        Err(e) => {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidFighterAbilitySlot".into(),
+                message: e.message,
+            }));
+        }
+    };
     if !(0..=2).contains(&raw_slot_id) {
         return Some(Err(BridgeRpcError {
             code: "InvalidFighterAbilitySlot".into(),

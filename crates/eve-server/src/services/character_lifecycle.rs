@@ -204,7 +204,10 @@ pub fn handle(
                 Ok(id) => id,
                 Err(e) => return Some(Err(e)),
             };
-            let bloodline_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1) as u32;
+            let bloodline_id = match crate::router::RpcArgs::positional(args).req_u32(1, "bloodlineID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let Some(binfo) = ctx.sde.bloodlines.get(&bloodline_id) else {
                 return Some(Err(err("InvalidBloodline", format!("Bloodline {bloodline_id} is invalid"))));
             };
@@ -255,10 +258,13 @@ pub fn handle(
                 Ok(id) => id,
                 Err(e) => return Some(Err(e)),
             };
-            let gender_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+            let gender_id = match crate::router::RpcArgs::positional(args).req_u32(1, "genderID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let updated = ctx.db.with_mut_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    ch.gender = gender_id as u32;
+                    ch.gender = gender_id;
                     ch.version += 1;
                     true
                 } else {

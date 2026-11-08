@@ -984,16 +984,21 @@ pub(crate) async fn handle_fleet_warp(
         }));
     };
 
+    let rpc = crate::router::RpcArgs::new(args, kwargs);
     let (dest_id, explicit_dest, min_range) = if args.len() >= 3
         && args.first().and_then(|a| a.as_f64()).is_some()
         && args.get(1).and_then(|a| a.as_f64()).is_some()
         && args.get(2).and_then(|a| a.as_f64()).is_some()
     {
-        let x = args.first().and_then(|a| a.as_f64()).unwrap_or(0.0);
-        let y = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0);
-        let z = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.0);
-        let d = args.get(3).and_then(|a| a.as_f64()).unwrap_or(0.0);
-        (0_i64, Some(DVec3::new(x, y, z)), d.clamp(0.0, 100_000.0))
+        let pos = match rpc.req_finite_vec3(0) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+        let d = match rpc.opt_finite_f64(3, "minRange") {
+            Ok(v) => v.unwrap_or(0.0).clamp(0.0, 100_000.0),
+            Err(e) => return Some(Err(e)),
+        };
+        (0_i64, Some(pos), d)
     } else {
         let Some(did) = parse_dest_id(args, kwargs) else {
             return Some(Err(BridgeRpcError {
@@ -1001,12 +1006,10 @@ pub(crate) async fn handle_fleet_warp(
                 message: "FleetWarp requires destination entity ID".into(),
             }));
         };
-        let d = args
-            .get(1)
-            .and_then(|a| a.as_f64())
-            .or_else(|| kwargs.get("minRange").and_then(|a| a.as_f64()))
-            .unwrap_or(0.0)
-            .clamp(0.0, 100_000.0);
+        let d = match rpc.opt_finite_f64(1, "minRange") {
+            Ok(v) => v.unwrap_or(0.0).clamp(0.0, 100_000.0),
+            Err(e) => return Some(Err(e)),
+        };
         (did, None, d)
     };
 

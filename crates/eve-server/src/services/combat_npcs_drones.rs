@@ -1049,7 +1049,10 @@ pub async fn handle_npcs_drones(
                 Err(e) => return Some(Err(e)),
             };
             let _ = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.character_id));
-            let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let target_char_id = match RpcArgs::new(args, kwargs).req_positive_i64(0, "targetCharID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let is_assist = method == "CmdAssist";
             let mut updated = 0;
             let mut drone_events = Vec::new();
@@ -1095,16 +1098,15 @@ pub async fn handle_npcs_drones(
             let _ = ctx
                 .db
                 .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.character_id));
-            let aggressive = kwargs
-                .get("aggressive")
-                .and_then(|v| v.as_bool())
-                .or_else(|| args.first().and_then(|a| a.as_bool()))
-                .unwrap_or(true);
-            let focus_fire = kwargs
-                .get("focusFire")
-                .and_then(|v| v.as_bool())
-                .or_else(|| args.get(1).and_then(|a| a.as_bool()))
-                .unwrap_or(true);
+            let rpc = RpcArgs::new(args, kwargs);
+            let aggressive = match rpc.opt_bool(0, "aggressive") {
+                Ok(v) => v.unwrap_or(true),
+                Err(e) => return Some(Err(e)),
+            };
+            let focus_fire = match rpc.opt_bool(1, "focusFire") {
+                Ok(v) => v.unwrap_or(true),
+                Err(e) => return Some(Err(e)),
+            };
             with_mut_combat_runtime(ctx, |rt| {
                 rt.drone_settings.insert(
                     char_id,
@@ -1149,7 +1151,10 @@ pub async fn handle_npcs_drones(
             if let Err(e) = crate::services::tourney_service::check_tourney_drone_restricted(ctx, sys_id, char_id) {
                 return Some(Err(e));
             }
-            let drone_ball_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let drone_ball_id = match RpcArgs::new(args, kwargs).req_positive_i64(0, "droneID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let ship_pos = sys_handle
                 .get_ball_snapshot(ship_id)

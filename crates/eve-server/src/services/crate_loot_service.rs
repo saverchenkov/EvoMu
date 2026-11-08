@@ -245,11 +245,9 @@ fn handle_crate_peek(ctx: &ServerContext, session: &SessionState, args: &[PyRep]
 
 fn handle_crate_claim_fitting(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let crate_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-    let fitting_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-    if crate_id <= 0 || fitting_id <= 0 {
-        return Err(err("InvalidFittingClaim", "Valid opened crate ID and fitting ID required"));
-    }
+    let rpc = crate::router::RpcArgs::positional(args);
+    let crate_id = rpc.req_positive_i64(0, "crateID").map_err(|_| err("CrateNotFound", "Valid crate item ID required"))?;
+    let fitting_id = rpc.req_positive_i64(1, "fittingID").map_err(|_| err("InvalidFittingClaim", "Valid opened crate ID and fitting ID required"))?;
     let session_dock = session.station_id.or(session.structure_id);
     ctx.db.try_with_mut_snapshot(|snap| {
         let dest_id = snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id)).or(session_dock)
@@ -296,11 +294,9 @@ fn handle_crate_claim_fitting(ctx: &ServerContext, session: &SessionState, args:
 
 fn handle_crate_claim_loot_stack(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let crate_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-    let qty = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).clamp(1, i64::from(i32::MAX)) as i32;
-    if crate_id <= 0 {
-        return Err(err("CrateNotFound", "Valid crate item ID required"));
-    }
+    let rpc = crate::router::RpcArgs::positional(args);
+    let crate_id = rpc.req_positive_i64(0, "crateID").map_err(|_| err("CrateNotFound", "Valid crate item ID required"))?;
+    let qty = rpc.opt_positive_i64(1, "quantity")?.unwrap_or(1).clamp(1, i64::from(i32::MAX)) as i32;
     let session_dock = session.station_id.or(session.structure_id);
     let res = ctx.db.try_with_mut_snapshot(|snap| {
         let dest_id = snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id)).or(session_dock)
@@ -339,11 +335,9 @@ fn handle_crate_claim_loot_stack(ctx: &ServerContext, session: &SessionState, ar
 
 fn handle_crate_claim_skill_bundle(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let crate_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-    let bundle_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-    if crate_id <= 0 || bundle_id <= 0 {
-        return Err(err("InvalidSkillBundle", "Valid opened crate and skill bundle ID required"));
-    }
+    let rpc = crate::router::RpcArgs::positional(args);
+    let crate_id = rpc.req_positive_i64(0, "crateID").map_err(|_| err("InvalidSkillBundle", "Valid opened crate and skill bundle ID required"))?;
+    let bundle_id = rpc.req_positive_i64(1, "bundleID").map_err(|_| err("InvalidSkillBundle", "Valid opened crate and skill bundle ID required"))?;
     let session_dock = session.station_id.or(session.structure_id);
     let now_ft = ctx.now_blueos_filetime_ticks();
     let (sp_grant, injected_skills, new_sp, rep) = ctx.db.try_with_mut_snapshot(|snap| {

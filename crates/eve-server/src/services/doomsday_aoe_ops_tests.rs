@@ -95,8 +95,8 @@ fn test_validate_doomsday_target_points_and_parse_vec3() {
         PyRep::Tuple(vec![PyRep::Real(10.0), PyRep::Real(20.0), PyRep::Real(30.0)]),
     ];
     assert_eq!(
-        parse_vec3_from_args(&args_tuple, 1),
-        Some(DVec3::new(10.0, 20.0, 30.0))
+        parse_vec3_arg_res(&args_tuple, 1),
+        Ok(Some(DVec3::new(10.0, 20.0, 30.0)))
     );
     let args_flat = vec![
         PyRep::Integer(1),
@@ -105,8 +105,8 @@ fn test_validate_doomsday_target_points_and_parse_vec3() {
         PyRep::Real(3.0),
     ];
     assert_eq!(
-        parse_vec3_from_args(&args_flat, 1),
-        Some(DVec3::new(1.0, 2.0, 3.0))
+        parse_vec3_arg_res(&args_flat, 1),
+        Ok(Some(DVec3::new(1.0, 2.0, 3.0)))
     );
 }
 

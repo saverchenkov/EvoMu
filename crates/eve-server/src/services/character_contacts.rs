@@ -498,12 +498,24 @@ pub fn handle_contacts(
                     message: format!("Contact entity {contact_id} not found"),
                 }));
             }
-            let standing = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0).clamp(-10.0, 10.0);
-            let in_watchlist = args.get(2).and_then(|a| match a {
-                PyRep::Bool(b) => Some(*b),
-                PyRep::Integer(i) => Some(*i != 0),
-                _ => None,
-            }).unwrap_or(false);
+            let rpc = crate::router::RpcArgs::new(args, kwargs);
+            let standing = match rpc.req_finite_f64(1, "standing") {
+                Ok(s) => s.clamp(-10.0, 10.0),
+                Err(e) => return Some(Err(e)),
+            };
+            let in_watchlist = match rpc.opt_bool(2, "inWatchlist") {
+                Ok(Some(b)) => b,
+                Ok(None) => false,
+                Err(_) => match args.get(2) {
+                    Some(PyRep::Integer(i @ (0 | 1))) => *i == 1,
+                    _ => {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidArgument".into(),
+                            message: "Expected boolean for 'inWatchlist' (arg[2])".into(),
+                        }));
+                    }
+                },
+            };
             // V24 positional layout is `(contactID, standing, inWatchlist, notify, note)` — `args[3]` is `notify`.
             let req_label_mask = kwargs
                 .get("labelMask")
@@ -594,13 +606,24 @@ pub fn handle_contacts(
                     message: format!("{method} requires at least one contactID"),
                 }));
             }
-            let standing = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0).clamp(-10.0, 10.0);
+            let rpc = crate::router::RpcArgs::new(args, kwargs);
+            let standing = match rpc.req_finite_f64(1, "standing") {
+                Ok(s) => s.clamp(-10.0, 10.0),
+                Err(e) => return Some(Err(e)),
+            };
             let watchlist_opt = if method == "EditContact" {
-                args.get(2).and_then(|a| match a {
-                    PyRep::Bool(b) => Some(*b),
-                    PyRep::Integer(i) => Some(*i != 0),
-                    _ => None,
-                })
+                match rpc.opt_bool(2, "inWatchlist") {
+                    Ok(v) => v,
+                    Err(_) => match args.get(2) {
+                        Some(PyRep::Integer(i @ (0 | 1))) => Some(*i == 1),
+                        _ => {
+                            return Some(Err(BridgeRpcError {
+                                code: "InvalidArgument".into(),
+                                message: "Expected boolean for 'inWatchlist' (arg[2])".into(),
+                            }));
+                        }
+                    },
+                }
             } else {
                 None
             };

@@ -103,19 +103,45 @@ pub fn handle_industry_jobs(
                     (Some(btid), act, r)
                 }
                 _ if args.len() >= 4 => {
-                    explicit_bp_item_id = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0);
-                    explicit_facility_id = args.get(4).and_then(|a| a.as_i64()).filter(|&id| id > 0);
-                    (
-                        args.get(1).and_then(|a| a.as_i64()),
-                        args.get(2).and_then(|a| a.as_i64()).unwrap_or(1),
-                        args.get(3).and_then(|a| a.as_i64()).unwrap_or(1),
-                    )
+                    let rpc = crate::router::RpcArgs::positional(args);
+                    explicit_bp_item_id = match rpc.opt_positive_i64(0, "blueprintItemID") {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    explicit_facility_id = match rpc.opt_positive_i64(4, "facilityID") {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let btid = match rpc.opt_i64(1, "blueprintTypeID") {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let act = match rpc.opt_i64(2, "activityID") {
+                        Ok(v) => v.unwrap_or(1),
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let runs = match rpc.opt_i64(3, "runs") {
+                        Ok(v) => v.unwrap_or(1),
+                        Err(e) => return Some(Err(e)),
+                    };
+                    (btid, act, runs)
                 }
-                _ => (
-                    args.first().and_then(|a| a.as_i64()),
-                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(1),
-                    args.get(2).and_then(|a| a.as_i64()).unwrap_or(1),
-                ),
+                _ => {
+                    let rpc = crate::router::RpcArgs::positional(args);
+                    let btid = match rpc.opt_i64(0, "blueprintTypeID") {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let act = match rpc.opt_i64(1, "activityID") {
+                        Ok(v) => v.unwrap_or(1),
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let runs = match rpc.opt_i64(2, "runs") {
+                        Ok(v) => v.unwrap_or(1),
+                        Err(e) => return Some(Err(e)),
+                    };
+                    (btid, act, runs)
+                }
             };
             let station_id = explicit_facility_id.unwrap_or(docked_id);
 

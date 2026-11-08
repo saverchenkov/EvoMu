@@ -765,7 +765,7 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
     service: &str,
     method: &str,
     args: &[PyRep],
-    _kwargs: &HashMap<String, PyRep>,
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("superWeaponMgr", "ActivateSinglePointTargetedModule")
@@ -786,7 +786,11 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
             if let Err(e) = crate::services::tactical_modules::check_superweapon_tether_guard(ctx, sys_id, ship_id).await {
                 return Some(Err(e));
             }
-            let module_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let rpc = crate::router::RpcArgs::new(args, kwargs);
+            let module_id = match rpc.req_positive_i64(0, "moduleID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let mod_type_info = ctx.db.with_snapshot(|snap| {
                 snap.items.get(&module_id).and_then(|i| ctx.sde.types.get(&i.type_id))
             });
@@ -1314,12 +1318,22 @@ fn handle_dogma_dbuff_rpc(
                 }
             }
         }
+        let rpc = crate::router::RpcArgs::positional(args);
         if buff_pairs.is_empty() {
-            let dbuff_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(12) as u32;
-            let value = args.get(2).and_then(|a| a.as_f64()).unwrap_or(10.0);
+            let dbuff_id = match rpc.opt_u32(1, "dbuffID") {
+                Ok(v) => v.unwrap_or(12),
+                Err(e) => return Some(Err(e)),
+            };
+            let value = match rpc.opt_finite_f64(2, "value") {
+                Ok(v) => v.unwrap_or(10.0),
+                Err(e) => return Some(Err(e)),
+            };
             buff_pairs.push((dbuff_id, value));
         }
-        let duration_s = args.get(2).and_then(|a| a.as_f64()).unwrap_or(60.0);
+        let duration_s = match rpc.opt_positive_f64(2, "durationSeconds") {
+            Ok(v) => v.unwrap_or(60.0),
+            Err(_) => 60.0,
+        };
         let exp = now_unix + (duration_s.round() as u64);
         {
             let mut st = scanners_superweapons_state()

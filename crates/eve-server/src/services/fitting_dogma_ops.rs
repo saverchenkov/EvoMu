@@ -31,15 +31,15 @@ pub(crate) async fn handle_dogma_ops(
                 Err(e) => return Some(Err(e)),
             };
 
-            let source_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let target_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-
-            if source_id == 0 || target_id == 0 {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "AddTargetOBO requires sourceID and targetID".into(),
-                }));
-            }
+            let rpc = crate::router::RpcArgs::positional(args);
+            let source_id = match rpc.req_positive_i64(0, "sourceID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let target_id = match rpc.req_positive_i64(1, "targetID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             if target_id == source_id {
                 return Some(Err(BridgeRpcError {
                     code: "TargetingFailed".into(),
@@ -271,15 +271,15 @@ pub(crate) async fn handle_dogma_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let source_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let target_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-
-            if source_id == 0 || target_id == 0 {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "RemoveTargetOBO requires sourceID and targetID".into(),
-                }));
-            }
+            let rpc = crate::router::RpcArgs::positional(args);
+            let source_id = match rpc.req_positive_i64(0, "sourceID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let target_id = match rpc.req_positive_i64(1, "targetID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
 
             let is_authorized = session.ship_id == Some(source_id)
                 || ctx.db.with_snapshot(|s| s.items.get(&source_id).is_some_and(|it| it.owner_id == char_id))

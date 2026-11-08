@@ -119,16 +119,26 @@ pub(super) fn handle_add_corporation(
     else {
         return Some(Err(BridgeRpcError { code: "InvalidCorporationName".into(), message: "Corporation name is required".into() }));
     };
-    let ticker = args.get(1).and_then(|a| a.as_str()).unwrap_or("EVOMU");
+    let rpc = crate::router::RpcArgs::positional(args);
+    let ticker = match rpc.opt_str(1, "ticker") {
+        Ok(v) => v.unwrap_or("EVOMU"),
+        Err(e) => return Some(Err(e)),
+    };
     let (description, url, tax_rate, shape1, shape2, shape3, color1, color2, color3, apps_enabled) =
         if args.get(2).and_then(|a| a.as_str()).is_some() {
-            let tax = args.get(4).and_then(|a| a.as_f64()).unwrap_or(0.10).clamp(0.0, 1.0);
+            let tax = match rpc.opt_finite_f64(4, "taxRate") {
+                Ok(v) => v.unwrap_or(0.10).clamp(0.0, 1.0),
+                Err(e) => return Some(Err(e)),
+            };
             let apps = args.get(12).map(|a| match a { PyRep::Bool(b) => *b, PyRep::Integer(i) => *i != 0, _ => true }).unwrap_or(true);
             (args.get(2).and_then(|a| a.as_str()).unwrap_or(""), args.get(3).and_then(|a| a.as_str()).unwrap_or(""), tax,
              args.get(5).and_then(|a| a.as_i64()).unwrap_or(415), args.get(6).and_then(|a| a.as_i64()).unwrap_or(416), args.get(7).and_then(|a| a.as_i64()).unwrap_or(417),
              args.get(8).and_then(|a| a.as_i64()).unwrap_or(671), args.get(9).and_then(|a| a.as_i64()).unwrap_or(672), args.get(10).and_then(|a| a.as_i64()).unwrap_or(673), apps)
         } else {
-            let tax = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.10).clamp(0.0, 1.0);
+            let tax = match rpc.opt_finite_f64(2, "taxRate") {
+                Ok(v) => v.unwrap_or(0.10).clamp(0.0, 1.0),
+                Err(e) => return Some(Err(e)),
+            };
             ("", "", tax, 415, 416, 417, 671, 672, 673, true)
         };
     let reg_fee = IskCents::from_isk(1_599_800);
@@ -589,18 +599,44 @@ pub(super) fn handle_corp_gov(
         }
 
         ("corpRegistry", "PayoutDividend") => {
+            let rpc = crate::router::RpcArgs::positional(args);
             let (to_shareholders, total_isk, raw_div) = if matches!(args.first(), Some(PyRep::Bool(_))) {
-                (args.first().and_then(|a| a.as_bool()).unwrap_or(false), args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0), args.get(2))
+                let b = match rpc.req_bool(0, "payShareholders") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                let amt = match rpc.req_positive_f64(1, "payoutAmount") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                (b, amt, args.get(2))
             } else if matches!(args.get(1), Some(PyRep::Bool(_))) {
-                (args.get(1).and_then(|a| a.as_bool()).unwrap_or(false), args.first().and_then(|a| a.as_f64()).unwrap_or(0.0), args.get(2))
+                let amt = match rpc.req_positive_f64(0, "payoutAmount") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                let b = match rpc.req_bool(1, "payShareholders") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                (b, amt, args.get(2))
             } else if args.len() >= 2 && matches!(args.first(), Some(PyRep::Integer(0 | 1))) && matches!(args.get(1), Some(PyRep::Real(_))) {
-                (args.first().and_then(|a| a.as_i64()).unwrap_or(0) != 0, args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0), args.get(2))
+                let b = args.first().and_then(|a| a.as_i64()).unwrap_or(0) != 0;
+                let amt = match rpc.req_positive_f64(1, "payoutAmount") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                (b, amt, args.get(2))
             } else {
-                (matches!(args.get(1), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1))), args.first().and_then(|a| a.as_f64()).unwrap_or(0.0), args.get(2))
+                let amt = match rpc.req_positive_f64(0, "payoutAmount") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                (matches!(args.get(1), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1))), amt, args.get(2))
             };
             let div_id: u8 = match raw_div {
-                Some(arg) => match u8::try_from(arg.as_i64().unwrap_or(0)) {
-                    Ok(val @ 1..=7) => val,
+                Some(_) => match rpc.req_i64(2, "divisionID") {
+                    Ok(val) if (1..=7).contains(&val) => val as u8,
                     _ => return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Wallet division ID must be between 1 and 7".into() })),
                 },
                 None => 1,

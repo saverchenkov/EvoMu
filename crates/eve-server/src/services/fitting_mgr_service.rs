@@ -625,10 +625,17 @@ async fn handle_update_fitting(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
+    let rpc = crate::router::RpcArgs::positional(args);
     // Supports (fittingID, ownerID, name, description), (ownerID, fittingID, name, description), or (fittingID, name, description)
     let (fid, owner_filter, new_name, new_desc) = if args.len() >= 4 {
-        let a0 = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-        let a1 = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+        let a0 = match rpc.req_positive_i64(0, "fittingOrOwnerID") {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+        let a1 = match rpc.req_positive_i64(1, "ownerOrFittingID") {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
         let (fid, oid) = ctx.db.with_snapshot(|s| {
             if s.saved_fittings.contains_key(&a0) {
                 (a0, a1)
@@ -643,14 +650,20 @@ async fn handle_update_fitting(
                 (a0, a1)
             }
         });
-        (
-            fid,
-            Some(oid),
-            args.get(2).and_then(|a| a.as_str()).unwrap_or("").to_string(),
-            args.get(3).and_then(|a| a.as_str()).unwrap_or("").to_string(),
-        )
+        let name = match rpc.opt_str(2, "name") {
+            Ok(v) => v.unwrap_or("").to_string(),
+            Err(e) => return Some(Err(e)),
+        };
+        let desc = match rpc.opt_str(3, "description") {
+            Ok(v) => v.unwrap_or("").to_string(),
+            Err(e) => return Some(Err(e)),
+        };
+        (fid, Some(oid), name, desc)
     } else {
-        let fid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+        let fid = match rpc.req_positive_i64(0, "fittingID") {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
         let inferred_owner = if service == "corpFittingMgr" {
             ctx.db.with_snapshot(|s| {
                 s.saved_fittings
@@ -661,12 +674,15 @@ async fn handle_update_fitting(
         } else {
             None
         };
-        (
-            fid,
-            inferred_owner,
-            args.get(1).and_then(|a| a.as_str()).unwrap_or("").to_string(),
-            args.get(2).and_then(|a| a.as_str()).unwrap_or("").to_string(),
-        )
+        let name = match rpc.opt_str(1, "name") {
+            Ok(v) => v.unwrap_or("").to_string(),
+            Err(e) => return Some(Err(e)),
+        };
+        let desc = match rpc.opt_str(2, "description") {
+            Ok(v) => v.unwrap_or("").to_string(),
+            Err(e) => return Some(Err(e)),
+        };
+        (fid, inferred_owner, name, desc)
     };
     let target_owner = match resolve_and_authorize_fitting_owner(
         ctx,
@@ -798,10 +814,17 @@ async fn handle_delete_fitting(
         }
         Some(Ok(PyRep::List(deleted_list)))
     } else {
+        let rpc = crate::router::RpcArgs::positional(args);
         // Supports DeleteFitting(ownerID, fittingID), DeleteFitting(fittingID, ownerID), and DeleteFitting(fittingID)
         let (owner_filter, fid) = if args.len() >= 2 {
-            let a0 = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let a1 = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+            let a0 = match rpc.req_positive_i64(0, "ownerOrFittingID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let a1 = match rpc.req_positive_i64(1, "fittingOrOwnerID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             ctx.db.with_snapshot(|s| {
                 if s.saved_fittings.contains_key(&a0) && !s.saved_fittings.contains_key(&a1) {
                     (Some(a1), a0)
@@ -810,7 +833,10 @@ async fn handle_delete_fitting(
                 }
             })
         } else {
-            let fid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let fid = match rpc.req_positive_i64(0, "fittingID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let inferred = if service == "corpFittingMgr" {
                 ctx.db.with_snapshot(|s| {
                     s.saved_fittings

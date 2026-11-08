@@ -484,25 +484,62 @@ pub fn handle_pi_orbitals(
                     message: "UserLaunchCommodities requires planetID or bound planetMgr moniker".into(),
                 }));
             };
+            let lrpc = crate::router::RpcArgs::positional(launch_args);
             let (launch_pin_id_opt, type_id, qty, destination) = if launch_args.len() >= 3 && launch_args.get(2).and_then(|a| a.as_i64()).is_some() && launch_args.get(3).is_some() {
-                let pid = launch_args.first().and_then(|a| a.as_i64());
-                let tid = launch_args.get(1).and_then(|a| a.as_i64()).unwrap_or(0) as TypeId;
-                let q = launch_args.get(2).and_then(|a| a.as_i64()).unwrap_or(0).max(1) as u64;
+                let pid = match lrpc.opt_positive_i64(0, "launchPinID") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                let tid = match lrpc.req_u32(1, "typeID") {
+                    Ok(v) => v as TypeId,
+                    Err(e) => return Some(Err(e)),
+                };
+                let q = match lrpc.opt_positive_i64(2, "quantity") {
+                    Ok(v) => v.unwrap_or(1) as u64,
+                    Err(e) => return Some(Err(e)),
+                };
                 (pid, tid, q, "CommandCenterLaunch")
             } else if launch_args.len() >= 3 && launch_args.get(2).and_then(|a| a.as_str()).is_some() {
-                let tid = launch_args.first().and_then(|a| a.as_i64()).unwrap_or(0) as TypeId;
-                let q = launch_args.get(1).and_then(|a| a.as_i64()).unwrap_or(0).max(1) as u64;
-                let dest = launch_args.get(2).and_then(|a| a.as_str()).unwrap_or("Storage");
+                let tid = match lrpc.req_u32(0, "typeID") {
+                    Ok(v) => v as TypeId,
+                    Err(e) => return Some(Err(e)),
+                };
+                let q = match lrpc.opt_positive_i64(1, "quantity") {
+                    Ok(v) => v.unwrap_or(1) as u64,
+                    Err(e) => return Some(Err(e)),
+                };
+                let dest = match lrpc.opt_str(2, "destination") {
+                    Ok(v) => v.unwrap_or("Storage"),
+                    Err(e) => return Some(Err(e)),
+                };
                 (None, tid, q, dest)
             } else if launch_args.len() >= 3 {
-                let pid = launch_args.first().and_then(|a| a.as_i64());
-                let tid = launch_args.get(1).and_then(|a| a.as_i64()).unwrap_or(0) as TypeId;
-                let q = launch_args.get(2).and_then(|a| a.as_i64()).unwrap_or(0).max(1) as u64;
+                let pid = match lrpc.opt_positive_i64(0, "launchPinID") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                let tid = match lrpc.req_u32(1, "typeID") {
+                    Ok(v) => v as TypeId,
+                    Err(e) => return Some(Err(e)),
+                };
+                let q = match lrpc.opt_positive_i64(2, "quantity") {
+                    Ok(v) => v.unwrap_or(1) as u64,
+                    Err(e) => return Some(Err(e)),
+                };
                 (pid, tid, q, "CommandCenterLaunch")
             } else {
-                let tid = launch_args.first().and_then(|a| a.as_i64()).unwrap_or(0) as TypeId;
-                let q = launch_args.get(1).and_then(|a| a.as_i64()).unwrap_or(0).max(1) as u64;
-                let dest = launch_args.get(2).and_then(|a| a.as_str()).unwrap_or("Storage");
+                let tid = match lrpc.req_u32(0, "typeID") {
+                    Ok(v) => v as TypeId,
+                    Err(e) => return Some(Err(e)),
+                };
+                let q = match lrpc.opt_positive_i64(1, "quantity") {
+                    Ok(v) => v.unwrap_or(1) as u64,
+                    Err(e) => return Some(Err(e)),
+                };
+                let dest = match lrpc.opt_str(2, "destination") {
+                    Ok(v) => v.unwrap_or("Storage"),
+                    Err(e) => return Some(Err(e)),
+                };
                 (None, tid, q, dest)
             };
             if type_id == 0 {

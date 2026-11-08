@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 
 use crate::formulas::{compute_broker_fee_rate, compute_sales_tax_rate};
-use crate::router::{NotificationTarget, ServerContext};
+use crate::router::{NotificationTarget, RpcArgs, ServerContext};
 
 fn notify_char(ctx: &ServerContext, char_id: i64, event: &str, args: Vec<PyRep>) {
     ctx.notify(NotificationTarget::Character(char_id), event, "charid", args);
@@ -438,8 +438,11 @@ pub fn handle(
                     Ok(v) => v,
                     Err(e) => return Some(Err(e)),
                 };
-                let include_corp = args.first().and_then(|a| a.as_bool()).unwrap_or(false)
-                    || _kwargs.get("isCorp").and_then(|v| v.as_bool()).unwrap_or(false);
+                let rpc = RpcArgs::new(args, _kwargs);
+                let include_corp = match rpc.opt_bool(0, "isCorp") {
+                    Ok(v) => v.unwrap_or(false),
+                    Err(e) => return Some(Err(e)),
+                };
                 let now_unix = ctx.now_unix();
                 let (swept_list, rows) = ctx.db.with_mut_snapshot(|snap| {
                     let swept = sweep_expired_orders(snap, now_unix);
@@ -902,16 +905,32 @@ pub fn handle(
                 };
                 let station_id = session.station_id.or(session.structure_id).unwrap_or(JITA_STATION_ID);
                 let region_id = session.region_id.unwrap_or(THE_FORGE_REGION_ID);
+                let rpc = RpcArgs::new(args, _kwargs);
                 let (price_isk, quantity, duration_days) = match args.first() {
-                    Some(PyRep::KeyVal(kv)) => (
-                        kv.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                        kv.get("quantity").and_then(|v| v.as_i64()).unwrap_or(0),
-                        kv.get("duration").or_else(|| args.get(2)).and_then(|v| v.as_i64()).unwrap_or(90),
-                    ),
+                    Some(PyRep::KeyVal(kv)) => {
+                        let p = match kv.get("price") {
+                            Some(PyRep::Real(v)) if v.is_finite() => *v,
+                            Some(PyRep::Integer(v)) => *v as f64,
+                            _ => return Some(Err(rpc_err("InvalidMarketOrder", "PlacePlexSellOrder requires finite positive price"))),
+                        };
+                        let q = match kv.get("quantity") {
+                            Some(PyRep::Integer(v)) => *v,
+                            _ => return Some(Err(rpc_err("InvalidMarketOrder", "PlacePlexSellOrder requires integer quantity"))),
+                        };
+                        let d = match kv.get("duration") {
+                            Some(PyRep::Integer(v)) => *v,
+                            Some(_) => return Some(Err(rpc_err("InvalidMarketOrder", "duration must be an integer"))),
+                            None => match rpc.opt_i64(2, "duration") {
+                                Ok(v) => v.unwrap_or(90),
+                                Err(e) => return Some(Err(e)),
+                            },
+                        };
+                        (p, q, d)
+                    }
                     _ => (
-                        args.first().and_then(|a| a.as_f64()).unwrap_or(0.0),
-                        args.get(1).and_then(|a| a.as_i64()).unwrap_or(0),
-                        args.get(2).and_then(|a| a.as_i64()).unwrap_or(90),
+                        match rpc.req_positive_f64(0, "price") { Ok(v) => v, Err(e) => return Some(Err(e)) },
+                        match rpc.req_positive_i64(1, "quantity") { Ok(v) => v, Err(e) => return Some(Err(e)) },
+                        match rpc.opt_i64(2, "duration") { Ok(v) => v.unwrap_or(90), Err(e) => return Some(Err(e)) },
                     ),
                 };
                 if !is_valid_4_sig_fig_price(price_isk) {
@@ -1348,7 +1367,8 @@ pub fn handle(
         }
         ("contractProxy", "FinishAuction") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let cid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let rpc = RpcArgs::new(args, _kwargs);
+            let cid = match rpc.req_positive_i64(0, "contractID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(c) = snap.contracts.get(&cid).cloned() else { return Err(rpc_err("ContractNotFound", "Auction contract not found")); };
@@ -1406,7 +1426,8 @@ pub fn handle(
         }
         ("contractProxy", "GetCourierContractFromItemID") => {
             let (_, _char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let rpc = RpcArgs::new(args, _kwargs);
+            let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let cid_opt = ctx.db.with_snapshot(|snap| {
                 snap.contracts.values().find(|c| {
                     c.contract_type == "Courier"
@@ -1417,7 +1438,12 @@ pub fn handle(
         }
         ("contractProxy", "GetItemsInContainer") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let container_id = args.get(1).and_then(|a| a.as_i64()).or_else(|| args.first().and_then(|a| a.as_i64())).unwrap_or(0);
+            let rpc = RpcArgs::new(args, _kwargs);
+            let container_id = match rpc.opt_positive_i64(1, "containerID") {
+                Ok(Some(v)) => v,
+                Ok(None) => match rpc.req_positive_i64(0, "containerID") { Ok(v) => v, Err(e) => return Some(Err(e)) },
+                Err(e) => return Some(Err(e)),
+            };
             let rows = ctx.db.with_snapshot(|snap| {
                 snap.items.values().filter(|i| i.location_id == container_id && (i.owner_id == char_id || Some(i.owner_id) == session.corporation_id))
                     .map(|i| PyRep::keyval([

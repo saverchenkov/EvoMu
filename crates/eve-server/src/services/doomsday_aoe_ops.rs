@@ -4,7 +4,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::router::{NotificationTarget, ServerContext};
+use crate::router::{NotificationTarget, RpcArgs, ServerContext};
 use crate::services::doomsday_aoe_tick::{
     GTFO_WARP_SUPPRESSION_SECS, PersistedSuperweaponCycle, SuperweaponCycleKind,
     mutate_superweapon_runtime, read_superweapon_runtime,
@@ -68,7 +68,7 @@ pub async fn dispatch_superweapon_aoe_rpc(
             message: "Superweapons can only be activated in space".into(),
         });
     };
-    let module_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+    let module_id = RpcArgs::positional(args).req_positive_i64(0, "moduleID")?;
     match mode {
         DoomsdayAoeMode::Cone => {
             activate_cone_doomsday(ctx, char_id, ship_id, sys_id, module_id, args).await
@@ -524,24 +524,13 @@ where
     ))
 }
 
-fn parse_vec3_from_args(args: &[PyRep], start_idx: usize) -> Option<DVec3> {
-    if let Some(PyRep::Tuple(vals) | PyRep::List(vals)) = args.get(start_idx) {
-        if vals.len() >= 3 {
-            if let (Some(x), Some(y), Some(z)) =
-                (vals[0].as_f64(), vals[1].as_f64(), vals[2].as_f64())
-            {
-                return Some(DVec3::new(x, y, z));
-            }
-        }
-    }
-    if let (Some(x), Some(y), Some(z)) = (
-        args.get(start_idx).and_then(|a| a.as_f64()),
-        args.get(start_idx + 1).and_then(|a| a.as_f64()),
-        args.get(start_idx + 2).and_then(|a| a.as_f64()),
-    ) {
-        return Some(DVec3::new(x, y, z));
-    }
-    None
+fn parse_vec3_arg_res(args: &[PyRep], start_idx: usize) -> Result<Option<DVec3>, BridgeRpcError> {
+    RpcArgs::positional(args)
+        .opt_finite_vec3(start_idx)
+        .map_err(|e| BridgeRpcError {
+            code: "InvalidTargetPoint".into(),
+            message: e.message,
+        })
 }
 
 /// `superWeaponMgr.ActivateSlashModule` (`doomsdayConeDOT`) — Bosonic Field Generator cone AoE doomsday.
@@ -553,13 +542,12 @@ pub async fn activate_cone_doomsday(
     module_id: i64,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let dir_vec = if let Some(v) = parse_vec3_from_args(args, 1) {
-        if !v.x.is_finite() || !v.y.is_finite() || !v.z.is_finite() {
-            return Err(BridgeRpcError {
-                code: "InvalidTargetPoint".into(),
-                message: "Doomsday direction vector must be finite".into(),
-            });
-        }
+    let explicit_vec = if matches!(args.get(1), Some(PyRep::Tuple(_) | PyRep::List(_))) || args.len() >= 4 {
+        parse_vec3_arg_res(args, 1)?
+    } else {
+        None
+    };
+    let dir_vec = if let Some(v) = explicit_vec {
         if v.length_squared() > 1e-6 {
             v.normalize()
         } else {
@@ -577,7 +565,7 @@ pub async fn activate_cone_doomsday(
         |_, _| Ok(Vec::new()),
     )
     .await?;
-    let resolved_dir = if parse_vec3_from_args(args, 1).is_some() {
+    let resolved_dir = if explicit_vec.is_some() {
         dir_vec
     } else if let Some(tid) = args.get(1).and_then(|a| a.as_i64()) {
         setup
@@ -684,7 +672,11 @@ pub async fn activate_spatial_gtfo_doomsday(
     module_id: i64,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let explicit_center = parse_vec3_from_args(args, 1);
+    let explicit_center = if matches!(args.get(1), Some(PyRep::Tuple(_) | PyRep::List(_))) || args.len() >= 4 {
+        parse_vec3_arg_res(args, 1)?
+    } else {
+        None
+    };
     let target_ball_id = if explicit_center.is_none() {
         args.get(1).and_then(|a| a.as_i64())
     } else {
@@ -791,24 +783,24 @@ pub async fn activate_multipoint_reaper_doomsday(
     module_id: i64,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let parsed_pair: Option<(DVec3, DVec3)> = if let (Some(s), Some(e)) =
-        (parse_vec3_from_args(args, 1), parse_vec3_from_args(args, 4))
+    let parsed_pair: Option<(DVec3, DVec3)> = if matches!(args.get(1), Some(PyRep::Tuple(_) | PyRep::List(_)))
+        && matches!(args.get(2), Some(PyRep::Tuple(_) | PyRep::List(_)))
     {
+        let s = parse_vec3_arg_res(args, 1)?.ok_or_else(|| BridgeRpcError {
+            code: "InvalidTargetPoint".into(),
+            message: "Reaper sweep start coordinates missing".into(),
+        })?;
+        let e = parse_vec3_arg_res(args, 2)?.ok_or_else(|| BridgeRpcError {
+            code: "InvalidTargetPoint".into(),
+            message: "Reaper sweep end coordinates missing".into(),
+        })?;
         Some((s, e))
-    } else if let (Some(PyRep::Tuple(s) | PyRep::List(s)), Some(PyRep::Tuple(e) | PyRep::List(e))) =
-        (args.get(1), args.get(2))
-    {
-        if let (Some(sx), Some(sy), Some(sz), Some(ex), Some(ey), Some(ez)) = (
-            s.first().and_then(|v| v.as_f64()),
-            s.get(1).and_then(|v| v.as_f64()),
-            s.get(2).and_then(|v| v.as_f64()),
-            e.first().and_then(|v| v.as_f64()),
-            e.get(1).and_then(|v| v.as_f64()),
-            e.get(2).and_then(|v| v.as_f64()),
-        ) {
-            Some((DVec3::new(sx, sy, sz), DVec3::new(ex, ey, ez)))
-        } else {
-            None
+    } else if args.len() >= 7 {
+        let s = parse_vec3_arg_res(args, 1)?;
+        let e = parse_vec3_arg_res(args, 4)?;
+        match (s, e) {
+            (Some(s), Some(e)) => Some((s, e)),
+            _ => None,
         }
     } else {
         None

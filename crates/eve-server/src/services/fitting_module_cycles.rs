@@ -27,12 +27,28 @@ pub(crate) async fn handle_module_cycles(
                 Err(e) => return Some(Err(e)),
             };
             let _ = crate::sp6_lifecycle::maybe_abort_safe_logoff_on_action(ctx, char_id, "SAFE_LOGOFF_ABORT_MODULE");
-            let raw_module_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let effect_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("defaultEffect").to_string();
-            let target_id_opt = args.get(2).and_then(|a| a.as_i64())
-                .or_else(|| args.get(1).and_then(|a| a.as_i64()))
-                .or_else(|| kwargs.get("target").and_then(|v| v.as_i64()));
-            let repeat = args.get(3).and_then(|a| a.as_i64()).unwrap_or(1) as i32;
+            let rpc = crate::router::RpcArgs::new(args, kwargs);
+            let raw_module_id = match rpc.opt_positive_i64(0, "itemID") {
+                Ok(v) => v.unwrap_or(0),
+                Err(e) => return Some(Err(e)),
+            };
+            let effect_name = match rpc.opt_str(1, "effectName") {
+                Ok(v) => v.unwrap_or("defaultEffect").to_string(),
+                Err(_) => "defaultEffect".to_string(),
+            };
+            let target_id_opt = match rpc
+                .opt_i64(2, "target")
+                .transpose()
+                .or_else(|| args.get(1).and_then(|a| a.as_i64()).map(Ok))
+            {
+                Some(Ok(v)) => Some(v),
+                Some(Err(e)) => return Some(Err(e)),
+                None => None,
+            };
+            let repeat = match rpc.opt_i32(3, "repeat") {
+                Ok(v) => v.unwrap_or(1),
+                Err(e) => return Some(Err(e)),
+            };
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "No active ship in session".into() }));
             };

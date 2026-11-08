@@ -10,7 +10,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::router::{NotificationTarget, ServerContext};
+use crate::router::{NotificationTarget, RpcArgs, ServerContext};
 use crate::services::wallet_services_ext::save_json_note;
 use eve_db::{InventoryFlag, IskCents};
 use eve_machonet::SessionState;
@@ -272,7 +272,11 @@ fn handle_raffle_subscription(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+    let rpc = RpcArgs::positional(args);
+    let target_id = match rpc.opt_i64(0, "targetID") {
+        Ok(v) => v.unwrap_or(0),
+        Err(e) => return Some(Err(e)),
+    };
     if target_id < 0 {
         return Some(Err(rpc_err(
             "InvalidArgument",
@@ -360,41 +364,75 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let rpc = RpcArgs::new(args, kwargs);
             let (item_id, ticket_count_opt, ticket_price_opt, custom_duration) = match args.first() {
-                Some(PyRep::KeyVal(kv)) => (
-                    kv.get("item_id")
-                        .or_else(|| kv.get("itemID"))
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0),
-                    kv.get("ticket_count")
-                        .or_else(|| kv.get("ticketCount"))
-                        .and_then(|v| v.as_i64()),
-                    kv.get("ticket_price")
-                        .or_else(|| kv.get("ticketPrice"))
-                        .and_then(|v| v.as_f64()),
-                    kv.get("duration")
-                        .or_else(|| kv.get("duration_secs"))
-                        .or_else(|| kv.get("durationSecs"))
-                        .and_then(|v| v.as_i64()),
-                ),
+                Some(PyRep::KeyVal(kv)) => {
+                    let item_id = match kv.get("item_id").or_else(|| kv.get("itemID")) {
+                        Some(PyRep::Integer(id)) if *id > 0 => *id,
+                        _ => return Some(Err(rpc_err("InvalidArgument", "CreateRaffle requires positive item_id"))),
+                    };
+                    let ticket_count_opt = match kv.get("ticket_count").or_else(|| kv.get("ticketCount")) {
+                        None | Some(PyRep::None) => None,
+                        Some(PyRep::Integer(tc)) => Some(*tc),
+                        Some(_) => return Some(Err(rpc_err("InvalidArgument", "ticket_count must be an integer"))),
+                    };
+                    let ticket_price_opt = match kv.get("ticket_price").or_else(|| kv.get("ticketPrice")) {
+                        Some(PyRep::Real(p)) => Some(*p),
+                        Some(PyRep::Integer(p)) => Some(*p as f64),
+                        _ => return Some(Err(rpc_err("InvalidArgument", "CreateRaffle requires positive finite ticket_price"))),
+                    };
+                    let duration = match kv.get("duration").or_else(|| kv.get("duration_secs")).or_else(|| kv.get("durationSecs")) {
+                        None | Some(PyRep::None) => None,
+                        Some(PyRep::Integer(d)) => Some(*d),
+                        Some(_) => return Some(Err(rpc_err("InvalidRaffleDuration", "duration must be an integer"))),
+                    };
+                    (item_id, ticket_count_opt, ticket_price_opt, duration)
+                }
                 Some(PyRep::Dict(kv)) => {
                     let fk = |k: &str| kv.iter().find(|(ek, _)| ek.as_str() == Some(k)).map(|(_, ev)| ev);
-                    (
-                        fk("item_id").or_else(|| fk("itemID")).and_then(|v| v.as_i64()).unwrap_or(0),
-                        fk("ticket_count").or_else(|| fk("ticketCount")).and_then(|v| v.as_i64()),
-                        fk("ticket_price").or_else(|| fk("ticketPrice")).and_then(|v| v.as_f64()),
-                        fk("duration")
-                            .or_else(|| fk("duration_secs"))
-                            .or_else(|| fk("durationSecs"))
-                            .and_then(|v| v.as_i64()),
-                    )
+                    let item_id = match fk("item_id").or_else(|| fk("itemID")) {
+                        Some(PyRep::Integer(id)) if *id > 0 => *id,
+                        _ => return Some(Err(rpc_err("InvalidArgument", "CreateRaffle requires positive item_id"))),
+                    };
+                    let ticket_count_opt = match fk("ticket_count").or_else(|| fk("ticketCount")) {
+                        None | Some(PyRep::None) => None,
+                        Some(PyRep::Integer(tc)) => Some(*tc),
+                        Some(_) => return Some(Err(rpc_err("InvalidArgument", "ticket_count must be an integer"))),
+                    };
+                    let ticket_price_opt = match fk("ticket_price").or_else(|| fk("ticketPrice")) {
+                        Some(PyRep::Real(p)) => Some(*p),
+                        Some(PyRep::Integer(p)) => Some(*p as f64),
+                        _ => return Some(Err(rpc_err("InvalidArgument", "CreateRaffle requires positive finite ticket_price"))),
+                    };
+                    let duration = match fk("duration").or_else(|| fk("duration_secs")).or_else(|| fk("durationSecs")) {
+                        None | Some(PyRep::None) => None,
+                        Some(PyRep::Integer(d)) => Some(*d),
+                        Some(_) => return Some(Err(rpc_err("InvalidRaffleDuration", "duration must be an integer"))),
+                    };
+                    (item_id, ticket_count_opt, ticket_price_opt, duration)
                 }
-                _ => (
-                    args.first().and_then(|a| a.as_i64()).unwrap_or(0),
-                    args.get(1).and_then(|a| a.as_i64()),
-                    args.get(2).and_then(|a| a.as_f64()),
-                    args.get(3).and_then(|a| a.as_i64()),
-                ),
+                _ => {
+                    let item_id = match rpc.req_i64_any(0, &["itemID", "item_id"]) {
+                        Ok(v) if v > 0 => v,
+                        Ok(_) => return Some(Err(rpc_err("InvalidArgument", "CreateRaffle requires positive item_id"))),
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let ticket_count_opt = match rpc.opt_i64_any(1, &["ticketCount", "ticket_count"]) {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let ticket_price_opt = match rpc.get_raw_any(2, &["ticketPrice", "ticket_price"]) {
+                        None => None,
+                        Some(PyRep::Real(p)) => Some(*p),
+                        Some(PyRep::Integer(p)) => Some(*p as f64),
+                        Some(_) => return Some(Err(rpc_err("InvalidArgument", "ticket_price must be a number"))),
+                    };
+                    let duration = match rpc.opt_i64_any(3, &["duration", "duration_secs", "durationSecs"]) {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    (item_id, ticket_count_opt, ticket_price_opt, duration)
+                }
             };
             let duration_secs = match custom_duration {
                 Some(d) if d <= 0 || d > (RAFFLE_DURATION_SECS as i64) => {
@@ -608,11 +646,14 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let _ = sweep_expired_raffles(ctx);
-            let Some(raffle_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(rpc_err("InvalidArgument", "Raffle ticket purchase requires raffle_id")));
+            let rpc = RpcArgs::new(args, kwargs);
+            let raffle_id = match rpc.req_positive_i64(0, "raffleID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
             };
-            let Some(second_arg) = args.get(1).and_then(|a| a.as_i64()) else {
-                return Some(Err(rpc_err("InvalidArgument", "Raffle ticket purchase requires ticket index or count")));
+            let second_arg = match rpc.req_i64(1, "") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
             };
             let now = ctx.now_unix();
             let rng_entropy_draw = ctx.mechanic_rng.try_next_u64().unwrap_or(now);
@@ -797,8 +838,10 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(raffle_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(rpc_err("InvalidArgument", "AwardItem requires raffle_id")));
+            let rpc = RpcArgs::new(args, kwargs);
+            let raffle_id = match rpc.req_positive_i64(0, "raffleID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
             };
             let now = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -833,7 +876,11 @@ pub fn handle(
         }
         ("raffleProxy", "GetRaffle") => {
             let _ = sweep_expired_raffles(ctx);
-            let raffle_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let rpc = RpcArgs::new(args, kwargs);
+            let raffle_id = match rpc.req_positive_i64(0, "raffleID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let rep = ctx.db.with_snapshot(|snap| {
                 snap.owner_notes
                     .get(&raffle_note_id(raffle_id))
@@ -953,10 +1000,10 @@ pub fn handle_qa_seed_raffles(
     let Some(station_id) = session.station_id else {
         return Err(rpc_err("UserError", "CharacterNotDocked"));
     };
-    let count = args.first().and_then(|a| a.as_i64()).unwrap_or(1).clamp(1, 100) as usize;
-    let seed_type_id = args
-        .get(1)
-        .and_then(|a| a.as_i64())
+    let rpc = RpcArgs::positional(args);
+    let count = rpc.opt_positive_i64(0, "count")?.unwrap_or(1).clamp(1, 100) as usize;
+    let seed_type_id = rpc
+        .opt_i64(1, "typeID")?
         .and_then(|n| u32::try_from(n).ok())
         .filter(|tid| ctx.sde.types.contains_key(tid))
         .or_else(|| {
@@ -1300,13 +1347,14 @@ pub fn handle_character_seeding(
     if !is_privileged {
         return Err(rpc_err("UserError", "NotAuthorized"));
     }
-    let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
-    let raw_count = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+    let rpc = RpcArgs::positional(args);
+    let target_char_id = rpc.opt_positive_i64(0, "charID")?.unwrap_or(char_id);
+    let raw_count = rpc.opt_i64(1, "count")?.unwrap_or(1);
     if raw_count <= 0 {
         return Err(BridgeRpcError::user_error("InvalidArguments"));
     }
     let count = raw_count.clamp(1, 50) as usize;
-    let seed_type_id = match args.get(2).and_then(|a| a.as_i64()) {
+    let seed_type_id = match rpc.opt_i64(2, "typeID")? {
         Some(tid) => match u32::try_from(tid).ok().filter(|t| ctx.sde.types.contains_key(t)) {
             Some(t) => t,
             None => return Err(BridgeRpcError::user_error("InvalidTypeID")),
@@ -1320,15 +1368,12 @@ pub fn handle_character_seeding(
             .min()
             .unwrap_or(587),
     };
-    let ticket_count_i64 = args.get(3).and_then(|a| a.as_i64()).unwrap_or(8);
+    let ticket_count_i64 = rpc.opt_i64(3, "ticketCount")?.unwrap_or(8);
     if !matches!(ticket_count_i64, 8 | 16 | 48 | 512) {
         return Err(BridgeRpcError::user_error("InvalidTicketCount"));
     }
     let ticket_count = ticket_count_i64 as u32;
-    let ticket_price_isk = args.get(4).and_then(|a| a.as_f64()).unwrap_or(1000.0);
-    if !ticket_price_isk.is_finite() || ticket_price_isk <= 0.0 {
-        return Err(BridgeRpcError::user_error("InvalidTicketPrice"));
-    }
+    let ticket_price_isk = rpc.opt_positive_f64(4, "ticketPrice")?.unwrap_or(1000.0);
     let hypercores_used = compute_required_hypercores(
         ticket_price_isk * (ticket_count as f64),
         ticket_count,

@@ -19,8 +19,15 @@ pub(crate) async fn handle_mining_and_deactivate(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let module_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let effect_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("defaultEffect").to_string();
+            let rpc = crate::router::RpcArgs::positional(args);
+            let module_id = match rpc.req_positive_i64(0, "moduleID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let effect_name = match rpc.opt_str(1, "effectName") {
+                Ok(v) => v.unwrap_or("defaultEffect").to_string(),
+                Err(_) => "defaultEffect".to_string(),
+            };
             if effect_name == "online" {
                 let Some(ship_id) = session.ship_id else {
                     return Some(Err(BridgeRpcError {
@@ -255,7 +262,11 @@ pub(crate) async fn handle_mining_and_deactivate(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let module_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let rpc = crate::router::RpcArgs::positional(args);
+            let module_id = match rpc.req_positive_i64(0, "moduleID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
@@ -317,7 +328,10 @@ pub(crate) async fn handle_mining_and_deactivate(
                     message: "No active ship in session".into(),
                 }));
             };
-            let arg_val = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let arg_val = match crate::router::RpcArgs::positional(args).req_non_negative_i64(0, "rackOrModuleID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
                 Ok(f) => f,
                 Err(e) => return Some(Err(e)),

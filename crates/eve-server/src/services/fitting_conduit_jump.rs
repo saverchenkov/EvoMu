@@ -147,9 +147,10 @@ pub(super) async fn bridge_to_fleet_beacon(
     args: &[PyRep],
     is_deployable: bool,
 ) -> Result<PyRep, BridgeRpcError> {
-    let cyno_char = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-    let target_sys = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0) as u32;
-    let beacon_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
+    let rpc = crate::router::RpcArgs::positional(args);
+    let cyno_char = rpc.req_positive_i64(0, "cynoCharID")?;
+    let target_sys = rpc.opt_u32(1, "targetSystemID")?.unwrap_or(0);
+    let beacon_id = rpc.opt_i64(2, "beaconID")?.unwrap_or(0);
     if (31_000_000..32_000_000).contains(&target_sys) {
         return Err(err(
             "JumpDriveForbiddenInWormholeSpace",
@@ -410,9 +411,10 @@ pub(super) async fn group_jump_to_fleet_beacon(
     args: &[PyRep],
     is_deployable: bool,
 ) -> Result<JumpOutcome, BridgeRpcError> {
-    let cyno_char = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-    let target_sys = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0) as u32;
-    let beacon_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
+    let rpc = crate::router::RpcArgs::positional(args);
+    let cyno_char = rpc.req_positive_i64(0, "cynoCharID")?;
+    let target_sys = rpc.opt_u32(1, "targetSystemID")?.unwrap_or(0);
+    let beacon_id = rpc.opt_i64(2, "beaconID")?.unwrap_or(0);
     if (31_000_000..32_000_000).contains(&target_sys) {
         return Err(err(
             "JumpDriveForbiddenInWormholeSpace",
@@ -828,10 +830,11 @@ pub(super) async fn jump_through_fleet(
     session: &mut SessionState,
     args: &[PyRep],
 ) -> Result<JumpOutcome, BridgeRpcError> {
-    let other_char = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-    let other_ship = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-    let req_beacon = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
-    let req_dest_sys = args.get(3).and_then(|a| a.as_i64()).unwrap_or(0);
+    let rpc = crate::router::RpcArgs::positional(args);
+    let other_char = rpc.req_positive_i64(0, "cynoCharID")?;
+    let other_ship = rpc.req_positive_i64(1, "cynoShipID")?;
+    let req_beacon = rpc.opt_i64(2, "beaconID")?.unwrap_or(0);
+    let req_dest_sys = rpc.opt_i64(3, "destSystemID")?.unwrap_or(0);
     let (_, char_id) = ServerContext::require_character(session)?;
     let now = ctx.now_unix_secs();
     if let (Some(ship_id), Some(sys_id)) = (session.ship_id, session.solar_system_id) {

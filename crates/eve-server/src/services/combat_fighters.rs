@@ -245,8 +245,15 @@ async fn handle_fighters_inner(
                     message: "Session has no active ship".into(),
                 }));
             };
-            let a0 = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let a1 = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+            let rpc = RpcArgs::positional(args);
+            let a0 = match rpc.req_i64(0, "tubeOrFighterID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let a1 = match rpc.req_i64(1, "fighterOrTubeID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let (tube_idx, fighter_item_id) = if (0..10).contains(&a0) {
                 (a0 as usize, a1)
             } else if (0..10).contains(&a1) {
@@ -470,7 +477,15 @@ async fn handle_fighters_inner(
                     message: "Session has no active ship".into(),
                 }));
             };
-            let raw_tube = args.first().and_then(|a| a.as_i64()).unwrap_or(-1);
+            let raw_tube = match RpcArgs::positional(args).req_i64(0, "tubeID") {
+                Ok(v) => v,
+                Err(e) => {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidFighterTube".into(),
+                        message: e.message,
+                    }));
+                }
+            };
             let carrier_type_id = ctx.db.with_snapshot(|snap| {
                 if let Some(struct_id) = session.structure_id {
                     if ship_id == struct_id || !snap.items.contains_key(&ship_id) {
@@ -1117,36 +1132,43 @@ async fn handle_fighters_inner(
                 }
                 return Some(Ok(PyRep::Bool(true)));
             }
+            let rpc = RpcArgs::positional(args);
             let mode = match cmd.as_str() {
                 "ORBIT" => {
-                    let target_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
-                    let range = args.get(3).and_then(|a| a.as_f64()).unwrap_or(1_000.0);
+                    let target_id = match rpc.req_positive_i64(2, "targetID") {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let range = match rpc.opt_non_negative_f64(3, "range") {
+                        Ok(v) => v.unwrap_or(1_000.0),
+                        Err(e) => return Some(Err(e)),
+                    };
                     eve_destiny::MovementMode::Orbit { target_id, range }
                 }
                 "FOLLOW" | "APPROACH" => {
-                    let target_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
-                    let range = args.get(3).and_then(|a| a.as_f64()).unwrap_or(500.0);
+                    let target_id = match rpc.req_positive_i64(2, "targetID") {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let range = match rpc.opt_non_negative_f64(3, "range") {
+                        Ok(v) => v.unwrap_or(500.0),
+                        Err(e) => return Some(Err(e)),
+                    };
                     eve_destiny::MovementMode::Follow { target_id, range }
                 }
                 "STOP" => eve_destiny::MovementMode::Stop,
                 _ => {
-                    let x = args
-                        .get(2)
-                        .or_else(|| args.get(1))
-                        .and_then(|a| a.as_f64())
-                        .unwrap_or(1.0);
-                    let y = args
-                        .get(3)
-                        .or_else(|| args.get(2))
-                        .and_then(|a| a.as_f64())
-                        .unwrap_or(0.0);
-                    let z = args
-                        .get(4)
-                        .or_else(|| args.get(3))
-                        .and_then(|a| a.as_f64())
-                        .unwrap_or(0.0);
+                    let dir = match rpc
+                        .opt_finite_vec3(2)
+                        .transpose()
+                        .or_else(|| rpc.opt_finite_vec3(1).transpose())
+                    {
+                        Some(Ok(v)) => v,
+                        Some(Err(e)) => return Some(Err(e)),
+                        None => DVec3::new(1.0, 0.0, 0.0),
+                    };
                     eve_destiny::MovementMode::GotoDirection {
-                        direction: DVec3::new(x, y, z),
+                        direction: dir,
                     }
                 }
             };

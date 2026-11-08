@@ -449,7 +449,10 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let structure_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let structure_id = match crate::router::RpcArgs::positional(args).req_positive_i64(0, "structureID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let now = ctx.now_unix();
             let caller_corp = session.corporation_id.unwrap_or(0);
             let (is_ceo, db_roles) = super::inventory_fitting::get_effective_corp_roles(ctx, caller_corp, char_id);
@@ -483,7 +486,10 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let structure_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let structure_id = match crate::router::RpcArgs::positional(args).req_positive_i64(0, "structureID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let caller_corp = session.corporation_id.unwrap_or(0);
             let (is_ceo, db_roles) = super::inventory_fitting::get_effective_corp_roles(ctx, caller_corp, char_id);
             let roles = db_roles | session.corp_role;
@@ -513,8 +519,15 @@ pub async fn handle(
         }
         ("beyonce", "CmdTransferCorpAssetOwnership") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let target_corp_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+            let rpc = crate::router::RpcArgs::positional(args);
+            let item_id = match rpc.req_positive_i64(0, "itemID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let target_corp_id = match rpc.req_positive_i64(1, "targetCorpID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let caller_corp = session.corporation_id.unwrap_or(0);
             // Protocol security: CEO or Director role required to transfer corporate property.
             let (is_ceo, db_roles) = super::inventory_fitting::get_effective_corp_roles(ctx, caller_corp, char_id);

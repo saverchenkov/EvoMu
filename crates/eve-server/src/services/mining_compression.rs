@@ -466,8 +466,12 @@ pub fn handle_structure_compression_mgr(
                     message: "CompressItemInStructure requires an Upwell structure with reprocessing, not an NPC station".into(),
                 }));
             };
+            let rpc = crate::router::RpcArgs::positional(args);
             let item_id = if args.len() >= 2 {
-                if let Some(arg_sid) = args.first().and_then(|a| a.as_i64()) {
+                if let Some(arg_sid) = match rpc.opt_positive_i64(0, "structureID") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                } {
                     if arg_sid != structure_id {
                         return Some(Err(BridgeRpcError {
                             code: "InvalidStructure".into(),
@@ -475,17 +479,16 @@ pub fn handle_structure_compression_mgr(
                         }));
                     }
                 }
-                args.get(1).and_then(|a| a.as_i64()).unwrap_or(0)
+                match rpc.req_positive_i64(1, "itemID") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                }
             } else {
-                args.first().and_then(|a| a.as_i64()).unwrap_or(0)
+                match rpc.req_positive_i64(0, "itemID") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                }
             };
-
-            if item_id == 0 {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "CompressItemInStructure requires itemID".into(),
-                }));
-            }
 
             let now_unix = ctx.now_unix();
             if let Some(cid) = session.corporation_id.filter(|&id| id > 0) {
@@ -664,8 +667,12 @@ pub fn handle_structure_compression_mgr(
                 }));
             };
 
+            let rpc = crate::router::RpcArgs::positional(args);
             let item_id = if args.len() >= 2 {
-                if let Some(arg_sid) = args.first().and_then(|a| a.as_i64()) {
+                if let Some(arg_sid) = match rpc.opt_positive_i64(0, "structureID") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                } {
                     if arg_sid != structure_id {
                         return Some(Err(BridgeRpcError {
                             code: "InvalidStructure".into(),
@@ -675,17 +682,16 @@ pub fn handle_structure_compression_mgr(
                         }));
                     }
                 }
-                args.get(1).and_then(|a| a.as_i64()).unwrap_or(0)
+                match rpc.req_positive_i64(1, "itemID") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                }
             } else {
-                args.first().and_then(|a| a.as_i64()).unwrap_or(0)
+                match rpc.req_positive_i64(0, "itemID") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                }
             };
-
-            if item_id == 0 {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "DecompressGasInStructure requires itemID".into(),
-                }));
-            }
 
             let efficiency =
                 compute_gas_decompression_efficiency(ctx, char_id, Some(structure_id));

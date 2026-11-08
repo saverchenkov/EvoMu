@@ -205,8 +205,9 @@ fn handle_gm_bounty_admin(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     ServerContext::require_character(session)?;
-    let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-    let set_amt = args.get(1).and_then(|a| a.as_f64());
+    let rpc = crate::router::RpcArgs::positional(args);
+    let target_id = rpc.req_positive_i64(0, "targetID")?;
+    let set_amt = rpc.opt_non_negative_f64(1, "amountISK")?;
     let action = if method == "GMReimburseBounties" {
         "reimburse"
     } else if set_amt.is_some() {
@@ -249,24 +250,25 @@ pub fn handle_bounty_proxy(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let kr_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let price_isk = match args.get(1).and_then(|a| a.as_f64()) {
-                Some(p) => p,
-                None => {
+            let rpc = crate::router::RpcArgs::positional(args);
+            let kr_id = match rpc.req_positive_i64(0, "killRightID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let price_isk = match rpc.req_non_negative_f64(1, "price") {
+                Ok(p) => p,
+                Err(e) => {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidPrice".into(),
-                        message: "Kill right price must be a valid number".into(),
+                        message: e.message,
                     }));
                 }
             };
-            if !price_isk.is_finite() || price_isk < 0.0 {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidPrice".into(),
-                    message: "Kill right price must be a non-negative finite number".into(),
-                }));
-            }
             let now_unix = ctx.now_unix();
-            let restricted_to = args.get(2).and_then(|a| a.as_i64()).filter(|&r| r > 0);
+            let restricted_to = match rpc.opt_i64(2, "restrictedTo") {
+                Ok(v) => v.filter(|&r| r > 0),
+                Err(e) => return Some(Err(e)),
+            };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let valid_target = restricted_to.is_none_or(|r| {
                     snap.characters.contains_key(&r)
@@ -349,8 +351,15 @@ pub fn handle_bounty_proxy(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let kr_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let _to_id = args.get(1).and_then(|a| a.as_i64());
+            let rpc = crate::router::RpcArgs::positional(args);
+            let kr_id = match rpc.req_positive_i64(0, "killRightID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let _to_id = match rpc.opt_i64(1, "toID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(kr) = snap.kill_rights.get_mut(&kr_id) else {
                     return Err(BridgeRpcError {
@@ -450,9 +459,20 @@ pub fn handle_bounty_proxy(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let amount_isk = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0);
-            if target_id <= 0 || !amount_isk.is_finite() || amount_isk < 100_000.0 {
+            let rpc = crate::router::RpcArgs::positional(args);
+            let Ok(target_id) = rpc.req_positive_i64(0, "targetID") else {
+                return Some(Err(BridgeRpcError {
+                    code: "BountyAmountTooLow".into(),
+                    message: "Minimum bounty placement is 100,000 ISK on a valid target ID".into(),
+                }));
+            };
+            let Ok(amount_isk) = rpc.req_finite_f64(1, "amountISK") else {
+                return Some(Err(BridgeRpcError {
+                    code: "BountyAmountTooLow".into(),
+                    message: "Minimum bounty placement is 100,000 ISK on a valid target ID".into(),
+                }));
+            };
+            if amount_isk < 100_000.0 {
                 return Some(Err(BridgeRpcError {
                     code: "BountyAmountTooLow".into(),
                     message: "Minimum bounty placement is 100,000 ISK on a valid target ID".into(),

@@ -1410,7 +1410,11 @@ pub(super) fn handle_corps(
                 Err(e) => return Some(Err(e)),
             };
             let corp_id = session.corporation_id.unwrap_or(0);
-            let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let rpc = crate::router::RpcArgs::positional(args);
+            let target_id = match rpc.req_positive_i64(0, "characterID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let accept_now = matches!(args.get(1), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
             if accept_now {
                 return Some(Err(BridgeRpcError {
@@ -1579,14 +1583,34 @@ pub(super) fn handle_corps(
                     }))
                 }
             };
-            let from_div = args.first().and_then(|a| a.as_i64()).unwrap_or(1) as u8;
-            let to_div = args.get(1).and_then(|a| a.as_i64()).unwrap_or(2) as u8;
-            let amount_isk = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.0);
+            let rpc = crate::router::RpcArgs::positional(args);
+            let from_div_i = match rpc.req_i64(0, "fromDivision") {
+                Ok(v) => v,
+                Err(e) => {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidTransferDivision".into(),
+                        message: e.message,
+                    }));
+                }
+            };
+            let to_div_i = match rpc.req_i64(1, "toDivision") {
+                Ok(v) => v,
+                Err(e) => {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidTransferDivision".into(),
+                        message: e.message,
+                    }));
+                }
+            };
+            let amount_isk = match rpc.req_positive_f64(2, "amountISK") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let (Ok(from_div), Ok(to_div)) = (u8::try_from(from_div_i), u8::try_from(to_div_i)) else {
+                return Some(Err(BridgeRpcError { code: "InvalidTransferDivision".into(), message: "Source and target wallet divisions must be distinct (1..=7)".into() }));
+            };
             if from_div == to_div || !(1..=7).contains(&from_div) || !(1..=7).contains(&to_div) {
                 return Some(Err(BridgeRpcError { code: "InvalidTransferDivision".into(), message: "Source and target wallet divisions must be distinct (1..=7)".into() }));
-            }
-            if amount_isk <= 0.0 || !amount_isk.is_finite() {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Transfer amount must be positive and finite".into() }));
             }
             let transfer_amount = IskCents::from_f64_isk(amount_isk);
             promote_due_pending_corp_grants(ctx, corp_id);

@@ -7,7 +7,7 @@ use super::{
     save_market_order_meta, MarketOrderMeta,
 };
 use crate::formulas::compute_broker_fee_rate;
-use crate::router::{NotificationTarget, ServerContext};
+use crate::router::{NotificationTarget, RpcArgs, ServerContext};
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, MarketOrderRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
@@ -63,12 +63,15 @@ pub fn handle_orders_escrow(
                     message: "PlaceMultiSellOrder requires at least one item entry".into(),
                 }));
             }
-            let use_corp = args
-                .get(1)
-                .and_then(|a| a.as_bool())
-                .or_else(|| _kwargs.get("useCorp").and_then(|v| v.as_bool()))
-                .unwrap_or(false);
-            let duration_days = args.get(2).and_then(|a| a.as_i64()).unwrap_or(90);
+            let rpc = RpcArgs::new(args, _kwargs);
+            let use_corp = match rpc.opt_bool(1, "useCorp") {
+                Ok(v) => v.unwrap_or(false),
+                Err(e) => return Some(Err(e)),
+            };
+            let duration_days = match rpc.opt_i64(2, "duration") {
+                Ok(v) => v.unwrap_or(90),
+                Err(e) => return Some(Err(e)),
+            };
             if ![0, 1, 3, 7, 14, 30, 90].contains(&duration_days) {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidMarketOrder".into(),

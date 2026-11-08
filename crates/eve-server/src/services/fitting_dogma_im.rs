@@ -1026,9 +1026,22 @@ pub(crate) async fn handle_dogma_im(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
-            let master_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-            let slave_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
+            let rpc = crate::router::RpcArgs::positional(args);
+            let ship_id = match rpc.opt_positive_i64(0, "shipID") {
+                Ok(v) => v.or(session.ship_id).unwrap_or(0),
+                Err(e) => return Some(Err(e)),
+            };
+            if !ctx.db.with_snapshot(|s| s.items.get(&ship_id).is_some_and(|it| it.owner_id == char_id)) {
+                return Some(Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}") }));
+            }
+            let master_id = match rpc.req_positive_i64(1, "masterID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let slave_id = match rpc.req_positive_i64(2, "slaveID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
                     return Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}") });
@@ -1065,9 +1078,22 @@ pub(crate) async fn handle_dogma_im(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
-            let new_mod_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-            let target_bank_mod_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
+            let rpc = crate::router::RpcArgs::positional(args);
+            let ship_id = match rpc.opt_positive_i64(0, "shipID") {
+                Ok(v) => v.or(session.ship_id).unwrap_or(0),
+                Err(e) => return Some(Err(e)),
+            };
+            if !ctx.db.with_snapshot(|s| s.items.get(&ship_id).is_some_and(|it| it.owner_id == char_id)) {
+                return Some(Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}") }));
+            }
+            let new_mod_id = match rpc.req_positive_i64(1, "newModID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let target_bank_mod_id = match rpc.req_positive_i64(2, "targetBankModID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
                     return Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}") });
@@ -1112,9 +1138,22 @@ pub(crate) async fn handle_dogma_im(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
-            let master_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-            let other_master_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
+            let rpc = crate::router::RpcArgs::positional(args);
+            let ship_id = match rpc.opt_positive_i64(0, "shipID") {
+                Ok(v) => v.or(session.ship_id).unwrap_or(0),
+                Err(e) => return Some(Err(e)),
+            };
+            if !ctx.db.with_snapshot(|s| s.items.get(&ship_id).is_some_and(|it| it.owner_id == char_id)) {
+                return Some(Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}") }));
+            }
+            let master_id = match rpc.req_positive_i64(1, "masterID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let other_master_id = match rpc.req_positive_i64(2, "otherMasterID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
                     return Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}") });
@@ -1156,8 +1195,15 @@ pub(crate) async fn handle_dogma_im(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
-            let mod_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+            let rpc = crate::router::RpcArgs::positional(args);
+            let ship_id = match rpc.opt_positive_i64(0, "shipID") {
+                Ok(v) => v.or(session.ship_id).unwrap_or(0),
+                Err(e) => return Some(Err(e)),
+            };
+            let mod_id = match rpc.req_positive_i64(1, "moduleID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
                     return Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}") });
@@ -1184,8 +1230,15 @@ pub(crate) async fn handle_dogma_im(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
-            let master_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+            let rpc = crate::router::RpcArgs::positional(args);
+            let ship_id = match rpc.opt_positive_i64(0, "shipID") {
+                Ok(v) => v.or(session.ship_id).unwrap_or(0),
+                Err(e) => return Some(Err(e)),
+            };
+            let master_id = match rpc.req_positive_i64(1, "masterID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
                     return Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}") });
@@ -1205,7 +1258,10 @@ pub(crate) async fn handle_dogma_im(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
+            let ship_id = match crate::router::RpcArgs::positional(args).opt_positive_i64(0, "shipID") {
+                Ok(v) => v.or(session.ship_id).unwrap_or(0),
+                Err(e) => return Some(Err(e)),
+            };
             let res = crate::services::combat_crimewatch::combat_weapons::handle_link_all_weapons(ctx, char_id, ship_id);
             Some(res)
         }
@@ -1215,7 +1271,10 @@ pub(crate) async fn handle_dogma_im(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
+            let ship_id = match crate::router::RpcArgs::positional(args).opt_positive_i64(0, "shipID") {
+                Ok(v) => v.or(session.ship_id).unwrap_or(0),
+                Err(e) => return Some(Err(e)),
+            };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
                     return Err(BridgeRpcError { code: "ShipOwnershipViolation".into(), message: format!("Ship {ship_id} is not owned by {char_id}") });

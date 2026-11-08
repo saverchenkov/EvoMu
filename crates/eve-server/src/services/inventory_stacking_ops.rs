@@ -17,23 +17,22 @@ fn parse_split_args(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<(Option<i64>, i64, i32), BridgeRpcError> {
+    let rpc = crate::router::RpcArgs::new(args, kwargs);
     let (loc_hint, item_id, raw_qty_opt) = if args.len() >= 3 {
         (
-            args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0),
-            args.get(1).and_then(|a| a.as_i64()).unwrap_or(0),
-            args.get(2).and_then(|a| a.as_i64()),
+            rpc.opt_positive_i64(0, "locationID")?,
+            rpc.req_positive_i64(1, "itemID")?,
+            rpc.opt_i64(2, "qty")?,
         )
     } else {
         let loc = bound_entry.map(|b| b.object_id).filter(|&id| id > 0);
-        let iid = args
-            .first()
-            .and_then(|a| a.as_i64())
-            .or_else(|| kwargs.get("itemID").and_then(|v| v.as_i64()))
-            .unwrap_or(0);
-        let qty = if let Some(arg1) = args.get(1) {
-            arg1.as_i64()
-        } else if let Some(kv) = kwargs.get("qty").or_else(|| kwargs.get("quantity")) {
-            kv.as_i64()
+        let iid = rpc.req_positive_i64(0, "itemID")?;
+        let qty = if args.get(1).is_some() {
+            rpc.opt_i64(1, "qty")?
+        } else if kwargs.contains_key("qty") {
+            rpc.opt_i64(1, "qty")?
+        } else if kwargs.contains_key("quantity") {
+            rpc.opt_i64(1, "quantity")?
         } else {
             Some(1)
         };
@@ -358,7 +357,10 @@ pub(in crate::services) fn handle_stack_ops(
                     }
                 }
                 Some(PyRep::Integer(dst_id)) => {
-                    let src_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+                    let src_id = match crate::router::RpcArgs::positional(args).req_positive_i64(1, "srcID") {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    };
                     let qty_opt = match args.get(2).and_then(|a| a.as_i64()) {
                         Some(raw_q) => match i32::try_from(raw_q) {
                             Ok(q) => Some(q),

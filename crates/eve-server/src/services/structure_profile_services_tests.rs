@@ -289,14 +289,8 @@ fn require_structure_service_access_enforces_lifecycle_acl_and_corp_management()
     let now = ctx.now_unix();
 
     ctx.db.with_mut_snapshot(|snap| {
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "ACL Guard Corp".into(),
-            ticker: "AGDC".into(),
-            ceo_id,
-            members: std::collections::HashSet::from([ceo_id, pending_dir_id]),
-            ..Default::default()
-        };
+        let mut corp = CorporationRecord::new(corp_id, "ACL Guard Corp", "AGDC", ceo_id);
+        corp.members = std::collections::HashSet::from([ceo_id, pending_dir_id]);
         corp.member_roles
             .insert(pending_dir_id, corp_roles::ROLE_DIRECTOR);
         snap.corporations.insert(corp_id, corp);

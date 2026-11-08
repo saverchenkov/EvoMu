@@ -10,7 +10,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::router::{NotificationTarget, ServerContext};
+use crate::router::{NotificationTarget, RpcArgs, ServerContext};
 use eve_db::{ContractRecord, InventoryFlag, InventoryItemRecord, IskCents, TypeId};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -338,8 +338,16 @@ pub fn handle(
                     _ => "Public".to_string(),
                 }
             };
-            let assignee_id = p_field("assigneeID").or_else(|| args.get(2)).and_then(|a| a.as_i64())
-                .or_else(|| kwargs.get("assigneeID").and_then(|v| v.as_i64())).unwrap_or(0);
+            let rpc = RpcArgs::new(args, kwargs);
+            let assignee_id = match p_field("assigneeID") {
+                Some(PyRep::Integer(v)) => *v,
+                Some(PyRep::None) => 0,
+                Some(_) => return Some(Err(rpc_err("InvalidContractParameters", "assigneeID must be an integer"))),
+                None => match rpc.opt_i64(2, "assigneeID") {
+                    Ok(v) => v.unwrap_or(0),
+                    Err(e) => return Some(Err(e)),
+                },
+            };
             let availability = if assignee_id > 0 && availability.eq_ignore_ascii_case("Public") {
                 "Personal".to_string()
             } else {
@@ -367,16 +375,36 @@ pub fn handle(
                     )));
                 }
             };
-            let price_arg = p_field("price").or_else(|| args.get(7)).and_then(|a| a.as_f64()).unwrap_or(0.0);
-            let reward_arg = p_field("reward").or_else(|| args.get(8)).and_then(|a| a.as_f64()).unwrap_or(0.0);
-            let collateral_arg = p_field("collateral").or_else(|| args.get(9)).and_then(|a| a.as_f64()).unwrap_or(0.0);
+            let parse_opt_isk = |field: &str, idx: usize| -> Result<f64, BridgeRpcError> {
+                if let Some(v) = p_field(field) {
+                    return match v {
+                        PyRep::None => Ok(0.0),
+                        PyRep::Real(f) if f.is_finite() => Ok(*f),
+                        PyRep::Integer(i) => Ok(*i as f64),
+                        _ => Err(rpc_err("InvalidContractParameters", format!("{field} must be a finite number"))),
+                    };
+                }
+                Ok(rpc.opt_finite_f64(idx, field)?.unwrap_or(0.0))
+            };
+            let price_arg = match parse_opt_isk("price", 7) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let reward_arg = match parse_opt_isk("reward", 8) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let collateral_arg = match parse_opt_isk("collateral", 9) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let (primary_isk, secondary_isk) = match contract_type {
                 "Courier" => (reward_arg, collateral_arg),
                 "Auction" => (price_arg, collateral_arg),
                 _ => (price_arg, reward_arg),
             };
-            let raw_title = p_field("title").or_else(|| args.get(10)).and_then(|a| a.as_str())
-                .or_else(|| kwargs.get("title").and_then(|v| v.as_str())).unwrap_or("");
+            let raw_title = if let Some(t) = p_field("title") {
+                match t {
+                    PyRep::None => "",
+                    other => match other.as_str() {
+                        Some(s) => s,
+                        None => return Some(Err(rpc_err("InvalidContractParameters", "title must be a string"))),
+                    },
+                }
+            } else {
+                match rpc.opt_str(10, "title") { Ok(v) => v.unwrap_or(""), Err(e) => return Some(Err(e)) }
+            };
             let title = raw_title.chars().take(128).collect::<String>();
             let items_source = p_field("itemList").or_else(|| p_field("items")).or_else(|| args.get(12)).or_else(|| kwargs.get("itemList")).or_else(|| kwargs.get("items"));
             let item_ids_req = parse_item_ids(items_source);
@@ -384,8 +412,15 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let for_corp = p_field("forCorp").or_else(|| args.get(15)).and_then(|a| a.as_bool())
-                .or_else(|| kwargs.get("forCorp").and_then(|v| v.as_bool())).unwrap_or(false);
+            let for_corp = if let Some(fc) = p_field("forCorp") {
+                match fc {
+                    PyRep::None => false,
+                    PyRep::Bool(b) => *b,
+                    _ => return Some(Err(rpc_err("InvalidContractParameters", "forCorp must be a boolean"))),
+                }
+            } else {
+                match rpc.opt_bool(15, "forCorp") { Ok(v) => v.unwrap_or(false), Err(e) => return Some(Err(e)) }
+            };
 
             if session.station_id.or(session.structure_id) != Some(start_station_id) {
                 return Some(Err(rpc_err(
@@ -695,10 +730,9 @@ pub fn handle(
 
         "AcceptContract" => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let cid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let accept_for_corp = args.get(1).map(|a| a.as_bool().unwrap_or(false) || a.as_i64().unwrap_or(0) != 0)
-                .or_else(|| kwargs.get("forCorp").and_then(|v| v.as_bool()))
-                .unwrap_or(false);
+            let rpc = RpcArgs::new(args, kwargs);
+            let cid = match rpc.req_positive_i64(0, "contractID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let accept_for_corp = match rpc.opt_bool(1, "forCorp") { Ok(v) => v.unwrap_or(false), Err(e) => return Some(Err(e)) };
             let caller_station = session.station_id.or(session.structure_id);
             let caller_ship = session.ship_id;
             let caller_corp = session.corporation_id.unwrap_or(0);
@@ -978,14 +1012,11 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let cid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let bid_isk = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0);
-            let bid_for_corp = args
-                .get(2)
-                .map(|a| a.as_bool().unwrap_or(false) || a.as_i64().unwrap_or(0) != 0)
-                .or_else(|| kwargs.get("forCorp").and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|n| n != 0))))
-                .unwrap_or(false);
-            if !bid_isk.is_finite() || bid_isk <= 0.0 {
+            let rpc = RpcArgs::new(args, kwargs);
+            let cid = match rpc.req_positive_i64(0, "contractID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let bid_isk = match rpc.req_finite_f64(1, "bidAmount") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let bid_for_corp = match rpc.opt_bool(2, "forCorp") { Ok(v) => v.unwrap_or(false), Err(e) => return Some(Err(e)) };
+            if bid_isk <= 0.0 {
                 return Some(Err(rpc_err("InvalidBidAmount", "Auction bid must be a positive finite ISK amount",)));
             }
             let caller_corp = session.corporation_id.unwrap_or(0);
@@ -1220,7 +1251,8 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let cid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let rpc = RpcArgs::new(args, kwargs);
+            let cid = match rpc.req_positive_i64(0, "contractID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let caller_station = session.station_id.or(session.structure_id);
             let caller_ship = session.ship_id;
             let caller_corp = session.corporation_id.unwrap_or(0);
@@ -1330,7 +1362,8 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let cid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let rpc = RpcArgs::new(args, kwargs);
+            let cid = match rpc.req_positive_i64(0, "contractID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let has_gm_role = snap.accounts.values().any(|a| a.user_id == user_id && a.role > 0);
@@ -1358,9 +1391,12 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let wrap_id = args.first().and_then(|a| a.as_i64())
-                .or_else(|| kwargs.get("itemID").or_else(|| kwargs.get("plasticWrapID")).and_then(|v| v.as_i64()))
-                .unwrap_or(0);
+            let rpc = RpcArgs::new(args, kwargs);
+            let wrap_id = match rpc.req_i64_any(0, &["itemID", "plasticWrapID"]) {
+                Ok(v) if v > 0 => v,
+                Ok(_) => return Some(Err(rpc_err("InvalidArgument", "BreakPlasticWrap requires positive wrap itemID"))),
+                Err(e) => return Some(Err(e)),
+            };
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let wrap_item_ids: Vec<(i64, i64)> = snap
@@ -1402,7 +1438,8 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let cid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let rpc = RpcArgs::new(args, kwargs);
+            let cid = match rpc.req_positive_i64(0, "contractID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let caller_corp = session.corporation_id.unwrap_or(0);
             let now_unix = ctx.now_unix();
             if let Some(corp_id) = ctx
@@ -1523,7 +1560,8 @@ pub fn handle(
 
         "GetContractInfo" | "GetContract" => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let cid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let rpc = RpcArgs::new(args, kwargs);
+            let cid = match rpc.req_positive_i64(0, "contractID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let caller_corp = session.corporation_id.unwrap_or(0);
             let caller_alliance = session.alliance_id;
             let now_unix = ctx.now_unix();

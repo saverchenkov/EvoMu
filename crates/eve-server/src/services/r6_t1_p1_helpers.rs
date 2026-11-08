@@ -344,6 +344,7 @@ pub(crate) async fn spawn_distinct_exit_wormhole(
 pub(crate) fn parse_fighter_point_target_args(
     args: &[PyRep],
 ) -> Result<(Vec<i64>, u32, DVec3), BridgeRpcError> {
+    let rpc = crate::router::RpcArgs::positional(args);
     let fighter_ids: Vec<i64> = match args.first() {
         Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => items
             .iter()
@@ -359,39 +360,14 @@ pub(crate) fn parse_fighter_point_target_args(
             message: "ActivateFighterAbilitySlotsOnPoint requires at least one valid fighterID".into(),
         });
     }
-    let slot_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0) as u32;
-    let target_point = match args.get(2) {
-        Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) if items.len() >= 3 => {
-            let (Some(x), Some(y), Some(z)) =
-                (items[0].as_f64(), items[1].as_f64(), items[2].as_f64())
-            else {
-                return Err(BridgeRpcError {
-                    code: "InvalidTargetPoint".into(),
-                    message: "Target point coordinates must be numeric".into(),
-                });
-            };
-            DVec3::new(x, y, z)
-        }
-        _ => {
-            let (Some(x), Some(y), Some(z)) = (
-                args.get(2).and_then(|a| a.as_f64()),
-                args.get(3).and_then(|a| a.as_f64()),
-                args.get(4).and_then(|a| a.as_f64()),
-            ) else {
-                return Err(BridgeRpcError {
-                    code: "InvalidTargetPoint".into(),
-                    message: "ActivateFighterAbilitySlotsOnPoint requires (x, y, z) coordinates".into(),
-                });
-            };
-            DVec3::new(x, y, z)
-        }
-    };
-    if !target_point.is_finite() {
-        return Err(BridgeRpcError {
-            code: "InvalidTargetPoint".into(),
-            message: "Target point coordinates must be finite".into(),
-        });
-    }
+    let slot_id = rpc.req_u32(1, "slotID").map_err(|e| BridgeRpcError {
+        code: "InvalidFighterAbilitySlot".into(),
+        message: e.message,
+    })?;
+    let target_point = rpc.req_finite_vec3(2).map_err(|e| BridgeRpcError {
+        code: "InvalidTargetPoint".into(),
+        message: e.message,
+    })?;
     Ok((fighter_ids, slot_id, target_point))
 }
 

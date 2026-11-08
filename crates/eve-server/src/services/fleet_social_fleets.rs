@@ -637,11 +637,24 @@ pub(super) async fn handle_fleets(
                     }))
                 }
             };
-            let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
+            let rpc = crate::router::RpcArgs::positional(args);
+            let target_id = match rpc.opt_positive_i64(0, "charID") {
+                Ok(v) => v.unwrap_or(char_id),
+                Err(e) => return Some(Err(e)),
+            };
             let now_unix = ctx.now_unix();
-            let new_wing_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
-            let new_squad_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1);
-            let new_role_num = args.get(3).and_then(|a| a.as_i64()).unwrap_or(4);
+            let new_wing_id = match rpc.opt_i64(1, "wingID") {
+                Ok(v) => v.unwrap_or(1),
+                Err(e) => return Some(Err(e)),
+            };
+            let new_squad_id = match rpc.opt_i64(2, "squadID") {
+                Ok(v) => v.unwrap_or(1),
+                Err(e) => return Some(Err(e)),
+            };
+            let new_role_num = match rpc.opt_i64(3, "role") {
+                Ok(v) => v.unwrap_or(4),
+                Err(e) => return Some(Err(e)),
+            };
             let new_role = i64_to_role(new_role_num);
 
             match crate::domain::fleets::move_fleet_member(

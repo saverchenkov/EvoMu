@@ -611,7 +611,7 @@ pub async fn handle_wrecks_killmails(
     service: &str,
     method: &str,
     args: &[PyRep],
-    _kwargs: &HashMap<String, PyRep>,
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         // rpc-lint: allow legacy combat_death_crimewatch self-destruct alias
@@ -862,7 +862,10 @@ pub async fn handle_wrecks_killmails(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let module_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let module_id = match RpcArgs::new(args, kwargs).req_positive_i64(0, "moduleID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let ship_id = session.ship_id.unwrap_or(0);
             if !ctx.db.with_snapshot(|s| s.items.get(&module_id).is_some_and(|i| i.owner_id == char_id && i.location_id == ship_id)) {
                 return Some(Err(BridgeRpcError { code: "ModuleNotOwnedByShip".into(), message: format!("Module {module_id} is not fitted to active ship {ship_id}") }));

@@ -212,6 +212,7 @@ pub mod wormhole_pve_escalations;
 pub mod wormhole_pve_seeding;
 pub mod quasar_vendors_and_war_services;
 
+pub use crate::router::RpcArgs;
 pub use inventory_fitting::fitting_containers_ships;
 pub use space_destiny::space_probe_scanning;
 
@@ -651,6 +652,8 @@ mod corp_registry_ops_extra_unit_tests;
 mod corp_registry_actions_and_tracking_unit_tests;
 #[cfg(test)]
 mod r8_shard_h_security_tests;
+#[cfg(test)]
+mod rpc_args_migration_tests;
 
 pub(crate) fn domain_err_to_rpc(err: crate::domain::DomainError) -> eve_proto::BridgeRpcError {
     eve_proto::BridgeRpcError {

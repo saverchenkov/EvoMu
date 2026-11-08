@@ -538,10 +538,17 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     message: "LaunchFromContainer requires an active ship".into(),
                 })),
             };
+            let rpc = crate::router::RpcArgs::positional(args);
             let item_id = if args.len() >= 2 {
-                args.get(1).and_then(|a| a.as_i64()).unwrap_or(0)
+                match rpc.req_positive_i64(1, "itemID") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                }
             } else {
-                args.first().and_then(|a| a.as_i64()).unwrap_or(0)
+                match rpc.req_positive_i64(0, "itemID") {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                }
             };
             let supplied_password = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
             let sys = ctx.systems.get_or_spawn(sys_id);
@@ -1065,7 +1072,10 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         message: "SetShipKillCounter requires GM role".into(),
                     }));
                 }
-                let kills = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).max(0);
+                let kills = match crate::router::RpcArgs::positional(args).opt_i64(1, "kills") {
+                    Ok(v) => v.unwrap_or(1).max(0),
+                    Err(e) => return Some(Err(e)),
+                };
                 let res = ctx.db.try_with_mut_snapshot(|snap| {
                     let Some(it) = snap.items.get_mut(&ship_id) else {
                         return Err(BridgeRpcError {

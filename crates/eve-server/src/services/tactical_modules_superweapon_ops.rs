@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use crate::router::RpcArgs;
 
 /// Rejects superweapon activation if `ship_id` is currently tethered (`CantActivateWhileTethered`, `#496`).
 pub(crate) async fn check_superweapon_tether_guard(
@@ -78,16 +79,16 @@ pub async fn activate_superweapon_or_lance(
     .await
 }
 
-fn parse_vec3_arg(arg: Option<&PyRep>) -> Option<DVec3> {
-    let items = match arg? {
-        PyRep::Tuple(v) | PyRep::List(v) if v.len() >= 3 => v,
-        _ => return None,
-    };
-    Some(DVec3::new(
-        items[0].as_f64().filter(|v| v.is_finite())?,
-        items[1].as_f64().filter(|v| v.is_finite())?,
-        items[2].as_f64().filter(|v| v.is_finite())?,
-    ))
+fn parse_vec3_arg(args: &[PyRep], idx: usize) -> Result<Option<DVec3>, BridgeRpcError> {
+    if !matches!(args.get(idx), Some(PyRep::Tuple(_) | PyRep::List(_))) {
+        return Ok(None);
+    }
+    RpcArgs::positional(args)
+        .opt_finite_vec3(idx)
+        .map_err(|e| BridgeRpcError {
+            code: "InvalidDirectionVector".into(),
+            message: e.message,
+        })
 }
 
 fn check_superweapon_fuel_available(
@@ -674,16 +675,11 @@ pub async fn activate_superweapon_with_args(
         None
     };
 
-    if is_slash {
-        for raw_arg in [args.get(1), args.get(2)].into_iter().flatten() {
-            if matches!(raw_arg, PyRep::Tuple(_) | PyRep::List(_)) && parse_vec3_arg(Some(raw_arg)).is_none() {
-                return Err(BridgeRpcError {
-                    code: "InvalidDirectionVector".into(),
-                    message: "Lance direction vector coordinates must be finite".into(),
-                });
-            }
-        }
-    }
+    let (slash_p0, slash_p1) = if is_slash {
+        (parse_vec3_arg(args, 1)?, parse_vec3_arg(args, 2)?)
+    } else {
+        (None, None)
+    };
 
     let fuel_tid = mod_type.default_attributes.get(&713).map(|&v| v as u32).unwrap_or(16274);
     let fuel_qty = mod_type.default_attributes.get(&714).map(|&v| v.round() as i32).unwrap_or(50_000);
@@ -732,7 +728,7 @@ pub async fn activate_superweapon_with_args(
     let lock_secs = (mod_type.default_attributes.get(&2427).copied().unwrap_or(300_000.0) / 1000.0).round() as u64;
 
     if is_slash {
-        let raw_dir = match (parse_vec3_arg(args.get(1)), parse_vec3_arg(args.get(2))) {
+        let raw_dir = match (slash_p0, slash_p1) {
             (Some(p0), Some(p1)) if (p1 - p0).length_squared() > 1e-4 => Some(p1 - p0),
             (Some(p0), Some(p1)) => Some(if p0.length_squared() > 1e-4 { p0 } else { p1 }),
             (a, b) => a.or(b),

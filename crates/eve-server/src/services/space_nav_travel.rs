@@ -814,16 +814,13 @@ pub(crate) async fn handle_cmd_goto_direction(
             message: "Session has no active ship".into(),
         });
     };
-    let x = args.first().and_then(|a| a.as_f64()).unwrap_or(0.0);
-    let y = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0);
-    let z = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.0);
-    if !x.is_finite() || !y.is_finite() || !z.is_finite() {
-        return Err(BridgeRpcError {
+    let raw_dir = crate::router::RpcArgs::positional(args)
+        .req_finite_vec3(0)
+        .map_err(|e| BridgeRpcError {
             code: "InvalidArguments".into(),
-            message: "Direction coordinates must be finite".into(),
-        });
-    }
-    let dir = DVec3::new(x, y, z).normalize_or_zero();
+            message: e.message,
+        })?;
+    let dir = raw_dir.normalize_or_zero();
     let direction = if dir.length_squared() > 1e-6 { dir } else { DVec3::X };
     let handle = ctx.systems.get_or_spawn(sys_id);
     let Some((_, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
@@ -933,13 +930,12 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
             message: "Session has no active ship".into(),
         });
     };
-    let fraction = args.first().and_then(|a| a.as_f64()).unwrap_or(1.0);
-    if !fraction.is_finite() || fraction < 0.0 {
-        return Err(BridgeRpcError {
+    let fraction = crate::router::RpcArgs::positional(args)
+        .req_non_negative_f64(0, "speedFraction")
+        .map_err(|e| BridgeRpcError {
             code: "InvalidSpeedFraction".into(),
-            message: "Speed fraction must be a finite non-negative number".into(),
-        });
-    }
+            message: e.message,
+        })?;
     let handle = ctx.systems.get_or_spawn(sys_id);
     ensure_not_mjd_spooling(&handle, ship_id).await?;
     let Some((_, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
@@ -1014,13 +1010,13 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
             message: "Session has no active ship".into(),
         });
     };
-    let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-    if target_id <= 0 {
-        return Err(BridgeRpcError {
+    let rpc = crate::router::RpcArgs::positional(args);
+    let target_id = rpc
+        .req_positive_i64(0, "targetID")
+        .map_err(|e| BridgeRpcError {
             code: "InvalidTarget".into(),
-            message: "Target ID must be a positive integer".into(),
-        });
-    }
+            message: e.message,
+        })?;
     if target_id == ship_id {
         return Err(BridgeRpcError {
             code: "InvalidTarget".into(),
@@ -1049,13 +1045,13 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
     } else {
         2_500.0
     };
-    let range = args.get(1).and_then(|a| a.as_f64()).unwrap_or(default_range);
-    if !range.is_finite() || range < 0.0 {
-        return Err(BridgeRpcError {
+    let range = rpc
+        .opt_non_negative_f64(1, "range")
+        .map_err(|e| BridgeRpcError {
             code: "InvalidRange".into(),
-            message: "Orbit or follow range must be a finite non-negative number".into(),
-        });
-    }
+            message: e.message,
+        })?
+        .unwrap_or(default_range);
     let mode = if method == "CmdOrbit" {
         MovementMode::Orbit { target_id, range }
     } else {

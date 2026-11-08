@@ -616,7 +616,10 @@ pub async fn handle_crimewatch(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let kr_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let kr_id = match crate::router::RpcArgs::positional(args).req_positive_i64(0, "killRightID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let is_docked = session.station_id.is_some() || session.structure_id.is_some();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(kr) = snap.kill_rights.get(&kr_id).cloned() else {
@@ -670,8 +673,16 @@ pub async fn handle_crimewatch(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let kr_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let expected_price_opt = args.get(1).and_then(|a| a.as_f64()).filter(|p| p.is_finite());
+            let kr_id = match crate::router::RpcArgs::positional(args).req_positive_i64(0, "killRightID") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let expected_price_opt = match crate::router::RpcArgs::positional(args)
+                .opt_finite_f64(1, "expectedPrice")
+            {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let is_docked = session.station_id.is_some() || session.structure_id.is_some();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(kr) = snap.kill_rights.get(&kr_id).cloned() else {
@@ -828,7 +839,10 @@ pub async fn handle_crimewatch(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(caller_id);
+            let target_char_id = match crate::router::RpcArgs::positional(args).opt_positive_i64(0, "characterID") {
+                Ok(v) => v.unwrap_or(caller_id),
+                Err(e) => return Some(Err(e)),
+            };
             let sec = ctx
                 .db
                 .with_snapshot(|s| s.characters.get(&target_char_id).map(|c| c.security_status))
@@ -902,7 +916,10 @@ pub async fn handle_crimewatch(
             let _ = ctx
                 .db
                 .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.character_id));
-            let raw_lvl = args.first().and_then(|a| a.as_i64()).unwrap_or(2);
+            let raw_lvl = match crate::router::RpcArgs::positional(args).req_i64(0, "safetyLevel") {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let lvl = match raw_lvl {
                 0 => SafetyLevel::Red,
                 1 => SafetyLevel::Yellow,

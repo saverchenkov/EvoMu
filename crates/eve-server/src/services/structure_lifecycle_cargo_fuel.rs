@@ -145,10 +145,14 @@ pub async fn handle_jettison_structure_fuel(
                 let default_tid = snap.items.values()
                     .filter(|i| i.location_id == structure_id && rules::is_structure_fuel_flag(i.flag) && i.quantity > 0 && rules::is_fuel_block_type(ctx, i.type_id))
                     .min_by_key(|i| i.item_id).map(|i| i64::from(i.type_id)).unwrap_or(4247);
+                let rpc = crate::router::RpcArgs::positional(args);
                 let (fuel_tid, req_qty) = if args.len() >= 3 {
-                    (args.get(1).and_then(|a| a.as_i64()).unwrap_or(default_tid), args.get(2).and_then(|a| a.as_i64()).unwrap_or(0))
+                    (
+                        rpc.opt_positive_i64(1, "fuelTypeID")?.unwrap_or(default_tid),
+                        rpc.req_non_negative_i64(2, "quantity")?,
+                    )
                 } else if args.len() == 2 {
-                    (default_tid, args.get(1).and_then(|a| a.as_i64()).unwrap_or(0))
+                    (default_tid, rpc.req_non_negative_i64(1, "quantity")?)
                 } else {
                     (default_tid, i64::from(st.fuel_blocks))
                 };
