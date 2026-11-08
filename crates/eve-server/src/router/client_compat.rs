@@ -863,6 +863,19 @@ fn normalize_godma_environment(env: PyRep, item_id: &PyRep, effect_id: &PyRep) -
     }
 }
 
+fn ensure_i4_pyrep(rep: &mut PyRep) {
+    match rep {
+        PyRep::Real(v) if v.is_finite() => {
+            *rep = PyRep::Integer((v.round() as i64).clamp(i32::MIN as i64, i32::MAX as i64));
+        }
+        PyRep::Integer(v) => {
+            *rep = PyRep::Integer((*v).clamp(i32::MIN as i64, i32::MAX as i64));
+        }
+        PyRep::None => {}
+        _ => *rep = PyRep::Integer(0),
+    }
+}
+
 fn normalize_on_godma_ship_effect(mut args: Vec<PyRep>) -> Vec<PyRep> {
     if args.is_empty() {
         return Vec::new();
@@ -876,6 +889,8 @@ fn normalize_on_godma_ship_effect(mut args: Vec<PyRep>) -> Vec<PyRep> {
         let env = std::mem::replace(&mut args[5], PyRep::None);
         args[5] = normalize_godma_environment(env, &item_id, &effect_id);
         ensure_filetime_pyrep(&mut args[6], fallback_ft);
+        ensure_i4_pyrep(&mut args[7]);
+        ensure_i4_pyrep(&mut args[8]);
         if args.len() == 10 {
             args.push(PyRep::None);
         }
@@ -897,7 +912,7 @@ fn normalize_on_godma_ship_effect(mut args: Vec<PyRep>) -> Vec<PyRep> {
         active_flag,
         env,
         PyRep::Integer(fallback_ft),
-        PyRep::Real(0.0),
+        PyRep::Integer(0),
         PyRep::Integer(0),
         PyRep::None,
         PyRep::None,
@@ -946,6 +961,8 @@ mod client_compat_tests {
         assert_eq!(ten_zero_ft.len(), 11);
         assert!(ten_zero_ft[2].as_i64().unwrap() > i32::MAX as i64);
         assert!(ten_zero_ft[6].as_i64().unwrap() > i32::MAX as i64);
+        assert_eq!(ten_zero_ft[7], PyRep::Integer(4000));
+        assert_eq!(ten_zero_ft[8], PyRep::Integer(0));
         assert!(matches!(&ten_zero_ft[5], PyRep::Tuple(t) if t.len() == 7));
 
         let preserved = normalize_macho_notification(

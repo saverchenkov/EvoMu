@@ -59,6 +59,7 @@ fn required_slash_role_and_gm_audit_cap_cover_all_branches() {
     for expected in [
         "giveisk",
         "heal",
+        "load",
         "tr",
         "setomega",
         "ban",

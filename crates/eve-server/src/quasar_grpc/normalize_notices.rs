@@ -174,7 +174,7 @@ pub fn normalize_macho_notification(event: &str, args: Vec<PyRep>) -> Vec<PyRep>
                     active,
                     env,
                     PyRep::Integer(default_ft),
-                    PyRep::Real(0.0),
+                    PyRep::Integer(0),
                     PyRep::Integer(0),
                     PyRep::None,
                     PyRep::None,

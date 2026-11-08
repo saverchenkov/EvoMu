@@ -957,23 +957,31 @@ pub fn handle_orders_escrow(
 
         "BuyMultipleItems" => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let Some(station_id) = session.station_id.or(session.structure_id) else {
-                return Some(Err(BridgeRpcError { code: "NotDockedAtStation".into(), message: "Character must be docked at a station or structure to BuyMultipleItems".into() }));
-            };
-            let raw_entries = match (args.first(), args.get(1)) {
-                (Some(PyRep::List(entries) | PyRep::Tuple(entries)), _) => entries.as_slice(),
+            let docked_station_id = session.station_id.or(session.structure_id);
+            let (station_id, raw_entries) = match (args.first(), args.get(1)) {
+                (Some(PyRep::List(entries) | PyRep::Tuple(entries)), _) => {
+                    let Some(sid) = docked_station_id else {
+                        return Some(Err(BridgeRpcError { code: "NotDockedAtStation".into(), message: "Character must be docked at a station or structure to BuyMultipleItems".into() }));
+                    };
+                    (sid, entries.as_slice())
+                }
                 (Some(PyRep::Integer(sid)), Some(PyRep::List(entries) | PyRep::Tuple(entries))) => {
-                    if *sid != station_id {
-                        return Some(Err(BridgeRpcError {
-                            code: "StationMismatch".into(),
-                            message: format!(
-                                "BuyMultipleItems station {sid} does not match docked station {station_id}"
-                            ),
-                        }));
+                    if let Some(docked) = docked_station_id {
+                        if *sid != docked {
+                            return Some(Err(BridgeRpcError {
+                                code: "StationMismatch".into(),
+                                message: format!(
+                                    "BuyMultipleItems station {sid} does not match docked station {docked}"
+                                ),
+                            }));
+                        }
                     }
-                    entries.as_slice()
+                    (*sid, entries.as_slice())
                 }
                 _ => {
+                    if docked_station_id.is_none() && args.is_empty() {
+                        return Some(Err(BridgeRpcError { code: "NotDockedAtStation".into(), message: "Character must be docked at a station or structure to BuyMultipleItems".into() }));
+                    }
                     return Some(Err(BridgeRpcError {
                         code: "InvalidBuyMultipleItems".into(),
                         message: "BuyMultipleItems requires a non-empty list of (type_id, quantity[, max_price_isk]) entries".into(),
@@ -1065,12 +1073,24 @@ pub fn handle_orders_escrow(
                 let _ = crate::services::structure_profile_services::apply_due_profiles_and_check_upwell_market(
                     ctx, snap, station_id, char_id, now_unix, "MarketServiceOffline",
                 )?;
+                let st_sys = super::resolve_station_solar_system(ctx, snap, station_id);
+                let st_reg = st_sys.and_then(|s| ctx.sde.solar_systems.get(&s).map(|sys| sys.region_id));
+                if st_reg != Some(region_id) {
+                    return Err(BridgeRpcError {
+                        code: "InvalidMarketStation".into(),
+                        message: format!("Station {station_id} is not in region {region_id}"),
+                    });
+                }
                 let sk = snap.skills.get(&char_id);
                 let vis_lvl = sk.and_then(|m| m.get(&3447)).map(|s| s.level).unwrap_or(0);
                 let max_vis_jumps = crate::services::market_contracts::max_remote_jumps_for_skill_level(vis_lvl);
                 let proc_lvl = sk.and_then(|m| m.get(&16594)).map(|s| s.level).unwrap_or(0);
                 let max_proc_jumps = crate::services::market_contracts::max_remote_jumps_for_skill_level(proc_lvl);
-                let caller_sys = super::resolve_station_solar_system(ctx, snap, station_id);
+                let caller_sys = if docked_station_id.is_some() {
+                    st_sys
+                } else {
+                    session.solar_system_id.or(st_sys)
+                };
                 for (req_tid, _, _, ent_st, ord_rng) in &parsed_requests {
                     if !matches!(*ord_rng, -1 | 0 | 1..=40 | 32767) {
                         return Err(BridgeRpcError { code: "InvalidBuyMultipleItems".into(), message: format!("Invalid orderRange {ord_rng} in BuyMultipleItems") });

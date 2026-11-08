@@ -63,6 +63,7 @@ const ALL_REMOTE_SLASH_COMMANDS: &[&str] = &[
     "industrytimer",
     "kick",
     "kill",
+    "load",
     "location",
     "online",
     "operation",
@@ -722,7 +723,8 @@ pub async fn handle(
             }
             let res: Option<Result<PyRep, BridgeRpcError>> = async {
                 if let Some(rest) = cmd.strip_prefix("/giveisk ") {
-                let Ok(amount) = rest.trim().parse::<i64>() else {
+                let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+                let Ok(amount) = tokens.first().map(String::as_str).unwrap_or("").parse::<i64>() else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Usage: /giveisk <positive_integer_amount>".into(),
@@ -1127,8 +1129,8 @@ pub async fn handle(
                     ("reason", PyRep::String(reason.to_string())),
                 ])))
             } else if let Some(rest) = cmd.strip_prefix("/giveitem ").or_else(|| cmd.strip_prefix("/createitem ")) {
-                let mut parts = rest.trim().split_whitespace();
-                let Some(type_id_str) = parts.next() else {
+                let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+                let Some(type_id_str) = tokens.first().map(String::as_str) else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
                         message: "Usage: /giveitem <type_id> [quantity] or /createitem <type_id> <quantity>".into(),
@@ -1140,7 +1142,7 @@ pub async fn handle(
                         message: "Invalid type_id for /giveitem".into(),
                     }));
                 };
-                let qty: i32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+                let qty: i32 = tokens.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
                 if qty <= 0 {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
@@ -1203,8 +1205,9 @@ pub async fn handle(
                     Err(e) => Some(Err(e)),
                 }
             } else if let Some(rest) = cmd.strip_prefix("/setskill ").or_else(|| cmd.strip_prefix("/giveskill ")) {
-                let tokens: Vec<&str> = rest.trim().split_whitespace().collect();
-                let (skill_id_opt, lvl_opt) = match tokens.as_slice() {
+                let tokens = crate::services::character_skills::character_gm_tools::parse_slash_tokens(rest);
+                let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+                let (skill_id_opt, lvl_opt) = match token_strs.as_slice() {
                     [s, l] => (Some(*s), Some(*l)),
                     [_target, s, l, ..] => (Some(*s), Some(*l)),
                     [s] => (Some(*s), None),

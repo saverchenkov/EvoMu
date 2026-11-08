@@ -577,4 +577,146 @@ fn market_proxy_error_guards_and_corporate_buy_order_matching() {
         plex_buy.dict_get("filledImmediately").and_then(|v| v.as_bool()),
         Some(true)
     );
+
+    // Issue #622: Undocked (in space) immediate PlaceBuyOrder & BuyMultipleItems succeed,
+    // while resting PlaceBuyOrder in space requires Procurement skill.
+    let seller_id = 90_000_099;
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.insert(
+            seller_id,
+            CharacterRecord {
+                character_id: seller_id,
+                balance: IskCents::from_isk(1_000_000),
+                station_id: Some(JITA_STATION_ID),
+                solar_system_id: Some(JITA_SYSTEM_ID),
+                region_id: Some(THE_FORGE_REGION_ID),
+                ..Default::default()
+            },
+        );
+        s.market_orders.insert(
+            860_002,
+            MarketOrderRecord {
+                order_id: 860_002,
+                owner_id: seller_id,
+                station_id: JITA_STATION_ID,
+                region_id: THE_FORGE_REGION_ID,
+                type_id: 34,
+                is_bid: false,
+                price: IskCents::from_isk(5),
+                vol_entered: 20,
+                vol_remaining: 20,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+        if let Some(ch) = s.characters.get_mut(&buyer_id) {
+            ch.balance = IskCents::from_isk(100_000);
+            ch.station_id = None;
+            ch.solar_system_id = Some(JITA_SYSTEM_ID);
+        }
+    });
+    let mut space_sess = SessionState::default();
+    space_sess.character_id = Some(buyer_id);
+    space_sess.user_id = Some(1);
+    space_sess.solar_system_id = Some(JITA_SYSTEM_ID);
+    space_sess.region_id = Some(THE_FORGE_REGION_ID);
+    space_sess.station_id = None;
+
+    // Immediate buy (duration=0) while in space fills from Jita sell order
+    let space_imm = handle(
+        &ctx,
+        &mut space_sess,
+        "marketProxy",
+        "PlaceBuyOrder",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Integer(34),
+            PyRep::Real(5.0),
+            PyRep::Integer(5),
+            PyRep::Integer(-1),
+            PyRep::Integer(1),
+            PyRep::Integer(0),
+            PyRep::Bool(false),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .expect("immediate PlaceBuyOrder in space should succeed");
+    assert_eq!(
+        space_imm.dict_get("filledImmediately").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+
+    // Resting buy order in space without Procurement fails with NotDockedAtStation
+    let space_rest_err = handle(
+        &ctx,
+        &mut space_sess,
+        "marketProxy",
+        "PlaceBuyOrder",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Integer(34),
+            PyRep::Real(4.0),
+            PyRep::Integer(5),
+            PyRep::Integer(-1),
+            PyRep::Integer(1),
+            PyRep::Integer(90),
+            PyRep::Bool(false),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(space_rest_err.code, "NotDockedAtStation");
+
+    // With Procurement >= 1, resting buy order in same solar system succeeds from space
+    ctx.db.with_mut_snapshot(|s| {
+        s.skills
+            .entry(buyer_id)
+            .or_default()
+            .insert(16594, SkillRecord { type_id: 16594, skillpoints: 1000, level: 1 });
+    });
+    let space_rest_ok = handle(
+        &ctx,
+        &mut space_sess,
+        "marketProxy",
+        "PlaceBuyOrder",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Integer(34),
+            PyRep::Real(4.0),
+            PyRep::Integer(5),
+            PyRep::Integer(-1),
+            PyRep::Integer(1),
+            PyRep::Integer(90),
+            PyRep::Bool(false),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .expect("resting PlaceBuyOrder in space with Procurement 1 should succeed");
+    assert_eq!(
+        space_rest_ok.dict_get("filledImmediately").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+
+    // BuyMultipleItems with explicit stationID while in space succeeds
+    let space_multi = crate::services::market_orders_escrow::handle(
+        &ctx,
+        &mut space_sess,
+        "marketProxy",
+        "BuyMultipleItems",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(34), PyRep::Integer(5)])]),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .expect("BuyMultipleItems with explicit stationID in space should succeed");
+    assert_eq!(
+        space_multi.dict_get("totalQuantity").and_then(|v| v.as_i64()),
+        Some(5)
+    );
 }

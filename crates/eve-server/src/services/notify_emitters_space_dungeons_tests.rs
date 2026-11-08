@@ -234,4 +234,42 @@ fn godma_ewar_drones_cloak_pvp_deathzone_and_dungeon_trigger_emitters() {
     assert!(events.contains("OnLeaveTournamentSystem"));
     assert!(events.contains("OnEssReserveBankInventoryFull"));
     assert!(events.contains("OnJumpQueueUpdate"));
+
+    let effect_info = drained
+        .iter()
+        .find(|n| n.event == "OnGodmaEffectInfo")
+        .expect("OnGodmaEffectInfo notification");
+    assert_eq!(effect_info.args.len(), 4);
+    assert_eq!(effect_info.args[0], PyRep::Integer(mod_id));
+    assert_eq!(effect_info.args[1], PyRep::Integer(440));
+    let PyRep::Dict(active_entries) = &effect_info.args[2] else {
+        panic!("expected activeEffects dict in OnGodmaEffectInfo");
+    };
+    assert_eq!(active_entries.len(), 1);
+    let (eff_key, PyRep::List(line)) = &active_entries[0] else {
+        panic!("expected active effect list entry");
+    };
+    assert!(matches!(eff_key, PyRep::Integer(_)));
+    assert_eq!(line.len(), 10);
+    assert_eq!(line[0], PyRep::Integer(mod_id));
+    assert_eq!(line[1], PyRep::Integer(char_id));
+    assert_eq!(line[2], PyRep::Integer(ship_id));
+    assert_eq!(line[3], PyRep::Integer(999_001));
+    assert_eq!(line[4], PyRep::None);
+    assert_eq!(line[5], PyRep::List(Vec::new()));
+    assert_eq!(&line[6], eff_key);
+    assert!(matches!(line[7], PyRep::Integer(ft) if ft > i32::MAX as i64));
+    assert_eq!(line[8], PyRep::Integer(5000));
+    assert_eq!(line[9], PyRep::Integer(0));
+
+    let prime_item = drained
+        .iter()
+        .find(|n| n.event == "OnGodmaPrimeItem")
+        .expect("OnGodmaPrimeItem notification");
+    assert_eq!(prime_item.args.len(), 2);
+    assert_eq!(prime_item.args[0], PyRep::Integer(ship_id));
+    let PyRep::KeyVal(kv) = &prime_item.args[1] else {
+        panic!("expected KeyVal in OnGodmaPrimeItem");
+    };
+    assert_eq!(kv.get("activeEffects"), Some(&effect_info.args[2]));
 }

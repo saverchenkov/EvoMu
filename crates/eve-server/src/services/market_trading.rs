@@ -726,10 +726,12 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(docked_station_id) = session.station_id.or(session.structure_id) else {
+            let docked_station_id = session.station_id.or(session.structure_id);
+            let arg_station_id = args.first().and_then(|a| a.as_i64());
+            let Some(station_id) = arg_station_id.or(docked_station_id) else {
                 return Some(Err(BridgeRpcError {
                     code: "NotDockedAtStation".into(),
-                    message: "Character must be docked at a station or structure to place a market order"
+                    message: "Character must be docked at a station or specify a stationID to place a market order"
                         .into(),
                 }));
             };
@@ -739,10 +741,6 @@ pub fn handle(
                     message: "Session has no active region".into(),
                 }));
             };
-            let station_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .unwrap_or(docked_station_id);
             let Some(raw_type_id) = args.get(1).and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidMarketOrder".into(),
@@ -809,7 +807,7 @@ pub fn handle(
             }
             let quantity_i32 = quantity as i32;
             let station_info = ctx.sde.solar_systems.values().find_map(|sys| {
-                if sys.region_id == region_id {
+                if sys.region_id == region_id || type_id == PLEX_TYPE_ID {
                     sys.stations.iter().find(|st| st.station_id == station_id)
                 } else {
                     None
@@ -818,7 +816,7 @@ pub fn handle(
             let station_owner_corp = station_info.map(|s| s.owner_corporation_id).unwrap_or(0);
             let owner_faction_id = station_info.and_then(|s| s.owner_faction_id);
 
-            let (broker_lvl, _acct_lvl, mt_lvl, vis_lvl, proc_lvl, faction_standing, corp_standing, max_open_orders, m_tier, remote_station_ok) =
+            let (broker_lvl, _acct_lvl, mt_lvl, vis_lvl, proc_lvl, proc_ok, in_same_region, faction_standing, corp_standing, max_open_orders, m_tier) =
                 ctx.db.with_snapshot(|snap| {
                     let sk = snap.skills.get(&char_id);
                     let b_lvl = sk.and_then(|m| m.get(&3446)).map(|s| s.level).unwrap_or(0);
@@ -829,6 +827,29 @@ pub fn handle(
                         .map(|s| s.level)
                         .unwrap_or(0);
                     let p_lvl = sk.and_then(|m| m.get(&16594)).map(|s| s.level).unwrap_or(0);
+                    let max_proc_jumps =
+                        super::market_contracts::max_remote_jumps_for_skill_level(p_lvl);
+                    let caller_sys = session
+                        .solar_system_id
+                        .or_else(|| docked_station_id.and_then(|ds| resolve_station_solar_system(ctx, snap, ds)));
+                    let target_sys = resolve_station_solar_system(ctx, snap, station_id);
+                    let same_reg = target_sys.is_some_and(|ts| {
+                        ctx.sde
+                            .solar_systems
+                            .get(&ts)
+                            .is_some_and(|s| s.region_id == region_id)
+                    });
+                    let p_ok = p_lvl > 0
+                        && same_reg
+                        && (max_proc_jumps >= 32_767
+                            || match (caller_sys, target_sys) {
+                                (Some(a), Some(b)) if a == b => true,
+                                (Some(a), Some(b)) if max_proc_jumps > 0 => {
+                                    solar_system_jump_distance(ctx, a, b)
+                                        .is_some_and(|d| (d as i64) <= max_proc_jumps)
+                                }
+                                _ => false,
+                            });
                     let trade_lvl = sk.and_then(|m| m.get(&3443)).map(|s| s.level).unwrap_or(0) as usize;
                     let retail_lvl = sk.and_then(|m| m.get(&3444)).map(|s| s.level).unwrap_or(0) as usize;
                     let wholesale_lvl = sk.and_then(|m| m.get(&16596)).map(|s| s.level).unwrap_or(0) as usize;
@@ -841,49 +862,45 @@ pub fn handle(
                     let c_st = ch
                         .and_then(|c| c.standings.get(&station_owner_corp).copied())
                         .unwrap_or(0.0);
-                    let m_sys = resolve_station_solar_system(ctx, snap, station_id).unwrap_or(0);
+                    let m_sys = target_sys.unwrap_or(0);
                     let tier = snap.fw_runtime.ihub_tiers.get(&m_sys).copied().unwrap_or(0);
-                    let st_ok = if station_id == docked_station_id {
-                        true
-                    } else {
-                        let docked_sys = resolve_station_solar_system(ctx, snap, docked_station_id);
-                        let target_sys = resolve_station_solar_system(ctx, snap, station_id);
-                        let in_same_region = target_sys.is_some_and(|ts| {
-                            ctx.sde
-                                .solar_systems
-                                .get(&ts)
-                                .is_some_and(|s| s.region_id == region_id)
-                        });
-                        if !in_same_region {
-                            false
-                        } else if duration_days == 0 {
-                            // Immediate buy (BuySimple / duration=0) can buy any sell order in the same region.
-                            true
-                        } else {
-                            match (docked_sys, target_sys) {
-                                (Some(ds), Some(ts)) if ds == ts => true,
-                                (Some(ds), Some(ts)) => {
-                                    let max_jumps =
-                                        super::market_contracts::max_remote_jumps_for_skill_level(p_lvl);
-                                    max_jumps >= 32_767
-                                        || (max_jumps > 0
-                                            && solar_system_jump_distance(ctx, ds, ts)
-                                                .is_some_and(|d| (d as i64) <= max_jumps))
-                                }
-                                _ => false,
-                            }
-                        }
-                    };
-                    (b_lvl, a_lvl, m_lvl, v_lvl, p_lvl, f_st, c_st, order_limit, tier, st_ok)
+                    (b_lvl, a_lvl, m_lvl, v_lvl, p_lvl, p_ok, same_reg, f_st, c_st, order_limit, tier)
                 });
-            let _ = proc_lvl;
-            if !remote_station_ok {
-                return Some(Err(BridgeRpcError {
-                    code: "StationMismatch".into(),
-                    message: format!(
-                        "Cannot place market order at station {station_id} while docked at {docked_station_id}"
-                    ),
-                }));
+            // Immediate buys (duration == 0) and PLEX orders are valid from space or remotely within
+            // the active region; resting buy orders at a non-docked station require Procurement skill.
+            if docked_station_id != Some(station_id) && type_id != PLEX_TYPE_ID {
+                if duration_days == 0 {
+                    if !in_same_region {
+                        return Some(Err(BridgeRpcError {
+                            code: if docked_station_id.is_some() { "StationMismatch" } else { "InvalidMarketOrder" }.into(),
+                            message: format!(
+                                "Cannot place immediate market buy at out-of-region station {station_id}"
+                            ),
+                        }));
+                    }
+                } else if let Some(docked) = docked_station_id {
+                    if !proc_ok {
+                        return Some(Err(BridgeRpcError {
+                            code: "StationMismatch".into(),
+                            message: format!(
+                                "Cannot place market order at station {station_id} while docked at {docked}"
+                            ),
+                        }));
+                    }
+                } else if proc_lvl == 0 {
+                    return Some(Err(BridgeRpcError {
+                        code: "NotDockedAtStation".into(),
+                        message: "Character must be docked at a station or structure to place a non-immediate market order"
+                            .into(),
+                    }));
+                } else if !proc_ok {
+                    return Some(Err(BridgeRpcError {
+                        code: "InsufficientProcurementSkill".into(),
+                        message: format!(
+                            "Procurement skill level {proc_lvl} is insufficient for remote station {station_id}"
+                        ),
+                    }));
+                }
             }
             if type_id != PLEX_TYPE_ID
                 && order_range > super::market_contracts::max_remote_jumps_for_skill_level(vis_lvl)

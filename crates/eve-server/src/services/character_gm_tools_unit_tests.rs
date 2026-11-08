@@ -450,4 +450,83 @@ async fn gm_slash_commands_and_qa_rpcs_execute_and_enforce_roles() {
             (PyRep::Integer(4), PyRep::Integer(0)),
         ]))
     );
+
+    // Issue #628: Quoted target arguments (e.g. from V24 svc_slash.py cmd_fit/cmd_loadcontainer)
+    let cur_ship_id = current_ship_id;
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let fit_quoted = handle_gm_slash_ext(&ctx, &mut sess, char_id, "/fit \"me\" 2048 ")
+        .await
+        .unwrap()
+        .expect("/fit with quoted \"me\" and trailing space must succeed");
+    assert_eq!(fit_quoted.dict_get("typeID"), Some(&PyRep::Integer(2048)));
+    assert_eq!(fit_quoted.dict_get("shipID"), Some(&PyRep::Integer(cur_ship_id)));
+    let fit_notifs_q = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        fit_notifs_q.iter().any(|n| n.event == "OnItemChange"),
+        "/fit should emit OnItemChange notification"
+    );
+
+    let set_quoted = handle_gm_slash_ext(&ctx, &mut sess, char_id, "/setattr \"me\" 9 512.5")
+        .await
+        .unwrap()
+        .expect("/setattr with quoted \"me\" must succeed");
+    assert_eq!(set_quoted.dict_get("itemID"), Some(&PyRep::Integer(cur_ship_id)));
+    assert_eq!(set_quoted.dict_get("value"), Some(&PyRep::Real(512.5)));
+
+    let get_quoted = handle_gm_slash_ext(&ctx, &mut sess, char_id, "/getattr \"me\" 9")
+        .await
+        .unwrap()
+        .expect("/getattr with quoted \"me\" must succeed");
+    assert_eq!(get_quoted.dict_get("value"), Some(&PyRep::Real(512.5)));
+
+    // Issue #627: /load slash command (quoted "me", unquoted me, ship ID, default qty, and bare /load error)
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let load_quoted = handle_gm_slash_ext(&ctx, &mut sess, char_id, "/load \"me\" 34 250 ")
+        .await
+        .unwrap()
+        .expect("/load \"me\" 34 250 must succeed");
+    let loaded_id_1 = load_quoted.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
+    assert_eq!(load_quoted.dict_get("typeID"), Some(&PyRep::Integer(34)));
+    assert_eq!(load_quoted.dict_get("quantity"), Some(&PyRep::Integer(250)));
+    assert_eq!(load_quoted.dict_get("locationID"), Some(&PyRep::Integer(cur_ship_id)));
+    assert_eq!(
+        load_quoted.dict_get("flagID"),
+        Some(&PyRep::Integer(InventoryFlag::Cargo as i64))
+    );
+    let loaded_rec_1 = ctx.db.get_item(loaded_id_1).expect("loaded item persisted in db");
+    assert_eq!(loaded_rec_1.quantity, 250);
+    assert_eq!(loaded_rec_1.location_id, cur_ship_id);
+    assert_eq!(loaded_rec_1.flag, InventoryFlag::Cargo);
+    let load_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        load_notifs.iter().any(|n| n.event == "OnItemChange"),
+        "/load should emit OnItemChange notification"
+    );
+
+    let load_default_qty = handle_gm_slash_ext(&ctx, &mut sess, char_id, "/load me 2048")
+        .await
+        .unwrap()
+        .expect("/load me 2048 (default qty 1) must succeed");
+    assert_eq!(load_default_qty.dict_get("quantity"), Some(&PyRep::Integer(1)));
+    assert_eq!(load_default_qty.dict_get("typeID"), Some(&PyRep::Integer(2048)));
+
+    let load_shorthand = handle_gm_slash_ext(&ctx, &mut sess, char_id, "/load 34 15")
+        .await
+        .unwrap()
+        .expect("/load <typeID> <qty> shorthand must succeed");
+    assert_eq!(load_shorthand.dict_get("quantity"), Some(&PyRep::Integer(15)));
+    assert_eq!(load_shorthand.dict_get("locationID"), Some(&PyRep::Integer(cur_ship_id)));
+
+    let load_explicit_ship = handle_gm_slash_ext(&ctx, &mut sess, char_id, &format!("/load {cur_ship_id} 34 42"))
+        .await
+        .unwrap()
+        .expect("/load <ship_id> 34 42 must succeed");
+    assert_eq!(load_explicit_ship.dict_get("quantity"), Some(&PyRep::Integer(42)));
+    assert_eq!(load_explicit_ship.dict_get("locationID"), Some(&PyRep::Integer(cur_ship_id)));
+
+    let load_bad = handle_gm_slash_ext(&ctx, &mut sess, char_id, "/load")
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(load_bad.code, "InvalidSlashArgument");
 }

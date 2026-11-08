@@ -451,10 +451,47 @@ pub fn handle_char_unbound(
     }
 }
 
+/// Splits a slash command argument string into tokens, stripping matching outer
+/// single or double quotes (e.g. `"me"` -> `me`) while preserving quoted spaces.
+pub(crate) fn parse_slash_tokens(rest: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut in_token = false;
+    for ch in rest.chars() {
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            } else {
+                cur.push(ch);
+            }
+        } else if ch == '"' || ch == '\'' {
+            quote = Some(ch);
+            in_token = true;
+        } else if ch.is_whitespace() {
+            if in_token {
+                tokens.push(std::mem::take(&mut cur));
+                in_token = false;
+            }
+        } else {
+            cur.push(ch);
+            in_token = true;
+        }
+    }
+    if in_token {
+        tokens.push(cur);
+    }
+    tokens
+}
+
+fn is_me_or_myship(tok: &str) -> bool {
+    tok.eq_ignore_ascii_case("me") || tok.eq_ignore_ascii_case("myship")
+}
+
 /// Handles GM slash commands added in `CH-5`:
 /// `/heal [target_id]`, `/spawn <type_id> [qty]`, `/unspawn <id>`, `/setattr <item_id> <attr_id> <val>`,
-/// `/getattr <item_id> <attr_id>`, `/fit [ship_id|"me"] <type_id> [flag]`, `/kill <target_id>`,
-/// `/location [char_id]`, and `/online`.
+/// `/getattr <item_id> <attr_id>`, `/fit [ship_id|"me"] <type_id> [flag]`, `/load [target|"me"] <type_id> [qty]`,
+/// `/kill <target_id>`, `/location [char_id]`, and `/online`.
 pub async fn handle_gm_slash_ext(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -462,7 +499,11 @@ pub async fn handle_gm_slash_ext(
     cmd: &str,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     if cmd == "/heal" || cmd.starts_with("/heal ") {
-        let arg_id = cmd.strip_prefix("/heal").map(str::trim).filter(|s| !s.is_empty()).and_then(|s| s.parse::<i64>().ok());
+        let tokens = parse_slash_tokens(cmd.strip_prefix("/heal").unwrap_or(""));
+        let arg_id = tokens
+            .first()
+            .filter(|s| !is_me_or_myship(s))
+            .and_then(|s| s.parse::<i64>().ok());
 
         let (target_char_id, sys_id, target_ship_id) = ctx.db.with_snapshot(|snap| {
             let caller_sys = session.solar_system_id.or_else(|| snap.characters.get(&cid).map(|c| c.solar_system_id)).unwrap_or(0);
@@ -522,11 +563,11 @@ pub async fn handle_gm_slash_ext(
     }
 
     if let Some(rest) = cmd.strip_prefix("/spawn ") {
-        let mut parts = rest.split_whitespace();
-        let Some(type_id) = parts.next().and_then(|s| s.parse::<u32>().ok()) else {
+        let tokens = parse_slash_tokens(rest);
+        let Some(type_id) = tokens.first().and_then(|s| s.parse::<u32>().ok()) else {
             return Some(Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /spawn <type_id> [quantity]".into() }));
         };
-        let qty = parts.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(1);
+        let qty = tokens.get(1).and_then(|s| s.parse::<i32>().ok()).unwrap_or(1);
         if !(1..=100).contains(&qty) {
             return Some(Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Quantity for /spawn must be between 1 and 100".into() }));
         }
@@ -624,7 +665,8 @@ pub async fn handle_gm_slash_ext(
     }
 
     if let Some(rest) = cmd.strip_prefix("/unspawn ").or_else(|| cmd.strip_prefix("/despawn ")) {
-        let Some(target_id) = rest.trim().parse::<i64>().ok().filter(|&id| id > 0) else {
+        let tokens = parse_slash_tokens(rest);
+        let Some(target_id) = tokens.first().and_then(|s| s.parse::<i64>().ok()).filter(|&id| id > 0) else {
             return Some(Err(BridgeRpcError { code: "InvalidSlashArgument".into(), message: "Usage: /unspawn <entity_id>".into() }));
         };
         let (sys_id, removed_db) = ctx.db.with_mut_snapshot(|snap| {
@@ -652,21 +694,21 @@ pub async fn handle_gm_slash_ext(
     }
 
     if let Some(rest) = cmd.strip_prefix("/setattr ") {
-        let mut parts = rest.split_whitespace();
-        let Some(item_tok) = parts.next() else {
+        let tokens = parse_slash_tokens(rest);
+        let Some(item_tok) = tokens.first().map(String::as_str) else {
             return Some(Err(BridgeRpcError {
                 code: "InvalidSlashArgument".into(),
                 message: "Usage: /setattr <item_id|me> <attribute_id> <value>".into(),
             }));
         };
-        let Some(attr_id) = parts.next().and_then(|s| s.parse::<u16>().ok()) else {
+        let Some(attr_id) = tokens.get(1).and_then(|s| s.parse::<u16>().ok()) else {
             return Some(Err(BridgeRpcError {
                 code: "InvalidSlashArgument".into(),
                 message: "Usage: /setattr <item_id|me> <attribute_id> <value>".into(),
             }));
         };
-        let Some(val) = parts
-            .next()
+        let Some(val) = tokens
+            .get(2)
             .and_then(|s| s.parse::<f64>().ok())
             .filter(|v| v.is_finite())
         else {
@@ -678,9 +720,7 @@ pub async fn handle_gm_slash_ext(
 
         let now_ft = ctx.now_blueos_filetime_ticks();
         let res = ctx.db.try_with_mut_snapshot(|snap| {
-            let item_id = if item_tok.eq_ignore_ascii_case("me")
-                || item_tok.eq_ignore_ascii_case("myship")
-            {
+            let item_id = if is_me_or_myship(item_tok) {
                 snap.characters
                     .get(&cid)
                     .map(|c| c.active_ship_id)
@@ -732,23 +772,21 @@ pub async fn handle_gm_slash_ext(
     }
 
     if let Some(rest) = cmd.strip_prefix("/getattr ") {
-        let mut parts = rest.split_whitespace();
-        let Some(item_tok) = parts.next() else {
+        let tokens = parse_slash_tokens(rest);
+        let Some(item_tok) = tokens.first().map(String::as_str) else {
             return Some(Err(BridgeRpcError {
                 code: "InvalidSlashArgument".into(),
                 message: "Usage: /getattr <item_id|me> <attribute_id>".into(),
             }));
         };
-        let Some(attr_id) = parts.next().and_then(|s| s.parse::<u16>().ok()) else {
+        let Some(attr_id) = tokens.get(1).and_then(|s| s.parse::<u16>().ok()) else {
             return Some(Err(BridgeRpcError {
                 code: "InvalidSlashArgument".into(),
                 message: "Usage: /getattr <item_id|me> <attribute_id>".into(),
             }));
         };
         let res = ctx.db.with_snapshot(|snap| {
-            let item_id = if item_tok.eq_ignore_ascii_case("me")
-                || item_tok.eq_ignore_ascii_case("myship")
-            {
+            let item_id = if is_me_or_myship(item_tok) {
                 snap.characters
                     .get(&cid)
                     .map(|c| c.active_ship_id)
@@ -786,11 +824,7 @@ pub async fn handle_gm_slash_ext(
     }
 
     if let Some(rest) = cmd.strip_prefix("/fit ") {
-        let tokens: Vec<&str> = rest
-            .split_whitespace()
-            .map(|t| t.trim_matches('"'))
-            .filter(|t| !t.is_empty())
-            .collect();
+        let tokens = parse_slash_tokens(rest);
         if tokens.is_empty() {
             return Some(Err(BridgeRpcError {
                 code: "InvalidSlashArgument".into(),
@@ -803,9 +837,7 @@ pub async fn handle_gm_slash_ext(
             .or(session.ship_id)
             .unwrap_or(0);
 
-        let (ship_id, type_id, explicit_flag) = if tokens[0].eq_ignore_ascii_case("me")
-            || tokens[0].eq_ignore_ascii_case("myship")
-        {
+        let (ship_id, type_id, explicit_flag) = if is_me_or_myship(&tokens[0]) {
             let Some(tid) = tokens.get(1).and_then(|s| s.parse::<u32>().ok()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSlashArgument".into(),
@@ -998,12 +1030,177 @@ pub async fn handle_gm_slash_ext(
         };
     }
 
+    if cmd == "/load" || cmd.starts_with("/load ") {
+        let tokens = parse_slash_tokens(cmd.strip_prefix("/load").unwrap_or(""));
+        if tokens.is_empty() {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidSlashArgument".into(),
+                message: "Usage: /load [target|me] <type_id> [quantity]".into(),
+            }));
+        }
+
+        let parse_qty = |tok_opt: Option<&String>| -> Result<i32, BridgeRpcError> {
+            match tok_opt {
+                None => Ok(1),
+                Some(s) => s
+                    .parse::<i32>()
+                    .ok()
+                    .filter(|&q| q > 0)
+                    .ok_or_else(|| BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Quantity for /load must be a positive integer".into(),
+                    }),
+            }
+        };
+
+        let (explicit_target_tok, type_id_tok, qty_tok) = if is_me_or_myship(&tokens[0]) {
+            let Some(tid_s) = tokens.get(1) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSlashArgument".into(),
+                    message: "Usage: /load me <type_id> [quantity]".into(),
+                }));
+            };
+            (Some(tokens[0].as_str()), tid_s.as_str(), tokens.get(2))
+        } else if tokens.len() >= 2 {
+            let first_i64 = tokens[0].parse::<i64>().unwrap_or(0);
+            let is_known_target = first_i64 > 0
+                && (ctx.sde.stations.contains_key(&first_i64)
+                    || ctx.db.with_snapshot(|snap| {
+                        snap.characters.contains_key(&first_i64)
+                            || snap.items.contains_key(&first_i64)
+                            || snap.structures.contains_key(&first_i64)
+                    }));
+            if is_known_target {
+                (Some(tokens[0].as_str()), tokens[1].as_str(), tokens.get(2))
+            } else {
+                (None, tokens[0].as_str(), tokens.get(1))
+            }
+        } else {
+            (None, tokens[0].as_str(), None)
+        };
+
+        let Ok(type_id) = type_id_tok.parse::<u32>() else {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidSlashArgument".into(),
+                message: "Usage: /load [target|me] <type_id> [quantity]".into(),
+            }));
+        };
+        let qty = match parse_qty(qty_tok) {
+            Ok(q) => q,
+            Err(e) => return Some(Err(e)),
+        };
+        let Some(inv_type) = ctx.sde.types.get(&type_id) else {
+            return Some(Err(BridgeRpcError {
+                code: "TypeNotFound".into(),
+                message: format!("Type ID {type_id} not found in SDE"),
+            }));
+        };
+        let is_ship = inv_type.category_id == 6;
+
+        let res = ctx.db.try_with_mut_snapshot(|snap| {
+            let resolve_char_dest = |char_id: i64| -> Result<(i64, i64, InventoryFlag), BridgeRpcError> {
+                let ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
+                    code: "CharacterNotFound".into(),
+                    message: format!("Character {char_id} not found"),
+                })?;
+                if ch.active_ship_id > 0 && snap.items.contains_key(&ch.active_ship_id) {
+                    Ok((char_id, ch.active_ship_id, InventoryFlag::Cargo))
+                } else if let Some(st_id) = ch.station_id.or(ch.structure_id) {
+                    Ok((char_id, st_id, InventoryFlag::Hangar))
+                } else {
+                    Err(BridgeRpcError {
+                        code: "TargetNotFound".into(),
+                        message: format!("Character {char_id} has no active ship or docked station"),
+                    })
+                }
+            };
+
+            let (owner_id, location_id, flag) = match explicit_target_tok {
+                None => resolve_char_dest(cid)?,
+                Some(tok) if is_me_or_myship(tok) => resolve_char_dest(cid)?,
+                Some(tok) => {
+                    let target_id = tok.parse::<i64>().map_err(|_| BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: format!("Invalid target '{tok}' for /load"),
+                    })?;
+                    if snap.characters.contains_key(&target_id) {
+                        resolve_char_dest(target_id)?
+                    } else if let Some(target_item) = snap.items.get(&target_id) {
+                        (target_item.owner_id, target_id, InventoryFlag::Cargo)
+                    } else if snap.structures.contains_key(&target_id)
+                        || ctx.sde.stations.contains_key(&target_id)
+                    {
+                        (cid, target_id, InventoryFlag::Hangar)
+                    } else {
+                        return Err(BridgeRpcError {
+                            code: "TargetNotFound".into(),
+                            message: format!("Target {target_id} not found for /load"),
+                        });
+                    }
+                }
+            };
+
+            snap.next_entity_id += 1;
+            let item_id = snap.next_entity_id;
+            let rec = InventoryItemRecord {
+                item_id,
+                type_id,
+                owner_id,
+                location_id,
+                flag,
+                quantity: qty,
+                singleton: is_ship && qty == 1,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            };
+            snap.items.insert(item_id, rec.clone());
+            Ok(rec)
+        });
+
+        return match res {
+            Ok(rec) => {
+                let inv_row = eve_proto::DBRowDescriptor::inv_item_header()
+                    .build_dbrow(crate::services::inventory_fitting::item_to_packed_cells(ctx, &rec));
+                let _ = ctx.notify_item_change(
+                    rec.owner_id,
+                    inv_row,
+                    vec![(3, PyRep::Integer(0)), (4, PyRep::Integer(0))],
+                );
+                Some(Ok(PyRep::keyval([
+                    ("command", PyRep::String(cmd.to_string())),
+                    ("itemID", PyRep::Integer(rec.item_id)),
+                    ("typeID", PyRep::Integer(type_id as i64)),
+                    ("quantity", PyRep::Integer(qty as i64)),
+                    ("locationID", PyRep::Integer(rec.location_id)),
+                    ("flagID", PyRep::Integer(rec.flag as i64)),
+                ])))
+            }
+            Err(e) => Some(Err(e)),
+        };
+    }
+
     if let Some(rest) = cmd.strip_prefix("/kill ") {
-        let Some(target_id) = rest.trim().parse::<i64>().ok().filter(|&id| id > 0) else {
+        let tokens = parse_slash_tokens(rest);
+        let Some(tok) = tokens.first() else {
             return Some(Err(BridgeRpcError {
                 code: "InvalidSlashArgument".into(),
                 message: "Usage: /kill <target_id>".into(),
             }));
+        };
+        let target_id = if is_me_or_myship(tok) {
+            cid
+        } else {
+            let Some(tid) = tok.parse::<i64>().ok().filter(|&id| id > 0) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSlashArgument".into(),
+                    message: "Usage: /kill <target_id>".into(),
+                }));
+            };
+            tid
         };
         let lookup = ctx.db.with_snapshot(|snap| {
             let caller_sys = session

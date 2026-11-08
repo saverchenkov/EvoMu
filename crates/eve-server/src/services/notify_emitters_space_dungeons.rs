@@ -541,26 +541,19 @@ pub fn emit_module_activation_godma_notifications(
         return;
     };
     let now_ft = ctx.now_blueos_filetime_ticks();
-    let dur_ms = (duration_s.max(1.0)) * 1_000.0;
+    let dur_ms_f64 = (duration_s.max(1.0)) * 1_000.0;
+    let dur_ms = dur_ms_f64.round() as i64;
     let active_effect_line = PyRep::List(vec![
         PyRep::Integer(module_id),
+        PyRep::Integer(char_id),
+        PyRep::Integer(ship_id),
+        target_id_opt.map(PyRep::Integer).unwrap_or(PyRep::None),
+        PyRep::None,
+        PyRep::List(Vec::new()),
         PyRep::Integer(effect_id),
         PyRep::Integer(now_ft),
-        PyRep::Real(dur_ms),
+        PyRep::Integer(dur_ms.max(0)),
         PyRep::Integer(0),
-        PyRep::Tuple(vec![
-            PyRep::Integer(module_id),
-            PyRep::Integer(char_id),
-            PyRep::Integer(ship_id),
-            target_id_opt.map(PyRep::Integer).unwrap_or(PyRep::None),
-            PyRep::None,
-            PyRep::List(vec![PyRep::Integer(module_id)]),
-            PyRep::Integer(effect_id),
-        ]),
-        PyRep::Integer(now_ft),
-        PyRep::Real(dur_ms),
-        PyRep::Integer(0),
-        PyRep::None,
     ]);
     let active_effects = PyRep::Dict(vec![(PyRep::Integer(effect_id), active_effect_line)]);
     ctx.notify(
@@ -588,7 +581,7 @@ pub fn emit_module_activation_godma_notifications(
         for (&k, &v) in &inv_item.dynamic_attributes {
             merged_attrs.insert(k, v);
         }
-        merged_attrs.entry(73).or_insert(dur_ms);
+        merged_attrs.entry(73).or_insert(dur_ms_f64);
         merged_attrs.insert(2, 1.0);
         let attrs_dict = PyRep::Dict(
             merged_attrs
