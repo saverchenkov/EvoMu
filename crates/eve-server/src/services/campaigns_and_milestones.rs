@@ -24,7 +24,7 @@ use crate::router::ServerContext;
 use crate::services::cosmetics_ui_ops::{load_cosmetics_ui_state, save_cosmetics_ui_state};
 
 #[path = "campaigns_milestones_playtime.rs"]
-mod playtime;
+pub mod playtime;
 
 /// FIFO buffer capacity for client telemetry events.
 pub const MAX_TELEMETRY_EVENTS: usize = 1_000;

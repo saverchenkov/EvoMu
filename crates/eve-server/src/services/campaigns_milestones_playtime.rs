@@ -33,14 +33,20 @@ pub struct CharacterMilestoneState {
     pub first_logon_unix: u64,
     pub last_activity_unix: u64,
     pub accumulated_playtime_secs: u64,
+    #[serde(default)]
+    pub active_session: bool,
 }
 
 impl CharacterMilestoneState {
     /// Total accumulated play time in seconds as of `now_unix`, including elapsed time
-    /// in the active logon window since `last_activity_unix`.
+    /// only when the character currently has an active online session.
     pub fn accumulated_playtime_now(&self, now_unix: u64) -> u64 {
-        self.accumulated_playtime_secs
-            .saturating_add(now_unix.saturating_sub(self.last_activity_unix))
+        if self.active_session && self.last_activity_unix > 0 {
+            self.accumulated_playtime_secs
+                .saturating_add(now_unix.saturating_sub(self.last_activity_unix))
+        } else {
+            self.accumulated_playtime_secs
+        }
     }
 }
 
@@ -87,6 +93,7 @@ pub fn save_milestone_state(
 }
 
 /// Updates persistent accumulated play time on character logon.
+/// Offline gaps while `active_session == false` are never counted as played time.
 pub fn record_milestone_logon(
     snap: &mut eve_db::WorldStateSnapshot,
     char_id: i64,
@@ -94,18 +101,20 @@ pub fn record_milestone_logon(
 ) -> CharacterMilestoneState {
     let mut state = match load_milestone_state(snap, char_id) {
         Some(mut existing) => {
-            if existing.last_activity_unix > 0 {
+            if existing.active_session && existing.last_activity_unix > 0 {
                 existing.accumulated_playtime_secs = existing
                     .accumulated_playtime_secs
                     .saturating_add(now_unix.saturating_sub(existing.last_activity_unix));
             }
             existing.last_activity_unix = now_unix;
+            existing.active_session = true;
             existing
         }
         None => CharacterMilestoneState {
             first_logon_unix: now_unix,
             last_activity_unix: now_unix,
             accumulated_playtime_secs: 0,
+            active_session: true,
         },
     };
     if state.first_logon_unix == 0 {
@@ -113,6 +122,39 @@ pub fn record_milestone_logon(
     }
     save_milestone_state(snap, char_id, &state);
     state
+}
+
+/// Flushes elapsed active-session playtime up to `now_unix` and pauses milestone
+/// accumulation so offline time after disconnect/logoff/eviction is never counted.
+pub fn pause_milestone_playtime_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    now_unix: u64,
+) {
+    let Some(mut existing) = load_milestone_state(snap, char_id) else {
+        return;
+    };
+    if existing.active_session {
+        if existing.last_activity_unix > 0 {
+            existing.accumulated_playtime_secs = existing
+                .accumulated_playtime_secs
+                .saturating_add(now_unix.saturating_sub(existing.last_activity_unix));
+        }
+        existing.last_activity_unix = now_unix;
+        existing.active_session = false;
+        save_milestone_state(snap, char_id, &existing);
+    }
+}
+
+/// Persistently flushes and pauses accumulated milestone playtime for `char_id`.
+pub fn pause_milestone_playtime(
+    db: &eve_db::WorldRepository,
+    char_id: i64,
+    now_unix: u64,
+) {
+    db.with_mut_snapshot(|snap| {
+        pause_milestone_playtime_in_snap(snap, char_id, now_unix);
+    });
 }
 
 /// Resolves the active daily login campaign for `char_id` from per-character enrollment,

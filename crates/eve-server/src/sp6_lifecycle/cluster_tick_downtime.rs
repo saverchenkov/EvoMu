@@ -542,6 +542,11 @@ pub fn clear_safe_logoff(db: &std::sync::Arc<eve_db::WorldRepository>, char_id: 
 
 /// Disconnects active client sessions and releases online locks for `char_id` after safe logoff.
 pub fn disconnect_safe_logoff_sessions(ctx: &crate::router::ServerContext, char_id: i64) {
+    crate::services::campaigns_and_milestones::playtime::pause_milestone_playtime(
+        &ctx.db,
+        char_id,
+        ctx.now_unix(),
+    );
     let mut session_ids = std::collections::BTreeSet::new();
     let user_id = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.user_id));
     if let Some(uid) = user_id {

@@ -290,6 +290,13 @@ impl ServerContext {
         {
             self.release_session_bindings(session.session_id);
             self.quasar_gateway.unsubscribe_session(session.session_id);
+            if let Some(cid) = session.character_id {
+                services::campaigns_and_milestones::playtime::pause_milestone_playtime(
+                    &self.db,
+                    cid,
+                    self.now_unix(),
+                );
+            }
             if let Some(uid) = session.user_id {
                 let _ = self.db.release_online_lock(uid, session.session_id);
             }
@@ -328,6 +335,13 @@ impl ServerContext {
                             return Err(BridgeRpcError { code, message: msg });
                         }
                     } else {
+                        if let Some(cid) = session.character_id {
+                            services::campaigns_and_milestones::playtime::pause_milestone_playtime(
+                                &self.db,
+                                cid,
+                                self.now_unix(),
+                            );
+                        }
                         let _ = self.db.release_online_lock(uid, session.session_id);
                         session.user_id = None;
                         session.role = 0;
@@ -751,8 +765,21 @@ impl ServerContext {
         if let Some(res) = services::character_certificates::handle(self, session, effective_service, method, args, kwargs) {
             return res;
         }
+        let prev_cid_before_select = (effective_service == "charUnboundMgr"
+            && method == "SelectCharacterID")
+            .then_some(session.character_id)
+            .flatten();
         if let Some(res) = services::character_skills::handle(self, session, effective_service, method, args, kwargs) {
             if effective_service == "charUnboundMgr" && method == "SelectCharacterID" && res.is_ok() {
+                if let (Some(old_cid), Some(new_cid)) = (prev_cid_before_select, session.character_id) {
+                    if old_cid != new_cid {
+                        services::campaigns_and_milestones::playtime::pause_milestone_playtime(
+                            &self.db,
+                            old_cid,
+                            self.now_unix(),
+                        );
+                    }
+                }
                 if let Some(cid) = session.character_id {
                     crate::sp6_lifecycle::clear_safe_logoff(&self.db, cid);
                     services::character_skill_ops::migrate_obsolete_skills_for_character(self, cid);

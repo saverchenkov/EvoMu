@@ -632,6 +632,15 @@ pub fn initiate_cluster_downtime_shutdown(ctx: &ServerContext) -> usize {
             non_gm_session_ids.insert(sid);
         }
     }
+    let now_unix = ctx.now_unix();
+    let mut non_gm_char_ids = BTreeSet::new();
+    if let Ok(bound) = ctx.bound_objects.read() {
+        for entry in bound.values() {
+            if !gm_session_ids.contains(&entry.session_id) && entry.character_id > 0 {
+                non_gm_char_ids.insert(entry.character_id);
+            }
+        }
+    }
     ctx.db.with_mut_snapshot(|snap| {
         for (&uid, os) in &snap.sessions {
             if gm_uids.contains(&uid) {
@@ -639,7 +648,15 @@ pub fn initiate_cluster_downtime_shutdown(ctx: &ServerContext) -> usize {
             } else {
                 non_gm_users.insert(uid);
                 non_gm_session_ids.insert(os.session_id);
+                if let Some(cid) = os.character_id {
+                    non_gm_char_ids.insert(cid);
+                }
             }
+        }
+        for cid in &non_gm_char_ids {
+            crate::services::campaigns_and_milestones::playtime::pause_milestone_playtime_in_snap(
+                snap, *cid, now_unix,
+            );
         }
         snap.sessions.retain(|&uid, _| gm_uids.contains(&uid));
     });

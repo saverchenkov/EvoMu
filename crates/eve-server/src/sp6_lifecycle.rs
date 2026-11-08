@@ -766,6 +766,9 @@ pub async fn handle_character_logoff_or_disconnect(
     char_id: i64,
 ) -> Option<DisconnectedShipEntry> {
     let now_unix = ctx.now_unix();
+    crate::services::campaigns_and_milestones::playtime::pause_milestone_playtime(
+        &ctx.db, char_id, now_unix,
+    );
     let (weap_until, npc_until, pvp_until, crim_until) =
         active_timers_for_char(ctx, char_id, now_unix);
     let safe_entry = with_mut_sp6_state(&ctx.db, |st, _snap| st.safe_logoffs.remove(&char_id));
