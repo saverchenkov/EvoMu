@@ -2915,3 +2915,128 @@ async fn test_space_navigation_cloak_targeting_delay_and_overrides() {
 }
 
 }
+
+#[tokio::test]
+async fn it_dock_enforces_2500m_perimeter_even_with_nonempty_session_address() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(9876);
+    sess.address = "tcp:127.0.0.1:41234".to_string();
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    let _ = ctx
+        .dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(90_000_001)], &kw, None)
+        .await
+        .expect("select char");
+    let char_id = sess.character_id.unwrap();
+    let ship_id = sess.ship_id.unwrap();
+    let sys_id = sess.solar_system_id.unwrap_or(30_000_142);
+
+    // Undock first into space
+    let _ = ctx
+        .dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("undock");
+    ctx.advance_secs(15);
+    let st_id = 60_003_760_i64;
+    let upwell_id = 1_099_774_001_i64;
+    let upwell_pos = DVec3::new(10_000_000.0, 0.0, 0.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            upwell_id,
+            UpwellStructureRecord {
+                structure_id: upwell_id,
+                type_id: 35832,
+                owner_corp_id: sess.corporation_id.unwrap_or(1_000_009),
+                solar_system_id: sys_id,
+                name: "Perimeter Test Citadel".into(),
+                position: upwell_pos.to_array(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 50,
+                shield_hp: 100_000.0,
+                armor_hp: 100_000.0,
+                hull_hp: 100_000.0,
+                ..Default::default()
+            },
+        );
+    });
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let (_, station_ball) = sys_h.get_ball_snapshot(st_id).await.unwrap().expect("station ball");
+
+    // Place ship 5,000m beyond station radius (> 2,500m, well inside old 35,000m bypass!)
+    let _ = sys_h
+        .set_ball_position(
+            ship_id,
+            station_ball.position + DVec3::new(station_ball.radius + 5_000.0, 0.0, 0.0),
+        )
+        .await;
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Dock", &[PyRep::Integer(st_id)], &kw, None)
+            .await
+            .unwrap_err()
+            .code,
+        "OutsideDockingPerimeter"
+    );
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess, "beyonce", None, "CmdDock", &[PyRep::Integer(st_id)], &kw, None)
+            .await
+            .unwrap_err()
+            .code,
+        "OutsideDockingPerimeter"
+    );
+
+    // Spawn structure ball on grid and move ship 10,000m beyond structure radius (> 2,500m)
+    let st_rad = 15_000.0;
+    let _ = sys_h
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: upwell_id,
+                type_id: 35832,
+                position: upwell_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: st_rad,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            eve_destiny::CombatState::new(),
+        )
+        .await;
+    let _ = sys_h
+        .set_ball_position(
+            ship_id,
+            upwell_pos + DVec3::new(st_rad + 10_000.0, 0.0, 0.0),
+        )
+        .await;
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess, "structureDocking", None, "Dock", &[PyRep::Integer(upwell_id)], &kw, None)
+            .await
+            .unwrap_err()
+            .code,
+        "OutsideDockingPerimeter"
+    );
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess, "beyonce", None, "CmdDock", &[PyRep::Integer(upwell_id)], &kw, None)
+            .await
+            .unwrap_err()
+            .code,
+        "OutsideDockingPerimeter"
+    );
+
+    // Within 2,000m of station radius -> stationSvc.Dock succeeds even with non-empty session.address
+    let _ = sys_h
+        .set_ball_position(
+            ship_id,
+            station_ball.position + DVec3::new(station_ball.radius + 2_000.0, 0.0, 0.0),
+        )
+        .await;
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Dock", &[PyRep::Integer(st_id)], &kw, None)
+        .await
+        .expect("Dock within 2,500m perimeter succeeds");
+    assert_eq!(sess.station_id, Some(st_id));
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&char_id].station_id), Some(st_id));
+}

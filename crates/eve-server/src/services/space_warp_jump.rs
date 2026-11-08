@@ -1243,11 +1243,7 @@ async fn handle_dock(
         .filter(|&r| r > 0.0)
         .unwrap_or(sde_target_radius);
     let dist = ball.position.distance(target_pos);
-    let max_dock_dist = if !session.address.is_empty() {
-        target_radius + 35_000.0
-    } else {
-        target_radius + 2_500.0
-    };
+    let max_dock_dist = target_radius + 2_500.0;
     if dist > max_dock_dist {
         return Err(BridgeRpcError {
             code: "OutsideDockingPerimeter".into(),

@@ -405,9 +405,11 @@ async fn undock_and_dock_upwell_structure_online_modules_and_guard_branches() {
     );
     let _ = sys_h.set_warp_scramble_strength(ship_id, 0).await;
 
-    // Outside docking perimeter -> OutsideDockingPerimeter
+    // Outside docking perimeter (including 10 km with non-empty session.address) -> OutsideDockingPerimeter
+    sess.address = "tcp:127.0.0.1:44444".to_string();
+    let (_, st_ball) = sys_h.get_ball_snapshot(st_id).await.unwrap().unwrap();
     let _ = sys_h
-        .set_ball_position(ship_id, DVec3::new(500_000.0, 0.0, 0.0))
+        .set_ball_position(ship_id, st_ball.position + DVec3::new(st_ball.radius + 10_000.0, 0.0, 0.0))
         .await;
     assert_eq!(
         handle(&ctx, &mut sess, "structureDocking", "Dock", &[PyRep::Integer(st_id)], &kw)
