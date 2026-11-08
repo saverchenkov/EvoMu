@@ -395,8 +395,55 @@ fn rpc_leaderboards_rank_status_withdraw_stubs_and_unknown() {
             &kw,
         ))
         .unwrap()
+        .unwrap_err()
+        .code,
+        "AccessDenied"
+    );
+    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    assert_eq!(
+        rt.block_on(handle(
+            &ctx,
+            &mut sess,
+            "facWarMgr",
+            "WithdrawJoinFactionAsCorporation",
+            &[],
+            &kw,
+        ))
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(false)
+    );
+    let corp_id = sess.corporation_id.unwrap_or(98_000_001);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut q = FwPendingQueue::default();
+        q.corp_joins.insert(corp_id, 500_001);
+        save_fw_pending(snap, &q);
+    });
+    assert_eq!(
+        rt.block_on(handle(
+            &ctx,
+            &mut sess,
+            "facWarMgr",
+            "WithdrawJoinFactionAsCorporation",
+            &[PyRep::Integer(500_001)],
+            &kw,
+        ))
+        .unwrap()
         .unwrap(),
         PyRep::Bool(true)
+    );
+    assert_eq!(
+        rt.block_on(handle(
+            &ctx,
+            &mut sess,
+            "facWarMgr",
+            "WithdrawJoinFactionAsCorporation",
+            &[],
+            &kw,
+        ))
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(false)
     );
     assert!(rt
         .block_on(handle(&ctx, &mut sess, "facWarMgr", "", &[], &kw))

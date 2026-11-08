@@ -617,50 +617,13 @@ pub async fn handle(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("facWarMgr", "GetStats_TopAndAllKillsAndVPs") => {
-            let (chars, corps, facs, allys) = compute_fw_leaderboards(ctx);
-            let (char_sub, char_top, char_all) = build_entity_subtables("characterID", &chars);
-            let (corp_sub, corp_top, corp_all) = build_entity_subtables("corporationID", &corps);
-            let (fac_sub, fac_top, fac_all) = build_entity_subtables("factionID", &facs);
-            let (ally_sub, ally_top, ally_all) = build_entity_subtables("allianceID", &allys);
-            let top_groups = PyRep::Dict(vec![
-                (PyRep::Integer(1), char_top.to_py_dict()),
-                (PyRep::Integer(2), corp_top.to_py_dict()),
-                (PyRep::Integer(19), fac_top.to_py_dict()),
-                (PyRep::Integer(32), ally_top.to_py_dict()),
-            ]);
-            let all_groups = PyRep::Dict(vec![
-                (PyRep::Integer(1), char_all.to_py_dict()),
-                (PyRep::Integer(2), corp_all.to_py_dict()),
-                (PyRep::Integer(19), fac_all.to_py_dict()),
-                (PyRep::Integer(32), ally_all.to_py_dict()),
-            ]);
-            // DERIVED (synthetic): Returns dictionary with keys 0 (top performers) and 1 (aggregate sums)
-            // grouped by entity type (1: character, 2: corporation, 19: faction, 32: alliance), along with
-            // named sub-tables ("characters", "corporations", "factions", "alliances") matching V24 client facwar expectations.
-            Some(Ok(PyRep::Dict(vec![
-                (PyRep::Integer(0), top_groups),
-                (PyRep::Integer(1), all_groups),
-                (PyRep::String("characters".into()), char_sub),
-                (PyRep::String("corporations".into()), corp_sub),
-                (PyRep::String("factions".into()), fac_sub),
-                (PyRep::String("alliances".into()), ally_sub),
-            ])))
+            Some(handle_fw_stats_top_and_all(ctx))
         }
         ("facWarMgr", "GetStats_Character") => {
-            let cid = args.first().and_then(|a| a.as_i64()).or(session.character_id).unwrap_or(0);
-            let (chars, _, _, _) = compute_fw_leaderboards(ctx);
-            Some(Ok(chars.get(&cid).copied().unwrap_or_default().to_py_dict()))
+            Some(handle_fw_stats_character(ctx, session, args))
         }
-        ("facWarMgr", "GetStats_Corp") => {
-            let cid = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(0);
-            let (_, corps, _, _) = compute_fw_leaderboards(ctx);
-            Some(Ok(corps.get(&cid).copied().unwrap_or_default().to_py_dict()))
-        }
-        ("facWarMgr", "GetStats_Alliance") => {
-            let aid = args.first().and_then(|a| a.as_i64()).or(session.alliance_id).unwrap_or(0);
-            let (_, _, _, allys) = compute_fw_leaderboards(ctx);
-            Some(Ok(allys.get(&aid).copied().unwrap_or_default().to_py_dict()))
-        }
+        ("facWarMgr", "GetStats_Corp") => Some(handle_fw_stats_corp(ctx, session, args)),
+        ("facWarMgr", "GetStats_Alliance") => Some(handle_fw_stats_alliance(ctx, session, args)),
         ("facWarMgr", "GetCorporationWarFactionID") => {
             let cid = args
                 .first()
@@ -1051,39 +1014,7 @@ pub async fn handle(
             }
         }
         ("facWarMgr", "DonateLPsToSolarSystem") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(sys_id) = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .and_then(|v| u32::try_from(v).ok())
-                .or(session.solar_system_id)
-            else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "No solar system specified".into(),
-                }));
-            };
-            let amt = match args.get(1).and_then(|a| a.as_i64()) {
-                Some(a) if a > 0 => a,
-                _ => {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidLpDonation".into(),
-                        message: "LP donation amount must be positive".into(),
-                    }))
-                }
-            };
-            Some(donate_lp_to_fw_ihub(ctx, char_id, sys_id, amt).map(|(tot, tier, tax, fac)| {
-                PyRep::keyval([
-                    ("totalLP", PyRep::Integer(tot)),
-                    ("systemTier", PyRep::Integer(tier as i64)),
-                    ("tier", PyRep::Integer(tier as i64)),
-                    ("taxReduction", PyRep::Real(tax)),
-                    ("facilityBonus", PyRep::Real(fac)),
-                ])
-            }))
+            Some(handle_donate_lps_to_solar_system(ctx, session, args))
         }
         ("facWarMgr", "CheckForRankChange") => {
             let cid = session.character_id.unwrap_or(0);
@@ -1302,60 +1233,322 @@ pub async fn handle(
             });
             Some(Ok(PyRep::List(rows)))
         }
-        ("facWarMgr", "GetStats_FactionInfo") => {
-            let dict = ctx.db.with_snapshot(|s| {
-                let mut out = Vec::new();
-                for fid in [500_001_i64, 500_002, 500_003, 500_004, 500_010, 500_011] {
-                    let members = s
-                        .characters
-                        .values()
-                        .filter(|c| c.war_faction_id == Some(fid))
-                        .count()
-                        .max(1) as i64;
-                    let systems = s
-                        .fw_system_occupations
-                        .values()
-                        .filter(|o| o.occupier_faction_id == fid)
-                        .count() as i64;
-                    out.push((
-                        PyRep::Integer(fid),
-                        PyRep::keyval([
-                            ("factionID", PyRep::Integer(fid)),
-                            ("militiaMembersCount", PyRep::Integer(members)),
-                            ("systemsCount", PyRep::Integer(systems)),
-                            ("warzoneControlled", PyRep::Real(0.5)),
-                        ]),
-                    ));
-                }
-                PyRep::Dict(out)
-            });
-            Some(Ok(dict))
+        ("facWarMgr", "GetStats_FactionInfo") => Some(handle_fw_stats_faction_info(ctx)),
+        ("facWarMgr", "GetStats_Militia") => Some(handle_fw_stats_militia(ctx)),
+        ("facWarMgr", "RefreshCorps") => Some(handle_fw_refresh_corps(ctx, session)),
+        ("facWarMgr", "WithdrawJoinFactionAsAlliance") => {
+            Some(handle_fw_withdraw_faction(ctx, session, true, false, args))
         }
-        ("facWarMgr", "GetStats_Militia") => {
-            let (_, _, facs, _) = compute_fw_leaderboards(ctx);
-            let mut entries = Vec::new();
-            for fid in [500_001_i64, 500_002, 500_003, 500_004, 500_010, 500_011] {
-                let st = facs.get(&fid).copied().unwrap_or_default();
-                entries.push((PyRep::Integer(fid), st.to_py_dict()));
-            }
-            Some(Ok(PyRep::Dict(entries)))
+        ("facWarMgr", "WithdrawJoinFactionAsCorporation") => {
+            Some(handle_fw_withdraw_faction(ctx, session, false, false, args))
         }
-        ("facWarMgr", "RefreshCorps") => {
-            let _ = ctx.db.with_snapshot(|snap| snap.corporations.len());
-            Some(Ok(PyRep::None))
+        ("facWarMgr", "WithdrawLeaveFactionAsAlliance") => {
+            Some(handle_fw_withdraw_faction(ctx, session, true, true, args))
         }
-        (
-            "facWarMgr",
-            "WithdrawJoinFactionAsAlliance"
-            | "WithdrawJoinFactionAsCorporation"
-            | "WithdrawLeaveFactionAsAlliance"
-            | "WithdrawLeaveFactionAsCorporation",
-        ) => {
-            let _ = ctx.db.with_snapshot(|snap| snap.corporations.len());
-            Some(Ok(PyRep::Bool(true)))
+        ("facWarMgr", "WithdrawLeaveFactionAsCorporation") => {
+            Some(handle_fw_withdraw_faction(ctx, session, false, true, args))
         }
         _ => None,
     }
+}
+
+const FW_PENDING_STORE_KEY: i64 = -10_000_004;
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct FwPendingQueue {
+    #[serde(default)]
+    pub corp_joins: HashMap<i64, i64>,
+    #[serde(default)]
+    pub corp_leaves: HashMap<i64, i64>,
+    #[serde(default)]
+    pub alliance_joins: HashMap<i64, i64>,
+    #[serde(default)]
+    pub alliance_leaves: HashMap<i64, i64>,
+}
+
+fn load_fw_pending(snap: &eve_db::WorldStateSnapshot) -> FwPendingQueue {
+    snap.item_custom_names
+        .get(&FW_PENDING_STORE_KEY)
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default()
+}
+
+fn save_fw_pending(snap: &mut eve_db::WorldStateSnapshot, st: &FwPendingQueue) {
+    if let Ok(json) = serde_json::to_string(st) {
+        snap.item_custom_names.insert(FW_PENDING_STORE_KEY, json);
+    }
+}
+
+fn handle_fw_stats_top_and_all(ctx: &ServerContext) -> Result<PyRep, BridgeRpcError> {
+    let (chars, corps, facs, allys) = compute_fw_leaderboards(ctx);
+    let (char_sub, char_top, char_all) = build_entity_subtables("characterID", &chars);
+    let (corp_sub, corp_top, corp_all) = build_entity_subtables("corporationID", &corps);
+    let (fac_sub, fac_top, fac_all) = build_entity_subtables("factionID", &facs);
+    let (ally_sub, ally_top, ally_all) = build_entity_subtables("allianceID", &allys);
+    let top_groups = PyRep::Dict(vec![
+        (PyRep::Integer(1), char_top.to_py_dict()),
+        (PyRep::Integer(2), corp_top.to_py_dict()),
+        (PyRep::Integer(19), fac_top.to_py_dict()),
+        (PyRep::Integer(32), ally_top.to_py_dict()),
+    ]);
+    let all_groups = PyRep::Dict(vec![
+        (PyRep::Integer(1), char_all.to_py_dict()),
+        (PyRep::Integer(2), corp_all.to_py_dict()),
+        (PyRep::Integer(19), fac_all.to_py_dict()),
+        (PyRep::Integer(32), ally_all.to_py_dict()),
+    ]);
+    Ok(PyRep::Dict(vec![
+        (PyRep::Integer(0), top_groups),
+        (PyRep::Integer(1), all_groups),
+        (PyRep::String("characters".into()), char_sub),
+        (PyRep::String("corporations".into()), corp_sub),
+        (PyRep::String("factions".into()), fac_sub),
+        (PyRep::String("alliances".into()), ally_sub),
+    ]))
+}
+
+fn handle_fw_stats_character(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let cid = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .or(session.character_id)
+        .unwrap_or(0);
+    let (chars, _, _, _) = compute_fw_leaderboards(ctx);
+    Ok(chars.get(&cid).copied().unwrap_or_default().to_py_dict())
+}
+
+fn handle_fw_stats_corp(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let cid = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .or(session.corporation_id)
+        .unwrap_or(0);
+    let (_, corps, _, _) = compute_fw_leaderboards(ctx);
+    Ok(corps.get(&cid).copied().unwrap_or_default().to_py_dict())
+}
+
+fn handle_fw_stats_alliance(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let aid = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .or(session.alliance_id)
+        .unwrap_or(0);
+    let (_, _, _, allys) = compute_fw_leaderboards(ctx);
+    Ok(allys.get(&aid).copied().unwrap_or_default().to_py_dict())
+}
+
+fn handle_fw_stats_militia(ctx: &ServerContext) -> Result<PyRep, BridgeRpcError> {
+    let (_, _, facs, _) = compute_fw_leaderboards(ctx);
+    let mut entries = Vec::new();
+    for fid in [500_001_i64, 500_002, 500_003, 500_004, 500_010, 500_011] {
+        let st = facs.get(&fid).copied().unwrap_or_default();
+        entries.push((PyRep::Integer(fid), st.to_py_dict()));
+    }
+    Ok(PyRep::Dict(entries))
+}
+
+fn handle_fw_stats_faction_info(ctx: &ServerContext) -> Result<PyRep, BridgeRpcError> {
+    let dict = ctx.db.with_snapshot(|s| {
+        let caldari_gal_total = s
+            .fw_system_occupations
+            .values()
+            .filter(|o| matches!(o.occupier_faction_id, 500_001 | 500_004))
+            .count();
+        let min_amarr_total = s
+            .fw_system_occupations
+            .values()
+            .filter(|o| matches!(o.occupier_faction_id, 500_002 | 500_003))
+            .count();
+        let pirate_total = s
+            .fw_system_occupations
+            .values()
+            .filter(|o| matches!(o.occupier_faction_id, 500_010 | 500_011))
+            .count();
+        let mut out = Vec::new();
+        for fid in [500_001_i64, 500_002, 500_003, 500_004, 500_010, 500_011] {
+            let members = s
+                .characters
+                .values()
+                .filter(|c| c.war_faction_id == Some(fid))
+                .count() as i64;
+            let systems = s
+                .fw_system_occupations
+                .values()
+                .filter(|o| o.occupier_faction_id == fid)
+                .count() as i64;
+            let warzone_total = match fid {
+                500_001 | 500_004 => caldari_gal_total,
+                500_002 | 500_003 => min_amarr_total,
+                _ => pirate_total,
+            };
+            let warzone_controlled = if warzone_total > 0 {
+                (systems as f64) / (warzone_total as f64)
+            } else {
+                0.0
+            };
+            out.push((
+                PyRep::Integer(fid),
+                PyRep::keyval([
+                    ("factionID", PyRep::Integer(fid)),
+                    ("militiaMembersCount", PyRep::Integer(members)),
+                    ("systemsCount", PyRep::Integer(systems)),
+                    ("warzoneControlled", PyRep::Real(warzone_controlled)),
+                ]),
+            ));
+        }
+        PyRep::Dict(out)
+    });
+    Ok(dict)
+}
+
+fn handle_donate_lps_to_solar_system(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let Some(sys_id) = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .and_then(|v| u32::try_from(v).ok())
+        .or(session.solar_system_id)
+    else {
+        return Err(BridgeRpcError {
+            code: "NoSolarSystem".into(),
+            message: "No solar system specified".into(),
+        });
+    };
+    let Some(amt) = args.get(1).and_then(|a| a.as_i64()).filter(|&a| a > 0) else {
+        return Err(BridgeRpcError {
+            code: "InvalidLpDonation".into(),
+            message: "LP donation amount must be positive".into(),
+        });
+    };
+    donate_lp_to_fw_ihub(ctx, char_id, sys_id, amt).map(|(tot, tier, tax, fac)| {
+        PyRep::keyval([
+            ("totalLP", PyRep::Integer(tot)),
+            ("systemTier", PyRep::Integer(tier as i64)),
+            ("tier", PyRep::Integer(tier as i64)),
+            ("taxReduction", PyRep::Real(tax)),
+            ("facilityBonus", PyRep::Real(fac)),
+        ])
+    })
+}
+
+fn handle_fw_refresh_corps(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    ctx.db.with_mut_snapshot(|snap| {
+        let alliances: Vec<(i64, Vec<i64>)> = snap
+            .alliances
+            .values()
+            .filter_map(|a| {
+                snap.fw_runtime
+                    .corp_war_factions
+                    .get(&a.executor_corp_id)
+                    .copied()
+                    .map(|fid| (fid, a.member_corp_ids.iter().copied().collect::<Vec<i64>>()))
+            })
+            .collect();
+        for (fid, member_corps) in alliances {
+            for mcid in member_corps {
+                snap.fw_runtime.corp_war_factions.entry(mcid).or_insert(fid);
+            }
+        }
+    });
+    Ok(PyRep::None)
+}
+
+fn handle_fw_withdraw_faction(
+    ctx: &ServerContext,
+    session: &SessionState,
+    is_alliance: bool,
+    is_leave: bool,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let requested_fac = args.first().and_then(|a| a.as_i64());
+    ctx.db.try_with_mut_snapshot(|snap| {
+        let cid = session
+            .corporation_id
+            .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id))
+            .unwrap_or(0);
+        let is_corp_officer = snap.corporations.get(&cid).is_some_and(|c| {
+            c.ceo_id == char_id
+                || (c.member_roles.get(&char_id).copied().unwrap_or(0)
+                    & eve_db::corp_roles::ROLE_DIRECTOR)
+                    != 0
+        }) || (session.corp_role & eve_db::corp_roles::ROLE_DIRECTOR != 0);
+        if !is_corp_officer {
+            return Err(BridgeRpcError {
+                code: "AccessDenied".into(),
+                message: "Only corporation CEO or Director can withdraw militia requests".into(),
+            });
+        }
+        let mut pending = load_fw_pending(snap);
+        let removed = if is_alliance {
+            let aid = session
+                .alliance_id
+                .or_else(|| snap.characters.get(&char_id).and_then(|c| c.alliance_id))
+                .ok_or_else(|| BridgeRpcError {
+                    code: "NotInAlliance".into(),
+                    message: "Corporation is not in an alliance".into(),
+                })?;
+            let is_exec = snap
+                .alliances
+                .get(&aid)
+                .is_some_and(|a| a.executor_corp_id == cid);
+            if !is_exec {
+                return Err(BridgeRpcError {
+                    code: "AccessDenied".into(),
+                    message: "Only the alliance executor corporation can withdraw alliance militia requests".into(),
+                });
+            }
+            let map = if is_leave {
+                &mut pending.alliance_leaves
+            } else {
+                &mut pending.alliance_joins
+            };
+            match map.get(&aid).copied() {
+                Some(pending_fac) if requested_fac.is_none_or(|rf| rf == pending_fac) => {
+                    map.remove(&aid);
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            let map = if is_leave {
+                &mut pending.corp_leaves
+            } else {
+                &mut pending.corp_joins
+            };
+            match map.get(&cid).copied() {
+                Some(pending_fac) if requested_fac.is_none_or(|rf| rf == pending_fac) => {
+                    map.remove(&cid);
+                    true
+                }
+                _ => false,
+            }
+        };
+        if removed {
+            save_fw_pending(snap, &pending);
+        }
+        Ok(PyRep::Bool(removed))
+    })
 }
 
 #[cfg(test)] #[path = "fw_gameplay_rpc_tests.rs"]

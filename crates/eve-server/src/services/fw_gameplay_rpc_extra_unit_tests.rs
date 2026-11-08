@@ -570,6 +570,8 @@ async fn stat_events_leaderboards_and_remaining_rpc_methods() {
         "WithdrawLeaveFactionAsAlliance",
         "WithdrawLeaveFactionAsCorporation",
     ] {
-        assert_eq!(call_facwar(&ctx, &mut sess, m, &[]).await.unwrap(), PyRep::Bool(true));
+        // Without a pending request, withdrawing returns false (or AccessDenied if not an officer).
+        let res = call_facwar(&ctx, &mut sess, m, &[]).await;
+        assert!(matches!(res, Ok(PyRep::Bool(false)) | Err(_)), "unexpected {m}: {res:?}");
     }
 }
