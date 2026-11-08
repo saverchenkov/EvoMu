@@ -267,18 +267,23 @@ async fn test_review_r8_regressions() {
 
     // 4. R8-P1-4 & R9-P1-3: Accepting missions allocates unique NPC ball IDs per character and mission instance;
     // s1 accepting 909 & 910 and s2 accepting 909 produce 3 distinct NPC balls that never collide.
-    let PyRep::KeyVal(u1_kv) = ctx.dispatch_rpc(&mut s1, "stationSvc", None, "Undock", &[], &kw, None).await.unwrap() else {
-        panic!("Expected u1_kv");
-    };
-    let s1_b_id = u1_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
-    ctx.dispatch_rpc(&mut s1, "beyonce", Some(s1_b_id), "CmdStop", &[], &kw, None).await.unwrap();
-    let PyRep::KeyVal(u2_kv) = ctx.dispatch_rpc(&mut s2, "stationSvc", None, "Undock", &[], &kw, None).await.unwrap() else {
-        panic!("Expected u2_kv");
-    };
-    let s2_b_id = u2_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
-    ctx.dispatch_rpc(&mut s2, "beyonce", Some(s2_b_id), "CmdStop", &[], &kw, None).await.unwrap();
+    let jita_agent_station = 60_015_169_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, ship_id) in [(90_000_001, 100_000_001), (90_000_002, 100_000_002)] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.station_id = Some(jita_agent_station);
+            }
+            if let Some(ship) = snap.items.get_mut(&ship_id) {
+                ship.location_id = jita_agent_station;
+            }
+        }
+    });
+    s1.station_id = Some(jita_agent_station);
+    s2.station_id = Some(jita_agent_station);
+
     let mut s1_mids = Vec::new();
     let mut s1_npcs = Vec::new();
+    let mut s1_bms = Vec::new();
     for _ in 0..2 {
         let rm = ctx.dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(2)], &kw, None).await.unwrap();
         let PyRep::KeyVal(rm_kv) = rm else {
@@ -291,6 +296,7 @@ async fn test_review_r8_regressions() {
             panic!("Expected am_kv");
         };
         s1_npcs.push(am_kv.get("spawnedNpcBallID").unwrap().as_i64().unwrap());
+        s1_bms.push(am_kv.get("bookmarkID").unwrap().as_i64().unwrap());
     }
     assert_ne!(s1_mids[0], s1_mids[1]);
     let rm_s2 = ctx.dispatch_rpc(&mut s2, "agentMgr", None, "DoAction", &[PyRep::Integer(2)], &kw, None).await.unwrap();
@@ -303,9 +309,28 @@ async fn test_review_r8_regressions() {
         panic!("Expected ams2_kv");
     };
     let s2_npc_1001 = ams2_kv.get("spawnedNpcBallID").unwrap().as_i64().unwrap();
+    let s2_bm_1 = ams2_kv.get("bookmarkID").unwrap().as_i64().unwrap();
     assert_ne!(s1_npcs[0], s1_npcs[1]);
     assert_ne!(s1_npcs[0], s2_npc_1001);
     assert_ne!(s1_npcs[1], s2_npc_1001);
+
+    let PyRep::KeyVal(u1_kv) = ctx.dispatch_rpc(&mut s1, "stationSvc", None, "Undock", &[], &kw, None).await.unwrap() else {
+        panic!("Expected u1_kv");
+    };
+    let s1_b_id = u1_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+    let PyRep::KeyVal(u2_kv) = ctx.dispatch_rpc(&mut s2, "stationSvc", None, "Undock", &[], &kw, None).await.unwrap() else {
+        panic!("Expected u2_kv");
+    };
+    let s2_b_id = u2_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+
+    let jita_handle = ctx.systems.get_or_spawn(30_000_142);
+    ctx.dispatch_rpc(&mut s1, "beyonce", Some(s1_b_id), "CmdWarpToStuff", &[PyRep::String("bookmark".into()), PyRep::Integer(s1_bms[0])], &kw, None).await.unwrap();
+    ctx.dispatch_rpc(&mut s2, "beyonce", Some(s2_b_id), "CmdWarpToStuff", &[PyRep::String("bookmark".into()), PyRep::Integer(s2_bm_1)], &kw, None).await.unwrap();
+    for _ in 0..200 {
+        let _ = jita_handle.step_manual(1.0).await.unwrap();
+    }
+    ctx.dispatch_rpc(&mut s1, "beyonce", Some(s1_b_id), "CmdStop", &[], &kw, None).await.unwrap();
+    ctx.dispatch_rpc(&mut s2, "beyonce", Some(s2_b_id), "CmdStop", &[], &kw, None).await.unwrap();
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
@@ -380,10 +405,22 @@ async fn test_review_r8_regressions() {
 
     let gate_m2_early = ctx.dispatch_rpc(&mut s1, "keeper", None, "ActivateAccelerationGate", &[PyRep::Integer(s1_mids[1])], &kw, None).await;
     assert_eq!(gate_m2_early.unwrap_err().code, "RoomNpcsRemaining");
-    let m2_early = ctx.dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(6), PyRep::Integer(s1_mids[1])], &kw, None).await;
+    let m2_early_local = ctx.dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(6), PyRep::Integer(s1_mids[1])], &kw, None).await;
+    assert_eq!(m2_early_local.unwrap_err().code, "AgentNotCoLocated");
+    let m2_early = ctx.dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(7), PyRep::Integer(s1_mids[1])], &kw, None).await;
     assert_eq!(m2_early.unwrap_err().code, "MissionIncomplete");
 
     let mut fw2_destroyed = false;
+    if ctx.dispatch_rpc(&mut s1, "beyonce", Some(s1_b_id), "CmdWarpToStuff", &[PyRep::String("bookmark".into()), PyRep::Integer(s1_bms[1])], &kw, None).await.is_ok() {
+        for _ in 0..200 {
+            let _ = jita_handle.step_manual(1.0).await.unwrap();
+        }
+    }
+    ctx.dispatch_rpc(&mut s1, "beyonce", Some(s1_b_id), "CmdFollowBall", &[PyRep::Integer(s1_npcs[1]), PyRep::Real(500.0)], &kw, None).await.unwrap();
+    for _ in 0..50 {
+        let _ = jita_handle.step_manual(1.0).await.unwrap();
+    }
+    ctx.dispatch_rpc(&mut s1, "beyonce", Some(s1_b_id), "CmdStop", &[], &kw, None).await.unwrap();
     for _ in 0..10 {
         for _ in 0..4 {
             let _ = jita_handle.step_manual(1.0).await.unwrap();
@@ -399,7 +436,7 @@ async fn test_review_r8_regressions() {
     }
     assert!(fw2_destroyed);
     ctx.dispatch_rpc(&mut s1, "keeper", None, "ActivateAccelerationGate", &[PyRep::Integer(s1_mids[1])], &kw, None).await.unwrap();
-    ctx.dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(6), PyRep::Integer(s1_mids[1])], &kw, None).await.unwrap();
+    ctx.dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(7), PyRep::Integer(s1_mids[1])], &kw, None).await.unwrap();
 
     // s2's mission NPC is still alive and independent; s2 destroys it and completes s2_mid_1
     let mut fws2_destroyed = false;
@@ -420,7 +457,15 @@ async fn test_review_r8_regressions() {
     }
     assert!(fws2_destroyed);
     ctx.dispatch_rpc(&mut s2, "keeper", None, "ActivateAccelerationGate", &[PyRep::Integer(s2_mid_1)], &kw, None).await.unwrap();
-    ctx.dispatch_rpc(&mut s2, "agentMgr", None, "DoAction", &[PyRep::Integer(6), PyRep::Integer(s2_mid_1)], &kw, None).await.unwrap();
+    ctx.dispatch_rpc(&mut s2, "agentMgr", None, "DoAction", &[PyRep::Integer(7), PyRep::Integer(s2_mid_1)], &kw, None).await.unwrap();
+
+    // Dock back to the Jita agent station so s1 is co-located for accepting/abandoning s1_mid_3
+    ctx.dispatch_rpc(&mut s1, "beyonce", Some(s1_b_id), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(jita_agent_station)], &kw, None).await.unwrap();
+    for _ in 0..200 {
+        let _ = jita_handle.step_manual(1.0).await.unwrap();
+    }
+    ctx.advance_secs(15);
+    ctx.dispatch_rpc(&mut s1, "stationSvc", None, "Dock", &[PyRep::Integer(jita_agent_station)], &kw, None).await.unwrap();
 
     // Mission abandon/decline via RemoveOfferFromJournal despawns the pocket NPC and clears the journal entry
     let rm_1003 = ctx.dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(2)], &kw, None).await.unwrap();
@@ -446,6 +491,9 @@ async fn test_review_r8_regressions() {
     assert_eq!(reaccept_completed.unwrap_err().code, "InvalidMissionState");
     let client_supplied_mid = ctx.dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(2), PyRep::Integer(s1_mids[1])], &kw, None).await;
     assert_eq!(client_supplied_mid.unwrap_err().code, "UnknownAgent");
+
+    ctx.advance_secs(15);
+    ctx.dispatch_rpc(&mut s1, "stationSvc", None, "Undock", &[], &kw, None).await.unwrap();
 
     // N4: Cannot fit a module into a ship slot while in space (`CannotFitInSpace`)
     let fit_in_space =

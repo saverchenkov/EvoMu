@@ -612,3 +612,294 @@ async fn test_pve_research_locator_and_epic_arcs() {
         .expect_err("Requesting epic arc on 90-day cooldown must fail");
     assert_eq!(cd_err.code, "EpicArcOnCooldown");
 }
+
+#[tokio::test]
+async fn test_epic_arc_multi_mission_remote_accept_spawn_and_remote_complete_guards() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let char_id = 90_000_001_i64;
+    let mut sess = create_auth_session(&ctx, 7_701, char_id).await;
+    let kw = HashMap::new();
+
+    // Pick a standard docked L1 Security/Combat agent and an Epic Arc agent in another system
+    let std_agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.agent_type_id == 2 && a.level == 1 && a.division_id == 24 && a.solar_system_id == Some(30_000_142) && a.station_id.is_some())
+        .or_else(|| ctx.sde.agents.values().find(|a| a.agent_type_id == 2 && a.level == 1 && a.solar_system_id.is_some() && a.station_id.is_some()))
+        .expect("Standard L1 combat agent in SDE")
+        .clone();
+    let ag_sys = std_agent.solar_system_id.unwrap();
+    let ag_sta = std_agent.station_id.unwrap();
+    let ship_id = 100_000_001_i64;
+
+    // 1. Place character in space (undocked) in another system (Rens 30002510),
+    //    seed an Offered combat mission from std_agent in ag_sys, and verify:
+    //    - DoAction(3) and DoAction(4) reject un-colocated pilot with AgentNotCoLocated
+    //    - DoAction(5) rejects non-remote-eligible regular mission with CannotAcceptRemotely
+    let remote_sys = if ag_sys == 30_000_142 { 30_002_510 } else { 30_000_142 };
+    let combat_mid = ctx
+        .sde
+        .missions
+        .values()
+        .find(|m| {
+            let ct = m.content_template.as_deref().unwrap_or_default();
+            ct.contains("BasicKill") && !m.is_courier
+        })
+        .expect("Combat mission in SDE")
+        .mission_id;
+    let mining_mid = ctx
+        .sde
+        .missions
+        .values()
+        .find(|m| {
+            let ct = m.content_template.as_deref().unwrap_or_default();
+            ct.contains("BasicMining") && !m.is_courier
+        })
+        .expect("Mining mission in SDE")
+        .mission_id;
+
+    let now = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = remote_sys;
+            ch.station_id = None;
+            ch.standings.insert(std_agent.agent_id, 5.0);
+            ch.standings.insert(std_agent.corporation_id, 5.0);
+        }
+        snap.active_missions.insert(
+            (char_id, combat_mid),
+            eve_db::ActiveMissionRecord {
+                character_id: char_id,
+                mission_id: combat_mid,
+                agent_id: std_agent.agent_id,
+                solar_system_id: ag_sys,
+                state: "Offered".into(),
+                current_room_id: 1,
+                npcs_remaining: 1,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
+            },
+        );
+        eve_server::services::agents_missions::save_mission_meta(
+            snap,
+            char_id,
+            &eve_server::services::agents_missions::MissionTimingAndCargoMeta {
+                mission_id: combat_mid,
+                agent_id: std_agent.agent_id,
+                offered_at_unix: now,
+                offer_expiry_unix: now + 86_400,
+                accepted_at_unix: None,
+                accept_expiry_unix: None,
+                bonus_expiry_unix: None,
+                completed_at_unix: None,
+                required_delivery_type_id: None,
+                required_delivery_qty: 0,
+                granted_courier_item_id: None,
+                granted_courier_qty: 0,
+                is_anomic_burner: false,
+                chosen_branch: None,
+                destination_station_id: None,
+                origin_station_id: Some(ag_sta),
+                offered_level: Some(1),
+            },
+        );
+    });
+    sess.solar_system_id = Some(remote_sys);
+    sess.station_id = None;
+    sess.ship_id = Some(ship_id);
+
+    for act in [3_i64, 4_i64] {
+        let err = ctx
+            .dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(act), PyRep::Integer(combat_mid as i64)], &kw, None)
+            .await
+            .expect_err("Un-colocated Accept/AcceptChoice must fail");
+        assert_eq!(err.code, "AgentNotCoLocated");
+    }
+
+    let rem_acc_err = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(5), PyRep::Integer(combat_mid as i64)], &kw, None)
+        .await
+        .expect_err("Regular mission DoAction(5) AcceptRemotely must fail when un-colocated");
+    assert_eq!(rem_acc_err.code, "CannotAcceptRemotely");
+
+    // Verify undocked in SAME system also fails DoAction(3 | 4) for stationed agent
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = ag_sys;
+            ch.station_id = None;
+        }
+    });
+    sess.solar_system_id = Some(ag_sys);
+    sess.station_id = None;
+    let space_acc_err = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(4), PyRep::Integer(combat_mid as i64)], &kw, None)
+        .await
+        .expect_err("Undocked in same system must still fail DoAction(4) for stationed agent");
+    assert_eq!(space_acc_err.code, "AgentNotCoLocated");
+
+    // 2. Remote-eligible Burner mission accepted via DoAction(5) while pilot sits in remote_sys:
+    //    Spawned NPC + mining asteroid + bookmark MUST spawn in ag_sys (m.solar_system_id), NEVER remote_sys!
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = remote_sys;
+            ch.station_id = None;
+        }
+        if let Some(mut mt) = eve_server::services::agents_missions::load_mission_meta(snap, char_id, combat_mid) {
+            mt.is_anomic_burner = true;
+            eve_server::services::agents_missions::save_mission_meta(snap, char_id, &mt);
+        }
+        snap.active_missions.insert(
+            (char_id, mining_mid),
+            eve_db::ActiveMissionRecord {
+                character_id: char_id,
+                mission_id: mining_mid,
+                agent_id: std_agent.agent_id,
+                solar_system_id: ag_sys,
+                state: "Offered".into(),
+                current_room_id: 1,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
+            },
+        );
+        eve_server::services::agents_missions::save_mission_meta(
+            snap,
+            char_id,
+            &eve_server::services::agents_missions::MissionTimingAndCargoMeta {
+                mission_id: mining_mid,
+                agent_id: std_agent.agent_id,
+                offered_at_unix: now,
+                offer_expiry_unix: now + 86_400,
+                accepted_at_unix: None,
+                accept_expiry_unix: None,
+                bonus_expiry_unix: None,
+                completed_at_unix: None,
+                required_delivery_type_id: Some(1230),
+                required_delivery_qty: 500,
+                granted_courier_item_id: None,
+                granted_courier_qty: 0,
+                is_anomic_burner: true,
+                chosen_branch: None,
+                destination_station_id: None,
+                origin_station_id: Some(ag_sta),
+                offered_level: Some(1),
+            },
+        );
+    });
+    sess.solar_system_id = Some(remote_sys);
+    sess.station_id = None;
+
+    let remote_combat_acc = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(5), PyRep::Integer(combat_mid as i64)], &kw, None)
+        .await
+        .expect("Remote-eligible burner mission accepts via DoAction(5)");
+    let npc_id = remote_combat_acc.dict_get("spawnedNpcBallID").and_then(|v| v.as_i64()).expect("spawnedNpcBallID");
+    let bm_id = remote_combat_acc.dict_get("bookmarkID").and_then(|v| v.as_i64()).expect("bookmarkID");
+    let remote_handle = ctx.systems.get_or_spawn(remote_sys);
+    let ag_handle = ctx.systems.get_or_spawn(ag_sys);
+    assert!(remote_handle.get_ball_snapshot(npc_id).await.ok().flatten().is_none(), "NPC must NOT spawn in caller's remote_sys");
+    assert!(ag_handle.get_ball_snapshot(npc_id).await.ok().flatten().is_some(), "NPC MUST spawn in m.solar_system_id (ag_sys)");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.bookmarks[&bm_id].solar_system_id, ag_sys, "Mission bookmark must be in m.solar_system_id");
+    });
+
+    let _remote_mining_acc = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(5), PyRep::Integer(mining_mid as i64)], &kw, None)
+        .await
+        .expect("Remote-eligible burner mining mission accepts via DoAction(5)");
+    let ast_id = 910_000_000 + (mining_mid as i64) * 1000 + 1;
+    assert!(remote_handle.get_ball_snapshot(ast_id).await.ok().flatten().is_none(), "Asteroid must NOT spawn in remote_sys");
+    assert!(ag_handle.get_ball_snapshot(ast_id).await.ok().flatten().is_some(), "Asteroid MUST spawn in ag_sys");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.asteroids[&ast_id].solar_system_id, ag_sys);
+    });
+
+    // 3. DoAction(6) requires co-location; DoAction(7) rejects physical item delivery; DoAction(7) succeeds on non-item combat
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.get_mut(&(char_id, combat_mid)).unwrap().npcs_remaining = 0;
+        snap.items.insert(
+            990_701,
+            InventoryItemRecord {
+                item_id: 990_701,
+                type_id: 1230,
+                owner_id: char_id,
+                location_id: ag_sta,
+                flag: InventoryFlag::Hangar,
+                quantity: 1_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    let comp6_remote_err = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(6), PyRep::Integer(combat_mid as i64)], &kw, None)
+        .await
+        .expect_err("DoAction(6) must reject non-colocated turn-in");
+    assert_eq!(comp6_remote_err.code, "AgentNotCoLocated");
+
+    let comp7_delivery_err = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(7), PyRep::Integer(mining_mid as i64)], &kw, None)
+        .await
+        .expect_err("DoAction(7) CompleteRemotely must reject physical item delivery missions");
+    assert_eq!(comp7_delivery_err.code, "CannotCompleteRemotely");
+
+    let comp7_ok = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(7), PyRep::Integer(combat_mid as i64)], &kw, None)
+        .await
+        .expect("DoAction(7) CompleteRemotely succeeds on cleared non-item mission");
+    assert_eq!(comp7_ok.dict_get("state").and_then(|v| v.as_str()), Some("Completed"));
+
+    // 4. Epic Arc Agent: Mission #1 keeps arc Active (no cooldown); Mission #2 can be requested
+    let soe_agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.agent_type_id == 10 && a.solar_system_id.is_some() && a.station_id.is_some())
+        .expect("Docked Epic Arc agent in SDE")
+        .clone();
+    let soe_sys = soe_agent.solar_system_id.unwrap();
+    let soe_sta = soe_agent.station_id.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = soe_sys;
+            ch.station_id = Some(soe_sta);
+            ch.standings.insert(soe_agent.corporation_id, 5.0);
+        }
+    });
+    sess.solar_system_id = Some(soe_sys);
+    sess.station_id = Some(soe_sta);
+
+    let soe_oid = bind_service_oid(&ctx, &mut sess, "agentMgr", PyRep::Integer(soe_agent.agent_id)).await;
+    let m1_offer = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", Some(soe_oid), "DoAction", &[PyRep::Integer(2)], &kw, None)
+        .await
+        .expect("Epic Arc Mission #1 offer");
+    let m1_id = m1_offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+    ctx.dispatch_rpc(&mut sess, "agentMgr", Some(soe_oid), "DoAction", &[PyRep::Integer(3), PyRep::Integer(m1_id as i64)], &kw, None)
+        .await
+        .expect("Accept Epic Arc Mission #1");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(m) = snap.active_missions.get_mut(&(char_id, m1_id)) {
+            m.npcs_remaining = 0;
+        }
+        // Clear any delivery requirement so Mission #1 completes cleanly regardless of which SDE EpicArc template was picked
+        if let Some(mut mt) = eve_server::services::agents_missions::load_mission_meta(snap, char_id, m1_id) {
+            mt.required_delivery_type_id = None;
+            mt.required_delivery_qty = 0;
+            mt.destination_station_id = None;
+            eve_server::services::agents_missions::save_mission_meta(snap, char_id, &mt);
+        }
+    });
+    ctx.dispatch_rpc(&mut sess, "agentMgr", Some(soe_oid), "DoAction", &[PyRep::Integer(6), PyRep::Integer(m1_id as i64)], &kw, None)
+        .await
+        .expect("Complete Epic Arc Mission #1");
+
+    let m2_offer = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", Some(soe_oid), "DoAction", &[PyRep::Integer(2)], &kw, None)
+        .await
+        .expect("Mission #2 must still be offerable immediately after Epic Arc Mission #1");
+    assert_eq!(m2_offer.dict_get("state").and_then(|v| v.as_str()), Some("Offered"));
+    assert_ne!(m2_offer.dict_get("missionID").and_then(|v| v.as_i64()), Some(m1_id as i64));
+}

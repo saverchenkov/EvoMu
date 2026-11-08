@@ -78,7 +78,7 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
     let (dist_agent_id, dist_corp_id) = ctx.sde.agents.values()
         .filter(|a| a.level == 1 && a.agent_type_id == 2 && a.division_id == 22 && a.solar_system_id.is_some())
         .min_by_key(|a| a.agent_id).map(|a| (a.agent_id, a.corporation_id)).expect("Distribution agent in SDE");
-    let (_, dist_station_id) = colocate_with_agent(&ctx, &mut sess, char_id, dist_agent_id);
+    let (dist_sys_id, dist_station_id) = colocate_with_agent(&ctx, &mut sess, char_id, dist_agent_id);
     ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&char_id) { ch.standings.insert(dist_corp_id, 2.0); } });
 
     // 1. Courier Mission archetype offered by Distribution agent (division 22)
@@ -139,7 +139,13 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
     let cargo_consumed = ctx.db.with_snapshot(|snap| !snap.items.values().any(|it| it.owner_id == char_id && it.type_id == courier_cargo_type && it.flag == InventoryFlag::Cargo));
     assert!(cargo_consumed, "Courier cargo must be consumed on completion");
 
-    ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&char_id) { ch.station_id = Some(dist_station_id); } });
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = dist_sys_id;
+            ch.station_id = Some(dist_station_id);
+        }
+    });
+    sess.solar_system_id = Some(dist_sys_id);
     sess.station_id = Some(dist_station_id);
 
     // 2. Trade Mission archetype: DERIVED required goods and quantity from template title heuristic
@@ -511,7 +517,7 @@ async fn test_courier_cargo_anti_stacking_in_invbroker_add_regression() {
     let (dist_agent_id, dist_corp_id) = ctx.sde.agents.values()
         .find(|a| a.level == 1 && a.agent_type_id == 2 && a.division_id == 22 && a.solar_system_id.is_some())
         .map(|a| (a.agent_id, a.corporation_id)).expect("Distribution agent");
-    let (_, dist_station_id) = colocate_with_agent(&ctx, &mut sess, char_id, dist_agent_id);
+    let (dist_sys_id, dist_station_id) = colocate_with_agent(&ctx, &mut sess, char_id, dist_agent_id);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) { ch.standings.insert(dist_corp_id, 2.0); }
     });
@@ -611,7 +617,13 @@ async fn test_courier_cargo_anti_stacking_in_invbroker_add_regression() {
     sess.station_id = None; sess.structure_id = None;
     let jet_err = ctx.dispatch_rpc(&mut sess, "ship", None, "Jettison", &[PyRep::List(vec![PyRep::Integer(granted_cid)])], &HashMap::new(), None).await.expect_err("ship.Jettison courier cargo must fail");
     assert_eq!(jet_err.code, "ItemCannotBeJettisoned");
-    ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&char_id) { ch.station_id = Some(dist_station_id); } });
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = dist_sys_id;
+            ch.station_id = Some(dist_station_id);
+        }
+    });
+    sess.solar_system_id = Some(dist_sys_id);
     sess.station_id = Some(dist_station_id);
 
     // Verify courier cargo is NOT merged into the untagged stack; two distinct item records exist with courier tag.
@@ -1530,9 +1542,20 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
         Some(true)
     );
 
-    // 2. Epic Arcs (`agent_type_id == 10`): complete arc mission -> 90-day cooldown blocks re-offer
+    // 2. Epic Arcs (`agent_type_id == 10`): intermediate missions keep arc Active without cooldown;
+    //    only completing the finale mission triggers the 90-day repeat cooldown.
     let (epic_agent_id, epic_corp_id, _) = find_agent_by_level_and_type(&ctx, 1, 10);
     let (epic_sys_id, _) = colocate_with_agent(&ctx, &mut sess, char_id, epic_agent_id);
+    let (arc_id, arc_fac_id) = eve_server::services::agents_missions::resolve_epic_arc_id_for_agent(&ctx, epic_agent_id);
+    let arc_total = ctx
+        .sde
+        .epic_arcs
+        .values()
+        .find(|ea| ea.faction_id == Some(arc_fac_id as u32))
+        .and_then(|ea| (ea.missions_count > 0).then_some(ea.missions_count as usize))
+        .unwrap_or(3)
+        .max(2);
+
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.standings.insert(epic_corp_id, 5.0);
@@ -1550,7 +1573,53 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
         &[PyRep::Integer(6), PyRep::Integer(reg_mid as i64)],
     )
     .await
-    .expect("Complete Epic Arc mission");
+    .expect("Complete Epic Arc mission 1");
+
+    let mid_status = rpc_call(&ctx, &mut sess, "agentMgr", "GetMyEpicArcStatus", &[])
+        .await
+        .expect("GetMyEpicArcStatus after mission 1");
+    let PyRep::List(mid_arcs) = mid_status else {
+        panic!("Expected list from GetMyEpicArcStatus");
+    };
+    let active_arc = mid_arcs
+        .iter()
+        .find(|a| a.dict_get("epicArcID").and_then(|v| v.as_i64()) == Some(arc_id as i64))
+        .expect("Active epic arc entry present after mission 1");
+    assert_eq!(active_arc.dict_get("state").and_then(|v| v.as_str()), Some("Active"));
+    assert_eq!(active_arc.dict_get("onCooldown"), Some(&PyRep::Bool(false)));
+
+    // Completing Mission #1 must NOT lock out Mission #2
+    rpc_call(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "DoAction",
+        &[PyRep::Integer(2), PyRep::Integer(epic_agent_id)],
+    )
+    .await
+    .expect("Epic Arc Mission #2 must remain offerable after Mission #1");
+
+    // Advance completed_missions to (arc_total - 1) and complete final mission -> 90-day cooldown
+    let finale_mid = reg_mid;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut arcs = eve_server::services::agents_missions::load_epic_arc_states(snap, char_id);
+        let arc = arcs.iter_mut().find(|a| a.epic_arc_id == arc_id).unwrap();
+        arc.completed_missions = (0..(arc_total - 1)).map(|i| 90_000 + i as u32).collect();
+        eve_server::services::agents_missions::save_epic_arc_states(snap, char_id, &arcs);
+        snap.active_missions.insert(
+            (char_id, finale_mid),
+            make_mission(char_id, finale_mid, epic_agent_id, epic_sys_id, "Accepted"),
+        );
+    });
+    rpc_call(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "DoAction",
+        &[PyRep::Integer(6), PyRep::Integer(finale_mid as i64)],
+    )
+    .await
+    .expect("Complete final Epic Arc mission");
 
     let epic_status = rpc_call(&ctx, &mut sess, "agentMgr", "GetMyEpicArcStatus", &[])
         .await
@@ -1558,7 +1627,12 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
     let PyRep::List(arcs) = epic_status else {
         panic!("Expected list from GetMyEpicArcStatus");
     };
-    assert!(!arcs.is_empty());
+    let done_arc = arcs
+        .iter()
+        .find(|a| a.dict_get("epicArcID").and_then(|v| v.as_i64()) == Some(arc_id as i64))
+        .expect("Completed epic arc entry");
+    assert_eq!(done_arc.dict_get("state").and_then(|v| v.as_str()), Some("Cooldown"));
+    assert_eq!(done_arc.dict_get("onCooldown"), Some(&PyRep::Bool(true)));
 
     let epic_cooldown_err = rpc_call(
         &ctx,
@@ -1568,7 +1642,7 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
         &[PyRep::Integer(1), PyRep::Integer(epic_agent_id)],
     )
     .await
-    .expect_err("Epic Arc must enforce 90-day cooldown");
+    .expect_err("Epic Arc must enforce 90-day cooldown after final mission");
     assert_eq!(epic_cooldown_err.code, "EpicArcOnCooldown");
 
     // 3. Career (`agent_type_id == 12`): one-time lockouts + GetCompletedCareerAgentIDs

@@ -45,6 +45,67 @@ pub async fn handle(
     handle_with_bound(ctx, session, None, service, method, args, _kwargs).await
 }
 
+async fn is_agent_colocated(
+    ctx: &ServerContext,
+    session: &SessionState,
+    sys_id: u32,
+    agent_info: &eve_sde::AgentInfo,
+) -> bool {
+    if agent_info.solar_system_id != Some(sys_id) {
+        return false;
+    }
+    if let Some(ag_st) = agent_info.station_id {
+        return session.station_id == Some(ag_st);
+    }
+    // In-space agent (`station_id == None`): pilot must be undocked in the same solar system
+    // and within 2,500 m of the agent ball when the agent is spawned in space.
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return false;
+    }
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    if let Ok(Some((_, ag_ball))) = handle.get_ball_snapshot(agent_info.agent_id).await {
+        let Some(ship_id) = session.ship_id else {
+            return false;
+        };
+        let Ok(Some((_, ship_ball))) = handle.get_ball_snapshot(ship_id).await else {
+            return false;
+        };
+        if ship_ball.position.distance(ag_ball.position) > 2_500.0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn deterministic_mission_site_origin(
+    ctx: &ServerContext,
+    mission_sys_id: u32,
+    mission_id: u32,
+) -> DVec3 {
+    let base = ctx
+        .sde
+        .solar_systems
+        .get(&mission_sys_id)
+        .and_then(|s| s.stations.first().map(|st| st.position))
+        .unwrap_or(DVec3::ZERO);
+    let offset = DVec3::new(
+        50_000.0 + ((mission_id % 97) as f64) * 1_000.0,
+        ((mission_id % 13) as f64) * 200.0,
+        0.0,
+    );
+    base + offset
+}
+
+fn epic_arc_required_missions(ctx: &ServerContext, fac_id: i64) -> usize {
+    ctx.sde
+        .epic_arcs
+        .values()
+        .find(|ea| ea.faction_id == Some(fac_id as u32))
+        .and_then(|ea| (ea.missions_count > 0).then_some(ea.missions_count as usize))
+        .unwrap_or(3)
+        .max(2)
+}
+
 pub async fn handle_with_bound(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -689,40 +750,65 @@ pub async fn handle_with_bound(
                     }
                     let tmpl_opt = ctx.sde.missions.get(&mission_id).cloned();
                     let agent_info_opt = ctx.sde.agents.get(&actual_agent_id).cloned();
-                    if matches!(action_id, 3 | 4) {
-                        if let Some(ref agent_info) = agent_info_opt {
-                            let station_has_local_agents = session.station_id.is_some_and(|sid| {
-                                ctx.sde.agents.values().any(|a| {
-                                    a.solar_system_id == Some(sys_id)
-                                        && a.station_id == Some(sid)
-                                        && !is_storyline_agent_type(a.agent_type_id)
-                                        && !is_unsupported_direct_agent_type(a.agent_type_id)
-                                })
+                    if let Some(ref agent_info) = agent_info_opt {
+                        let colocated = is_agent_colocated(ctx, session, sys_id, agent_info).await;
+                        if matches!(action_id, 3 | 4) && !colocated {
+                            return Some(Err(BridgeRpcError {
+                                code: "AgentNotCoLocated".into(),
+                                message: format!(
+                                    "Agent {actual_agent_id} is in system {:?} / station {:?}, not character's current location (system {sys_id}, station {:?})",
+                                    agent_info.solar_system_id, agent_info.station_id, session.station_id
+                                ),
+                            }));
+                        }
+                        if action_id == 5 && !colocated {
+                            let is_burner = ctx.db.with_snapshot(|snap| {
+                                load_mission_meta(snap, char_id, mission_id)
+                                    .is_some_and(|mt| mt.is_anomic_burner)
                             });
-                            let has_active_offer = ctx.db.with_snapshot(|snap| snap.active_missions.contains_key(&(char_id, mission_id)));
-                            if agent_info.solar_system_id != Some(sys_id)
-                                || (session.station_id.is_some()
-                                    && (explicit_agent || station_has_local_agents || has_active_offer)
-                                    && agent_info.station_id.is_some()
-                                    && agent_info.station_id != session.station_id)
-                            {
+                            let remote_eligible = is_storyline_agent_type(agent_info.agent_type_id)
+                                || tmpl_opt.as_ref().is_some_and(is_storyline_template)
+                                || matches!(agent_info.agent_type_id, 5 | 8)
+                                || is_burner;
+                            if !remote_eligible {
                                 return Some(Err(BridgeRpcError {
-                                    code: "AgentNotCoLocated".into(),
+                                    code: "CannotAcceptRemotely".into(),
                                     message: format!(
-                                        "Agent {actual_agent_id} is in system {:?} / station {:?}, not character's current location (system {sys_id}, station {:?})",
-                                        agent_info.solar_system_id, agent_info.station_id, session.station_id
+                                        "Mission {mission_id} from agent {actual_agent_id} requires visiting the agent to accept"
                                     ),
                                 }));
                             }
                         }
                     }
-                    let enc_opt = tmpl_opt.as_ref().and_then(|t| agent_info_opt.as_ref().map(|a| resolve_security_mission_encounter(ctx, t, a, sys_id)));
-                    let handle = ctx.systems.get_or_spawn(sys_id);
+                    let mission_sys_id = ctx
+                        .db
+                        .with_snapshot(|snap| {
+                            snap.active_missions
+                                .get(&(char_id, mission_id))
+                                .map(|m| m.solar_system_id)
+                                .filter(|&s| s > 0)
+                        })
+                        .or_else(|| {
+                            agent_info_opt
+                                .as_ref()
+                                .and_then(|a| a.solar_system_id)
+                                .filter(|&s| s > 0)
+                        })
+                        .unwrap_or(sys_id);
+                    let enc_opt = tmpl_opt.as_ref().and_then(|t| {
+                        agent_info_opt
+                            .as_ref()
+                            .map(|a| resolve_security_mission_encounter(ctx, t, a, mission_sys_id))
+                    });
+                    let handle = ctx.systems.get_or_spawn(mission_sys_id);
                     let existing_accepted = ctx.db.with_snapshot(|snap| {
-                        snap.active_missions.get(&(char_id, mission_id)).filter(|m| m.state == "Accepted" && m.npcs_remaining > 0).map(|m| (m.solar_system_id, m.spawned_npc_ball_ids.clone()))
+                        snap.active_missions
+                            .get(&(char_id, mission_id))
+                            .filter(|m| m.state == "Accepted" && m.npcs_remaining > 0)
+                            .map(|m| (m.solar_system_id, m.spawned_npc_ball_ids.clone()))
                     });
                     let can_respawn_missing = if let Some((m_sys_id, prev_balls)) = existing_accepted {
-                        if m_sys_id == sys_id && !prev_balls.is_empty() {
+                        if m_sys_id == mission_sys_id && !prev_balls.is_empty() {
                             let m_handle = ctx.systems.get_or_spawn(m_sys_id);
                             let mut all_missing = true;
                             for bid in prev_balls {
@@ -760,7 +846,7 @@ pub async fn handle_with_bound(
                                 });
                                 return Some(Err(BridgeRpcError { code: "MissionOfferExpired".into(), message: format!("Mission {mission_id} offer has expired") }));
                             }
-                        } else if !(state == "Accepted" && sys == sys_id && can_respawn_missing) {
+                        } else if !(state == "Accepted" && sys == mission_sys_id && can_respawn_missing) {
                             return Some(Err(BridgeRpcError { code: "InvalidMissionState".into(), message: format!("Mission {mission_id} is in state '{state}' (system {sys}), not Offered") }));
                         }
                     }
@@ -769,14 +855,16 @@ pub async fn handle_with_bound(
                         let Some(m_check) = snap.active_missions.get(&(char_id, mission_id)) else {
                             return Err(BridgeRpcError { code: "MissionNotOffered".into(), message: format!("Mission {mission_id} has not been offered to character {char_id}") });
                         };
-                        if m_check.state != "Offered" && !(m_check.state == "Accepted" && m_check.solar_system_id == sys_id && can_respawn_missing) {
+                        if m_check.state != "Offered" && !(m_check.state == "Accepted" && m_check.solar_system_id == mission_sys_id && can_respawn_missing) {
                             return Err(BridgeRpcError { code: "InvalidMissionState".into(), message: format!("Mission {mission_id} is in state '{}' (system {}), not Offered", m_check.state, m_check.solar_system_id) });
                         }
                         let mut spawned_npcs: Vec<(i64, eve_db::TypeId)> = Vec::new();
                         let mut need_npc = false;
                         if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
                             m.state = "Accepted".into();
-                            if m.solar_system_id == 0 { m.solar_system_id = sys_id; }
+                            if m.solar_system_id == 0 {
+                                m.solar_system_id = mission_sys_id;
+                            }
                             need_npc = m.npcs_remaining > 0;
                         }
                         if need_npc {
@@ -827,17 +915,12 @@ pub async fn handle_with_bound(
                     let spawned_npcs = match res { Ok(v) => v, Err(e) => return Some(Err(e)) };
                     let first_npc_id = spawned_npcs.first().map(|(id, _)| *id);
 
+                    let site_origin = deterministic_mission_site_origin(ctx, mission_sys_id, mission_id);
                     if !spawned_npcs.is_empty() {
-                        let origin = if let Some(ship_id) = session.ship_id {
-                            handle.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position)
-                                .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).and_then(|s| s.stations.first().map(|st| st.position + DVec3::new(1_500.0, 0.0, 0.0))).unwrap_or(DVec3::ZERO))
-                        } else {
-                            DVec3::ZERO
-                        };
                         for (idx, (npc_id, tid)) in spawned_npcs.into_iter().enumerate() {
                             let pocket_offset = ((npc_id % 40) as f64) * 35.0 + (idx as f64) * 350.0;
-                            let pos = origin + DVec3::new(800.0 + pocket_offset, (idx as f64) * 120.0, 0.0);
-                            let (ball, cs, mut entity) = crate::services::wormhole_pve_seeding::build_specialized_npc_components(ctx, sys_id, npc_id, tid, "Pirate", 1, pos);
+                            let pos = site_origin + DVec3::new(800.0 + pocket_offset, (idx as f64) * 120.0, 0.0);
+                            let (ball, cs, mut entity) = crate::services::wormhole_pve_seeding::build_specialized_npc_components(ctx, mission_sys_id, npc_id, tid, "Pirate", 1, pos);
                             entity.bounty_isk = entity.bounty_isk.max(10_000.0);
                             let _ = handle.spawn_ball_with_combat(ball, cs).await;
                             ctx.combat_ephemeral.write().unwrap_or_else(|e| e.into_inner()).npc_entities.insert(npc_id, entity);
@@ -858,15 +941,10 @@ pub async fn handle_with_bound(
                     if is_mining_mission {
                         let ore_tid = ctx.db.with_snapshot(|snap| load_mission_meta(snap, char_id, mission_id).and_then(|m| m.required_delivery_type_id).unwrap_or(1230));
                         let ore_vol = ctx.sde.types.get(&ore_tid).map(|t| t.volume.max(0.01)).unwrap_or(0.1);
-                        let origin = if let Some(ship_id) = session.ship_id {
-                            handle.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(DVec3::ZERO)
-                        } else {
-                            DVec3::ZERO
-                        };
                         let ast_id = 910_000_000 + (mission_id as i64) * 1000 + 1;
-                        let ast_pos = origin + DVec3::new(8_000.0, 1_000.0, -5_000.0);
+                        let ast_pos = site_origin + DVec3::new(8_000.0, 1_000.0, -5_000.0);
                         ctx.db.with_mut_snapshot(|snap| {
-                            snap.asteroids.insert(ast_id, eve_db::AsteroidRecord { asteroid_id: ast_id, solar_system_id: sys_id, belt_id: 0, type_id: ore_tid, quantity: 5_000, initial_quantity: 5_000, position: (ast_pos.x, ast_pos.y, ast_pos.z), radius: 50.0 });
+                            snap.asteroids.insert(ast_id, eve_db::AsteroidRecord { asteroid_id: ast_id, solar_system_id: mission_sys_id, belt_id: 0, type_id: ore_tid, quantity: 5_000, initial_quantity: 5_000, position: (ast_pos.x, ast_pos.y, ast_pos.z), radius: 50.0 });
                         });
                         let ast_ball = Ball { id: ast_id, type_id: ore_tid, position: ast_pos, velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 50_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop };
                         let ast_state = crate::system_actor::AsteroidState { asteroid_id: ast_id, belt_id: 0, type_id: ore_tid, initial_units: 5_000, remaining_units: 5_000, unit_volume: ore_vol, depleted: false, respawn_at_tick: None };
@@ -879,8 +957,8 @@ pub async fn handle_with_bound(
                     let bookmark_id = ctx.db.with_mut_snapshot(|snap| {
                         snap.next_entity_id += 1;
                         let bmid = snap.next_entity_id;
-                        let b_sys = snap.active_missions.get(&(char_id, mission_id)).map(|m| m.solar_system_id).unwrap_or(sys_id);
-                        snap.bookmarks.insert(bmid, eve_db::BookmarkRecord { bookmark_id: bmid, owner_id: char_id, solar_system_id: b_sys, label: format!("Mission: {mission_title}"), x: 50_000.0, y: 0.0, z: 0.0, item_id: None, memo: "Mission Pocket Destination".into(), folder_id: None, is_shared: false });
+                        let b_sys = snap.active_missions.get(&(char_id, mission_id)).map(|m| m.solar_system_id).filter(|&s| s > 0).unwrap_or(mission_sys_id);
+                        snap.bookmarks.insert(bmid, eve_db::BookmarkRecord { bookmark_id: bmid, owner_id: char_id, solar_system_id: b_sys, label: format!("Mission: {mission_title}"), x: site_origin.x, y: site_origin.y, z: site_origin.z, item_id: None, memo: "Mission Pocket Destination".into(), folder_id: None, is_shared: false });
                         if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
                             m.bookmark_id = Some(bmid);
                         }
@@ -920,9 +998,36 @@ pub async fn handle_with_bound(
                         return Some(Err(BridgeRpcError { code: "UnknownMission".into(), message: format!("Mission {mission_id} does not exist in SDE") }));
                     };
                     let is_storyline = is_storyline_template(&tmpl);
-                    let active_agent_id = ctx.db.with_snapshot(|snap| {
-                        snap.active_missions.get(&(char_id, mission_id)).map_or(agent_id, |m| m.agent_id)
+                    let (active_agent_id, pre_dest_station, pre_is_dc, pre_is_trade, pre_is_courier) = ctx.db.with_snapshot(|snap| {
+                        let m_agent = snap.active_missions.get(&(char_id, mission_id)).map_or(agent_id, |m| m.agent_id);
+                        let meta_opt = load_mission_meta(snap, char_id, mission_id);
+                        let is_dc = ctx.sde.agents.get(&m_agent).is_some_and(|a| a.agent_type_id == 5);
+                        let is_trade = !is_dc && tmpl.content_template.as_deref().unwrap_or_default().contains("Trade");
+                        let dest_st = meta_opt.as_ref().and_then(|mt| mt.destination_station_id);
+                        let is_courier = !is_trade && !is_dc && (tmpl.is_courier || tmpl.content_template.as_deref().unwrap_or_default().contains("Courier") || dest_st.is_some());
+                        (m_agent, dest_st, is_dc, is_trade, is_courier)
                     });
+                    if action_id == 6 {
+                        if let Some(ref agent_info) = ctx.sde.agents.get(&active_agent_id).cloned() {
+                            let at_courier_dest = pre_is_courier
+                                && pre_dest_station.is_some()
+                                && session.station_id == pre_dest_station;
+                            if !at_courier_dest && !is_agent_colocated(ctx, session, sys_id, agent_info).await {
+                                return Some(Err(BridgeRpcError {
+                                    code: "AgentNotCoLocated".into(),
+                                    message: format!(
+                                        "Agent {active_agent_id} is in system {:?} / station {:?}, not character's current location (system {sys_id}, station {:?})",
+                                        agent_info.solar_system_id, agent_info.station_id, session.station_id
+                                    ),
+                                }));
+                            }
+                        } else if pre_is_dc || pre_is_trade {
+                            return Some(Err(BridgeRpcError {
+                                code: "UnknownAgent".into(),
+                                message: format!("Agent {active_agent_id} does not exist in SDE"),
+                            }));
+                        }
+                    }
                     let agent_level = ctx.sde.agents.get(&active_agent_id).map_or(1.0, |a| a.level.max(1) as f64);
                     let storyline_mult = if is_storyline { 3.0 } else { 1.0 };
                     let standing_pct = if tmpl.has_standing_rewards { 1.5 * agent_level * storyline_mult } else { 0.0 };
@@ -1027,10 +1132,22 @@ pub async fn handle_with_bound(
                                 }
                             });
                         let m_agent_id = m.agent_id;
+                        if action_id == 7 && req_delivery.is_some() {
+                            return Err(BridgeRpcError {
+                                code: "CannotCompleteRemotely".into(),
+                                message: format!(
+                                    "Mission {mission_id} requires physical item delivery and cannot be completed remotely"
+                                ),
+                            });
+                        }
                         if let Some((req_tid, req_units)) = req_delivery {
                             let current_station = snap.characters.get(&char_id).and_then(|c| c.station_id).or(session.station_id);
-                            let agent_station_id = ctx.sde.agents.get(&m_agent_id).and_then(|a| a.station_id)
-                                .or(session.station_id);
+                            let agent_station_id = ctx
+                                .sde
+                                .agents
+                                .get(&m_agent_id)
+                                .and_then(|a| a.station_id)
+                                .or_else(|| meta_opt.as_ref().and_then(|mt| mt.origin_station_id));
                             let active_ship_id = snap.characters.get(&char_id).map(|c| c.active_ship_id).or(session.ship_id);
                             let dest_station_id = meta_opt.as_ref().and_then(|mt| mt.destination_station_id);
                             let granted_cid = meta_opt.as_ref().and_then(|mt| mt.granted_courier_item_id);
@@ -1148,15 +1265,36 @@ pub async fn handle_with_bound(
                             .is_some_and(|a| a.agent_type_id == 10)
                         {
                             let (arc_id, fac_id) = resolve_epic_arc_id_for_agent(ctx, m_agent_id);
+                            let required_missions = epic_arc_required_missions(ctx, fac_id);
                             let mut arcs = load_epic_arc_states(snap, char_id);
                             if let Some(arc) = arcs.iter_mut().find(|a| a.epic_arc_id == arc_id) {
+                                if arc.completed_at_unix.is_some() {
+                                    arc.completed_missions.clear();
+                                    arc.completed_at_unix = None;
+                                    arc.cooldown_until_unix = None;
+                                    arc.chapter = 1;
+                                }
                                 if !arc.completed_missions.contains(&mission_id) {
                                     arc.completed_missions.push(mission_id);
                                 }
-                                arc.completed_at_unix = Some(now);
-                                arc.cooldown_until_unix = Some(now + 7_776_000);
+                                let done = arc.completed_missions.len();
+                                let computed_chapter = ((done * 3).saturating_add(required_missions - 1) / required_missions).clamp(1, 3) as u32;
+                                arc.chapter = arc.chapter.max(computed_chapter);
+                                if done >= required_missions {
+                                    arc.completed_at_unix = Some(now);
+                                    arc.cooldown_until_unix = Some(now + 7_776_000);
+                                }
                             } else {
-                                arcs.push(EpicArcStateEntry { epic_arc_id: arc_id, agent_id: m_agent_id, faction_id: fac_id, chapter: 3, completed_missions: vec![mission_id], chosen_branch: None, completed_at_unix: Some(now), cooldown_until_unix: Some(now + 7_776_000), });
+                                arcs.push(EpicArcStateEntry {
+                                    epic_arc_id: arc_id,
+                                    agent_id: m_agent_id,
+                                    faction_id: fac_id,
+                                    chapter: 1,
+                                    completed_missions: vec![mission_id],
+                                    chosen_branch: None,
+                                    completed_at_unix: None,
+                                    cooldown_until_unix: None,
+                                });
                             }
                             save_epic_arc_states(snap, char_id, &arcs);
                         }

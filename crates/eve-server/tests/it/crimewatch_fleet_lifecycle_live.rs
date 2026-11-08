@@ -490,11 +490,28 @@ async fn test_live_crimewatch_sec_gain_caps_and_tag_tier_bands() {
         if ctx.sde.solar_systems.get(&asys).is_none_or(|s| s.security_status < 0.7) {
             continue;
         }
-        slash_cmd(&ctx, &mut pilot.sess, &format!("/tr {asys}")).await;
+        let Some(astation) = ctx.sde.agents.get(&aid).and_then(|a| a.station_id) else { continue };
+        ctx.db.with_mut_snapshot(|s| {
+            if let Some(ch) = s.characters.get_mut(&pilot.char_id) {
+                ch.solar_system_id = asys;
+                ch.station_id = Some(astation);
+                ch.structure_id = None;
+            }
+            if let Some(ship) = s.items.get_mut(&pilot.ship_id) {
+                ship.location_id = astation;
+                ship.flag = eve_db::InventoryFlag::Hangar;
+            }
+        });
+        pilot.sess.solar_system_id = Some(asys);
+        pilot.sess.station_id = Some(astation);
+        pilot.sess.structure_id = None;
         let a_oid = bind_oid(&ctx, &mut pilot, "agentMgr", PyRep::Integer(aid)).await;
         let offer = ctx.dispatch_rpc(&mut pilot.sess, "agentMgr", Some(a_oid), "DoAction", &[PyRep::Integer(2)], &HashMap::new(), None).await.unwrap();
         let mid = offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
         ctx.dispatch_rpc(&mut pilot.sess, "agentMgr", Some(a_oid), "DoAction", &[PyRep::Integer(3)], &HashMap::new(), None).await.unwrap();
+        ctx.advance_secs(12);
+        rpc(&ctx, &mut pilot, "stationSvc", "Undock", &[]).await.unwrap();
+        pilot.ship_id = pilot.sess.ship_id.unwrap_or(pilot.ship_id);
         let spawned = ctx.db.with_snapshot(|s| s.active_missions.get(&(pilot.char_id, mid)).map(|m| (m.solar_system_id, m.spawned_npc_ball_ids.clone())));
         if let Some((mission_sys, rats)) = spawned {
             if let Some(&m_rat_id) = rats.first() {

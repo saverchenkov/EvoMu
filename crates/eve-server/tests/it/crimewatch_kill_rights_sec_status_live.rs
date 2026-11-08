@@ -527,18 +527,42 @@ async fn test_security_status_gain_caps_tag_bands_and_transactions() {
     for row in l1_agents.iter().take(12) {
         let aid = row[0].as_i64().unwrap();
         let Some(asys) = row[5].as_i64().map(|v| v as u32) else { continue };
-        slash(&ctx, &mut pilot_sess, &format!("/tr {asys}")).await;
+        let Some(astation) = ctx.sde.agents.get(&aid).and_then(|a| a.station_id) else { continue };
+        ctx.db.with_mut_snapshot(|s| {
+            if let Some(ch) = s.characters.get_mut(&pilot_id) {
+                ch.solar_system_id = asys;
+                ch.station_id = Some(astation);
+                ch.structure_id = None;
+            }
+            if let Some(ship) = pilot_sess.ship_id.and_then(|sid| s.items.get_mut(&sid)) {
+                ship.location_id = astation;
+                ship.flag = eve_db::InventoryFlag::Hangar;
+            }
+        });
+        pilot_sess.solar_system_id = Some(asys);
+        pilot_sess.station_id = Some(astation);
+        pilot_sess.structure_id = None;
         let a_oid = bind_oid(&ctx, &mut pilot_sess, "agentMgr", PyRep::Integer(aid)).await;
         let offer = ctx.dispatch_rpc(&mut pilot_sess, "agentMgr", Some(a_oid), "DoAction", &[PyRep::Integer(2)], &HashMap::new(), None).await.unwrap();
         let mid = offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
         ctx.dispatch_rpc(&mut pilot_sess, "agentMgr", Some(a_oid), "DoAction", &[PyRep::Integer(3)], &HashMap::new(), None).await.unwrap();
-        let spawned = ctx.db.with_snapshot(|s| s.active_missions.get(&(pilot_id, mid)).map(|m| m.spawned_npc_ball_ids.clone()).unwrap_or_default());
-        if let Some(&m_rat_id) = spawned.first() {
-            warp_to_item_and_stop(&ctx, &mut pilot_sess, asys, m_rat_id, 2_000.0).await;
-            slash(&ctx, &mut pilot_sess, "/heal").await;
-            lock_and_destroy(&ctx, &mut pilot_sess, asys, &guns, m_rat_id).await;
-            mission_rat_killed = true;
-            break;
+        ctx.advance_secs(12);
+        rpc(&ctx, &mut pilot_sess, "stationSvc", "Undock", &[]).await.unwrap();
+        let spawned = ctx.db.with_snapshot(|s| s.active_missions.get(&(pilot_id, mid)).map(|m| (m.solar_system_id, m.spawned_npc_ball_ids.clone())));
+        if let Some((mission_sys, spawned_ids)) = spawned {
+            if let Some(&m_rat_id) = spawned_ids.first() {
+                if mission_sys != asys {
+                    slash(&ctx, &mut pilot_sess, &format!("/tr {mission_sys}")).await;
+                }
+                let m_handle = ctx.systems.get_or_spawn(mission_sys);
+                if let (Some(ship_id), Ok(Some((_, rat_b)))) = (pilot_sess.ship_id, m_handle.get_ball_snapshot(m_rat_id).await) {
+                    m_handle.set_ball_position(ship_id, rat_b.position + glam::DVec3::new(2_000.0, 0.0, 0.0)).await;
+                }
+                slash(&ctx, &mut pilot_sess, "/heal").await;
+                lock_and_destroy(&ctx, &mut pilot_sess, mission_sys, &guns, m_rat_id).await;
+                mission_rat_killed = true;
+                break;
+            }
         }
     }
     assert!(mission_rat_killed, "must spawn and kill a real security mission rat");

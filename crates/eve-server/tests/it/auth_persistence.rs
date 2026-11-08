@@ -338,15 +338,15 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
         .expect_err("Aura agent (type 11) must return UnimplementedRPC");
     assert_eq!(aura_err.code, "UnimplementedRPC");
 
-    // Restore sess1 (90_000_001) to Jita 4-4 and verify CompleteMission tally gate (!is_storyline && has_standing_rewards)
+    // Move sess1 (90_000_001) to agent 3_020_034's station (60_015_169) and verify CompleteMission tally gate (#576 co-location)
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {
             ch.solar_system_id = 30_000_142;
-            ch.station_id = Some(60_003_760);
+            ch.station_id = Some(60_015_169);
         }
     });
     sess1.solar_system_id = Some(30_000_142);
-    sess1.station_id = Some(60_003_760);
+    sess1.station_id = Some(60_015_169);
     let no_standing_mid = *ctx
         .sde
         .missions

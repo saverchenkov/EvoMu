@@ -537,7 +537,17 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
         rows[0][3].as_i64().unwrap(),
         rows[0][5].as_i64().unwrap() as u32,
     );
-    slash_cmd(&ctx, &mut pilot, &format!("/tr {agent_sys}")).await;
+    let agent_station = ctx.sde.agents.get(&agent_id).and_then(|a| a.station_id).unwrap_or(60_003_760);
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&char_id) {
+            ch.solar_system_id = agent_sys;
+            ch.station_id = Some(agent_station);
+            ch.structure_id = None;
+        }
+    });
+    pilot.solar_system_id = Some(agent_sys);
+    pilot.station_id = Some(agent_station);
+    pilot.structure_id = None;
 
     // Bind agent on agentMgr
     let bind_rep = ctx

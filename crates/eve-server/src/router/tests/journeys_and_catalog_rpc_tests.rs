@@ -112,9 +112,35 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
         .await
         .unwrap();
     let perim_agent_oid = ctx.bind_object(session, "agentMgr", 3_012_018).unwrap();
-
     let mut storyline_triggered = false;
     for _ in 1..=16i64 {
+        // Warp to station 60_003_754 in Perimeter so pilot can dock to accept offers from 3_012_018
+        ctx.dispatch_rpc(
+            session,
+            "beyonce",
+            Some(cur_b_id),
+            "CmdWarpToStuff",
+            &[PyRep::String("item".into()), PyRep::Integer(60_003_754)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        for _ in 0..200 {
+            let _ = perim_handle.step_manual(1.0).await.unwrap();
+        }
+        ctx.advance_secs(15);
+        ctx.dispatch_rpc(
+            session,
+            "stationSvc",
+            None,
+            "Dock",
+            &[PyRep::Integer(60_003_754)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
         let req_m = ctx
             .dispatch_rpc(
                 session,
@@ -147,6 +173,33 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
             panic!("Expected DoAction(AcceptMission) KeyVal");
         };
         let npc_ball_id = acc_mkv.get("spawnedNpcBallID").unwrap().as_i64().unwrap();
+        let bm_id = acc_mkv.get("bookmarkID").unwrap().as_i64().unwrap();
+        ctx.advance_secs(15);
+        let PyRep::KeyVal(undock_kv) = ctx
+            .dispatch_rpc(session, "stationSvc", None, "Undock", &[], &empty, None)
+            .await
+            .unwrap()
+        else {
+            panic!("Expected Undock KeyVal");
+        };
+        cur_b_id = undock_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+        ctx.dispatch_rpc(
+            session,
+            "beyonce",
+            Some(cur_b_id),
+            "CmdWarpToStuff",
+            &[PyRep::String("bookmark".into()), PyRep::Integer(bm_id)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        for _ in 0..200 {
+            let _ = perim_handle.step_manual(1.0).await.unwrap();
+        }
+        ctx.dispatch_rpc(session, "beyonce", Some(cur_b_id), "CmdStop", &[], &empty, None)
+            .await
+            .unwrap();
         ctx.set_invention_roll_override(Some(0.001));
         let mut destroyed = false;
         for _ in 0..200 {
@@ -191,7 +244,7 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
                 "agentMgr",
                 Some(perim_agent_oid),
                 "DoAction",
-                &[PyRep::Integer(6), PyRep::Integer(mid)],
+                &[PyRep::Integer(7), PyRep::Integer(mid)],
                 &empty,
                 None,
             )
@@ -209,6 +262,20 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
     );
 
     // Return Perimeter (30000144, gate 50002185) -> Jita (30000142) and warp back to Jita 4-4 (60003760)
+    ctx.dispatch_rpc(
+        session,
+        "beyonce",
+        Some(cur_b_id),
+        "CmdWarpToStuff",
+        &[PyRep::String("item".into()), PyRep::Integer(50_002_185)],
+        &empty,
+        None,
+    )
+    .await
+    .unwrap();
+    for _ in 0..200 {
+        let _ = perim_handle.step_manual(1.0).await.unwrap();
+    }
     ctx.advance_secs(65);
     let jump_jita = ctx
         .dispatch_rpc(
