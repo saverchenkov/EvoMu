@@ -194,11 +194,12 @@ pub async fn handle(
                 ).await;
             }
 
-            if let Ok(mut bounds) = ctx.bound_objects.write() {
-                for b in bounds.values_mut().filter(|b| b.character_id == caller_cid && b.service == "beyonce") {
-                    b.object_id = arena_sys;
-                }
-            }
+            ctx.invalidate_bound_objects_for_session_transition(
+                caller_cid,
+                arena_sys as u32,
+                None,
+                "tourney_teleport",
+            );
 
             if old_sys != arena_sys as u32 || old_st.is_some() {
                 let sess_rep = PyRep::keyval([
@@ -283,11 +284,12 @@ pub async fn handle(
                         let sys_handle = ctx.systems.get_or_spawn(old_sys);
                         let _ = sys_handle.remove_ball(ref_ship).await;
                     }
-                    if let Ok(mut bounds) = ctx.bound_objects.write() {
-                        for b in bounds.values_mut().filter(|b| b.character_id == caller_cid && b.service == "beyonce") {
-                            b.object_id = i64::from(home_sys);
-                        }
-                    }
+                    ctx.invalidate_bound_objects_for_session_transition(
+                        caller_cid,
+                        home_sys,
+                        Some(home_st_id),
+                        "dock",
+                    );
                     let sess_rep = PyRep::keyval([
                         ("charid", PyRep::Integer(caller_cid)),
                         ("stationid", PyRep::Integer(home_st_id)),

@@ -780,43 +780,51 @@ pub fn handle_apply_tags_for_sec_status(
     }) else {
         return Some(Err(BridgeRpcError {
             code: "InvalidSecurityTagArguments".into(),
-            message: "ApplyTagsForSecStatus requires (targetSecStatus, tagsToUseDict)".into(),
+            message: "ApplyTagsForSecStatus requires (targetSecurityStatus, currentSecurityStatus) or (targetSecStatus, tagsToUseDict)".into(),
         }));
     };
-    let PyRep::Dict(raw_tags) = &args[1] else {
-        return Some(Err(BridgeRpcError {
-            code: "InvalidSecurityTagArguments".into(),
-            message: "ApplyTagsForSecStatus second argument must be tagsToUseDict".into(),
-        }));
+    let requested_by_type: Option<[i32; 4]> = match &args[1] {
+        PyRep::Dict(raw_tags) => {
+            if raw_tags.is_empty() {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidQuantity".into(),
+                    message: "tagsToUseDict must specify at least one tag".into(),
+                }));
+            }
+            let mut counts: [i32; 4] = [0; 4];
+            for (k, v) in raw_tags {
+                let Some(tag_type_id) = k.as_i64().and_then(|val| u32::try_from(val).ok()) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSecurityTagType".into(),
+                        message: "Invalid security tag typeID".into(),
+                    }));
+                };
+                let Some(idx) = (33138..=33141).position(|id| id == tag_type_id) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSecurityTagType".into(),
+                        message: format!("Type {tag_type_id} is not a valid Clone Soldier Tag (33138..=33141)"),
+                    }));
+                };
+                let Some(q) = v.as_i64().and_then(|val| i32::try_from(val).ok()).filter(|&q| q > 0) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidQuantity".into(),
+                        message: "Tag quantity must be a positive integer".into(),
+                    }));
+                };
+                counts[idx] = counts[idx].saturating_add(q);
+            }
+            Some(counts)
+        }
+        other => {
+            if !matches!(other, PyRep::Real(v) if v.is_finite()) {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSecurityTagArguments".into(),
+                    message: "ApplyTagsForSecStatus second argument must be currentSecurityStatus or tagsToUseDict".into(),
+                }));
+            }
+            None
+        }
     };
-    if raw_tags.is_empty() {
-        return Some(Err(BridgeRpcError {
-            code: "InvalidQuantity".into(),
-            message: "tagsToUseDict must specify at least one tag".into(),
-        }));
-    }
-    let mut requested_by_type: [i32; 4] = [0; 4];
-    for (k, v) in raw_tags {
-        let Some(tag_type_id) = k.as_i64().and_then(|val| u32::try_from(val).ok()) else {
-            return Some(Err(BridgeRpcError {
-                code: "InvalidSecurityTagType".into(),
-                message: "Invalid security tag typeID".into(),
-            }));
-        };
-        let Some(idx) = (33138..=33141).position(|id| id == tag_type_id) else {
-            return Some(Err(BridgeRpcError {
-                code: "InvalidSecurityTagType".into(),
-                message: format!("Type {tag_type_id} is not a valid Clone Soldier Tag (33138..=33141)"),
-            }));
-        };
-        let Some(q) = v.as_i64().and_then(|val| i32::try_from(val).ok()).filter(|&q| q > 0) else {
-            return Some(Err(BridgeRpcError {
-                code: "InvalidQuantity".into(),
-                message: "Tag quantity must be a positive integer".into(),
-            }));
-        };
-        requested_by_type[idx] = requested_by_type[idx].saturating_add(q);
-    }
     let now_unix = ctx.now_unix();
     let Some(sys_id) = session.solar_system_id.or_else(|| {
         ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
@@ -871,78 +879,76 @@ pub fn handle_apply_tags_for_sec_status(
         let mut tier_txs: Vec<(u32, f64, f64)> = Vec::new();
         let mut changed_items: Vec<(eve_db::InventoryItemRecord, Option<eve_db::InventoryItemRecord>)> = Vec::new();
         for (idx, (tag_type_id, min_band, max_band, fee_per_tag_isk)) in tag_bands.into_iter().enumerate() {
-            let req_qty = requested_by_type[idx];
-            if req_qty <= 0 {
-                continue;
-            }
-            if cur_sec < min_band - 1e-6 || cur_sec >= max_band - 1e-6 {
-                return Err(BridgeRpcError {
-                    code: "SecurityTagBandMismatch".into(),
-                    message: format!(
-                        "Tag {tag_type_id} is only valid in security band [{min_band:.1}, {max_band:.1}); character is at {cur_sec:.2}"
-                    ),
-                });
-            }
-            if cur_sec + 1e-9 >= effective_target {
-                continue;
-            }
-            let band_cap = ((max_band - cur_sec) / 0.5).ceil().max(1.0) as i32;
-            let target_cap = ((effective_target - cur_sec) / 0.5).ceil().max(0.0) as i32;
-            let max_needed = band_cap.min(target_cap);
-            if max_needed <= 0 {
-                continue;
-            }
-            let consumed_qty = req_qty.min(max_needed);
-            let mut matching_ids: Vec<(i64, i32)> = snap
-                .items
-                .values()
-                .filter(|i| {
-                    i.owner_id == char_id
-                        && i.type_id == tag_type_id
-                        && i.quantity > 0
-                        && ((i.location_id == station_id && i.flag == eve_db::InventoryFlag::Hangar)
-                            || (ship_id_opt.is_some_and(|sid| i.location_id == sid)
-                                && i.flag == eve_db::InventoryFlag::Cargo))
-                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                })
-                .map(|i| (i.item_id, i.quantity))
-                .collect();
-            matching_ids.sort_by_key(|&(iid, _)| iid);
-            let total_avail: i64 = matching_ids.iter().map(|&(_, q)| i64::from(q)).sum();
-            if total_avail < i64::from(consumed_qty) {
-                return Err(BridgeRpcError {
-                    code: "InsufficientSecurityTags".into(),
-                    message: format!("Missing {consumed_qty}x unlocked tag type {tag_type_id} in local station hangar or active ship cargo"),
-                });
-            }
-            let mut remaining = consumed_qty;
-            for (iid, _) in matching_ids {
-                if remaining <= 0 {
-                    break;
+            if let Some(req_counts) = requested_by_type {
+                let req_qty = req_counts[idx];
+                if req_qty <= 0 {
+                    continue;
                 }
-                if let Some(old_item) = snap.items.get(&iid).cloned() {
-                    let take = old_item.quantity.min(remaining);
-                    remaining -= take;
-                    let new_item_opt = if let Some(it) = snap.items.get_mut(&iid) {
-                        if it.quantity > take {
-                            it.quantity -= take;
-                            it.version += 1;
-                            Some(it.clone())
-                        } else {
-                            snap.items.remove(&iid);
-                            None
-                        }
-                    } else {
-                        None
-                    };
-                    changed_items.push((old_item, new_item_opt));
+                if cur_sec < min_band - 1e-6 || cur_sec >= max_band - 1e-6 {
+                    return Err(BridgeRpcError {
+                        code: "SecurityTagBandMismatch".into(),
+                        message: format!(
+                            "Tag {tag_type_id} is only valid in security band [{min_band:.1}, {max_band:.1}); character is at {cur_sec:.2}"
+                        ),
+                    });
                 }
+                if cur_sec + 1e-9 >= effective_target {
+                    continue;
+                }
+                let band_cap = ((max_band - cur_sec) / 0.5).ceil().max(1.0) as i32;
+                let target_cap = ((effective_target - cur_sec) / 0.5).ceil().max(0.0) as i32;
+                let max_needed = band_cap.min(target_cap);
+                if max_needed <= 0 {
+                    continue;
+                }
+                let consumed_qty = req_qty.min(max_needed);
+                consume_band_tags(
+                    snap,
+                    char_id,
+                    station_id,
+                    ship_id_opt,
+                    tag_type_id,
+                    consumed_qty,
+                    &mut changed_items,
+                )?;
+                let prev_tier_sec = cur_sec;
+                cur_sec = (cur_sec + 0.5 * f64::from(consumed_qty)).min(0.0);
+                tier_txs.push((tag_type_id, prev_tier_sec, cur_sec));
+                total_fee_isk = total_fee_isk.saturating_add(fee_per_tag_isk.saturating_mul(i64::from(consumed_qty)));
+                total_consumed = total_consumed.saturating_add(consumed_qty);
+            } else {
+                if cur_sec + 1e-9 >= effective_target || cur_sec < min_band - 1e-6 || cur_sec >= max_band - 1e-6 {
+                    continue;
+                }
+                let band_cap = ((max_band - cur_sec) / 0.5).ceil().max(1.0) as i32;
+                let target_cap = ((effective_target - cur_sec) / 0.5).ceil().max(0.0) as i32;
+                let consumed_qty = band_cap.min(target_cap);
+                if consumed_qty <= 0 {
+                    continue;
+                }
+                consume_band_tags(
+                    snap,
+                    char_id,
+                    station_id,
+                    ship_id_opt,
+                    tag_type_id,
+                    consumed_qty,
+                    &mut changed_items,
+                )?;
+                let prev_tier_sec = cur_sec;
+                cur_sec = (cur_sec + 0.5 * f64::from(consumed_qty)).min(0.0);
+                tier_txs.push((tag_type_id, prev_tier_sec, cur_sec));
+                total_fee_isk = total_fee_isk.saturating_add(fee_per_tag_isk.saturating_mul(i64::from(consumed_qty)));
+                total_consumed = total_consumed.saturating_add(consumed_qty);
             }
-            let prev_tier_sec = cur_sec;
-            cur_sec = (cur_sec + 0.5 * f64::from(consumed_qty)).min(0.0);
-            tier_txs.push((tag_type_id, prev_tier_sec, cur_sec));
-            total_fee_isk = total_fee_isk.saturating_add(fee_per_tag_isk.saturating_mul(i64::from(consumed_qty)));
-            total_consumed = total_consumed.saturating_add(consumed_qty);
+        }
+        if total_consumed == 0 {
+            return Err(BridgeRpcError {
+                code: "InvalidTargetSecurityStatus".into(),
+                message: format!(
+                    "No Clone Soldier security tags applicable for transition from {orig_sec:.2} to {effective_target:.2}"
+                ),
+            });
         }
         let total_fee = eve_db::IskCents::from_isk(total_fee_isk);
         let cur_bal = snap
@@ -1064,6 +1070,65 @@ pub fn handle_apply_tags_for_sec_status(
         }
         Err(e) => Some(Err(e)),
     }
+}
+
+fn consume_band_tags(
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    station_id: i64,
+    ship_id_opt: Option<i64>,
+    tag_type_id: u32,
+    consumed_qty: i32,
+    changed_items: &mut Vec<(eve_db::InventoryItemRecord, Option<eve_db::InventoryItemRecord>)>,
+) -> Result<(), BridgeRpcError> {
+    let mut matching_ids: Vec<(i64, i32)> = snap
+        .items
+        .values()
+        .filter(|i| {
+            i.owner_id == char_id
+                && i.type_id == tag_type_id
+                && i.quantity > 0
+                && ((i.location_id == station_id && i.flag == eve_db::InventoryFlag::Hangar)
+                    || (ship_id_opt.is_some_and(|sid| i.location_id == sid)
+                        && i.flag == eve_db::InventoryFlag::Cargo))
+                && !snap.is_item_locked_in_contract_or_job(i.item_id)
+        })
+        .map(|i| (i.item_id, i.quantity))
+        .collect();
+    matching_ids.sort_by_key(|&(iid, _)| iid);
+    let total_avail: i64 = matching_ids.iter().map(|&(_, q)| i64::from(q)).sum();
+    if total_avail < i64::from(consumed_qty) {
+        return Err(BridgeRpcError {
+            code: "InsufficientSecurityTags".into(),
+            message: format!(
+                "Missing {consumed_qty}x unlocked tag type {tag_type_id} in local station hangar or active ship cargo"
+            ),
+        });
+    }
+    let mut remaining = consumed_qty;
+    for (iid, _) in matching_ids {
+        if remaining <= 0 {
+            break;
+        }
+        if let Some(old_item) = snap.items.get(&iid).cloned() {
+            let take = old_item.quantity.min(remaining);
+            remaining -= take;
+            let new_item_opt = if let Some(it) = snap.items.get_mut(&iid) {
+                if it.quantity > take {
+                    it.quantity -= take;
+                    it.version += 1;
+                    Some(it.clone())
+                } else {
+                    snap.items.remove(&iid);
+                    None
+                }
+            } else {
+                None
+            };
+            changed_items.push((old_item, new_item_opt));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

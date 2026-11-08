@@ -110,14 +110,12 @@ pub(super) async fn handle_return_players(
                 session.structure_id = None;
                 session.solar_system_id = Some(home_sys);
             }
-            if let Ok(mut bounds) = ctx.bound_objects.write() {
-                for b in bounds
-                    .values_mut()
-                    .filter(|b| b.character_id == cid && b.service == "beyonce")
-                {
-                    b.object_id = i64::from(home_sys);
-                }
-            }
+            ctx.invalidate_bound_objects_for_session_transition(
+                cid,
+                home_sys,
+                Some(home_st_id),
+                "dock",
+            );
             let sess_rep = PyRep::keyval([
                 ("charid", PyRep::Integer(cid)),
                 ("stationid", PyRep::Integer(home_st_id)),
@@ -214,6 +212,12 @@ pub(super) async fn handle_teleport_ref_home(
             session.station_id = Some(home_st_id);
             session.structure_id = None;
             session.solar_system_id = Some(home_sys);
+            ctx.invalidate_bound_objects_for_session_transition(
+                caller_cid,
+                home_sys,
+                Some(home_st_id),
+                "dock",
+            );
             let sess_rep = PyRep::keyval([
                 ("charid", PyRep::Integer(caller_cid)),
                 ("stationid", PyRep::Integer(home_st_id)),

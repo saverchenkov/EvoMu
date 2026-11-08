@@ -210,13 +210,13 @@ async fn notify_b30_target_multi_event_and_fw_warzone() {
     });
     let mut sess_fw = login_in_space(&fw_ctx, 9_619, "demo", "demo-secret", PILOT_A, fw_ship, 587, warzone_sys, DVec3::ZERO).await;
     sess_fw.role |= ROLE_GM_DEFAULT;
-    let wz_beyonce = fw_ctx.bind_object(&sess_fw, "beyonce", i64::from(warzone_sys)).unwrap();
     fw_ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&PILOT_A).unwrap().station_id = Some(60_003_760); });
     rpc(&fw_ctx, &mut sess_fw, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(500_004)])
         .await
         .expect("CreateMyDirectEnlistment");
     fw_ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&PILOT_A).unwrap().station_id = None; });
     sess_fw.station_id = None;
+    let wz_beyonce = fw_ctx.bind_object(&sess_fw, "beyonce", i64::from(warzone_sys)).unwrap();
     let _ = rpc(&fw_ctx, &mut sess_fw, "fwWarzoneSolarsystem", "GetLocalOccupationState", &[]).await.expect("GetLocalOccupationState");
     let _ = rpc(&fw_ctx, &mut sess_fw, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await.expect("GetFactionWarfareInstances");
     let novice_gate = fw_ctx.db.with_snapshot(|s| {

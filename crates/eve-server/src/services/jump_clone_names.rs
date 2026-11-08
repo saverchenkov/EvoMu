@@ -1155,6 +1155,12 @@ pub(crate) async fn handle_qa_move_me_to(
     session.region_id = Some(updated_ch.region_id);
     session.station_id = None;
     session.structure_id = None;
+    ctx.invalidate_bound_objects_for_session_transition(
+        cid,
+        dest_sys_id,
+        None,
+        "slash_teleport",
+    );
     Ok(PyRep::keyval([
         ("characterID", PyRep::Integer(cid)),
         ("solarSystemID", PyRep::Integer(dest_sys_id as i64)),

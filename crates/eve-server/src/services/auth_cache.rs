@@ -1400,6 +1400,12 @@ pub async fn handle(
                 session.region_id = Some(updated_ch.region_id);
                 session.station_id = None;
                 session.structure_id = None;
+                ctx.invalidate_bound_objects_for_session_transition(
+                    cid,
+                    dest_sys_id,
+                    None,
+                    "slash_teleport",
+                );
 
                 Some(Ok(PyRep::keyval([
                     ("command", PyRep::String(cmd.to_string())),

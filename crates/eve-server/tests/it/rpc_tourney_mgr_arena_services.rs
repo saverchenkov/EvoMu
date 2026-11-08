@@ -195,13 +195,28 @@ async fn test_tourney_setup_pairings_and_teleportation() {
     assert!(sess.station_id.is_none(), "Station ID should be None in space");
     assert_eq!(sess.solar_system_id, Some(30_000_142));
     assert!(old_sys_handle.get_ball_snapshot(p1_ship).await.unwrap().is_none(), "Ship ball should be removed from old_sys");
-    assert_eq!(
-        ctx.bound_objects.read().unwrap().get(&bound_oid).unwrap().object_id,
-        30_000_142,
-        "beyonce bound object_id must be updated to arena_sys"
+    assert!(
+        !ctx.bound_objects.read().unwrap().contains_key(&bound_oid),
+        "stale beyonce bound object must be evicted on TeleportToArena"
     );
+    let arena_notifs = ctx.drain_notifications_for_char(P1);
+    assert!(
+        arena_notifs.iter().any(|n| n.event == "OnMachoObjectDisconnect"),
+        "OnMachoObjectDisconnect must be emitted on TeleportToArena"
+    );
+    let _rebind_arena = rpc(&ctx, &mut sess, "beyonce", "MachoBindObject", &[PyRep::Integer(30_000_142)])
+        .await
+        .expect("rebind beyonce in arena_sys");
+    let arena_oid = ctx
+        .bound_objects
+        .read()
+        .unwrap()
+        .iter()
+        .find(|(_, b)| b.character_id == P1 && b.service == "beyonce" && b.object_id == 30_000_142)
+        .map(|(id, _)| *id)
+        .expect("arena beyonce binding registered");
 
-    // 5. TeleportToStation: returns referee/GM to home station
+    // 5. TeleportToStation: returns referee/GM to home station and evicts arena beyonce binding
     let _ = ctx.drain_notifications_for_char(P1);
     let tele_home_res = rpc(&ctx, &mut sess, "tourneyMgr", "TeleportToStation", &[PyRep::Integer(match_id)])
         .await
@@ -209,15 +224,76 @@ async fn test_tourney_setup_pairings_and_teleportation() {
     assert_eq!(tele_home_res, PyRep::Bool(true));
     assert!(sess.station_id.is_some(), "Character should be docked in station");
     let home_sys = sess.solar_system_id.unwrap() as i64;
-    assert_eq!(
-        ctx.bound_objects.read().unwrap().get(&bound_oid).unwrap().object_id,
-        home_sys,
-        "beyonce bound object_id must be updated to home_sys"
+    assert!(
+        !ctx.bound_objects.read().unwrap().contains_key(&arena_oid),
+        "arena beyonce bound object must be evicted on TeleportToStation"
     );
     let notifs = ctx.drain_notifications_for_char(P1);
+    assert!(
+        notifs.iter().any(|n| n.event == "OnMachoObjectDisconnect"),
+        "OnMachoObjectDisconnect must be emitted on TeleportToStation"
+    );
     let session_change = notifs.iter().find(|n| n.event == "OnSessionChanged").expect("OnSessionChanged emitted");
     assert_eq!(session_change.args.len(), 3, "OnSessionChanged must have 3 args");
     let sess_rep = &session_change.args[1];
     assert_eq!(sess_rep.dict_get("solarsystemid"), Some(&PyRep::None), "Docked session solarsystemid must be None");
     assert_eq!(sess_rep.dict_get("solarsystemid2"), Some(&PyRep::Integer(home_sys)), "Docked session solarsystemid2 must be home_sys");
+}
+
+#[tokio::test]
+async fn test_slash_teleport_evicts_space_and_pi_bindings_and_blocks_cross_system_binds() {
+    let ctx = ServerContext::new();
+    let mut sess = select_pilot(&ctx, 80_201, "demo", "demo-secret", P1).await;
+    sess.role |= eve_machonet::service_roles::ROLE_GMH;
+
+    // Undock into Jita space (30_000_142) via MachoBindObject / undock or slash teleport
+    rpc(&ctx, &mut sess, "slash", "SlashCmd", &[PyRep::String("/tr 30000142".into())])
+        .await
+        .expect("/tr Jita");
+    let sys_id = sess.solar_system_id.expect("in system") as i64;
+    assert_eq!(sys_id, 30_000_142);
+
+    // Non-system keeper (1) succeeds, while cross-system keeper & planetOrbitalRegistryBroker fail
+    let bind_denied = ["BindAuthorization", "Denied"].concat();
+    let keep_global = ctx.bind_object(&sess, "keeper", 1).expect("keeper global bind");
+    assert_eq!(
+        ctx.bind_object(&sess, "keeper", 30_000_144)
+            .unwrap_err()
+            .code,
+        bind_denied
+    );
+    assert_eq!(
+        ctx.bind_object(&sess, "planetOrbitalRegistryBroker", 30_000_144)
+            .unwrap_err()
+            .code,
+        bind_denied
+    );
+
+    let bey_bind = ctx.bind_object(&sess, "beyonce", sys_id).expect("beyonce bind");
+    let pi_bind = ctx
+        .bind_object(&sess, "planetOrbitalRegistryBroker", sys_id)
+        .expect("planetOrbitalRegistryBroker bind");
+    let keep_sys_bind = ctx.bind_object(&sess, "keeper", sys_id).expect("keeper sys bind");
+    let _ = ctx.drain_notifications_for_char(P1);
+
+    // Slash teleport to another system (30_000_144) evicts all system-scoped bindings
+    rpc(&ctx, &mut sess, "slash", "SlashCmd", &[PyRep::String("/tr 30000144".into())])
+        .await
+        .expect("/tr Lowsec");
+    assert_eq!(sess.solar_system_id, Some(30_000_144));
+    assert!(ctx.verify_bound_object(&sess, bey_bind).is_err());
+    assert!(ctx.verify_bound_object(&sess, pi_bind).is_err());
+    assert!(ctx.verify_bound_object(&sess, keep_sys_bind).is_err());
+    assert!(ctx.verify_bound_object(&sess, keep_global).is_ok());
+
+    let disconnects: Vec<_> = ctx
+        .drain_notifications_for_char(P1)
+        .into_iter()
+        .filter(|n| n.event == "OnMachoObjectDisconnect")
+        .collect();
+    assert_eq!(
+        disconnects.len(),
+        3,
+        "OnMachoObjectDisconnect must fire for beyonce, planetOrbitalRegistryBroker, and solar-system keeper"
+    );
 }

@@ -114,7 +114,27 @@ impl ServerContext {
         kwargs: &HashMap<String, PyRep>,
         caller_trace: Option<&str>,
     ) -> Result<PyRep, BridgeRpcError> {
+        let pre_sync_loc = (
+            session.solar_system_id,
+            session.station_id,
+            session.structure_id,
+        );
         self.sync_session(session);
+        let post_sync_loc = (
+            session.solar_system_id,
+            session.station_id,
+            session.structure_id,
+        );
+        if pre_sync_loc.0.is_some() && post_sync_loc != pre_sync_loc {
+            if let (Some(cid), Some(sys_id)) = (session.character_id, session.solar_system_id) {
+                self.invalidate_bound_objects_for_session_transition(
+                    cid,
+                    sys_id,
+                    session.station_id.or(session.structure_id),
+                    "session_location_change",
+                );
+            }
+        }
         let initial_len = session
             .character_id
             .and_then(|cid| {
@@ -225,6 +245,21 @@ impl ServerContext {
         }
 
         if let Some(cid) = session.character_id {
+            let post_rpc_loc = (
+                session.solar_system_id,
+                session.station_id,
+                session.structure_id,
+            );
+            if post_sync_loc.0.is_some() && post_rpc_loc != post_sync_loc {
+                if let Some(sys_id) = session.solar_system_id {
+                    self.invalidate_bound_objects_for_session_transition(
+                        cid,
+                        sys_id,
+                        session.station_id.or(session.structure_id),
+                        "session_location_change",
+                    );
+                }
+            }
             if let Some(notifs) = self
                 .pending_notifications
                 .read()
@@ -376,17 +411,7 @@ impl ServerContext {
         let _ = self.quasar_gateway.on_session_changed(session, now_unix);
 
         let bound_entry = if let Some(bid) = bound_id {
-            match self.verify_bound_object(session, bid) {
-                Ok(entry) => Some(entry),
-                Err(e) => {
-                    let cw = self.bound_objects.read().ok().and_then(|m| m.get(&bid).cloned())
-                        .filter(|en| en.service == "crimewatch")
-                        .and_then(|en| u32::try_from(en.object_id).ok())
-                        .filter(|&sid| self.sde.solar_systems.contains_key(&sid))
-                        .and_then(|sid| { let mut s = session.clone(); s.solar_system_id = Some(sid); self.verify_bound_object(&s, bid).ok() });
-                    if let Some(entry) = cw { Some(entry) } else { return Err(e); }
-                }
-            }
+            Some(self.verify_bound_object(session, bid)?)
         } else {
             None
         };
@@ -633,11 +658,7 @@ impl ServerContext {
                     })
                 }
             };
-            let cw_sess = (effective_service == "crimewatch")
-                .then(|| u32::try_from(obj_id).ok().filter(|id| self.sde.solar_systems.contains_key(id)))
-                .flatten()
-                .map(|sys_id| { let mut s = session.clone(); s.solar_system_id = Some(sys_id); s });
-            let bid = self.bind_object(cw_sess.as_ref().unwrap_or(session), effective_service, obj_id)?;
+            let bid = self.bind_object(session, effective_service, obj_id)?;
             if effective_service == "beyonce" {
                 let requested_sys = u32::try_from(obj_id)
                     .ok()

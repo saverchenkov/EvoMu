@@ -18,6 +18,7 @@ use eve_sde::SdeRegistry;
 use std::sync::{Arc, OnceLock};
 
 pub(super) static SHARED_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
+const EXPECTED_BIND_DENIED_CODE: &str = "BindAuthorizationDenied";
 
 pub(super) fn test_ctx() -> ServerContext {
     if let Some(sde) = SHARED_SDE.get() {
@@ -207,13 +208,23 @@ fn moniker_bind_and_verify_authorization_matrix_across_all_services() {
         );
     }
 
-    // 5) crimewatch: allowed for char_id, solar_system_id, station_id, and 0;
-    //    denied for `struct_id` and `other_char`!
-    for valid_id in [char_id, sys_id as i64, st_id, 0] {
-        assert!(ctx.bind_object(&sess, "crimewatch", valid_id).is_ok());
+    // 5) crimewatch: allowed for char_id, solar_system_id, station_id, docked struct_id, and 0;
+    //    denied for foreign structure IDs, foreign solar systems, and other_char!
+    for valid_id in [char_id, sys_id as i64, st_id, struct_id, 0] {
+        assert!(
+            ctx.bind_object(&sess, "crimewatch", valid_id).is_ok(),
+            "crimewatch should allow {valid_id}"
+        );
     }
+    let foreign_struct_id = struct_id + 1;
     assert_eq!(
-        ctx.bind_object(&sess, "crimewatch", struct_id)
+        ctx.bind_object(&sess, "crimewatch", foreign_struct_id)
+            .unwrap_err()
+            .code,
+        "BindAuthorizationDenied" // rpc-lint: allow error code assertion
+    );
+    assert_eq!(
+        ctx.bind_object(&sess, "crimewatch", 30_000_144)
             .unwrap_err()
             .code,
         "BindAuthorizationDenied" // rpc-lint: allow error code assertion
@@ -305,13 +316,31 @@ fn session_transition_invalidation_and_macho_object_disconnect_notifications() {
 
     let b_bey = ctx.bind_object(&sess, "beyonce", sys_id as i64).unwrap();
     let b_scan = ctx.bind_object(&sess, "scanMgr", sys_id as i64).unwrap();
+    let b_pi = ctx
+        .bind_object(&sess, "planetOrbitalRegistryBroker", sys_id as i64)
+        .unwrap();
     let b_keep_sys = ctx.bind_object(&sess, "keeper", sys_id as i64).unwrap();
+    let b_keep_global = ctx.bind_object(&sess, "keeper", 1).unwrap();
     let b_pos_sys = ctx.bind_object(&sess, "posMgr", sys_id as i64).unwrap();
     let b_pos_non_sys = ctx.bind_object(&sess, "posMgr", 500).unwrap();
     let b_dev_sys = ctx
         .bind_object(&sess, "devIndexManager", sys_id as i64)
         .unwrap();
     let b_repair = ctx.bind_object(&sess, "repairSvc", st_id).unwrap();
+
+    // Cross-system planetOrbitalRegistryBroker and solar-system-scoped keeper are denied
+    assert_eq!(
+        ctx.bind_object(&sess, "planetOrbitalRegistryBroker", 30_000_144)
+            .unwrap_err()
+            .code,
+        EXPECTED_BIND_DENIED_CODE
+    );
+    assert_eq!(
+        ctx.bind_object(&sess, "keeper", 30_000_144)
+            .unwrap_err()
+            .code,
+        EXPECTED_BIND_DENIED_CODE
+    );
 
     // 1) Exempt reasons never invalidate any bound objects
     for exempt in [
@@ -328,7 +357,9 @@ fn session_transition_invalidation_and_macho_object_disconnect_notifications() {
     for bid in [
         b_bey,
         b_scan,
+        b_pi,
         b_keep_sys,
+        b_keep_global,
         b_pos_sys,
         b_pos_non_sys,
         b_dev_sys,
@@ -337,14 +368,16 @@ fn session_transition_invalidation_and_macho_object_disconnect_notifications() {
         assert!(ctx.bound_objects.read().unwrap().contains_key(&bid));
     }
 
-    // 2) "dock" invalidates all solar-system-scoped bindings (including keeper/posMgr/devIndexManager
-    //    with solar-system object_id in 30_000_000..=39_999_999), while preserving b_pos_non_sys (500)
-    //    and b_repair (matching active_dock_id = Some(st_id))!
+    // 2) "dock" invalidates solar-system space bindings (keeper/posMgr/devIndexManager with
+    //    solar-system object_id), while preserving same-system planetOrbitalRegistryBroker,
+    //    non-system keeper (1), b_pos_non_sys (500), and b_repair (matching active_dock_id = Some(st_id))!
     ctx.pending_notifications.write().unwrap().clear();
     ctx.invalidate_bound_objects_for_session_transition(char_id, sys_id, Some(st_id), "dock");
     for sys_bid in [b_bey, b_scan, b_keep_sys, b_pos_sys, b_dev_sys] {
         assert!(!ctx.bound_objects.read().unwrap().contains_key(&sys_bid));
     }
+    assert!(ctx.bound_objects.read().unwrap().contains_key(&b_pi));
+    assert!(ctx.bound_objects.read().unwrap().contains_key(&b_keep_global));
     assert!(ctx.bound_objects.read().unwrap().contains_key(&b_pos_non_sys));
     assert!(ctx.bound_objects.read().unwrap().contains_key(&b_repair));
 
@@ -371,4 +404,25 @@ fn session_transition_invalidation_and_macho_object_disconnect_notifications() {
     ctx.release_bound_object(&sess, b_repair)
         .expect("release b_repair");
     assert!(!ctx.bound_objects.read().unwrap().contains_key(&b_repair));
+
+    // 4) "slash_teleport" and "tourney_teleport" evict space, PI, and station bindings
+    let b_bey_t = ctx.bind_object(&sess, "beyonce", sys_id as i64).unwrap();
+    let b_rep_t = ctx.bind_object(&sess, "repairSvc", st_id).unwrap();
+    ctx.invalidate_bound_objects_for_session_transition(
+        char_id,
+        30_000_144,
+        None,
+        "slash_teleport",
+    );
+    assert!(!ctx.bound_objects.read().unwrap().contains_key(&b_pi));
+    assert!(!ctx.bound_objects.read().unwrap().contains_key(&b_bey_t));
+    assert!(!ctx.bound_objects.read().unwrap().contains_key(&b_rep_t));
+    let b_bey_a = ctx.bind_object(&sess, "beyonce", sys_id as i64).unwrap();
+    ctx.invalidate_bound_objects_for_session_transition(
+        char_id,
+        30_000_144,
+        None,
+        "tourney_teleport",
+    );
+    assert!(!ctx.bound_objects.read().unwrap().contains_key(&b_bey_a));
 }

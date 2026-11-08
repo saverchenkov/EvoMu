@@ -824,6 +824,8 @@ pub async fn spawn_matched_arena_instance(
     participants: Vec<(i64, i64, u32)>,
 ) {
     session.solar_system_id = Some(32_000_001);
+    session.station_id = None;
+    session.structure_id = None;
     let arena = ctx.systems.get_or_spawn(32_000_001);
     let center = DVec3::from_array(arena_offset);
     if arena.get_ball_snapshot(end_gate_id).await.ok().flatten().is_none() {
@@ -864,6 +866,12 @@ pub async fn spawn_matched_arena_instance(
 
     let num_teams = teams.len().max(2);
     for (pid, p_ship_id, p_origin_sys) in participants {
+        ctx.invalidate_bound_objects_for_session_transition(
+            pid,
+            32_000_001,
+            None,
+            "filament_jump",
+        );
         crate::services::map_service::record_solar_system_visit(ctx, pid, 32_000_001);
         let sess_rep = PyRep::keyval([
             ("charid", PyRep::Integer(pid)),
@@ -1093,6 +1101,14 @@ pub async fn handle_pvp_end_gate_activation(
     };
 
     session.solar_system_id = Some(osys);
+    session.station_id = None;
+    session.structure_id = None;
+    ctx.invalidate_bound_objects_for_session_transition(
+        char_id,
+        osys,
+        None,
+        "filament_jump",
+    );
     crate::services::map_service::record_solar_system_visit(ctx, char_id, osys);
     let cur_ship = active_ship_id.or(session.ship_id).unwrap_or(char_id);
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, cur_ship, 32_000_001);

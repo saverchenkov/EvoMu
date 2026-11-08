@@ -1044,11 +1044,12 @@ pub async fn handle(
                         session.station_id = None;
                         session.structure_id = None;
                     }
-                    if let Ok(mut bounds) = ctx.bound_objects.write() {
-                        for b in bounds.values_mut().filter(|b| b.character_id == cid && b.service == "beyonce") {
-                            b.object_id = match_sys;
-                        }
-                    }
+                    ctx.invalidate_bound_objects_for_session_transition(
+                        cid,
+                        match_sys as u32,
+                        None,
+                        "tourney_teleport",
+                    );
                     let sess_rep = PyRep::keyval([
                         ("charid", PyRep::Integer(cid)),
                         ("stationid", PyRep::None),

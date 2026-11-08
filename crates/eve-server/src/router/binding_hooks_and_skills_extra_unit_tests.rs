@@ -294,11 +294,11 @@ fn binding_auth_and_session_transitions_enforce_service_rules() {
     assert!(ctx.bind_object(&sess, "entity", 0).is_err());
     let entity_bind = ctx.bind_object(&sess, "entity", 30_000_142).expect("entity bind");
 
-    // Jumping to another solar system evicts system-scoped entity binding while valid SDE system stays bound.
+    // Jumping to another solar system evicts system-scoped entity and planetOrbitalRegistryBroker bindings.
     sess.solar_system_id = Some(30_000_144);
     ctx.invalidate_bound_objects_for_session_transition(90_000_001, 30_000_144, None, "stargate_jump");
     assert!(ctx.verify_bound_object(&sess, entity_bind).is_err());
-    assert!(ctx.verify_bound_object(&sess, pi_sys_bind).is_ok());
+    assert!(ctx.verify_bound_object(&sess, pi_sys_bind).is_err());
 
     let entity_bind_2 = ctx.bind_object(&sess, "entity", 30_000_144).expect("entity bind 2");
 

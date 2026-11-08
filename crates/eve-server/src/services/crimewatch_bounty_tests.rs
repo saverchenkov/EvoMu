@@ -323,3 +323,88 @@ fn apply_tags_for_sec_status_enforces_lowsec_concord_office_bands_and_fees() {
         assert!(!snap.items.contains_key(&tag_33140_id));
     });
 }
+
+#[test]
+fn apply_tags_for_sec_status_supports_v24_two_float_signature_and_validates_bounds() {
+    let (ctx, mut session, char_id, _ship_id, _sys_id) = make_fighter_ctx_and_session();
+    let (station_id, lowsec_sys_id) = ctx
+        .sde
+        .stations
+        .values()
+        .find(|st| {
+            let sec = ctx
+                .sde
+                .solar_systems
+                .get(&st.solar_system_id)
+                .map(|s| s.security_status)
+                .unwrap_or(1.0);
+            0.0 < sec
+                && sec < 0.45
+                && crate::services::station_structure::npc_station_offers_service(
+                    &ctx.sde,
+                    st.station_id,
+                    27,
+                )
+        })
+        .map(|st| (st.station_id, st.solar_system_id))
+        .expect("SDE has low-sec Security Office station");
+    session.solar_system_id = Some(lowsec_sys_id);
+    session.station_id = Some(station_id);
+    let tag_33139_id = 910_000_201_i64;
+    let tag_33140_id = 910_000_202_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(station_id);
+            ch.solar_system_id = lowsec_sys_id;
+            ch.security_status = -5.5;
+            ch.balance = IskCents::from_f64_isk(50_000_000.0);
+        }
+        snap.items.insert(
+            tag_33139_id,
+            make_fighter_item(tag_33139_id, 33_139, char_id, station_id, InventoryFlag::Hangar, 1),
+        );
+        snap.items.insert(
+            tag_33140_id,
+            make_fighter_item(tag_33140_id, 33_140, char_id, station_id, InventoryFlag::Hangar, 2),
+        );
+    });
+
+    // Non-finite arguments must fail validation before touching state
+    let nan_err = handle_apply_tags_for_sec_status(
+        &ctx,
+        &session,
+        &[PyRep::Real(f64::NAN), PyRep::Real(-5.5)],
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(nan_err.code, "InvalidSecurityTagArguments");
+
+    // Reaching 0.0 requires more tags than available in [-2.0, 0.0)
+    let ins_err = handle_apply_tags_for_sec_status(
+        &ctx,
+        &session,
+        &[PyRep::Real(0.0), PyRep::Real(-5.5)],
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(ins_err.code, "InsufficientSecurityTags");
+
+    // V24.01 2-float call (targetSec, currentSec) auto-consumes bands up to -4.0
+    let ok_res = handle_apply_tags_for_sec_status(
+        &ctx,
+        &session,
+        &[PyRep::Real(-4.0), PyRep::Real(-5.5)],
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(ok_res.dict_get("oldSecurityStatus"), Some(&PyRep::Real(-5.5)));
+    assert_eq!(ok_res.dict_get("newSecurityStatus"), Some(&PyRep::Real(-4.0)));
+    ctx.db.with_snapshot(|snap| {
+        let ch = snap.characters.get(&char_id).unwrap();
+        assert!((ch.security_status - (-4.0)).abs() < 1e-6);
+        assert!((ch.balance.to_wire_f64() - 38_000_000.0).abs() < 1e-2);
+        assert!(!snap.items.contains_key(&tag_33139_id));
+        assert!(!snap.items.contains_key(&tag_33140_id));
+    });
+}

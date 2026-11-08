@@ -425,19 +425,39 @@ async fn pregame_points_cleanup_radius_boundary_teleport_return_and_fleet_sync()
             points: 0,
         });
         save_store(snap, &store, 1_003);
+        if !snap.accounts.values().any(|a| a.user_id == blue_p1 as u64) {
+            if let Some(mut acc) = snap.accounts.values().next().cloned() {
+                acc.user_id = blue_p1 as u64;
+                acc.username = format!("blue_ref_{blue_p1}");
+                snap.accounts.insert(acc.username.clone(), acc);
+            }
+        }
     });
 
+    let buid = ctx.db.with_snapshot(|s| s.characters.get(&blue_p1).map(|c| c.user_id).unwrap_or(blue_p1 as u64));
+    ctx.db.acquire_online_lock(buid, 1, Some(blue_p1), true, 1_800_000_000).unwrap();
     let mut blue_ref_sess = mk_sess(Some(blue_p1), Some(sys_home), false);
     tm_ok(&ctx, &mut blue_ref_sess, "TeleportPlayers", &py_ints(&[1, 1])).await;
     assert_eq!(blue_ref_sess.solar_system_id, Some(sys_arena));
-    assert_eq!(ctx.bound_objects.read().unwrap()[&501].object_id, i64::from(sys_arena));
+    assert!(!ctx.bound_objects.read().unwrap().contains_key(&501));
+    assert!(ctx
+        .drain_notifications_for_char(blue_p1)
+        .iter()
+        .any(|n| n.event == "OnMachoObjectDisconnect"));
+    let arena_bid = ctx
+        .bind_object(&blue_ref_sess, "beyonce", i64::from(sys_arena))
+        .expect("rebind beyonce in arena");
     tm_ok(&ctx, &mut blue_ref_sess, "TeleportPlayers", &py_ints(&[1, 1])).await;
 
     // 1-arg ReturnTeamPlayers returns blue_p1 from sys_arena back to st_amarr in sys_home (`home_sys != old_sys`)
     tm_ok(&ctx, &mut blue_ref_sess, "ReturnTeamPlayers", &py_ints(&[1])).await;
     assert_eq!(blue_ref_sess.station_id, Some(st_amarr));
     assert_eq!(blue_ref_sess.solar_system_id, Some(sys_home));
-    assert_eq!(ctx.bound_objects.read().unwrap()[&501].object_id, i64::from(sys_home));
+    assert!(!ctx.bound_objects.read().unwrap().contains_key(&arena_bid));
+    assert!(ctx
+        .drain_notifications_for_char(blue_p1)
+        .iter()
+        .any(|n| n.event == "OnMachoObjectDisconnect"));
 
     // 3-arg RemovePlayer on blue team
     tm_ok(&ctx, &mut gm, "RemovePlayer", &py_ints(&[mid, 1, ghost_pilot])).await;

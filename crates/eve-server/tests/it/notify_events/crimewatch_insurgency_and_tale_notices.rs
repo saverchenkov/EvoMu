@@ -251,11 +251,11 @@ async fn test_batch4_fw_lp_vp_and_insurgency_corruption_security() {
     });
     let mut sess_fw = login_in_space(&fw_ctx, 92_021, "demo", "demo-secret", PILOT_A, fw_ship, 587, warzone_sys, DVec3::ZERO).await;
     sess_fw.role |= ROLE_GM_DEFAULT;
-    let wz_beyonce = fw_ctx.bind_object(&sess_fw, "beyonce", i64::from(warzone_sys)).unwrap();
     fw_ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&PILOT_A).unwrap().station_id = Some(60_003_760); });
     rpc(&fw_ctx, &mut sess_fw, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(500_004)]).await.unwrap();
     fw_ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&PILOT_A).unwrap().station_id = None; });
     sess_fw.station_id = None;
+    let wz_beyonce = fw_ctx.bind_object(&sess_fw, "beyonce", i64::from(warzone_sys)).unwrap();
     let _ = rpc(&fw_ctx, &mut sess_fw, "fwWarzoneSolarsystem", "GetLocalOccupationState", &[]).await.unwrap();
     let _ = rpc(&fw_ctx, &mut sess_fw, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[]).await.unwrap();
 

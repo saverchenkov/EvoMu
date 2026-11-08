@@ -41,12 +41,7 @@ pub(super) fn authorize_service_binding(
                 || session.structure_id == Some(object_id)
                 || object_id == 0
         }
-        "crimewatch" => {
-            Some(object_id) == session.character_id
-                || session.solar_system_id.map(i64::from) == Some(object_id)
-                || session.station_id == Some(object_id)
-                || object_id == 0
-        }
+        "crimewatch" => is_authorized_crimewatch_target(ctx, session, object_id),
         "i2" => session.has_gm_role() && object_id > 0,
         "corpRegistry" | "corpmgr" => {
             object_id > 0
@@ -64,9 +59,10 @@ pub(super) fn authorize_service_binding(
         "allianceRegistry" => object_id > 0 && session.alliance_id == Some(object_id),
         "fleetObjectHandler" => object_id > 0 && session.fleet_id == Some(object_id),
         "planetMgr" => authorize_planet_binding(ctx, session, char_id, object_id),
-        "planetOrbitalRegistryBroker" => u32::try_from(object_id)
-            .ok()
-            .is_some_and(|id| ctx.sde.solar_systems.contains_key(&id)),
+        "planetOrbitalRegistryBroker" => {
+            is_solar_system_id(ctx, object_id)
+                && session.solar_system_id.map(i64::from) == Some(object_id)
+        }
         "structure" => authorize_structure_binding(ctx, session, object_id),
         "posMgr" => authorize_pos_binding(ctx, session, object_id),
         "trademgr" => authorize_trade_binding(ctx, session, object_id),
@@ -93,7 +89,12 @@ pub(super) fn authorize_service_binding(
                     || session.structure_id == Some(object_id)
                     || session.solar_system_id.map(i64::from) == Some(object_id))
         }
-        "agentMgr" | "keeper" | "tourneyMgr" => object_id > 0,
+        "keeper" => {
+            object_id > 0
+                && (!is_solar_system_id(ctx, object_id)
+                    || session.solar_system_id.map(i64::from) == Some(object_id))
+        }
+        "agentMgr" | "tourneyMgr" => object_id > 0,
         _ => false,
     }
 }
@@ -126,12 +127,7 @@ pub(super) fn verify_service_binding_context(
                 || session.structure_id == Some(entry.object_id)
                 || entry.object_id == 0
         }
-        "crimewatch" => {
-            Some(entry.object_id) == session.character_id
-                || session.solar_system_id.map(i64::from) == Some(entry.object_id)
-                || session.station_id == Some(entry.object_id)
-                || entry.object_id == 0
-        }
+        "crimewatch" => is_authorized_crimewatch_target(ctx, session, entry.object_id),
         "station" | "stationSvc" | "corpStationMgr" | "repairSvc" | "reprocessingSvc"
         | "insuranceSvc" => {
             session.station_id == Some(entry.object_id)
@@ -154,9 +150,10 @@ pub(super) fn verify_service_binding_context(
         "allianceRegistry" => entry.object_id > 0 && session.alliance_id == Some(entry.object_id),
         "fleetObjectHandler" => entry.object_id > 0 && session.fleet_id == Some(entry.object_id),
         "planetMgr" => authorize_planet_binding(ctx, session, entry.character_id, entry.object_id),
-        "planetOrbitalRegistryBroker" => u32::try_from(entry.object_id)
-            .ok()
-            .is_some_and(|id| ctx.sde.solar_systems.contains_key(&id)),
+        "planetOrbitalRegistryBroker" => {
+            is_solar_system_id(ctx, entry.object_id)
+                && session.solar_system_id.map(i64::from) == Some(entry.object_id)
+        }
         "structure" => authorize_structure_binding(ctx, session, entry.object_id),
         "posMgr" => authorize_pos_binding(ctx, session, entry.object_id),
         "trademgr" => authorize_trade_binding(ctx, session, entry.object_id),
@@ -190,7 +187,12 @@ pub(super) fn verify_service_binding_context(
                     || session.structure_id == Some(entry.object_id)
                     || session.solar_system_id.map(i64::from) == Some(entry.object_id))
         }
-        "agentMgr" | "keeper" | "tourneyMgr" => entry.object_id > 0,
+        "keeper" => {
+            entry.object_id > 0
+                && (!is_solar_system_id(ctx, entry.object_id)
+                    || session.solar_system_id.map(i64::from) == Some(entry.object_id))
+        }
+        "agentMgr" | "tourneyMgr" => entry.object_id > 0,
         _ => false,
     }
 }
@@ -321,10 +323,13 @@ pub(super) fn should_invalidate_bound_object(
             | "filament_jump"
             | "jump_bridge"
             | "shipcaster"
+            | "slash_teleport"
+            | "tourney_teleport"
     );
 
     match entry.service.as_str() {
         "beyonce" | "scanMgr" | "entity" => is_docked || is_space_jump || oid != i64::from(system_id),
+        "planetOrbitalRegistryBroker" => is_space_jump || oid != i64::from(system_id),
         "keeper" | "posMgr" | "devIndexManager" if (30_000_000..=39_999_999).contains(&oid) => {
             is_docked || is_space_jump || oid != i64::from(system_id)
         }
@@ -450,6 +455,37 @@ fn authorize_trade_binding(ctx: &ServerContext, session: &SessionState, object_i
             snap.structures.get(&object_id).is_some_and(|st| {
                 Some(st.solar_system_id) == session.solar_system_id
                     || Some(st.owner_corp_id) == session.corporation_id
+            })
+        })
+}
+
+fn is_solar_system_id(ctx: &ServerContext, object_id: i64) -> bool {
+    u32::try_from(object_id)
+        .ok()
+        .is_some_and(|id| ctx.sde.solar_systems.contains_key(&id))
+}
+
+fn is_authorized_crimewatch_target(
+    ctx: &ServerContext,
+    session: &SessionState,
+    object_id: i64,
+) -> bool {
+    Some(object_id) == session.character_id
+        || session.solar_system_id.map(i64::from) == Some(object_id)
+        || session.station_id == Some(object_id)
+        || session.structure_id == Some(object_id)
+        || object_id == 0
+        || session.station_id.and_then(|st| {
+            ctx.sde
+                .stations
+                .get(&st)
+                .map(|s| i64::from(s.solar_system_id))
+        }) == Some(object_id)
+        || session.structure_id.is_some_and(|sid| {
+            ctx.db.with_snapshot(|snap| {
+                snap.structures
+                    .get(&sid)
+                    .is_some_and(|st| i64::from(st.solar_system_id) == object_id)
             })
         })
 }

@@ -507,6 +507,12 @@ async fn activate_trace(
     session.region_id = Some(reg_id);
     session.station_id = None;
     session.structure_id = None;
+    ctx.invalidate_bound_objects_for_session_transition(
+        char_id,
+        ABYSSAL_SPACE_SYSTEM_ID,
+        None,
+        "filament_jump",
+    );
     ctx.quasar_gateway.on_session_changed(session, entry_now);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, ABYSSAL_SPACE_SYSTEM_ID);
     emit_abyssal_entry_notifications(ctx, char_id, pocket_id, tier, remaining_sec);
@@ -645,6 +651,12 @@ async fn activate_inventory_filament(
     session.region_id = Some(reg_id);
     session.station_id = None;
     session.structure_id = None;
+    ctx.invalidate_bound_objects_for_session_transition(
+        char_id,
+        ABYSSAL_SPACE_SYSTEM_ID,
+        None,
+        "filament_jump",
+    );
     ctx.quasar_gateway.on_session_changed(session, now_unix);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, ABYSSAL_SPACE_SYSTEM_ID);
     emit_abyssal_entry_notifications(ctx, char_id, pocket_id, tier, 1_200);

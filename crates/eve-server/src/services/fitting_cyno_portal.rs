@@ -818,13 +818,12 @@ pub async fn relocate_ship(
             PyRep::Bool(true),
         ],
     );
-    if let Ok(mut bmap) = ctx.bound_objects.write() {
-        for entry in bmap.values_mut() {
-            if entry.character_id == char_id && entry.service == "beyonce" {
-                entry.object_id = to_sys as i64;
-            }
-        }
-    }
+    ctx.invalidate_bound_objects_for_session_transition(
+        char_id,
+        to_sys,
+        None,
+        "cyno_jump",
+    );
     let type_id = old.as_ref().map(|b| b.type_id).unwrap_or_else(|| {
         ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0)
     });

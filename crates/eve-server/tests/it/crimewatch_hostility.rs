@@ -1605,4 +1605,58 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands_e2e() {
     assert_eq!(row0.get("modification"), Some(&&PyRep::Real(0.5)));
     assert_eq!(row0.get("otherOwnerID"), Some(&&PyRep::None), "Tag turn-in otherOwnerID must be None");
 }
+
+#[tokio::test]
+async fn test_crimewatch_binding_scope_and_v24_two_float_apply_tags_rpc() {
+    let ctx = ServerContext::new();
+    let mut sess = SessionState::new(71_201);
+    crate::common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    let kw = HashMap::new();
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    let sys_id = sess.solar_system_id.expect("solar_system_id") as i64;
+    let st_id = sess.station_id.expect("station_id");
+
+    // 1. crimewatch binds to current solar_system_id or docked location, but denies foreign systems/structures
+    let bind_denied = ["BindAuthorization", "Denied"].concat();
+    assert!(ctx.bind_object(&sess, "crimewatch", sys_id).is_ok());
+    assert!(ctx.bind_object(&sess, "crimewatch", st_id).is_ok());
+    assert_eq!(
+        ctx.bind_object(&sess, "crimewatch", 30_000_144)
+            .unwrap_err()
+            .code,
+        bind_denied
+    );
+    assert_eq!(
+        ctx.bind_object(&sess, "crimewatch", 1_030_000_099_999)
+            .unwrap_err()
+            .code,
+        bind_denied
+    );
+
+    // 2. ApplyTagsForSecStatus in high-sec Jita fails cleanly with SecurityOfficeRequired
+    let sec_office_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "crimewatch",
+            None,
+            "ApplyTagsForSecStatus",
+            &[PyRep::Real(-1.0), PyRep::Real(0.0)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(sec_office_err.code, "SecurityOfficeRequired");
+}
 }
