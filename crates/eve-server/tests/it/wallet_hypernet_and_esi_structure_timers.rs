@@ -102,6 +102,37 @@ async fn test_hypernet_hypercore_sizing_and_expiry_refund_lifecycle() {
     ])], &kw, None).await.unwrap_err();
     assert_eq!(bad_nodes.code, "InvalidRaffleTicketCount");
 
+    // 1b. Reject zero, negative, sub-1 ISK, NaN, and omitted ticketPrice (#554)
+    for bad_price_args in [
+        vec![PyRep::Integer(valid_item), PyRep::Integer(8)],
+        vec![PyRep::Integer(valid_item), PyRep::Integer(8), PyRep::Real(0.0)],
+        vec![PyRep::Integer(valid_item), PyRep::Integer(8), PyRep::Real(-500.0)],
+        vec![PyRep::Integer(valid_item), PyRep::Integer(8), PyRep::Real(f64::NAN)],
+    ] {
+        let err = ctx
+            .dispatch_rpc(&mut s1, "raffleProxy", None, "CreateRaffle", &bad_price_args, &kw, None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "InvalidTicketPrice");
+    }
+    let wrapped_count = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "raffleProxy",
+            None,
+            "CreateRaffle",
+            &[
+                PyRep::Integer(valid_item),
+                PyRep::Integer(i64::from(u32::MAX) + 9),
+                PyRep::Real(1_000.0),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(wrapped_count.code, "InvalidRaffleTicketCount");
+
     // 2. Verify HyperCore requirement scaling with estimated value and node counts
     let cores_8 = eve_server::services::hypernet_raffle_ops::compute_required_hypercores(100_000_000.0, 8).unwrap();
     let cores_16 = eve_server::services::hypernet_raffle_ops::compute_required_hypercores(100_000_000.0, 16).unwrap();

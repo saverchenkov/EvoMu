@@ -368,7 +368,7 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let (item_id, ticket_count, ticket_price_isk, custom_duration) = match args.first() {
+            let (item_id, ticket_count_opt, ticket_price_opt, custom_duration) = match args.first() {
                 Some(PyRep::KeyVal(kv)) => (
                     kv.get("item_id")
                         .or_else(|| kv.get("itemID"))
@@ -376,12 +376,10 @@ pub fn handle(
                         .unwrap_or(0),
                     kv.get("ticket_count")
                         .or_else(|| kv.get("ticketCount"))
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(8) as u32,
+                        .and_then(|v| v.as_i64()),
                     kv.get("ticket_price")
                         .or_else(|| kv.get("ticketPrice"))
-                        .and_then(|v| v.as_f64())
-                        .unwrap_or(0.0),
+                        .and_then(|v| v.as_f64()),
                     kv.get("duration")
                         .or_else(|| kv.get("duration_secs"))
                         .or_else(|| kv.get("durationSecs"))
@@ -391,8 +389,8 @@ pub fn handle(
                     let fk = |k: &str| kv.iter().find(|(ek, _)| ek.as_str() == Some(k)).map(|(_, ev)| ev);
                     (
                         fk("item_id").or_else(|| fk("itemID")).and_then(|v| v.as_i64()).unwrap_or(0),
-                        fk("ticket_count").or_else(|| fk("ticketCount")).and_then(|v| v.as_i64()).unwrap_or(8) as u32,
-                        fk("ticket_price").or_else(|| fk("ticketPrice")).and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        fk("ticket_count").or_else(|| fk("ticketCount")).and_then(|v| v.as_i64()),
+                        fk("ticket_price").or_else(|| fk("ticketPrice")).and_then(|v| v.as_f64()),
                         fk("duration")
                             .or_else(|| fk("duration_secs"))
                             .or_else(|| fk("durationSecs"))
@@ -401,8 +399,8 @@ pub fn handle(
                 }
                 _ => (
                     args.first().and_then(|a| a.as_i64()).unwrap_or(0),
-                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(8) as u32,
-                    args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.0),
+                    args.get(1).and_then(|a| a.as_i64()),
+                    args.get(2).and_then(|a| a.as_f64()),
                     args.get(3).and_then(|a| a.as_i64()),
                 ),
             };
@@ -443,7 +441,43 @@ pub fn handle(
                     "HyperNet raffles cannot be created in wormhole space",
                 )));
             }
-            let ticket_price_cents = IskCents::from_f64_isk(ticket_price_isk).0;
+            let Some(ticket_count) = ticket_count_opt
+                .and_then(|n| u32::try_from(n).ok())
+                .filter(|n| ALLOWED_RAFFLE_SIZES.contains(n))
+            else {
+                return Some(Err(rpc_err(
+                    "InvalidRaffleTicketCount",
+                    "HyperNet raffle ticket_count must be one of 8, 16, 48, or 512",
+                )));
+            };
+            let max_cents_f64 = (i64::MAX / 2) as f64;
+            let Some(ticket_price_isk) = ticket_price_opt.filter(|p| {
+                p.is_finite() && *p >= 1.0 && (*p * 100.0) <= max_cents_f64
+            }) else {
+                return Some(Err(rpc_err(
+                    "InvalidTicketPrice",
+                    "HyperNet ticket price must be a finite number >= 1.0 ISK",
+                )));
+            };
+            let total_price_isk = ticket_price_isk * f64::from(ticket_count);
+            if !total_price_isk.is_finite() || (total_price_isk * 100.0) > max_cents_f64 {
+                return Some(Err(rpc_err(
+                    "InvalidTicketPrice",
+                    "HyperNet total raffle value overflows finite ISK range",
+                )));
+            }
+            let ticket_price_cents_val = IskCents::from_f64_isk(ticket_price_isk);
+            let ticket_price_cents = ticket_price_cents_val.0;
+            if ticket_price_cents < 100
+                || ticket_price_cents_val
+                    .checked_mul_qty(i64::from(ticket_count))
+                    .is_none()
+            {
+                return Some(Err(rpc_err(
+                    "InvalidTicketPrice",
+                    "HyperNet ticket price is invalid or overflows ISK cents range",
+                )));
+            }
             let now = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let ch_rec = snap.characters.get(&char_id);

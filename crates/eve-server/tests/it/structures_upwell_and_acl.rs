@@ -7089,7 +7089,7 @@ async fn test_wallet_nes_evermarks_hypernet() {
             &mut sess,
             "raffleProxy",
             "CreateRaffle",
-            &[PyRep::Integer(rifter_id), PyRep::Real(1_000_000.0), PyRep::Integer(8)],
+            &[PyRep::Integer(rifter_id), PyRep::Integer(8), PyRep::Real(1_000_000.0)],
         )
         .await
         .is_err()
@@ -7105,7 +7105,7 @@ async fn test_wallet_nes_evermarks_hypernet() {
         &mut sess,
         "raffleProxy",
         "CreateRaffle",
-        &[PyRep::Integer(rifter_id), PyRep::Real(1_000_000.0), PyRep::Integer(8)],
+        &[PyRep::Integer(rifter_id), PyRep::Integer(8), PyRep::Real(1_000_000.0)],
     )
     .await
     .expect("CreateRaffle");
