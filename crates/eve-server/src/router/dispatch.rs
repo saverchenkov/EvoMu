@@ -174,7 +174,7 @@ impl ServerContext {
             }
         }
         if wal_failed {
-            crate::services::fleet_social::hydrate_social_state_from_db(self);
+            self.rehydrate_runtime_from_db();
             if let Some(cid) = session.character_id {
                 if let Ok(mut q) = self.pending_notifications.write() {
                     if let Some(v) = q.get_mut(&cid) {

@@ -613,6 +613,8 @@ impl WorldRepository {
             wal_lock: std::sync::Mutex::new(()),
             snapshot_path: None,
             pending_wal_records: std::sync::atomic::AtomicUsize::new(0),
+            state_epoch: std::sync::atomic::AtomicU64::new(1),
+            rollback_epoch: std::sync::atomic::AtomicU64::new(1),
             #[cfg(test)]
             wal_fault_mode: std::sync::atomic::AtomicU8::new(0),
         };

@@ -115,6 +115,7 @@ pub fn cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx: &ServerContext) ->
     crate::services::fleet_social::execute_pending_auto_kicks_on_downtime(ctx);
     let _bounty_flushed = flush_pending_bounty_ticks_on_downtime(ctx);
     let _probes_recovered = recover_scanner_probes_on_downtime(ctx);
+    ctx.sync_runtime_to_db();
 
     (wrecks_removed_count, missions_reset_count)
 }

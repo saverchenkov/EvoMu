@@ -184,6 +184,9 @@ impl QuasarCorpState {
 
     pub fn sync_to_db(&self) {
         let Some(ref db) = self.db else { return };
+        if db.is_write_locked_by_current_thread() {
+            return;
+        }
         let plans = self.skill_plans.read().unwrap_or_else(|e| e.into_inner()).clone();
         let counters = *self.id_counters.read().unwrap_or_else(|e| e.into_inner());
         db.with_mut_snapshot(|snap| {
@@ -195,6 +198,46 @@ impl QuasarCorpState {
             }
             snap.quasar_state_blobs.remove("quasar_corp_goals");
         });
+    }
+
+    pub fn rehydrate_from_db(&self) {
+        let Some(ref db) = self.db else { return };
+        let (plans_map, max_goal, saved_counters) = db.with_snapshot(|snap| {
+            let mut plans = HashMap::new();
+            let mut counters = (1u64, 1u64, 101u64);
+            if let Some(s) = snap.quasar_state_blobs.get("quasar_corp_counters") {
+                if let Ok(c) = serde_json::from_str::<(u64, u64, u64)>(s) {
+                    counters = c;
+                }
+            }
+            if let Some(s) = snap.quasar_state_blobs.get("quasar_corp_plans") {
+                if let Ok(p_map) = serde_json::from_str::<HashMap<u64, CorpSkillPlanRecord>>(s) {
+                    plans = p_map;
+                }
+            }
+            let max_proj = snap
+                .corp_projects
+                .keys()
+                .copied()
+                .max()
+                .unwrap_or(100)
+                .max(100) as u64;
+            (plans, max_proj, counters)
+        });
+
+        let max_plan = plans_map.keys().copied().max().unwrap_or(0);
+        let max_ms = plans_map
+            .values()
+            .flat_map(|p| p.milestones.iter().map(|(mid, _)| *mid))
+            .max()
+            .unwrap_or(0);
+
+        *self.skill_plans.write().unwrap_or_else(|e| e.into_inner()) = plans_map;
+        *self.id_counters.write().unwrap_or_else(|e| e.into_inner()) = (
+            saved_counters.0.max(1).max(max_plan + 1),
+            saved_counters.1.max(1).max(max_ms + 1),
+            saved_counters.2.max(101).max(max_goal + 1),
+        );
     }
 }
 

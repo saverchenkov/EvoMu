@@ -134,6 +134,9 @@ impl SkillPlanManager {
 
     pub fn save_to_db(&self) {
         if let Some(ref db) = self.db {
+            if db.is_write_locked_by_current_thread() {
+                return;
+            }
             let p = self.personal_plans.read().unwrap_or_else(|e| e.into_inner());
             let c = self.corp_plans.read().unwrap_or_else(|e| e.into_inner());
             let a = self.active_plans.read().unwrap_or_else(|e| e.into_inner());
@@ -150,6 +153,61 @@ impl SkillPlanManager {
                 });
             }
         }
+    }
+
+    pub fn rehydrate_from_db(&self) {
+        let Some(ref db) = self.db else { return };
+        let persisted = db
+            .with_snapshot(|s| {
+                s.quasar_state_blobs.get("quasar_skill_plans").and_then(|json| {
+                    serde_json::from_str::<QuasarSkillPlansPersistedState>(json)
+                        .ok()
+                        .or_else(|| {
+                            serde_json::from_str::<(
+                                HashMap<u32, Vec<SkillPlan>>,
+                                HashMap<u32, Vec<SkillPlan>>,
+                                HashMap<u32, [u8; 16]>,
+                            )>(json)
+                            .ok()
+                            .map(|(personal_plans, corp_plans, active_plans)| {
+                                QuasarSkillPlansPersistedState {
+                                    personal_plans,
+                                    corp_plans,
+                                    active_plans,
+                                    next_seq: 0,
+                                }
+                            })
+                        })
+                })
+            })
+            .unwrap_or_default();
+        let extract_seq = |uuid: &[u8; 16]| -> u64 {
+            if &uuid[0..4] == b"SPCH" || &uuid[0..4] == b"MSCH" {
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(&uuid[8..16]);
+                u64::from_be_bytes(arr)
+            } else {
+                0
+            }
+        };
+        let max_existing_seq = persisted
+            .personal_plans
+            .values()
+            .flatten()
+            .flat_map(|p| {
+                std::iter::once(extract_seq(&p.uuid))
+                    .chain(p.milestones.iter().map(|m| extract_seq(&m.uuid)))
+            })
+            .max()
+            .unwrap_or(0);
+        let initial_seq = persisted.next_seq.max(max_existing_seq + 1).max(100);
+        *self
+            .personal_plans
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = persisted.personal_plans;
+        *self.corp_plans.write().unwrap_or_else(|e| e.into_inner()) = persisted.corp_plans;
+        *self.active_plans.write().unwrap_or_else(|e| e.into_inner()) = persisted.active_plans;
+        self.next_seq.store(initial_seq, Ordering::Relaxed);
     }
 
     pub fn get_personal_plans(&self, char_id: u32) -> Vec<SkillPlan> {

@@ -142,12 +142,25 @@ impl CosmeticsMarketState {
     }
 
     fn save(&self) {
+        if self.db.is_write_locked_by_current_thread() {
+            return;
+        }
         let json = serde_json::to_string(&*self.data.read().unwrap_or_else(|e| e.into_inner()));
         if let Ok(json) = json {
             self.db.with_mut_snapshot(|s| {
                 s.quasar_state_blobs.insert(BLOB_KEY.into(), json);
             });
         }
+    }
+
+    pub fn rehydrate_from_db(&self) {
+        let data: CosmeticsMarketData = self.db.with_snapshot(|s| {
+            s.quasar_state_blobs
+                .get(BLOB_KEY)
+                .and_then(|j| serde_json::from_str(j).ok())
+                .unwrap_or_default()
+        });
+        *self.data.write().unwrap_or_else(|e| e.into_inner()) = data;
     }
 
     fn sync_from_blob(&self) {
@@ -1466,6 +1479,12 @@ pub fn register_with_state(router: &PublicGatewayRouter, state: Arc<CosmeticsMar
         let st = Arc::clone(&state);
         router.register_handler(name, Arc::new(move |ctx, _any, msg| f(&st, ctx, msg)));
     }
+    let st_rehydrate = Arc::clone(&state);
+    let st_sync = Arc::clone(&state);
+    router.register_persistence_hooks(
+        Arc::new(move || st_rehydrate.rehydrate_from_db()),
+        Arc::new(move || st_sync.save()),
+    );
 }
 
 #[cfg(test)]

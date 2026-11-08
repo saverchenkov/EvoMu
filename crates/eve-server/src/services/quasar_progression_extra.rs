@@ -193,6 +193,9 @@ impl ProgressionExtraManager {
 
     pub fn save_to_db(&self) {
         if let Some(ref db) = self.db {
+            if db.is_write_locked_by_current_thread() {
+                return;
+            }
             let tracks = self.community_tracks.read().unwrap_or_else(|e| e.into_inner());
             let goals = self.generic_goals.read().unwrap_or_else(|e| e.into_inner());
             let tales = self.active_tales.read().unwrap_or_else(|e| e.into_inner());
@@ -221,6 +224,81 @@ impl ProgressionExtraManager {
                 Ok::<(), String>(())
             });
         }
+    }
+
+    pub fn rehydrate_from_db(&self) {
+        let Some(ref db) = self.db else { return };
+        let (
+            tracks_loaded,
+            goals_loaded,
+            tales_loaded,
+            camps_loaded,
+            objs_loaded,
+            camp_tracks_loaded,
+        ) = db.with_snapshot(|s| {
+            let t = s
+                .quasar_state_blobs
+                .get("quasar_community_tracks")
+                .and_then(|json| serde_json::from_str::<HashMap<u32, CommunityTrackState>>(json).ok());
+            let g = s
+                .quasar_state_blobs
+                .get("quasar_generic_goals")
+                .and_then(|json| serde_json::from_str::<HashMap<String, GenericGoalRecord>>(json).ok());
+            let tales = s
+                .quasar_state_blobs
+                .get("quasar_active_tales")
+                .and_then(|json| serde_json::from_str::<HashMap<u32, (u32, u32, u64)>>(json).ok());
+            let camps = s
+                .quasar_state_blobs
+                .get("quasar_campaigns")
+                .and_then(|json| serde_json::from_str::<HashMap<u64, CampaignRecord>>(json).ok());
+            let objs = s
+                .quasar_state_blobs
+                .get("quasar_campaign_objectives")
+                .and_then(|json| serde_json::from_str::<HashMap<u64, CampaignObjectiveRecord>>(json).ok());
+            let trks = s
+                .quasar_state_blobs
+                .get("quasar_campaign_tracks")
+                .and_then(|json| serde_json::from_str::<HashMap<u64, CampaignTrackRecord>>(json).ok());
+            (t, g, tales, camps, objs, trks)
+        });
+        let mut tracks = tracks_loaded.unwrap_or_default();
+        let templates = self
+            .community_track_templates
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        for t in tracks.values_mut() {
+            if t.template_id == 0 {
+                t.template_id = t.track_id;
+            }
+            if t.tale_templates.is_empty() {
+                if let Some(tpl) = templates.get(&t.template_id) {
+                    t.tale_templates = tpl.tale_templates.clone();
+                }
+            }
+        }
+        *self
+            .community_tracks
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = tracks;
+        *self
+            .generic_goals
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = goals_loaded.unwrap_or_default();
+        *self
+            .active_tales
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = tales_loaded.unwrap_or_default();
+        *self.campaigns.write().unwrap_or_else(|e| e.into_inner()) =
+            camps_loaded.unwrap_or_default();
+        *self
+            .campaign_objectives
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = objs_loaded.unwrap_or_default();
+        *self
+            .campaign_tracks
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = camp_tracks_loaded.unwrap_or_default();
     }
 
     pub fn activate_community_track(&self, template_id: u32) -> Result<CommunityTrackState, (u32, String)> {

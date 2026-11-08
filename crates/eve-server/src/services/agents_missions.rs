@@ -923,7 +923,9 @@ pub async fn handle_with_bound(
                             let (ball, cs, mut entity) = crate::services::wormhole_pve_seeding::build_specialized_npc_components(ctx, mission_sys_id, npc_id, tid, "Pirate", 1, pos);
                             entity.bounty_isk = entity.bounty_isk.max(10_000.0);
                             let _ = handle.spawn_ball_with_combat(ball, cs).await;
-                            ctx.combat_ephemeral.write().unwrap_or_else(|e| e.into_inner()).npc_entities.insert(npc_id, entity);
+                            crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                                rt.npc_entities.insert(npc_id, entity);
+                            });
                         }
                     }
 

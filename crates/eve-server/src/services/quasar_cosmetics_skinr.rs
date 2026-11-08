@@ -493,6 +493,9 @@ impl SkinrCosmeticsState {
     }
 
     pub fn save(&self) {
+        if self.db.is_write_locked_by_current_thread() {
+            return;
+        }
         self.sync_redeemed_skins_if_needed();
         let mut snapshot_copy = self.data.read().unwrap_or_else(|e| e.into_inner()).clone();
         let mut recovered_skins = Vec::new();
@@ -520,6 +523,20 @@ impl SkinrCosmeticsState {
                 data.skins.entry(k).or_insert(v);
             }
         }
+    }
+
+    pub fn rehydrate_from_db(&self) {
+        let data = self.db.with_snapshot(|s| {
+            s.quasar_state_blobs
+                .get(SKINR_BLOB_KEY)
+                .and_then(|j| serde_json::from_str::<SkinrCosmeticsData>(j).ok())
+                .unwrap_or_default()
+        });
+        *self.data.write().unwrap_or_else(|e| e.into_inner()) = data;
+        self.last_redeemed_gen.store(
+            super::quasar_entitlement_ledger::redeemed_skin_generation(),
+            std::sync::atomic::Ordering::Release,
+        );
     }
 
     pub fn comp_key(character_id: u32, is_pattern: bool, component_id: u32) -> String {
@@ -1144,6 +1161,12 @@ fn handle_title_version_get_default(state: &SkinrCosmeticsState) -> HandlerResul
 
 pub fn register(router: &PublicGatewayRouter, state: Arc<SkinrCosmeticsState>) {
     register_live_skinr_state(&state);
+    let st_rehydrate = Arc::clone(&state);
+    let st_sync = Arc::clone(&state);
+    router.register_persistence_hooks(
+        Arc::new(move || st_rehydrate.rehydrate_from_db()),
+        Arc::new(move || st_sync.save()),
+    );
     macro_rules! reg {
         ($name:expr, $closure:expr) => {{
             let s = Arc::clone(&state);

@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::fleet_social_notify as notify;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct FleetAdvertState {
     pub(crate) fleet_id: i64,
     pub(crate) leader_id: i64,

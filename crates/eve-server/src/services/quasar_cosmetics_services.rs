@@ -74,6 +74,9 @@ impl QuasarCosmeticsState {
     }
 
     pub fn sync_to_db(&self) {
+        if self.db.is_write_locked_by_current_thread() {
+            return;
+        }
         let data = self.data.read().unwrap_or_else(|e| e.into_inner());
         if let Ok(json) = serde_json::to_string(&*data) {
             let _ = self.db.try_with_mut_snapshot(|snap| {
@@ -81,6 +84,16 @@ impl QuasarCosmeticsState {
                 Ok::<(), String>(())
             });
         }
+    }
+
+    pub fn rehydrate_from_db(&self) {
+        let loaded = self.db.with_snapshot(|snap| {
+            snap.quasar_state_blobs
+                .get("quasar_cosmetics")
+                .and_then(|s| serde_json::from_str::<QuasarCosmeticsStateData>(s).ok())
+                .unwrap_or_default()
+        });
+        *self.data.write().unwrap_or_else(|e| e.into_inner()) = loaded;
     }
 }
 
@@ -91,6 +104,12 @@ pub fn register_handlers(
     sde: Arc<SdeRegistry>,
 ) {
     let state = QuasarCosmeticsState::from_db(Arc::clone(&db));
+    let st_rehydrate = Arc::clone(&state);
+    let st_sync = Arc::clone(&state);
+    router.register_persistence_hooks(
+        Arc::new(move || st_rehydrate.rehydrate_from_db()),
+        Arc::new(move || st_sync.sync_to_db()),
+    );
     let desc = Arc::clone(&router.descriptors);
 
     // 1. Ship logo display/clear: see `quasar_cosmetics_live` (state-backed handlers).

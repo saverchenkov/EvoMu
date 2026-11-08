@@ -16,7 +16,7 @@ use glam::DVec3;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ActiveInterdictionProbe {
     pub probe_id: i64,
     pub probe_type_id: u32,
@@ -25,7 +25,7 @@ pub struct ActiveInterdictionProbe {
     pub is_wubble: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct LauncherFireStamp {
     pub fired_unix: u64,
     pub fired_tick: u64,

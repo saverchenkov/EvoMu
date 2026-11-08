@@ -407,10 +407,14 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
         let cs = rpc(&ctx2, &mut sess2, "crimewatch", "GetClientStates", &[]).await;
         let PyRep::Tuple(items) = cs else { panic!("expected 4-tuple, got {cs:?}") };
         let PyRep::Tuple(timers) = &items[0] else { panic!("expected combat timers tuple") };
-        assert_eq!(timers[0], PyRep::Tuple(vec![PyRep::Integer(101), PyRep::Integer(unix_to_filetime(t0 + 60))]));
-        assert_eq!(timers[1], PyRep::Tuple(vec![PyRep::Integer(201), PyRep::Integer(unix_to_filetime(t0 + 900))]));
+        // Weapons, PvP, and criminal timers were emitted at `t0` via `evaluate_remote_assistance_legality`,
+        // so with persisted `crimewatch_timer_states`/`crimewatch_timer_triggered_at` (#592)
+        // at `t0 + 30` they transition into their counting-down states (`102`, `202`, `303`) identically
+        // to an uninterrupted server.
+        assert_eq!(timers[0], PyRep::Tuple(vec![PyRep::Integer(102), PyRep::Integer(unix_to_filetime(t0 + 60))]));
+        assert_eq!(timers[1], PyRep::Tuple(vec![PyRep::Integer(202), PyRep::Integer(unix_to_filetime(t0 + 900))]));
         assert_eq!(timers[2], PyRep::Tuple(vec![PyRep::Integer(401), PyRep::Integer(unix_to_filetime(t0 + 120))]));
-        assert_eq!(timers[3], PyRep::Tuple(vec![PyRep::Integer(301), PyRep::Integer(unix_to_filetime(t0 + 900))]));
+        assert_eq!(timers[3], PyRep::Tuple(vec![PyRep::Integer(303), PyRep::Integer(unix_to_filetime(t0 + 900))]));
         assert_eq!(timers[4], PyRep::Tuple(vec![PyRep::Integer(501), PyRep::Integer(unix_to_filetime(t0 + 180))]));
         assert!(matches!(
             &items[1],

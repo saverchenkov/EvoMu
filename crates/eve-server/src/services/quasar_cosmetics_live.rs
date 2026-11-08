@@ -152,6 +152,9 @@ impl CosmeticsLiveState {
     }
 
     fn save(&self) {
+        if self.db.is_write_locked_by_current_thread() {
+            return;
+        }
         self.sync_ship_logos_if_revoked();
         let json = serde_json::to_string(&*self.data.read().unwrap_or_else(|e| e.into_inner()));
         if let Ok(json) = json {
@@ -159,6 +162,20 @@ impl CosmeticsLiveState {
                 s.quasar_state_blobs.insert(BLOB_KEY.into(), json);
             });
         }
+    }
+
+    pub fn rehydrate_from_db(&self) {
+        let data: CosmeticsLiveData = self.db.with_snapshot(|s| {
+            s.quasar_state_blobs
+                .get(BLOB_KEY)
+                .and_then(|j| serde_json::from_str(j).ok())
+                .unwrap_or_default()
+        });
+        *self.data.write().unwrap_or_else(|e| e.into_inner()) = data;
+        self.last_logo_gen.store(
+            REVOKED_LOGO_GEN.load(std::sync::atomic::Ordering::Acquire),
+            std::sync::atomic::Ordering::Release,
+        );
     }
 }
 
@@ -761,6 +778,12 @@ pub fn register(
     reg("eve_public.cosmetic.structure.paintwork.license.api.GetCatalogueRequest", license_get_catalogue);
     reg("eve_public.cosmetic.structure.paintwork.license.api.admin.IssueRequest", license_admin_issue);
     reg("eve_public.cosmetic.structure.paintwork.license.api.admin.RevokeRequest", license_admin_revoke);
+    let st_rehydrate = Arc::clone(&state);
+    let st_sync = Arc::clone(&state);
+    router.register_persistence_hooks(
+        Arc::new(move || st_rehydrate.rehydrate_from_db()),
+        Arc::new(move || st_sync.save()),
+    );
     super::quasar_cosmetics_market::register(router, Arc::clone(&state.db), Arc::clone(&state.sde), skinr_state);
 }
 

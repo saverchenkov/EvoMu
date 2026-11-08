@@ -450,6 +450,9 @@ impl CareerGoalManager {
 
     pub fn save_to_db(&self) {
         if let Some(ref db) = self.db {
+            if db.is_write_locked_by_current_thread() {
+                return;
+            }
             let defs = self.definitions.read().unwrap_or_else(|e| e.into_inner());
             let map = self.character_career_goals.read().unwrap_or_else(|e| e.into_inner());
             let cm = self.claimed_milestones.read().unwrap_or_else(|e| e.into_inner());
@@ -474,6 +477,55 @@ impl CareerGoalManager {
                 Ok::<(), String>(())
             });
         }
+    }
+
+    pub fn rehydrate_from_db(&self) {
+        let Some(ref db) = self.db else { return };
+        let (defs, mut loaded, loaded_milestones) = db.with_snapshot(|s| {
+            let defs = s
+                .quasar_state_blobs
+                .get("quasar_career_goal_defs")
+                .and_then(|json| serde_json::from_str::<Vec<CareerGoalDef>>(json).ok())
+                .unwrap_or_else(default_career_goal_definitions);
+            let loaded = s
+                .quasar_state_blobs
+                .get("quasar_career_goals")
+                .and_then(|json| {
+                    serde_json::from_str::<HashMap<u32, Vec<CharacterCareerGoal>>>(json).ok()
+                })
+                .unwrap_or_default();
+            let mut out = s
+                .quasar_state_blobs
+                .get("quasar_career_milestones")
+                .and_then(|json| serde_json::from_str::<HashMap<u32, HashSet<u32>>>(json).ok())
+                .unwrap_or_default();
+            let valid_mids: HashSet<u32> = default_career_milestones()
+                .into_iter()
+                .map(|m| m.milestone_id)
+                .collect();
+            for (&cid, npe) in &s.npe_progress {
+                if let Ok(u32_cid) = u32::try_from(cid) {
+                    for &gid in &npe.claimed_goals {
+                        if valid_mids.contains(&gid) {
+                            out.entry(u32_cid).or_default().insert(gid);
+                        }
+                    }
+                }
+            }
+            (defs, loaded, out)
+        });
+        for goals in loaded.values_mut() {
+            ensure_character_career_goals_with_defs(goals, &defs);
+        }
+        *self.definitions.write().unwrap_or_else(|e| e.into_inner()) = defs;
+        *self
+            .character_career_goals
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = loaded;
+        *self
+            .claimed_milestones
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = loaded_milestones;
     }
 
     fn ensure_goals_for_list(&self, goals: &mut Vec<CharacterCareerGoal>) {

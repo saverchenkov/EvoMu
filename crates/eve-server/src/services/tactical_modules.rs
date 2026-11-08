@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 pub use super::tactical_modules_probes::*;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProjectedRemoteAssistance {
     pub source_ship_id: i64,
     pub module_id: i64,
@@ -27,7 +27,7 @@ pub struct ProjectedRemoteAssistance {
     pub tracking_speed_bonus_pct: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ActiveEntosisLinkState {
     pub ship_id: i64,
     pub char_id: i64,
@@ -771,6 +771,7 @@ pub async fn handle_entosis_link_activation(
 
     scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner()).entosis_contested_nodes.insert(target_id, ship_id);
     ctx.invalidate_ship_fitting(ship_id);
+    ctx.persist_server_runtime_to_db();
 
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)), ("targetID", PyRep::Integer(target_id)), ("active", PyRep::Bool(true)),

@@ -314,6 +314,9 @@ impl AchievementManager {
 
     pub fn save_to_db(&self) {
         if let Some(ref db) = self.db {
+            if db.is_write_locked_by_current_thread() {
+                return;
+            }
             let map = self.character_achievements.read().unwrap_or_else(|e| e.into_inner());
             let cat_scores = self.category_scores.read().unwrap_or_else(|e| e.into_inner());
             let cat_map: HashMap<String, u32> = cat_scores.iter().map(|((c, cat), v)| (format!("{c}:{cat}"), *v)).collect();
@@ -327,6 +330,52 @@ impl AchievementManager {
                 Ok::<(), String>(())
             });
         }
+    }
+
+    pub fn rehydrate_from_db(&self) {
+        let Some(ref db) = self.db else { return };
+        let (mut loaded, loaded_cat_scores) = db.with_snapshot(|s| {
+            let loaded = s
+                .quasar_state_blobs
+                .get("quasar_achievements")
+                .and_then(|json| serde_json::from_str::<HashMap<u32, Vec<CharacterAchievement>>>(json).ok())
+                .unwrap_or_default();
+            let cat_scores = s
+                .quasar_state_blobs
+                .get("quasar_achievement_cat_scores")
+                .and_then(|json| serde_json::from_str::<HashMap<String, u32>>(json).ok())
+                .map(|map| {
+                    map.into_iter()
+                        .filter_map(|(k, v)| {
+                            let mut parts = k.split(':');
+                            let c = parts.next()?.parse::<u32>().ok()?;
+                            let cat = parts.next()?.parse::<u32>().ok()?;
+                            Some(((c, cat), v))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            (loaded, cat_scores)
+        });
+        let defs_by_id: HashMap<u32, &AchievementDef> =
+            self.definitions.iter().map(|d| (d.id, d)).collect();
+        if !defs_by_id.is_empty() {
+            for list in loaded.values_mut() {
+                for a in list.iter_mut() {
+                    if let Some(fresh_def) = defs_by_id.get(&a.def.id) {
+                        a.def = (*fresh_def).clone();
+                    }
+                }
+            }
+        }
+        *self
+            .character_achievements
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = loaded;
+        *self
+            .category_scores
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = loaded_cat_scores;
     }
 
     fn init_list<'a>(

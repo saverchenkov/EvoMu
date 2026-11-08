@@ -531,6 +531,7 @@ pub async fn activate_superweapon_with_args(
         }
         ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).get_or_create(char_id).weapon_timer_until_unix = now_unix + 60;
         ctx.record_module_reactivation_delay(ship_id, module_id, caster_lock_secs as f64);
+        ctx.persist_server_runtime_to_db();
 
         return Ok(PyRep::keyval([
             ("moduleID", PyRep::Integer(module_id)),

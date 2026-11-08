@@ -134,9 +134,26 @@ pub async fn handle_fighters(
     args: &[PyRep],
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    if service == "fighterMgr" && method == "CmdScoopAbandonedFighterFromSpace" {
-        return handle_scoop_abandoned_fighter(ctx, session, args).await;
+    let res = if service == "fighterMgr" && method == "CmdScoopAbandonedFighterFromSpace" {
+        handle_scoop_abandoned_fighter(ctx, session, args).await
+    } else {
+        handle_fighters_inner(ctx, session, service, method, args, _kwargs).await
+    };
+    let is_read_only = matches!((service, method), ("fighterMgr", "GetFightersForShip"));
+    if !is_read_only && matches!(res, Some(Ok(_))) {
+        ctx.persist_server_runtime_to_db();
     }
+    res
+}
+
+async fn handle_fighters_inner(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    _kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("fighterMgr", "GetFightersForShip") => {
             let (_, char_id) = match ServerContext::require_character(session) {

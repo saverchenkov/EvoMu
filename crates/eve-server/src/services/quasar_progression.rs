@@ -30,6 +30,26 @@ pub struct ProgressionManagers {
     pub corp_state: Arc<QuasarCorpState>,
 }
 
+impl ProgressionManagers {
+    pub fn rehydrate_from_db(&self) {
+        self.daily_goals.rehydrate_from_db();
+        self.career_goals.rehydrate_from_db();
+        self.achievements.rehydrate_from_db();
+        self.skill_plans.rehydrate_from_db();
+        self.extra.rehydrate_from_db();
+        self.corp_state.rehydrate_from_db();
+    }
+
+    pub fn sync_to_db(&self) {
+        self.daily_goals.save_to_db();
+        self.career_goals.save_to_db();
+        self.achievements.save_to_db();
+        self.skill_plans.save_to_db();
+        self.extra.save_to_db();
+        self.corp_state.sync_to_db();
+    }
+}
+
 impl Default for ProgressionManagers {
     fn default() -> Self {
         let corp_state = Arc::new(QuasarCorpState::default());

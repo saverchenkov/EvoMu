@@ -21,6 +21,7 @@ use eve_proto::quasar::{
     QuasarMessage, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::{BridgeRpcError, PyRep};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -261,11 +262,27 @@ impl NoticeRoutingCache {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+const QUASAR_GATEWAY_META_BLOB_KEY: &str = "quasar_gateway_meta";
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct QuasarHijackState {
     pub enabled: bool,
     pub error_code: Option<u32>,
     pub latency_sec: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct QuasarGatewayMetaPayload {
+    #[serde(default)]
+    server_hijack_state: QuasarHijackState,
+    #[serde(default = "default_notice_seq")]
+    next_notice_seq: u64,
+    #[serde(default)]
+    free_fast_checkout_plex: Option<bool>,
+}
+
+fn default_notice_seq() -> u64 {
+    1
 }
 
 pub type IdempotencyKeyTuple = (i32, u32, String, Vec<u8>);
@@ -349,8 +366,12 @@ pub struct PublicGatewayRouter {
     pub pending_notices: Arc<RwLock<Vec<(NoticeScope, GoogleAny)>>>,
     pub macho_notify_sink: Arc<RwLock<Option<MachoNotifySink>>>,
     pub free_fast_checkout_plex: Arc<std::sync::atomic::AtomicBool>,
+    pub has_persisted_free_fast_checkout_plex: Arc<std::sync::atomic::AtomicBool>,
     pub progression: Arc<crate::services::quasar_progression::ProgressionManagers>,
     pub chat_moderation: Arc<crate::services::quasar_social_chat::ChatModerationState>,
+    pub synced_rollback_epoch: AtomicU64,
+    pub rehydrate_hooks: RwLock<Vec<Arc<dyn Fn() + Send + Sync>>>,
+    pub sync_hooks: RwLock<Vec<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl PublicGatewayRouter {
@@ -361,6 +382,7 @@ impl PublicGatewayRouter {
     ) -> Self {
         let progression = crate::services::quasar_progression::new_progression_managers(Arc::clone(&db), Arc::clone(&sde));
         let chat_moderation = Arc::new(crate::services::quasar_social_chat::ChatModerationState::new(&db));
+        let initial_rollback_epoch = db.rollback_epoch();
         let router = Self {
             descriptors,
             db: Arc::clone(&db),
@@ -380,7 +402,12 @@ impl PublicGatewayRouter {
             pending_notices: Arc::new(RwLock::new(Vec::new())),
             macho_notify_sink: Arc::new(RwLock::new(None)),
             free_fast_checkout_plex: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            has_persisted_free_fast_checkout_plex: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            synced_rollback_epoch: AtomicU64::new(initial_rollback_epoch),
+            rehydrate_hooks: RwLock::new(Vec::new()),
+            sync_hooks: RwLock::new(Vec::new()),
         };
+        router.hydrate_meta_from_db();
         router.register_builtin_core_handlers(Arc::clone(&db), Arc::clone(&sde));
         crate::services::quasar_social::register_social_services(&router, Arc::clone(&db));
         let desc = &router.descriptors;
@@ -395,6 +422,98 @@ impl PublicGatewayRouter {
             Arc::clone(&router.progression.daily_goals),
         );
         router
+    }
+
+    pub fn register_persistence_hooks(
+        &self,
+        rehydrate: Arc<dyn Fn() + Send + Sync>,
+        sync: Arc<dyn Fn() + Send + Sync>,
+    ) {
+        self.rehydrate_hooks.write().unwrap_or_else(|e| e.into_inner()).push(rehydrate);
+        self.sync_hooks.write().unwrap_or_else(|e| e.into_inner()).push(sync);
+    }
+
+    pub fn hydrate_meta_from_db(&self) {
+        let meta_opt = self.db.with_snapshot(|snap| {
+            snap.quasar_state_blobs
+                .get(QUASAR_GATEWAY_META_BLOB_KEY)
+                .and_then(|json| serde_json::from_str::<QuasarGatewayMetaPayload>(json).ok())
+        });
+        if let Some(meta) = meta_opt {
+            *self.server_hijack_state.write().unwrap_or_else(|e| e.into_inner()) =
+                meta.server_hijack_state;
+            self.next_notice_seq.store(meta.next_notice_seq.max(1), Ordering::Relaxed);
+            if let Some(flag) = meta.free_fast_checkout_plex {
+                self.free_fast_checkout_plex.store(flag, Ordering::Relaxed);
+                self.has_persisted_free_fast_checkout_plex.store(true, Ordering::Relaxed);
+            } else {
+                self.has_persisted_free_fast_checkout_plex.store(false, Ordering::Relaxed);
+            }
+        } else {
+            *self.server_hijack_state.write().unwrap_or_else(|e| e.into_inner()) =
+                QuasarHijackState::default();
+            self.next_notice_seq.store(1, Ordering::Relaxed);
+            self.free_fast_checkout_plex.store(false, Ordering::Relaxed);
+            self.has_persisted_free_fast_checkout_plex.store(false, Ordering::Relaxed);
+        }
+        self.synced_rollback_epoch
+            .store(self.db.rollback_epoch(), Ordering::Relaxed);
+    }
+
+    pub fn sync_meta_into_snapshot(&self, snap: &mut eve_db::WorldStateSnapshot) {
+        let payload = QuasarGatewayMetaPayload {
+            server_hijack_state: self
+                .server_hijack_state
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            next_notice_seq: self.next_notice_seq.load(Ordering::Relaxed).max(1),
+            free_fast_checkout_plex: if self.has_persisted_free_fast_checkout_plex.load(Ordering::Relaxed) {
+                Some(self.free_fast_checkout_plex.load(Ordering::Relaxed))
+            } else {
+                None
+            },
+        };
+        if let Ok(json) = serde_json::to_string(&payload) {
+            snap.quasar_state_blobs
+                .insert(QUASAR_GATEWAY_META_BLOB_KEY.to_string(), json);
+        }
+    }
+
+    pub fn sync_meta_to_db(&self) {
+        if self.db.is_write_locked_by_current_thread() {
+            return;
+        }
+        self.db.with_mut_snapshot(|snap| self.sync_meta_into_snapshot(snap));
+    }
+
+    pub fn sync_all_to_db(&self) {
+        self.sync_meta_to_db();
+        self.chat_moderation.sync_to_db(&self.db);
+        self.progression.sync_to_db();
+        let hooks = self.sync_hooks.read().unwrap_or_else(|e| e.into_inner()).clone();
+        for hook in hooks {
+            hook();
+        }
+    }
+
+    pub fn rehydrate_all_from_db(&self) {
+        self.hydrate_meta_from_db();
+        self.chat_moderation.rehydrate_from_db(&self.db);
+        self.progression.rehydrate_from_db();
+        let hooks = self.rehydrate_hooks.read().unwrap_or_else(|e| e.into_inner()).clone();
+        for hook in hooks {
+            hook();
+        }
+        self.synced_rollback_epoch
+            .store(self.db.rollback_epoch(), Ordering::Relaxed);
+    }
+
+    pub fn ensure_rollback_synced(&self) {
+        let db_epoch = self.db.rollback_epoch();
+        if self.synced_rollback_epoch.load(Ordering::Relaxed) != db_epoch {
+            self.rehydrate_all_from_db();
+        }
     }
 
     pub fn enqueue_notice(&self, scope: NoticeScope, payload: GoogleAny) {
@@ -707,6 +826,7 @@ impl PublicGatewayRouter {
         now_unix: u64,
     ) -> Result<(EvePublicNotice, usize), BridgeRpcError> {
         let seq = self.next_notice_seq.fetch_add(1, Ordering::Relaxed);
+        self.sync_meta_to_db();
         let mut uuid = [0u8; 16];
         uuid[0..8].copy_from_slice(&now_unix.to_be_bytes());
         uuid[8..16].copy_from_slice(&seq.to_be_bytes());
@@ -793,6 +913,7 @@ impl PublicGatewayRouter {
         require_character_override: bool,
         now_unix: u64,
     ) -> EvePublicResponse {
+        self.ensure_rollback_synced();
         let app_uuid = if request.application_instance_uuid.is_empty() {
             Self::default_app_instance_uuid(session.session_id)
         } else {
@@ -1151,6 +1272,7 @@ impl PublicGatewayRouter {
     pub fn set_server_hijack_mode(&self, enabled: bool, error: Option<u32>, latency: Option<f64>) {
         *self.server_hijack_state.write().unwrap_or_else(|e| e.into_inner()) =
             QuasarHijackState { enabled, error_code: error, latency_sec: latency };
+        self.sync_meta_to_db();
     }
 
     pub fn is_server_hijack_mode_enabled(&self) -> bool {

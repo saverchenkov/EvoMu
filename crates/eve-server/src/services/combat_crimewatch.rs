@@ -161,7 +161,7 @@ pub fn schedule_highsec_criminal_concord_if_needed(
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EntropicSpoolState {
     pub target_id: i64,
     pub solar_system_id: u32,
@@ -180,7 +180,7 @@ pub struct EntropicSpoolState {
     pub current_multiplier: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InFlightMissileState {
     pub missile_ball_id: i64,
     pub solar_system_id: u32,
@@ -210,7 +210,7 @@ pub struct InFlightMissileState {
     pub applied_damage: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ActiveBreacherDot {
     pub target_ball_id: i64,
     pub source_char_id: i64,
@@ -223,7 +223,7 @@ pub struct ActiveBreacherDot {
     pub tick_damage: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AssistLogEntry {
     pub attacker_char_id: i64,
     pub corporation_id: i64,
@@ -237,7 +237,7 @@ pub struct AssistLogEntry {
 
 pub use eve_db::{DetailedKillmail, KillmailAttackerEntry, KillmailItemEntry};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ContainerLifetimeEntry {
     pub item_id: i64,
     pub solar_system_id: u32,
@@ -248,7 +248,7 @@ pub struct ContainerLifetimeEntry {
     pub is_abandoned: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SelfDestructCountdown {
     pub ship_id: i64,
     pub char_id: i64,
@@ -259,7 +259,7 @@ pub struct SelfDestructCountdown {
 
 pub use eve_db::PersistedSecStatusTransaction as SecStatusTransaction;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SentryAggressionState {
     pub solar_system_id: u32,
     pub offender_char_id: i64,
@@ -269,7 +269,7 @@ pub struct SentryAggressionState {
     pub total_sentry_damage_dealt: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum SafetyLevel {
     Red = 0,
     Yellow = 1,
@@ -277,7 +277,7 @@ pub enum SafetyLevel {
     Green = 2,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DroneBehaviorSettings {
     pub aggressive: bool,
     pub focus_fire: bool,
@@ -289,7 +289,7 @@ impl Default for DroneBehaviorSettings {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DroneSpaceState {
     pub ball_id: i64,
     pub drone_item_id: i64,
@@ -318,7 +318,7 @@ pub struct DroneSpaceState {
     pub tp_sig_bonus_pct: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExtendedNpcEntity {
     pub ball_id: i64,
     pub type_id: u32,
@@ -351,7 +351,7 @@ pub struct ExtendedNpcEntity {
     pub custom_cargo_loot: Option<(u32, i64)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EncounterWaveDirector {
     pub encounter_id: u32,
     pub solar_system_id: u32,
@@ -366,7 +366,7 @@ pub struct EncounterWaveDirector {
     pub next_wave_pending: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InsuranceContractState {
     pub ship_id: i64,
     pub ship_type_id: u32,
@@ -381,6 +381,8 @@ pub struct InsuranceContractState {
 
 #[derive(Debug, Default)]
 pub struct CombatRuntimeState {
+    #[doc(hidden)]
+    pub synced_db_epoch: u64,
     pub entropic_spools: HashMap<(i64, i64), EntropicSpoolState>,
     pub in_flight_missiles: HashMap<i64, InFlightMissileState>,
     pub active_breacher_dots: HashMap<i64, ActiveBreacherDot>,
@@ -429,7 +431,7 @@ pub struct CombatRuntimeState {
     pub npc_sec_gain_intervals: HashMap<(i64, i32), (u64, f64)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DroneMiningState {
     pub drone_id: i64,
     pub asteroid_id: i64,
@@ -442,6 +444,43 @@ pub struct DroneMiningState {
     pub waste_prob: f64,
     pub ore_type_id: u32,
     pub destination_flag: eve_db::InventoryFlag,
+}
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct PersistedCombatExtendedPayload {
+    entropic_spools: Vec<((i64, i64), EntropicSpoolState)>,
+    in_flight_missiles: HashMap<i64, InFlightMissileState>,
+    active_breacher_dots: HashMap<i64, ActiveBreacherDot>,
+    aggression_assist_log: HashMap<i64, Vec<AssistLogEntry>>,
+    container_lifetimes: HashMap<i64, ContainerLifetimeEntry>,
+    self_destruct_countdowns: HashMap<i64, SelfDestructCountdown>,
+    modified_system_securities: HashMap<u32, f64>,
+    sentry_gun_aggression: Vec<((u32, i64), SentryAggressionState)>,
+    crimewatch_timer_states: HashMap<i64, (i64, i64, i64, i64, i64)>,
+    crimewatch_timer_triggered_at: HashMap<i64, [u64; 5]>,
+    active_drones_in_space: HashMap<i64, DroneSpaceState>,
+    drone_next_ready_unix: HashMap<i64, u64>,
+    npc_entities: HashMap<i64, ExtendedNpcEntity>,
+    pending_bounty_ticks: Vec<((u32, i64), f64)>,
+    bounty_tick_next_flush_unix: Vec<((u32, i64), u64)>,
+    pending_bounty_tick_started_unix: Vec<((u32, i64), u64)>,
+    encounter_waves: HashMap<u32, EncounterWaveDirector>,
+    insurance_contracts: HashMap<i64, InsuranceContractState>,
+    fighter_unit_damage_accum: HashMap<i64, f64>,
+    fighter_tube_rearm_until: Vec<((i64, usize), u64)>,
+    behavior_debugging_active: std::collections::HashSet<i64>,
+    authorized_shipping_storage: Vec<(i64, i64)>,
+    active_drone_miners: HashMap<i64, DroneMiningState>,
+    ess_main_bank_thefts: HashMap<u32, Vec<(i64, f64, u64)>>,
+    ess_reserve_bank_thefts: HashMap<u32, Vec<(i64, f64, u64)>>,
+    ess_reserve_unlocked_until: HashMap<u32, u64>,
+    clone_soldier_cooldown_until: HashMap<u32, u64>,
+    bounty_credited_balls: std::collections::HashSet<i64>,
+    destroyed_npc_cache: HashMap<i64, ExtendedNpcEntity>,
+    ci_sentry_deployed_systems: std::collections::HashSet<u32>,
+    npc_scrambled_ships: HashMap<u32, std::collections::HashSet<i64>>,
+    npc_sec_gain_intervals: Vec<((i64, i32), (u64, f64))>,
 }
 
 impl CombatRuntimeState {
@@ -476,7 +515,7 @@ impl CombatRuntimeState {
             .is_some_and(|&exp| now_unix < exp)
     }
 
-    pub fn sync_from_persisted(&mut self, p: &eve_db::PersistedCombatCrimewatchState) {
+    pub fn sync_core_from_persisted(&mut self, p: &eve_db::PersistedCombatCrimewatchState) {
         self.sec_status_transactions = p.sec_status_transactions.clone();
         self.safety_levels = p
             .safety_levels
@@ -519,7 +558,205 @@ impl CombatRuntimeState {
         self.pending_bounty_tick_started_unix = p.pending_bounty_tick_started_unix.clone();
     }
 
+    pub fn sync_from_persisted(&mut self, p: &eve_db::PersistedCombatCrimewatchState) {
+        self.sync_core_from_persisted(p);
+
+        if p.extended_runtime_json.is_empty() {
+            self.entropic_spools.clear();
+            self.in_flight_missiles.clear();
+            self.active_breacher_dots.clear();
+            self.aggression_assist_log.clear();
+            self.container_lifetimes.clear();
+            self.self_destruct_countdowns.clear();
+            self.modified_system_securities.clear();
+            self.sentry_gun_aggression.clear();
+            self.crimewatch_timer_states.clear();
+            self.crimewatch_timer_triggered_at.clear();
+            self.active_drones_in_space.clear();
+            self.drone_next_ready_unix.clear();
+            self.npc_entities.clear();
+            self.encounter_waves.clear();
+            self.insurance_contracts.clear();
+            self.fighter_unit_damage_accum.clear();
+            self.fighter_tube_rearm_until.clear();
+            self.behavior_debugging_active.clear();
+            self.authorized_shipping_storage.clear();
+            self.active_drone_miners.clear();
+            self.ess_main_bank_thefts.clear();
+            self.ess_reserve_bank_thefts.clear();
+            self.ess_reserve_unlocked_until.clear();
+            self.clone_soldier_cooldown_until.clear();
+            self.bounty_credited_balls.clear();
+            self.destroyed_npc_cache.clear();
+            self.ci_sentry_deployed_systems.clear();
+            self.npc_scrambled_ships.clear();
+            self.npc_sec_gain_intervals.clear();
+        } else if let Ok(ext) =
+            serde_json::from_str::<PersistedCombatExtendedPayload>(&p.extended_runtime_json)
+        {
+            self.entropic_spools = ext.entropic_spools.into_iter().collect();
+            self.in_flight_missiles = ext.in_flight_missiles;
+            self.active_breacher_dots = ext.active_breacher_dots;
+            self.aggression_assist_log = ext.aggression_assist_log;
+            self.container_lifetimes = ext.container_lifetimes;
+            self.self_destruct_countdowns = ext.self_destruct_countdowns;
+            self.modified_system_securities = ext.modified_system_securities;
+            self.sentry_gun_aggression = ext.sentry_gun_aggression.into_iter().collect();
+            self.crimewatch_timer_states = ext.crimewatch_timer_states;
+            self.crimewatch_timer_triggered_at = ext.crimewatch_timer_triggered_at;
+            self.active_drones_in_space = ext.active_drones_in_space;
+            self.drone_next_ready_unix = ext.drone_next_ready_unix;
+            self.npc_entities = ext.npc_entities;
+            if !ext.pending_bounty_ticks.is_empty() || p.pending_bounty_ticks.is_empty() {
+                self.pending_bounty_ticks = ext.pending_bounty_ticks.into_iter().collect();
+            }
+            if !ext.bounty_tick_next_flush_unix.is_empty()
+                || p.bounty_tick_next_flush_unix.is_empty()
+            {
+                self.bounty_tick_next_flush_unix =
+                    ext.bounty_tick_next_flush_unix.into_iter().collect();
+            }
+            if !ext.pending_bounty_tick_started_unix.is_empty()
+                || p.pending_bounty_tick_started_unix.is_empty()
+            {
+                self.pending_bounty_tick_started_unix =
+                    ext.pending_bounty_tick_started_unix.into_iter().collect();
+            }
+            self.encounter_waves = ext.encounter_waves;
+            self.insurance_contracts = ext.insurance_contracts;
+            self.fighter_unit_damage_accum = ext.fighter_unit_damage_accum;
+            self.fighter_tube_rearm_until = ext.fighter_tube_rearm_until.into_iter().collect();
+            self.behavior_debugging_active = ext.behavior_debugging_active;
+            self.authorized_shipping_storage =
+                ext.authorized_shipping_storage.into_iter().collect();
+            self.active_drone_miners = ext.active_drone_miners;
+            self.ess_main_bank_thefts = ext.ess_main_bank_thefts;
+            self.ess_reserve_bank_thefts = ext.ess_reserve_bank_thefts;
+            self.ess_reserve_unlocked_until = ext.ess_reserve_unlocked_until;
+            self.clone_soldier_cooldown_until = ext.clone_soldier_cooldown_until;
+            self.bounty_credited_balls = ext.bounty_credited_balls;
+            self.destroyed_npc_cache = ext.destroyed_npc_cache;
+            self.ci_sentry_deployed_systems = ext.ci_sentry_deployed_systems;
+            self.npc_scrambled_ships = ext.npc_scrambled_ships;
+            self.npc_sec_gain_intervals = ext.npc_sec_gain_intervals.into_iter().collect();
+        }
+    }
+
+    fn has_extended_runtime_state(&self) -> bool {
+        !self.entropic_spools.is_empty()
+            || !self.in_flight_missiles.is_empty()
+            || !self.active_breacher_dots.is_empty()
+            || !self.aggression_assist_log.is_empty()
+            || !self.container_lifetimes.is_empty()
+            || !self.self_destruct_countdowns.is_empty()
+            || !self.modified_system_securities.is_empty()
+            || !self.sentry_gun_aggression.is_empty()
+            || !self.crimewatch_timer_states.is_empty()
+            || !self.crimewatch_timer_triggered_at.is_empty()
+            || !self.active_drones_in_space.is_empty()
+            || !self.drone_next_ready_unix.is_empty()
+            || !self.npc_entities.is_empty()
+            || !self.pending_bounty_ticks.is_empty()
+            || !self.bounty_tick_next_flush_unix.is_empty()
+            || !self.pending_bounty_tick_started_unix.is_empty()
+            || !self.encounter_waves.is_empty()
+            || !self.insurance_contracts.is_empty()
+            || !self.fighter_unit_damage_accum.is_empty()
+            || !self.fighter_tube_rearm_until.is_empty()
+            || !self.behavior_debugging_active.is_empty()
+            || !self.authorized_shipping_storage.is_empty()
+            || !self.active_drone_miners.is_empty()
+            || !self.ess_main_bank_thefts.is_empty()
+            || !self.ess_reserve_bank_thefts.is_empty()
+            || !self.ess_reserve_unlocked_until.is_empty()
+            || !self.clone_soldier_cooldown_until.is_empty()
+            || !self.bounty_credited_balls.is_empty()
+            || !self.destroyed_npc_cache.is_empty()
+            || !self.ci_sentry_deployed_systems.is_empty()
+            || !self.npc_scrambled_ships.is_empty()
+            || !self.npc_sec_gain_intervals.is_empty()
+    }
+
     pub fn to_persisted(&self) -> eve_db::PersistedCombatCrimewatchState {
+        let extended_runtime_json = if self.has_extended_runtime_state() {
+            let mut payload = PersistedCombatExtendedPayload {
+                entropic_spools: self
+                    .entropic_spools
+                    .iter()
+                    .map(|(k, v)| (*k, v.clone()))
+                    .collect(),
+                in_flight_missiles: self.in_flight_missiles.clone(),
+                active_breacher_dots: self.active_breacher_dots.clone(),
+                aggression_assist_log: self.aggression_assist_log.clone(),
+                container_lifetimes: self.container_lifetimes.clone(),
+                self_destruct_countdowns: self.self_destruct_countdowns.clone(),
+                modified_system_securities: self.modified_system_securities.clone(),
+                sentry_gun_aggression: self
+                    .sentry_gun_aggression
+                    .iter()
+                    .map(|(k, v)| (*k, v.clone()))
+                    .collect(),
+                crimewatch_timer_states: self.crimewatch_timer_states.clone(),
+                crimewatch_timer_triggered_at: self.crimewatch_timer_triggered_at.clone(),
+                active_drones_in_space: self.active_drones_in_space.clone(),
+                drone_next_ready_unix: self.drone_next_ready_unix.clone(),
+                npc_entities: self.npc_entities.clone(),
+                pending_bounty_ticks: self
+                    .pending_bounty_ticks
+                    .iter()
+                    .map(|(k, v)| (*k, *v))
+                    .collect(),
+                bounty_tick_next_flush_unix: self
+                    .bounty_tick_next_flush_unix
+                    .iter()
+                    .map(|(k, v)| (*k, *v))
+                    .collect(),
+                pending_bounty_tick_started_unix: self
+                    .pending_bounty_tick_started_unix
+                    .iter()
+                    .map(|(k, v)| (*k, *v))
+                    .collect(),
+                encounter_waves: self.encounter_waves.clone(),
+                insurance_contracts: self.insurance_contracts.clone(),
+                fighter_unit_damage_accum: self.fighter_unit_damage_accum.clone(),
+                fighter_tube_rearm_until: self
+                    .fighter_tube_rearm_until
+                    .iter()
+                    .map(|(k, v)| (*k, *v))
+                    .collect(),
+                behavior_debugging_active: self.behavior_debugging_active.clone(),
+                authorized_shipping_storage: self
+                    .authorized_shipping_storage
+                    .iter()
+                    .copied()
+                    .collect(),
+                active_drone_miners: self.active_drone_miners.clone(),
+                ess_main_bank_thefts: self.ess_main_bank_thefts.clone(),
+                ess_reserve_bank_thefts: self.ess_reserve_bank_thefts.clone(),
+                ess_reserve_unlocked_until: self.ess_reserve_unlocked_until.clone(),
+                clone_soldier_cooldown_until: self.clone_soldier_cooldown_until.clone(),
+                bounty_credited_balls: self.bounty_credited_balls.clone(),
+                destroyed_npc_cache: self.destroyed_npc_cache.clone(),
+                ci_sentry_deployed_systems: self.ci_sentry_deployed_systems.clone(),
+                npc_scrambled_ships: self.npc_scrambled_ships.clone(),
+                npc_sec_gain_intervals: self
+                    .npc_sec_gain_intervals
+                    .iter()
+                    .map(|(k, v)| (*k, *v))
+                    .collect(),
+            };
+            payload.entropic_spools.sort_by_key(|(k, _)| *k);
+            payload.sentry_gun_aggression.sort_by_key(|(k, _)| *k);
+            payload.pending_bounty_ticks.sort_by_key(|(k, _)| *k);
+            payload.bounty_tick_next_flush_unix.sort_by_key(|(k, _)| *k);
+            payload.pending_bounty_tick_started_unix.sort_by_key(|(k, _)| *k);
+            payload.fighter_tube_rearm_until.sort_by_key(|(k, _)| *k);
+            payload.authorized_shipping_storage.sort_unstable();
+            payload.npc_sec_gain_intervals.sort_by_key(|(k, _)| *k);
+            serde_json::to_string(&payload).unwrap_or_default()
+        } else {
+            String::new()
+        };
         eve_db::PersistedCombatCrimewatchState {
             sec_status_transactions: self.sec_status_transactions.clone(),
             safety_levels: self
@@ -546,44 +783,56 @@ impl CombatRuntimeState {
             pending_bounty_ticks: self.pending_bounty_ticks.clone(),
             bounty_tick_next_flush_unix: self.bounty_tick_next_flush_unix.clone(),
             pending_bounty_tick_started_unix: self.pending_bounty_tick_started_unix.clone(),
+            extended_runtime_json,
         }
     }
 }
 
-pub fn with_combat_runtime<R>(
-    ctx: &ServerContext,
-    f: impl FnOnce(&CombatRuntimeState) -> R,
-) -> R {
+/// Rehydrates [`CombatRuntimeState`] from `ctx.db` whenever the repository epoch has changed
+/// (e.g. on startup, database reload, or transaction rollback) (`#592`).
+pub fn sync_combat_runtime_from_db(ctx: &ServerContext) {
+    let db_epoch = ctx.db.rollback_epoch();
+    let cached_epoch = ctx
+        .combat_ephemeral
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .synced_db_epoch;
+    if cached_epoch == db_epoch {
+        return;
+    }
+    if ctx.db.is_write_locked_by_current_thread() {
+        return;
+    }
     ctx.db.with_snapshot(|s| {
         let mut guard = ctx
             .combat_ephemeral
             .write()
             .unwrap_or_else(|e| e.into_inner());
         guard.sync_from_persisted(&s.combat_crimewatch_state);
-        f(&guard)
-    })
+        guard.synced_db_epoch = ctx.db.rollback_epoch();
+    });
 }
 
-pub fn with_mut_combat_runtime<R>(
-    ctx: &ServerContext,
-    f: impl FnOnce(&mut CombatRuntimeState) -> R,
-) -> R {
+/// Persists the current in-memory [`CombatRuntimeState`] mirror into `ctx.db` (`#592`).
+pub fn flush_combat_runtime_to_db(ctx: &ServerContext) {
+    if ctx.db.is_write_locked_by_current_thread() {
+        return;
+    }
     ctx.db.with_mut_snapshot(|s| {
         let mut guard = ctx
             .combat_ephemeral
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        guard.sync_from_persisted(&s.combat_crimewatch_state);
-        let out = f(&mut guard);
         s.combat_crimewatch_state = guard.to_persisted();
-        out
-    })
+        guard.synced_db_epoch = 0;
+    });
 }
 
-pub fn with_combat_ephemeral<R>(
+pub fn with_combat_runtime<R>(
     ctx: &ServerContext,
     f: impl FnOnce(&CombatRuntimeState) -> R,
 ) -> R {
+    sync_combat_runtime_from_db(ctx);
     let guard = ctx
         .combat_ephemeral
         .read()
@@ -591,15 +840,56 @@ pub fn with_combat_ephemeral<R>(
     f(&guard)
 }
 
+pub fn with_mut_combat_runtime<R>(
+    ctx: &ServerContext,
+    f: impl FnOnce(&mut CombatRuntimeState) -> R,
+) -> R {
+    if ctx.db.is_write_locked_by_current_thread() {
+        let mut guard = ctx
+            .combat_ephemeral
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let out = f(&mut guard);
+        guard.synced_db_epoch = 0;
+        return out;
+    }
+    let rb_before = ctx.db.rollback_epoch();
+    let out = ctx.db.with_mut_snapshot(|s| {
+        let mut guard = ctx
+            .combat_ephemeral
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let db_epoch = ctx.db.rollback_epoch();
+        if guard.synced_db_epoch != db_epoch {
+            guard.sync_from_persisted(&s.combat_crimewatch_state);
+        }
+        let out = f(&mut guard);
+        s.combat_crimewatch_state = guard.to_persisted();
+        guard.synced_db_epoch = 0;
+        out
+    });
+    if ctx.db.rollback_epoch() == rb_before {
+        let mut guard = ctx
+            .combat_ephemeral
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.synced_db_epoch = ctx.db.rollback_epoch();
+    }
+    out
+}
+
+pub fn with_combat_ephemeral<R>(
+    ctx: &ServerContext,
+    f: impl FnOnce(&CombatRuntimeState) -> R,
+) -> R {
+    with_combat_runtime(ctx, f)
+}
+
 pub fn with_mut_combat_ephemeral<R>(
     ctx: &ServerContext,
     f: impl FnOnce(&mut CombatRuntimeState) -> R,
 ) -> R {
-    let mut guard = ctx
-        .combat_ephemeral
-        .write()
-        .unwrap_or_else(|e| e.into_inner());
-    f(&mut guard)
+    with_mut_combat_runtime(ctx, f)
 }
 
 /// Evaluates the effective signature radius of a ship in space (`feat:dogma.signature-radius`),
@@ -1180,7 +1470,9 @@ pub fn claim_player_bounty_on_kill(
             None
         };
         let mut guard = ctx.combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
-        guard.sync_from_persisted(&snap.combat_crimewatch_state);
+        guard.sync_core_from_persisted(&snap.combat_crimewatch_state);
+        snap.combat_crimewatch_state = guard.to_persisted();
+        guard.synced_db_epoch = 0;
         (claimed, bal)
     });
     if claimed_isk > 0.0 {
@@ -1292,6 +1584,7 @@ pub fn gm_admin_bounty_action(
                 }
                 let mut guard = ctx.combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
                 guard.sync_from_persisted(&snap.combat_crimewatch_state);
+                guard.synced_db_epoch = 0;
                 sum
             });
             Ok(total_reimbursed)

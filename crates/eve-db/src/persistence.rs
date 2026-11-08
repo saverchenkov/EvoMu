@@ -349,6 +349,8 @@ pub struct WorldRepository {
     pub(crate) wal_lock: std::sync::Mutex<()>,
     pub(crate) snapshot_path: Option<std::path::PathBuf>,
     pub(crate) pending_wal_records: std::sync::atomic::AtomicUsize,
+    pub(crate) state_epoch: std::sync::atomic::AtomicU64,
+    pub(crate) rollback_epoch: std::sync::atomic::AtomicU64,
     #[cfg(test)]
     pub(crate) wal_fault_mode: std::sync::atomic::AtomicU8,
 }
@@ -381,6 +383,30 @@ impl WorldRepository {
     /// Returns the process-unique monotonic instance ID of this [`WorldRepository`].
     pub fn instance_id(&self) -> u64 {
         self.instance_id
+    }
+
+    /// Returns a monotonic state epoch incremented on every snapshot commit, load, or rollback (`#592`).
+    pub fn state_epoch(&self) -> u64 {
+        self.state_epoch.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Returns a monotonic epoch incremented specifically when a snapshot load or rollback
+    /// replaces or reverts in-memory snapshot state (`#592`).
+    pub fn rollback_epoch(&self) -> u64 {
+        self.rollback_epoch.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    #[inline]
+    pub(crate) fn bump_state_epoch(&self) {
+        self.state_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
+    #[inline]
+    pub(crate) fn bump_rollback_epoch(&self) {
+        self.rollback_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+        self.bump_state_epoch();
     }
 
     /// Returns `true` when this repository is an ephemeral `:memory:` instance with no backing SQLite or snapshot file.
@@ -447,6 +473,8 @@ impl WorldRepository {
             wal_lock: std::sync::Mutex::new(()),
             snapshot_path: None,
             pending_wal_records: std::sync::atomic::AtomicUsize::new(0),
+            state_epoch: std::sync::atomic::AtomicU64::new(1),
+            rollback_epoch: std::sync::atomic::AtomicU64::new(1),
             #[cfg(test)]
             wal_fault_mode: std::sync::atomic::AtomicU8::new(0),
         })
@@ -604,6 +632,8 @@ impl WorldRepository {
             wal_lock: std::sync::Mutex::new(()),
             snapshot_path: None,
             pending_wal_records: std::sync::atomic::AtomicUsize::new(0),
+            state_epoch: std::sync::atomic::AtomicU64::new(1),
+            rollback_epoch: std::sync::atomic::AtomicU64::new(1),
             #[cfg(test)]
             wal_fault_mode: std::sync::atomic::AtomicU8::new(0),
         };
@@ -815,6 +845,7 @@ impl WorldRepository {
         }
         *fp = sqlite_store::replace_sqlite_from_snapshot(&mut conn, &snap)?;
         *guard = std::sync::Arc::new(snap);
+        self.bump_rollback_epoch();
         Ok(())
     }
 
@@ -854,6 +885,7 @@ impl WorldRepository {
                 sqlite_store::rollback_dirty_from_sqlite(&conn, guard, &fp).expect(
                     "Fatal: failed to roll back dirty state from SQLite after poisoned dispatch",
                 );
+                self.bump_rollback_epoch();
                 return Err(poison_err);
             }
             for (&sid, st) in &mut guard.system_states {
@@ -882,11 +914,13 @@ impl WorldRepository {
             match persist_res {
                 Ok(()) => {
                     *fp = staged_fp;
+                    self.bump_state_epoch();
                     Ok(())
                 }
                 Err(persist_err) => {
                     sqlite_store::rollback_dirty_from_sqlite(&conn, guard, &fp)
                         .expect("Fatal: failed to roll back dirty state from SQLite after persist error");
+                    self.bump_rollback_epoch();
                     Err(persist_err)
                 }
             }
@@ -894,6 +928,7 @@ impl WorldRepository {
             sqlite_store::rollback_dirty_from_sqlite(&conn, guard, &fp).expect(
                 "Fatal: failed to roll back dirty state from SQLite after transaction error",
             );
+            self.bump_rollback_epoch();
             Ok(())
         }
     }

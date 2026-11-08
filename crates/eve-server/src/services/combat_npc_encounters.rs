@@ -364,7 +364,7 @@ pub async fn handle_npc_destroyed_in_space(
             // pending bounty ticks atomically even when killer sec status is already >= 5.0.
             db.with_mut_snapshot(|snap| {
                 let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
-                rt.sync_from_persisted(&snap.combat_crimewatch_state);
+                rt.sync_core_from_persisted(&snap.combat_crimewatch_state);
                 let credited = rt.bounty_credited_balls.insert(killed_ball_id);
                 if credited {
                     let clock_now = db.clock().now_unix_secs();
@@ -426,6 +426,13 @@ pub async fn handle_npc_destroyed_in_space(
             )
             .await;
         }
+    }
+
+    if !db.is_write_locked_by_current_thread() {
+        db.with_mut_snapshot(|s| {
+            let guard = combat_ephemeral.read().unwrap_or_else(|e| e.into_inner());
+            s.combat_crimewatch_state = guard.to_persisted();
+        });
     }
 }
 

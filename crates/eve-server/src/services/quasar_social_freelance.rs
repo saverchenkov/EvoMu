@@ -266,6 +266,11 @@ fn check_corp_admin_role(
 
 pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let state = QuasarFreelanceState::from_db(db);
+    let state_rehydrate = Arc::clone(&state);
+    router.register_persistence_hooks(
+        Arc::new(move || state_rehydrate.refresh_from_db(0)),
+        Arc::new(|| {}),
+    );
     let sde_create = Arc::clone(&router.sde);
 
     // 1. CreateRequest -> CreateResponse

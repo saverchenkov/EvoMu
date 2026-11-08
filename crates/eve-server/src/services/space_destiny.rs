@@ -46,7 +46,7 @@ pub mod space_nav_travel;
 pub(crate) const AU_IN_METERS: f64 = 149_597_870_700.0;
 const BEYONCE_SVC: &str = "beyonce";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionChangeTimerState {
     pub expires_unix: u64,
     pub system_id: u32,
@@ -211,6 +211,7 @@ fn record_session_change_timer_with_invuln(
                 location_change_invul_until,
             },
         );
+    ctx.persist_server_runtime_to_db();
     let (change_dict, sess_rep, has_entries, active_dock_id) = ctx.db.with_snapshot(|snap| {
         let ch = snap.characters.get(&char_id);
         let station_id = ch.and_then(|c| c.station_id);

@@ -36,6 +36,90 @@ pub struct QuasarCommunityState {
     pub standings: RwLock<HashMap<(u32, u32), f64>>, // (from_id, to_id) -> standing (-10.0..=10.0)
 }
 
+const QUASAR_COMMUNITY_STATE_BLOB_KEY: &str = "quasar_community_state";
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct PersistedQuasarCommunityState {
+    mails: Vec<(u64, (u32, Vec<u32>, String, String, u64))>,
+    next_mail_id: u64,
+    tags: HashMap<String, String>,
+    standings: Vec<((u32, u32), f64)>,
+}
+
+impl QuasarCommunityState {
+    pub fn rehydrate_from_db(&self, db: &WorldRepository) {
+        let persisted_opt = db.with_snapshot(|snap| {
+            snap.quasar_state_blobs
+                .get(QUASAR_COMMUNITY_STATE_BLOB_KEY)
+                .and_then(|s| serde_json::from_str::<PersistedQuasarCommunityState>(s).ok())
+        });
+        if let Some(p) = persisted_opt {
+            *self.mails.write().unwrap_or_else(|e| e.into_inner()) =
+                p.mails.into_iter().collect();
+            self.next_mail_id
+                .store(p.next_mail_id.max(50001), Ordering::SeqCst);
+            *self.tags.write().unwrap_or_else(|e| e.into_inner()) = p.tags;
+            *self.standings.write().unwrap_or_else(|e| e.into_inner()) =
+                p.standings.into_iter().collect();
+        } else {
+            self.mails.write().unwrap_or_else(|e| e.into_inner()).clear();
+            self.next_mail_id.store(50001, Ordering::SeqCst);
+            self.tags.write().unwrap_or_else(|e| e.into_inner()).clear();
+            self.standings
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+        }
+    }
+
+    pub fn sync_to_db(&self, db: &WorldRepository) {
+        if db.is_write_locked_by_current_thread() {
+            return;
+        }
+        let mut mails: Vec<_> = self
+            .mails
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(&k, v)| (k, v.clone()))
+            .collect();
+        mails.sort_by_key(|(k, _)| *k);
+        let next_mail_id = self.next_mail_id.load(Ordering::SeqCst).max(50001);
+        let tags = self.tags.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let mut standings: Vec<_> = self
+            .standings
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(&k, &v)| (k, v))
+            .collect();
+        standings.sort_by_key(|(k, _)| *k);
+
+        if mails.is_empty() && next_mail_id == 50001 && tags.is_empty() && standings.is_empty() {
+            let _ = db.try_with_mut_snapshot(|snap| {
+                snap.quasar_state_blobs
+                    .remove(QUASAR_COMMUNITY_STATE_BLOB_KEY);
+                Ok::<(), String>(())
+            });
+            return;
+        }
+        let payload = PersistedQuasarCommunityState {
+            mails,
+            next_mail_id,
+            tags,
+            standings,
+        };
+        if let Ok(json) = serde_json::to_string(&payload) {
+            let _ = db.try_with_mut_snapshot(|snap| {
+                snap.quasar_state_blobs
+                    .insert(QUASAR_COMMUNITY_STATE_BLOB_KEY.to_string(), json);
+                Ok::<(), String>(())
+            });
+        }
+    }
+}
+
 fn encode_seq_id(field_num: u32, id: u64, out: &mut Vec<u8>) {
     let mut id_bytes = Vec::with_capacity(8);
     encode_varint_field(1, id, &mut id_bytes);
@@ -44,7 +128,15 @@ fn encode_seq_id(field_num: u32, id: u64, out: &mut Vec<u8>) {
 
 pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let state = Arc::new(QuasarCommunityState::default());
-    state.next_mail_id.store(50001, Ordering::SeqCst);
+    state.rehydrate_from_db(&db);
+    let state_rehydrate = Arc::clone(&state);
+    let db_rehydrate = Arc::clone(&db);
+    let state_sync = Arc::clone(&state);
+    let db_sync = Arc::clone(&db);
+    router.register_persistence_hooks(
+        Arc::new(move || state_rehydrate.rehydrate_from_db(&db_rehydrate)),
+        Arc::new(move || state_sync.sync_to_db(&db_sync)),
+    );
 
     // ========================================================================
     // MAIL DOMAIN (5 protos)
@@ -147,6 +239,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(mail_id, (sender, recipients, subject, body, ctx_now_unix(ctx)));
+            state_mail.sync_to_db(&db_mail);
 
             let mut out = Vec::new();
             encode_seq_id(1, mail_id, &mut out); // successes
@@ -304,11 +397,15 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
 
     // 8. eve.standing.api.IncreaseCommanded & DecreaseCommanded
     let state_st = Arc::clone(&state);
+    let db_st = Arc::clone(&db);
     let inc_handler: QuasarHandlerFn = Arc::new(move |ctx, _any, _dyn_msg| {
         let cid = ctx.effective_character_id().unwrap_or(90000001);
-        let mut st = state_st.standings.write().unwrap_or_else(|e| e.into_inner());
-        let entry = st.entry((cid, 90000002)).or_insert(0.0);
-        *entry = (*entry + 1.0).min(10.0);
+        {
+            let mut st = state_st.standings.write().unwrap_or_else(|e| e.into_inner());
+            let entry = st.entry((cid, 90000002)).or_insert(0.0);
+            *entry = (*entry + 1.0).min(10.0);
+        }
+        state_st.sync_to_db(&db_st);
         Ok(GoogleAny {
             type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}google.protobuf.Empty"),
             value: Vec::new(),
@@ -318,11 +415,15 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler("eve.standing.api.commands.IncreaseCommanded", inc_handler);
 
     let state_std = Arc::clone(&state);
+    let db_std = Arc::clone(&db);
     let dec_handler: QuasarHandlerFn = Arc::new(move |ctx, _any, _dyn_msg| {
         let cid = ctx.effective_character_id().unwrap_or(90000001);
-        let mut st = state_std.standings.write().unwrap_or_else(|e| e.into_inner());
-        let entry = st.entry((cid, 90000002)).or_insert(0.0);
-        *entry = (*entry - 1.0).max(-10.0);
+        {
+            let mut st = state_std.standings.write().unwrap_or_else(|e| e.into_inner());
+            let entry = st.entry((cid, 90000002)).or_insert(0.0);
+            *entry = (*entry - 1.0).max(-10.0);
+        }
+        state_std.sync_to_db(&db_std);
         Ok(GoogleAny {
             type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}google.protobuf.Empty"),
             value: Vec::new(),
@@ -497,6 +598,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
 
     // 14. eve.tag.api.RegisterRequest & EditRequest -> RegisterResponse / EditResponse
     let state_tag = Arc::clone(&state);
+    let db_tag = Arc::clone(&db);
     router.register_handler(
         "eve.tag.api.RegisterRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
@@ -505,6 +607,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 _ => "fleet_doctrine".into(),
             };
             state_tag.tags.write().unwrap_or_else(|e| e.into_inner()).insert(name, "1.0.0".into());
+            state_tag.sync_to_db(&db_tag);
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.tag.api.RegisterResponse"),
                 value: Vec::new(),

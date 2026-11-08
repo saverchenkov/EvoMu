@@ -10,6 +10,7 @@ pub mod cache_notifications;
 pub mod client_compat;
 pub mod context;
 mod context_charges;
+mod context_runtime_persistence;
 pub mod dispatch;
 pub mod session;
 
@@ -25,6 +26,8 @@ mod dispatch_deep_extra_unit_tests;
 mod session_sync_object_binding_security_tests;
 #[cfg(test)]
 mod router_advanced_branches_tests;
+#[cfg(test)]
+mod runtime_persistence_tests;
 #[cfg(test)]
 mod session_context_deep_extra_unit_tests;
 #[cfg(test)]

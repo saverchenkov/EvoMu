@@ -81,7 +81,7 @@ pub fn is_player_ship_ball(
     false
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PendingWubbleProbe {
     pub probe_id: i64,
     pub solar_system_id: u32,
@@ -93,7 +93,7 @@ pub struct PendingWubbleProbe {
     pub detonated: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ActiveWubbleDebuff {
     pub remaining_s: f64,
     pub velocity_multiplier: f64,

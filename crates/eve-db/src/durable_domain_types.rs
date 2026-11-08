@@ -726,6 +726,8 @@ pub struct PersistedCombatCrimewatchState {
     pub bounty_tick_next_flush_unix: HashMap<(u32, i64), u64>,
     #[serde(default, with = "tuple_map_serde")]
     pub pending_bounty_tick_started_unix: HashMap<(u32, i64), u64>,
+    #[serde(default)]
+    pub extended_runtime_json: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

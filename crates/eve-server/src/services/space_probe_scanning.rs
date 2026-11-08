@@ -295,6 +295,7 @@ pub async fn activate_scan_probe_launcher(
         let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnNewProbe", "charid", vec![probe_kv]);
         let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(PROBE_STATE_IDLE as i64)]);
     }
+    ctx.persist_server_runtime_to_db();
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)),
         ("launcherID", PyRep::Integer(module_id)),
@@ -323,23 +324,45 @@ pub(crate) async fn handle_scan_and_wormhole_extras(
     // parity: feat:scanning.probe-launch, feat:scanning.probe-recall, feat:scanning.probe-scan-math
     // parity: feat:scanning.probe-range-deviation, feat:scanning.probe-target-classes, feat:scanning.signature-reveal-thresholds, feat:scanning.signature-strength-levels
     // parity: rpc:scanMgr.GetSystemScanMgr
-    match (service, method) {
+    let mut mutated = false;
+    let res = match (service, method) {
         ("scanMgr", "GetSystemScanMgr") => handle_get_system_scan_mgr(ctx, session, service, args).await,
         ("scanMgr", "GetAnomalies") => handle_get_anomalies(ctx, session, bound_entry).await,
-        ("scanMgr", "RequestScans") => handle_request_scans(ctx, session, bound_entry, args, kwargs).await,
-        ("scanMgr", "RecoverProbes") => handle_recover_probes(ctx, session, bound_entry, args).await,
-        ("scanMgr", "ReconnectToLostProbes") => handle_reconnect_probes(ctx, session, bound_entry).await,
-        ("scanMgr", "DestroyProbe") => handle_destroy_probe(ctx, session, bound_entry, args).await,
+        ("scanMgr", "RequestScans") => {
+            mutated = true;
+            handle_request_scans(ctx, session, bound_entry, args, kwargs).await
+        }
+        ("scanMgr", "RecoverProbes") => {
+            mutated = true;
+            handle_recover_probes(ctx, session, bound_entry, args).await
+        }
+        ("scanMgr", "ReconnectToLostProbes") => {
+            mutated = true;
+            handle_reconnect_probes(ctx, session, bound_entry).await
+        }
+        ("scanMgr", "DestroyProbe") => {
+            mutated = true;
+            handle_destroy_probe(ctx, session, bound_entry, args).await
+        }
         ("scanMgr", "GetFullState") => handle_get_full_state(ctx, session, bound_entry).await,
         ("scanMgr", "QAOverrideProbeExpiry") => {
+            mutated = true;
             handle_qa_override_probe_expiry(ctx, session, args)
         }
-        ("scanMgr", "QAScanSites") => handle_qa_scan_sites(ctx, session, bound_entry).await,
+        ("scanMgr", "QAScanSites") => {
+            mutated = true;
+            handle_qa_scan_sites(ctx, session, bound_entry).await
+        }
         ("scanMgr", "SetActivityState") => {
+            mutated = true;
             handle_set_activity_state(ctx, session, bound_entry, args)
         }
         _ => None,
+    };
+    if mutated && matches!(res, Some(Ok(_))) {
+        ctx.persist_server_runtime_to_db();
     }
+    res
 }
 
 async fn handle_get_full_state(
@@ -1526,4 +1549,5 @@ pub(crate) fn sync_scanner_probes_to_db(ctx: &ServerContext) {
                 .collect();
         }
     });
+    ctx.persist_server_runtime_to_db();
 }

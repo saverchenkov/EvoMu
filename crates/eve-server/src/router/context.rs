@@ -98,7 +98,7 @@ pub struct ServerContext {
     pub fw_idle_last_step_unix: RwLock<HashMap<i64, u64>>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct ModuleCooldownEntry { pub recorded_unix_f64: f64, pub delay_s: f64, pub solar_system_id: Option<u32>, pub recorded_sys_sim_s: f64 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -395,6 +395,8 @@ impl ServerContext {
             }
         });
         crate::services::fleet_social::hydrate_social_state_from_db(&ctx);
+        ctx.hydrate_server_runtime_from_db();
+        crate::services::combat_crimewatch::sync_combat_runtime_from_db(&ctx);
         crate::sp6_lifecycle::seed_persisted_abandoned_drones(&ctx);
         crate::services::quasar_cosmetics_live::install_macho_notify_sink(&ctx);
         ctx.wire_module_deactivation_hook();
@@ -431,10 +433,21 @@ impl ServerContext {
         ctx.systems.set_belt_respawn_interval_secs(cfg.belt_respawn_interval_secs);
         ctx.systems.set_downtime_utc_secs_of_day(cfg.downtime_utc_secs_of_day);
         ctx.feature_flags = cfg.feature_flags.clone();
-        ctx.quasar_gateway.free_fast_checkout_plex.store(
-            ctx.feature_flags.free_fast_checkout_plex,
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        if !ctx
+            .quasar_gateway
+            .has_persisted_free_fast_checkout_plex
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            ctx.quasar_gateway.free_fast_checkout_plex.store(
+                ctx.feature_flags.free_fast_checkout_plex,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        } else {
+            ctx.feature_flags.free_fast_checkout_plex = ctx
+                .quasar_gateway
+                .free_fast_checkout_plex
+                .load(std::sync::atomic::Ordering::Relaxed);
+        }
         ctx.esi_port = cfg.esi_port;
         if cfg.feature_flags.seed_demo {
             ctx.seed_demo_world_fixtures();
@@ -450,6 +463,10 @@ impl ServerContext {
         self.quasar_gateway
             .free_fast_checkout_plex
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        self.quasar_gateway
+            .has_persisted_free_fast_checkout_plex
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.quasar_gateway.sync_meta_to_db();
     }
 
     /// Explicitly seeds demo convoys (`800_000_001..=800_000_003`), nullsec ESS bank balances (`10M`/`25M` ISK),
@@ -716,6 +733,8 @@ impl ServerContext {
                 recorded_sys_sim_s: cur_sys_sim_s,
             },
         );
+        drop(guard);
+        self.persist_server_runtime_to_db();
     }
 
     /// Returns the active [`eve_db::ServerClock`] implementation (`T-7`).
@@ -1272,7 +1291,7 @@ impl ServerContext {
                     }
                     changed
                 });
-            crate::services::combat_crimewatch::with_mut_combat_ephemeral(self, |rt| {
+            crate::services::combat_crimewatch::with_combat_ephemeral(self, |rt| {
                 for d in rt.active_drones_in_space.values() {
                     if d.parent_ship_id == ship_id && !d.is_abandoned {
                         if !existing.drones.iter().any(|&(id, _)| id == d.drone_item_id) {

@@ -33,10 +33,73 @@ pub struct ChatModerationState {
 impl ChatModerationState {
     pub fn new(db: &WorldRepository) -> Self {
         let initial_mutes = load_mutes_from_db(db);
+        let initial_speakers = load_wormhole_speakers_from_db(db);
         Self {
             mutes: RwLock::new(initial_mutes),
-            wormhole_speakers: RwLock::new(std::collections::HashSet::new()),
+            wormhole_speakers: RwLock::new(initial_speakers),
         }
+    }
+
+    pub fn rehydrate_from_db(&self, db: &WorldRepository) {
+        let mutes = load_mutes_from_db(db);
+        let speakers = load_wormhole_speakers_from_db(db);
+        *self.mutes.write().unwrap_or_else(|e| e.into_inner()) = mutes;
+        *self
+            .wormhole_speakers
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = speakers;
+    }
+
+    pub fn sync_to_db(&self, db: &WorldRepository) {
+        if db.is_write_locked_by_current_thread() {
+            return;
+        }
+        let mutes = self.mutes.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let speakers = self
+            .wormhole_speakers
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        save_mutes_to_db(db, &mutes);
+        save_wormhole_speakers_to_db(db, &speakers);
+    }
+}
+
+pub fn load_wormhole_speakers_from_db(
+    db: &WorldRepository,
+) -> std::collections::HashSet<(u32, u32)> {
+    let entries: Vec<(u32, u32)> = db.with_snapshot(|snap| {
+        snap.quasar_state_blobs
+            .get("quasar_chat_wormhole_speakers")
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default()
+    });
+    entries.into_iter().collect()
+}
+
+pub fn save_wormhole_speakers_to_db(
+    db: &WorldRepository,
+    speakers: &std::collections::HashSet<(u32, u32)>,
+) {
+    if db.is_write_locked_by_current_thread() {
+        return;
+    }
+    let mut entries: Vec<(u32, u32)> = speakers.iter().copied().collect();
+    entries.sort_unstable();
+    if entries.is_empty() {
+        let _ = db.try_with_mut_snapshot(|snap| {
+            snap.quasar_state_blobs
+                .remove("quasar_chat_wormhole_speakers");
+            Ok::<(), String>(())
+        });
+        return;
+    }
+    if let Ok(json) = serde_json::to_string(&entries) {
+        let _ = db.try_with_mut_snapshot(|snap| {
+            snap.quasar_state_blobs
+                .insert("quasar_chat_wormhole_speakers".into(), json);
+            Ok::<(), String>(())
+        });
     }
 }
 
@@ -50,6 +113,16 @@ pub fn load_mutes_from_db(db: &WorldRepository) -> HashMap<u32, (u64, String)> {
 }
 
 pub fn save_mutes_to_db(db: &WorldRepository, mutes: &HashMap<u32, (u64, String)>) {
+    if db.is_write_locked_by_current_thread() {
+        return;
+    }
+    if mutes.is_empty() {
+        let _ = db.try_with_mut_snapshot(|snap| {
+            snap.quasar_state_blobs.remove("quasar_chat_mutes");
+            Ok::<(), String>(())
+        });
+        return;
+    }
     if let Ok(json) = serde_json::to_string(mutes) {
         let _ = db.try_with_mut_snapshot(|snap| {
             snap.quasar_state_blobs
@@ -324,11 +397,17 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
 
             let is_wh = is_delayed_local_system(sys_id);
             if is_wh {
-                let is_new = state_bcast
-                    .wormhole_speakers
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert((sys_id, cid));
+                let (is_new, speakers_snap) = {
+                    let mut sp = state_bcast
+                        .wormhole_speakers
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let is_new = sp.insert((sys_id, cid));
+                    (is_new, is_new.then(|| sp.clone()))
+                };
+                if let Some(sp) = speakers_snap {
+                    save_wormhole_speakers_to_db(&db_bcast, &sp);
+                }
                 if is_new {
                     let member_bytes = encode_chat_member(cid, corpid, aid, fid);
                     let mut join_payload = Vec::new();
@@ -650,19 +729,25 @@ pub fn on_character_enter_local_chat(
 
 pub fn on_character_leave_local_chat(
     gateway: &PublicGatewayRouter,
-    _db: &WorldRepository,
+    db: &WorldRepository,
     char_id: u32,
     solar_system_id: u32,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
     let is_wh = is_delayed_local_system(solar_system_id);
     if is_wh {
-        let was_revealed = gateway
-            .chat_moderation
-            .wormhole_speakers
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&(solar_system_id, char_id));
+        let (was_revealed, speakers_snap) = {
+            let mut sp = gateway
+                .chat_moderation
+                .wormhole_speakers
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let removed = sp.remove(&(solar_system_id, char_id));
+            (removed, removed.then(|| sp.clone()))
+        };
+        if let Some(sp) = speakers_snap {
+            save_wormhole_speakers_to_db(db, &sp);
+        }
         if !was_revealed {
             return Ok(0);
         }

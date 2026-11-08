@@ -734,6 +734,7 @@ pub async fn handle_pve_site_npc_destruction(
         killer_char_id,
         false,
     ).await;
+    crate::services::combat_crimewatch::flush_combat_runtime_to_db(ctx);
 
     if let Some(ref sid) = cleared_site_id {
         let now = ctx.now_unix();
@@ -930,6 +931,7 @@ pub async fn advance_site_wave_or_complete(
                     site_id,
                     pos,
                 ).await;
+                crate::services::combat_crimewatch::flush_combat_runtime_to_db(ctx);
             }
         }
 

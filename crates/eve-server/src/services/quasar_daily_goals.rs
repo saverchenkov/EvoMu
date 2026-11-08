@@ -410,6 +410,9 @@ impl DailyGoalManager {
 
     pub fn save_to_db(&self) {
         if let Some(ref db) = self.db {
+            if db.is_write_locked_by_current_thread() {
+                return;
+            }
             let templates = self.templates.read().unwrap_or_else(|e| e.into_inner()).clone();
             let character_goals = self.character_goals.read().unwrap_or_else(|e| e.into_inner()).clone();
             let store = DailyGoalStore { templates, character_goals };
@@ -419,6 +422,60 @@ impl DailyGoalManager {
                     Ok::<(), String>(())
                 });
             }
+        }
+    }
+
+    pub fn rehydrate_from_db(&self) {
+        let Some(ref db) = self.db else { return };
+        let store_opt = db.with_snapshot(|s| {
+            s.quasar_state_blobs.get("quasar_daily_goals").and_then(|json| {
+                if let Some(st) = serde_json::from_str::<DailyGoalStore>(json)
+                    .ok()
+                    .filter(|st| !st.templates.is_empty() || !st.character_goals.is_empty())
+                {
+                    Some(st)
+                } else if let Ok(cg) =
+                    serde_json::from_str::<HashMap<u32, Vec<CharacterDailyGoal>>>(json)
+                {
+                    let mut templates = Vec::new();
+                    for list in cg.values() {
+                        for g in list {
+                            if !templates.iter().any(|t: &DailyGoalTemplate| t.uuid == g.template.uuid) {
+                                templates.push(g.template.clone());
+                            }
+                        }
+                    }
+                    Some(DailyGoalStore {
+                        templates,
+                        character_goals: cg,
+                    })
+                } else {
+                    None
+                }
+            })
+        });
+        if let Some(mut store) = store_opt {
+            if !store.templates.is_empty()
+                && !store.templates.iter().any(|t| t.effective_goal_category() == 2)
+            {
+                store.templates.push(default_daily_bonus_template());
+            }
+            if !store.templates.is_empty() {
+                *self.templates.write().unwrap_or_else(|e| e.into_inner()) = store.templates.clone();
+            }
+            let tpls = self.templates.read().unwrap_or_else(|e| e.into_inner()).clone();
+            for goals in store.character_goals.values_mut() {
+                ensure_character_daily_goals_with_templates(goals, &tpls, 0);
+            }
+            *self
+                .character_goals
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = store.character_goals;
+        } else {
+            self.character_goals
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
         }
     }
 

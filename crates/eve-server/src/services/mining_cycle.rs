@@ -52,7 +52,7 @@ mod attr {
 const ASTEROID_CATEGORY: u32 = 25;
 
 /// What a mining module harvests, derived from its SDE default effect and required skills.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MiningKind {
     /// `miningLaser` effect on a module whose required skills include the target's required skill.
     Asteroid,
@@ -93,7 +93,7 @@ impl MiningStopReason {
 }
 
 /// One running mining module.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ActiveMiningCycle {
     pub char_id: i64,
     pub ship_id: i64,
@@ -712,6 +712,7 @@ pub(crate) fn clear_emptied_sites(ctx: &ServerContext, sys_id: u32, ast_pos: DVe
 /// Marks the module inactive in the fitting engine and persisted state, and tells the client.
 fn stop_module(ctx: &ServerContext, cycle: &ActiveMiningCycle) {
     ctx.mining_cycles.write().unwrap_or_else(|e| e.into_inner()).remove(&cycle.module_id);
+    ctx.persist_server_runtime_to_db();
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.remove(&cycle.module_id);
     });
@@ -784,6 +785,7 @@ pub async fn activate(
         snap.module_active_states.insert(module_id);
     });
     ctx.mining_cycles.write().unwrap_or_else(|e| e.into_inner()).insert(module_id, cycle.clone());
+    ctx.persist_server_runtime_to_db();
     ctx.notify(
         NotificationTarget::Character(char_id),
         "OnGodmaShipEffect",
@@ -852,6 +854,7 @@ pub async fn process_mining_cycles(ctx: &ServerContext) -> Vec<MiningCycleOutcom
             let effective_duration_ms = ((cycle.duration_ms as f64) / tidi).round().max(1.0) as u64;
             if now < cycle.cycle_start_ms + effective_duration_ms {
                 ctx.mining_cycles.write().unwrap_or_else(|e| e.into_inner()).insert(cycle.module_id, cycle.clone());
+                ctx.persist_server_runtime_to_db();
                 break;
             }
             let outcome = match resolve_cycle(ctx, &cycle, 1.0).await {
