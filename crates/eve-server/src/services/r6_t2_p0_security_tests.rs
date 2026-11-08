@@ -298,18 +298,18 @@ fn r6_t2_03_issue_372_metenox_drill_security() {
         seed_char(snap, char_id, corp_id, None, sys_id);
         snap.structures.insert(uncored_id, UpwellStructureRecord { structure_id: uncored_id, type_id: TYPE_METENOX_MOON_DRILL, owner_corp_id: corp_id, solar_system_id: sys_id, state: "ShieldVulnerable".into(), quantum_core_installed: false, fuel_blocks: 50, position: [moon_pos.x, moon_pos.y, moon_pos.z], ..Default::default() });
         snap.structures.insert(anchoring_id, UpwellStructureRecord { structure_id: anchoring_id, type_id: TYPE_METENOX_MOON_DRILL, owner_corp_id: corp_id, solar_system_id: sys_id, state: "AnchorVulnerable".into(), quantum_core_installed: true, fuel_blocks: 50, position: [moon_pos.x, moon_pos.y, moon_pos.z], ..Default::default() });
-        snap.structures.insert(cored_id, UpwellStructureRecord { structure_id: cored_id, type_id: TYPE_METENOX_MOON_DRILL, owner_corp_id: corp_id, solar_system_id: sys_id, state: "ShieldVulnerable".into(), quantum_core_installed: true, fuel_blocks: 2, position: [moon_pos.x, moon_pos.y, moon_pos.z], ..Default::default() });
+        snap.structures.insert(cored_id, UpwellStructureRecord { structure_id: cored_id, type_id: TYPE_METENOX_MOON_DRILL, owner_corp_id: corp_id, solar_system_id: sys_id, state: "ShieldVulnerable".into(), quantum_core_installed: true, fuel_blocks: 5, position: [moon_pos.x, moon_pos.y, moon_pos.z], ..Default::default() });
 
-        snap.items.insert(sf_fuel, InventoryItemRecord { item_id: sf_fuel, type_id: 4247, owner_id: corp_id, location_id: cored_id, flag: InventoryFlag::StructureFuel, quantity: 4, version: 1, ..Default::default() });
+        snap.items.insert(sf_fuel, InventoryItemRecord { item_id: sf_fuel, type_id: 4247, owner_id: corp_id, location_id: cored_id, flag: InventoryFlag::StructureFuel, quantity: 5, version: 1, ..Default::default() });
         snap.items.insert(sf_gas, InventoryItemRecord { item_id: sf_gas, type_id: 81143, owner_id: corp_id, location_id: cored_id, flag: InventoryFlag::StructureFuel, quantity: 300, version: 1, ..Default::default() });
         snap.items.insert(sag_fuel, InventoryItemRecord { item_id: sag_fuel, type_id: 4247, owner_id: corp_id, location_id: cored_id, flag: InventoryFlag::CorpSAG1, quantity: 100, version: 1, ..Default::default() });
         snap.items.insert(guest_gas, InventoryItemRecord { item_id: guest_gas, type_id: 81143, owner_id: 90_000_002, location_id: cored_id, flag: InventoryFlag::Hangar, quantity: 500, version: 1, ..Default::default() });
     });
 
-    // Inspection ignores CorpSAG1 and guest Hangar items, reporting only st.fuel_blocks (2) + StructureFuel (4) = 6
+    // Inspection ignores CorpSAG1 and guest Hangar items, reporting only synced StructureFuel item blocks (5) without double-counting st.fuel_blocks (#567)
     ctx.db.with_snapshot(|snap| {
         let insp = inspect_metenox_drill(&ctx.sde, snap, cored_id, char_id, 1.0).unwrap();
-        assert_eq!(insp.total_struct_fuel, 6);
+        assert_eq!(insp.total_struct_fuel, 5);
         assert_eq!(insp.total_struct_gas, 300);
     });
 
@@ -320,7 +320,7 @@ fn r6_t2_03_issue_372_metenox_drill_security() {
         assert_eq!(snap.structures[&anchoring_id].fuel_blocks, 50);
         assert!(snap.items.values().all(|it| it.location_id != uncored_id && it.location_id != anchoring_id));
 
-        assert_eq!(snap.structures[&cored_id].fuel_blocks, 1);
+        assert_eq!(snap.structures[&cored_id].fuel_blocks, 0);
         assert!(!snap.items.contains_key(&sf_fuel));
         assert_eq!(snap.items[&sf_gas].quantity, 290);
         assert_eq!(snap.items[&sag_fuel].quantity, 100);

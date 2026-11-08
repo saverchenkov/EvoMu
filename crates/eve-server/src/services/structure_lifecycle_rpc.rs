@@ -83,7 +83,8 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
         return Err(err("AnchoringDisallowedInPochven", "Upwell structures cannot be anchored in Pochven"));
     }
     let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0);
-    if profile.hull_class == life::HullClass::Flex && (sys_sec >= 0.0 || sys_id >= 31_000_000) {
+    let is_sov_flex = profile.hull_class == life::HullClass::Flex && profile.group_id != 4744 && profile.type_id != 81_826;
+    if is_sov_flex && (sys_sec >= 0.0 || sys_id >= 31_000_000) {
         return Err(err("CannotAnchorFlexOutsideSovNull", format!("FLEX structure type {type_id} can only be anchored in sovereign K-space null-security space (system {sys_id})")));
     }
     if matches!(type_id, 35840 | 35841 | crate::services::sov_gameplay::TYPE_TENEBREX_CYNO_JAMMER) {

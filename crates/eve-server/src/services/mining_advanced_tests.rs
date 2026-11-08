@@ -370,3 +370,164 @@ async fn test_auto_moon_mining_details_output_and_hourly_tick() {
     });
     assert!(harvested > 0);
 }
+
+#[tokio::test]
+async fn test_metenox_fuel_no_double_count_disposal_sync_and_reinforce_pause() {
+    let mut ctx = make_ctx();
+    Arc::make_mut(&mut ctx.sde).types.insert(
+        4051,
+        make_inv_type(4051, 1136, 4, "Nitrogen Fuel Block", 5.0, 0.0, 1),
+    );
+    let char_id = 90_000_001;
+    let corp_id = 1_000_009;
+    let metenox_id = 1_000_000_000_599;
+    let sys_id = 30_002_537;
+    let moon = ctx
+        .sde
+        .celestials_in_system(sys_id)
+        .into_iter()
+        .find(|c| c.group_id == 8)
+        .unwrap();
+
+    let fuel_item_id = 950_101i64;
+    let gas_item_id = 950_102i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&char_id) {
+            c.corporation_id = corp_id;
+        }
+        snap.corporations.insert(
+            corp_id,
+            CorporationRecord {
+                corporation_id: corp_id,
+                name: "Moon Corp".into(),
+                ticker: "MOON".into(),
+                ceo_id: char_id,
+                tax_rate: 0.05,
+                ..Default::default()
+            },
+        );
+        // Both st.fuel_blocks = 10 and item_fuel = 10 (synced bay): effective total must be 10, NOT 20.
+        snap.structures.insert(
+            metenox_id,
+            UpwellStructureRecord {
+                structure_id: metenox_id,
+                type_id: 81826,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Metenox Sync Test".into(),
+                state: "ShieldVulnerable".into(),
+                position: [moon.position.x + 200.0, moon.position.y, moon.position.z],
+                quantum_core_installed: true,
+                fuel_blocks: 10,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            fuel_item_id,
+            InventoryItemRecord {
+                item_id: fuel_item_id,
+                type_id: 4051,
+                owner_id: corp_id,
+                location_id: metenox_id,
+                flag: InventoryFlag::StructureFuel,
+                quantity: 10,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            gas_item_id,
+            InventoryItemRecord {
+                item_id: gas_item_id,
+                type_id: 81143,
+                owner_id: corp_id,
+                location_id: metenox_id,
+                flag: InventoryFlag::StructureFuel,
+                quantity: 1_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut session = SessionState {
+        user_id: Some(1),
+        character_id: Some(char_id),
+        corporation_id: Some(corp_id),
+        ..Default::default()
+    };
+    let details = handle(
+        &ctx,
+        &mut session,
+        "autoMoonMining",
+        "RequestMiningDetails",
+        &[PyRep::Integer(metenox_id)],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .expect("mining details");
+    assert_eq!(
+        details.dict_get("fuelRemaining").and_then(|v| v.as_i64()),
+        Some(10),
+        "inspect_metenox_drill must not double-count st.fuel_blocks + item_fuel"
+    );
+
+    // Run 1 hourly cycle (consumes 5 fuel blocks) -> item_fuel becomes 5 and st.fuel_blocks must sync to 5.
+    let now = ctx.now_unix();
+    tick_all_metenox_moon_drills(&ctx, now - 3_600, now);
+    ctx.db.with_mut_snapshot(|snap| {
+        assert_eq!(snap.items.get(&fuel_item_id).map(|i| i.quantity), Some(5));
+        assert_eq!(snap.structures.get(&metenox_id).map(|s| s.fuel_blocks), Some(5));
+        assert_eq!(
+            snap.auto_moon_miners.get(&metenox_id).map(|r| r.fuel_units_remaining),
+            Some(5),
+            "auto_moon_miners must reflect 5 remaining (not 15)"
+        );
+        // Materializing structure fuel for disposal must NOT mint extra unbacked blocks.
+        let before_count = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == metenox_id && i.type_id == 4051)
+            .map(|i| i.quantity)
+            .sum::<i32>();
+        crate::services::structure_acl_defense_rules::materialize_structure_fuel_for_disposal(
+            &ctx,
+            snap,
+            metenox_id,
+        );
+        let after_count = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == metenox_id && i.type_id == 4051)
+            .map(|i| i.quantity)
+            .sum::<i32>();
+        assert_eq!(before_count, 5);
+        assert_eq!(after_count, 5, "stale st.fuel_blocks must not mint unbacked fuel on disposal");
+    });
+
+    // Put Metenox into ArmorReinforce / ArmorReinforced / HullReinforce / HullReinforced: drilling must pause.
+    let harvest_before = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .filter(|i| i.location_id == metenox_id && i.flag == InventoryFlag::SpecializedMineralHold)
+            .map(|i| i.quantity)
+            .sum::<i32>()
+    });
+    for rf_state in ["ArmorReinforce", "ArmorReinforced", "HullReinforce", "HullReinforced"] {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.structures.get_mut(&metenox_id).unwrap().state = rf_state.into();
+        });
+        tick_all_metenox_moon_drills(&ctx, now, now + 7_200);
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.items.get(&fuel_item_id).map(|i| i.quantity), Some(5), "no fuel burned in {rf_state}");
+            let harvest_now = snap
+                .items
+                .values()
+                .filter(|i| i.location_id == metenox_id && i.flag == InventoryFlag::SpecializedMineralHold)
+                .map(|i| i.quantity)
+                .sum::<i32>();
+            assert_eq!(harvest_now, harvest_before, "no harvest in {rf_state}");
+        });
+    }
+}

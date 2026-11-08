@@ -507,7 +507,7 @@ pub fn rollback_ship_after_failed_undock(ctx: &ServerContext, structure_id: i64,
     });
 }
 
-fn disengage_structure_control_in_snap(
+pub(crate) fn disengage_structure_control_in_snap(
     ctx: Option<&ServerContext>,
     snap: &mut WorldStateSnapshot,
     structure_id: i64,

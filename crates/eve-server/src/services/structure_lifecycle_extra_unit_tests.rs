@@ -160,7 +160,7 @@ fn power_state_strings_hull_profiles_and_service_families_cover_all_variants() {
     assert!(!flex.disallow_in_highsec);
 
     let g4744 = structure_profile(&ctx, g4744_tid).expect("group 4744 profile");
-    assert_eq!(g4744.hull_class, HullClass::Medium);
+    assert_eq!(g4744.hull_class, HullClass::Flex);
     assert!(structure_profile(&ctx, non_struct_tid).is_none());
 
     assert!((tether_range_m(&ctx, lg_tid) - 17_500.0).abs() < 1e-6);

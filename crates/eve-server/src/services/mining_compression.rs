@@ -1257,7 +1257,7 @@ pub(crate) fn inspect_metenox_drill(
                 && sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136)
         })
         .fold(0u32, |acc, it| acc.saturating_add(it.quantity.max(0) as u32));
-    let total_struct_fuel = st.fuel_blocks.saturating_add(item_fuel_blocks);
+    let total_struct_fuel = if item_fuel_blocks > 0 { item_fuel_blocks } else { st.fuel_blocks };
     let total_struct_gas: u32 = snap.items.values()
         .filter(|it| {
             it.location_id == structure_id

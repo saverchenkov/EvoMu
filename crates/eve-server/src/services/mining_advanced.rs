@@ -1254,7 +1254,7 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
                 st.quantum_core_installed
                     && matches!(
                         st.state.as_str(),
-                        "ShieldVulnerable" | "ArmorReinforce" | "ArmorVulnerable" | "HullReinforce" | "HullVulnerable" | "Online" | "Operating"
+                        "ShieldVulnerable" | "ArmorVulnerable" | "HullVulnerable" | "Online" | "Operating"
                     )
                     && ctx.sde.types.get(&st.type_id).is_some_and(|t| t.group_id == 4744)
             })
@@ -1291,10 +1291,21 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
                         }
                     }
                 }
-                (st_fuel.saturating_add(item_fuel), gas)
+                let fuel = if item_fuel > 0 { item_fuel } else { st_fuel };
+                (fuel, gas)
             };
 
             let (init_fuel, init_gas) = count_reagents(snap);
+            let init_item_fuel: u32 = snap.items.values()
+                .filter(|it| {
+                    it.location_id == structure_id
+                        && (st_owner_corp == 0 || it.owner_id == st_owner_corp)
+                        && matches!(it.flag, InventoryFlag::StructureFuel | InventoryFlag::SpecializedFuelBay)
+                        && it.quantity > 0
+                        && !snap.is_item_locked_in_contract_or_job(it.item_id)
+                        && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136)
+                })
+                .fold(0u32, |acc, it| acc.saturating_add(it.quantity as u32));
             let last_cycle_unix = snap.auto_moon_miners.entry(structure_id).or_insert_with(|| AutoMoonMinerRecord {
                 structure_id, fuel_units_remaining: init_fuel, magmatic_gas_remaining: init_gas, efficiency,
                 cycle_duration_seconds: cycle_secs, last_cycle_unix: prev_unix, ore_type_id: primary_mat_tid,
@@ -1309,7 +1320,8 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
             let runnable_cycles = elapsed_cycles.min(init_fuel / fuel_per_cycle).min(init_gas / gas_per_cycle).min(max_cap_cycles);
 
             if runnable_cycles > 0 {
-                let mut rem_fuel = runnable_cycles * fuel_per_cycle;
+                let consumed_fuel = runnable_cycles * fuel_per_cycle;
+                let mut rem_fuel = consumed_fuel;
                 let mut rem_gas = runnable_cycles * gas_per_cycle;
                 for (rem_ref, is_fuel) in [(&mut rem_fuel, true), (&mut rem_gas, false)] {
                     if *rem_ref == 0 { continue; }
@@ -1335,8 +1347,11 @@ pub fn tick_all_metenox_moon_drills(ctx: &ServerContext, prev_unix: u64, now_uni
                         }
                     }
                 }
-                if rem_fuel > 0 {
-                    if let Some(st_mut) = snap.structures.get_mut(&structure_id) {
+                if let Some(st_mut) = snap.structures.get_mut(&structure_id) {
+                    if init_item_fuel > 0 {
+                        let remaining_item_fuel = init_item_fuel.saturating_sub(consumed_fuel);
+                        st_mut.fuel_blocks = st_mut.fuel_blocks.saturating_sub(consumed_fuel).min(remaining_item_fuel);
+                    } else if rem_fuel > 0 {
                         st_mut.fuel_blocks = st_mut.fuel_blocks.saturating_sub(rem_fuel);
                     }
                 }

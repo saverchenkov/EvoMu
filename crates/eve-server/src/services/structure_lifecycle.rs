@@ -146,7 +146,7 @@ pub fn structure_profile(ctx: &ServerContext, type_id: u32) -> Option<StructureP
         Some(2) => HullClass::Medium,
         Some(3) => HullClass::Large,
         Some(4) => HullClass::XLarge,
-        _ if matches!(type_id, 2233 | 3962 | 81826) || t.group_id == 4744 => HullClass::Medium,
+        _ if matches!(type_id, 2233 | 3962) => HullClass::Medium,
         _ => HullClass::Flex,
     };
     Some(StructureProfile {
@@ -162,7 +162,11 @@ pub fn structure_profile(ctx: &ServerContext, type_id: u32) -> Option<StructureP
         pause_shield_dps: a(ATTR_PAUSE_SHIELD_REPAIR_DPS).unwrap_or(0.0),
         pause_armor_dps: a(ATTR_PAUSE_ARMOR_REPAIR_DPS).unwrap_or(0.0),
         pause_hull_dps: a(ATTR_PAUSE_HULL_REPAIR_DPS).unwrap_or(0.0),
-        core_type_id: a(ATTR_REQUIRES_DEED_TYPE).filter(|v| *v > 0.0).map(|v| v as u32),
+        core_type_id: a(ATTR_REQUIRES_DEED_TYPE)
+            .or_else(|| a(5701))
+            .or_else(|| (type_id == 81_826 || t.group_id == 4744).then_some(81_920.0))
+            .filter(|v| *v > 0.0)
+            .map(|v| v as u32),
         disallow_in_highsec: a(ATTR_DISALLOW_IN_HIGHSEC).unwrap_or(0.0) > 0.0,
         high_slots: a(ATTR_HI_SLOTS).unwrap_or(0.0) as u32,
         mid_slots: a(ATTR_MED_SLOTS).unwrap_or(0.0) as u32,
@@ -714,10 +718,347 @@ pub fn tether_range_m(ctx: &ServerContext, st_type_id: u32) -> f64 {
     radius + tether_extra
 }
 
+fn push_char_notification(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    char_id: i64,
+    event: &str,
+    id_type: &str,
+    args: Vec<eve_proto::PyRep>,
+) {
+    let uid = snap.characters.get(&char_id).map(|c| c.user_id).filter(|&u| u != 0);
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let (packet, marshaled_packet) =
+        ServerContext::build_macho_notification_packet(char_id, uid, event, id_type, args.clone());
+    let notif = crate::router::PendingMachoNotification {
+        recipient_char_id: char_id,
+        event: event.into(),
+        id_type: id_type.into(),
+        args,
+        packet,
+        marshaled_packet,
+        created_filetime: now_ft,
+    };
+    ctx.pending_notifications
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(char_id)
+        .or_default()
+        .push(notif.clone());
+    let _ = ctx.notify_tx.send((char_id, notif));
+}
+
+/// Disengages any active structure gunner, evacuates all docked characters into space aboard
+/// their active ship (or a newly spawned Capsule `670`), and resets `home_station_id` for any
+/// character bound to `st.structure_id` BEFORE `dispose_contents` runs (`#568`).
+fn evacuate_structure_on_leave_space(
+    ctx: &ServerContext,
+    snap: &mut WorldStateSnapshot,
+    ext: &mut StructureExtendedState,
+    st: &UpwellStructureRecord,
+) {
+    let structure_id = st.structure_id;
+    let sys_id = st.solar_system_id;
+
+    // 1. Disengage active structure gunner first so their active_ship_id is restored before evacuation.
+    if let Some(pilot_id) = ext.active_pilot_by_structure.get(&structure_id).copied() {
+        crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, ext);
+        let (_, restored_ship) = crate::services::structure_control_ops::disengage_structure_control_in_snap(
+            Some(ctx),
+            snap,
+            structure_id,
+            pilot_id,
+            None,
+        );
+        *ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        let new_ship_opt = (restored_ship > 0).then_some(restored_ship);
+        crate::services::fleet_social::fleet_social_persistence::with_social_state(ctx, |s| {
+            s.forced_session_ship_sync.insert(pilot_id, (structure_id, new_ship_opt));
+        });
+        let new_py = new_ship_opt.map(eve_proto::PyRep::Integer).unwrap_or(eve_proto::PyRep::None);
+        let sess_rep = eve_proto::PyRep::keyval([
+            ("charid", eve_proto::PyRep::Integer(pilot_id)),
+            ("shipid", new_py.clone()),
+        ]);
+        push_char_notification(
+            ctx,
+            snap,
+            pilot_id,
+            "OnSessionChanged",
+            "charid",
+            vec![
+                eve_proto::PyRep::Bool(false),
+                sess_rep,
+                eve_proto::PyRep::Dict(vec![(
+                    eve_proto::PyRep::String("shipid".into()),
+                    eve_proto::PyRep::Tuple(vec![eve_proto::PyRep::Integer(structure_id), new_py]),
+                )]),
+            ],
+        );
+        push_char_notification(
+            ctx,
+            snap,
+            pilot_id,
+            "OnStructureTargetRemoved",
+            "charid",
+            vec![eve_proto::PyRep::Integer(structure_id), eve_proto::PyRep::Integer(0)],
+        );
+    }
+
+    // 2. Evacuate all docked characters into space aboard their active ship (or Capsule 670).
+    let mut docked_cids: Vec<i64> = snap
+        .characters
+        .values()
+        .filter(|c| c.structure_id == Some(structure_id))
+        .map(|c| c.character_id)
+        .collect();
+    docked_cids.sort_unstable();
+
+    let (const_id, region_id) = ctx
+        .sde
+        .solar_systems
+        .get(&sys_id)
+        .map(|s| (s.constellation_id, s.region_id))
+        .unwrap_or((0, 0));
+
+    // Never call `ctx.systems.get_or_spawn` while holding `ctx.db` write lock (`get_or_spawn` reads `ctx.db`).
+    // Unspawned systems will spawn the persisted in-space ship from `snap.items`/`snap.item_positions` on demand.
+    let handle_opt = ctx
+        .systems
+        .active_system_handles()
+        .into_iter()
+        .find(|(id, _)| *id == sys_id)
+        .map(|(_, h)| h);
+
+    for (idx, cid) in docked_cids.into_iter().enumerate() {
+        let cur_active = snap.characters.get(&cid).map(|c| c.active_ship_id).unwrap_or(0);
+        let valid_active = (cur_active > 0
+            && cur_active != structure_id
+            && !snap.structures.contains_key(&cur_active)
+            && snap.items.get(&cur_active).is_some_and(|i| {
+                i.owner_id == cid
+                    && i.singleton
+                    && (i.location_id == structure_id || i.location_id == i64::from(sys_id))
+                    && !snap.is_item_locked_in_contract_or_job(cur_active)
+                    && !matches!(i.flag, InventoryFlag::Locked | InventoryFlag::Deliveries)
+                    && !ctx
+                        .sde
+                        .types
+                        .get(&i.type_id)
+                        .is_some_and(|t| t.category_id == CATEGORY_STRUCTURE)
+            }))
+        .then_some(cur_active);
+
+        let fallback_capsule = valid_active.or_else(|| {
+            snap.items
+                .values()
+                .filter(|i| {
+                    i.owner_id == cid
+                        && i.type_id == 670
+                        && i.singleton
+                        && i.location_id == structure_id
+                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                        && !matches!(i.flag, InventoryFlag::Locked | InventoryFlag::Deliveries)
+                })
+                .min_by_key(|i| i.item_id)
+                .map(|i| i.item_id)
+        });
+
+        let ship_id = fallback_capsule.unwrap_or_else(|| {
+            snap.next_entity_id += 1;
+            let cap_id = snap.next_entity_id;
+            snap.items.insert(
+                cap_id,
+                InventoryItemRecord {
+                    item_id: cap_id,
+                    type_id: 670,
+                    owner_id: cid,
+                    location_id: i64::from(sys_id),
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            cap_id
+        });
+
+        let mut ship_pos = [
+            st.position[0] + 500.0 + (idx as f64) * 200.0,
+            st.position[1],
+            st.position[2],
+        ];
+        if let Some(it) = snap.items.get_mut(&ship_id) {
+            if it.location_id != i64::from(sys_id) || it.flag != InventoryFlag::None {
+                it.location_id = i64::from(sys_id);
+                it.flag = InventoryFlag::None;
+                it.version += 1;
+                snap.item_positions.insert(ship_id, ship_pos);
+            } else if let Some(existing_pos) = snap.item_positions.get(&ship_id).copied() {
+                ship_pos = existing_pos;
+            } else {
+                snap.item_positions.insert(ship_id, ship_pos);
+            }
+        }
+        let ship_type_id = snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(670);
+
+        let (user_id, corp_id, alliance_id, sec_status, war_faction_id, skin_id) =
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.structure_id = None;
+                ch.station_id = None;
+                ch.solar_system_id = sys_id;
+                if const_id != 0 {
+                    ch.constellation_id = const_id;
+                }
+                if region_id != 0 {
+                    ch.region_id = region_id;
+                }
+                ch.active_ship_id = ship_id;
+                let ally = ch.alliance_id;
+                (
+                    ch.user_id,
+                    ch.corporation_id,
+                    ally,
+                    ch.security_status,
+                    ch.war_faction_id,
+                    snap.applied_ship_skins.get(&ship_id).copied().map(|raw| {
+                        ctx.sde
+                            .skin_licenses
+                            .get(&raw)
+                            .map(|l| l.skin_id)
+                            .unwrap_or(raw)
+                    }),
+                )
+            } else {
+                (0, st.owner_corp_id, None, 0.0, None, None)
+            };
+
+        if cur_active != ship_id || cur_active == structure_id {
+            crate::services::fleet_social::fleet_social_persistence::with_social_state(ctx, |s| {
+                s.forced_session_ship_sync.insert(cid, (structure_id, Some(ship_id)));
+            });
+        }
+
+        if let Some(ref handle) = handle_opt {
+            if handle.get_ball_position_sync(ship_id).is_none() {
+                let sde_t = ctx.sde.types.get(&ship_type_id);
+                let mass = sde_t.map(|t| t.mass.max(1.0)).unwrap_or(1_000_000.0);
+                let radius = sde_t.map(|t| t.radius.max(5.0)).unwrap_or(25.0);
+                let max_vel = sde_t
+                    .and_then(|t| t.default_attributes.get(&37).copied())
+                    .unwrap_or(200.0);
+                let inertia = sde_t
+                    .and_then(|t| t.default_attributes.get(&70).copied())
+                    .unwrap_or(1.0);
+                let group_id = sde_t.map(|t| t.group_id).unwrap_or(29);
+                let category_id = sde_t.map(|t| t.category_id).unwrap_or(6);
+                let corp_ally = alliance_id
+                    .or_else(|| snap.corporations.get(&corp_id).and_then(|c| c.alliance_id))
+                    .unwrap_or(0);
+                handle.try_spawn_ball_with_meta(
+                    eve_destiny::Ball {
+                        id: ship_id,
+                        type_id: ship_type_id,
+                        position: glam::DVec3::from_array(ship_pos),
+                        velocity: glam::DVec3::ZERO,
+                        max_velocity: max_vel,
+                        inertia,
+                        mass,
+                        radius,
+                        speed_fraction: 0.0,
+                        mode: eve_destiny::MovementMode::Stop,
+                    },
+                    ctx.build_type_combat_state(ship_type_id),
+                    eve_destiny::SlimItemMeta {
+                        owner_id: cid,
+                        char_id: Some(cid),
+                        corp_id,
+                        alliance_id: corp_ally,
+                        war_faction_id,
+                        group_id,
+                        category_id,
+                        security_status: sec_status,
+                        is_cloaked: false,
+                        skin_id,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+
+        let sess_rep = eve_proto::PyRep::keyval([
+            ("userid", eve_proto::PyRep::Integer(user_id as i64)),
+            ("charid", eve_proto::PyRep::Integer(cid)),
+            ("corpid", eve_proto::PyRep::Integer(corp_id)),
+            ("allianceid", alliance_id.map(eve_proto::PyRep::Integer).unwrap_or(eve_proto::PyRep::None)),
+            ("shipid", eve_proto::PyRep::Integer(ship_id)),
+            ("stationid", eve_proto::PyRep::None),
+            ("structureid", eve_proto::PyRep::None),
+            ("solarsystemid2", eve_proto::PyRep::Integer(i64::from(sys_id))),
+            ("solarsystemid", eve_proto::PyRep::Integer(i64::from(sys_id))),
+            ("locationid", eve_proto::PyRep::Integer(i64::from(sys_id))),
+            ("constellationid", eve_proto::PyRep::Integer(i64::from(const_id))),
+            ("regionid", eve_proto::PyRep::Integer(i64::from(region_id))),
+        ]);
+        let mut diff = vec![(
+            eve_proto::PyRep::String("structureid".into()),
+            eve_proto::PyRep::Tuple(vec![eve_proto::PyRep::Integer(structure_id), eve_proto::PyRep::None]),
+        )];
+        if cur_active != ship_id {
+            let old_py = if cur_active > 0 {
+                eve_proto::PyRep::Integer(cur_active)
+            } else {
+                eve_proto::PyRep::None
+            };
+            diff.push((
+                eve_proto::PyRep::String("shipid".into()),
+                eve_proto::PyRep::Tuple(vec![old_py, eve_proto::PyRep::Integer(ship_id)]),
+            ));
+        }
+        push_char_notification(
+            ctx,
+            snap,
+            cid,
+            "OnSessionChanged",
+            "charid",
+            vec![
+                eve_proto::PyRep::Bool(false),
+                sess_rep,
+                eve_proto::PyRep::Dict(diff),
+            ],
+        );
+        push_char_notification(
+            ctx,
+            snap,
+            cid,
+            "OnCharacterLeftStructure",
+            "charid",
+            vec![eve_proto::PyRep::Integer(cid)],
+        );
+    }
+
+    // 3. Reset home_station_id for every character whose death clone was bound to this structure.
+    let mut home_cids: Vec<i64> = snap
+        .characters
+        .values()
+        .filter(|c| c.home_station_id == structure_id)
+        .map(|c| c.character_id)
+        .collect();
+    home_cids.sort_unstable();
+    for cid in home_cids {
+        let fallback = resolve_char_school_or_nearest_station(ctx, snap, cid, sys_id);
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.home_station_id = fallback;
+        }
+    }
+}
+
 /// Destroys a structure: killmail, structure wreck, quantum core in wreck, and asset safety.
 pub fn destroy_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &mut StructureExtendedState, structure_id: i64, attacker_char_id: i64, now: u64) -> DisposalOutcome {
     let mut out = DisposalOutcome::default();
     let Some(st) = snap.structures.get(&structure_id).cloned() else { return out };
+    evacuate_structure_on_leave_space(ctx, snap, ext, &st);
     dispose_contents(ctx, snap, ext, &st, true, now, &mut out);
     let wreck_type_id = ctx.sde.wrecks.get(&st.type_id).copied().unwrap_or(26557);
     snap.next_entity_id += 1;
@@ -822,6 +1163,7 @@ pub fn prepare_home_station_respawn(ctx: &ServerContext, char_id: i64) {
 pub fn package_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &mut StructureExtendedState, structure_id: i64, now: u64) -> DisposalOutcome {
     let mut out = DisposalOutcome::default();
     let Some(st) = snap.structures.get(&structure_id).cloned() else { return out };
+    evacuate_structure_on_leave_space(ctx, snap, ext, &st);
     dispose_contents(ctx, snap, ext, &st, false, now, &mut out);
     if st.quantum_core_installed {
         if let Some(core) = structure_profile(ctx, st.type_id).and_then(|p| p.core_type_id) {
@@ -974,7 +1316,7 @@ pub(crate) fn sync_structure_with_released(
         let timer = st.reinforced_until_unix;
         let next = match st.state.as_str() {
             STATE_ANCHOR_VULNERABLE if now >= timer => Some((STATE_ANCHORING, timer + anchoring_secs)),
-            STATE_ANCHORING if now >= timer => Some(if profile.core_type_id.is_some() { (STATE_NO_CORE, 0) } else { (STATE_ONLINING, timer + ONLINING_SECS) }),
+            STATE_ANCHORING if now >= timer => Some(if profile.core_type_id.is_some() && !st.quantum_core_installed { (STATE_NO_CORE, 0) } else { (STATE_ONLINING, timer + ONLINING_SECS) }),
             STATE_NO_CORE => {
                 if ctx.sde.solar_systems.get(&st.solar_system_id).map(|s| s.region_id) == Some(POCHVEN_REGION_ID) {
                     None

@@ -96,7 +96,8 @@ pub fn check_anchor_position(
         .get(&sys_id)
         .map(|s| s.security_status)
         .unwrap_or(1.0);
-    if profile.hull_class == HullClass::Flex && (sys_sec >= 0.0 || sys_id >= 31_000_000) {
+    let is_sov_flex = profile.hull_class == HullClass::Flex && profile.group_id != 4744 && profile.type_id != 81_826;
+    if is_sov_flex && (sys_sec >= 0.0 || sys_id >= 31_000_000) {
         return Err(err(
             "CannotAnchorFlexOutsideSovNull",
             format!(
@@ -130,7 +131,7 @@ pub fn check_anchor_position(
             format!("Only one Keepstar-sized Citadel may be anchored in solar system {sys_id}"),
         ));
     }
-    if profile.hull_class == HullClass::Flex
+    if is_sov_flex
         && snap
             .structures
             .values()
@@ -290,7 +291,8 @@ pub fn validate_and_resolve_anchor(
 
     check_anchor_position(ctx, snap, profile, sys_id, anchor_pos)?;
 
-    if profile.hull_class == HullClass::Flex {
+    let is_sov_flex = profile.hull_class == HullClass::Flex && profile.group_id != 4744 && profile.type_id != 81_826;
+    if is_sov_flex {
         check_flex_system_sovereignty(snap, sys_id, corp_id, profile.type_id)?;
     }
 
@@ -302,7 +304,7 @@ pub fn validate_and_resolve_anchor(
         .unwrap_or(0);
     // V24 base FLEX deploying time is 2,700 s (`FLEX_DEPLOYING_TIME`); DERIVED `(1 + strat_idx)` scaling
     // extends FLEX anchoring duration per Strategic Index level.
-    let mut anchoring_duration_secs = if profile.hull_class == HullClass::Flex {
+    let mut anchoring_duration_secs = if is_sov_flex {
         ANSIBLEX_BASE_ANCHORING_SECS * (1 + strat_idx)
     } else {
         ANCHORING_SECS
