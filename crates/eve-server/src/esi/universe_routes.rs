@@ -288,6 +288,15 @@ pub fn dispatch_universe_and_nav(
                 Ok(v) => v,
                 Err(e) => return e,
             };
+            if let Some(c) = claims {
+                if c.character_id != char_id {
+                    return RouteExecutionResult::error(
+                        403,
+                        "Character mismatch for structure search".to_string(),
+                    );
+                }
+            }
+            let caller_char_id = claims.map(|c| c.character_id).unwrap_or(char_id);
             let has_char = ctx
                 .db
                 .with_snapshot(|snap| snap.characters.contains_key(&char_id));
@@ -386,7 +395,13 @@ pub fn dispatch_universe_and_nav(
                             snap.structures
                                 .values()
                                 .filter(|st| {
-                                    character_has_structure_acl_access(snap, char_id, st)
+                                    character_has_structure_acl_access(snap, caller_char_id, st)
+                                        && crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access(
+                                            ctx,
+                                            snap,
+                                            st.structure_id,
+                                            caller_char_id,
+                                        )
                                         && matches_name(&st.name)
                                 })
                                 .map(|st| st.structure_id)
@@ -926,6 +941,12 @@ pub fn dispatch_universe_and_nav(
                     .values()
                     .filter(|st| {
                         st.state != "Destroyed"
+                            && crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access(
+                                ctx,
+                                snap,
+                                st.structure_id,
+                                0,
+                            )
                             && (!require_active_service
                                 || (st.quantum_core_installed && st.fuel_blocks > 0))
                     })
@@ -948,7 +969,14 @@ pub fn dispatch_universe_and_nav(
                         format!("Structure {sid} not found"),
                     );
                 };
-                if !character_has_structure_acl_access(snap, caller_char_id, st) {
+                if !character_has_structure_acl_access(snap, caller_char_id, st)
+                    || !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access(
+                        ctx,
+                        snap,
+                        st.structure_id,
+                        caller_char_id,
+                    )
+                {
                     return RouteExecutionResult::error(
                         403,
                         format!("Character {caller_char_id} is not on the ACL for structure {sid}"),

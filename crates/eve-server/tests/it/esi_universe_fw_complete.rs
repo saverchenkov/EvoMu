@@ -776,6 +776,16 @@ async fn test_esi_universe_celestials_stations_structures_and_jumps_kills() {
                 self_destruct_at_unix: None,
             },
         );
+        let mut ext =
+            eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        ext.access_profiles.insert(
+            structure_id,
+            eve_server::services::station_structure::structure_upwell_ops::StructureAccessProfile {
+                corp_only: false,
+                ..Default::default()
+            },
+        );
+        eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
         snap.station_office_rental_costs.insert(60_003_760, 750_000.0);
 
         for (cid, ts) in [
@@ -932,6 +942,62 @@ async fn test_esi_universe_celestials_stations_structures_and_jumps_kills() {
         &router,
         EsiHttpRequest::new("GET", "/v2/universe/structures/99999999/").with_bearer_token(&owner_token),
         404,
+    );
+
+    // Private corp-only structure must stay hidden from neutral outsiders in public list and detail
+    let neutral_outsider_id = 90_000_099_i64;
+    let private_structure_id = 1_000_000_000_099_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(mut ch) = snap.characters.get(&outsider_id).cloned() {
+            ch.character_id = neutral_outsider_id;
+            ch.name = "Neutral Outsider".into();
+            ch.standings.clear();
+            snap.characters.insert(neutral_outsider_id, ch);
+        }
+        snap.structures.insert(
+            private_structure_id,
+            UpwellStructureRecord {
+                structure_id: private_structure_id,
+                type_id: 35832,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Hidden Corp Citadel".into(),
+                position: [5000.0, 6000.0, 7000.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                ..Default::default()
+            },
+        );
+        let mut ext =
+            eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        ext.access_profiles.insert(
+            private_structure_id,
+            eve_server::services::station_structure::structure_upwell_ops::StructureAccessProfile {
+                corp_only: true,
+                ..Default::default()
+            },
+        );
+        eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+    });
+    let neutral_token = issue_token_with_scopes(
+        &ctx,
+        neutral_outsider_id,
+        vec!["esi-universe.read_structures.v1".to_string()],
+    );
+    let list_after = call(&router, EsiHttpRequest::new("GET", "/v1/universe/structures/"), 200);
+    assert!(!list_after.as_array().unwrap().contains(&json!(private_structure_id)));
+    call(
+        &router,
+        EsiHttpRequest::new("GET", format!("/v2/universe/structures/{private_structure_id}/"))
+            .with_bearer_token(&neutral_token),
+        403,
+    );
+    call(
+        &router,
+        EsiHttpRequest::new("GET", format!("/v2/universe/structures/{private_structure_id}/"))
+            .with_bearer_token(&owner_token),
+        200,
     );
 
     // 3. Universe System Jumps and Kills (`GET /universe/system_jumps`, `GET /universe/system_kills`)

@@ -324,3 +324,123 @@ fn dispatch_universe_catalog_names_ids_structures_and_autopilot_waypoint() {
     );
     assert_eq!(wp_res.status_code, 204);
 }
+
+#[test]
+fn private_structure_is_hidden_from_public_list_detail_and_search() {
+    let (ctx, _token, char_id, corp_id, _planet_id) = seed_full_esi_context();
+    let outsider_id = 90_000_099_i64;
+    let private_sid = 1_055_000_099_i64;
+    let public_sid = 1_055_000_100_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters[&char_id].clone();
+        ch.character_id = outsider_id;
+        ch.name = "Neutral Outsider".into();
+        ch.corporation_id = 98_999_888;
+        ch.alliance_id = None;
+        ch.standings.clear();
+        snap.characters.insert(outsider_id, ch);
+        for (sid, name, corp_only) in [
+            (private_sid, "Private Keepstar", true),
+            (public_sid, "Public Freeport Keepstar", false),
+        ] {
+            snap.structures.insert(
+                sid,
+                UpwellStructureRecord {
+                    structure_id: sid,
+                    type_id: 35_834,
+                    owner_corp_id: corp_id,
+                    solar_system_id: 30_000_142,
+                    name: name.into(),
+                    position: [10_000.0, 20_000.0, 30_000.0],
+                    state: "ShieldVulnerable".into(),
+                    quantum_core_installed: true,
+                    fuel_blocks: 500,
+                    ..Default::default()
+                },
+            );
+            let mut ext =
+                crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+            ext.access_profiles.insert(
+                sid,
+                crate::services::station_structure::structure_upwell_ops::StructureAccessProfile {
+                    corp_only,
+                    ..Default::default()
+                },
+            );
+            crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+        }
+    });
+
+    let empty_q = HashMap::new();
+    let list_res =
+        dispatch_universe_and_nav(&ctx, "GET", "/universe/structures", &empty_q, &empty_q, None, 1, b"");
+    assert_eq!(list_res.status_code, 200);
+    let ids = list_res.body.unwrap();
+    let arr = ids.as_array().unwrap();
+    assert!(!arr.contains(&json!(private_sid)));
+    assert!(arr.contains(&json!(public_sid)));
+
+    let outsider_claims = make_claims(outsider_id);
+    let priv_detail = dispatch_universe_and_nav(
+        &ctx,
+        "GET",
+        "/universe/structures/{structure_id}",
+        &params(&[("structure_id", &private_sid.to_string())]),
+        &empty_q,
+        Some(&outsider_claims),
+        1,
+        b"",
+    );
+    assert_eq!(priv_detail.status_code, 403);
+
+    let owner_claims = make_claims(char_id);
+    let owner_detail = dispatch_universe_and_nav(
+        &ctx,
+        "GET",
+        "/universe/structures/{structure_id}",
+        &params(&[("structure_id", &private_sid.to_string())]),
+        &empty_q,
+        Some(&owner_claims),
+        1,
+        b"",
+    );
+    assert_eq!(owner_detail.status_code, 200);
+
+    let search_query = "Keepstar";
+    let search_outsider = dispatch_universe_and_nav(
+        &ctx,
+        "GET",
+        "/characters/{character_id}/search",
+        &params(&[("character_id", &outsider_id.to_string())]),
+        &params(&[("categories", "structure"), ("search", search_query)]),
+        Some(&outsider_claims),
+        1,
+        b"",
+    );
+    assert_eq!(search_outsider.status_code, 200);
+    let outsider_hits = search_outsider.body.unwrap()["structure"]
+        .as_array()
+        .cloned()
+        .unwrap();
+    assert!(!outsider_hits.contains(&json!(private_sid)));
+    assert!(outsider_hits.contains(&json!(public_sid)));
+
+    let search_owner = dispatch_universe_and_nav(
+        &ctx,
+        "GET",
+        "/characters/{character_id}/search",
+        &params(&[("character_id", &char_id.to_string())]),
+        &params(&[("categories", "structure"), ("search", search_query)]),
+        Some(&owner_claims),
+        1,
+        b"",
+    );
+    assert_eq!(search_owner.status_code, 200);
+    let owner_hits = search_owner.body.unwrap()["structure"]
+        .as_array()
+        .cloned()
+        .unwrap();
+    assert!(owner_hits.contains(&json!(private_sid)));
+    assert!(owner_hits.contains(&json!(public_sid)));
+}

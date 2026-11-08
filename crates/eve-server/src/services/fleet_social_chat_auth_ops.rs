@@ -110,16 +110,17 @@ pub(super) fn has_dynamic_org_operator_role(
     char_id: i64,
     chan_id: &str,
 ) -> bool {
-    if let Some(cid) = chan_id.strip_prefix("corpid:").and_then(|s| s.parse::<i64>().ok()) {
+    let lower = chan_id.to_ascii_lowercase();
+    if let Some(cid) = lower.strip_prefix("corpid:").and_then(|s| s.parse::<i64>().ok()) {
         return has_corp_chat_operator_rights(snap, session, char_id, cid);
     }
-    if let Some(aid) = chan_id.strip_prefix("allianceid:").and_then(|s| s.parse::<i64>().ok()) {
+    if let Some(aid) = lower.strip_prefix("allianceid:").and_then(|s| s.parse::<i64>().ok()) {
         let Some(ally) = snap.alliances.get(&aid) else {
             return false;
         };
         return has_corp_chat_operator_rights(snap, session, char_id, ally.executor_corp_id);
     }
-    if let Some(fid) = chan_id.strip_prefix("fleetid:").and_then(|s| s.parse::<i64>().ok()) {
+    if let Some(fid) = lower.strip_prefix("fleetid:").and_then(|s| s.parse::<i64>().ok()) {
         let Some(fleet) = snap.fleets.get(&fid) else {
             return false;
         };
@@ -211,7 +212,8 @@ pub(super) fn validate_channel_join_auth(
         message: format!("Not authorized to join channel {chan_id}"),
     };
 
-    if let Some(rest) = chan_id.strip_prefix("solarsystemid2:") {
+    let lower = chan_id.to_ascii_lowercase();
+    if let Some(rest) = lower.strip_prefix("solarsystemid2:") {
         let Some(req_sys) = rest.parse::<u32>().ok() else {
             return Err(deny());
         };
@@ -220,7 +222,7 @@ pub(super) fn validate_channel_join_auth(
         }
         return Ok(());
     }
-    if let Some(rest) = chan_id.strip_prefix("resourcewars:") {
+    if let Some(rest) = lower.strip_prefix("resourcewars:") {
         let Some(req_sys) = rest.parse::<u32>().ok() else {
             return Err(deny());
         };
@@ -229,7 +231,7 @@ pub(super) fn validate_channel_join_auth(
         }
         return Ok(());
     }
-    if let Some(rest) = chan_id.strip_prefix("constellationid:") {
+    if let Some(rest) = lower.strip_prefix("constellationid:") {
         let Some(req_cid) = rest.parse::<u32>().ok() else {
             return Err(deny());
         };
@@ -243,7 +245,7 @@ pub(super) fn validate_channel_join_auth(
         }
         return Ok(());
     }
-    if let Some(rest) = chan_id.strip_prefix("regionid:") {
+    if let Some(rest) = lower.strip_prefix("regionid:") {
         let Some(req_rid) = rest.parse::<u32>().ok() else {
             return Err(deny());
         };
@@ -257,7 +259,7 @@ pub(super) fn validate_channel_join_auth(
         }
         return Ok(());
     }
-    if let Some(rest) = chan_id.strip_prefix("corpid:") {
+    if let Some(rest) = lower.strip_prefix("corpid:") {
         let Some(req_corp) = rest.parse::<i64>().ok() else {
             return Err(deny());
         };
@@ -266,7 +268,7 @@ pub(super) fn validate_channel_join_auth(
         }
         return Ok(());
     }
-    if let Some(rest) = chan_id.strip_prefix("allianceid:") {
+    if let Some(rest) = lower.strip_prefix("allianceid:") {
         let Some(req_ally) = rest.parse::<i64>().ok() else {
             return Err(deny());
         };
@@ -275,7 +277,7 @@ pub(super) fn validate_channel_join_auth(
         }
         return Ok(());
     }
-    if let Some(rest) = chan_id.strip_prefix("fleetid:") {
+    if let Some(rest) = lower.strip_prefix("fleetid:") {
         let Some(req_fleet) = rest.parse::<i64>().ok() else {
             return Err(deny());
         };
@@ -289,7 +291,7 @@ pub(super) fn validate_channel_join_auth(
         }
         return Ok(());
     }
-    if let Some(rest) = chan_id.strip_prefix("factionid:") {
+    if let Some(rest) = lower.strip_prefix("factionid:") {
         let Some(req_fac) = rest.parse::<i64>().ok() else {
             return Err(deny());
         };
@@ -298,7 +300,7 @@ pub(super) fn validate_channel_join_auth(
         }
         return Ok(());
     }
-    let is_priv = chan_id.starts_with("private:")
+    let is_priv = lower.starts_with("private:")
         || snap.chat_channels.get(chan_id).is_some_and(|c| c.is_private);
     if is_priv {
         let invited = snap.chat_channels.get(chan_id).is_some_and(|c| {

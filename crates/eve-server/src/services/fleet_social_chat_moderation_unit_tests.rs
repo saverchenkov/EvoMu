@@ -67,13 +67,24 @@ async fn chat_scoped_messages_moderation_acl_invite_cspa_and_destroy_channel() {
         );
     }
 
-    // Matching system, corp, alliance, fleet and delayed wormhole local -> all succeed
+    // Matching system, corp, alliance, fleet and delayed wormhole local -> join then SendMessage all succeed
     for good_chan in [
         "solarsystemid2:30000142",
         "corpid:98000001",
         "allianceid:99000001",
         "fleetid:700001",
     ] {
+        handle_social(
+            &ctx,
+            &mut owner_sess,
+            "LSC",
+            "JoinChannel",
+            &[PyRep::String(good_chan.into())],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(handle_social(
             &ctx,
             &mut owner_sess,
@@ -347,4 +358,331 @@ async fn chat_scoped_messages_moderation_acl_invite_cspa_and_destroy_channel() {
     .await
     .unwrap()
     .is_ok());
+}
+
+#[tokio::test]
+async fn chat_channel_takeover_nonmember_spoofing_and_owner_lockout_are_blocked() {
+    let ctx = test_ctx_with_clock(1_800_012_500);
+    let kw = HashMap::new();
+    let owner_id = 90_000_011i64;
+    let op_id = 90_000_012i64;
+    let attacker_id = 90_000_013i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut c1 = clone_char_with(snap, owner_id, "ChanOwner", 98_000_011, 30_000_142, 100_000_011);
+        c1.war_faction_id = Some(500_001);
+        let c2 = clone_char_with(snap, op_id, "ChanOp", 98_000_012, 30_000_142, 100_000_012);
+        let mut c3 = clone_char_with(snap, attacker_id, "Attacker", 98_000_013, 30_000_144, 100_000_013);
+        c3.war_faction_id = Some(500_004);
+        snap.characters.insert(owner_id, c1);
+        snap.characters.insert(op_id, c2);
+        snap.characters.insert(attacker_id, c3);
+    });
+
+    let mut owner_sess = SessionState::new(21);
+    owner_sess.user_id = Some(owner_id as u64);
+    owner_sess.character_id = Some(owner_id);
+    owner_sess.solar_system_id = Some(30_000_142);
+    owner_sess.war_faction_id = Some(500_001);
+
+    let mut op_sess = SessionState::new(22);
+    op_sess.user_id = Some(op_id as u64);
+    op_sess.character_id = Some(op_id);
+    op_sess.solar_system_id = Some(30_000_142);
+
+    let mut attacker_sess = SessionState::new(23);
+    attacker_sess.user_id = Some(attacker_id as u64);
+    attacker_sess.character_id = Some(attacker_id);
+    attacker_sess.solar_system_id = Some(30_000_144);
+    attacker_sess.war_faction_id = Some(500_004);
+
+    // 1. CreatePlayerOwnedChannel refuses to overwrite an existing channel (exact or mixed-case name)
+    handle_social(
+        &ctx,
+        &mut owner_sess,
+        "XmppChatMgr",
+        "CreatePlayerOwnedChannel",
+        &[
+            PyRep::String("Intel Hub".into()),
+            PyRep::String("secretpw".into()),
+            PyRep::String("Owner MOTD".into()),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    for hijack_name in ["Intel Hub", "INTEL HUB"] {
+        let err = handle_social(
+            &ctx,
+            &mut attacker_sess,
+            "XmppChatMgr",
+            "CreatePlayerOwnedChannel",
+            &[PyRep::String(hijack_name.into())],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err.code, "ChannelAlreadyExists");
+    }
+    ctx.db.with_snapshot(|snap| {
+        let ch = &snap.chat_channels["channel:intel_hub"];
+        assert_eq!(ch.owner_id, Some(owner_id));
+        assert_eq!(ch.password.as_deref(), Some("secretpw"));
+        assert_eq!(ch.motd, "Owner MOTD");
+        assert!(ch.members.contains(&owner_id));
+        assert!(!ch.members.contains(&attacker_id));
+    });
+
+    // 2. Non-member and banned member cannot SendMessage into the channel
+    let err_unjoined = handle_social(
+        &ctx,
+        &mut attacker_sess,
+        "XmppChatMgr",
+        "SendMessage",
+        &[PyRep::String("channel:intel_hub".into()), PyRep::String("spoofed".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_unjoined.code, "ChannelAccessDenied");
+
+    // 3. Scoped system/constellation/region/faction channels reject spoofing even if case-varied
+    let jita_cid = ctx.sde.solar_systems[&30_000_142].constellation_id;
+    let jita_rid = ctx.sde.solar_systems[&30_000_142].region_id;
+    let wrong_cid = jita_cid + 999;
+    let wrong_rid = jita_rid + 999;
+    for bad_chan in [
+        format!("constellationid:{wrong_cid}"),
+        format!("ConstellationID:{wrong_cid}"),
+        format!("regionid:{wrong_rid}"),
+        "factionid:500004".to_string(),
+        "resourcewars:30000144".to_string(),
+        "SOLARSYSTEMID2:30000144".to_string(),
+    ] {
+        let err = handle_social(
+            &ctx,
+            &mut owner_sess,
+            "LSC",
+            "SendMessage",
+            &[PyRep::String(bad_chan.clone()), PyRep::String("spoof".into())],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err.code, "ChannelAccessDenied", "expected rejection for {bad_chan}");
+    }
+    for good_chan in [
+        format!("constellationid:{jita_cid}"),
+        format!("regionid:{jita_rid}"),
+        "factionid:500001".to_string(),
+    ] {
+        handle_social(
+            &ctx,
+            &mut owner_sess,
+            "LSC",
+            "JoinChannel",
+            &[PyRep::String(good_chan.clone())],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(handle_social(
+            &ctx,
+            &mut owner_sess,
+            "LSC",
+            "SendMessage",
+            &[PyRep::String(good_chan.clone()), PyRep::String("legit".into())],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_ok());
+    }
+
+    // 4. Operator cannot mute, ban/kick, clear ACL of owner, or promote another operator
+    handle_social(
+        &ctx,
+        &mut owner_sess,
+        "LSC",
+        "JoinChannel",
+        &[PyRep::String("channel:intel_hub".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    handle_social(
+        &ctx,
+        &mut op_sess,
+        "LSC",
+        "JoinChannel",
+        &[PyRep::String("channel:intel_hub".into()), PyRep::String("secretpw".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    handle_social(
+        &ctx,
+        &mut owner_sess,
+        "LSC",
+        "AccessControl",
+        &[
+            PyRep::String("channel:intel_hub".into()),
+            PyRep::Integer(op_id),
+            PyRep::Integer(2),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // Operator cannot promote attacker to operator (mode 2)
+    assert_eq!(
+        handle_social(
+            &ctx,
+            &mut op_sess,
+            "LSC",
+            "AccessControl",
+            &[
+                PyRep::String("channel:intel_hub".into()),
+                PyRep::Integer(attacker_id),
+                PyRep::Integer(2),
+            ],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "NotChannelOwner"
+    );
+
+    // Operator cannot mute owner via AccessControl (-1) or GMMute
+    assert_eq!(
+        handle_social(
+            &ctx,
+            &mut op_sess,
+            "LSC",
+            "AccessControl",
+            &[
+                PyRep::String("channel:intel_hub".into()),
+                PyRep::Integer(owner_id),
+                PyRep::Integer(-1),
+            ],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "NotChannelOwner"
+    );
+    assert_eq!(
+        handle_social(
+            &ctx,
+            &mut op_sess,
+            "XmppChatMgr",
+            "GMMute",
+            &[PyRep::Integer(owner_id), PyRep::String("channel:intel_hub".into())],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "NotChannelOwner"
+    );
+
+    // Operator cannot kick/ban owner (mode -2) or reset owner ACL (mode 0)
+    for bad_mode in [-2_i64, 0] {
+        assert_eq!(
+            handle_social(
+                &ctx,
+                &mut op_sess,
+                "LSC",
+                "AccessControl",
+                &[
+                    PyRep::String("channel:intel_hub".into()),
+                    PyRep::Integer(owner_id),
+                    PyRep::Integer(bad_mode),
+                ],
+                &kw,
+            )
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "NotChannelOwner"
+        );
+    }
+
+    // Owner still has membership, operator rights, and is not in deny_list or blocked_in_channel
+    ctx.db.with_snapshot(|snap| {
+        let ch = &snap.chat_channels["channel:intel_hub"];
+        assert!(ch.members.contains(&owner_id));
+        assert_eq!(ch.owner_id, Some(owner_id));
+        let denied = snap
+            .chat_channel_acl
+            .get("channel:intel_hub")
+            .is_some_and(|a| a.deny_list.contains(&owner_id));
+        assert!(!denied);
+    });
+    assert!(!ctx
+        .social_extras
+        .lock()
+        .unwrap()
+        .blocked_in_channel
+        .get("channel:intel_hub")
+        .is_some_and(|b| b.contains(&owner_id)));
+
+    // Owner can ban attacker via mode -2, blocking attacker SendMessage and JoinChannel
+    handle_social(
+        &ctx,
+        &mut attacker_sess,
+        "LSC",
+        "JoinChannel",
+        &[PyRep::String("channel:intel_hub".into()), PyRep::String("secretpw".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    handle_social(
+        &ctx,
+        &mut owner_sess,
+        "LSC",
+        "AccessControl",
+        &[
+            PyRep::String("channel:intel_hub".into()),
+            PyRep::Integer(attacker_id),
+            PyRep::Integer(-2),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        handle_social(
+            &ctx,
+            &mut attacker_sess,
+            "LSC",
+            "SendMessage",
+            &[PyRep::String("channel:intel_hub".into()), PyRep::String("after ban".into())],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "ChannelAccessDenied"
+    );
 }

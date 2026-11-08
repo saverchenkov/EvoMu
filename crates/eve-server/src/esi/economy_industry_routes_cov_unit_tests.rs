@@ -366,6 +366,17 @@ fn facilities_jobs_format_mining_extractions_and_observers_edge_cases() {
         save_facility_taxes(snap, st_react_exact, &HashMap::from([(9, 0.035)]));
         save_facility_taxes(snap, st_react_mfg_fb, &HashMap::from([(1, 0.025)]));
         save_facility_taxes(snap, st_react_def_fb, &HashMap::new());
+        let mut ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        for sid in [st_react_exact, st_react_mfg_fb, st_react_def_fb] {
+            ext.access_profiles.insert(
+                sid,
+                crate::services::station_structure::structure_upwell_ops::StructureAccessProfile {
+                    corp_only: false,
+                    ..Default::default()
+                },
+            );
+        }
+        crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
 
         snap.items.insert(
             555_001,
@@ -451,6 +462,51 @@ fn facilities_jobs_format_mining_extractions_and_observers_edge_cases() {
     assert_eq!(tax_of(non_ind_st_id), Some(NPC_STATION_INDUSTRY_TAX_RATE));
     assert_eq!(tax_of(st_destroyed), None);
     assert_eq!(tax_of(st_bad_sys), None);
+
+    // Private corp-only structure with industry service must be hidden from unauthenticated /industry/facilities
+    let st_private = 1_077_000_006_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            st_private,
+            UpwellStructureRecord {
+                structure_id: st_private,
+                type_id: 35_835,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                name: "Private Industry Citadel".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                ..Default::default()
+            },
+        );
+        let mod_id = st_private + 500;
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: 45_539,
+                owner_id: corp_id,
+                location_id: st_private,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(mod_id, true);
+        let mut ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        ext.access_profiles.insert(
+            st_private,
+            crate::services::station_structure::structure_upwell_ops::StructureAccessProfile {
+                corp_only: true,
+                ..Default::default()
+            },
+        );
+        crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+    });
+    let facs_after = dispatch_economy_industry_route(&ctx, "GET", "/industry/facilities", &empty, &empty, None, 1).unwrap();
+    assert!(!body(&facs_after).as_array().unwrap().iter().any(|f| f["facility_id"] == st_private));
 
     assert_eq!(dispatch_economy_industry_route(&ctx, "GET", "/characters/{character_id}/industry/jobs", &empty, &empty, None, 1).unwrap().status_code, 400);
     assert_eq!(dispatch_economy_industry_route(&ctx, "GET", "/characters/{character_id}/industry/jobs", &params(&[("character_id", "99999999")]), &empty, None, 1).unwrap().status_code, 404);

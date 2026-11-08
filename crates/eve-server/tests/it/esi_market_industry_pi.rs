@@ -1848,6 +1848,16 @@ async fn test_esi6_industry_and_mining_routes() {
             struct_id,
             &std::collections::HashMap::from([(1_u8, 0.08)]),
         );
+        let mut ext =
+            eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        ext.access_profiles.insert(
+            struct_id,
+            eve_server::services::station_structure::structure_upwell_ops::StructureAccessProfile {
+                corp_only: false,
+                ..Default::default()
+            },
+        );
+        eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
         let mut next_iid = 941_000_i64;
         for (owner, loc) in [
             (other_char_id, jita_stn),
@@ -3646,6 +3656,16 @@ pub(crate) mod esi6_industry_mining_routes {
                 struct_id,
                 &std::collections::HashMap::from([(1_u8, 0.08)]),
             );
+            let mut ext =
+                eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+            ext.access_profiles.insert(
+                struct_id,
+                eve_server::services::station_structure::structure_upwell_ops::StructureAccessProfile {
+                    corp_only: false,
+                    ..Default::default()
+                },
+            );
+            eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
             let mut next_iid = 941_000_i64;
             for (owner, loc) in [
                 (other_char_id, jita_stn),
@@ -6519,6 +6539,18 @@ pub(crate) mod esi_char_public_contracts_live {
                 );
             }
             save_facility_taxes(snap, raitaru_id, &HashMap::from([(1_u8, 0.035)]));
+            let mut ext =
+                eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+            for sid in [raitaru_id, bare_astrahus_id] {
+                ext.access_profiles.insert(
+                    sid,
+                    eve_server::services::station_structure::structure_upwell_ops::StructureAccessProfile {
+                        corp_only: false,
+                        ..Default::default()
+                    },
+                );
+            }
+            eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
             Ok(())
         });
 

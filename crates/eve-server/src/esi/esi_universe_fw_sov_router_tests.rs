@@ -38,6 +38,7 @@ fn universe_names_ids_structures_and_autopilot_waypoint_branches() {
     let alliance_id = 99_000_001_i64;
     let struct_id = 1_055_000_001_i64;
     let offline_struct_id = 1_055_000_002_i64;
+    let private_struct_id = 1_055_000_003_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
@@ -61,6 +62,45 @@ fn universe_names_ids_structures_and_autopilot_waypoint_branches() {
                 self_destruct_at_unix: None,
             },
         );
+        snap.structures.insert(
+            private_struct_id,
+            UpwellStructureRecord {
+                structure_id: private_struct_id,
+                type_id: 35_832,
+                owner_corp_id: 98_999_999,
+                solar_system_id: 30_000_142,
+                name: "Secret Corp Citadel".into(),
+                position: [50_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                shield_hp: 100_000.0,
+                armor_hp: 100_000.0,
+                hull_hp: 100_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        let mut ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        for sid in [struct_id, offline_struct_id] {
+            ext.access_profiles.insert(
+                sid,
+                crate::services::station_structure::structure_upwell_ops::StructureAccessProfile {
+                    corp_only: false,
+                    ..Default::default()
+                },
+            );
+        }
+        ext.access_profiles.insert(
+            private_struct_id,
+            crate::services::station_structure::structure_upwell_ops::StructureAccessProfile {
+                corp_only: true,
+                ..Default::default()
+            },
+        );
+        crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
         snap.structure_docking_acl_denied
             .entry(offline_struct_id)
             .or_default()
@@ -85,6 +125,10 @@ fn universe_names_ids_structures_and_autopilot_waypoint_branches() {
         .as_array()
         .unwrap()
         .contains(&json!(offline_struct_id)));
+    assert!(!all_structs
+        .as_array()
+        .unwrap()
+        .contains(&json!(private_struct_id)));
 
     let (_, market_structs) = call_json(
         &router,

@@ -2613,6 +2613,18 @@ async fn test_esi_p6_industry_jobs_and_facilities_live_rpc_and_sqlite_persistenc
             );
         }
         save_facility_taxes(snap, raitaru_id, &HashMap::from([(1_u8, 0.035)]));
+        let mut ext =
+            eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        for sid in [raitaru_id, bare_astrahus_id] {
+            ext.access_profiles.insert(
+                sid,
+                eve_server::services::station_structure::structure_upwell_ops::StructureAccessProfile {
+                    corp_only: false,
+                    ..Default::default()
+                },
+            );
+        }
+        eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
         Ok(())
     });
 
