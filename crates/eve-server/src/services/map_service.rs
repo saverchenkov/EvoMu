@@ -203,33 +203,7 @@ pub fn handle(
         }
 
         ("map", "GetDeadspaceAgentsMap") => {
-            let desc = DBRowDescriptor::new([
-                ("solarSystemID", DbColumnType::I4),
-                ("dungeonID", DbColumnType::I4),
-                ("difficulty", DbColumnType::I4),
-                ("dungeonName", DbColumnType::WStr),
-            ]);
-            let rows: Vec<Vec<PyRep>> = session
-                .character_id
-                .map(|char_id| {
-                    crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
-                        reg.escalations_by_char
-                            .get(&char_id)
-                            .into_iter()
-                            .flatten()
-                            .map(|e| {
-                                vec![
-                                    PyRep::Integer(i64::from(e.destination_solar_system_id)),
-                                    PyRep::Integer(i64::from(e.expedition_dungeon_id)),
-                                    PyRep::Integer(i64::from(e.step_index.max(1))),
-                                    PyRep::String(e.expedition_name.clone()),
-                                ]
-                            })
-                            .collect()
-                    })
-                })
-                .unwrap_or_default();
-            Some(Ok(desc.build_crowset(rows)))
+            Some(handle_get_deadspace_agents_map(ctx, session))
         }
 
         ("map", "GetDeadspaceComplexMap") => {
@@ -271,27 +245,11 @@ pub fn handle(
         }
 
         // parity: rpc:map.GetEdencomFortressSystems
-        ("map", "GetEdencomFortressSystems") => {
-            crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
-            let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-                reg.edencom_fortress_systems
-                    .iter()
-                    .map(|&s| PyRep::Integer(i64::from(s)))
-                    .collect::<Vec<_>>()
-            });
-            Some(Ok(PyRep::List(list)))
-        }
+        ("map", "GetEdencomFortressSystems") => Some(handle_get_edencom_fortress_systems(ctx)),
 
         // parity: rpc:map.GetEdencomMinorVictorySystems
         ("map", "GetEdencomMinorVictorySystems") => {
-            crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
-            let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-                reg.edencom_minor_victory_systems
-                    .iter()
-                    .map(|&s| PyRep::Integer(i64::from(s)))
-                    .collect::<Vec<_>>()
-            });
-            Some(Ok(PyRep::List(list)))
+            Some(handle_get_edencom_minor_victory_systems(ctx))
         }
 
         ("map", "GetFacWarZoneInfo") => {
@@ -466,43 +424,7 @@ pub fn handle(
             Some(Ok(desc.build_crowset(rows)))
         }
 
-        ("map", "GetIncursionGlobalReport") => {
-            crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
-            let now_ft = ctx.now_blueos_filetime_ticks();
-            let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-                let now_sec = crate::services::pve_special_sites::spec_now_sec(reg);
-                reg.incursions
-                    .values()
-                    .filter(|inc| inc.state != "Ended")
-                    .map(|inc| {
-                        let withdraw_ft = inc.lockout_until_filetime.unwrap_or(0);
-                        let grace_time_ft = reg
-                            .incursion_lifecycle
-                            .get(&inc.constellation_id)
-                            .and_then(|m| m.withdraw_until_sec)
-                            .map(|wu| (wu.saturating_sub(now_sec) as i64) * 10_000_000)
-                            .unwrap_or_else(|| withdraw_ft.saturating_sub(now_ft).max(0));
-                        PyRep::keyval([
-                            ("taleID", PyRep::Integer(inc.tale_id)),
-                            ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
-                            ("constellationName", PyRep::String(inc.constellation_name.clone())),
-                            ("stagingSolarSystemID", PyRep::Integer(i64::from(inc.staging_solar_system_id))),
-                            ("hqSolarSystemID", PyRep::Integer(i64::from(inc.hq_solar_system_id))),
-                            ("influence", PyRep::Real(inc.influence)),
-                            ("state", PyRep::String(inc.state.clone())),
-                            ("hasBoss", PyRep::Bool(inc.mothership_spawned && !inc.mothership_defeated)),
-                            ("factionID", PyRep::Integer(500_019)),
-                            ("decayRate", PyRep::Real(0.02)),
-                            ("graceTime", PyRep::Integer(grace_time_ft)),
-                            ("lastUpdated", PyRep::Integer(now_ft)),
-                            ("withdrawTime", PyRep::Integer(withdraw_ft)),
-                            ("rewardGroupID", PyRep::Integer(inc.tale_id)),
-                        ])
-                    })
-                    .collect()
-            });
-            Some(Ok(PyRep::List(list)))
-        }
+        ("map", "GetIncursionGlobalReport") => Some(handle_get_incursion_global_report(ctx)),
 
         ("map", "GetMyExtraMapInfo") => {
             let (_, char_id) = match ServerContext::require_character(session) {
@@ -620,81 +542,180 @@ pub fn handle(
             Some(Ok(PyRep::Dict(dict)))
         }
 
-        ("map", "GetSystemsInIncursions") => {
-            crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
-            let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-                let mut out = Vec::new();
-                for inc in reg.incursions.values() {
-                    if inc.state == "Ended" {
-                        continue;
-                    }
-                    // Staging (sceneType 1); templateNameID 564035 = "Sansha's Nation Incursion"
-                    out.push(PyRep::keyval([
-                        ("locationID", PyRep::Integer(i64::from(inc.staging_solar_system_id))),
-                        ("solarSystemID", PyRep::Integer(i64::from(inc.staging_solar_system_id))),
-                        ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
-                        ("sceneType", PyRep::Integer(1)),
-                        ("state", PyRep::String(inc.state.clone())),
-                        ("templateNameID", PyRep::Integer(564_035)),
-                    ]));
-                    // Vanguard (sceneType 2)
-                    for &sys_id in &inc.vanguard_solar_system_ids {
-                        out.push(PyRep::keyval([
-                            ("locationID", PyRep::Integer(i64::from(sys_id))),
-                            ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
-                            ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
-                            ("sceneType", PyRep::Integer(2)),
-                            ("state", PyRep::String(inc.state.clone())),
-                            ("templateNameID", PyRep::Integer(564_035)),
-                        ]));
-                    }
-                    // Assault (sceneType 3)
-                    for &sys_id in &inc.assault_solar_system_ids {
-                        out.push(PyRep::keyval([
-                            ("locationID", PyRep::Integer(i64::from(sys_id))),
-                            ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
-                            ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
-                            ("sceneType", PyRep::Integer(3)),
-                            ("state", PyRep::String(inc.state.clone())),
-                            ("templateNameID", PyRep::Integer(564_035)),
-                        ]));
-                    }
-                    // HQ (sceneType 4)
-                    out.push(PyRep::keyval([
-                        ("locationID", PyRep::Integer(i64::from(inc.hq_solar_system_id))),
-                        ("solarSystemID", PyRep::Integer(i64::from(inc.hq_solar_system_id))),
-                        ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
-                        ("sceneType", PyRep::Integer(4)),
-                        ("state", PyRep::String(inc.state.clone())),
-                        ("templateNameID", PyRep::Integer(564_035)),
-                    ]));
-                }
-                out
-            });
-            Some(Ok(PyRep::List(list)))
-        }
+        ("map", "GetSystemsInIncursions") => Some(handle_get_systems_in_incursions(ctx)),
 
         // parity: rpc:map.GetTriglavianMinorVictorySystems
         ("map", "GetTriglavianMinorVictorySystems") => {
-            crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
-            let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-                reg.triglavian_minor_victory_systems
-                    .iter()
-                    .map(|&s| PyRep::Integer(i64::from(s)))
-                    .collect::<Vec<_>>()
-            });
-            Some(Ok(PyRep::List(list)))
+            Some(handle_get_triglavian_minor_victory_systems(ctx))
         }
 
         // parity: feat:pve.metaliminal-storms, rpc:map.GetAllRoamingWeatherSystems
         ("map", "GetAllRoamingWeatherSystems") => {
-            crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
-            let list = crate::services::pve_special_sites::get_all_roaming_weather_systems(ctx);
-            Some(Ok(PyRep::List(list)))
+            Some(handle_get_all_roaming_weather_systems(ctx))
         }
 
         _ => None,
     }
+}
+
+fn handle_get_deadspace_agents_map(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    let desc = DBRowDescriptor::new([
+        ("solarSystemID", DbColumnType::I4),
+        ("dungeonID", DbColumnType::I4),
+        ("difficulty", DbColumnType::I4),
+        ("dungeonName", DbColumnType::WStr),
+    ]);
+    let rows: Vec<Vec<PyRep>> = session
+        .character_id
+        .map(|char_id| {
+            crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
+                reg.escalations_by_char
+                    .get(&char_id)
+                    .into_iter()
+                    .flatten()
+                    .map(|e| {
+                        vec![
+                            PyRep::Integer(i64::from(e.destination_solar_system_id)),
+                            PyRep::Integer(i64::from(e.expedition_dungeon_id)),
+                            PyRep::Integer(i64::from(e.step_index.max(1))),
+                            PyRep::String(e.expedition_name.clone()),
+                        ]
+                    })
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+    Ok(desc.build_crowset(rows))
+}
+
+fn handle_get_edencom_fortress_systems(ctx: &ServerContext) -> Result<PyRep, BridgeRpcError> {
+    crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
+    let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+        reg.edencom_fortress_systems
+            .iter()
+            .map(|&s| PyRep::Integer(i64::from(s)))
+            .collect::<Vec<_>>()
+    });
+    Ok(PyRep::List(list))
+}
+
+fn handle_get_edencom_minor_victory_systems(ctx: &ServerContext) -> Result<PyRep, BridgeRpcError> {
+    crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
+    let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+        reg.edencom_minor_victory_systems
+            .iter()
+            .map(|&s| PyRep::Integer(i64::from(s)))
+            .collect::<Vec<_>>()
+    });
+    Ok(PyRep::List(list))
+}
+
+fn handle_get_incursion_global_report(ctx: &ServerContext) -> Result<PyRep, BridgeRpcError> {
+    crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+        let now_sec = crate::services::pve_special_sites::spec_now_sec(reg);
+        reg.incursions
+            .values()
+            .filter(|inc| inc.state != "Ended")
+            .map(|inc| {
+                let withdraw_ft = inc.lockout_until_filetime.unwrap_or(0);
+                let grace_time_ft = reg
+                    .incursion_lifecycle
+                    .get(&inc.constellation_id)
+                    .and_then(|m| m.withdraw_until_sec)
+                    .map(|wu| (wu.saturating_sub(now_sec) as i64) * 10_000_000)
+                    .unwrap_or_else(|| withdraw_ft.saturating_sub(now_ft).max(0));
+                PyRep::keyval([
+                    ("taleID", PyRep::Integer(inc.tale_id)),
+                    ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
+                    ("constellationName", PyRep::String(inc.constellation_name.clone())),
+                    ("stagingSolarSystemID", PyRep::Integer(i64::from(inc.staging_solar_system_id))),
+                    ("hqSolarSystemID", PyRep::Integer(i64::from(inc.hq_solar_system_id))),
+                    ("influence", PyRep::Real(inc.influence)),
+                    ("state", PyRep::String(inc.state.clone())),
+                    ("hasBoss", PyRep::Bool(inc.mothership_spawned && !inc.mothership_defeated)),
+                    ("factionID", PyRep::Integer(500_019)),
+                    ("decayRate", PyRep::Real(0.02)),
+                    ("graceTime", PyRep::Integer(grace_time_ft)),
+                    ("lastUpdated", PyRep::Integer(now_ft)),
+                    ("withdrawTime", PyRep::Integer(withdraw_ft)),
+                    ("rewardGroupID", PyRep::Integer(inc.tale_id)),
+                ])
+            })
+            .collect()
+    });
+    Ok(PyRep::List(list))
+}
+
+fn handle_get_systems_in_incursions(ctx: &ServerContext) -> Result<PyRep, BridgeRpcError> {
+    crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
+    let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+        let mut out = Vec::new();
+        for inc in reg.incursions.values() {
+            if inc.state == "Ended" {
+                continue;
+            }
+            out.push(PyRep::keyval([
+                ("locationID", PyRep::Integer(i64::from(inc.staging_solar_system_id))),
+                ("solarSystemID", PyRep::Integer(i64::from(inc.staging_solar_system_id))),
+                ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
+                ("sceneType", PyRep::Integer(1)),
+                ("state", PyRep::String(inc.state.clone())),
+                ("templateNameID", PyRep::Integer(564_035)),
+            ]));
+            for &sys_id in &inc.vanguard_solar_system_ids {
+                out.push(PyRep::keyval([
+                    ("locationID", PyRep::Integer(i64::from(sys_id))),
+                    ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+                    ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
+                    ("sceneType", PyRep::Integer(2)),
+                    ("state", PyRep::String(inc.state.clone())),
+                    ("templateNameID", PyRep::Integer(564_035)),
+                ]));
+            }
+            for &sys_id in &inc.assault_solar_system_ids {
+                out.push(PyRep::keyval([
+                    ("locationID", PyRep::Integer(i64::from(sys_id))),
+                    ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+                    ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
+                    ("sceneType", PyRep::Integer(3)),
+                    ("state", PyRep::String(inc.state.clone())),
+                    ("templateNameID", PyRep::Integer(564_035)),
+                ]));
+            }
+            out.push(PyRep::keyval([
+                ("locationID", PyRep::Integer(i64::from(inc.hq_solar_system_id))),
+                ("solarSystemID", PyRep::Integer(i64::from(inc.hq_solar_system_id))),
+                ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
+                ("sceneType", PyRep::Integer(4)),
+                ("state", PyRep::String(inc.state.clone())),
+                ("templateNameID", PyRep::Integer(564_035)),
+            ]));
+        }
+        out
+    });
+    Ok(PyRep::List(list))
+}
+
+fn handle_get_triglavian_minor_victory_systems(ctx: &ServerContext) -> Result<PyRep, BridgeRpcError> {
+    crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
+    let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+        reg.triglavian_minor_victory_systems
+            .iter()
+            .map(|&s| PyRep::Integer(i64::from(s)))
+            .collect::<Vec<_>>()
+    });
+    Ok(PyRep::List(list))
+}
+
+fn handle_get_all_roaming_weather_systems(ctx: &ServerContext) -> Result<PyRep, BridgeRpcError> {
+    crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
+    let list = crate::services::pve_special_sites::get_all_roaming_weather_systems(ctx);
+    Ok(PyRep::List(list))
 }
 
 #[cfg(test)]

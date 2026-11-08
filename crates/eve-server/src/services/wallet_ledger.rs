@@ -71,16 +71,66 @@ pub fn handle(
             if args.len() == 3 && matches!(args.get(2), Some(PyRep::Real(_))) && matches!(args.get(0), Some(PyRep::Integer(1..=7))) {
                 None
             } else {
-                Some(give_cash_from_corp(ctx, session, args, kwargs))
+                Some(handle_give_cash_from_corp(ctx, session, args, kwargs))
             }
         }
-        ("account", "GetTransactions") => Some(get_journal(ctx, session, args)),
-        ("marketProxy", "CharGetTransactions") => Some(market_transactions(ctx, session, args, false)),
-        ("marketProxy", "CorpGetTransactions") => Some(market_transactions(ctx, session, args, true)),
-        ("invbroker", "DepositPlexToVault") => Some(deposit_plex(ctx, session, args, kwargs)),
-        ("invbroker", "WithdrawPlexFromVault") => Some(withdraw_plex(ctx, session, args, kwargs)),
+        ("account", "GetTransactions") => Some(handle_get_journal(ctx, session, args)),
+        ("marketProxy", "CharGetTransactions") => {
+            Some(handle_market_transactions(ctx, session, args, false))
+        }
+        ("marketProxy", "CorpGetTransactions") => {
+            Some(handle_market_transactions(ctx, session, args, true))
+        }
+        ("invbroker", "DepositPlexToVault") => Some(handle_deposit_plex(ctx, session, args, kwargs)),
+        ("invbroker", "WithdrawPlexFromVault") => {
+            Some(handle_withdraw_plex(ctx, session, args, kwargs))
+        }
         _ => None,
     }
+}
+
+fn handle_give_cash_from_corp(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    give_cash_from_corp(ctx, session, args, kwargs)
+}
+
+fn handle_get_journal(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    get_journal(ctx, session, args)
+}
+
+fn handle_market_transactions(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    is_corp: bool,
+) -> Result<PyRep, BridgeRpcError> {
+    market_transactions(ctx, session, args, is_corp)
+}
+
+fn handle_deposit_plex(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    deposit_plex(ctx, session, args, kwargs)
+}
+
+fn handle_withdraw_plex(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    withdraw_plex(ctx, session, args, kwargs)
 }
 
 fn give_cash_from_corp(

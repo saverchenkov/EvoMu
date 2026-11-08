@@ -757,54 +757,16 @@ pub(super) async fn handle_fleet_ops(
 
         // rpc-lint: allow auditor acceptance text feat:fleet.broadcast-scope-and-filter
         ("fleetObjectHandler", "SetBroadcastFilter") | ("fleetMgr", "SetBroadcastFilter") => {
-            // parity: feat:fleet.broadcast-scope-and-filter
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let b_name = args.first().and_then(|a| a.as_str()).unwrap_or("Target");
-            let enabled = args.get(1).and_then(|a| match a { PyRep::Bool(b) => Some(*b), PyRep::Integer(i) => Some(*i != 0), _ => None }).unwrap_or(true);
-            let muted_list = {
-                let mut ex = ctx.fleet_extras.lock().unwrap();
-                let set = ex.broadcast_filters.entry(char_id).or_default();
-                if enabled { set.remove(b_name); } else { set.insert(b_name.to_string()); }
-                let mut v: Vec<String> = set.iter().cloned().collect();
-                v.sort();
-                v
-            };
-            Some(Ok(PyRep::keyval([
-                ("broadcastType", PyRep::String(b_name.to_string())),
-                ("enabled", PyRep::Bool(enabled)),
-                ("mutedBroadcasts", PyRep::List(muted_list.into_iter().map(PyRep::String).collect())),
-            ])))
+            Some(handle_set_broadcast_filter(ctx, session, args))
         }
 
         // rpc-lint: allow auditor acceptance text feat:fleet.broadcast-scope-and-filter
         ("fleetObjectHandler", "GetBroadcastFilter") | ("fleetMgr", "GetBroadcastFilter") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let muted_list = {
-                let ex = ctx.fleet_extras.lock().unwrap();
-                let mut v: Vec<String> = ex.broadcast_filters.get(&char_id).map(|s| s.iter().cloned().collect()).unwrap_or_default();
-                v.sort();
-                v
-            };
-            Some(Ok(PyRep::keyval([("mutedBroadcasts", PyRep::List(muted_list.into_iter().map(PyRep::String).collect()))])))
+            Some(handle_get_broadcast_filter(ctx, session))
         }
 
         ("fleetObjectHandler", "GetBroadcastHistory") | ("fleetMgr", "GetBroadcastHistory") => {
-            let (_, _char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let Some(fleet_id) = session.fleet_id else {
-                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
-            };
-            let history = ctx.fleet_extras.lock().unwrap().broadcast_history.get(&fleet_id).cloned().unwrap_or_default();
-            let entries: Vec<PyRep> = history.into_iter().map(|(ts, sender, name, scope, item_id, type_id)| {
-                PyRep::keyval([
-                    ("timestamp", PyRep::Integer(ts as i64)),
-                    ("senderID", PyRep::Integer(sender)),
-                    ("broadcast", PyRep::String(name)),
-                    ("scope", PyRep::Integer(scope)),
-                    ("itemID", item_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                    ("typeID", type_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                ])
-            }).collect();
-            Some(Ok(PyRep::List(entries)))
+            Some(handle_get_broadcast_history(ctx, session))
         }
 
         ("fleetMgr", "Regroup") | ("fleetObjectHandler", "Regroup") => {
@@ -1350,6 +1312,111 @@ pub(crate) async fn handle_fleet_warp(
         ("destinationY", PyRep::Real(dest_pos.y)),
         ("destinationZ", PyRep::Real(dest_pos.z)),
     ])))
+}
+
+fn handle_set_broadcast_filter(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    // parity: feat:fleet.broadcast-scope-and-filter
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let b_name = args.first().and_then(|a| a.as_str()).unwrap_or("Target");
+    let enabled = args
+        .get(1)
+        .and_then(|a| match a {
+            PyRep::Bool(b) => Some(*b),
+            PyRep::Integer(i) => Some(*i != 0),
+            _ => None,
+        })
+        .unwrap_or(true);
+    let muted_list = {
+        let mut ex = ctx.fleet_extras.lock().unwrap();
+        let set = ex.broadcast_filters.entry(char_id).or_default();
+        if enabled {
+            set.remove(b_name);
+        } else {
+            set.insert(b_name.to_string());
+        }
+        let mut v: Vec<String> = set.iter().cloned().collect();
+        v.sort();
+        v
+    };
+    Ok(PyRep::keyval([
+        ("broadcastType", PyRep::String(b_name.to_string())),
+        ("enabled", PyRep::Bool(enabled)),
+        (
+            "mutedBroadcasts",
+            PyRep::List(muted_list.into_iter().map(PyRep::String).collect()),
+        ),
+    ]))
+}
+
+fn handle_get_broadcast_filter(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let muted_list = {
+        let ex = ctx.fleet_extras.lock().unwrap();
+        let mut v: Vec<String> = ex
+            .broadcast_filters
+            .get(&char_id)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default();
+        v.sort();
+        v
+    };
+    Ok(PyRep::keyval([(
+        "mutedBroadcasts",
+        PyRep::List(muted_list.into_iter().map(PyRep::String).collect()),
+    )]))
+}
+
+fn handle_get_broadcast_history(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let Some(fleet_id) = session.fleet_id else {
+        return Err(BridgeRpcError {
+            code: "NotInFleet".into(),
+            message: "Character is not in a fleet".into(),
+        });
+    };
+    let in_fleet = ctx.db.with_snapshot(|snap| {
+        snap.fleets
+            .get(&fleet_id)
+            .is_some_and(|f| f.members.contains(&char_id))
+    });
+    if !in_fleet {
+        return Err(BridgeRpcError {
+            code: "NotInFleet".into(),
+            message: "Character is not a member of that fleet".into(),
+        });
+    }
+    let history = ctx
+        .fleet_extras
+        .lock()
+        .unwrap()
+        .broadcast_history
+        .get(&fleet_id)
+        .cloned()
+        .unwrap_or_default();
+    let entries: Vec<PyRep> = history
+        .into_iter()
+        .map(|(ts, sender, name, scope, item_id, type_id)| {
+            PyRep::keyval([
+                ("timestamp", PyRep::Integer(ts as i64)),
+                ("senderID", PyRep::Integer(sender)),
+                ("broadcast", PyRep::String(name)),
+                ("scope", PyRep::Integer(scope)),
+                ("itemID", item_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("typeID", type_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+            ])
+        })
+        .collect();
+    Ok(PyRep::List(entries))
 }
 
 #[cfg(test)]
