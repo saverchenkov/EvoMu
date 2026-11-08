@@ -416,13 +416,14 @@ impl WorldRepository {
         let fp = sqlite_store::replace_sqlite_from_snapshot(&mut conn, &snap)?;
         let jwt_secret =
             sqlite_store::load_or_init_jwt_secret(&conn, Self::generate_random_secret_32)?;
+        let auth_runtime = sqlite_store::load_auth_runtime_from_sqlite(&conn, jwt_secret)?;
         Ok(Self {
             instance_id: Self::next_instance_id(),
             inner: RwLock::new(std::sync::Arc::new(snap)),
             sqlite_conn: std::sync::Mutex::new(conn),
             sqlite_fp: std::sync::Mutex::new(fp),
             sqlite_path: Some(target.to_path_buf()),
-            auth_runtime: RwLock::new(AuthRuntimeState::new(jwt_secret)),
+            auth_runtime: RwLock::new(auth_runtime),
             clock: std::sync::RwLock::new(std::sync::Arc::new(
                 crate::clock::VirtualServerClock::new(),
             )),
@@ -439,13 +440,28 @@ impl WorldRepository {
         self.sqlite_path.as_deref()
     }
 
-    /// Saves the current snapshot state directly into a SQLite database at `path`.
+    /// Saves the current snapshot state directly into a SQLite database at `path`, including
+    /// durable `AuthRuntimeState` (`jwt_signing_secret`, `revoked_jtis`, `kicked_users`, and
+    /// SHA-256-digested `refresh_tokens`) (`#540`).
     pub fn save_to_sqlite(&self, path: impl AsRef<Path>) -> Result<(), String> {
         let repo = Self::open_sqlite(path)?;
         let snap = self.read_state();
+        let auth_rt = self.auth_runtime.read().unwrap_or_else(|e| e.into_inner()).clone();
         let mut conn = repo.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
         sqlite_store::replace_sqlite_from_snapshot(&mut conn, &snap)?;
+        sqlite_store::save_jwt_secret(&conn, &auth_rt.jwt_signing_secret)?;
+        sqlite_store::replace_auth_runtime_in_sqlite(&mut conn, &auth_rt)?;
         Ok(())
+    }
+
+    /// Prunes expired `revoked_jtis` and expired `refresh_tokens` from both in-memory
+    /// `AuthRuntimeState` and SQLite storage relative to `now_unix` (`#540`).
+    pub fn prune_expired_auth_runtime(&self, now_unix: u64) -> usize {
+        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
+        let mem_pruned = sqlite_store::prune_auth_runtime_locked(&mut rt, now_unix);
+        let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = sqlite_store::persist_prune_expired(&mut conn, rt.last_auth_now_unix);
+        mem_pruned
     }
 
     /// Creates a production `WorldRepository` with an empty account, character, and player item table

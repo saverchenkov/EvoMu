@@ -376,11 +376,24 @@ fn test_verify_quasar_bearer_jwt_and_dev_token_validations() {
         Err(DbError::InvalidCredentials)
     );
 
-    // nbf in the future
+    // nbf within 60s clock-skew leeway (including float JSON timestamp) succeeds; beyond 60s fails
+    let nbf_leeway_jwt = sign_dev_jwt(
+        &h,
+        &json!({
+            "sub": format!("CHARACTER:EVE:{cid}"),
+            "exp": now + 120,
+            "nbf": (now as f64) + 59.5,
+            "jti": "jti-nbf-leeway",
+        }),
+    );
+    assert!(repo
+        .verify_local_dev_client_jwt(&nbf_leeway_jwt, peer_ip, now)
+        .is_ok());
+
     let nbf_payload = json!({
         "sub": format!("CHARACTER:EVE:{cid}"),
-        "exp": now + 60,
-        "nbf": now + 10,
+        "exp": now + 120,
+        "nbf": now + 61,
         "jti": "jti-nbf",
     });
     let nbf_jwt = sign_dev_jwt(&h, &nbf_payload);
@@ -389,16 +402,43 @@ fn test_verify_quasar_bearer_jwt_and_dev_token_validations() {
         Err(DbError::InvalidCredentials)
     );
 
-    // iat in the future
+    // iat within 60s clock-skew leeway (including float JSON timestamp) succeeds; beyond 60s fails
+    let iat_leeway_jwt = sign_dev_jwt(
+        &h,
+        &json!({
+            "sub": format!("CHARACTER:EVE:{cid}"),
+            "exp": now + 120,
+            "iat": (now as f64) + 59.5,
+            "jti": "jti-iat-leeway",
+        }),
+    );
+    assert!(repo
+        .verify_local_dev_client_jwt(&iat_leeway_jwt, peer_ip, now)
+        .is_ok());
+
     let iat_payload = json!({
         "sub": format!("CHARACTER:EVE:{cid}"),
-        "exp": now + 60,
-        "iat": now + 5,
+        "exp": now + 120,
+        "iat": now + 61,
         "jti": "jti-iat",
     });
     let iat_jwt = sign_dev_jwt(&h, &iat_payload);
     assert_eq!(
         repo.verify_local_dev_client_jwt(&iat_jwt, peer_ip, now),
+        Err(DbError::InvalidCredentials)
+    );
+
+    let negative_iat_jwt = sign_dev_jwt(
+        &h,
+        &json!({
+            "sub": format!("CHARACTER:EVE:{cid}"),
+            "exp": now + 120,
+            "iat": -1.5,
+            "jti": "jti-neg-iat",
+        }),
+    );
+    assert_eq!(
+        repo.verify_local_dev_client_jwt(&negative_iat_jwt, peer_ip, now),
         Err(DbError::InvalidCredentials)
     );
 
@@ -481,4 +521,188 @@ fn test_authorize_pkce_character_bounds() {
         ),
         Err(DbError::ValidationError("Invalid character_id".into()))
     );
+}
+
+#[test]
+fn test_auth_runtime_state_persists_and_prunes_across_sqlite_restart() {
+    use crate::accounts::{base64url_encode_no_pad, sha256_bytes};
+
+    let pid = std::process::id();
+    let db_path = std::env::temp_dir().join(format!("evomu_540_auth_rt_{pid}.sqlite"));
+    let copy_path = std::env::temp_dir().join(format!("evomu_540_auth_rt_copy_{pid}.sqlite"));
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(&copy_path);
+
+    let repo = WorldRepository::open_sqlite(&db_path).expect("open_sqlite");
+    let now = 1_750_000_000u64;
+    let uid_alice = repo.provision_player_account("alice_persist", "pw-alice");
+    let uid_bob = repo.provision_player_account("bob_persist", "pw-bob");
+    let cid_alice = 91_100_001i64;
+    let cid_bob = 91_100_002i64;
+    let template_char =
+        WorldRepository::with_demo_seed().with_snapshot(|s| s.characters[&90_000_001].clone());
+    repo.with_mut_snapshot(|snap| {
+        let mut ch1 = template_char.clone();
+        ch1.character_id = cid_alice;
+        ch1.user_id = uid_alice;
+        ch1.name = "Alice Persist".into();
+        snap.characters.insert(cid_alice, ch1);
+
+        let mut ch2 = template_char;
+        ch2.character_id = cid_bob;
+        ch2.user_id = uid_bob;
+        ch2.name = "Bob Persist".into();
+        snap.characters.insert(cid_bob, ch2);
+    });
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = base64url_encode_no_pad(&sha256_bytes(verifier.as_bytes()));
+
+    // Alice gets two token bundles: bundle_revoked is revoked; bundle_active stays valid for 30 days.
+    let code_a1 = repo
+        .authorize_pkce(
+            "alice_persist",
+            "pw-alice",
+            cid_alice,
+            "evomu-launcher",
+            "https://localhost/cb",
+            vec!["publicData".into()],
+            &challenge,
+            "S256",
+            now,
+        )
+        .unwrap();
+    let bundle_revoked = repo
+        .exchange_pkce_code(&code_a1, "evomu-launcher", verifier, now + 1)
+        .unwrap();
+    assert!(repo.revoke_sso_refresh_token(&bundle_revoked.access_token));
+
+    let code_a2 = repo
+        .authorize_pkce(
+            "alice_persist",
+            "pw-alice",
+            cid_alice,
+            "evomu-launcher",
+            "https://localhost/cb",
+            vec!["publicData".into()],
+            &challenge,
+            "S256",
+            now + 2,
+        )
+        .unwrap();
+    let bundle_active = repo
+        .exchange_pkce_code(&code_a2, "evomu-launcher", verifier, now + 3)
+        .unwrap();
+
+    // Also mint + revoke an older token whose exp is already expired relative to `now + 2_000`.
+    let code_exp = repo
+        .authorize_pkce(
+            "alice_persist",
+            "pw-alice",
+            cid_alice,
+            "evomu-launcher",
+            "https://localhost/cb",
+            vec!["publicData".into()],
+            &challenge,
+            "S256",
+            now - 2_000,
+        )
+        .unwrap();
+    let bundle_expired = repo
+        .exchange_pkce_code(&code_exp, "evomu-launcher", verifier, now - 1_999)
+        .unwrap();
+    assert!(repo.revoke_sso_refresh_token(&bundle_expired.access_token));
+    let expired_jti = repo
+        .auth_runtime
+        .read()
+        .unwrap()
+        .revoked_jti_expiries
+        .iter()
+        .find_map(|(j, &exp)| (exp == now - 1_999 + 1_200).then(|| j.clone()))
+        .expect("expired jti recorded before prune");
+
+    // Bob gets a token, then Bob is kicked.
+    let code_b = repo
+        .authorize_pkce(
+            "bob_persist",
+            "pw-bob",
+            cid_bob,
+            "evomu-launcher",
+            "https://localhost/cb",
+            vec!["publicData".into()],
+            &challenge,
+            "S256",
+            now + 4,
+        )
+        .unwrap();
+    let bob_bundle = repo
+        .exchange_pkce_code(&code_b, "evomu-launcher", verifier, now + 5)
+        .unwrap();
+    repo.kick_user(uid_bob, "restart-kick", now + 10);
+
+    // Ensure plaintext refresh token is NEVER stored in SQLite (only its SHA-256 digest).
+    {
+        let conn = repo.sqlite_conn.lock().unwrap();
+        let stored_keys: Vec<String> = conn
+            .prepare("SELECT token_hash FROM auth_refresh_tokens")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(!stored_keys.is_empty());
+        assert!(!stored_keys.contains(&bundle_active.refresh_token));
+        assert!(stored_keys.contains(&crate::sqlite_store::refresh_token_digest(
+            &bundle_active.refresh_token
+        )));
+    }
+
+    // Save to another SQLite path and reload from disk.
+    repo.save_to_sqlite(&copy_path).expect("save_to_sqlite");
+    drop(repo);
+
+    // Verify both direct reopen of `db_path` and `copy_path` restore full AuthRuntimeState.
+    for reload_path in [&copy_path, &db_path] {
+        let reloaded = WorldRepository::open_sqlite(reload_path).expect("open_sqlite reload");
+
+        // Expired revoked JTI was pruned on mint/kick/reload (`exp <= now + 10`), while active revoked JTI stays!
+        assert!(
+            !reloaded
+                .auth_runtime
+                .read()
+                .unwrap()
+                .revoked_jtis
+                .contains(&expired_jti),
+            "expired revoked JTI must be pruned"
+        );
+        assert_eq!(
+            reloaded.verify_sso_access_token(&bundle_revoked.access_token, now + 20),
+            Err(DbError::InvalidCredentials),
+            "revoked JWT must stay rejected across restart"
+        );
+        assert_eq!(
+            reloaded.verify_sso_access_token(&bob_bundle.access_token, now + 20),
+            Err(DbError::InvalidCredentials),
+            "kicked user JWT must stay rejected across restart"
+        );
+        assert_eq!(
+            reloaded.kicked_reason(uid_bob).as_deref(),
+            Some("restart-kick")
+        );
+        assert_eq!(
+            reloaded.refresh_sso_token(&bob_bundle.refresh_token, "evomu-launcher", now + 20),
+            Err(DbError::InvalidCredentials),
+            "kicked user's refresh token must stay revoked across restart"
+        );
+
+        // Active 30-day refresh token survives restart and rotates cleanly.
+        let rotated = reloaded
+            .refresh_sso_token(&bundle_active.refresh_token, "evomu-launcher", now + 86_400)
+            .expect("active refresh token must remain valid across restart");
+        assert!(reloaded
+            .verify_sso_access_token(&rotated.access_token, now + 86_405)
+            .is_ok());
+    }
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(&copy_path);
 }

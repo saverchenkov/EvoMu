@@ -44,6 +44,22 @@ const EMPTY_GRPC_FRAME: [u8; 5] = [0, 0, 0, 0, 0];
 const MAX_GRPC_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 
 static NEXT_GRPC_SESSION_ID: AtomicU64 = AtomicU64::new(9_000_000);
+static LAST_REJECTED_BEARER_WARN_UNIX: AtomicU64 = AtomicU64::new(0);
+
+fn warn_rejected_bearer_token(now_unix: u64, peer_ip: Option<std::net::IpAddr>, reason: &str) {
+    let prev = LAST_REJECTED_BEARER_WARN_UNIX.load(Ordering::Relaxed);
+    if (prev == 0 || now_unix >= prev.saturating_add(10))
+        && LAST_REJECTED_BEARER_WARN_UNIX
+            .compare_exchange(prev, now_unix.max(1), Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        tracing::warn!(
+            peer_ip = ?peer_ip,
+            reason = reason,
+            "Rejected Quasar gRPC bearer token"
+        );
+    }
+}
 
 pub async fn handle_quasar_grpc_connection(
     stream: TcpStream,
@@ -423,6 +439,7 @@ fn authenticate_grpc_headers(
     headers: &HeaderMap,
     peer_ip: Option<std::net::IpAddr>,
 ) -> Option<VerifiedGatewayIdentity> {
+    let now_unix = ctx.now_unix();
     let raw_hdr = headers
         .get("authorization")
         .or_else(|| headers.get("authorization_token"))?
@@ -430,6 +447,7 @@ fn authenticate_grpc_headers(
         .ok()?
         .trim();
     if raw_hdr.is_empty() {
+        warn_rejected_bearer_token(now_unix, peer_ip, "empty_authorization_header");
         return None;
     }
     let token = raw_hdr
@@ -438,19 +456,52 @@ fn authenticate_grpc_headers(
         .unwrap_or(raw_hdr)
         .trim();
     if token.is_empty() {
+        warn_rejected_bearer_token(now_unix, peer_ip, "empty_bearer_token");
         return None;
     }
 
-    let now_unix = ctx.now_unix();
     let verified = match ctx.db.verify_quasar_bearer_jwt(token, now_unix) {
         Ok(v) => v,
-        Err(_) if ctx.feature_flags.allow_local_dev_gateway_jwt => {
-            let ip = peer_ip?;
-            ctx.db.verify_local_dev_client_jwt(token, ip, now_unix).ok()?
+        Err(bearer_err) if ctx.feature_flags.allow_local_dev_gateway_jwt => {
+            let Some(ip) = peer_ip else {
+                warn_rejected_bearer_token(
+                    now_unix,
+                    peer_ip,
+                    "missing_peer_ip_for_local_dev_jwt",
+                );
+                return None;
+            };
+            match ctx.db.verify_local_dev_client_jwt(token, ip, now_unix) {
+                Ok(v) => v,
+                Err(local_err) => {
+                    warn_rejected_bearer_token(
+                        now_unix,
+                        peer_ip,
+                        &format!(
+                            "bearer_and_local_dev_jwt_rejected ({bearer_err:?} / {local_err:?})"
+                        ),
+                    );
+                    return None;
+                }
+            }
         }
-        Err(_) => return None,
+        Err(bearer_err) => {
+            warn_rejected_bearer_token(
+                now_unix,
+                peer_ip,
+                &format!("bearer_jwt_rejected ({bearer_err:?})"),
+            );
+            return None;
+        }
     };
-    let mut account_role = lookup_active_account_role(ctx, verified.user_id, now_unix)?;
+    let Some(mut account_role) = lookup_active_account_role(ctx, verified.user_id, now_unix) else {
+        warn_rejected_bearer_token(
+            now_unix,
+            peer_ip,
+            "account_missing_or_restricted_for_token",
+        );
+        return None;
+    };
     if !verified.is_full_sso {
         account_role &= !service_roles::ROLE_GM_MASK;
     }

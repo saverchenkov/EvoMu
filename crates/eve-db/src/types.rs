@@ -438,6 +438,8 @@ pub struct SsoRefreshTokenRecord {
     pub revoked: bool,
     #[serde(default)]
     pub last_access_token_jti: String,
+    #[serde(default)]
+    pub last_access_token_exp_unix: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -449,6 +451,8 @@ pub(crate) struct AuthRuntimeState {
     pub(crate) pkce_codes: HashMap<String, PkceAuthCode>,
     pub(crate) refresh_tokens: HashMap<String, SsoRefreshTokenRecord>,
     pub(crate) revoked_jtis: HashSet<String>,
+    pub(crate) revoked_jti_expiries: HashMap<String, u64>,
+    pub(crate) last_auth_now_unix: u64,
     pub(crate) jwt_signing_secret: [u8; 32],
 }
 
@@ -462,6 +466,8 @@ impl AuthRuntimeState {
             pkce_codes: HashMap::new(),
             refresh_tokens: HashMap::new(),
             revoked_jtis: HashSet::new(),
+            revoked_jti_expiries: HashMap::new(),
+            last_auth_now_unix: 0,
             jwt_signing_secret,
         }
     }

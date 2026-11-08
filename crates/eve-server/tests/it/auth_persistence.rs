@@ -1169,3 +1169,139 @@ character_name = "ISD Config"
     }
     let _ = std::fs::remove_file(&tmp_db);
 }
+
+#[tokio::test]
+async fn test_auth_runtime_state_restart_persistence_it() {
+    let copy_sqlite = std::env::temp_dir().join(format!(
+        "evomu_auth_it_copy_{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&copy_sqlite);
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let now_unix = ctx.now_unix();
+    let uid_active = ctx.db.provision_player_account("it_auth_active", "pass-1");
+    let uid_kicked = ctx.db.provision_player_account("it_auth_kicked", "pass-2");
+    let cid_active = 90_800_001i64;
+    let cid_kicked = 90_800_002i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch1 = snap.characters[&90_000_001].clone();
+        ch1.character_id = cid_active;
+        ch1.user_id = uid_active;
+        ch1.name = "Active Restart Pilot".into();
+        snap.characters.insert(cid_active, ch1);
+
+        let mut ch2 = snap.characters[&90_000_001].clone();
+        ch2.character_id = cid_kicked;
+        ch2.user_id = uid_kicked;
+        ch2.name = "Kicked Restart Pilot".into();
+        snap.characters.insert(cid_kicked, ch2);
+    });
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
+    let code_rev = ctx
+        .db
+        .authorize_pkce(
+            "it_auth_active",
+            "pass-1",
+            cid_active,
+            "evomu-launcher",
+            "https://localhost/callback",
+            vec!["publicData".into()],
+            challenge,
+            "S256",
+            now_unix,
+        )
+        .unwrap();
+    let revoked_bundle = ctx
+        .db
+        .exchange_pkce_code(&code_rev, "evomu-launcher", verifier, now_unix + 1)
+        .unwrap();
+    assert!(ctx.db.revoke_sso_refresh_token(&revoked_bundle.access_token));
+
+    let code_live = ctx
+        .db
+        .authorize_pkce(
+            "it_auth_active",
+            "pass-1",
+            cid_active,
+            "evomu-launcher",
+            "https://localhost/callback",
+            vec!["publicData".into()],
+            challenge,
+            "S256",
+            now_unix + 2,
+        )
+        .unwrap();
+    let live_bundle = ctx
+        .db
+        .exchange_pkce_code(&code_live, "evomu-launcher", verifier, now_unix + 3)
+        .unwrap();
+
+    let code_kick = ctx
+        .db
+        .authorize_pkce(
+            "it_auth_kicked",
+            "pass-2",
+            cid_kicked,
+            "evomu-launcher",
+            "https://localhost/callback",
+            vec!["publicData".into()],
+            challenge,
+            "S256",
+            now_unix + 4,
+        )
+        .unwrap();
+    let kicked_bundle = ctx
+        .db
+        .exchange_pkce_code(&code_kick, "evomu-launcher", verifier, now_unix + 5)
+        .unwrap();
+    ctx.db.kick_user(uid_kicked, "gm_restart_kick", now_unix + 10);
+
+    ctx.db.save_to_sqlite(&copy_sqlite).expect("save_to_sqlite");
+
+    let reloaded_db = Arc::new(
+        eve_db::WorldRepository::open_sqlite(&copy_sqlite)
+            .expect("WorldRepository::open_sqlite"),
+    );
+    let reloaded_ctx = ServerContext::with_sde_and_repository(ctx.sde.clone(), reloaded_db);
+    reloaded_ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(
+        now_unix + 20,
+    )));
+
+    // 1. Revoked JWT remains rejected
+    assert!(
+        reloaded_ctx
+            .db
+            .verify_sso_access_token(&revoked_bundle.access_token, now_unix + 20)
+            .is_err(),
+        "Revoked JWT must stay rejected after save_to_sqlite + open_sqlite"
+    );
+
+    // 2. Kicked account remains rejected (both access token and refresh token)
+    assert!(
+        reloaded_ctx
+            .db
+            .verify_sso_access_token(&kicked_bundle.access_token, now_unix + 20)
+            .is_err(),
+        "Kicked account JWT must stay rejected after save_to_sqlite + open_sqlite"
+    );
+    assert_eq!(
+        reloaded_ctx.db.kicked_reason(uid_kicked).as_deref(),
+        Some("gm_restart_kick")
+    );
+
+    // 3. Valid 30-day refresh token remains valid across restart and rotates cleanly
+    let rotated = reloaded_ctx
+        .db
+        .refresh_sso_token(&live_bundle.refresh_token, "evomu-launcher", now_unix + 86_400)
+        .expect("30-day refresh token must stay valid across restart");
+    assert!(reloaded_ctx
+        .db
+        .verify_sso_access_token(&rotated.access_token, now_unix + 86_405)
+        .is_ok());
+    let _ = std::fs::remove_file(&copy_sqlite);
+}

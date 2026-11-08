@@ -728,3 +728,74 @@ async fn evomu_toml_local_dev_jwt_and_persistent_bidi_requests_resolve_527_528_5
         "eve_public.plex.vault.api.BalanceResponse"
     );
 }
+
+#[tokio::test]
+async fn regression_532_local_dev_jwt_accepts_float_iat_nbf_within_skew_and_rejects_bad_bearer() {
+    let mut raw_ctx = ServerContext::new();
+    raw_ctx.feature_flags.allow_local_dev_gateway_jwt = true;
+    let ctx = Arc::new(raw_ctx);
+    let now_u = ctx.now_unix();
+    let uid = ctx.db.provision_player_account("skew_pilot", "pw123");
+    let cid = 92_300_002i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters[&90_000_001].clone();
+        ch.character_id = cid;
+        ch.user_id = uid;
+        snap.characters.insert(cid, ch);
+    });
+    ctx.db
+        .acquire_online_lock(uid, 70_902, Some(cid), true, now_u)
+        .unwrap();
+    ctx.db
+        .set_online_session_peer_ip(uid, 70_902, "127.0.0.1:51235");
+
+    // Float iat/nbf within 60s skew leeway succeeds
+    let skew_jwt = sign_hs256(
+        r#"{"alg":"HS256","typ":"JWT"}"#,
+        &format!(
+            r#"{{"sub":"USER:EVE:{uid}","iat":{:.3},"nbf":{:.3},"exp":{}}}"#,
+            (now_u as f64) + 30.25,
+            (now_u as f64) + 59.75,
+            now_u + 300
+        ),
+        b"dev",
+    );
+    assert!(ctx
+        .db
+        .verify_local_dev_client_jwt(&skew_jwt, "127.0.0.1".parse().unwrap(), now_u)
+        .is_ok());
+
+    // Beyond 60s skew is rejected
+    let beyond_skew_jwt = sign_hs256(
+        r#"{"alg":"HS256","typ":"JWT"}"#,
+        &format!(
+            r#"{{"sub":"USER:EVE:{uid}","iat":{},"exp":{}}}"#,
+            now_u + 65,
+            now_u + 300
+        ),
+        b"dev",
+    );
+    assert!(ctx
+        .db
+        .verify_local_dev_client_jwt(&beyond_skew_jwt, "127.0.0.1".parse().unwrap(), now_u)
+        .is_err());
+
+    // gRPC stream with rejected bearer token fails cleanly with gRPC status 16 (UNAUTHENTICATED)
+    let addr = spawn_grpc_server(Arc::clone(&ctx)).await;
+    let (mut client, conn) = h2::client::handshake(TcpStream::connect(addr).await.unwrap())
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    let bad_req = Request::builder()
+        .method("POST")
+        .uri("http://127.0.0.1/eve_public.gateway.Requests/Send")
+        .header("content-type", "application/grpc")
+        .header("authorization", format!("Bearer {beyond_skew_jwt}"))
+        .body(())
+        .unwrap();
+    let (rsp_fut, _send_stream) = client.send_request(bad_req, false).unwrap();
+    let rsp_head = rsp_fut.await.unwrap();
+    assert_eq!(rsp_head.headers().get("grpc-status").and_then(|v| v.to_str().ok()), Some("16"));
+}

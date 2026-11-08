@@ -12,6 +12,7 @@ use crate::accounts::{
     base64url_decode_no_pad, base64url_encode_no_pad, constant_time_eq, hmac_sha256, sha256_bytes,
 };
 use crate::persistence::WorldRepository;
+use crate::sqlite_store;
 use crate::types::{
     AuthRuntimeState, DbError, PkceAuthCode, SsoRefreshTokenRecord, SsoTokenBundle, SsoTokenClaims,
 };
@@ -122,6 +123,16 @@ fn parse_strict_positive_i64(raw: &str) -> Result<i64, DbError> {
         return Err(DbError::InvalidCredentials);
     }
     Ok(val)
+}
+
+const LOCAL_DEV_JWT_CLOCK_SKEW_SECS: u64 = 60;
+
+fn parse_jwt_timestamp_u64(val: &Value) -> Option<u64> {
+    val.as_u64().or_else(|| {
+        val.as_f64()
+            .filter(|v| v.is_finite() && *v >= 0.0 && *v <= u64::MAX as f64)
+            .map(|v| v as u64)
+    })
 }
 
 impl WorldRepository {
@@ -432,8 +443,7 @@ impl WorldRepository {
             return Err(DbError::InvalidCredentials);
         }
         if let Some(exp_val) = payload_obj.get("exp") {
-            let exp = exp_val
-                .as_u64()
+            let exp = parse_jwt_timestamp_u64(exp_val)
                 .filter(|&e| e > 0)
                 .ok_or(DbError::InvalidCredentials)?;
             if now_unix >= exp {
@@ -441,14 +451,14 @@ impl WorldRepository {
             }
         }
         if let Some(nbf_val) = payload_obj.get("nbf") {
-            let nbf = nbf_val.as_u64().ok_or(DbError::InvalidCredentials)?;
-            if now_unix < nbf {
+            let nbf = parse_jwt_timestamp_u64(nbf_val).ok_or(DbError::InvalidCredentials)?;
+            if now_unix.saturating_add(LOCAL_DEV_JWT_CLOCK_SKEW_SECS) < nbf {
                 return Err(DbError::InvalidCredentials);
             }
         }
         if let Some(iat_val) = payload_obj.get("iat") {
-            let iat = iat_val.as_u64().ok_or(DbError::InvalidCredentials)?;
-            if iat > now_unix {
+            let iat = parse_jwt_timestamp_u64(iat_val).ok_or(DbError::InvalidCredentials)?;
+            if iat > now_unix.saturating_add(LOCAL_DEV_JWT_CLOCK_SKEW_SECS) {
                 return Err(DbError::InvalidCredentials);
             }
         }
@@ -637,19 +647,30 @@ impl WorldRepository {
         let access_token = format!("{signing_input}.{sig_b64}");
 
         let refresh_token = format!("evomu_rt_{}", Self::generate_random_salt_hex());
-        rt.refresh_tokens.insert(
-            refresh_token.clone(),
-            SsoRefreshTokenRecord {
-                refresh_token: refresh_token.clone(),
-                user_id,
-                character_id,
-                client_id: client_id.to_string(),
-                scopes,
-                expires_at_unix: now_unix.saturating_add(86_400 * 30),
-                revoked: false,
-                last_access_token_jti: jti,
-            },
-        );
+        let token_hash = sqlite_store::refresh_token_digest(&refresh_token);
+        let access_exp = claims.exp;
+        sqlite_store::prune_auth_runtime_locked(rt, now_unix);
+        let rec = SsoRefreshTokenRecord {
+            refresh_token: token_hash.clone(),
+            user_id,
+            character_id,
+            client_id: client_id.to_string(),
+            scopes,
+            expires_at_unix: now_unix.saturating_add(86_400 * 30),
+            revoked: false,
+            last_access_token_jti: jti,
+            last_access_token_exp_unix: access_exp,
+        };
+        {
+            let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = sqlite_store::persist_minted_refresh_token(
+                &mut conn,
+                &token_hash,
+                &rec,
+                rt.last_auth_now_unix,
+            );
+        }
+        rt.refresh_tokens.insert(token_hash, rec);
         SsoTokenBundle {
             access_token,
             token_type: "Bearer".to_string(),
@@ -749,11 +770,12 @@ impl WorldRepository {
         client_id: &str,
         now_unix: u64,
     ) -> Result<SsoTokenBundle, DbError> {
+        let token_hash = sqlite_store::refresh_token_digest(refresh_token);
         let rec = {
             let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
             let r = rt
                 .refresh_tokens
-                .get_mut(refresh_token)
+                .get_mut(&token_hash)
                 .ok_or(DbError::InvalidCredentials)?;
             if r.revoked
                 || now_unix > r.expires_at_unix
@@ -763,7 +785,12 @@ impl WorldRepository {
                 return Err(DbError::InvalidCredentials);
             }
             r.revoked = true;
-            r.clone()
+            let cloned = r.clone();
+            {
+                let conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = sqlite_store::persist_refresh_token_revoked(&conn, &token_hash);
+            }
+            cloned
         };
         let acc_username = {
             let guard = self.read_state();
@@ -873,19 +900,37 @@ impl WorldRepository {
     /// Revokes an SSO refresh token (or access token) (`D-4`, `ESI-1`).
     pub fn revoke_sso_refresh_token(&self, token: &str) -> bool {
         let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
-        let mut jti_to_revoke = None;
+        let token_hash = sqlite_store::refresh_token_digest(token);
+        let mut jti_to_revoke: Option<(String, u64)> = None;
         let mut found = false;
-        if let Some(rec) = rt.refresh_tokens.get_mut(token) {
+        if let Some(rec) = rt.refresh_tokens.get_mut(&token_hash) {
             rec.revoked = true;
             if !rec.last_access_token_jti.is_empty() {
-                jti_to_revoke = Some(rec.last_access_token_jti.clone());
+                jti_to_revoke = Some((
+                    rec.last_access_token_jti.clone(),
+                    rec.last_access_token_exp_unix,
+                ));
             }
             found = true;
         }
-        if let Some(jti) = jti_to_revoke {
-            rt.revoked_jtis.insert(jti);
-        }
         if found {
+            if let Some((jti, exp)) = jti_to_revoke {
+                rt.revoked_jtis.insert(jti.clone());
+                if exp > 0 {
+                    rt.revoked_jti_expiries.insert(jti.clone(), exp);
+                }
+                let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = sqlite_store::persist_refresh_token_revoked(&conn, &token_hash);
+                let _ = sqlite_store::persist_revoked_jti(
+                    &mut conn,
+                    &jti,
+                    exp,
+                    rt.last_auth_now_unix,
+                );
+            } else {
+                let conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = sqlite_store::persist_refresh_token_revoked(&conn, &token_hash);
+            }
             return true;
         }
         if token.matches('.').count() == 2 {
@@ -895,7 +940,17 @@ impl WorldRepository {
             {
                 if let Ok(payload_bytes) = base64url_decode_no_pad(payload_b64) {
                     if let Ok(parsed) = serde_json::from_slice::<SsoTokenClaims>(&payload_bytes) {
-                        rt.revoked_jtis.insert(parsed.jti);
+                        rt.revoked_jtis.insert(parsed.jti.clone());
+                        if parsed.exp > 0 {
+                            rt.revoked_jti_expiries.insert(parsed.jti.clone(), parsed.exp);
+                        }
+                        let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
+                        let _ = sqlite_store::persist_revoked_jti(
+                            &mut conn,
+                            &parsed.jti,
+                            parsed.exp,
+                            rt.last_auth_now_unix,
+                        );
                         return true;
                     }
                 }

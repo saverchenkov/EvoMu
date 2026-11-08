@@ -393,11 +393,11 @@ impl WorldRepository {
             ));
         }
         let key = sha256_bytes(raw_secret);
+        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
         {
             let conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
             sqlite_store::save_jwt_secret(&conn, &key)?;
         }
-        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
         rt.jwt_signing_secret = key;
         Ok(())
     }
@@ -572,7 +572,10 @@ impl WorldRepository {
             Ok(acc.user_id)
         })?;
         let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
-        rt.kicked_users.remove(&user_id);
+        if rt.kicked_users.remove(&user_id).is_some() {
+            let conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = sqlite_store::persist_clear_kicked_user(&conn, user_id);
+        }
         Ok(user_id)
     }
 
@@ -596,7 +599,10 @@ impl WorldRepository {
             Ok((acc.user_id, acc.username.clone()))
         })?;
         let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
-        rt.kicked_users.remove(&user_id);
+        if rt.kicked_users.remove(&user_id).is_some() {
+            let conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = sqlite_store::persist_clear_kicked_user(&conn, user_id);
+        }
         Ok((user_id, username))
     }
 
@@ -727,7 +733,10 @@ impl WorldRepository {
     /// with verified credentials (`R36-P1-3`).
     pub fn clear_revocation_on_fresh_login(&self, user_id: u64, session_id: u64) {
         let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
-        rt.kicked_users.remove(&user_id);
+        if rt.kicked_users.remove(&user_id).is_some() {
+            let conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = sqlite_store::persist_clear_kicked_user(&conn, user_id);
+        }
         rt.displaced_sessions.remove(&session_id);
     }
 
@@ -1032,19 +1041,40 @@ impl WorldRepository {
             }
         }
         let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
+        sqlite_store::prune_auth_runtime_locked(&mut rt, now_unix);
         rt.kicked_users
             .insert(user_id, (now_unix, reason.to_string()));
-        let mut jtis_to_revoke = Vec::new();
-        for rec in rt.refresh_tokens.values_mut() {
+        let mut revoked_token_hashes = Vec::new();
+        let mut jtis_to_revoke: Vec<(String, u64)> = Vec::new();
+        for (token_hash, rec) in rt.refresh_tokens.iter_mut() {
             if rec.user_id == user_id {
                 rec.revoked = true;
+                revoked_token_hashes.push(token_hash.clone());
                 if !rec.last_access_token_jti.is_empty() {
-                    jtis_to_revoke.push(rec.last_access_token_jti.clone());
+                    jtis_to_revoke.push((
+                        rec.last_access_token_jti.clone(),
+                        rec.last_access_token_exp_unix,
+                    ));
                 }
             }
         }
-        for jti in jtis_to_revoke {
-            rt.revoked_jtis.insert(jti);
+        for (jti, exp) in &jtis_to_revoke {
+            rt.revoked_jtis.insert(jti.clone());
+            if *exp > 0 {
+                rt.revoked_jti_expiries.insert(jti.clone(), *exp);
+            }
+        }
+        {
+            let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = sqlite_store::persist_kicked_user(
+                &mut conn,
+                user_id,
+                now_unix,
+                reason,
+                &revoked_token_hashes,
+                &jtis_to_revoke,
+                rt.last_auth_now_unix,
+            );
         }
         let removed = rt.online_sessions.remove(&user_id);
         rt.online_session_ips.remove(&user_id);
